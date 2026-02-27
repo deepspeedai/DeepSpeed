@@ -154,9 +154,7 @@ class XPU_Accelerator(DeepSpeedAccelerator):
 
     # Misc
     def amp(self):
-        if hasattr(torch.xpu, 'amp'):
-            return torch.xpu.amp
-        return None
+        return torch.amp
 
     def is_available(self):
         return torch.xpu.is_available()

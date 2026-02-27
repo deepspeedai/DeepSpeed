@@ -101,7 +101,7 @@ Refer to [LLM examples](https://github.com/intel/intel-extension-for-pytorch/tre
 
 
 # Intel XPU
-DeepSpeed XPU accelerator supports Intel® discrete GPUs with XPU backend through stock PyTorch (2.8+).
+DeepSpeed XPU accelerator supports Intel® discrete GPUs with XPU backend through PyTorch.
 
 DeepSpeed has been verified on the following GPU products:
 * Intel® Data Center GPU Max 1100
@@ -146,12 +146,6 @@ launching, activate the oneAPI environment so that `icpx` is on `PATH`:
 source <oneAPI installed path>/setvars.sh
 ```
 
-**Note:** If your system has a different oneAPI version installed than what PyTorch
-ships with, make sure the Python environment's libraries take precedence by placing
-them first in `LD_LIBRARY_PATH`:
-```
-export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH
-```
 
 To validate the XPU availability and if the XPU accelerator is correctly chosen, here is an example:
 ```
@@ -163,9 +157,6 @@ XPU available: True
 >>> from deepspeed.accelerator import get_accelerator; print('accelerator:', get_accelerator()._name)
 accelerator: xpu
 ```
-
-## More examples for using DeepSpeed on Intel XPU
-Refer to [DeepSpeed Examples](https://github.com/deepspeedai/DeepSpeedExamples) for code samples of training and inference with DeepSpeed on Intel XPU.
 
 
 # Huawei Ascend NPU

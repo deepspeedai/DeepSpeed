@@ -120,11 +120,10 @@ def get_accelerator():
         try:
             import torch
 
-            # Detect XPU via stock PyTorch (torch.xpu is supported in pytorch >= 2.8).
+            # Detect XPU via stock PyTorch
             if hasattr(torch, 'xpu'):
-                if torch.cuda.device_count() == 0:  #ignore-cuda
-                    if torch.xpu.device_count() > 0 and torch.xpu.is_available():
-                        accelerator_name = "xpu"
+                if torch.xpu.is_available():
+                    accelerator_name = "xpu"
         except ImportError as e:
             pass
         if accelerator_name is None:
