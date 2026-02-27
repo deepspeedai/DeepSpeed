@@ -15,12 +15,6 @@ try:
 except ImportError as e:
     oneccl_imported_p = False
 
-try:
-    import intel_extension_for_pytorch as ipex  # noqa: F401 # type: ignore
-    ipex_imported_p = True
-except ImportError as e:
-    ipex_imported_p = False
-
 
 class XPU_Accelerator(DeepSpeedAccelerator):
 
@@ -39,14 +33,7 @@ class XPU_Accelerator(DeepSpeedAccelerator):
         return False
 
     def use_host_timers(self):
-        if not ipex_imported_p:
-            return self.is_synchronized_device()
-        else:
-            # WA XPU event will be consolidated in 2.6
-            if ipex.__version__ < '2.6':
-                return True
-            else:
-                return self.is_synchronized_device()
+        return self.is_synchronized_device()
 
     def resolves_data_dependency(self):
         return self.is_synchronized_device()
@@ -167,7 +154,7 @@ class XPU_Accelerator(DeepSpeedAccelerator):
 
     # Misc
     def amp(self):
-        return torch.xpu.amp
+        return torch.amp
 
     def is_available(self):
         return torch.xpu.is_available()
@@ -306,14 +293,8 @@ class XPU_Accelerator(DeepSpeedAccelerator):
             return self.class_dict['NotImplementedBuilder']
 
     def build_extension(self):
-        if ipex_imported_p:
-            try:
-                from intel_extension_for_pytorch.xpu.cpp_extension import DpcppBuildExtension
-            except ImportError:
-                from intel_extension_for_pytorch.xpu.utils import DpcppBuildExtension
-        else:
-            from torch.utils.cpp_extension import DpcppBuildExtension
-        return DpcppBuildExtension
+        from torch.utils.cpp_extension import BuildExtension
+        return BuildExtension
 
     def export_envs(self):
         return []

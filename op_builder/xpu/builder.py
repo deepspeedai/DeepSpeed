@@ -19,20 +19,17 @@ except ImportError:
 class SYCLOpBuilder(OpBuilder):
 
     def builder(self):
-        try:
-            from intel_extension_for_pytorch.xpu.cpp_extension import DPCPPExtension
-        except ImportError:
-            from intel_extension_for_pytorch.xpu.utils import DPCPPExtension
+        from torch.utils.cpp_extension import SyclExtension
         include_dirs = [os.path.abspath(x) for x in self.strip_empty_entries(self.include_paths())]
-        print("dpcpp sources = {}".format(self.sources()))
-        dpcpp_ext = DPCPPExtension(name=self.absolute_name(),
-                                   sources=self.strip_empty_entries(self.sources()),
-                                   include_dirs=include_dirs,
-                                   extra_compile_args={
-                                       'cxx': self.strip_empty_entries(self.cxx_args()),
-                                   },
-                                   extra_link_args=self.strip_empty_entries(self.fixed_aotflags()))
-        return dpcpp_ext
+        print("sycl sources = {}".format(self.sources()))
+        sycl_ext = SyclExtension(name=self.absolute_name(),
+                                 sources=self.strip_empty_entries(self.sources()),
+                                 include_dirs=include_dirs,
+                                 extra_compile_args={
+                                     'cxx': self.strip_empty_entries(self.cxx_args()),
+                                 },
+                                 extra_link_args=self.strip_empty_entries(self.fixed_aotflags()))
+        return sycl_ext
 
     def version_dependent_macros(self):
         try:
@@ -51,26 +48,72 @@ class SYCLOpBuilder(OpBuilder):
             version_ge_1_5 = ['-DVERSION_GE_1_5']
         return version_ge_1_1 + version_ge_1_3 + version_ge_1_5
 
+    def _sycl_env_paths(self):
+        """Find the SYCL include and lib directories from the Python environment.
+
+        When using PyTorch XPU wheels, libsycl.so and SYCL headers are
+        installed into the Python environment (e.g. conda env).  The system
+        ``icpx`` compiler ships its own (potentially newer) SYCL headers and
+        runtime.  To avoid ABI mismatches we must compile and link against the
+        *same* SYCL version that PyTorch was built with.
+
+        Returns (include_dir, lib_dir) – either or both may be ``None`` when
+        the paths do not exist.
+        """
+        import sys
+        prefix = sys.prefix  # e.g. /home/user/miniforge3/envs/myenv
+        inc = os.path.join(prefix, 'include')
+        lib = os.path.join(prefix, 'lib')
+        sycl_inc = inc if os.path.isdir(os.path.join(inc, 'sycl')) else None
+        sycl_lib = lib if os.path.isfile(os.path.join(lib, 'libsycl.so')) else None
+        return sycl_inc, sycl_lib
+
     def cxx_args(self):
         cxx_flags = [
-            '-fsycl', '-fsycl-targets=spir64_gen', '-g', '-gdwarf-4', '-O3', '-std=c++17', '-fPIC', '-DMKL_ILP64',
-            '-fno-strict-aliasing'
+            '-fsycl',
+            '-fsycl-targets=spir64',
+            '-g',
+            '-gdwarf-4',
+            '-O3',
+            '-std=c++17',
+            '-fPIC',
+            '-DMKL_ILP64',
+            '-fno-strict-aliasing',
         ]
+        # Use SYCL headers from the Python environment so that compiled code
+        # references symbols present in the *environment's* libsycl.so rather
+        # than the (possibly newer) system oneAPI installation.
+        sycl_inc, _ = self._sycl_env_paths()
+        if sycl_inc:
+            cxx_flags = [f'-isystem', sycl_inc] + cxx_flags
         if os.environ.get('USE_MKL_GEMM'):
             cxx_flags.append('-DUSE_MKL_GEMM')
         return cxx_flags
 
     def extra_ldflags(self):
-        return [
-            '-fPIC', '-fsycl', '-fsycl-targets=spir64_gen', '-fsycl-max-parallel-link-jobs=8',
-            '-Xs "-options -cl-poison-unsupported-fp64-kernels,cl-intel-enable-auto-large-GRF-mode"',
-            '-Xs "-device pvc"', '-Wl,-export-dynamic'
+        import torch
+        torch_lib_dir = os.path.join(os.path.dirname(torch.__file__), 'lib')
+        flags = [
+            '-fPIC',
+            '-fsycl',
+            '-fsycl-targets=spir64',
+            '-Xs "-options -cl-intel-enable-auto-large-GRF-mode"',
+            '-fsycl-max-parallel-link-jobs=8',
+            '-Wl,-export-dynamic',
+            f'-L{torch_lib_dir}',
+            f'-Wl,-rpath,{torch_lib_dir}',
         ]
+        # Link against the Python environment's libsycl.so to match the
+        # headers we compiled against (see cxx_args).
+        _, sycl_lib = self._sycl_env_paths()
+        if sycl_lib:
+            flags = [f'-L{sycl_lib}', f'-Wl,-rpath,{sycl_lib}'] + flags
+        return flags
 
     def fixed_aotflags(self):
         return [
-            '-fsycl', '-fsycl-targets=spir64_gen', '-fsycl-max-parallel-link-jobs=8', '-Xs',
-            "-options -cl-poison-unsupported-fp64-kernels,cl-intel-enable-auto-large-GRF-mode", '-Xs', "-device pvc"
+            '-fsycl', '-fsycl-targets=spir64', '-fsycl-max-parallel-link-jobs=8',
+            '-Xs "-options -cl-intel-enable-auto-large-GRF-mode"'
         ]
 
     def load(self, verbose=True):
@@ -93,7 +136,7 @@ class SYCLOpBuilder(OpBuilder):
             raise RuntimeError(f"Unable to JIT load the {self.name} op due to ninja not being installed.") from e
 
         self.jit_mode = True
-        from intel_extension_for_pytorch.xpu.cpp_extension import load
+        from torch.utils.cpp_extension import load
 
         start_build = time.time()
         # Recognize relative paths as absolute paths for jit load
@@ -101,32 +144,40 @@ class SYCLOpBuilder(OpBuilder):
         sources = [self.deepspeed_src_path(path) for path in self.sources()]
         extra_include_paths = [self.deepspeed_src_path(path) for path in self.include_paths()]
 
-        # Torch will try and apply whatever CCs are in the arch list at compile time,
-        # we have already set the intended targets ourselves we know that will be
-        # needed at runtime. This prevents CC collisions such as multiple __half
-        # implementations. Stash arch list to reset after build.
-        '''
-        torch_arch_list = None
-        if "TORCH_CUDA_ARCH_LIST" in os.environ:
-            torch_arch_list = os.environ.get("TORCH_CUDA_ARCH_LIST")
-            os.environ["TORCH_CUDA_ARCH_LIST"] = ""
-        '''
+        # Set CXX to icpx (Intel oneAPI DPC++ compiler) so that .cpp/.dp.cpp
+        # files containing SYCL code are compiled with the SYCL-aware compiler.
+        # PyTorch's cpp_extension only routes .sycl files to icpx by default.
+        saved_env = {}
+        for var in ('CXX', 'LIBRARY_PATH', 'CPATH'):
+            saved_env[var] = os.environ.get(var)
+        os.environ['CXX'] = 'icpx'
 
-        op_module = load(
-            name=self.name,
-            sources=self.strip_empty_entries(sources),
-            extra_include_paths=self.strip_empty_entries(extra_include_paths),
-            extra_cflags=self.strip_empty_entries(self.cxx_args()),
-            # extra_cuda_cflags=self.strip_empty_entries(self.nvcc_args()),
-            extra_ldflags=self.strip_empty_entries(self.extra_ldflags()),
-            verbose=verbose)
+        # Point icpx at the Python environment's SYCL headers and libraries so
+        # the compiled extension uses the same SYCL ABI as PyTorch.
+        sycl_inc, sycl_lib = self._sycl_env_paths()
+        if sycl_lib:
+            lib_path = os.environ.get('LIBRARY_PATH', '')
+            os.environ['LIBRARY_PATH'] = f'{sycl_lib}:{lib_path}' if lib_path else sycl_lib
+        if sycl_inc:
+            cpath = os.environ.get('CPATH', '')
+            os.environ['CPATH'] = f'{sycl_inc}:{cpath}' if cpath else sycl_inc
+
+        try:
+            op_module = load(name=self.name,
+                             sources=self.strip_empty_entries(sources),
+                             extra_include_paths=self.strip_empty_entries(extra_include_paths),
+                             extra_cflags=self.strip_empty_entries(self.cxx_args()),
+                             extra_ldflags=self.strip_empty_entries(self.extra_ldflags()),
+                             verbose=verbose)
+        finally:
+            # Restore original environment
+            for var, val in saved_env.items():
+                if val is None:
+                    os.environ.pop(var, None)
+                else:
+                    os.environ[var] = val
 
         build_duration = time.time() - start_build
         if verbose:
             print(f"Time to load {self.name} op: {build_duration} seconds")
-        '''
-        # Reset arch list so we are not silently removing it for other possible use cases
-        if torch_arch_list:
-            os.environ["TORCH_CUDA_ARCH_LIST"] = torch_arch_list
-        '''
         return op_module
