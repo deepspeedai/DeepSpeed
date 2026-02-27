@@ -3,7 +3,8 @@
 
 # DeepSpeed Team
 
-from deepspeed.utils.groups import _get_expert_parallel_ranks
+import pytest
+from deepspeed.utils.groups import _ensure_divisibility, _get_expert_parallel_ranks
 
 
 def test_get_expert_parallel_ranks():
@@ -36,3 +37,8 @@ def test_get_expert_parallel_ranks():
         [5, 13],
         [7, 15],
     ]
+
+
+def test_ensure_divisibility_rejects_zero_denominator():
+    with pytest.raises(ValueError, match="denominator must be non-zero"):
+        _ensure_divisibility(8, 0)
