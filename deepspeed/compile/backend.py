@@ -6,7 +6,7 @@
 from typing import Dict, List, Callable, Tuple
 import time
 import gc
-from collections import OrderedDict
+from collections import OrderedDict, deque
 
 import torch
 from torch.fx import Graph, GraphModule
@@ -81,14 +81,14 @@ def init_schedule(schedule):
         assert isinstance(passes, list), f"Passes at a certain step should be a list, but got {type(passes)}"
 
     global remaining_schedule
-    remaining_schedule = schedule
+    remaining_schedule = deque(schedule)
 
 
 def launch_compile_passes(global_steps: int):
     global next_pass_step, next_passes
 
     if len(remaining_schedule) > 0 and global_steps == remaining_schedule[0][0]:
-        _, next_passes = remaining_schedule.pop(0)
+        _, next_passes = remaining_schedule.popleft()
         log_rank0(f"Launching compile passes: global_steps={global_steps} passes={next_passes}", True)
 
         torch._dynamo.reset()

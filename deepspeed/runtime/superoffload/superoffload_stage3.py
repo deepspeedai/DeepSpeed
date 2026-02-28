@@ -5,6 +5,7 @@
 
 import time
 import torch
+from collections import deque
 from typing import List
 
 from deepspeed.runtime.superoffload.superoffload_utils import SuperOffloadCPUOptimizer, TaskKeys, ResultKeys, EventTypes
@@ -30,7 +31,7 @@ class SuperOffloadOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
     ):
 
         self.sub_group_to_param_num = {}
-        self.params_in_ipg_bucket_buffer = []
+        self.params_in_ipg_bucket_buffer = deque()
         self._cur_bucket_index = -1
         self.async_cpuadam_num = 0
         self.max_grad_numel = 0
@@ -120,7 +121,7 @@ class SuperOffloadOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
 
                 # Process buffered parameters
                 while self.params_in_ipg_bucket_buffer:
-                    buffered_param = self.params_in_ipg_bucket_buffer.pop(0)
+                    buffered_param = self.params_in_ipg_bucket_buffer.popleft()
                     ci, _, _ = self.grad_position[self.get_param_id(buffered_param)]
                     self._cur_bucket_index = ci
                     if getattr(buffered_param, "ds_grad_is_ready", True):
