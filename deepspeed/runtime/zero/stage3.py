@@ -19,6 +19,7 @@ from deepspeed.runtime.base_optimizer import ZeROOptimizer
 from deepspeed.utils import logger
 from deepspeed.utils.torch import register_grad_hook, required_torch_version
 from deepspeed.runtime.fp16.loss_scaler import CreateLossScaler
+from deepspeed.runtime.loss_scale_validation import validate_loss_scale_value
 from deepspeed.runtime.torch_autocast import get_autocast_dtype, get_all_comm_dtypes, is_autocast_initialized, sort_dtypes
 from deepspeed.runtime.comm.coalesced_collectives import reduce_scatter_coalesced, all_to_all_quant_reduce, all_to_all_loco_quant_reduce
 from deepspeed.runtime.utils import inf, is_model_parallel_parameter, get_only_unique_item, mask_nan_or_inf_with_val_inplace, count_used_parameters_in_backward
@@ -2212,10 +2213,11 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             self._partitioned_params_swap_out(sub_group_id)
 
     def override_loss_scale(self, loss_scale):
-        if loss_scale != self.external_loss_scale:
-            logger.info(f'[deepspeed] setting loss scale from {self.external_loss_scale} -> {loss_scale}')
+        validated_loss_scale = validate_loss_scale_value(loss_scale, name="loss_scale")
+        if validated_loss_scale != self.external_loss_scale:
+            logger.info(f'[deepspeed] setting loss scale from {self.external_loss_scale} -> {validated_loss_scale}')
         self.custom_loss_scaler = True
-        self.external_loss_scale = loss_scale
+        self.external_loss_scale = validated_loss_scale
 
     @instrument_w_nvtx
     def step(self, closure=None):
@@ -2701,7 +2703,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             return self.loss_scaler.cur_scale
 
     def _set_loss_scale(self, value):
-        self.loss_scaler.cur_scale = value
+        self.loss_scaler.cur_scale = validate_loss_scale_value(value, name="loss_scale")
 
     loss_scale = property(_get_loss_scale, _set_loss_scale)
     cur_scale = property(_get_loss_scale, _set_loss_scale)

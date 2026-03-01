@@ -19,6 +19,7 @@ from typing import Container
 from deepspeed.runtime.zero.offload_states import offload_optimizer_states, reload_optimizer_states
 from deepspeed.runtime.base_optimizer import ZeROOptimizer
 from deepspeed.runtime.fp16.loss_scaler import CreateLossScaler
+from deepspeed.runtime.loss_scale_validation import validate_loss_scale_value
 from deepspeed.runtime.torch_autocast import get_autocast_dtype, get_all_comm_dtypes, is_autocast_initialized, sort_dtypes
 from deepspeed.runtime.utils import (empty_cache, see_memory_usage, inf, is_model_parallel_parameter,
                                      align_dense_tensors, all_gather_dp_groups, mask_nan_or_inf_with_val_inplace,
@@ -2031,10 +2032,11 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         return self.optimizer.param_groups[0]["lr"]
 
     def override_loss_scale(self, loss_scale):
-        if loss_scale != self.external_loss_scale:
-            logger.info(f'[deepspeed] setting loss scale from {self.external_loss_scale} -> {loss_scale}')
+        validated_loss_scale = validate_loss_scale_value(loss_scale, name="loss_scale")
+        if validated_loss_scale != self.external_loss_scale:
+            logger.info(f'[deepspeed] setting loss scale from {self.external_loss_scale} -> {validated_loss_scale}')
         self.custom_loss_scaler = True
-        self.external_loss_scale = loss_scale
+        self.external_loss_scale = validated_loss_scale
 
     def scaled_global_norm(self, norm_type=2):
         assert norm_type == 2, "only L2 norm supported"
@@ -2346,7 +2348,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             return self.loss_scaler.cur_scale
 
     def _set_loss_scale(self, value):
-        self.loss_scaler.cur_scale = value
+        self.loss_scaler.cur_scale = validate_loss_scale_value(value, name="loss_scale")
 
     loss_scale = property(_get_loss_scale, _set_loss_scale)
     cur_scale = property(_get_loss_scale, _set_loss_scale)
