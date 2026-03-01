@@ -925,6 +925,10 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
     def _create_momentum_buffer(self, num_elements, i, ds_id):
         if self.use_muon and self.sub_groups_using_muon[i]:
+            # For NVMe swap, defer creating the momentum buffer until after the first swap-in.
+            # Otherwise the swapper will try to read a non-existent swap file during init.
+            if self.swap_optimizer and self._swappable_optimizer_subgroup(i) and not self.save_muon_momentum_buffer_in_memory:
+                return
             unpinned_fp32_buffer_momentum = torch.zeros(num_elements,
                                                         device=self.device,
                                                         dtype=self.communication_data_type)
@@ -1186,6 +1190,10 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
             if swappable_optimizer_subgroup:
                 self._optimizer_states_and_gradient_swap_in(i, timer_names)
+                if self.use_muon and self.sub_groups_using_muon[i] and not self.save_muon_momentum_buffer_in_memory:
+                    # Create momentum buffer after swap-in so swap files can be created on swap-out.
+                    if "momentum_buffer" not in self.optimizer.state.get(self.fp32_partitioned_groups_flat[i], {}):
+                        self._create_momentum_buffer(num_elements, i, self.fp32_partitioned_groups_flat[i].ds_id)
 
             if self.offload_optimizer and not swappable_optimizer_subgroup:
                 subgroup_gradient_buffer = torch.zeros(num_elements, dtype=gradient_dtype, device=self.device)
@@ -1464,109 +1472,96 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         Returns:
             None
         """
-        momentum_buffer = []
-        use_muon_params = []
-        params_to_subgroup_maps = {}
-        idx = 0
-        # find the parameters that need to be updated using muon and they will be indexed by the subgroups
-        # this is done since the parameters are swapped in and out to nvme by the subgroups
+        if not self.use_muon:
+            return
+
+        params_by_group = {}
         params_size_offset = 0
-        param_grad_offsets = {}
         for param in self.ipg_buckets[communication_data_type].params:
             i, dest_offset, _ = self.grad_position[self.get_param_id(param)]
-            if self.use_muon and self.sub_groups_using_muon[i]:
-                use_muon_params.append(param)
-                param_grad_offsets[param] = params_size_offset
+            if self.sub_groups_using_muon[i]:
                 # copy the gradients back to the params in the ipg bucket for the muon update
                 param.grad.data.copy_(buffer_to_reduce.narrow(0, params_size_offset,
                                                               param.grad.numel()).view_as(param.grad),
                                       non_blocking=False)
-                momentum_buffer.append(None)
-                if i not in params_to_subgroup_maps:
-                    params_to_subgroup_maps[i] = []
-                params_to_subgroup_maps[i].append((idx, dest_offset))
-                idx += 1
+                if i not in params_by_group:
+                    params_by_group[i] = []
+                params_by_group[i].append((param, dest_offset, params_size_offset))
             params_size_offset += param.grad.numel()
-        # if optimizer is swappable, swap in the momentum buffer of the parameters that need to be updated using muon and then swap them out
-        # if optimizer is not swappable, find the momentum buffer of the parameters that need to be updated using muon in memory
-        for i in params_to_subgroup_maps:
+
+        # process muon updates per subgroup to avoid holding all parameters and states at once
+        for i, group_items in params_by_group.items():
+            params = [param for param, _, _ in group_items]
+            if not params:
+                continue
+
+            momentum_buffer = []
             if self._swappable_optimizer_subgroup(i) and not self.save_muon_momentum_buffer_in_memory:
+                # swap-in once, keep resident through update + writeback
                 self.optimizer_swapper.swap_in_optimizer_state(parameter=self.fp32_partitioned_groups_flat[i])
-                for idx, dest_offset in params_to_subgroup_maps[i]:
-                    momentum_buffer[idx] = self.optimizer.state[
-                        self.fp32_partitioned_groups_flat[i]]["momentum_buffer"].narrow(
-                            0, dest_offset, use_muon_params[idx].partition_numel()).clone()
-                self.optimizer_swapper.swap_out_optimizer_state(parameter=self.fp32_partitioned_groups_flat[i])
+                state_buffer = self.optimizer.state[self.fp32_partitioned_groups_flat[i]]["momentum_buffer"]
+                for param, dest_offset, _ in group_items:
+                    momentum_buffer.append(state_buffer.narrow(0, dest_offset,
+                                                               param.partition_numel()).clone())
             elif self.save_muon_momentum_buffer_in_memory:
-                for idx, dest_offset in params_to_subgroup_maps[i]:
-                    momentum_buffer[idx] = self.muon_momentum_buffer_partitioned_groups_flat[i].narrow(
-                        0, dest_offset, use_muon_params[idx].partition_numel()).clone()
+                state_buffer = self.muon_momentum_buffer_partitioned_groups_flat[i]
+                for param, dest_offset, _ in group_items:
+                    momentum_buffer.append(state_buffer.narrow(0, dest_offset,
+                                                               param.partition_numel()).clone())
             else:
                 raise ValueError(
                     "Invalid momentum buffer save mode, momentum buffer should be saved in memory or swapped in and out to nvme"
                 )
-        # if there are parameters that need to be updated using muon
-        if momentum_buffer:
-            # all gather the momentum buffers of the parameters to the global buffer
-            # this is done since the momentum buffers are stored in partitions just like the params themselves
-            gathered_params_momentums = self._partitioned_buffers_all_gather(use_muon_params, momentum_buffer,
-                                                                             communication_data_type)
-            for i in params_to_subgroup_maps:
-                if self._swappable_optimizer_subgroup(i) and not self.save_muon_momentum_buffer_in_memory:
-                    self.optimizer_swapper.swap_in_optimizer_state(parameter=self.fp32_partitioned_groups_flat[i])
 
-                # in the case of large numbers of parameters, we distribute the workload across the ranks
-                # because muon update is a heavy operation
-                world_sz = dist.get_world_size(self.dp_process_group)
-                rank = dist.get_rank(self.dp_process_group)
-                params = [use_muon_params[idx] for idx, _ in params_to_subgroup_maps[i]]
-                gathered_momentums = [gathered_params_momentums[idx] for idx, _ in params_to_subgroup_maps[i]]
-                # params_pad = params + [torch.empty_like(params[-1])] * (world_sz - len(params) % world_sz)
-                grads_pad = [param.grad for param in params] + [torch.empty_like(params[-1].grad)] * (
-                    (world_sz - len(params) % world_sz) % world_sz)
-                gathered_momentums_pad = gathered_momentums + [torch.empty_like(gathered_momentums[-1])] * (
-                    (world_sz - len(gathered_momentums) % world_sz) % world_sz)
-                for base_i in range(len(params))[::world_sz]:
-                    if base_i + rank < len(params):
-                        param = params[base_i + rank]
-                        g = param.grad
-                        m = gathered_momentums_pad[base_i + rank]
-                        update = muon_update(g, m, beta=self.muon_beta)
-                        g.data.copy_(update, non_blocking=False)
-                        buffer_to_reduce.narrow(0, param_grad_offsets[param],
-                                                param.grad.numel()).data.copy_(g.view(-1), non_blocking=False)
-                    dist.all_gather(grads_pad[base_i:base_i + world_sz], grads_pad[base_i + rank])
-                    dist.all_gather(gathered_momentums_pad[base_i:base_i + world_sz],
-                                    gathered_momentums_pad[base_i + rank])
-                # now each rank has the full momentum buffers updated as well as the gradients updated
-                # then write them backt to the optimizer state
-                for idx, dest_offset in params_to_subgroup_maps[i]:
-                    param = use_muon_params[idx]
-                    gathered_momentum = gathered_params_momentums[idx]
-                    chunk_sz = math.ceil(param.grad.numel() / world_sz)
-                    start_offset = rank * chunk_sz
-                    end_offset = start_offset + chunk_sz
-                    if end_offset > param.grad.numel():
-                        buffer_to_update = torch.zeros(chunk_sz, device=param.grad.device, dtype=param.grad.dtype)
-                        buffer_to_update[:param.grad.numel() - start_offset] = gathered_momentum.view(
-                            -1).data[start_offset:param.grad.numel()]
-                    else:
-                        buffer_to_update = gathered_momentum.view(-1).data[start_offset:end_offset]
-                    if self._swappable_optimizer_subgroup(i) and not self.save_muon_momentum_buffer_in_memory:
-                        self.optimizer.state[self.fp32_partitioned_groups_flat[i]]["momentum_buffer"].narrow(
-                            0, dest_offset, param.partition_numel()).data.copy_(buffer_to_update, non_blocking=False)
-                    elif self.save_muon_momentum_buffer_in_memory:
-                        self.muon_momentum_buffer_partitioned_groups_flat[i].narrow(
-                            0, dest_offset, param.partition_numel()).data.copy_(buffer_to_update, non_blocking=False)
-                        # update the momentum buffer in the optimizer state
-                        self.optimizer.state[self.fp32_partitioned_groups_flat[i]][
-                            "momentum_buffer"] = self.muon_momentum_buffer_partitioned_groups_flat[i]
-                    else:
-                        raise ValueError(
-                            "Invalid momentum buffer save mode, momentum buffer should be saved in memory or swapped in and out to nvme"
-                        )
+            gathered_params_momentums = self._partitioned_buffers_all_gather(params, momentum_buffer,
+                                                                             communication_data_type)
+
+            world_sz = dist.get_world_size(self.dp_process_group)
+            rank = dist.get_rank(self.dp_process_group)
+            grads_pad = [param.grad for param in params] + [torch.empty_like(params[-1].grad)] * (
+                (world_sz - len(params) % world_sz) % world_sz)
+            gathered_momentums_pad = gathered_params_momentums + [torch.empty_like(gathered_params_momentums[-1])] * (
+                (world_sz - len(gathered_params_momentums) % world_sz) % world_sz)
+            for base_i in range(len(params))[::world_sz]:
+                if base_i + rank < len(params):
+                    param = params[base_i + rank]
+                    g = param.grad
+                    m = gathered_momentums_pad[base_i + rank]
+                    update = muon_update(g, m, beta=self.muon_beta)
+                    g.data.copy_(update, non_blocking=False)
+                    _, _, grad_offset = group_items[base_i + rank]
+                    buffer_to_reduce.narrow(0, grad_offset,
+                                            param.grad.numel()).data.copy_(g.view(-1), non_blocking=False)
+                dist.all_gather(grads_pad[base_i:base_i + world_sz], grads_pad[base_i + rank])
+                dist.all_gather(gathered_momentums_pad[base_i:base_i + world_sz],
+                                gathered_momentums_pad[base_i + rank])
+
+            for idx, (param, dest_offset, _) in enumerate(group_items):
+                gathered_momentum = gathered_params_momentums[idx]
+                chunk_sz = math.ceil(param.grad.numel() / world_sz)
+                start_offset = rank * chunk_sz
+                end_offset = start_offset + chunk_sz
+                if end_offset > param.grad.numel():
+                    buffer_to_update = torch.zeros(chunk_sz, device=param.grad.device, dtype=param.grad.dtype)
+                    buffer_to_update[:param.grad.numel() - start_offset] = gathered_momentum.view(
+                        -1).data[start_offset:param.grad.numel()]
+                else:
+                    buffer_to_update = gathered_momentum.view(-1).data[start_offset:end_offset]
                 if self._swappable_optimizer_subgroup(i) and not self.save_muon_momentum_buffer_in_memory:
-                    self.optimizer_swapper.swap_out_optimizer_state(parameter=self.fp32_partitioned_groups_flat[i])
+                    self.optimizer.state[self.fp32_partitioned_groups_flat[i]]["momentum_buffer"].narrow(
+                        0, dest_offset, param.partition_numel()).data.copy_(buffer_to_update, non_blocking=False)
+                elif self.save_muon_momentum_buffer_in_memory:
+                    self.muon_momentum_buffer_partitioned_groups_flat[i].narrow(
+                        0, dest_offset, param.partition_numel()).data.copy_(buffer_to_update, non_blocking=False)
+                    # update the momentum buffer in the optimizer state
+                    self.optimizer.state[self.fp32_partitioned_groups_flat[i]][
+                        "momentum_buffer"] = self.muon_momentum_buffer_partitioned_groups_flat[i]
+                else:
+                    raise ValueError(
+                        "Invalid momentum buffer save mode, momentum buffer should be saved in memory or swapped in and out to nvme"
+                    )
+            if self._swappable_optimizer_subgroup(i) and not self.save_muon_momentum_buffer_in_memory:
+                self.optimizer_swapper.swap_out_optimizer_state(parameter=self.fp32_partitioned_groups_flat[i])
 
     @instrument_w_nvtx
     def __avg_scatter_contiguous_grads(self, buffer_to_reduce: Tensor,
