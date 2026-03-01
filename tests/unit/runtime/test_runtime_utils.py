@@ -7,6 +7,7 @@ import torch
 from torch._utils import _flatten_dense_tensors
 import deepspeed.comm as dist
 import pytest
+from typing import Dict
 
 import deepspeed.runtime.utils as ds_utils
 import deepspeed.utils.groups as groups
@@ -98,3 +99,30 @@ class TestCheckOverflow(DistributedTest):
             overflow_checker = ds_utils.CheckOverflow([parameters])
             overflow = overflow_checker.check()
         assert overflow
+
+
+@pytest.mark.skipif(not hasattr(torch.autograd.graph, "_get_grad_fn_or_grad_acc"),
+                    reason="requires torch.autograd.graph._get_grad_fn_or_grad_acc")
+def test_count_used_parameters_enables_grad_for_grad_acc_lookup(monkeypatch):
+    """count_used_parameters_in_backward should enable grad for grad-acc lookup."""
+    param = torch.nn.Parameter(torch.tensor([1.0], requires_grad=True))
+    seen: Dict[str, int] = {"lookup_calls": 0}
+    original_getter = torch.autograd.graph._get_grad_fn_or_grad_acc
+
+    def _require_grad_enabled(t):
+        seen["lookup_calls"] += 1
+        if not torch.is_grad_enabled():
+            raise RuntimeError("grad mode must be enabled for grad-acc lookup")
+        return original_getter(t)
+
+    monkeypatch.setattr(torch.autograd.graph, "_get_grad_fn_or_grad_acc", _require_grad_enabled)
+
+    def _hook(grad):
+        seen["count"] = ds_utils.count_used_parameters_in_backward([param])
+        return grad
+
+    param.register_hook(_hook)
+    loss = (param * 2.0).sum()
+    loss.backward()
+    assert seen["lookup_calls"] > 0
+    assert "count" in seen

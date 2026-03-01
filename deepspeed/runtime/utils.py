@@ -1455,7 +1455,10 @@ def count_used_parameters_in_backward(parameters: Sequence[torch.nn.Parameter]) 
         if not isinstance(param, torch.Tensor) or not param.requires_grad:
             continue
 
-        grad_fn = _get_grad_fn_or_grad_acc(param)
+        # Backward hooks run with grad mode disabled, but PyTorch <=2.4's
+        # _get_grad_fn_or_grad_acc() requires grad mode for leaf params.
+        with torch.enable_grad():
+            grad_fn = _get_grad_fn_or_grad_acc(param)
         if grad_fn is None:
             continue
 
