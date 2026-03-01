@@ -61,10 +61,10 @@ def prepare_autosp_inputs(input_id: torch.Tensor, label_id: torch.Tensor, positi
     if attention_mask is not None:
         torch._dynamo.decorators.mark_dynamic(attention_mask, seq_dim)
     
-    input_id.tag = constants.INPUT_ID_KEY
-    label_id.tag = constants.LABEL_ID_KEY
+    input_id.tag = constants.AUTOSP_INPUT_ID_KEY
+    label_id.tag = constants.AUTOSP_LABEL_ID_KEY
     if position_id is not None:
-        position_id.tag = constants.POSITION_ID_KEY
+        position_id.tag = constants.AUTOSP_POSITION_ID_KEY
     
     return input_id, label_id, position_id, attention_mask
 

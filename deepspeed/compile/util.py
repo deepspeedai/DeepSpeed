@@ -6,7 +6,6 @@
 import functools
 import operator
 from typing import List, Tuple, Dict, Optional
-from dataclasses import dataclass
 from collections import defaultdict
 
 import torch
@@ -526,11 +525,6 @@ def pad_tensors(specs: List[Tuple[torch.Tensor, int, int]]) -> List[torch.Tensor
 
     return padded
 
-INPUT_ID_KEY = "input_id"
-LABEL_ID_KEY = "label_id"
-POSITION_ID_KEY = "position_id"
-
-
 def create_shard_offsets(
     gm: GraphModule, 
     s0_node: Node
@@ -566,21 +560,21 @@ def get_sdpa_nodes(gm: GraphModule) -> List[Node]:
 
 def get_input_id_node(gm: GraphModule) -> Node:
     from .fx import find_node_by_tag
-    node = find_node_by_tag(gm, constants.INPUT_ID_KEY)
+    node = find_node_by_tag(gm, constants.AUTOSP_INPUT_ID_KEY)
     if node is None:
         raise RuntimeError("Failed to find a node for the input sequence.")
     return node
 
 def get_label_id_node(gm: GraphModule) -> Node:
     from .fx import find_node_by_tag
-    node = find_node_by_tag(gm, constants.LABEL_ID_KEY)
+    node = find_node_by_tag(gm, constants.AUTOSP_LABEL_ID_KEY)
     if node is None:
         raise RuntimeError("Failed to find a node for the label.")
     return node
 
 def get_position_id_node(gm: GraphModule) -> Node:
     from .fx import find_node_by_tag
-    node = find_node_by_tag(gm, constants.POSITION_ID_KEY)
+    node = find_node_by_tag(gm, constants.AUTOSP_POSITION_ID_KEY)
     return node
 
 
