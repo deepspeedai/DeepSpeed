@@ -128,18 +128,15 @@ def pass_shard_seq_dim(gm: GraphModule, example_inputs):
 
 
 def pass_shard_input_ids(gm: GraphModule, example_inputs):
-    """Shard input_ids tensor across ranks."""
     input_ids_node = get_input_id_node(gm)
     shard_tensor_node(gm, input_ids_node)
 
 
 def pass_shard_label_ids(gm: GraphModule, example_inputs):
-    """Shard label_ids tensor across ranks."""
     label_ids_node = get_label_id_node(gm)
     shard_tensor_node(gm, label_ids_node)
 
 def pass_shard_position_ids(gm: GraphModule, example_inputs):
-    """Shard position_ids tensor across ranks."""
     position_ids_node = get_position_id_node(gm)
     if position_ids_node is None:
         print("[WARNING] position id node not found. Skipping sharding of position ids.")

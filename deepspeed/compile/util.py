@@ -529,17 +529,6 @@ def create_shard_offsets(
     gm: GraphModule, 
     s0_node: Node
 ) -> Tuple[Node, Node]:
-    """
-    Create FX nodes for computing shard start and end offsets.
-    
-    Computes:
-        chunk_size = s0 // sp_size 
-        start = rank * chunk_size
-        end = start + chunk_size
-    
-    Returns:
-        Tuple of (start_node, end_node)
-    """
     sp_size: int = sp_dp_registry.sp_size()
     sp_rank: int = dist.get_rank() % sp_dp_registry.sp_size()
     with gm.graph.inserting_after(s0_node):
