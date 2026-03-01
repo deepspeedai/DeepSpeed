@@ -4391,6 +4391,7 @@ class DeepSpeedEngine(Module):
 
             compile_config = self._config.compile_config
             if self.compile_autosp():
+                compile_kwargs['fullgraph'] = True
                 backend = init_autosp(compile_config)
             else: ## By default then only zero-style DP should be triggered in dc. ##
                 if (("zero_optimization" in self.config and "offload_optimizer" in self.config["zero_optimization"]

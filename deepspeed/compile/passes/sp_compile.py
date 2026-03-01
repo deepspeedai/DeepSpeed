@@ -145,16 +145,6 @@ def pass_shard_position_ids(gm: GraphModule, example_inputs):
 
 
 def pass_insert_attention_all_to_all(gm: GraphModule, real_inputs):
-    """
-    Insert all-to-all collectives around SDPA for Ulysses parallelism.
-    
-    For each SDPA:
-        - Before Q, K, V: scatter heads (dim=1), gather sequence (dim=2)
-        - After O: scatter sequence (dim=2), gather heads (dim=1)
-    """
-    world_size = dist.get_world_size()
-    attention_nodes = get_sdpa_nodes(gm)
-    
     def insert_a2a(node: Node, scatter_idx: int, gather_idx: int, name: str) -> Node:
         with gm.graph.inserting_after(node):
             a2a_node = gm.graph.call_function(
@@ -165,6 +155,15 @@ def pass_insert_attention_all_to_all(gm: GraphModule, real_inputs):
             node.replace_all_uses_with(a2a_node)
             a2a_node.update_arg(0, node)
         return a2a_node
+    
+    attention_nodes = get_sdpa_nodes(gm)
+    if len(attention_nodes) == 0:
+        raise RuntimeError(
+            "AutoSP currently supports torch.nn.functional.scaled_dot_product_attention as the "
+            "attention backend. No SDPA attention operations were found in the compiled graph. "
+            "Please ensure your model uses torch.nn.functional.scaled_dot_product_attention "
+            "for AutoSP to work as expected."
+        )
     
     for idx, attn_node in enumerate(attention_nodes):
         q, k, v = attn_node.args[:3]
