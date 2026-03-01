@@ -29,7 +29,7 @@ https://github.com/snowflakedb/ArcticTraining/blob/main/projects/sequence-parall
 
 """
 
-from collections import defaultdict
+from collections import defaultdict, deque
 from deepspeed.runtime.utils import see_memory_usage
 from deepspeed.sequence.layer import _DimZeroAllToAll
 from deepspeed.utils.logging import logger
@@ -550,7 +550,7 @@ class UlyssesSPDataLoaderAdapter:
         self.device = device
 
         self.iter = iter(dl)
-        self.micro_batches: list[Any] = []
+        self.micro_batches: deque[Any] = deque()
 
     def __len__(self):
         return len(self.dl) * self.sp_world_size
@@ -562,7 +562,7 @@ class UlyssesSPDataLoaderAdapter:
         if len(self.micro_batches) == 0:
             self.refill()
 
-        return self.micro_batches.pop(0)
+        return self.micro_batches.popleft()
 
     def refill(self):
         # reset the iterator if StopIteration arrives, and re-raise it to allow multiple epochs to run
