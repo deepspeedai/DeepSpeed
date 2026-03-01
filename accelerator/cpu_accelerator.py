@@ -199,9 +199,6 @@ class CPU_Accelerator(DeepSpeedAccelerator):
         return psutil.virtual_memory().available
 
     # Misc
-    def amp(self):
-        return torch.cpu.amp
-
     def is_available(self):
         return True
 

@@ -222,11 +222,6 @@ class CUDA_Accelerator(DeepSpeedAccelerator):
         return supported_dtypes
 
     # Misc
-    def amp(self):
-        if hasattr(torch.cuda, 'amp'):
-            return torch.cuda.amp
-        return None
-
     def is_available(self):
         return torch.cuda.is_available()
 

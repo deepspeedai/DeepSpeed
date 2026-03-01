@@ -163,11 +163,6 @@ class NPU_Accelerator(DeepSpeedAccelerator):
         return [torch.float, torch.half, torch.bfloat16]
 
     # Misc
-    def amp(self):
-        if hasattr(torch.npu, 'amp'):
-            return torch.npu.amp
-        return None
-
     def is_available(self):
         return torch.npu.is_available()
 
