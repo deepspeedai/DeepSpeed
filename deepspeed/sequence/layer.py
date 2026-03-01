@@ -3,6 +3,7 @@
 
 # DeepSpeed Team
 import torch
+import torch.nn.functional as F
 
 from typing import Any, Tuple
 from torch import Tensor
@@ -14,6 +15,7 @@ import deepspeed.comm as dist
 from deepspeed.accelerator import get_accelerator
 from deepspeed.module_inject.tp_shard import get_shard_size_list, set_num_kv_heads, get_num_kv_heads
 from deepspeed.utils import groups
+from deepspeed.utils.groups import _get_max_local_seq_len
 
 
 def _generate_layout_params(scatter_idx, batch_dim_idx, seq_world_size, input):
@@ -44,7 +46,10 @@ def _generate_layout_params(scatter_idx, batch_dim_idx, seq_world_size, input):
             pre_all2all_permute_idx = None
 
             post_all2all_permute_idx = (1, 2, 0, 3, 4)
-            post_all2all_res_shape = [bs, seq_world_size * global_seq_len, num_local_head // seq_world_size, head_dim]
+            # Scatter seq → gather heads.  After permute the tensor has shape
+            # [global_seq_len // seq_world_size, bs, seq_world_size, num_local_head, head_dim];
+            # collapse the last two head dims to get the full head count on each rank.
+            post_all2all_res_shape = [global_seq_len // seq_world_size, bs, seq_world_size * num_local_head, head_dim]
         else:
             local_seq_len, bs, num_total_head, head_dim = input.shape
             assert num_total_head % seq_world_size == 0, f"Number of heads ({num_total_head}) must be divisible by the sequence parallel size ({seq_world_size})!"
@@ -364,6 +369,21 @@ class DistributedAttention(torch.nn.Module):
         if self.sp_overlap_comm and hasattr(layer, 'done_event'):
             self.default_stream.wait_event(layer.done_event)
 
+    @staticmethod
+    def _pad_to_seq_world_size(tensor: Tensor, seq_dim: int, target_len: int) -> Tensor:
+        """Pad *tensor* along *seq_dim* to *target_len* with zeros."""
+        pad_amount = target_len - tensor.shape[seq_dim]
+        if pad_amount == 0:
+            return tensor
+        # F.pad expects padding in reversed-dim order, two ints per dim: (pad_left, pad_right).
+        # Build a flat list of zeros with pad_amount at the right end of seq_dim.
+        pad_spec = [0] * (tensor.dim() * 2)
+        # Position for the RIGHT-side pad of seq_dim in the reversed list:
+        # F.pad list starts from the LAST dim.  seq_dim from-the-end index = ndim - 1 - seq_dim.
+        # Right-side pad is at position 2 * (ndim - 1 - seq_dim) + 1.
+        pad_spec[2 * (tensor.dim() - 1 - seq_dim) + 1] = pad_amount
+        return F.pad(tensor, pad_spec)
+
     def forward(self,
                 query: Tensor,
                 key: Tensor,
@@ -379,6 +399,8 @@ class DistributedAttention(torch.nn.Module):
             key (Tensor): key input to the layer
             value (Tensor): value input to the layer
             batch_dim_idx (int): indicating which dim is batch
+                0 → batch-first [B, S, H, D]
+                1 → seq-first   [S, B, H, D]
             args: other args
 
         Returns:
@@ -388,6 +410,24 @@ class DistributedAttention(torch.nn.Module):
         # TODO Merge three alltoall calls into one
         # TODO (Reza): change the api on the megatron-deepspeed side so that we only receive all data (q,k, and v) together!
         #in shape : e.g.,  [s/p:h:]
+
+        # When the LOCAL sequence length is not the same across all ranks (which
+        # happens whenever the global sequence length is not divisible by the
+        # sequence-parallel world size), the all-to-all collective requires
+        # equal-sized contributions from every rank.  Detect this case and pad
+        # Q/K/V to the maximum local sequence length before the all-to-all; the
+        # padding tokens are discarded from the final output.
+        seq_dim = 1 if batch_dim_idx == 0 else 0
+        local_seq_len = query.shape[seq_dim]
+        seq_world_size = dist.get_world_size(self.spg)
+
+        max_local_seq_len = _get_max_local_seq_len(local_seq_len, self.spg)
+        needs_pad = max_local_seq_len != local_seq_len
+
+        if needs_pad:
+            query = self._pad_to_seq_world_size(query, seq_dim, max_local_seq_len)
+            key = self._pad_to_seq_world_size(key, seq_dim, max_local_seq_len)
+            value = self._pad_to_seq_world_size(value, seq_dim, max_local_seq_len)
 
         def bwd_hook(layer_type):
 
@@ -435,6 +475,13 @@ class DistributedAttention(torch.nn.Module):
 
         output = _SeqAllToAll.apply(self.spg, context_layer, self.gather_idx, self.scatter_idx, batch_dim_idx,
                                     self.sp_stream, self.overlap_handles, 'o')
+
+        # Remove padding that was added to align sequence lengths across ranks.
+        if needs_pad:
+            if batch_dim_idx == 0:
+                output = output[:, :local_seq_len]
+            else:
+                output = output[:local_seq_len]
 
         #out e.g., [s/p::h]
         return output
