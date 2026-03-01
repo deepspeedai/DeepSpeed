@@ -925,10 +925,6 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
     def _create_momentum_buffer(self, num_elements, i, ds_id):
         if self.use_muon and self.sub_groups_using_muon[i]:
-            # For NVMe swap, defer creating the momentum buffer until after the first swap-in.
-            # Otherwise the swapper will try to read a non-existent swap file during init.
-            if self.swap_optimizer and self._swappable_optimizer_subgroup(i) and not self.save_muon_momentum_buffer_in_memory:
-                return
             unpinned_fp32_buffer_momentum = torch.zeros(num_elements,
                                                         device=self.device,
                                                         dtype=self.communication_data_type)
@@ -982,7 +978,9 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                 self.fp32_partitioned_groups_flat[i].ds_id = ds_id
                 nvme_memory_usage += (fp32_element_size * num_elements)
                 num_swappable_partitions += 1
-                self._create_momentum_buffer(num_elements, i, ds_id)
+                if not (self.use_muon and self.sub_groups_using_muon[i]
+                        and not self.save_muon_momentum_buffer_in_memory):
+                    self._create_momentum_buffer(num_elements, i, ds_id)
 
                 if self.params_in_nvme_and_cpu and tensor is None:
                     num_swap_from_nvme_partitions += 1
@@ -1499,6 +1497,10 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             if self._swappable_optimizer_subgroup(i) and not self.save_muon_momentum_buffer_in_memory:
                 # swap-in once, keep resident through update + writeback
                 self.optimizer_swapper.swap_in_optimizer_state(parameter=self.fp32_partitioned_groups_flat[i])
+                if "momentum_buffer" not in self.optimizer.state.get(self.fp32_partitioned_groups_flat[i], {}):
+                    self._create_momentum_buffer(self.fp16_partitioned_groups_flat_numel[i],
+                                                 i,
+                                                 self.fp32_partitioned_groups_flat[i].ds_id)
                 state_buffer = self.optimizer.state[self.fp32_partitioned_groups_flat[i]]["momentum_buffer"]
                 for param, dest_offset, _ in group_items:
                     momentum_buffer.append(state_buffer.narrow(0, dest_offset,
