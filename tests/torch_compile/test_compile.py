@@ -9,7 +9,6 @@ from deepspeed.accelerator import get_accelerator
 from deepspeed import comm
 
 import torch
-import intel_extension_for_pytorch  # noqa: F401 # type: ignore
 from torch.utils.data import Dataset, DataLoader
 
 torch._dynamo.config.cache_size_limit = 100
