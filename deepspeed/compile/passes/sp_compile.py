@@ -20,7 +20,7 @@ from torch.fx import GraphModule, Node
 from torch.fx.passes.fake_tensor_prop import FakeTensorProp
 from torch.fx.experimental.symbolic_shapes import ShapeEnv
 
-from deepspeed.runtime import constants
+from deepspeed.compile import constants
 
 from ..custom_ops import all_to_all, sp_dp_registry
 from ..fx import find_node_by_name, get_node_shape_meta

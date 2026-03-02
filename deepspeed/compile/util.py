@@ -23,7 +23,7 @@ import deepspeed.comm as dist
 from deepspeed.accelerator import get_accelerator
 from deepspeed.utils.torch import required_torch_version
 from deepspeed.ops.op_builder.dc import DeepCompileBuilder
-from deepspeed.runtime import constants
+from deepspeed.compile import constants
 
 from .custom_ops import sp_dp_registry
 
