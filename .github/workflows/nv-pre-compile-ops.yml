@@ -23,10 +23,19 @@ jobs:
   unit-tests:
     runs-on: ubuntu-24.04
     container:
-      image: deepspeed/gh-builder:ubuntu1804-py38-torch1131-cu116
+      image: nvidia/cuda:12.6.3-devel-ubuntu22.04
 
     steps:
+        - name: Install system dependencies
+          run: |
+            apt-get update && apt-get install -y git python3 python3-pip libaio-dev ninja-build
+            ln -sf /usr/bin/python3 /usr/bin/python
+
         - uses: actions/checkout@v4
+
+        - name: Install PyTorch
+          run: |
+            pip install torch==2.10.0 --index-url https://download.pytorch.org/whl/cu126
 
         - name: environment
           run: |
@@ -36,7 +45,7 @@ jobs:
             #python -c "import torch; print('CUDA available:', torch.cuda.is_available())"
         - name: Compile DeepSpeed Ops
           run: |
-            DS_ACCELERATOR=cuda DS_ENABLE_NINJA=1 TORCH_CUDA_ARCH_LIST="7.0;7.5;8.0" DS_BUILD_OPS=1 DS_BUILD_SPARSE_ATTN=0 DS_BUILD_FP_QUANTIZER=0 DS_BUILD_CUTLASS_OPS=0 DS_BUILD_GDS=0 DS_BUILD_RAGGED_DEVICE_OPS=0 DS_BUILD_EVOFORMER_ATTN=0 DS_BUILD_DEEP_COMPILE=0 pip3 install .
+            DS_ACCELERATOR=cuda DS_ENABLE_NINJA=1 TORCH_CUDA_ARCH_LIST="7.0;7.5;8.0;8.6;8.9;9.0" DS_BUILD_OPS=1 DS_BUILD_SPARSE_ATTN=0 DS_BUILD_FP_QUANTIZER=0 DS_BUILD_CUTLASS_OPS=0 DS_BUILD_GDS=0 DS_BUILD_RAGGED_DEVICE_OPS=0 DS_BUILD_EVOFORMER_ATTN=0 DS_BUILD_DEEP_COMPILE=0 pip3 install .
         - name: DS Report
           run: |
-             ds_report
+             DS_ACCELERATOR=cuda ds_report
