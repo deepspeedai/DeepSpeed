@@ -720,24 +720,25 @@ def initialize_parallel_state_from_config(
     order: Optional[str] = None,
     create_gloo_process_groups: Optional[bool] = None,
     high_priority_stream_groups: Optional[List[str]] = None,
-) -> None:
+) -> ParallelState:
     """Initialize parallel state from DeepSpeed config.json with optional parameter overrides.
 
-    This function reads parallelism configuration from the DeepSpeed config file
-    (top-level fields) and automatically initializes the ParallelState instance.
-    This allows code to work with both explicit initialization and config-based initialization.
+    Reads parallelism configuration from the DeepSpeed config (including nested dicts)
+    and initializes the ParallelState instance. Returns the instance so it can be used
+    directly as the ``mpu`` argument to ``deepspeed.initialize``.
 
-    Configuration priority: function parameters > config file values > default values (1)
+    Configuration priority: function parameters > config file values > default values
+
+    Config keys support dot-separated paths for nested dicts. For example,
+    ``tensor_model_parallel_size`` is resolved from either the top-level key
+    ``"tensor_model_parallel_size"`` or the nested key ``"tensor_parallel.autotp_size"``.
 
     Args:
         config: Either a DeepSpeedConfig object or a config dictionary.
-                If DeepSpeedConfig, will access its _param_dict attribute.
-                If dict, will use it directly.
         name: Optional name of the parallel state instance to initialize.
               If None, initializes the default global instance.
-
-        # Parallelism dimension parameters (override config if provided):
-        tensor_model_parallel_size: Size of tensor model parallel group. Default: 1
+        tensor_model_parallel_size: Size of tensor model parallel group. Default: 1.
+            Also read from ``tensor_parallel.autotp_size`` in config.
         pipeline_model_parallel_size: Size of pipeline model parallel group. Default: 1
         virtual_pipeline_model_parallel_size: Virtual pipeline model parallel size. Default: None
         pipeline_model_parallel_comm_backend: Communication backend for pipeline. Default: None
@@ -753,46 +754,35 @@ def initialize_parallel_state_from_config(
         create_gloo_process_groups: Whether to create Gloo process groups. Default: False
         high_priority_stream_groups: High priority stream groups. Default: None
 
-    Example config.json (using existing DeepSpeed config fields):
-        {
-          "train_batch_size": 8,
-          "sequence_parallel_size": 1,
-          "zero_optimization": {
-            "stage": 1
-          }
+    Returns:
+        The initialized (or already-initialized) ParallelState instance.
+
+    Example usage::
+
+        # Use return value as mpu:
+        ps = initialize_parallel_state_from_config(config_dict)
+        model, optimizer, _, _ = deepspeed.initialize(
+            model=model, model_parameters=model.parameters(),
+            config=config_dict, mpu=ps)
+
+        # AutoTP config (nested dict):
+        config_dict = {
+            "tensor_parallel": {"autotp_size": 4},
+            ...
         }
-
-    Note:
-    - Currently only "sequence_parallel_size" can be read from config (existing field)
-    - Other parallelism parameters must be passed via function parameters or use defaults
-    - Context Parallel is NOT supported (cp must be 1)
-
-    Example usage:
-        # Basic usage from config file:
-        from deepspeed import DeepSpeedConfig
-        ds_config = DeepSpeedConfig("config.json")
-        initialize_parallel_state_from_config(ds_config)
+        ps = initialize_parallel_state_from_config(config_dict)
 
         # Override specific parameters:
-        initialize_parallel_state_from_config(
+        ps = initialize_parallel_state_from_config(
             ds_config,
-            tensor_model_parallel_size=4,  # Override config value
+            tensor_model_parallel_size=4,
             expert_model_parallel_size=2
         )
 
-        # From config dictionary:
-        import json
-        with open("config.json") as f:
-            config_dict = json.load(f)
-        initialize_parallel_state_from_config(config_dict)
-
-        # For named instances (RL scenarios):
-        initialize_parallel_state_from_config(ds_config, name="actor")
-        initialize_parallel_state_from_config(
-            ds_config,
-            name="critic",
-            tensor_model_parallel_size=2  # Override for critic
-        )
+        # Named instances (RL scenarios):
+        actor_ps = initialize_parallel_state_from_config(ds_config, name="actor")
+        critic_ps = initialize_parallel_state_from_config(
+            ds_config, name="critic", tensor_model_parallel_size=2)
     """
     # Extract config dictionary
     if hasattr(config, '_param_dict'):
@@ -807,75 +797,74 @@ def initialize_parallel_state_from_config(
     # Get the parallel state instance
     ps = get_parallel_state_instance(name)
 
-    # Check if already initialized
     if ps.is_initialized():
-        # Already initialized, skip
-        return
+        return ps
 
     # Import logging
     import logging
     logger = logging.getLogger(__name__)
 
-    # Helper function to get value with proper priority handling
-    # Priority: function parameter > config file value > default value
-    def get_value(param_name, param_value, config_key, default_value):
-        """
-        Get value with priority handling.
+    def _resolve_nested_key(d, dotted_key):
+        """Resolve a dot-separated key path in a nested dict. Returns (found, value)."""
+        keys = dotted_key.split(".")
+        cur = d
+        for k in keys:
+            if isinstance(cur, dict) and k in cur:
+                cur = cur[k]
+            else:
+                return False, None
+        return True, cur
 
-        Priority:
-        1. If function parameter is provided -> use parameter value
-        2. If config file has the value -> use config value
-        3. Otherwise -> use default value
+    def get_value(param_value, config_key, default_value):
         """
-        # Case 1: Function parameter provided
+        Get value with priority: function parameter > config value > default.
+
+        config_key can be a single dot-separated string (e.g. "tensor_parallel.autotp_size")
+        or a list of candidate keys tried in order.
+        """
         if param_value is not None:
             return param_value
 
-        # Case 2: Config file has the key
-        if config_key in config_dict:
-            config_value = config_dict[config_key]
-            return config_value
+        candidates = config_key if isinstance(config_key, (list, tuple)) else [config_key]
+        for key in candidates:
+            found, value = _resolve_nested_key(config_dict, key)
+            if found:
+                return value
 
-        # Case 3: Use default
         return default_value
 
-    # Extract parameters with proper priority: function param > config value > default
     init_kwargs = {
         "tensor_model_parallel_size":
-        get_value("tensor_model_parallel_size", tensor_model_parallel_size, "tensor_model_parallel_size", 1),
+        get_value(tensor_model_parallel_size,
+                  ["tensor_model_parallel_size", "tensor_parallel.autotp_size"], 1),
         "pipeline_model_parallel_size":
-        get_value("pipeline_model_parallel_size", pipeline_model_parallel_size, "pipeline_model_parallel_size", 1),
+        get_value(pipeline_model_parallel_size, "pipeline_model_parallel_size", 1),
         "virtual_pipeline_model_parallel_size":
-        get_value("virtual_pipeline_model_parallel_size", virtual_pipeline_model_parallel_size,
-                  "virtual_pipeline_model_parallel_size", None),
+        get_value(virtual_pipeline_model_parallel_size, "virtual_pipeline_model_parallel_size", None),
         "pipeline_model_parallel_comm_backend":
-        get_value("pipeline_model_parallel_comm_backend", pipeline_model_parallel_comm_backend,
-                  "pipeline_model_parallel_comm_backend", None),
+        get_value(pipeline_model_parallel_comm_backend, "pipeline_model_parallel_comm_backend", None),
         "context_parallel_size":
-        get_value("context_parallel_size", context_parallel_size, "context_parallel_size", 1),
+        get_value(context_parallel_size, "context_parallel_size", 1),
         "sequence_parallel_size":
-        get_value("sequence_parallel_size", sequence_parallel_size, "sequence_parallel_size", 1),
+        get_value(sequence_parallel_size, "sequence_parallel_size", 1),
         "hierarchical_context_parallel_sizes":
-        get_value("hierarchical_context_parallel_sizes", hierarchical_context_parallel_sizes,
-                  "hierarchical_context_parallel_sizes", None),
+        get_value(hierarchical_context_parallel_sizes, "hierarchical_context_parallel_sizes", None),
         "expert_model_parallel_size":
-        get_value("expert_model_parallel_size", expert_model_parallel_size, "expert_model_parallel_size", 1),
+        get_value(expert_model_parallel_size, "expert_model_parallel_size", 1),
         "num_distributed_optimizer_instances":
-        get_value("num_distributed_optimizer_instances", num_distributed_optimizer_instances,
-                  "num_distributed_optimizer_instances", 1),
+        get_value(num_distributed_optimizer_instances, "num_distributed_optimizer_instances", 1),
         "expert_tensor_parallel_size":
-        get_value("expert_tensor_parallel_size", expert_tensor_parallel_size, "expert_tensor_parallel_size", None),
+        get_value(expert_tensor_parallel_size, "expert_tensor_parallel_size", None),
         "nccl_communicator_config_path":
-        get_value("nccl_communicator_config_path", nccl_communicator_config_path, "nccl_communicator_config_path",
-                  None),
+        get_value(nccl_communicator_config_path, "nccl_communicator_config_path", None),
         "distributed_timeout_minutes":
-        get_value("distributed_timeout_minutes", distributed_timeout_minutes, "distributed_timeout_minutes", 30),
+        get_value(distributed_timeout_minutes, "distributed_timeout_minutes", 30),
         "order":
-        get_value("order", order, "order", "tp-ep-dp-pp"),
+        get_value(order, "order", "tp-ep-dp-pp"),
         "create_gloo_process_groups":
-        get_value("create_gloo_process_groups", create_gloo_process_groups, "create_gloo_process_groups", False),
+        get_value(create_gloo_process_groups, "create_gloo_process_groups", False),
         "high_priority_stream_groups":
-        get_value("high_priority_stream_groups", high_priority_stream_groups, "high_priority_stream_groups", None),
+        get_value(high_priority_stream_groups, "high_priority_stream_groups", None),
     }
 
     # Validate context_parallel_size
@@ -915,5 +904,5 @@ def initialize_parallel_state_from_config(
         ]:
             filtered_kwargs[key] = value
 
-    # Initialize parallel state
     ps.initialize_model_parallel(**filtered_kwargs)
+    return ps
