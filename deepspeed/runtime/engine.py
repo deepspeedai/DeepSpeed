@@ -4345,6 +4345,66 @@ class DeepSpeedEngine(Module):
             gc.collect()
             get_accelerator().empty_cache()
 
+    def get_autosp_backend(self, compile_kwargs):
+        if self.compile_autosp() and self.zero_optimization_stage() not in [ZeroStageEnum.disabled, ZeroStageEnum.optimizer_states]:
+            logger.info(
+                f"Currently AutoSP does not compose with ZeRO stage 2 and 3. Falling back to the torch compiler."
+            )
+            return None
+        
+        compile_config = self._config.compile_config
+        compile_kwargs['fullgraph'] = True
+        return init_autosp(compile_config)
+
+    def get_deepcompile_backend(self, backend, compile_kwargs, schedule):
+        if self.zero_optimization_stage() != ZeroStageEnum.optimizer_states \
+                and self.zero_optimization_stage() != ZeroStageEnum.weights \
+                and self.zero_optimization_stage() != ZeroStageEnum.gradients:
+            logger.info(
+                f"Currently DeepCompile supports ZeRO stage 1, 2, or 3 only, but ZeRO stage is set to {self.zero_optimization_stage()}. Falling back to the torch compiler."
+            )
+            return None
+
+        compile_config = self._config.compile_config
+        if (("zero_optimization" in self.config and "offload_optimizer" in self.config["zero_optimization"]
+             and "offload_param" in self.config["zero_optimization"])
+                and self._config.zero_config.offload_param.device == "cpu"
+                and self._config.zero_config.offload_optimizer.device == "cpu"):
+            compile_config.offload_parameters = True
+        if self.zero_optimization_stage() == ZeroStageEnum.optimizer_states:
+            return init_z1(self, backend, compile_config, compile_kwargs, schedule)
+        elif self.zero_optimization_stage() == ZeroStageEnum.gradients:
+            return init_z1(self, backend, compile_config, compile_kwargs, schedule, use_z2=True)
+        elif self.zero_optimization_stage() == ZeroStageEnum.weights:
+            return init_z3(self, backend, compile_config, compile_kwargs, schedule)
+        return None
+
+    def get_deepspeed_compile_backend(self, backend, compile_kwargs, schedule):
+        resolved_backend = None
+
+        if schedule is not None:
+
+            def passes_name_to_fn(passes):
+                for p in passes:
+                    assert callable(p) or p in opt_passes, f"Unknown pass {p}"
+                return [p if callable(p) else opt_passes[p] for p in passes]
+
+            schedule = [(step, passes_name_to_fn(passes)) for step, passes in schedule]
+
+        assert backend in ['inductor', 'eager'], f"Backend {backend} is not supported for DeepCompile."
+
+        if self.compile_autosp():
+            resolved_backend = self.get_autosp_backend(compile_kwargs)
+        else:
+            if self.validate_deepcompile_config():
+                resolved_backend = self.get_deepcompile_backend(backend, compile_kwargs, schedule)
+
+        # Fallback to torch backend if no DeepSpeed backend was selected.
+        if resolved_backend is None:
+            resolved_backend = backend
+
+        return resolved_backend, schedule
+
     def compile(self,
                 backend=get_accelerator().get_compile_backend(),
                 compile_kwargs={},
@@ -4367,59 +4427,19 @@ class DeepSpeedEngine(Module):
 
         logger.info(f"Compiling deepcompile={self.is_deepcompile_enabled()} backend={backend}")
 
-        enable_deepcompile = self.is_deepcompile_enabled()
-        if enable_deepcompile and self.zero_optimization_stage() != ZeroStageEnum.optimizer_states \
-                and self.zero_optimization_stage() != ZeroStageEnum.weights \
-                and self.zero_optimization_stage() != ZeroStageEnum.gradients \
-                and self.compile_autosp() and self.zero_optimization_stage() not in [ZeroStageEnum.disabled, ZeroStageEnum.optimizer_states]:
-            if self.compile_autosp():
-                logger.info(
-                    f"Currently AutoSP does not compose with ZeRO stage 2 and 3. Falling back to the torch compiler."
-                )
-            else:
-                logger.info(
-                    f"Currently DeepCompile supports ZeRO stage 1, 2, or 3 only, but ZeRO stage is set to {self.zero_optimization_stage()}. Falling back to the torch compiler."
-                )
-            enable_deepcompile = False
+        if self.is_deepcompile_enabled():
+            backend, schedule = self.get_deepspeed_compile_backend(backend, compile_kwargs, schedule)
 
-        if enable_deepcompile:
-
-            if schedule is not None:
-
-                def passes_name_to_fn(passes):
-                    for p in passes:
-                        assert callable(p) or p in opt_passes, f"Unknown pass {p}"
-                    return [p if callable(p) else opt_passes[p] for p in passes]
-
-                schedule = [(step, passes_name_to_fn(passes)) for step, passes in schedule]
-
-            assert backend in ['inductor', 'eager'], f"Backend {backend} is not supported for DeepCompile."
-
-            compile_config = self._config.compile_config
-            if self.compile_autosp():
-                compile_kwargs['fullgraph'] = True
-                backend = init_autosp(compile_config)
-            else: ## By default then only zero-style DP should be triggered in dc. ##
-                if (("zero_optimization" in self.config and "offload_optimizer" in self.config["zero_optimization"]
-                     and "offload_param" in self.config["zero_optimization"])
-                        and self._config.zero_config.offload_param.device == "cpu"
-                        and self._config.zero_config.offload_optimizer.device == "cpu"):
-                    compile_config.offload_parameters = True
-                if self.zero_optimization_stage() == ZeroStageEnum.optimizer_states:
-                    backend = init_z1(self, backend, compile_config, compile_kwargs, schedule)
-                elif self.zero_optimization_stage() == ZeroStageEnum.gradients:
-                    backend = init_z1(self, backend, compile_config, compile_kwargs, schedule, use_z2=True)
-                elif self.zero_optimization_stage() == ZeroStageEnum.weights:
-                    backend = init_z3(self, backend, compile_config, compile_kwargs, schedule)
-
+        is_deepspeed_compile_backend = backend is not None
+        
         # Hook state must align with whether DeepCompile is active.
-        self._set_deepcompile_active(enable_deepcompile)
+        self._set_deepcompile_active(is_deepspeed_compile_backend)
 
         # create new dict to avoid modifying original dict
         try:
             self.module.compile(**{**compile_kwargs, 'backend': backend})
         except Exception:
-            if enable_deepcompile:
+            if is_deepspeed_compile_backend:
                 # Restore default hooks if compilation fails before completing.
                 self._set_deepcompile_active(False)
             raise
