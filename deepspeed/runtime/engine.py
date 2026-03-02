@@ -4396,12 +4396,7 @@ class DeepSpeedEngine(Module):
         if self.compile_autosp():
             resolved_backend = self.get_autosp_backend(compile_kwargs)
         else:
-            if self.validate_deepcompile_config():
-                resolved_backend = self.get_deepcompile_backend(backend, compile_kwargs, schedule)
-
-        # Fallback to torch backend if no DeepSpeed backend was selected.
-        if resolved_backend is None:
-            resolved_backend = backend
+            resolved_backend = self.get_deepcompile_backend(backend, compile_kwargs, schedule)
 
         return resolved_backend, schedule
 
@@ -4428,9 +4423,12 @@ class DeepSpeedEngine(Module):
         logger.info(f"Compiling deepcompile={self.is_deepcompile_enabled()} backend={backend}")
 
         if self.is_deepcompile_enabled():
-            backend, schedule = self.get_deepspeed_compile_backend(backend, compile_kwargs, schedule)
+            resolved_backend, schedule = self.get_deepspeed_compile_backend(backend, compile_kwargs, schedule)
 
-        is_deepspeed_compile_backend = backend is not None
+        is_deepspeed_compile_backend = resolved_backend is not None
+
+        # default to torch.compiler backend if deepspeed config validation fails
+        backend = resolved_backend or backend
         
         # Hook state must align with whether DeepCompile is active.
         self._set_deepcompile_active(is_deepspeed_compile_backend)
