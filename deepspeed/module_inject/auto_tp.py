@@ -17,6 +17,7 @@ from .fusedqkv_utils import require_tp_fused_qkvw
 from deepspeed.module_inject.tp_shard import get_shard_size, get_shard_size_list
 from deepspeed.utils import groups
 from deepspeed.module_inject.layers import is_autotp_training_mode
+from .autotp_config import TPLayerSpec, AutoTPConfig, PartitionType
 
 
 def move(tensor, device, copy=True):
@@ -67,7 +68,7 @@ class ReplaceWithTensorSlicing:
             if src_shape[outer_dim] == dst_shape[self.out_dim]:
                 try:
                     dst = dst.reshape(-1).data.copy_(src.data.reshape(-1)).reshape(src.shape)
-                except:
+                except Exception:
                     print(dst.shape, src.shape)
                     exit()
                 dst = torch.nn.parameter.Parameter(dst, requires_grad=False)
@@ -199,7 +200,8 @@ class AutoTP():
                  state_dict,
                  linear_layer_setting,
                  orig_layer_impl,
-                 keep_module_on_host=False):
+                 keep_module_on_host=False,
+                 partition_config: Optional[AutoTPConfig] = None):
         self.module = module
         self.all_reduce_linears = all_reduce_linears
         self.prefix = prefix
@@ -211,6 +213,7 @@ class AutoTP():
         self.orig_layer_impl = orig_layer_impl
         self.linear_policies = None
         self.conv_linear_layer = False
+        self.partition_config = partition_config
         TensorParallel_Layer.set_keep_module_on_host(keep_module_on_host)
 
     def in_module_list(module, module_list):
@@ -353,6 +356,11 @@ class AutoTP():
 
         weight_shape = child.weight.shape
         mp_replace = ReplaceWithTensorSlicing(mp_group=self.mp_group)
+
+        # If partition_config is provided, use the new configurable API
+        if self.partition_config is not None:
+            return self._replace_with_config(child, name)
+
         # For TP layer skip, e.g., MoE gate, deepseek low rank layer skip
         if "mlp.gate" == name or "q_a_proj" in name or "kv_a_proj_with_mqa" in name or name == "block_sparse_moe.gate" or (
             ('mlp.shared_expert_gate' == name or 'mlp.gate' == name) and 'qwen2_moe' in str(type(self.module))):
@@ -396,9 +404,99 @@ class AutoTP():
 
             return LinearLayer(child, self.mp_group, name=name)
 
+    def _replace_with_config(self, child, name):
+        """
+        Replace layer using the new configurable AutoTP API.
+
+        This method uses TPLayerSpec to determine how to partition the layer.
+        """
+        if getattr(child, "replaced", False) == True:
+            return child
+
+        # Build the full parameter name for pattern matching
+        param_name = name + ".weight" if not name.endswith(".weight") else name
+
+        # Find matching spec
+        model_type = self._get_model_type()
+        spec = self.partition_config.find_matching_spec(param_name, model_type)
+
+        if spec is None:
+            # No matching spec found
+            if self.partition_config.strict_mode:
+                raise ValueError(f"No matching spec for {param_name}")
+            # With partition_config, rely only on explicit specs and skip unmatched layers.
+            return child
+
+        setattr(child, "replaced", True)
+
+        if spec.partition_type == PartitionType.SKIP:
+            return child
+
+        if spec.partition_type == PartitionType.ROW:
+            return self._create_row_parallel_layer(child, spec, name)
+        else:
+            return self._create_column_parallel_layer(child, spec, name)
+
+    def _create_row_parallel_layer(self, module, spec: TPLayerSpec, name: str):
+        """Create row-parallel layer (AllReduce after forward)."""
+        if self.conv_linear_layer:
+            return Conv_LinearALlreduce(module, self.mp_group, name=name)
+        # Check for lm_head / embed_out
+        if name == "lm_head" or name == 'embed_out':
+            return LmHeadLinearAllreduce(module, self.mp_group)
+
+        if spec.shape is not None:
+            return SubParamLinearAllreduce(
+                module,
+                self.mp_group,
+                shape=spec.shape,
+                partition_dim=spec.get_partition_dim(),
+                name=name,
+            )
+        return LinearAllreduce(module, self.mp_group, name=name)
+
+    def _create_column_parallel_layer(self, module, spec: TPLayerSpec, name: str):
+        """Create column-parallel layer (AllReduce in backward)."""
+        if self.conv_linear_layer:
+            return conv_LinearLayer(module, self.mp_group, name=name)
+        # Only use fused-QKV heuristics when no partition_config is provided.
+        elif self.partition_config is None and require_tp_fused_qkvw(name, self.mp_size):
+            # Check and handle fused qkv for TP
+            return fused_LinearLayer(module, self.mp_group, fused_module=self.module)
+        if spec.shape is not None:
+            return SubParamLinearLayer(
+                module,
+                self.mp_group,
+                shape=spec.shape,
+                partition_dim=spec.get_partition_dim(),
+                name=name,
+            )
+        return LinearLayer(module, self.mp_group, name=name)
+
+    def _get_model_type(self) -> Optional[str]:
+        """Extract model type from module config or class name."""
+        config = getattr(self.module, "config", None)
+        if config is not None:
+            model_type = getattr(config, "model_type", None)
+            if model_type:
+                return str(model_type).lower()
+        module_str = str(type(self.module))
+        # Try to extract model type from class name (e.g., "LlamaDecoderLayer" -> "llama")
+        patterns = [
+            r"(\w+)DecoderLayer",
+            r"(\w+)Block",
+            r"(\w+)Layer",
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, module_str)
+            if match:
+                return match.group(1).lower()
+        return None
+
     def _slice_embedding(self, child, name, conv_linear_layer):
         if getattr(child, "replaced", False) == True:
             return
+
         mp_replace = ReplaceWithTensorSlicing(mp_group=self.mp_group)
 
         if hasattr(child.weight, 'ds_tensor'):
@@ -462,7 +560,30 @@ class AutoTP():
                     continue
             if len(child._buffers) != 0 and self.state_dict is not None:
                 Loading.load_buffer(child, self.state_dict, checking_key)
-            if child.__class__ in self.linear_policies:
+
+            # When using partition_config (custom patterns/presets), use pattern-based routing
+            # instead of linear_policies. This keeps all pattern logic centralized here.
+            if self.partition_config is not None:
+                full_name = prev_name + '.' + name if prev_name else name
+                if isinstance(child, nn.Embedding):
+                    # Check if embedding matches any pattern
+                    param_name = full_name + ".weight"
+                    model_type = self._get_model_type()
+                    spec = self.partition_config.find_matching_spec(param_name, model_type)
+                    if spec is not None and spec.partition_type != PartitionType.SKIP:
+                        new_child = self._slice_embedding(child, full_name, False)
+                        if new_child is not None:
+                            setattr(r_module, name, new_child)
+                    # If no pattern matched or skip, leave embedding unchanged
+                elif hasattr(child, "weight") and getattr(child.weight, "dim", lambda: 0)() == 2:
+                    new_child = self._replace_with_config(child, full_name)
+                    if new_child is not None:
+                        setattr(r_module, name, new_child)
+                else:
+                    self.update_mp_params(child)
+                    self._replace_module(child, name, class_name)
+            # Traditional path: use linear_policies for type-based routing
+            elif child.__class__ in self.linear_policies:
                 setattr(r_module, name, self.linear_policies[child.__class__](child, prev_name + '.' + name,
                                                                               self.conv_linear_layer))
             elif any(isinstance(child, lp) for lp in self.linear_policies):

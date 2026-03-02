@@ -232,7 +232,7 @@ class CPU_Accelerator(DeepSpeedAccelerator):
         try:
             if torch.ops.mkldnn._is_mkldnn_fp16_supported():
                 return True
-        except:
+        except Exception:
             return False
 
     def supported_dtypes(self):

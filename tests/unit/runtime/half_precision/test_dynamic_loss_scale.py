@@ -51,15 +51,15 @@ class TestFused(DistributedTest):
         expected_loss_scale = 2**8
         expected_scale_window = 2
         # Ensure the dynamic loss scaler is correctly configured.
-        assert optim.dynamic_loss_scale == True
-        assert optim.cur_scale == expected_loss_scale
-        assert optim.scale_window == expected_scale_window
+        assert optim.loss_scale_config.dynamic_loss_scale == True
+        assert optim.loss_scale_config.cur_scale == expected_loss_scale
+        assert optim.loss_scale_config.scale_window == expected_scale_window
 
         for i, value in enumerate(np.random.uniform(-0.1, 0.1, 10)):
             run_model_step(model, [value])
-            assert optim.cur_scale == expected_loss_scale
-            assert optim.cur_iter == (i + 1)
-            if optim.cur_iter % expected_scale_window == 0:
+            assert optim.loss_scale_config.cur_scale == expected_loss_scale
+            assert optim.loss_scale_config.cur_iter == (i + 1)
+            if optim.loss_scale_config.cur_iter % expected_scale_window == 0:
                 expected_loss_scale *= 2
 
     def test_all_overflow(self):
@@ -87,15 +87,15 @@ class TestFused(DistributedTest):
 
         expected_loss_scale = 2**4
         # Ensure the dynamic loss scaler is correctly configured.
-        assert optim.dynamic_loss_scale == True
-        assert optim.cur_scale == expected_loss_scale
+        assert optim.loss_scale_config.dynamic_loss_scale == True
+        assert optim.loss_scale_config.cur_scale == expected_loss_scale
 
         overflow_gradients = [float('inf'), float('-inf')] + [float('nan')] * 6
         for i, value in enumerate(overflow_gradients):
             run_model_step(model, [value])
             expected_loss_scale = max(expected_loss_scale / 2, 1)
-            assert optim.cur_scale == expected_loss_scale
-            assert optim.cur_iter == (i + 1)
+            assert optim.loss_scale_config.cur_scale == expected_loss_scale
+            assert optim.loss_scale_config.cur_iter == (i + 1)
 
     def test_some_overflow(self):
         if not get_accelerator().is_fp16_supported():
@@ -124,33 +124,33 @@ class TestFused(DistributedTest):
         expected_scale_window = 2
         expected_iteration = 0
         # Ensure the dynamic loss scaler is correctly configured.
-        assert optim.dynamic_loss_scale == True
-        assert optim.cur_scale == expected_loss_scale
-        assert optim.scale_window == expected_scale_window
+        assert optim.loss_scale_config.dynamic_loss_scale == True
+        assert optim.loss_scale_config.cur_scale == expected_loss_scale
+        assert optim.loss_scale_config.scale_window == expected_scale_window
 
         # Run model with overflows to decrease scale
         overflow_gradients = [float('inf'), float('nan')]
         expected_iteration += len(overflow_gradients)
         run_model_step(model, overflow_gradients)
         expected_loss_scale /= (2**len(overflow_gradients))
-        assert optim.cur_scale == expected_loss_scale
-        assert optim.cur_iter == expected_iteration
+        assert optim.loss_scale_config.cur_scale == expected_loss_scale
+        assert optim.loss_scale_config.cur_iter == expected_iteration
 
         # Run model scale_window + 1 times to increase scale once
         normal_gradients = np.random.uniform(-0.1, 0.1, expected_scale_window + 1)
         expected_iteration += len(normal_gradients)
         run_model_step(model, normal_gradients)
         expected_loss_scale *= 2
-        assert optim.cur_scale == expected_loss_scale
-        assert optim.cur_iter == expected_iteration
+        assert optim.loss_scale_config.cur_scale == expected_loss_scale
+        assert optim.loss_scale_config.cur_iter == expected_iteration
 
         # Run model with overflows to decrease scale
         overflow_gradients = [float('inf')]
         expected_iteration += len(overflow_gradients)
         run_model_step(model, overflow_gradients)
         expected_loss_scale /= (2**len(overflow_gradients))
-        assert optim.cur_scale == expected_loss_scale
-        assert optim.cur_iter == expected_iteration
+        assert optim.loss_scale_config.cur_scale == expected_loss_scale
+        assert optim.loss_scale_config.cur_iter == expected_iteration
 
 
 @pytest.mark.skipif(not deepspeed.ops.__compatible_ops__[FusedLambBuilder.NAME],
@@ -183,15 +183,15 @@ class TestUnfused(DistributedTest):
         expected_loss_scale = 2**8
         expected_scale_window = 2
         # Ensure the dynamic loss scaler is correctly configured.
-        assert optim.dynamic_loss_scale == True
-        assert optim.cur_scale == expected_loss_scale
-        assert optim.scale_window == expected_scale_window
+        assert optim.loss_scale_config.dynamic_loss_scale == True
+        assert optim.loss_scale_config.cur_scale == expected_loss_scale
+        assert optim.loss_scale_config.scale_window == expected_scale_window
 
         for i, value in enumerate(np.random.uniform(-0.1, 0.1, 10)):
             run_model_step(model, [value])
-            assert optim.cur_scale == expected_loss_scale
-            assert optim.cur_iter == (i + 1)
-            if optim.cur_iter % expected_scale_window == 0:
+            assert optim.loss_scale_config.cur_scale == expected_loss_scale
+            assert optim.loss_scale_config.cur_iter == (i + 1)
+            if optim.loss_scale_config.cur_iter % expected_scale_window == 0:
                 expected_loss_scale *= 2
 
     def test_all_overflow(self):
@@ -224,16 +224,16 @@ class TestUnfused(DistributedTest):
         expected_loss_scale = 2**4
         expected_min_loss_scale = min_loss_scale_value
         # Ensure the dynamic loss scaler is correctly configured.
-        assert optim.dynamic_loss_scale == True
-        assert optim.cur_scale == expected_loss_scale
-        assert optim.min_loss_scale == expected_min_loss_scale
+        assert optim.loss_scale_config.dynamic_loss_scale == True
+        assert optim.loss_scale_config.cur_scale == expected_loss_scale
+        assert optim.loss_scale_config.min_loss_scale == expected_min_loss_scale
 
         overflow_gradients = [float('inf'), float('-inf')] + [float('nan')] * 6
         for i, value in enumerate(overflow_gradients):
             run_model_step(model, [value])
             expected_loss_scale = max(expected_loss_scale / 2, expected_min_loss_scale)
-            assert optim.cur_scale == expected_loss_scale
-            assert optim.cur_iter == (i + 1)
+            assert optim.loss_scale_config.cur_scale == expected_loss_scale
+            assert optim.loss_scale_config.cur_iter == (i + 1)
 
     def test_some_overflow(self):
         if not get_accelerator().is_fp16_supported():
@@ -262,30 +262,30 @@ class TestUnfused(DistributedTest):
         expected_scale_window = 2
         expected_iteration = 0
         # Ensure the dynamic loss scaler is correctly configured.
-        assert optim.dynamic_loss_scale == True
-        assert optim.cur_scale == expected_loss_scale
-        assert optim.scale_window == expected_scale_window
+        assert optim.loss_scale_config.dynamic_loss_scale == True
+        assert optim.loss_scale_config.cur_scale == expected_loss_scale
+        assert optim.loss_scale_config.scale_window == expected_scale_window
 
         # Run model with overflows to decrease scale
         overflow_gradients = [float('inf'), float('nan')]
         expected_iteration += len(overflow_gradients)
         run_model_step(model, overflow_gradients)
         expected_loss_scale /= (2**len(overflow_gradients))
-        assert optim.cur_scale == expected_loss_scale
-        assert optim.cur_iter == expected_iteration
+        assert optim.loss_scale_config.cur_scale == expected_loss_scale
+        assert optim.loss_scale_config.cur_iter == expected_iteration
 
         # Run model scale_window + 1 times to increase scale once
         normal_gradients = np.random.uniform(-0.1, 0.1, expected_scale_window + 1)
         expected_iteration += len(normal_gradients)
         run_model_step(model, normal_gradients)
         expected_loss_scale *= 2
-        assert optim.cur_scale == expected_loss_scale
-        assert optim.cur_iter == expected_iteration
+        assert optim.loss_scale_config.cur_scale == expected_loss_scale
+        assert optim.loss_scale_config.cur_iter == expected_iteration
 
         # Run model with overflows to decrease scale
         overflow_gradients = [float('inf')]
         expected_iteration += len(overflow_gradients)
         run_model_step(model, overflow_gradients)
         expected_loss_scale /= (2**len(overflow_gradients))
-        assert optim.cur_scale == expected_loss_scale
-        assert optim.cur_iter == expected_iteration
+        assert optim.loss_scale_config.cur_scale == expected_loss_scale
+        assert optim.loss_scale_config.cur_iter == expected_iteration

@@ -59,8 +59,10 @@ lnav:
         url: /tutorials/accelerator-abstraction-interface/
       - title: 'Accelerator Setup Guides'
         url: /tutorials/accelerator-setup-guide/
-      - title: 'Automatic Tensor Parallelism'
+      - title: 'Automatic Tensor Parallelism (Inference)'
         url: /tutorials/automatic-tensor-parallelism/
+      - title: 'Automatic Tensor Parallelism (Training)'
+        url: /tutorials/autotp-training/
       - title: 'Autotuning'
         url: /tutorials/autotuning/
       - title: 'BingBertSQuAD Fine-tuning'
