@@ -42,3 +42,41 @@ Distributed Initialization
 Optional distributed backend initialization separate from ``deepspeed.initialize()``. Useful in scenarios where the user wants to use torch distributed calls before calling ``deepspeed.initialize()``, such as when using model parallelism, pipeline parallelism, or certain data loader scenarios.
 
 .. autofunction:: deepspeed.init_distributed
+
+
+.. _parallel-state-init:
+
+Parallel State Initialization
+-----------------------------
+DeepSpeed provides a built-in ``ParallelState`` class for Megatron-style process group management
+covering tensor, pipeline, data, sequence, context, and expert parallelism.
+
+Use ``initialize_parallel_state_from_config`` to create and initialize a ``ParallelState`` from
+a DeepSpeed config dictionary (or ``DeepSpeedConfig`` object). The returned instance implements
+the ``mpu`` interface and can be passed directly to ``deepspeed.initialize(mpu=...)``.
+
+Example usage:
+
+.. code-block:: python
+
+    from deepspeed.utils import parallel_state_deepspeed as ps
+
+    config_dict = {
+        "train_micro_batch_size_per_gpu": 1,
+        "tensor_parallel": {"autotp_size": 4},
+    }
+
+    # Initialize and use as mpu
+    parallel_state = ps.initialize_parallel_state_from_config(config_dict)
+    model_engine, optimizer, _, _ = deepspeed.initialize(
+        model=model,
+        model_parameters=model.parameters(),
+        config=config_dict,
+        mpu=parallel_state,
+    )
+
+.. autofunction:: deepspeed.utils.parallel_state_deepspeed.initialize_parallel_state_from_config
+
+.. autoclass:: deepspeed.utils.parallel_state.ParallelState
+   :members: initialize_model_parallel, is_initialized, get_tensor_model_parallel_group, get_data_parallel_group, get_pipeline_model_parallel_group, get_sequence_parallel_group, get_tensor_model_parallel_world_size, get_tensor_model_parallel_rank, get_data_parallel_world_size, get_data_parallel_rank, get_pipeline_model_parallel_world_size, get_pipeline_model_parallel_rank
+   :noindex:

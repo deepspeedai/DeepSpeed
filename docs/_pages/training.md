@@ -244,6 +244,100 @@ mpu.get_data_parallel_group()
 mpu.get_data_parallel_world_size()
 ```
 
+### Built-in Parallel State Management
+
+DeepSpeed provides a built-in `ParallelState` class that implements the `mpu` interface
+with Megatron-style process group management. It supports tensor parallelism (TP),
+pipeline parallelism (PP), data parallelism (DP), sequence parallelism (SP),
+context parallelism (CP), and expert parallelism (EP).
+
+#### Basic Usage
+
+You can initialize the parallel state either explicitly or from a DeepSpeed config:
+
+```python
+from deepspeed.utils import parallel_state_deepspeed as ps
+
+# Option 1: Initialize from config dict (also works with DeepSpeedConfig objects)
+config_dict = {
+    "train_micro_batch_size_per_gpu": 1,
+    "tensor_parallel": {"autotp_size": 4},
+    "zero_optimization": {"stage": 1}
+}
+parallel_state = ps.initialize_parallel_state_from_config(config_dict)
+
+# The returned ParallelState can be passed directly as mpu
+model_engine, optimizer, _, _ = deepspeed.initialize(
+    model=model,
+    model_parameters=model.parameters(),
+    config=config_dict,
+    mpu=parallel_state
+)
+```
+
+```python
+# Option 2: Initialize explicitly with parallelism dimensions
+parallel_state = ps.get_parallel_state_instance()
+parallel_state.initialize_model_parallel(
+    tensor_model_parallel_size=4,
+    pipeline_model_parallel_size=2,
+    sequence_parallel_size=1,
+)
+```
+
+#### Configuration-based Initialization
+
+`initialize_parallel_state_from_config` resolves parallelism parameters with
+the following priority: **function parameters > config values > defaults**.
+
+Config keys support dot-separated paths for nested dictionaries. For example,
+`tensor_model_parallel_size` can be read from `"tensor_model_parallel_size"` at
+the top level or `"tensor_parallel.autotp_size"` in a nested config.
+
+```python
+from deepspeed.utils import parallel_state_deepspeed as ps
+
+# Override specific parameters while reading others from config
+parallel_state = ps.initialize_parallel_state_from_config(
+    config_dict,
+    tensor_model_parallel_size=4,   # Override config value
+    expert_model_parallel_size=2,   # Override config value
+)
+```
+
+#### Multiple Instances (RL Scenarios)
+
+In reinforcement learning scenarios where multiple models (e.g., actor and critic)
+require different parallelism configurations, you can create named instances:
+
+```python
+from deepspeed.utils import parallel_state_deepspeed as ps
+
+# Create separate parallel state instances
+actor_ps = ps.initialize_parallel_state_from_config(
+    actor_config, name="actor",
+    tensor_model_parallel_size=4,
+)
+critic_ps = ps.initialize_parallel_state_from_config(
+    critic_config, name="critic",
+    tensor_model_parallel_size=2,
+)
+
+# Use context manager to switch between instances
+with ps.set_current_parallel_state("actor"):
+    dp_group = ps.get_data_parallel_group()  # Uses actor's groups
+
+with ps.set_current_parallel_state("critic"):
+    dp_group = ps.get_data_parallel_group()  # Uses critic's groups
+```
+
+#### Compatibility with Existing Code
+
+The module-level functions in `parallel_state_deepspeed` (such as
+`get_data_parallel_group()`, `get_tensor_model_parallel_world_size()`, etc.)
+operate on the current active `ParallelState` instance, preserving backward
+compatibility with code written against the previous `groups.py` API.
+
 ### Integration with Megatron-LM
 DeepSpeed is fully compatible with [Megatron](https://github.com/NVIDIA/Megatron-LM).
 Please see the [Megatron-LM tutorial](/tutorials/megatron/) for details.
