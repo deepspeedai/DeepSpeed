@@ -59,7 +59,7 @@ Example usage:
 
 .. code-block:: python
 
-    from deepspeed.utils import parallel_state_deepspeed as ps
+    from deepspeed.utils import parallel_state_wrappers as ps
 
     config_dict = {
         "train_micro_batch_size_per_gpu": 1,
@@ -75,7 +75,7 @@ Example usage:
         mpu=parallel_state,
     )
 
-.. autofunction:: deepspeed.utils.parallel_state_deepspeed.initialize_parallel_state_from_config
+.. autofunction:: deepspeed.utils.parallel_state_wrappers.initialize_parallel_state_from_config
 
 .. autoclass:: deepspeed.utils.parallel_state.ParallelState
    :members: initialize_model_parallel, is_initialized, get_tensor_model_parallel_group, get_data_parallel_group, get_pipeline_model_parallel_group, get_sequence_parallel_group, get_tensor_model_parallel_world_size, get_tensor_model_parallel_rank, get_data_parallel_world_size, get_data_parallel_rank, get_pipeline_model_parallel_world_size, get_pipeline_model_parallel_rank

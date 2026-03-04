@@ -1,5 +1,5 @@
-# Copyright (c) Microsoft Corporation.
 # SPDX-License-Identifier: Apache-2.0
+# Copyright (c) DeepSpeed Team
 
 # DeepSpeed Team
 """
@@ -55,7 +55,7 @@ class TestParallelStateAsMPU(DistributedTest):
 
     def test_basic_mpu_usage(self):
         """Test basic TP with ParallelState instance as mpu"""
-        from deepspeed.utils import parallel_state_deepspeed as ps
+        from deepspeed.utils import parallel_state_wrappers as ps
 
         state = ps.get_parallel_state_instance("test_basic")
         state.initialize_model_parallel(tensor_model_parallel_size=2)
@@ -74,7 +74,7 @@ class TestParallelStateAsMPU(DistributedTest):
 
     def test_config_driven_mpu(self):
         """Test mpu initialized from config with tensor_model_parallel_size"""
-        from deepspeed.utils import parallel_state_deepspeed as ps
+        from deepspeed.utils import parallel_state_wrappers as ps
 
         parallel_config = {
             "tensor_parallel": {
@@ -96,7 +96,7 @@ class TestParallelStateAsMPU(DistributedTest):
 
     def test_multi_instance_mpu(self):
         """Test multiple named instances as mpu (Actor-Critic scenario)"""
-        from deepspeed.utils import parallel_state_deepspeed as ps
+        from deepspeed.utils import parallel_state_wrappers as ps
 
         actor_state = ps.get_parallel_state_instance("actor")
         actor_state.initialize_model_parallel(tensor_model_parallel_size=2)
@@ -129,7 +129,7 @@ class TestParallelStateAsMPU(DistributedTest):
 
     def test_mpu_with_zero_stage1(self):
         """Test mpu integration with ZeRO Stage 1"""
-        from deepspeed.utils import parallel_state_deepspeed as ps
+        from deepspeed.utils import parallel_state_wrappers as ps
 
         state = ps.get_parallel_state_instance("test_zero")
         state.initialize_model_parallel(tensor_model_parallel_size=2)
@@ -162,7 +162,7 @@ class TestParallelStateAsMPU(DistributedTest):
 
     def test_deepspeed_config_uses_mpu(self):
         """Test DeepSpeedConfig correctly uses mpu for world_size calculation"""
-        from deepspeed.utils import parallel_state_deepspeed as ps
+        from deepspeed.utils import parallel_state_wrappers as ps
         from deepspeed.runtime.config import DeepSpeedConfig
 
         state = ps.get_parallel_state_instance("test_config")
@@ -177,7 +177,7 @@ class TestParallelStateAsMPU(DistributedTest):
 
     def test_mpu_without_parallelism(self):
         """Test mpu with all parallelism dimensions = 1 (no parallelism)"""
-        from deepspeed.utils import parallel_state_deepspeed as ps
+        from deepspeed.utils import parallel_state_wrappers as ps
 
         state = ps.get_parallel_state_instance("test_no_parallel")
         state.initialize_model_parallel()
@@ -197,7 +197,7 @@ class TestParallelStateAsMPU(DistributedTest):
 
     def test_mpu_with_different_orders(self):
         """Test mpu with custom parallel dimension order"""
-        from deepspeed.utils import parallel_state_deepspeed as ps
+        from deepspeed.utils import parallel_state_wrappers as ps
 
         state = ps.get_parallel_state_instance("test_order")
         state.initialize_model_parallel(tensor_model_parallel_size=2,
@@ -226,7 +226,7 @@ class TestParallelStateConfigPriority(DistributedTest):
 
     def test_param_overrides_config(self):
         """Function parameter should override nested config value"""
-        from deepspeed.utils import parallel_state_deepspeed as ps
+        from deepspeed.utils import parallel_state_wrappers as ps
 
         config = {
             "tensor_parallel": {
@@ -245,7 +245,7 @@ class TestParallelStateConfigPriority(DistributedTest):
 
     def test_config_overrides_default(self):
         """Nested config value (tensor_parallel.autotp_size) should override default"""
-        from deepspeed.utils import parallel_state_deepspeed as ps
+        from deepspeed.utils import parallel_state_wrappers as ps
 
         config = {
             "tensor_parallel": {
@@ -266,14 +266,14 @@ class TestParallelStateValidation(DistributedTest):
 
     def test_context_parallel_not_supported(self):
         """Test that CP > 1 raises NotImplementedError"""
-        from deepspeed.utils import parallel_state_deepspeed as ps
+        from deepspeed.utils import parallel_state_wrappers as ps
 
         with pytest.raises(NotImplementedError, match="does not support context_parallel_size"):
             ps.initialize_parallel_state_from_config({}, name="cp_test", context_parallel_size=2)
 
     def test_hierarchical_cp_not_supported(self):
         """Test that hierarchical CP raises NotImplementedError"""
-        from deepspeed.utils import parallel_state_deepspeed as ps
+        from deepspeed.utils import parallel_state_wrappers as ps
 
         with pytest.raises(NotImplementedError, match="does not support hierarchical_context_parallel_sizes"):
             ps.initialize_parallel_state_from_config({}, name="hcp_test", hierarchical_context_parallel_sizes=[2, 2])
@@ -286,7 +286,7 @@ class TestAllToAllGroupsWithMPU(DistributedTest):
 
     def test_all_to_all_groups_with_mpu(self):
         """Test All-to-All groups work with mpu in initialize"""
-        from deepspeed.utils import parallel_state_deepspeed as ps
+        from deepspeed.utils import parallel_state_wrappers as ps
 
         state = ps.get_parallel_state_instance("test_all_to_all")
         state.initialize_model_parallel()

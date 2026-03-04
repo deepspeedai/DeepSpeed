@@ -33,11 +33,11 @@ Key Features:
 
 Usage:
     # Basic usage (single global instance):
-    from parallel_state_deepspeed import get_data_parallel_group
+    from parallel_state_wrappers import get_data_parallel_group
     dp_group = get_data_parallel_group()
 
     # Multi-instance usage (for RL scenarios):
-    from parallel_state_deepspeed import (
+    from parallel_state_wrappers import (
         get_parallel_state_instance,
         set_current_parallel_state,
         get_data_parallel_group,
@@ -896,7 +896,7 @@ def initialize_parallel_state_from_config(
         "hierarchical_context_parallel_sizes", "expert_model_parallel_size", "num_distributed_optimizer_instances",
         "expert_tensor_parallel_size", "distributed_timeout_minutes", "order", "create_gloo_process_groups"
     }
-    
+
     for key, value in init_kwargs.items():
         # Skip unsupported parameters
         if key not in supported_params:

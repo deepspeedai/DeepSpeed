@@ -256,7 +256,7 @@ context parallelism (CP), and expert parallelism (EP).
 You can initialize the parallel state either explicitly or from a DeepSpeed config:
 
 ```python
-from deepspeed.utils import parallel_state_deepspeed as ps
+from deepspeed.utils import parallel_state_wrappers as ps
 
 # Option 1: Initialize from config dict (also works with DeepSpeedConfig objects)
 config_dict = {
@@ -295,7 +295,7 @@ Config keys support dot-separated paths for nested dictionaries. For example,
 the top level or `"tensor_parallel.autotp_size"` in a nested config.
 
 ```python
-from deepspeed.utils import parallel_state_deepspeed as ps
+from deepspeed.utils import parallel_state_wrappers as ps
 
 # Override specific parameters while reading others from config
 parallel_state = ps.initialize_parallel_state_from_config(
@@ -311,7 +311,7 @@ In reinforcement learning scenarios where multiple models (e.g., actor and criti
 require different parallelism configurations, you can create named instances:
 
 ```python
-from deepspeed.utils import parallel_state_deepspeed as ps
+from deepspeed.utils import parallel_state_wrappers as ps
 
 # Create separate parallel state instances
 actor_ps = ps.initialize_parallel_state_from_config(
@@ -333,7 +333,7 @@ with ps.set_current_parallel_state("critic"):
 
 #### Compatibility with Existing Code
 
-The module-level functions in `parallel_state_deepspeed` (such as
+The module-level functions in `parallel_state_wrappers` (such as
 `get_data_parallel_group()`, `get_tensor_model_parallel_world_size()`, etc.)
 operate on the current active `ParallelState` instance, preserving backward
 compatibility with code written against the previous `groups.py` API.
