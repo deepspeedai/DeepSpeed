@@ -1011,7 +1011,7 @@ class DeepSpeedEngine(Module):
 
     def compile_autosp(self):
         """Determines if AutoSP is set in deepcompile's passes attributes."""
-        return "autosp" in self._config.compile_config.passes
+        return "autosp" in (getattr(self._config.compile_config, "passes", None) or [])
 
     def mics_shard_size(self):
         return self._config.mics_shard_size
@@ -4422,6 +4422,7 @@ class DeepSpeedEngine(Module):
 
         logger.info(f"Compiling deepcompile={self.is_deepcompile_enabled()} backend={backend}")
 
+        resolved_backend = None
         if self.is_deepcompile_enabled():
             resolved_backend, schedule = self.get_deepspeed_compile_backend(backend, compile_kwargs, schedule)
 

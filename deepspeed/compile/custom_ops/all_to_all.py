@@ -65,7 +65,7 @@ def _all_to_all_backward_setup(ctx, inputs, output):
 def _all_to_all_backward(ctx, grad):
     return (
         all_to_all(grad, ctx.scatter_idx, ctx.gather_idx, ctx.name),
-        None, None, None, None
+        None, None, None 
     )
 
 
