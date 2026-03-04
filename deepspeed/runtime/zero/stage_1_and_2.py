@@ -1046,12 +1046,14 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                     def wrapper(param, i):
 
                         def grad_handling_hook(*notneeded):
-                            self.reenter_backward_if_needed()
-                            self.process_gradients(param, i)
                             if self._remaining_grad_acc_hooks == 0:
-                                self.current_expected_hooks = count_used_parameters_in_backward(all_params_requiring_grad)
-                            self.update_hook_state_and_maybe_run_epilogue(self.current_expected_hooks)
-                            self._remaining_grad_acc_hooks -= 1
+                                self.reenter_backward_if_needed()
+                            self.process_gradients(param, i)
+                            if self._hooks_fired_this_backward == 0:
+                                current_expected = count_used_parameters_in_backward(all_params_requiring_grad)
+                            else:
+                                current_expected = self._max_expected_hooks_seen
+                            self.update_hook_state_and_maybe_run_epilogue(current_expected)
 
                         self._grad_acc_hooks.append(register_grad_hook(param, grad_handling_hook))
 
