@@ -439,37 +439,41 @@ def get_sequence_parallel_rank(name: Optional[str] = None):
     return get_parallel_state(name).get_sequence_parallel_rank()
 
 
-def get_sequence_and_data_parallel_group(name: Optional[str] = None):
+def get_sequence_data_parallel_group(name: Optional[str] = None):
     """Get the sequence and data parallel group the caller rank belongs to.
 
     Args:
         name: Optional name of the parallel state instance. If None, uses current active instance.
 
-    DeepSpeed-compatible interface.
+    DeepSpeed groups.py compatible interface: groups._get_sequence_data_parallel_group()
+    checks hasattr(mpu, 'get_sequence_data_parallel_group') to route ZeRO optimizer
+    to the correct all-reduce group spanning both SP and DP dimensions.
     """
-    return get_parallel_state(name).get_sequence_and_data_parallel_group()
+    return get_parallel_state(name).get_sequence_data_parallel_group()
 
 
-def get_sequence_and_data_parallel_world_size(name: Optional[str] = None):
+def get_sequence_data_parallel_world_size(name: Optional[str] = None):
     """Return world size for the sequence and data parallel group.
 
     Args:
         name: Optional name of the parallel state instance. If None, uses current active instance.
 
-    DeepSpeed-compatible interface.
+    DeepSpeed groups.py compatible interface: groups._get_sequence_data_parallel_world_size()
+    checks hasattr(mpu, 'get_sequence_data_parallel_world_size') to route ZeRO optimizer.
     """
-    return get_parallel_state(name).get_sequence_and_data_parallel_world_size()
+    return get_parallel_state(name).get_sequence_data_parallel_world_size()
 
 
-def get_sequence_and_data_parallel_rank(name: Optional[str] = None):
+def get_sequence_data_parallel_rank(name: Optional[str] = None):
     """Return caller's rank in the sequence and data parallel group.
 
     Args:
         name: Optional name of the parallel state instance. If None, uses current active instance.
 
-    DeepSpeed-compatible interface.
+    DeepSpeed groups.py compatible interface: groups._get_sequence_data_parallel_rank()
+    checks hasattr(mpu, 'get_sequence_data_parallel_rank') to route ZeRO optimizer.
     """
-    return get_parallel_state(name).get_sequence_and_data_parallel_rank()
+    return get_parallel_state(name).get_sequence_data_parallel_rank()
 
 
 # ============================================================================

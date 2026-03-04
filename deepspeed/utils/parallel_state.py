@@ -885,11 +885,16 @@ class ParallelState:
             assert self.sequence_parallel_group is not None, "sequence parallel group is not initialized"
         return self.sequence_parallel_group
 
-    def get_sequence_and_data_parallel_group(self, check_initialized=True):
-        """Get the sequence and data parallel group the caller rank belongs to."""
-        if check_initialized:
-            assert self.sequence_and_data_parallel_group is not None, "sequence and data parallel group is not initialized"
-        return self.sequence_and_data_parallel_group
+    def get_sequence_data_parallel_group(self, check_initialized=True):
+        """Get the sequence and data parallel group the caller rank belongs to.
+
+        DeepSpeed groups.py compatible interface: groups._get_sequence_data_parallel_group()
+        checks hasattr(mpu, 'get_sequence_data_parallel_group') to route ZeRO optimizer
+        to the correct all-reduce group spanning both SP and DP dimensions.
+        """
+        if self.sequence_and_data_parallel_group is not None:
+            return self.sequence_and_data_parallel_group
+        return self.get_data_parallel_group()
 
     def get_embedding_group(self, check_initialized=True):
         """Get the embedding group the caller rank belongs to."""
@@ -987,7 +992,7 @@ class ParallelState:
                 return self.get_sequence_parallel_group().rank()
         return 0
 
-    def get_sequence_and_data_parallel_world_size(self):
+    def get_sequence_data_parallel_world_size(self):
         """Return world size for the sequence and data parallel group."""
         if dist.is_available() and dist.is_initialized():
             if self.sequence_and_data_parallel_group is not None:
@@ -995,7 +1000,7 @@ class ParallelState:
             return self.get_data_parallel_world_size()
         return 0
 
-    def get_sequence_and_data_parallel_rank(self):
+    def get_sequence_data_parallel_rank(self):
         """Return caller's rank in the sequence and data parallel group."""
         if dist.is_available() and dist.is_initialized():
             if self.sequence_and_data_parallel_group is not None:
@@ -1003,13 +1008,34 @@ class ParallelState:
             return self.get_data_parallel_rank()
         return 0
 
-    # ---- DeepSpeed mpu compatibility aliases ----
-    # groups.py and engine.py call these methods on the mpu object.
+    # ============================================================================
+    # Backward Compatibility Methods for DeepSpeed ZeRO
+    # ============================================================================
 
     def get_model_parallel_world_size(self):
+        """Return world size for the model parallel group.
+
+        Backward compatibility method for DeepSpeed ZeRO optimizer.
+        In SP scenarios, model_parallel (TP) size is always 1 since SP cannot coexist with TP.
+        In non-SP scenarios, model_parallel refers to tensor parallel (TP).
+        """
+        if self.sequence_parallel_group is not None:
+            # SP is enabled, model_parallel (TP) size must be 1
+            return 1
+        # No SP, return TP size
         return self.get_tensor_model_parallel_world_size()
 
     def get_model_parallel_rank(self):
+        """Return caller's rank for the model parallel group.
+
+        Backward compatibility method for DeepSpeed ZeRO optimizer.
+        In SP scenarios, model_parallel (TP) rank is always 0 since SP cannot coexist with TP.
+        In non-SP scenarios, model_parallel refers to tensor parallel (TP).
+        """
+        if self.sequence_parallel_group is not None:
+            # SP is enabled, model_parallel (TP) rank must be 0
+            return 0
+        # No SP, return TP rank
         return self.get_tensor_model_parallel_rank()
 
     def get_tensor_model_parallel_src_rank(self):
@@ -1020,21 +1046,6 @@ class ParallelState:
 
     def get_data_parallel_group_ranks(self):
         return self.data_parallel_global_ranks
-
-    def get_sequence_data_parallel_group(self):
-        if self.sequence_and_data_parallel_group is not None:
-            return self.sequence_and_data_parallel_group
-        return self.get_data_parallel_group()
-
-    def get_sequence_data_parallel_world_size(self):
-        if self.sequence_and_data_parallel_group is not None:
-            return self.get_sequence_and_data_parallel_world_size()
-        return self.get_data_parallel_world_size()
-
-    def get_sequence_data_parallel_rank(self):
-        if self.sequence_and_data_parallel_group is not None:
-            return self.get_sequence_and_data_parallel_rank()
-        return self.get_data_parallel_rank()
 
     # ---- end compatibility aliases ----
 
