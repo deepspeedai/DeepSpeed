@@ -991,15 +991,52 @@ class ParallelState:
         """Return world size for the sequence and data parallel group."""
         if dist.is_available() and dist.is_initialized():
             if self.sequence_and_data_parallel_group is not None:
-                return self.get_sequence_and_data_parallel_group().size()
+                return self.sequence_and_data_parallel_group.size()
+            return self.get_data_parallel_world_size()
         return 0
 
     def get_sequence_and_data_parallel_rank(self):
         """Return caller's rank in the sequence and data parallel group."""
         if dist.is_available() and dist.is_initialized():
             if self.sequence_and_data_parallel_group is not None:
-                return self.get_sequence_and_data_parallel_group().rank()
+                return self.sequence_and_data_parallel_group.rank()
+            return self.get_data_parallel_rank()
         return 0
+
+    # ---- DeepSpeed mpu compatibility aliases ----
+    # groups.py and engine.py call these methods on the mpu object.
+
+    def get_model_parallel_world_size(self):
+        return self.get_tensor_model_parallel_world_size()
+
+    def get_model_parallel_rank(self):
+        return self.get_tensor_model_parallel_rank()
+
+    def get_tensor_model_parallel_src_rank(self):
+        """Global rank corresponding to the first local rank in the TP group."""
+        global_rank = dist.get_rank()
+        local_rank = self.get_tensor_model_parallel_rank()
+        return global_rank - local_rank
+
+    def get_data_parallel_group_ranks(self):
+        return self.data_parallel_global_ranks
+
+    def get_sequence_data_parallel_group(self):
+        if self.sequence_and_data_parallel_group is not None:
+            return self.sequence_and_data_parallel_group
+        return self.get_data_parallel_group()
+
+    def get_sequence_data_parallel_world_size(self):
+        if self.sequence_and_data_parallel_group is not None:
+            return self.get_sequence_and_data_parallel_world_size()
+        return self.get_data_parallel_world_size()
+
+    def get_sequence_data_parallel_rank(self):
+        if self.sequence_and_data_parallel_group is not None:
+            return self.get_sequence_and_data_parallel_rank()
+        return self.get_data_parallel_rank()
+
+    # ---- end compatibility aliases ----
 
     def is_initialized(self):
         """Check if parallel state has been initialized"""
