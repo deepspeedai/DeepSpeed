@@ -1717,8 +1717,8 @@ class DeepSpeedEngine(Module):
                 msg = "Muon optimizer is used, but the use_muon attribute is NOT configured for some of the model parameters, " \
                 "please set by `param.use_muon = True / False` for all params"
                 logger.error(msg)
-            muon_params = [p for p in model_parameters if p.use_muon]
-            non_muon_params = [p for p in model_parameters if not p.use_muon]
+            muon_params = [p for p in model_parameters if p.use_muon and p.requires_grad]
+            non_muon_params = [p for p in model_parameters if (not p.use_muon) and p.requires_grad]
             param_groups = []
             if muon_params:
                 accepted_parameters = dict()
@@ -3962,7 +3962,7 @@ class DeepSpeedEngine(Module):
             checkpoint_name = name_function(save_dir, tag)
             path = os.path.dirname(checkpoint_name)
             self.checkpoint_engine.makedirs(path, exist_ok=True)
-        except:
+        except Exception:
             logger.error(f"Failed saving model checkpoint to {save_dir} with tag {tag}")
             return False
 

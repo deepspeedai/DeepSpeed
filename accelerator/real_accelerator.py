@@ -20,7 +20,7 @@ try:
 except ImportError as e:
     dsa2 = None
 
-SUPPORTED_ACCELERATOR_LIST = ['cuda', 'cpu', 'xpu', 'xpu.external', 'npu', 'mps', 'hpu', 'mlu', 'sdaa']
+SUPPORTED_ACCELERATOR_LIST = ['cuda', 'cpu', 'xpu', 'npu', 'mps', 'hpu', 'mlu', 'sdaa']
 
 ds_accelerator = None
 
@@ -60,18 +60,11 @@ def get_accelerator():
         accelerator_name = os.environ["DS_ACCELERATOR"]
         if accelerator_name == "xpu":
             try:
-                import intel_extension_for_pytorch as ipex
-                assert ipex._C._has_xpu(), "XPU_Accelerator requires an intel_extension_for_pytorch that supports XPU."
-            except ImportError as e:
-                raise ValueError(
-                    "XPU_Accelerator requires intel_extension_for_pytorch, which is not installed on this system.")
-        elif accelerator_name == "xpu.external":
-            try:
-                from intel_extension_for_deepspeed import XPU_Accelerator  # noqa: F401 # type: ignore
-            except ImportError as e:
-                raise ValueError(
-                    "XPU_Accelerator external requires intel_extension_for_deepspeed, which is not installed on this system."
-                )
+                import torch
+                assert hasattr(torch, 'xpu') and torch.xpu.is_available(), \
+                    "XPU_Accelerator requires PyTorch with XPU support (torch.xpu)."
+            except (ImportError, AssertionError) as e:
+                raise ValueError(f"XPU_Accelerator requires PyTorch with XPU support: {e}")
         elif accelerator_name == "cpu":
             pass
         elif accelerator_name == "npu":
@@ -124,33 +117,14 @@ def get_accelerator():
         #    between installation time and runtime.
 
         try:
-            from intel_extension_for_deepspeed import XPU_Accelerator  # noqa: F401,F811 # type: ignore
-            accelerator_name = "xpu.external"
+            import torch
+
+            # Detect XPU via PyTorch
+            if hasattr(torch, 'xpu'):
+                if torch.xpu.is_available():
+                    accelerator_name = "xpu"
         except ImportError as e:
             pass
-        if accelerator_name is None:
-            try:
-                import intel_extension_for_pytorch as ipex
-
-                if ipex._C._has_xpu():
-                    accelerator_name = "xpu"
-            except ImportError as e:
-                pass
-        if accelerator_name is None:
-            try:
-                import torch
-
-                # torch.xpu will be supported in upstream pytorch-2.8.
-                # Currently we can run on xpu device only using pytorch,
-                # also reserve the old path using ipex when the torch version is old.
-                if hasattr(torch, 'xpu'):
-                    if torch.cuda.device_count() == 0:  #ignore-cuda
-                        if torch.xpu.device_count() > 0 and torch.xpu.is_available():
-                            accelerator_name = "xpu"
-                else:
-                    pass
-            except ImportError as e:
-                pass
         if accelerator_name is None:
             try:
                 import torch_npu  # noqa: F401,F811 # type: ignore
@@ -222,15 +196,6 @@ def get_accelerator():
         from .cpu_accelerator import CPU_Accelerator
 
         ds_accelerator = CPU_Accelerator()
-    elif accelerator_name == "xpu.external":
-        # XPU_Accelerator is already imported in detection stage
-        try:
-            from intel_extension_for_deepspeed import XPU_Accelerator  # noqa: F811
-        except ImportError as e:
-            raise ValueError(
-                f"XPU_Accelerator external requires intel_extension_for_deepspeed, which is not installed on this system."
-            )
-        ds_accelerator = XPU_Accelerator()
     elif accelerator_name == "xpu":
         from .xpu_accelerator import XPU_Accelerator
 
