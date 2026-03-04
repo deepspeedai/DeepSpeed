@@ -829,46 +829,29 @@ def initialize_parallel_state_from_config(
         if param_value is not None:
             return param_value
 
-        candidates = config_key if isinstance(config_key, (list, tuple)) else [config_key]
-        for key in candidates:
-            found, value = _resolve_nested_key(config_dict, key)
+        if config_key is not None:
+            found, value = _resolve_nested_key(config_dict, config_key)
             if found:
                 return value
 
         return default_value
 
     init_kwargs = {
-        "tensor_model_parallel_size":
-        get_value(tensor_model_parallel_size,
-                  ["tensor_model_parallel_size", "tensor_parallel.autotp_size"], 1),
-        "pipeline_model_parallel_size":
-        get_value(pipeline_model_parallel_size, "pipeline_model_parallel_size", 1),
-        "virtual_pipeline_model_parallel_size":
-        get_value(virtual_pipeline_model_parallel_size, "virtual_pipeline_model_parallel_size", None),
-        "pipeline_model_parallel_comm_backend":
-        get_value(pipeline_model_parallel_comm_backend, "pipeline_model_parallel_comm_backend", None),
-        "context_parallel_size":
-        get_value(context_parallel_size, "context_parallel_size", 1),
-        "sequence_parallel_size":
-        get_value(sequence_parallel_size, "sequence_parallel_size", 1),
-        "hierarchical_context_parallel_sizes":
-        get_value(hierarchical_context_parallel_sizes, "hierarchical_context_parallel_sizes", None),
-        "expert_model_parallel_size":
-        get_value(expert_model_parallel_size, "expert_model_parallel_size", 1),
-        "num_distributed_optimizer_instances":
-        get_value(num_distributed_optimizer_instances, "num_distributed_optimizer_instances", 1),
-        "expert_tensor_parallel_size":
-        get_value(expert_tensor_parallel_size, "expert_tensor_parallel_size", None),
-        "nccl_communicator_config_path":
-        get_value(nccl_communicator_config_path, "nccl_communicator_config_path", None),
-        "distributed_timeout_minutes":
-        get_value(distributed_timeout_minutes, "distributed_timeout_minutes", 30),
-        "order":
-        get_value(order, "order", "tp-ep-dp-pp"),
-        "create_gloo_process_groups":
-        get_value(create_gloo_process_groups, "create_gloo_process_groups", False),
-        "high_priority_stream_groups":
-        get_value(high_priority_stream_groups, "high_priority_stream_groups", None),
+        "tensor_model_parallel_size": get_value(tensor_model_parallel_size, "tensor_parallel.autotp_size", 1),
+        "pipeline_model_parallel_size": get_value(pipeline_model_parallel_size, None, 1),
+        "virtual_pipeline_model_parallel_size": get_value(virtual_pipeline_model_parallel_size, None, None),
+        "pipeline_model_parallel_comm_backend": get_value(pipeline_model_parallel_comm_backend, None, None),
+        "context_parallel_size": get_value(context_parallel_size, None, 1),
+        "sequence_parallel_size": get_value(sequence_parallel_size, None, 1),
+        "hierarchical_context_parallel_sizes": get_value(hierarchical_context_parallel_sizes, None, None),
+        "expert_model_parallel_size": get_value(expert_model_parallel_size, None, 1),
+        "num_distributed_optimizer_instances": get_value(num_distributed_optimizer_instances, None, 1),
+        "expert_tensor_parallel_size": get_value(expert_tensor_parallel_size, None, None),
+        "nccl_communicator_config_path": get_value(nccl_communicator_config_path, None, None),
+        "distributed_timeout_minutes": get_value(distributed_timeout_minutes, None, 30),
+        "order": get_value(order, None, "tp-ep-dp-pp"),
+        "create_gloo_process_groups": get_value(create_gloo_process_groups, None, False),
+        "high_priority_stream_groups": get_value(high_priority_stream_groups, None, None),
     }
 
     # Validate context_parallel_size
