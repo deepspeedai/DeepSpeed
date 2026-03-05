@@ -1279,14 +1279,19 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
                         @instrument_w_nvtx
                         def reduce_partition_and_remove_grads(*notneeded):
+                            # Evaluate refresh condition before reenter_backward_if_needed()
+                            refresh_expected = self.should_refresh_expected_hook_count()
                             # Re-enter backward for subsequent phases in reentrant checkpointing
                             self.reenter_backward_if_needed()
 
                             self.reduce_ready_partitions_and_remove_grads(param)
 
                             # Update hook state and run epilogue if all expected hooks have fired
-                            current_expected = count_used_parameters_in_backward(
-                                non_leaf_params_requiring_grad) + leaf_module_count
+                            if refresh_expected:
+                                current_expected = count_used_parameters_in_backward(
+                                    non_leaf_params_requiring_grad) + leaf_module_count
+                            else:
+                                current_expected = self._max_expected_hooks_seen
                             self.update_hook_state_and_maybe_run_epilogue(current_expected)
 
                         self._grad_acc_hooks.append(register_grad_hook(param, reduce_partition_and_remove_grads))
@@ -1303,6 +1308,8 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             def make_hook(params):
 
                 def reduce_leaf_module_grads(module, grad_input, grad_output):
+                    # Evaluate refresh condition before reenter_backward_if_needed()
+                    refresh_expected = self.should_refresh_expected_hook_count()
                     self.reenter_backward_if_needed()
 
                     for param in params:
@@ -1311,8 +1318,11 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                             param.grad = torch.zeros_like(param)
                         self.reduce_ready_partitions_and_remove_grads(param)
 
-                    current_expected = count_used_parameters_in_backward(
-                        non_leaf_params_requiring_grad) + leaf_module_count
+                    if refresh_expected:
+                        current_expected = count_used_parameters_in_backward(
+                            non_leaf_params_requiring_grad) + leaf_module_count
+                    else:
+                        current_expected = self._max_expected_hooks_seen
                     self.update_hook_state_and_maybe_run_epilogue(current_expected)
 
                 return reduce_leaf_module_grads

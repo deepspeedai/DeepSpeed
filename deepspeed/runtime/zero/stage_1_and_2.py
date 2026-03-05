@@ -1053,9 +1053,14 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                     def wrapper(param, i):
 
                         def grad_handling_hook(*notneeded):
+                            # Evaluate refresh condition before reenter_backward_if_needed()
+                            refresh_expected = self.should_refresh_expected_hook_count()
                             self.reenter_backward_if_needed()
                             self.process_gradients(param, i)
-                            current_expected = count_used_parameters_in_backward(all_params_requiring_grad)
+                            if refresh_expected:
+                                current_expected = count_used_parameters_in_backward(all_params_requiring_grad)
+                            else:
+                                current_expected = self._max_expected_hooks_seen
                             self.update_hook_state_and_maybe_run_epilogue(current_expected)
 
                         self._grad_acc_hooks.append(register_grad_hook(param, grad_handling_hook))
