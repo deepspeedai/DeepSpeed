@@ -3,11 +3,11 @@
 
 # DeepSpeed Team
 
-from typing import Callable, Any, List, Dict
+from typing import Callable, Any, List, Dict, Optional
 from collections import defaultdict
 
 import torch
-from torch.fx import Node, Graph
+from torch.fx import Node, Graph, GraphModule
 
 from .util import get_last_uses
 
@@ -138,3 +138,28 @@ def add_free_activations(graph_id: int, graph: Graph, activation_node_names: Lis
 
             # Python version for debugging
             # graph.create_node('call_function', free_tensors, args, {}, name=node_name)
+
+def find_node_by_name(gm: GraphModule, name: str) -> Optional[Node]:
+    for node in gm.graph.nodes:
+        if node.name == name:
+            return node
+    return None
+
+def get_node_shape_meta(node: Node) -> Optional[torch.Tensor]:
+    return node.meta.get("val") or node.meta.get("example_value")
+
+def find_node_by_tag(gm: GraphModule, tag: str) -> Optional[Node]:
+    input_id_node = None
+    for node in gm.graph.nodes:
+        # https://github.com/pytorch/pytorch/blob/085b71eab05cbc7d474a173884269c62d2778f77/torch/_dynamo/utils.py#L5048
+        tensor_dict = node.meta.get('tensor_dict')
+        if tensor_dict and tensor_dict.get('tag') == tag:
+            input_id_node = node
+            break
+    return input_id_node
+
+def replace_node_users(node: Node, replacement: Node, exclude: Optional[List[Node]] = None):
+    exclude = exclude or []
+    to_replace = [u for u in node.users if u not in exclude]
+    for user in to_replace:
+        user.replace_input_with(node, replacement)
