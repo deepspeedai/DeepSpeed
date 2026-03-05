@@ -65,7 +65,7 @@ The Adam optimizer also supports the following two params keys/values in additio
 | adam\_w\_mode | Apply L2 regularization (also known as AdamW)                               | true    |
 
 Example of <i>**optimizer**</i> with Muon
-if not set muon_lr will default to lr.
+if not set muon_lr will default to lr. save_muon_momentum_buffer_in_memory is useful for stage3 to determine if the muon's momentum buffer is saved in memory or not.
 ```json
 "optimizer": {
     "type": "Muon",
@@ -76,6 +76,7 @@ if not set muon_lr will default to lr.
       "muon_lr": 0.001
     }
   }
+  "save_muon_momentum_buffer_in_memory": True
 ```
 
 Another example of <i>**optimizer**</i> with 1-bit Adam specific parameters is as follows.
