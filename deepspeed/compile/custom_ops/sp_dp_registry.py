@@ -18,6 +18,14 @@ def get_registry():
 def is_setup():
     return GROUP_REGISTRY['is_reg'] if 'is_reg' in GROUP_REGISTRY else False
 
+def extract_mesh_size(compile_config):
+    sp_size = compile_config.pass_args.get('sp_size', 1)
+    assert dist.get_world_size() % sp_size == 0, 'World mesh-size should be divisible by SP_SIZE'
+    dp_size = dist.get_world_size() // sp_size
+
+    return sp_size, dp_size
+
+
 def sp_size():
     assert 'SP_SIZE' in GROUP_REGISTRY, 'SP_SIZE not init properly.'
 

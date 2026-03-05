@@ -59,8 +59,5 @@ class CompileConfig(DeepSpeedConfigModel):
     passes: Optional[List[PassName]] = None
     """ Composes different optimizations. """
 
-    sp_size: int = 1
-    """ SP group-size """
-
-    dp_size: int = 1
-    """ DP group-size """
+    pass_args: dict[str, any] = {}
+    """ Arguments for compiler-passes """
