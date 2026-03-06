@@ -179,10 +179,6 @@ class DeepSpeedAccelerator(ABC):
 
     # Misc
     @abc.abstractmethod
-    def amp(self):
-        ...
-
-    @abc.abstractmethod
     def is_available(self):
         ...
 

@@ -273,9 +273,20 @@ def replace_transformer_layer(orig_layer_impl, model, checkpoint_dict, config, m
     def replace_wo_policy(module, all_reduce_linears, prefix="", state_dict=None):
         #mp_replace = ReplaceWithTensorSlicing(mp_group=config.tensor_parallel.tp_group)
 
+        # Get the configurable partition_config if available
+        partition_config = None
+        if hasattr(config, 'get_partition_config_object'):
+            partition_config = config.get_partition_config_object()
+
         # 1. Create AutoTP object
-        _autotp = AutoTP(module, all_reduce_linears, prefix, state_dict, linear_layer_setting, orig_layer_impl,
-                         config.keep_module_on_host)
+        _autotp = AutoTP(module,
+                         all_reduce_linears,
+                         prefix,
+                         state_dict,
+                         linear_layer_setting,
+                         orig_layer_impl,
+                         config.keep_module_on_host,
+                         partition_config=partition_config)
 
         # 2. Set the tensor parallelism config
         _autotp.set_tensor_parallel_config(config.tensor_parallel.tp_size, config.tensor_parallel.tp_group)

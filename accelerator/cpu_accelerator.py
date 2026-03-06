@@ -199,9 +199,6 @@ class CPU_Accelerator(DeepSpeedAccelerator):
         return psutil.virtual_memory().available
 
     # Misc
-    def amp(self):
-        return torch.cpu.amp
-
     def is_available(self):
         return True
 
@@ -232,7 +229,7 @@ class CPU_Accelerator(DeepSpeedAccelerator):
         try:
             if torch.ops.mkldnn._is_mkldnn_fp16_supported():
                 return True
-        except:
+        except Exception:
             return False
 
     def supported_dtypes(self):

@@ -11,12 +11,12 @@ from dataclasses import dataclass
 from typing import List
 
 import numpy as np
-import torch
 from torch import Tensor
 
 from deepspeed import comm as dist
 from deepspeed.accelerator import get_accelerator
 from deepspeed.utils import logger
+from deepspeed.utils.torch import jit_script_compat
 
 
 def _log_rank0(msg):
@@ -24,7 +24,7 @@ def _log_rank0(msg):
         logger.info(msg)
 
 
-@torch.jit.script
+@jit_script_compat
 def scale_tensors(tensors: List[Tensor], scale: int):
     for t in tensors:
         t.div_(scale)

@@ -29,7 +29,7 @@ https://github.com/snowflakedb/ArcticTraining/blob/main/projects/sequence-parall
 
 """
 
-from collections import defaultdict
+from collections import defaultdict, deque
 from deepspeed.runtime.utils import see_memory_usage
 from deepspeed.sequence.layer import _DimZeroAllToAll
 from deepspeed.utils.logging import logger
@@ -78,6 +78,9 @@ class UlyssesSPAttentionHF(torch.nn.Module):
         kv_head_count (int): total number of kv heads
         num_hidden_layers (int): total number of layers
         process_group (dist.ProcessGroup): Ulysses process group
+        disable_in_eval (bool): whether to disable sequence parallelism during evaluation (default: False).
+            When True, SP operations are bypassed during eval to avoid potential issues with frameworks
+            like HF Trainer that may run eval with different data distribution.
 
 
     Extras:
@@ -96,6 +99,7 @@ class UlyssesSPAttentionHF(torch.nn.Module):
         seq_length_is_variable: bool = False,
         local_seq_length: int = None,
         global_seq_length: int = None,
+        disable_in_eval: bool = False,
     ) -> None:
         super().__init__()
         self.attn = attn
@@ -107,6 +111,7 @@ class UlyssesSPAttentionHF(torch.nn.Module):
         self.seq_length_is_variable = seq_length_is_variable
         self.local_seq_length = local_seq_length
         self.global_seq_length = global_seq_length
+        self.disable_in_eval = disable_in_eval
 
         self.attn_head_size = attn_head_size
         self.attn_head_count = attn_head_count
@@ -246,6 +251,12 @@ class UlyssesSPAttentionHF(torch.nn.Module):
         # print_rank0(f"{key.shape=}")
         # print_rank0(f"{value.shape=}")
         # print_rank0(f"{self.required_input_shape=}")
+
+        # Skip SP operations during eval if disable_in_eval is True
+        # This avoids issues with frameworks like HF Trainer that may run eval with different data distribution
+        if not module.training and self.disable_in_eval:
+            return self.attn(module, query, key, value, attention_mask, *args, **kwargs)
+
         if self.seq_length_is_variable:
             current_local_seq_length = query.shape[2]
             self.local_seq_length = current_local_seq_length
@@ -350,6 +361,7 @@ class UlyssesSPAttentionHF(torch.nn.Module):
         micro_batch_size,
         seq_length=None,
         seq_length_is_variable=True,
+        disable_in_eval=False,
         # deprecated
         max_length=None,
     ):
@@ -364,6 +376,9 @@ class UlyssesSPAttentionHF(torch.nn.Module):
         - micro_batch_size (int): micro batch size
         - seq_length (int): set this argument if the sequence length is fixed in all batches
         - seq_length_is_variable (bool): whether global seqlen may change between batches an optimization flag - the default is `True`
+        - disable_in_eval (bool): whether to disable sequence parallelism during evaluation (default: False).
+            When True, SP operations are bypassed during eval to avoid issues with frameworks
+            like HF Trainer that may run eval with different data distribution.
         - max_length (int): actual global sequence length - this argument is deprecated - use `seq_length` instead
 
         """
@@ -431,6 +446,7 @@ class UlyssesSPAttentionHF(torch.nn.Module):
             seq_length_is_variable=seq_length_is_variable,
             local_seq_length=local_seq_length,
             global_seq_length=global_seq_length,
+            disable_in_eval=disable_in_eval,
         )
 
         def uattn_wrapper(
@@ -534,7 +550,7 @@ class UlyssesSPDataLoaderAdapter:
         self.device = device
 
         self.iter = iter(dl)
-        self.micro_batches: list[Any] = []
+        self.micro_batches: deque[Any] = deque()
 
     def __len__(self):
         return len(self.dl) * self.sp_world_size
@@ -546,7 +562,7 @@ class UlyssesSPDataLoaderAdapter:
         if len(self.micro_batches) == 0:
             self.refill()
 
-        return self.micro_batches.pop(0)
+        return self.micro_batches.popleft()
 
     def refill(self):
         # reset the iterator if StopIteration arrives, and re-raise it to allow multiple epochs to run

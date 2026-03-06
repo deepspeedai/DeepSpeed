@@ -37,6 +37,7 @@ from deepspeed.runtime.zenflow.engine import (configure_zenflow, zenflow_step, i
                                               sync_zenflow_optimizer_lr)
 
 from deepspeed.runtime.fp16.fused_optimizer import FP16_Optimizer
+from deepspeed.runtime.fp16.loss_scaler import LossScaleConfig, LossScaleProfile
 from deepspeed.runtime.fp16.unfused_optimizer import FP16_UnfusedOptimizer
 from deepspeed.runtime.bf16_optimizer import BF16_Optimizer
 
@@ -499,6 +500,7 @@ class DeepSpeedEngine(Module):
     def _configure_tensor_parallel(self, model, tp_config):
         self._configure_tensor_parallel_states(model)
         configure_tensor_parallel_runtime(tp_config)
+        self._apply_autotp_partitioning(model, tp_config)
 
     def _configure_tensor_parallel_states(self, model):
         """
@@ -563,6 +565,55 @@ class DeepSpeedEngine(Module):
         self.first_dataloader_check = self.module.register_forward_pre_hook(check_dataloader_inputs_same_across_ranks,
                                                                             prepend=True,
                                                                             with_kwargs=True)
+
+    def _apply_autotp_partitioning(self, model, tp_config):
+        if getattr(model, "ds_autotp_parsed", False):
+            return
+        if get_accelerator().is_available() and self.local_rank >= 0:
+            get_accelerator().set_device(self.local_rank)
+
+        tp_size = self.autotp_size()
+        if tp_config.tensor_parallel.tp_size not in (1, tp_size):
+            raise ValueError(f"tensor_parallel.tp.tp_size ({tp_config.tensor_parallel.tp_size}) "
+                             f"does not match tensor_parallel.autotp_size ({tp_size}).")
+        tp_config.tensor_parallel.tp_size = tp_size
+        if tp_config.tensor_parallel.tp_group is None:
+            tp_config.tensor_parallel.tp_group = groups.get_tensor_model_parallel_group()
+
+        from deepspeed.module_inject.auto_tp import AutoTP
+
+        partition_config = None
+        if hasattr(tp_config, "get_partition_config_object"):
+            partition_config = tp_config.get_partition_config_object()
+
+        if partition_config is not None:
+            autotp = AutoTP(module=model,
+                            all_reduce_linears=(),
+                            prefix="",
+                            state_dict=None,
+                            linear_layer_setting=(torch.nn.Linear, torch.nn.Embedding),
+                            orig_layer_impl=None,
+                            keep_module_on_host=tp_config.keep_module_on_host,
+                            partition_config=partition_config)
+            autotp.set_tensor_parallel_config(tp_size, tp_config.tensor_parallel.tp_group)
+            autotp.update_linear_policies()
+            autotp._replace_module(model)
+            setattr(model, "ds_autotp_parsed", True)
+            return
+
+        if tp_size <= 1:
+            setattr(model, "ds_autotp_parsed", True)
+            return
+
+        model_config = getattr(model, "config", None)
+        from deepspeed.module_inject import replace_transformer_layer
+
+        parser_dict = AutoTP.tp_parser(model)
+        for client_module, injection_policy in parser_dict:
+            tp_config.injection_policy_tuple = injection_policy
+            replace_transformer_layer(client_module, model, None, tp_config, model_config)
+
+        setattr(model, "ds_autotp_parsed", True)
 
     def __del__(self):
         try:
@@ -1416,6 +1467,14 @@ class DeepSpeedEngine(Module):
         self.expert_data_parallel_group = groups._get_expert_data_parallel_group_dict()
         self.sequence_parallel_size = groups._get_sequence_parallel_world_size()
         if self.sequence_parallel_size > 1:
+            # Inserted Warning for PyTorch < 2.3
+            if not required_torch_version(min_version=2.3):
+                logger.warning(
+                    "DeepSpeed Sequence Parallelism (Ulysses) with PyTorch < 2.3 may encounter "
+                    "rank indexing errors during backward pass when sp_size < world_size. "
+                    "Please use the weighted all-reduce workaround shown in the regression test "
+                    "(https://github.com/deepspeedai/DeepSpeed/blob/master/tests/unit/sequence_parallelism/test_ulysses.py) "
+                    "or upgrade to PyTorch 2.3+.")
             self.communication_data_type = self._config.seq_parallel_communication_data_type
             self.seq_parallel_group = groups._get_sequence_parallel_group()
 
@@ -1649,8 +1708,8 @@ class DeepSpeedEngine(Module):
                 msg = "Muon optimizer is used, but the use_muon attribute is NOT configured for some of the model parameters, " \
                 "please set by `param.use_muon = True / False` for all params"
                 logger.error(msg)
-            muon_params = [p for p in model_parameters if p.use_muon]
-            non_muon_params = [p for p in model_parameters if not p.use_muon]
+            muon_params = [p for p in model_parameters if p.use_muon and p.requires_grad]
+            non_muon_params = [p for p in model_parameters if (not p.use_muon) and p.requires_grad]
             param_groups = []
             if muon_params:
                 accepted_parameters = dict()
@@ -1715,7 +1774,6 @@ class DeepSpeedEngine(Module):
         return quantizer
 
     def _configure_fp16_optimizer(self, optimizer, low_precision_dtype):
-        initial_dynamic_scale = self.initial_dynamic_scale()
         dynamic_loss_args = self.dynamic_loss_scale_args()
         clip_grad = self.gradient_clipping()
 
@@ -1724,46 +1782,47 @@ class DeepSpeedEngine(Module):
         else:
             fused_opts = FusedAdam
 
-        if isinstance(optimizer, fused_opts) \
-                or self.optimizer_name() in [ONEBIT_ADAM_OPTIMIZER, ZERO_ONE_ADAM_OPTIMIZER]:
-            if self.dynamic_loss_scale():
+        use_fused_optimizer = isinstance(optimizer, fused_opts) \
+            or self.optimizer_name() in [ONEBIT_ADAM_OPTIMIZER, ZERO_ONE_ADAM_OPTIMIZER]
+        loss_scale_profile = LossScaleProfile.FUSED if use_fused_optimizer else LossScaleProfile.UNFUSED
+        initial_dynamic_scale = self.initial_dynamic_scale() if loss_scale_profile == LossScaleProfile.FUSED else None
+        loss_scale_config = LossScaleConfig(
+            low_precision_dtype=low_precision_dtype,
+            dynamic_loss_scale=self.dynamic_loss_scale(),
+            static_loss_scale=self.loss_scale(),
+            dynamic_loss_args=dynamic_loss_args,
+            profile=loss_scale_profile,
+            initial_dynamic_scale=initial_dynamic_scale,
+        )
+
+        if use_fused_optimizer:
+            if loss_scale_config.dynamic_loss_scale:
                 log_dist('Creating fp16 optimizer with dynamic loss scale', ranks=[0])
-                timers = self.timers if self.wall_clock_breakdown() else NoopTimer()
-                optimizer = FP16_Optimizer(
-                    optimizer,
-                    deepspeed=self,
-                    low_precision_dtype=low_precision_dtype,
-                    dynamic_loss_scale=True,
-                    initial_dynamic_scale=initial_dynamic_scale,
-                    dynamic_loss_args=dynamic_loss_args,
-                    mpu=self.mpu,
-                    clip_grad=clip_grad,
-                    fused_adam_legacy=self.optimizer_legacy_fusion(),
-                    timers=timers,
-                    has_moe_layers=self.has_moe_layers,
-                )
             else:
-                log_dist(f'Creating fp16 optimizer with static loss scale: {self.loss_scale()}', ranks=[0])
-                timers = self.timers if self.wall_clock_breakdown() else NoopTimer()
-                optimizer = FP16_Optimizer(
-                    optimizer,
-                    deepspeed=self,
-                    low_precision_dtype=low_precision_dtype,
-                    static_loss_scale=self.loss_scale(),
-                    mpu=self.mpu,
-                    clip_grad=clip_grad,
-                    fused_adam_legacy=self.optimizer_legacy_fusion(),
-                    timers=timers,
-                    has_moe_layers=self.has_moe_layers,
-                )
+                log_dist(f'Creating fp16 optimizer with static loss scale: {loss_scale_config.cur_scale}', ranks=[0])
+            timers = self.timers if self.wall_clock_breakdown() else NoopTimer()
+            optimizer = FP16_Optimizer(
+                optimizer,
+                deepspeed=self,
+                loss_scale_config=loss_scale_config,
+                low_precision_dtype=low_precision_dtype,
+                mpu=self.mpu,
+                clip_grad=clip_grad,
+                fused_adam_legacy=self.optimizer_legacy_fusion(),
+                timers=timers,
+                has_moe_layers=self.has_moe_layers,
+            )
         else:
-            log_dist('Creating fp16 unfused optimizer with dynamic loss scale', ranks=[0])
+            if loss_scale_config.dynamic_loss_scale:
+                log_dist('Creating fp16 unfused optimizer with dynamic loss scale', ranks=[0])
+            else:
+                log_dist(f'Creating fp16 unfused optimizer with static loss scale: {loss_scale_config.cur_scale}',
+                         ranks=[0])
             optimizer = FP16_UnfusedOptimizer(
                 optimizer,
                 deepspeed=self,
-                static_loss_scale=self.loss_scale(),
-                dynamic_loss_scale=self.dynamic_loss_scale(),
-                dynamic_loss_args=dynamic_loss_args,
+                loss_scale_config=loss_scale_config,
+                low_precision_dtype=low_precision_dtype,
                 mpu=self.mpu,
                 clip_grad=clip_grad,
                 fused_lamb_legacy=self.optimizer_name() == LAMB_OPTIMIZER,
@@ -2624,10 +2683,10 @@ class DeepSpeedEngine(Module):
         # the behavior that we want
         if self.bfloat16_enabled():
             # TODO: Temporary until bf16_optimizer and zero_optimizer are integrated
-            if self.zero_optimization() and hasattr(self.optimizer, "zero_grad"):
+            if hasattr(self.optimizer, "zero_grad"):
                 self.optimizer.zero_grad()
             else:
-                pass
+                self.zero_grad()
         elif self.zero_optimization() or self.fp16_enabled() or self.amp_enabled():
             self.optimizer.zero_grad()
         else:
@@ -2699,8 +2758,8 @@ class DeepSpeedEngine(Module):
             if (self.eigenvalue_enabled() and (self.gas_boundary_ctr % self.eigenvalue_gas_boundary_resolution() == 0)
                     and self.quantizer.any_precision_switch()):
                 log_dist("computing eigenvalue...", ranks=[0])
-                self.block_eigenvalue = self.eigenvalue.compute_eigenvalue(self.module, self.device,
-                                                                           self.optimizer.cur_scale)
+                loss_scale = self._get_optimizer_loss_scale() or 1.0
+                self.block_eigenvalue = self.eigenvalue.compute_eigenvalue(self.module, self.device, loss_scale)
 
             if self.progressive_layer_drop:
                 self.progressive_layer_drop.update_state(self.global_steps)
@@ -2726,10 +2785,11 @@ class DeepSpeedEngine(Module):
                 if self.global_rank == 0:
                     self.summary_events = [("Train/Samples/lr", self.get_lr()[0], self.global_samples)]
 
-                    if self.fp16_enabled() and hasattr(self.optimizer, "cur_scale"):
+                    loss_scale = self._get_optimizer_loss_scale() if self.fp16_enabled() else None
+                    if loss_scale is not None:
                         self.summary_events.append((
                             "Train/Samples/loss_scale",
-                            self.optimizer.cur_scale,
+                            loss_scale,
                             self.global_samples,
                         ))
 
@@ -2871,6 +2931,13 @@ class DeepSpeedEngine(Module):
             else:
                 result.append(0.0)
         return result
+
+    def _get_optimizer_loss_scale(self):
+        if not self.optimizer:
+            return None
+        if hasattr(self.optimizer, "loss_scale_config"):
+            return self.optimizer.loss_scale_config.cur_scale
+        return getattr(self.optimizer, "cur_scale", None)
 
     def get_lr(self):
         return self._get_optimizer_param("lr")
@@ -3886,7 +3953,7 @@ class DeepSpeedEngine(Module):
             checkpoint_name = name_function(save_dir, tag)
             path = os.path.dirname(checkpoint_name)
             self.checkpoint_engine.makedirs(path, exist_ok=True)
-        except:
+        except Exception:
             logger.error(f"Failed saving model checkpoint to {save_dir} with tag {tag}")
             return False
 
