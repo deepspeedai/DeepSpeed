@@ -4,6 +4,8 @@
 # DeepSpeed Team
 
 from deepspeed.runtime.config_utils import DeepSpeedConfigModel
+from pydantic import field_validator
+from .loss_scale_validation import validate_loss_scale_value, validate_positive_finite, validate_positive_int
 from .fp16.loss_scaler import (
     INITIAL_LOSS_SCALE,
     SCALE_WINDOW,
@@ -133,12 +135,32 @@ class DeepSpeedFP16Config(DeepSpeedConfigModel):
     Refill hysteresis if iteration does not overflow/underflow.
     """
 
-    min_loss_scale: int = 1
+    min_loss_scale: float = 1
     """
     Minimum dynamic loss scale value.
     """
 
     fp16_master_weights_and_grads: bool = False
+    @field_validator("loss_scale")
+    @classmethod
+    def validate_loss_scale(cls, value):
+        return validate_loss_scale_value(value, name="fp16.loss_scale", allow_dynamic_zero=True)
+
+    @field_validator("loss_scale_window")
+    @classmethod
+    def validate_loss_scale_window(cls, value):
+        return validate_positive_int(value, name="fp16.loss_scale_window")
+
+    @field_validator("hysteresis")
+    @classmethod
+    def validate_hysteresis(cls, value):
+        return validate_positive_int(value, name="fp16.hysteresis")
+
+    @field_validator("min_loss_scale")
+    @classmethod
+    def validate_min_loss_scale(cls, value):
+        return validate_positive_finite(value, name="fp16.min_loss_scale")
+
     """
     Maintain master weights in optimizer state as fp16 instead of fp32 (valid with DeepSpeedCPUAdam only).
     """
