@@ -3,6 +3,8 @@
 
 # DeepSpeed Team
 
+import math
+from pydantic import field_validator
 from deepspeed.runtime.config_utils import DeepSpeedConfigModel
 from .fp16.loss_scaler import (
     INITIAL_LOSS_SCALE,
@@ -107,11 +109,30 @@ class DeepSpeedFP16Config(DeepSpeedConfigModel):
     """
     Automatically cast inputs to fp16
     """
-
+    
     loss_scale: float = 0
     """
     Loss scaling value. Default value of 0 means dynamic loss scaling instead of static loss scale.
     """
+    @field_validator("loss_scale", mode="before")
+    @classmethod
+    def _validate_loss_scale(cls, v):
+        # Prevent True/False from being treated as 1/0
+        # (must run before Pydantic coerces bool -> float)
+        if isinstance(v, bool):
+            raise ValueError("fp16.loss_scale must be a number, not bool")
+
+        v = float(v)
+
+        # Reject inf/-inf/nan
+        if not math.isfinite(v):
+            raise ValueError("fp16.loss_scale must be a finite number (not inf/-inf/nan)")
+
+        # Reject negative values; 0 still means dynamic loss scaling
+        if v < 0:
+            raise ValueError("fp16.loss_scale must be >= 0 (0 enables dynamic loss scaling)")
+
+        return v
 
     initial_scale_power: int = 16
     """
