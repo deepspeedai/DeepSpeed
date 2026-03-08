@@ -102,8 +102,14 @@ def test_fp16_loss_scale_valid(loss_scale):
 
 @pytest.mark.parametrize("loss_scale", [float("inf"), float("-inf"), float("nan")])
 def test_fp16_loss_scale_rejects_non_finite(loss_scale):
-    """Non-finite loss_scale values must raise ValidationError (issue #7852)."""
-    with pytest.raises(ValidationError, match="finite"):
+    """Non-finite loss_scale values must raise ValidationError (issue #7852).
+
+    The exact error message is not asserted because Pydantic may run the
+    ``ge=0`` field constraint before the custom ``field_validator``, producing
+    a "greater than or equal to" message for -inf/nan instead of our "finite"
+    message.  What matters is that invalid values are rejected.
+    """
+    with pytest.raises(ValidationError):
         DeepSpeedFP16Config(loss_scale=loss_scale)
 
 
