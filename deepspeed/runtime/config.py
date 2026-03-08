@@ -51,11 +51,8 @@ from ..elasticity.constants import (
 
 from ..profiling.config import DeepSpeedFlopsProfilerConfig
 from ..autotuning.config import DeepSpeedAutotuningConfig
-from ..nebula.config import DeepSpeedNebulaConfig
 from ..datastates.config import DeepSpeedDataStatesConfig
 
-from ..compression.config import get_compression_config, get_quantize_enabled
-from ..compression.constants import *
 from .swap_tensor.aio_config import get_aio_config
 from .model_checkpointing.config import get_checkpoint_config
 
@@ -72,9 +69,7 @@ ADAGRAD_OPTIMIZER = 'adagrad'
 ADAM_OPTIMIZER = 'adam'
 ADAMW_OPTIMIZER = 'adamw'
 LAMB_OPTIMIZER = 'lamb'
-ONEBIT_ADAM_OPTIMIZER = 'onebitadam'
 ZERO_ONE_ADAM_OPTIMIZER = 'zerooneadam'
-ONEBIT_LAMB_OPTIMIZER = 'onebitlamb'
 MUADAM_OPTIMIZER = 'muadam'
 MUADAMW_OPTIMIZER = 'muadamw'
 MUSGD_OPTIMIZER = 'musgd'
@@ -82,8 +77,8 @@ LION_OPTIMIZER = 'lion'
 MUON_OPTIMIZER = 'muon'
 
 DEEPSPEED_OPTIMIZERS = [
-    ADAGRAD_OPTIMIZER, ADAM_OPTIMIZER, ADAMW_OPTIMIZER, LAMB_OPTIMIZER, ONEBIT_ADAM_OPTIMIZER, ONEBIT_LAMB_OPTIMIZER,
-    ZERO_ONE_ADAM_OPTIMIZER, MUADAM_OPTIMIZER, MUADAMW_OPTIMIZER, MUSGD_OPTIMIZER, LION_OPTIMIZER, MUON_OPTIMIZER
+    ADAGRAD_OPTIMIZER, ADAM_OPTIMIZER, ADAMW_OPTIMIZER, LAMB_OPTIMIZER, ZERO_ONE_ADAM_OPTIMIZER, MUADAM_OPTIMIZER,
+    MUADAMW_OPTIMIZER, MUSGD_OPTIMIZER, LION_OPTIMIZER, MUON_OPTIMIZER
 ]
 
 # extra optimizer parameters for adam/adamw
@@ -533,42 +528,16 @@ def get_expert_data_topo_config(param_dict):
 
 
 def get_eigenvalue_config(param_dict):
-    if get_quantize_enabled(param_dict):
-        quantize_training_params = param_dict.get('quantize_training')
-        if quantize_training_params is None:
-            return (
-                EIGENVALUE_ENABLED_DEFAULT,
-                EIGENVALUE_VERBOSE_DEFAULT,
-                EIGENVALUE_MAX_ITER_DEFAULT,
-                EIGENVALUE_TOL_DEFAULT,
-                EIGENVALUE_STABILITY_DEFAULT,
-                EIGENVALUE_GAS_BOUNDARY_RESOLUTION_DEFAULT,
-                EIGENVALUE_LAYER_NAME_DEFAULT,
-                EIGENVALUE_LAYER_NUM_DEFAULT,
-            )
-
-        assert not get_eigenvalue_enabled(quantize_training_params), "Eigenvalue based MoQ is temporarily disabled"
-        return (
-            get_eigenvalue_enabled(quantize_training_params),
-            get_eigenvalue_verbose(quantize_training_params),
-            get_eigenvalue_max_iter(quantize_training_params),
-            get_eigenvalue_tol(quantize_training_params),
-            get_eigenvalue_stability(quantize_training_params),
-            get_eigenvalue_gas_boundary_resolution(quantize_training_params),
-            get_eigenvalue_layer_name(quantize_training_params),
-            get_eigenvalue_layer_num(quantize_training_params),
-        )
-    else:
-        return (
-            EIGENVALUE_ENABLED_DEFAULT,
-            EIGENVALUE_VERBOSE_DEFAULT,
-            EIGENVALUE_MAX_ITER_DEFAULT,
-            EIGENVALUE_TOL_DEFAULT,
-            EIGENVALUE_STABILITY_DEFAULT,
-            EIGENVALUE_GAS_BOUNDARY_RESOLUTION_DEFAULT,
-            EIGENVALUE_LAYER_NAME_DEFAULT,
-            EIGENVALUE_LAYER_NUM_DEFAULT,
-        )
+    return (
+        EIGENVALUE_ENABLED_DEFAULT,
+        EIGENVALUE_VERBOSE_DEFAULT,
+        EIGENVALUE_MAX_ITER_DEFAULT,
+        EIGENVALUE_TOL_DEFAULT,
+        EIGENVALUE_STABILITY_DEFAULT,
+        EIGENVALUE_GAS_BOUNDARY_RESOLUTION_DEFAULT,
+        EIGENVALUE_LAYER_NAME_DEFAULT,
+        EIGENVALUE_LAYER_NUM_DEFAULT,
+    )
 
 
 def get_eigenvalue_enabled(param_dict):
@@ -841,7 +810,6 @@ class DeepSpeedConfig(object):
         self.torch_autocast_dtype = get_torch_autocast_dtype(param_dict)
         self.torch_autocast_lower_precision_safe_modules = get_lower_precision_safe_modules(param_dict)
 
-        self.compression_config = get_compression_config(param_dict)
         self.graph_harvesting = get_graph_harvesting(param_dict)
 
         self.optimizer_name = get_optimizer_name(param_dict)
@@ -916,7 +884,6 @@ class DeepSpeedConfig(object):
 
         self.log_level = get_log_level(param_dict)
 
-        self.nebula_config = DeepSpeedNebulaConfig(param_dict)
         self.datastates_config = DeepSpeedDataStatesConfig(param_dict)
         self.checkpoint_config = get_checkpoint_config(param_dict)
 

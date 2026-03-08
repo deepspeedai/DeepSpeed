@@ -99,7 +99,7 @@ combinations, which we call 3D parallelism.
 Pipeline parallelism of DeepSpeed reduce communication volume during distributed training, which allows users to train multi-billion-parameter models 2–7x faster on clusters with limited network bandwidth.
 ![Low-bandwidth GPT-2 Performance](/assets/images/pp-lowbw-gpt2.png)
 
-1-bit Adam, 0/1 Adam and 1-bit LAMB reduce communication volume by up to 26x while achieving similar convergence efficiency to Adam, allowing for scaling to different types of GPU clusters and networks.  [1-bit Adam blog post](https://www.deepspeed.ai/2020/09/08/onebit-adam-blog-post.html), [1-bit Adam tutorial](https://www.deepspeed.ai/tutorials/onebit-adam/), [0/1 Adam tutorial](https://www.deepspeed.ai/tutorials/zero-one-adam/), [1-bit LAMB tutorial](https://www.deepspeed.ai/tutorials/onebit-lamb/).
+0/1 Adam reduces communication volume by up to 26x while achieving similar convergence efficiency to Adam, allowing for scaling to different types of GPU clusters and networks.  [0/1 Adam tutorial](https://www.deepspeed.ai/tutorials/zero-one-adam/).
 
 ## Data efficiency
 DeepSpeed Data Efficiency Library provides efficient data sampling via curriculum learning and efficient data routing via random layerwise token dropping. The composed solution enables up to 2x data and 2x time saving during GPT-3/BERT pretraining and GPT/ViT finetuning, or further improve model quality under the same data/time. See more in [the tutorial](/tutorials/data-efficiency).
@@ -146,7 +146,7 @@ Below we provide a brief feature list, see our detailed [feature overview](https
   * Memory- and compute-efficient sparse kernels
   * Support 10x long sequences than dense
   * Flexible support to different sparse structures
-* [1-bit Adam](https://www.deepspeed.ai/2020/09/08/onebit-adam-blog-post.html), [0/1 Adam](https://www.deepspeed.ai/tutorials/zero-one-adam/) and [1-bit LAMB](https://www.deepspeed.ai/tutorials/onebit-lamb/)
+* [0/1 Adam](https://www.deepspeed.ai/tutorials/zero-one-adam/)
   * Custom communication collective
   * Up to 26x communication volume saving
 * [Additional Memory and Bandwidth Optimizations](https://www.deepspeed.ai/features/#additional-memory-and-bandwidth-optimizations)
@@ -358,18 +358,14 @@ Please see the [core API doc](https://deepspeed.readthedocs.io/) for more detail
 
 ## Training Optimizers
 
-### 1-bit Adam, 0/1 Adam and 1-bit LAMB optimizers with up to 26x less communication
+### 0/1 Adam optimizer with up to 26x less communication
 
-DeepSpeed has three communication-efficient optimizers called 1-bit Adam, 0/1 Adam and 1-bit LAMB.
-They offer the same convergence as Adam/LAMB, incur up to 26x less communication that enables
+DeepSpeed has a communication-efficient optimizer called 0/1 Adam.
+It offers the same convergence as Adam, incurs up to 26x less communication that enables
 up to 6.6x higher throughput for BERT-Large pretraining and up to 2.7x higher throughput
 for SQuAD fine-tuning on bandwidth-limited clusters. For more details on usage and performance,
-please refer to the [1-bit Adam tutorial](https://www.deepspeed.ai/tutorials/onebit-adam),
-[1-bit Adam blog post](https://www.deepspeed.ai/2020/09/08/onebit-adam-blog-post.html),
-[0/1 Adam tutorial](https://www.deepspeed.ai/tutorials/zero-one-adam)
-and [1-bit LAMB tutorial](https://www.deepspeed.ai/tutorials/onebit-lamb/). For technical details,
-please refer to the [1-bit Adam paper](https://arxiv.org/abs/2102.02888), [0/1 Adam paper](https://arxiv.org/abs/2202.06009) and
-[1-bit LAMB paper](https://arxiv.org/abs/2104.06069).
+please refer to the [0/1 Adam tutorial](https://www.deepspeed.ai/tutorials/zero-one-adam).
+For technical details, please refer to the [0/1 Adam paper](https://arxiv.org/abs/2202.06009).
 
 ### Fused Adam optimizer and arbitrary torch.optim.Optimizer
 With DeepSpeed, the user can choose to use a high performance implementation of ADAM from

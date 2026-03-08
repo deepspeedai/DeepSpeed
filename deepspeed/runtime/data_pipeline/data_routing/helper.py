@@ -5,7 +5,7 @@
 
 from .basic_layer import RandomLayerTokenDrop
 from collections import OrderedDict
-from deepspeed.compression.helper import recursive_getattr, recursive_setattr
+from deepspeed.utils.module_utils import recursive_getattr, recursive_setattr
 
 
 def convert_to_random_ltd(model, convert_type):

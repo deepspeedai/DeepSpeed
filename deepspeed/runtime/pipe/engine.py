@@ -84,7 +84,7 @@ class PipelineEngine(DeepSpeedEngine):
         # BF16 Optimizer is hardcoded for fp32 gradient accumulation
         self.using_bf16_optimizer = type(self.optimizer) == BF16_Optimizer
 
-        # used to disable the pipeline all-reduce when used with 1-bit Adam/1-bit LAMB
+        # used to disable the pipeline all-reduce when used with 0/1 Adam
         self.pipeline_enable_backward_allreduce = True
 
         if self.elasticity_enabled():

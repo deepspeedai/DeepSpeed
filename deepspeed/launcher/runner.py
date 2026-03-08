@@ -27,7 +27,6 @@ import shlex
 from .multinode_runner import PDSHRunner, OpenMPIRunner, MVAPICHRunner, SlurmRunner, MPICHRunner, IMPIRunner
 from .constants import PDSH_LAUNCHER, OPENMPI_LAUNCHER, MVAPICH_LAUNCHER, SLURM_LAUNCHER, MPICH_LAUNCHER, IMPI_LAUNCHER
 from ..constants import TORCH_DISTRIBUTED_DEFAULT_PORT
-from ..nebula.constants import NEBULA_EXPORT_ENVS
 from ..utils import logger, set_log_level_from_string
 
 from ..autotuning import Autotuner
@@ -35,7 +34,6 @@ from deepspeed.accelerator import get_accelerator
 
 DLTS_HOSTFILE = "/job/hostfile"
 EXPORT_ENVS = ['MLFLOW', 'PYTHON', 'MV2', 'UCX']
-EXPORT_ENVS += NEBULA_EXPORT_ENVS
 DEEPSPEED_ENVIRONMENT_NAME = os.getenv("DS_ENV_FILE", ".deepspeed_env")
 DEEPSPEED_ENVIRONMENT_PATHS = [os.path.expanduser("~"), '.']
 PDSH_MAX_FAN_OUT = 1024

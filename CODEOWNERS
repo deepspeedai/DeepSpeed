@@ -26,13 +26,12 @@
 /deepspeed/autotuning/ @loadams
 /deepspeed/checkpoint/ @tjruwase
 /deepspeed/comm/ @guanhuawang
-/deepspeed/compression/ @tjruwase
+
 /deepspeed/elasticity/ @tjruwase
 /deepspeed/launcher/ @loadams
 /deepspeed/module_inject/ @hwchen2017 @loadams
 /deepspeed/moe/ @tohtana
 /deepspeed/monitor/ @tjruwase
-/deepspeed/nebula/ @tjruwase
 /deepspeed/nvme/ @tjruwase @jomayeri
 /deepspeed/ops/ @tohtana
 /deepspeed/pipe/ @tohtana @loadams
