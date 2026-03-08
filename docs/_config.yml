@@ -55,7 +55,7 @@ collections:
       - monitor.md
       - comms-logging.md
       - one-cycle.md
-      - zero-one-adam.md
+
       - pipeline.md
       - progressive_layer_dropping.md
       - sparse-attention.md

@@ -105,8 +105,6 @@ lnav:
         url: /tutorials/comms-logging
       - title: 'One-Cycle Schedule'
         url: /tutorials/one-cycle/
-      - title: "Zero-One Adam"
-        url: /tutorials/zero-one-adam/
       - title: 'Pipeline Parallelism'
         url: /tutorials/pipeline/
       - title: 'Progressive Layer Dropping'

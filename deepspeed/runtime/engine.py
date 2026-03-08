@@ -52,7 +52,7 @@ from deepspeed.module_inject.auto_ep_folding import (clear_autoep_folding_gradie
                                                      reduce_autoep_folding_gradient)
 from deepspeed.runtime.config import DEEPSPEED_OPTIMIZERS, \
     ADAGRAD_OPTIMIZER, ADAM_OPTIMIZER, ADAMW_OPTIMIZER, LAMB_OPTIMIZER, \
-    TORCH_ADAM_PARAM, ADAM_W_MODE, ADAM_W_MODE_DEFAULT, ZERO_ONE_ADAM_OPTIMIZER, MUADAM_OPTIMIZER, MUADAMW_OPTIMIZER, \
+    TORCH_ADAM_PARAM, ADAM_W_MODE, ADAM_W_MODE_DEFAULT, MUADAM_OPTIMIZER, MUADAMW_OPTIMIZER, \
     MUSGD_OPTIMIZER, LION_OPTIMIZER, MUON_OPTIMIZER
 
 from deepspeed.runtime.model_checkpointing.constants import ValidationMode, \
@@ -2426,13 +2426,6 @@ class DeepSpeedEngine(Module):
             from deepspeed.ops.lamb import FusedLamb
 
             optimizer = FusedLamb(model_parameters, **optimizer_parameters)
-        elif self.optimizer_name() == ZERO_ONE_ADAM_OPTIMIZER:
-            assert not self.zero_optimization(), "0/1 Adam is not compatible with ZeRO"
-            from deepspeed.runtime.fp16.onebit.zoadam import ZeroOneAdam
-
-            optimizer = ZeroOneAdam(model_parameters, self, **optimizer_parameters)
-            if not self.fp16_enabled():
-                logger.warning('Currently the convergence of 0/1 Adam is only verified under FP16')
         elif self.optimizer_name() == LION_OPTIMIZER:
             if self.zero_use_cpu_optimizer():
                 from deepspeed.ops.lion import DeepSpeedCPULion
@@ -2522,8 +2515,7 @@ class DeepSpeedEngine(Module):
         else:
             fused_opts = FusedAdam
 
-        use_fused_optimizer = isinstance(optimizer, fused_opts) \
-            or self.optimizer_name() in [ZERO_ONE_ADAM_OPTIMIZER]
+        use_fused_optimizer = isinstance(optimizer, fused_opts)
         loss_scale_profile = LossScaleProfile.FUSED if use_fused_optimizer else LossScaleProfile.UNFUSED
         initial_dynamic_scale = self.initial_dynamic_scale() if loss_scale_profile == LossScaleProfile.FUSED else None
         loss_scale_config = LossScaleConfig(

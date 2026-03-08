@@ -99,8 +99,6 @@ combinations, which we call 3D parallelism.
 Pipeline parallelism of DeepSpeed reduce communication volume during distributed training, which allows users to train multi-billion-parameter models 2–7x faster on clusters with limited network bandwidth.
 ![Low-bandwidth GPT-2 Performance](/assets/images/pp-lowbw-gpt2.png)
 
-0/1 Adam reduces communication volume by up to 26x while achieving similar convergence efficiency to Adam, allowing for scaling to different types of GPU clusters and networks.  [0/1 Adam tutorial](https://www.deepspeed.ai/tutorials/zero-one-adam/).
-
 ## Data efficiency
 DeepSpeed Data Efficiency Library provides efficient data sampling via curriculum learning and efficient data routing via random layerwise token dropping. The composed solution enables up to 2x data and 2x time saving during GPT-3/BERT pretraining and GPT/ViT finetuning, or further improve model quality under the same data/time. See more in [the tutorial](/tutorials/data-efficiency).
 
@@ -146,9 +144,6 @@ Below we provide a brief feature list, see our detailed [feature overview](https
   * Memory- and compute-efficient sparse kernels
   * Support 10x long sequences than dense
   * Flexible support to different sparse structures
-* [0/1 Adam](https://www.deepspeed.ai/tutorials/zero-one-adam/)
-  * Custom communication collective
-  * Up to 26x communication volume saving
 * [Additional Memory and Bandwidth Optimizations](https://www.deepspeed.ai/features/#additional-memory-and-bandwidth-optimizations)
   * Smart Gradient Accumulation
   * Communication/Computation Overlap
@@ -357,15 +352,6 @@ for loss scaling can be specified in the `deepspeed_config` JSON file.
 Please see the [core API doc](https://deepspeed.readthedocs.io/) for more details.
 
 ## Training Optimizers
-
-### 0/1 Adam optimizer with up to 26x less communication
-
-DeepSpeed has a communication-efficient optimizer called 0/1 Adam.
-It offers the same convergence as Adam, incurs up to 26x less communication that enables
-up to 6.6x higher throughput for BERT-Large pretraining and up to 2.7x higher throughput
-for SQuAD fine-tuning on bandwidth-limited clusters. For more details on usage and performance,
-please refer to the [0/1 Adam tutorial](https://www.deepspeed.ai/tutorials/zero-one-adam).
-For technical details, please refer to the [0/1 Adam paper](https://arxiv.org/abs/2202.06009).
 
 ### Fused Adam optimizer and arbitrary torch.optim.Optimizer
 With DeepSpeed, the user can choose to use a high performance implementation of ADAM from

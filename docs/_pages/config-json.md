@@ -105,34 +105,6 @@ If not set, muon_lr will default to lr.
   }
 ```
 
-An example of <i>**optimizer**</i> with 0/1 Adam, a communication-efficient optimizer using adaptive variance freezing and 1-bit synchronization over optimizer states.
-```json
-"optimizer": {
-    "type": "ZeroOneAdam",
-    "params": {
-      "lr": 1e-3,
-      "weight_decay": 0.01,
-      "bias_correction": false,
-      "var_freeze_step": 1000,
-      "var_update_scaler": 16,
-      "local_step_scaler": 1000,
-      "local_step_clipper": 16,
-      "cuda_aware": false,
-      "comm_backend_name": "nccl"
-    }
-  }
-```
-0/1 Adam supports  the following params key/values in addition to standard Adam (learn more in our [tutorial](/tutorial/zero-one-adam/).)
-
-| "params" key        | Description                                                                        | Default |
-| ------------------- | ---------------------------------------------------------------------------------- | ------- |
-| var\_freeze\_step   | The latest step to update the variance                                             | 100000  |
-| var\_update\_scaler | The interval to update the variance                                                | 16  |
-| local\_step\_scaler | The interval to scale the local steps interval according to the learning rate policy   | 32678  |
-| local\_step\_clipper | The largest interval for local steps with learning rate policy                     | 16  |
-| cuda\_aware         | To indicate that the underlying MPI library supports CUDA-Aware communication      | false   |
-| comm\_backend\_name | To indicate which backend implementation to use                                    | "nccl"  |
-
 ### Scheduler Parameters
 
 

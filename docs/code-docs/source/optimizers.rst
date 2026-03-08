@@ -15,6 +15,3 @@ FusedLamb (GPU)
 ----------------------------
 .. autoclass:: deepspeed.ops.lamb.FusedLamb
 
-ZeroOneAdam (GPU)
-----------------------------
-.. autoclass:: deepspeed.runtime.fp16.onebit.zoadam.ZeroOneAdam

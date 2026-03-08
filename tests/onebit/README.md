@@ -1,6 +1,6 @@
 # One-Bit tests
 
-In this folder, you can test the functionality and performance of different backend for doing compressed allreduce, which is the main algorithm in communication-efficient optimizers like [Zero-One Adam](https://www.deepspeed.ai/tutorials/zero-one-adam/).
+In this folder, you can test the functionality and performance of different backend for doing compressed allreduce, which is the main algorithm in communication-efficient optimizers.
 
 ## How to run
 
