@@ -42,6 +42,7 @@ from typing import Tuple
 import deepspeed.comm as dist
 import importlib.metadata
 import math
+import re
 import torch
 import torch.distributed.nn
 
@@ -411,13 +412,32 @@ class UlyssesSPAttentionHF(torch.nn.Module):
             # if we don't have the model yet at this stage
             hf_model_config = AutoConfig.from_pretrained(model_name_or_path)
 
+        model_attn_implementation = getattr(hf_model_config, "_attn_implementation", None)
+        if model_attn_implementation is not None and model_attn_implementation != core_attn_implementation:
+            raise ValueError(
+                f"core_attn_implementation='{core_attn_implementation}' does not match "
+                f"model config attn_implementation='{model_attn_implementation}'. "
+                "Set both to the same value so sequence-parallel wrapper can intercept the active attention path.")
+
         # eager requires attention_mask which SP doesn't support; flex_attention is untested
-        unsupported_attn_implementation = ["eager", "flex_attention"]
+        unsupported_attn_implementation = ["eager", "flex_attention", "paged|eager", "paged|flex_attention"]
         if core_attn_implementation in unsupported_attn_implementation:
             raise ValueError(
                 f"{core_attn_implementation} attn_implementation isn't currently supported by Ulysses sequence"
                 f" parallelism. Use 'flash_attention_2', 'flash_attention_3', 'sdpa',"
                 f" or a hub-hosted kernel (e.g. 'kernels-community/flash-attn2').")
+
+        # Hub kernels (e.g. kernels-community/flash-attn2) are registered lazily in transformers.
+        # Ensure registration happens before validating against ALL_ATTENTION_FUNCTIONS.
+        is_hub_kernel_attn = (isinstance(core_attn_implementation, str) and re.search(
+            r"^[^/:]+/[^/:]+(?:@[^/:]+)?(?::[^/:]+)?$", core_attn_implementation) is not None)
+        if is_hub_kernel_attn:
+            try:
+                from transformers.modeling_flash_attention_utils import lazy_import_flash_attention
+            except ImportError as e:
+                raise ImportError("Hub kernel attention requires a transformers version exposing "
+                                  "`transformers.modeling_flash_attention_utils.lazy_import_flash_attention`.") from e
+            lazy_import_flash_attention(core_attn_implementation)
 
         if core_attn_implementation not in ALL_ATTENTION_FUNCTIONS:
             raise ValueError(
@@ -473,11 +493,9 @@ class UlyssesSPAttentionHF(torch.nn.Module):
             )
             return attn_output, attn_weights
 
-        # We don't do: ALL_ATTENTION_FUNCTIONS.register("ulysses", uattn_wrapper)
-        # The problem with this approach is that we are missing on all the special use cases in HF Transformers that do things like: if self.config._attn_implementation == "flash_attention_2": ...
-        # So instead we hack `ALL_ATTENTION_FUNCTIONS` to override all existing keys with our implementation, since it only gets used at the point of calling the attention and that's what we want, all other code branches relying on the original core `attn_implementation` will still be executed. This is what we called "Being John Malkovich"
-        for key in ALL_ATTENTION_FUNCTIONS.keys():
-            ALL_ATTENTION_FUNCTIONS[key] = uattn_wrapper
+        # Keep the original HF attn_implementation dispatch behavior intact by overriding only the
+        # requested core implementation (instead of mutating the full registry).
+        ALL_ATTENTION_FUNCTIONS[core_attn_implementation] = uattn_wrapper
 
         return mpu
 
