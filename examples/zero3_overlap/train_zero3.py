@@ -144,7 +144,7 @@ def main():
         ds_config_path = os.path.join(script_dir, ds_config_path)
     args.deepspeed_config = ds_config_path
 
-    deepspeed.init_distributed()
+    deepspeed.init_distributed(dist_backend="cpu:gloo,cuda:nccl")
     local_rank = args.local_rank
     torch.cuda.set_device(local_rank)
 
