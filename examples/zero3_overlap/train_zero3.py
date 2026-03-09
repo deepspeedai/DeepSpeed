@@ -6,6 +6,7 @@ Designed for single-node 8x AMD GPU setup.
 
 import argparse
 import math
+import os
 import time
 
 import torch
@@ -137,11 +138,17 @@ def parse_args():
 def main():
     args = parse_args()
 
+    ds_config_path = args.deepspeed_config
+    if ds_config_path and not os.path.isfile(ds_config_path):
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        ds_config_path = os.path.join(script_dir, ds_config_path)
+    args.deepspeed_config = ds_config_path
+
     deepspeed.init_distributed()
     local_rank = args.local_rank
     torch.cuda.set_device(local_rank)
 
-    with deepspeed.zero.Init(config_dict_or_path=args.deepspeed_config):
+    with deepspeed.zero.Init(config_dict_or_path=ds_config_path):
         model = GPT2Model(
             vocab_size=args.vocab_size,
             hidden_size=args.hidden_size,
