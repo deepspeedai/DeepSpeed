@@ -26,12 +26,7 @@ import deepspeed
 from deepspeed import comm as dist
 from deepspeed.accelerator import get_accelerator
 
-from deepspeed.runtime.zero.partition_parameters import (
-    _init_sdma_allgather,
-    _sdma_allgather_enabled,
-    _sdma_allgather_handle,
-    _dist_allgather_fn,
-)
+import deepspeed.runtime.zero.partition_parameters as pp
 
 
 def verify_allgather(partitions, world_size, partition_sz, rank, dtype):
@@ -62,10 +57,10 @@ def run_single_allgather(rank, world_size, dtype, partition_sz, ag_stream):
     partitions[rank].fill_(float(rank + 1))
 
     with get_accelerator().stream(ag_stream):
-        handle = _dist_allgather_fn(partitions[rank], flat_tensor)
+        handle = pp._dist_allgather_fn(partitions[rank], flat_tensor)
 
-    if _sdma_allgather_enabled() and not _sdma_allgather_handle._copy:
-        transit_buf_u32 = _sdma_allgather_handle.get_output_transit_buffer()
+    if pp._sdma_allgather_enabled() and not pp._sdma_allgather_handle._copy:
+        transit_buf_u32 = pp._sdma_allgather_handle.get_output_transit_buffer()
         transit_buf = transit_buf_u32.view(dtype)
         partitions = []
         for i in range(world_size):
@@ -108,7 +103,7 @@ def run_bandwidth_test(rank, world_size, dtype, partition_sz, ag_stream,
 
         ev_start.record(ag_stream)
         with get_accelerator().stream(ag_stream):
-            handle = _dist_allgather_fn(partitions[rank], flat_tensor)
+            handle = pp._dist_allgather_fn(partitions[rank], flat_tensor)
         with get_accelerator().stream(ag_stream):
             handle.wait()
         ev_end.record(ag_stream)
@@ -150,14 +145,14 @@ def main():
         print(f"  iterations    : {args.iterations}  (warmup {args.warmup})")
         print(f"{'=' * 65}")
 
-    _init_sdma_allgather(max_numel=args.max_numel)
+    pp._init_sdma_allgather(max_numel=args.max_numel)
 
     if rank == 0:
-        if _sdma_allgather_enabled():
-            mode = "zero-copy transit buffer" if not _sdma_allgather_handle._copy else "copy-to-user"
+        if pp._sdma_allgather_enabled():
+            mode = "zero-copy transit buffer" if not pp._sdma_allgather_handle._copy else "copy-to-user"
             print(f"  backend       : SDMA ({mode})")
         else:
-            print(f"  backend       : RCCL (SDMA not available)")
+            print(f"  backend       : RCCL (SDMA not available, handle is None)")
         print()
 
     ag_stream = get_accelerator().Stream()
@@ -234,7 +229,7 @@ def main():
 
     get_accelerator().synchronize()
     dist.barrier()
-    if _sdma_allgather_enabled():
+    if pp._sdma_allgather_enabled():
         import mori.shmem as shmem
         shmem.shmem_finalize()
 
