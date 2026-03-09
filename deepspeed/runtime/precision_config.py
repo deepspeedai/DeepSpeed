@@ -117,21 +117,16 @@ class DeepSpeedFP16Config(DeepSpeedConfigModel):
     @field_validator("loss_scale", mode="before")
     @classmethod
     def _validate_loss_scale(cls, v):
-        # Prevent True/False from being treated as 1/0
-        # (must run before Pydantic coerces bool -> float)
         if isinstance(v, bool):
             raise ValueError("fp16.loss_scale must be a number, not bool")
-
-        v = float(v)
-
-        # Reject inf/-inf/nan
+        try:
+            v = float(v)
+        except (TypeError, ValueError):
+            raise ValueError("fp16.loss_scale must be a number")
         if not math.isfinite(v):
             raise ValueError("fp16.loss_scale must be a finite number (not inf/-inf/nan)")
-
-        # Reject negative values; 0 still means dynamic loss scaling
         if v < 0:
             raise ValueError("fp16.loss_scale must be >= 0 (0 enables dynamic loss scaling)")
-
         return v
 
     initial_scale_power: int = 16
