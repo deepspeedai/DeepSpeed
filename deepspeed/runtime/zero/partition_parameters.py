@@ -188,11 +188,23 @@ def _sdma_allgather_enabled():
     return _sdma_allgather_handle is not None
 
 
+def _ensure_default_pg_registered():
+    """Register the WORLD process group as 'default' in PyTorch's C++ GroupRegistry
+    so that mori's shmem_torch_process_group_init can resolve it by name.
+
+    This mirrors what mori's TorchDistContext does after init_process_group().
+    """
+    world_group = torch.distributed.group.WORLD
+    assert world_group is not None, "torch.distributed must be initialized before SDMA allgather"
+    torch._C._distributed_c10d._register_process_group("default", world_group)
+
+
 def _init_sdma_allgather(max_numel: int = 64 * 1024 * 1024):
     """Initialize the module-level SDMA allgather handle (called once from Init.__init__)."""
     global _sdma_allgather_handle
     if _sdma_allgather_handle is not None:
         return
+    _ensure_default_pg_registered()
     import mori.shmem as shmem
     shmem.shmem_torch_process_group_init("default")
     _sdma_allgather_handle = _SdmaAllGatherHandle(
