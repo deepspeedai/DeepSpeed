@@ -50,6 +50,8 @@ ZeRO optimization should be enabled as:
     "zeropp_loco_param": {...},
     "log_trace_cache_warnings" : [true|false],
     "enable_sanity_checks": [true|false],
+    "sdma_allgather": [true|false],
+    "sdma_allgather_max_numel": 67108864,
     }
 }
 """
@@ -369,6 +371,19 @@ class DeepSpeedZeroConfig(DeepSpeedConfigModel):
     leaf_module: DeepSpeedZeroLeafModuleConfig = Field(default_factory=DeepSpeedZeroLeafModuleConfig)
     """
     Configuration for modules that should be treated as ZeRO3 leaf modules.
+    """
+
+    sdma_allgather: bool = False
+    """
+    Use mori SDMA allgather instead of RCCL allgather for ZeRO-3 parameter
+    fetching.  Effective only when ``overlap_comm`` is enabled (stage 3).
+    Requires the ``mori`` package (``mori.ccl.AllgatherSdma``).
+    """
+
+    sdma_allgather_max_numel: int = Field(pp_int(64 * 1024 * 1024), ge=0)
+    """
+    Maximum number of elements (uint32) per allgather call when using SDMA.
+    Controls the pre-allocated transit buffer size inside ``AllgatherSdma``.
     """
 
     # Validators
