@@ -42,5 +42,5 @@
     "sdma_allgather": true,
     "sdma_allgather_max_numel": 67108864
   },
-  "wall_clock_breakdown": true
+  "wall_clock_breakdown": false
 }
