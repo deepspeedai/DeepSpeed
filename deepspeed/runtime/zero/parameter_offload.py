@@ -37,6 +37,12 @@ def _apply_forward_and_backward_to_tensors_only(module, forward_function, backwa
         return outputs
 
 
+def _ensure_ds_grads_remaining(module):
+    if not hasattr(module, "ds_grads_remaining"):
+        module.ds_grads_remaining = 0
+    return module.ds_grads_remaining
+
+
 class ZeROOrderedDict(OrderedDict):
 
     def __init__(self, parent_module, *args, **kwargs):
@@ -356,26 +362,27 @@ class DeepSpeedZeRoOffload(object):
         #This is an alternate to doing _post_backward_module_hook
         #it uses tensor.register_hook instead of using torch.autograd.Function
         def _alternate_post_backward_module_hook(module, inputs):
-            module.ds_grads_remaining = 0
+            _ensure_ds_grads_remaining(module)
 
             #print(f"Before Forward {module.__class__.__name__}")
 
             def _run_after_backward_hook(*unused):
-                module.ds_grads_remaining = module.ds_grads_remaining - 1
+                remaining = _ensure_ds_grads_remaining(module) - 1
+                module.ds_grads_remaining = remaining
                 if module.ds_grads_remaining == 0:
                     #print(f"After backward {module.__class__.__name__}")
                     self.post_sub_module_backward_function(module)
 
             def _run_before_forward_function(input):
                 if input.requires_grad:
-                    module.ds_grads_remaining += 1
+                    module.ds_grads_remaining = _ensure_ds_grads_remaining(module) + 1
 
             return _apply_forward_and_backward_to_tensors_only(module, _run_before_forward_function,
                                                                _run_after_backward_hook, inputs)
 
         @torch.compiler.disable
         def _post_backward_module_hook(module, inputs):
-            module.ds_grads_remaining = 0
+            _ensure_ds_grads_remaining(module)
 
             return apply_to_tensors_only(module.post_bwd_fn.apply,
                                          inputs,
@@ -428,7 +435,7 @@ class DeepSpeedZeRoOffload(object):
 
             @instrument_w_nvtx
             def _run_after_backward_function(sub_module):
-                if sub_module.ds_grads_remaining == 0:
+                if _ensure_ds_grads_remaining(sub_module) == 0:
                     self.post_sub_module_backward_function(sub_module)
 
             class PostBackwardFunctionModule(torch.autograd.Function):
@@ -445,15 +452,16 @@ class DeepSpeedZeRoOffload(object):
                         #assert len(module.parameters(recurse=False)), "The input tensor to the module is a view, and autograd Function or register_hook is not triggered with view tensors."
                         #if module.ds_grads_remaining == 0:
                         #    print(f"Before Forward: {ctx.module.__class__.__name__}")
-                        module.ds_grads_remaining += 1
+                        module.ds_grads_remaining = _ensure_ds_grads_remaining(module) + 1
                         ctx.post_backward_function = _run_after_backward_function
                     output = output.detach()
                     return output
 
                 @staticmethod
                 def backward(ctx, *args):
-                    ctx.module.ds_grads_remaining = ctx.module.ds_grads_remaining - 1
-                    if ctx.module.ds_grads_remaining == 0:
+                    remaining = _ensure_ds_grads_remaining(ctx.module) - 1
+                    ctx.module.ds_grads_remaining = remaining
+                    if remaining == 0:
                         ctx.post_backward_function(ctx.module)
                     return args
 
