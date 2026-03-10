@@ -1533,9 +1533,6 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                     m = gathered_momentums_pad[base_i + rank]
                     update = muon_update(g, m, beta=self.muon_beta)
                     g.data.copy_(update, non_blocking=False)
-                    _, _, grad_offset = group_items[base_i + rank]
-                    buffer_to_reduce.narrow(0, grad_offset,
-                                            param.grad.numel()).data.copy_(g.view(-1), non_blocking=False)
                 grad_handle = dist.all_gather(grads_pad[base_i:base_i + world_sz], grads_pad[base_i + rank], async_op=True)
                 grad_handles.append(grad_handle)
                 momentum_handle = dist.all_gather(gathered_momentums_pad[base_i:base_i + world_sz],
