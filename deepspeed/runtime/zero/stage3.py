@@ -1524,6 +1524,8 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                 (world_sz - len(params) % world_sz) % world_sz)
             gathered_momentums_pad = gathered_params_momentums + [torch.empty_like(gathered_params_momentums[-1])] * (
                 (world_sz - len(gathered_params_momentums) % world_sz) % world_sz)
+            grad_handles = []
+            momentum_handles = []
             for base_i in range(len(params))[::world_sz]:
                 if base_i + rank < len(params):
                     param = params[base_i + rank]
@@ -1534,10 +1536,14 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                     _, _, grad_offset = group_items[base_i + rank]
                     buffer_to_reduce.narrow(0, grad_offset,
                                             param.grad.numel()).data.copy_(g.view(-1), non_blocking=False)
-                dist.all_gather(grads_pad[base_i:base_i + world_sz], grads_pad[base_i + rank])
-                dist.all_gather(gathered_momentums_pad[base_i:base_i + world_sz],
-                                gathered_momentums_pad[base_i + rank])
-
+                grad_handle = dist.all_gather(grads_pad[base_i:base_i + world_sz], grads_pad[base_i + rank], async_op=True)
+                grad_handles.append(grad_handle)
+                momentum_handle = dist.all_gather(gathered_momentums_pad[base_i:base_i + world_sz],
+                                gathered_momentums_pad[base_i + rank], async_op=True)
+                momentum_handles.append(momentum_handle)
+            
+            for handle in momentum_handles:
+                handle.wait()
             for idx, (param, dest_offset, _) in enumerate(group_items):
                 gathered_momentum = gathered_params_momentums[idx]
                 chunk_sz = math.ceil(param.grad.numel() / world_sz)
@@ -1564,6 +1570,11 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                     )
             if self._swappable_optimizer_subgroup(i) and not self.save_muon_momentum_buffer_in_memory:
                 self.optimizer_swapper.swap_out_optimizer_state(parameter=self.fp32_partitioned_groups_flat[i])
+            for handle in grad_handles:
+                handle.wait()
+            for param, _, params_size_offset in group_items:
+                buffer_to_reduce.narrow(0, params_size_offset,
+                                        param.grad.numel()).data.copy_(param.grad.view(-1), non_blocking=False)
 
     @instrument_w_nvtx
     def __avg_scatter_contiguous_grads(self, buffer_to_reduce: Tensor,
