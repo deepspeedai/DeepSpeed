@@ -142,7 +142,7 @@ class _SdmaAllGatherHandle:
     """
 
     def __init__(self, max_numel: int = 64 * 1024 * 1024,
-                 copy_output_to_user: bool = False):
+                 copy_output_to_user: bool = True):
         import mori.shmem as shmem
         from mori.ccl import AllgatherSdma
 
