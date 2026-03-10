@@ -102,18 +102,21 @@ class GPT2Model(nn.Module):
 # Synthetic dataset
 # ---------------------------------------------------------------------------
 class SyntheticTextDataset(Dataset):
-    """Generates random token sequences for demonstration purposes."""
+    """Generates random token sequences, deterministic across runs."""
 
-    def __init__(self, vocab_size, seq_len, num_samples):
+    def __init__(self, vocab_size, seq_len, num_samples, seed=42):
         self.vocab_size = vocab_size
         self.seq_len = seq_len
         self.num_samples = num_samples
+        self.seed = seed
 
     def __len__(self):
         return self.num_samples
 
     def __getitem__(self, idx):
-        tokens = torch.randint(0, self.vocab_size, (self.seq_len + 1,))
+        g = torch.Generator()
+        g.manual_seed(self.seed + idx)
+        tokens = torch.randint(0, self.vocab_size, (self.seq_len + 1,), generator=g)
         return tokens[:-1], tokens[1:]
 
 
@@ -147,6 +150,9 @@ def main():
     deepspeed.init_distributed(dist_backend="cpu:gloo,cuda:nccl")
     local_rank = args.local_rank
     torch.cuda.set_device(local_rank)
+
+    torch.manual_seed(42)
+    torch.cuda.manual_seed_all(42)
 
     with deepspeed.zero.Init(config_dict_or_path=ds_config_path):
         model = GPT2Model(
