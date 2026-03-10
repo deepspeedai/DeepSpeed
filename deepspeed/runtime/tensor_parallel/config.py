@@ -144,3 +144,59 @@ def get_tensor_parallel_config(ds_config):
     if 'tensor_parallel' in ds_config:
         return TPTrainingConfig(**ds_config['tensor_parallel'])
     return TPTrainingConfig()
+
+
+def _get_hf_tp_plan(model_or_config):
+    """Extract tp_plan from HuggingFace model or config."""
+    if hasattr(model_or_config, '_tp_plan'):
+        return model_or_config._tp_plan
+
+    if hasattr(model_or_config, 'config') and hasattr(model_or_config.config, 'base_model_tp_plan'):
+        return model_or_config.config.base_model_tp_plan
+
+    if hasattr(model_or_config, 'base_model_tp_plan'):
+        return model_or_config.base_model_tp_plan
+
+    return None
+
+
+def resolve_tp_config(model, ds_config):
+    """Resolve TP configuration with priority: custom > tp_plan > preset.
+
+    Args:
+        model: The model to be partitioned
+        ds_config: DeepSpeed configuration dictionary
+
+    Returns:
+        AutoTPConfig with resolved layer specs
+
+    Raises:
+        ValueError: If no TP configuration can be determined
+    """
+    from deepspeed.module_inject.tp_plan_converter import TPPlanConverter
+    from deepspeed.module_inject.autotp_config import AutoTPConfig, AutoTPPresets
+
+    tp_section = ds_config.get("tensor_parallel", {})
+
+    # Priority 1: User custom config (highest priority)
+    if tp_section.get("partition_config", {}).get("layer_specs"):
+        return AutoTPConfig.from_dict(tp_section["partition_config"])
+
+    # Priority 2: HF tp_plan (medium priority)
+    hf_tp_plan = _get_hf_tp_plan(model)
+    if hf_tp_plan:
+        layer_specs = TPPlanConverter.convert(hf_tp_plan)
+        return AutoTPConfig(tp_size=tp_section.get("autotp_size", 1), layer_specs=layer_specs)
+
+    # Priority 3: DeepSpeed preset (lowest priority)
+    preset = tp_section.get("preset_model")
+    if preset:
+        preset_config = AutoTPPresets.get_preset(preset)
+        if preset_config:
+            return preset_config
+
+    # No configuration found - raise error
+    raise ValueError("No TP configuration found. Please provide one of:\n"
+                     "  1. partition_config.layer_specs in tensor_parallel config\n"
+                     "  2. HuggingFace model with base_model_tp_plan\n"
+                     "  3. preset_model in tensor_parallel config")
