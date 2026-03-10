@@ -184,13 +184,21 @@ def main():
     )
 
     device = model_engine.device
+    global_batch = model_engine.train_batch_size()
+    tokens_per_step = global_batch * args.max_seq_len
+    warmup_steps = min(50, args.train_steps // 10)
 
     step = 0
+    step_times = []
     t_start = time.time()
+    t_steady = None
     while step < args.train_steps:
         for batch in train_loader:
             if step >= args.train_steps:
                 break
+
+            torch.cuda.synchronize()
+            t_step_start = time.time()
 
             input_ids = batch[0].to(device)
             labels = batch[1].to(device)
@@ -199,32 +207,56 @@ def main():
             model_engine.backward(loss)
             model_engine.step()
 
+            torch.cuda.synchronize()
+            step_time_ms = (time.time() - t_step_start) * 1000
+
+            if step == warmup_steps:
+                t_steady = time.time()
+            if step >= warmup_steps:
+                step_times.append(step_time_ms)
+
             if step % 10 == 0 and local_rank == 0:
-                elapsed = time.time() - t_start
-                global_batch = model_engine.train_batch_size()
-                samples_per_sec = (step + 1) * global_batch / elapsed
-                tokens_per_sec = samples_per_sec * args.max_seq_len
-                tflops = tokens_per_sec * flops_per_token / 1e12
-                tflops_per_gpu = tflops / num_gpus
+                if step_times:
+                    import numpy as np
+                    recent = np.array(step_times[-20:])
+                    avg_ms = recent.mean()
+                    cur_samples_per_sec = global_batch / (avg_ms / 1000)
+                    cur_tokens_per_sec = cur_samples_per_sec * args.max_seq_len
+                    cur_tflops_per_gpu = cur_tokens_per_sec * flops_per_token / 1e12 / num_gpus
+                else:
+                    avg_ms = step_time_ms
+                    cur_tflops_per_gpu = 0.0
+                    cur_samples_per_sec = 0.0
                 print(
                     f"step {step:5d} | loss {loss.item():.4f} | "
                     f"lr {lr_scheduler.get_last_lr()[0]:.6f} | "
-                    f"{samples_per_sec:.1f} samples/s | "
-                    f"{tflops:.1f} TFLOPS | "
-                    f"{tflops_per_gpu:.1f} TFLOPS/GPU"
+                    f"{cur_samples_per_sec:.1f} samples/s | "
+                    f"{cur_tflops_per_gpu:.2f} TFLOPS/GPU | "
+                    f"step {avg_ms:.1f} ms"
                 )
             step += 1
 
     if local_rank == 0:
+        import numpy as np
         total_time = time.time() - t_start
-        total_samples = args.train_steps * model_engine.train_batch_size()
-        avg_samples_per_sec = total_samples / total_time
-        avg_tokens_per_sec = avg_samples_per_sec * args.max_seq_len
-        avg_tflops = avg_tokens_per_sec * flops_per_token / 1e12
-        avg_tflops_per_gpu = avg_tflops / num_gpus
-        print(f"\nTraining complete: {args.train_steps} steps in {total_time:.1f}s")
-        print(f"  Avg throughput : {avg_samples_per_sec:.1f} samples/s")
-        print(f"  Avg TFLOPS     : {avg_tflops:.1f} (total) | {avg_tflops_per_gpu:.1f} (per GPU)")
+        st = np.array(step_times)
+        steady_steps = len(st)
+        steady_time = time.time() - t_steady if t_steady else total_time
+
+        steady_samples_per_sec = steady_steps * global_batch / steady_time
+        steady_tokens_per_sec = steady_samples_per_sec * args.max_seq_len
+        steady_tflops = steady_tokens_per_sec * flops_per_token / 1e12
+        steady_tflops_per_gpu = steady_tflops / num_gpus
+
+        print(f"\n{'=' * 70}")
+        print(f"Training complete: {args.train_steps} steps in {total_time:.1f}s")
+        print(f"  (warmup={warmup_steps} steps skipped, measured {steady_steps} steps)")
+        print(f"{'=' * 70}")
+        print(f"  Throughput       : {steady_samples_per_sec:.1f} samples/s")
+        print(f"  TFLOPS           : {steady_tflops:.1f} (total) | {steady_tflops_per_gpu:.2f} (per GPU)")
+        print(f"  Step time (ms)   : avg {st.mean():.1f} | p50 {np.median(st):.1f} | "
+              f"p99 {np.percentile(st, 99):.1f} | min {st.min():.1f} | max {st.max():.1f}")
+        print(f"{'=' * 70}")
 
 
 if __name__ == "__main__":
