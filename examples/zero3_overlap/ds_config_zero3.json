@@ -18,7 +18,7 @@
       "warmup_min_lr": 0,
       "warmup_max_lr": 3e-4,
       "warmup_num_steps": 100,
-      "total_num_steps": 1000
+      "total_num_steps": 2000
     }
   },
   "gradient_clipping": 1.0,

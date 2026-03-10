@@ -132,7 +132,7 @@ def parse_args():
     parser.add_argument("--max_seq_len", type=int, default=1024)
     parser.add_argument("--dropout", type=float, default=0.1)
     parser.add_argument("--num_samples", type=int, default=10000)
-    parser.add_argument("--train_steps", type=int, default=200)
+    parser.add_argument("--train_steps", type=int, default=2000)
     parser.add_argument("--local_rank", type=int, default=-1)
     parser = deepspeed.add_config_arguments(parser)
     return parser.parse_args()
@@ -165,8 +165,15 @@ def main():
         )
 
     total_params = sum(p.numel() for p in model.parameters())
+    num_gpus = torch.distributed.get_world_size()
     if local_rank == 0:
         print(f"Model parameters: {total_params / 1e6:.1f}M")
+        print(f"GPUs: {num_gpus}")
+
+    # FLOPs per token (forward + backward): 6*params + 12*L*H*S
+    # Reference: "Efficient Large-Scale Language Model Training on GPU Clusters
+    #             Using Megatron-LM" (Narayanan et al., 2021)
+    flops_per_token = 6 * total_params + 12 * args.num_layers * args.hidden_size * args.max_seq_len
 
     dataset = SyntheticTextDataset(args.vocab_size, args.max_seq_len, args.num_samples)
 
@@ -194,17 +201,30 @@ def main():
 
             if step % 10 == 0 and local_rank == 0:
                 elapsed = time.time() - t_start
-                samples_per_sec = (step + 1) * model_engine.train_batch_size() / elapsed
+                global_batch = model_engine.train_batch_size()
+                samples_per_sec = (step + 1) * global_batch / elapsed
+                tokens_per_sec = samples_per_sec * args.max_seq_len
+                tflops = tokens_per_sec * flops_per_token / 1e12
+                tflops_per_gpu = tflops / num_gpus
                 print(
                     f"step {step:5d} | loss {loss.item():.4f} | "
                     f"lr {lr_scheduler.get_last_lr()[0]:.6f} | "
-                    f"throughput {samples_per_sec:.1f} samples/s"
+                    f"{samples_per_sec:.1f} samples/s | "
+                    f"{tflops:.1f} TFLOPS | "
+                    f"{tflops_per_gpu:.1f} TFLOPS/GPU"
                 )
             step += 1
 
     if local_rank == 0:
         total_time = time.time() - t_start
+        total_samples = args.train_steps * model_engine.train_batch_size()
+        avg_samples_per_sec = total_samples / total_time
+        avg_tokens_per_sec = avg_samples_per_sec * args.max_seq_len
+        avg_tflops = avg_tokens_per_sec * flops_per_token / 1e12
+        avg_tflops_per_gpu = avg_tflops / num_gpus
         print(f"\nTraining complete: {args.train_steps} steps in {total_time:.1f}s")
+        print(f"  Avg throughput : {avg_samples_per_sec:.1f} samples/s")
+        print(f"  Avg TFLOPS     : {avg_tflops:.1f} (total) | {avg_tflops_per_gpu:.1f} (per GPU)")
 
 
 if __name__ == "__main__":
