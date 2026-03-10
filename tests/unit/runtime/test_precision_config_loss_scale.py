@@ -18,6 +18,7 @@ def test_fp16_loss_scale_accepts_valid_values(loss_scale):
     assert math.isfinite(cfg.loss_scale)
     assert cfg.loss_scale >= 0
 
+
 @pytest.mark.parametrize("loss_scale", [[], {}])
 def test_fp16_loss_scale_invalid_type_has_clear_error(loss_scale):
     with pytest.raises(ValidationError) as excinfo:

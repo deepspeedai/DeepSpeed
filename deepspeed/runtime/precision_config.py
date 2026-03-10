@@ -109,11 +109,12 @@ class DeepSpeedFP16Config(DeepSpeedConfigModel):
     """
     Automatically cast inputs to fp16
     """
-    
+
     loss_scale: float = 0
     """
     Loss scaling value. Default value of 0 means dynamic loss scaling instead of static loss scale.
     """
+
     @field_validator("loss_scale", mode="before")
     @classmethod
     def _validate_loss_scale(cls, v):
