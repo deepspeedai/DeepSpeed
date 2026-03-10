@@ -633,15 +633,15 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             assert self.loss_scaler.cur_scale == 1.0
             assert not self.dynamic_loss_scale
 
-        see_memory_usage("Before initializing optimizer states", force=True)
+        see_memory_usage("Before initializing optimizer states", force=False)
         self.initialize_optimizer_states()
-        see_memory_usage("After initializing optimizer states", force=True)
+        see_memory_usage("After initializing optimizer states", force=False)
 
         if dist.get_rank() == 0:
             logger.info("optimizer state initialized")
 
         if dist.get_rank(group=self.dp_process_group) == 0:
-            see_memory_usage("After initializing ZeRO optimizer", force=True)
+            see_memory_usage("After initializing ZeRO optimizer", force=False)
 
         self._link_all_hp_params()
         self._hp_optimizer_states_linked = False
