@@ -102,21 +102,31 @@ class GPT2Model(nn.Module):
 # Synthetic dataset
 # ---------------------------------------------------------------------------
 class SyntheticTextDataset(Dataset):
-    """Generates random token sequences, deterministic across runs."""
+    """Generates synthetic token sequences for perf/correctness testing."""
 
-    def __init__(self, vocab_size, seq_len, num_samples, seed=42):
+    def __init__(self, vocab_size, seq_len, num_samples, seed=42, mode="random"):
         self.vocab_size = vocab_size
         self.seq_len = seq_len
         self.num_samples = num_samples
         self.seed = seed
+        self.mode = mode
 
     def __len__(self):
         return self.num_samples
 
     def __getitem__(self, idx):
-        g = torch.Generator()
-        g.manual_seed(self.seed + idx)
-        tokens = torch.randint(0, self.vocab_size, (self.seq_len + 1,), generator=g)
+        if self.mode == "random":
+            g = torch.Generator()
+            g.manual_seed(self.seed + idx)
+            tokens = torch.randint(0, self.vocab_size, (self.seq_len + 1,), generator=g)
+        elif self.mode == "arange":
+            start = (self.seed + idx) % self.vocab_size
+            tokens = (torch.arange(self.seq_len + 1, dtype=torch.long) + start) % self.vocab_size
+        elif self.mode == "repeat":
+            v = (self.seed + idx) % self.vocab_size
+            tokens = torch.full((self.seq_len + 1,), v, dtype=torch.long)
+        else:
+            raise ValueError(f"Unsupported data mode: {self.mode}")
         return tokens[:-1], tokens[1:]
 
 
@@ -133,6 +143,11 @@ def parse_args():
     parser.add_argument("--dropout", type=float, default=0.1)
     parser.add_argument("--num_samples", type=int, default=10000)
     parser.add_argument("--train_steps", type=int, default=2000)
+    parser.add_argument("--data_mode",
+                        type=str,
+                        default="random",
+                        choices=["random", "arange", "repeat"],
+                        help="Synthetic data mode. random is not learnable for next-token prediction.")
     parser.add_argument("--local_rank", type=int, default=-1)
     parser = deepspeed.add_config_arguments(parser)
     return parser.parse_args()
@@ -175,7 +190,12 @@ def main():
     #             Using Megatron-LM" (Narayanan et al., 2021)
     flops_per_token = 6 * total_params + 12 * args.num_layers * args.hidden_size * args.max_seq_len
 
-    dataset = SyntheticTextDataset(args.vocab_size, args.max_seq_len, args.num_samples)
+    dataset = SyntheticTextDataset(args.vocab_size, args.max_seq_len, args.num_samples, mode=args.data_mode)
+    if local_rank == 0:
+        if args.data_mode == "random":
+            print(f"Data mode: random (expected CE floor ~ ln(vocab) = {math.log(args.vocab_size):.4f})")
+        else:
+            print(f"Data mode: {args.data_mode} (learnable pattern, loss should decrease)")
 
     model_engine, optimizer, train_loader, lr_scheduler = deepspeed.initialize(
         args=args,
