@@ -12,11 +12,71 @@ from dataclasses import dataclass
 from .constants import (FP32_WEIGHT_KEY, PARAM, VOCAB_TENSOR, CAT_DIM, PARAM_N_SUB_PARAMS, SUB_PARAM_SHAPE)
 
 
+AUTOTP_UC_META_KEY = 'ds_autotp_universal_checkpoint_meta'
+
+
 @dataclass
 class SubparamShape:
     patterns: List[str]
     shape: Tuple[Union[Tuple[int], int]]
     partition_dim: int
+
+
+def _get_param_uc_restore_meta(param):
+    """Return the restore-facing view of AutoTP UC metadata for a parameter.
+
+    AutoTP parameter metadata intentionally serves two separate consumers:
+    - restore-time fields at the top level, consumed here by UC loading
+    - conversion-time fields under `conversion`, consumed by
+      `collect_autotp_universal_checkpoint_info()` in `layers.py`
+    """
+    return getattr(param, AUTOTP_UC_META_KEY, None)
+
+
+def _resolve_autotp_partition(self, ckpt_dict, full_hp_param, tp_rank, tp_world_size):
+    meta = _get_param_uc_restore_meta(self)
+    if not meta:
+        return None
+
+    partition_dim = meta.get('partition_dim')
+    logical_shape = meta.get('logical_shape')
+    output_shape = meta.get('output_shape')
+    sub_param_shape = meta.get('sub_param_shape')
+    sub_param_sizes = meta.get('sub_param_sizes')
+    target_partition_shape = meta.get('target_partition_shape')
+    is_bias = meta.get('is_bias', False)
+    replicated = meta.get('replicated', False)
+
+    if replicated or partition_dim is None:
+        slice_tensor = full_hp_param
+    else:
+        target_shape = output_shape if is_bias else logical_shape
+        if target_shape is None:
+            return None
+
+        full_view = full_hp_param.view(target_shape)
+        if sub_param_sizes is None and sub_param_shape is not None:
+            sub_dim_sizes = sub_param_shape[partition_dim]
+            if not isinstance(sub_dim_sizes, tuple):
+                sub_dim_sizes = (sub_dim_sizes, )
+        else:
+            sub_dim_sizes = sub_param_sizes
+
+        if sub_dim_sizes is not None:
+            offset = 0
+            partitioned_chunks = []
+            for sub_dim_size in sub_dim_sizes:
+                sub_tensor = full_view.narrow(partition_dim, offset, sub_dim_size)
+                partitioned_chunks.append(sub_tensor.chunk(tp_world_size, dim=partition_dim)[tp_rank])
+                offset += sub_dim_size
+            slice_tensor = torch.cat(partitioned_chunks, dim=partition_dim)
+        else:
+            slice_tensor = full_view.chunk(tp_world_size, dim=partition_dim)[tp_rank]
+
+    desired_shape = tuple(target_partition_shape) if target_partition_shape is not None else tuple(self.shape)
+    if tuple(slice_tensor.shape) != desired_shape:
+        slice_tensor = slice_tensor.reshape(desired_shape)
+    return slice_tensor.flatten()
 
 
 def load_hp_checkpoint_state(self, folder, tp_rank, tp_world_size):
@@ -73,52 +133,52 @@ def load_hp_checkpoint_state(self, folder, tp_rank, tp_world_size):
                 padding_size = padded_target_vocab_size - full_hp_param.shape[0]
                 full_hp_param = torch.nn.functional.pad(full_hp_param, (0, 0, 0, padding_size), "constant", 0)
 
-        full_param_numel = full_hp_param.numel()
-        tp_slice_numel = self.numel()
-        #        if key == FP32_WEIGHT_KEY and 'word_embeddings.weight' in folder:
-        #            print_rank_0(f'{full_hp_param[:10]=}', force=True)
-
-
-        assert full_param_numel == tp_world_size * tp_slice_numel, \
-            f'Loading {ckpt_file} full param numel {full_param_numel} != tensor slice numel {tp_slice_numel} * tp_world_size {tp_world_size}'
-
-        #        print(f"{full_hp_param.shape=} {full_param_numel=} {folder=}")
-        #        print(f"{dst_tensor.shape=} {dst_tensor.numel()=}{folder=}")
-
-        sub_param_shape = ckpt_dict.get(SUB_PARAM_SHAPE, None)
-        # since when we do many to 1 on tp we cat sometimes on dim=0 and other times on dim=1 we have to do exactly the same in reverse
-        # special case is when a single parameter is effectively a container for multiple sub parameters
-        # (more details at PARAM_N_SUB_PARAMS definition)
-        chunk_dim = ckpt_dict.get(CAT_DIM, 0)
-        n_sub_params = ckpt_dict.get(PARAM_N_SUB_PARAMS, 1)
-        if sub_param_shape:
-            partition_dim = sub_param_shape.partition_dim
-            sub_dim_sizes = sub_param_shape.shape[partition_dim]
-            if not isinstance(sub_dim_sizes, tuple):
-                sub_dim_sizes = (sub_dim_sizes, )
-
-            partition_shape = [sum(d) if isinstance(d, tuple) else d for d in sub_param_shape.shape]
-            full_hp_param = full_hp_param.view(partition_shape)
-
-            offset = 0
-            merged_chunks = []
-            for sub_dim_size in sub_dim_sizes:
-                sub_params_tp_slice = full_hp_param.narrow(partition_dim,
-                                                           offset, sub_dim_size).chunk(tp_world_size,
-                                                                                       dim=partition_dim)[tp_rank]
-                merged_chunks.append(sub_params_tp_slice)
-                offset += sub_dim_size
-            tp_hp_slice = torch.cat(merged_chunks, dim=partition_dim)
-
-        elif n_sub_params > 1:
-            sub_params = full_hp_param.chunk(n_sub_params, dim=chunk_dim)
-            sub_params_tp_slice = [p.chunk(tp_world_size, dim=chunk_dim)[tp_rank] for p in sub_params]
-            tp_hp_slice = torch.cat(sub_params_tp_slice, dim=chunk_dim)
+        autotp_tp_hp_slice = _resolve_autotp_partition(self, ckpt_dict, full_hp_param, tp_rank, tp_world_size)
+        if autotp_tp_hp_slice is not None:
+            tp_hp_slice = autotp_tp_hp_slice
         else:
-            # this performs the opposite of cat when merging TP slices
-            tp_hp_slice = full_hp_param.chunk(tp_world_size, chunk_dim)[tp_rank]
+            full_param_numel = full_hp_param.numel()
+            tp_slice_numel = self.numel()
+            assert full_param_numel == tp_world_size * tp_slice_numel, \
+                f'Loading {ckpt_file} full param numel {full_param_numel} != tensor slice numel {tp_slice_numel} * tp_world_size {tp_world_size}'
 
-        tp_hp_slice = tp_hp_slice.flatten()
+            #        print(f"{full_hp_param.shape=} {full_param_numel=} {folder=}")
+            #        print(f"{dst_tensor.shape=} {dst_tensor.numel()=}{folder=}")
+
+            sub_param_shape = ckpt_dict.get(SUB_PARAM_SHAPE, None)
+            # since when we do many to 1 on tp we cat sometimes on dim=0 and other times on dim=1 we have to do exactly the same in reverse
+            # special case is when a single parameter is effectively a container for multiple sub parameters
+            # (more details at PARAM_N_SUB_PARAMS definition)
+            chunk_dim = ckpt_dict.get(CAT_DIM, 0)
+            n_sub_params = ckpt_dict.get(PARAM_N_SUB_PARAMS, 1)
+            if sub_param_shape:
+                partition_dim = sub_param_shape.partition_dim
+                sub_dim_sizes = sub_param_shape.shape[partition_dim]
+                if not isinstance(sub_dim_sizes, tuple):
+                    sub_dim_sizes = (sub_dim_sizes, )
+
+                partition_shape = [sum(d) if isinstance(d, tuple) else d for d in sub_param_shape.shape]
+                full_hp_param = full_hp_param.view(partition_shape)
+
+                offset = 0
+                merged_chunks = []
+                for sub_dim_size in sub_dim_sizes:
+                    sub_params_tp_slice = full_hp_param.narrow(partition_dim,
+                                                               offset, sub_dim_size).chunk(tp_world_size,
+                                                                                           dim=partition_dim)[tp_rank]
+                    merged_chunks.append(sub_params_tp_slice)
+                    offset += sub_dim_size
+                tp_hp_slice = torch.cat(merged_chunks, dim=partition_dim)
+
+            elif n_sub_params > 1:
+                sub_params = full_hp_param.chunk(n_sub_params, dim=chunk_dim)
+                sub_params_tp_slice = [p.chunk(tp_world_size, dim=chunk_dim)[tp_rank] for p in sub_params]
+                tp_hp_slice = torch.cat(sub_params_tp_slice, dim=chunk_dim)
+            else:
+                # this performs the opposite of cat when merging TP slices
+                tp_hp_slice = full_hp_param.chunk(tp_world_size, chunk_dim)[tp_rank]
+
+            tp_hp_slice = tp_hp_slice.flatten()
 
         lp_frag_address = hp_mapping.lp_fragment_address
         tp_hp_fragment = tp_hp_slice.narrow(0, lp_frag_address.start, lp_frag_address.numel)
@@ -144,3 +204,4 @@ def load_hp_checkpoint_state(self, folder, tp_rank, tp_world_size):
 def enable_universal_checkpoint(param_list):
     for param in param_list:
         param.load_hp_checkpoint_state = types.MethodType(load_hp_checkpoint_state, param)
+
