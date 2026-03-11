@@ -106,13 +106,7 @@ class NoGatherCoalescedHandle:
 
 
 class _SdmaWork:
-    """Duck-type compatible with ``torch.distributed.Work``.
-
-    Wraps a GPU event recorded after the SDMA allgather submission.
-    ``.wait()`` only synchronizes; no data copy is needed because the
-    ``AllGatherCoalescedHandle`` already holds partitions that are
-    views into the transit buffer.
-    """
+    """Duck-type compatible with ``torch.distributed.Work``."""
 
     def __init__(self, event):
         self._event = event
@@ -124,99 +118,59 @@ class _SdmaWork:
         return self._event.query()
 
 
-class _SdmaAllGatherHandle:
-    """Persistent handle that caches the ``AllgatherSdma`` C++ object.
-
-    Zero-copy design: when ``copy_output_to_user=False`` (default), the
-    allgather result lives in an internal transit buffer.  Instead of
-    copying it back to a separate ``flat_tensor``, the caller should
-    build its ``partitions`` list directly from the transit buffer via
-    :meth:`get_output_transit_buffer`.
-
-    Args:
-        max_numel: Maximum number of elements (uint32) per allgather call.
-            Controls the pre-allocated transit buffer size.
-        copy_output_to_user: If ``True`` the C++ kernel copies the result
-            into the caller-supplied *output_tensor*.  If ``False`` (default)
-            the result stays in the internal transit buffer (zero-copy).
-    """
-
-    def __init__(self, max_numel: int = 64 * 1024 * 1024,
-                 copy_output_to_user: bool = False):
-        import mori.shmem as shmem
-        from mori.ccl import AllgatherSdma
-
-        self._my_pe = shmem.shmem_mype()
-        self._npes = shmem.shmem_npes()
-        self._copy = copy_output_to_user
-
-        elem_bytes = 4  # uint32
-        self._ag = AllgatherSdma(
-            self._my_pe, self._npes,
-            input_buffer_size=max_numel * elem_bytes,
-            output_buffer_size=max_numel * self._npes * elem_bytes,
-            copy_output_to_user=copy_output_to_user,
-        )
-
-    def get_output_transit_buffer(self) -> Tensor:
-        """Return the internal transit buffer as a zero-copy 1-D tensor view."""
-        return self._ag.get_output_transit_buffer(device=self._my_pe)
-
-    def allgather(self, input_tensor: Tensor, output_tensor: Tensor,
-                  group=None, async_op: bool = True):
-        """Submit SDMA allgather on the **current** stream.
-
-        Returns an :class:`_SdmaWork` whose ``.wait()`` blocks until the
-        transfer is complete.  If *async_op* is ``False``, waits inline.
-        """
-        stream = get_accelerator().current_stream()
-        self._ag(input_tensor, output_tensor, input_tensor.numel(), stream)
-
-        event = get_accelerator().Event()
-        event.record(stream)
-
-        work = _SdmaWork(event)
-        if not async_op:
-            work.wait()
-        return work
-
-
-_sdma_allgather_handle = None
+_sdma_ag = None
 
 
 def _sdma_allgather_enabled():
-    return _sdma_allgather_handle is not None
+    return _sdma_ag is not None
 
 
 def _ensure_default_pg_registered():
-    """Register the WORLD process group as 'default' in PyTorch's C++ GroupRegistry
-    so that mori's shmem_torch_process_group_init can resolve it by name.
-
-    This mirrors what mori's TorchDistContext does after init_process_group().
-    """
+    """Register the WORLD process group as 'default' in PyTorch's C++ GroupRegistry."""
     world_group = torch.distributed.group.WORLD
     assert world_group is not None, "torch.distributed must be initialized before SDMA allgather"
     torch._C._distributed_c10d._register_process_group("default", world_group)
 
 
 def _init_sdma_allgather(max_numel: int = 64 * 1024 * 1024):
-    """Initialize the module-level SDMA allgather handle (called once from Init.__init__)."""
-    global _sdma_allgather_handle
-    if _sdma_allgather_handle is not None:
+    """Initialize SDMA allgather with direct-write (single instance).
+
+    Uses ``register_output_buffer`` to IPC-map each unique output_tensor
+    address on first use.  SDMA then writes directly into the caller's
+    VRAM, bypassing the internal transit buffer entirely.
+    """
+    global _sdma_ag
+    if _sdma_ag is not None:
         return
     _ensure_default_pg_registered()
     import mori.shmem as shmem
+    from mori.ccl import AllgatherSdma
+
     shmem.shmem_torch_process_group_init("default")
-    _sdma_allgather_handle = _SdmaAllGatherHandle(
-        max_numel=max_numel,
+    my_pe = shmem.shmem_mype()
+    npes = shmem.shmem_npes()
+    elem_bytes = 4
+    _sdma_ag = AllgatherSdma(
+        my_pe, npes,
+        input_buffer_size=max_numel * elem_bytes,
+        output_buffer_size=max_numel * npes * elem_bytes,
+        copy_output_to_user=False,
     )
     if dist.get_rank() == 0:
-        logger.info(f"SDMA allgather enabled (max_numel={max_numel})")
+        logger.info(f"SDMA allgather enabled (direct-write, max_numel={max_numel})")
 
 
 def _dist_allgather_fn(input_tensor: Tensor, output_tensor: Tensor, group=None):
     if _sdma_allgather_enabled():
-        return _sdma_allgather_handle.allgather(input_tensor, output_tensor, group=group, async_op=True)
+        if not _sdma_ag.is_output_registered(output_tensor):
+            _sdma_ag.register_output_buffer(output_tensor)
+
+        stream = get_accelerator().current_stream()
+        _sdma_ag(input_tensor, output_tensor, input_tensor.numel(), stream)
+
+        event = get_accelerator().Event()
+        event.record(stream)
+        return _SdmaWork(event)
     return instrument_w_nvtx(dist.allgather_fn)(output_tensor, input_tensor, group=group, async_op=True)
 
 
@@ -1379,12 +1333,6 @@ class Init(InsertPostInitMethodToModuleSubClasses):
                     [p.ds_tensor.to(get_accelerator().current_device_name()).to(allgather_dtype) for p in params],
                     out=partitions[rank_in_group])
             handle = _dist_allgather_fn(partitions[rank_in_group], flat_tensor, ds_process_group)
-
-            if _sdma_allgather_enabled() and not _sdma_allgather_handle._copy:
-                transit_buf = _sdma_allgather_handle.get_output_transit_buffer()
-                partitions = []
-                for i in range(world_size):
-                    partitions.append(transit_buf.narrow(0, partition_sz * i, partition_sz))
 
             return AllGatherCoalescedHandle(
                 allgather_handle=handle,
