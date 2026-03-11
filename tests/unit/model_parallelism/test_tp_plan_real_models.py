@@ -5,8 +5,10 @@
 
 import pytest
 import torch
+import torch.distributed as dist
 import deepspeed
 from deepspeed.accelerator import get_accelerator
+from deepspeed.utils import groups
 from unit.common import DistributedTest
 
 
@@ -45,6 +47,7 @@ class TestTPPlanRealHFModels(DistributedTest):
         ds_config = {
             "train_micro_batch_size_per_gpu": 1,
             "tensor_parallel": {"autotp_size": 2},
+            "optimizer": {"type": "AdamW", "params": {"lr": 1e-4}},
             "zero_optimization": {"stage": 2},
             "bf16": {"enabled": True},
             "steps_per_print": 1,
@@ -60,6 +63,11 @@ class TestTPPlanRealHFModels(DistributedTest):
         for _ in range(3):
             input_ids = torch.randint(0, 1000, (1, 16)).to(
                 get_accelerator().current_device_name()
+            )
+            dist.broadcast(
+                input_ids,
+                src=groups.get_tensor_model_parallel_src_rank(),
+                group=groups.get_tensor_model_parallel_group(),
             )
             outputs = engine(input_ids, labels=input_ids)
             engine.backward(outputs.loss)
