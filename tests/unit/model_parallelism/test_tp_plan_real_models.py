@@ -152,6 +152,7 @@ class TestTPPlanRealHFModels(DistributedTest):
         ds_config = {
             "train_micro_batch_size_per_gpu": 1,
             "tensor_parallel": {"autotp_size": 2},
+            "optimizer": {"type": "AdamW", "params": {"lr": 1e-4}},
             "zero_optimization": {"stage": 0},
             "bf16": {"enabled": True},
         }
@@ -163,7 +164,14 @@ class TestTPPlanRealHFModels(DistributedTest):
         assert engine.autotp_size() == 2
 
         # Training step
-        input_tensor = torch.randn(2, 4, 64).to(get_accelerator().current_device_name())
+        input_tensor = torch.randn(2, 4, 64, dtype=torch.bfloat16).to(
+            get_accelerator().current_device_name()
+        )
+        dist.broadcast(
+            input_tensor,
+            src=groups.get_tensor_model_parallel_src_rank(),
+            group=groups.get_tensor_model_parallel_group(),
+        )
         output = engine(input_tensor)
         loss = output.mean()
         engine.backward(loss)

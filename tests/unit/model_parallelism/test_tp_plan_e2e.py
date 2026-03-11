@@ -5,13 +5,15 @@
 
 import pytest
 import torch
+import torch.distributed as dist
 import deepspeed
 from deepspeed.accelerator import get_accelerator
+from deepspeed.utils import groups
 from unit.common import DistributedTest, preferred_dtype
 
 
 def skip_on_device():
-    if get_accelerator().device_name() == 'xpu':
+    if get_accelerator().device_name() == "xpu":
         pytest.skip("XPU requires a higher version for test")
 
 
@@ -22,17 +24,24 @@ class TestTPPlanEndToEnd(DistributedTest):
         skip_on_device()
 
         class SimpleHFModel(torch.nn.Module):
-
             def __init__(self, hidden_size=64):
                 super().__init__()
                 self.config = type(
-                    'Config', (), {'base_model_tp_plan': {
-                        'layers.*.q_proj': 'colwise',
-                        'layers.*.o_proj': 'rowwise'
-                    }})()
+                    "Config",
+                    (),
+                    {
+                        "base_model_tp_plan": {
+                            "layers.*.q_proj": "colwise",
+                            "layers.*.o_proj": "rowwise",
+                        }
+                    },
+                )()
                 self.layers = torch.nn.ModuleList(
-                    [torch.nn.Linear(hidden_size, hidden_size * 2),
-                     torch.nn.Linear(hidden_size * 2, hidden_size)])
+                    [
+                        torch.nn.Linear(hidden_size, hidden_size * 2),
+                        torch.nn.Linear(hidden_size * 2, hidden_size),
+                    ]
+                )
 
             def forward(self, x):
                 return self.layers[1](self.layers[0](x))
@@ -41,12 +50,9 @@ class TestTPPlanEndToEnd(DistributedTest):
 
         ds_config = {
             "train_micro_batch_size_per_gpu": 1,
-            "tensor_parallel": {
-                "autotp_size": 2
-            },
-            "zero_optimization": {
-                "stage": 0
-            },
+            "tensor_parallel": {"autotp_size": 2},
+            "optimizer": {"type": "AdamW", "params": {"lr": 1e-4}},
+            "zero_optimization": {"stage": 0},
             "steps_per_print": 1,
         }
 
@@ -55,11 +61,20 @@ class TestTPPlanEndToEnd(DistributedTest):
         elif preferred_dtype() == torch.bfloat16:
             ds_config["bf16"] = {"enabled": True}
 
-        engine, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=ds_config)
+        engine, _, _, _ = deepspeed.initialize(
+            model=model, model_parameters=model.parameters(), config=ds_config
+        )
 
         assert engine.autotp_size() == 2
 
-        input_tensor = torch.randn(2, 4, 64).to(get_accelerator().current_device_name())
+        input_tensor = torch.randn(2, 4, 64, dtype=preferred_dtype()).to(
+            get_accelerator().current_device_name()
+        )
+        dist.broadcast(
+            input_tensor,
+            src=groups.get_tensor_model_parallel_src_rank(),
+            group=groups.get_tensor_model_parallel_group(),
+        )
         output = engine(input_tensor)
         loss = output.mean()
         engine.backward(loss)
@@ -69,17 +84,24 @@ class TestTPPlanEndToEnd(DistributedTest):
         skip_on_device()
 
         class SimpleHFModel(torch.nn.Module):
-
             def __init__(self, hidden_size=64):
                 super().__init__()
                 self.config = type(
-                    'Config', (), {'base_model_tp_plan': {
-                        'layers.*.q_proj': 'colwise',
-                        'layers.*.o_proj': 'rowwise'
-                    }})()
+                    "Config",
+                    (),
+                    {
+                        "base_model_tp_plan": {
+                            "layers.*.q_proj": "colwise",
+                            "layers.*.o_proj": "rowwise",
+                        }
+                    },
+                )()
                 self.layers = torch.nn.ModuleList(
-                    [torch.nn.Linear(hidden_size, hidden_size * 2),
-                     torch.nn.Linear(hidden_size * 2, hidden_size)])
+                    [
+                        torch.nn.Linear(hidden_size, hidden_size * 2),
+                        torch.nn.Linear(hidden_size * 2, hidden_size),
+                    ]
+                )
 
             def forward(self, x):
                 return self.layers[1](self.layers[0](x))
@@ -88,12 +110,9 @@ class TestTPPlanEndToEnd(DistributedTest):
 
         ds_config = {
             "train_micro_batch_size_per_gpu": 1,
-            "tensor_parallel": {
-                "autotp_size": 2
-            },
-            "zero_optimization": {
-                "stage": 1
-            },
+            "tensor_parallel": {"autotp_size": 2},
+            "optimizer": {"type": "AdamW", "params": {"lr": 1e-4}},
+            "zero_optimization": {"stage": 1},
             "steps_per_print": 1,
         }
 
@@ -102,12 +121,21 @@ class TestTPPlanEndToEnd(DistributedTest):
         elif preferred_dtype() == torch.bfloat16:
             ds_config["bf16"] = {"enabled": True}
 
-        engine, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=ds_config)
+        engine, _, _, _ = deepspeed.initialize(
+            model=model, model_parameters=model.parameters(), config=ds_config
+        )
 
         assert engine.autotp_size() == 2
 
         for _ in range(3):
-            input_tensor = torch.randn(2, 4, 64).to(get_accelerator().current_device_name())
+            input_tensor = torch.randn(2, 4, 64, dtype=preferred_dtype()).to(
+                get_accelerator().current_device_name()
+            )
+            dist.broadcast(
+                input_tensor,
+                src=groups.get_tensor_model_parallel_src_rank(),
+                group=groups.get_tensor_model_parallel_group(),
+            )
             output = engine(input_tensor)
             loss = output.mean()
             engine.backward(loss)
@@ -120,17 +148,24 @@ class TestTPPlanEndToEnd(DistributedTest):
         skip_on_device()
 
         class SimpleHFModel(torch.nn.Module):
-
             def __init__(self, hidden_size=64):
                 super().__init__()
                 self.config = type(
-                    'Config', (), {'base_model_tp_plan': {
-                        'layers.*.q_proj': 'colwise',
-                        'layers.*.o_proj': 'rowwise'
-                    }})()
+                    "Config",
+                    (),
+                    {
+                        "base_model_tp_plan": {
+                            "layers.*.q_proj": "colwise",
+                            "layers.*.o_proj": "rowwise",
+                        }
+                    },
+                )()
                 self.layers = torch.nn.ModuleList(
-                    [torch.nn.Linear(hidden_size, hidden_size * 2),
-                     torch.nn.Linear(hidden_size * 2, hidden_size)])
+                    [
+                        torch.nn.Linear(hidden_size, hidden_size * 2),
+                        torch.nn.Linear(hidden_size * 2, hidden_size),
+                    ]
+                )
 
             def forward(self, x):
                 return self.layers[1](self.layers[0](x))
@@ -139,12 +174,9 @@ class TestTPPlanEndToEnd(DistributedTest):
 
         ds_config = {
             "train_micro_batch_size_per_gpu": 1,
-            "tensor_parallel": {
-                "autotp_size": 2
-            },
-            "zero_optimization": {
-                "stage": 2
-            },
+            "tensor_parallel": {"autotp_size": 2},
+            "optimizer": {"type": "AdamW", "params": {"lr": 1e-4}},
+            "zero_optimization": {"stage": 2},
             "steps_per_print": 1,
         }
 
@@ -153,11 +185,20 @@ class TestTPPlanEndToEnd(DistributedTest):
         elif preferred_dtype() == torch.bfloat16:
             ds_config["bf16"] = {"enabled": True}
 
-        engine, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=ds_config)
+        engine, _, _, _ = deepspeed.initialize(
+            model=model, model_parameters=model.parameters(), config=ds_config
+        )
 
         assert engine.autotp_size() == 2
 
-        input_tensor = torch.randn(2, 4, 64).to(get_accelerator().current_device_name())
+        input_tensor = torch.randn(2, 4, 64, dtype=preferred_dtype()).to(
+            get_accelerator().current_device_name()
+        )
+        dist.broadcast(
+            input_tensor,
+            src=groups.get_tensor_model_parallel_src_rank(),
+            group=groups.get_tensor_model_parallel_group(),
+        )
         output = engine(input_tensor)
         loss = output.mean()
         engine.backward(loss)
@@ -171,17 +212,24 @@ class TestTPPlanCorrectness(DistributedTest):
         skip_on_device()
 
         class SimpleHFModel(torch.nn.Module):
-
             def __init__(self, hidden_size=64):
                 super().__init__()
                 self.config = type(
-                    'Config', (), {'base_model_tp_plan': {
-                        'layers.*.q_proj': 'colwise',
-                        'layers.*.o_proj': 'rowwise'
-                    }})()
+                    "Config",
+                    (),
+                    {
+                        "base_model_tp_plan": {
+                            "layers.*.q_proj": "colwise",
+                            "layers.*.o_proj": "rowwise",
+                        }
+                    },
+                )()
                 self.layers = torch.nn.ModuleList(
-                    [torch.nn.Linear(hidden_size, hidden_size * 2),
-                     torch.nn.Linear(hidden_size * 2, hidden_size)])
+                    [
+                        torch.nn.Linear(hidden_size, hidden_size * 2),
+                        torch.nn.Linear(hidden_size * 2, hidden_size),
+                    ]
+                )
 
             def forward(self, x):
                 return self.layers[1](self.layers[0](x))
@@ -191,12 +239,8 @@ class TestTPPlanCorrectness(DistributedTest):
 
         ds_config = {
             "train_micro_batch_size_per_gpu": 1,
-            "tensor_parallel": {
-                "autotp_size": 2
-            },
-            "zero_optimization": {
-                "stage": 0
-            },
+            "tensor_parallel": {"autotp_size": 2},
+            "zero_optimization": {"stage": 0},
         }
 
         if preferred_dtype() == torch.float16:
@@ -204,10 +248,19 @@ class TestTPPlanCorrectness(DistributedTest):
         elif preferred_dtype() == torch.bfloat16:
             ds_config["bf16"] = {"enabled": True}
 
-        engine, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=ds_config)
+        engine, _, _, _ = deepspeed.initialize(
+            model=model, model_parameters=model.parameters(), config=ds_config
+        )
 
         torch.manual_seed(123)
-        input_tensor = torch.randn(2, 4, 64).to(get_accelerator().current_device_name())
+        input_tensor = torch.randn(2, 4, 64, dtype=preferred_dtype()).to(
+            get_accelerator().current_device_name()
+        )
+        dist.broadcast(
+            input_tensor,
+            src=groups.get_tensor_model_parallel_src_rank(),
+            group=groups.get_tensor_model_parallel_group(),
+        )
         output = engine(input_tensor)
 
         assert output.shape == (2, 4, 64)
