@@ -9,6 +9,7 @@ import torch.distributed as dist
 import deepspeed
 from deepspeed.accelerator import get_accelerator
 from deepspeed.utils import groups
+from deepspeed.runtime.tensor_parallel.config import resolve_tp_config
 from unit.common import DistributedTest
 
 
@@ -156,6 +157,13 @@ class TestTPPlanRealHFModels(DistributedTest):
             "zero_optimization": {"stage": 0},
             "bf16": {"enabled": True},
         }
+
+        tp_config = resolve_tp_config(model, ds_config)
+        assert tp_config is not None
+        assert any(
+            "encoder" in spec.patterns[0] and "attention" in spec.patterns[0]
+            for spec in tp_config.layer_specs
+        )
 
         engine, _, _, _ = deepspeed.initialize(
             model=model, model_parameters=model.parameters(), config=ds_config
