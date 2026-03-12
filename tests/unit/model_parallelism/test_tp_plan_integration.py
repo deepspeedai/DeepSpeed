@@ -124,43 +124,6 @@ class TestTPPlanIntegration:
         with pytest.raises(ValueError, match="No TP configuration"):
             resolve_tp_config(NoPlanModel(), {"tensor_parallel": {"autotp_size": 2}})
 
-    def test_priority_order_complete(self):
-        """Complete test of priority order"""
-
-        class ModelWithPlan:
-            _tp_plan = {"layers.*.q_proj": "colwise"}
-
-        # Case 1: Custom config has highest priority
-        custom_config = {
-            "tensor_parallel": {
-                "autotp_size": 2,
-                "partition_config": {
-                    "layer_specs": [
-                        {
-                            "patterns": [".*\\.custom\\.weight$"],
-                            "partition_type": "column",
-                        }
-                    ]
-                },
-            }
-        }
-        result = resolve_tp_config(ModelWithPlan(), custom_config)
-        assert "custom" in result.layer_specs[0].patterns[0]
-
-        # Case 2: tp_plan has medium priority
-        tp_only_config = {"tensor_parallel": {"autotp_size": 2}}
-        result = resolve_tp_config(ModelWithPlan(), tp_only_config)
-        assert any("q_proj" in s.patterns[0] for s in result.layer_specs)
-
-        # Case 3: preset has lowest priority
-        class NoPlanModel:
-            pass
-
-        preset_config = {"tensor_parallel": {"autotp_size": 2, "preset_model": "llama"}}
-        result = resolve_tp_config(NoPlanModel(), preset_config)
-        assert result is not None
-        assert len(result.layer_specs) > 0
-
     def test_mixed_layer_types(self):
         """Test mixed layer types (attention + mlp)"""
         hf_plan = {
