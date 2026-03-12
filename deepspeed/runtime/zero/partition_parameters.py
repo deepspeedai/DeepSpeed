@@ -1048,7 +1048,7 @@ class Init(InsertPostInitMethodToModuleSubClasses):
             self.num_ranks_in_param_group = groups._get_zero_param_intra_parallel_group_world_size()
             self.num_param_groups = int(self.dp_world_size / self.num_ranks_in_param_group)
             self.rank_in_group = groups._get_zero_param_intra_parallel_rank_in_mygroup()
-            print_rank_0(f"hpZeRO group size: {self.num_ranks_in_param_group}", force=True)
+            print_rank_0(f"hpZeRO group size: {self.num_ranks_in_param_group}", force=False)
 
             logger.debug(
                 "hpZeRO partition parameter my rank in world {} my rank in group {} ranks in my param partition group: {} "
@@ -1073,7 +1073,7 @@ class Init(InsertPostInitMethodToModuleSubClasses):
         self.module = module
         if (self.quantized_weights or self.quantized_nontrainable_weights):
             self.quantizer_module = CUDAQuantizer()
-            print_rank_0(f'Using quantizer for weights: {self.quantizer_module.__class__.__name__}', force=True)
+            print_rank_0(f'Using quantizer for weights: {self.quantizer_module.__class__.__name__}', force=False)
 
         if _ds_config is not None:
             Init.override_module_apply = _ds_config.zero_config.override_module_apply
@@ -1674,7 +1674,7 @@ class Init(InsertPostInitMethodToModuleSubClasses):
 
             if param.ds_tensor is not None and not has_been_updated:  ##param already partitioned
 
-                #print_rank_0(f"Param  {param.ds_id} pri {param.ds_tensor.size()}  loc? {param.ds_tensor.final_location}", force=True)
+                #print_rank_0(f"Param  {param.ds_id} pri {param.ds_tensor.size()}  loc? {param.ds_tensor.final_location}", force=False)
                 #param.data = param.ds_tensor.data
 
                 see_memory_usage(f'Before partitioning param {param.ds_id} {param.shape}', force=False)
@@ -1780,7 +1780,7 @@ class Init(InsertPostInitMethodToModuleSubClasses):
         assert param.ds_status is not ZeroParamStatus.INFLIGHT, f" {param} Cannot partition a param in flight"
         global reuse_buffers
         ##support for NVME secondary param offload
-        #print_rank_0(f"SEC Param id {param.ds_id} status is {param.ds_status}", force=True)
+        #print_rank_0(f"SEC Param id {param.ds_id} status is {param.ds_status}", force=False)
         if param.ds_status is ZeroParamStatus.AVAILABLE:
             if param.ds_secondary_tensor is not None and not has_been_updated:  ##param already partitioned
                 return
