@@ -84,3 +84,35 @@ def test_config_base_literalfail(config_dict):
 def test_config_base_deprecatedfail():
     with pytest.raises(AssertionError):
         config = SimpleConf(**{"param_2": ["DS"], "param_2_old": "DS"})
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# DeepSpeedFP16Config.loss_scale validation  (issue #7852)
+# ──────────────────────────────────────────────────────────────────────────────
+
+from deepspeed.runtime.precision_config import DeepSpeedFP16Config
+
+
+@pytest.mark.parametrize("loss_scale", [0, 1.0, 128.0, 65536.0])
+def test_fp16_loss_scale_valid(loss_scale):
+    """0 (dynamic) and finite positive values must be accepted."""
+    cfg = DeepSpeedFP16Config(loss_scale=loss_scale)
+    assert cfg.loss_scale == loss_scale
+
+
+@pytest.mark.parametrize("loss_scale", [float("inf"), float("-inf"), float("nan")])
+def test_fp16_loss_scale_rejects_non_finite(loss_scale):
+    """Non-finite loss_scale values must raise ValidationError (issue #7852).
+
+    Pydantic may run the ``ge=0`` field constraint before the custom
+    ``field_validator``, producing a "greater than or equal" message for
+    -inf/nan instead of our "finite" message. Accept either.
+    """
+    with pytest.raises(ValidationError, match=r"finite|greater than or equal"):
+        DeepSpeedFP16Config(loss_scale=loss_scale)
+
+
+def test_fp16_loss_scale_rejects_negative():
+    """Negative loss_scale must raise ValidationError."""
+    with pytest.raises(ValidationError):
+        DeepSpeedFP16Config(loss_scale=-1.0)
