@@ -31,12 +31,20 @@ class TestTPPlanIntegration:
         assert len(layer_specs) == 7
 
         # Verify Q/K/V are column parallel
-        qkv_specs = [s for s in layer_specs if any(proj in s.patterns[0] for proj in ['q_proj', 'k_proj', 'v_proj'])]
+        qkv_specs = [
+            s
+            for s in layer_specs
+            if any(proj in s.patterns[0] for proj in ["q_proj", "k_proj", "v_proj"])
+        ]
         assert len(qkv_specs) == 3
         assert all(s.partition_type.value == "column" for s in qkv_specs)
 
         # Verify o_proj and down_proj are row parallel
-        row_specs = [s for s in layer_specs if any(proj in s.patterns[0] for proj in ['o_proj', 'down_proj'])]
+        row_specs = [
+            s
+            for s in layer_specs
+            if any(proj in s.patterns[0] for proj in ["o_proj", "down_proj"])
+        ]
         assert len(row_specs) == 2
         assert all(s.partition_type.value == "row" for s in row_specs)
 
@@ -45,9 +53,11 @@ class TestTPPlanIntegration:
 
         # Create a mock HF model
         class MockHFModel:
-
             def __init__(self):
-                self._tp_plan = {"layers.*.attention.q_proj": "colwise", "layers.*.attention.o_proj": "rowwise"}
+                self._tp_plan = {
+                    "layers.*.attention.q_proj": "colwise",
+                    "layers.*.attention.o_proj": "rowwise",
+                }
 
         model = MockHFModel()
         ds_config = {"tensor_parallel": {"autotp_size": 2}}
@@ -61,11 +71,17 @@ class TestTPPlanIntegration:
         assert len(tp_config.layer_specs) == 2
 
         # Verify correct patterns are included (note the escaping)
-        assert any('attention' in s.patterns[0] and 'q_proj' in s.patterns[0] for s in tp_config.layer_specs)
+        assert any(
+            "attention" in s.patterns[0] and "q_proj" in s.patterns[0]
+            for s in tp_config.layer_specs
+        )
 
     def test_pattern_matches_real_param_names(self):
         """Test generated regex matches real parameter names"""
-        hf_plan = {"layers.*.self_attn.q_proj": "colwise", "layers.*.mlp.down_proj": "rowwise"}
+        hf_plan = {
+            "layers.*.self_attn.q_proj": "colwise",
+            "layers.*.mlp.down_proj": "rowwise",
+        }
 
         layer_specs = TPPlanConverter.convert(hf_plan)
 
@@ -79,9 +95,12 @@ class TestTPPlanIntegration:
         ]
 
         import re
+
         for spec in layer_specs:
             pattern = spec.patterns[0]
-            matching_params = [name for name in real_param_names if re.match(pattern, name)]
+            matching_params = [
+                name for name in real_param_names if re.match(pattern, name)
+            ]
 
             if "q_proj" in pattern:
                 assert len(matching_params) == 3
@@ -116,11 +135,13 @@ class TestTPPlanIntegration:
             "tensor_parallel": {
                 "autotp_size": 2,
                 "partition_config": {
-                    "layer_specs": [{
-                        "patterns": [".*\\.custom\\.weight$"],
-                        "partition_type": "column"
-                    }]
-                }
+                    "layer_specs": [
+                        {
+                            "patterns": [".*\\.custom\\.weight$"],
+                            "partition_type": "column",
+                        }
+                    ]
+                },
             }
         }
         result = resolve_tp_config(ModelWithPlan(), custom_config)
@@ -154,8 +175,42 @@ class TestTPPlanIntegration:
         layer_specs = TPPlanConverter.convert(hf_plan)
 
         # Count colwise and rowwise
-        colwise_count = sum(1 for s in layer_specs if s.partition_type.value == "column")
+        colwise_count = sum(
+            1 for s in layer_specs if s.partition_type.value == "column"
+        )
         rowwise_count = sum(1 for s in layer_specs if s.partition_type.value == "row")
 
         assert colwise_count == 4  # q, k, v, fc1
         assert rowwise_count == 2  # o_proj, fc2
+
+    def test_alternate_prefixes(self):
+        """Test tp_plan with non-layers prefix"""
+        hf_plan = {
+            "model.layers.*.self_attn.q_proj": "colwise",
+            "transformer.layers.*.self_attn.o_proj": "rowwise",
+        }
+
+        layer_specs = TPPlanConverter.convert(hf_plan)
+        assert len(layer_specs) == 2
+        assert any("model\\.layers" in s.patterns[0] for s in layer_specs)
+        assert any("transformer\\.layers" in s.patterns[0] for s in layer_specs)
+
+    def test_alternate_projection_names(self):
+        """Test tp_plan with qkv and Wq/Wk/Wv style names"""
+        hf_plan = {
+            "layers.*.attn.qkv": "colwise",
+            "layers.*.attn.out_proj": "rowwise",
+            "layers.*.attn.Wq": "colwise",
+            "layers.*.attn.Wk": "colwise",
+            "layers.*.attn.Wv": "colwise",
+        }
+
+        layer_specs = TPPlanConverter.convert(hf_plan)
+        assert len(layer_specs) == 5
+        colwise_count = sum(
+            1 for s in layer_specs if s.partition_type.value == "column"
+        )
+        rowwise_count = sum(1 for s in layer_specs if s.partition_type.value == "row")
+
+        assert colwise_count == 4  # qkv + Wq/Wk/Wv
+        assert rowwise_count == 1  # out_proj
