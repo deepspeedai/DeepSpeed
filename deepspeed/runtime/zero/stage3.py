@@ -214,7 +214,6 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             raise SystemError("Cannot use fp16 without accelerator.")
 
         self.optimizer = init_optimizer
-
         self.param_names = param_names
 
         # Use torch (un)flatten ops
@@ -1782,7 +1781,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         Returns:
             List[Tensor]
         """
-        # assert False, "check entrance of _partitioned_buffers_all_gather"
+
         assert len(params) == len(buffers_to_allgather), "params and buffers_to_allgather must have the same length"
         assert all(param.partition_numel() == buffer.numel() for param, buffer in zip(
             params, buffers_to_allgather)), "params and buffers_to_allgather must have the same numel"
