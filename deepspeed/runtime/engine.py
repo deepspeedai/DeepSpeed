@@ -582,6 +582,7 @@ class DeepSpeedEngine(Module):
 
         from deepspeed.module_inject.auto_tp import AutoTP
 
+        # Tensor parallel priority: custom config > HF tp_plan > AutoTP
         partition_config = None
         if hasattr(tp_config, "get_partition_config_object"):
             partition_config = tp_config.get_partition_config_object()
