@@ -46,24 +46,31 @@ class TestTPPlanRealHFModels(DistributedTest):
 
         ds_config = {
             "train_micro_batch_size_per_gpu": 1,
-            "tensor_parallel": {"autotp_size": 2},
-            "optimizer": {"type": "AdamW", "params": {"lr": 1e-4}},
-            "zero_optimization": {"stage": 2},
-            "bf16": {"enabled": True},
+            "tensor_parallel": {
+                "autotp_size": 2
+            },
+            "optimizer": {
+                "type": "AdamW",
+                "params": {
+                    "lr": 1e-4
+                }
+            },
+            "zero_optimization": {
+                "stage": 2
+            },
+            "bf16": {
+                "enabled": True
+            },
             "steps_per_print": 1,
         }
 
-        engine, _, _, _ = deepspeed.initialize(
-            model=model, model_parameters=model.parameters(), config=ds_config
-        )
+        engine, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=ds_config)
 
         assert engine.autotp_size() == 2
 
         # Train for a few steps
         for _ in range(3):
-            input_ids = torch.randint(0, 1000, (1, 16)).to(
-                get_accelerator().current_device_name()
-            )
+            input_ids = torch.randint(0, 1000, (1, 16)).to(get_accelerator().current_device_name())
             dist.broadcast(
                 input_ids,
                 src=groups.get_tensor_model_parallel_src_rank(),
@@ -80,6 +87,7 @@ class TestTPPlanRealHFModels(DistributedTest):
         skip_on_device()
 
         class CustomTransformerModel(torch.nn.Module):
+
             def __init__(self, hidden_size=64):
                 super().__init__()
                 self.config = type(
@@ -98,41 +106,22 @@ class TestTPPlanRealHFModels(DistributedTest):
                 )()
 
                 # Simple encoder layers
-                self.encoder = torch.nn.ModuleList(
-                    [
-                        torch.nn.ModuleDict(
-                            {
-                                "attention": torch.nn.ModuleDict(
-                                    {
-                                        "query": torch.nn.Linear(
-                                            hidden_size, hidden_size
-                                        ),
-                                        "key": torch.nn.Linear(
-                                            hidden_size, hidden_size
-                                        ),
-                                        "value": torch.nn.Linear(
-                                            hidden_size, hidden_size
-                                        ),
-                                        "output": torch.nn.Linear(
-                                            hidden_size, hidden_size
-                                        ),
-                                    }
-                                ),
-                                "ffn": torch.nn.ModuleDict(
-                                    {
-                                        "intermediate": torch.nn.Linear(
-                                            hidden_size, hidden_size * 4
-                                        ),
-                                        "output": torch.nn.Linear(
-                                            hidden_size * 4, hidden_size
-                                        ),
-                                    }
-                                ),
-                            }
-                        )
-                        for _ in range(2)
-                    ]
-                )
+                self.encoder = torch.nn.ModuleList([
+                    torch.nn.ModuleDict({
+                        "attention":
+                        torch.nn.ModuleDict({
+                            "query": torch.nn.Linear(hidden_size, hidden_size),
+                            "key": torch.nn.Linear(hidden_size, hidden_size),
+                            "value": torch.nn.Linear(hidden_size, hidden_size),
+                            "output": torch.nn.Linear(hidden_size, hidden_size),
+                        }),
+                        "ffn":
+                        torch.nn.ModuleDict({
+                            "intermediate": torch.nn.Linear(hidden_size, hidden_size * 4),
+                            "output": torch.nn.Linear(hidden_size * 4, hidden_size),
+                        }),
+                    }) for _ in range(2)
+                ])
 
             def forward(self, x):
                 for layer in self.encoder:
@@ -151,22 +140,29 @@ class TestTPPlanRealHFModels(DistributedTest):
 
         ds_config = {
             "train_micro_batch_size_per_gpu": 1,
-            "tensor_parallel": {"autotp_size": 2},
-            "optimizer": {"type": "AdamW", "params": {"lr": 1e-4}},
-            "zero_optimization": {"stage": 0},
-            "bf16": {"enabled": True},
+            "tensor_parallel": {
+                "autotp_size": 2
+            },
+            "optimizer": {
+                "type": "AdamW",
+                "params": {
+                    "lr": 1e-4
+                }
+            },
+            "zero_optimization": {
+                "stage": 0
+            },
+            "bf16": {
+                "enabled": True
+            },
         }
 
-        engine, _, _, _ = deepspeed.initialize(
-            model=model, model_parameters=model.parameters(), config=ds_config
-        )
+        engine, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=ds_config)
 
         assert engine.autotp_size() == 2
 
         # Training step
-        input_tensor = torch.randn(2, 4, 64, dtype=torch.bfloat16).to(
-            get_accelerator().current_device_name()
-        )
+        input_tensor = torch.randn(2, 4, 64, dtype=torch.bfloat16).to(get_accelerator().current_device_name())
         dist.broadcast(
             input_tensor,
             src=groups.get_tensor_model_parallel_src_rank(),
