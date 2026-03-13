@@ -232,6 +232,7 @@ Furthermore, if users are not using transformers library, you can replace the ``
 - **Optimization**: Communication/Activation optimization.
 - **Usability**: Support the [Transformers TP plan](https://github.com/huggingface/transformers/blob/336dc69d63d56f232a183a3e7f52790429b871ef/src/transformers/models/llama/configuration_llama.py#L145), decouple the AutoTP parser, and expand model testing.
   - [UPDATE] We now support [custom partitioning](https://deepspeed.readthedocs.io/en/latest/training.html#custom-layer-specs) in the same spirit as HF's partitioning plan, and will build Transformers TP plan support on top of that ([PR](http://github.com/deepspeedai/DeepSpeed/pull/7806)).
+  - [UPDATE] DeepSpeed now automatically detects and uses HuggingFace's built-in `base_model_tp_plan` (e.g. Llama, Qwen, Gemma2). When a model provides a `tp_plan`, AutoTP uses it directly without requiring `preset_model` or `partition_config`. Currently `colwise` and `rowwise` partition types are supported. See the [AutoTP training tutorial](https://deepspeed.readthedocs.io/en/latest/training.html#huggingface-tp-plan) for details ([PR](https://github.com/deepspeedai/DeepSpeed/pull/7901)).
 
 Theoretically, features supported by ZeRO should also be supported, though extensive testing is pending.
 Welcome bug reports, enhancement, and additional model training examples.

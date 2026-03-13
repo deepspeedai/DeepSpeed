@@ -144,3 +144,15 @@ def get_tensor_parallel_config(ds_config):
     if 'tensor_parallel' in ds_config:
         return TPTrainingConfig(**ds_config['tensor_parallel'])
     return TPTrainingConfig()
+
+
+def _get_hf_tp_plan(model):
+    """Extract tp_plan from HuggingFace model."""
+    if getattr(model, '_tp_plan', None):
+        return model._tp_plan
+
+    config = getattr(model, 'config', None)
+    if config and getattr(config, 'base_model_tp_plan', None):
+        return model.config.base_model_tp_plan
+
+    return None
