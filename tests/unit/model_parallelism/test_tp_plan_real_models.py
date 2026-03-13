@@ -5,7 +5,7 @@
 
 import pytest
 import torch
-import torch.distributed as dist
+import deepspeed.comm as dist
 import deepspeed
 from deepspeed.accelerator import get_accelerator
 from deepspeed.utils import groups
