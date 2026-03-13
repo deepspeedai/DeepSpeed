@@ -22,7 +22,11 @@ class TPPlanConverter:
             elif partition.lower() == "rowwise":
                 partition_type = PartitionType.ROW
             else:
-                raise ValueError(f"Invalid partition type '{partition}', must be 'colwise' or 'rowwise'")
+                # TODO: HF tp_plan supports additional partition types that are not yet handled:
+                #   colwise_rep, local_colwise, local_rowwise, local_packed_rowwise,
+                #   gather, sequence_parallel. Add support as needed.
+                raise ValueError(f"Unsupported partition type '{partition}'. "
+                                 f"Currently only 'colwise' and 'rowwise' are supported.")
 
             # Only add .weight suffix if not already present
             if not regex_pattern.endswith(r"\.weight"):
