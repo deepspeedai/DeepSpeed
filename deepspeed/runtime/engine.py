@@ -613,6 +613,7 @@ class DeepSpeedEngine(Module):
 
         hf_tp_plan = _get_hf_tp_plan(model)
         if hf_tp_plan:
+            logger.info(f"Using HuggingFace tp_plan with {len(hf_tp_plan)} layer specifications")
             from deepspeed.module_inject.tp_plan_converter import TPPlanConverter
             from deepspeed.module_inject.autotp_config import AutoTPConfig
 
