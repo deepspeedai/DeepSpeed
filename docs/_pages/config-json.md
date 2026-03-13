@@ -36,8 +36,10 @@ toc_label: "Contents"
 
 | Fields | Value                                                                                                                                                                                                                                                                                                        | Example                      |
 | ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------- |
-| type   | The optimizer name. DeepSpeed natively supports **Adam**, **AdamW**, **OneBitAdam**, **Lamb**, and **OneBitLamb** optimizers (See [here](https://deepspeed.readthedocs.io/en/latest/optimizers.html) for details) and will import other optimizers from [torch](https://pytorch.org/docs/stable/optim.html). | `"Adam"`                     |
+| type   | The optimizer name. DeepSpeed natively supports **Adam**, **AdamW**, **OneBitAdam**, **Lamb**, **OneBitLamb**, and **Muon** optimizers (See [here](https://deepspeed.readthedocs.io/en/latest/optimizers.html) for details) and will import other optimizers from [torch](https://pytorch.org/docs/stable/optim.html). | `"Adam"`                     |
 | params | Dictionary of parameters to instantiate optimizer. The parameter names must match the optimizer constructor signature (e.g., for [Adam](https://pytorch.org/docs/stable/optim.html#torch.optim.Adam)).                                                                                                       | `{"lr": 0.001, "eps": 1e-8}` |
+
+Muon optimizer is supported with ZeRO Stage 1, 2, and 3. To use Muon, set the optimizer name to `Muon`. The parameters applied for Muon are automatically determined by the matrix shape and name. For ZeRO Stage 3, set `save_muon_momentum_buffer_in_memory` to `true` when optimizer offload is applied to CPU (not NVMe).
 
   Example of <i>**optimizer**</i> with Adam
 
@@ -61,6 +63,21 @@ The Adam optimizer also supports the following two params keys/values in additio
 | ------------- | --------------------------------------------------------------------------- | ------- |
 | torch\_adam   | Use torch's implementation of adam instead of our fused adam implementation | false   |
 | adam\_w\_mode | Apply L2 regularization (also known as AdamW)                               | true    |
+
+Example of <i>**optimizer**</i> with Muon
+if not set muon_lr will default to lr. save_muon_momentum_buffer_in_memory is useful for stage3 to determine if the muon's momentum buffer is saved in memory or not.
+```json
+"optimizer": {
+    "type": "Muon",
+    "params": {
+      "lr": 0.001,
+      "momentum": 0.9,
+      "weight_decay": 0.0,
+      "muon_lr": 0.001
+    }
+  }
+  "save_muon_momentum_buffer_in_memory": True
+```
 
 Another example of <i>**optimizer**</i> with 1-bit Adam specific parameters is as follows.
 
