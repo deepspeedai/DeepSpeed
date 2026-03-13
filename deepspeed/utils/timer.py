@@ -4,6 +4,7 @@
 # DeepSpeed Team
 
 import time
+import numbers
 from numpy import mean
 from deepspeed.utils.logging import print_dist
 from deepspeed.accelerator import get_accelerator
@@ -211,7 +212,16 @@ class ThroughputTimer:
         self.global_step_count = 0
         self.total_elapsed_time = 0
         self.step_elapsed_time = 0
-        self.steps_per_output = steps_per_output
+        if steps_per_output is not None:
+            if not isinstance(steps_per_output, numbers.Integral):
+                raise ValueError(
+                    f"steps_per_output must be a positive integer or None, got {type(steps_per_output).__name__}"
+                )
+            if steps_per_output <= 0:
+                raise ValueError(f"steps_per_output must be greater than 0, got {steps_per_output}")
+            self.steps_per_output = int(steps_per_output)
+        else:
+            self.steps_per_output = None
         self.monitor_memory = monitor_memory
         self.logging = logging_fn
         if self.logging is None:
