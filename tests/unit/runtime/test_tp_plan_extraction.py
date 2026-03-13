@@ -24,21 +24,6 @@ class TestTPPlanExtraction:
         assert "layers.*.self_attn.q_proj" in tp_plan
         assert tp_plan["layers.*.self_attn.q_proj"] == "colwise"
 
-    def test_extract_tp_plan_from_config(self):
-
-        class MockHFConfig:
-            base_model_tp_plan = {
-                "layers.*.mlp.gate_proj": "colwise",
-                "layers.*.mlp.up_proj": "colwise",
-                "layers.*.mlp.down_proj": "rowwise"
-            }
-
-        config = MockHFConfig()
-        tp_plan = _get_hf_tp_plan(config)
-
-        assert tp_plan is not None
-        assert tp_plan == config.base_model_tp_plan
-
     def test_extract_tp_plan_from_model_with_config(self):
 
         class MockHFConfig:
