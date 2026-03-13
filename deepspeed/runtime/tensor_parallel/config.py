@@ -148,10 +148,11 @@ def get_tensor_parallel_config(ds_config):
 
 def _get_hf_tp_plan(model):
     """Extract tp_plan from HuggingFace model."""
-    if hasattr(model, '_tp_plan'):
+    if getattr(model, '_tp_plan', None):
         return model._tp_plan
 
-    if hasattr(model, 'config') and hasattr(model.config, 'base_model_tp_plan'):
+    config = getattr(model, 'config', None)
+    if config and getattr(config, 'base_model_tp_plan', None):
         return model.config.base_model_tp_plan
 
     return None
