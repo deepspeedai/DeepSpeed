@@ -5,19 +5,7 @@
 
 import torch
 
-
-def _get_hf_tp_plan(model_or_config):
-    """Extract tp_plan from HF model or config"""
-    if hasattr(model_or_config, '_tp_plan'):
-        return model_or_config._tp_plan
-
-    if hasattr(model_or_config, 'config') and hasattr(model_or_config.config, 'base_model_tp_plan'):
-        return model_or_config.config.base_model_tp_plan
-
-    if hasattr(model_or_config, 'base_model_tp_plan'):
-        return model_or_config.base_model_tp_plan
-
-    return None
+from deepspeed.runtime.tensor_parallel.config import _get_hf_tp_plan
 
 
 class TestTPPlanExtraction:

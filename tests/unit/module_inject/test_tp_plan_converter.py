@@ -91,3 +91,33 @@ class TestTPPlanConverter:
 
         with pytest.raises(ValueError):
             TPPlanConverter.convert(hf_plan)
+
+    def test_alternate_prefixes(self):
+        """Test tp_plan with non-layers prefix"""
+        hf_plan = {
+            "model.layers.*.self_attn.q_proj": "colwise",
+            "transformer.layers.*.self_attn.o_proj": "rowwise",
+        }
+
+        layer_specs = TPPlanConverter.convert(hf_plan)
+        assert len(layer_specs) == 2
+        assert any("model\\.layers" in s.patterns[0] for s in layer_specs)
+        assert any("transformer\\.layers" in s.patterns[0] for s in layer_specs)
+
+    def test_alternate_projection_names(self):
+        """Test tp_plan with qkv and Wq/Wk/Wv style names"""
+        hf_plan = {
+            "layers.*.attn.qkv": "colwise",
+            "layers.*.attn.out_proj": "rowwise",
+            "layers.*.attn.Wq": "colwise",
+            "layers.*.attn.Wk": "colwise",
+            "layers.*.attn.Wv": "colwise",
+        }
+
+        layer_specs = TPPlanConverter.convert(hf_plan)
+        assert len(layer_specs) == 5
+        colwise_count = sum(1 for s in layer_specs if s.partition_type == PartitionType.COLUMN)
+        rowwise_count = sum(1 for s in layer_specs if s.partition_type == PartitionType.ROW)
+
+        assert colwise_count == 4  # qkv + Wq/Wk/Wv
+        assert rowwise_count == 1  # out_proj
