@@ -32,7 +32,7 @@ from .runtime.engine import ADAM_OPTIMIZER, LAMB_OPTIMIZER, MUON_OPTIMIZER
 from .runtime.hybrid_engine import DeepSpeedHybridEngine
 from .runtime.pipe.engine import PipelineEngine
 from .inference.engine import InferenceEngine
-from .inference.config import DeepSpeedInferenceConfig
+from .inference.config import DeepSpeedInferenceConfig, QuantizationConfig
 from .runtime.lr_schedules import add_tuning_arguments
 from .runtime.config import DeepSpeedConfig, DeepSpeedConfigError
 from .runtime.activation_checkpointing import checkpointing
@@ -380,6 +380,14 @@ def init_inference(model, config=None, **kwargs):
         if config_dict[key] != kwargs[key]:
             raise ValueError(f"Conflicting argument '{key}' in 'config':{config_dict[key]} and kwargs:{kwargs[key]}")
     config_dict.update(kwargs)
+
+    # Set the number of weight quantization groups if an optional 'quantize_groups' argument is given
+    if "quantize_groups" in config_dict:
+        if not ("dtype", torch.int8) in config_dict.items():
+            raise ValueError("'dtype' argument expected int8 when 'quantize_groups' argument is provided")
+        quant = QuantizationConfig()
+        quant.weight.q_groups = config_dict.pop("quantize_groups")
+        config_dict["quant"] = quant
 
     ds_inference_config = DeepSpeedInferenceConfig(**config_dict)
 
