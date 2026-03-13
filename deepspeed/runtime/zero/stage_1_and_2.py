@@ -1572,7 +1572,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                     param = self.bit16_groups[group_idx][param_idx_in_group]
 
                     assert self.params_already_reduced[param_id] == False, \
-                        f"The parameter {param_id} has already been reduced. \
+                        f"The parameter {debug_param2name(param)} has already been reduced. \
                         Gradient computed twice for this partition. \
                         Multiple gradient reduction is currently not supported"
 
