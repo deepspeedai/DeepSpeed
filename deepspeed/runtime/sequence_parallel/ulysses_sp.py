@@ -122,6 +122,9 @@ class UlyssesSPAttentionHF(torch.nn.Module):
         self.skip_all_but_last_attention_debug_mode = False
         self.rotating_layer_counter = 0  # used for dev work
 
+        self.core_attn_implementation = None  # set by register_with_transformers
+        self._packed_sample_validated = False  # one-time check flag
+
         self.local_q_head_count = attn_head_count // self.world_size
 
         # if we have 4 kv heads and sp 8, we need to replicate kv heads 2x
@@ -287,6 +290,23 @@ class UlyssesSPAttentionHF(torch.nn.Module):
         # code where rotating_layer_counter is used - so we could calculate it on the first layer
         # and re-use on the remaining layers
         if "position_ids" in kwargs:
+            # One-time check: detect packed samples with attn backends that silently break.
+            # Must check the LOCAL (pre-gather) position_ids — after gather, SP shard boundaries
+            # create false resets that look like packing.
+            if not self._packed_sample_validated:
+                self._packed_sample_validated = True
+                local_pos_ids = kwargs["position_ids"]
+                pos_diff = torch.diff(local_pos_ids, dim=-1)
+                has_packed_samples = (pos_diff < 0).any().item()
+                if has_packed_samples and self.core_attn_implementation in ("sdpa", "eager"):
+                    raise ValueError(
+                        f"Packed samples detected (position_ids reset mid-sequence) with "
+                        f"attn_implementation='{self.core_attn_implementation}'. This silently produces "
+                        f"incorrect results because Ulysses SP sets attention_mask=None and "
+                        f"{self.core_attn_implementation} ignores position_ids for causal masking, "
+                        f"causing cross-document attention. Use 'flash_attention_2', 'flash_attention_3', "
+                        f"or 'flex_attention' instead.")
+
             position_ids_list = [torch.empty_like(kwargs["position_ids"]) for _ in range(self.world_size)]
             dist.all_gather(position_ids_list, kwargs["position_ids"], group=self.process_group)
             kwargs["position_ids"] = torch.cat(position_ids_list, dim=1)
@@ -311,6 +331,29 @@ class UlyssesSPAttentionHF(torch.nn.Module):
         # XXX: could move this somewhere to do it only once per run
         if self.kv_replication_factor > 1:
             module.num_key_value_groups = query_layer.size(-3) // key_layer.size(-3)
+
+        # For flex_attention: the SP wrapper discards the original BlockMask (built for the
+        # local shard). We must construct a causal BlockMask for the full gathered sequence.
+        if self.core_attn_implementation == "flex_attention" and attention_mask is None:
+            try:
+                from torch.nn.attention.flex_attention import create_block_mask
+                seq_len = query_layer.shape[2]  # full gathered sequence length
+                batch_size = query_layer.shape[0]
+
+                def causal_mask(batch_idx, head_idx, q_idx, kv_idx):
+                    return q_idx >= kv_idx
+
+                attention_mask = create_block_mask(
+                    mask_mod=causal_mask,
+                    B=batch_size,
+                    H=None,
+                    Q_LEN=seq_len,
+                    KV_LEN=seq_len,
+                    device=query_layer.device,
+                    _compile=True,
+                )
+            except ImportError:
+                pass  # flex_attention not available, attention_mask stays None
 
         if not self.skip_all_but_last_attention_debug_mode:
             # expects: [bs hc_l sl hs]
@@ -419,12 +462,14 @@ class UlyssesSPAttentionHF(torch.nn.Module):
                 f"model config attn_implementation='{model_attn_implementation}'. "
                 "Set both to the same value so sequence-parallel wrapper can intercept the active attention path.")
 
-        # eager requires attention_mask which SP doesn't support; flex_attention is untested
-        unsupported_attn_implementation = ["eager", "flex_attention", "paged|eager", "paged|flex_attention"]
+        # eager requires a 4D attention_mask which SP doesn't support (O(n²) memory).
+        # sdpa is allowed but validated at runtime for packed samples (see _packed_sample_validated).
+        unsupported_attn_implementation = ["eager", "paged|eager"]
         if core_attn_implementation in unsupported_attn_implementation:
             raise ValueError(
                 f"{core_attn_implementation} attn_implementation isn't currently supported by Ulysses sequence"
-                f" parallelism. Use 'flash_attention_2', 'flash_attention_3', 'sdpa',"
+                f" parallelism because it requires a 4D attention_mask (O(n²) memory)."
+                f" Use 'flash_attention_2', 'flash_attention_3', 'flex_attention', 'sdpa',"
                 f" or a hub-hosted kernel (e.g. 'kernels-community/flash-attn2').")
 
         # Hub kernels (e.g. kernels-community/flash-attn2) are registered lazily in transformers.
@@ -466,6 +511,7 @@ class UlyssesSPAttentionHF(torch.nn.Module):
             global_seq_length=global_seq_length,
             disable_in_eval=disable_in_eval,
         )
+        uattn.core_attn_implementation = core_attn_implementation
 
         def uattn_wrapper(
             module: torch.nn.Module,
@@ -589,6 +635,16 @@ class UlyssesSPDataLoaderAdapter:
             raise StopIteration
         micro_batches = defaultdict(dict)
         # XXX: replace with more efficient all-to-all?
+
+        # Ensure position_ids exist before all_gather and sharding.
+        # Without this, the Trainer generates local position_ids [0,...,chunk_len-1]
+        # on each rank AFTER sharding, which after all_gather in UlyssesSPAttentionHF
+        # looks like packed sequences [0,...,N, 0,...,N, ...]. flash_attention_2 handles
+        # this via flash_varlen_fn, but sdpa/flex_attention apply full causal masking
+        # across the resets, producing incorrect attention.
+        if "position_ids" not in batch:
+            batch["position_ids"] = torch.arange(batch["input_ids"].shape[1], dtype=torch.long).unsqueeze(0).expand(
+                batch["input_ids"].shape[0], -1)
 
         # we have batches of variable seqlen so in order to do all_gather on batches - we need to know the exact length of each tensor on each rank
         seqlen = torch.tensor(batch["input_ids"].shape[1], dtype=torch.int64, device=self.device)
