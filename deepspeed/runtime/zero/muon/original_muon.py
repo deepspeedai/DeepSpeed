@@ -101,6 +101,24 @@ class Muon(torch.optim.Optimizer):
         params = sorted(params, key=lambda x: x.size(), reverse=True)
         super().__init__(params, defaults)
 
+    def load_state_dict(self, state_dict):
+        """Load optimizer state dict and cast momentum_buffer to match parameter dtype.
+
+        When resuming from a checkpoint with bf16 enabled, momentum_buffer may be saved as fp32
+        while parameters are bf16. This override ensures momentum_buffer dtype matches the
+        parameter dtype to prevent dtype mismatch errors in muon_update.
+
+        See: https://github.com/deepspeedai/DeepSpeed/issues/7746
+        """
+        super().load_state_dict(state_dict)
+        # Cast momentum_buffer to match parameter dtype after loading
+        for group in self.param_groups:
+            for p in group["params"]:
+                if p in self.state and "momentum_buffer" in self.state[p]:
+                    buf = self.state[p]["momentum_buffer"]
+                    if buf.dtype != p.dtype:
+                        self.state[p]["momentum_buffer"] = buf.to(dtype=p.dtype)
+
     @torch.no_grad()
     def step(self, closure=None):
 
@@ -139,6 +157,19 @@ class SingleDeviceMuon(torch.optim.Optimizer):
     def __init__(self, params, lr=0.02, weight_decay=0, momentum=0.95):
         defaults = dict(lr=lr, weight_decay=weight_decay, momentum=momentum)
         super().__init__(params, defaults)
+
+    def load_state_dict(self, state_dict):
+        """Load optimizer state dict and cast momentum_buffer to match parameter dtype.
+
+        See: https://github.com/deepspeedai/DeepSpeed/issues/7746
+        """
+        super().load_state_dict(state_dict)
+        for group in self.param_groups:
+            for p in group["params"]:
+                if p in self.state and "momentum_buffer" in self.state[p]:
+                    buf = self.state[p]["momentum_buffer"]
+                    if buf.dtype != p.dtype:
+                        self.state[p]["momentum_buffer"] = buf.to(dtype=p.dtype)
 
     @torch.no_grad()
     def step(self, closure=None):
@@ -218,6 +249,21 @@ class MuonWithAuxAdam(torch.optim.Optimizer):
                 assert set(group.keys()) == set(["params", "lr", "betas", "eps", "weight_decay", "use_muon"])
         super().__init__(param_groups, dict())
 
+    def load_state_dict(self, state_dict):
+        """Load optimizer state dict and cast buffers to match parameter dtype.
+
+        Handles both Muon buffers (momentum_buffer) and Adam buffers (exp_avg, exp_avg_sq).
+        See: https://github.com/deepspeedai/DeepSpeed/issues/7746
+        """
+        super().load_state_dict(state_dict)
+        for group in self.param_groups:
+            for p in group["params"]:
+                if p in self.state:
+                    state = self.state[p]
+                    for key in ["momentum_buffer", "exp_avg", "exp_avg_sq"]:
+                        if key in state and state[key].dtype != p.dtype:
+                            state[key] = state[key].to(dtype=p.dtype)
+
     @torch.no_grad()
     def step(self, closure=None):
 
@@ -286,6 +332,21 @@ class SingleDeviceMuonWithAuxAdam(torch.optim.Optimizer):
                 group["weight_decay"] = group.get("weight_decay", 0)
                 assert set(group.keys()) == set(["params", "lr", "betas", "eps", "weight_decay", "use_muon"])
         super().__init__(param_groups, dict())
+
+    def load_state_dict(self, state_dict):
+        """Load optimizer state dict and cast buffers to match parameter dtype.
+
+        Handles both Muon buffers (momentum_buffer) and Adam buffers (exp_avg, exp_avg_sq).
+        See: https://github.com/deepspeedai/DeepSpeed/issues/7746
+        """
+        super().load_state_dict(state_dict)
+        for group in self.param_groups:
+            for p in group["params"]:
+                if p in self.state:
+                    state = self.state[p]
+                    for key in ["momentum_buffer", "exp_avg", "exp_avg_sq"]:
+                        if key in state and state[key].dtype != p.dtype:
+                            state[key] = state[key].to(dtype=p.dtype)
 
     @torch.no_grad()
     def step(self, closure=None):
