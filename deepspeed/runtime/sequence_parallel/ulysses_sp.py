@@ -278,23 +278,15 @@ class UlyssesSPAttentionHF(torch.nn.Module):
         key = rearrange(key, "bs hc sl hs -> sl bs hc hs")  # .contiguous()
         value = rearrange(value, "bs hc sl hs -> sl bs hc hs")  # .contiguous()
 
-        # core attn like FA2 expects an unsharded `position_ids` - without which packed samples
-        # will return loss=nan.
-        #
-        # XXX: need to figure out if we can do the same for SDPA - as it doesn't require this and
-        # wants an attention mask, so possibly doing this for FA2 only?
-        #
-        # Ideally we would passing the original unsharded position_ids - but we have no way to pass
-        # it here as HF Transformers drops unexpected keys in `batch` - so either we need to stash
-        # it somewhere in UlyssesSPDataLoaderAdapter and retrieve it here or we could gather it once
-        # per batch and stash it inside `module` arg - I already have a machinery to figure out
-        # which layer number is being called below in the skip_all_but_last_attention_debug_mode
-        # code where rotating_layer_counter is used - so we could calculate it on the first layer
-        # and re-use on the remaining layers
+        # All attention backends need unsharded position_ids after the all-to-all.
+        # FA2 uses them for packed-sequence detection (flash_varlen_fn), sdpa/flex_attention
+        # need them to be monotonically increasing so causal masking works correctly.
+        # UlyssesSPDataLoaderAdapter ensures position_ids are in the batch before sharding,
+        # so after gathering here they reconstruct to the correct global positions.
         if "position_ids" in kwargs:
-            # One-time check: detect packed samples with attn backends that silently break.
-            # Must check the LOCAL (pre-gather) position_ids — after gather, SP shard boundaries
-            # create false resets that look like packing.
+            # One-time check: detect packed samples (multiple documents concatenated in one
+            # sequence) with attn backends that silently break. We check LOCAL (pre-gather)
+            # position_ids for resets, which indicate document boundaries from packing.
             if not self._packed_sample_validated:
                 self._packed_sample_validated = True
                 local_pos_ids = kwargs["position_ids"]
@@ -463,8 +455,10 @@ class UlyssesSPAttentionHF(torch.nn.Module):
                 f"model config attn_implementation='{model_attn_implementation}'. "
                 "Set both to the same value so sequence-parallel wrapper can intercept the active attention path.")
 
-        # eager requires a 4D attention_mask which SP doesn't support (O(n²) memory).
-        # sdpa is allowed but validated at runtime for packed samples (see _packed_sample_validated).
+        # eager always materializes a 4D attention_mask (O(n²) memory) and cannot fall back
+        # to is_causal=True like sdpa — so it's incompatible with SP which discards masks.
+        # sdpa and flex_attention are allowed but validated at runtime for packed samples
+        # (see _packed_sample_validated in forward()).
         unsupported_attn_implementation = ["eager", "paged|eager"]
         if core_attn_implementation in unsupported_attn_implementation:
             raise ValueError(
@@ -533,9 +527,11 @@ class UlyssesSPAttentionHF(torch.nn.Module):
             **kwargs,
         ) -> Tuple[torch.Tensor, torch.Tensor]:
 
-            # Discard 4D tensor masks — they were built for the local shard's sequence
-            # length and are invalid after the SP all-to-all gathers the full sequence.
-            # A 4D mask at full sequence length would also be O(n²) memory.
+            # SP relies on position_ids (not attention_mask) for causal masking.
+            # HF doesn't know about the SP wrapper, so it creates an attention_mask for
+            # the local shard's sequence length — which is invalid after the SP all-to-all
+            # gathers the full sequence. A 4D mask at full sequence length would also be
+            # O(n²) memory. So we discard 4D tensor masks.
             #
             # Keep BlockMask (flex_attention) — it's a compressed sparse representation.
             # It will be rebuilt for the full gathered sequence in forward().
@@ -555,8 +551,13 @@ class UlyssesSPAttentionHF(torch.nn.Module):
             )
             return attn_output, attn_weights
 
-        # Keep the original HF attn_implementation dispatch behavior intact by overriding only the
-        # requested core implementation (instead of mutating the full registry).
+        # We don't do: ALL_ATTENTION_FUNCTIONS.register("ulysses", uattn_wrapper)
+        # The problem with that approach is that we'd miss all the special-case branches in
+        # HF Transformers that check `if self.config._attn_implementation == "flash_attention_2": ...`
+        # So instead we override the requested core implementation key in ALL_ATTENTION_FUNCTIONS
+        # with our wrapper. All other code paths relying on the original core attn_implementation
+        # will still be executed — we only intercept at the point of calling attention.
+        # This is what we called "Being John Malkovich".
         ALL_ATTENTION_FUNCTIONS[core_attn_implementation] = uattn_wrapper
 
         return mpu
