@@ -124,6 +124,8 @@ class UlyssesSPAttentionHF(torch.nn.Module):
 
         self.core_attn_implementation = None  # set by register_with_transformers
         self._packed_sample_validated = False  # one-time check flag
+        self._flex_block_mask_cls = None  # set by register_with_transformers
+        self._flex_create_block_mask = None  # set by register_with_transformers
 
         self.local_q_head_count = attn_head_count // self.world_size
 
@@ -332,28 +334,27 @@ class UlyssesSPAttentionHF(torch.nn.Module):
         if self.kv_replication_factor > 1:
             module.num_key_value_groups = query_layer.size(-3) // key_layer.size(-3)
 
-        # For flex_attention: the SP wrapper discards the original BlockMask (built for the
-        # local shard). We must construct a causal BlockMask for the full gathered sequence.
-        if self.core_attn_implementation == "flex_attention" and attention_mask is None:
-            try:
-                from torch.nn.attention.flex_attention import create_block_mask
-                seq_len = query_layer.shape[2]  # full gathered sequence length
-                batch_size = query_layer.shape[0]
+        # For flex_attention: the wrapper preserved the BlockMask from the model, but it
+        # was built for the local shard's sequence length. Rebuild it for the full gathered
+        # sequence length after the all-to-all.
+        # XXX: currently hardcodes a causal mask_mod — models with sliding window or other
+        # non-standard patterns would need the mask_mod extracted from the original BlockMask.
+        if self._flex_block_mask_cls is not None and isinstance(attention_mask, self._flex_block_mask_cls):
+            seq_len = query_layer.shape[2]
+            batch_size = query_layer.shape[0]
 
-                def causal_mask(batch_idx, head_idx, q_idx, kv_idx):
-                    return q_idx >= kv_idx
+            def causal_mask(batch_idx, head_idx, q_idx, kv_idx):
+                return q_idx >= kv_idx
 
-                attention_mask = create_block_mask(
-                    mask_mod=causal_mask,
-                    B=batch_size,
-                    H=None,
-                    Q_LEN=seq_len,
-                    KV_LEN=seq_len,
-                    device=query_layer.device,
-                    _compile=True,
-                )
-            except ImportError:
-                pass  # flex_attention not available, attention_mask stays None
+            attention_mask = self._flex_create_block_mask(
+                mask_mod=causal_mask,
+                B=batch_size,
+                H=None,
+                Q_LEN=seq_len,
+                KV_LEN=seq_len,
+                device=query_layer.device,
+                _compile=True,
+            )
 
         if not self.skip_all_but_last_attention_debug_mode:
             # expects: [bs hc_l sl hs]
@@ -513,6 +514,15 @@ class UlyssesSPAttentionHF(torch.nn.Module):
         )
         uattn.core_attn_implementation = core_attn_implementation
 
+        # Import flex_attention utilities once; stored on the instance for use in
+        # both the wrapper (to detect BlockMask) and forward() (to rebuild it).
+        uattn._flex_block_mask_cls = None
+        uattn._flex_create_block_mask = None
+        if core_attn_implementation == "flex_attention":
+            from torch.nn.attention.flex_attention import BlockMask, create_block_mask
+            uattn._flex_block_mask_cls = BlockMask
+            uattn._flex_create_block_mask = create_block_mask
+
         def uattn_wrapper(
             module: torch.nn.Module,
             query: torch.Tensor,
@@ -523,9 +533,16 @@ class UlyssesSPAttentionHF(torch.nn.Module):
             **kwargs,
         ) -> Tuple[torch.Tensor, torch.Tensor]:
 
-            # We are relaying on position_ids for SP to work so attention_mask has to be None
-            # the problem is that HF currently doesn't know anything about ALL_ATTENTION_FUNCTIONS["ulysses"] so it doesn't make a special case like for "flash_attention_2" and "sdpa" and it creates an attention mask on the fly and it breaks things.
-            attention_mask = None
+            # Discard 4D tensor masks — they were built for the local shard's sequence
+            # length and are invalid after the SP all-to-all gathers the full sequence.
+            # A 4D mask at full sequence length would also be O(n²) memory.
+            #
+            # Keep BlockMask (flex_attention) — it's a compressed sparse representation.
+            # It will be rebuilt for the full gathered sequence in forward().
+            if uattn._flex_block_mask_cls is not None and isinstance(attention_mask, uattn._flex_block_mask_cls):
+                pass  # keep BlockMask — will be rebuilt in forward() for gathered seq len
+            else:
+                attention_mask = None
 
             attn_output, attn_weights = uattn(
                 module,
@@ -533,7 +550,6 @@ class UlyssesSPAttentionHF(torch.nn.Module):
                 key,
                 value,
                 attention_mask,
-                # XXX: fixme
                 *args,
                 **kwargs,
             )
