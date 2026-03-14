@@ -505,3 +505,91 @@ unless you provide a custom ``partition_config``.
 These presets are also useful when you want to extend the default patterns:
 set ``use_default_specs`` to ``true`` in ``partition_config`` to merge your custom
 specs on top of the selected preset.
+
+
+Automatic Sequence Parallel Training
+------------------------------------
+DeepSpeed supports **Automatic Sequence Parallel (AutoSP) training** for enabling
+compiler-based sequence parallelism to unlock long-context LLM training. AutoSP
+leverages defines custom passes to automatically shard inputs along the
+sequence dimension and enable Ulysses-styled sequence parallelism.
+
+AutoSP training is enabled by setting ``compile`` and ``passes`` in the DeepSpeed
+config and calling ``prepare_autosp_inputs()`` to prepare inputs before each forward pass.
+
+.. code-block:: python
+
+    import deepspeed
+    from deepspeed.compile.passes.sp_compile import prepare_autosp_inputs
+
+    ds_config = {
+        "train_micro_batch_size_per_gpu": 1,
+        "zero_optimization": {"stage": 0},
+        "compile": {
+            "deepcompile": True,
+            "passes": ["autosp"],
+            "pass_args": {"sp_size": 2}
+        }
+    }
+
+    engine, optimizer, _, _ = deepspeed.initialize(
+        model=model,
+        optimizer=optimizer,
+        config=ds_config,
+    )
+
+    # Compile the model before training
+    engine.compile(backend='inductor')
+
+    for batch in dataloader:
+        input_ids = prepare_autosp_inputs(
+            input_id=batch["input_ids"],
+            label_id=batch["labels"],
+            position_id=batch.get("position_ids"),
+            seq_dim=1
+        )
+        loss = engine(input_ids)
+        engine.backward(loss)
+        engine.step()
+
+.. note::
+   AutoSP requires ZeRO stage 0 (no ZeRO optimization). Using AutoSP with ZeRO stages 1, 2, or 3 is not currently supported.
+   AutoSP also requires ``torch.nn.functional.scaled_dot_product_attention()`` as the attention backend.
+
+Input Preparation
+~~~~~~~~~~~~~~~~~
+
+Before each forward pass, inputs must be prepared using ``prepare_autosp_inputs()`` to
+mark the sequence dimension as dynamic and annotate tensors for identification during
+automatic sharding:
+
+.. code-block:: python
+
+    from deepspeed.compile.passes.sp_compile import prepare_autosp_inputs
+
+    input_ids = prepare_autosp_inputs(
+        input_id=input_ids,
+        label_id=labels,
+        position_id=position_ids,  # optional
+        attention_mask=attention_mask,  # optional
+        seq_dim=1
+    )
+
+This serves as a hint to the compiler to know which inputs should be sharded across which dimension.
+
+Memory Optimization
+~~~~~~~~~~~~~~~~~~~
+
+AutoSP includes selective activation checkpointing that recomputes matmul operations
+during backpropagation while preserving attention activations. This is effective for
+long-context training because attention operations scale quadratically with sequence
+length and dominate computation latency, while matmul operations scale linearly and are relatively cheaper
+to recompute. This provides significant memory savings with minimal computational
+overhead
+
+Limitations
+~~~~~~~~~~~
+
+AutoSP currently supports only ``torch.nn.functional.scaled_dot_product_attention``. Other attention patterns require additional pattern matching logic.
+
+AutoSP requires a fully connected computation graph without breaks. Graph breaks destroy the use-def chains across graphs and the compiler cannot propoaget sequence dimension sharding information.
