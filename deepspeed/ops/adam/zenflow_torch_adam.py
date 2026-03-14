@@ -8,6 +8,7 @@ from typing import cast, List, Optional, Tuple, Union
 from torch import Tensor
 
 from deepspeed.utils.torch import required_torch_version
+from deepspeed.runtime.compiler import is_compiling
 
 # Check if we have PyTorch >= 2.0 for ZenFlow features
 _ZENFLOW_AVAILABLE = required_torch_version(min_version=2.1)
@@ -568,7 +569,7 @@ def _single_tensor_adamw(
         step_t = state_steps[i]
 
         # If compiling, the compiler will handle cudagraph checks, see note [torch.compile x capturable]
-        if not torch._utils.is_compiling() and capturable:
+        if not is_compiling() and capturable:
             capturable_supported_devices = _get_capturable_supported_devices()
             assert (
                 param.device.type == step_t.device.type and param.device.type in capturable_supported_devices
@@ -674,7 +675,7 @@ def _multi_tensor_adamw(
         raise RuntimeError("lr as a Tensor is not supported for capturable=False and foreach=True")
 
     # If compiling, the compiler will handle cudagraph checks, see note [torch.compile x capturable]
-    if not torch._utils.is_compiling() and capturable:
+    if not is_compiling() and capturable:
         capturable_supported_devices = _get_capturable_supported_devices(supports_xla=False)
         assert all(
             p.device.type == step.device.type and p.device.type in capturable_supported_devices
@@ -722,7 +723,7 @@ def _multi_tensor_adamw(
         # If steps are on CPU, foreach will fall back to the slow path, which is a for-loop calling t.add(1) over
         # and over. 1 will then be wrapped into a Tensor over and over again, which is slower than if we just
         # wrapped it once now. The alpha is required to assure we go to the right overload.
-        if not torch._utils.is_compiling() and device_state_steps[0].is_cpu:
+        if not is_compiling() and device_state_steps[0].is_cpu:
             torch._foreach_add_(device_state_steps, torch.tensor(1.0, device="cpu"), alpha=1.0)
         else:
             torch._foreach_add_(device_state_steps, 1)
@@ -936,7 +937,7 @@ def adamw(
                            "Please upgrade to PyTorch 2.0+ to use ZenFlow, or omit 'zenflow' "
                            "from your DeepSpeed configuration to use the default ZeRO-Offload optimizer.")
 
-    if not torch._utils.is_compiling() and not all(isinstance(t, torch.Tensor) for t in state_steps):
+    if not is_compiling() and not all(isinstance(t, torch.Tensor) for t in state_steps):
         raise RuntimeError("API has changed, `state_steps` argument must contain a list of singleton tensors")
 
     # Respect when the user inputs False/True for foreach or fused. We only want to change

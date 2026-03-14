@@ -313,9 +313,9 @@ class CPU_Accelerator(DeepSpeedAccelerator):
             # is op_builder from deepspeed or a 3p version? this should only succeed if it's deepspeed
             # if successful this also means we're doing a local install and not JIT compile path
             from op_builder import __deepspeed__  # noqa: F401 # type: ignore
-            from op_builder.cpu import AsyncIOBuilder, CCLCommBuilder, ShareMemCommBuilder, FusedAdamBuilder, CPUAdamBuilder, NotImplementedBuilder
+            from op_builder.cpu import AsyncIOBuilder, CCLCommBuilder, ShareMemCommBuilder, FusedAdamBuilder, CPUAdamBuilder, ZenFlowAdamBuilder, NotImplementedBuilder
         except ImportError:
-            from deepspeed.ops.op_builder.cpu import AsyncIOBuilder, CCLCommBuilder, ShareMemCommBuilder, FusedAdamBuilder, CPUAdamBuilder, NotImplementedBuilder
+            from deepspeed.ops.op_builder.cpu import AsyncIOBuilder, CCLCommBuilder, ShareMemCommBuilder, FusedAdamBuilder, CPUAdamBuilder, ZenFlowAdamBuilder, NotImplementedBuilder
 
         if class_name == "CCLCommBuilder":
             return CCLCommBuilder
@@ -325,6 +325,8 @@ class CPU_Accelerator(DeepSpeedAccelerator):
             return FusedAdamBuilder
         elif class_name == "CPUAdamBuilder":
             return CPUAdamBuilder
+        elif class_name == "ZenFlowAdamBuilder":
+            return ZenFlowAdamBuilder
         elif class_name == "AsyncIOBuilder":
             return AsyncIOBuilder
         else:
