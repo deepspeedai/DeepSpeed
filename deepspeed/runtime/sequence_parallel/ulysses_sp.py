@@ -42,6 +42,7 @@ from typing import Tuple
 import deepspeed.comm as dist
 import importlib.metadata
 import math
+import re
 import torch
 import torch.distributed.nn
 
@@ -120,6 +121,11 @@ class UlyssesSPAttentionHF(torch.nn.Module):
         self.num_hidden_layers = num_hidden_layers
         self.skip_all_but_last_attention_debug_mode = False
         self.rotating_layer_counter = 0  # used for dev work
+
+        self.core_attn_implementation = None  # set by register_with_transformers
+        self._packed_sample_validated = False  # one-time check flag
+        self._flex_block_mask_cls = None  # set by register_with_transformers
+        self._flex_create_block_mask = None  # set by register_with_transformers
 
         self.local_q_head_count = attn_head_count // self.world_size
 
@@ -272,20 +278,29 @@ class UlyssesSPAttentionHF(torch.nn.Module):
         key = rearrange(key, "bs hc sl hs -> sl bs hc hs")  # .contiguous()
         value = rearrange(value, "bs hc sl hs -> sl bs hc hs")  # .contiguous()
 
-        # core attn like FA2 expects an unsharded `position_ids` - without which packed samples
-        # will return loss=nan.
-        #
-        # XXX: need to figure out if we can do the same for SDPA - as it doesn't require this and
-        # wants an attention mask, so possibly doing this for FA2 only?
-        #
-        # Ideally we would passing the original unsharded position_ids - but we have no way to pass
-        # it here as HF Transformers drops unexpected keys in `batch` - so either we need to stash
-        # it somewhere in UlyssesSPDataLoaderAdapter and retrieve it here or we could gather it once
-        # per batch and stash it inside `module` arg - I already have a machinery to figure out
-        # which layer number is being called below in the skip_all_but_last_attention_debug_mode
-        # code where rotating_layer_counter is used - so we could calculate it on the first layer
-        # and re-use on the remaining layers
+        # All attention backends need unsharded position_ids after the all-to-all.
+        # FA2 uses them for packed-sequence detection (flash_varlen_fn), sdpa/flex_attention
+        # need them to be monotonically increasing so causal masking works correctly.
+        # UlyssesSPDataLoaderAdapter ensures position_ids are in the batch before sharding,
+        # so after gathering here they reconstruct to the correct global positions.
         if "position_ids" in kwargs:
+            # One-time check: detect packed samples (multiple documents concatenated in one
+            # sequence) with attn backends that silently break. We check LOCAL (pre-gather)
+            # position_ids for resets, which indicate document boundaries from packing.
+            if not self._packed_sample_validated:
+                self._packed_sample_validated = True
+                local_pos_ids = kwargs["position_ids"]
+                pos_diff = torch.diff(local_pos_ids, dim=-1)
+                has_packed_samples = (pos_diff < 0).any().item()
+                if has_packed_samples and self.core_attn_implementation in ("sdpa", "eager"):
+                    raise ValueError(
+                        f"Packed samples detected (position_ids reset mid-sequence) with "
+                        f"attn_implementation='{self.core_attn_implementation}'. This silently produces "
+                        f"incorrect results because Ulysses SP sets attention_mask=None and "
+                        f"{self.core_attn_implementation} ignores position_ids for causal masking, "
+                        f"causing cross-document attention. Use 'flash_attention_2', 'flash_attention_3', "
+                        f"or 'flex_attention' instead.")
+
             position_ids_list = [torch.empty_like(kwargs["position_ids"]) for _ in range(self.world_size)]
             dist.all_gather(position_ids_list, kwargs["position_ids"], group=self.process_group)
             kwargs["position_ids"] = torch.cat(position_ids_list, dim=1)
@@ -310,6 +325,28 @@ class UlyssesSPAttentionHF(torch.nn.Module):
         # XXX: could move this somewhere to do it only once per run
         if self.kv_replication_factor > 1:
             module.num_key_value_groups = query_layer.size(-3) // key_layer.size(-3)
+
+        # For flex_attention: the wrapper preserved the BlockMask from the model, but it
+        # was built for the local shard's sequence length. Rebuild it for the full gathered
+        # sequence length after the all-to-all.
+        # XXX: currently hardcodes a causal mask_mod — models with sliding window or other
+        # non-standard patterns would need the mask_mod extracted from the original BlockMask.
+        if self._flex_block_mask_cls is not None and isinstance(attention_mask, self._flex_block_mask_cls):
+            seq_len = query_layer.shape[2]
+            batch_size = query_layer.shape[0]
+
+            def causal_mask(batch_idx, head_idx, q_idx, kv_idx):
+                return q_idx >= kv_idx
+
+            attention_mask = self._flex_create_block_mask(
+                mask_mod=causal_mask,
+                B=batch_size,
+                H=None,
+                Q_LEN=seq_len,
+                KV_LEN=seq_len,
+                device=query_layer.device,
+                _compile=True,
+            )
 
         if not self.skip_all_but_last_attention_debug_mode:
             # expects: [bs hc_l sl hs]
@@ -411,15 +448,36 @@ class UlyssesSPAttentionHF(torch.nn.Module):
             # if we don't have the model yet at this stage
             hf_model_config = AutoConfig.from_pretrained(model_name_or_path)
 
-        supported_attn_implementation = ["flash_attention_2", "flash_attention_3", "sdpa"]
-        if core_attn_implementation not in supported_attn_implementation:
-            # notes on the excluded ones:
-            # - eager: The problem is that `eager` wants an attention_mask and it creates the wrong attention mask it seems if we don't provide one - it's possible that we could somehow solve this, but it's also unlikely someone will want to use the slow eager attention with sequence parallelism
-            # - flex_attention: haven't tried
+        model_attn_implementation = getattr(hf_model_config, "_attn_implementation", None)
+        if model_attn_implementation is not None and model_attn_implementation != core_attn_implementation:
+            raise ValueError(
+                f"core_attn_implementation='{core_attn_implementation}' does not match "
+                f"model config attn_implementation='{model_attn_implementation}'. "
+                "Set both to the same value so sequence-parallel wrapper can intercept the active attention path.")
 
+        # eager always materializes a 4D attention_mask (O(n²) memory) and cannot fall back
+        # to is_causal=True like sdpa — so it's incompatible with SP which discards masks.
+        # sdpa and flex_attention are allowed but validated at runtime for packed samples
+        # (see _packed_sample_validated in forward()).
+        unsupported_attn_implementation = ["eager", "paged|eager"]
+        if core_attn_implementation in unsupported_attn_implementation:
             raise ValueError(
                 f"{core_attn_implementation} attn_implementation isn't currently supported by Ulysses sequence"
-                f" parallelism. Set core_attn_implementation arg to one of {supported_attn_implementation}.")
+                f" parallelism because it requires a 4D attention_mask (O(n²) memory)."
+                f" Use 'flash_attention_2', 'flash_attention_3', 'flex_attention', 'sdpa',"
+                f" or a hub-hosted kernel (e.g. 'kernels-community/flash-attn2').")
+
+        # Hub kernels (e.g. kernels-community/flash-attn2) are registered lazily in transformers.
+        # Ensure registration happens before validating against ALL_ATTENTION_FUNCTIONS.
+        is_hub_kernel_attn = (isinstance(core_attn_implementation, str) and re.search(
+            r"^[^/:]+/[^/:]+(?:@[^/:]+)?(?::[^/:]+)?$", core_attn_implementation) is not None)
+        if is_hub_kernel_attn:
+            try:
+                from transformers.modeling_flash_attention_utils import lazy_import_flash_attention
+            except ImportError as e:
+                raise ImportError("Hub kernel attention requires a transformers version exposing "
+                                  "`transformers.modeling_flash_attention_utils.lazy_import_flash_attention`.") from e
+            lazy_import_flash_attention(core_attn_implementation)
 
         if core_attn_implementation not in ALL_ATTENTION_FUNCTIONS:
             raise ValueError(
@@ -448,6 +506,16 @@ class UlyssesSPAttentionHF(torch.nn.Module):
             global_seq_length=global_seq_length,
             disable_in_eval=disable_in_eval,
         )
+        uattn.core_attn_implementation = core_attn_implementation
+
+        # Import flex_attention utilities once; stored on the instance for use in
+        # both the wrapper (to detect BlockMask) and forward() (to rebuild it).
+        uattn._flex_block_mask_cls = None
+        uattn._flex_create_block_mask = None
+        if core_attn_implementation == "flex_attention":
+            from torch.nn.attention.flex_attention import BlockMask, create_block_mask
+            uattn._flex_block_mask_cls = BlockMask
+            uattn._flex_create_block_mask = create_block_mask
 
         def uattn_wrapper(
             module: torch.nn.Module,
@@ -459,9 +527,18 @@ class UlyssesSPAttentionHF(torch.nn.Module):
             **kwargs,
         ) -> Tuple[torch.Tensor, torch.Tensor]:
 
-            # We are relaying on position_ids for SP to work so attention_mask has to be None
-            # the problem is that HF currently doesn't know anything about ALL_ATTENTION_FUNCTIONS["ulysses"] so it doesn't make a special case like for "flash_attention_2" and "sdpa" and it creates an attention mask on the fly and it breaks things.
-            attention_mask = None
+            # SP relies on position_ids (not attention_mask) for causal masking.
+            # HF doesn't know about the SP wrapper, so it creates an attention_mask for
+            # the local shard's sequence length — which is invalid after the SP all-to-all
+            # gathers the full sequence. A 4D mask at full sequence length would also be
+            # O(n²) memory. So we discard 4D tensor masks.
+            #
+            # Keep BlockMask (flex_attention) — it's a compressed sparse representation.
+            # It will be rebuilt for the full gathered sequence in forward().
+            if uattn._flex_block_mask_cls is not None and isinstance(attention_mask, uattn._flex_block_mask_cls):
+                pass  # keep BlockMask — will be rebuilt in forward() for gathered seq len
+            else:
+                attention_mask = None
 
             attn_output, attn_weights = uattn(
                 module,
@@ -469,17 +546,19 @@ class UlyssesSPAttentionHF(torch.nn.Module):
                 key,
                 value,
                 attention_mask,
-                # XXX: fixme
                 *args,
                 **kwargs,
             )
             return attn_output, attn_weights
 
         # We don't do: ALL_ATTENTION_FUNCTIONS.register("ulysses", uattn_wrapper)
-        # The problem with this approach is that we are missing on all the special use cases in HF Transformers that do things like: if self.config._attn_implementation == "flash_attention_2": ...
-        # So instead we hack `ALL_ATTENTION_FUNCTIONS` to override all existing keys with our implementation, since it only gets used at the point of calling the attention and that's what we want, all other code branches relying on the original core `attn_implementation` will still be executed. This is what we called "Being John Malkovich"
-        for key in ALL_ATTENTION_FUNCTIONS.keys():
-            ALL_ATTENTION_FUNCTIONS[key] = uattn_wrapper
+        # The problem with that approach is that we'd miss all the special-case branches in
+        # HF Transformers that check `if self.config._attn_implementation == "flash_attention_2": ...`
+        # So instead we override the requested core implementation key in ALL_ATTENTION_FUNCTIONS
+        # with our wrapper. All other code paths relying on the original core attn_implementation
+        # will still be executed — we only intercept at the point of calling attention.
+        # This is what we called "Being John Malkovich".
+        ALL_ATTENTION_FUNCTIONS[core_attn_implementation] = uattn_wrapper
 
         return mpu
 
@@ -573,6 +652,16 @@ class UlyssesSPDataLoaderAdapter:
             raise StopIteration
         micro_batches = defaultdict(dict)
         # XXX: replace with more efficient all-to-all?
+
+        # Ensure position_ids exist before all_gather and sharding.
+        # Without this, the Trainer generates local position_ids [0,...,chunk_len-1]
+        # on each rank AFTER sharding, which after all_gather in UlyssesSPAttentionHF
+        # looks like packed sequences [0,...,N, 0,...,N, ...]. flash_attention_2 handles
+        # this via flash_varlen_fn, but sdpa/flex_attention apply full causal masking
+        # across the resets, producing incorrect attention.
+        if "position_ids" not in batch:
+            batch["position_ids"] = torch.arange(batch["input_ids"].shape[1], dtype=torch.long).unsqueeze(0).expand(
+                batch["input_ids"].shape[0], -1)
 
         # we have batches of variable seqlen so in order to do all_gather on batches - we need to know the exact length of each tensor on each rank
         seqlen = torch.tensor(batch["input_ids"].shape[1], dtype=torch.int64, device=self.device)

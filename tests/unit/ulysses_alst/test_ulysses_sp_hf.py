@@ -301,3 +301,87 @@ class TestUlyssesSPHFDisableInEval(DistributedTest):
         # Verify: with disable_in_eval=True, full sequence input should produce
         # the same output as baseline (SP is bypassed)
         torch_assert_equal(logits_baseline, logits_sp)
+
+
+class TestUlyssesSPHFHubKernel(DistributedTest):
+    world_size = 2
+
+    def test_register_hub_kernel_attn(self, monkeypatch):
+        """Test hub-kernel attention strings are registered before validation.
+
+        This verifies that DeepSpeed can accept kernel-based attention implementations
+        by triggering transformers' lazy registration path prior to checking
+        ALL_ATTENTION_FUNCTIONS.
+        """
+        from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
+
+        model_name_or_path = 'hf-internal-testing/tiny-random-LlamaForCausalLM'
+        seq_length = 64
+        sequence_parallel_size = self.world_size
+        micro_batch_size = 1
+        hub_attn_implementation = 'kernels-community/flash-attn2'
+
+        called_with = []
+        had_hub_key_before = hub_attn_implementation in ALL_ATTENTION_FUNCTIONS
+        original_sdpa = ALL_ATTENTION_FUNCTIONS['sdpa']
+
+        def _mock_lazy_import_flash_attention(implementation, attention_wrapper=None, allow_all_kernels=False):
+            called_with.append(implementation)
+            if implementation == hub_attn_implementation and implementation not in ALL_ATTENTION_FUNCTIONS:
+                # Mimic transformers hub-kernel registration behavior.
+                ALL_ATTENTION_FUNCTIONS.register(implementation, ALL_ATTENTION_FUNCTIONS['sdpa'])
+            return (None, None, None, None), None
+
+        monkeypatch.setattr(
+            'transformers.modeling_flash_attention_utils.lazy_import_flash_attention',
+            _mock_lazy_import_flash_attention,
+        )
+
+        try:
+            mpu = UlyssesSPAttentionHF.register_with_transformers(
+                model_name_or_path=model_name_or_path,
+                core_attn_implementation=hub_attn_implementation,
+                sequence_parallel_size=sequence_parallel_size,
+                micro_batch_size=micro_batch_size,
+                seq_length=seq_length,
+                seq_length_is_variable=True,
+            )
+            assert ALL_ATTENTION_FUNCTIONS['sdpa'] is original_sdpa
+            assert ALL_ATTENTION_FUNCTIONS[hub_attn_implementation] is not original_sdpa
+        finally:
+            if not had_hub_key_before and hub_attn_implementation in ALL_ATTENTION_FUNCTIONS:
+                ALL_ATTENTION_FUNCTIONS.pop(hub_attn_implementation, None)
+
+        assert mpu is not None
+        assert called_with == [hub_attn_implementation]
+
+
+class TestUlyssesSPHFAttnImplMismatch(DistributedTest):
+    world_size = 2
+
+    def test_register_with_mismatched_attn_impl_raises(self):
+        from transformers import AutoConfig
+
+        model_name_or_path = 'hf-internal-testing/tiny-random-LlamaForCausalLM'
+        seq_length = 64
+        sequence_parallel_size = self.world_size
+        micro_batch_size = 1
+
+        hf_config = AutoConfig.from_pretrained(model_name_or_path)
+        hf_config._attn_implementation = "sdpa"
+
+        class MockModel:
+            """Mock model wrapper exposing a transformers config attribute."""
+
+            def __init__(self, config):
+                self.config = config
+
+        with pytest.raises(ValueError, match='does not match model config attn_implementation'):
+            UlyssesSPAttentionHF.register_with_transformers(
+                model_name_or_path=MockModel(hf_config),
+                core_attn_implementation='flash_attention_2',
+                sequence_parallel_size=sequence_parallel_size,
+                micro_batch_size=micro_batch_size,
+                seq_length=seq_length,
+                seq_length_is_variable=True,
+            )
