@@ -7,7 +7,7 @@ SuperOffload utilities for 1) running CPU optimizers in separate processes.
 
 """
 
-from typing import Dict, Optional, Any
+from typing import Dict, List, Optional, Any
 import torch
 import torch.multiprocessing as mp
 import psutil
@@ -35,7 +35,7 @@ class EventTypes:
 
 
 def superoffload_optimizer_worker(param_queue: mp.SimpleQueue, result_queue: mp.SimpleQueue,
-                                  optimizer_config: Dict[str, Any], max_grad_numel: int) -> None:
+                                  optimizer_config: List[Dict[str, Any]], max_grad_numel: int) -> None:
     """
     This function runs in a separate process and continuously processes optimization
     tasks from the parameter queue. It creates a DeepSpeedCPUAdam optimizer and
@@ -44,21 +44,26 @@ def superoffload_optimizer_worker(param_queue: mp.SimpleQueue, result_queue: mp.
     Args:
         param_queue: Queue for receiving optimization tasks
         result_queue: Queue for sending back optimization results
-        optimizer_config: Configuration dictionary for the optimizer containing
-                         lr, betas, eps, weight_decay, and amsgrad parameters
+        optimizer_config: Configuration dictionaries for each optimizer param group.
         max_grad_numel: Maximum number of elements expected in gradient tensors
     """
-    # Initialize dummy parameter for optimizer creation
-    cpu_tensor = torch.randn(1, device="cpu")
-    cpu_param = torch.nn.Parameter(cpu_tensor)
+    # Initialize one dummy parameter per optimizer group so param_group_id
+    # continues to match the main ZeRO optimizer's group layout.
+    dummy_param_groups = []
+    for param_group_config in optimizer_config:
+        cpu_tensor = torch.randn(1, device="cpu")
+        cpu_param = torch.nn.Parameter(cpu_tensor)
+        dummy_param_groups.append({
+            "params": [cpu_param],
+            "lr": param_group_config["lr"],
+            "betas": param_group_config["betas"],
+            "eps": param_group_config["eps"],
+            "weight_decay": param_group_config["weight_decay"],
+            "amsgrad": param_group_config.get("amsgrad", False),
+        })
 
     try:
-        optimizer = DeepSpeedCPUAdam([cpu_param],
-                                     lr=optimizer_config["lr"],
-                                     betas=optimizer_config["betas"],
-                                     eps=optimizer_config["eps"],
-                                     weight_decay=optimizer_config["weight_decay"],
-                                     amsgrad=optimizer_config["amsgrad"])
+        optimizer = DeepSpeedCPUAdam(dummy_param_groups)
     except KeyError as e:
         error_msg = f"Missing required optimizer config key: {e}"
         logger.error(error_msg)

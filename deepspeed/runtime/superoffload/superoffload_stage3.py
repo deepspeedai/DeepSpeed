@@ -30,7 +30,7 @@ class SuperOffloadOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
         **kwargs,
     ):
 
-        self.sub_group_to_param_num = {}
+        self.sub_group_to_param_num = []
         self.params_in_ipg_bucket_buffer = deque()
         self._cur_bucket_index = -1
         self.async_cpuadam_num = 0
@@ -38,17 +38,27 @@ class SuperOffloadOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
 
         super().__init__(module, init_optimizer, param_names, timers, ds_config, **kwargs)
 
-        optimizer_config = {
-            "lr": self.optimizer.param_groups[0]["lr"],
-            "betas": self.optimizer.param_groups[0]["betas"],
-            "eps": self.optimizer.param_groups[0]["eps"],
-            "weight_decay": self.optimizer.param_groups[0]["weight_decay"],
-            "amsgrad": self.optimizer.param_groups[0]["amsgrad"]
-        }
+        optimizer_config = self._get_superoffload_optimizer_config()
         cpuadam_cores_perc = kwargs.get("cpuadam_cores_perc", 0.8)
         self.superoffload_cpu_optimizer = SuperOffloadCPUOptimizer(optimizer_config=optimizer_config,
                                                                    cpuadam_cores_perc=cpuadam_cores_perc,
-                                                                   max_grad_numel=self.max_grad_numel)
+                                                                   max_grad_numel=max(1, self.max_grad_numel))
+
+    def _get_superoffload_optimizer_config(self):
+        optimizer_config = []
+        for param_group in self.optimizer.param_groups:
+            optimizer_config.append({
+                "lr": param_group["lr"],
+                "betas": param_group["betas"],
+                "eps": param_group["eps"],
+                "weight_decay": param_group["weight_decay"],
+                "amsgrad": param_group.get("amsgrad", False)
+            })
+        return optimizer_config
+
+    def _record_sub_group_metadata(self, sub_group, sub_group_numel):
+        self.max_grad_numel = max(self.max_grad_numel, sub_group_numel)
+        self.sub_group_to_param_num.append(len(sub_group))
 
     def _create_fp16_sub_groups(self, params_group):
 
@@ -56,6 +66,7 @@ class SuperOffloadOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
         sub_group_size = self.sub_group_size
 
         if sub_group_size is None or sub_group_size >= params_group_numel:
+            self._record_sub_group_metadata(params_group, params_group_numel)
             return [params_group]
 
         sub_groups = []
@@ -67,9 +78,8 @@ class SuperOffloadOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
             local_sub_group_size += param.partition_numel()
 
             if local_sub_group_size >= sub_group_size or id(param) == id(params_group[-1]):
-                self.max_grad_numel = max(self.max_grad_numel, local_sub_group_size)
+                self._record_sub_group_metadata(sub_group, local_sub_group_size)
                 sub_groups.append(sub_group)
-                self.sub_group_to_param_num[len(sub_groups) - 1] = len(sub_group)
 
                 sub_group = []
                 local_sub_group_size = 0
