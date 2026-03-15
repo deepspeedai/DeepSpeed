@@ -8,7 +8,7 @@ import torch
 from collections import deque
 from typing import List
 
-from deepspeed.runtime.superoffload.superoffload_utils import SuperOffloadCPUOptimizer, TaskKeys, ResultKeys, EventTypes
+from deepspeed.runtime.superoffload.superoffload_utils import SuperOffloadCPUOptimizer, EventTypes
 from deepspeed.runtime.zero.partition_parameters import Parameter, Tensor
 from deepspeed.runtime.zero.stage3 import DeepSpeedZeroOptimizer_Stage3
 from deepspeed.utils.nvtx import instrument_w_nvtx
@@ -32,6 +32,7 @@ class SuperOffloadOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
 
         self.sub_group_to_param_num = []
         self.params_in_ipg_bucket_buffer = deque()
+        self.pending_cpu_grad_copies = deque()
         self._cur_bucket_index = -1
         self.async_cpuadam_num = 0
         self.max_grad_numel = 0
@@ -41,8 +42,7 @@ class SuperOffloadOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
         optimizer_config = self._get_superoffload_optimizer_config()
         cpuadam_cores_perc = kwargs.get("cpuadam_cores_perc", 0.8)
         self.superoffload_cpu_optimizer = SuperOffloadCPUOptimizer(optimizer_config=optimizer_config,
-                                                                   cpuadam_cores_perc=cpuadam_cores_perc,
-                                                                   max_grad_numel=max(1, self.max_grad_numel))
+                                                                   cpuadam_cores_perc=cpuadam_cores_perc)
 
     def _get_superoffload_optimizer_config(self):
         optimizer_config = []
@@ -139,10 +139,6 @@ class SuperOffloadOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
 
     @instrument_w_nvtx
     def _reassign_or_swap_out_partitioned_parameters(self, sub_group_id):
-        if self.subgroup_to_device[sub_group_id] == 'cpu':
-            self._unflatten_partitioned_parameters(sub_group_id)
-            return
-
         if self.fp16_partitioned_groups_flat[sub_group_id] is not None:
             self.fp16_partitioned_groups_flat[sub_group_id].data.copy_(
                 self.fp32_partitioned_groups_flat[sub_group_id].data)
@@ -150,14 +146,54 @@ class SuperOffloadOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
         else:
             self._partitioned_params_swap_out(sub_group_id)
 
-    @instrument_w_nvtx
-    def _reassign_or_swap_out_partitioned_parameters_async(self, sub_group_id, updated_param):
-        """Asynchronously update partitioned parameters with optimized values."""
-        self.fp32_partitioned_groups_flat[sub_group_id].data.copy_(updated_param, non_blocking=True)
+    def _submit_async_cpu_optimizer_step(self, sub_group_id: int, fp32_grad_tensor: Tensor, rollback: bool = False) -> None:
+        fp32_param = self.fp32_partitioned_groups_flat[sub_group_id]
+        param_group_id = self.sub_group_to_group_id[sub_group_id]
+
+        self.superoffload_cpu_optimizer.async_step(param_group_id,
+                                                   sub_group_id,
+                                                   fp32_param,
+                                                   fp32_grad_tensor,
+                                                   rollback=rollback)
+        self.async_cpuadam_num += 1
+
+    def _consume_completed_async_result(self, result) -> bool:
+        if result is None:
+            return False
+
+        self.async_cpuadam_num -= 1
+        return True
+
+    def _submit_ready_cpu_grad_copies(self) -> None:
+        while self.pending_cpu_grad_copies and self.pending_cpu_grad_copies[0]["event"].query():
+            pending_copy = self.pending_cpu_grad_copies.popleft()
+            self._submit_async_cpu_optimizer_step(pending_copy["sub_group_id"], pending_copy["fp32_grad_tensor"])
+
+    def _wait_for_pending_grad_copies(self, timeout_seconds=60):
+        if not self.pending_cpu_grad_copies:
+            return
+
+        start_time = time.time()
+        initial_pending_copies = len(self.pending_cpu_grad_copies)
+
+        while self.pending_cpu_grad_copies:
+            self._submit_ready_cpu_grad_copies()
+            if not self.pending_cpu_grad_copies:
+                return
+
+            elapsed_time = time.time() - start_time
+            if elapsed_time >= timeout_seconds:
+                raise RuntimeError(
+                    f"SuperOffload grad copy timeout after {elapsed_time:.1f} seconds. "
+                    f"Still waiting for {len(self.pending_cpu_grad_copies)}/{initial_pending_copies} "
+                    f"CPU grad copies to complete.")
+
+            time.sleep(0.001)
 
     @instrument_w_nvtx
     def partition_grads(self, params_to_release: List[Parameter], grad_partitions: List[Tensor]) -> None:
         # print("[DEBUG] partition_grads called")
+        self._submit_ready_cpu_grad_copies()
         buffers = []
         device_buffers = {}
         buffer_numel_min = {}
@@ -190,22 +226,17 @@ class SuperOffloadOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
                 concatenated_buffer = torch.cat(device_buffers[i], dim=0).to(dtype=self.master_weights_and_grads_dtype)
 
                 if self.subgroup_to_device[i] == 'cpu':
-                    # Trigger asynchronous CPU optimization
-                    param_group_id = self.sub_group_to_group_id[i]
-                    fp32_param = self.fp32_partitioned_groups_flat[i]
-
-                    self.superoffload_cpu_optimizer.async_step(param_group_id, i, fp32_param.data,
-                                                               concatenated_buffer.data)
-                    self.async_cpuadam_num += 1
-
-                    # Check for completed async operations
-                    result = self.superoffload_cpu_optimizer.get_result()
-                    if result is not None:
-                        self._reassign_or_swap_out_partitioned_parameters_async(result[TaskKeys.SUB_GROUP_ID],
-                                                                                result[ResultKeys.UPDATED_PARAM])
-                        self.async_cpuadam_num -= 1
-
                     fp32_grad_tensor.copy_(concatenated_buffer, non_blocking=True)
+                    copy_event = get_accelerator().Event()
+                    get_accelerator().current_stream().record_event(copy_event)
+                    self.pending_cpu_grad_copies.append({
+                        "sub_group_id": i,
+                        "fp32_grad_tensor": fp32_grad_tensor,
+                        "concatenated_buffer": concatenated_buffer,
+                        "event": copy_event,
+                    })
+                    self._submit_ready_cpu_grad_copies()
+                    self._consume_completed_async_result(self.superoffload_cpu_optimizer.get_result())
                 else:
                     fp32_grad_tensor.copy_(concatenated_buffer, non_blocking=True)
 
@@ -220,6 +251,7 @@ class SuperOffloadOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
         """
             Not supporting closure.
         """
+        self._wait_for_pending_grad_copies()
         # Wait for any pending asynchronous CPU optimizer operations
         self._wait_for_async_operations()
 
@@ -276,7 +308,7 @@ class SuperOffloadOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
 
         while self.async_cpuadam_num > 0:
             result = self.superoffload_cpu_optimizer.get_result()
-            if result is None:
+            if not self._consume_completed_async_result(result):
                 current_time = time.time()
                 elapsed_time = current_time - start_time
 
@@ -290,10 +322,6 @@ class SuperOffloadOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
                 time.sleep(0.001)  # 1ms sleep
                 continue
 
-            self._reassign_or_swap_out_partitioned_parameters_async(result[TaskKeys.SUB_GROUP_ID],
-                                                                    result[ResultKeys.UPDATED_PARAM])
-            self.async_cpuadam_num -= 1
-
     def _wait_for_single_async_result(self, event_type: str, timeout_seconds=60):
         """Wait for a single asynchronous CPU-Adam optimizer operation with timeout.
 
@@ -305,9 +333,7 @@ class SuperOffloadOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
 
         while True:
             result = self.superoffload_cpu_optimizer.get_result(expected_event_type=event_type)
-            if result is not None:
-                self._reassign_or_swap_out_partitioned_parameters_async(result[TaskKeys.SUB_GROUP_ID],
-                                                                        result[ResultKeys.UPDATED_PARAM])
+            if self._consume_completed_async_result(result):
                 break
 
             current_time = time.time()
@@ -321,57 +347,32 @@ class SuperOffloadOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
             time.sleep(0.001)  # 1ms sleep
 
     def _sync_cpu_optimizer_step(self,
-                                 param_group_id: int,
                                  sub_group_id: int,
-                                 fp32_param_data,
-                                 fp32_grad_data,
                                  rollback: bool = False,
                                  timeout_seconds: int = 60):
         event_type = EventTypes.ROLLBACK if rollback else EventTypes.ADAM_STEP
-        self.superoffload_cpu_optimizer.async_step(param_group_id,
-                                                   sub_group_id,
-                                                   fp32_param_data,
-                                                   fp32_grad_data,
-                                                   rollback=rollback)
-        # Wait for completion
+        fp32_grad = self.fp32_partitioned_groups_flat[sub_group_id].grad
+        self._submit_async_cpu_optimizer_step(sub_group_id, fp32_grad, rollback=rollback)
         self._wait_for_single_async_result(event_type, timeout_seconds)
 
     def _handle_overflow_rollback(self):
         """Handle gradient overflow by rolling back CPU optimizer states."""
         for sub_group_id, _ in enumerate(self.fp16_groups):
             if self.subgroup_to_device[sub_group_id] == 'cpu':
-                param_group_id = self.sub_group_to_group_id[sub_group_id]
-                fp32_param = self.fp32_partitioned_groups_flat[sub_group_id]
-
                 # Trigger rollback
-                self._sync_cpu_optimizer_step(param_group_id,
-                                              sub_group_id,
-                                              fp32_param.data,
-                                              fp32_param.grad.data,
-                                              rollback=True)
+                self._sync_cpu_optimizer_step(sub_group_id, rollback=True)
 
     def _handle_gradient_clipping(self, scaled_global_grad_norm):
         """Handle gradient clipping with CPU optimizer rollback and re-optimization."""
         for sub_group_id, _ in enumerate(self.fp16_groups):
             if self.subgroup_to_device[sub_group_id] == 'cpu':
-                param_group_id = self.sub_group_to_group_id[sub_group_id]
-                fp32_param = self.fp32_partitioned_groups_flat[sub_group_id]
-
                 # Rollback CPU optimizer states
-                self._sync_cpu_optimizer_step(param_group_id,
-                                              sub_group_id,
-                                              fp32_param.data,
-                                              fp32_param.grad.data,
-                                              rollback=True)
+                self._sync_cpu_optimizer_step(sub_group_id, rollback=True)
 
                 # Clip gradients and re-optimize
                 self.unscale_and_clip_grads(sub_group_id, scaled_global_grad_norm)
 
-                self._sync_cpu_optimizer_step(param_group_id,
-                                              sub_group_id,
-                                              fp32_param.data,
-                                              fp32_param.grad.data,
-                                              rollback=False)
+                self._sync_cpu_optimizer_step(sub_group_id, rollback=False)
 
     @instrument_w_nvtx
     def check_clip_grads(self, total_norm):

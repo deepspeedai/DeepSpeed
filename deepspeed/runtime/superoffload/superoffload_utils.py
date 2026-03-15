@@ -17,7 +17,7 @@ from deepspeed.utils import logger
 
 
 class TaskKeys:
-    PARAM_DATA = "param_data"
+    PARAM = "param"
     PARAM_GRAD = "param_grad"
     PARAM_GROUP_ID = "param_group_id"
     SUB_GROUP_ID = "sub_group_id"
@@ -25,7 +25,6 @@ class TaskKeys:
 
 
 class ResultKeys:
-    UPDATED_PARAM = "updated_param"
     EVENT_TYPE = "event_type"
 
 
@@ -34,8 +33,16 @@ class EventTypes:
     ROLLBACK = "rollback"
 
 
+def _ensure_shared_cpu_tensor(tensor: torch.Tensor, tensor_name: str) -> None:
+    if tensor.device.type != "cpu":
+        raise RuntimeError(f"SuperOffload expects {tensor_name} to be on CPU, but got {tensor.device}")
+
+    if not tensor.is_shared():
+        tensor.share_memory_()
+
+
 def superoffload_optimizer_worker(param_queue: mp.SimpleQueue, result_queue: mp.SimpleQueue,
-                                  optimizer_config: List[Dict[str, Any]], max_grad_numel: int) -> None:
+                                  optimizer_config: List[Dict[str, Any]]) -> None:
     """
     This function runs in a separate process and continuously processes optimization
     tasks from the parameter queue. It creates a DeepSpeedCPUAdam optimizer and
@@ -45,7 +52,6 @@ def superoffload_optimizer_worker(param_queue: mp.SimpleQueue, result_queue: mp.
         param_queue: Queue for receiving optimization tasks
         result_queue: Queue for sending back optimization results
         optimizer_config: Configuration dictionaries for each optimizer param group.
-        max_grad_numel: Maximum number of elements expected in gradient tensors
     """
     # Initialize one dummy parameter per optimizer group so param_group_id
     # continues to match the main ZeRO optimizer's group layout.
@@ -70,9 +76,6 @@ def superoffload_optimizer_worker(param_queue: mp.SimpleQueue, result_queue: mp.
         result_queue.put({"error": error_msg})
         return
 
-    # Pre-allocate reusable pinned memory buffer for gradients
-    pinned_grad_buffer = torch.empty(max_grad_numel, dtype=torch.float32, device='cpu', pin_memory=True)
-
     while True:
         try:
             task = param_queue.get()
@@ -81,7 +84,7 @@ def superoffload_optimizer_worker(param_queue: mp.SimpleQueue, result_queue: mp.
                 logger.debug("Received termination signal, shutting down worker")
                 break
 
-            param_data = task[TaskKeys.PARAM_DATA]
+            fp32_param = task[TaskKeys.PARAM]
             param_grad = task[TaskKeys.PARAM_GRAD]
             param_group_id = task[TaskKeys.PARAM_GROUP_ID]
             sub_group_id = task[TaskKeys.SUB_GROUP_ID]
@@ -89,23 +92,9 @@ def superoffload_optimizer_worker(param_queue: mp.SimpleQueue, result_queue: mp.
 
             logger.debug(f"Processing param_group_id: {param_group_id}, sub_group_id: {sub_group_id}")
 
-            del task[TaskKeys.PARAM_DATA]
-            del task[TaskKeys.PARAM_GRAD]
             task.clear()
 
-            grad_numel = param_grad.numel()
-            if grad_numel > max_grad_numel:
-                error_msg = (
-                    f"Gradient size {grad_numel} exceeds pre-allocated buffer size {max_grad_numel}. "
-                    f"This indicates insufficient buffer allocation. Please increase max_grad_numel parameter.")
-                result_queue.put({"error": error_msg})
-                break
-
-            param_grad_cpu = pinned_grad_buffer[:grad_numel].view_as(param_grad)
-            param_grad_cpu.copy_(param_grad, non_blocking=True)
-
-            fp32_param = torch.nn.Parameter(param_data)
-            fp32_param.grad = param_grad_cpu
+            fp32_param.grad = param_grad
 
             optimizer.param_groups[param_group_id]['params'] = [fp32_param]
 
@@ -120,13 +109,12 @@ def superoffload_optimizer_worker(param_queue: mp.SimpleQueue, result_queue: mp.
             result_queue.put({
                 TaskKeys.PARAM_GROUP_ID: param_group_id,
                 TaskKeys.SUB_GROUP_ID: sub_group_id,
-                ResultKeys.UPDATED_PARAM: fp32_param.data,
                 ResultKeys.EVENT_TYPE: event_type,
             })
 
             # Clean up references to free memory
             optimizer.param_groups[param_group_id]['params'] = []
-            del param_grad_cpu, fp32_param.grad, fp32_param, param_grad, param_data
+            fp32_param.grad = None
 
         except KeyError as e:
             error_msg = f"Missing required task key: {e}"
@@ -139,31 +127,24 @@ def superoffload_optimizer_worker(param_queue: mp.SimpleQueue, result_queue: mp.
             result_queue.put({"error": error_msg})
             break
 
-    # Clean up pinned memory buffer
-    if 'pinned_grad_buffer' in locals():
-        del pinned_grad_buffer
-        logger.debug("Cleaned up pinned memory buffer")
-
     logger.debug("Worker process terminated")
 
 
 class SuperOffloadCPUOptimizer:
 
     def __init__(self,
-                 optimizer_config: Dict[str, Any],
-                 cpuadam_cores_perc: float = 0.8,
-                 max_grad_numel: int = 1000000) -> None:
+                 optimizer_config: List[Dict[str, Any]],
+                 cpuadam_cores_perc: float = 0.8) -> None:
         if not 0 < cpuadam_cores_perc <= 1:
             raise ValueError("cpuadam_cores_perc must be between 0 and 1")
 
-        self.max_grad_numel = max_grad_numel
         self.mp_context = mp.get_context('spawn')
         self.param_queue = self.mp_context.SimpleQueue()
         self.result_queue = self.mp_context.SimpleQueue()
 
         self.cpuadam_process = self.mp_context.Process(
             target=superoffload_optimizer_worker,
-            args=(self.param_queue, self.result_queue, optimizer_config, max_grad_numel),
+            args=(self.param_queue, self.result_queue, optimizer_config),
             daemon=True,
         )
         self.cpuadam_process.start()
@@ -214,8 +195,11 @@ class SuperOffloadCPUOptimizer:
         if not self.cpuadam_process.is_alive():
             raise RuntimeError("Worker process is not alive")
 
+        _ensure_shared_cpu_tensor(fp32_param.data, "fp32_param")
+        _ensure_shared_cpu_tensor(fp32_grad, "fp32_grad")
+
         self.param_queue.put({
-            TaskKeys.PARAM_DATA: fp32_param,
+            TaskKeys.PARAM: fp32_param,
             TaskKeys.PARAM_GRAD: fp32_grad,
             TaskKeys.PARAM_GROUP_ID: param_group_id,
             TaskKeys.SUB_GROUP_ID: sub_group_id,
