@@ -132,9 +132,7 @@ def superoffload_optimizer_worker(param_queue: mp.SimpleQueue, result_queue: mp.
 
 class SuperOffloadCPUOptimizer:
 
-    def __init__(self,
-                 optimizer_config: List[Dict[str, Any]],
-                 cpuadam_cores_perc: float = 0.8) -> None:
+    def __init__(self, optimizer_config: List[Dict[str, Any]], cpuadam_cores_perc: float = 0.8) -> None:
         if not 0 < cpuadam_cores_perc <= 1:
             raise ValueError("cpuadam_cores_perc must be between 0 and 1")
 

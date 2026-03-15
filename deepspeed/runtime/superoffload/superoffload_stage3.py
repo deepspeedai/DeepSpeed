@@ -146,7 +146,10 @@ class SuperOffloadOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
         else:
             self._partitioned_params_swap_out(sub_group_id)
 
-    def _submit_async_cpu_optimizer_step(self, sub_group_id: int, fp32_grad_tensor: Tensor, rollback: bool = False) -> None:
+    def _submit_async_cpu_optimizer_step(self,
+                                         sub_group_id: int,
+                                         fp32_grad_tensor: Tensor,
+                                         rollback: bool = False) -> None:
         fp32_param = self.fp32_partitioned_groups_flat[sub_group_id]
         param_group_id = self.sub_group_to_group_id[sub_group_id]
 
@@ -183,10 +186,9 @@ class SuperOffloadOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
 
             elapsed_time = time.time() - start_time
             if elapsed_time >= timeout_seconds:
-                raise RuntimeError(
-                    f"SuperOffload grad copy timeout after {elapsed_time:.1f} seconds. "
-                    f"Still waiting for {len(self.pending_cpu_grad_copies)}/{initial_pending_copies} "
-                    f"CPU grad copies to complete.")
+                raise RuntimeError(f"SuperOffload grad copy timeout after {elapsed_time:.1f} seconds. "
+                                   f"Still waiting for {len(self.pending_cpu_grad_copies)}/{initial_pending_copies} "
+                                   f"CPU grad copies to complete.")
 
             time.sleep(0.001)
 
@@ -346,10 +348,7 @@ class SuperOffloadOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
 
             time.sleep(0.001)  # 1ms sleep
 
-    def _sync_cpu_optimizer_step(self,
-                                 sub_group_id: int,
-                                 rollback: bool = False,
-                                 timeout_seconds: int = 60):
+    def _sync_cpu_optimizer_step(self, sub_group_id: int, rollback: bool = False, timeout_seconds: int = 60):
         event_type = EventTypes.ROLLBACK if rollback else EventTypes.ADAM_STEP
         fp32_grad = self.fp32_partitioned_groups_flat[sub_group_id].grad
         self._submit_async_cpu_optimizer_step(sub_group_id, fp32_grad, rollback=rollback)
