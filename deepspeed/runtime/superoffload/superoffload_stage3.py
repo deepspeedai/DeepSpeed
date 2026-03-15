@@ -110,7 +110,7 @@ class SuperOffloadOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
 
         if len(bucket.params) == 0:
             self._cur_bucket_index = i
-            if getattr(param, "ds_grad_is_ready", True):
+            if getattr(param, "ds_grad_is_ready", True) and param.grad is not None:
                 self._DeepSpeedZeroOptimizer_Stage3__add_grad_to_ipg_bucket(param)
 
             # If this is a single-parameter sub-group, reduce immediately
@@ -122,7 +122,7 @@ class SuperOffloadOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
             self.params_in_ipg_bucket_buffer.append(param)
         else:
             # Parameter belongs to current bucket
-            if getattr(param, "ds_grad_is_ready", True):
+            if getattr(param, "ds_grad_is_ready", True) and param.grad is not None:
                 self._DeepSpeedZeroOptimizer_Stage3__add_grad_to_ipg_bucket(param)
 
             # Check if bucket is complete
@@ -132,10 +132,9 @@ class SuperOffloadOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
                 # Process buffered parameters
                 while self.params_in_ipg_bucket_buffer:
                     buffered_param = self.params_in_ipg_bucket_buffer.popleft()
-                    ci, _, _ = self.grad_position[self.get_param_id(buffered_param)]
-                    self._cur_bucket_index = ci
-                    if getattr(buffered_param, "ds_grad_is_ready", True):
-                        self._DeepSpeedZeroOptimizer_Stage3__add_grad_to_ipg_bucket(buffered_param)
+                    if buffered_param.grad is None:
+                        continue
+                    self.reduce_independent_p_g_buckets_and_remove_grads(buffered_param)
 
     @instrument_w_nvtx
     def _reassign_or_swap_out_partitioned_parameters(self, sub_group_id):
