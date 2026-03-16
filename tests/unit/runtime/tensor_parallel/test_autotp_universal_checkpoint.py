@@ -14,8 +14,10 @@ def test_collect_autotp_universal_checkpoint_info_row_parallel():
 
     uc_info = collect_autotp_universal_checkpoint_info(model)
 
-    assert any("proj.weight" in p for p in uc_info[PARAMETER_WITH_ROW_PARALLELISM_PATTERNS])
-    assert any("proj.bias" in p for p in uc_info[TP_REPLICATED_PARAMETER_PATTERNS])
+    # collect_autotp_universal_checkpoint_info() stores regex patterns like r"^proj\.weight$"
+    assert r"^proj\.weight$" in uc_info[PARAMETER_WITH_ROW_PARALLELISM_PATTERNS]
+    # bias in LinearAllreduce is marked replicated, so it should appear in replicated patterns
+    assert r"^proj\.bias$" in uc_info[TP_REPLICATED_PARAMETER_PATTERNS]
 
 
 def test_collect_autotp_universal_checkpoint_info_subparams():
@@ -47,7 +49,7 @@ def test_collect_autotp_universal_checkpoint_info_column_parallel_bias_not_repli
 def test_collect_autotp_universal_checkpoint_info_subparams_preserves_shape_metadata():
     layer = SubParamLinearLayer(torch.nn.Linear(12, 12, bias=True),
                                 mp_group=None,
-                                shape=((2, 1), -1),
+                                shape=((2, 10), 12),
                                 partition_dim=0,
                                 name="fused")
     model = torch.nn.Module()
@@ -55,7 +57,7 @@ def test_collect_autotp_universal_checkpoint_info_subparams_preserves_shape_meta
 
     uc_info = collect_autotp_universal_checkpoint_info(model)
 
-    assert uc_info[PARAMETER_WITH_SUB_PARAMS][0]["shape"] == [(2, 1), -1]
+    assert uc_info[PARAMETER_WITH_SUB_PARAMS][0]["shape"] == [(2, 10), 12]
 
 
 def test_subparam_layer_marks_standardized_param_metadata():
