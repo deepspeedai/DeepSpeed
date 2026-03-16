@@ -2014,18 +2014,34 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
 
     def scaled_global_norm(self, norm_type=2):
         assert norm_type == 2, "only L2 norm supported"
+        # Collect per-parameter-group squared-norms so MoE averaging can
+        # operate on a per-group basis instead of a single accumulated value.
+        group_sq_norms = []
         local_total_sq_norm = torch.zeros(1, device=self.device, dtype=self.gradient_accumulation_dtype)
         for i, _ in enumerate(self.bit16_groups):
             if self.cpu_offload:
                 group_sq_norm = self.complete_grad_norm_calculation_for_cpu_offload(self.params_in_partition[i])
             else:
                 group_sq_norm = self.get_grad_norm_direct(self.averaged_gradients[i], self.params_in_partition[i])
+            group_sq_norms.append(group_sq_norm)
             local_total_sq_norm += group_sq_norm
 
         if self.has_moe_layers:
-            self._average_expert_grad_norms(local_total_sq_norm)
+            # _average_expert_grad_norms expects an indexable collection of per-group norms
+            # and updates them in-place for MoE groups. Pass the list instead of the
+            # single accumulated tensor so expert and non-expert groups are scaled
+            # correctly prior to global reduction.
+            self._average_expert_grad_norms(group_sq_norms)
 
-        local_total_sq_norm = local_total_sq_norm.to(torch.cuda.current_device())
+            # Recompute the total from possibly-updated per-group norms to reflect
+            # any MoE-specific averaging that occurred.
+            local_total_sq_norm = torch.zeros(1, device=self.device, dtype=self.gradient_accumulation_dtype)
+            for g in group_sq_norms:
+                # ensure device/dtype compatibility when summing
+                local_total_sq_norm += g.to(local_total_sq_norm.device)
+
+        # Move tensor to the current accelerator device (supports non-CUDA backends)
+        local_total_sq_norm = local_total_sq_norm.to(get_accelerator().current_device_name())
         dist.all_reduce(
             local_total_sq_norm,
             op=dist.ReduceOp.SUM,
