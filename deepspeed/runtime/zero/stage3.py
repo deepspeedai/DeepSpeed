@@ -191,7 +191,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         enable_sanity_checks=False,
         cpuadam_cores_perc=0.8,
     ):
-        see_memory_usage("Stage 3 initialize beginning", force=True)
+        see_memory_usage("Stage 3 initialize beginning", force=False)
 
         print_rank_0(f"initialized {__class__.__name__} with args: {locals()}", force=False)
         super().__init__()
@@ -406,10 +406,10 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         # Trainable parameters
         self.trainable_param_groups = self._get_trainable_parameter_groups()
 
-        see_memory_usage("Before creating fp16 partitions", force=True)
+        see_memory_usage("Before creating fp16 partitions", force=False)
         self._create_fp16_partitions_with_defragmentation(self.trainable_param_groups)
         num_fp16_subgroups = len(self.fp16_partitioned_groups_flat)
-        see_memory_usage(f"After creating fp16 partitions: {num_fp16_subgroups}", force=True)
+        see_memory_usage(f"After creating fp16 partitions: {num_fp16_subgroups}", force=False)
 
         # Optimizer tensor swapping
         if self.swap_optimizer:
@@ -494,7 +494,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         self.offloaded_states: Set[OffloadDeviceEnum] = set()
 
         if dist.get_rank(group=self.dp_process_group) == 0:
-            see_memory_usage("After initializing ZeRO optimizer", force=True)
+            see_memory_usage("After initializing ZeRO optimizer", force=False)
 
     def destroy(self):
         self.parameter_offload.destroy()
@@ -593,18 +593,18 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                     param.ds_secondary_tensor = None
 
     def _setup_for_real_optimizer(self):
-        see_memory_usage("Before creating fp32 partitions", force=True)
+        see_memory_usage("Before creating fp32 partitions", force=False)
         self._create_fp32_partitions()
-        see_memory_usage("After creating fp32 partitions", force=True)
+        see_memory_usage("After creating fp32 partitions", force=False)
         dist.barrier()
 
         # To support pipelined optimizer swapping
         self._create_next_swappable_fp32_groups()
 
-        see_memory_usage("Before initializing optimizer states", force=True)
+        see_memory_usage("Before initializing optimizer states", force=False)
 
         self.initialize_optimizer_states()
-        see_memory_usage("After initializing optimizer states", force=True)
+        see_memory_usage("After initializing optimizer states", force=False)
         dist.barrier()
 
         if dist.get_rank() == 0:
@@ -1279,14 +1279,19 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
                         @instrument_w_nvtx
                         def reduce_partition_and_remove_grads(*notneeded):
+                            # Evaluate refresh condition before reenter_backward_if_needed()
+                            refresh_expected = self.should_refresh_expected_hook_count()
                             # Re-enter backward for subsequent phases in reentrant checkpointing
                             self.reenter_backward_if_needed()
 
                             self.reduce_ready_partitions_and_remove_grads(param)
 
                             # Update hook state and run epilogue if all expected hooks have fired
-                            current_expected = count_used_parameters_in_backward(
-                                non_leaf_params_requiring_grad) + leaf_module_count
+                            if refresh_expected:
+                                current_expected = count_used_parameters_in_backward(
+                                    non_leaf_params_requiring_grad) + leaf_module_count
+                            else:
+                                current_expected = self._max_expected_hooks_seen
                             self.update_hook_state_and_maybe_run_epilogue(current_expected)
 
                         self._grad_acc_hooks.append(register_grad_hook(param, reduce_partition_and_remove_grads))
@@ -1303,6 +1308,8 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             def make_hook(params):
 
                 def reduce_leaf_module_grads(module, grad_input, grad_output):
+                    # Evaluate refresh condition before reenter_backward_if_needed()
+                    refresh_expected = self.should_refresh_expected_hook_count()
                     self.reenter_backward_if_needed()
 
                     for param in params:
@@ -1311,8 +1318,11 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                             param.grad = torch.zeros_like(param)
                         self.reduce_ready_partitions_and_remove_grads(param)
 
-                    current_expected = count_used_parameters_in_backward(
-                        non_leaf_params_requiring_grad) + leaf_module_count
+                    if refresh_expected:
+                        current_expected = count_used_parameters_in_backward(
+                            non_leaf_params_requiring_grad) + leaf_module_count
+                    else:
+                        current_expected = self._max_expected_hooks_seen
                     self.update_hook_state_and_maybe_run_epilogue(current_expected)
 
                 return reduce_leaf_module_grads
@@ -1350,7 +1360,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
     @torch.no_grad()
     def __add_grad_to_ipg_bucket(self, param: Parameter) -> None:
         if not get_accelerator().resolves_data_dependency():
-            self.reduce_and_partition_stream.wait_stream(get_accelerator().default_stream())
+            self.reduce_and_partition_stream.wait_stream(get_accelerator().current_stream())
 
         bucket = self.ipg_buckets[self.get_param_comm_dtype(param)]
         if self.contiguous_gradients and bucket.elements + param.grad.numel() <= self.reduce_bucket_size:

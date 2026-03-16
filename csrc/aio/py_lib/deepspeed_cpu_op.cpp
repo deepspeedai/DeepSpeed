@@ -45,7 +45,9 @@ void cpu_op_desc_t::finish()
             if (_buffer.is_xpu()) { _buffer.copy_(_cpu_buffer.to(torch::kXPU)); }
             if (_buffer.is_cpu()) { _buffer.copy_(_cpu_buffer); }
 #if defined(__ENABLE_CANN__)
-            if (torch_npu::utils::is_npu(_buffer)) {
+            // `DS_BUILD_OPS=1 install.sh` complains that ‘torch_npu’ has not
+            // been declared, so inline `torch_npu::utils::is_npu`.
+            if (_buffer.is_privateuseone()) {
                 auto device = at::Device("npu:0");
                 _buffer.copy_(_cpu_buffer.to(device));
             }

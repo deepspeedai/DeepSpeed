@@ -16,12 +16,6 @@ class EvoformerAttnBuilder(CUDAOpBuilder):
         name = self.NAME if name is None else name
         super().__init__(name=name)
         self.cutlass_path = os.environ.get("CUTLASS_PATH")
-        # Target GPU architecture.
-        # Current useful values are: 70, 75, 80.
-        # For modern GPUs, 80 is the right value.
-        # No specializations of the kernel beyond Ampere are implemented
-        # See gemm_kernel_utils.h (also in cutlass example for fused attention) and cutlass/arch/arch.h
-        self.gpu_arch = os.environ.get("DS_EVOFORMER_GPU_ARCH")
 
     def absolute_name(self):
         return f"deepspeed.ops.{self.NAME}_op"
@@ -37,19 +31,23 @@ class EvoformerAttnBuilder(CUDAOpBuilder):
         return [f"{src_dir}/attention.cpp", f"{src_dir}/attention_back.cu", f"{src_dir}/attention_cu.cu"]
 
     def nvcc_args(self):
-        args = super().nvcc_args()
-        if not self.gpu_arch:
-            try:
-                import torch
-            except ImportError:
-                self.warning("Please install torch if trying to pre-compile kernels")
-                return args
-            major = torch.cuda.get_device_properties(0).major  #ignore-cuda
-            minor = torch.cuda.get_device_properties(0).minor  #ignore-cuda
-            args.append(f"-DGPU_ARCH={major}{minor}")
-        else:
-            args.append(f"-DGPU_ARCH={self.gpu_arch}")
-        return args
+        if os.environ.get("DS_EVOFORMER_GPU_ARCH"):
+            self.warning("DS_EVOFORMER_GPU_ARCH is deprecated and ignored for Evoformer builds. "
+                         "Use TORCH_CUDA_ARCH_LIST to control build targets.")
+        return super().nvcc_args()
+
+    def filter_ccs(self, ccs):
+        """Keep only Tensor Core capable targets (>= 7.0)."""
+        retained = []
+        pruned = []
+        for cc in [cc.split('.') for cc in ccs]:
+            if int(cc[0]) >= 7:
+                retained.append(cc)
+            else:
+                pruned.append(cc)
+        if pruned:
+            self.warning(f"Evoformer: excluding targets below SM 7.0: {pruned}. Tensor Core required.")
+        return retained
 
     def is_compatible(self, verbose=False):
         try:
@@ -115,7 +113,7 @@ class EvoformerAttnBuilder(CUDAOpBuilder):
         if not cutlass_path.is_dir():
             raise RuntimeError(f"CUTLASS_PATH {cutlass_path} does not exist")
         include_dirs = cutlass_path / "include", cutlass_path / "tools" / "util" / "include"
-        include_dirs = [include_dir for include_dir in include_dirs if include_dir.is_dir()]
+        include_dirs = [str(include_dir) for include_dir in include_dirs if include_dir.is_dir()]
         if not include_dirs:
             raise RuntimeError(f"CUTLASS_PATH {cutlass_path} does not contain any include directories")
         return include_dirs

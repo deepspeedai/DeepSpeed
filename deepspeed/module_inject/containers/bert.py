@@ -41,7 +41,7 @@ class HFBertLayerPolicy(TransformerPolicy):
                     transformers.models.bert.modeling_bert.BertLayer,
                     transformers.models.roberta.modeling_roberta.RobertaLayer
                 ]
-            except:
+            except Exception:
                 HFBertLayerPolicy._orig_layer_class = None
 
     def get_hidden_heads(self):

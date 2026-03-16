@@ -192,11 +192,6 @@ class SDAA_Accelerator(DeepSpeedAccelerator):
         return supported_dtypes
 
     # Misc
-    def amp(self):
-        if hasattr(torch.sdaa, 'amp'):
-            return torch.sdaa.amp
-        return None
-
     def is_available(self):
         return torch.sdaa.is_available()
 

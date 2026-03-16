@@ -68,7 +68,7 @@ class ReplaceWithTensorSlicing:
             if src_shape[outer_dim] == dst_shape[self.out_dim]:
                 try:
                     dst = dst.reshape(-1).data.copy_(src.data.reshape(-1)).reshape(src.shape)
-                except:
+                except Exception:
                     print(dst.shape, src.shape)
                     exit()
                 dst = torch.nn.parameter.Parameter(dst, requires_grad=False)

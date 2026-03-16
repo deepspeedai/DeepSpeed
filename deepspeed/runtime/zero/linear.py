@@ -23,7 +23,6 @@ from torch import Tensor
 from torch.nn.parameter import Parameter
 from torch.nn import init
 from torch.nn.modules.module import Module
-from deepspeed.runtime.utils import noop_decorator
 from deepspeed import comm as dist
 from deepspeed.accelerator import get_accelerator
 
@@ -33,18 +32,8 @@ def print_rank_0(message, debug=False, force=False):
         print(message)
 
 
-try:
-    # Fix `torch.[device].amp.custom_fwd/bwd` FutureWarning in torch 2.4
-    if hasattr(torch, 'amp') and hasattr(torch.amp, 'custom_fwd') and hasattr(torch.amp, 'custom_bwd'):
-        autocast_custom_fwd = functools.partial(torch.amp.custom_fwd, device_type=get_accelerator().device_name())
-        autocast_custom_bwd = functools.partial(torch.amp.custom_bwd, device_type=get_accelerator().device_name())
-    else:
-        # original implementation
-        autocast_custom_fwd = get_accelerator().amp().custom_fwd
-        autocast_custom_bwd = get_accelerator().amp().custom_bwd
-except (ImportError, AttributeError) as exp:
-    autocast_custom_fwd = noop_decorator
-    autocast_custom_bwd = noop_decorator
+autocast_custom_fwd = functools.partial(torch.amp.custom_fwd, device_type=get_accelerator().device_name())
+autocast_custom_bwd = functools.partial(torch.amp.custom_bwd, device_type=get_accelerator().device_name())
 
 
 class LinearFunctionForZeroStage3(torch.autograd.Function):

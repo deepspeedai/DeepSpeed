@@ -3,7 +3,7 @@ title: "Automatic Tensor Parallelism for HuggingFace Models"
 tags: inference
 ---
 
-> **Note:** This tutorial covers AutoTP for **inference**. For **training** with tensor parallelism and ZeRO optimization, see [AutoTP Training API](autotp-training).
+> **Note:** This tutorial covers AutoTP for **inference**. For **training** with tensor parallelism and ZeRO optimization, see [Automatic Tensor Parallelism (Training)](/tutorials/autotp-training/).
 
 # Contents
    * [Introduction](#introduction)

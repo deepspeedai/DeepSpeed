@@ -1,11 +1,9 @@
 ---
-title: "AutoTP Training API"
+title: "Automatic Tensor Parallelism (Training)"
 tags: training tensor-parallelism
 ---
 
-# AutoTP Training API
-
-This tutorial covers the **AutoTP Training API** for combining tensor parallelism with ZeRO optimization during training. For inference-only tensor parallelism, see [Automatic Tensor Parallelism for HuggingFace Models](automatic-tensor-parallelism).
+This tutorial covers **Automatic Tensor Parallelism** for combining tensor parallelism with ZeRO optimization during training. For inference-only tensor parallelism, see [Automatic Tensor Parallelism (Inference)](/tutorials/automatic-tensor-parallelism/).
 
 ## Contents
 - [Introduction](#introduction)
@@ -87,7 +85,7 @@ If your model matches a built-in preset, set `tensor_parallel.preset_model` in t
 }
 ```
 
-For the list of available presets, see [supported models](../code-docs/training#autotp-supported-models).
+For the list of available presets, see [supported models](/code-docs/training#autotp-supported-models).
 
 
 
@@ -183,6 +181,6 @@ For Grouped Query Attention with different Q/K/V sizes:
 
 ## See Also
 
-- [Automatic Tensor Parallelism for Inference](automatic-tensor-parallelism)
-- [ZeRO Optimization](zero)
-- [DeepSpeed Configuration](config-json)
+- [Automatic Tensor Parallelism (Inference)](/tutorials/automatic-tensor-parallelism/)
+- [ZeRO Optimization](/tutorials/zero/)
+- [DeepSpeed Configuration](/docs/config-json/)

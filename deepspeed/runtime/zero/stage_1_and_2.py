@@ -14,6 +14,7 @@ from torch._utils import _flatten_dense_tensors, _unflatten_dense_tensors
 from deepspeed.runtime.zenflow import zenflow_utils
 
 import gc
+import math
 from typing import Container
 from deepspeed.runtime.zero.offload_states import offload_optimizer_states, reload_optimizer_states
 from deepspeed.runtime.base_optimizer import ZeROOptimizer
@@ -366,18 +367,29 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             # not sure why apex was cloning the weights before flattening
             # removing cloning here
 
-            see_memory_usage(f"Before moving param group {i} to CPU")
-            # move all the parameters to cpu to free up GPU space for creating flat buffer
-
-            # Create temp CPU param copies, free accelerator tensors
-            orig_group_numel = 0
-            for param in self.bit16_groups[i]:
-                orig_group_numel += param.numel()
-                param.cpu_data = param.data.cpu()
-                param.data = torch.empty(1).to(param.device)
+            # Compute group size for VRAM check (need 2x model size on GPU to flatten in place: params + flat copy)
+            orig_group_numel = sum(param.numel() for param in self.bit16_groups[i])
+            alignment = self.nccl_start_alignment_factor * dist.get_world_size(group=self.real_dp_process_group[i])
+            aligned_numel = int(math.ceil(orig_group_numel / alignment)) * alignment
+            param_dtype = self.bit16_groups[i][0].dtype
+            element_size = torch.tensor([], dtype=param_dtype).element_size()
+            flat_buffer_bytes = aligned_numel * element_size
 
             empty_cache()
-            see_memory_usage(f"After moving param group {i} to CPU", force=False)
+            accelerator = get_accelerator()
+            available_vram = accelerator.available_memory() if accelerator.is_available() else 0
+            # Flatten on GPU only if we have enough VRAM for the flat buffer (2x = params already there + copy)
+            flatten_on_gpu = (accelerator.is_available() and (available_vram >= flat_buffer_bytes))
+
+            if not flatten_on_gpu:
+                see_memory_usage(f"Before moving param group {i} to CPU")
+                # move all the parameters to cpu to free up GPU space for creating flat buffer
+                for param in self.bit16_groups[i]:
+                    param.cpu_data = param.data.cpu()
+                    param.data = torch.empty(1).to(param.device)
+
+                empty_cache()
+                see_memory_usage(f"After moving param group {i} to CPU", force=False)
 
             # Reorder group parameters for load balancing of gradient partitioning during backward among ranks.
             # This ensures that gradients are reduced in a fashion such that ownership round robins among the ranks.
@@ -396,24 +408,35 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             # Create meta tensors list, ordered according to round_robin_tensors
             meta_tensors = []
             for param in round_robin_tensors:
-                meta_tensors.append(torch.zeros_like(param.cpu_data, device="meta"))
+                if flatten_on_gpu:
+                    meta_tensors.append(torch.zeros_like(param.data, device="meta"))
+                else:
+                    meta_tensors.append(torch.zeros_like(param.cpu_data, device="meta"))
             self.round_robin_bit16_meta.append(meta_tensors)
 
-            # create flat buffer in CPU
-            flattened_buffer = self.flatten_dense_tensors_aligned(
-                self.round_robin_bit16_groups[i],
-                self.nccl_start_alignment_factor * dist.get_world_size(group=self.real_dp_process_group[i]),
-                use_cpu_data=True)
+            if flatten_on_gpu:
+                logger.info(f"Flattening param group {i} on GPU (sufficient VRAM)")
+                flattened_buffer = self.flatten_dense_tensors_aligned(self.round_robin_bit16_groups[i],
+                                                                      alignment,
+                                                                      use_cpu_data=False)
+                self.bit16_groups_flat.append(flattened_buffer)
+                see_memory_usage(f"After flattening param group {i} on GPU", force=False)
+            else:
+                logger.info(f"Flattening param group {i} on CPU (insufficient VRAM)")
 
-            # free temp CPU params
-            for param in self.bit16_groups[i]:
-                del param.cpu_data
+                flattened_buffer = self.flatten_dense_tensors_aligned(self.round_robin_bit16_groups[i],
+                                                                      alignment,
+                                                                      use_cpu_data=True)
 
-            # Move CPU flat tensor to the accelerator memory.
-            self.bit16_groups_flat.append(flattened_buffer.to(get_accelerator().current_device_name()))
-            del flattened_buffer
+                # free temp CPU params
+                for param in self.bit16_groups[i]:
+                    del param.cpu_data
 
-            see_memory_usage(f"After flattening and moving param group {i} to GPU", force=False)
+                # Move CPU flat tensor to the accelerator memory.
+                self.bit16_groups_flat.append(flattened_buffer.to(get_accelerator().current_device_name()))
+                del flattened_buffer
+
+                see_memory_usage(f"After flattening and moving param group {i} to GPU", force=False)
 
             if dist.get_rank(group=self.real_dp_process_group[i]) == 0:
                 see_memory_usage(f"After Flattening and after emptying param group {i} cache", force=False)
@@ -610,15 +633,15 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             assert self.loss_scaler.cur_scale == 1.0
             assert not self.dynamic_loss_scale
 
-        see_memory_usage("Before initializing optimizer states", force=True)
+        see_memory_usage("Before initializing optimizer states", force=False)
         self.initialize_optimizer_states()
-        see_memory_usage("After initializing optimizer states", force=True)
+        see_memory_usage("After initializing optimizer states", force=False)
 
         if dist.get_rank() == 0:
             logger.info("optimizer state initialized")
 
         if dist.get_rank(group=self.dp_process_group) == 0:
-            see_memory_usage("After initializing ZeRO optimizer", force=True)
+            see_memory_usage("After initializing ZeRO optimizer", force=False)
 
         self._link_all_hp_params()
         self._hp_optimizer_states_linked = False
@@ -1023,9 +1046,14 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                     def wrapper(param, i):
 
                         def grad_handling_hook(*notneeded):
+                            # Evaluate refresh condition before reenter_backward_if_needed()
+                            refresh_expected = self.should_refresh_expected_hook_count()
                             self.reenter_backward_if_needed()
                             self.process_gradients(param, i)
-                            current_expected = count_used_parameters_in_backward(all_params_requiring_grad)
+                            if refresh_expected:
+                                current_expected = count_used_parameters_in_backward(all_params_requiring_grad)
+                            else:
+                                current_expected = self._max_expected_hooks_seen
                             self.update_hook_state_and_maybe_run_epilogue(current_expected)
 
                         self._grad_acc_hooks.append(register_grad_hook(param, grad_handling_hook))
@@ -1535,7 +1563,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                     param = self.bit16_groups[group_idx][param_idx_in_group]
 
                     assert self.params_already_reduced[param_id] == False, \
-                        f"The parameter {param_id} has already been reduced. \
+                        f"The parameter {debug_param2name(param)} has already been reduced. \
                         Gradient computed twice for this partition. \
                         Multiple gradient reduction is currently not supported"
 

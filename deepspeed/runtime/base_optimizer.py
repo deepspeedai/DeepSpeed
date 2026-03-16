@@ -109,6 +109,17 @@ class BackwardHookStateManager:
 
     def enter_backward(self):
         """Enter backward context. Call at the start of backward pass."""
+        # On first real backward entry of a step, reset counters that may have been
+        # polluted by pre-user-backward hooks (e.g. TiledFusedLogitsLoss calling
+        # torch.autograd.backward() from forward). Do NOT reset on reentrant
+        # phase re-entry (backward_seen_this_step == True) so phase-to-phase
+        # state remains intact.
+        if self.backward_active_depth == 0 and not self.backward_seen_this_step:
+            self.hooks_fired_this_backward = 0
+            self.max_expected_hooks_seen = 0
+            self.remaining_grad_acc_hooks = 0
+            self.post_backward_callback_queued = False
+            self.post_backward_callback_graph_task_id = None
         self.backward_active_depth += 1
         # Track that backward has been active at some point in this step.
         # This is used to detect subsequent gradient hook phases with reentrant checkpointing.
@@ -127,6 +138,22 @@ class BackwardHookStateManager:
         self.epilogue_ran_this_backward = False
         self.post_backward_callback_queued = False
         self.post_backward_callback_graph_task_id = None
+
+    def should_refresh_expected_hook_count(self):
+        """Return True when count_used_parameters_in_backward() should be re-evaluated.
+
+        Refresh is needed in two cases:
+        1. First hook of a backward (or backward phase): hooks_fired == 0.
+        2. A new reentrant phase started: remaining hooks exhausted, we exited
+           backward, but backward was active earlier this step.
+
+        The predicate must be evaluated BEFORE reenter_backward_if_needed()
+        because re-entering changes backward_active_depth and hides the
+        phase-boundary signal.
+        """
+        return (self.hooks_fired_this_backward == 0
+                or (self.remaining_grad_acc_hooks == 0 and self.backward_active_depth == 0
+                    and self.backward_seen_this_step))
 
     def reenter_backward_if_needed(self):
         """Re-enter backward context for subsequent phases in reentrant checkpointing.
@@ -400,6 +427,10 @@ class ZeROOptimizer(DeepSpeedOptimizer):
     def clear_backward_seen_flag(self):
         """Clear the backward seen flag and reset hook counters at the start of each step."""
         self._backward_hook_state.reset_for_new_step()
+
+    def should_refresh_expected_hook_count(self):
+        """Return True when count_used_parameters_in_backward() should be re-evaluated."""
+        return self._backward_hook_state.should_refresh_expected_hook_count()
 
     def reenter_backward_if_needed(self):
         """Re-enter backward context for subsequent phases in reentrant checkpointing."""

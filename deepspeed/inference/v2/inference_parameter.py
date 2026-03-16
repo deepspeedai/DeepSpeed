@@ -47,7 +47,7 @@ class InferenceParameter(torch.Tensor):
                 new_attr = attr.to(*args, **kwargs)
                 setattr(new_tensor, name, new_attr)
                 new_tensor.aux_attrs[name] = new_attr
-        except:
+        except Exception:
             pass
 
         return new_tensor
