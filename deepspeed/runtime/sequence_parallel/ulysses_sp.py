@@ -123,7 +123,6 @@ class UlyssesSPAttentionHF(torch.nn.Module):
         self.rotating_layer_counter = 0  # used for dev work
 
         self.core_attn_implementation = None  # set by register_with_transformers
-        self._packed_sample_validated = False  # one-time check flag
         self._flex_block_mask_cls = None  # set by register_with_transformers
         self._flex_create_block_mask = None  # set by register_with_transformers
 
@@ -284,23 +283,6 @@ class UlyssesSPAttentionHF(torch.nn.Module):
         # UlyssesSPDataLoaderAdapter ensures position_ids are in the batch before sharding,
         # so after gathering here they reconstruct to the correct global positions.
         if "position_ids" in kwargs:
-            # One-time check: detect packed samples (multiple documents concatenated in one
-            # sequence) with attn backends that silently break. We check LOCAL (pre-gather)
-            # position_ids for resets, which indicate document boundaries from packing.
-            if not self._packed_sample_validated:
-                self._packed_sample_validated = True
-                local_pos_ids = kwargs["position_ids"]
-                pos_diff = torch.diff(local_pos_ids, dim=-1)
-                has_packed_samples = (pos_diff < 0).any().item()
-                if has_packed_samples and self.core_attn_implementation in ("sdpa", "eager"):
-                    raise ValueError(
-                        f"Packed samples detected (position_ids reset mid-sequence) with "
-                        f"attn_implementation='{self.core_attn_implementation}'. This silently produces "
-                        f"incorrect results because Ulysses SP sets attention_mask=None and "
-                        f"{self.core_attn_implementation} ignores position_ids for causal masking, "
-                        f"causing cross-document attention. Use 'flash_attention_2', 'flash_attention_3', "
-                        f"or 'flex_attention' instead.")
-
             position_ids_list = [torch.empty_like(kwargs["position_ids"]) for _ in range(self.world_size)]
             dist.all_gather(position_ids_list, kwargs["position_ids"], group=self.process_group)
             kwargs["position_ids"] = torch.cat(position_ids_list, dim=1)
@@ -457,8 +439,6 @@ class UlyssesSPAttentionHF(torch.nn.Module):
 
         # eager always materializes a 4D attention_mask (O(n²) memory) and cannot fall back
         # to is_causal=True like sdpa — so it's incompatible with SP which discards masks.
-        # sdpa and flex_attention are allowed but validated at runtime for packed samples
-        # (see _packed_sample_validated in forward()).
         unsupported_attn_implementation = ["eager", "paged|eager"]
         if core_attn_implementation in unsupported_attn_implementation:
             raise ValueError(
@@ -653,15 +633,21 @@ class UlyssesSPDataLoaderAdapter:
         micro_batches = defaultdict(dict)
         # XXX: replace with more efficient all-to-all?
 
-        # Ensure position_ids exist before all_gather and sharding.
-        # Without this, the Trainer generates local position_ids [0,...,chunk_len-1]
-        # on each rank AFTER sharding, which after all_gather in UlyssesSPAttentionHF
-        # looks like packed sequences [0,...,N, 0,...,N, ...]. flash_attention_2 handles
-        # this via flash_varlen_fn, but sdpa/flex_attention apply full causal masking
-        # across the resets, producing incorrect attention.
+        # position_ids must exist before sharding so that after all_gather in
+        # UlyssesSPAttentionHF.forward() they reconstruct to correct global positions.
+        # If missing (common with SFTTrainer packing=False), we generate monotonic
+        # [0,...,seq_len-1] which is correct for non-packed sequences. For packed
+        # sequences the collator MUST provide position_ids with proper document
+        # boundaries — generating them here would silently produce wrong attention.
         if "position_ids" not in batch:
-            batch["position_ids"] = torch.arange(batch["input_ids"].shape[1], dtype=torch.long).unsqueeze(0).expand(
-                batch["input_ids"].shape[0], -1)
+            logger.warning_once("position_ids not found in dataloader batch — generating monotonic "
+                                "[0,...,seq_len-1]. This is correct for non-packed sequences. If you are "
+                                "using packing, ensure your collator provides position_ids with proper "
+                                "document boundaries.")
+            batch["position_ids"] = torch.arange(
+                batch["input_ids"].shape[1],
+                dtype=torch.long,
+            ).unsqueeze(0).expand(batch["input_ids"].shape[0], -1).contiguous()
 
         # we have batches of variable seqlen so in order to do all_gather on batches - we need to know the exact length of each tensor on each rank
         seqlen = torch.tensor(batch["input_ids"].shape[1], dtype=torch.int64, device=self.device)
