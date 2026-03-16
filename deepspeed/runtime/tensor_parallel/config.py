@@ -147,12 +147,17 @@ def get_tensor_parallel_config(ds_config):
 
 
 def _get_hf_tp_plan(model):
-    """Extract tp_plan from HuggingFace model."""
-    if getattr(model, '_tp_plan', None):
-        return model._tp_plan
+    """Extract tp_plan from HuggingFace model.
 
+    Prefer base_model_tp_plan (from model config) over _tp_plan (runtime attribute)
+    because _tp_plan often contains duplicate entries with a 'model.' prefix added
+    by HuggingFace, which causes spurious duplicate-match warnings during conversion.
+    """
     config = getattr(model, 'config', None)
     if config and getattr(config, 'base_model_tp_plan', None):
         return model.config.base_model_tp_plan
+
+    if getattr(model, '_tp_plan', None):
+        return model._tp_plan
 
     return None

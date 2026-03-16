@@ -90,7 +90,7 @@ class TestTPPlanExtraction:
 
         assert tp_plan is None
 
-    def test_priority_model_over_config(self):
+    def test_priority_config_over_model(self):
 
         class MockHFConfig:
             base_model_tp_plan = {"config_plan": "colwise"}
@@ -106,5 +106,5 @@ class TestTPPlanExtraction:
         tp_plan = _get_hf_tp_plan(model)
 
         assert tp_plan is not None
-        assert "model_plan" in tp_plan
-        assert "config_plan" not in tp_plan
+        assert "config_plan" in tp_plan
+        assert "model_plan" not in tp_plan
