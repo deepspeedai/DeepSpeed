@@ -6,7 +6,7 @@ import torch
 from deepspeed.checkpoint.constants import (CAT_DIM, FP32_WEIGHT_KEY, PARAM, PARAMETER_WITH_ROW_PARALLELISM_PATTERNS,
                                            PARAMETER_WITH_SUB_PARAMS, SUB_PARAM_SHAPE,
                                            TP_REPLICATED_PARAMETER_PATTERNS, UNIVERSAL_CHECKPOINT_INFO)
-from deepspeed.checkpoint.constants import SubparamShape as CheckpointSubparamShape
+from deepspeed.checkpoint.universal_checkpoint import SubparamShape as CheckpointSubparamShape
 from deepspeed.checkpoint.ds_to_universal import merge_tp_slices
 from deepspeed.checkpoint.universal_checkpoint import (_get_param_uc_restore_meta, _resolve_autotp_partition,
                                                        load_hp_checkpoint_state)
@@ -29,7 +29,7 @@ class _DummyHPMapping:
         self.optim_fragment = {}
 
     def get_hp_fragment(self):
-        return self._param
+        return self._param.view(-1)
 
     def get_optim_state_keys(self):
         return []
@@ -130,7 +130,14 @@ def test_load_hp_checkpoint_state_prefers_autotp_metadata(tmp_path, monkeypatch)
 def _write_tp_slice(base_dir, param_name, tp_idx, state_name, tensor):
     shard_dir = base_dir / param_name / str(tp_idx)
     shard_dir.mkdir(parents=True, exist_ok=True)
-    torch.save(tensor, shard_dir / f"{state_name}.00")
+    torch.save(tensor.reshape(-1), shard_dir / f"{state_name}.00")
+
+
+def _write_tp_states(base_dir, param_name, tp_idx, fp32_tensor):
+    # merge_tp_slices 会尝试合并这三个 state，所以测试必须把它们都写出来
+    _write_tp_slice(base_dir, param_name, tp_idx, "fp32", fp32_tensor)
+    _write_tp_slice(base_dir, param_name, tp_idx, "exp_avg", torch.zeros_like(fp32_tensor))
+    _write_tp_slice(base_dir, param_name, tp_idx, "exp_avg_sq", torch.zeros_like(fp32_tensor))
 
 
 def test_merge_tp_slices_emits_subparam_shape_metadata(tmp_path):
@@ -140,8 +147,8 @@ def test_merge_tp_slices_emits_subparam_shape_metadata(tmp_path):
 
     tp0 = torch.arange(12, dtype=torch.float32).view(3, 4)
     tp1 = torch.arange(12, 24, dtype=torch.float32).view(3, 4)
-    _write_tp_slice(slice_dir, param_name, 0, "fp32", tp0)
-    _write_tp_slice(slice_dir, param_name, 1, "fp32", tp1)
+    _write_tp_states(slice_dir, param_name, 0, tp0)
+    _write_tp_states(slice_dir, param_name, 1, tp1)
 
     uc_info = {
         PARAMETER_WITH_ROW_PARALLELISM_PATTERNS: [],
@@ -170,8 +177,8 @@ def test_merge_tp_slices_uses_row_parallel_cat_dim(tmp_path):
 
     tp0 = torch.arange(16, dtype=torch.float32).view(4, 4)
     tp1 = torch.arange(16, 32, dtype=torch.float32).view(4, 4)
-    _write_tp_slice(slice_dir, param_name, 0, "fp32", tp0)
-    _write_tp_slice(slice_dir, param_name, 1, "fp32", tp1)
+    _write_tp_states(slice_dir, param_name, 0, tp0)
+    _write_tp_states(slice_dir, param_name, 1, tp1)
 
     uc_info = {
         PARAMETER_WITH_ROW_PARALLELISM_PATTERNS: [rf"^{param_name}$"],
