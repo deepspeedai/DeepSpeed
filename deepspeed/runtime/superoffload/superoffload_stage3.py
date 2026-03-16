@@ -241,7 +241,8 @@ class SuperOffloadOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
                                                  dtype=self.master_weights_and_grads_dtype)
                     for dest_offset, grad_partition in grad_entries:
                         grad_buffer = grad_partition.to(dtype=self.master_weights_and_grads_dtype)
-                        staging_buffer.narrow(0, dest_offset, grad_buffer.numel()).copy_(grad_buffer, non_blocking=True)
+                        staging_buffer.narrow(0, dest_offset, grad_buffer.numel()).copy_(grad_buffer,
+                                                                                         non_blocking=True)
 
                     fp32_grad_tensor.copy_(staging_buffer, non_blocking=True)
                     copy_event = get_accelerator().Event()
@@ -258,7 +259,8 @@ class SuperOffloadOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
                     fp32_grad_tensor.zero_()
                     for dest_offset, grad_partition in grad_entries:
                         grad_buffer = grad_partition.to(dtype=self.master_weights_and_grads_dtype)
-                        fp32_grad_tensor.narrow(0, dest_offset, grad_buffer.numel()).copy_(grad_buffer, non_blocking=True)
+                        fp32_grad_tensor.narrow(0, dest_offset, grad_buffer.numel()).copy_(grad_buffer,
+                                                                                           non_blocking=True)
 
         # Clean up parameter gradients
         for param in params_to_release:
