@@ -106,89 +106,25 @@ class NoGatherCoalescedHandle:
 
 
 class _SdmaWork:
-    """Duck-type compatible with ``torch.distributed.Work``."""
+    """Duck-type compatible with ``torch.distributed.Work``.
+
+    Mirrors NCCL Work.wait() semantics: CPU-level blocking AND GPU-level
+    stream dependency so the current compute stream sees SDMA-written data.
+    """
 
     def __init__(self, event):
         self._event = event
 
     def wait(self):
         self._event.synchronize()
+        get_accelerator().current_stream().wait_event(self._event)
 
     def is_completed(self) -> bool:
         return self._event.query()
 
 
-class _SdmaOutputPool:
-    """Pre-allocated registered VRAM buffer pool for SDMA direct-write.
-
-    One large buffer is allocated and registered with SDMA once at init.
-    The buffer is divided into ``num_slots`` equal slots.  Each allgather
-    call acquires the next slot (round-robin) and SDMA writes directly
-    into it.  Callers use the returned slot view as ``output_tensor``.
-
-    This avoids repeated ``register_output_buffer`` calls (which are
-    collective and expensive) while keeping each in-flight allgather's
-    output in an independent memory region.
-    """
-
-    def __init__(self, ag, slot_bytes: int, num_slots: int = 6):
-        self._ag = ag
-        self._num_slots = num_slots
-        self._slot_bytes = slot_bytes
-        self._buf = torch.empty(
-            slot_bytes * num_slots,
-            dtype=torch.uint8,
-            device=get_accelerator().current_device_name(),
-        )
-        self._ag.register_output_buffer(self._buf)
-        self._idx = 0
-        self._slot_events = [None] * num_slots
-        self._slot_in_use = [False] * num_slots
-        self._ptr_to_slot = {}
-        self._reuse_wait_warned = False
-        self._exhaust_warned = False
-
-    def acquire(self, numel: int, dtype: torch.dtype):
-        """Return a view into the next slot, or ``None`` if it doesn't fit."""
-        byte_need = numel * torch.tensor([], dtype=dtype).element_size()
-        if byte_need > self._slot_bytes:
-            return None
-        for _ in range(self._num_slots):
-            slot_idx = self._idx
-            self._idx = (self._idx + 1) % self._num_slots
-            if self._slot_in_use[slot_idx]:
-                continue
-            slot_event = self._slot_events[slot_idx]
-            if slot_event is not None and not slot_event.query():
-                continue
-            self._slot_in_use[slot_idx] = True
-            offset = slot_idx * self._slot_bytes
-            tensor = self._buf.narrow(0, offset, byte_need).view(dtype)
-            self._ptr_to_slot[int(tensor.data_ptr())] = slot_idx
-            return tensor
-
-        if not self._exhaust_warned and dist.is_initialized() and dist.get_rank() == 0:
-            logger.warning("SDMA pool exhausted by active parameter lifetimes; fallback to dist.allgather for this call")
-            self._exhaust_warned = True
-        return None
-
-    def record_inflight(self, tensor: Tensor, event) -> None:
-        """Record the completion event for the slot backing *tensor*."""
-        slot_idx = self._ptr_to_slot.get(int(tensor.data_ptr()))
-        if slot_idx is not None:
-            self._slot_events[slot_idx] = event
-
-    def release(self, tensor: Tensor) -> None:
-        """Release a slot previously acquired for *tensor*."""
-        slot_idx = self._ptr_to_slot.get(int(tensor.data_ptr()))
-        if slot_idx is not None:
-            self._slot_in_use[slot_idx] = False
-
 
 _sdma_ag = None
-_sdma_pool = None
-_sdma_fallback_warned = False
-_sdma_fallback_align_warned = False
 _sdma_call_failed_warned = False
 
 
@@ -207,19 +143,13 @@ def _init_sdma_allgather(max_numel: int = 64 * 1024 * 1024,
                          prefetch_bucket_size: int = 50000000,
                          num_slots: int = None,
                          dtype_bytes: int = 2):
-    """Initialize SDMA allgather with a single registered output buffer pool.
+    """Initialize SDMA allgather with copy_output_to_user=True.
 
-    One large VRAM buffer is allocated and IPC-registered once.  Each
-    allgather call takes a slot from the pool (round-robin) so that
-    concurrent in-flight calls never overwrite each other.
-
-    The slot size is determined by ``prefetch_bucket_size * dtype_bytes``
-    which is the max output size of a single allgather (all ranks'
-    partitions concatenated).  This is much smaller than
-    ``max_numel * npes * elem_bytes`` which sizes the internal SDMA
-    transit buffer.
+    SDMA gathers data via DMA into an internal transit buffer, then
+    copies to the caller-provided output tensor.  No output buffer
+    registration or pool management is needed.
     """
-    global _sdma_ag, _sdma_pool
+    global _sdma_ag
     if _sdma_ag is not None:
         return
     _ensure_default_pg_registered()
@@ -234,42 +164,17 @@ def _init_sdma_allgather(max_numel: int = 64 * 1024 * 1024,
         my_pe, npes,
         input_buffer_size=max_numel * elem_bytes,
         output_buffer_size=max_numel * npes * elem_bytes,
-        copy_output_to_user=False,
+        copy_output_to_user=True,
     )
-    if num_slots is None:
-        # Fixed default for overlap stability/perf without external env knobs.
-        num_slots = 16
-    slot_bytes = int(int(prefetch_bucket_size) * dtype_bytes * 1.2)
-    _sdma_pool = _SdmaOutputPool(_sdma_ag, slot_bytes=slot_bytes, num_slots=num_slots)
     if dist.get_rank() == 0:
-        total_mb = slot_bytes * num_slots / (1024 * 1024)
-        logger.info(f"SDMA allgather enabled (direct-write pool: {num_slots} slots, "
-                    f"slot={slot_bytes // (1024*1024)} MB, total={total_mb:.0f} MB)")
+        logger.info("SDMA allgather enabled (copy_output_to_user=True)")
 
 
-def _sdma_acquire_output(numel: int, dtype: torch.dtype) -> Tensor:
-    """Acquire an output buffer from the SDMA pool for *numel* elements of *dtype*."""
-    return _sdma_pool.acquire(numel, dtype)
 
 
 def _dist_allgather_fn(input_tensor: Tensor, output_tensor: Tensor, group=None):
     if _sdma_allgather_enabled():
-        global _sdma_fallback_warned, _sdma_fallback_align_warned, _sdma_call_failed_warned
-        # mori AllgatherSdma currently operates through a uint32 transport path.
-        # For direct-write correctness, require exact 4-byte alignment on byte size.
-        # Otherwise, fall back to dist allgather to avoid tail-byte overwrite.
-        if (input_tensor.nbytes % 4) != 0 or (output_tensor.nbytes % 4) != 0:
-            if not _sdma_fallback_align_warned and dist.is_initialized() and dist.get_rank() == 0:
-                logger.warning("SDMA allgather fallback to dist.allgather for non-4B-aligned tensor size")
-                _sdma_fallback_align_warned = True
-            return instrument_w_nvtx(dist.allgather_fn)(output_tensor, input_tensor, group=group, async_op=True)
-        # Direct-write mode requires output to be from the pre-registered pool.
-        # If not registered, fall back to the default backend for correctness.
-        if not _sdma_ag.is_output_registered(output_tensor):
-            if not _sdma_fallback_warned and dist.is_initialized() and dist.get_rank() == 0:
-                logger.warning("SDMA allgather fallback to dist.allgather for unregistered output tensor")
-                _sdma_fallback_warned = True
-            return instrument_w_nvtx(dist.allgather_fn)(output_tensor, input_tensor, group=group, async_op=True)
+        global _sdma_call_failed_warned
         stream = get_accelerator().current_stream()
         ok = _sdma_ag(input_tensor, output_tensor, input_tensor.numel(), stream)
         if not ok:
@@ -280,7 +185,6 @@ def _dist_allgather_fn(input_tensor: Tensor, output_tensor: Tensor, group=None):
 
         event = get_accelerator().Event()
         event.record(stream)
-        _sdma_pool.record_inflight(output_tensor, event)
         return _SdmaWork(event)
     return instrument_w_nvtx(dist.allgather_fn)(output_tensor, input_tensor, group=group, async_op=True)
 
@@ -865,9 +769,7 @@ class AllGatherHandle:
                  param: Parameter,
                  quantization=None,
                  param_buffer=None,
-                 original_dtype=None,
-                 sdma_output=None,
-                 hold_sdma_until_partition=False) -> None:
+                 original_dtype=None) -> None:
         if param.ds_status != ZeroParamStatus.INFLIGHT:
             raise RuntimeError(f"expected param {param.ds_summary()} to be available")
 
@@ -876,8 +778,6 @@ class AllGatherHandle:
         self.__quantization = quantization
         self.__param_buffer = param_buffer
         self.__original_dtype = original_dtype
-        self.__sdma_output = sdma_output
-        self.__hold_sdma_until_partition = hold_sdma_until_partition
 
     def wait(self, handle_dependency=True) -> None:
         instrument_w_nvtx(self.__handle.wait)()
@@ -885,24 +785,12 @@ class AllGatherHandle:
         if self.__param_buffer is not None:
             gathered = self.__param_buffer.narrow(0, 0, self.__param.ds_numel).view(self.__param.ds_shape).to(
                 self.__original_dtype).to(self.__param.device)
-            # Fast path: when we keep the slot alive until partition, param.data can
-            # safely alias SDMA pool memory (zero-copy).
-            # Slow path: if slot is released immediately and storage still aliases the
-            # pool, clone to preserve correctness.
-            if self.__sdma_output is not None and not self.__hold_sdma_until_partition:
-                if gathered.untyped_storage().data_ptr() == self.__param_buffer.untyped_storage().data_ptr():
-                    gathered = gathered.clone()
             self.__param.data = gathered
         elif self.__quantization:
             instrument_w_nvtx(self.__quantization.quant_handle.wait)()
             self.__param.data = self.__quantization.backend.dequantize(
                 self.__quantization.quantized_param, self.__quantization.scale_buffer).to(self.__param.device)
 
-        if self.__sdma_output is not None:
-            if self.__hold_sdma_until_partition:
-                self.__param._ds_sdma_output_ref = self.__sdma_output
-            elif _sdma_pool is not None:
-                _sdma_pool.release(self.__sdma_output)
         self.__param.ds_status = ZeroParamStatus.AVAILABLE
 
 
@@ -918,7 +806,6 @@ class AllGatherCoalescedHandle:
         world_size: int,
         use_secondary_tensor=False,
         quantization=None,
-        sdma_output=None,
     ) -> None:
         self.allgather_handle = allgather_handle
         self.params = params
@@ -927,7 +814,6 @@ class AllGatherCoalescedHandle:
         self.use_secondary_tensor = use_secondary_tensor
         self.complete = False
         self.quantization = quantization
-        self.sdma_output = sdma_output
 
         for param in self.params:
             if param.ds_status != ZeroParamStatus.INFLIGHT:
@@ -974,8 +860,6 @@ class AllGatherCoalescedHandle:
             param_offset += ds_tensor_numel
 
         self.complete = True
-        if self.sdma_output is not None and _sdma_pool is not None:
-            _sdma_pool.release(self.sdma_output)
         if not get_accelerator().is_synchronized_device() and not handle_dependency:
             # if the device needs to handle dependencies and opts for explicit processing outside the function.
             AllGatherCoalescedHandle.data_buffer.append(partitions)
@@ -1455,15 +1339,10 @@ class Init(InsertPostInitMethodToModuleSubClasses):
                 partition_sz = sum(p.ds_tensor.ds_numel * p.ds_secondary_tensor_num_of_groups for p in params)
 
             total_numel = partition_sz * world_size
-            # Coalesced path requires tensor re-layout (torch.cat) and has shown
-            # correctness drift with SDMA direct-write in current implementation.
-            # Keep coalesced allgather on default backend for correctness.
-            flat_tensor = None
-            if flat_tensor is None:
-                flat_tensor = torch.empty(total_numel,
-                                          dtype=allgather_dtype,
-                                          device=get_accelerator().current_device_name(),
-                                          requires_grad=False)
+            flat_tensor = torch.empty(total_numel,
+                                      dtype=allgather_dtype,
+                                      device=get_accelerator().current_device_name(),
+                                      requires_grad=False)
 
             partitions: List[Parameter] = []
             for i in range(world_size):
@@ -1488,7 +1367,6 @@ class Init(InsertPostInitMethodToModuleSubClasses):
                 partitions=partitions,
                 world_size=world_size,
                 use_secondary_tensor=use_secondary_tensor,
-                sdma_output=None,
             )
 
         def _all_gather_sequential(params, world_size, use_secondary_tensor, ds_process_group, quantize):
@@ -1506,15 +1384,12 @@ class Init(InsertPostInitMethodToModuleSubClasses):
                 else:
                     allgather_dtype = get_allgather_dtype(param, param_ds_tensor)
 
-                param_buffer = _sdma_acquire_output(buffer_size, allgather_dtype) \
-                    if (not quantize and _sdma_allgather_enabled()) else None
-                if param_buffer is None:
-                    param_buffer = torch.empty(
-                        buffer_size,
-                        dtype=allgather_dtype,
-                        device=get_accelerator().current_device_name(),
-                        requires_grad=False,
-                    )
+                param_buffer = torch.empty(
+                    buffer_size,
+                    dtype=allgather_dtype,
+                    device=get_accelerator().current_device_name(),
+                    requires_grad=False,
+                )
                 if not quantize:
                     handle = _dist_allgather_fn(
                         param_ds_tensor.to(get_accelerator().current_device_name()).to(allgather_dtype),
@@ -1522,36 +1397,13 @@ class Init(InsertPostInitMethodToModuleSubClasses):
                         ds_process_group,
                     )
 
-                    if original_dtype == allgather_dtype:
-                        handles.append(
-                            AllGatherHandle(
-                                handle,
-                                param,
-                                param_buffer=param_buffer,
-                                original_dtype=original_dtype,
-                                sdma_output=param_buffer if _sdma_allgather_enabled() else None,
-                                hold_sdma_until_partition=False,
-                            ))
-                    else:
-                        # This case is complicated:
-                        # We use `register_post_accumulate_grad_hook` to set allgather hooks. Normally, the hook is
-                        # called once per parameter, even if that parameter is tied to multiple layers.
-                        # However, when the dtype changes, the hook may be triggered multiple times.
-                        # If we directly do:
-                        #   param_buffer.narrow(0, 0, param.ds_numel).view(param.ds_shape).to(param.device)
-                        # as above, the dtype may differ, causing the gradient-reduce hook
-                        # to be invoked multiple times.
-                        # To avoid this, we leave `param.data` in a partitioned state.
-                        # This prevents duplicate gradient-reduce hook calls.
-                        # In theory, this path could be consolidated with the case where
-                        # (original_dtype == allgather_dtype), but because it changes the
-                        # state transition of DeepSpeed parameters, we keep it separate for safety.
-                        handles.append(
-                            AllGatherHandle(handle,
-                                            param,
-                                            param_buffer=param_buffer,
-                                            original_dtype=original_dtype,
-                                            sdma_output=param_buffer if _sdma_allgather_enabled() else None))
+                    handles.append(
+                        AllGatherHandle(
+                            handle,
+                            param,
+                            param_buffer=param_buffer,
+                            original_dtype=original_dtype,
+                        ))
                 else:
                     if hasattr(param_ds_tensor, "ds_quant_scale"):
                         scales = param_ds_tensor.ds_quant_scale
@@ -1893,10 +1745,6 @@ class Init(InsertPostInitMethodToModuleSubClasses):
         print_rank_0(f"Param id {param.ds_id} status is {param.ds_status}", force=False)
         if param.ds_status is ZeroParamStatus.AVAILABLE:
             print_rank_0(f"Partitioning param id {param.ds_id} reuse buffers {reuse_buffers}", force=False)
-            sdma_out = getattr(param, "_ds_sdma_output_ref", None)
-            if sdma_out is not None and _sdma_pool is not None:
-                _sdma_pool.release(sdma_out)
-                delattr(param, "_ds_sdma_output_ref")
             # if reuse_buffers and False:
             #     numel = buffer.numel()
             #     buffer = param.data.view(-1)
