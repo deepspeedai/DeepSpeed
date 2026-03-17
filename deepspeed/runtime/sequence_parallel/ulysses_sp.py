@@ -125,6 +125,8 @@ class UlyssesSPAttentionHF(torch.nn.Module):
         self.core_attn_implementation = None  # set by register_with_transformers
         self._flex_block_mask_cls = None  # set by register_with_transformers
         self._flex_create_block_mask = None  # set by register_with_transformers
+        self._flex_block_mask_cached = None  # cached BlockMask for flex_attention
+        self._flex_block_mask_cache_key = None  # (batch_size, seq_len) for cache invalidation
 
         self.local_q_head_count = attn_head_count // self.world_size
 
@@ -316,19 +318,27 @@ class UlyssesSPAttentionHF(torch.nn.Module):
         if self._flex_block_mask_cls is not None and isinstance(attention_mask, self._flex_block_mask_cls):
             seq_len = query_layer.shape[2]
             batch_size = query_layer.shape[0]
+            cache_key = (batch_size, seq_len)
 
-            def causal_mask(batch_idx, head_idx, q_idx, kv_idx):
-                return q_idx >= kv_idx
+            # Cache the BlockMask — create_block_mask is expensive and the mask is the
+            # same for all layers within a forward pass. Only rebuild when dimensions change.
+            if self._flex_block_mask_cache_key != cache_key:
 
-            attention_mask = self._flex_create_block_mask(
-                mask_mod=causal_mask,
-                B=batch_size,
-                H=None,
-                Q_LEN=seq_len,
-                KV_LEN=seq_len,
-                device=query_layer.device,
-                _compile=True,
-            )
+                def causal_mask(batch_idx, head_idx, q_idx, kv_idx):
+                    return q_idx >= kv_idx
+
+                self._flex_block_mask_cached = self._flex_create_block_mask(
+                    mask_mod=causal_mask,
+                    B=batch_size,
+                    H=None,
+                    Q_LEN=seq_len,
+                    KV_LEN=seq_len,
+                    device=query_layer.device,
+                    _compile=True,
+                )
+                self._flex_block_mask_cache_key = cache_key
+
+            attention_mask = self._flex_block_mask_cached
 
         if not self.skip_all_but_last_attention_debug_mode:
             # expects: [bs hc_l sl hs]
