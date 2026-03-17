@@ -635,19 +635,15 @@ class UlyssesSPDataLoaderAdapter:
 
         # position_ids must exist before sharding so that after all_gather in
         # UlyssesSPAttentionHF.forward() they reconstruct to correct global positions.
-        # If missing (common with SFTTrainer packing=False), we generate monotonic
-        # [0,...,seq_len-1] which is correct for non-packed sequences. For packed
-        # sequences the collator MUST provide position_ids with proper document
-        # boundaries — generating them here would silently produce wrong attention.
+        # Without them, the Trainer generates local [0,...,chunk_len-1] per rank AFTER
+        # sharding, which after all_gather looks like packed sequences and breaks
+        # sdpa/flex_attention causal masking.
         if "position_ids" not in batch:
-            logger.warning_once("position_ids not found in dataloader batch — generating monotonic "
-                                "[0,...,seq_len-1]. This is correct for non-packed sequences. If you are "
-                                "using packing, ensure your collator provides position_ids with proper "
-                                "document boundaries.")
-            batch["position_ids"] = torch.arange(
-                batch["input_ids"].shape[1],
-                dtype=torch.long,
-            ).unsqueeze(0).expand(batch["input_ids"].shape[0], -1).contiguous()
+            raise ValueError("Ulysses SP requires `position_ids` in every dataloader batch so that "
+                             "each token retains its correct global position after sequence sharding. "
+                             "For non-packed sequences: position_ids = torch.arange(seq_len) per sample. "
+                             "For packed sequences: position_ids must reset at document boundaries. "
+                             "Ensure your data collator includes position_ids in its output.")
 
         # we have batches of variable seqlen so in order to do all_gather on batches - we need to know the exact length of each tensor on each rank
         seqlen = torch.tensor(batch["input_ids"].shape[1], dtype=torch.int64, device=self.device)
