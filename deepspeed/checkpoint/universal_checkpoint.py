@@ -9,10 +9,7 @@ import torch
 import types
 from typing import List, Tuple, Union
 from dataclasses import dataclass
-from .constants import (FP32_WEIGHT_KEY, PARAM, VOCAB_TENSOR, CAT_DIM, PARAM_N_SUB_PARAMS, SUB_PARAM_SHAPE)
-
-
-AUTOTP_UC_META_KEY = 'ds_autotp_universal_checkpoint_meta'
+from .constants import (FP32_WEIGHT_KEY, PARAM, VOCAB_TENSOR, CAT_DIM, PARAM_N_SUB_PARAMS, SUB_PARAM_SHAPE, DS_AUTOTP_UC_META)
 
 
 @dataclass
@@ -30,11 +27,11 @@ def _get_param_uc_restore_meta(param):
     - conversion-time fields under `conversion`, consumed by
       `collect_autotp_universal_checkpoint_info()` in `layers.py`
     """
-    return getattr(param, AUTOTP_UC_META_KEY, None)
+    return getattr(param, DS_AUTOTP_UC_META, None)
 
 
-def _resolve_autotp_partition(self, ckpt_dict, full_hp_param, tp_rank, tp_world_size):
-    meta = _get_param_uc_restore_meta(self)
+def _resolve_autotp_partition(current_param, ckpt_dict, full_hp_param, tp_rank, tp_world_size):
+    meta = _get_param_uc_restore_meta(current_param)
     if not meta:
         return None
 
@@ -47,21 +44,38 @@ def _resolve_autotp_partition(self, ckpt_dict, full_hp_param, tp_rank, tp_world_
     is_bias = meta.get('is_bias', False)
     replicated = meta.get('replicated', False)
 
-    if replicated or partition_dim is None:
+    # Make replicated semantics explicit:
+    # - replicated=True means the parameter is fully replicated on each TP rank => no partition_dim.
+    # - partition_dim=None without replicated=True means "no AutoTP sharding info" (fall back to legacy logic).
+    if replicated:
+        assert partition_dim is None, (
+            f"AutoTP UC metadata inconsistent for param: replicated=True requires partition_dim=None, "
+            f"but got partition_dim={partition_dim}"
+        )
         slice_tensor = full_hp_param
+
+    elif partition_dim is None:
+        # Not replicated, but no partition dimension => metadata is incomplete for AutoTP restore.
+        # Return None to let caller fall back to the legacy UC slicing logic.
+        return None
     else:
-        target_shape = output_shape if is_bias else logical_shape
+        # NOTE: Always view by `logical_shape` for slicing.
+        # `output_shape` exists to describe the logical output dimensions of a *weight* tensor, but bias tensors
+        # should not require a different view here (bias logical_shape is already 1D and matches its intended view).
+        target_shape = logical_shape
         if target_shape is None:
             return None
 
-        full_view = full_hp_param.view(target_shape)
-        if sub_param_sizes is None and sub_param_shape is not None:
-            sub_dim_sizes = sub_param_shape[partition_dim]
-            if not isinstance(sub_dim_sizes, tuple):
-                sub_dim_sizes = (sub_dim_sizes, )
+        if sub_param_shape:
+            partition_dim = sub_param_shape.partition_dim
+            sub_dim_sizes = sub_param_shape.shape[partition_dim]
+        if not isinstance(sub_dim_sizes, tuple):
+            sub_dim_sizes = (sub_dim_sizes, ) 
         else:
             sub_dim_sizes = sub_param_sizes
 
+        # Only materialize the view when we actually need to slice/chunk.
+        full_view = full_hp_param.view(target_shape)
         if sub_dim_sizes is not None:
             offset = 0
             partitioned_chunks = []
@@ -133,7 +147,7 @@ def load_hp_checkpoint_state(self, folder, tp_rank, tp_world_size):
                 padding_size = padded_target_vocab_size - full_hp_param.shape[0]
                 full_hp_param = torch.nn.functional.pad(full_hp_param, (0, 0, 0, padding_size), "constant", 0)
 
-        autotp_tp_hp_slice = _resolve_autotp_partition(self, ckpt_dict, full_hp_param, tp_rank, tp_world_size)
+        autotp_tp_hp_slice = _resolve_autotp_partition(current_param, ckpt_dict, full_hp_param, tp_rank, tp_world_size)
         if autotp_tp_hp_slice is not None:
             tp_hp_slice = autotp_tp_hp_slice
         else:

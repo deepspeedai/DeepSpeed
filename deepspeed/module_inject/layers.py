@@ -16,6 +16,7 @@ from abc import ABC, abstractmethod
 from typing import Iterable, Any, Optional, List, Tuple, Dict
 from .fusedqkv_utils import shard_value_with_share_qk, shard_chunk_mlp, prepare_tp_fused_qkvw
 from deepspeed.runtime.tensor_parallel import AUTOTP_MODE
+from deepspeed.checkpoint.constants import DS_AUTOTP_UC_META
 from copy import deepcopy
 from typing import Union
 
@@ -28,7 +29,6 @@ __all__ = [
 DEEPSPEED_AUTOTP_MODE = AUTOTP_MODE.INFERENCE
 DS_IS_REPLACED_MODULE = 'ds_is_replaced_module'
 DS_TENSOR_MODEL_PARALLEL = 'tensor_model_parallel'
-DS_AUTOTP_UC_META = 'ds_autotp_universal_checkpoint_meta'
 
 
 def _normalize_uc_shape(value):
@@ -454,7 +454,7 @@ def collect_autotp_universal_checkpoint_info(model: nn.Module) -> Dict[str, Any]
     original_vocab_size = None
 
     for module_name, module in model.named_modules():
-        marker = getattr(module, '_mark_uc_metadata', None)
+        marker = getattr(module, "_mark_uc_metadata", None)
         if callable(marker):
             marker()
 
