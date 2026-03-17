@@ -455,7 +455,7 @@ def collect_autotp_universal_checkpoint_info(model: nn.Module) -> Dict[str, Any]
 
     for module_name, module in model.named_modules():
         marker = getattr(module, "_mark_uc_metadata", None)
-        if callable(marker):
+        if marker is not None:
             marker()
 
         for param_name, param in module.named_parameters(recurse=False):
