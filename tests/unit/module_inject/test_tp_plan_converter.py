@@ -3,7 +3,6 @@
 
 # DeepSpeed Team
 
-import pytest
 from deepspeed.module_inject.tp_plan_converter import TPPlanConverter
 from deepspeed.module_inject.autotp_config import PartitionType
 
@@ -86,11 +85,11 @@ class TestTPPlanConverter:
 
         assert re.match(down_pattern.patterns[0], "model.layers.5.mlp.down_proj.weight")
 
-    def test_invalid_partition_type(self):
-        hf_plan = {"layers.*.q_proj": "invalid_type"}
-
-        with pytest.raises(ValueError):
-            TPPlanConverter.convert(hf_plan)
+    def test_unsupported_style_returns_none(self):
+        """Unsupported styles cause convert() to return None for fallback."""
+        hf_plan = {"layers.*.q_proj": "colwise_rep", "layers.*.o_proj": "rowwise"}
+        result = TPPlanConverter.convert(hf_plan)
+        assert result is None
 
     def test_alternate_prefixes(self):
         """Test tp_plan with non-layers prefix"""
