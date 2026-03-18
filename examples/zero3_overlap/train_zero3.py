@@ -130,6 +130,33 @@ class SyntheticTextDataset(Dataset):
         return tokens[:-1], tokens[1:]
 
 
+class WikitextDataset(Dataset):
+    """Real text dataset from HuggingFace wikitext-2 / wikitext-103."""
+
+    def __init__(self, vocab_size, seq_len, num_samples, split="train", dataset_name="wikitext-2-raw-v1"):
+        from datasets import load_dataset
+        from transformers import GPT2TokenizerFast
+
+        tokenizer = GPT2TokenizerFast.from_pretrained("gpt2")
+        raw = load_dataset("wikitext", dataset_name, split=split)
+        text = "\n\n".join([t for t in raw["text"] if t.strip()])
+        all_ids = tokenizer.encode(text)
+
+        self.seq_len = seq_len
+        self.samples = []
+        for i in range(0, len(all_ids) - seq_len - 1, seq_len):
+            self.samples.append(torch.tensor(all_ids[i : i + seq_len + 1], dtype=torch.long))
+            if len(self.samples) >= num_samples:
+                break
+
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, idx):
+        tokens = self.samples[idx]
+        return tokens[:-1], tokens[1:]
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -146,8 +173,8 @@ def parse_args():
     parser.add_argument("--data_mode",
                         type=str,
                         default="random",
-                        choices=["random", "arange", "repeat"],
-                        help="Synthetic data mode. random is not learnable for next-token prediction.")
+                        choices=["random", "arange", "repeat", "wikitext2", "wikitext103"],
+                        help="Data mode. random/arange/repeat are synthetic; wikitext2/wikitext103 use real text.")
     parser.add_argument("--local_rank", type=int, default=-1)
     parser = deepspeed.add_config_arguments(parser)
     return parser.parse_args()
@@ -168,6 +195,8 @@ def main():
 
     torch.manual_seed(42)
     torch.cuda.manual_seed_all(42)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
     with deepspeed.zero.Init(config_dict_or_path=ds_config_path):
         model = GPT2Model(
@@ -176,7 +205,7 @@ def main():
             num_layers=args.num_layers,
             num_heads=args.num_heads,
             max_seq_len=args.max_seq_len,
-            dropout=args.dropout,
+            dropout=0.0,
         )
 
     total_params = sum(p.numel() for p in model.parameters())
@@ -190,17 +219,32 @@ def main():
     #             Using Megatron-LM" (Narayanan et al., 2021)
     flops_per_token = 6 * total_params + 12 * args.num_layers * args.hidden_size * args.max_seq_len
 
-    dataset = SyntheticTextDataset(args.vocab_size, args.max_seq_len, args.num_samples, mode=args.data_mode)
+    if args.data_mode in ("wikitext2", "wikitext103"):
+        ds_name = "wikitext-2-raw-v1" if args.data_mode == "wikitext2" else "wikitext-103-raw-v1"
+        dataset = WikitextDataset(args.vocab_size, args.max_seq_len, args.num_samples, dataset_name=ds_name)
+    else:
+        dataset = SyntheticTextDataset(args.vocab_size, args.max_seq_len, args.num_samples, mode=args.data_mode)
     if local_rank == 0:
         if args.data_mode == "random":
             print(f"Data mode: random (expected CE floor ~ ln(vocab) = {math.log(args.vocab_size):.4f})")
+        elif args.data_mode in ("wikitext2", "wikitext103"):
+            print(f"Data mode: {args.data_mode} (real text, {len(dataset)} samples)")
         else:
             print(f"Data mode: {args.data_mode} (learnable pattern, loss should decrease)")
 
-    model_engine, optimizer, train_loader, lr_scheduler = deepspeed.initialize(
+    model_engine, optimizer, _, lr_scheduler = deepspeed.initialize(
         args=args,
         model=model,
-        training_data=dataset,
+    )
+    sampler = torch.utils.data.distributed.DistributedSampler(
+        dataset, shuffle=False, seed=42,
+    )
+    train_loader = DataLoader(
+        dataset,
+        batch_size=model_engine.train_micro_batch_size_per_gpu(),
+        sampler=sampler,
+        num_workers=0,
+        pin_memory=True,
     )
 
     device = model_engine.device
