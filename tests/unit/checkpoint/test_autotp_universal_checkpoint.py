@@ -82,6 +82,49 @@ def test_resolve_autotp_partition_subparam_column_weight():
     assert torch.equal(slice_flat, expected)
 
 
+def test_resolve_autotp_partition_subparam_sizes_uneven_gqa_like():
+    # Simulate a fused QKV weight where Q/K/V have uneven sizes along partition_dim=0.
+    # Example (GQA-like):
+    #   Q: 8
+    #   K: 4
+    #   V: 4
+    # Total: 16
+    #
+    # With tp_world_size=2, correct slicing is:
+    #   Q chunk -> 4 per rank
+    #   K chunk -> 2 per rank
+    #   V chunk -> 2 per rank
+    # Each rank gets 8 rows total, but importantly boundaries must align with Q/K/V.
+    sub_param_sizes = [8, 4, 4]
+    tp_world_size = 2
+    tp_rank = 1
+
+    param = _make_param((8, 2), {
+        "partition_type": "column",
+        "partition_dim": 0,
+        "logical_shape": (sum(sub_param_sizes), 2),  # (16, 2)
+        "output_shape": (sum(sub_param_sizes), ),    # (16,)
+        "sub_param_shape": (tuple(sub_param_sizes), 2),
+        "sub_param_sizes": sub_param_sizes,
+        "original_shape": (sum(sub_param_sizes), 2),
+        "is_bias": False,
+        "replicated": False,
+    })
+
+    # Full (unsharded) HP parameter: shape (16, 2)
+    full_hp_param = torch.arange(sum(sub_param_sizes) * 2, dtype=torch.float32).view(sum(sub_param_sizes), 2)
+
+    slice_flat = _resolve_autotp_partition(param, {PARAM: full_hp_param}, full_hp_param, tp_rank=tp_rank, tp_world_size=tp_world_size)
+
+    # Expected: split into Q/K/V blocks, chunk each block by TP, take tp_rank slice, concat back.
+    q, k, v = torch.split(full_hp_param, sub_param_sizes, dim=0)
+    expected = torch.cat([q.chunk(tp_world_size, dim=0)[tp_rank],
+                          k.chunk(tp_world_size, dim=0)[tp_rank],
+                          v.chunk(tp_world_size, dim=0)[tp_rank]], dim=0).flatten()
+
+    assert torch.equal(slice_flat, expected)
+
+
 def test_resolve_autotp_partition_replicated_bias():
     full_hp_param = torch.arange(8, dtype=torch.float32)
     param = _make_param((8, ), {
@@ -134,7 +177,7 @@ def _write_tp_slice(base_dir, param_name, tp_idx, state_name, tensor):
 
 
 def _write_tp_states(base_dir, param_name, tp_idx, fp32_tensor):
-    # merge_tp_slices 会尝试合并这三个 state，所以测试必须把它们都写出来
+    # merge_tp_slices attempts to merge these three states, so the test must write all of them.
     _write_tp_slice(base_dir, param_name, tp_idx, "fp32", fp32_tensor)
     _write_tp_slice(base_dir, param_name, tp_idx, "exp_avg", torch.zeros_like(fp32_tensor))
     _write_tp_slice(base_dir, param_name, tp_idx, "exp_avg_sq", torch.zeros_like(fp32_tensor))

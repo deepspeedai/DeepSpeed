@@ -1,7 +1,7 @@
 import torch
 
 from deepspeed.checkpoint.constants import (PARAMETER_WITH_ROW_PARALLELISM_PATTERNS, PARAMETER_WITH_SUB_PARAMS,
-                                           TP_REPLICATED_PARAMETER_PATTERNS)
+                                           TP_REPLICATED_PARAMETER_PATTERNS, DS_AUTOTP_UC_META)
 from deepspeed.module_inject.layers import (_build_param_uc_restore_meta, _get_param_uc_conversion_meta,
                                             LinearAllreduce, LinearLayer, SubParamLinearLayer,
                                             collect_autotp_universal_checkpoint_info)
@@ -67,8 +67,8 @@ def test_subparam_layer_marks_standardized_param_metadata():
                                 partition_dim=0,
                                 name="packed")
 
-    weight_meta = getattr(layer.weight, "ds_autotp_universal_checkpoint_meta")
-    bias_meta = getattr(layer.bias, "ds_autotp_universal_checkpoint_meta")
+    weight_meta = getattr(layer.weight, DS_AUTOTP_UC_META)
+    bias_meta = getattr(layer.bias, DS_AUTOTP_UC_META)
 
     assert weight_meta["sub_param_sizes"] == (4, 4, 4)
     assert tuple(weight_meta["target_partition_shape"]) == tuple(layer.weight.shape)
