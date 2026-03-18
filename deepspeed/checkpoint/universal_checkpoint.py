@@ -37,59 +37,61 @@ def _resolve_autotp_partition(current_param, ckpt_dict, full_hp_param, tp_rank, 
 
     partition_dim = meta.get('partition_dim')
     logical_shape = meta.get('logical_shape')
-    output_shape = meta.get('output_shape')
     sub_param_shape = meta.get('sub_param_shape')
     sub_param_sizes = meta.get('sub_param_sizes')
-    target_partition_shape = meta.get('target_partition_shape')
-    is_bias = meta.get('is_bias', False)
     replicated = meta.get('replicated', False)
 
-    # Make replicated semantics explicit:
-    # - replicated=True means the parameter is fully replicated on each TP rank => no partition_dim.
-    # - partition_dim=None without replicated=True means "no AutoTP sharding info" (fall back to legacy logic).
     if replicated:
-        assert partition_dim is None, (
-            f"AutoTP UC metadata inconsistent for param: replicated=True requires partition_dim=None, "
-            f"but got partition_dim={partition_dim}"
-        )
+        assert partition_dim is None
         slice_tensor = full_hp_param
+        return slice_tensor.flatten()
 
-    elif partition_dim is None:
-        # Not replicated, but no partition dimension => metadata is incomplete for AutoTP restore.
-        # Return None to let caller fall back to the legacy UC slicing logic.
+    if partition_dim is None:
         return None
-    else:
-        # NOTE: Always view by `logical_shape` for slicing.
-        # `output_shape` exists to describe the logical output dimensions of a *weight* tensor, but bias tensors
-        # should not require a different view here (bias logical_shape is already 1D and matches its intended view).
-        target_shape = logical_shape
-        if target_shape is None:
-            return None
 
-        if sub_param_shape:
+    if logical_shape is None:
+        return None
+
+    full_view = full_hp_param.view(logical_shape)
+
+    if sub_param_shape is not None:
+        if hasattr(sub_param_shape, "shape") and hasattr(sub_param_shape, "partition_dim"):
+            shape_spec = sub_param_shape.shape
             partition_dim = sub_param_shape.partition_dim
-            sub_dim_sizes = sub_param_shape.shape[partition_dim]
+        else:
+            shape_spec = sub_param_shape
+
+        sub_dim_sizes = shape_spec[partition_dim]
         if not isinstance(sub_dim_sizes, tuple):
-            sub_dim_sizes = (sub_dim_sizes, ) 
-        else:
-            sub_dim_sizes = sub_param_sizes
+            sub_dim_sizes = (sub_dim_sizes,)
 
-        # Only materialize the view when we actually need to slice/chunk.
-        full_view = full_hp_param.view(target_shape)
-        if sub_dim_sizes is not None:
-            offset = 0
-            partitioned_chunks = []
-            for sub_dim_size in sub_dim_sizes:
-                sub_tensor = full_view.narrow(partition_dim, offset, sub_dim_size)
-                partitioned_chunks.append(sub_tensor.chunk(tp_world_size, dim=partition_dim)[tp_rank])
-                offset += sub_dim_size
-            slice_tensor = torch.cat(partitioned_chunks, dim=partition_dim)
-        else:
-            slice_tensor = full_view.chunk(tp_world_size, dim=partition_dim)[tp_rank]
+        offset = 0
+        merged_chunks = []
+        for sub_dim_size in sub_dim_sizes:
+            sub_slice = full_view.narrow(partition_dim, offset, sub_dim_size) \
+                                .chunk(tp_world_size, dim=partition_dim)[tp_rank]
+            merged_chunks.append(sub_slice)
+            offset += sub_dim_size
 
-    desired_shape = tuple(target_partition_shape) if target_partition_shape is not None else tuple(self.shape)
-    if tuple(slice_tensor.shape) != desired_shape:
-        slice_tensor = slice_tensor.reshape(desired_shape)
+        slice_tensor = torch.cat(merged_chunks, dim=partition_dim)
+        return slice_tensor.flatten()
+
+    if sub_param_sizes is not None:
+        if not isinstance(sub_param_sizes, (tuple, list)):
+            sub_param_sizes = (sub_param_sizes,)
+
+        offset = 0
+        merged_chunks = []
+        for sub_dim_size in sub_param_sizes:
+            sub_slice = full_view.narrow(partition_dim, offset, sub_dim_size) \
+                                .chunk(tp_world_size, dim=partition_dim)[tp_rank]
+            merged_chunks.append(sub_slice)
+            offset += sub_dim_size
+
+        slice_tensor = torch.cat(merged_chunks, dim=partition_dim)
+        return slice_tensor.flatten()
+
+    slice_tensor = full_view.chunk(tp_world_size, dim=partition_dim)[tp_rank]
     return slice_tensor.flatten()
 
 

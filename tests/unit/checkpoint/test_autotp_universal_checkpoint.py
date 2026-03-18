@@ -156,12 +156,19 @@ def test_load_hp_checkpoint_state_prefers_autotp_metadata(tmp_path, monkeypatch)
     })
     param.load_hp_checkpoint_state = types.MethodType(load_hp_checkpoint_state, param)
 
+    import deepspeed.checkpoint.universal_checkpoint as uc
+    monkeypatch.setattr(uc, "current_param", param, raising=False)
+
     ckpt_dir = tmp_path / "weight"
     ckpt_dir.mkdir(parents=True)
     full_hp_param = torch.arange(32, dtype=torch.float32).view(4, 8)
     torch.save({PARAM: full_hp_param}, ckpt_dir / f"{FP32_WEIGHT_KEY}.pt")
 
-    monkeypatch.setattr(torch, "load", lambda *args, **kwargs: {PARAM: full_hp_param} if str(args[0]).endswith("fp32.pt") else 0)
+    monkeypatch.setattr(
+        torch,
+        "load",
+        lambda *args, **kwargs: {PARAM: full_hp_param} if str(args[0]).endswith("fp32.pt") else 0,
+    )
 
     step = param.load_hp_checkpoint_state(str(ckpt_dir), tp_rank=1, tp_world_size=2)
 
