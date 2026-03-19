@@ -5,6 +5,7 @@
 
 import torch
 import deepspeed.comm as dist
+from torch.utils._sympy.functions import FloorDiv
 from .sp_dp_registry import get_group, is_setup, sp_size
 
 
@@ -54,9 +55,25 @@ def all_to_all(
 
 @torch.library.register_fake("autosp::all_to_all")
 def all_to_all_fake(input: torch.Tensor, scatter_idx: int, gather_idx: int, name: str):
+
+    def maybe_restore_sharded_dim(dim: torch.SymInt, factor: int):
+        # Torch 2.9 may keep `P * (s // P)` distinct from the original `s` during
+        # fake shape propagation. When the local dim is exactly `FloorDiv(s, P)`,
+        # restore the original symbol so downstream ops see a consistent sequence dim.
+        node = getattr(dim, "node", None)
+        if node is None:
+            return dim * factor
+
+        expr = node.expr
+        if isinstance(expr, FloorDiv) and expr.args[1] == factor:
+            hint = node.hint * factor if node.has_hint() else None
+            return node.shape_env.create_symintnode(expr.args[0], hint=hint)
+
+        return dim * factor
+
     B, dim1, dim2, H = input.shape
     if scatter_idx == 1:
-        return input.new_empty(B, dim1 // sp_size(), dim2 * sp_size(), H)
+        return input.new_empty(B, dim1 // sp_size(), maybe_restore_sharded_dim(dim2, sp_size()), H)
     else:
         return input.new_empty(B, dim1 * sp_size(), dim2 // sp_size(), H)
 

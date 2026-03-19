@@ -591,7 +591,8 @@ def shard_tensor_node(gm: GraphModule, tensor_node: Node):
     seq_len = val.shape[1]
 
     assert isinstance(
-        seq_len, torch.SymInt), f"Expected sequence dimension to be `torch.SymInt` but instead found `{type(seq_len)}`"
+        seq_len,
+        torch.SymInt), (f"Expected sequence dimension to be {torch.SymInt!r} but instead found {type(seq_len)!r}")
 
     symb_seq_int_node = find_node_by_name(gm, str(seq_len))
     assert symb_seq_int_node, f"Unable to find symbolic placeholder for {seq_len}"
@@ -599,7 +600,12 @@ def shard_tensor_node(gm: GraphModule, tensor_node: Node):
     slice_all, slice_range = create_symbolic_slice_indices(gm, symb_seq_int_node)
     indices = (slice_all, slice_range)
 
-    with gm.graph.inserting_after(tensor_node):
+    positions = {node: i for i, node in enumerate(gm.graph.nodes)}
+    # Insert after the later dependency so the new getitem does not appear
+    # before the symbolic slice nodes in graph order. Torch 2.9 bf16 can place
+    # the SymInt placeholder after the tensor placeholder.
+    anchor_node = slice_range if positions[slice_range] > positions[tensor_node] else tensor_node
+    with gm.graph.inserting_after(anchor_node):
         sliced_node = gm.graph.call_function(
             operator.getitem,
             args=(tensor_node, indices),

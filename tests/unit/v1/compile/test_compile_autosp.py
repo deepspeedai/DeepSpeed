@@ -9,6 +9,7 @@ from unittest.mock import patch
 import pytest
 import torch
 import torch.nn.functional as F
+from torch.fx import Graph, GraphModule
 
 from deepspeed.utils.torch import required_torch_version
 from deepspeed.accelerator import get_accelerator
@@ -235,3 +236,49 @@ class TestShardTensorCompile:
                 f"User '{user.name}' still references the unsharded input_ids_node"
             assert sliced_node in user.all_input_nodes, \
                 f"User '{user.name}' does not reference the sliced node"
+
+    def test_preserves_topological_order_when_sym_placeholder_follows_input(self):
+        import deepspeed.comm as _dist
+        from deepspeed.compile.custom_ops import sp_dp_registry as _registry
+        from deepspeed.compile.fx import find_node_by_name, get_node_shape_meta
+        from deepspeed.compile.util import shard_tensor_node, get_input_id_node
+
+        # Regression test for the torch 2.9 bf16 trace where the SymInt
+        # placeholder can appear after input_ids. shard_tensor_node must still
+        # produce a lint-clean graph instead of inserting getitem before its
+        # symbolic slice dependencies.
+        gm, _ = create_gm_nodes(seq_len=64)
+        input_ids_node = get_input_id_node(gm)
+        seq_symint = get_node_shape_meta(input_ids_node).shape[1]
+        sym_seq_node = find_node_by_name(gm, str(seq_symint))
+        assert sym_seq_node is not None, "Symbolic sequence-length node not found in graph"
+
+        nodes = list(gm.graph.nodes)
+        input_idx = nodes.index(input_ids_node)
+        sym_idx = nodes.index(sym_seq_node)
+        assert sym_idx < input_idx, "Expected source graph to place the symbolic placeholder before input_ids"
+
+        # Reorder placeholders to mirror the torch 2.9 bf16 trace where the symbolic
+        # sequence placeholder can appear after input_ids.
+        reordered_nodes = nodes[:]
+        reordered_nodes.pop(input_idx)
+        reordered_nodes.insert(sym_idx, input_ids_node)
+        reordered_nodes.pop(sym_idx + 1)
+        reordered_nodes.insert(input_idx, sym_seq_node)
+
+        reordered_graph = Graph()
+        env = {}
+        for node in reordered_nodes:
+            new_node = reordered_graph.node_copy(node, lambda n: env[n])
+            new_node.meta = node.meta.copy()
+            env[node] = new_node
+        reordered_graph.lint()
+
+        reordered_gm = GraphModule(gm, reordered_graph)
+        reordered_input_ids = get_input_id_node(reordered_gm)
+
+        with patch.object(_registry, 'sp_size', return_value=_SP_SIZE), \
+             patch.object(_dist, 'get_rank', return_value=0):
+            shard_tensor_node(reordered_gm, reordered_input_ids)
+
+        reordered_gm.graph.lint()
