@@ -263,7 +263,7 @@ class OpBuilder(ABC):
             output = result.decode('utf-8')
             match = re.search(r'gfx\S+', output)
             rocm_gpu_arch = match.group(0).strip() if match else ""
-        except (subprocess.CalledProcessError, FileNotFoundError):
+        except (subprocess.CalledProcessError, FileNotFoundError, OSError):
             rocm_gpu_arch = ""
         OpBuilder._rocm_gpu_arch = rocm_gpu_arch
         return OpBuilder._rocm_gpu_arch
@@ -281,7 +281,7 @@ class OpBuilder(ABC):
             output = result.decode('utf-8')
             match = re.search(r'Wavefront Size:\s+(\d+)', output)
             rocm_wavefront_size = match.group(1) if match else "32"
-        except (subprocess.CalledProcessError, FileNotFoundError):
+        except (subprocess.CalledProcessError, FileNotFoundError, OSError):
             rocm_wavefront_size = "32"
         OpBuilder._rocm_wavefront_size = rocm_wavefront_size
         return OpBuilder._rocm_wavefront_size
