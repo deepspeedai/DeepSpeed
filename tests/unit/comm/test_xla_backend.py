@@ -31,7 +31,7 @@ def _install_fake_torch_xla(monkeypatch, local_ordinal=0):
 
 
 def test_torch_backend_uses_xla_init_method(monkeypatch):
-    from deepspeed.comm import torch as ds_torch
+    import deepspeed.comm.torch as ds_torch
 
     _install_fake_torch_xla(monkeypatch, local_ordinal=3)
 
