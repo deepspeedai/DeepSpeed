@@ -36,6 +36,7 @@ def test_torch_backend_uses_xla_init_method(monkeypatch):
     _install_fake_torch_xla(monkeypatch, local_ordinal=3)
 
     init_calls = []
+    dist_pkg = getattr(torch, 'distributed')
 
     class FakeAccelerator:
 
@@ -46,12 +47,15 @@ def test_torch_backend_uses_xla_init_method(monkeypatch):
     monkeypatch.delenv('LOCAL_RANK', raising=False)
     monkeypatch.setattr(ds_torch, "build_shm_op", lambda: None)
     monkeypatch.setattr(ds_torch, "get_accelerator", lambda: FakeAccelerator())
-    monkeypatch.setattr(torch.distributed, "is_initialized", lambda: False)
-    monkeypatch.setattr(torch.distributed, "init_process_group",
-                        lambda backend, **kwargs: init_calls.append((backend, kwargs)))
-    monkeypatch.setattr(torch.distributed, "get_rank", lambda: 1)
-    monkeypatch.setattr(torch.distributed, "get_world_size", lambda: 8)
-    monkeypatch.setattr(torch.distributed, "get_backend", lambda: XLA_BACKEND)
+    monkeypatch.setattr(dist_pkg, "is_initialized", lambda: False)
+    monkeypatch.setattr(
+        dist_pkg,
+        "init_process_group",
+        lambda backend, **kwargs: init_calls.append((backend, kwargs)),
+    )
+    monkeypatch.setattr(dist_pkg, "get_rank", lambda: 1)
+    monkeypatch.setattr(dist_pkg, "get_world_size", lambda: 8)
+    monkeypatch.setattr(dist_pkg, "get_backend", lambda: XLA_BACKEND)
 
     backend = ds_torch.TorchBackend(XLA_BACKEND, timedelta(seconds=5), None)
 
