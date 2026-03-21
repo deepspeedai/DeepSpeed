@@ -162,6 +162,8 @@ def init_deepspeed_backend(ds_backend, timeout, init_method):
         utils.logger.info(f"Initialize {ds_backend} backend")
     elif ds_backend == HCCL_BACKEND:
         utils.logger.debug("HCCL backend in DeepSpeed not yet implemented")
+    elif ds_backend == XLA_BACKEND:
+        utils.logger.debug("XLA backend in DeepSpeed is provided via torch.distributed")
     else:
         utils.logger.debug(f"DeepSpeed does not support {ds_backend} backend")
 
@@ -821,6 +823,8 @@ def init_distributed(dist_backend=None,
         utils.logger.info(f'cdb={cdb}')
     if cdb is None and torch.distributed.is_initialized():
         # The user initialized torch.dist themselves, create cdb and short-circuit
+        if dist_backend is None:
+            dist_backend = get_accelerator().communication_backend_name()
         cdb = TorchBackend(dist_backend, timeout, init_method)
         return
 
@@ -831,7 +835,8 @@ def init_distributed(dist_backend=None,
     else:
         # Initialize torch distributed if needed
         required_env = ["RANK", "WORLD_SIZE", "MASTER_ADDR", "MASTER_PORT", "LOCAL_RANK"]
-        if auto_mpi_discovery and not all(map(lambda v: v in os.environ, required_env)):
+        xla_backend = dist_backend == XLA_BACKEND or get_accelerator().communication_backend_name() == XLA_BACKEND
+        if auto_mpi_discovery and not xla_backend and not all(map(lambda v: v in os.environ, required_env)):
             if verbose:
                 utils.logger.info("Not using the DeepSpeed or dist launchers, attempting to detect MPI environment...")
             if in_aml() and not in_dlts():

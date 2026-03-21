@@ -20,7 +20,7 @@ try:
 except ImportError as e:
     dsa2 = None
 
-SUPPORTED_ACCELERATOR_LIST = ['cuda', 'cpu', 'xpu', 'npu', 'mps', 'hpu', 'mlu', 'sdaa']
+SUPPORTED_ACCELERATOR_LIST = ['cuda', 'cpu', 'xpu', 'npu', 'mps', 'hpu', 'mlu', 'sdaa', 'xla']
 
 ds_accelerator = None
 
@@ -98,6 +98,12 @@ def get_accelerator():
                 import torch_mlu  # noqa: F401
             except ImportError as e:
                 raise ValueError("MLU_Accelerator requires torch_mlu, which is not installed on this system.")
+        elif accelerator_name in ["xla", "tpu"]:
+            accelerator_name = "xla"
+            try:
+                import torch_xla  # noqa: F401
+            except ImportError as e:
+                raise ValueError("XLA_Accelerator requires torch_xla, which is not installed on this system.")
         elif accelerator_name not in SUPPORTED_ACCELERATOR_LIST:
             raise ValueError(f'DS_ACCELERATOR must be one of {SUPPORTED_ACCELERATOR_LIST}. '
                              f'Value "{accelerator_name}" is not supported')
@@ -125,6 +131,14 @@ def get_accelerator():
                     accelerator_name = "xpu"
         except ImportError as e:
             pass
+        if accelerator_name is None:
+            try:
+                import torch_xla.core.xla_model as xm
+
+                if len(xm.get_xla_supported_devices(devkind='TPU')) > 0:
+                    accelerator_name = "xla"
+            except ImportError as e:
+                pass
         if accelerator_name is None:
             try:
                 import torch_npu  # noqa: F401,F811 # type: ignore
@@ -220,6 +234,10 @@ def get_accelerator():
         from .mlu_accelerator import MLU_Accelerator
 
         ds_accelerator = MLU_Accelerator()
+    elif accelerator_name == 'xla':
+        from .xla_accelerator import XLA_Accelerator
+
+        ds_accelerator = XLA_Accelerator()
     _validate_accelerator(ds_accelerator)
     if accel_logger is not None:
         accel_logger.info(f"Setting ds_accelerator to {ds_accelerator._name} ({ds_set_method})")

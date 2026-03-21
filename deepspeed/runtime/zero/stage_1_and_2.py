@@ -59,14 +59,11 @@ def input(msg):
 
 
 def split_half_float_double(tensors):
-    device_type = get_accelerator().device_name()
-    dtypes = [
-        "torch.{}.HalfTensor".format(device_type), "torch.{}.FloatTensor".format(device_type),
-        "torch.{}.DoubleTensor".format(device_type), "torch.{}.BFloat16Tensor".format(device_type)
-    ]
     buckets = []
-    for i, dtype in enumerate(dtypes):
-        bucket = [t for t in tensors if t.type() == dtype]
+    accelerator = get_accelerator()
+    dtype_order = (torch.float16, torch.float32, torch.float64, torch.bfloat16)
+    for dtype in dtype_order:
+        bucket = [tensor for tensor in tensors if tensor.dtype == dtype and accelerator.on_accelerator(tensor)]
         if bucket:
             buckets.append(bucket)
     return buckets
