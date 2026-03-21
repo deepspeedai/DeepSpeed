@@ -5,7 +5,6 @@
 
 import time
 import torch
-from collections import deque
 from typing import List
 
 from deepspeed.runtime.superoffload.superoffload_utils import SuperOffloadCPUOptimizer, TaskKeys, ResultKeys, EventTypes
@@ -31,8 +30,7 @@ class SuperOffloadOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
     ):
 
         self.sub_group_to_param_num = {}
-        self.params_in_ipg_bucket_buffer = deque()
-        self._cur_bucket_index = -1
+        self.sub_group_grad_partition_counts = {}
         self.async_cpuadam_num = 0
         self.max_grad_numel = 0
 
@@ -93,49 +91,10 @@ class SuperOffloadOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
             step_with_gradscaler(self.backup_optimizer)
             self.backup_optimizer.param_groups[param_group_id]['params'] = []
 
-    def reduce_independent_p_g_buckets_and_remove_grads(self, param):
-        comm_dtype = self.get_param_comm_dtype(param)
-        bucket = self.ipg_buckets[comm_dtype]
-        i, _, _ = self.grad_position[self.get_param_id(param)]
-
-        if len(bucket.params) == 0:
-            self._cur_bucket_index = i
-            if getattr(param, "ds_grad_is_ready", True):
-                self._DeepSpeedZeroOptimizer_Stage3__add_grad_to_ipg_bucket(param)
-
-            # If this is a single-parameter sub-group, reduce immediately
-            if self.sub_group_to_param_num[self._cur_bucket_index] == 1:
-                self._DeepSpeedZeroOptimizer_Stage3__reduce_and_partition_ipg_grads(comm_dtype)
-
-        elif i != self._cur_bucket_index:
-            # Parameter belongs to different sub-group, buffer it
-            self.params_in_ipg_bucket_buffer.append(param)
-        else:
-            # Parameter belongs to current bucket
-            if getattr(param, "ds_grad_is_ready", True):
-                self._DeepSpeedZeroOptimizer_Stage3__add_grad_to_ipg_bucket(param)
-
-            # Check if bucket is complete
-            if self.sub_group_to_param_num[self._cur_bucket_index] == len(bucket.params):
-                self._DeepSpeedZeroOptimizer_Stage3__reduce_and_partition_ipg_grads(comm_dtype)
-
-                # Process buffered parameters
-                self._flush_ipg_bucket_buffer()
-
-    def _flush_ipg_bucket_buffer(self):
-        while self.params_in_ipg_bucket_buffer:
-            buffered_param = self.params_in_ipg_bucket_buffer.popleft()
-            if buffered_param.grad is None:
-                continue
-            ci, _, _ = self.grad_position[self.get_param_id(buffered_param)]
-            self._cur_bucket_index = ci
-            if getattr(buffered_param, "ds_grad_is_ready", True):
-                self._DeepSpeedZeroOptimizer_Stage3__add_grad_to_ipg_bucket(buffered_param)
-
     @instrument_w_nvtx
     def independent_gradient_partition_epilogue(self):
-        self._flush_ipg_bucket_buffer()
         super().independent_gradient_partition_epilogue()
+        self.sub_group_grad_partition_counts.clear()
 
     @instrument_w_nvtx
     def _reassign_or_swap_out_partitioned_parameters(self, sub_group_id):
@@ -159,10 +118,7 @@ class SuperOffloadOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
 
     @instrument_w_nvtx
     def partition_grads(self, params_to_release: List[Parameter], grad_partitions: List[Tensor]) -> None:
-        buffers = []
-        device_buffers = {}
-        buffer_numel_min = {}
-        buffer_numel_max = {}
+        completed_sub_groups = []
 
         for param, grad_partition in zip(params_to_release, grad_partitions):
             i, dest_offset, _ = self.grad_position[self.get_param_id(param)]
@@ -170,32 +126,26 @@ class SuperOffloadOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
             if self.is_gradient_accumulation_boundary:
                 self.norm_for_param_grads[self.get_param_id(param)] = self._constant_buffered_norm2(grad_partition)
 
-            buffer_numel = grad_partition.numel()
-            buffers.append(grad_partition)
-
-            if i not in device_buffers:
-                device_buffers[i] = []
-            device_buffers[i].append(grad_partition)
-
-            if i not in buffer_numel_min:
-                buffer_numel_min[i] = dest_offset
-                buffer_numel_max[i] = dest_offset + buffer_numel
-            else:
-                buffer_numel_min[i] = min(buffer_numel_min[i], dest_offset)
-                buffer_numel_max[i] = max(buffer_numel_max[i], dest_offset + buffer_numel)
-
-        if self.is_gradient_accumulation_boundary:
-            for i in buffer_numel_min.keys():
                 fp32_grad_tensor = self.fp32_partitioned_groups_flat[i].grad.narrow(
-                    0, buffer_numel_min[i], buffer_numel_max[i] - buffer_numel_min[i])
-                concatenated_buffer = torch.cat(device_buffers[i], dim=0).to(dtype=self.master_weights_and_grads_dtype)
+                    0, dest_offset, grad_partition.numel())
+                fp32_grad_tensor.copy_(grad_partition.to(dtype=self.master_weights_and_grads_dtype), non_blocking=True)
 
+            self.sub_group_grad_partition_counts[i] = self.sub_group_grad_partition_counts.get(i, 0) + 1
+            if self.sub_group_grad_partition_counts[i] == self.sub_group_to_param_num[i]:
+                completed_sub_groups.append(i)
+
+        if self.is_gradient_accumulation_boundary and completed_sub_groups:
+            # Ensure all async CUDA-to-CPU grad copies have landed before
+            # the worker process reads the CPU grad buffer.
+            get_accelerator().current_stream().synchronize()
+
+            for i in completed_sub_groups:
                 if self.subgroup_to_device[i] == 'cpu' and not self.clip_grad:
                     param_group_id = self.sub_group_to_group_id[i]
                     fp32_param = self.fp32_partitioned_groups_flat[i]
 
                     self.superoffload_cpu_optimizer.async_step(param_group_id, i, fp32_param.data,
-                                                               concatenated_buffer.data)
+                                                               fp32_param.grad.data)
                     self.async_cpuadam_num += 1
 
                     result = self.superoffload_cpu_optimizer.get_result()
@@ -203,8 +153,6 @@ class SuperOffloadOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
                         self._reassign_or_swap_out_partitioned_parameters_async(result[TaskKeys.SUB_GROUP_ID],
                                                                                 result[ResultKeys.UPDATED_PARAM])
                         self.async_cpuadam_num -= 1
-
-                fp32_grad_tensor.copy_(concatenated_buffer, non_blocking=True)
 
         for param in params_to_release:
             if not get_accelerator().is_synchronized_device():
