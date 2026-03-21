@@ -5,10 +5,11 @@
 import pytest
 import deepspeed.comm as dist
 from unit.common import DistributedTest
-from unit.simple_model import random_dataloader
+from unit.simple_model import random_dataloader, SimpleModel
 
 import deepspeed
 import torch
+from deepspeed.runtime.superoffload.superoffload_stage3 import SuperOffloadOptimizer_Stage3
 from deepspeed.runtime.zero.offload_config import DeepSpeedZeroOffloadOptimizerConfig
 
 import torch.nn as nn
@@ -79,3 +80,61 @@ class TestZeroPartialOffloadConfigSweep(DistributedTest):
             loss = model(batch[0], batch[1])
             model.backward(loss)
             model.step()
+
+
+class TestSuperOffloadBucketIndependence(DistributedTest):
+    world_size = 1
+    non_daemonic_procs = True
+
+    def test(self) -> None:
+        config_dict = {
+            "train_batch_size": 2,
+            "steps_per_print": 1,
+            "optimizer": {
+                "type": "Adam",
+                "params": {
+                    "lr": 0.00015,
+                }
+            },
+            "fp16": {
+                "enabled": True,
+                "initial_scale_power": 8
+            },
+            "zero_optimization": {
+                "stage": 3,
+                "sub_group_size": 1500,
+                "reduce_bucket_size": 1024,
+                "offload_optimizer": {
+                    "device": "cpu",
+                    "pin_memory": True,
+                    "ratio": 1.0,
+                    "super_offload": True,
+                    "cpuadam_cores_perc": 0.5,
+                }
+            }
+        }
+
+        torch.manual_seed(1234)
+        model = SimpleModel(hidden_dim=32, nlayers=2)
+        model_engine, optimizer, _, _ = deepspeed.initialize(model=model,
+                                                             model_parameters=model.parameters(),
+                                                             config=config_dict)
+
+        assert isinstance(optimizer, SuperOffloadOptimizer_Stage3)
+        assert optimizer.reduce_bucket_size != optimizer.sub_group_size
+        assert optimizer.sub_group_to_param_num[0] > 1
+        assert optimizer.fp32_partitioned_groups_flat[0].grad.numel() > optimizer.reduce_bucket_size
+
+        inputs = torch.randn(2, 32, device=model_engine.device, dtype=torch.float16)
+        targets = torch.randn(2, 32, device=model_engine.device, dtype=torch.float16)
+
+        loss = model_engine(inputs, targets)
+        model_engine.backward(loss)
+
+        fp32_grad_tensor = optimizer.fp32_partitioned_groups_flat[0].grad
+        for param in optimizer.fp16_groups[0]:
+            _, dest_offset, num_elements = optimizer.grad_position[optimizer.get_param_id(param)]
+            grad_slice = fp32_grad_tensor.narrow(0, dest_offset, num_elements)
+            assert torch.count_nonzero(grad_slice).item() > 0
+
+        model_engine.step()

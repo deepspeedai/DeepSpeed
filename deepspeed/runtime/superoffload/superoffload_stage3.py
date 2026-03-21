@@ -8,6 +8,7 @@ import torch
 from collections import deque
 from typing import List
 
+import deepspeed.comm as dist
 from deepspeed.runtime.superoffload.superoffload_utils import SuperOffloadCPUOptimizer, EventTypes
 from deepspeed.runtime.zero.partition_parameters import Parameter, Tensor
 from deepspeed.runtime.zero.stage3 import DeepSpeedZeroOptimizer_Stage3
@@ -38,6 +39,7 @@ class SuperOffloadOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
         self.max_grad_numel = 0
 
         super().__init__(module, init_optimizer, param_names, timers, ds_config, **kwargs)
+        self._reset_sub_group_grad_partition_tracking()
 
         optimizer_config = self._get_superoffload_optimizer_config()
         cpuadam_cores_perc = kwargs.get("cpuadam_cores_perc", 0.8)
@@ -59,6 +61,10 @@ class SuperOffloadOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
     def _record_sub_group_metadata(self, sub_group, sub_group_numel):
         self.max_grad_numel = max(self.max_grad_numel, sub_group_numel)
         self.sub_group_to_param_num.append(len(sub_group))
+
+    def _reset_sub_group_grad_partition_tracking(self):
+        self.sub_group_partition_counts = [0] * len(self.sub_group_to_param_num)
+        self.sub_group_grad_staging_buffers = {}
 
     def _create_fp16_sub_groups(self, params_group):
 
@@ -106,59 +112,11 @@ class SuperOffloadOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
     def reduce_independent_p_g_buckets_and_remove_grads(self, param):
         comm_dtype = self.get_param_comm_dtype(param)
         bucket = self.ipg_buckets[comm_dtype]
-        i, _, _ = self.grad_position[self.get_param_id(param)]
+        if bucket.elements + param.ds_numel > self.reduce_bucket_size and bucket.elements > 0:
+            self._DeepSpeedZeroOptimizer_Stage3__reduce_and_partition_ipg_grads(comm_dtype)
 
-        if len(bucket.params) == 0:
-            self._cur_bucket_index = i
-            if getattr(param, "ds_grad_is_ready", True) and param.grad is not None:
-                self._DeepSpeedZeroOptimizer_Stage3__add_grad_to_ipg_bucket(param)
-
-            # If this is a single-parameter sub-group, reduce immediately
-            if self.sub_group_to_param_num[self._cur_bucket_index] == 1:
-                self._DeepSpeedZeroOptimizer_Stage3__reduce_and_partition_ipg_grads(comm_dtype)
-
-        elif i != self._cur_bucket_index:
-            # Parameter belongs to different sub-group, buffer it
-            if getattr(param, "ds_grad_is_ready", True) and param.grad is not None:
-                self.params_in_ipg_bucket_buffer.append(param)
-        else:
-            # Parameter belongs to current bucket
-            if getattr(param, "ds_grad_is_ready", True) and param.grad is not None:
-                self._DeepSpeedZeroOptimizer_Stage3__add_grad_to_ipg_bucket(param)
-
-            # Check if bucket is complete
-            if self.sub_group_to_param_num[self._cur_bucket_index] == len(bucket.params):
-                self._DeepSpeedZeroOptimizer_Stage3__reduce_and_partition_ipg_grads(comm_dtype)
-
-                # Process buffered parameters
-                while self.params_in_ipg_bucket_buffer:
-                    deferred_params = deque()
-
-                    while self.params_in_ipg_bucket_buffer:
-                        buffered_param = self.params_in_ipg_bucket_buffer.popleft()
-                        if buffered_param.grad is None:
-                            continue
-
-                        ci, _, _ = self.grad_position[self.get_param_id(buffered_param)]
-                        if len(bucket.params) == 0:
-                            self._cur_bucket_index = ci
-
-                        if ci != self._cur_bucket_index:
-                            deferred_params.append(buffered_param)
-                            continue
-
-                        if getattr(buffered_param, "ds_grad_is_ready", True):
-                            self._DeepSpeedZeroOptimizer_Stage3__add_grad_to_ipg_bucket(buffered_param)
-
-                        if self.sub_group_to_param_num[self._cur_bucket_index] == len(bucket.params):
-                            self._DeepSpeedZeroOptimizer_Stage3__reduce_and_partition_ipg_grads(comm_dtype)
-                            break
-
-                    if deferred_params:
-                        self.params_in_ipg_bucket_buffer.extendleft(reversed(deferred_params))
-
-                    if len(bucket.params) != 0:
-                        break
+        if getattr(param, "ds_grad_is_ready", True) and param.grad is not None:
+            self._DeepSpeedZeroOptimizer_Stage3__add_grad_to_ipg_bucket(param)
 
     @instrument_w_nvtx
     def _reassign_or_swap_out_partitioned_parameters(self, sub_group_id):
@@ -218,55 +176,59 @@ class SuperOffloadOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
     @instrument_w_nvtx
     def partition_grads(self, params_to_release: List[Parameter], grad_partitions: List[Tensor]) -> None:
         self._submit_ready_cpu_grad_copies()
-        subgroup_grad_partitions = {}
 
         for param, grad_partition in zip(params_to_release, grad_partitions):
             i, dest_offset, _ = self.grad_position[self.get_param_id(param)]
+            is_grad_boundary = self.is_gradient_accumulation_boundary
+            contains_real_data = param.partition_numel() * dist.get_rank(self.dp_process_group) < param.ds_numel
+            is_cpu_sub_group = self.subgroup_to_device[i] == 'cpu'
 
-            if self.is_gradient_accumulation_boundary:
-                self.norm_for_param_grads[self.get_param_id(param)] = self._constant_buffered_norm2(grad_partition)
+            if is_grad_boundary:
+                if self.sub_group_partition_counts[i] == 0:
+                    if is_cpu_sub_group:
+                        expected_numel = self.fp32_partitioned_groups_flat[i].grad.numel()
+                        self.sub_group_grad_staging_buffers[i] = torch.zeros(expected_numel,
+                                                                            device=grad_partition.device,
+                                                                            dtype=self.master_weights_and_grads_dtype)
+                    else:
+                        self.fp32_partitioned_groups_flat[i].grad.zero_()
+                if contains_real_data:
+                    self.norm_for_param_grads[self.get_param_id(param)] = self._constant_buffered_norm2(grad_partition)
 
-            if i not in subgroup_grad_partitions:
-                subgroup_grad_partitions[i] = []
-            subgroup_grad_partitions[i].append((dest_offset, grad_partition))
+            if contains_real_data and is_grad_boundary:
+                grad_buffer = grad_partition.to(dtype=self.master_weights_and_grads_dtype)
+                if is_cpu_sub_group:
+                    staging_buffer = self.sub_group_grad_staging_buffers[i]
+                    staging_buffer.narrow(0, dest_offset, grad_buffer.numel()).copy_(grad_buffer, non_blocking=True)
+                else:
+                    fp32_grad_tensor = self.fp32_partitioned_groups_flat[i].grad
+                    fp32_grad_tensor.narrow(0, dest_offset, grad_buffer.numel()).copy_(grad_buffer, non_blocking=True)
 
-        if self.is_gradient_accumulation_boundary:
-            for i, grad_entries in subgroup_grad_partitions.items():
-                fp32_grad_tensor = self.fp32_partitioned_groups_flat[i].grad
-                expected_numel = fp32_grad_tensor.numel()
-
-                if self.subgroup_to_device[i] == 'cpu':
-                    staging_buffer = torch.zeros(expected_numel,
-                                                 device=grad_entries[0][1].device,
-                                                 dtype=self.master_weights_and_grads_dtype)
-                    for dest_offset, grad_partition in grad_entries:
-                        grad_buffer = grad_partition.to(dtype=self.master_weights_and_grads_dtype)
-                        staging_buffer.narrow(0, dest_offset, grad_buffer.numel()).copy_(grad_buffer,
-                                                                                         non_blocking=True)
-
+            if is_grad_boundary:
+                self.sub_group_partition_counts[i] += 1
+                if is_cpu_sub_group and self.sub_group_partition_counts[i] == self.sub_group_to_param_num[i]:
+                    fp32_grad_tensor = self.fp32_partitioned_groups_flat[i].grad
+                    staging_buffer = self.sub_group_grad_staging_buffers.pop(i)
                     fp32_grad_tensor.copy_(staging_buffer, non_blocking=True)
                     copy_event = get_accelerator().Event()
                     get_accelerator().current_stream().record_event(copy_event)
                     self.pending_cpu_grad_copies.append({
                         "sub_group_id": i,
                         "fp32_grad_tensor": fp32_grad_tensor,
-                        "staging_buffer": staging_buffer,
                         "event": copy_event,
                     })
                     self._submit_ready_cpu_grad_copies()
                     self._consume_completed_async_result(self.superoffload_cpu_optimizer.get_result())
-                else:
-                    fp32_grad_tensor.zero_()
-                    for dest_offset, grad_partition in grad_entries:
-                        grad_buffer = grad_partition.to(dtype=self.master_weights_and_grads_dtype)
-                        fp32_grad_tensor.narrow(0, dest_offset, grad_buffer.numel()).copy_(grad_buffer,
-                                                                                           non_blocking=True)
 
         # Clean up parameter gradients
         for param in params_to_release:
             if not get_accelerator().is_synchronized_device():
                 param.grad.record_stream(get_accelerator().current_stream())
             param.grad = None
+
+    def independent_gradient_partition_epilogue(self):
+        super().independent_gradient_partition_epilogue()
+        self._reset_sub_group_grad_partition_tracking()
 
     @instrument_w_nvtx
     def step(self, closure=None):
