@@ -11,8 +11,10 @@ import torch
 from .abstract_accelerator import DeepSpeedAccelerator
 
 try:
+    import torch_xla
     import torch_xla.core.xla_model as xm
 except ImportError as e:
+    torch_xla = None
     xm = None
 
 
@@ -33,6 +35,21 @@ class XLA_Accelerator(DeepSpeedAccelerator):
     def _tensor_factory(self, dtype):
         return functools.partial(torch.tensor, dtype=dtype, device=self.current_device_name())
 
+    def _addressable_devices(self):
+        if torch_xla is not None and hasattr(torch_xla, 'devices'):
+            return list(torch_xla.devices())
+
+        xm_module = self._require_xm()
+        return [torch.device(device) for device in xm_module.get_xla_supported_devices(devkind='TPU')]
+
+    def _normalize_device_index(self, device_index=None):
+        devices = self._addressable_devices()
+        if not devices:
+            raise RuntimeError("No addressable XLA devices are available in the current process.")
+        if device_index is None:
+            return 0
+        return min(device_index, len(devices) - 1)
+
     def is_synchronized_device(self):
         return True
 
@@ -49,21 +66,29 @@ class XLA_Accelerator(DeepSpeedAccelerator):
     def device_name(self, device_index=None):
         if device_index is None:
             return 'xla'
-        return f'xla:{device_index}'
+        return str(self._addressable_devices()[self._normalize_device_index(device_index)])
 
     def device(self, device_index=None):
         xm_module = self._require_xm()
-        return xm_module.xla_device(n=device_index, devkind='TPU')
+        if device_index is None:
+            return xm_module.xla_device(devkind='TPU')
+        return xm_module.xla_device(n=self._normalize_device_index(device_index), devkind='TPU')
 
     def set_device(self, device_index):
+        # XLA uses the default device selected for the current process.
+        self.device(device_index)
         os.environ['LOCAL_RANK'] = str(device_index)
+        os.environ.setdefault('PJRT_LOCAL_PROCESS_RANK', str(device_index))
 
     def current_device(self):
-        xm_module = self._require_xm()
-        return xm_module.get_local_ordinal()
+        current_device = self.device()
+        device_index = getattr(current_device, 'index', None)
+        if device_index is not None:
+            return device_index
+        return self._normalize_device_index()
 
     def current_device_name(self):
-        return self.device_name(self.current_device())
+        return str(self.device())
 
     def device_count(self):
         xm_module = self._require_xm()

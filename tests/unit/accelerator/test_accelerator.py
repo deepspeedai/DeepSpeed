@@ -67,8 +67,24 @@ def _install_fake_torch_xla(monkeypatch, local_ordinal=0, device_count=2):
     torch_xla_xla_model = types.ModuleType("torch_xla.core.xla_model")
     torch_xla_distributed = types.ModuleType("torch_xla.distributed")
     torch_xla_backend = types.ModuleType("torch_xla.distributed.xla_backend")
+    selected_device = {"index": local_ordinal}
 
-    torch_xla_xla_model.xla_device = lambda n=None, devkind=None: f"xla:{local_ordinal if n is None else n}"
+    class FakeDevice:
+
+        def __init__(self, index):
+            self.type = "xla"
+            self.index = index
+
+        def __str__(self):
+            return f"xla:{self.index}"
+
+    def xla_device(n=None, devkind=None):
+        if n is not None:
+            selected_device["index"] = n
+        return FakeDevice(selected_device["index"])
+
+    torch_xla.devices = lambda: [FakeDevice(idx) for idx in range(device_count)]
+    torch_xla_xla_model.xla_device = xla_device
     torch_xla_xla_model.get_local_ordinal = lambda: local_ordinal
     torch_xla_xla_model.get_xla_supported_devices = lambda devkind=None: [f"xla:{idx}" for idx in range(device_count)]
     torch_xla_xla_model.mark_step = lambda: None
@@ -98,6 +114,20 @@ def test_xla_override_selects_xla_accelerator(monkeypatch):
     assert not accelerator.is_fp16_supported()
 
     monkeypatch.setattr(real_accelerator, "ds_accelerator", None)
+
+
+def test_xla_device_mapping_uses_addressable_devices(monkeypatch):
+    _install_fake_torch_xla(monkeypatch, local_ordinal=0, device_count=1)
+
+    import accelerator.xla_accelerator as xla_accelerator
+
+    importlib.reload(xla_accelerator)
+    accelerator = xla_accelerator.XLA_Accelerator()
+
+    accelerator.set_device(3)
+
+    assert accelerator.device_name(3) == "xla:0"
+    assert accelerator.current_device_name() == "xla:0"
 
 
 def test_zero_split_half_float_double_groups_xla_tensors(monkeypatch):
