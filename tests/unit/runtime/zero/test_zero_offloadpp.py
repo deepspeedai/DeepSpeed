@@ -5,11 +5,10 @@
 import pytest
 import deepspeed.comm as dist
 from unit.common import DistributedTest
-from unit.simple_model import random_dataloader, SimpleModel
+from unit.simple_model import random_dataloader
 
 import deepspeed
 import torch
-from deepspeed.runtime.superoffload.superoffload_stage3 import SuperOffloadOptimizer_Stage3
 from deepspeed.runtime.zero.offload_config import DeepSpeedZeroOffloadOptimizerConfig
 
 import torch.nn as nn
