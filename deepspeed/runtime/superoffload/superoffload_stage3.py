@@ -135,8 +135,6 @@ class SuperOffloadOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
                 completed_sub_groups.append(i)
 
         if self.is_gradient_accumulation_boundary and completed_sub_groups:
-            # Ensure all async CUDA-to-CPU grad copies have landed before
-            # the worker process reads the CPU grad buffer.
             get_accelerator().current_stream().synchronize()
 
             for i in completed_sub_groups:
