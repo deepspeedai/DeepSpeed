@@ -16,6 +16,7 @@ from deepspeed.accelerator import get_accelerator
 
 OPTIMIZER_STEP_TIMER = 'optimizer_step'
 
+
 def _validate_superoffload_accelerator():
     """Validate that the current accelerator is compatible with SuperOffload."""
     accelerator = get_accelerator()
@@ -169,8 +170,11 @@ class SuperOffloadOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
                     fp32_param = self.fp32_partitioned_groups_flat[i]
                     current_lr = self.optimizer.param_groups[param_group_id]['lr']
 
-                    self.superoffload_cpu_optimizer.async_step(param_group_id, i, fp32_param.data,
-                                                               fp32_param.grad.data, lr=current_lr)
+                    self.superoffload_cpu_optimizer.async_step(param_group_id,
+                                                               i,
+                                                               fp32_param.data,
+                                                               fp32_param.grad.data,
+                                                               lr=current_lr)
                     self.async_cpuadam_num += 1
 
                     result = self.superoffload_cpu_optimizer.get_result()
@@ -236,8 +240,10 @@ class SuperOffloadOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
                 param_group_id = self.sub_group_to_group_id[sub_group_id]
                 fp32_param = self.fp32_partitioned_groups_flat[sub_group_id]
                 current_lr = self.optimizer.param_groups[param_group_id]['lr']
-                self._sync_cpu_optimizer_step(param_group_id, sub_group_id,
-                                              fp32_param.data, fp32_param.grad.data,
+                self._sync_cpu_optimizer_step(param_group_id,
+                                              sub_group_id,
+                                              fp32_param.data,
+                                              fp32_param.grad.data,
                                               lr=current_lr)
             else:
                 self._optimizer_step(sub_group_id)
