@@ -43,15 +43,17 @@ class SuperOffloadOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
 
         super().__init__(module, init_optimizer, param_names, timers, ds_config, **kwargs)
 
-        optimizer_config = {
-            "lr": self.optimizer.param_groups[0]["lr"],
-            "betas": self.optimizer.param_groups[0]["betas"],
-            "eps": self.optimizer.param_groups[0]["eps"],
-            "weight_decay": self.optimizer.param_groups[0]["weight_decay"],
-            "amsgrad": self.optimizer.param_groups[0]["amsgrad"]
-        }
+        optimizer_configs = []
+        for pg in self.optimizer.param_groups:
+            optimizer_configs.append({
+                "lr": pg["lr"],
+                "betas": pg["betas"],
+                "eps": pg["eps"],
+                "weight_decay": pg["weight_decay"],
+                "amsgrad": pg["amsgrad"],
+            })
         cpuadam_cores_perc = kwargs.get("cpuadam_cores_perc", 0.8)
-        self.superoffload_cpu_optimizer = SuperOffloadCPUOptimizer(optimizer_config=optimizer_config,
+        self.superoffload_cpu_optimizer = SuperOffloadCPUOptimizer(optimizer_config=optimizer_configs,
                                                                    cpuadam_cores_perc=cpuadam_cores_perc,
                                                                    max_grad_numel=self.max_grad_numel)
 
@@ -61,6 +63,9 @@ class SuperOffloadOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
         sub_group_size = self.sub_group_size
 
         if sub_group_size is None or sub_group_size >= params_group_numel:
+            global_idx = len(self.sub_group_to_param_num)
+            self.sub_group_to_param_num[global_idx] = len(params_group)
+            self.max_grad_numel = max(self.max_grad_numel, params_group_numel)
             return [params_group]
 
         sub_groups = []
@@ -74,7 +79,8 @@ class SuperOffloadOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
             if local_sub_group_size >= sub_group_size or id(param) == id(params_group[-1]):
                 self.max_grad_numel = max(self.max_grad_numel, local_sub_group_size)
                 sub_groups.append(sub_group)
-                self.sub_group_to_param_num[len(sub_groups) - 1] = len(sub_group)
+                global_idx = len(self.sub_group_to_param_num)
+                self.sub_group_to_param_num[global_idx] = len(sub_group)
 
                 sub_group = []
                 local_sub_group_size = 0
@@ -130,12 +136,26 @@ class SuperOffloadOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
         for param, grad_partition in zip(params_to_release, grad_partitions):
             i, dest_offset, _ = self.grad_position[self.get_param_id(param)]
 
+            # Accumulate gradient into the grad_buffer, mirroring base class logic
+            grad_buffer = self._DeepSpeedZeroOptimizer_Stage3__param_id_to_grad_partition[param.ds_id].narrow(
+                0, 0, grad_partition.numel())
+            if self.micro_step_id == 0:
+                grad_buffer.copy_(grad_partition, non_blocking=True)
+                grad_buffer = grad_buffer.to(grad_partition.device, non_blocking=True)
+            elif get_accelerator().on_accelerator(grad_buffer):
+                grad_buffer.add_(grad_partition.to(self.gradient_accumulation_dtype).view(grad_buffer.shape))
+            else:
+                cuda_grad_buffer = grad_buffer.to(grad_partition.device, non_blocking=True)
+                cuda_grad_buffer.add_(grad_partition.to(self.gradient_accumulation_dtype).view(cuda_grad_buffer.shape))
+                grad_buffer.copy_(cuda_grad_buffer, non_blocking=True)
+                grad_buffer = cuda_grad_buffer
+
             if self.is_gradient_accumulation_boundary:
-                self.norm_for_param_grads[self.get_param_id(param)] = self._constant_buffered_norm2(grad_partition)
+                self.norm_for_param_grads[self.get_param_id(param)] = self._constant_buffered_norm2(grad_buffer)
 
                 fp32_grad_tensor = self.fp32_partitioned_groups_flat[i].grad.narrow(
-                    0, dest_offset, grad_partition.numel())
-                fp32_grad_tensor.copy_(grad_partition.to(dtype=self.master_weights_and_grads_dtype), non_blocking=True)
+                    0, dest_offset, grad_buffer.numel())
+                fp32_grad_tensor.copy_(grad_buffer.to(dtype=self.master_weights_and_grads_dtype), non_blocking=True)
 
             self.sub_group_grad_partition_counts[i] = self.sub_group_grad_partition_counts.get(i, 0) + 1
             if self.sub_group_grad_partition_counts[i] == self.sub_group_to_param_num[i]:
@@ -143,14 +163,14 @@ class SuperOffloadOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
 
         if self.is_gradient_accumulation_boundary and completed_sub_groups:
             get_accelerator().current_stream().synchronize()
-
             for i in completed_sub_groups:
                 if self.subgroup_to_device[i] == 'cpu' and not self.clip_grad:
                     param_group_id = self.sub_group_to_group_id[i]
                     fp32_param = self.fp32_partitioned_groups_flat[i]
+                    current_lr = self.optimizer.param_groups[param_group_id]['lr']
 
                     self.superoffload_cpu_optimizer.async_step(param_group_id, i, fp32_param.data,
-                                                               fp32_param.grad.data)
+                                                               fp32_param.grad.data, lr=current_lr)
                     self.async_cpuadam_num += 1
 
                     result = self.superoffload_cpu_optimizer.get_result()
@@ -215,8 +235,10 @@ class SuperOffloadOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
             if self.subgroup_to_device[sub_group_id] == 'cpu':
                 param_group_id = self.sub_group_to_group_id[sub_group_id]
                 fp32_param = self.fp32_partitioned_groups_flat[sub_group_id]
+                current_lr = self.optimizer.param_groups[param_group_id]['lr']
                 self._sync_cpu_optimizer_step(param_group_id, sub_group_id,
-                                              fp32_param.data, fp32_param.grad.data)
+                                              fp32_param.data, fp32_param.grad.data,
+                                              lr=current_lr)
             else:
                 self._optimizer_step(sub_group_id)
 
@@ -289,13 +311,15 @@ class SuperOffloadOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
                                  fp32_param_data,
                                  fp32_grad_data,
                                  rollback: bool = False,
+                                 lr: float = None,
                                  timeout_seconds: int = 60):
         event_type = EventTypes.ROLLBACK if rollback else EventTypes.ADAM_STEP
         self.superoffload_cpu_optimizer.async_step(param_group_id,
                                                    sub_group_id,
                                                    fp32_param_data,
                                                    fp32_grad_data,
-                                                   rollback=rollback)
+                                                   rollback=rollback,
+                                                   lr=lr)
         # Wait for completion
         self._wait_for_single_async_result(event_type, timeout_seconds)
 
@@ -330,11 +354,13 @@ class SuperOffloadOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
                 # Clip gradients and re-optimize
                 self.unscale_and_clip_grads(sub_group_id, scaled_global_grad_norm)
 
+                current_lr = self.optimizer.param_groups[param_group_id]['lr']
                 self._sync_cpu_optimizer_step(param_group_id,
                                               sub_group_id,
                                               fp32_param.data,
                                               fp32_param.grad.data,
-                                              rollback=False)
+                                              rollback=False,
+                                              lr=current_lr)
 
     @instrument_w_nvtx
     def check_clip_grads(self, total_norm):

@@ -22,6 +22,7 @@ class TaskKeys:
     PARAM_GROUP_ID = "param_group_id"
     SUB_GROUP_ID = "sub_group_id"
     ROLLBACK = "rollback"
+    LR = "lr"
 
 
 class ResultKeys:
@@ -48,17 +49,32 @@ def superoffload_optimizer_worker(param_queue: mp.SimpleQueue, result_queue: mp.
                          lr, betas, eps, weight_decay, and amsgrad parameters
         max_grad_numel: Maximum number of elements expected in gradient tensors
     """
-    # Initialize dummy parameter for optimizer creation
     cpu_tensor = torch.randn(1, device="cpu")
     cpu_param = torch.nn.Parameter(cpu_tensor)
 
     try:
+        if isinstance(optimizer_config, list):
+            pg_configs = optimizer_config
+        else:
+            pg_configs = [optimizer_config]
+
+        first_cfg = pg_configs[0]
         optimizer = DeepSpeedCPUAdam([cpu_param],
-                                     lr=optimizer_config["lr"],
-                                     betas=optimizer_config["betas"],
-                                     eps=optimizer_config["eps"],
-                                     weight_decay=optimizer_config["weight_decay"],
-                                     amsgrad=optimizer_config["amsgrad"])
+                                     lr=first_cfg["lr"],
+                                     betas=first_cfg["betas"],
+                                     eps=first_cfg["eps"],
+                                     weight_decay=first_cfg["weight_decay"],
+                                     amsgrad=first_cfg["amsgrad"])
+        for cfg in pg_configs[1:]:
+            dummy = torch.nn.Parameter(torch.randn(1, device="cpu"))
+            optimizer.add_param_group({
+                "params": [dummy],
+                "lr": cfg["lr"],
+                "betas": cfg["betas"],
+                "eps": cfg["eps"],
+                "weight_decay": cfg["weight_decay"],
+                "amsgrad": cfg["amsgrad"],
+            })
     except KeyError as e:
         error_msg = f"Missing required optimizer config key: {e}"
         logger.error(error_msg)
@@ -81,12 +97,16 @@ def superoffload_optimizer_worker(param_queue: mp.SimpleQueue, result_queue: mp.
             param_group_id = task[TaskKeys.PARAM_GROUP_ID]
             sub_group_id = task[TaskKeys.SUB_GROUP_ID]
             rollback = task.get(TaskKeys.ROLLBACK, False)
+            task_lr = task.get(TaskKeys.LR, None)
 
             logger.debug(f"Processing param_group_id: {param_group_id}, sub_group_id: {sub_group_id}")
 
             del task[TaskKeys.PARAM_DATA]
             del task[TaskKeys.PARAM_GRAD]
             task.clear()
+
+            if task_lr is not None:
+                optimizer.param_groups[param_group_id]['lr'] = task_lr
 
             grad_numel = param_grad.numel()
             if grad_numel > max_grad_numel:
@@ -202,20 +222,24 @@ class SuperOffloadCPUOptimizer:
                    sub_group_id: int,
                    fp32_param: torch.Tensor,
                    fp32_grad: torch.Tensor,
-                   rollback: bool = False) -> None:
+                   rollback: bool = False,
+                   lr: float = None) -> None:
         """
         Queue parameter for optimization in the worker process.
         """
         if not self.cpuadam_process.is_alive():
             raise RuntimeError("Worker process is not alive")
 
-        self.param_queue.put({
+        task = {
             TaskKeys.PARAM_DATA: fp32_param,
             TaskKeys.PARAM_GRAD: fp32_grad,
             TaskKeys.PARAM_GROUP_ID: param_group_id,
             TaskKeys.SUB_GROUP_ID: sub_group_id,
             TaskKeys.ROLLBACK: rollback,
-        })
+        }
+        if lr is not None:
+            task[TaskKeys.LR] = lr
+        self.param_queue.put(task)
 
     def get_result(self, expected_event_type: str = None) -> Optional[Dict[str, Any]]:
         """
