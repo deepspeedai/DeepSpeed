@@ -16,6 +16,12 @@ from deepspeed.accelerator import get_accelerator
 
 OPTIMIZER_STEP_TIMER = 'optimizer_step'
 
+def _validate_superoffload_accelerator():
+    """Validate that the current accelerator is compatible with SuperOffload."""
+    accelerator = get_accelerator()
+    assert accelerator.device_name() == 'cuda', (
+        f"SuperOffload only supports NVIDIA CUDA GPUs, but found accelerator '{accelerator.device_name()}'.")
+
 
 class SuperOffloadOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
 
@@ -28,6 +34,7 @@ class SuperOffloadOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
         ds_config,
         **kwargs,
     ):
+        _validate_superoffload_accelerator()
 
         self.sub_group_to_param_num = {}
         self.sub_group_grad_partition_counts = {}
