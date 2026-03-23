@@ -31,9 +31,8 @@ def _install_fake_torch_xla(monkeypatch, local_ordinal=0):
 
 
 def test_torch_backend_uses_xla_init_method(monkeypatch):
-    import deepspeed.comm.torch as ds_torch
-
     _install_fake_torch_xla(monkeypatch, local_ordinal=3)
+    import deepspeed.comm.torch as ds_torch
 
     init_calls = []
     dist_pkg = getattr(torch, 'distributed')
