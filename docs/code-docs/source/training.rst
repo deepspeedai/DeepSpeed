@@ -528,7 +528,6 @@ config and calling ``prepare_autosp_inputs()`` to prepare inputs before each for
         "compile": {
             "deepcompile": True,
             "passes": ["autosp"],
-            "pass_args": {"sp_size": 2}
         }
     }
 

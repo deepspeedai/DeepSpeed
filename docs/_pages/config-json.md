@@ -1906,7 +1906,6 @@ DeepSpeed provides compiler-based optimization passes through the `compile` conf
     "compile": {
         "deepcompile": true,
         "passes": ["autosp"],
-        "pass_args": {"sp_size": 2}
     }
 }
 ```
@@ -1916,13 +1915,6 @@ DeepSpeed provides compiler-based optimization passes through the `compile` conf
 | Description                                                              | Default |
 | ------------------------------------------------------------------------ | ------- |
 | List of compiler passes to apply. Currently supported: `["autosp"]`.     | `[]`    |
-
-
-<i>**sp_size**</i>: [integer]
-
-| Description                                                                         | Default |
-| ----------------------------------------------------------------------------------- | ------- |
-| Sequence parallel degree (number of devices to shard the sequence dimension across).   | `1`     |
 
 ### Data Type options
 
