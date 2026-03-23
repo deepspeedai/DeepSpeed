@@ -6,6 +6,7 @@
 import os
 import sys
 import types
+import importlib
 from datetime import timedelta
 
 import pytest
@@ -32,7 +33,7 @@ def _install_fake_torch_xla(monkeypatch, local_ordinal=0):
 
 def test_torch_backend_uses_xla_init_method(monkeypatch):
     _install_fake_torch_xla(monkeypatch, local_ordinal=3)
-    import deepspeed.comm.torch as ds_torch
+    ds_torch = importlib.import_module("deepspeed.comm.torch")
 
     init_calls = []
     dist_pkg = getattr(torch, 'distributed')
