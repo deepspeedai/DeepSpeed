@@ -1514,8 +1514,8 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                     "Invalid momentum buffer save mode, momentum buffer should be saved in memory or swapped in and out to nvme"
                 )
 
-            gathered_params_momentums = self._partitioned_buffers_all_gather(params, momentum_buffer,
-                                                                             communication_data_type)
+            gathered_params_momentums = self._partitioned_buffers_all_gather(
+                params, momentum_buffer, communication_data_type)
 
             world_sz = dist.get_world_size(self.dp_process_group)
             rank = dist.get_rank(self.dp_process_group)
@@ -1532,12 +1532,15 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                     m = gathered_momentums_pad[base_i + rank]
                     update = muon_update(g, m, beta=self.muon_beta)
                     g.data.copy_(update, non_blocking=False)
-                grad_handle = dist.all_gather(grads_pad[base_i:base_i + world_sz], grads_pad[base_i + rank], async_op=True)
+                grad_handle = dist.all_gather(grads_pad[base_i:base_i + world_sz],
+                                              grads_pad[base_i + rank],
+                                              async_op=True)
                 grad_handles.append(grad_handle)
                 momentum_handle = dist.all_gather(gathered_momentums_pad[base_i:base_i + world_sz],
-                                gathered_momentums_pad[base_i + rank], async_op=True)
+                                                  gathered_momentums_pad[base_i + rank],
+                                                  async_op=True)
                 momentum_handles.append(momentum_handle)
-            
+
             for handle in momentum_handles:
                 handle.wait()
             for idx, (param, dest_offset, _) in enumerate(group_items):
@@ -1770,7 +1773,9 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                                                           gradient_tensors=offload_fp32_gradients[i])
         return buffers
 
-    def _partitioned_buffers_all_gather(self, params: List[Parameter], buffers_to_allgather: List[Tensor],
+    def _partitioned_buffers_all_gather(self,
+                                        params: List[Parameter],
+                                        buffers_to_allgather: List[Tensor],
                                         communication_data_type: torch.dtype):
         """
         Allgather the partitioned buffers of the parameters to the global buffer.
@@ -1783,8 +1788,10 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         """
 
         assert len(params) == len(buffers_to_allgather), "params and buffers_to_allgather must have the same length"
-        assert all(param.partition_numel() == buffer.numel() for param, buffer in zip(
-            params, buffers_to_allgather)), "params and buffers_to_allgather must have the same numel"
+        assert all(param.partition_numel() == buffer.numel()
+                   for param,
+                   buffer in zip(params, buffers_to_allgather)), \
+            "params and buffers_to_allgather must have the same numel"
         coalesced_buffer = instrument_w_nvtx(torch.cat)(buffers_to_allgather)
         buffer_numel = coalesced_buffer.numel()
         reduce_buffer = torch.empty(self.partition_count * buffer_numel,
