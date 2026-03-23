@@ -1360,7 +1360,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
     @torch.no_grad()
     def __add_grad_to_ipg_bucket(self, param: Parameter) -> None:
         if not get_accelerator().resolves_data_dependency():
-            self.reduce_and_partition_stream.wait_stream(get_accelerator().default_stream())
+            self.reduce_and_partition_stream.wait_stream(get_accelerator().current_stream())
 
         bucket = self.ipg_buckets[self.get_param_comm_dtype(param)]
         if self.contiguous_gradients and bucket.elements + param.grad.numel() <= self.reduce_bucket_size:
