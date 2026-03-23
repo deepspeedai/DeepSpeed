@@ -149,7 +149,7 @@ def load_hp_checkpoint_state(self, folder, tp_rank, tp_world_size):
                 padding_size = padded_target_vocab_size - full_hp_param.shape[0]
                 full_hp_param = torch.nn.functional.pad(full_hp_param, (0, 0, 0, padding_size), "constant", 0)
 
-        autotp_tp_hp_slice = _resolve_autotp_partition(current_param, ckpt_dict, full_hp_param, tp_rank, tp_world_size)
+        autotp_tp_hp_slice = _resolve_autotp_partition(self, ckpt_dict, full_hp_param, tp_rank, tp_world_size)
         if autotp_tp_hp_slice is not None:
             tp_hp_slice = autotp_tp_hp_slice
         else:
