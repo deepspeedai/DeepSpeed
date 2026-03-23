@@ -74,22 +74,33 @@ def _build_param_uc_restore_meta(*,
     are intentionally omitted from model-level conversion schema.
     """
     return {
-        'partition_type': partition_type,
-        'partition_dim': partition_dim,
-        'logical_shape': _normalize_uc_shape(logical_shape),
-        'output_shape': _normalize_uc_shape(output_shape),
-        'sub_param_shape': _normalize_uc_shape(sub_param_shape),
-        'sub_param_sizes': _normalize_uc_shape(sub_param_sizes),
-        'target_partition_shape': _normalize_uc_shape(target_partition_shape),
-        'original_shape': _normalize_uc_shape(original_shape),
-        'is_bias': is_bias,
-        'replicated': replicated,
-        'conversion': _build_param_uc_conversion_meta(partition_type=partition_type,
-                                                      partition_dim=partition_dim,
-                                                      sub_param_shape=sub_param_shape,
-                                                      original_shape=original_shape,
-                                                      is_bias=is_bias,
-                                                      replicated=replicated),
+        'partition_type':
+        partition_type,
+        'partition_dim':
+        partition_dim,
+        'logical_shape':
+        _normalize_uc_shape(logical_shape),
+        'output_shape':
+        _normalize_uc_shape(output_shape),
+        'sub_param_shape':
+        _normalize_uc_shape(sub_param_shape),
+        'sub_param_sizes':
+        _normalize_uc_shape(sub_param_sizes),
+        'target_partition_shape':
+        _normalize_uc_shape(target_partition_shape),
+        'original_shape':
+        _normalize_uc_shape(original_shape),
+        'is_bias':
+        is_bias,
+        'replicated':
+        replicated,
+        'conversion':
+        _build_param_uc_conversion_meta(partition_type=partition_type,
+                                        partition_dim=partition_dim,
+                                        sub_param_shape=sub_param_shape,
+                                        original_shape=original_shape,
+                                        is_bias=is_bias,
+                                        replicated=replicated),
     }
 
 
@@ -1306,17 +1317,18 @@ class SubParamLinearLayer(TensorParallel_Layer):
                                 target_partition_shape=self.weight.shape,
                                 original_shape=self._orig_weight_shape)
         if self.bias is not None:
-            self._set_param_uc_meta(self.bias,
-                                    partition_type='column',
-                                    partition_dim=self._bias_partition_dim,
-                                    logical_shape=self._output_shape,
-                                    output_shape=self._output_shape,
-                                    sub_param_shape=self.shape if self._bias_partition_dim is not None else None,
-                                    sub_param_sizes=self._subparam_sizes if self._bias_partition_dim is not None else None,
-                                    target_partition_shape=self.bias.shape,
-                                    original_shape=self._orig_bias_shape,
-                                    is_bias=True,
-                                    replicated=self._bias_partition_dim is None)
+            self._set_param_uc_meta(
+                self.bias,
+                partition_type='column',
+                partition_dim=self._bias_partition_dim,
+                logical_shape=self._output_shape,
+                output_shape=self._output_shape,
+                sub_param_shape=self.shape if self._bias_partition_dim is not None else None,
+                sub_param_sizes=self._subparam_sizes if self._bias_partition_dim is not None else None,
+                target_partition_shape=self.bias.shape,
+                original_shape=self._orig_bias_shape,
+                is_bias=True,
+                replicated=self._bias_partition_dim is None)
 
 
 class SubParamLinearAllreduce(TensorParallel_Layer):
@@ -1430,4 +1442,3 @@ class RMSNormalize(nn.Module):
             hidden_states = hidden_states.to(self.weight.dtype)
 
         return hidden_states * self.weight
-

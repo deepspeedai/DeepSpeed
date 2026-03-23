@@ -9,7 +9,8 @@ import torch
 import types
 from typing import List, Tuple, Union
 from dataclasses import dataclass
-from .constants import (FP32_WEIGHT_KEY, PARAM, VOCAB_TENSOR, CAT_DIM, PARAM_N_SUB_PARAMS, SUB_PARAM_SHAPE, DS_AUTOTP_UC_META)
+from .constants import (FP32_WEIGHT_KEY, PARAM, VOCAB_TENSOR, CAT_DIM, PARAM_N_SUB_PARAMS, SUB_PARAM_SHAPE,
+                        DS_AUTOTP_UC_META)
 
 
 @dataclass
@@ -63,7 +64,7 @@ def _resolve_autotp_partition(current_param, ckpt_dict, full_hp_param, tp_rank, 
 
         sub_dim_sizes = shape_spec[partition_dim]
         if not isinstance(sub_dim_sizes, tuple):
-            sub_dim_sizes = (sub_dim_sizes,)
+            sub_dim_sizes = (sub_dim_sizes, )
 
         offset = 0
         merged_chunks = []
@@ -78,7 +79,7 @@ def _resolve_autotp_partition(current_param, ckpt_dict, full_hp_param, tp_rank, 
 
     if sub_param_sizes is not None:
         if not isinstance(sub_param_sizes, (tuple, list)):
-            sub_param_sizes = (sub_param_sizes,)
+            sub_param_sizes = (sub_param_sizes, )
 
         offset = 0
         merged_chunks = []
@@ -220,4 +221,3 @@ def load_hp_checkpoint_state(self, folder, tp_rank, tp_world_size):
 def enable_universal_checkpoint(param_list):
     for param in param_list:
         param.load_hp_checkpoint_state = types.MethodType(load_hp_checkpoint_state, param)
-

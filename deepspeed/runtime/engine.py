@@ -4502,4 +4502,3 @@ class DeepSpeedEngine(Module):
             DeepSpeedZeRoOffload), "Moving states across devices is not supported without an optimizer."
 
         self.optimizer.reload_states(non_blocking=non_blocking)
-

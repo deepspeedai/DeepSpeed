@@ -9,8 +9,8 @@ from types import SimpleNamespace
 import torch
 
 from deepspeed.checkpoint.constants import (CAT_DIM, FP32_WEIGHT_KEY, PARAM, PARAMETER_WITH_ROW_PARALLELISM_PATTERNS,
-                                           PARAMETER_WITH_SUB_PARAMS, SUB_PARAM_SHAPE,
-                                           TP_REPLICATED_PARAMETER_PATTERNS, UNIVERSAL_CHECKPOINT_INFO)
+                                            PARAMETER_WITH_SUB_PARAMS, SUB_PARAM_SHAPE,
+                                            TP_REPLICATED_PARAMETER_PATTERNS, UNIVERSAL_CHECKPOINT_INFO)
 from deepspeed.checkpoint.universal_checkpoint import SubparamShape as CheckpointSubparamShape
 from deepspeed.checkpoint.ds_to_universal import merge_tp_slices
 from deepspeed.checkpoint.universal_checkpoint import (_get_param_uc_restore_meta, _resolve_autotp_partition,
@@ -49,16 +49,17 @@ def _make_param(shape, meta=None):
 
 
 def test_resolve_autotp_partition_row_parallel_weight():
-    param = _make_param((4, 4), {
-        'partition_type': 'row',
-        'partition_dim': 1,
-        'logical_shape': (4, 8),
-        'output_shape': (4, ),
-        'sub_param_shape': None,
-        'original_shape': (4, 8),
-        'is_bias': False,
-        'replicated': False,
-    })
+    param = _make_param(
+        (4, 4), {
+            'partition_type': 'row',
+            'partition_dim': 1,
+            'logical_shape': (4, 8),
+            'output_shape': (4, ),
+            'sub_param_shape': None,
+            'original_shape': (4, 8),
+            'is_bias': False,
+            'replicated': False,
+        })
     full_hp_param = torch.arange(32, dtype=torch.float32).view(4, 8)
 
     slice_flat = _resolve_autotp_partition(param, {PARAM: full_hp_param}, full_hp_param, tp_rank=1, tp_world_size=2)
@@ -68,16 +69,17 @@ def test_resolve_autotp_partition_row_parallel_weight():
 
 
 def test_resolve_autotp_partition_subparam_column_weight():
-    param = _make_param((3, 4), {
-        'partition_type': 'column',
-        'partition_dim': 0,
-        'logical_shape': (6, 4),
-        'output_shape': (6, ),
-        'sub_param_shape': ((2, 2, 2), 4),
-        'original_shape': (6, 4),
-        'is_bias': False,
-        'replicated': False,
-    })
+    param = _make_param(
+        (3, 4), {
+            'partition_type': 'column',
+            'partition_dim': 0,
+            'logical_shape': (6, 4),
+            'output_shape': (6, ),
+            'sub_param_shape': ((2, 2, 2), 4),
+            'original_shape': (6, 4),
+            'is_bias': False,
+            'replicated': False,
+        })
     full_hp_param = torch.arange(24, dtype=torch.float32).view(6, 4)
 
     slice_flat = _resolve_autotp_partition(param, {PARAM: full_hp_param}, full_hp_param, tp_rank=0, tp_world_size=2)
@@ -104,44 +106,53 @@ def test_resolve_autotp_partition_subparam_sizes_uneven_gqa_like():
     tp_world_size = 2
     tp_rank = 1
 
-    param = _make_param((8, 2), {
-        "partition_type": "column",
-        "partition_dim": 0,
-        "logical_shape": (sum(sub_param_sizes), 2),  # (16, 2)
-        "output_shape": (sum(sub_param_sizes), ),    # (16,)
-        "sub_param_shape": (tuple(sub_param_sizes), 2),
-        "sub_param_sizes": sub_param_sizes,
-        "original_shape": (sum(sub_param_sizes), 2),
-        "is_bias": False,
-        "replicated": False,
-    })
+    param = _make_param(
+        (8, 2),
+        {
+            "partition_type": "column",
+            "partition_dim": 0,
+            "logical_shape": (sum(sub_param_sizes), 2),  # (16, 2)
+            "output_shape": (sum(sub_param_sizes), ),  # (16,)
+            "sub_param_shape": (tuple(sub_param_sizes), 2),
+            "sub_param_sizes": sub_param_sizes,
+            "original_shape": (sum(sub_param_sizes), 2),
+            "is_bias": False,
+            "replicated": False,
+        })
 
     # Full (unsharded) HP parameter: shape (16, 2)
     full_hp_param = torch.arange(sum(sub_param_sizes) * 2, dtype=torch.float32).view(sum(sub_param_sizes), 2)
 
-    slice_flat = _resolve_autotp_partition(param, {PARAM: full_hp_param}, full_hp_param, tp_rank=tp_rank, tp_world_size=tp_world_size)
+    slice_flat = _resolve_autotp_partition(param, {PARAM: full_hp_param},
+                                           full_hp_param,
+                                           tp_rank=tp_rank,
+                                           tp_world_size=tp_world_size)
 
     # Expected: split into Q/K/V blocks, chunk each block by TP, take tp_rank slice, concat back.
     q, k, v = torch.split(full_hp_param, sub_param_sizes, dim=0)
-    expected = torch.cat([q.chunk(tp_world_size, dim=0)[tp_rank],
-                          k.chunk(tp_world_size, dim=0)[tp_rank],
-                          v.chunk(tp_world_size, dim=0)[tp_rank]], dim=0).flatten()
+    expected = torch.cat([
+        q.chunk(tp_world_size, dim=0)[tp_rank],
+        k.chunk(tp_world_size, dim=0)[tp_rank],
+        v.chunk(tp_world_size, dim=0)[tp_rank]
+    ],
+                         dim=0).flatten()
 
     assert torch.equal(slice_flat, expected)
 
 
 def test_resolve_autotp_partition_replicated_bias():
     full_hp_param = torch.arange(8, dtype=torch.float32)
-    param = _make_param((8, ), {
-        'partition_type': 'row',
-        'partition_dim': None,
-        'logical_shape': (8, ),
-        'output_shape': (8, ),
-        'sub_param_shape': None,
-        'original_shape': (8, ),
-        'is_bias': True,
-        'replicated': True,
-    })
+    param = _make_param(
+        (8, ), {
+            'partition_type': 'row',
+            'partition_dim': None,
+            'logical_shape': (8, ),
+            'output_shape': (8, ),
+            'sub_param_shape': None,
+            'original_shape': (8, ),
+            'is_bias': True,
+            'replicated': True,
+        })
 
     slice_flat = _resolve_autotp_partition(param, {PARAM: full_hp_param}, full_hp_param, tp_rank=1, tp_world_size=2)
 
@@ -149,16 +160,17 @@ def test_resolve_autotp_partition_replicated_bias():
 
 
 def test_load_hp_checkpoint_state_prefers_autotp_metadata(tmp_path, monkeypatch):
-    param = _make_param((4, 4), {
-        'partition_type': 'row',
-        'partition_dim': 1,
-        'logical_shape': (4, 8),
-        'output_shape': (4, ),
-        'sub_param_shape': None,
-        'original_shape': (4, 8),
-        'is_bias': False,
-        'replicated': False,
-    })
+    param = _make_param(
+        (4, 4), {
+            'partition_type': 'row',
+            'partition_dim': 1,
+            'logical_shape': (4, 8),
+            'output_shape': (4, ),
+            'sub_param_shape': None,
+            'original_shape': (4, 8),
+            'is_bias': False,
+            'replicated': False,
+        })
     param.load_hp_checkpoint_state = types.MethodType(load_hp_checkpoint_state, param)
 
     import deepspeed.checkpoint.universal_checkpoint as uc
@@ -215,7 +227,8 @@ def test_merge_tp_slices_emits_subparam_shape_metadata(tmp_path):
         }],
     }
 
-    ds_checkpoint = SimpleNamespace(get_checkpoint_info=lambda key: uc_info if key == UNIVERSAL_CHECKPOINT_INFO else {})
+    ds_checkpoint = SimpleNamespace(
+        get_checkpoint_info=lambda key: uc_info if key == UNIVERSAL_CHECKPOINT_INFO else {})
 
     unmatched = merge_tp_slices(ds_checkpoint, str(output_dir), str(slice_dir), 2, (param_name, torch.Size([3, 4])))
 
@@ -241,7 +254,8 @@ def test_merge_tp_slices_uses_row_parallel_cat_dim(tmp_path):
         PARAMETER_WITH_SUB_PARAMS: [],
     }
 
-    ds_checkpoint = SimpleNamespace(get_checkpoint_info=lambda key: uc_info if key == UNIVERSAL_CHECKPOINT_INFO else {})
+    ds_checkpoint = SimpleNamespace(
+        get_checkpoint_info=lambda key: uc_info if key == UNIVERSAL_CHECKPOINT_INFO else {})
 
     merge_tp_slices(ds_checkpoint, str(output_dir), str(slice_dir), 2, (param_name, torch.Size([4, 4])))
 
@@ -286,7 +300,9 @@ def test_get_param_uc_restore_meta_returns_top_level_restore_schema():
         "target_partition_shape": (4, 4),
         "is_bias": False,
         "replicated": False,
-        "conversion": {"partition_dim": 999},
+        "conversion": {
+            "partition_dim": 999
+        },
     }
     param = _make_param((4, 4), meta)
 

@@ -6,7 +6,7 @@
 import torch
 
 from deepspeed.checkpoint.constants import (PARAMETER_WITH_ROW_PARALLELISM_PATTERNS, PARAMETER_WITH_SUB_PARAMS,
-                                           TP_REPLICATED_PARAMETER_PATTERNS, DS_AUTOTP_UC_META)
+                                            TP_REPLICATED_PARAMETER_PATTERNS, DS_AUTOTP_UC_META)
 from deepspeed.module_inject.layers import (_build_param_uc_restore_meta, _get_param_uc_conversion_meta,
                                             LinearAllreduce, LinearLayer, SubParamLinearLayer,
                                             collect_autotp_universal_checkpoint_info)
