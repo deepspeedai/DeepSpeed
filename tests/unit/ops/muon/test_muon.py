@@ -17,17 +17,18 @@ if torch.half not in get_accelerator().supported_dtypes():
 
 muon_configs = []
 for optimizer_name in ['muon', 'adam']:
-    for stage in [1, 2]:
+    for stage in [1, 2, 3]:
         for lr in [0.01, 0.05]:
             for model_dim in [32, 128]:
                 for nlayer in [5, 10]:
-                    muon_configs.append([optimizer_name, stage, lr, model_dim, nlayer])
+                    for offload_optimizer in [True, False]:
+                        muon_configs.append([optimizer_name, stage, lr, model_dim, nlayer, offload_optimizer])
 
 
-@pytest.mark.parametrize('optimizer_type, zero_stage, lr, hidden_dim, nlayer', muon_configs)
+@pytest.mark.parametrize('optimizer_type, zero_stage, lr, hidden_dim, nlayer, offload_optimizer', muon_configs)
 class TestMuonConfigs(DistributedTest):
 
-    def test(self, optimizer_type, zero_stage, lr, hidden_dim, nlayer):
+    def test(self, optimizer_type, zero_stage, lr, hidden_dim, nlayer, offload_optimizer):
         optimizer_params = {"lr": lr}
         batch_size = 8
         config_dict = {
@@ -42,8 +43,16 @@ class TestMuonConfigs(DistributedTest):
             },
             "zero_optimization": {
                 "stage": zero_stage,
-            }
+                "reduce_scatter": False,
+            },
+            "save_muon_momentum_buffer_in_memory": True,
         }
+        if offload_optimizer:
+            config_dict["zero_optimization"]["offload_optimizer"] = {
+                "device": "cpu",
+                "pin_memory": True,
+            }
+
         # Perform a few training steps to ensure the optimizer works correctly
 
         model = SimpleModel(hidden_dim=hidden_dim, nlayers=nlayer)
