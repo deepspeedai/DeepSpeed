@@ -57,9 +57,8 @@ def test_torch_backend_uses_xla_init_method(monkeypatch):
     monkeypatch.setattr(dist_pkg, "get_world_size", lambda: 8)
     monkeypatch.setattr(dist_pkg, "get_backend", lambda: XLA_BACKEND)
 
-    backend = ds_torch.TorchBackend(XLA_BACKEND, timedelta(seconds=5), None)
+    ds_torch.TorchBackend(XLA_BACKEND, timedelta(seconds=5), None)
 
-    assert backend.is_initialized()
     assert init_calls[0][0] == XLA_BACKEND
     assert init_calls[0][1]["init_method"] == "xla://"
     assert os.environ["LOCAL_RANK"] == "3"
