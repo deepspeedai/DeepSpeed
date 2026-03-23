@@ -40,6 +40,7 @@ from deepspeed.checkpoint.constants import (DS_VERSION, GROUP_PADDINGS, PARTITIO
                                             BASE_OPTIMIZER_STATE_STEP, CLIP_GRAD, ZERO_STAGE, PARAM_SLICE_MAPPINGS)
 from deepspeed.utils import link_hp_params, lazy_init_hp_params_optimizer_state
 from deepspeed.checkpoint import enable_universal_checkpoint
+from deepspeed.checkpoint.constants import UNIVERSAL_CHECKPOINT_INFO
 
 from deepspeed.utils import groups
 from deepspeed.utils.debug import debug_param2name
@@ -663,8 +664,18 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         self.print_rank_0("Removed grad acc hooks")
 
     def _enable_universal_checkpoint(self):
+        self._universal_checkpoint_info = None
         for lp_param_group in self.bit16_groups:
+            if self._universal_checkpoint_info is None:
+                for param in lp_param_group:
+                    autotp_uc_info = getattr(param, UNIVERSAL_CHECKPOINT_INFO, None)
+                    if autotp_uc_info is not None:
+                        self._universal_checkpoint_info = autotp_uc_info
+                        break
             enable_universal_checkpoint(param_list=lp_param_group)
+
+    def _get_universal_checkpoint_info(self):
+        return getattr(self, '_universal_checkpoint_info', None)
 
     def _create_param_mapping(self):
         param_mapping = []
@@ -2429,6 +2440,10 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         state_dict[DS_VERSION] = version
         state_dict[PARAM_SLICE_MAPPINGS] = self._param_slice_mappings
 
+        autotp_uc_info = self._get_universal_checkpoint_info()
+        if autotp_uc_info is not None:
+            state_dict[UNIVERSAL_CHECKPOINT_INFO] = autotp_uc_info
+
         return state_dict
 
     # Restore base optimizer fp32 weights from elastic checkpoint by:
@@ -2971,3 +2986,4 @@ def estimate_zero2_model_states_mem_needs_all_cold(total_params,
 
         options_str = format_options(cpu_offload=cpu_offload)
         print(f" {cpu_mem/2**30:7.2f}GB | {gpu_mem/2**30:6.2f}GB | {options_str}")
+
