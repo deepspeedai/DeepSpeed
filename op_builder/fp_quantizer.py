@@ -3,6 +3,7 @@
 
 # DeepSpeed Team
 
+import os
 try:
     from packaging import version as pkg_version
 except ImportError:
@@ -31,19 +32,20 @@ class FPQuantizerBuilder(CUDAOpBuilder):
             return False
 
         cuda_okay = True
-        if not self.is_rocm_pytorch() and torch.cuda.is_available():  #ignore-cuda
-            sys_cuda_major, _ = installed_cuda_version()
-            torch_cuda_major = int(torch.version.cuda.split('.')[0])
-            cuda_capability = torch.cuda.get_device_properties(0).major  #ignore-cuda
-            if cuda_capability < 8:
-                if verbose:
-                    self.warning("NVIDIA Inference is only supported on Ampere and newer architectures")
-                cuda_okay = False
-            if cuda_capability >= 8:
-                if torch_cuda_major < 11 or sys_cuda_major < 11:
+        if not os.environ.get("DS_IGNORE_CUDA_DETECTION"):
+            if not self.is_rocm_pytorch() and torch.cuda.is_available():  #ignore-cuda
+                sys_cuda_major, _ = installed_cuda_version()
+                torch_cuda_major = int(torch.version.cuda.split('.')[0])
+                cuda_capability = torch.cuda.get_device_properties(0).major  #ignore-cuda
+                if cuda_capability < 8:
                     if verbose:
-                        self.warning("On Ampere and higher architectures please use CUDA 11+")
+                        self.warning("NVIDIA Inference is only supported on Ampere and newer architectures")
                     cuda_okay = False
+                if cuda_capability >= 8:
+                    if torch_cuda_major < 11 or sys_cuda_major < 11:
+                        if verbose:
+                            self.warning("On Ampere and higher architectures please use CUDA 11+")
+                        cuda_okay = False
 
         try:
             import triton
