@@ -53,7 +53,8 @@ class TritonCacheDir:
 
     @staticmethod
     def default_cache_dir():
-        tmp_path = os.path.join(Path.home(), ".triton", "autotune")
+        tt_home = os.environ.get('TRITON_HOME') or os.path.join(Path.home(), ".triton")
+        tmp_path = os.path.join(tt_home, "autotune")
         return tmp_path
 
 
