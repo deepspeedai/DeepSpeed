@@ -42,7 +42,7 @@ from deepspeed.runtime.fp16.unfused_optimizer import FP16_UnfusedOptimizer
 from deepspeed.runtime.bf16_optimizer import BF16_Optimizer
 
 from deepspeed.linear.optimized_linear import LoRAOptimizedLinear
-from deepspeed.module_inject.layers import GatherReplacedLayerParams, configure_tensor_parallel_runtime
+from deepspeed.module_inject.layers import GatherReplacedLayerParams, configure_tensor_parallel_runtime, collect_autotp_universal_checkpoint_info
 from deepspeed.runtime.config import DEEPSPEED_OPTIMIZERS, \
     ADAGRAD_OPTIMIZER, ADAM_OPTIMIZER, ADAMW_OPTIMIZER, LAMB_OPTIMIZER, ONEBIT_ADAM_OPTIMIZER, ONEBIT_LAMB_OPTIMIZER, \
     TORCH_ADAM_PARAM, ADAM_W_MODE, ADAM_W_MODE_DEFAULT, ZERO_ONE_ADAM_OPTIMIZER, MUADAM_OPTIMIZER, MUADAMW_OPTIMIZER, \
@@ -70,7 +70,7 @@ from deepspeed.compression.constants import \
     WEIGHT_QUANTIZE_ROUNDING, \
     WEIGHT_QUANTIZE_VERBOSE, \
     WEIGHT_QUANTIZE_KERNEL
-from deepspeed.checkpoint.constants import OPTIMIZER_STATE_DICT, FROZEN_PARAM_FRAGMENTS
+from deepspeed.checkpoint.constants import OPTIMIZER_STATE_DICT, FROZEN_PARAM_FRAGMENTS, UNIVERSAL_CHECKPOINT_INFO
 from deepspeed.checkpoint.utils import clone_tensors_for_torch_save
 from deepspeed.checkpoint.ds_to_universal import dp_index_to_str
 from deepspeed.runtime.sparse_tensor import SparseTensor
@@ -599,6 +599,7 @@ class DeepSpeedEngine(Module):
             autotp.set_tensor_parallel_config(tp_size, tp_config.tensor_parallel.tp_group)
             autotp.update_linear_policies()
             autotp._replace_module(model)
+            setattr(model, UNIVERSAL_CHECKPOINT_INFO, collect_autotp_universal_checkpoint_info(model))
             setattr(model, "ds_autotp_parsed", True)
             return
 
@@ -641,6 +642,7 @@ class DeepSpeedEngine(Module):
             tp_config.injection_policy_tuple = injection_policy
             replace_transformer_layer(client_module, model, None, tp_config, model_config)
 
+        setattr(model, UNIVERSAL_CHECKPOINT_INFO, collect_autotp_universal_checkpoint_info(model))
         setattr(model, "ds_autotp_parsed", True)
 
     def __del__(self):
@@ -4033,6 +4035,9 @@ class DeepSpeedEngine(Module):
                      mp_world_size=self.mp_world_size,
                      ds_config=self.config,
                      ds_version=version)
+        autotp_uc_info = getattr(self.module, UNIVERSAL_CHECKPOINT_INFO, None)
+        if autotp_uc_info is not None:
+            state[UNIVERSAL_CHECKPOINT_INFO] = autotp_uc_info
         state.update(client_state)
         log_dist(message=f'Saving model checkpoint: {save_path}', ranks=[0])
 
