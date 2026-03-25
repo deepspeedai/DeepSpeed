@@ -40,6 +40,7 @@ from deepspeed.checkpoint.constants import (DS_VERSION, GROUP_PADDINGS, PARTITIO
                                             BASE_OPTIMIZER_STATE_STEP, CLIP_GRAD, ZERO_STAGE, PARAM_SLICE_MAPPINGS)
 from deepspeed.utils import link_hp_params, lazy_init_hp_params_optimizer_state
 from deepspeed.checkpoint import enable_universal_checkpoint
+from deepspeed.checkpoint.constants import UNIVERSAL_CHECKPOINT_INFO
 
 from deepspeed.utils import groups
 from deepspeed.utils.debug import debug_param2name
@@ -633,15 +634,15 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             assert self.loss_scaler.cur_scale == 1.0
             assert not self.dynamic_loss_scale
 
-        see_memory_usage("Before initializing optimizer states", force=True)
+        see_memory_usage("Before initializing optimizer states", force=False)
         self.initialize_optimizer_states()
-        see_memory_usage("After initializing optimizer states", force=True)
+        see_memory_usage("After initializing optimizer states", force=False)
 
         if dist.get_rank() == 0:
             logger.info("optimizer state initialized")
 
         if dist.get_rank(group=self.dp_process_group) == 0:
-            see_memory_usage("After initializing ZeRO optimizer", force=True)
+            see_memory_usage("After initializing ZeRO optimizer", force=False)
 
         self._link_all_hp_params()
         self._hp_optimizer_states_linked = False
@@ -663,8 +664,18 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         self.print_rank_0("Removed grad acc hooks")
 
     def _enable_universal_checkpoint(self):
+        self._universal_checkpoint_info = None
         for lp_param_group in self.bit16_groups:
+            if self._universal_checkpoint_info is None:
+                for param in lp_param_group:
+                    autotp_uc_info = getattr(param, UNIVERSAL_CHECKPOINT_INFO, None)
+                    if autotp_uc_info is not None:
+                        self._universal_checkpoint_info = autotp_uc_info
+                        break
             enable_universal_checkpoint(param_list=lp_param_group)
+
+    def _get_universal_checkpoint_info(self):
+        return getattr(self, '_universal_checkpoint_info', None)
 
     def _create_param_mapping(self):
         param_mapping = []
@@ -1572,7 +1583,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                     param = self.bit16_groups[group_idx][param_idx_in_group]
 
                     assert self.params_already_reduced[param_id] == False, \
-                        f"The parameter {param_id} has already been reduced. \
+                        f"The parameter {debug_param2name(param)} has already been reduced. \
                         Gradient computed twice for this partition. \
                         Multiple gradient reduction is currently not supported"
 
@@ -2428,6 +2439,10 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
 
         state_dict[DS_VERSION] = version
         state_dict[PARAM_SLICE_MAPPINGS] = self._param_slice_mappings
+
+        autotp_uc_info = self._get_universal_checkpoint_info()
+        if autotp_uc_info is not None:
+            state_dict[UNIVERSAL_CHECKPOINT_INFO] = autotp_uc_info
 
         return state_dict
 

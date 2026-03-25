@@ -42,45 +42,28 @@
 template <typename arch, typename scalar_t>
 struct CheckArch {
     static constexpr bool isPreVolta = arch::kMinComputeCapability < 70;
-    static constexpr bool isPreAmpere =
-        arch::kMinComputeCapability < 80 && arch::kMinComputeCapability >= 70;
+    // DISPATCH_ARCHTAG only binds Sm70/Sm75/Sm80+, so overlap with isPreVolta is unreachable.
+    static constexpr bool isPreAmpere = arch::kMinComputeCapability < 80;
     static constexpr bool isAmpere = arch::kMinComputeCapability >= 80;
-#if defined(__CUDA_ARCH__)
-    static constexpr bool compiler_cc = arch::kMinComputeCapability * 10 <= __CUDA_ARCH__;
-#else
-    static constexpr bool compiler_cc = true;
-#endif
     static constexpr bool value = (isPreVolta && std::is_same_v<scalar_t, float>) ||
                                   (isPreAmpere && !std::is_same_v<scalar_t, cutlass::bfloat16_t>) ||
-                                  isAmpere && compiler_cc;
+                                  isAmpere;
 };
 
-#define DISPATCH_ARCHTAG(CC, func)                                                      \
-    {                                                                                   \
-        if constexpr (GPU_ARCH >= 80) {                                                 \
-            if (CC >= 80) {                                                             \
-                using ArchTag = cutlass::arch::Sm80;                                    \
-                func;                                                                   \
-            } else {                                                                    \
-                EVOFORMER_CHECK(false, "Compile flag error. Unexpected GPU");           \
-            }                                                                           \
-        } else if constexpr (GPU_ARCH >= 75) {                                          \
-            if (CC >= 75) {                                                             \
-                using ArchTag = cutlass::arch::Sm75;                                    \
-                func;                                                                   \
-            } else {                                                                    \
-                EVOFORMER_CHECK(false, "Compile flag error. Unexpected GPU");           \
-            }                                                                           \
-        } else if constexpr (GPU_ARCH >= 70) {                                          \
-            if (CC >= 70) {                                                             \
-                using ArchTag = cutlass::arch::Sm70;                                    \
-                func;                                                                   \
-            } else {                                                                    \
-                EVOFORMER_CHECK(false, "Compile flag error. Unexpected GPU");           \
-            }                                                                           \
-        } else {                                                                        \
-            EVOFORMER_CHECK(false, "Only GPUs with Tensor Core are supported for now"); \
-        }                                                                               \
+#define DISPATCH_ARCHTAG(CC, func)                                                         \
+    {                                                                                      \
+        if ((CC) >= 80) {                                                                  \
+            using ArchTag = cutlass::arch::Sm80;                                           \
+            func;                                                                          \
+        } else if ((CC) >= 75) {                                                           \
+            using ArchTag = cutlass::arch::Sm75;                                           \
+            func;                                                                          \
+        } else if ((CC) >= 70) {                                                           \
+            using ArchTag = cutlass::arch::Sm70;                                           \
+            func;                                                                          \
+        } else {                                                                           \
+            EVOFORMER_CHECK(false, "Only GPUs with Tensor Core (SM >= 70) are supported"); \
+        }                                                                                  \
     }
 
 #define DISPATCH_TYPES(tensor, func)                                              \
