@@ -796,9 +796,8 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                     self.sub_groups_using_muon.extend([True] * len(param_groups[idx]))
                     group_beta = param_group['momentum']
                     if self.muon_beta is not None and self.muon_beta != group_beta:
-                        raise ValueError(
-                            f"All Muon parameter groups must have the same momentum (beta). "
-                            f"Found {self.muon_beta} and {group_beta}.")
+                        raise ValueError(f"All Muon parameter groups must have the same momentum (beta). "
+                                         f"Found {self.muon_beta} and {group_beta}.")
                     self.muon_beta = group_beta
                 else:
                     self.sub_groups_using_muon.extend([False] * len(param_groups[idx]))

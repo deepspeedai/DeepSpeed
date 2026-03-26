@@ -23,9 +23,8 @@ for optimizer_name in ['muon', 'adam']:
                 for nlayer in [5, 10]:
                     for offload_optimizer in [True, False]:
                         for save_in_mem in ([True, False] if stage == 3 else [False]):
-                            muon_configs.append([
-                                optimizer_name, stage, lr, model_dim, nlayer, offload_optimizer, save_in_mem
-                            ])
+                            muon_configs.append(
+                                [optimizer_name, stage, lr, model_dim, nlayer, offload_optimizer, save_in_mem])
 
 
 @pytest.mark.parametrize(
