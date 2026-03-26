@@ -258,11 +258,12 @@ class OpBuilder(ABC):
         rocm_info = Path("/opt/rocm/bin/rocminfo")
         if (not rocm_info.is_file()):
             rocm_info = Path("rocminfo")
-        rocm_gpu_arch_cmd = str(rocm_info) + " | grep -o -m 1 'gfx.*'"
         try:
-            result = subprocess.check_output(rocm_gpu_arch_cmd, shell=True)
-            rocm_gpu_arch = result.decode('utf-8').strip()
-        except subprocess.CalledProcessError:
+            result = subprocess.check_output([str(rocm_info)], stderr=subprocess.DEVNULL)
+            output = result.decode('utf-8')
+            match = re.search(r'gfx\S+', output)
+            rocm_gpu_arch = match.group(0).strip() if match else ""
+        except (subprocess.CalledProcessError, FileNotFoundError, OSError):
             rocm_gpu_arch = ""
         OpBuilder._rocm_gpu_arch = rocm_gpu_arch
         return OpBuilder._rocm_gpu_arch
@@ -275,12 +276,12 @@ class OpBuilder(ABC):
         rocm_info = Path("/opt/rocm/bin/rocminfo")
         if (not rocm_info.is_file()):
             rocm_info = Path("rocminfo")
-        rocm_wavefront_size_cmd = str(
-            rocm_info) + " | grep -Eo -m1 'Wavefront Size:[[:space:]]+[0-9]+' | grep -Eo '[0-9]+'"
         try:
-            result = subprocess.check_output(rocm_wavefront_size_cmd, shell=True)
-            rocm_wavefront_size = result.decode('utf-8').strip()
-        except subprocess.CalledProcessError:
+            result = subprocess.check_output([str(rocm_info)], stderr=subprocess.DEVNULL)
+            output = result.decode('utf-8')
+            match = re.search(r'Wavefront Size:\s+(\d+)', output)
+            rocm_wavefront_size = match.group(1) if match else "32"
+        except (subprocess.CalledProcessError, FileNotFoundError, OSError):
             rocm_wavefront_size = "32"
         OpBuilder._rocm_wavefront_size = rocm_wavefront_size
         return OpBuilder._rocm_wavefront_size
