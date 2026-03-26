@@ -60,10 +60,8 @@ def input(msg):
 
 def split_half_float_double(tensors):
     buckets = []
-    accelerator = get_accelerator()
-    dtype_order = (torch.float16, torch.float32, torch.float64, torch.bfloat16)
-    for dtype in dtype_order:
-        bucket = [tensor for tensor in tensors if tensor.dtype == dtype and accelerator.on_accelerator(tensor)]
+    for dtype in (torch.float16, torch.float32, torch.float64, torch.bfloat16):
+        bucket = [t for t in tensors if t.dtype == dtype]
         if bucket:
             buckets.append(bucket)
     return buckets

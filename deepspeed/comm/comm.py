@@ -822,7 +822,8 @@ def init_distributed(dist_backend=None,
         set_backend()
         utils.logger.info(f'cdb={cdb}')
     if cdb is None and torch.distributed.is_initialized():
-        # The user initialized torch.dist themselves, create cdb and short-circuit
+        # The user initialized torch.dist themselves, create cdb and short-circuit.
+        # Resolve dist_backend so TorchBackend always receives a concrete name.
         if dist_backend is None:
             dist_backend = get_accelerator().communication_backend_name()
         cdb = TorchBackend(dist_backend, timeout, init_method)
