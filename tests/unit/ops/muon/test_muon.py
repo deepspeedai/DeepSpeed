@@ -13,7 +13,7 @@ from deepspeed.accelerator import get_accelerator
 if torch.half not in get_accelerator().supported_dtypes():
     pytest.skip(f"fp16 not supported, valid dtype: {get_accelerator().supported_dtypes()}", allow_module_level=True)
 
-# 'optimizer_type, zero_stage, lr, hidden_dim, nlayer'
+# 'optimizer_type, zero_stage, lr, hidden_dim, nlayer, offload_optimizer, save_muon_momentum_buffer_in_memory'
 
 muon_configs = []
 for optimizer_name in ['muon', 'adam']:
@@ -22,13 +22,19 @@ for optimizer_name in ['muon', 'adam']:
             for model_dim in [32, 128]:
                 for nlayer in [5, 10]:
                     for offload_optimizer in [True, False]:
-                        muon_configs.append([optimizer_name, stage, lr, model_dim, nlayer, offload_optimizer])
+                        for save_in_mem in ([True, False] if stage == 3 else [False]):
+                            muon_configs.append([
+                                optimizer_name, stage, lr, model_dim, nlayer, offload_optimizer, save_in_mem
+                            ])
 
 
-@pytest.mark.parametrize('optimizer_type, zero_stage, lr, hidden_dim, nlayer, offload_optimizer', muon_configs)
+@pytest.mark.parametrize(
+    'optimizer_type, zero_stage, lr, hidden_dim, nlayer, offload_optimizer, save_muon_momentum_buffer_in_memory',
+    muon_configs)
 class TestMuonConfigs(DistributedTest):
 
-    def test(self, optimizer_type, zero_stage, lr, hidden_dim, nlayer, offload_optimizer):
+    def test(self, optimizer_type, zero_stage, lr, hidden_dim, nlayer, offload_optimizer,
+             save_muon_momentum_buffer_in_memory):
         optimizer_params = {"lr": lr}
         batch_size = 8
         config_dict = {
@@ -44,8 +50,8 @@ class TestMuonConfigs(DistributedTest):
             "zero_optimization": {
                 "stage": zero_stage,
                 "reduce_scatter": False,
+                "save_muon_momentum_buffer_in_memory": save_muon_momentum_buffer_in_memory,
             },
-            "save_muon_momentum_buffer_in_memory": True,
         }
         if offload_optimizer:
             config_dict["zero_optimization"]["offload_optimizer"] = {

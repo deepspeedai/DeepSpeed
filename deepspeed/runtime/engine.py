@@ -1071,6 +1071,9 @@ class DeepSpeedEngine(Module):
     def zero_ignore_unused_parameters(self):
         return self._config.zero_config.ignore_unused_parameters
 
+    def zero_save_muon_momentum_buffer_in_memory(self):
+        return self._config.zero_config.save_muon_momentum_buffer_in_memory
+
     def tensor_parallel_config(self):
         return self._config.tensor_parallel_config
 
@@ -2014,6 +2017,7 @@ class DeepSpeedEngine(Module):
                     log_trace_cache_warnings=self.zero_log_trace_cache_warnings(),
                     enable_sanity_checks=self.is_sanity_checks_enabled(),
                     cpuadam_cores_perc=self.cpuadam_cores_perc(),
+                    save_muon_momentum_buffer_in_memory=self.zero_save_muon_momentum_buffer_in_memory(),
                 )
 
         else:
