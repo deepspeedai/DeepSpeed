@@ -343,6 +343,26 @@ defaults with customizability:
 * **Heuristics**: automatic sharding based on parameter names and model rules.
 * **Preset**: choose a built-in model family via ``preset_model``.
 * **Custom specs**: define regex patterns and partition rules via ``partition_config``.
+* **HuggingFace tp_plan**: automatically detected from ``model.config.base_model_tp_plan`` or ``model._tp_plan``.
+
+HuggingFace tp_plan
+^^^^^^^^^^^^^^^^^^^
+Many HuggingFace models (e.g. Llama, Qwen, Gemma2) define a
+``base_model_tp_plan`` in their model config. When present, DeepSpeed
+automatically extracts and converts this plan into internal partition rules.
+This means you do not need ``preset_model`` or ``partition_config`` for these
+models -- just set ``autotp_size``.
+
+The resolution priority is:
+
+1. ``partition_config`` (user-defined custom specs -- highest priority)
+2. HuggingFace ``tp_plan`` (from model config)
+3. AutoTP heuristics / ``preset_model`` (lowest priority)
+
+Currently only ``colwise`` and ``rowwise`` partition types from the HuggingFace
+``tp_plan`` are supported. Other types (``colwise_rep``, ``local_colwise``,
+``local_rowwise``, ``local_packed_rowwise``, ``gather``, ``sequence_parallel``)
+are not yet handled and will raise an error.
 
 Heuristic rules
 ^^^^^^^^^^^^^^^

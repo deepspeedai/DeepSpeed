@@ -56,6 +56,8 @@ UNIVERSAL_CHECKPOINT_INFO = 'universal_checkpoint_info'
 UNIVERSAL_CHECKPOINT_VERSION_KEY = 'universal_checkpoint_version'
 # Reserve version 0.1  for the hardcoded logic used in BLOOM-176B training
 UNIVERSAL_CHECKPOINT_VERSION_VALUE = 0.2
+# Attribute name used to store AutoTP universal-checkpoint metadata on torch Parameters.
+DS_AUTOTP_UC_META = "ds_autotp_universal_checkpoint_meta"
 
 # Vocabulary padding
 VOCAB_TENSOR = 'vocab_tensor'
