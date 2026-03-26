@@ -137,7 +137,7 @@ def get_accelerator():
 
                 if len(xm.get_xla_supported_devices(devkind='TPU')) > 0:
                     accelerator_name = "xla"
-            except ImportError as e:
+            except (ImportError, RuntimeError):
                 pass
         if accelerator_name is None:
             try:

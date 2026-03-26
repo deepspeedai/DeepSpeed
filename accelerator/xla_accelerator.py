@@ -48,6 +48,10 @@ class XLA_Accelerator(DeepSpeedAccelerator):
             raise RuntimeError("No addressable XLA devices are available in the current process.")
         if device_index is None:
             return 0
+        if isinstance(device_index, torch.device):
+            device_index = device_index.index if device_index.index is not None else 0
+        elif isinstance(device_index, str):
+            device_index = int(device_index) if device_index.isdigit() else int(device_index.split(':')[-1])
         return min(device_index, len(devices) - 1)
 
     def is_synchronized_device(self):
