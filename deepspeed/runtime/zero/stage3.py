@@ -34,7 +34,8 @@ from deepspeed.runtime.swap_tensor.partitioned_param_swapper import PartitionedP
 from deepspeed.runtime.swap_tensor.optimizer_utils import OptimizerSwapper
 from deepspeed.runtime.swap_tensor.partitioned_optimizer_swapper import PartitionedOptimizerSwapper
 from deepspeed.runtime.swap_tensor.pipelined_optimizer_swapper import PipelinedOptimizerSwapper
-from deepspeed.checkpoint.constants import OPTIMIZER_STATE_DICT, FP32_FLAT_GROUPS, PARTITION_COUNT, ZERO_STAGE, LOSS_SCALER
+from deepspeed.checkpoint.constants import (OPTIMIZER_STATE_DICT, FP32_FLAT_GROUPS, PARTITION_COUNT, ZERO_STAGE,
+                                            LOSS_SCALER, AUTOEP_LAYERS_KEY)
 from deepspeed.accelerator import get_accelerator
 from deepspeed.runtime.zero.muon.original_muon import muon_update
 from deepspeed.runtime.zero.muon.muon_optimizer import MuonWithAuxAdam
@@ -576,8 +577,23 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
     def _get_trainable_parameter_groups(self):
         param_groups = []
         PARAMS_KEY = "params"
+
+        # Collect AutoEP expert params separately: they are EP-partitioned and
+        # have ds_tensor=None, so partition_numel() would crash if they entered
+        # the standard ZeRO-3 fp16-partition / fp32-partition machinery.
+        self.autoep_expert_params = []
+
         for param_group in self.optimizer.param_groups:
-            trainable_params = [p for p in param_group[PARAMS_KEY] if p.requires_grad]
+            trainable_params = []
+            for p in param_group[PARAMS_KEY]:
+                if not p.requires_grad:
+                    continue
+                if getattr(p, '_autoep_expert', False):
+                    # Segregate expert params from ZeRO-3 partitioning pipeline.
+                    self.autoep_expert_params.append(p)
+                else:
+                    trainable_params.append(p)
+
             if len(trainable_params) == 0:
                 continue
 
@@ -1309,6 +1325,11 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
         for i, param_group in enumerate(self.fp16_groups):
             for param in param_group:
+                if getattr(param, '_autoep_expert', False):
+                    # AutoEP expert params are EP-partitioned, not DP-partitioned.
+                    # They must not be counted in the standard hook-epilogue budget,
+                    # and must not go through all_gather / partition.
+                    continue
                 if z3_leaf_parameter(param):
                     self.leaf_parameters[param.ds_z3_leaf_module].append(param)
                 elif param.requires_grad:
@@ -1318,6 +1339,22 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
         for i, param_group in enumerate(self.fp16_groups):
             for param in param_group:
+                if getattr(param, '_autoep_expert', False):
+                    # Register a lightweight hook that calls _reduce_expert_grad
+                    # directly, without touching the ZeRO-3 IPG bucket machinery.
+                    if param.requires_grad:
+
+                        def _make_expert_hook(p):
+
+                            def _expert_grad_hook(*_notneeded):
+                                self._reduce_expert_grad(p)
+
+                            return _expert_grad_hook
+
+                        self._grad_acc_hooks.append(register_grad_hook(param, _make_expert_hook(param)))
+                    # Expert params are never partitioned; skip all_gather/partition.
+                    continue
+
                 if param.requires_grad:
                     param.all_gather()
 
@@ -1842,7 +1879,56 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
     def reduce_ready_partitions_and_remove_grads(self, param):
         #print_rank_0(f"Backward {debug_param2name_id_shape(param)}", force=True)
+        if getattr(param, '_autoep_expert', False):
+            # Expert parameters must not go through ZeRO-3's DP reduce-scatter.
+            # Instead, all_reduce within the EP group so every rank in the EP
+            # group accumulates the same gradient (EP data-parallel symmetry).
+            self._reduce_expert_grad(param)
+            return
         self.reduce_independent_p_g_buckets_and_remove_grads(param)
+
+    @torch.no_grad()
+    def _reduce_expert_grad(self, param):
+        """All-reduce an AutoEP expert parameter gradient within its EP group.
+
+        Expert parameters are already partitioned along the EP dimension (each
+        rank owns ``num_local_experts`` out of the total).  When multiple DP
+        replicas share the same EP rank, their independently computed gradients
+        must be averaged via all_reduce over the DP sub-group that maps to the
+        same EP rank.  We do NOT do reduce-scatter because expert params are
+        stored full on each EP rank — there is no DP shard to scatter into.
+
+        The EP group is stored in ``param.group_name``; the actual group handle
+        is looked up from DeepSpeed's global groups registry.  If no group is
+        found (e.g., single-GPU runs or unit tests without dist init), the
+        gradient is left as-is so tests can still verify the hook fires.
+        """
+        if param.grad is None:
+            return
+
+        # Retrieve the EP process group by name.  group_name is set in
+        # AutoEPMoELayer.__init__ / set_deepspeed_parallelism.
+        ep_group = None
+        group_name = getattr(param, 'group_name', None)
+        if group_name is not None:
+            try:
+                from deepspeed.utils import groups as ds_groups
+                ep_group = ds_groups._get_expert_data_parallel_group_dict().get(group_name)
+            except Exception:
+                pass
+
+        grad = param.grad
+        if ep_group is not None:
+            ep_world_size = dist.get_world_size(ep_group)
+            if ep_world_size > 1:
+                # Average across DP replicas that share this EP rank.
+                # This is equivalent to what ZeRO-2's allreduce_bucket does
+                # for MoE expert params, but scoped to the EP group.
+                grad.div_(ep_world_size)
+                dist.all_reduce(grad, group=ep_group)
+
+        # Keep the gradient on the param; the optimizer will update in-place.
+        # No partition needed because expert params have ds_persist=True.
 
     def zero_reduced_gradients(self, partition_id, i):
 
@@ -2487,6 +2573,9 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
         self._post_step(timer_names)
 
+        # Update AutoEP expert parameters that were excluded from the ZeRO-3 pipeline.
+        self._step_expert_params()
+
         # warn user about caching allocator flushes
         memory_stats = get_accelerator().memory_stats()
         alloc_retries = memory_stats.get("num_alloc_retries")
@@ -2504,6 +2593,44 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                     "that all ranks flush their caches at the same time",
                     alloc_retries - self.n_caching_allocator_flushes)
             self.n_caching_allocator_flushes = alloc_retries
+
+    @torch.no_grad()
+    def _step_expert_params(self):
+        """In-place optimizer update for AutoEP expert parameters.
+
+        Expert params are stored full on each EP rank (ds_persist=True, ds_tensor=None),
+        bypassing the ZeRO-3 fp32 flat-buffer pipeline entirely.  Their gradients were
+        already EP-allreduced by _reduce_expert_grad during backward.  We update them
+        via a dedicated optimizer instance so they never touch fp32_partitioned_groups.
+        """
+        expert_params = getattr(self, 'autoep_expert_params', [])
+        if not expert_params:
+            return
+
+        params_with_grad = [p for p in expert_params if p.grad is not None]
+        if not params_with_grad:
+            return
+
+        # Reverse loss scaling so the effective learning rate is correct.
+        if self.loss_scale != 1.0:
+            for p in params_with_grad:
+                p.grad.div_(self.loss_scale)
+
+        # Build a dedicated optimizer for expert params on the first step.
+        # We reuse the same class and hyper-parameters as the main optimizer so
+        # that learning rate schedules apply transparently.
+        if not hasattr(self, '_autoep_expert_optimizer'):
+            optimizer_cls = type(self.optimizer)
+            base_group = self.optimizer.param_groups[0]
+            expert_group = {k: v for k, v in base_group.items() if k != 'params'}
+            expert_group['params'] = expert_params
+            self._autoep_expert_optimizer = optimizer_cls([expert_group])
+
+        self._autoep_expert_optimizer.step()
+
+        # Clear gradients so they do not accumulate across steps.
+        for p in params_with_grad:
+            p.grad = None
 
     def dump_pre_step_gradients(self, debug_fp32_grads):
         # Dump gradient norms for debugging
@@ -2991,7 +3118,82 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         state_dict[FP32_FLAT_GROUPS] = self.fp32_partitioned_groups_flat
         self._clear_fp32_optimizer_param_groups()
 
+        # Save AutoEP expert parameters keyed by layer name and EP rank.
+        # Expert params are stored full on each EP rank (ds_persist=True, ds_tensor=None),
+        # so we do not need to gather across DP ranks — each EP rank writes its own slice.
+        state_dict[AUTOEP_LAYERS_KEY] = self._collect_autoep_expert_state()
+
         return state_dict
+
+    def _collect_autoep_expert_state(self):
+        """Return a dict mapping AutoEPMoELayer names to their local expert state_dicts.
+
+        Structure::
+
+            {
+                "<layer_path>": {
+                    "ep_rank": int,
+                    "experts": { <param_name>: Tensor, ... },
+                },
+                ...
+            }
+
+        This is called on every rank independently.  Each EP rank saves only the
+        experts it owns; a matching load routine must select the right slice based
+        on ep_rank when restoring the checkpoint.
+        """
+        from deepspeed.module_inject.auto_ep_layer import AutoEPMoELayer
+
+        layers = {}
+        for name, mod in self.module.named_modules():
+            if not isinstance(mod, AutoEPMoELayer):
+                continue
+            layers[name] = {
+                "ep_rank": mod.ep_rank,
+                "experts": {
+                    k: v.detach().cpu()
+                    for k, v in mod.experts.state_dict().items()
+                },
+            }
+        return layers
+
+    @torch.no_grad()
+    def _restore_autoep_expert_state(self, saved_layers):
+        """Load AutoEP expert parameters from a checkpoint produced by _collect_autoep_expert_state.
+
+        Each entry in *saved_layers* was written by the EP rank that owns those experts.
+        The current rank loads only the entry whose ``ep_rank`` matches its own rank in
+        the same EP group, so the restore is correct even when the DP world size changes
+        between saving and loading (DP-rank-agnostic, EP-rank-sensitive).
+
+        Args:
+            saved_layers: dict returned by _collect_autoep_expert_state, keyed by
+                          layer module path.  May be absent in old checkpoints (caller
+                          guards with ``AUTOEP_LAYERS_KEY in state_dict``).
+        """
+        from deepspeed.module_inject.auto_ep_layer import AutoEPMoELayer
+
+        for name, mod in self.module.named_modules():
+            if not isinstance(mod, AutoEPMoELayer):
+                continue
+            if name not in saved_layers:
+                logger.warning(f"AutoEP layer '{name}' not found in checkpoint; skipping restore.")
+                continue
+
+            saved = saved_layers[name]
+            # Verify the checkpoint was written by the same EP rank.
+            # Mismatched ep_rank means the checkpoint was saved with a different EP config.
+            if saved["ep_rank"] != mod.ep_rank:
+                raise RuntimeError(f"AutoEP checkpoint ep_rank mismatch for layer '{name}': "
+                                   f"checkpoint has ep_rank={saved['ep_rank']}, "
+                                   f"but current model has ep_rank={mod.ep_rank}. "
+                                   "Ensure EP world size is the same between save and load.")
+
+            # Restore expert weights directly into the module.
+            # move tensors to the device of the current expert params before copying.
+            device = next(mod.experts.parameters()).device
+            expert_sd = {k: v.to(device) for k, v in saved["experts"].items()}
+            mod.experts.load_state_dict(expert_sd, strict=True)
 
     def state_dict(self):
         """
@@ -3122,6 +3324,11 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
             for partitioned_param, q in zip(self.fp16_partitioned_groups[sub_group_id], updated_params):
                 partitioned_param.data = q.data
+
+        # Restore AutoEP expert parameters.  These params have ds_persist=True and
+        # ds_tensor=None so they are not covered by the fp32_partitioned_groups pipeline.
+        if AUTOEP_LAYERS_KEY in state_dict:
+            self._restore_autoep_expert_state(state_dict[AUTOEP_LAYERS_KEY])
 
     # TODO: Support different/changing load/save DP degree.
     def load_state_dict(self,

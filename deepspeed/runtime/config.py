@@ -871,6 +871,10 @@ class DeepSpeedConfig(object):
         self.timers_config = get_timers_config(param_dict)
         self.tensor_parallel_config = get_tensor_parallel_config(param_dict)
 
+        # AutoEP expert parallelism config
+        from deepspeed.module_inject.auto_ep_config import parse_autoep_config
+        self.expert_parallel_config = parse_autoep_config(param_dict)
+
     def _batch_assertion(self):
 
         train_batch = self.train_batch_size

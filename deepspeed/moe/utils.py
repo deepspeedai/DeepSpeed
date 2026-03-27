@@ -30,6 +30,17 @@ def is_moe_param(param: torch.Tensor) -> bool:
     return False
 
 
+def is_autoep_expert_param(param: torch.Tensor) -> bool:
+    """Return True if *param* is an AutoEP expert weight.
+
+    AutoEP expert parameters are tagged with ``_autoep_expert = True`` by
+    :class:`~deepspeed.moe.ep_experts.GroupedExperts`.  ZeRO-3 uses this flag
+    to skip DP partitioning; gradient hooks use it to route gradients through
+    the EP group instead of the DP group.
+    """
+    return getattr(param, '_autoep_expert', False)
+
+
 def split_params_into_shared_and_expert_params(
         params: List[torch.nn.Parameter]) -> Tuple[List[torch.nn.Parameter], List[torch.nn.Parameter]]:
     shared_params: List[nn.Parameter] = []
