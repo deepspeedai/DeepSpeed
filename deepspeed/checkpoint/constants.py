@@ -50,6 +50,14 @@ FP16_ZERO_FILE_PREFIX = 'fp16_' + ZERO_FILE_PREFIX
 DS_VERSION = 'ds_version'
 
 #########################################
+# AutoEP checkpoint keys
+#########################################
+# Key under which AutoEP layer state-dicts are saved in the checkpoint
+AUTOEP_LAYERS_KEY = 'ds_autoep_layers'
+# Legacy alias kept for forward-compatibility with older checkpoints
+AUTOEP_LAYERS_KEY_LEGACY = 'autoep_layers'
+
+#########################################
 # Universal Checkpoint keys
 #########################################
 UNIVERSAL_CHECKPOINT_INFO = 'universal_checkpoint_info'
