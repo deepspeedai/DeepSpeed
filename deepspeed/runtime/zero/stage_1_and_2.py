@@ -1476,7 +1476,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                 # so they have no norm_for_param_grads
                 if param_id in self.norm_for_param_grads:
                     param_norm = self.norm_for_param_grads[param_id]
-                    local_sq_norm += param_norm**2
+                    local_sq_norm += param_norm.item()**2
                 else:
                     # As unused parameters in modules may not be expected sometimes,
                     # add an explicit error msg when it occurred and an option to
@@ -1904,7 +1904,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         """
         assert norm_type == 2, "only L2 norm supported"
 
-        local_sq_norm = torch.zeros(1, device=self.device, dtype=self.gradient_accumulation_dtype)
+        local_sq_norm = torch.zeros(1, device=self.device, dtype=torch.float32)
 
         for g, p in zip(gradients, params):
             # Pipeline parallelism may replicate parameters. Avoid multi-counting.
