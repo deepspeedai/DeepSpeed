@@ -582,6 +582,7 @@ class DeepSpeedEngine(Module):
 
         from deepspeed.module_inject.auto_tp import AutoTP
 
+        # Tensor parallel priority: custom config > HF tp_plan > AutoTP
         partition_config = None
         if hasattr(tp_config, "get_partition_config_object"):
             partition_config = tp_config.get_partition_config_object()
@@ -608,6 +609,33 @@ class DeepSpeedEngine(Module):
 
         model_config = getattr(model, "config", None)
         from deepspeed.module_inject import replace_transformer_layer
+
+        from deepspeed.runtime.tensor_parallel.config import _get_hf_tp_plan
+
+        hf_tp_plan = _get_hf_tp_plan(model)
+        if hf_tp_plan:
+            from deepspeed.module_inject.tp_plan_converter import TPPlanConverter
+            from deepspeed.module_inject.autotp_config import AutoTPConfig
+
+            layer_specs = TPPlanConverter.convert(hf_tp_plan)
+            if layer_specs is not None:
+                logger.info(f"Using HuggingFace tp_plan with {len(layer_specs)} layer specifications")
+                tp_plan_config = AutoTPConfig(tp_size=tp_size, layer_specs=layer_specs)
+                autotp = AutoTP(
+                    module=model,
+                    all_reduce_linears=(),
+                    prefix="",
+                    state_dict=None,
+                    linear_layer_setting=(torch.nn.Linear, torch.nn.Embedding),
+                    orig_layer_impl=None,
+                    keep_module_on_host=tp_config.keep_module_on_host,
+                    partition_config=tp_plan_config,
+                )
+                autotp.set_tensor_parallel_config(tp_size, tp_config.tensor_parallel.tp_group)
+                autotp.update_linear_policies()
+                autotp._replace_module(model)
+                setattr(model, "ds_autotp_parsed", True)
+                return
 
         parser_dict = AutoTP.tp_parser(model)
         for client_module, injection_policy in parser_dict:
@@ -1072,6 +1100,9 @@ class DeepSpeedEngine(Module):
 
     def zero_ignore_unused_parameters(self):
         return self._config.zero_config.ignore_unused_parameters
+
+    def zero_save_muon_momentum_buffer_in_memory(self):
+        return self._config.zero_config.save_muon_momentum_buffer_in_memory
 
     def tensor_parallel_config(self):
         return self._config.tensor_parallel_config
@@ -1705,7 +1736,6 @@ class DeepSpeedEngine(Module):
             optimizer = MuSGD(model_parameters, **optimizer_parameters)
         elif self.optimizer_name() == MUON_OPTIMIZER:
             zero_stage = self.zero_optimization_stage()
-            assert zero_stage <= ZeroStageEnum.gradients, "Muon optimizer is not yet compatible with ZeRO Stage 3"
             if not all([hasattr(p, 'use_muon') for p in model_parameters]):
                 msg = "Muon optimizer is used, but the use_muon attribute is NOT configured for some of the model parameters, " \
                 "please set by `param.use_muon = True / False` for all params"
@@ -2017,6 +2047,7 @@ class DeepSpeedEngine(Module):
                     log_trace_cache_warnings=self.zero_log_trace_cache_warnings(),
                     enable_sanity_checks=self.is_sanity_checks_enabled(),
                     cpuadam_cores_perc=self.cpuadam_cores_perc(),
+                    save_muon_momentum_buffer_in_memory=self.zero_save_muon_momentum_buffer_in_memory(),
                 )
 
         else:

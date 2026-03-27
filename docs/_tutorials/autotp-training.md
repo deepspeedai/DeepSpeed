@@ -8,6 +8,7 @@ This tutorial covers **Automatic Tensor Parallelism** for combining tensor paral
 ## Contents
 - [Introduction](#introduction)
 - [Quick Start](#quick-start)
+- [HuggingFace tp_plan Support](#huggingface-tp_plan-support)
 - [Custom Layer Specifications](#custom-layer-specifications)
 - [Limitations](#limitations)
 
@@ -87,6 +88,43 @@ If your model matches a built-in preset, set `tensor_parallel.preset_model` in t
 
 For the list of available presets, see [supported models](/code-docs/training#autotp-supported-models).
 
+
+
+## HuggingFace tp_plan Support
+
+Many HuggingFace models (e.g. Llama, Qwen, Gemma2) ship with a built-in
+`base_model_tp_plan` in their model config that describes how each layer
+should be partitioned for tensor parallelism. DeepSpeed can automatically
+detect and use this plan, so you do not need to configure `preset_model` or
+`partition_config` for these models.
+
+When `tensor_parallel` is set in the DeepSpeed config, the initialization
+follows this priority:
+
+1. **Custom `partition_config`** (highest): User-defined regex patterns.
+2. **HuggingFace `tp_plan`**: Automatically extracted from
+   `model._tp_plan` or `model.config.base_model_tp_plan`.
+3. **AutoTP heuristics** (lowest): Built-in parser based on module structure.
+
+For models that define a `tp_plan`, you only need a minimal config:
+
+```json
+{
+    "train_micro_batch_size_per_gpu": 1,
+    "zero_optimization": { "stage": 2 },
+    "bf16": { "enabled": true },
+    "tensor_parallel": { "autotp_size": 4 }
+}
+```
+
+DeepSpeed will read the model's `tp_plan` at initialization and convert it to
+internal partition rules. Currently `colwise` and `rowwise` partition types
+are supported. Additional types defined by HuggingFace (such as
+`colwise_rep`, `local_colwise`, `local_rowwise`, etc.) are not yet handled
+and will raise an error if encountered.
+
+If you need to override the model's built-in `tp_plan`, provide a
+`partition_config` in the DeepSpeed config -- it takes precedence.
 
 
 ## Custom Patterns
