@@ -123,8 +123,6 @@ class UlyssesSPAttentionHF(torch.nn.Module):
         self.rotating_layer_counter = 0  # used for dev work
 
         self.core_attn_implementation = None  # set by register_with_transformers
-        self._flex_block_mask_cls = None  # set by register_with_transformers
-        self._flex_create_block_mask = None  # set by register_with_transformers
         self._flex_block_mask_cached = None  # cached BlockMask for flex_attention
         self._flex_block_mask_cache_key = None  # (batch_size, seq_len) for cache invalidation
 
@@ -315,27 +313,29 @@ class UlyssesSPAttentionHF(torch.nn.Module):
         # sequence length after the all-to-all.
         # XXX: currently hardcodes a causal mask_mod — models with sliding window or other
         # non-standard patterns would need the mask_mod extracted from the original BlockMask.
-        if self._flex_block_mask_cls is not None and isinstance(attention_mask, self._flex_block_mask_cls):
-            seq_len = query_layer.shape[2]
-            batch_size = query_layer.shape[0]
-            cache_key = (batch_size, seq_len)
+        if self.core_attn_implementation == "flex_attention":
+            from torch.nn.attention.flex_attention import BlockMask, create_block_mask
+            if isinstance(attention_mask, BlockMask):
+                seq_len = query_layer.shape[2]
+                batch_size = query_layer.shape[0]
+                cache_key = (batch_size, seq_len)
 
-            # Cache the BlockMask — create_block_mask is expensive and the mask is the
-            # same for all layers within a forward pass. Only rebuild when dimensions change.
-            if self._flex_block_mask_cache_key != cache_key:
+                # Cache the BlockMask — create_block_mask is expensive and the mask is the
+                # same for all layers within a forward pass. Only rebuild when dimensions change.
+                if self._flex_block_mask_cache_key != cache_key:
 
-                def causal_mask(batch_idx, head_idx, q_idx, kv_idx):
-                    return q_idx >= kv_idx
+                    def causal_mask(batch_idx, head_idx, q_idx, kv_idx):
+                        return q_idx >= kv_idx
 
-                self._flex_block_mask_cached = self._flex_create_block_mask(
-                    mask_mod=causal_mask,
-                    B=batch_size,
-                    H=None,
-                    Q_LEN=seq_len,
-                    KV_LEN=seq_len,
-                    device=query_layer.device,
-                    _compile=True,
-                )
+                    self._flex_block_mask_cached = create_block_mask(
+                        mask_mod=causal_mask,
+                        B=batch_size,
+                        H=None,
+                        Q_LEN=seq_len,
+                        KV_LEN=seq_len,
+                        device=query_layer.device,
+                        _compile=True,
+                    )
                 self._flex_block_mask_cache_key = cache_key
 
             attention_mask = self._flex_block_mask_cached
@@ -454,7 +454,7 @@ class UlyssesSPAttentionHF(torch.nn.Module):
             raise ValueError(
                 f"{core_attn_implementation} attn_implementation isn't currently supported by Ulysses sequence"
                 f" parallelism because it requires a 4D attention_mask (O(n²) memory)."
-                f" Use 'flash_attention_2', 'flash_attention_3', 'flex_attention', 'sdpa',"
+                f" Use any flash attention variant, 'flex_attention', 'sdpa',"
                 f" or a hub-hosted kernel (e.g. 'kernels-community/flash-attn2').")
 
         # Hub kernels (e.g. kernels-community/flash-attn2) are registered lazily in transformers.
@@ -498,15 +498,6 @@ class UlyssesSPAttentionHF(torch.nn.Module):
         )
         uattn.core_attn_implementation = core_attn_implementation
 
-        # Import flex_attention utilities once; stored on the instance for use in
-        # both the wrapper (to detect BlockMask) and forward() (to rebuild it).
-        uattn._flex_block_mask_cls = None
-        uattn._flex_create_block_mask = None
-        if core_attn_implementation == "flex_attention":
-            from torch.nn.attention.flex_attention import BlockMask, create_block_mask
-            uattn._flex_block_mask_cls = BlockMask
-            uattn._flex_create_block_mask = create_block_mask
-
         def uattn_wrapper(
             module: torch.nn.Module,
             query: torch.Tensor,
@@ -525,9 +516,12 @@ class UlyssesSPAttentionHF(torch.nn.Module):
             #
             # Keep BlockMask (flex_attention) — it's a compressed sparse representation.
             # It will be rebuilt for the full gathered sequence in forward().
-            if uattn._flex_block_mask_cls is not None and isinstance(attention_mask, uattn._flex_block_mask_cls):
-                pass  # keep BlockMask — will be rebuilt in forward() for gathered seq len
-            else:
+            _is_block_mask = False
+            if core_attn_implementation == "flex_attention":
+                from torch.nn.attention.flex_attention import BlockMask
+                _is_block_mask = isinstance(attention_mask, BlockMask)
+
+            if not _is_block_mask:
                 attention_mask = None
 
             attn_output, attn_weights = uattn(

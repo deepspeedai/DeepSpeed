@@ -34,6 +34,7 @@ class TestUlyssesSPHF(DistributedTest):
     world_size = 2
 
     def test_ulysses_sp_hf(self, zero_stage):
+        core_attn_implementation = "sdpa"
         model_name_or_path = 'hf-internal-testing/tiny-random-LlamaForCausalLM'
         #model_name_or_path = 'Felladrin/Llama-160M-Chat-v1'
         seq_length = 64
@@ -103,14 +104,15 @@ class TestUlyssesSPHF(DistributedTest):
         # Part 2. Ulysses: Setup
         mpu = UlyssesSPAttentionHF.register_with_transformers(
             model_name_or_path=model_name_or_path,
-            core_attn_implementation="sdpa",
+            core_attn_implementation=core_attn_implementation,
             sequence_parallel_size=sequence_parallel_size,
             micro_batch_size=micro_batch_size,
             seq_length=seq_length,
             seq_length_is_variable=True,
         )
 
-        model_b = AutoModelForCausalLM.from_pretrained(model_name_or_path)
+        model_b = AutoModelForCausalLM.from_pretrained(model_name_or_path,
+                                                       attn_implementation=core_attn_implementation)
         model_b, _, _, _ = deepspeed.initialize(config=config_dict,
                                                 model=model_b,
                                                 model_parameters=model_b.parameters(),
@@ -385,3 +387,119 @@ class TestUlyssesSPHFAttnImplMismatch(DistributedTest):
                 seq_length=seq_length,
                 seq_length_is_variable=True,
             )
+
+
+class TestUlyssesSPHFFlexAttention(DistributedTest):
+    """Separate class for flex_attention tests — requires non_daemonic_procs
+    because torch.compile (used by flex_attention) creates unpicklable objects
+    that break the default multiprocessing.Pool exception handling."""
+    world_size = 2
+    non_daemonic_procs = True
+
+    @pytest.mark.skipif(not torch.cuda.is_available(), reason="flex_attention requires CUDA")  #ignore-cuda
+    def test_ulysses_sp_hf_flex_attention(self):
+        # flex_attention's compiled kernel requires head_dim >= 16.
+        # tiny-random-LlamaForCausalLM has head_dim=4, so we use Felladrin/Llama-160M-Chat-v1
+        # which has head_dim=64.
+        model_name_or_path = 'Felladrin/Llama-160M-Chat-v1'
+        seq_length = 64
+        sequence_parallel_size = self.world_size
+        micro_batch_size = 1
+        zero_stage = 2
+
+        rank = dist.get_rank()
+
+        config_dict = {
+            "train_micro_batch_size_per_gpu": 1,
+            "zero_optimization": {
+                "stage": zero_stage,
+            },
+            "optimizer": {
+                "type": "Adam",
+                "params": {
+                    "lr": 1e-3
+                }
+            },
+            "sequence_parallel_size": sequence_parallel_size,
+        }
+
+        dtype = preferred_dtype()
+        if dtype == torch.bfloat16:
+            config_dict["bf16"] = {"enabled": True}
+        elif dtype == torch.float16:
+            config_dict["fp16"] = {"enabled": True, "loss_scale": 1.0}
+
+        # Part 1. Baseline (no SP)
+        def collate_fn(batch):
+            input_ids, position_ids = batch[0]
+            return dict(input_ids=input_ids.unsqueeze(0),
+                        position_ids=position_ids.unsqueeze(0),
+                        labels=input_ids.unsqueeze(0))
+
+        input_ids = tensor([[1, 10, 10, 10, 2, 2], [1, 20, 20, 20, 2, 2]])
+        position_ids = tensor([[0, 1, 2, 3, 4, 5], [0, 1, 2, 3, 4, 5]])
+        ds = torch.utils.data.TensorDataset(input_ids, position_ids)
+
+        dl_a = torch.utils.data.DataLoader(ds, batch_size=micro_batch_size, collate_fn=collate_fn)
+        batch_a = next(iter(dl_a))
+
+        model_a = AutoModelForCausalLM.from_pretrained(model_name_or_path)
+        model_a, _, _, _ = deepspeed.initialize(config=config_dict,
+                                                model=model_a,
+                                                model_parameters=model_a.parameters(),
+                                                mpu=None)
+        batch_a = move_to_device(batch_a, model_a.device)
+        loss_a = model_a(**batch_a).loss
+        model_a.backward(loss_a)
+
+        # Part 2. Ulysses with flex_attention
+        mpu = UlyssesSPAttentionHF.register_with_transformers(
+            model_name_or_path=model_name_or_path,
+            core_attn_implementation="flex_attention",
+            sequence_parallel_size=sequence_parallel_size,
+            micro_batch_size=micro_batch_size,
+            seq_length=seq_length,
+            seq_length_is_variable=True,
+        )
+
+        model_b = AutoModelForCausalLM.from_pretrained(model_name_or_path, attn_implementation="flex_attention")
+        model_b, _, _, _ = deepspeed.initialize(config=config_dict,
+                                                model=model_b,
+                                                model_parameters=model_b.parameters(),
+                                                mpu=mpu)
+
+        sp_group = groups._get_sequence_parallel_group()
+        sp_world_size = groups._get_sequence_parallel_world_size()
+        sp_rank = groups._get_sequence_parallel_rank()
+        dl_a = torch.utils.data.DataLoader(ds, batch_size=micro_batch_size, collate_fn=collate_fn)
+        dl_b = UlyssesSPDataLoaderAdapter(
+            dl_a,
+            sp_rank=sp_rank,
+            sp_group=sp_group,
+            sp_world_size=sp_world_size,
+            device=model_b.device,
+        )
+        batch_b = next(iter(dl_b))
+        batch_b = move_to_device(batch_b, model_b.device)
+
+        outputs = model_b(**batch_b)
+        shift_labels = batch_b["shift_labels"]
+        loss_b = model_b.module.loss_function(
+            logits=outputs.logits,
+            labels=None,
+            shift_labels=shift_labels,
+            vocab_size=model_b.module.config.vocab_size,
+        )
+
+        losses_per_rank = torch.distributed.nn.functional.all_gather(loss_b, group=sp_group)
+        good_tokens = sum((shift_labels != -100).view(-1))
+        good_tokens_per_rank = torch.distributed.nn.functional.all_gather(good_tokens, group=sp_group)
+        total_loss = sum(losses_per_rank[r] * good_tokens_per_rank[r] for r in range(sp_world_size))
+        total_good_tokens = sum(good_tokens_per_rank)
+        loss_b = total_loss / total_good_tokens
+        model_b.backward(loss_b)
+
+        # Compare: SP loss should match non-SP loss.
+        # flex_attention uses torch.compile which introduces small numerical differences,
+        # especially on short sequences with small models. Use atol=1e-1 for flex.
+        torch_assert_close(loss_a, loss_b, atol=1e-1, rtol=1e-2)
