@@ -339,7 +339,6 @@ class UlyssesSPAttentionHF(torch.nn.Module):
                         Q_LEN=seq_len,
                         KV_LEN=seq_len,
                         device=query_layer.device,
-                        _compile=True,
                     )
                 self._flex_block_mask_cache_key = cache_key
 
