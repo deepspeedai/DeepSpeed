@@ -286,6 +286,11 @@ class UlyssesSPAttentionHF(torch.nn.Module):
             position_ids_list = [torch.empty_like(kwargs["position_ids"]) for _ in range(self.world_size)]
             dist.all_gather(position_ids_list, kwargs["position_ids"], group=self.process_group)
             kwargs["position_ids"] = torch.cat(position_ids_list, dim=1)
+        else:
+            logger.warning_once(
+                "position_ids not found in forward() kwargs. Ulysses SP needs global position_ids "
+                "so that after all_gather causal masking works correctly. Without them, sdpa/flex_attention "
+                "may see repeated local positions and produce incorrect results.")
 
         # please don't remove the white-space vertical alignment in the error message
         assert query.shape == self.required_query_shape, (
@@ -338,7 +343,7 @@ class UlyssesSPAttentionHF(torch.nn.Module):
                     )
                 self._flex_block_mask_cache_key = cache_key
 
-            attention_mask = self._flex_block_mask_cached
+                attention_mask = self._flex_block_mask_cached
 
         if not self.skip_all_but_last_attention_debug_mode:
             # expects: [bs hc_l sl hs]
