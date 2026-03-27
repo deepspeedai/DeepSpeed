@@ -332,6 +332,10 @@ class UlyssesSPAttentionHF(torch.nn.Module):
                     def causal_mask(batch_idx, head_idx, q_idx, kv_idx):
                         return q_idx >= kv_idx
 
+                    # Don't compile create_block_mask here — it runs inside the model's
+                    # forward pass where flex_attention already uses torch.compile, and
+                    # nesting compiled contexts causes gradient explosion in the backward
+                    # pass. The BlockMask is cached so creation cost is negligible.
                     self._flex_block_mask_cached = create_block_mask(
                         mask_mod=causal_mask,
                         B=batch_size,
