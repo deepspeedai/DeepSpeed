@@ -19,8 +19,8 @@ from unit.v1.compile.util import compare_sp_loss, create_gm_nodes, find_sym_seq_
 from unit.common import DistributedTest
 from unit.util import bf16_required_version_check, skip_on_arch
 
-pytestmark = pytest.mark.skipif(not required_torch_version(min_version=2.6),
-                                reason="AutoSP tests require PyTorch >= 2.6")
+pytestmark = pytest.mark.skipif(not required_torch_version(min_version=2.9),
+                                reason="AutoSP tests require PyTorch >= 2.9")
 
 # Fixed sp_size injected into mocks.
 _SP_SIZE = 2
