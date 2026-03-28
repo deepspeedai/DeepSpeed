@@ -18,6 +18,10 @@ from deepspeed import utils
 
 FWD_MODULE_STACK = list()
 
+# PyTorch >= 2.0: setup_context on autograd.Function is required for torch.func transforms.
+# Match deepspeed/runtime/zero/linear.py: keep legacy forward(ctx, ...) when unavailable.
+_SUPPORTS_SETUP_CONTEXT = hasattr(torch.autograd.Function, "setup_context")
+
 
 #for each tensor in outputs run the forward_function and register backward_function as hook
 def _apply_forward_and_backward_to_tensors_only(module, forward_function, backward_function, outputs):
@@ -401,23 +405,45 @@ class DeepSpeedZeRoOffload(object):
                     sub_module.applied_pre_backward_ref_cnt -= 1
                 #print(f"COUNTER after: {sub_module.applied_pre_backward_ref_cnt}")
 
-            class PreBackwardFunctionForModule(torch.autograd.Function):
+            if _SUPPORTS_SETUP_CONTEXT:
 
-                @staticmethod
-                def forward(ctx, outputs):
-                    # Capture `module` and _run_before_backward_function
-                    ctx.module = module
-                    ctx.pre_backward_function = _run_before_backward_function
-                    if not hasattr(ctx.module, "applied_pre_backward_ref_cnt"):
-                        ctx.module.applied_pre_backward_ref_cnt = 0
-                    ctx.module.applied_pre_backward_ref_cnt += 1
-                    outputs = outputs.detach()
-                    return outputs
+                class PreBackwardFunctionForModule(torch.autograd.Function):
 
-                @staticmethod
-                def backward(ctx, *args):
-                    ctx.pre_backward_function(ctx.module)
-                    return args
+                    @staticmethod
+                    def forward(outputs):
+                        return outputs.detach()
+
+                    @staticmethod
+                    def setup_context(ctx, inputs, output):
+                        ctx.module = module
+                        ctx.pre_backward_function = _run_before_backward_function
+                        if not hasattr(ctx.module, "applied_pre_backward_ref_cnt"):
+                            ctx.module.applied_pre_backward_ref_cnt = 0
+                        ctx.module.applied_pre_backward_ref_cnt += 1
+
+                    @staticmethod
+                    def backward(ctx, *args):
+                        ctx.pre_backward_function(ctx.module)
+                        return args
+
+            else:
+
+                class PreBackwardFunctionForModule(torch.autograd.Function):
+
+                    @staticmethod
+                    def forward(ctx, outputs):
+                        ctx.module = module
+                        ctx.pre_backward_function = _run_before_backward_function
+                        if not hasattr(ctx.module, "applied_pre_backward_ref_cnt"):
+                            ctx.module.applied_pre_backward_ref_cnt = 0
+                        ctx.module.applied_pre_backward_ref_cnt += 1
+                        outputs = outputs.detach()
+                        return outputs
+
+                    @staticmethod
+                    def backward(ctx, *args):
+                        ctx.pre_backward_function(ctx.module)
+                        return args
 
             module.pre_bwd_fn = PreBackwardFunctionForModule
 
@@ -431,31 +457,64 @@ class DeepSpeedZeRoOffload(object):
                 if sub_module.ds_grads_remaining == 0:
                     self.post_sub_module_backward_function(sub_module)
 
-            class PostBackwardFunctionModule(torch.autograd.Function):
+            if _SUPPORTS_SETUP_CONTEXT:
 
-                @staticmethod
-                def forward(ctx, output):
-                    ctx.module = module
-                    if output.requires_grad:
-                        #TODO SOME TIMES post backward does not seem to be triggered debug in detail
-                        #Should only cause increase in memory not correctness issue
-                        #if output.grad_fn.__class__.__name__ == 'ViewBackward':
-                        #    ctx.view=True
-                        #    print(f"Warning view tensor for input to module : {module.__class__.__name__}. Backward hooks may not trigger properly")
-                        #assert len(module.parameters(recurse=False)), "The input tensor to the module is a view, and autograd Function or register_hook is not triggered with view tensors."
-                        #if module.ds_grads_remaining == 0:
-                        #    print(f"Before Forward: {ctx.module.__class__.__name__}")
-                        module.ds_grads_remaining += 1
-                        ctx.post_backward_function = _run_after_backward_function
-                    output = output.detach()
-                    return output
+                class PostBackwardFunctionModule(torch.autograd.Function):
 
-                @staticmethod
-                def backward(ctx, *args):
-                    ctx.module.ds_grads_remaining = ctx.module.ds_grads_remaining - 1
-                    if ctx.module.ds_grads_remaining == 0:
-                        ctx.post_backward_function(ctx.module)
-                    return args
+                    @staticmethod
+                    def forward(output):
+                        return output.detach()
+
+                    @staticmethod
+                    def setup_context(ctx, inputs, output):
+                        (output_in, ) = inputs
+                        ctx.module = module
+                        if output_in.requires_grad:
+                            #TODO SOME TIMES post backward does not seem to be triggered debug in detail
+                            #Should only cause increase in memory not correctness issue
+                            #if output.grad_fn.__class__.__name__ == 'ViewBackward':
+                            #    ctx.view=True
+                            #    print(f"Warning view tensor for input to module : {module.__class__.__name__}. Backward hooks may not trigger properly")
+                            #assert len(module.parameters(recurse=False)), "The input tensor to the module is a view, and autograd Function or register_hook is not triggered with view tensors."
+                            #if module.ds_grads_remaining == 0:
+                            #    print(f"Before Forward: {ctx.module.__class__.__name__}")
+                            module.ds_grads_remaining += 1
+                            ctx.post_backward_function = _run_after_backward_function
+
+                    @staticmethod
+                    def backward(ctx, *args):
+                        ctx.module.ds_grads_remaining = ctx.module.ds_grads_remaining - 1
+                        if ctx.module.ds_grads_remaining == 0:
+                            ctx.post_backward_function(ctx.module)
+                        return args
+
+            else:
+
+                class PostBackwardFunctionModule(torch.autograd.Function):
+
+                    @staticmethod
+                    def forward(ctx, output):
+                        ctx.module = module
+                        if output.requires_grad:
+                            #TODO SOME TIMES post backward does not seem to be triggered debug in detail
+                            #Should only cause increase in memory not correctness issue
+                            #if output.grad_fn.__class__.__name__ == 'ViewBackward':
+                            #    ctx.view=True
+                            #    print(f"Warning view tensor for input to module : {module.__class__.__name__}. Backward hooks may not trigger properly")
+                            #assert len(module.parameters(recurse=False)), "The input tensor to the module is a view, and autograd Function or register_hook is not triggered with view tensors."
+                            #if module.ds_grads_remaining == 0:
+                            #    print(f"Before Forward: {ctx.module.__class__.__name__}")
+                            module.ds_grads_remaining += 1
+                            ctx.post_backward_function = _run_after_backward_function
+                        output = output.detach()
+                        return output
+
+                    @staticmethod
+                    def backward(ctx, *args):
+                        ctx.module.ds_grads_remaining = ctx.module.ds_grads_remaining - 1
+                        if ctx.module.ds_grads_remaining == 0:
+                            ctx.post_backward_function(ctx.module)
+                        return args
 
             module.post_bwd_fn = PostBackwardFunctionModule
 

@@ -55,76 +55,141 @@ def _get_autocast_decorators():
 
 autocast_custom_fwd, autocast_custom_bwd = _get_autocast_decorators()
 
+# PyTorch >= 2.0 supports setup_context, which is required for
+# torch.func transforms (vmap, grad, jvp, jacrev, etc.)
+_SUPPORTS_SETUP_CONTEXT = hasattr(torch.autograd.Function, 'setup_context')
 
-class LinearFunctionForZeroStage3(torch.autograd.Function):
+if _SUPPORTS_SETUP_CONTEXT:
 
-    # Note that both forward and backward are @staticmethods
-    @staticmethod
-    @autocast_custom_fwd
-    # bias is an optional argument
-    def forward(ctx, input, weight, bias=None):
+    class LinearFunctionForZeroStage3(torch.autograd.Function):
 
-        ctx.save_for_backward(input, weight, bias)
+        @staticmethod
+        # bias is an optional argument
+        def forward(input, weight, bias=None):
 
-        if input.dim() == 2 and bias is not None:
-            # fused op is marginally faster
-            ret = torch.addmm(bias, input, weight.t())
-        else:
-            output = input.matmul(weight.t())
-            if bias is not None:
-                output += bias
-            ret = output
-
-        return ret
-
-    # This function has only a single output, so it gets only one gradient
-    @staticmethod
-    @autocast_custom_bwd
-    def backward(ctx, grad_output):
-        # This is a pattern that is very convenient - at the top of backward
-        # unpack saved_tensors and initialize all gradients w.r.t. inputs to
-        # None. Thanks to the fact that additional trailing Nones are
-        # ignored, the return statement is simple even when the function has
-        # optional inputs.
-        input, weight, bias = ctx.saved_tensors
-
-        grad_input = grad_weight = grad_bias = None
-
-        #print(f"backward shaped grad_output {grad_output.shape}, input {input.shape}, weight {weight.shape} and bias {bias.shape if bias is not None else None}")
-        # These needs_input_grad checks are optional and there only to
-        # improve efficiency. If you want to make your code simpler, you can
-        # skip them. Returning gradients for inputs that don't require it is
-        # not an error.
-        dim = grad_output.dim()
-        if ctx.needs_input_grad[0]:
-            #print(f"Computing grad input weight {weight.shape} grad_output {grad_output.shape}")
-            grad_input = grad_output.matmul(weight)
-            #print(f"Computed grad input {grad_input.shape}")
-        if ctx.needs_input_grad[1]:
-            #print("Computing grad weight")
-            if dim > 2:
-                grad_weight = grad_output.reshape(-1,
-                                                  grad_output.shape[-1]).t().matmul(input.reshape(-1, input.shape[-1]))
+            if input.dim() == 2 and bias is not None:
+                # fused op is marginally faster
+                ret = torch.addmm(bias, input, weight.t())
             else:
-                grad_weight = grad_output.t().matmul(input)
-            #print(f"Computed grad weight grad_weight {grad_weight.shape}")
-        if bias is not None and ctx.needs_input_grad[2]:
-            #print("Computing grad bias")
-            if dim > 2:
-                grad_bias = grad_output.sum([i for i in range(dim - 1)])
+                output = input.matmul(weight.t())
+                if bias is not None:
+                    output += bias
+                ret = output
+
+            return ret
+
+        @staticmethod
+        def setup_context(ctx, inputs, output):
+            # Replicate autocast state that @autocast_custom_fwd normally sets on ctx,
+            # since the decorator assumes args[0] is ctx which is unavailable in the
+            # separate forward() + setup_context() pattern.
+            device_type = get_accelerator().device_name()
+            ctx._dtype = torch.get_autocast_dtype(device_type)
+            ctx._fwd_used_autocast = torch.is_autocast_enabled(device_type)
+            input, weight, bias = inputs[0], inputs[1], inputs[2] if len(inputs) > 2 else None
+            ctx.save_for_backward(input, weight, bias)
+
+        # This function has only a single output, so it gets only one gradient
+        @staticmethod
+        def backward(ctx, grad_output):
+            # Do not use @autocast_custom_bwd here: it pairs with @autocast_custom_fwd on
+            # legacy forward(ctx, ...). With forward + setup_context, use AMP state from setup_context.
+            device_type = get_accelerator().device_name()
+            if getattr(ctx, "_fwd_used_autocast", False):
+                with torch.amp.autocast(device_type=device_type, enabled=True, dtype=ctx._dtype):
+                    return LinearFunctionForZeroStage3._backward_core(ctx, grad_output)
+            return LinearFunctionForZeroStage3._backward_core(ctx, grad_output)
+
+        @staticmethod
+        def _backward_core(ctx, grad_output):
+            input, weight, bias = ctx.saved_tensors
+
+            grad_input = grad_weight = grad_bias = None
+
+            dim = grad_output.dim()
+            if ctx.needs_input_grad[0]:
+                grad_input = grad_output.matmul(weight)
+            if ctx.needs_input_grad[1]:
+                if dim > 2:
+                    grad_weight = grad_output.reshape(-1, grad_output.shape[-1]).t().matmul(
+                        input.reshape(-1, input.shape[-1]))
+                else:
+                    grad_weight = grad_output.t().matmul(input)
+            if bias is not None and ctx.needs_input_grad[2]:
+                if dim > 2:
+                    grad_bias = grad_output.sum([i for i in range(dim - 1)])
+                else:
+                    grad_bias = grad_output.sum(0)
+            return grad_input, grad_weight, grad_bias
+
+else:
+
+    class LinearFunctionForZeroStage3(torch.autograd.Function):
+
+        # Note that both forward and backward are @staticmethods
+        @staticmethod
+        @autocast_custom_fwd
+        # bias is an optional argument
+        def forward(ctx, input, weight, bias=None):
+
+            ctx.save_for_backward(input, weight, bias)
+
+            if input.dim() == 2 and bias is not None:
+                # fused op is marginally faster
+                ret = torch.addmm(bias, input, weight.t())
             else:
-                grad_bias = grad_output.sum(0)
-            #print("Done computing grad bias")
-            #print("needs bias")
-        #print(f"backward shaped grad_input {grad_input.shape}, grad_weight {grad_weight.shape}, grad_bias {grad_bias.shape if grad_bias is not None else None}")
-        return grad_input, grad_weight, grad_bias
+                output = input.matmul(weight.t())
+                if bias is not None:
+                    output += bias
+                ret = output
+
+            return ret
+
+        # This function has only a single output, so it gets only one gradient
+        @staticmethod
+        @autocast_custom_bwd
+        def backward(ctx, grad_output):
+            # This is a pattern that is very convenient - at the top of backward
+            # unpack saved_tensors and initialize all gradients w.r.t. inputs to
+            # None. Thanks to the fact that additional trailing Nones are
+            # ignored, the return statement is simple even when the function has
+            # optional inputs.
+            input, weight, bias = ctx.saved_tensors
+
+            grad_input = grad_weight = grad_bias = None
+
+            #print(f"backward shaped grad_output {grad_output.shape}, input {input.shape}, weight {weight.shape} and bias {bias.shape if bias is not None else None}")
+            # These needs_input_grad checks are optional and there only to
+            # improve efficiency. If you want to make your code simpler, you can
+            # skip them. Returning gradients for inputs that don't require it is
+            # not an error.
+            dim = grad_output.dim()
+            if ctx.needs_input_grad[0]:
+                #print(f"Computing grad input weight {weight.shape} grad_output {grad_output.shape}")
+                grad_input = grad_output.matmul(weight)
+                #print(f"Computed grad input {grad_input.shape}")
+            if ctx.needs_input_grad[1]:
+                #print("Computing grad weight")
+                if dim > 2:
+                    grad_weight = grad_output.reshape(-1, grad_output.shape[-1]).t().matmul(
+                        input.reshape(-1, input.shape[-1]))
+                else:
+                    grad_weight = grad_output.t().matmul(input)
+                #print(f"Computed grad weight grad_weight {grad_weight.shape}")
+            if bias is not None and ctx.needs_input_grad[2]:
+                #print("Computing grad bias")
+                if dim > 2:
+                    grad_bias = grad_output.sum([i for i in range(dim - 1)])
+                else:
+                    grad_bias = grad_output.sum(0)
+                #print("Done computing grad bias")
+                #print("needs bias")
+            #print(f"backward shaped grad_input {grad_input.shape}, grad_weight {grad_weight.shape}, grad_bias {grad_bias.shape if grad_bias is not None else None}")
+            return grad_input, grad_weight, grad_bias
 
 
 def zero3_linear_wrap(input, weight, bias=None):
-    if bias is None:
-        return LinearFunctionForZeroStage3.apply(input, weight)
-    else:
-        return LinearFunctionForZeroStage3.apply(input, weight, bias)
+    return LinearFunctionForZeroStage3.apply(input, weight, bias)
 
 
 class LinearModuleForZeroStage3(Module):
