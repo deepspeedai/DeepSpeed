@@ -282,15 +282,16 @@ class UlyssesSPAttentionHF(torch.nn.Module):
         # need them to be monotonically increasing so causal masking works correctly.
         # UlyssesSPDataLoaderAdapter ensures position_ids are in the batch before sharding,
         # so after gathering here they reconstruct to the correct global positions.
-        if "position_ids" in kwargs:
-            position_ids_list = [torch.empty_like(kwargs["position_ids"]) for _ in range(self.world_size)]
-            dist.all_gather(position_ids_list, kwargs["position_ids"], group=self.process_group)
-            kwargs["position_ids"] = torch.cat(position_ids_list, dim=1)
-        else:
-            logger.warning_once(
-                "position_ids not found in forward() kwargs. Ulysses SP needs global position_ids "
-                "so that after all_gather causal masking works correctly. Without them, sdpa/flex_attention "
-                "may see repeated local positions and produce incorrect results.")
+        assert "position_ids" in kwargs, (
+            "Ulysses SP requires position_ids in every forward() call so that after all_gather "
+            "causal masking works correctly. Without them each rank generates local [0..chunk_len-1] "
+            "positions which, after gathering, look like packed sequences and break attention. "
+            "For non-packed sequences: position_ids = torch.arange(seq_len) per sample. "
+            "For packed sequences: position_ids must reset at document boundaries. "
+            "Ensure your data collator or UlyssesSPDataLoaderAdapter includes position_ids.")
+        position_ids_list = [torch.empty_like(kwargs["position_ids"]) for _ in range(self.world_size)]
+        dist.all_gather(position_ids_list, kwargs["position_ids"], group=self.process_group)
+        kwargs["position_ids"] = torch.cat(position_ids_list, dim=1)
 
         # please don't remove the white-space vertical alignment in the error message
         assert query.shape == self.required_query_shape, (
