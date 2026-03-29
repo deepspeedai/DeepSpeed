@@ -419,16 +419,25 @@ class DeepSpeedEngine(Module):
                 raise RuntimeError(
                     "DeepSpeedEngine: Optimizer initialization failed. Check for JIT compilation errors.")
 
-            required_methods = ['step', 'backward', 'load_state_dict']
+            optimizer_methods = ['step', 'load_state_dict']
 
             if self.zero_optimization_partition_gradients():
-                required_methods.append('overlapping_partition_gradients_reduce_epilogue')
+                optimizer_methods.append('overlapping_partition_gradients_reduce_epilogue')
 
-            for method in required_methods:
-                if not hasattr(self.optimizer, method):
-                    raise AttributeError(
-                        f"DeepSpeedEngine: Optimizer is missing core functional attribute (.{method}). "
-                        "This usually indicates a toolchain mismatch or failed JIT kernels.")
+            for method in optimizer_methods:
+                attr = getattr(self.optimizer, method, None)
+                if attr is None or not callable(attr):
+                    raise RuntimeError(
+                        f"DeepSpeedEngine: Optimizer missing callable `{method}`. "
+                        "This indicates incomplete initialization (e.g., JIT/toolchain failure)."
+                    )
+
+            # Validate engine separately
+            if not hasattr(self, "backward") or not callable(getattr(self, "backward")):
+                raise RuntimeError(
+                    "DeepSpeedEngine initialization failed: missing callable `backward`. "
+                    "Engine may be partially initialized."
+                )
 
         if self.global_rank == 0:
             self._config.print("DeepSpeedEngine configuration")
