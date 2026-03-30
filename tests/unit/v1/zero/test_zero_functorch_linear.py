@@ -193,11 +193,11 @@ class TestZeroLinearAutocast(DistributedTest):
         weight = torch.randn(4, 4, device=device, dtype=torch.float32, requires_grad=True)
         inp = torch.randn(2, 4, device=device, dtype=torch.float32, requires_grad=True)
 
-        # Without autocast
+        # Without autocast: setup_context must record that forward did not use autocast
         out = zero3_linear_wrap(inp, weight, None)
         grad_fn = out.grad_fn
-        # The saved context is accessible via the grad_fn
-        assert hasattr(grad_fn, '_saved__fwd_used_autocast') or hasattr(grad_fn, '_fwd_used_autocast') or True
-        # Just verify backward works and produces finite gradients
+        assert hasattr(grad_fn, "_fwd_used_autocast")
+        assert grad_fn._fwd_used_autocast is False
+        assert hasattr(grad_fn, "_dtype")
         out.sum().backward()
         assert torch.isfinite(weight.grad).all()
