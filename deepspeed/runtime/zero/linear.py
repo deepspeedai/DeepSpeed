@@ -16,12 +16,14 @@
 #when implemented outside of torch.autograd.Function
 
 import math
+import functools
 
 import torch
 from torch import Tensor
 from torch.nn.parameter import Parameter
 from torch.nn import init
 from torch.nn.modules.module import Module
+from deepspeed.runtime.utils import noop_decorator
 from deepspeed import comm as dist
 from deepspeed.accelerator import get_accelerator
 
@@ -29,6 +31,49 @@ from deepspeed.accelerator import get_accelerator
 def print_rank_0(message, debug=False, force=False):
     if dist.get_rank() == 0 and (debug or force):
         print(message)
+
+
+def _get_legacy_autocast_decorators(device_type):
+    legacy_amp = getattr(getattr(torch, device_type, None), 'amp', None)
+    custom_fwd = getattr(legacy_amp, 'custom_fwd', None)
+    custom_bwd = getattr(legacy_amp, 'custom_bwd', None)
+    if custom_fwd is not None and custom_bwd is not None:
+        return custom_fwd, custom_bwd
+    return noop_decorator, noop_decorator
+
+
+def _get_autocast_decorators():
+    amp = getattr(torch, 'amp', None)
+    custom_fwd = getattr(amp, 'custom_fwd', None)
+    custom_bwd = getattr(amp, 'custom_bwd', None)
+    if custom_fwd is not None and custom_bwd is not None:
+        device_type = get_accelerator().device_name()
+        return functools.partial(custom_fwd, device_type=device_type), functools.partial(custom_bwd,
+                                                                                         device_type=device_type)
+    return _get_legacy_autocast_decorators(get_accelerator().device_name())
+
+
+autocast_custom_fwd, autocast_custom_bwd = _get_autocast_decorators()
+
+
+def _is_autocast_enabled(device_type):
+    try:
+        return torch.is_autocast_enabled(device_type)
+    except TypeError:
+        legacy_getter = getattr(torch, f'is_autocast_{device_type}_enabled', None)
+        if legacy_getter is not None:
+            return legacy_getter()
+        return torch.is_autocast_enabled()
+
+
+def _get_autocast_dtype(device_type):
+    try:
+        return torch.get_autocast_dtype(device_type)
+    except TypeError:
+        legacy_getter = getattr(torch, f'get_autocast_{device_type}_dtype', None)
+        if legacy_getter is not None:
+            return legacy_getter()
+        return None
 
 
 class LinearFunctionForZeroStage3(torch.autograd.Function):
@@ -51,8 +96,8 @@ class LinearFunctionForZeroStage3(torch.autograd.Function):
     @staticmethod
     def setup_context(ctx, inputs, output):
         device_type = get_accelerator().device_name()
-        ctx._dtype = torch.get_autocast_dtype(device_type)
-        ctx._fwd_used_autocast = torch.is_autocast_enabled(device_type)
+        ctx._dtype = _get_autocast_dtype(device_type)
+        ctx._fwd_used_autocast = _is_autocast_enabled(device_type)
         input, weight, bias = inputs[0], inputs[1], inputs[2] if len(inputs) > 2 else None
         ctx.save_for_backward(input, weight, bias)
 
@@ -63,7 +108,7 @@ class LinearFunctionForZeroStage3(torch.autograd.Function):
         # autocast state as forward — including explicitly disabling autocast
         # when forward did not use it, to guard against outer autocast regions.
         device_type = get_accelerator().device_name()
-        with torch.amp.autocast(device_type=device_type, enabled=ctx._fwd_used_autocast, dtype=ctx._dtype):
+        with torch.autocast(device_type=device_type, enabled=ctx._fwd_used_autocast, dtype=ctx._dtype):
             input, weight, bias = ctx.saved_tensors
 
             grad_input = grad_weight = grad_bias = None

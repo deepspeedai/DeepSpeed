@@ -7,7 +7,7 @@
 
 - All commits MUST have a `Signed-off-by` line (use `--signoff`). Get the name and email from `git config user.name` / `git config user.email`.
 - Formatting: yapf (column_limit=119, `.style.yapf`) + flake8 (`.flake8`).
-- Always verify changed files pass pre-commit checks before committing. Config: `.pre-commit-config.yaml`.
+- Always verify changed files pass pre-commit checks before committing: `pre-commit run --files <changed_files>`. Only check modified files, not the entire codebase. Config: `.pre-commit-config.yaml`.
 - `check-torchdist` hook: NEVER directly import torch's distributed module. Use `import deepspeed.comm as dist` instead.
 - New files require license header:
   ```
