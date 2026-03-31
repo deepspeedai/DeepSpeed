@@ -419,7 +419,7 @@ class DeepSpeedEngine(Module):
                 raise RuntimeError(
                     "DeepSpeedEngine: Optimizer initialization failed. Check for JIT compilation errors.")
 
-            optimizer_methods = ['step', 'load_state_dict']
+            optimizer_methods = ['step', 'load_state_dict','backward']
 
             if self.zero_optimization_partition_gradients():
                 optimizer_methods.append('overlapping_partition_gradients_reduce_epilogue')
@@ -431,13 +431,6 @@ class DeepSpeedEngine(Module):
                         f"DeepSpeedEngine: Optimizer missing callable `{method}`. "
                         "This indicates incomplete initialization (e.g., JIT/toolchain failure)."
                     )
-
-            # Validate engine separately
-            if not hasattr(self, "backward") or not callable(getattr(self, "backward")):
-                raise RuntimeError(
-                    "DeepSpeedEngine initialization failed: missing callable `backward`. "
-                    "Engine may be partially initialized."
-                )
 
         if self.global_rank == 0:
             self._config.print("DeepSpeedEngine configuration")
@@ -2438,8 +2431,7 @@ class DeepSpeedEngine(Module):
         self.optimizer.is_gradient_accumulation_boundary = self.is_gradient_accumulation_boundary()
         # ZeRO stage >= 2 communicates during non gradient accumulation boundaries as well
         if self.zero_optimization_partition_gradients():
-            if hasattr(self.optimizer, 'overlapping_partition_gradients_reduce_epilogue'):
-                self.optimizer.overlapping_partition_gradients_reduce_epilogue()
+            self.optimizer.overlapping_partition_gradients_reduce_epilogue()
 
         # Communicate only at gradient accumulation boundaries
         elif self.is_gradient_accumulation_boundary():
