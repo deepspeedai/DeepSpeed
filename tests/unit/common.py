@@ -341,7 +341,7 @@ class DistributedExec(ABC):
         if isinstance(world_size, int):
             world_size = [world_size]
         for procs in world_size:
-            with tempfile.NamedTemporaryFile(delete_on_close=False, dir=str(tmpdir), suffix='_filestore') as fp:
+            with tempfile.NamedTemporaryFile(delete=False, dir=str(tmpdir), suffix='_filestore') as fp:
                 init_method = f"file://{fp.name}"
             self._launch_procs(procs, init_method)
             time.sleep(0.5)
