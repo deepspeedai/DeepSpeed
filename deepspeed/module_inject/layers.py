@@ -369,6 +369,12 @@ class TensorParallel_Layer(nn.Module, ABC):
     def _mark_uc_metadata(self):
         return
 
+    def _should_materialize_tp_partition(self):
+        # AutoTP partitioning should only materialize parameters when an actual
+        # TP process group is present. Metadata-only construction with
+        # mp_group=None should not touch device placement.
+        return self.mp_group is not None
+
     def is_training_mode(self):
         global DEEPSPEED_AUTOTP_MODE
         return DEEPSPEED_AUTOTP_MODE == AUTOTP_MODE.TRAINING
@@ -579,7 +585,8 @@ class LinearAllreduce(TensorParallel_Layer):
         self.weight = module.weight
         self.bias = module.bias
 
-        self._tp_partition([self.weight, self.bias])
+        if self._should_materialize_tp_partition():
+            self._tp_partition([self.weight, self.bias])
         self.support_training = True
         self.config_tp_params(self.weight)
         if self.bias is not None:
@@ -674,7 +681,7 @@ class LinearLayer(TensorParallel_Layer):
         super(LinearLayer, self).__init__(mp_group, **kwargs)
         self.weight = module.weight
         self.bias = module.bias
-        if not skip_partition:
+        if not skip_partition and self._should_materialize_tp_partition():
             self._tp_partition([self.weight, self.bias])
         self.support_training = True
         self.config_tp_params(self.weight)
@@ -1234,7 +1241,8 @@ class SubParamLinearLayer(TensorParallel_Layer):
             raise ValueError(f"AutoTP layer '{self.name}' bias size {self.bias.numel()} does not match output shape "
                              f"{self._output_shape}.")
 
-        self._tp_partition([self.weight, self.bias])
+        if self._should_materialize_tp_partition():
+            self._tp_partition([self.weight, self.bias])
         self.support_training = True
         self.config_tp_params(self.weight)
         if self.bias is not None:
@@ -1352,7 +1360,8 @@ class SubParamLinearAllreduce(TensorParallel_Layer):
          self._bias_partition_dim) = _infer_subparam_logical_shapes(self._orig_weight_shape, self.shape,
                                                                     self.partition_dim, self.name)
 
-        self._tp_partition([self.weight, self.bias])
+        if self._should_materialize_tp_partition():
+            self._tp_partition([self.weight, self.bias])
         self.support_training = True
         self.config_tp_params(self.weight)
         if self.bias is not None:
