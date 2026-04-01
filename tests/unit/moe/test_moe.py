@@ -318,14 +318,15 @@ class TestExpertWeightGradWithZero(DistributedTest):
         def extract_expert_grad(model, expert_id):
 
             def _get_weight_bias(experts):
-                return ([deepspeed.runtime.zero.tensor_fragment.safe_get_full_grad(expert[0].weight)
-                         for expert in experts][expert_id].detach().clone(),
-                        [deepspeed.runtime.zero.tensor_fragment.safe_get_full_grad(expert[0].bias)
-                         for expert in experts][expert_id].detach().clone(),
-                        [deepspeed.runtime.zero.tensor_fragment.safe_get_full_grad(expert[1].weight)
-                         for expert in experts][expert_id].detach().clone(),
-                        [deepspeed.runtime.zero.tensor_fragment.safe_get_full_grad(expert[1].bias)
-                         for expert in experts][expert_id].detach().clone())
+                return ([
+                    deepspeed.runtime.zero.tensor_fragment.safe_get_full_grad(expert[0].weight) for expert in experts
+                ][expert_id].detach().clone(), [
+                    deepspeed.runtime.zero.tensor_fragment.safe_get_full_grad(expert[0].bias) for expert in experts
+                ][expert_id].detach().clone(), [
+                    deepspeed.runtime.zero.tensor_fragment.safe_get_full_grad(expert[1].weight) for expert in experts
+                ][expert_id].detach().clone(), [
+                    deepspeed.runtime.zero.tensor_fragment.safe_get_full_grad(expert[1].bias) for expert in experts
+                ][expert_id].detach().clone())
 
             return (*_get_weight_bias(model.moe_1.deepspeed_moe.experts.deepspeed_experts),
                     *_get_weight_bias(model.moe_2.deepspeed_moe.experts.deepspeed_experts))

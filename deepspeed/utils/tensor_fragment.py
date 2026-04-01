@@ -4,6 +4,4 @@
 from deepspeed.runtime.zero.tensor_fragment import *
 from deepspeed.utils import logger
 
-logger.warning_once(
-    "deepspeed.utils.tensor_fragment is deprecated, please use deepspeed.runtime.zero.tensor_fragment"
-)
+logger.warning_once("deepspeed.utils.tensor_fragment is deprecated, please use deepspeed.runtime.zero.tensor_fragment")
