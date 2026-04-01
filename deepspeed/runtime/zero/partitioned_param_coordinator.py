@@ -90,6 +90,7 @@ class PartitionedParameterCoordinator:
         zero_quantized_nontrainable_weights=False,
         fast_sharding_for_leaf_module=False,
         log_trace_cache_warnings=False,
+        max_ongoing_fetch_events: int = 2,
     ) -> None:
         # mapping of param -> handle for each param that is currently in flight
         self.__inflight_param_registry = inflight_param_registry
@@ -124,13 +125,9 @@ class PartitionedParameterCoordinator:
         # time of the call, but not used until later by the asynchronous cuda stream.
         # allowing an infinite number of these to queue up causes a lot of memory
         # pressure that then becomes detrimental to performance.
-        # this is a much less elegant way of fixing this vs something like using
-        # cudaMallocAsync/cudaFreeAsync. Choosing to not expose this to the user now
-        # because ideally in the future its replaced by an async allocation
-        # mechanism which doesn't require any configuration by the user.
+        # configurable via zero_optimization.stage3_max_ongoing_fetch_events in the JSON config.
         self.__ongoing_fetch_events: Deque[get_accelerator().Event] = collections.deque()
-        # TODO. make this configurable via JSON
-        self.__max_ongoing_fetch_events: int = 2
+        self.__max_ongoing_fetch_events: int = max_ongoing_fetch_events
         self.__profiler = PartitionedParameterProfiler(timers if ENABLE_PROFILER else None)
 
         # Whether to log trace cache warnings, e.g. invalidation events

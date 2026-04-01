@@ -273,6 +273,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             zero_quantized_nontrainable_weights=zero_quantized_nontrainable_weights,
             zero_module_granularity_threshold=zero_module_granularity_threshold,
             log_trace_cache_warnings=log_trace_cache_warnings,
+            max_ongoing_fetch_events=ds_config.zero_config.max_ongoing_fetch_events,
         )
 
         self.persistent_parameters = self.parameter_offload.persistent_parameters
@@ -426,8 +427,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         self.is_gradient_accumulation_boundary: bool = True
 
         self.param_reduce_events: Deque[get_accelerator().Event] = collections.deque()
-        # TODO. make this configurable via JSON
-        self.max_param_reduce_events: int = 2
+        self.max_param_reduce_events: int = ds_config.zero_config.max_param_reduce_events
 
         self.param_dict = {}
 
@@ -553,6 +553,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         zero_quantized_nontrainable_weights,
         zero_module_granularity_threshold,
         log_trace_cache_warnings,
+        max_ongoing_fetch_events,
     ):
         return DeepSpeedZeRoOffload(module=module,
                                     timers=timers,
@@ -571,7 +572,8 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                                     zero_quantized_weights=zero_quantized_weights,
                                     zero_quantized_nontrainable_weights=zero_quantized_nontrainable_weights,
                                     zero_module_granularity_threshold=zero_module_granularity_threshold,
-                                    log_trace_cache_warnings=log_trace_cache_warnings)
+                                    log_trace_cache_warnings=log_trace_cache_warnings,
+                                    max_ongoing_fetch_events=max_ongoing_fetch_events)
 
     def _get_trainable_parameter_groups(self):
         param_groups = []

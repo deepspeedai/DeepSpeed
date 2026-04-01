@@ -108,6 +108,7 @@ class DeepSpeedZeRoOffload(object):
         zero_quantized_nontrainable_weights=False,
         zero_module_granularity_threshold=0,
         log_trace_cache_warnings=False,
+        max_ongoing_fetch_events=2,
     ):
 
         see_memory_usage("DeepSpeedZeRoOffload initialize [begin]", force=False)
@@ -174,6 +175,7 @@ class DeepSpeedZeRoOffload(object):
             zero_quantized_nontrainable_weights=self.zero_quantized_nontrainable_weights,
             fast_sharding_for_leaf_module=self.fast_sharding_for_leaf_module,
             log_trace_cache_warnings=self.log_trace_cache_warnings,
+            max_ongoing_fetch_events=max_ongoing_fetch_events,
         )
 
         self.forward_hooks = []

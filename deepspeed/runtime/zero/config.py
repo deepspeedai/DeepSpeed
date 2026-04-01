@@ -277,6 +277,22 @@ class DeepSpeedZeroConfig(DeepSpeedConfigModel):
     Recommended for scenarios with high memory pressure.
     """
 
+    max_param_reduce_events: int = Field(2, ge=1, alias="stage3_max_param_reduce_events")
+    """
+    Maximum number of in-flight CUDA events used to bound the parameter reduce (gradient all-reduce)
+    queue in ZeRO Stage 3. Limiting this prevents excessive GPU memory allocation by the host thread
+    before the async CUDA stream consumes it. Increase this value if you have ample GPU memory and
+    want to allow more overlap; decrease it to reduce memory pressure.
+    """
+
+    max_ongoing_fetch_events: int = Field(2, ge=1, alias="stage3_max_ongoing_fetch_events")
+    """
+    Maximum number of in-flight CUDA events used to bound the parameter fetch (allgather)
+    queue in ZeRO Stage 3. Limiting this prevents excessive GPU memory allocation by the host thread
+    before the async CUDA stream consumes it. Increase this value if you have ample GPU memory and
+    want to allow more overlap; decrease it to reduce memory pressure.
+    """
+
     stage3_gather_fp16_weights_on_model_save: bool = Field(False,
                                                            json_schema_extra={
                                                                "deprecated": True,
