@@ -12,7 +12,7 @@ from deepspeed.accelerator import get_accelerator
 from unit.common import DistributedTest
 from unit.simple_model import random_dataloader, SimpleModel
 from deepspeed.runtime.zero.offload_config import OffloadDeviceEnum, OffloadStateTypeEnum
-from deepspeed.utils import safe_get_local_fp32_param, safe_get_local_optimizer_state
+from deepspeed.runtime.zero.tensor_fragment import safe_get_local_fp32_param, safe_get_local_optimizer_state
 from deepspeed.runtime.zero.offload_states import get_state_devices
 
 # ==============================================================================

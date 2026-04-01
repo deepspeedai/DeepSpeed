@@ -4,8 +4,8 @@
 # DeepSpeed Team
 
 import types
-from deepspeed.utils import get_full_hp_param, get_full_hp_grad, get_hp_fragment_mapping
-from deepspeed.utils import set_full_hp_param, set_full_hp_grad
+from deepspeed.runtime.zero.tensor_fragment import get_full_hp_param, get_full_hp_grad, get_hp_fragment_mapping
+from deepspeed.runtime.zero.tensor_fragment import set_full_hp_param, set_full_hp_grad
 
 
 def link_hp_params(lp_param_list, flat_hp_partition, gradient_dict, offload_gradient_dict, use_offload,

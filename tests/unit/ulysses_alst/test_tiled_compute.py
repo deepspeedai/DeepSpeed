@@ -7,7 +7,7 @@ Arctic Long Sequence Training (ALST) Tiled compute component tests
 """
 
 from deepspeed.runtime.sequence_parallel.ulysses_sp import TiledMLP, sequence_tiled_compute, TiledFusedLogitsLoss
-from deepspeed.utils import safe_get_full_grad
+from deepspeed.runtime.zero.tensor_fragment import safe_get_full_grad
 from torch.nn import Linear, Module
 from unit.common import DistributedTest, preferred_dtype
 from unit.util import torch_assert_equal, torch_assert_close, CaptureStderr

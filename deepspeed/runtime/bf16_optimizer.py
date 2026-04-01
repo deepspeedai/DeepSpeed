@@ -15,7 +15,9 @@ from deepspeed.git_version_info import version
 from deepspeed.runtime.utils import (get_global_norm_of_tensors, clip_tensors_by_global_norm, DummyOptim,
                                      align_dense_tensors, all_gather_dp_groups, is_model_parallel_parameter,
                                      see_memory_usage, graph_process, get_norm_with_moe_layers)
-from deepspeed.utils import link_hp_params, lazy_init_hp_params_optimizer_state, fragment_address, groups
+from deepspeed.runtime.zero.mixed_precision_linkage import link_hp_params, lazy_init_hp_params_optimizer_state
+from deepspeed.runtime.zero.tensor_fragment import fragment_address
+from deepspeed.utils import groups
 from deepspeed.moe.utils import is_moe_param, is_moe_param_group
 from deepspeed.utils.bwc import bwc_tensor_model_parallel_rank
 from deepspeed.utils.torch import register_grad_hook

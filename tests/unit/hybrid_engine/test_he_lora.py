@@ -11,7 +11,7 @@ import pytest
 import deepspeed
 from deepspeed.runtime.zero import GatheredParameters
 from deepspeed.ops.op_builder import OpBuilder
-from deepspeed.utils import safe_get_full_grad
+from deepspeed.runtime.zero.tensor_fragment import safe_get_full_grad
 import numpy.testing as npt
 from unit.common import DistributedTest
 from deepspeed.ops.op_builder import InferenceBuilder

@@ -8,7 +8,7 @@ import torch
 from typing import Any
 
 from deepspeed.utils import logger
-from deepspeed.utils.tensor_fragment import map_to_flat_opt_states
+from deepspeed.runtime.zero.tensor_fragment import map_to_flat_opt_states
 from deepspeed.runtime.utils import bwc_tensor_model_parallel_rank, see_memory_usage
 from deepspeed.runtime.torch_autocast import get_comm_dtype, is_autocast_initialized
 from deepspeed.runtime.utils import maybe_loss_for_backward

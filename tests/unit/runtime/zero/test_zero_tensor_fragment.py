@@ -13,11 +13,11 @@ from unit.simple_model import random_dataloader, SimpleModel
 from unit.util import bf16_required_version_check
 
 import deepspeed
-from deepspeed.utils import safe_get_full_fp32_param, safe_get_full_grad, safe_get_full_optimizer_state
-from deepspeed.utils import safe_set_full_fp32_param, safe_set_full_grad, safe_set_full_optimizer_state
-from deepspeed.utils import safe_get_local_fp32_param, safe_get_local_grad, safe_get_local_optimizer_state
-from deepspeed.utils import safe_set_local_fp32_param, safe_set_local_grad, safe_set_local_optimizer_state
-from deepspeed.utils import safe_update_full_grad_vectorized
+from deepspeed.runtime.zero.tensor_fragment import safe_get_full_fp32_param, safe_get_full_grad, safe_get_full_optimizer_state
+from deepspeed.runtime.zero.tensor_fragment import safe_set_full_fp32_param, safe_set_full_grad, safe_set_full_optimizer_state
+from deepspeed.runtime.zero.tensor_fragment import safe_get_local_fp32_param, safe_get_local_grad, safe_get_local_optimizer_state
+from deepspeed.runtime.zero.tensor_fragment import safe_set_local_fp32_param, safe_set_local_grad, safe_set_local_optimizer_state
+from deepspeed.runtime.zero.tensor_fragment import safe_update_full_grad_vectorized
 from deepspeed.runtime.zero.offload_config import OffloadDeviceEnum
 from deepspeed.ops.aio import AsyncIOBuilder
 from deepspeed.accelerator import get_accelerator

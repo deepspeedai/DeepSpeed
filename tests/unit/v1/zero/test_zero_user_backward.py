@@ -12,7 +12,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from unit.common import DistributedTest, preferred_dtype, allclose_on_all_ranks
 from unit.simple_model import SimpleModel, random_dataloader
 from deepspeed.accelerator import get_accelerator
-from deepspeed.utils import safe_get_full_grad
+from deepspeed.runtime.zero.tensor_fragment import safe_get_full_grad
 
 
 class SimpleNonScalarModel(torch.nn.Module):

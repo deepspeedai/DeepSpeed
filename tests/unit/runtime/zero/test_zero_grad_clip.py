@@ -7,7 +7,7 @@ import torch
 import pytest
 import deepspeed
 from deepspeed.runtime.zero.stage3 import DeepSpeedZeroOptimizer_Stage3
-from deepspeed.utils import safe_get_local_grad, safe_set_local_grad
+from deepspeed.runtime.zero.tensor_fragment import safe_get_local_grad, safe_set_local_grad
 from deepspeed.accelerator import get_accelerator
 from unit.simple_model import SimpleModel
 import os

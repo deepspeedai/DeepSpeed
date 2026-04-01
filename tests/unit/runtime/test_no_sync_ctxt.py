@@ -13,7 +13,7 @@ from unit.common import DistributedTest
 
 import deepspeed
 import deepspeed.comm as dist
-from deepspeed.utils import safe_get_full_grad
+from deepspeed.runtime.zero.tensor_fragment import safe_get_full_grad
 
 
 class TestNoSyncCtxt(DistributedTest):

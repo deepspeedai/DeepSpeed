@@ -10,7 +10,7 @@ import pytest
 import numpy as np
 from unit.common import DistributedTest
 from unit.simple_model import SimpleModel, random_dataloader
-from deepspeed.utils import safe_set_full_grad
+from deepspeed.runtime.zero.tensor_fragment import safe_set_full_grad
 
 
 def has_inf_or_nan(x):

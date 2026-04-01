@@ -38,7 +38,7 @@ from deepspeed.runtime.zero.muon.original_muon import muon_update
 from deepspeed.checkpoint.constants import (DS_VERSION, GROUP_PADDINGS, PARTITION_COUNT, LOSS_SCALER,
                                             SINGLE_PARTITION_OF_FP32_GROUPS, BASE_OPTIMIZER_STATE,
                                             BASE_OPTIMIZER_STATE_STEP, CLIP_GRAD, ZERO_STAGE, PARAM_SLICE_MAPPINGS)
-from deepspeed.utils import link_hp_params, lazy_init_hp_params_optimizer_state
+from deepspeed.runtime.zero.mixed_precision_linkage import link_hp_params, lazy_init_hp_params_optimizer_state
 from deepspeed.checkpoint import enable_universal_checkpoint
 from deepspeed.checkpoint.constants import UNIVERSAL_CHECKPOINT_INFO
 

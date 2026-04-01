@@ -9,7 +9,7 @@ UlyssesPlus: UlyssesSPHF tests
 from deepspeed.runtime.sequence_parallel.ulysses_sp import UlyssesSPAttentionHF, UlyssesSPDataLoaderAdapter
 from deepspeed.runtime.utils import move_to_device
 from deepspeed.utils import groups
-from deepspeed.utils import safe_get_full_grad
+from deepspeed.runtime.zero.tensor_fragment import safe_get_full_grad
 from torch import tensor
 from transformers import AutoModelForCausalLM
 from unit.common import DistributedTest, preferred_dtype
