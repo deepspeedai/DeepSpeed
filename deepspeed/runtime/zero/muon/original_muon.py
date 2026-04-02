@@ -31,6 +31,10 @@ import torch
 import deepspeed.comm as dist  # replace torch's distributed package with deepspeed.comm to resolve deepspeed check
 from deepspeed.runtime import compiler
 
+# Detect CPU hardware support for efficient bf16 matmul (AMX or AVX-512-BF16)
+_cpu_bf16_supported = hasattr(torch.cpu, "_is_amx_tile_supported") and (torch.cpu._is_amx_tile_supported()
+                                                                        or torch.cpu._is_avx512_bf16_supported())
+
 
 @compiler.compile()
 def zeropower_via_newtonschulz5(G, steps: int):
@@ -45,7 +49,7 @@ def zeropower_via_newtonschulz5(G, steps: int):
     """
     assert G.ndim >= 2  # batched Muon implementation by @scottjmaddox, and put into practice in the record by @YouJiacheng
     a, b, c = (3.4445, -4.7750, 2.0315)
-    X = G.bfloat16()
+    X = G.bfloat16() if G.device.type != "cpu" or _cpu_bf16_supported else G.float()
     if G.size(-2) > G.size(-1):
         X = X.mT
 
