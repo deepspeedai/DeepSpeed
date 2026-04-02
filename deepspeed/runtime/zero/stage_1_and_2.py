@@ -417,10 +417,6 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
 
             if flatten_on_accelerator:
                 logger.info(f"Flattening param group {i} on {accelerator.device_name()} (sufficient memory)")
-                # detach() is critical: without it, the flat buffer retains autograd history
-                # (CatBackward0 from torch.cat on params with requires_grad=True), and later
-                # _unflatten_dense_tensors creates SplitBackward0 views that cause RuntimeError
-                # when modified inplace during optimizer step.
                 flattened_buffer = self.flatten_dense_tensors_aligned(self.round_robin_bit16_groups[i],
                                                                       alignment,
                                                                       use_cpu_data=False).detach()
@@ -441,7 +437,8 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                 self.bit16_groups_flat.append(flattened_buffer.to(get_accelerator().current_device_name()))
                 del flattened_buffer
 
-                see_memory_usage(f"After flattening and moving param group {i} to {get_accelerator().device_name()}", force=False)
+                see_memory_usage(f"After flattening and moving param group {i} to {get_accelerator().device_name()}",
+                                 force=False)
 
             if dist.get_rank(group=self.real_dp_process_group[i]) == 0:
                 see_memory_usage(f"After Flattening and after emptying param group {i} cache", force=False)
