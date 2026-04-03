@@ -1918,6 +1918,26 @@ Different pruning sets, this is used for different pruning parameters. In this e
 | ------------------------------------------------------------- | ------- |
 | Use pipeline stages to parallelize the writing of checkpoints.| `false` |
 
+### AutoSP options
+
+DeepSpeed provides compiler-based optimization passes through the `compile` configuration. This includes enabling Ulysses-styled sequence paralllelism and a custom heuristic selective activation checkpointing pass. To enable Automatic Sequence Parallelism (AutoSP), configure the `compile` section:
+
+```json
+{
+    "zero_optimization": {"stage": 0},
+    "compile": {
+        "deepcompile": true,
+        "passes": ["autosp"],
+    }
+}
+```
+
+<i>**passes**</i>: [array of strings]
+
+| Description                                                              | Default |
+| ------------------------------------------------------------------------ | ------- |
+| List of compiler passes to apply. Currently supported: `["autosp"]`.     | `[]`    |
+
 ### Data Type options
 
 ```json

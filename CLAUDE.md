@@ -11,7 +11,6 @@
 - `check-torchdist` hook: NEVER directly import torch's distributed module. Use `import deepspeed.comm as dist` instead.
 - New files require license header:
   ```
-  # Copyright (c) Microsoft Corporation.
   # SPDX-License-Identifier: Apache-2.0
   # DeepSpeed Team
   ```
