@@ -677,6 +677,22 @@ def _get_sequence_data_parallel_world_size():
     return _get_data_parallel_world_size()
 
 
+def _get_max_local_seq_len(local_seq_len: int, group) -> int:
+    """Return the maximum local sequence length across all ranks in *group*.
+
+    Uses a single allreduce (MAX) so that all ranks agree on the same
+    padded sequence length.  This is needed to keep the implicit
+    equal-sized splits in ``dist.all_to_all_single`` consistent when the
+    global sequence length is not evenly divisible by the world size.
+    """
+    import torch
+    from deepspeed.accelerator import get_accelerator
+    device = get_accelerator().current_device_name()
+    local_tensor = torch.tensor(local_seq_len, dtype=torch.long, device=device)
+    dist.all_reduce(local_tensor, op=dist.ReduceOp.MAX, group=group)
+    return int(local_tensor.item())
+
+
 def _get_sequence_data_parallel_rank():
     """Return my rank for the data parallel group."""
     global mpu
