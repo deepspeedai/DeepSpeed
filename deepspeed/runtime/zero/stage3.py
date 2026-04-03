@@ -759,6 +759,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         if self.use_muon:
             self.sub_groups_using_muon = []
             self.muon_beta = None
+            self.muon_ns_method = None
             for idx, param_group in enumerate(fp16_param_groups):
                 if getattr(param_group['params'][0], 'use_muon', False):
                     self.sub_groups_using_muon.extend([True] * len(param_groups[idx]))
@@ -767,6 +768,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                         raise ValueError(f"All Muon parameter groups must have the same momentum (beta). "
                                          f"Found {self.muon_beta} and {group_beta}.")
                     self.muon_beta = group_beta
+                    self.muon_ns_method = param_group.get('ns_method', 'gram')
                 else:
                     self.sub_groups_using_muon.extend([False] * len(param_groups[idx]))
         # bookkeeping related to param groups
@@ -1515,7 +1517,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                     param = params[base_i + rank]
                     g = param.grad
                     m = gathered_momentums_pad[base_i + rank]
-                    update = muon_update(g, m, beta=self.muon_beta)
+                    update = muon_update(g, m, beta=self.muon_beta, ns_method=getattr(self, 'muon_ns_method', 'gram'))
                     g.data.copy_(update, non_blocking=False)
                 grad_handle = dist.all_gather(grads_pad[base_i:base_i + world_sz],
                                               grads_pad[base_i + rank],

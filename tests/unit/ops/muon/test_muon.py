@@ -86,3 +86,94 @@ class TestMuonConfigs(DistributedTest):
         after_training = [p.clone().cpu() for p in model.parameters()]
         for initial, final in zip(initial_params, after_training):
             assert not torch.equal(initial.cpu(), final.cpu()), "Parameters should have been updated during training"
+
+
+class TestGramNewtonSchulz(DistributedTest):
+    """Test Gram Newton-Schulz integration with Muon optimizer."""
+
+    world_size = 2
+    reuse_dist_env = True
+
+    @pytest.mark.parametrize('ns_method', ['gram', 'standard'])
+    @pytest.mark.parametrize('zero_stage', [1, 2])
+    def test_ns_method_training(self, ns_method, zero_stage):
+        """Verify both ns_method values work end-to-end with DeepSpeed."""
+        hidden_dim = 64
+        batch_size = 8
+        config_dict = {
+            "train_batch_size": batch_size,
+            "optimizer": {
+                "type": "muon",
+                "params": {
+                    "lr": 0.01,
+                    "ns_method": ns_method,
+                }
+            },
+            "gradient_clipping": 1.0,
+            "fp16": {
+                "enabled": True,
+            },
+            "zero_optimization": {
+                "stage": zero_stage,
+                "reduce_scatter": False,
+            },
+        }
+
+        model = SimpleModel(hidden_dim=hidden_dim, nlayers=3)
+        initial_params = [p.clone().cpu() for p in model.parameters()]
+        engine, optimizer, _, _ = deepspeed.initialize(
+            config=config_dict,
+            model=model,
+            model_parameters=model.parameters(),
+            dist_init_required=False,
+        )
+
+        for _ in range(3):
+            x = torch.randn(batch_size, hidden_dim, device=engine.device, dtype=torch.half)
+            y = torch.randint(0, hidden_dim, (batch_size, ), device=engine.device)
+            loss = engine(x, y)
+            engine.backward(loss)
+            engine.step()
+
+        after_training = [p.clone().cpu() for p in model.parameters()]
+        for initial, final in zip(initial_params, after_training):
+            assert not torch.equal(initial, final), "Parameters should have been updated"
+
+    @pytest.mark.parametrize('ns_method', ['gram', 'standard'])
+    def test_ns_method_stage3(self, ns_method):
+        """Verify ns_method works with ZeRO Stage 3."""
+        hidden_dim = 64
+        batch_size = 8
+        config_dict = {
+            "train_batch_size": batch_size,
+            "optimizer": {
+                "type": "muon",
+                "params": {
+                    "lr": 0.01,
+                    "ns_method": ns_method,
+                }
+            },
+            "gradient_clipping": 1.0,
+            "fp16": {
+                "enabled": True,
+            },
+            "zero_optimization": {
+                "stage": 3,
+                "reduce_scatter": False,
+            },
+        }
+
+        model = SimpleModel(hidden_dim=hidden_dim, nlayers=3)
+        engine, optimizer, _, _ = deepspeed.initialize(
+            config=config_dict,
+            model=model,
+            model_parameters=model.parameters(),
+            dist_init_required=False,
+        )
+
+        for _ in range(3):
+            x = torch.randn(batch_size, hidden_dim, device=engine.device, dtype=torch.half)
+            y = torch.randint(0, hidden_dim, (batch_size, ), device=engine.device)
+            loss = engine(x, y)
+            engine.backward(loss)
+            engine.step()

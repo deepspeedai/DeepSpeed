@@ -41,6 +41,17 @@ toc_label: "Contents"
 
 Muon optimizer is supported with ZeRO Stage 1, 2, and 3. To use Muon, set the optimizer name to `Muon`. The parameters applied for Muon are automatically determined by the matrix shape and name. For ZeRO Stage 3 with NVMe offloading, set `save_muon_momentum_buffer_in_memory` to `true` under `zero_optimization` to keep the Muon momentum buffer in GPU/CPU memory instead of swapping to NVMe.
 
+Muon supports the following params:
+
+| "params" key   | Description                                                                                                          | Default   |
+| -------------- | -------------------------------------------------------------------------------------------------------------------- | --------- |
+| lr             | Learning rate for all parameters. Overridden by `muon_lr` / `adam_lr` if set.                                        | 0.001     |
+| momentum       | Momentum coefficient for the Muon update.                                                                            | 0.95      |
+| weight\_decay  | Weight decay (AdamW-style).                                                                                          | 0.0       |
+| muon\_lr       | Learning rate override for Muon parameters. Defaults to `lr` if not set.                                             | -         |
+| adam\_lr       | Learning rate override for non-Muon (Adam) parameters. Defaults to `lr` if not set.                                  | -         |
+| ns\_method     | Newton-Schulz orthogonalization method: `"gram"` for Gram NS (~2x faster on rectangular matrices), `"standard"` for the original iteration. Use `"standard"` to fall back if you encounter convergence issues. | `"gram"`  |
+
   Example of <i>**optimizer**</i> with Adam
 
 ```json
@@ -73,7 +84,8 @@ If not set, muon_lr will default to lr.
       "lr": 0.001,
       "momentum": 0.9,
       "weight_decay": 0.0,
-      "muon_lr": 0.001
+      "muon_lr": 0.001,
+      "ns_method": "gram"
     }
   },
   "zero_optimization": {
