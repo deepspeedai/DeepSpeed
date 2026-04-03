@@ -3,7 +3,8 @@
 
 # DeepSpeed Team
 
-from typing import Iterable, Set, List, Union
+from dataclasses import dataclass, field
+from typing import Iterable, Optional, Set, List, Union
 import importlib
 from contextlib import contextmanager
 
@@ -22,9 +23,21 @@ LOWER_PRECISION_SAFE_MODULES = [
 PARAM_COMM_DTYPE_ATTR_NAME = "comm_dtype"
 _WARNED_NESTED_AUTOCAST = False
 
-# TODO: Avoid using global variables
-TORCH_AUTOCAST_INITIALIZED = False
-TORCH_AUTOCAST_DTYPE = None
+
+@dataclass
+class _AutocastState:
+    """Holds torch-autocast initialization state for the DeepSpeed engine.
+
+    Using a single object instead of bare module-level variables avoids the
+    need for ``global`` statements and makes the state easier to reason about
+    and reset in tests.
+    """
+    initialized: bool = False
+    dtype: Optional[torch.dtype] = field(default=None)
+
+
+# Module-level singleton that stores autocast state set by init_autocast_params.
+_autocast_state = _AutocastState()
 
 
 def _validate_auto_cast_settings(engine):
@@ -56,14 +69,12 @@ def init_autocast_params(engine, dtype: torch.dtype,
             for p in module.parameters(recurse=False):
                 setattr(p, PARAM_COMM_DTYPE_ATTR_NAME, dtype)
 
-    global TORCH_AUTOCAST_INITIALIZED
-    TORCH_AUTOCAST_INITIALIZED = True
-    global TORCH_AUTOCAST_DTYPE
-    TORCH_AUTOCAST_DTYPE = dtype
+    _autocast_state.initialized = True
+    _autocast_state.dtype = dtype
 
 
 def is_autocast_initialized() -> bool:
-    return TORCH_AUTOCAST_INITIALIZED
+    return _autocast_state.initialized
 
 
 def get_default_autocast_lower_precision_modules() -> List[str]:
@@ -71,7 +82,7 @@ def get_default_autocast_lower_precision_modules() -> List[str]:
 
 
 def get_autocast_dtype() -> torch.dtype:
-    return TORCH_AUTOCAST_DTYPE
+    return _autocast_state.dtype
 
 
 def has_comm_dtype(param: torch.nn.Parameter) -> bool:
