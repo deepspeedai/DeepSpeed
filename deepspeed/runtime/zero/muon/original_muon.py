@@ -132,7 +132,7 @@ def zeropower_via_gram_newtonschulz(G, steps: int):
     X = Q @ X
 
     if G.size(-2) > G.size(-1):
-        X = X.mT
+        X = X.mT.contiguous()
     return X
 
 
@@ -141,6 +141,7 @@ NS_METHODS = {"standard", "gram"}
 
 @compiler.compile()
 def muon_update(grad, momentum, beta=0.95, ns_steps=5, nesterov=True, ns_method="gram"):
+    orig_dtype = grad.dtype
     momentum.lerp_(grad, 1 - beta)
     update = grad.lerp_(momentum, beta) if nesterov else momentum
     if update.ndim == 4:  # for the case of conv filters
@@ -150,6 +151,8 @@ def muon_update(grad, momentum, beta=0.95, ns_steps=5, nesterov=True, ns_method=
     else:
         update = zeropower_via_newtonschulz5(update, steps=ns_steps)
     update *= max(1, grad.size(-2) / grad.size(-1))**0.5
+    if update.dtype != orig_dtype:
+        update = update.to(orig_dtype)
     return update
 
 
