@@ -46,7 +46,9 @@ def zeropower_via_newtonschulz5(G, steps: int):
     """
     assert G.ndim >= 2  # batched Muon implementation by @scottjmaddox, and put into practice in the record by @YouJiacheng
     a, b, c = (3.4445, -4.7750, 2.0315)
-    X = G.bfloat16()
+    # Use bf16 when hardware supports it; fp32 otherwise
+    compute_dtype = torch.bfloat16 if get_accelerator().is_bf16_supported() else torch.float32
+    X = G.to(compute_dtype)
     if G.size(-2) > G.size(-1):
         X = X.mT
 
@@ -84,8 +86,8 @@ def zeropower_via_gram_newtonschulz(G, steps: int):
     """
     assert G.ndim >= 2
     a, b, c = (3.4445, -4.7750, 2.0315)
-    # Use fp16 on GPU for better precision than bf16; fp32 on CPU for stability
-    compute_dtype = torch.float16 if get_accelerator().on_accelerator(G) else torch.float32
+    # Use fp16 for better precision than bf16 when hardware supports it; fp32 otherwise
+    compute_dtype = torch.float16 if get_accelerator().is_fp16_supported() else torch.float32
     X = G.to(compute_dtype)
     if G.size(-2) > G.size(-1):
         X = X.mT
