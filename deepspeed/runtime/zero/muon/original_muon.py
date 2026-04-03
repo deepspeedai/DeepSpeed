@@ -80,7 +80,7 @@ def zeropower_via_gram_newtonschulz(G, steps: int):
     Falls back to standard Newton-Schulz for square matrices (n == m)
     where there is no FLOP advantage.
 
-    Reference: https://arxiv.org/abs/2503.02022
+    Reference: https://tridao.me/blog/2026/gram-newton-schulz/
     """
     assert G.ndim >= 2
     a, b, c = (3.4445, -4.7750, 2.0315)
