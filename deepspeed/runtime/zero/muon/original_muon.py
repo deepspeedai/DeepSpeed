@@ -129,10 +129,10 @@ def zeropower_via_gram_newtonschulz(G, steps: int):
             RZ = a * R + Z @ R
             R = a * RZ + Z @ RZ
 
-    X = Q @ X
-
     if G.size(-2) > G.size(-1):
-        X = X.mT.contiguous()
+        X = X.mT @ Q.mT
+    else:
+        X = Q @ X
     return X
 
 
