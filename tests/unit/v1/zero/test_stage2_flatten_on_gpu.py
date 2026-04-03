@@ -142,7 +142,11 @@ class TestStage2FlattenOnGPU(DistributedTest):
             assert flat.grad_fn is None, ("Flat buffer must be detached from autograd graph"
                                           " to prevent inplace-modification errors during optimizer step")
 
-        data_loader = random_dataloader(model=engine, total_samples=8, hidden_dim=hidden_dim, device=engine.device, dtype=_DTYPE_MAP[dtype])
+        data_loader = random_dataloader(model=engine,
+                                        total_samples=8,
+                                        hidden_dim=hidden_dim,
+                                        device=engine.device,
+                                        dtype=_DTYPE_MAP[dtype])
         for batch in data_loader:
             loss = engine(batch[0], batch[1])
             engine.backward(loss)
