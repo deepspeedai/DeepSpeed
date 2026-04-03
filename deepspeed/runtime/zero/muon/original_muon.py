@@ -108,7 +108,6 @@ def zeropower_via_gram_newtonschulz(G, steps: int):
 
     # Gram NS: iterate on R = X @ X.T (n x n) instead of X (n x m)
     R = X @ X.mT
-    I = torch.eye(n, device=X.device, dtype=X.dtype)
     Q = None
     restart_at = 2
 
@@ -121,13 +120,14 @@ def zeropower_via_gram_newtonschulz(G, steps: int):
         Z = b * R + c * R @ R
 
         if Q is None:
-            Q = Z + a * I
+            Q = Z.clone()
+            Q.diagonal().add_(a)
         else:
-            Q = a * Q + Z @ Q
+            Q = torch.addmm(Q, Z, Q, beta=a, alpha=1.0)
 
         if i < steps - 1 and (i + 1) != restart_at:
-            RZ = a * R + Z @ R
-            R = a * RZ + Z @ RZ
+            RZ = torch.addmm(R, Z, R, beta=a, alpha=1.0)
+            R = torch.addmm(RZ, Z, RZ, beta=a, alpha=1.0)
 
     if G.size(-2) > G.size(-1):
         X = X.mT @ Q.mT
