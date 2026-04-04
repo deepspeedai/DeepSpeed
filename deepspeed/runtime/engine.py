@@ -4413,10 +4413,6 @@ class DeepSpeedEngine(Module):
         elif self.zero_optimization_stage() == ZeroStageEnum.gradients:
             return init_z1(self, backend, compile_config, compile_kwargs, schedule, use_z2=True)
         elif self.zero_optimization_stage() == ZeroStageEnum.weights:
-            if required_torch_version(min_version=2.9):
-                raise RuntimeError(
-                    "DeepCompile with ZeRO stage 3 is not currently supported on PyTorch >= 2.9. "
-                    "Please use ZeRO stage 1 or 2 with DeepCompile, or disable DeepCompile for ZeRO stage 3.")
             return init_z3(self, backend, compile_config, compile_kwargs, schedule)
         return None
 
