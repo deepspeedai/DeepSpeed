@@ -1502,6 +1502,70 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         return torch.tensor(total_norm, device=self.device, dtype=torch.float)
 
     ############################################################################################
+    def _apply_muon_update_for_cpu_offload(self, param):
+        """Apply muon_update on CPU for a parameter in the CPU offload path.
+
+        For Muon parameters (use_muon=True), copies the complete gradient to
+        CPU, runs Newton-Schulz orthogonalization on CPU, then writes only the
+        partition slice back to the CPU FP32 grad buffer. Cross-boundary
+        parameters are redundantly processed by each involved rank with the
+        full gradient, matching the non-offload path behavior in get_flat_partition.
+
+        Returns True if muon_update was applied (caller should skip the normal
+        copy for this param).
+        """
+        if not getattr(param, 'use_muon', False):
+            return False
+        if 'muon' not in self.optimizer.__class__.__name__.lower():
+            return False
+
+        param_id = self.get_param_id(param)
+        [i, source_offset, dest_offset, num_elements] = self.grad_position[param_id]
+
+        grad_accum = self.get_param_gradient_attribute(param)
+        if grad_accum is None:
+            return False
+
+        grad_cpu = grad_accum.detach().clone().to(device=self.device, dtype=torch.float32)
+
+        flatten_copy = self.optimizer.param_groups[i]['params'][0]
+        if "momentum_buffer" not in self.optimizer.state[flatten_copy]:
+            total_size = sum(p.numel() for p in self.params_in_partition[i])
+            self.optimizer.state[flatten_copy]["momentum_buffer"] = torch.zeros(total_size,
+                                                                                dtype=torch.float32,
+                                                                                device=self.device)
+
+        momentum_flat = self.optimizer.state[flatten_copy]["momentum_buffer"]
+
+        muon_offset = 0
+        for p in self.params_in_partition[i]:
+            if p is param:
+                break
+            muon_offset += p.numel()
+
+        momentum_cpu = momentum_flat[muon_offset:muon_offset + param.numel()].view(param.size())
+
+        beta = self.optimizer.param_groups[i].get('momentum', 0.95)
+        update = muon_update(grad_cpu.view(param.size()), momentum_cpu, beta=beta)
+
+        momentum_flat[muon_offset:muon_offset + param.numel()] = momentum_cpu.view(-1)
+
+        # Write only the partition slice of the update to CPU FP32 grad buffer
+        tensor_offset = 0
+        actual_num_elements = param.numel()
+        if source_offset > 0:
+            tensor_offset = source_offset
+            actual_num_elements = param.numel() - tensor_offset
+        if actual_num_elements > num_elements:
+            actual_num_elements = num_elements
+
+        dest_tensor = self.single_partition_of_fp32_groups[i].grad.view(-1).narrow(0, dest_offset, actual_num_elements)
+        update_slice = update.view(-1).narrow(0, tensor_offset, actual_num_elements)
+        dest_tensor.copy_(update_slice.to(self.master_weights_and_grads_dtype))
+
+        self.clear_grad_attribute(param)
+        return True
+
     def copy_grads_in_partition(self, param):
         if self.cpu_offload:
 
@@ -1513,7 +1577,8 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
 
                 self.update_offload_overflow_tracker_for_param_grad(param)
 
-                self.async_inplace_copy_grad_to_fp32_buffer_from_gpu(param)
+                if not self._apply_muon_update_for_cpu_offload(param):
+                    self.async_inplace_copy_grad_to_fp32_buffer_from_gpu(param)
 
             return
         #print(f"ID {self.get_param_id(param)} grad norm {param.grad.norm()}")
