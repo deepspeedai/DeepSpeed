@@ -1118,6 +1118,17 @@ class Init(InsertPostInitMethodToModuleSubClasses):
         Init.model_persistence_threshold = ds_config.zero_config.model_persistence_threshold // self.num_partitions
 
     def _zero_init_param(self, param):
+        # AutoEP expert parameters are already EP-partitioned: each rank owns
+        # num_local_experts out of the total.  Applying ZeRO-3 DP partitioning
+        # on top would corrupt the EP weight sharding.  We still call
+        # _convert_to_deepspeed_param so the parameter carries ds_* attributes,
+        # but we mark it as persistent (never evicted / gathered by ZeRO) and
+        # skip the DP broadcast + partition() call.
+        if getattr(param, '_autoep_expert', False):
+            self._convert_to_deepspeed_param(param)
+            param.ds_persist = True  # never evict from GPU
+            param.ds_tensor = None  # no DP shard allocated
+            return
         self._convert_to_deepspeed_param(param)
         if dist.get_world_group() == self.get_dp_process_group():
             dist.broadcast(param.data, 0, self.get_dp_process_group())

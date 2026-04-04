@@ -302,6 +302,9 @@ class DeepSpeedEngine(Module):
         self._deepcompile_active = False
 
         # Configure distributed model
+        # AutoEP must run BEFORE _configure_distributed_model so that
+        # AutoEPMoELayer instances exist when has_moe_layers is set.
+        self._configure_expert_parallel(model)
         self._configure_distributed_model(model)
 
         # These hooks should be disabled later if DeepCompile is not active.
@@ -1447,6 +1450,65 @@ class DeepSpeedEngine(Module):
         # register module attribute in engine but avoid getattr
         self.__dict__['module'] = model
 
+    def _configure_expert_parallel(self, model):
+        """Set up AutoEP if enabled in the config.
+
+        Called BEFORE _configure_distributed_model so that AutoEPMoELayer
+        instances are in place when has_moe_layers is detected.
+        Does nothing when ``expert_parallel.enabled`` is False.
+        """
+        autoep_config = getattr(self._config, 'expert_parallel_config', None)
+        if autoep_config is None or not autoep_config.enabled:
+            return
+
+        from deepspeed.module_inject.auto_ep import AutoEP
+        from deepspeed.module_inject.auto_ep_config import (
+            validate_autoep_config,
+            validate_autoep_post_detection,
+            PRESET_MODELS,
+        )
+
+        world_size = dist.get_world_size()
+        validate_autoep_config(autoep_config, world_size)
+
+        ep_size = autoep_config.autoep_size
+        ep_rank = dist.get_rank() % ep_size
+
+        # Build EP process group (ranks that share the same expert shard)
+        ep_group = self._build_ep_group(ep_size)
+
+        auto_ep = AutoEP(model, autoep_config)
+        layer_specs = auto_ep.ep_parser()
+        validate_autoep_post_detection(autoep_config, layer_specs)
+
+        preset = PRESET_MODELS.get(autoep_config.preset_model) if autoep_config.preset_model else None
+
+        for spec in layer_specs:
+            AutoEP.replace_moe_layer(spec, ep_size, ep_rank, ep_group, preset=preset)
+
+        log_dist(
+            f"AutoEP: replaced {len(layer_specs)} MoE layers "
+            f"(ep_size={ep_size}, preset={autoep_config.preset_model})",
+            ranks=[0],
+        )
+
+    def _build_ep_group(self, ep_size: int):
+        """Create (or retrieve) the EP process group for this rank.
+
+        Ranks are grouped so that consecutive ``ep_size`` ranks form one EP
+        group, mirroring what the prototype does via
+        ``groups._create_expert_and_data_parallel``.
+        """
+        world_size = dist.get_world_size()
+        rank = dist.get_rank()
+        ep_group = None
+        for start in range(0, world_size, ep_size):
+            ranks_in_group = list(range(start, min(start + ep_size, world_size)))
+            group = dist.new_group(ranks_in_group)
+            if rank in ranks_in_group:
+                ep_group = group
+        return ep_group
+
     def _configure_distributed_model(self, model):
         self._set_client_model(model)
         apply_zero_leaf_module_config(self.module, getattr(self._config.zero_config, "leaf_module", None))
@@ -1471,6 +1533,13 @@ class DeepSpeedEngine(Module):
         # MoE related initialization
         for _, module in self.module.named_modules():
             if isinstance(module, MoE):
+                self.has_moe_layers = True
+                self.num_experts.append(module.num_experts)
+
+        # AutoEP layers also set has_moe_layers so the engine knows MoE is present
+        from deepspeed.module_inject.auto_ep_layer import AutoEPMoELayer as _AutoEPMoELayer
+        for _, module in self.module.named_modules():
+            if isinstance(module, _AutoEPMoELayer):
                 self.has_moe_layers = True
                 self.num_experts.append(module.num_experts)
 
@@ -1969,7 +2038,18 @@ class DeepSpeedEngine(Module):
                 check_grad_overflow=check_grad_overflow)
 
         elif zero_stage == ZeroStageEnum.weights:
-            assert not self.has_moe_layers, "MoE not supported with Stage 3"
+            if self.has_moe_layers:
+                # AutoEP layers are EP-partitioned and exempt from ZeRO-3 DP
+                # partitioning (see partition_parameters._zero_init_param).
+                # Legacy MoE (deepspeed.moe.layer.MoE) is still unsupported.
+                from deepspeed.module_inject.auto_ep_layer import AutoEPMoELayer as _AutoEPMoELayer
+                from deepspeed.moe.layer import MoE as _MoE
+                legacy_moe_modules = [
+                    m for m in self.module.modules() if isinstance(m, _MoE) and not isinstance(m, _AutoEPMoELayer)
+                ]
+                assert not legacy_moe_modules, (
+                    "Native deepspeed.moe.layer.MoE is not supported with ZeRO Stage 3. "
+                    "Use AutoEP (set 'expert_parallel.enabled': true in ds_config) instead.")
             if isinstance(optimizer, DummyOptim):
                 log_dist("Creating ZeRO Offload", ranks=[0])
                 zero_param_parallel_group = groups._get_zero_param_intra_parallel_group()
