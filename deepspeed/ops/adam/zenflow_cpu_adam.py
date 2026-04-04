@@ -5,18 +5,28 @@
 
 from deepspeed.ops.adam import DeepSpeedCPUAdam
 import torch
+from deepspeed.ops.op_builder import ZenFlowAdamBuilder
 
 
 class ZenFlowCPUAdam(DeepSpeedCPUAdam):
 
     def __init__(self, *args, overlap_step=False, **kwargs):
         super(ZenFlowCPUAdam, self).__init__(*args, **kwargs)
+
+        # Destroy the one created by DeepSpeedCPUAdam in cpu_adam_op
+        self.ds_opt_adam.destroy_adam(self.opt_id)
+
+        self.ds_opt_adam = ZenFlowAdamBuilder().load()
+        self.ds_opt_adam.create_adam(self.opt_id, self.param_groups[0]['lr'], self.param_groups[0]['betas'][0],
+                                     self.param_groups[0]['betas'][1], self.param_groups[0]['eps'],
+                                     self.param_groups[0]['weight_decay'], self.adam_w_mode, False)
+
         self.overlap_step = overlap_step
         if not self.overlap_step:
-            print("ZenFlowCPUAdam initialized with normal step.")
+            # Use sequential update logic
             self.step = self._sequential_step
         else:
-            print("ZenFlowCPUAdam initialized with overlap step.")
+            # Use parallel/overlapped update logic
             self.step = self._parallel_step
 
     @torch.no_grad()
