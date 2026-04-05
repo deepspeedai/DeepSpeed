@@ -314,6 +314,16 @@ class ZeROOptimizer(DeepSpeedOptimizer):
             tp_world_size = self.mpu.get_slice_parallel_world_size() if hasattr(self.mpu, "get_slice_parallel_world_size") \
                 else self.mpu.get_tensor_model_parallel_world_size()
 
+        # Obtain EP rank/size for universal checkpoint expert parameter slicing.
+        # Guarded for non-MoE models where expert groups don't exist.
+        try:
+            from deepspeed.utils import groups
+            max_ep_name = groups._get_max_expert_size_name()
+            ep_rank = groups._get_expert_parallel_rank(max_ep_name)
+            ep_size = groups._get_expert_parallel_world_size(max_ep_name)
+        except (RuntimeError, AttributeError, KeyError):
+            ep_rank, ep_size = 0, 1
+
         for i, (param_group,
                 loaded_param_group) in enumerate(zip(self.optimizer.param_groups, optim_sd['param_groups'])):
             # We have an assumption that all params in the same param_group have the same keys
@@ -324,8 +334,11 @@ class ZeROOptimizer(DeepSpeedOptimizer):
             for lp in lp_groups[i]:
                 if lp._hp_mapping is not None:
                     #print(f"Loading {self.param_names[lp]} {tp_rank=} {tp_world_size=}")
-                    step = lp.load_hp_checkpoint_state(os.path.join(checkpoint_dir, self.param_names[lp]), tp_rank,
-                                                       tp_world_size)
+                    step = lp.load_hp_checkpoint_state(os.path.join(checkpoint_dir, self.param_names[lp]),
+                                                       tp_rank,
+                                                       tp_world_size,
+                                                       ep_rank=ep_rank,
+                                                       ep_size=ep_size)
                     for key in lp._hp_mapping.get_optim_state_keys():
                         opt_keys.add(key)
                     steps.append(step)

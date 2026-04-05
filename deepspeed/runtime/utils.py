@@ -1121,7 +1121,7 @@ def get_norm_with_moe_layers(non_expert_norm, mpu, expert_tensors, norm_type=2):
     """
 
     def to_tensor(v):
-        return get_accelerator().FloatTensor(float(v)).detach()
+        return get_accelerator().FloatTensor([float(v)]).detach()
 
     group_norms = [non_expert_norm]
     for exp_name, tensors in expert_tensors.items():
