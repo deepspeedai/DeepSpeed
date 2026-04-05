@@ -1,6 +1,6 @@
 # Using Muon Optimizer with DeepSpeed
 ## TL;DR
-Muon optimizer has gain momentum with more and more use from community and also from Large Foundation Model like Kimi-K2-Thinking.  Now DeepSpeed supports Muon optimizer
+Muon optimizer has gained momentum with more and more use from community and also from Large Foundation Model like Kimi-K2-Thinking.  Now DeepSpeed supports Muon optimizer.
 
 ## What is Muon optimizer?
 Muon is an optimizer designed for hidden 2D weights of a neural network.  It takes gradient of the weight, computes its momentum, and applies NewtonSchulz iterations to orthogonalize the momentum matrix, then use this orthogonalized matrix to update weight[1](https://kellerjordan.github.io/posts/muon/).  With Muon optimizer, optimization are less likely to overfit, converge faster, and saves more memory than Adam optimizer.   It is used by Keller Jordan’s mod of NanoGPT[2](https://github.com/KellerJordan/modded-nanogpt), Andrej Karpathy’s nanochat[3](https://github.com/karpathy/nanochat), and a variant of Muon (MuonClip) is also used by product level LLM model Kimi-K2 from MoonShot[4](https://arxiv.org/pdf/2507.20534).
@@ -35,7 +35,7 @@ In theory, Muon optimizer has one momentum buffer while Adam has two, this makes
 With Muon optimizer, we can potentially use larger batch sizes and avoid CPU offloading.
 
 ### Real-world Example: 3B Model - No Offloading Required
-We tested finetune Qwen2.5-3B model with tatsu-lab/aplaca dataset on 2xA100 (40GB GPU memory each) using batch size=8 and input length=512:
+We tested finetuning a Qwen2.5-3B model with tatsu-lab/alpaca dataset on 2xA100 (40GB GPU memory each) using batch size=8 and input length=512:
 
 **Training Configuration:**
 - Model: Qwen2.5-3B
@@ -60,7 +60,7 @@ BS=8, sequence length=512
 From this result, we can see in certain situation, Muon optimizer can use less memory and does not need CPU offloading, while Adam optimizer cannot fit GPU memory and requires CPU offloading.  This collaterally brings performance benefit even when Muon optimizer needs more computation, because no offloading needed.
 
 ## Future plan
-Muon optimizer is getting more and more attention, and is verified by product level open LLM model such as Kimi-K2 which has 1T weights.  This makes Muon a second choice even potential replacement of Adam optimizer.   To make Muon optimizer more accessible in production environment, the following feature is needed:
+Muon optimizer is getting more and more attention, and is verified by product level open LLM model such as Kimi-K2 which has 1T weights.  This makes Muon a strong second choice and a potential replacement of Adam optimizer.   To make Muon optimizer more accessible in production environment, the following feature is needed:
 
 - [ ] Muon optimizer with ZeRO stage 3
 - [ ] CPU Offloading support
