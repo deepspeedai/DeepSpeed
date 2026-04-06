@@ -18,8 +18,13 @@ cd deepspeed_finetune_demo
 ./finetune.sh <NUM_GPUS> <MODEL_NAME> z2_muon.json
 ```
 
-## Muon Optimizer convergence experiment result
-[TBD]
+## Muon Optimizer Convergence Experiment Result
+
+We compared Muon optimizer with AdamW optimizer by finetuning a Qwen2.5-3B model on the tatsu-lab/alpaca dataset with the same learning rate.
+
+![Muon vs AdamW convergence on Qwen2.5-3B](images/adamw_vs_muon_3b.png)
+
+In one epoch, Muon optimizer achieved approximately 19% lower loss compared to AdamW optimizer. Moreover, Muon optimizer did not show overfitting while AdamW optimizer exhibited overfitting behavior.
 
 ## Muon Optimizer memory overhead
 Muon optimizer has significantly smaller memory requirements than Adam optimizer, making it particularly valuable for large-scale model training.
