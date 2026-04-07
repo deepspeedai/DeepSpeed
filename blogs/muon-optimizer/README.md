@@ -23,6 +23,7 @@ cd deepspeed_finetune_demo
 We compared Muon optimizer with AdamW optimizer by finetuning a Qwen2.5-3B model on the tatsu-lab/alpaca dataset with the same learning rate.
 
 ![Muon vs AdamW convergence on Qwen2.5-3B](images/adamw_vs_muon_3b.png)
+*Training configuration: Qwen2.5-3B, tatsu-lab/alpaca dataset, ZeRO Stage 2, bf16, batch_size=8, lr=2e-5, 1 epoch, 8 GPUs.*
 
 In one epoch, Muon optimizer achieved approximately 19% lower loss compared to AdamW optimizer. Moreover, Muon optimizer did not show overfitting while AdamW optimizer exhibited overfitting behavior.
 
