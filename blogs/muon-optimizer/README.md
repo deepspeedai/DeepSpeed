@@ -96,15 +96,16 @@ We measured peak GPU memory during finetuning Qwen2.5-3B on tatsu-lab/alpaca usi
 
 Muon reduces per-GPU memory by approximately 3 GiB (9%) compared to AdamW.  The savings come entirely from optimizer states: Muon parameters store one momentum buffer (4 bytes) instead of Adam's two (8 bytes).  However, because optimizer states are only one component of total GPU memory (alongside model weights, gradients, and activations), the end-to-end reduction is modest.  For larger models or tighter memory budgets, this 9% savings could make the difference between fitting a workload on-device versus requiring CPU offloading.
 
-## Future plan
-Muon optimizer is getting more and more attention, and is verified by production-level open LLM model such as Kimi-K2 which has 1T weights.  This makes Muon a strong second choice and a potential replacement of Adam optimizer.   To make Muon optimizer more accessible in production environment, the following features are needed:
+## What’s Next
+Muon is rapidly gaining traction in the community, and production-level adoption like Kimi-K2 (1T parameters) signals that it is a serious contender to replace Adam as the default optimizer for large-scale training.  We are actively building out full Muon support in DeepSpeed, with a series of improvements already in flight:
 
-- [x] Muon optimizer with ZeRO stage 3
-- [ ] CPU Offloading support
-- [ ] MuonClip support
-- [x] Performance optimization with Gram-Schmidt based Newton-Schulz iteration (in review)
+- [x] **ZeRO Stage 3 support** — merged
+- [x] **Gram-Schmidt based Newton-Schulz iteration** — a faster orthogonalization kernel, in review
+- [ ] **CPU Offloading** — partially done
+- [ ] **ZeRO Stage 2 support** — work in progress
+- [ ] **MuonClip** — the variant used by Kimi-K2, planned
 
-If you have thoughts, feedback and contribution on Muon optimizer, welcome to start an issue for discussion, or submit a PR to DeepSpeed.  Let’s make Muon optimizer rock solid and lightning fast in DeepSpeed!
+If you have thoughts, feedback, or contributions on Muon optimizer, welcome to start an issue for discussion or submit a PR to DeepSpeed.  Let’s make Muon rock solid and lightning fast in DeepSpeed!
 
 ## Contributors
 This work is contributed from Wang, Zhipeng (@PKUWZP); Chi McIsaac(@qimcis) and Ma, Guokai (@delock)
