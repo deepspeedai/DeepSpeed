@@ -7,7 +7,7 @@ Muon is an optimizer designed for hidden 2D weights of a neural network.  It tak
 
 The orthogonalization step is key to Muon’s convergence advantage in pretraining.  In practice, gradient updates for 2D weights in transformers tend to have very high condition numbers — they are nearly low-rank, dominated by a few large singular directions.  By orthogonalizing the momentum matrix, Muon equalizes all singular values, effectively amplifying rare but important update directions that would otherwise be overshadowed.  This leads to better sample efficiency: in NanoGPT speedrunning benchmarks, Muon improved training speed by 35% over AdamW, and at 1.5B parameter scale it reached GPT-2 XL level performance approximately 25% faster than AdamW[1](https://kellerjordan.github.io/posts/muon/).
 
-Muon is used by Keller Jordan’s mod of NanoGPT[2](https://github.com/KellerJordan/modded-nanogpt), Andrej Karpathy’s nanochat[3](https://github.com/karpathy/nanochat), and a variant of Muon (MuonClip) is also used by the production-level LLM Kimi-K2 from MoonShot[4](https://arxiv.org/pdf/2507.20534).
+Muon is used by Keller Jordan’s mod of NanoGPT[2](https://github.com/KellerJordan/modded-nanogpt), Andrej Karpathy’s nanochat[3](https://github.com/karpathy/nanochat), and a variant of Muon (MuonClip) is also used by the production-level LLM Kimi-K2 from MoonShot[4](https://arxiv.org/pdf/2507.20534).  More recently, Zhipu AI’s GLM-5 (744B parameters) confirmed the use of Muon optimizer in both GLM-4.5 and GLM-5 pretraining, along with a “Muon Split” technique that splits MLA up-projection matrices by attention head and orthogonalizes each head independently, addressing a performance gap between MLA and GQA when using Muon[5](https://arxiv.org/abs/2602.15763).
 
 ## Muon Optimizer support in DeepSpeed
 One of the challenges of applying Muon optimizer to DeepSpeed is that previous optimizers (SGD, Adam) look at gradients as flattened buffers.   Thus it is hard to swap in Muon optimizer in the same place because the gradient buffers are already flattened.   We move the Muon update to the get_flat_partition function of stage 1 and 2 DeepSpeedZeroOptimizer in which per parameter gradients are still in unflattened stages, thus we can easily apply the Muon updates.
@@ -17,7 +17,7 @@ Muon optimizer works for hidden 2D gradients.   We apply a parse in model engine
 Note that Muon is a hybrid optimizer: it uses Muon updates only for 2D hidden weights and falls back to Adam for all other parameters (embeddings, layer norms, biases, lm_head).  The DeepSpeed config supports separate learning rates via `muon_lr` (for Muon parameters) and `adam_lr` (for Adam parameters).
 
 ## Running DeepSpeed finetune with Muon optimizer
-Deepspeed finetune demo[5](https://github.com/delock/deepspeed_finetune_demo) is a demo to use different DeepSpeed training features and compare their performance in a single place.  You can use it to test finetune LLM models with Muon optimizer:
+Deepspeed finetune demo[6](https://github.com/delock/deepspeed_finetune_demo) is a demo to use different DeepSpeed training features and compare their performance in a single place.  You can use it to test finetune LLM models with Muon optimizer:
 ```
 git clone https://github.com/delock/deepspeed_finetune_demo
 cd deepspeed_finetune_demo
@@ -97,12 +97,12 @@ We measured peak GPU memory during finetuning Qwen2.5-3B on tatsu-lab/alpaca usi
 Muon reduces per-GPU memory by approximately 3 GiB (9%) compared to AdamW.  The savings come entirely from optimizer states: Muon parameters store one momentum buffer (4 bytes) instead of Adam's two (8 bytes).  However, because optimizer states are only one component of total GPU memory (alongside model weights, gradients, and activations), the end-to-end reduction is modest.  For larger models or tighter memory budgets, this 9% savings could make the difference between fitting a workload on-device versus requiring CPU offloading.
 
 ## What’s Next
-Muon is rapidly gaining traction in the community, and production-level adoption like Kimi-K2 (1T parameters) signals that it is a serious contender to replace Adam as the default optimizer for large-scale training.  We are actively building out full Muon support in DeepSpeed, with a series of improvements already in flight:
+Muon is rapidly gaining traction in the community, and production-level adoption by Kimi-K2 (1T parameters) and GLM-5 (744B parameters) signals that it is a serious contender to replace Adam as the default optimizer for large-scale training.  We are actively building out full Muon support in DeepSpeed, with a series of improvements already in flight:
 
+- [x] **ZeRO Stage 2 support** — merged
 - [x] **ZeRO Stage 3 support** — merged
 - [x] **Gram-Schmidt based Newton-Schulz iteration** — a faster orthogonalization kernel, in review
-- [ ] **CPU Offloading** — partially done
-- [ ] **ZeRO Stage 2 support** — work in progress
+- [ ] **CPU Offloading** — in progress
 - [ ] **MuonClip** — the variant used by Kimi-K2, planned
 
 If you have thoughts, feedback, or contributions on Muon optimizer, welcome to start an issue for discussion or submit a PR to DeepSpeed.  Let’s make Muon rock solid and lightning fast in DeepSpeed!
