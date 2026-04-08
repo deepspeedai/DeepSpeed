@@ -95,10 +95,10 @@ Muon reduces per-GPU memory by approximately 3 GiB (9%) compared to AdamW.  The 
 ## Future plan
 Muon optimizer is getting more and more attention, and is verified by production-level open LLM model such as Kimi-K2 which has 1T weights.  This makes Muon a strong second choice and a potential replacement of Adam optimizer.   To make Muon optimizer more accessible in production environment, the following features are needed:
 
-- [ ] Muon optimizer with ZeRO stage 3
+- [x] Muon optimizer with ZeRO stage 3
 - [ ] CPU Offloading support
 - [ ] MuonClip support
-- [ ] Performance optimization to make Muon optimizer more efficient
+- [x] Performance optimization with Gram-Schmidt based Newton-Schulz iteration (in review)
 
 If you have thoughts, feedback and contribution on Muon optimizer, welcome to start an issue for discussion, or submit a PR to DeepSpeed.  Let’s make Muon optimizer rock solid and lightning fast in DeepSpeed!
 
