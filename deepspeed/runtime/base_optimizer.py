@@ -10,7 +10,7 @@ from typing import Any
 from deepspeed.utils import logger
 from deepspeed.utils.tensor_fragment import map_to_flat_opt_states
 from deepspeed.runtime.utils import bwc_tensor_model_parallel_rank, see_memory_usage
-from deepspeed.runtime.torch_autocast import get_comm_dtype, is_autocast_initialized
+from deepspeed.runtime.torch_autocast import get_comm_dtype, has_comm_dtype
 from deepspeed.runtime.utils import maybe_loss_for_backward
 
 
@@ -354,7 +354,10 @@ class ZeROOptimizer(DeepSpeedOptimizer):
             )
 
     def get_param_comm_dtype(self, param):
-        if is_autocast_initialized():
+        # Use the per-parameter comm_dtype attribute set by init_autocast_params().
+        # Each engine stamps its own parameters, so multiple engines with different
+        # autocast configs are naturally isolated without a shared global state.
+        if has_comm_dtype(param):
             return get_comm_dtype(param)
         else:
             return self.communication_data_type

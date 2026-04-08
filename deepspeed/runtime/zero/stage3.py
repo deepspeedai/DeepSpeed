@@ -19,7 +19,7 @@ from deepspeed.runtime.base_optimizer import ZeROOptimizer
 from deepspeed.utils import logger
 from deepspeed.utils.torch import register_grad_hook, required_torch_version
 from deepspeed.runtime.fp16.loss_scaler import CreateLossScaler
-from deepspeed.runtime.torch_autocast import get_autocast_dtype, get_all_comm_dtypes, is_autocast_initialized, sort_dtypes
+from deepspeed.runtime.torch_autocast import get_all_comm_dtypes, has_comm_dtype, sort_dtypes
 from deepspeed.runtime.comm.coalesced_collectives import reduce_scatter_coalesced, all_to_all_quant_reduce, all_to_all_loco_quant_reduce
 from deepspeed.runtime.utils import inf, is_model_parallel_parameter, mask_nan_or_inf_with_val_inplace, count_used_parameters_in_backward
 from deepspeed.runtime.zero.partition_parameters import *
@@ -435,9 +435,10 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         self.is_param_in_current_partition = {}
 
         self.torch_autocast_gradscaler = None
-        if is_autocast_initialized():
-            comm_dtypes = get_all_comm_dtypes([p for params in self.fp16_groups for p in params])
-            if get_autocast_dtype() == torch.float16:
+        all_params = [p for params in self.fp16_groups for p in params]
+        if any(has_comm_dtype(p) for p in all_params):
+            comm_dtypes = get_all_comm_dtypes(all_params)
+            if torch.float16 in comm_dtypes:
                 self.torch_autocast_gradscaler = torch.amp.GradScaler(device=get_accelerator().device_name())
         else:
             comm_dtypes = {self.communication_data_type}

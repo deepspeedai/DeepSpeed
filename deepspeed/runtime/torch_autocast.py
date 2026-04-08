@@ -26,18 +26,14 @@ _WARNED_NESTED_AUTOCAST = False
 
 @dataclass
 class _AutocastState:
-    """Holds torch-autocast initialization state for the DeepSpeed engine.
+    """Holds torch-autocast initialization state for one DeepSpeed engine instance.
 
-    Using a single object instead of bare module-level variables avoids the
-    need for ``global`` statements and makes the state easier to reason about
-    and reset in tests.
+    Storing this object on the engine (``engine._autocast_state``) rather than as
+    a module-level singleton allows multiple engine instances to carry independent
+    autocast configurations without interfering with each other.
     """
     initialized: bool = False
     dtype: Optional[torch.dtype] = field(default=None)
-
-
-# Module-level singleton that stores autocast state set by init_autocast_params.
-_autocast_state = _AutocastState()
 
 
 def _validate_auto_cast_settings(engine):
@@ -69,20 +65,26 @@ def init_autocast_params(engine, dtype: torch.dtype,
             for p in module.parameters(recurse=False):
                 setattr(p, PARAM_COMM_DTYPE_ATTR_NAME, dtype)
 
-    _autocast_state.initialized = True
-    _autocast_state.dtype = dtype
+    engine._autocast_state = _AutocastState(initialized=True, dtype=dtype)
 
 
-def is_autocast_initialized() -> bool:
-    return _autocast_state.initialized
+def is_autocast_initialized(engine) -> bool:
+    """Return True if torch autocast was initialised for *this* engine instance.
+
+    Accepts the engine as an argument so that multiple DeepSpeed engines can
+    carry independent ``_autocast_state`` objects without sharing a
+    module-level singleton.
+    """
+    return getattr(engine, '_autocast_state', _AutocastState()).initialized
 
 
 def get_default_autocast_lower_precision_modules() -> List[str]:
     return [f"{cls.__module__}.{cls.__name__}" for cls in LOWER_PRECISION_SAFE_MODULES]
 
 
-def get_autocast_dtype() -> torch.dtype:
-    return _autocast_state.dtype
+def get_autocast_dtype(engine) -> torch.dtype:
+    """Return the autocast dtype configured for *this* engine instance."""
+    return getattr(engine, '_autocast_state', _AutocastState()).dtype
 
 
 def has_comm_dtype(param: torch.nn.Parameter) -> bool:
