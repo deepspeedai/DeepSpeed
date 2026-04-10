@@ -1411,8 +1411,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
 
         if self.micro_step_id > 0:
             accumulate_gradients()
-        else:
-            copy_gradients_to_cpu()
+        copy_gradients_to_cpu()
 
     def set_norm_for_param_grad(self, param):
         param_id = self.get_param_id(param)
