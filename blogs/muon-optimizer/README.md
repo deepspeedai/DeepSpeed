@@ -5,14 +5,14 @@ Muon optimizer has gained momentum with more and more use from community and als
 ## What is Muon optimizer?
 Muon is an optimizer designed for hidden 2D weights of a neural network.  It takes gradient of the weight, computes its momentum, and applies Newton-Schulz iterations to orthogonalize the momentum matrix, then uses this orthogonalized matrix to update the weight[1](https://kellerjordan.github.io/posts/muon/).  Because Muon only maintains one momentum buffer (versus Adam’s two), it uses less memory for optimizer states.
 
-The orthogonalization step is key to Muon’s convergence advantage in pretraining.  In practice, gradient updates for 2D weights in transformers tend to have very high condition numbers — they are nearly low-rank, dominated by a few large singular directions.  By orthogonalizing the momentum matrix, Muon equalizes all singular values, effectively amplifying rare but important update directions that would otherwise be overshadowed.  This leads to better sample efficiency: in NanoGPT speedrunning benchmarks, Muon improved training speed by 35% over AdamW, and at 1.5B parameter scale it reached GPT-2 XL level performance approximately 25% faster than AdamW[1](https://kellerjordan.github.io/posts/muon/).
+The orthogonalization step is key to Muon’s convergence advantage in pretraining.  In practice, gradient updates for 2D weights in transformers tend to have very high condition numbers — they are nearly low-rank, dominated by a few large singular directions.  By orthogonalizing the momentum matrix, Muon equalizes all singular values, effectively amplifying rare but important update directions that would otherwise be overshadowed.  This leads to better sample efficiency: in NanoGPT speedrunning benchmarks[2](https://github.com/KellerJordan/modded-nanogpt), Muon improved training speed by 35% over AdamW, and at 1.5B parameter scale it reached GPT-2 XL level performance approximately 25% faster than AdamW[1](https://kellerjordan.github.io/posts/muon/).
 
 Muon is used by Keller Jordan’s mod of NanoGPT[2](https://github.com/KellerJordan/modded-nanogpt), Andrej Karpathy’s nanochat[3](https://github.com/karpathy/nanochat), and a variant of Muon (MuonClip) is also used by the production-level LLM Kimi-K2 from MoonShot[4](https://arxiv.org/pdf/2507.20534).  More recently, Zhipu AI’s GLM-5 (744B parameters) confirmed the use of Muon optimizer in both GLM-4.5 and GLM-5 pretraining, along with a “Muon Split” technique that splits MLA up-projection matrices by attention head and orthogonalizes each head independently, addressing a performance gap between MLA and GQA when using Muon[5](https://arxiv.org/abs/2602.15763).
 
 ## Muon Optimizer support in DeepSpeed
-One of the challenges of applying Muon optimizer to DeepSpeed is that previous optimizers (SGD, Adam) look at gradients as flattened buffers.   Thus it is hard to swap in Muon optimizer in the same place because the gradient buffers are already flattened.   We move the Muon update to the get_flat_partition function of stage 1 and 2 DeepSpeedZeroOptimizer in which per parameter gradients are still in unflattened stages, thus we can easily apply the Muon updates.
+One of the challenges of applying Muon optimizer to DeepSpeed is that previous optimizers (SGD, Adam) look at gradients as flattened buffers.   Thus it is hard to swap in Muon optimizer in the same place because the gradient buffers are already flattened.   We move the Muon update to `get_flat_partition` function of stage 1 and 2 `DeepSpeedZeroOptimizer` in which per parameter gradients are still in unflattened stages, thus we can easily apply the Muon updates.
 
-Muon optimizer works for hidden 2D gradients.   We apply a parse in model engine initializer to tag the model parameter with 'use_muon', if and only if the model parameter is 2D and is hidden.   When Muon optimizer is used, any gradient with parameter match 'use_muon' will use Muon optimizer to update weight.
+Muon optimizer works for hidden 2D gradients.   We apply a parse in model engine initializer to tag the model parameter with `use_muon`, if and only if the model parameter is 2D and is hidden.   When Muon optimizer is used, any gradient with parameter match `use_muon` will use Muon optimizer to update weight.
 
 Note that Muon is a hybrid optimizer: it uses Muon updates only for 2D hidden weights and falls back to Adam for all other parameters (embeddings, layer norms, biases, lm_head).  The DeepSpeed config supports separate learning rates via `muon_lr` (for Muon parameters) and `adam_lr` (for Adam parameters).
 
@@ -26,7 +26,7 @@ cd deepspeed_finetune_demo
 
 ## Muon Optimizer Convergence Experiment Result
 
-We compared Muon optimizer with AdamW optimizer by finetuning a Qwen2.5-3B model on the tatsu-lab/alpaca dataset.  To ensure a fair comparison, we performed learning rate sweeps for both optimizers independently and report results at each optimizer’s best configuration.
+We tested Muon optimizer by finetuning a Qwen2.5-3B model on the tatsu-lab/alpaca dataset.
 
 **Training Configuration:**
 - Model: Qwen2.5-3B
@@ -34,52 +34,26 @@ We compared Muon optimizer with AdamW optimizer by finetuning a Qwen2.5-3B model
 - ZeRO Stage 2, bf16
 - Batch size: 32 (4 per GPU), 8 GPUs (A100 40GB)
 - 1 epoch (~1460 steps), eval every 100 steps
+- Muon lr: 5e-3, Adam lr: 5e-6
 - LR schedule: constant (no warmup, no decay)
 - Gradient clipping: 1.0
 
-**AdamW Optimizer Hyperparameters:**
-- betas: (0.9, 0.999)
-- eps: 1e-8
-- weight_decay: 0.01
+![Muon optimizer convergence on Qwen2.5-3B](images/muon_loss_3b.png)
 
-**Muon Optimizer Hyperparameters:**
-- momentum: 0.95 (Muon parameters)
-- betas: (0.9, 0.999) (Adam parameters)
-- eps: 1e-8
-- weight_decay: 0.01
+Muon optimizer converges smoothly and shows no overfitting during finetuning.
 
-**Learning Rate Sweep Results:**
+### Tuning Learning Rate for Muon Optimizer
 
-For AdamW, we swept lr across {1e-6, 2e-6, 5e-6, 1e-5}. For Muon, we first swept muon_lr across {1e-4, 2e-4, 5e-4, 1e-3, 2e-3, 5e-3, 1e-2} with adam_lr=2e-6, then swept adam_lr across {2e-6, 5e-6, 1e-5} with muon_lr=5e-3.
+Since Muon is a hybrid optimizer with separate `muon_lr` and `adam_lr`, finding the optimal learning rate combination requires a different approach than a single-optimizer setup.  We recommend the following two-step process:
 
-| Optimizer | Learning Rate | Final Eval Loss |
-|-----------|---------------|-----------------|
-| AdamW     | lr=1e-5       | 1.2404          |
-| AdamW     | lr=5e-6       | 1.2001          |
-| **AdamW** | **lr=2e-6**   | **1.1842**      |
-| AdamW     | lr=1e-6       | 1.1883          |
-| Muon      | muon_lr=5e-3, adam_lr=2e-6 | 1.1996 |
-| **Muon**  | **muon_lr=5e-3, adam_lr=5e-6** | **1.1966** |
-| Muon      | muon_lr=5e-3, adam_lr=1e-5 | 1.1970 |
-
-**Convergence Trajectory (Best Configuration per Optimizer):**
-
-| Step | AdamW (lr=2e-6) | Muon (muon_lr=5e-3, adam_lr=5e-6) |
-|------|-----------------|-----------------------------------|
-| 0    | 1.3278          | 1.3300                            |
-| 100  | 1.2205          | 1.2814                            |
-| 200  | 1.2101          | 1.2300                            |
-| 500  | 1.1969          | 1.2107                            |
-| 1000 | 1.1894          | 1.2009                            |
-| 1400 | **1.1842**      | **1.1966**                        |
-
-In this finetuning experiment, AdamW achieves a slightly lower final eval loss (1.1842) compared to Muon (1.1966).  AdamW also converges faster in early training steps.  This result is consistent with the observation that Muon’s strength has been demonstrated primarily in pretraining settings, while finetuning a pretrained model on a small dataset may not fully benefit from Muon’s orthogonalization approach.
+1. Fix `adam_lr` as a ratio of `muon_lr` (e.g., `adam_lr = muon_lr / 50`), then sweep `muon_lr` to find the best value.
+2. With the best `muon_lr` fixed, sweep `adam_lr` to find the optimal combination.
 
 ## Muon Optimizer Memory Savings
 Muon optimizer uses less memory for optimizer states than Adam, because it maintains one momentum buffer per parameter instead of two (first and second moment).
 
 ### Memory Usage Comparison
-Note that Muon is a hybrid optimizer: 2D hidden weights use Muon (1 buffer), while remaining parameters (embeddings, layer norms, lm_head) still use Adam (2 buffers).  The actual memory savings depend on the fraction of parameters that are 2D hidden weights.  For typical transformer models, 70-80% of parameters are 2D hidden weights, so optimizer state memory is reduced by roughly 35-40%.  However, because total GPU memory also includes model weights, gradients, and activations, the end-to-end memory reduction is smaller (see measured results below).
+Note that Muon is a hybrid optimizer: 2D hidden weights use Muon (1 buffer), while remaining parameters (embeddings, layer norms, lm_head) still use Adam (2 buffers).  The actual memory savings depend on the fraction of parameters that are 2D hidden weights.  For typical transformer models, approximately 90% of parameters are 2D hidden weights, so optimizer state memory is reduced by roughly 45%.  However, because total GPU memory also includes model weights, gradients, and activations, the end-to-end memory reduction is smaller (see measured results below).
 
 | Optimizer | State Buffers per Param | Memory per Parameter |
 |-----------|------------------------|---------------------|
