@@ -99,12 +99,12 @@ at::Tensor reduce_grad(at::Tensor grad_tensor, long graph_id, long ds_id)
 
     if (sync_after_reduce) { c10::cuda::device_synchronize(); }
 
-    return at::Tensor();
+    return torch::empty({0}, grad_tensor.options());
 }
 
 at::Tensor reduce_grad_meta(at::Tensor grad_tensor, long graph_id, long ds_id)
 {
-    return at::Tensor();
+    return torch::empty({0}, grad_tensor.options());
 }
 
 void free_tensors(std::vector<at::Tensor> tensors)
@@ -179,10 +179,12 @@ void start_backward(bool update)
     for (auto& it : executors) { it.second->startBackward(update); }
 }
 
-void end_backward(long graph_id)
+void end_backward(const c10::IValue& deps, long graph_id)
 {
     auto executor = getExecutor<CustomOpExecutor>(graph_id, executors);
     executor->endBackward();
 }
+
+void end_backward_meta(const c10::IValue& deps, long graph_id) {}
 
 }  // namespace dc
