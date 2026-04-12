@@ -33,18 +33,27 @@ def print_rank_0(message, debug=False, force=False):
         print(message)
 
 
-try:
-    # Fix `torch.[device].amp.custom_fwd/bwd` FutureWarning in torch 2.4
-    if hasattr(torch, 'amp') and hasattr(torch.amp, 'custom_fwd') and hasattr(torch.amp, 'custom_bwd'):
-        autocast_custom_fwd = functools.partial(torch.amp.custom_fwd, device_type=get_accelerator().device_name())
-        autocast_custom_bwd = functools.partial(torch.amp.custom_bwd, device_type=get_accelerator().device_name())
-    else:
-        # original implementation
-        autocast_custom_fwd = get_accelerator().amp().custom_fwd
-        autocast_custom_bwd = get_accelerator().amp().custom_bwd
-except (ImportError, AttributeError) as exp:
-    autocast_custom_fwd = noop_decorator
-    autocast_custom_bwd = noop_decorator
+def _get_legacy_autocast_decorators(device_type):
+    legacy_amp = getattr(getattr(torch, device_type, None), 'amp', None)
+    custom_fwd = getattr(legacy_amp, 'custom_fwd', None)
+    custom_bwd = getattr(legacy_amp, 'custom_bwd', None)
+    if custom_fwd is not None and custom_bwd is not None:
+        return custom_fwd, custom_bwd
+    return noop_decorator, noop_decorator
+
+
+def _get_autocast_decorators():
+    amp = getattr(torch, 'amp', None)
+    custom_fwd = getattr(amp, 'custom_fwd', None)
+    custom_bwd = getattr(amp, 'custom_bwd', None)
+    if custom_fwd is not None and custom_bwd is not None:
+        device_type = get_accelerator().device_name()
+        return functools.partial(custom_fwd, device_type=device_type), functools.partial(custom_bwd,
+                                                                                         device_type=device_type)
+    return _get_legacy_autocast_decorators(get_accelerator().device_name())
+
+
+autocast_custom_fwd, autocast_custom_bwd = _get_autocast_decorators()
 
 
 class LinearFunctionForZeroStage3(torch.autograd.Function):

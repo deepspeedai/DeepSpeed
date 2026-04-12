@@ -212,6 +212,7 @@ def register_custom_ops():
                                never_reuse_output=True,
                                force_free_input=True)
     register_fallback_no_reuse(torch.ops.dc.free_tensors.default, never_reuse_input=True, never_reuse_output=True)
+    register_fallback_no_reuse(torch.ops.dc.end_backward.default, never_reuse_input=True, never_reuse_output=False)
 
     if not hasattr(Scheduler, "is_dc_patched") or not Scheduler.is_dc_patched:
         Scheduler.is_dc_patched = True
