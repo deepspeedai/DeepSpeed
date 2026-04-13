@@ -139,18 +139,23 @@ def zeropower_via_gram_newtonschulz(G, steps: int):
 NS_METHODS = {"standard", "gram"}
 
 
-@compiler.compile()
-def muon_update(grad, momentum, beta=0.95, ns_steps=5, nesterov=True, ns_method="gram"):
+def muon_update(grad, momentum, beta=0.95, ns_steps=5, nesterov=True, ns_method="gram", is_expert_group=False):
     orig_dtype = grad.dtype
     momentum.lerp_(grad, 1 - beta)
     update = grad.lerp_(momentum, beta) if nesterov else momentum
-    if update.ndim == 4:  # for the case of conv filters
-        update = update.view(len(update), -1)
-    if ns_method == "gram":
-        update = zeropower_via_gram_newtonschulz(update, steps=ns_steps)
+    if is_expert_group:
+        # Grouped expert weights (E, I, O): apply NS independently per expert
+        scale = max(1, update.size(-2) / update.size(-1))**0.5
+        update = torch.stack([zeropower_via_newtonschulz5(update[i], steps=ns_steps)
+                              for i in range(update.size(0))]) * scale
     else:
-        update = zeropower_via_newtonschulz5(update, steps=ns_steps)
-    update *= max(1, grad.size(-2) / grad.size(-1))**0.5
+        if update.ndim == 4:  # for the case of conv filters
+            update = update.view(len(update), -1)
+        if ns_method == "gram":
+            update = zeropower_via_gram_newtonschulz(update, steps=ns_steps)
+        else:
+            update = zeropower_via_newtonschulz5(update, steps=ns_steps)
+        update *= max(1, grad.size(-2) / grad.size(-1))**0.5
     if update.dtype != orig_dtype:
         update = update.to(orig_dtype)
     return update
@@ -210,7 +215,8 @@ class Muon(torch.optim.Optimizer):
                     update = muon_update(p.grad,
                                          state["momentum_buffer"],
                                          beta=group["momentum"],
-                                         ns_method=group.get("ns_method", "gram"))
+                                         ns_method=group.get("ns_method", "gram"),
+                                         is_expert_group=getattr(p, 'is_expert_group', False))
                     p.mul_(1 - group["lr"] * group["weight_decay"])
                     p.add_(update.reshape(p.shape), alpha=-group["lr"])
                 dist.all_gather(params_pad[base_i:base_i + dist.get_world_size()],
@@ -247,7 +253,8 @@ class SingleDeviceMuon(torch.optim.Optimizer):
                 update = muon_update(p.grad,
                                      state["momentum_buffer"],
                                      beta=group["momentum"],
-                                     ns_method=group.get("ns_method", "gram"))
+                                     ns_method=group.get("ns_method", "gram"),
+                                     is_expert_group=getattr(p, 'is_expert_group', False))
                 p.mul_(1 - group["lr"] * group["weight_decay"])
                 p.add_(update.reshape(p.shape), alpha=-group["lr"])
 
@@ -302,14 +309,14 @@ class MuonWithAuxAdam(torch.optim.Optimizer):
                 group["ns_method"] = group.get("ns_method", "gram")
                 assert group[
                     "ns_method"] in NS_METHODS, f"ns_method must be one of {NS_METHODS}, got {group['ns_method']}"
-                assert set(group.keys()) == set(["params", "lr", "momentum", "weight_decay", "use_muon", "ns_method"])
+                assert set(["params", "lr", "momentum", "weight_decay", "use_muon", "ns_method"]).issubset(set(group.keys()))
             else:
                 # defaults
                 group["lr"] = group.get("lr", 3e-4)
                 group["betas"] = group.get("betas", (0.9, 0.95))
                 group["eps"] = group.get("eps", 1e-10)
                 group["weight_decay"] = group.get("weight_decay", 0)
-                assert set(group.keys()) == set(["params", "lr", "betas", "eps", "weight_decay", "use_muon"])
+                assert set(["params", "lr", "betas", "eps", "weight_decay", "use_muon"]).issubset(set(group.keys()))
         super().__init__(param_groups, dict())
 
     @torch.no_grad()
@@ -337,7 +344,8 @@ class MuonWithAuxAdam(torch.optim.Optimizer):
                         update = muon_update(p.grad,
                                              state["momentum_buffer"],
                                              beta=group["momentum"],
-                                             ns_method=group.get("ns_method", "gram"))
+                                             ns_method=group.get("ns_method", "gram"),
+                                             is_expert_group=getattr(p, 'is_expert_group', False))
                         p.mul_(1 - group["lr"] * group["weight_decay"])
                         p.add_(update.reshape(p.shape), alpha=-group["lr"])
                     dist.all_gather(params_pad[base_i:base_i + dist.get_world_size()],
@@ -377,14 +385,14 @@ class SingleDeviceMuonWithAuxAdam(torch.optim.Optimizer):
                 group["ns_method"] = group.get("ns_method", "gram")
                 assert group[
                     "ns_method"] in NS_METHODS, f"ns_method must be one of {NS_METHODS}, got {group['ns_method']}"
-                assert set(group.keys()) == set(["params", "lr", "momentum", "weight_decay", "use_muon", "ns_method"])
+                assert set(["params", "lr", "momentum", "weight_decay", "use_muon", "ns_method"]).issubset(set(group.keys()))
             else:
                 # defaults
                 group["lr"] = group.get("lr", 3e-4)
                 group["betas"] = group.get("betas", (0.9, 0.95))
                 group["eps"] = group.get("eps", 1e-10)
                 group["weight_decay"] = group.get("weight_decay", 0)
-                assert set(group.keys()) == set(["params", "lr", "betas", "eps", "weight_decay", "use_muon"])
+                assert set(["params", "lr", "betas", "eps", "weight_decay", "use_muon"]).issubset(set(group.keys()))
         super().__init__(param_groups, dict())
 
     @torch.no_grad()
@@ -407,7 +415,8 @@ class SingleDeviceMuonWithAuxAdam(torch.optim.Optimizer):
                     update = muon_update(p.grad,
                                          state["momentum_buffer"],
                                          beta=group["momentum"],
-                                         ns_method=group.get("ns_method", "gram"))
+                                         ns_method=group.get("ns_method", "gram"),
+                                         is_expert_group=getattr(p, 'is_expert_group', False))
                     p.mul_(1 - group["lr"] * group["weight_decay"])
                     p.add_(update.reshape(p.shape), alpha=-group["lr"])
             else:
