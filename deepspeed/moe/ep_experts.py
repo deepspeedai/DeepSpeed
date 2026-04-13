@@ -163,6 +163,10 @@ class GroupedExperts(nn.Module):
         self.w1 = nn.Parameter(torch.empty(num_experts, hidden_dim, dim))
         self.w2 = nn.Parameter(torch.empty(num_experts, dim, hidden_dim))
         self.w3 = nn.Parameter(torch.empty(num_experts, hidden_dim, dim))
+        # Mark as grouped expert tensors so Muon applies NS per-expert
+        self.w1.is_expert_group = True
+        self.w2.is_expert_group = True
+        self.w3.is_expert_group = True
 
         # Check grouped_mm availability at construction time
         self._has_grouped_mm = hasattr(torch, "_grouped_mm")

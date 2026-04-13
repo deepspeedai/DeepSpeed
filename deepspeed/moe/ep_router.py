@@ -60,6 +60,9 @@ class TokenChoiceTopKRouter(nn.Module):
         self.score_func = score_func
         self.route_norm = route_norm
         self.route_scale = route_scale
+        # Trainable expert score correction bias (e.g. DeepSeek-V3/Moonlight noaux_tc).
+        # Separate from the dynamic load-balancing expert_bias passed in forward().
+        self.e_score_correction_bias = None
 
     # ------------------------------------------------------------------
     # Node-limited (group-limited) routing
@@ -141,6 +144,10 @@ class TokenChoiceTopKRouter(nn.Module):
             raise NotImplementedError(f"Unknown score function: {self.score_func}")
 
         scores_for_choice = (scores if expert_bias is None else scores + expert_bias)
+
+        # Apply pre-trained score correction bias (e.g. DeepSeek-V3 noaux_tc routing)
+        if self.e_score_correction_bias is not None:
+            scores_for_choice = scores_for_choice + self.e_score_correction_bias.unsqueeze(0)
 
         # Apply node-limited routing if configured
         if self.num_expert_groups is not None:

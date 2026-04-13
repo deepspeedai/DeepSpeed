@@ -375,6 +375,13 @@ class AutoEPMoELayer(nn.Module):
         if spec.gate_bias and getattr(source_gate, 'bias', None) is not None:
             self.router.gate.bias.data.copy_(source_gate.bias.data)
 
+        # Copy pre-trained score correction bias (DeepSeek-V3/Moonlight noaux_tc routing)
+        source_ecb = getattr(source_gate, 'e_score_correction_bias', None)
+        if source_ecb is not None and isinstance(source_ecb, nn.Parameter):
+            self.router.e_score_correction_bias = nn.Parameter(source_ecb.data.clone())
+            logger.info('AutoEP: copied e_score_correction_bias from source gate '
+                        '(shape=%s)', source_ecb.shape)
+
         # Alias router under the name OutputRecorder expects (layer_name if provided),
         # but only when OutputRecorder captures from the router child and the alias is safe.
         alias_target = spec.router_logits_capture_layer_name or spec.router_name

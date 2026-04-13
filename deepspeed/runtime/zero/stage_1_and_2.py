@@ -2003,7 +2003,10 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                 assert tensor.ndim > 1, f"if use muon, then tensor dim > 1, got {tensor.size()}"
                 buffer = torch.narrow(self.optimizer.state[flatten_copy]["momentum_buffer"], 0, buffer_idx,
                                       tensor.numel()).view(tensor.size())
-                grad_accum = muon_update(grad_accum, buffer, self.optimizer.param_groups[param_group_idx]['momentum'])
+                grad_accum = muon_update(grad_accum,
+                                         buffer,
+                                         self.optimizer.param_groups[param_group_idx]['momentum'],
+                                         is_expert_group=getattr(tensor, 'is_expert_group', False))
             tensor = grad_accum
             num_elements = tensor.numel()
             buffer_idx += num_elements
