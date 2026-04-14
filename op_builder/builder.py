@@ -672,14 +672,25 @@ class CUDAOpBuilder(OpBuilder):
             if int(cc[0]) <= 7:
                 self.enable_bf16 = False
 
+        # Synchronise TORCH_CUDA_ARCH_LIST with the (potentially filtered) arch
+        # list so that PyTorch's BuildExtension / load() generates consistent
+        # -gencode flags.  Without this, filter_ccs() removals are silently
+        # re-added by PyTorch reading the original, unfiltered env var.
+        # See https://github.com/deepspeedai/DeepSpeed/issues/7972
+        arch_list = ";".join(f"{cc[0]}.{cc[1]}" for cc in ccs)
+        os.environ["TORCH_CUDA_ARCH_LIST"] = arch_list
+
         if self.jit_mode:
-            # Let PyTorch handle -gencode flag generation via TORCH_CUDA_ARCH_LIST
-            # to avoid duplicate flags.  Reconstruct the arch-list string from the
-            # (potentially filtered) ``ccs`` list.
-            arch_list = ";".join(f"{cc[0]}.{cc[1]}" for cc in ccs)
-            os.environ["TORCH_CUDA_ARCH_LIST"] = arch_list
+            # In JIT mode PyTorch's load() will read TORCH_CUDA_ARCH_LIST and
+            # generate the -gencode flags itself, so we return nothing here to
+            # avoid duplicates.
             return []
 
+        # In non-JIT (setup.py) mode we still return explicit -gencode flags
+        # because each CUDAExtension needs its own per-builder flags in
+        # extra_compile_args.  BuildExtension will also read the env var, which
+        # may cause harmless duplicates but will no longer reintroduce archs
+        # that filter_ccs() removed.
         args = []
         for cc in ccs:
             num = cc[0] + cc[1].split('+')[0]
