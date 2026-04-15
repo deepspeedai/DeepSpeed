@@ -491,8 +491,8 @@ class UlyssesSPAttentionHF(torch.nn.Module):
             local_seq_length = seq_length // mpu.get_sequence_parallel_world_size()
             global_seq_length = seq_length
 
-         ## Fix here
-        arch_cfg = getattr(hf_model_config, "text_config", hf_model_config)
+        ## Fix here
+        arch_cfg = hf_model_config if not hasattr(hf_model_config, "text_config") else hf_model_config.text_config
 
         uattn = UlyssesSPAttentionHF(
             attn=core_attn_function,
