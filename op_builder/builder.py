@@ -563,11 +563,7 @@ class OpBuilder(ABC):
         sources = [os.path.abspath(self.deepspeed_src_path(path)) for path in self.sources()]
         extra_include_paths = [os.path.abspath(self.deepspeed_src_path(path)) for path in self.include_paths()]
 
-        # Stash the original TORCH_CUDA_ARCH_LIST so we can restore it after build.
-        # In JIT mode, compute_capability_args() will set TORCH_CUDA_ARCH_LIST to
-        # the detected GPU architectures, letting PyTorch generate the -gencode
-        # flags. This avoids duplicate flags and the "TORCH_CUDA_ARCH_LIST is not
-        # set" warning.  See https://github.com/deepspeedai/DeepSpeed/issues/7972
+        # Stash TORCH_CUDA_ARCH_LIST to restore after build.
         torch_arch_list = os.environ.get("TORCH_CUDA_ARCH_LIST")
 
         nvcc_args = self.strip_empty_entries(self.nvcc_args())
@@ -601,8 +597,7 @@ class OpBuilder(ABC):
         if verbose:
             print(f"Time to load {self.name} op: {build_duration} seconds")
 
-        # Restore the original TORCH_CUDA_ARCH_LIST so we are not silently
-        # modifying it for other possible use cases.
+        # Restore TORCH_CUDA_ARCH_LIST to its original state.
         if torch_arch_list is not None:
             os.environ["TORCH_CUDA_ARCH_LIST"] = torch_arch_list
         elif "TORCH_CUDA_ARCH_LIST" in os.environ:
@@ -672,25 +667,16 @@ class CUDAOpBuilder(OpBuilder):
             if int(cc[0]) <= 7:
                 self.enable_bf16 = False
 
-        # Synchronise TORCH_CUDA_ARCH_LIST with the (potentially filtered) arch
-        # list so that PyTorch's BuildExtension / load() generates consistent
-        # -gencode flags.  Without this, filter_ccs() removals are silently
-        # re-added by PyTorch reading the original, unfiltered env var.
-        # See https://github.com/deepspeedai/DeepSpeed/issues/7972
+        # Keep TORCH_CUDA_ARCH_LIST in sync with the filtered arch list so
+        # PyTorch does not re-add archs that filter_ccs() removed.
         arch_list = ";".join(f"{cc[0]}.{cc[1]}" for cc in ccs)
         os.environ["TORCH_CUDA_ARCH_LIST"] = arch_list
 
         if self.jit_mode:
-            # In JIT mode PyTorch's load() will read TORCH_CUDA_ARCH_LIST and
-            # generate the -gencode flags itself, so we return nothing here to
-            # avoid duplicates.
+            # Let PyTorch generate -gencode flags from the env var.
             return []
 
-        # In non-JIT (setup.py) mode we still return explicit -gencode flags
-        # because each CUDAExtension needs its own per-builder flags in
-        # extra_compile_args.  BuildExtension will also read the env var, which
-        # may cause harmless duplicates but will no longer reintroduce archs
-        # that filter_ccs() removed.
+        # Non-JIT: return explicit flags per builder for extra_compile_args.
         args = []
         for cc in ccs:
             num = cc[0] + cc[1].split('+')[0]
