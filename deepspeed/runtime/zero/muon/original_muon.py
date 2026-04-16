@@ -139,6 +139,7 @@ def zeropower_via_gram_newtonschulz(G, steps: int):
 NS_METHODS = {"standard", "gram"}
 
 
+@compiler.compile()
 def muon_update(grad, momentum, beta=0.95, ns_steps=5, nesterov=True, ns_method="gram", is_expert_group=False):
     orig_dtype = grad.dtype
     momentum.lerp_(grad, 1 - beta)
