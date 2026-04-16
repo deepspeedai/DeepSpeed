@@ -8,6 +8,7 @@ from collections import defaultdict
 
 import torch
 from torch.fx import Node, Graph, GraphModule
+from torch.fx.node import map_aggregate
 
 from .util import get_last_uses
 
@@ -17,6 +18,23 @@ def get_output_node(graph: Graph):
         if v.target == "output":
             return v
     raise ValueError("No output node found")
+
+
+def add_end_backward(graph: Graph, graph_id: int):
+    reduce_nodes = [n for n in graph.nodes if n.target == torch.ops.dc.reduce_grad.default]
+    if len(reduce_nodes) == 0:
+        return
+
+    with graph.inserting_before(get_output_node(graph)):
+        graph.create_node("call_function", torch.ops.dc.end_backward.default, (reduce_nodes, graph_id))
+
+
+def replace_reduce_outputs_with_none(graph: Graph):
+    output_node = get_output_node(graph)
+    new_outputs = map_aggregate(
+        output_node.args[0], lambda n: None
+        if isinstance(n, Node) and n.target == torch.ops.dc.reduce_grad.default else n)
+    output_node.args = (new_outputs, )
 
 
 def move_primals_to_head(graph: Graph):
