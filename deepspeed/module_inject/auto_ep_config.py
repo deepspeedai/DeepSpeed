@@ -428,3 +428,24 @@ def _divisors(n: int) -> list[int]:
             if i != n // i:
                 divs.append(n // i)
     return sorted(divs)
+
+
+def fill_autoep_config_from_hf(config: AutoEPConfig, model_config) -> None:
+    """Back-fill AutoEPConfig fields from HF model config when user hasn't set them.
+
+    HF field names (e.g. n_group, topk_group, routed_scaling_factor) differ from
+    AutoEP's internal names, so we map them explicitly rather than relying on the
+    user to duplicate these values in the DS config JSON.
+    """
+    if model_config is None:
+        return
+    # n_group / topk_group: DeepSeek-style node-limited routing groups
+    if config.num_expert_groups is None:
+        config.num_expert_groups = getattr(model_config, 'n_group', None)
+    if config.num_limited_groups is None:
+        config.num_limited_groups = getattr(model_config, 'topk_group', None)
+    # routed_scaling_factor: sigmoid score scaling (DeepSeek-V3 / Moonlight)
+    if config.routed_scaling_factor == "auto":
+        hf_scale = getattr(model_config, 'routed_scaling_factor', None)
+        if hf_scale is not None:
+            config.route_scale = float(hf_scale)

@@ -67,10 +67,9 @@ def muon_update(grad, momentum, beta=0.95, ns_steps=5, nesterov=True, is_expert_
     momentum.lerp_(grad, 1 - beta)
     update = grad.lerp_(momentum, beta) if nesterov else momentum
     if is_expert_group:
-        # Grouped expert weights (E, I, O): apply NS independently per expert
+        # (E, I, O) tensor: zeropower_via_newtonschulz5 supports batched ndim>=2
         scale = max(1, update.size(-2) / update.size(-1))**0.5
-        update = torch.stack([zeropower_via_newtonschulz5(update[i], steps=ns_steps)
-                              for i in range(update.size(0))]) * scale
+        update = zeropower_via_newtonschulz5(update, steps=ns_steps) * scale
     else:
         if update.ndim == 4:  # for the case of conv filters
             update = update.view(len(update), -1)
