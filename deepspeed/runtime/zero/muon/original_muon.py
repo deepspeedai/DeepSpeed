@@ -62,6 +62,7 @@ def zeropower_via_newtonschulz5(G, steps: int):
     return X
 
 
+@compiler.compile()
 def muon_update(grad, momentum, beta=0.95, ns_steps=5, nesterov=True, is_expert_group=False):
     orig_dtype = grad.dtype
     momentum.lerp_(grad, 1 - beta)
