@@ -833,7 +833,7 @@ class WarmupCosineLR(object):
     def get_lr_ratio(self):
         if self.last_batch_iteration < 0:
             logger.warning("Attempting to get learning rate from scheduler before it has started")
-            return [0.0]
+            return 0.0
 
         if self.last_batch_iteration < self.warmup_num_steps:
             if self.warmup_type == WARMUP_LOG_RATE:
@@ -860,7 +860,7 @@ class WarmupCosineLR(object):
     def get_lr(self):
         if self.last_batch_iteration < 0:
             logger.warning("Attempting to get learning rate from scheduler before it has started")
-            return [0.0]
+            return [0.0 for _ in self.org_lrs]
         lr_ratio = self.get_lr_ratio()
         return [org_lr * lr_ratio for org_lr in self.org_lrs]
 
