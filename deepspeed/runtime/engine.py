@@ -4526,6 +4526,18 @@ class DeepSpeedEngine(Module):
     def is_compiled(self) -> bool:
         return self._is_compiled
 
+    def _refine_include_states(self, include: Container[OffloadStateTypeEnum]) -> Container[OffloadStateTypeEnum]:
+        if include is None:
+            include = list(OffloadStateTypeEnum)
+
+        if self.zero_offload_optimizer() is not None:
+            exclude_states = [OffloadStateTypeEnum.hp_params, OffloadStateTypeEnum.optim_states]
+            if self.zero_optimization_partition_weights():
+                exclude_states.append(OffloadStateTypeEnum.lp_grads)
+            include = [x for x in include if x not in exclude_states]
+
+        return include
+
     def offload_states(self,
                        include: Container[OffloadStateTypeEnum] = None,
                        device: OffloadDeviceEnum = OffloadDeviceEnum.cpu,
@@ -4539,8 +4551,7 @@ class DeepSpeedEngine(Module):
             pin_memory: Optional. Whether to pin the memory of the offloaded states.
             non_blocking: Optional. Whether to offload the states asynchronously.
         """
-        opt_offload_config = self.zero_offload_optimizer()
-        assert opt_offload_config is None or opt_offload_config.device == OffloadDeviceEnum.none, "Moving states across devices is not supported for offloaded optimizer states."
+        include = self._refine_include_states(include)
         param_offload_config = self.zero_offload_param()
         assert param_offload_config is None or param_offload_config.device == OffloadDeviceEnum.none, "Moving states across devices is not supported for offloaded parameters."
 

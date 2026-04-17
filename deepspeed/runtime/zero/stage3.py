@@ -3269,11 +3269,12 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
         self.empty_partition_cache()
 
-        assert self.optimizer.__class__ == deepspeed.ops.adam.fused_adam.FusedAdam, "Offloading is supported only for DeepSpeed FusedAdam."
-
         def needs_offload(target):
             # return True
             return target not in self.offloaded_states and (include == None or target in include)
+
+        if needs_offload(OffloadStateTypeEnum.optim_states) or needs_offload(OffloadStateTypeEnum.hp_params):
+            assert self.optimizer.__class__ == deepspeed.ops.adam.fused_adam.FusedAdam, "Offloading is supported only for DeepSpeed FusedAdam."
 
         # HP param
         if needs_offload(OffloadStateTypeEnum.hp_params):
