@@ -12,6 +12,7 @@ import subprocess
 from abc import ABC, abstractmethod
 from pathlib import Path
 import random
+import tempfile
 import numpy as np
 from typing import Callable, Any
 
@@ -336,18 +337,13 @@ class DistributedExec(ABC):
 
     def _launch_with_file_store(self, request, world_size):
         tmpdir = request.getfixturevalue("tmpdir")
-        dist_file_store = tmpdir.join("dist_file_store")
-        assert not os.path.exists(dist_file_store)
-        init_method = f"file://{dist_file_store}"
 
         if isinstance(world_size, int):
             world_size = [world_size]
         for procs in world_size:
-            try:
-                self._launch_procs(procs, init_method)
-            finally:
-                if os.path.exists(dist_file_store):
-                    os.remove(dist_file_store)
+            with tempfile.NamedTemporaryFile(delete=False, dir=str(tmpdir), suffix='_filestore') as fp:
+                init_method = f"file://{fp.name}"
+            self._launch_procs(procs, init_method)
             time.sleep(0.5)
 
     def _dist_destroy(self):
@@ -357,7 +353,7 @@ class DistributedExec(ABC):
 
     def _close_pool(self, pool, num_procs, force=False):
         if force or not self.reuse_dist_env:
-            msg = pool.starmap(self._dist_destroy, [() for _ in range(num_procs)])
+            pool.starmap(self._dist_destroy, [() for _ in range(num_procs)])
             pool.close()
             pool.join()
 
