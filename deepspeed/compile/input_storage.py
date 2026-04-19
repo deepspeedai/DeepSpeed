@@ -44,7 +44,7 @@ class InputStorage:
         # Get memory format safely
         try:
             memory_format = tensor.memory_format() if hasattr(tensor, 'memory_format') else torch.contiguous_format
-        except:
+        except Exception:
             memory_format = torch.contiguous_format
 
         # Store real data for tensors if configured to do so

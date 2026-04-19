@@ -119,6 +119,35 @@ If you call ``loss.backward()`` directly without using ``engine.scale()`` or ``e
 will raise a ``RuntimeError`` to prevent training with unscaled gradients, which can lead to incorrect results
 or gradient underflow.
 
+Using torch.autocast Outside the Engine
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+DeepSpeed applies ``torch.autocast`` internally during ``engine.forward()``.
+However, you may also want autocast to cover code that runs **outside** the engine,
+such as a loss function or post-processing logic. In that case, wrap the entire
+forward-plus-loss block in your own ``torch.autocast`` context:
+
+.. code-block:: python
+
+    # Autocast covers both the engine forward AND the loss computation
+    with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+        logits = model_engine(input_ids)
+        loss = loss_fn(logits.view(-1, vocab_size), labels.view(-1))
+
+Without the outer ``torch.autocast``, only the model's forward pass benefits from
+autocast; the loss function would run in full precision.
+
+When DeepSpeed detects a nested autocast context, it handles it as follows:
+
+* If ``torch_autocast`` is **enabled** in the DeepSpeed config, the engine overrides the
+  outer context with the dtype from the config. An info message is logged once.
+* If ``torch_autocast`` is **disabled** in the config (i.e., you are using DeepSpeed's
+  built-in bf16/fp16 support instead), the engine disables autocast inside
+  ``engine.forward()`` and a warning is logged once.
+
+In both cases, PyTorch's ``torch.autocast`` is idempotent when nested with the same
+dtype, so there is no performance or correctness penalty from the nesting.
+
 .. autofunction:: deepspeed.runtime.torch_autocast.init_autocast_params
 .. autofunction:: deepspeed.runtime.torch_autocast.is_autocast_initialized
 .. autofunction:: deepspeed.runtime.torch_autocast.get_default_autocast_lower_precision_modules
@@ -314,6 +343,26 @@ defaults with customizability:
 * **Heuristics**: automatic sharding based on parameter names and model rules.
 * **Preset**: choose a built-in model family via ``preset_model``.
 * **Custom specs**: define regex patterns and partition rules via ``partition_config``.
+* **HuggingFace tp_plan**: automatically detected from ``model.config.base_model_tp_plan`` or ``model._tp_plan``.
+
+HuggingFace tp_plan
+^^^^^^^^^^^^^^^^^^^
+Many HuggingFace models (e.g. Llama, Qwen, Gemma2) define a
+``base_model_tp_plan`` in their model config. When present, DeepSpeed
+automatically extracts and converts this plan into internal partition rules.
+This means you do not need ``preset_model`` or ``partition_config`` for these
+models -- just set ``autotp_size``.
+
+The resolution priority is:
+
+1. ``partition_config`` (user-defined custom specs -- highest priority)
+2. HuggingFace ``tp_plan`` (from model config)
+3. AutoTP heuristics / ``preset_model`` (lowest priority)
+
+Currently only ``colwise`` and ``rowwise`` partition types from the HuggingFace
+``tp_plan`` are supported. Other types (``colwise_rep``, ``local_colwise``,
+``local_rowwise``, ``local_packed_rowwise``, ``gather``, ``sequence_parallel``)
+are not yet handled and will raise an error.
 
 Heuristic rules
 ^^^^^^^^^^^^^^^
@@ -476,3 +525,90 @@ unless you provide a custom ``partition_config``.
 These presets are also useful when you want to extend the default patterns:
 set ``use_default_specs`` to ``true`` in ``partition_config`` to merge your custom
 specs on top of the selected preset.
+
+
+Automatic Sequence Parallel Training
+------------------------------------
+DeepSpeed supports **Automatic Sequence Parallel (AutoSP) training** for enabling
+compiler-based sequence parallelism to unlock long-context LLM training. AutoSP
+leverages defines custom passes to automatically shard inputs along the
+sequence dimension and enable Ulysses-styled sequence parallelism.
+
+AutoSP training is enabled by setting ``compile`` and ``passes`` in the DeepSpeed
+config and calling ``prepare_autosp_inputs()`` to prepare inputs before each forward pass.
+
+.. code-block:: python
+
+    import deepspeed
+    from deepspeed.compile.passes.sp_compile import prepare_autosp_inputs
+
+    ds_config = {
+        "train_micro_batch_size_per_gpu": 1,
+        "zero_optimization": {"stage": 0},
+        "compile": {
+            "deepcompile": True,
+            "passes": ["autosp"],
+        }
+    }
+
+    engine, optimizer, _, _ = deepspeed.initialize(
+        model=model,
+        optimizer=optimizer,
+        config=ds_config,
+    )
+
+    # Compile the model before training
+    engine.compile(backend='inductor')
+
+    for batch in dataloader:
+        input_ids = prepare_autosp_inputs(
+            input_id=batch["input_ids"],
+            label_id=batch["labels"],
+            position_id=batch.get("position_ids"),
+            seq_dim=1
+        )
+        loss = engine(input_ids)
+        engine.backward(loss)
+        engine.step()
+
+.. note::
+   AutoSP requires ZeRO stage 0 (no ZeRO optimization). Using AutoSP with ZeRO stages 1, 2, or 3 is not currently supported.
+   AutoSP also requires ``torch.nn.functional.scaled_dot_product_attention()`` as the attention backend.
+
+Input Preparation
+~~~~~~~~~~~~~~~~~
+
+Before each forward pass, inputs must be prepared using ``prepare_autosp_inputs()`` to
+mark the sequence dimension as dynamic and annotate tensors for identification during
+automatic sharding:
+
+.. code-block:: python
+
+    from deepspeed.compile.passes.sp_compile import prepare_autosp_inputs
+
+    input_ids = prepare_autosp_inputs(
+        input_id=input_ids,
+        label_id=labels,
+        position_id=position_ids,  # optional
+        attention_mask=attention_mask,  # optional
+        seq_dim=1
+    )
+
+This serves as a hint to the compiler to know which inputs should be sharded across which dimension.
+
+Memory Optimization
+~~~~~~~~~~~~~~~~~~~
+
+AutoSP includes selective activation checkpointing that recomputes matmul operations
+during backpropagation while preserving attention activations. This is effective for
+long-context training because attention operations scale quadratically with sequence
+length and dominate computation latency, while matmul operations scale linearly and are relatively cheaper
+to recompute. This provides significant memory savings with minimal computational
+overhead
+
+Limitations
+~~~~~~~~~~~
+
+AutoSP currently supports only ``torch.nn.functional.scaled_dot_product_attention``. Other attention patterns require additional pattern matching logic.
+
+AutoSP requires a fully connected computation graph without breaks. Graph breaks destroy the use-def chains across graphs and the compiler cannot propoaget sequence dimension sharding information.

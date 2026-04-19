@@ -24,12 +24,7 @@
   "gradient_clipping": 1.0,
   "prescale_gradients": false,
   "bf16": {
-      "enabled": true,
-      "loss_scale": 0,
-      "loss_scale_window": 500,
-      "hysteresis": 2,
-      "min_loss_scale": 1,
-      "initial_scale_power": 15
+      "enabled": true
   },
   "wall_clock_breakdown": false,
   "zero_optimization": {

@@ -1048,7 +1048,7 @@ class Init(InsertPostInitMethodToModuleSubClasses):
             self.num_ranks_in_param_group = groups._get_zero_param_intra_parallel_group_world_size()
             self.num_param_groups = int(self.dp_world_size / self.num_ranks_in_param_group)
             self.rank_in_group = groups._get_zero_param_intra_parallel_rank_in_mygroup()
-            print_rank_0(f"hpZeRO group size: {self.num_ranks_in_param_group}", force=True)
+            print_rank_0(f"hpZeRO group size: {self.num_ranks_in_param_group}", force=False)
 
             logger.debug(
                 "hpZeRO partition parameter my rank in world {} my rank in group {} ranks in my param partition group: {} "
@@ -1066,10 +1066,14 @@ class Init(InsertPostInitMethodToModuleSubClasses):
         if _ds_config is not None and _ds_config.zero_config.zero_quantized_nontrainable_weights and not self.quantized_nontrainable_weights:
             self.quantized_nontrainable_weights = _ds_config.zero_config.zero_quantized_nontrainable_weights
 
+        self.enable_sanity_checks = get_config_default(DeepSpeedZeroConfig, "enable_sanity_checks")
+        if _ds_config is not None:
+            self.enable_sanity_checks = _ds_config.zero_config.enable_sanity_checks
+
         self.module = module
         if (self.quantized_weights or self.quantized_nontrainable_weights):
             self.quantizer_module = CUDAQuantizer()
-            print_rank_0(f'Using quantizer for weights: {self.quantizer_module.__class__.__name__}', force=True)
+            print_rank_0(f'Using quantizer for weights: {self.quantizer_module.__class__.__name__}', force=False)
 
         if _ds_config is not None:
             Init.override_module_apply = _ds_config.zero_config.override_module_apply
@@ -1202,6 +1206,7 @@ class Init(InsertPostInitMethodToModuleSubClasses):
 
         # The group that the parameter is scattered across.
         param.ds_process_group = self.ds_process_group
+        param.ds_enable_sanity_checks = self.enable_sanity_checks
 
         # Stores the secondary partitioned copy of the tensor
         param.ds_secondary_tensor = None
@@ -1669,7 +1674,7 @@ class Init(InsertPostInitMethodToModuleSubClasses):
 
             if param.ds_tensor is not None and not has_been_updated:  ##param already partitioned
 
-                #print_rank_0(f"Param  {param.ds_id} pri {param.ds_tensor.size()}  loc? {param.ds_tensor.final_location}", force=True)
+                #print_rank_0(f"Param  {param.ds_id} pri {param.ds_tensor.size()}  loc? {param.ds_tensor.final_location}", force=False)
                 #param.data = param.ds_tensor.data
 
                 see_memory_usage(f'Before partitioning param {param.ds_id} {param.shape}', force=False)
@@ -1775,7 +1780,7 @@ class Init(InsertPostInitMethodToModuleSubClasses):
         assert param.ds_status is not ZeroParamStatus.INFLIGHT, f" {param} Cannot partition a param in flight"
         global reuse_buffers
         ##support for NVME secondary param offload
-        #print_rank_0(f"SEC Param id {param.ds_id} status is {param.ds_status}", force=True)
+        #print_rank_0(f"SEC Param id {param.ds_id} status is {param.ds_status}", force=False)
         if param.ds_status is ZeroParamStatus.AVAILABLE:
             if param.ds_secondary_tensor is not None and not has_been_updated:  ##param already partitioned
                 return
@@ -2286,6 +2291,7 @@ class GatheredParameters:
         """
 
         self.enabled = enabled
+        self._param_versions = None
         if not enabled:
             return
 
@@ -2305,6 +2311,7 @@ class GatheredParameters:
         self.params = sorted(
             set(self.params), key=lambda x: x.ds_id
         )  # remove the duplicates to prevent racing condition, we must also make sure the order is the same on all ranks otherwise we'll get deadlocks
+        self.enable_sanity_checks = getattr(self.params[0], "ds_enable_sanity_checks", False)
         self.src_rank = None
         if modifier_rank is not None:
             if self.params[0].ds_process_group == dist.get_world_group():
@@ -2322,11 +2329,32 @@ class GatheredParameters:
         if not self.enabled:
             return
         self.params[0].all_gather(param_list=self.params)
+        if self.src_rank is None and self.enable_sanity_checks:
+            self._param_versions = [(p, p.data.data_ptr(), p._version) for p in self.params]
 
     def __exit__(self, *exc):
         if not self.enabled:
             return
         if self.src_rank is None:
+            if self._param_versions:
+                modified_params = [
+                    p for p, data_ptr, version in self._param_versions
+                    if p.data.data_ptr() != data_ptr or p._version != version
+                ]
+                modified_local = bool(modified_params)
+                modified_global = modified_local
+                if dist.is_initialized():
+                    modified_flag = torch.tensor(
+                        int(modified_local),
+                        device=get_accelerator().current_device_name(),
+                    )
+                    dist.all_reduce(modified_flag, op=dist.ReduceOp.MAX, group=self.params[0].ds_process_group)
+                    modified_global = bool(modified_flag.item())
+                if modified_global:
+                    self.params[0].partition(param_list=self.params, has_been_updated=False)
+                    raise RuntimeError(
+                        "Detected in-place modification of ZeRO-3 parameters inside GatheredParameters with "
+                        "modifier_rank=None. Use modifier_rank=<rank> to broadcast updates across ranks.")
             self.params[0].partition(param_list=self.params, has_been_updated=False)
             return
 
