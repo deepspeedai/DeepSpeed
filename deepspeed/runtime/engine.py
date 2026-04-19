@@ -4530,7 +4530,7 @@ class DeepSpeedEngine(Module):
         if include is None:
             include = list(OffloadStateTypeEnum)
 
-        if self.zero_offload_optimizer() is not None:
+        if self.zero_use_cpu_optimizer():
             exclude_states = [OffloadStateTypeEnum.hp_params, OffloadStateTypeEnum.optim_states]
             if self.zero_optimization_partition_weights():
                 exclude_states.append(OffloadStateTypeEnum.lp_grads)
