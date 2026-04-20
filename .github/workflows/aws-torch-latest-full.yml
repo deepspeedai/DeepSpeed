@@ -17,6 +17,18 @@ on:
   schedule:
     - cron: '0 8 * * *'   # Daily at 08:00 UTC (midnight PST)
   workflow_dispatch:
+    inputs:
+      torch_preset:
+        description: PyTorch preset to install for manual runs
+        required: false
+        default: '2.7.1-cu126'
+        type: choice
+        options:
+          - '2.7.1-cu126'
+          - '2.8.0-cu126'
+          - '2.9.1-cu126'
+          - '2.10.0-cu126'
+          - '2.11.0-cu126'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -38,7 +50,7 @@ jobs:
           default_branch="${{ github.event.repository.default_branch }}"
 
           last_sha=$(gh api \
-            "repos/${{ github.repository }}/actions/workflows/aws-torch-latest-full.yml/runs?status=success&branch=${default_branch}&per_page=1" \
+            "repos/${{ github.repository }}/actions/workflows/aws-torch-latest-full.yml/runs?status=success&event=schedule&branch=${default_branch}&per_page=1" \
             --jq '.workflow_runs[0].head_sha // empty')
 
           current_sha="${{ github.sha }}"
@@ -69,11 +81,10 @@ jobs:
       options: --gpus all --shm-size "32G" -v /mnt/aio:/mnt/aio
 
     env:
-      TORCH_VER: "2.7"
-      CUDA_VER: "12.6"
+      DEFAULT_TORCH_PRESET: '2.7.1-cu126'
       CUTLASS_PATH: /opt/cutlass
       # Disable reuse_dist_env to prevent pool worker cleanup hangs in full test runs
-      DS_DISABLE_REUSE_DIST_ENV: "1"
+      DS_DISABLE_REUSE_DIST_ENV: '1'
 
     steps:
       - name: Install system dependencies
@@ -87,6 +98,79 @@ jobs:
         with:
           lfs: true
 
+      - name: Resolve PyTorch preset
+        env:
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          MANUAL_TORCH_PRESET: ${{ github.event.inputs.torch_preset || '' }}
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = 'workflow_dispatch' ] && [ -n "$MANUAL_TORCH_PRESET" ]; then
+            selected_preset="$MANUAL_TORCH_PRESET"
+          else
+            selected_preset="$DEFAULT_TORCH_PRESET"
+          fi
+
+          case "$selected_preset" in
+            '2.7.1-cu126')
+              torch_install_version='2.7.1'
+              torchvision_install_version='0.22.1'
+              torchaudio_install_version='2.7.1'
+              torch_test_version='2.7'
+              cuda_test_version='12.6'
+              pytorch_index_url='https://download.pytorch.org/whl/cu126'
+              ;;
+            '2.8.0-cu126')
+              torch_install_version='2.8.0'
+              torchvision_install_version='0.23.0'
+              torchaudio_install_version='2.8.0'
+              torch_test_version='2.8'
+              cuda_test_version='12.6'
+              pytorch_index_url='https://download.pytorch.org/whl/cu126'
+              ;;
+            '2.9.1-cu126')
+              torch_install_version='2.9.1'
+              torchvision_install_version='0.24.1'
+              torchaudio_install_version='2.9.1'
+              torch_test_version='2.9'
+              cuda_test_version='12.6'
+              pytorch_index_url='https://download.pytorch.org/whl/cu126'
+              ;;
+            '2.10.0-cu126')
+              torch_install_version='2.10.0'
+              torchvision_install_version='0.25.0'
+              torchaudio_install_version='2.10.0'
+              torch_test_version='2.10'
+              cuda_test_version='12.6'
+              pytorch_index_url='https://download.pytorch.org/whl/cu126'
+              ;;
+            '2.11.0-cu126')
+              torch_install_version='2.11.0'
+              torchvision_install_version='0.26.0'
+              torchaudio_install_version='2.11.0'
+              torch_test_version='2.11'
+              cuda_test_version='12.6'
+              pytorch_index_url='https://download.pytorch.org/whl/cu126'
+              ;;
+            *)
+              echo "Unsupported torch_preset: $selected_preset" >&2
+              exit 1
+              ;;
+          esac
+
+          {
+            echo "SELECTED_TORCH_PRESET=$selected_preset"
+            echo "TORCH_INSTALL_VERSION=$torch_install_version"
+            echo "TORCHVISION_INSTALL_VERSION=$torchvision_install_version"
+            echo "TORCHAUDIO_INSTALL_VERSION=$torchaudio_install_version"
+            echo "TORCH_TEST_VERSION=$torch_test_version"
+            echo "CUDA_TEST_VERSION=$cuda_test_version"
+            echo "PYTORCH_INDEX_URL=$pytorch_index_url"
+          } >> "$GITHUB_ENV"
+
+          echo "Selected preset: $selected_preset"
+          echo "Resolved install tuple: torch==$torch_install_version torchvision==$torchvision_install_version torchaudio==$torchaudio_install_version"
+          echo "Resolved test expectations: torch=$torch_test_version cuda=$cuda_test_version"
+          echo "Resolved PyTorch index: $pytorch_index_url"
+
       - name: Install CUTLASS
         run: |
           git clone --depth 1 --branch v3.5.1 https://github.com/NVIDIA/cutlass.git /opt/cutlass
@@ -95,7 +179,11 @@ jobs:
 
       - name: Install PyTorch
         run: |
-          pip install torch==2.7.1 torchvision==0.22.1 torchaudio==2.7.1 --index-url https://download.pytorch.org/whl/cu126
+          pip install \
+            torch=="$TORCH_INSTALL_VERSION" \
+            torchvision=="$TORCHVISION_INSTALL_VERSION" \
+            torchaudio=="$TORCHAUDIO_INSTALL_VERSION" \
+            --index-url "$PYTORCH_INDEX_URL"
 
       - name: Install transformers
         run: |
@@ -114,6 +202,12 @@ jobs:
 
       - name: Check environment
         run: |
+          echo "=== Selected PyTorch Preset ==="
+          echo "Preset: $SELECTED_TORCH_PRESET"
+          echo "Install tuple: torch==$TORCH_INSTALL_VERSION torchvision==$TORCHVISION_INSTALL_VERSION torchaudio==$TORCHAUDIO_INSTALL_VERSION"
+          echo "PyTorch index URL: $PYTORCH_INDEX_URL"
+          echo "Expected test versions: torch=$TORCH_TEST_VERSION cuda=$CUDA_TEST_VERSION"
+          echo ""
           echo "=== GPU Information ==="
           nvidia-smi
           echo ""
@@ -129,7 +223,7 @@ jobs:
           echo ""
           echo "=== CUTLASS ==="
           echo "CUTLASS_PATH: $CUTLASS_PATH"
-          ls -la $CUTLASS_PATH/include/ | head -5
+          ls -la "$CUTLASS_PATH"/include/ | head -5
 
       - name: Detect GPU architecture
         run: |
@@ -181,7 +275,7 @@ jobs:
             --ignore=unit/launcher/test_user_args.py \
             --ignore=unit/runtime/zenflow \
             --ignore=unit/ops/adam/test_zf_torch_adam.py \
-            --torch_ver=${{ env.TORCH_VER }} --cuda_ver=${{ env.CUDA_VER }}
+            --torch_ver="$TORCH_TEST_VERSION" --cuda_ver="$CUDA_TEST_VERSION"
 
       - name: Unit tests (sequential)
         run: |
@@ -195,4 +289,4 @@ jobs:
             --ignore=unit/runtime/zenflow \
             --ignore=unit/ops/adam/test_zf_torch_adam.py \
             --ignore=unit/ops/deepspeed4science/test_DS4Sci_EvoformerAttention.py \
-            --torch_ver=${{ env.TORCH_VER }} --cuda_ver=${{ env.CUDA_VER }}
+            --torch_ver="$TORCH_TEST_VERSION" --cuda_ver="$CUDA_TEST_VERSION"

@@ -24,7 +24,7 @@ TORCH_LIBRARY(dc, m)
     m.def("wait_reload(Tensor a, int id, int id) -> Tensor");
     m.def("offload_parameter(Tensor a, int id, int id) -> ()");
     m.def("reload_parameter(Tensor a, int id, int id) -> ()");
-    m.def("end_backward(int graph_id) -> ()");
+    m.def("end_backward(Any deps, int graph_id) -> ()");
 
     m.def("test_call(Tensor a) -> Tensor");
 }
@@ -43,6 +43,7 @@ TORCH_LIBRARY_IMPL(dc, CPU, m)
     m.impl("wait_reload", &dc::wait_reload);
     m.impl("offload_parameter", &dc::offload_parameter);
     m.impl("reload_parameter", &dc::reload_parameter);
+    m.impl("end_backward", &dc::end_backward);
 
     m.impl("test_call", &dc::test_call);
 }
@@ -61,6 +62,7 @@ TORCH_LIBRARY_IMPL(dc, CUDA, m)
     m.impl("wait_reload", &dc::wait_reload);
     m.impl("offload_parameter", &dc::offload_parameter);
     m.impl("reload_parameter", &dc::reload_parameter);
+    m.impl("end_backward", &dc::end_backward);
 
     m.impl("test_call", &dc::test_call);
 }
@@ -75,10 +77,11 @@ TORCH_LIBRARY_IMPL(dc, Meta, m)
     m.impl("free_tensors", &dc::free_tensors_meta);
     m.impl("reload_parameter", &dc::reload_parameter_meta);
     m.impl("offload_parameter", &dc::offload_parameter_meta);
+    m.impl("end_backward", &dc::end_backward_meta);
 }
 
-// The "Undefined" dispatch key is for operations whose arguments do not contain
-// a tensor.
+// end_backward may be invoked with dependency placeholders that have already
+// become None, in which case the dispatcher sees no tensor arguments.
 TORCH_LIBRARY_IMPL(dc, Undefined, m) { m.impl("end_backward", &dc::end_backward); }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)

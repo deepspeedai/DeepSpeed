@@ -409,11 +409,39 @@ private:
     std::unordered_map<long, long> param_use_count_;
 };
 
-static at::cuda::CUDAStream ag_stream = at::cuda::getStreamFromPool(true);
-static at::cuda::CUDAStream rs_stream = at::cuda::getStreamFromPool(true);
-static at::cuda::CUDAStream copy_stream = at::cuda::getStreamFromPool(true);
-static at::cuda::CUDAStream offload_stream = at::cuda::getStreamFromPool(true);
-static at::cuda::CUDAStream reload_stream = at::cuda::getStreamFromPool(true);
+namespace {
+
+at::cuda::CUDAStream get_ag_stream()
+{
+    static at::cuda::CUDAStream ag_stream = at::cuda::getStreamFromPool(true);
+    return ag_stream;
+}
+
+at::cuda::CUDAStream get_rs_stream()
+{
+    static at::cuda::CUDAStream rs_stream = at::cuda::getStreamFromPool(true);
+    return rs_stream;
+}
+
+at::cuda::CUDAStream get_copy_stream()
+{
+    static at::cuda::CUDAStream copy_stream = at::cuda::getStreamFromPool(true);
+    return copy_stream;
+}
+
+at::cuda::CUDAStream get_offload_stream()
+{
+    static at::cuda::CUDAStream offload_stream = at::cuda::getStreamFromPool(true);
+    return offload_stream;
+}
+
+at::cuda::CUDAStream get_reload_stream()
+{
+    static at::cuda::CUDAStream reload_stream = at::cuda::getStreamFromPool(true);
+    return reload_stream;
+}
+
+}  // namespace
 
 void register_graph_z3(long graph_id, const std::vector<long>& ds_ids)
 {
@@ -422,11 +450,11 @@ void register_graph_z3(long graph_id, const std::vector<long>& ds_ids)
                                                                reduce_buckets,
                                                                ds_ids,
                                                                nccl_comm,
-                                                               ag_stream,
-                                                               rs_stream,
-                                                               copy_stream,
-                                                               offload_stream,
-                                                               reload_stream,
+                                                               get_ag_stream(),
+                                                               get_rs_stream(),
+                                                               get_copy_stream(),
+                                                               get_offload_stream(),
+                                                               get_reload_stream(),
                                                                pre_div_reduce);
 }
 
