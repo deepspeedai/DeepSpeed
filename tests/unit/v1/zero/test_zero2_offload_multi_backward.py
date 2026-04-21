@@ -125,7 +125,8 @@ class TestZeroOffloadMultiBackward(DistributedTest):
     def test_single_backward_allocates_no_cpu_accumulator(self, zero_stage):
         hidden_dim = 8
         engine = _init_engine(_base_config(zero_stage, cpu_offload=True), hidden_dim)
-        batch = next(iter(random_dataloader(model=engine, total_samples=1, hidden_dim=hidden_dim, device=engine.device)))
+        batch = next(
+            iter(random_dataloader(model=engine, total_samples=1, hidden_dim=hidden_dim, device=engine.device)))
         loss = engine(batch[0], batch[1])
         engine.set_gradient_accumulation_boundary(True)
         engine.backward(loss)
@@ -138,7 +139,9 @@ class TestZeroOffloadMultiBackward(DistributedTest):
         hidden_dim = 8
         ga = 4
         ref = _run_ga_microsteps(_base_config(zero_stage, gradient_accumulation_steps=ga, cpu_offload=False),
-                                 hidden_dim, total_microsteps=ga)
+                                 hidden_dim,
+                                 total_microsteps=ga)
         test = _run_ga_microsteps(_base_config(zero_stage, gradient_accumulation_steps=ga, cpu_offload=True),
-                                  hidden_dim, total_microsteps=ga)
+                                  hidden_dim,
+                                  total_microsteps=ga)
         _assert_params_match(ref, test, label=f"ZeRO-{zero_stage} ga=4")
