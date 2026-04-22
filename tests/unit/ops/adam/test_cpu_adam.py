@@ -313,7 +313,6 @@ class TestCPUAdamSubgroup(DistributedTest):
         assert optimizer.state[0]['step'] == 1, "Subgroup 0 step count should be decremented"
         assert optimizer.state[1]['step'] == 1, "Subgroup 1 step count should be unchanged"
 
-
     def test_step_subgroup_same_step_idempotent_across_subgroups(self):
         """Repeated same-step subgroup updates should remain bit-identical."""
         from deepspeed.ops.adam import DeepSpeedCPUAdam

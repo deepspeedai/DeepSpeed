@@ -73,7 +73,8 @@ public:
                 _step++;
                 _betta1_t *= _betta1;
                 _betta2_t *= _betta2;
-            } else if (step == _step) {  // no need to update step; beta1_t and beta2_t already updated
+            } else if (step ==
+                       _step) {  // no need to update step; beta1_t and beta2_t already updated
                 return;
             } else {  // support step increase not equal to 1
                 _betta1_t = std::pow(_betta1, step);
