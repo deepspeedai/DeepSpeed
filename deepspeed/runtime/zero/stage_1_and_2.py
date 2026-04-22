@@ -1507,8 +1507,11 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
     ############################################################################################
     def copy_grads_in_partition(self, param):
         if self.cpu_offload:
-
-            if self.gradient_accumulation_steps > 1:
+            # Accumulate when there were prior backwards in this step (restore from
+            # CPU buffer) or more will follow (save to CPU buffer). Skipping only
+            # the lone backward of a step preserves the existing fast path for
+            # ga_steps=1 + single backward.
+            if self.micro_step_id > 0 or not self.is_gradient_accumulation_boundary:
                 self.async_accumulate_grad_in_cpu_via_gpu(param)
 
             if self.is_gradient_accumulation_boundary:
