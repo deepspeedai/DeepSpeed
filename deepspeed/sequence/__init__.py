@@ -3,7 +3,6 @@
 
 # DeepSpeed Team
 
-
 from deepspeed.sequence.autosp_detector import detect_model_sp_info, SPModelInfo
 from deepspeed.sequence.autosp_vit import UlyssesSPViTAttention
 from deepspeed.sequence.autosp_fusion import ModalityFusionSPAdapter

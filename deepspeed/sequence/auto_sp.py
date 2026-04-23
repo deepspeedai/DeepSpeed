@@ -72,11 +72,10 @@ def auto_wrap_model_for_sp(model: nn.Module, process_group) -> nn.Module:
     info = detect_model_sp_info(model)
 
     if not info.vit_attn_modules and not info.llm_attn_modules:
-        raise ValueError(
-            "auto_wrap_model_for_sp: no recognisable attention modules found. "
-            "Add the model's attention class name(s) to "
-            "_VIT_ATTN_CLASSNAMES or _LLM_ATTN_CLASSNAMES in "
-            "deepspeed/sequence/autosp_detector.py and retry.")
+        raise ValueError("auto_wrap_model_for_sp: no recognisable attention modules found. "
+                         "Add the model's attention class name(s) to "
+                         "_VIT_ATTN_CLASSNAMES or _LLM_ATTN_CLASSNAMES in "
+                         "deepspeed/sequence/autosp_detector.py and retry.")
 
     # ------------------------------------------------------------------
     # Wrap ViT encoder attention layers

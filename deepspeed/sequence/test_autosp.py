@@ -18,7 +18,6 @@ from deepspeed.sequence.autosp_detector import (SPModelInfo, _LLM_ATTN_CLASSNAME
 from deepspeed.sequence.autosp_vit import UlyssesSPViTAttention
 from deepspeed.sequence.auto_sp import _set_module_by_name, auto_wrap_model_for_sp
 
-
 # ---------------------------------------------------------------------------
 # Minimal fake modules that mimic the interface of real attention layers
 # without requiring a GPU or a real transformer model.

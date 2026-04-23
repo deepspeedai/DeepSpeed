@@ -113,7 +113,7 @@ class ModalityFusionSPAdapter(nn.Module):
         return fused[:, rank * local_len:(rank + 1) * local_len, :].contiguous()
 
     def _splice_visual_into_text(self, text_embeds: torch.Tensor, visual_embeds: torch.Tensor,
-                                  input_ids: torch.Tensor) -> torch.Tensor:
+                                 input_ids: torch.Tensor) -> torch.Tensor:
         """Replace image placeholder positions in *text_embeds* with *visual_embeds*.
 
         This is intentionally architecture-specific.  The default raises
@@ -124,7 +124,6 @@ class ModalityFusionSPAdapter(nn.Module):
         * InternVL: ``InternVLChatModel.extract_feature``
         * Qwen-VL: ``Qwen2VLForConditionalGeneration.get_rope_index``
         """
-        raise NotImplementedError(
-            f"{type(self).__name__}._splice_visual_into_text is not implemented. "
-            "Subclass ModalityFusionSPAdapter and override this method to match "
-            "your model's prepare_inputs_embeds logic.")
+        raise NotImplementedError(f"{type(self).__name__}._splice_visual_into_text is not implemented. "
+                                  "Subclass ModalityFusionSPAdapter and override this method to match "
+                                  "your model's prepare_inputs_embeds logic.")
