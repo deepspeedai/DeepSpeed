@@ -127,3 +127,61 @@ class ModalityFusionSPAdapter(nn.Module):
         raise NotImplementedError(f"{type(self).__name__}._splice_visual_into_text is not implemented. "
                                   "Subclass ModalityFusionSPAdapter and override this method to match "
                                   "your model's prepare_inputs_embeds logic.")
+
+
+class LlavaFusionAdapter(ModalityFusionSPAdapter):
+    """LLaVA-style splice: replace each image placeholder token with visual tokens.
+
+    Follows the logic of ``LlavaMetaForCausalLM.prepare_inputs_labels_for_multimodal``:
+    for each sample, locate ``image_token_id`` placeholders in ``input_ids``,
+    remove them, and insert the corresponding visual token chunk in their place.
+
+    Visual tokens for a sample are split evenly across the number of image
+    placeholders found.  This matches the common single-image case (one
+    placeholder per sample) and simple multi-image cases where every image
+    contributes the same number of tokens.
+
+    Parameters are inherited from :class:`ModalityFusionSPAdapter`.
+    """
+
+    def _splice_visual_into_text(self, text_embeds: torch.Tensor, visual_embeds: torch.Tensor,
+                                 input_ids: torch.Tensor) -> torch.Tensor:
+        bs, text_len, hidden = text_embeds.shape
+        device = text_embeds.device
+
+        fused_samples = []
+        for i in range(bs):
+            img_pos = (input_ids[i] == self.image_token_id).nonzero(as_tuple=True)[0]
+            num_images = img_pos.numel()
+
+            if num_images == 0:
+                # No image in this sample — keep text embeddings unchanged.
+                fused_samples.append(text_embeds[i])
+                continue
+
+            # Split all visual tokens evenly across the image placeholders.
+            visual_chunks = torch.chunk(visual_embeds[i], num_images, dim=0)
+
+            segments = []
+            prev = 0
+            for j, pos in enumerate(img_pos.tolist()):
+                # Text segment before this placeholder.
+                if pos > prev:
+                    segments.append(text_embeds[i, prev:pos])
+                # Visual tokens replacing this placeholder.
+                segments.append(visual_chunks[j])
+                # Skip the placeholder token itself.
+                prev = pos + 1
+
+            # Remaining text after the last placeholder.
+            if prev < text_len:
+                segments.append(text_embeds[i, prev:])
+
+            fused_samples.append(torch.cat(segments, dim=0))
+
+        # Pad all samples to the same length so they stack into a tensor.
+        max_len = max(s.shape[0] for s in fused_samples)
+        out = torch.zeros(bs, max_len, hidden, dtype=text_embeds.dtype, device=device)
+        for i, s in enumerate(fused_samples):
+            out[i, :s.shape[0]] = s
+        return out

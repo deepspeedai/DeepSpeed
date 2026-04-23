@@ -8,6 +8,7 @@ Unit tests for AutoSP multimodal sequence parallelism:
   - UlyssesSPViTAttention: ViT SP wrapper
   - auto_wrap_model_for_sp: end-to-end wrapping
   - ModalityFusionSPAdapter: cross-modal gather/scatter
+  - LlavaFusionAdapter: LLaVA-style visual token splice
 """
 
 import pytest
@@ -16,7 +17,7 @@ import torch.nn as nn
 
 from deepspeed.sequence.autosp_detector import (SPModelInfo, _LLM_ATTN_CLASSNAMES, _VIT_ATTN_CLASSNAMES,
                                                 detect_model_sp_info)
-from deepspeed.sequence.autosp_fusion import ModalityFusionSPAdapter
+from deepspeed.sequence.autosp_fusion import LlavaFusionAdapter, ModalityFusionSPAdapter
 from deepspeed.sequence.autosp_vit import UlyssesSPViTAttention
 from deepspeed.sequence.auto_sp import _set_module_by_name, auto_wrap_model_for_sp
 from deepspeed.sequence.layer import DistributedAttention
@@ -384,3 +385,113 @@ class TestModalityFusionSPAdapter:
         # Since text_len=4 and local_len=6, rank0 slice starts with text zeros
         # and ends with some visual twos.
         assert out.max().item() == pytest.approx(2.0)
+
+
+# ---------------------------------------------------------------------------
+# LlavaFusionAdapter tests  (tests _splice_visual_into_text directly)
+# ---------------------------------------------------------------------------
+
+_IMAGE_ID = -200  # matches ModalityFusionSPAdapter default
+
+
+def _make_llava_adapter(world_size=2, rank=0):
+    pg = _make_mock_process_group(world_size=world_size, rank=rank)
+    return LlavaFusionAdapter(nn.Identity(), pg, image_token_id=_IMAGE_ID)
+
+
+class TestLlavaFusionAdapter:
+
+    def test_single_image_fused_shape(self):
+        """One image placeholder per sample → fused length = text_len - 1 + num_visual."""
+        adapter = _make_llava_adapter()
+        bs, text_len, num_vis, hidden = 2, 6, 4, 8
+        # Place a single image placeholder at position 2.
+        ids = torch.zeros(bs, text_len, dtype=torch.long)
+        ids[:, 2] = _IMAGE_ID
+        text = torch.randn(bs, text_len, hidden)
+        visual = torch.randn(bs, num_vis, hidden)
+
+        fused = adapter._splice_visual_into_text(text, visual, ids)
+        # placeholder is removed and replaced by num_vis tokens
+        assert fused.shape == (bs, text_len - 1 + num_vis, hidden)
+
+    def test_text_values_preserved_around_image(self):
+        """Text tokens before and after the placeholder must be numerically intact."""
+        adapter = _make_llava_adapter()
+        bs, text_len, num_vis, hidden = 1, 5, 3, 4
+        # Placeholder at index 2: text = [A, B, <img>, C, D]
+        ids = torch.zeros(bs, text_len, dtype=torch.long)
+        ids[0, 2] = _IMAGE_ID
+        text = torch.arange(bs * text_len * hidden, dtype=torch.float).reshape(bs, text_len, hidden)
+        visual = torch.ones(bs, num_vis, hidden) * 99.0
+
+        fused = adapter._splice_visual_into_text(text, visual, ids)
+        # fused = [A, B, vis0, vis1, vis2, C, D]
+        assert torch.allclose(fused[0, :2], text[0, :2])  # A, B preserved
+        assert torch.allclose(fused[0, 5:], text[0, 3:])  # C, D preserved
+        assert torch.allclose(fused[0, 2:5], visual[0])  # visual inserted
+
+    def test_no_image_token_returns_text_unchanged(self):
+        """When input_ids has no placeholder, output equals text_embeds exactly."""
+        adapter = _make_llava_adapter()
+        bs, text_len, hidden = 2, 6, 8
+        ids = torch.zeros(bs, text_len, dtype=torch.long)  # no -200
+        text = torch.randn(bs, text_len, hidden)
+        visual = torch.randn(bs, 4, hidden)
+
+        fused = adapter._splice_visual_into_text(text, visual, ids)
+        assert fused.shape == (bs, text_len, hidden)
+        assert torch.allclose(fused, text)
+
+    def test_multi_image_splice(self):
+        """Two placeholders per sample → visual tokens split evenly between them."""
+        adapter = _make_llava_adapter()
+        bs, text_len, num_vis, hidden = 1, 7, 6, 4
+        # Placeholders at index 1 and 4: [t0, <img>, t2, t3, <img>, t5, t6]
+        ids = torch.zeros(bs, text_len, dtype=torch.long)
+        ids[0, 1] = _IMAGE_ID
+        ids[0, 4] = _IMAGE_ID
+        text = torch.zeros(bs, text_len, hidden)
+        # First 3 visual tokens = 1.0, last 3 = 2.0 (so we can tell them apart)
+        visual = torch.cat([torch.ones(bs, 3, hidden), torch.full((bs, 3, hidden), 2.0)], dim=1)
+
+        fused = adapter._splice_visual_into_text(text, visual, ids)
+        # Expected fused length: 7 - 2 placeholders + 6 visual = 11
+        assert fused.shape == (bs, 11, hidden)
+        # First chunk (indices 1-3) should be 1.0
+        assert torch.allclose(fused[0, 1:4], torch.ones(3, hidden))
+        # Second chunk (indices 6-8) should be 2.0
+        assert torch.allclose(fused[0, 6:9], torch.full((3, hidden), 2.0))
+
+    def test_batch_padding_when_lengths_differ(self):
+        """Samples with different numbers of image tokens are padded to max length."""
+        adapter = _make_llava_adapter()
+        hidden = 4
+        # Sample 0: 1 placeholder in a 4-token sequence + 2 visual → fused len = 5
+        # Sample 1: no placeholder in a 4-token sequence → fused len = 4
+        ids = torch.zeros(2, 4, dtype=torch.long)
+        ids[0, 1] = _IMAGE_ID
+        text = torch.ones(2, 4, hidden)
+        visual = torch.ones(2, 2, hidden) * 3.0
+
+        fused = adapter._splice_visual_into_text(text, visual, ids)
+        # Max fused length is 5; sample 1 padded with zeros at the end.
+        assert fused.shape == (2, 5, hidden)
+        assert torch.all(fused[1, 4:] == 0)  # padding tokens are zero
+
+    def test_forward_end_to_end_shape(self):
+        """Full forward pass through LlavaFusionAdapter returns the correct shard shape."""
+        world_size = 2
+        pg = _make_mock_process_group(world_size=world_size, rank=0)
+        adapter = LlavaFusionAdapter(nn.Identity(), pg, image_token_id=_IMAGE_ID)
+
+        bs, local_v, text_len, hidden = 1, 4, 6, 8
+        ids = torch.zeros(bs, text_len, dtype=torch.long)
+        ids[0, 2] = _IMAGE_ID  # one placeholder
+        visual = torch.randn(bs, local_v, hidden)
+        text = torch.randn(bs, text_len, hidden)
+
+        out = adapter(visual, text, ids)
+        # fused_len = text_len - 1 + local_v * world_size = 5 + 8 = 13
+        # padded to 14 (next multiple of 2), local = 7
+        assert out.shape == (bs, 7, hidden)
