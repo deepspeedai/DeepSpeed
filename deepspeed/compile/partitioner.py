@@ -3,7 +3,7 @@
 
 # DeepSpeed Team
 
-from typing import Tuple, List
+from typing import Tuple, List, Set
 
 import torch
 from torch.fx import GraphModule, Graph, Node
@@ -85,10 +85,13 @@ def get_wrapped_partitioner(
     z3_partition: bool,
     param_indices: List[Tuple[int, int, torch.Size]],
     partition_fn,
+    frame_id: int,
+    frames_partitioned: Set[int],
 ):
 
     def partition_recompute_ds_params(joint_module: GraphModule, _joint_inputs, *, num_fwd_outputs,
                                       **kwargs) -> Tuple[GraphModule, GraphModule]:
+        frames_partitioned.add(frame_id)
         if z3_partition:
             _recompute_param_aliases(joint_module.graph, param_indices)
         return partition_fn(joint_module, _joint_inputs, num_fwd_outputs=num_fwd_outputs, **kwargs)
