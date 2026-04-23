@@ -271,6 +271,7 @@ class TestAutoWrapModelForSP:
 # ModalityFusionSPAdapter tests
 # ---------------------------------------------------------------------------
 
+
 class _ConcatFusionAdapter(ModalityFusionSPAdapter):
     """Concrete subclass that appends visual tokens after text tokens."""
 
@@ -367,6 +368,7 @@ class TestModalityFusionSPAdapter:
 
         # Use a projection that doubles all values
         class _DoubleProjection(nn.Module):
+
             def forward(self, x):
                 return x * 2.0
 
