@@ -7,6 +7,7 @@ Unit tests for AutoSP multimodal sequence parallelism:
   - autosp_detector: model scanning
   - UlyssesSPViTAttention: ViT SP wrapper
   - auto_wrap_model_for_sp: end-to-end wrapping
+  - ModalityFusionSPAdapter: cross-modal gather/scatter
 """
 
 import pytest
@@ -15,8 +16,10 @@ import torch.nn as nn
 
 from deepspeed.sequence.autosp_detector import (SPModelInfo, _LLM_ATTN_CLASSNAMES, _VIT_ATTN_CLASSNAMES,
                                                 detect_model_sp_info)
+from deepspeed.sequence.autosp_fusion import ModalityFusionSPAdapter
 from deepspeed.sequence.autosp_vit import UlyssesSPViTAttention
 from deepspeed.sequence.auto_sp import _set_module_by_name, auto_wrap_model_for_sp
+from deepspeed.sequence.layer import DistributedAttention
 
 # ---------------------------------------------------------------------------
 # Minimal fake modules that mimic the interface of real attention layers
@@ -67,6 +70,14 @@ class _FakeViTOnlyModel(nn.Module):
     def __init__(self, num_layers=3):
         super().__init__()
         self.layers = nn.ModuleList([_FakeViTAttn() for _ in range(num_layers)])
+
+
+class _FakeLLMOnlyModel(nn.Module):
+    """Minimal LLM-only model with multiple decoder attention layers."""
+
+    def __init__(self, num_layers=2):
+        super().__init__()
+        self.layers = nn.ModuleList([_FakeLLMAttn() for _ in range(num_layers)])
 
 
 # ---------------------------------------------------------------------------
@@ -228,3 +239,146 @@ class TestAutoWrapModelForSP:
         new_mod = nn.Identity()
         _set_module_by_name(model, "vision_encoder.0", new_mod)
         assert model.vision_encoder[0] is new_mod
+
+    def test_llm_layers_replaced_with_distributed_attention(self):
+        """LLM attention layers must be wrapped with DistributedAttention."""
+        pg = _make_mock_process_group(world_size=2, rank=0)
+        model = _FakeLLMOnlyModel(num_layers=3)
+        auto_wrap_model_for_sp(model, pg)
+        for layer in model.layers:
+            assert isinstance(layer, DistributedAttention)
+
+    def test_multimodal_model_wraps_both_branches(self):
+        """Both ViT and LLM attention layers must be replaced in a combined model."""
+        pg = _make_mock_process_group(world_size=2, rank=0)
+        model = _FakeMultimodalModel()
+        returned = auto_wrap_model_for_sp(model, pg)
+        # auto_wrap_model_for_sp must return the same object (in-place)
+        assert returned is model
+        assert isinstance(model.vision_encoder[0], UlyssesSPViTAttention)
+        assert isinstance(model.llm[0], DistributedAttention)
+
+    def test_original_module_preserved_inside_wrapper(self):
+        """The wrapped module should still be accessible inside the wrapper."""
+        pg = _make_mock_process_group(world_size=2, rank=0)
+        model = _FakeViTOnlyModel(num_layers=1)
+        original_attn = model.layers[0]
+        auto_wrap_model_for_sp(model, pg)
+        assert model.layers[0].attn is original_attn
+
+
+# ---------------------------------------------------------------------------
+# ModalityFusionSPAdapter tests
+# ---------------------------------------------------------------------------
+
+class _ConcatFusionAdapter(ModalityFusionSPAdapter):
+    """Concrete subclass that appends visual tokens after text tokens."""
+
+    def _splice_visual_into_text(self, text_embeds, visual_embeds, input_ids):
+        return torch.cat([text_embeds, visual_embeds], dim=1)
+
+
+class TestModalityFusionSPAdapter:
+
+    def test_base_class_raises_not_implemented(self):
+        """The base _splice_visual_into_text must raise NotImplementedError."""
+        pg = _make_mock_process_group(world_size=2, rank=0)
+        adapter = ModalityFusionSPAdapter(nn.Identity(), pg)
+        with pytest.raises(NotImplementedError):
+            adapter._splice_visual_into_text(None, None, None)
+
+    @pytest.mark.parametrize("world_size,local_v,text_len,hidden", [
+        (2, 4, 6, 8),
+        (4, 3, 5, 16),
+        (1, 8, 8, 4),
+    ])
+    def test_output_shape(self, world_size, local_v, text_len, hidden):
+        """Output local_len must equal ceil(fused_len / world_size)."""
+        pg = _make_mock_process_group(world_size=world_size, rank=0)
+        adapter = _ConcatFusionAdapter(nn.Identity(), pg)
+
+        bs = 2
+        visual = torch.randn(bs, local_v, hidden)
+        text = torch.randn(bs, text_len, hidden)
+        ids = torch.zeros(bs, text_len, dtype=torch.long)
+
+        out = adapter(visual, text, ids)
+
+        # all_gather mock copies local_v to each of world_size slots
+        fused_len = text_len + local_v * world_size
+        pad = (world_size - fused_len % world_size) % world_size
+        expected_local = (fused_len + pad) // world_size
+        assert out.shape == (bs, expected_local, hidden), f"Expected ({bs},{expected_local},{hidden}), got {out.shape}"
+
+    def test_padding_produces_valid_output_when_not_divisible(self):
+        """When fused_len % world_size != 0, padding must not raise and output is well-formed."""
+        world_size = 4
+        # text_len=5, local_v=3 → fused_len = 5 + 3*4 = 17, needs padding of 3
+        pg = _make_mock_process_group(world_size=world_size, rank=0)
+        adapter = _ConcatFusionAdapter(nn.Identity(), pg)
+
+        bs, local_v, text_len, hidden = 1, 3, 5, 4
+        out = adapter(
+            torch.randn(bs, local_v, hidden),
+            torch.randn(bs, text_len, hidden),
+            torch.zeros(bs, text_len, dtype=torch.long),
+        )
+        # padded_len = 20, local_len = 5
+        assert out.shape == (bs, 5, hidden)
+
+    def test_no_padding_when_divisible(self):
+        """When fused_len is already divisible, no extra tokens should be added."""
+        world_size = 4
+        # text_len=4, local_v=4 → fused_len = 4 + 4*4 = 20, divisible by 4
+        pg = _make_mock_process_group(world_size=world_size, rank=0)
+        adapter = _ConcatFusionAdapter(nn.Identity(), pg)
+
+        bs, local_v, text_len, hidden = 1, 4, 4, 8
+        out = adapter(
+            torch.randn(bs, local_v, hidden),
+            torch.randn(bs, text_len, hidden),
+            torch.zeros(bs, text_len, dtype=torch.long),
+        )
+        assert out.shape == (bs, 5, hidden)  # 20 // 4 = 5
+
+    def test_different_ranks_return_different_slices(self):
+        """Rank 0 and rank 1 must return different slices of the fused sequence."""
+        world_size = 2
+        bs, local_v, text_len, hidden = 1, 4, 4, 8
+        # Use distinct text vs visual values so slices clearly differ
+        text = torch.zeros(bs, text_len, hidden)
+        visual = torch.ones(bs, local_v, hidden)
+        ids = torch.zeros(bs, text_len, dtype=torch.long)
+
+        outputs = {}
+        for rank in range(world_size):
+            pg = _make_mock_process_group(world_size=world_size, rank=rank)
+            adapter = _ConcatFusionAdapter(nn.Identity(), pg)
+            outputs[rank] = adapter(visual.clone(), text.clone(), ids.clone())
+
+        # fused = [0,0,0,0, 1,1,1,1, 1,1,1,1]  (text zeros then visual ones x2)
+        # rank 0: indices 0-5, rank 1: indices 6-11
+        assert not torch.allclose(outputs[0], outputs[1])
+
+    def test_projection_is_applied(self):
+        """Projection layer must transform visual features before gather."""
+        world_size = 2
+        pg = _make_mock_process_group(world_size=world_size, rank=0)
+
+        # Use a projection that doubles all values
+        class _DoubleProjection(nn.Module):
+            def forward(self, x):
+                return x * 2.0
+
+        adapter = _ConcatFusionAdapter(_DoubleProjection(), pg)
+        bs, local_v, text_len, hidden = 1, 4, 4, 8
+        visual = torch.ones(bs, local_v, hidden)
+        text = torch.zeros(bs, text_len, hidden)
+        ids = torch.zeros(bs, text_len, dtype=torch.long)
+
+        out = adapter(visual, text, ids)
+        # The visual part of the output should have value 2.0 (doubled), not 1.0
+        # rank 0 gets the first local_len tokens; fused = [text(0)*4, visual(2)*8]
+        # Since text_len=4 and local_len=6, rank0 slice starts with text zeros
+        # and ends with some visual twos.
+        assert out.max().item() == pytest.approx(2.0)
