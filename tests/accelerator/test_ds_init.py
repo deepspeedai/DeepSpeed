@@ -40,9 +40,9 @@ def test_literal_device():
     os.environ['LOCAL_RANK'] = '0'
     deepspeed.init_distributed(get_accelerator().communication_backend_name())
     deepspeed.initialize(model=model, config='ds_config.json')
-    string = get_accelerator().device_name()  #'xpu' or 'cuda'
-    string0 = get_accelerator().device_name(0)  #'xpu:0' or 'cuda:0'
-    string1 = get_accelerator().device_name(1)  #'xpu:1' or 'cuda:1'
-    assert string == 'xpu' or string == 'cuda'
-    assert string0 == 'xpu:0' or string0 == 'cuda:0'
-    assert string1 == 'xpu:1' or string1 == 'cuda:1'
+    string = get_accelerator().device_name()  #'xpu', 'cuda', or 'xla'
+    string0 = get_accelerator().device_name(0)  #'xpu:0', 'cuda:0', or 'xla:0'
+    string1 = get_accelerator().device_name(1)  #'xpu:1', 'cuda:1', or 'xla:1'
+    assert string in ['xpu', 'cuda', 'xla']
+    assert string0 in ['xpu:0', 'cuda:0', 'xla:0']
+    assert string1 in ['xpu:1', 'cuda:1', 'xla:1']
