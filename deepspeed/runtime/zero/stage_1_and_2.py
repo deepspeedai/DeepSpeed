@@ -19,7 +19,7 @@ from typing import Container
 from deepspeed.runtime.zero.offload_states import offload_optimizer_states, reload_optimizer_states
 from deepspeed.runtime.base_optimizer import ZeROOptimizer
 from deepspeed.runtime.fp16.loss_scaler import CreateLossScaler
-from deepspeed.runtime.torch_autocast import get_autocast_dtype, get_all_comm_dtypes, is_autocast_initialized, sort_dtypes
+from deepspeed.runtime.torch_autocast import get_all_comm_dtypes, has_comm_dtype, sort_dtypes
 from deepspeed.runtime.utils import (empty_cache, see_memory_usage, inf, is_model_parallel_parameter,
                                      align_dense_tensors, all_gather_dp_groups, mask_nan_or_inf_with_val_inplace,
                                      count_used_parameters_in_backward)
@@ -519,9 +519,10 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         self.is_param_in_current_partition = {}
 
         self.torch_autocast_gradscaler = None
-        if is_autocast_initialized():
-            comm_dtypes = get_all_comm_dtypes([p for params in self.bit16_groups for p in params])
-            if get_autocast_dtype() == torch.float16:
+        all_params = [p for params in self.bit16_groups for p in params]
+        if any(has_comm_dtype(p) for p in all_params):
+            comm_dtypes = get_all_comm_dtypes(all_params)
+            if torch.float16 in comm_dtypes:
                 self.torch_autocast_gradscaler = torch.amp.GradScaler(device=get_accelerator().device_name())
         else:
             comm_dtypes = {self.communication_data_type}
