@@ -9,6 +9,8 @@ Unit tests for AutoSP multimodal sequence parallelism:
   - auto_wrap_model_for_sp: end-to-end wrapping
   - ModalityFusionSPAdapter: cross-modal gather/scatter
   - LlavaFusionAdapter: LLaVA-style visual token splice
+  - InternVLFusionAdapter: InternVL-style IMG_CONTEXT token splice
+  - Qwen2VLFusionAdapter: Qwen2-VL vision_start/end bounded splice
 """
 
 import pytest
@@ -17,7 +19,8 @@ import torch.nn as nn
 
 from deepspeed.sequence.autosp_detector import (SPModelInfo, _LLM_ATTN_CLASSNAMES, _VIT_ATTN_CLASSNAMES,
                                                 detect_model_sp_info)
-from deepspeed.sequence.autosp_fusion import LlavaFusionAdapter, ModalityFusionSPAdapter
+from deepspeed.sequence.autosp_fusion import (InternVLFusionAdapter, LlavaFusionAdapter, ModalityFusionSPAdapter,
+                                              Qwen2VLFusionAdapter)
 from deepspeed.sequence.autosp_vit import UlyssesSPViTAttention
 from deepspeed.sequence.auto_sp import _set_module_by_name, auto_wrap_model_for_sp
 from deepspeed.sequence.layer import DistributedAttention
@@ -495,3 +498,227 @@ class TestLlavaFusionAdapter:
         # fused_len = text_len - 1 + local_v * world_size = 5 + 8 = 13
         # padded to 14 (next multiple of 2), local = 7
         assert out.shape == (bs, 7, hidden)
+
+
+# ---------------------------------------------------------------------------
+# InternVLFusionAdapter tests  (tests _splice_visual_into_text directly)
+# ---------------------------------------------------------------------------
+
+_CONTEXT_ID = 92546  # arbitrary IMG_CONTEXT token id for tests
+_START_ID = 92545
+_END_ID = 92547
+
+
+def _make_internvl_adapter(world_size=2, rank=0):
+    pg = _make_mock_process_group(world_size=world_size, rank=rank)
+    return InternVLFusionAdapter(nn.Identity(), pg, image_token_id=_CONTEXT_ID)
+
+
+class TestInternVLFusionAdapter:
+
+    def test_context_tokens_replaced_with_visual(self):
+        """IMG_CONTEXT positions must carry visual embeddings after splice."""
+        adapter = _make_internvl_adapter()
+        bs, text_len, hidden = 1, 7, 4
+        # Layout: [t0, START, ctx, ctx, ctx, END, t6]
+        ids = torch.zeros(bs, text_len, dtype=torch.long)
+        ids[0, 2] = _CONTEXT_ID
+        ids[0, 3] = _CONTEXT_ID
+        ids[0, 4] = _CONTEXT_ID
+
+        text = torch.zeros(bs, text_len, hidden)
+        visual = torch.ones(bs, 3, hidden) * 7.0
+
+        fused = adapter._splice_visual_into_text(text, visual, ids)
+        assert torch.allclose(fused[0, 2:5], visual[0])
+
+    def test_sequence_length_preserved(self):
+        """Output length must equal input length (1-to-1 replacement)."""
+        adapter = _make_internvl_adapter()
+        bs, text_len, hidden = 2, 10, 8
+        ids = torch.zeros(bs, text_len, dtype=torch.long)
+        ids[:, 3:7] = _CONTEXT_ID  # 4 context tokens per sample
+        text = torch.randn(bs, text_len, hidden)
+        visual = torch.randn(bs, 4, hidden)
+
+        fused = adapter._splice_visual_into_text(text, visual, ids)
+        assert fused.shape == (bs, text_len, hidden)
+
+    def test_boundary_tokens_preserved(self):
+        """IMG_START and IMG_END embeddings must be unchanged after splice."""
+        adapter = _make_internvl_adapter()
+        bs, text_len, hidden = 1, 5, 4
+        # [START, ctx, ctx, END, text]
+        ids = torch.zeros(bs, text_len, dtype=torch.long)
+        ids[0, 1] = _CONTEXT_ID
+        ids[0, 2] = _CONTEXT_ID
+
+        text = torch.arange(bs * text_len * hidden, dtype=torch.float).reshape(bs, text_len, hidden)
+        visual = torch.ones(bs, 2, hidden) * 99.0
+
+        fused = adapter._splice_visual_into_text(text, visual, ids)
+        # Position 0 (START) and 3 (END) must be unchanged.
+        assert torch.allclose(fused[0, 0], text[0, 0])
+        assert torch.allclose(fused[0, 3], text[0, 3])
+
+    def test_no_context_tokens_returns_text_unchanged(self):
+        """When there are no IMG_CONTEXT tokens the output must equal text_embeds."""
+        adapter = _make_internvl_adapter()
+        bs, text_len, hidden = 2, 6, 8
+        ids = torch.zeros(bs, text_len, dtype=torch.long)
+        text = torch.randn(bs, text_len, hidden)
+        visual = torch.randn(bs, 4, hidden)
+
+        fused = adapter._splice_visual_into_text(text, visual, ids)
+        assert torch.allclose(fused, text)
+
+    def test_multi_image_replacement(self):
+        """Two separate runs of context tokens correspond to two images."""
+        adapter = _make_internvl_adapter()
+        bs, text_len, hidden = 1, 10, 4
+        # Image 1: positions 1-2, Image 2: positions 6-7
+        ids = torch.zeros(bs, text_len, dtype=torch.long)
+        ids[0, 1] = _CONTEXT_ID
+        ids[0, 2] = _CONTEXT_ID
+        ids[0, 6] = _CONTEXT_ID
+        ids[0, 7] = _CONTEXT_ID
+
+        text = torch.zeros(bs, text_len, hidden)
+        # First 2 visual tokens = 1.0, next 2 = 2.0
+        visual = torch.cat([torch.ones(bs, 2, hidden), torch.full((bs, 2, hidden), 2.0)], dim=1)
+
+        fused = adapter._splice_visual_into_text(text, visual, ids)
+        assert fused.shape == (bs, text_len, hidden)
+        assert torch.allclose(fused[0, 1:3], torch.ones(2, hidden))
+        assert torch.allclose(fused[0, 6:8], torch.full((2, hidden), 2.0))
+
+    def test_forward_end_to_end_shape(self):
+        """Full forward pass returns the correct shard shape."""
+        world_size = 2
+        pg = _make_mock_process_group(world_size=world_size, rank=0)
+        adapter = InternVLFusionAdapter(nn.Identity(), pg, image_token_id=_CONTEXT_ID)
+
+        bs, local_v, text_len, hidden = 1, 3, 8, 4
+        ids = torch.zeros(bs, text_len, dtype=torch.long)
+        ids[0, 2:5] = _CONTEXT_ID  # 3 context tokens; local_v * world_size = 6 total
+        visual = torch.randn(bs, local_v, hidden)
+        text = torch.randn(bs, text_len, hidden)
+
+        out = adapter(visual, text, ids)
+        # fused_len == text_len == 8 (length-preserving); padded to 8 (divisible by 2); local = 4
+        assert out.shape == (bs, 4, hidden)
+
+
+# ---------------------------------------------------------------------------
+# Qwen2VLFusionAdapter tests  (tests _splice_visual_into_text directly)
+# ---------------------------------------------------------------------------
+
+_VIS_START_ID = 151652
+_VIS_END_ID = 151653
+
+
+def _make_qwen2vl_adapter(world_size=2, rank=0):
+    pg = _make_mock_process_group(world_size=world_size, rank=rank)
+    return Qwen2VLFusionAdapter(nn.Identity(),
+                                pg,
+                                vision_start_token_id=_VIS_START_ID,
+                                vision_end_token_id=_VIS_END_ID)
+
+
+class TestQwen2VLFusionAdapter:
+
+    def test_inner_tokens_replaced_with_visual(self):
+        """Tokens between vision_start and vision_end must become visual embeddings."""
+        adapter = _make_qwen2vl_adapter()
+        bs, text_len, hidden = 1, 7, 4
+        # [t0, t1, <vis_start>, pad, pad, <vis_end>, t6]
+        ids = torch.zeros(bs, text_len, dtype=torch.long)
+        ids[0, 2] = _VIS_START_ID
+        ids[0, 5] = _VIS_END_ID
+
+        text = torch.zeros(bs, text_len, hidden)
+        visual = torch.ones(bs, 2, hidden) * 5.0
+
+        fused = adapter._splice_visual_into_text(text, visual, ids)
+        assert torch.allclose(fused[0, 3:5], visual[0])
+
+    def test_sequence_length_preserved(self):
+        """Output length must equal input length (1-to-1 replacement)."""
+        adapter = _make_qwen2vl_adapter()
+        bs, text_len, hidden = 2, 12, 8
+        ids = torch.zeros(bs, text_len, dtype=torch.long)
+        ids[:, 2] = _VIS_START_ID
+        ids[:, 8] = _VIS_END_ID  # 5 inner placeholder tokens
+        text = torch.randn(bs, text_len, hidden)
+        visual = torch.randn(bs, 5, hidden)
+
+        fused = adapter._splice_visual_into_text(text, visual, ids)
+        assert fused.shape == (bs, text_len, hidden)
+
+    def test_boundary_tokens_preserved(self):
+        """vision_start and vision_end embeddings must be unchanged after splice."""
+        adapter = _make_qwen2vl_adapter()
+        bs, text_len, hidden = 1, 6, 4
+        # [t0, <vis_start>, pad, pad, <vis_end>, t5]
+        ids = torch.zeros(bs, text_len, dtype=torch.long)
+        ids[0, 1] = _VIS_START_ID
+        ids[0, 4] = _VIS_END_ID
+
+        text = torch.arange(bs * text_len * hidden, dtype=torch.float).reshape(bs, text_len, hidden)
+        visual = torch.ones(bs, 2, hidden) * 99.0
+
+        fused = adapter._splice_visual_into_text(text, visual, ids)
+        assert torch.allclose(fused[0, 1], text[0, 1])  # vision_start preserved
+        assert torch.allclose(fused[0, 4], text[0, 4])  # vision_end preserved
+
+    def test_no_vision_tokens_returns_text_unchanged(self):
+        """When there are no vision_start/end tokens the output must equal text_embeds."""
+        adapter = _make_qwen2vl_adapter()
+        bs, text_len, hidden = 2, 8, 4
+        ids = torch.zeros(bs, text_len, dtype=torch.long)
+        text = torch.randn(bs, text_len, hidden)
+        visual = torch.randn(bs, 4, hidden)
+
+        fused = adapter._splice_visual_into_text(text, visual, ids)
+        assert torch.allclose(fused, text)
+
+    def test_multi_image_replacement(self):
+        """Two vision blocks are handled independently."""
+        adapter = _make_qwen2vl_adapter()
+        bs, text_len, hidden = 1, 14, 4
+        # Block 1: positions 1 (start) .. 4 (end), 2 inner tokens at 2-3
+        # Block 2: positions 8 (start) .. 12 (end), 3 inner tokens at 9-11
+        ids = torch.zeros(bs, text_len, dtype=torch.long)
+        ids[0, 1] = _VIS_START_ID
+        ids[0, 4] = _VIS_END_ID
+        ids[0, 8] = _VIS_START_ID
+        ids[0, 12] = _VIS_END_ID
+
+        text = torch.zeros(bs, text_len, hidden)
+        visual = torch.cat([torch.ones(bs, 2, hidden), torch.full((bs, 3, hidden), 2.0)], dim=1)
+
+        fused = adapter._splice_visual_into_text(text, visual, ids)
+        assert fused.shape == (bs, text_len, hidden)
+        assert torch.allclose(fused[0, 2:4], torch.ones(2, hidden))
+        assert torch.allclose(fused[0, 9:12], torch.full((3, hidden), 2.0))
+
+    def test_forward_end_to_end_shape(self):
+        """Full forward pass returns the correct shard shape."""
+        world_size = 2
+        pg = _make_mock_process_group(world_size=world_size, rank=0)
+        adapter = Qwen2VLFusionAdapter(nn.Identity(),
+                                       pg,
+                                       vision_start_token_id=_VIS_START_ID,
+                                       vision_end_token_id=_VIS_END_ID)
+
+        bs, local_v, text_len, hidden = 1, 3, 10, 4
+        ids = torch.zeros(bs, text_len, dtype=torch.long)
+        # 6 inner placeholder tokens (local_v * world_size = 6)
+        ids[0, 1] = _VIS_START_ID
+        ids[0, 8] = _VIS_END_ID
+        visual = torch.randn(bs, local_v, hidden)
+        text = torch.randn(bs, text_len, hidden)
+
+        out = adapter(visual, text, ids)
+        # fused_len == text_len == 10 (length-preserving); padded to 10; local = 5
+        assert out.shape == (bs, 5, hidden)
