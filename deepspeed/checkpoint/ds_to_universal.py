@@ -501,17 +501,64 @@ def main(args):
         print('*** 2. Merging slices .....')
         _merge_tp_slice_files(args, ds_checkpoint, slice_shapes, temp_dir)
 
+        print('*** 2.5. Consolidating AutoEP expert files')
+        from .constants import AUTOEP_LAYERS_KEY, AUTOEP_LAYERS_KEY_LEGACY, EXPERT_PARAMETER_PATTERNS
+        from .autoep_universal import consolidate_autoep_expert_files, consolidate_autoep_optimizer_states
+
+        # Load AutoEP metadata from main checkpoint
+        main_sd = torch.load(ds_checkpoint.mp_rank_files[0], map_location=torch.device('cpu'), weights_only=False)
+        autoep_metadata = main_sd.get(AUTOEP_LAYERS_KEY)
+        if autoep_metadata is None:
+            autoep_metadata = main_sd.get(AUTOEP_LAYERS_KEY_LEGACY)
+
+        # Check for expert files in checkpoint directory
+        expert_files = glob.glob(os.path.join(args.input_folder, 'layer_*_expert_*_model_states.pt'))
+
+        if autoep_metadata is not None:
+            consolidate_autoep_expert_files(args.input_folder, args.output_folder, autoep_metadata)
+            ep_size = autoep_metadata[0]['ep_size'] if autoep_metadata else 1
+            consolidate_autoep_optimizer_states(args.input_folder, args.output_folder, autoep_metadata, ep_size)
+            print(f'    Consolidated {len(autoep_metadata)} AutoEP layer(s)')
+        elif expert_files:
+            raise RuntimeError(f"Found {len(expert_files)} expert checkpoint files but no AutoEP metadata "
+                               f"(ds_autoep_layers) in the checkpoint. The checkpoint may be corrupt.")
+        else:
+            print('    No AutoEP layers found, skipping')
+
         print('*** 3. Saving common optimizer states')
         _save_optimizer_state(args, ds_checkpoint)
 
         if not args.keep_temp_folder:
             shutil.rmtree(temp_dir, ignore_errors=True)
 
-        # Copy mp* files into output folder
+        # Copy mp* files into output folder, injecting AutoEP metadata into UNIVERSAL_CHECKPOINT_INFO
         for f in glob.glob(os.path.join(args.input_folder, 'mp*')):
-            shutil.copy2(f, args.output_folder)
+            if autoep_metadata is not None:
+                # Load -> update with AutoEP metadata -> save
+                mp_sd = torch.load(f, map_location=torch.device('cpu'), weights_only=False)
+                if UNIVERSAL_CHECKPOINT_INFO not in mp_sd:
+                    mp_sd[UNIVERSAL_CHECKPOINT_INFO] = {}
+                mp_sd[UNIVERSAL_CHECKPOINT_INFO][EXPERT_PARAMETER_PATTERNS] = [r'\.experts\.w[123]$']
+                mp_sd[UNIVERSAL_CHECKPOINT_INFO][AUTOEP_LAYERS_KEY] = autoep_metadata
+                out_path = os.path.join(args.output_folder, os.path.basename(f))
+                torch.save(mp_sd, out_path)
+            else:
+                shutil.copy2(f, args.output_folder)
 
     else:
+        # Stage 3 path
+        # Check for AutoEP metadata - Stage 3 + AutoEP is not supported
+        stage3_expert_files = glob.glob(os.path.join(args.input_folder, 'layer_*_expert_*_model_states.pt'))
+        stage3_model_files_for_meta = glob.glob(os.path.join(args.input_folder, 'mp_rank_*_model_states.pt'))
+        if stage3_model_files_for_meta:
+            _stage3_sd = torch.load(stage3_model_files_for_meta[0],
+                                    map_location=torch.device('cpu'),
+                                    weights_only=False)
+            _stage3_autoep = _stage3_sd.get('ds_autoep_layers') or _stage3_sd.get('autoep_layers')
+            if _stage3_autoep is not None:
+                raise NotImplementedError("Stage 3 universal checkpoint conversion with AutoEP is not supported. "
+                                          "AutoEP currently requires ZeRO Stage 1 or 2.")
+
         model_files = _get_model_state_files(args.input_folder)
         param_shapes = _parse_model_states_stage3(model_files)
         dp_degree = len(model_files)
@@ -531,8 +578,11 @@ def main(args):
         if not args.keep_temp_folder:
             shutil.rmtree(temp_dir, ignore_errors=True)
 
-        # Copy *model_states files into output folder
+        # Copy *model_states files into output folder, filtering out expert files
         for f in glob.glob(os.path.join(args.input_folder, '*model_states.pt')):
+            basename = os.path.basename(f)
+            if basename.startswith('layer_') and '_expert_' in basename:
+                continue  # Skip expert files (handled separately if AutoEP were supported)
             shutil.copy2(f, args.output_folder)
 
     # Update latest to output folder

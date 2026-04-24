@@ -237,25 +237,47 @@ def _create_model_parallel(model_parallel_size_):
     return _DATA_PARALLEL_GROUP, _MODEL_PARALLEL_GROUP
 
 
-def _create_expert_and_data_parallel(expert_parallel_size_, use_data_before_expert_parallel_=False):
-    """
-        Create expert and data parallel groups.
+def _create_expert_and_data_parallel(expert_parallel_size_,
+                                     mp_size=None,
+                                     pp_size=None,
+                                     mp_mode="tp",
+                                     use_data_before_expert_parallel_=False):
+    """Create expert and data parallel groups.
 
-        Note: Caller of this function is responsible to check if the groups already exist.
+    When mp_size is None or 1: legacy consecutive ordering (backward compatible).
+    When mp_size > 1 and mp_mode=="tp": TP-strided rank ordering.
+    When mp_size > 1 and mp_mode=="sp": consecutive rank ordering.
 
-        Example - E + D parallel
-        world_size = 16
-        expert_parallel_size = 2 # number of experts in same group
-        expert_data_parallel_group = [0,2,4,6,8,10,12,14], [1,3,5,7,9,11,13,15] - all reduce is only on MoE params
-        expert_parallel_group = [0, 1], [2,3], [4,5], [6,7], [8,9] - no all reduce, but all to all
-        data_parallel_group = [0,1,...,15] - all reduce is only on non-MoE
-        use_data_before_expert_parallel_ (bool): Use the D + E instead of E + D topology
+    Note: Caller of this function is responsible to check if the groups already exist.
+
+    Example - E + D parallel (legacy path)
+    world_size = 16
+    expert_parallel_size = 2 # number of experts in same group
+    expert_data_parallel_group = [0,2,4,6,8,10,12,14], [1,3,5,7,9,11,13,15] - all reduce is only on MoE params
+    expert_parallel_group = [0, 1], [2,3], [4,5], [6,7], [8,9] - no all reduce, but all to all
+    data_parallel_group = [0,1,...,15] - all reduce is only on non-MoE
+
+    Args:
+        expert_parallel_size_ (int): Expert parallel group size.
+        mp_size (int, optional): Model parallel size (TP or SP). None treated as 1.
+        pp_size (int, optional): Pipeline parallel size. None falls back to mpu.
+        mp_mode (str): "tp" for TP-strided ordering, "sp" for consecutive ordering.
+        use_data_before_expert_parallel_ (bool): Use the D + E instead of E + D topology.
     """
     assert dist.is_initialized()
 
+    # Resolve parameters for backward compat
+    effective_mp_size = 1 if mp_size is None else mp_size
+
     log_dist(f'Creating expert and data parallel groups with size {expert_parallel_size_}', ranks=[0])
     world_size = dist.get_world_size()
-    pp_world_size = 1 if mpu is None else bwc_pipeline_parallel_world_size(mpu)
+
+    # Resolve pp_size
+    if pp_size is not None:
+        pp_world_size = pp_size
+    else:
+        pp_world_size = 1 if mpu is None else bwc_pipeline_parallel_world_size(mpu)
+
     rank = dist.get_rank()
 
     pp_stride = world_size // pp_world_size
@@ -263,37 +285,49 @@ def _create_expert_and_data_parallel(expert_parallel_size_, use_data_before_expe
 
     group_name = f"ep_size_{expert_parallel_size_}"
 
-    # Build the expert data parallel groups.
     global _EXPERT_DATA_PARALLEL_GROUP
     global _EXPERT_DATA_PARALLEL_GROUP_RANKS
-
-    ep_stride = pp_stride // expert_parallel_size_
-
-    # Only create group if it does not already exist
-    if group_name not in _EXPERT_DATA_PARALLEL_GROUP:
-        for pp_stage_start in range(0, world_size, pp_stride):
-            for i in range(expert_parallel_size_):
-                if use_data_before_expert_parallel_:
-                    ranks = range(pp_stage_start + i * ep_stride, pp_stage_start + (i + 1) * ep_stride)
-                else:
-                    ranks = range(pp_stage_start + i, pp_stage_start + pp_stride, expert_parallel_size_)
-                group = dist.new_group(ranks)
-                log_dist(f'Creating expert data parallel process group named {group_name} with ranks: {list(ranks)}',
-                         [0])
-                if rank in ranks:
-                    _EXPERT_DATA_PARALLEL_GROUP[group_name] = group
-                    _EXPERT_DATA_PARALLEL_GROUP_RANKS[group_name] = ranks
-
-    # Build the expert parallel groups.
     global _EXPERT_PARALLEL_GROUP
     global _EXPERT_PARALLEL_GROUP_RANKS
 
-    # Only create group if it does not already exist
-    if group_name not in _EXPERT_PARALLEL_GROUP:
-        if use_data_before_expert_parallel_:
+    # Legacy path: mp_size <= 1 (preserves exact original behavior)
+    if effective_mp_size <= 1:
+        ep_stride = pp_stride // expert_parallel_size_
+
+        # Build the expert data parallel groups.
+        # Only create group if it does not already exist
+        if group_name not in _EXPERT_DATA_PARALLEL_GROUP:
             for pp_stage_start in range(0, world_size, pp_stride):
-                for i in range(ep_stride):
-                    ranks = range(pp_stage_start + i, pp_stage_start + pp_stride, ep_stride)
+                for i in range(expert_parallel_size_):
+                    if use_data_before_expert_parallel_:
+                        ranks = range(pp_stage_start + i * ep_stride, pp_stage_start + (i + 1) * ep_stride)
+                    else:
+                        ranks = range(pp_stage_start + i, pp_stage_start + pp_stride, expert_parallel_size_)
+                    group = dist.new_group(ranks)
+                    log_dist(
+                        f'Creating expert data parallel process group named {group_name} with ranks: {list(ranks)}',
+                        [0])
+                    if rank in ranks:
+                        _EXPERT_DATA_PARALLEL_GROUP[group_name] = group
+                        _EXPERT_DATA_PARALLEL_GROUP_RANKS[group_name] = ranks
+
+        # Build the expert parallel groups.
+        # Only create group if it does not already exist
+        if group_name not in _EXPERT_PARALLEL_GROUP:
+            if use_data_before_expert_parallel_:
+                for pp_stage_start in range(0, world_size, pp_stride):
+                    for i in range(ep_stride):
+                        ranks = range(pp_stage_start + i, pp_stage_start + pp_stride, ep_stride)
+                        group = dist.new_group(ranks)
+                        log_dist(
+                            f'creating expert parallel process group named {group_name} '
+                            f'with ranks: {list(ranks)}', [0])
+                        if rank in ranks:
+                            _EXPERT_PARALLEL_GROUP[group_name] = group
+                            _EXPERT_PARALLEL_GROUP_RANKS[group_name] = ranks
+            else:
+                for i in range(world_size // expert_parallel_size_):
+                    ranks = range(i * expert_parallel_size_, (i + 1) * expert_parallel_size_)
                     group = dist.new_group(ranks)
                     log_dist(
                         f'creating expert parallel process group named {group_name} '
@@ -301,15 +335,51 @@ def _create_expert_and_data_parallel(expert_parallel_size_, use_data_before_expe
                     if rank in ranks:
                         _EXPERT_PARALLEL_GROUP[group_name] = group
                         _EXPERT_PARALLEL_GROUP_RANKS[group_name] = ranks
+        return
+
+    # New path: mp_size > 1
+    if use_data_before_expert_parallel_:
+        raise NotImplementedError("use_data_before_expert_parallel_ is not supported with mp_size > 1")
+
+    if group_name in _EXPERT_PARALLEL_GROUP:
+        return  # Already created
+
+    for pp_stage_start in range(0, world_size, pp_stride):
+        stage_ranks = list(range(pp_stage_start, pp_stage_start + pp_stride))
+
+        # Build ordered_stage_ranks based on mp_mode
+        if mp_mode == "tp" and effective_mp_size > 1:
+            # TP-strided: group by TP, then interleave DP lanes
+            num_tp_groups = len(stage_ranks) // effective_mp_size
+            ordered = []
+            for dp_lane in range(effective_mp_size):
+                for tp_group_idx in range(num_tp_groups):
+                    ordered.append(stage_ranks[tp_group_idx * effective_mp_size + dp_lane])
+            ordered_stage_ranks = ordered
         else:
-            for i in range(world_size // expert_parallel_size_):
-                ranks = range(i * expert_parallel_size_, (i + 1) * expert_parallel_size_)
-                group = dist.new_group(ranks)
-                log_dist(f'creating expert parallel process group named {group_name} '
-                         f'with ranks: {list(ranks)}', [0])
-                if rank in ranks:
-                    _EXPERT_PARALLEL_GROUP[group_name] = group
-                    _EXPERT_PARALLEL_GROUP_RANKS[group_name] = ranks
+            # SP or no-MP: consecutive
+            ordered_stage_ranks = stage_ranks
+
+        # Create EP groups by chunking ordered ranks
+        num_ep_groups = len(ordered_stage_ranks) // expert_parallel_size_
+        ep_groups_list = []
+        for g in range(num_ep_groups):
+            ep_ranks = ordered_stage_ranks[g * expert_parallel_size_:(g + 1) * expert_parallel_size_]
+            ep_groups_list.append(ep_ranks)
+            group = dist.new_group(ep_ranks)
+            log_dist(f'creating expert parallel process group named {group_name} with ranks: {ep_ranks}', [0])
+            if rank in ep_ranks:
+                _EXPERT_PARALLEL_GROUP[group_name] = group
+                _EXPERT_PARALLEL_GROUP_RANKS[group_name] = ep_ranks
+
+        # Create EDP groups: same position across EP groups
+        for pos in range(expert_parallel_size_):
+            edp_ranks = [ep_groups_list[g][pos] for g in range(num_ep_groups)]
+            group = dist.new_group(edp_ranks)
+            log_dist(f'Creating expert data parallel process group named {group_name} with ranks: {edp_ranks}', [0])
+            if rank in edp_ranks:
+                _EXPERT_DATA_PARALLEL_GROUP[group_name] = group
+                _EXPERT_DATA_PARALLEL_GROUP_RANKS[group_name] = edp_ranks
 
 
 def _get_expert_parallel_ranks(world_size,

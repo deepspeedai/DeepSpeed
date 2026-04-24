@@ -464,7 +464,8 @@ class InferenceEngine(Module):
                                                     old_moe_load=old_moe_load,
                                                     model=self.module,
                                                     mpu=self.mpu,
-                                                    checkpoint_engine=self.checkpoint_engine)
+                                                    checkpoint_engine=self.checkpoint_engine,
+                                                    autoep_layers=None)
 
             self.module.load_state_dict(state_dict=checkpoint[self._choose_module_key(checkpoint)],
                                         strict=load_module_strict)
