@@ -753,7 +753,7 @@ Configuring the asynchronous I/O module for offloading parameter and optimizer s
 ### Tensor Parallel (AutoTP)
 Configure AutoTP tensor parallelism for training via the DeepSpeed config and hybrid TP + ZeRO. AutoTP supports ZeRO stages 0, 1, and 2 (stage 3 is not supported). `deepspeed.tp_model_init()` remains supported for backward compatibility but is not required when `tensor_parallel` is set in the config.
 
-When a HuggingFace model provides a built-in `tp_plan` (via `model.config.base_model_tp_plan`), DeepSpeed automatically detects and uses it. In this case, neither `preset_model` nor `partition_config` is required -- just set `autotp_size`. If `partition_config` is also provided, it takes precedence over the model's `tp_plan`.
+When a HuggingFace model provides a built-in `tp_plan` (via `model.config.base_model_tp_plan`), DeepSpeed automatically detects and uses it. In this case, neither `preset_model` nor `partition_config` is required -- just set `autotp_size`. If `preset_model` or `partition_config` is also provided, that explicit manual AutoTP config takes precedence over the model's `tp_plan`. If both are provided, `partition_config` still overrides or extends the preset according to `use_default_specs`.
 ```json
   "tensor_parallel": {
     "autotp_size": 4,
@@ -786,7 +786,10 @@ When a HuggingFace model provides a built-in `tp_plan` (via `model.config.base_m
 
 | Description                                                                                           | Default |
 | ----------------------------------------------------------------------------------------------------- | ------- |
-| Built-in model presets: `llama`, `bloom`, `chatglm`, `mixtral`, `deepseek_v2`, `qwen2`, `phi3`.        | `null`  |
+| Built-in model presets: `llama`, `bloom`, `chatglm`, `mixtral`, `deepseek_v2`, `qwen2`, `qwen3_5`, `phi3`. | `null`  |
+
+> **`qwen3_5` coverage note:** This manual preset targets dense Qwen 3.5 decoder layers. It covers `mlp.{gate,up,down}_proj` in every decoder layer, `self_attn.{q,k,v,o}_proj` where full-attention layers are present, and `linear_attn.{in_proj_qkv,in_proj_z,out_proj}` on hybrid linear-attention layers. The fused `linear_attn.in_proj_qkv` split sizes are derived from the model config. The preset still does not cover `linear_attn.in_proj_a`, `linear_attn.in_proj_b`, `linear_attn.conv1d`, `linear_attn.norm`, `linear_attn.dt_bias`, `linear_attn.A_log`, or Qwen 3.5 MoE weights. Because `linear_attn.in_proj_a` and `linear_attn.in_proj_b` remain unmatched 2D weights, `strict_mode` is still not compatible with hybrid Qwen 3.5 models when this preset is used by itself.
+
 
 ***tp_overlap_comm***: [boolean]
 
