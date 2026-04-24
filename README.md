@@ -16,6 +16,8 @@
 
 ## Latest News
 
+* [2026/04] [Using Muon Optimizer with DeepSpeed](https://github.com/deepspeedai/DeepSpeed/blob/master/blogs/muon-optimizer/README.md)
+
 * [2026/03] DeepSpeed Team gave a tutorial at ASPLOS 2026 titled ["Building Efficient Large-Scale Model Systems with DeepSpeed: From Open-Source Foundations to Emerging Research" ](https://supercomputing-system-ai-lab.github.io/events/asplos2026-llm-tutorial/index.html)
 
 * [2026/03] [Our SuperOffload work received an Honorable Mention for the ASPLOS 2026 Best Paper Award](https://dl.acm.org/doi/10.1145/3760250.3762217)
