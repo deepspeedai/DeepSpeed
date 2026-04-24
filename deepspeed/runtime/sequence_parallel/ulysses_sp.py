@@ -491,14 +491,20 @@ class UlyssesSPAttentionHF(torch.nn.Module):
             local_seq_length = seq_length // mpu.get_sequence_parallel_world_size()
             global_seq_length = seq_length
 
+        ## Fix here
+        arch_cfg = hf_model_config if not hasattr(hf_model_config, "text_config") else hf_model_config.text_config
+
         uattn = UlyssesSPAttentionHF(
             attn=core_attn_function,
             batch_size=micro_batch_size,
-            attn_head_count=hf_model_config.num_attention_heads,
-            attn_head_size=getattr(hf_model_config, "head_dim",
-                                   hf_model_config.hidden_size // hf_model_config.num_attention_heads),
-            kv_head_count=hf_model_config.num_key_value_heads,
-            num_hidden_layers=hf_model_config.num_hidden_layers,
+            attn_head_count=arch_cfg.num_attention_heads,
+            attn_head_size=getattr(
+                arch_cfg,
+                "head_dim",
+                arch_cfg.hidden_size // arch_cfg.num_attention_heads,
+            ),
+            kv_head_count=arch_cfg.num_key_value_heads,
+            num_hidden_layers=arch_cfg.num_hidden_layers,
             process_group=mpu.get_sequence_parallel_group(),
             seq_length_is_variable=seq_length_is_variable,
             local_seq_length=local_seq_length,
