@@ -20,6 +20,7 @@ import pytest
 import deepspeed.comm as dist
 from deepspeed.sequence.autosp_vit import UlyssesSPViTAttention
 from deepspeed.sequence.autosp_fusion import LlavaFusionAdapter
+from deepspeed.accelerator import get_accelerator
 
 from unit.common import DistributedTest
 
@@ -62,11 +63,11 @@ class TestViTSPEquivalence(DistributedTest):
         # is identical everywhere).
         torch.manual_seed(42)
         if has_cls_token:
-            full_input = torch.randn(bs, 1 + num_patches, hidden).cuda()
+            full_input = torch.randn(bs, 1 + num_patches, hidden).to(get_accelerator().device_name())
         else:
-            full_input = torch.randn(bs, num_patches, hidden).cuda()
+            full_input = torch.randn(bs, num_patches, hidden).to(get_accelerator().device_name())
 
-        identity = _IdentityAttn().cuda()
+        identity = _IdentityAttn().to(get_accelerator().device_name())
         # Single-device path is just identity — output == input.
         ref_out = identity(full_input)
 
@@ -79,7 +80,9 @@ class TestViTSPEquivalence(DistributedTest):
         else:
             local_input = full_input[:, rank * local_patches:(rank + 1) * local_patches, :]
 
-        wrapper = UlyssesSPViTAttention(_IdentityAttn().cuda(), sp_group, has_cls_token=has_cls_token).cuda()
+        wrapper = UlyssesSPViTAttention(_IdentityAttn().to(get_accelerator().device_name()),
+                                        sp_group,
+                                        has_cls_token=has_cls_token).to(get_accelerator().device_name())
         sp_out = wrapper(local_input)
 
         # --- Compare ---
@@ -111,9 +114,9 @@ class TestLlavaFusionEquivalence(DistributedTest):
         """Build deterministic visual and text tensors identical on every rank."""
         torch.manual_seed(0)
         # Each rank holds a contiguous slice of the visual tokens.
-        full_visual = torch.randn(bs, local_v * self.world_size, hidden).cuda()
-        text = torch.randn(bs, text_len, hidden).cuda()
-        ids = torch.zeros(bs, text_len, dtype=torch.long).cuda()
+        full_visual = torch.randn(bs, local_v * self.world_size, hidden).to(get_accelerator().device_name())
+        text = torch.randn(bs, text_len, hidden).to(get_accelerator().device_name())
+        ids = torch.zeros(bs, text_len, dtype=torch.long).to(get_accelerator().device_name())
         ids[:, 1] = _IMAGE_TOKEN_ID  # one image placeholder at position 1
         local_visual = full_visual[:, rank * local_v:(rank + 1) * local_v, :]
         return full_visual, local_visual, text, ids
@@ -128,7 +131,8 @@ class TestLlavaFusionEquivalence(DistributedTest):
         full_visual, local_visual, text, ids = self._build_inputs(bs, local_v, text_len, hidden, rank)
 
         # --- SP path: each rank gets one shard ---
-        adapter = LlavaFusionAdapter(nn.Identity(), sp_group, image_token_id=_IMAGE_TOKEN_ID).cuda()
+        adapter = LlavaFusionAdapter(nn.Identity(), sp_group,
+                                     image_token_id=_IMAGE_TOKEN_ID).to(get_accelerator().device_name())
         local_out = adapter(local_visual, text, ids)  # [bs, local_fused, hidden]
 
         # Gather all shards onto every rank so we can compare globally.
@@ -139,7 +143,8 @@ class TestLlavaFusionEquivalence(DistributedTest):
         # --- Single-device reference ---
         # Simulate what a non-SP LlavaFusionAdapter would produce: project the
         # full visual tensor (identity here) and splice once.
-        ref_adapter = LlavaFusionAdapter(nn.Identity(), sp_group, image_token_id=_IMAGE_TOKEN_ID).cuda()
+        ref_adapter = LlavaFusionAdapter(nn.Identity(), sp_group,
+                                         image_token_id=_IMAGE_TOKEN_ID).to(get_accelerator().device_name())
         # Call _splice_visual_into_text directly so we bypass the SP scatter.
         ref_fused = ref_adapter._splice_visual_into_text(text, full_visual, ids)
 
@@ -161,11 +166,12 @@ class TestLlavaFusionEquivalence(DistributedTest):
 
         bs, local_v, text_len, hidden = 1, 2, 8, 4
         torch.manual_seed(1)
-        local_visual = torch.randn(bs, local_v, hidden).cuda()
-        text = torch.randn(bs, text_len, hidden).cuda()
-        ids = torch.zeros(bs, text_len, dtype=torch.long).cuda()  # no image placeholder
+        local_visual = torch.randn(bs, local_v, hidden).to(get_accelerator().device_name())
+        text = torch.randn(bs, text_len, hidden).to(get_accelerator().device_name())
+        ids = torch.zeros(bs, text_len, dtype=torch.long).to(get_accelerator().device_name())  # no image placeholder
 
-        adapter = LlavaFusionAdapter(nn.Identity(), sp_group, image_token_id=_IMAGE_TOKEN_ID).cuda()
+        adapter = LlavaFusionAdapter(nn.Identity(), sp_group,
+                                     image_token_id=_IMAGE_TOKEN_ID).to(get_accelerator().device_name())
         local_out = adapter(local_visual, text, ids)
 
         # Gather shards and strip the padding slice from visual gather.
