@@ -421,14 +421,15 @@ class MVAPICHRunner(MultiNodeRunner):
         mpiname_exists = shutil.which('mpiname')
         exists = False
         if not mpiname_exists:
-            warnings.warn("mpiname does not exist, mvapich is not installed properly")
+            warnings.warn("mpiname does not exist, mvapich is not installed properly", stacklevel=2)
         else:
             results = subprocess.check_output(['mpiname'])
             mpiname_results = results.decode('utf-8').strip()
             if "MVAPICH2-GDR" in mpiname_results:
                 exists = True
             else:
-                warnings.warn(f"Expected MVAPICH2-GDR as return for mpiname but received {mpiname_results}")
+                warnings.warn(f"Expected MVAPICH2-GDR as return for mpiname but received {mpiname_results}",
+                              stacklevel=2)
         return exists
 
     @property
