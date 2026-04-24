@@ -1754,7 +1754,7 @@ class DeepSpeedEngine(Module):
             param_groups = []
             if muon_params:
                 accepted_parameters = dict()
-                for key in ["lr", "momentum", "weight_decay", "muon_lr"]:
+                for key in ["lr", "momentum", "weight_decay", "muon_lr", "ns_method"]:
                     if key in optimizer_parameters:
                         if key == "muon_lr":  # muon_lr will override lr
                             accepted_parameters['lr'] = optimizer_parameters[key]
