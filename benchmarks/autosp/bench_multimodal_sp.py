@@ -38,6 +38,7 @@ import torch.nn as nn
 
 import deepspeed
 import deepspeed.comm as dist
+from deepspeed.accelerator import get_accelerator
 from deepspeed.sequence.auto_sp import auto_wrap_model_for_sp
 from deepspeed.sequence.autosp_vit import UlyssesSPViTAttention
 from deepspeed.sequence.autosp_fusion import InternVLFusionAdapter, Qwen2VLFusionAdapter
@@ -204,8 +205,8 @@ def _run(arch: str, args) -> None:
     deepspeed.init_distributed(dist_backend="nccl")
     rank = dist.get_rank()
     world_size = dist.get_world_size()
-    device = torch.device(f"cuda:{rank % torch.cuda.device_count()}")
-    torch.cuda.set_device(device)
+    device = torch.device(get_accelerator().device_name(), rank % get_accelerator().device_count())
+    get_accelerator().set_device(rank % get_accelerator().device_count())
 
     sp_group = dist.new_group(ranks=list(range(world_size)))
     model, local_patches, text_embeds, input_ids = _build_model_and_inputs(arch, args, sp_group, device)
@@ -215,22 +216,22 @@ def _run(arch: str, args) -> None:
     with torch.no_grad():
         for _ in range(args.warmup):
             model(local_patches, text_embeds, input_ids)
-    torch.cuda.synchronize()
-    torch.cuda.reset_peak_memory_stats(device)
+    get_accelerator().synchronize()
+    get_accelerator().reset_peak_memory_stats()
 
     # Timed iterations using CUDA events for accurate GPU-side measurement.
     latencies_ms = []
     with torch.no_grad():
         for _ in range(args.iters):
-            t_start = torch.cuda.Event(enable_timing=True)
-            t_end = torch.cuda.Event(enable_timing=True)
+            t_start = get_accelerator().Event(enable_timing=True)
+            t_end = get_accelerator().Event(enable_timing=True)
             t_start.record()
             model(local_patches, text_embeds, input_ids)
             t_end.record()
-            torch.cuda.synchronize()
+            get_accelerator().synchronize()
             latencies_ms.append(t_start.elapsed_time(t_end))
 
-    peak_mem_mb = torch.cuda.max_memory_allocated(device) / 1024**2
+    peak_mem_mb = get_accelerator().max_memory_allocated() / 1024**2
     mean_ms = statistics.mean(latencies_ms)
     std_ms = statistics.stdev(latencies_ms) if len(latencies_ms) > 1 else 0.0
     # tokens/s: fused sequence length approximated by seq_len (length-preserving adapters).
