@@ -30,6 +30,7 @@ Arguments:
 """
 
 import argparse
+import logging
 import statistics
 
 import torch
@@ -37,7 +38,6 @@ import torch.nn as nn
 
 import deepspeed
 import deepspeed.comm as dist
-from deepspeed.accelerator import get_accelerator
 from deepspeed.sequence.auto_sp import auto_wrap_model_for_sp
 from deepspeed.sequence.autosp_vit import UlyssesSPViTAttention
 from deepspeed.sequence.autosp_fusion import InternVLFusionAdapter, Qwen2VLFusionAdapter
@@ -162,7 +162,12 @@ def _build_model_and_inputs(arch: str, args, sp_group, device):
         input_ids[:, 2:2 + num_ctx] = _INTERNVL_CONTEXT_ID
 
         model = _MinimalInternVLModel(hidden, args.num_layers).to(device)
+        # Suppress the Phase 2 projection-layer warning: we wrap manually below.
+        _auto_sp_logger = logging.getLogger("deepspeed.sequence.auto_sp")
+        _prev_level = _auto_sp_logger.level
+        _auto_sp_logger.setLevel(logging.ERROR)
         auto_wrap_model_for_sp(model, sp_group)
+        _auto_sp_logger.setLevel(_prev_level)
         for m in model.modules():
             if isinstance(m, UlyssesSPViTAttention):
                 m.has_cls_token = False
@@ -174,7 +179,11 @@ def _build_model_and_inputs(arch: str, args, sp_group, device):
         input_ids[:, 2 + num_inner] = _QWEN2VL_END_ID
 
         model = _MinimalQwen2VLModel(hidden, args.num_layers).to(device)
+        _auto_sp_logger = logging.getLogger("deepspeed.sequence.auto_sp")
+        _prev_level = _auto_sp_logger.level
+        _auto_sp_logger.setLevel(logging.ERROR)
         auto_wrap_model_for_sp(model, sp_group)
+        _auto_sp_logger.setLevel(_prev_level)
         for m in model.modules():
             if isinstance(m, UlyssesSPViTAttention):
                 m.has_cls_token = False
@@ -243,6 +252,8 @@ def _run(arch: str, args) -> None:
         print(f"  Throughput      : {throughput:,.0f} tokens/s")
         print(f"  Peak GPU memory : {peak_mem_mb:.1f} MB")
         print(f"{sep}\n")
+
+    dist.destroy_process_group()
 
 
 def main() -> None:
