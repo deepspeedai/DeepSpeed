@@ -6,10 +6,10 @@ Numerical equivalence tests for AutoSP multimodal sequence parallelism.
 Each test verifies that running the SP-wrapped path across N ranks produces
 the same result as the equivalent single-device (non-SP) computation.
 
-These tests require 2 GPUs and the NCCL backend.
+These tests require 2 GPUs.
 Run with:
 
-    deepspeed --num_gpus 2 --no_local_rank --module pytest tests/unit/sequence_parallelism/test_autosp_equivalence.py -v
+    NCCL_P2P_DISABLE=1 python -m pytest tests/unit/sequence_parallelism/test_autosp_equivalence.py -v
 """
 
 import torch
