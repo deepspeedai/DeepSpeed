@@ -2837,13 +2837,7 @@ class DeepSpeedEngine(Module):
 
                     if (self.eigenvalue_enabled()
                             and not self.gas_boundary_ctr % self.eigenvalue_gas_boundary_resolution()):
-                        ev_values = self.block_eigenvalue.values()
-                        for i in range(len(ev_values)):
-                            self.summary_events.append((
-                                f"Train/Eigenvalues/ModelBlockParam_{i}",
-                                self.ev_values[i][0],
-                                self.global_samples,
-                            ))
+                        self.summary_events.extend(self._get_eigenvalue_monitor_events())
                     self.monitor.write_events(self.summary_events)
 
         # Check flops profiling
@@ -2962,6 +2956,11 @@ class DeepSpeedEngine(Module):
                 ),
             ]
             self.monitor.write_events(self.summary_events)
+
+    def _get_eigenvalue_monitor_events(self):
+        ev_values = list(self.block_eigenvalue.values())
+        return [(f"Train/Eigenvalues/ModelBlockParam_{i}", value[0], self.global_samples)
+                for i, value in enumerate(ev_values)]
 
     def _get_optimizer_param(self, param_name):
         result = []
