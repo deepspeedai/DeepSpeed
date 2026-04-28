@@ -384,14 +384,16 @@ def topkgating(
     """Implements TopKGating on logits."""
 
     # everything is in fp32 in this function
-    # get topk gates
-    top_gate, top_idx = torch.topk(logits, k=k, dim=1)
     # gating decisions
     gates = F.softmax(logits, dim=1)
     num_experts = int(gates.shape[1])
 
+    # get topk gates — use softmax probs so non-assigned slots (zero) never
+    # outrank legitimately-assigned tokens that happen to have negative logits
+    top_gate, top_idx = torch.topk(gates, k=k, dim=1)
+
     # get topk mask
-    topk_masked_gates = torch.zeros_like(logits).scatter(1, top_idx, top_gate)
+    topk_masked_gates = torch.zeros_like(gates).scatter(1, top_idx, top_gate)
 
     mask = torch.zeros_like(gates, dtype=torch.bool).scatter_(1, top_idx, 1)
 
