@@ -388,12 +388,8 @@ def topkgating(
     gates = F.softmax(logits, dim=1)
     num_experts = int(gates.shape[1])
 
-    # get topk gates — use softmax probs so non-assigned slots (zero) never
-    # outrank legitimately-assigned tokens that happen to have negative logits
+    # get topk gates
     top_gate, top_idx = torch.topk(gates, k=k, dim=1)
-
-    # get topk mask
-    topk_masked_gates = torch.zeros_like(gates).scatter(1, top_idx, top_gate)
 
     mask = torch.zeros_like(gates, dtype=torch.bool).scatter_(1, top_idx, 1)
 
@@ -410,9 +406,10 @@ def topkgating(
         # update mask and locations by capacity
 
         if drop_policy == 'probs':
-            capacity_probs, capacity_indices = torch.topk(topk_masked_gates, k=capacity, dim=0, sorted=False)
-            capacity_mask = torch.zeros_like(logits).scatter(0, capacity_indices, 1)
-            mask = torch.logical_and(mask, capacity_mask)
+            topk_masked_gates = torch.zeros_like(gates).scatter(1, top_idx, top_gate)
+            _, capacity_indices = torch.topk(topk_masked_gates, k=capacity, dim=0, sorted=False)
+            capacity_mask = torch.zeros_like(gates, dtype=torch.bool).scatter_(0, capacity_indices, True)
+            mask &= capacity_mask
             locations = torch.cumsum(mask, dim=0) - 1
 
         elif drop_policy == "position":
