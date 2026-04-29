@@ -3,21 +3,23 @@
 Muon optimizer has gained momentum with more and more use from community and also from Large Foundation Model like Kimi-K2-Thinking.  Now DeepSpeed supports Muon optimizer.
 
 ## What is Muon optimizer?
-Muon is an optimizer designed for hidden 2D weights of a neural network.  It takes gradient of the weight, computes its momentum, and applies Newton-Schulz iterations to orthogonalize the momentum matrix, then uses this orthogonalized matrix to update the weight[1](https://kellerjordan.github.io/posts/muon/).  Because Muon only maintains one momentum buffer (versus Adam’s two), it uses less memory for optimizer states.
+Muon is an optimizer designed for hidden 2D weights of a neural network.  It takes gradient of the weight, computes its momentum, and applies Newton-Schulz iterations to orthogonalize the momentum matrix, then uses this orthogonalized matrix to update the weight [[1]](https://kellerjordan.github.io/posts/muon/).  Because Muon only maintains one momentum buffer (versus Adam’s two), it uses less memory for optimizer states.
 
-The orthogonalization step is key to Muon’s convergence advantage in pretraining.  In practice, gradient updates for 2D weights in transformers tend to have very high condition numbers — they are nearly low-rank, dominated by a few large singular directions.  By orthogonalizing the momentum matrix, Muon equalizes all singular values, effectively amplifying rare but important update directions that would otherwise be overshadowed.  This leads to better sample efficiency: in NanoGPT speedrunning benchmarks[2](https://github.com/KellerJordan/modded-nanogpt), Muon improved training speed by 35% over AdamW, and at 1.5B parameter scale it reached GPT-2 XL level performance approximately 25% faster than AdamW[1](https://kellerjordan.github.io/posts/muon/).
+The orthogonalization step is key to Muon’s convergence advantage in pretraining.  In practice, gradient updates for 2D weights in transformers tend to have very high condition numbers — they are nearly low-rank, dominated by a few large singular directions.  By orthogonalizing the momentum matrix, Muon equalizes all singular values, effectively amplifying rare but important update directions that would otherwise be overshadowed.  This leads to better sample efficiency: in NanoGPT speedrunning benchmarks [[2]](https://github.com/KellerJordan/modded-nanogpt), Muon improved training speed by 35% over AdamW, and at 1.5B parameter scale it reached GPT-2 XL level performance approximately 25% faster than AdamW [[1]](https://kellerjordan.github.io/posts/muon/).
 
-Muon is used by Keller Jordan’s mod of NanoGPT[2](https://github.com/KellerJordan/modded-nanogpt), Andrej Karpathy’s nanochat[3](https://github.com/karpathy/nanochat), and a variant of Muon (MuonClip) is also used by the production-level LLM Kimi-K2 from MoonShot[4](https://arxiv.org/pdf/2507.20534).  More recently, Zhipu AI’s GLM-5 (744B parameters) confirmed the use of Muon optimizer in both GLM-4.5 and GLM-5 pretraining, along with a “Muon Split” technique that splits MLA up-projection matrices by attention head and orthogonalizes each head independently, addressing a performance gap between MLA and GQA when using Muon[5](https://arxiv.org/abs/2602.15763).
+Different from Adam optimizer that requires two momentum buffer for each parameter, Muon optimizer only requires one momentum buffer.  This means that for parameters using Muon optimizer, we only need to allocate one buffer for momentum, which can save memory compared to Adam.
+
+Muon is used by Keller Jordan’s mod of NanoGPT [[2]](https://github.com/KellerJordan/modded-nanogpt), Andrej Karpathy’s nanochat [[3]](https://github.com/karpathy/nanochat), and a variant of Muon (MuonClip) is also used by the production-level LLM Kimi-K2 from MoonShot [[4]](https://arxiv.org/pdf/2507.20534).  More recently, Zhipu AI’s GLM-5 (744B parameters) confirmed the use of Muon optimizer in both GLM-4.5 and GLM-5 pretraining, along with a “Muon Split” technique that splits MLA up-projection matrices by attention head and orthogonalizes each head independently, addressing a performance gap between MLA and GQA when using Muon [[5]](https://arxiv.org/abs/2602.15763)  DeepSeek-V4 (1.6T parameters) also employs the Muon optimizer for faster convergence and greater training stability [[6]](https://huggingface.co/deepseek-ai/DeepSeek-V4-Pro).
 
 ## Muon Optimizer support in DeepSpeed
 One of the challenges of applying Muon optimizer to DeepSpeed is that previous optimizers (SGD, Adam) look at gradients as flattened buffers.   Thus it is hard to swap in Muon optimizer in the same place because the gradient buffers are already flattened.   We move the Muon update to `get_flat_partition` function of stage 1 and 2 `DeepSpeedZeroOptimizer` in which per parameter gradients are still in unflattened stages, thus we can easily apply the Muon updates.
 
-Muon optimizer works for hidden 2D gradients.   We apply a parse in model engine initializer to tag the model parameter with `use_muon`, if and only if the model parameter is 2D and is hidden.   When Muon optimizer is used, any gradient with parameter match `use_muon` will use Muon optimizer to update weight.
+Muon optimizer works on 2D weight matrices (attention and MLP weights).  It applies Newton-Schulz orthogonalization to the momentum matrix, which requires the weight to be 2D.  Non-2D parameters (embeddings, layer norms, biases, lm_head) fall back to AdamW.  We apply a parse in model engine initializer to tag the model parameter with `use_muon`, if and only if the model parameter is 2D and belongs to hidden layers.   When Muon optimizer is used, any parameter tagged `use_muon` will use Muon optimizer to update weight.
 
 Note that Muon is a hybrid optimizer: it uses Muon updates only for 2D hidden weights and falls back to Adam for all other parameters (embeddings, layer norms, biases, lm_head).  The DeepSpeed config supports separate learning rates via `muon_lr` (for Muon parameters) and `adam_lr` (for Adam parameters).
 
 ## Running DeepSpeed finetune with Muon optimizer
-Deepspeed finetune demo[6](https://github.com/delock/deepspeed_finetune_demo) is a demo to use different DeepSpeed training features and compare their performance in a single place.  You can use it to test finetune LLM models with Muon optimizer:
+Deepspeed finetune demo [[7]](https://github.com/delock/deepspeed_finetune_demo) is a demo to use different DeepSpeed training features and compare their performance in a single place.  You can use it to test finetune LLM models with Muon optimizer:
 ```
 git clone https://github.com/delock/deepspeed_finetune_demo
 cd deepspeed_finetune_demo
@@ -26,21 +28,30 @@ cd deepspeed_finetune_demo
 
 ## Muon Optimizer Convergence Experiment Result
 
-We tested Muon optimizer by finetuning a Qwen2.5-3B model on the tatsu-lab/alpaca dataset.
+We tested Muon optimizer by finetuning Moonlight-16B-A3B (a Mixture-of-Experts model with 16B total and 3B active parameters) on the CodeAlpaca-20k dataset, and evaluated code generation quality using the MBPP and MBPP+ benchmarks via EvalPlus.
 
 **Training Configuration:**
-- Model: Qwen2.5-3B
-- Dataset: tatsu-lab/alpaca
-- ZeRO Stage 2, bf16
-- Batch size: 32 (4 per GPU), 8 GPUs (A100 40GB)
-- 1 epoch (~1460 steps), eval every 100 steps
-- Muon lr: 5e-3, Adam lr: 5e-6
-- LR schedule: constant (no warmup, no decay)
-- Gradient clipping: 1.0
+- Model: Moonlight-16B-A3B (MoE, 16B total / 3B active)
+- Dataset: sahil2801/CodeAlpaca-20k
+- ZeRO Stage 2, bf16, Expert Parallelism (autoep_size=8)
+- Batch size: 16, gradient accumulation: 2, 8 GPUs
+- 1 epoch, gradient clipping: 1.0
 
-![Muon optimizer convergence on Qwen2.5-3B](images/muon_loss_3b.png)
+### Eval Loss Curve
 
-Muon optimizer converges smoothly and shows no overfitting during finetuning.
+![Eval loss comparison: Muon vs AdamW on CodeAlpaca](images/muon_vs_adam.png)
+
+Starting from an initial eval loss of 0.671, AdamW converges to 0.494 and Muon to 0.545 after one epoch.  Despite Muon's higher eval loss, it produces better downstream task performance (see MBPP/MBPP+ results below), suggesting that Muon's orthogonalized updates lead to better generalization.
+
+### MBPP / MBPP+ Evaluation Results
+
+| Optimizer | Learning Rate | adam_lr (for Muon) | MBPP | MBPP+ |
+|-----------|--------------|-------------------|------|-------|
+| baseline (pre-finetune) | —        | —                 | 0.495| 0.431 |
+| AdamW     | 2e-6         | —                 | 0.611| 0.505 |
+| Muon      | 2e-4         | 2e-6              | 0.661| 0.553 |
+
+Muon outperforms the best AdamW result on both MBPP (0.661 vs 0.611, +8.2%) and MBPP+ (0.553 vs 0.505, +9.5%), despite AdamW achieving lower eval loss (see above).  This suggests that Muon's orthogonalized updates lead to better generalization on downstream tasks.
 
 ### Tuning Learning Rate for Muon Optimizer
 
