@@ -37,6 +37,7 @@ not carry gradients and are never passed to downstream layers.
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 import deepspeed.comm as dist
 
@@ -100,10 +101,27 @@ class UlyssesSPViTAttention(nn.Module):
         # -------------------------------------------------------------------
         # 1. All-gather patches from all ranks to reconstruct the full sequence
         # -------------------------------------------------------------------
-        # We need to all-gather so every rank sees the full K/V context.
-        gathered = [torch.zeros_like(local_patches) for _ in range(self.world_size)]
-        dist.all_gather(gathered, local_patches.contiguous(), group=self.process_group)
-        full_patches = torch.cat(gathered, dim=1)  # [bs, num_patches_padded, hidden_dim]
+        # When num_patches % world_size != 0, ranks may hold different numbers
+        # of patches (the first `num_patches % world_size` ranks carry one extra
+        # patch).  We find the largest local_patch_len across ranks and zero-pad
+        # shorter slices so that all_gather receives equal-size tensors.
+        max_len_t = torch.tensor(local_patch_len, dtype=torch.long, device=local_patches.device)
+        dist.all_reduce(max_len_t, op=dist.ReduceOp.MAX, group=self.process_group)
+        max_local_len = int(max_len_t.item())
+
+        pad_len = max_local_len - local_patch_len
+        if pad_len > 0:
+            # Append zero rows so this rank's buffer matches the largest shard.
+            local_patches_padded = F.pad(local_patches, (0, 0, 0, pad_len))
+        else:
+            local_patches_padded = local_patches
+
+        gathered = [
+            torch.zeros(bs, max_local_len, hidden_dim, dtype=local_patches.dtype, device=local_patches.device)
+            for _ in range(self.world_size)
+        ]
+        dist.all_gather(gathered, local_patches_padded.contiguous(), group=self.process_group)
+        full_patches = torch.cat(gathered, dim=1)  # [bs, world_size * max_local_len, hidden_dim]
 
         # -------------------------------------------------------------------
         # 2. Build the full input (prepend CLS if needed) and call attention
@@ -123,7 +141,9 @@ class UlyssesSPViTAttention(nn.Module):
             extra = []
 
         # -------------------------------------------------------------------
-        # 3. Scatter output: each rank keeps only its local slice of patches
+        # 3. Scatter output: each rank keeps only its local slice of patches.
+        #    Slice starts at rank * max_local_len and spans local_patch_len
+        #    tokens, dropping the zero-padding rows that may have been appended.
         # -------------------------------------------------------------------
         if self.has_cls_token:
             cls_out = full_out[:, :1, :]
@@ -131,9 +151,9 @@ class UlyssesSPViTAttention(nn.Module):
         else:
             patch_out = full_out
 
-        # Determine this rank's slice boundaries
         rank = dist.get_rank(self.process_group)
-        local_out = patch_out[:, rank * local_patch_len:(rank + 1) * local_patch_len, :].contiguous()
+        start = rank * max_local_len
+        local_out = patch_out[:, start:start + local_patch_len, :].contiguous()
 
         if self.has_cls_token:
             local_out = torch.cat([cls_out, local_out], dim=1)

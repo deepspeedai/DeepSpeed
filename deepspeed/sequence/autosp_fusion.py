@@ -21,6 +21,46 @@ Workflow
                                                         │
                                                LLM decoder (SP-aware)
 
+Usage
+-----
+After calling :func:`~deepspeed.sequence.auto_sp.auto_wrap_model_for_sp` to
+wrap the ViT attention layers, attach the appropriate fusion adapter to the
+vision-language projection layer **before** the first forward pass.  Choose
+the adapter that matches your model architecture::
+
+    from deepspeed.sequence.auto_sp import auto_wrap_model_for_sp
+    from deepspeed.sequence.autosp_fusion import (
+        LlavaFusionAdapter,
+        InternVLFusionAdapter,
+        Qwen2VLFusionAdapter,
+    )
+    from deepspeed.utils import groups
+
+    # 1. Wrap ViT and LLM attention layers automatically.
+    sp_group = groups._get_sequence_parallel_group()
+    auto_wrap_model_for_sp(model, process_group=sp_group)
+
+    # 2. Attach the fusion adapter for the vision-language projection layer.
+    #    LLaVA — replaces image-placeholder tokens with visual tokens:
+    model.mm_projector = LlavaFusionAdapter(
+        model.mm_projector, sp_group, image_token_id=IMAGE_TOKEN_ID
+    )
+
+    #    InternVL — replaces IMG_CONTEXT tokens 1-to-1 with visual tokens:
+    model.mm_projector = InternVLFusionAdapter(
+        model.mm_projector, sp_group, image_token_id=IMG_CONTEXT_TOKEN_ID
+    )
+
+    #    Qwen2-VL — replaces tokens between vision_start/end pairs 1-to-1:
+    model.visual.merger = Qwen2VLFusionAdapter(
+        model.visual.merger, sp_group,
+        vision_start_token_id=VISION_START_ID,
+        vision_end_token_id=VISION_END_ID,
+    )
+
+    # 3. Use the model as normal; the adapter handles all SP gather/scatter.
+    outputs = model(input_ids=input_ids, pixel_values=pixel_values, ...)
+
 Status: Phase 2.  ``_splice_visual_into_text`` is intentionally left as a
 ``NotImplementedError``; override it per model architecture (see docstring).
 """
