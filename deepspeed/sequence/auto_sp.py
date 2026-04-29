@@ -89,8 +89,7 @@ def auto_wrap_model_for_sp(model: nn.Module, process_group) -> nn.Module:
         has_cls = _VIT_HAS_CLS_TOKEN.get(cls_name, True)
         wrapped = UlyssesSPViTAttention(module, process_group, has_cls_token=has_cls)
         _set_module_by_name(model, name, wrapped)
-        logger.debug("AutoSP: wrapped ViT attention '%s' with UlyssesSPViTAttention (has_cls_token=%s)", name,
-                     has_cls)
+        logger.debug("AutoSP: wrapped ViT attention '%s' with UlyssesSPViTAttention (has_cls_token=%s)", name, has_cls)
 
     logger.info("AutoSP: wrapped %d ViT attention layer(s).", len(info.vit_attn_modules))
 

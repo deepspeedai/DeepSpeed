@@ -133,8 +133,8 @@ class TestViTSPEquivalence(DistributedTest):
 
         # Reference: identity wrapper — each rank's output must equal its input slice.
         if has_cls_token:
-            ref_slice = torch.cat(
-                [full_input[:, :1, :], full_input[:, 1 + patch_start:1 + patch_start + local_v, :]], dim=1)
+            ref_slice = torch.cat([full_input[:, :1, :], full_input[:, 1 + patch_start:1 + patch_start + local_v, :]],
+                                  dim=1)
         else:
             ref_slice = full_input[:, patch_start:patch_start + local_v, :]
 
