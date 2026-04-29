@@ -29,6 +29,19 @@ _VIT_ATTN_CLASSNAMES = {
     "PaliGemmaVisionAttention",
 }
 
+# Whether each known ViT class uses a prepended CLS token.
+# CLS is replicated on every rank and is NOT sharded across the sequence.
+# Defaults to True for unknown classes (safe fallback).
+_VIT_HAS_CLS_TOKEN = {
+    "ViTAttention": True,
+    "CLIPAttention": True,
+    "SiglipAttention": False,
+    "InternVisionAttention": False,
+    "Qwen2VLVisionAttention": False,
+    "Idefics2VisionAttention": False,
+    "PaliGemmaVisionAttention": False,
+}
+
 # Known LLM decoder attention class names
 _LLM_ATTN_CLASSNAMES = {
     "LlamaAttention",

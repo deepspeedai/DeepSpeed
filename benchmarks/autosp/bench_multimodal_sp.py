@@ -40,7 +40,6 @@ import deepspeed
 import deepspeed.comm as dist
 from deepspeed.accelerator import get_accelerator
 from deepspeed.sequence.auto_sp import auto_wrap_model_for_sp
-from deepspeed.sequence.autosp_vit import UlyssesSPViTAttention
 from deepspeed.sequence.autosp_fusion import InternVLFusionAdapter, Qwen2VLFusionAdapter
 
 # ---------------------------------------------------------------------------
@@ -169,9 +168,6 @@ def _build_model_and_inputs(arch: str, args, sp_group, device):
         _auto_sp_logger.setLevel(logging.ERROR)
         auto_wrap_model_for_sp(model, sp_group)
         _auto_sp_logger.setLevel(_prev_level)
-        for m in model.modules():
-            if isinstance(m, UlyssesSPViTAttention):
-                m.has_cls_token = False
         model.fusion = InternVLFusionAdapter(model.mm_projector, sp_group,
                                              image_token_id=_INTERNVL_CONTEXT_ID).to(device)
     else:  # qwen2vl
@@ -185,9 +181,6 @@ def _build_model_and_inputs(arch: str, args, sp_group, device):
         _auto_sp_logger.setLevel(logging.ERROR)
         auto_wrap_model_for_sp(model, sp_group)
         _auto_sp_logger.setLevel(_prev_level)
-        for m in model.modules():
-            if isinstance(m, UlyssesSPViTAttention):
-                m.has_cls_token = False
         model.fusion = Qwen2VLFusionAdapter(model.multi_modal_projector,
                                             sp_group,
                                             vision_start_token_id=_QWEN2VL_START_ID,

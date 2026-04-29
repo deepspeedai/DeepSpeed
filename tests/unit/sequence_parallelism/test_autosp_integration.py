@@ -6,14 +6,11 @@ End-to-end integration tests for AutoSP multimodal sequence parallelism.
 Each test builds a minimal mock model whose attention-layer class names match
 the autosp_detector registry, then verifies two things:
 
-1. auto_wrap_model_for_sp correctly identifies and wraps the attention modules.
+1. auto_wrap_model_for_sp correctly identifies and wraps ViT attention modules
+   (with the correct has_cls_token value from the registry) and emits warnings
+   for HF-style LLM attention without wrapping them.
 2. The full pipeline (SP-wrapped ViT -> fusion adapter) produces fused output
    numerically equivalent to the single-device splice reference.
-
-The LLM decoder branch is intentionally not called in the forward-pass
-equivalence tests because DistributedAttention uses a Megatron Q/K/V
-interface that is incompatible with the simple hidden_states mock.  Its
-correct injection is verified by the detection tests instead.
 
 These tests require 2 GPUs.
 Run with:
@@ -28,7 +25,6 @@ import torch.nn.functional as F
 import deepspeed.comm as dist
 from deepspeed.sequence.auto_sp import auto_wrap_model_for_sp
 from deepspeed.sequence.autosp_vit import UlyssesSPViTAttention
-from deepspeed.sequence.layer import DistributedAttention
 from deepspeed.sequence.autosp_fusion import InternVLFusionAdapter, Qwen2VLFusionAdapter
 from deepspeed.accelerator import get_accelerator
 
@@ -107,7 +103,7 @@ class _MinimalInternVLModel(nn.Module):
     - ``mm_projector``           -> keyword in _VISION_PROJ_KEYWORDS
 
     ``forward`` exercises only the ViT + fusion path; ``language_model`` is
-    present solely for detection verification (DistributedAttention wrapping).
+    present to verify that auto_wrap does NOT wrap HF-style LLM attention.
     """
 
     def __init__(self) -> None:
@@ -155,7 +151,8 @@ class TestInternVLIntegration(DistributedTest):
 
     def test_auto_wrap_detects_and_wraps_modules(self):
         """auto_wrap_model_for_sp must replace InternVisionAttention with
-        UlyssesSPViTAttention and InternLM2Attention with DistributedAttention."""
+        UlyssesSPViTAttention (has_cls_token=False) and must NOT wrap
+        InternLM2Attention (HF-style, incompatible with DistributedAttention)."""
         sp_group = dist.new_group(ranks=list(range(self.world_size)))
         model = _MinimalInternVLModel().to(get_accelerator().device_name())
         auto_wrap_model_for_sp(model, sp_group)
@@ -163,9 +160,10 @@ class TestInternVLIntegration(DistributedTest):
         assert isinstance(
             model.vision_encoder[0].attn,
             UlyssesSPViTAttention), ("Expected vision_encoder[0].attn to be UlyssesSPViTAttention after auto_wrap")
-        assert isinstance(
-            model.language_model[0].attn,
-            DistributedAttention), ("Expected language_model[0].attn to be DistributedAttention after auto_wrap")
+        assert not model.vision_encoder[0].attn.has_cls_token, (
+            "InternVisionAttention has no CLS token; has_cls_token must be False")
+        assert isinstance(model.language_model[0].attn,
+                          InternLM2Attention), ("HF-style LLM attention must NOT be wrapped by auto_wrap")
 
     def test_full_pipeline_visual_to_fused(self):
         """SP-wrapped ViT -> InternVLFusionAdapter must produce fused output
@@ -186,10 +184,6 @@ class TestInternVLIntegration(DistributedTest):
 
         model = _MinimalInternVLModel().to(get_accelerator().device_name())
         auto_wrap_model_for_sp(model, sp_group)
-        # The mock ViT has no CLS token; override the default set by auto_wrap.
-        for m in model.modules():
-            if isinstance(m, UlyssesSPViTAttention):
-                m.has_cls_token = False
         model.fusion = InternVLFusionAdapter(model.mm_projector, sp_group,
                                              image_token_id=_INTERNVL_CONTEXT_ID).to(get_accelerator().device_name())
 
@@ -224,7 +218,8 @@ class TestQwen2VLIntegration(DistributedTest):
 
     def test_auto_wrap_detects_and_wraps_modules(self):
         """auto_wrap_model_for_sp must replace Qwen2VLVisionAttention with
-        UlyssesSPViTAttention and Qwen2Attention with DistributedAttention."""
+        UlyssesSPViTAttention (has_cls_token=False) and must NOT wrap
+        Qwen2Attention (HF-style, incompatible with DistributedAttention)."""
         sp_group = dist.new_group(ranks=list(range(self.world_size)))
         model = _MinimalQwen2VLModel().to(get_accelerator().device_name())
         auto_wrap_model_for_sp(model, sp_group)
@@ -232,8 +227,10 @@ class TestQwen2VLIntegration(DistributedTest):
         assert isinstance(
             model.visual[0].attn,
             UlyssesSPViTAttention), ("Expected visual[0].attn to be UlyssesSPViTAttention after auto_wrap")
+        assert not model.visual[0].attn.has_cls_token, (
+            "Qwen2VLVisionAttention has no CLS token; has_cls_token must be False")
         assert isinstance(model.model[0].attn,
-                          DistributedAttention), ("Expected model[0].attn to be DistributedAttention after auto_wrap")
+                          Qwen2Attention), ("HF-style LLM attention must NOT be wrapped by auto_wrap")
 
     def test_full_pipeline_visual_to_fused(self):
         """SP-wrapped ViT -> Qwen2VLFusionAdapter must produce fused output
@@ -255,9 +252,6 @@ class TestQwen2VLIntegration(DistributedTest):
 
         model = _MinimalQwen2VLModel().to(get_accelerator().device_name())
         auto_wrap_model_for_sp(model, sp_group)
-        for m in model.modules():
-            if isinstance(m, UlyssesSPViTAttention):
-                m.has_cls_token = False
         model.fusion = Qwen2VLFusionAdapter(model.multi_modal_projector,
                                             sp_group,
                                             vision_start_token_id=_QWEN2VL_START_ID,
