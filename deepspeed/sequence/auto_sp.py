@@ -18,8 +18,10 @@ Usage::
 
 * :class:`~deepspeed.sequence.autosp_vit.UlyssesSPViTAttention`
   for ViT encoder attention layers.
-* :class:`~deepspeed.sequence.layer.DistributedAttention`
-  for LLM decoder attention layers (Megatron-style Q/K/V interface).
+* a warning for LLM decoder attention layers: HuggingFace-style
+  ``hidden_states`` attention is incompatible with
+  :class:`~deepspeed.sequence.layer.DistributedAttention`'s Q/K/V interface;
+  configure LLM sequence parallelism manually.
 
 The vision-language projection layer (Phase 2) is detected and a warning is
 emitted; wrap it manually with
@@ -31,9 +33,8 @@ import logging
 
 import torch.nn as nn
 
-from deepspeed.sequence.autosp_detector import detect_model_sp_info
+from deepspeed.sequence.autosp_detector import detect_model_sp_info, _VIT_HAS_CLS_TOKEN
 from deepspeed.sequence.autosp_vit import UlyssesSPViTAttention
-from deepspeed.sequence.layer import DistributedAttention
 
 logger = logging.getLogger(__name__)
 
@@ -45,7 +46,8 @@ def auto_wrap_model_for_sp(model: nn.Module, process_group) -> nn.Module:
     with their SP-aware equivalents:
 
     * ViT attention  → :class:`UlyssesSPViTAttention`
-    * LLM attention  → :class:`DistributedAttention`
+    * LLM attention  → warning only (HuggingFace ``hidden_states`` interface
+      is incompatible with :class:`DistributedAttention`'s Q/K/V interface)
 
     The function modifies *model* in-place **and** returns it for convenience.
 
@@ -81,25 +83,34 @@ def auto_wrap_model_for_sp(model: nn.Module, process_group) -> nn.Module:
     # Wrap ViT encoder attention layers
     # ------------------------------------------------------------------
     for name, module in info.vit_attn_modules:
-        wrapped = UlyssesSPViTAttention(module, process_group)
+        cls_name = type(module).__name__
+        # Look up whether this ViT architecture uses a CLS token; default True
+        # (safe fallback) for unknown classes not yet in the registry.
+        has_cls = _VIT_HAS_CLS_TOKEN.get(cls_name, True)
+        wrapped = UlyssesSPViTAttention(module, process_group, has_cls_token=has_cls)
         _set_module_by_name(model, name, wrapped)
-        logger.debug("AutoSP: wrapped ViT attention '%s' with UlyssesSPViTAttention", name)
+        logger.debug("AutoSP: wrapped ViT attention '%s' with UlyssesSPViTAttention (has_cls_token=%s)", name, has_cls)
 
     logger.info("AutoSP: wrapped %d ViT attention layer(s).", len(info.vit_attn_modules))
 
     # ------------------------------------------------------------------
-    # Wrap LLM decoder attention layers
+    # LLM decoder attention layers — warn, do not auto-wrap
     # ------------------------------------------------------------------
+    # DistributedAttention expects a Megatron-style (query, key, value)
+    # interface, but every class in _LLM_ATTN_CLASSNAMES uses the
+    # HuggingFace hidden_states interface.  Wrapping them silently would
+    # produce incorrect behaviour at the first forward pass.  Emit a
+    # per-layer warning so the user can configure SP manually.
     for name, module in info.llm_attn_modules:
-        # DistributedAttention wraps a Megatron-style attention that receives
-        # (query, key, value) tensors separately.  For HuggingFace-style
-        # attention that receives hidden_states, use scatter_idx=2 / gather_idx=0
-        # defaults which match the typical [bs, seq, heads, dim] layout.
-        wrapped = DistributedAttention(local_attention=module, sequence_process_group=process_group)
-        _set_module_by_name(model, name, wrapped)
-        logger.debug("AutoSP: wrapped LLM attention '%s' with DistributedAttention", name)
+        logger.warning(
+            "AutoSP: LLM attention '%s' (class %s) uses a HuggingFace hidden_states "
+            "interface that is incompatible with DistributedAttention's Q/K/V interface. "
+            "Skipping auto-wrap. Configure sequence parallelism for this layer manually.", name,
+            type(module).__name__)
 
-    logger.info("AutoSP: wrapped %d LLM attention layer(s).", len(info.llm_attn_modules))
+    if info.llm_attn_modules:
+        logger.info("AutoSP: found %d LLM attention layer(s); skipped wrapping (see warnings above).",
+                    len(info.llm_attn_modules))
 
     # ------------------------------------------------------------------
     # Warn about the vision projection layer (Phase 2)

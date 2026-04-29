@@ -97,6 +97,51 @@ class TestViTSPEquivalence(DistributedTest):
                               atol=1e-5), (f"rank={rank} sp_out differs from reference: "
                                            f"max_diff={( sp_out - ref_slice).abs().max().item():.2e}")
 
+    @pytest.mark.parametrize("has_cls_token", [True, False])
+    def test_noneven_patches(self, has_cls_token):
+        """When num_patches % world_size != 0, the wrapper must still produce
+        correct per-rank output.  With 5 patches and world_size=2, rank 0
+        holds 3 patches and rank 1 holds 2 patches."""
+        sp_group = dist.new_group(ranks=list(range(self.world_size)))
+        rank = dist.get_rank(sp_group)
+        bs, hidden = 2, 16
+        num_patches = 5  # not divisible by world_size=2
+
+        torch.manual_seed(77)
+        if has_cls_token:
+            full_input = torch.randn(bs, 1 + num_patches, hidden).to(get_accelerator().device_name())
+        else:
+            full_input = torch.randn(bs, num_patches, hidden).to(get_accelerator().device_name())
+
+        # Distribute: first (num_patches % world_size) ranks carry one extra patch.
+        extra = num_patches % self.world_size  # = 1
+        base = num_patches // self.world_size  # = 2
+        local_v = base + (1 if rank < extra else 0)
+        patch_start = rank * base + min(rank, extra)
+
+        if has_cls_token:
+            cls = full_input[:, :1, :]
+            patch_slice = full_input[:, 1 + patch_start:1 + patch_start + local_v, :]
+            local_input = torch.cat([cls, patch_slice], dim=1)
+        else:
+            local_input = full_input[:, patch_start:patch_start + local_v, :]
+
+        wrapper = UlyssesSPViTAttention(_IdentityAttn().to(get_accelerator().device_name()),
+                                        sp_group,
+                                        has_cls_token=has_cls_token)
+        sp_out = wrapper(local_input)
+
+        # Reference: identity wrapper — each rank's output must equal its input slice.
+        if has_cls_token:
+            ref_slice = torch.cat([full_input[:, :1, :], full_input[:, 1 + patch_start:1 + patch_start + local_v, :]],
+                                  dim=1)
+        else:
+            ref_slice = full_input[:, patch_start:patch_start + local_v, :]
+
+        assert torch.allclose(sp_out, ref_slice,
+                              atol=1e-5), (f"rank={rank} non-even patches: sp_out differs from reference: "
+                                           f"max_diff={(sp_out - ref_slice).abs().max().item():.2e}")
+
 
 # ---------------------------------------------------------------------------
 # LlavaFusionAdapter equivalence
