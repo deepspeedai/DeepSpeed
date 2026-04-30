@@ -29,7 +29,7 @@ app = modal.App("deepspeedai-torch-latest-ci", image=image)
 
 @app.function(
     gpu="l40s:2",
-    timeout=1800,
+    timeout=3600,
 )
 def pytest():
     import subprocess

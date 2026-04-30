@@ -2470,12 +2470,20 @@ class DeepSpeedEngine(Module):
     def _backward_epilogue(self):
         self._stop_timers(self.engine_timers.backward_inner_timers)
         self._start_timers(self.engine_timers.backward_reduce_timers)
+        # BF16_Optimizer (without immediate_grad_update) accumulates low
+        # precision grads into a separate fp32 buffer in backward_epilogue().
+        # Run it before allreduce so the boundary microbatch is reduced.
+        bf16_optimizer = isinstance(self.optimizer, BF16_Optimizer)
+        if bf16_optimizer:
+            self.optimizer.backward_epilogue()
+
         if self.enable_backward_allreduce and not self.inside_no_sync_ctxt:
             # Traditional code path that allreduces the module parameter grads
             self.allreduce_gradients()
 
         if isinstance(self.optimizer, ZeROOptimizer):
-            self.optimizer.backward_epilogue()
+            if not bf16_optimizer:
+                self.optimizer.backward_epilogue()
             self.optimizer.exit_backward()
 
         see_memory_usage("Engine after backward", force=self.memory_breakdown())
