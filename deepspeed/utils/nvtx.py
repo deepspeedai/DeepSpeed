@@ -7,6 +7,19 @@ from deepspeed.accelerator import get_accelerator
 from deepspeed.runtime.compiler import is_compiling
 
 enable_nvtx = True
+DEEPSPEED_NVTX_DOMAIN = "DeepSpeed"
+
+
+def _range_push(accelerator, msg):
+    if getattr(accelerator, "supports_nvtx_domain", False):
+        return accelerator.range_push(msg, domain=DEEPSPEED_NVTX_DOMAIN)
+    return accelerator.range_push(msg)
+
+
+def _range_pop(accelerator):
+    if getattr(accelerator, "supports_nvtx_domain", False):
+        return accelerator.range_pop(domain=DEEPSPEED_NVTX_DOMAIN)
+    return accelerator.range_pop()
 
 
 def instrument_w_nvtx(func):
@@ -16,10 +29,10 @@ def instrument_w_nvtx(func):
 
     def wrapped_fn(*args, **kwargs):
         if enable_nvtx and not is_compiling():
-            get_accelerator().range_push(func.__qualname__)
+            _range_push(get_accelerator(), func.__qualname__)
         ret_val = func(*args, **kwargs)
         if enable_nvtx and not is_compiling():
-            get_accelerator().range_pop()
+            _range_pop(get_accelerator())
         return ret_val
 
     return wrapped_fn
