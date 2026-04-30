@@ -30,9 +30,12 @@ The ``cls`` token (if present) is replicated on every rank and is not split
 across the sequence dimension.  Each rank appends its local patches to the
 same ``cls`` token before calling the wrapped attention.
 
-Padding: when ``num_patches % world_size != 0``, we pad patches with zeros
-before scattering and strip the padding after gathering.  Padding tokens do
-not carry gradients and are never passed to downstream layers.
+Padding: when ``num_patches % world_size != 0``, shorter shards are
+zero-padded to a uniform size for ``all_gather``.  The padding is stripped
+*before* the attention call by trimming each rank's contribution to its true
+length, so the wrapped attention always sees exactly ``num_patches`` real
+tokens — identical to single-device execution and free of softmax pollution
+from dummy tokens.
 """
 
 import torch
@@ -101,13 +104,18 @@ class UlyssesSPViTAttention(nn.Module):
         # -------------------------------------------------------------------
         # 1. All-gather patches from all ranks to reconstruct the full sequence
         # -------------------------------------------------------------------
-        # When num_patches % world_size != 0, ranks may hold different numbers
-        # of patches (the first `num_patches % world_size` ranks carry one extra
-        # patch).  We find the largest local_patch_len across ranks and zero-pad
-        # shorter slices so that all_gather receives equal-size tensors.
-        max_len_t = torch.tensor(local_patch_len, dtype=torch.long, device=local_patches.device)
-        dist.all_reduce(max_len_t, op=dist.ReduceOp.MAX, group=self.process_group)
-        max_local_len = int(max_len_t.item())
+        # When num_patches % world_size != 0, ranks hold different shard sizes.
+        # We all-gather every rank's local_patch_len so we can:
+        #   (a) zero-pad shorter slices to uniform size for all_gather, and
+        #   (b) strip the padding per rank *before* calling attention, so that
+        #       the wrapped module never sees dummy tokens (which would corrupt
+        #       the softmax normalisation).
+        len_bufs = [torch.zeros(1, dtype=torch.long, device=local_patches.device) for _ in range(self.world_size)]
+        dist.all_gather(len_bufs,
+                        torch.tensor([local_patch_len], dtype=torch.long, device=local_patches.device),
+                        group=self.process_group)
+        all_lens = [int(t.item()) for t in len_bufs]
+        max_local_len = max(all_lens)
 
         pad_len = max_local_len - local_patch_len
         if pad_len > 0:
@@ -121,7 +129,11 @@ class UlyssesSPViTAttention(nn.Module):
             for _ in range(self.world_size)
         ]
         dist.all_gather(gathered, local_patches_padded.contiguous(), group=self.process_group)
-        full_patches = torch.cat(gathered, dim=1)  # [bs, world_size * max_local_len, hidden_dim]
+
+        # Strip per-rank padding before concatenation so attention only sees
+        # the true num_patches tokens, identical to single-device execution.
+        real_parts = [gathered[r][:, :all_lens[r], :] for r in range(self.world_size)]
+        full_patches = torch.cat(real_parts, dim=1)  # [bs, total_real_patches, hidden_dim]
 
         # -------------------------------------------------------------------
         # 2. Build the full input (prepend CLS if needed) and call attention
@@ -141,9 +153,9 @@ class UlyssesSPViTAttention(nn.Module):
             extra = []
 
         # -------------------------------------------------------------------
-        # 3. Scatter output: each rank keeps only its local slice of patches.
-        #    Slice starts at rank * max_local_len and spans local_patch_len
-        #    tokens, dropping the zero-padding rows that may have been appended.
+        # 3. Scatter output: each rank keeps its local slice of the real patches.
+        #    Because padding was stripped before attention, scatter offsets are
+        #    the cumulative sums of all_lens, not rank * max_local_len.
         # -------------------------------------------------------------------
         if self.has_cls_token:
             cls_out = full_out[:, :1, :]
@@ -152,7 +164,7 @@ class UlyssesSPViTAttention(nn.Module):
             patch_out = full_out
 
         rank = dist.get_rank(self.process_group)
-        start = rank * max_local_len
+        start = sum(all_lens[:rank])
         local_out = patch_out[:, start:start + local_patch_len, :].contiguous()
 
         if self.has_cls_token:
