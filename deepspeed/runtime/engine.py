@@ -1754,7 +1754,7 @@ class DeepSpeedEngine(Module):
             param_groups = []
             if muon_params:
                 accepted_parameters = dict()
-                for key in ["lr", "momentum", "weight_decay", "muon_lr"]:
+                for key in ["lr", "momentum", "weight_decay", "muon_lr", "ns_method"]:
                     if key in optimizer_parameters:
                         if key == "muon_lr":  # muon_lr will override lr
                             accepted_parameters['lr'] = optimizer_parameters[key]
@@ -2470,12 +2470,20 @@ class DeepSpeedEngine(Module):
     def _backward_epilogue(self):
         self._stop_timers(self.engine_timers.backward_inner_timers)
         self._start_timers(self.engine_timers.backward_reduce_timers)
+        # BF16_Optimizer (without immediate_grad_update) accumulates low
+        # precision grads into a separate fp32 buffer in backward_epilogue().
+        # Run it before allreduce so the boundary microbatch is reduced.
+        bf16_optimizer = isinstance(self.optimizer, BF16_Optimizer)
+        if bf16_optimizer:
+            self.optimizer.backward_epilogue()
+
         if self.enable_backward_allreduce and not self.inside_no_sync_ctxt:
             # Traditional code path that allreduces the module parameter grads
             self.allreduce_gradients()
 
         if isinstance(self.optimizer, ZeROOptimizer):
-            self.optimizer.backward_epilogue()
+            if not bf16_optimizer:
+                self.optimizer.backward_epilogue()
             self.optimizer.exit_backward()
 
         see_memory_usage("Engine after backward", force=self.memory_breakdown())
@@ -4526,6 +4534,18 @@ class DeepSpeedEngine(Module):
     def is_compiled(self) -> bool:
         return self._is_compiled
 
+    def _refine_include_states(self, include: Container[OffloadStateTypeEnum]) -> Container[OffloadStateTypeEnum]:
+        if include is None:
+            include = list(OffloadStateTypeEnum)
+
+        if self.zero_use_cpu_optimizer():
+            exclude_states = [OffloadStateTypeEnum.hp_params, OffloadStateTypeEnum.optim_states]
+            if self.zero_optimization_partition_weights():
+                exclude_states.append(OffloadStateTypeEnum.lp_grads)
+            include = [x for x in include if x not in exclude_states]
+
+        return include
+
     def offload_states(self,
                        include: Container[OffloadStateTypeEnum] = None,
                        device: OffloadDeviceEnum = OffloadDeviceEnum.cpu,
@@ -4539,8 +4559,7 @@ class DeepSpeedEngine(Module):
             pin_memory: Optional. Whether to pin the memory of the offloaded states.
             non_blocking: Optional. Whether to offload the states asynchronously.
         """
-        opt_offload_config = self.zero_offload_optimizer()
-        assert opt_offload_config is None or opt_offload_config.device == OffloadDeviceEnum.none, "Moving states across devices is not supported for offloaded optimizer states."
+        include = self._refine_include_states(include)
         param_offload_config = self.zero_offload_param()
         assert param_offload_config is None or param_offload_config.device == OffloadDeviceEnum.none, "Moving states across devices is not supported for offloaded parameters."
 
