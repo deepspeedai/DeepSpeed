@@ -1,7 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # DeepSpeed Team
 
-from transformers import Gemma4Config
+import pytest
+
+transformers = pytest.importorskip("transformers")
+Gemma4Config = getattr(transformers, "Gemma4Config", None)
+pytestmark = pytest.mark.skipif(Gemma4Config is None, reason="Gemma4Config not available in this transformers version")
 
 
 def test_gemma4_text_config_fallback():
