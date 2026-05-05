@@ -93,4 +93,4 @@ Muon is rapidly gaining traction in the community, and production-level adoption
 If you have thoughts, feedback, or contributions on Muon optimizer, welcome to start an issue for discussion or submit a PR to DeepSpeed.  Let’s make Muon rock solid and lightning fast in DeepSpeed!
 
 ## Contributors
-This work is contributed from Wang, Zhipeng (@PKUWZP); Chi McIsaac(@qimcis) and Ma, Guokai (@delock)
+This work is contributed from Wang, Zhipeng (@PKUWZP); Peng Du (@pengdurice); Chi McIsaac(@qimcis) and Ma, Guokai (@delock)
