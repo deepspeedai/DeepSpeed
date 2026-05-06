@@ -24,6 +24,7 @@
 - Write beginner-friendly code: avoid deeply nested expressions or chained logic. Break complex expressions into clear, named intermediate steps.
 - Comments should explain **why**, not **what**. Describe the purpose and reasoning, not the mechanics that the code already shows.
 - New features must include corresponding tests and documentation updates.
+- New tests must go under `tests/unit/v1/` (not `tests/unit/`), since the GPU CI workflow only runs `tests/unit/v1/`. Other workflows (cpu, inference) may run tests from `tests/unit/` as well.
 
 ## Tool Caveats
 
