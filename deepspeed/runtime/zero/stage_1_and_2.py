@@ -1507,8 +1507,11 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
     ############################################################################################
     def copy_grads_in_partition(self, param):
         if self.cpu_offload:
-
-            if self.gradient_accumulation_steps > 1:
+            # Accumulate when there were prior backwards in this step (restore from
+            # CPU buffer) or more will follow (save to CPU buffer). Skipping only
+            # the lone backward of a step preserves the existing fast path for
+            # ga_steps=1 + single backward.
+            if self.micro_step_id > 0 or not self.is_gradient_accumulation_boundary:
                 self.async_accumulate_grad_in_cpu_via_gpu(param)
 
             if self.is_gradient_accumulation_boundary:
@@ -2003,7 +2006,11 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                 assert tensor.ndim > 1, f"if use muon, then tensor dim > 1, got {tensor.size()}"
                 buffer = torch.narrow(self.optimizer.state[flatten_copy]["momentum_buffer"], 0, buffer_idx,
                                       tensor.numel()).view(tensor.size())
-                grad_accum = muon_update(grad_accum, buffer, self.optimizer.param_groups[param_group_idx]['momentum'])
+                ns_method = self.optimizer.param_groups[param_group_idx].get('ns_method', 'gram')
+                grad_accum = muon_update(grad_accum,
+                                         buffer,
+                                         self.optimizer.param_groups[param_group_idx]['momentum'],
+                                         ns_method=ns_method)
             tensor = grad_accum
             num_elements = tensor.numel()
             buffer_idx += num_elements

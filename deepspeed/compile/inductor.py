@@ -3,6 +3,8 @@
 
 # DeepSpeed Team
 
+from typing import Set
+
 import torch
 
 try:
@@ -60,23 +62,29 @@ def patch_compiler(original_compiler, dc_compiler, z3_partition: bool, graph_id,
     return wrapped_compiler
 
 
-def wrap_partition_fn(partition_fn, real_inputs, param_indices):
+def wrap_partition_fn(z3_partition: bool, partition_fn, real_inputs, param_indices, frame_id: int,
+                      frames_partitioned: Set[int]):
 
     def wrapped_partition_fn(*args, **kwargs):
 
-        fn = get_wrapped_partitioner(True, param_indices, partition_fn=partition_fn)
+        fn = get_wrapped_partitioner(z3_partition,
+                                     param_indices,
+                                     partition_fn=partition_fn,
+                                     frame_id=frame_id,
+                                     frames_partitioned=frames_partitioned)
         fw_module, bw_module = fn(*args, **kwargs)
 
-        # get parameter names
-        pm = DSGraphParamManager(fw_module.graph, real_inputs, param_indices)
+        if z3_partition:
+            # get parameter names
+            pm = DSGraphParamManager(fw_module.graph, real_inputs, param_indices)
 
-        def fix_placeholder_meta(graph):
-            for n in graph.nodes:
-                if n.op == "placeholder" and n.name in pm.param_names:
-                    n.meta["val"] = torch.empty([0], dtype=n.meta["val"].dtype, device=n.meta["val"].device)
+            def fix_placeholder_meta(graph):
+                for n in graph.nodes:
+                    if n.op == "placeholder" and n.name in pm.param_names:
+                        n.meta["val"] = torch.empty([0], dtype=n.meta["val"].dtype, device=n.meta["val"].device)
 
-        fix_placeholder_meta(fw_module.graph)
-        fix_placeholder_meta(bw_module.graph)
+            fix_placeholder_meta(fw_module.graph)
+            fix_placeholder_meta(bw_module.graph)
 
         return fw_module, bw_module
 
@@ -84,7 +92,7 @@ def wrap_partition_fn(partition_fn, real_inputs, param_indices):
 
 
 def patch_create_aot_dispatcher_function(graph_id: int, z3_partition: bool, make_fw_graph, make_bw_graph, real_inputs,
-                                         param_indices, param_manager):
+                                         param_indices, param_manager, frame_id: int, frames_partitioned: Set[int]):
 
     from torch._dynamo.backends.common import AotAutograd
     import functools
@@ -112,8 +120,8 @@ def patch_create_aot_dispatcher_function(graph_id: int, z3_partition: bool, make
                                                    bwd=True)
             kwargs["inference_compiler"] = kwargs["fw_compiler"]
 
-            if z3_partition:
-                kwargs["partition_fn"] = wrap_partition_fn(kwargs["partition_fn"], real_inputs, param_indices)
+            kwargs["partition_fn"] = wrap_partition_fn(z3_partition, kwargs["partition_fn"], real_inputs,
+                                                       param_indices, frame_id, frames_partitioned)
 
             original_init(self, **kwargs)
 
