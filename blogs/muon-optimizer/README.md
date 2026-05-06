@@ -37,12 +37,6 @@ We tested Muon optimizer by finetuning Moonlight-16B-A3B (a Mixture-of-Experts m
 - Batch size: 16, gradient accumulation: 2, 8 GPUs
 - 1 epoch, gradient clipping: 1.0
 
-### Eval Loss Curve
-
-![Eval loss comparison: Muon vs AdamW on CodeAlpaca](images/muon_vs_adam.png)
-
-Starting from an initial eval loss of 0.671, AdamW converges to 0.494 and Muon to 0.545 after one epoch.  Despite Muon's higher eval loss, it produces better downstream task performance (see MBPP/MBPP+ results below), suggesting that Muon's orthogonalized updates lead to better generalization.
-
 ### MBPP / MBPP+ Evaluation Results
 
 | Optimizer | Learning Rate | adam_lr (for Muon) | MBPP | MBPP+ |
@@ -51,7 +45,7 @@ Starting from an initial eval loss of 0.671, AdamW converges to 0.494 and Muon t
 | AdamW     | 2e-6         | —                 | 0.611| 0.505 |
 | Muon      | 2e-4         | 2e-6              | 0.661| 0.553 |
 
-Muon outperforms the best AdamW result on both MBPP (0.661 vs 0.611, +8.2%) and MBPP+ (0.553 vs 0.505, +9.5%), despite AdamW achieving lower eval loss (see above).  This suggests that Muon's orthogonalized updates lead to better generalization on downstream tasks.
+Muon outperforms the best AdamW result on both MBPP (0.661 vs 0.611, +8.2%) and MBPP+ (0.553 vs 0.505, +9.5%).
 
 ### Tuning Learning Rate for Muon Optimizer
 
