@@ -44,7 +44,9 @@ class _SdmaWork:
         self._event = event
 
     def wait(self):
-        self._event.synchronize()
+        # Stream-level dependency only; do NOT block CPU.  RCCL Work.wait()
+        # is also non-CPU-blocking and the ZeRO-3 prefetch pipeline depends on
+        # the CPU staying free so the next bucket can be queued ahead of time.
         get_accelerator().current_stream().wait_event(self._event)
 
     def is_completed(self) -> bool:
