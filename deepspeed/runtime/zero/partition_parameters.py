@@ -28,6 +28,7 @@ from deepspeed.runtime.zero.config import DeepSpeedZeroConfig
 from deepspeed.runtime.zero.utils import assert_ints_same_as_other_ranks, is_zero_param
 from deepspeed.runtime.zero.offload_config import OffloadDeviceEnum
 from deepspeed.runtime.config_utils import get_config_default
+from deepspeed.runtime.comm import mori
 from deepspeed.utils import instrument_w_nvtx, logger
 from deepspeed.comm.comm import init_distributed
 from deepspeed.utils.debug import (debug_param2name_id_shape, debug_param2name_id_shape_device, debug_module2name,
@@ -105,87 +106,10 @@ class NoGatherCoalescedHandle:
         self.__complete = True
 
 
-class _SdmaWork:
-    """Duck-type compatible with ``torch.distributed.Work``.
-
-    Mirrors NCCL Work.wait() semantics: CPU-level blocking AND GPU-level
-    stream dependency so the current compute stream sees SDMA-written data.
-    """
-
-    def __init__(self, event):
-        self._event = event
-
-    def wait(self):
-        self._event.synchronize()
-        get_accelerator().current_stream().wait_event(self._event)
-
-    def is_completed(self) -> bool:
-        return self._event.query()
-
-
-
-_sdma_ag = None
-_sdma_call_failed_warned = False
-
-
-def _sdma_allgather_enabled():
-    return _sdma_ag is not None
-
-
-def _ensure_default_pg_registered():
-    """Register the WORLD process group as 'default' in PyTorch's C++ GroupRegistry."""
-    world_group = torch.distributed.group.WORLD
-    assert world_group is not None, "torch.distributed must be initialized before SDMA allgather"
-    torch._C._distributed_c10d._register_process_group("default", world_group)
-
-
-def _init_sdma_allgather(max_numel: int = 64 * 1024 * 1024,
-                         prefetch_bucket_size: int = 50000000,
-                         num_slots: int = None,
-                         dtype_bytes: int = 2):
-    """Initialize SDMA allgather with copy_output_to_user=True.
-
-    SDMA gathers data via DMA into an internal transit buffer, then
-    copies to the caller-provided output tensor.  No output buffer
-    registration or pool management is needed.
-    """
-    global _sdma_ag
-    if _sdma_ag is not None:
-        return
-    _ensure_default_pg_registered()
-    import mori.shmem as shmem
-    from mori.ccl import AllgatherSdma
-
-    shmem.shmem_torch_process_group_init("default")
-    my_pe = shmem.shmem_mype()
-    npes = shmem.shmem_npes()
-    elem_bytes = 4
-    _sdma_ag = AllgatherSdma(
-        my_pe, npes,
-        input_buffer_size=max_numel * elem_bytes,
-        output_buffer_size=max_numel * npes * elem_bytes,
-        copy_output_to_user=True,
-    )
-    if dist.get_rank() == 0:
-        logger.info("SDMA allgather enabled (copy_output_to_user=True)")
-
-
-
-
 def _dist_allgather_fn(input_tensor: Tensor, output_tensor: Tensor, group=None):
-    if _sdma_allgather_enabled():
-        global _sdma_call_failed_warned
-        stream = get_accelerator().current_stream()
-        ok = _sdma_ag(input_tensor, output_tensor, input_tensor.numel(), stream)
-        if not ok:
-            if not _sdma_call_failed_warned and dist.is_initialized() and dist.get_rank() == 0:
-                logger.warning("SDMA allgather call returned False, fallback to dist.allgather")
-                _sdma_call_failed_warned = True
-            return instrument_w_nvtx(dist.allgather_fn)(output_tensor, input_tensor, group=group, async_op=True)
-
-        event = get_accelerator().Event()
-        event.record(stream)
-        return _SdmaWork(event)
+    work = mori.allgather_into_tensor(input_tensor, output_tensor)
+    if work is not None:
+        return work
     return instrument_w_nvtx(dist.allgather_fn)(output_tensor, input_tensor, group=group, async_op=True)
 
 
@@ -1203,10 +1127,7 @@ class Init(InsertPostInitMethodToModuleSubClasses):
                 cfg_max = _ds_config.zero_config.sdma_allgather_max_numel
                 prefetch_partition = int(_ds_config.zero_config.prefetch_bucket_size) // self.num_partitions
                 safe_max = max(cfg_max, prefetch_partition * 2)
-                _init_sdma_allgather(
-                    max_numel=safe_max,
-                    prefetch_bucket_size=int(_ds_config.zero_config.prefetch_bucket_size),
-                )
+                mori.init(max_numel=safe_max)
 
     def _update_persist_config(self, ds_config):
         Init.apply_param_persistence = True
