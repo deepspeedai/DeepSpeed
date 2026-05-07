@@ -34,7 +34,9 @@ from deepspeed.runtime.swap_tensor.partitioned_param_swapper import PartitionedP
 from deepspeed.runtime.swap_tensor.optimizer_utils import OptimizerSwapper
 from deepspeed.runtime.swap_tensor.partitioned_optimizer_swapper import PartitionedOptimizerSwapper
 from deepspeed.runtime.swap_tensor.pipelined_optimizer_swapper import PipelinedOptimizerSwapper
-from deepspeed.checkpoint.constants import OPTIMIZER_STATE_DICT, FP32_FLAT_GROUPS, PARTITION_COUNT, ZERO_STAGE, LOSS_SCALER
+from deepspeed.checkpoint.constants import (OPTIMIZER_STATE_DICT, FP32_FLAT_GROUPS, PARTITION_COUNT, ZERO_STAGE,
+                                            LOSS_SCALER, BASE_OPTIMIZER_STATE, BASE_OPTIMIZER_STATE_STEP,
+                                            GROUP_PADDINGS)
 from deepspeed.accelerator import get_accelerator
 from deepspeed.runtime.zero.muon.original_muon import muon_update
 from deepspeed.runtime.zero.muon.muon_optimizer import MuonWithAuxAdam
@@ -2948,6 +2950,53 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         for param_group in self.optimizer.param_groups:
             param_group['params'] = []
 
+    def _get_elastic_optimizer_state(self):
+        # Return per-sub-group lean optimizer states (per-param tensors with padding stripped).
+        # Lean format allows the checkpoint to be loaded with a different DP world size.
+        sub_group_states = []
+        for sub_group_id, _ in enumerate(self.fp16_groups):
+            fp32_param = self.fp32_partitioned_groups_flat[sub_group_id]
+            if fp32_param not in self.optimizer.state or not self.optimizer.state[fp32_param]:
+                sub_group_states.append({})
+                continue
+            lean_state = {}
+            for key, value in self.optimizer.state[fp32_param].items():
+                if torch.is_tensor(value):
+                    lean_state[key] = self._get_lean_tensors(value, self.fp16_partitioned_groups[sub_group_id],
+                                                             self.groups_padding[sub_group_id])
+                else:
+                    lean_state[key] = value
+            sub_group_states.append(lean_state)
+        return sub_group_states
+
+    def _elastic_state_dict(self):
+        # Build a world-size-agnostic checkpoint by saving lean (padding-stripped) fp32 and
+        # optimizer-state partitions.  Each sub-group entry is a list of per-param lean tensors
+        # so that loading code can merge ranks and re-partition for any DP world size.
+        state_dict = {}
+        state_dict[ZERO_STAGE] = ZeroStageEnum.weights
+        state_dict[LOSS_SCALER] = self.loss_scaler
+        state_dict['dynamic_loss_scale'] = self.dynamic_loss_scale
+        state_dict['overflow'] = self.overflow
+        state_dict[PARTITION_COUNT] = self.partition_count
+
+        lean_fp32_groups = [
+            self._get_lean_tensors(fp32_flat, self.fp16_partitioned_groups[i], self.groups_padding[i])
+            for i, fp32_flat in enumerate(self.fp32_partitioned_groups_flat)
+        ]
+        state_dict[FP32_FLAT_GROUPS] = lean_fp32_groups
+
+        self._set_fp32_optimizer_param_groups()
+        state_dict[BASE_OPTIMIZER_STATE] = self._get_elastic_optimizer_state()
+        if self.optimizer.param_groups and "step" in self.optimizer.param_groups[0]:
+            assert all(pg["step"] == self.optimizer.param_groups[0]["step"] for pg in self.optimizer.param_groups), \
+                "All param groups must have the same step value"
+            state_dict[BASE_OPTIMIZER_STATE_STEP] = self.optimizer.param_groups[0]["step"]
+        self._clear_fp32_optimizer_param_groups()
+
+        state_dict[GROUP_PADDINGS] = self.groups_padding
+        return state_dict
+
     def _rigid_state_dict(self):
         state_dict = {}
         state_dict[ZERO_STAGE] = ZeroStageEnum.weights
@@ -2975,7 +3024,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             torch.save(checkpoint, "saved.pth")
         """
         if self.elastic_checkpoint:
-            raise NotImplementedError("ZeRO-3 does not yet support elastic checkpointing, please disable for now.")
+            return self._elastic_state_dict()
 
         return self._rigid_state_dict()
 
@@ -3049,6 +3098,104 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                 else:
                     self.optimizer.state[p][key] = saved
 
+    def _repartition_for_current_rank(self, lean_parts_per_ckpt_rank, param):
+        # Merge lean (padding-stripped) partitions from all checkpoint ranks into the full
+        # parameter, then slice out the current rank's portion under the new world size.
+        full_tensor = torch.cat(lean_parts_per_ckpt_rank)
+        rank = dist.get_rank(group=self.dp_process_group)
+        partition_size = param.partition_numel()
+        start = rank * partition_size
+        end = min(start + partition_size, param.ds_numel)
+        local_part = full_tensor[start:end]
+        # Last rank may need zero-padding to fill its partition slot.
+        if local_part.numel() < partition_size:
+            pad = torch.zeros(partition_size - local_part.numel(), dtype=local_part.dtype, device=local_part.device)
+            local_part = torch.cat([local_part, pad])
+        return local_part
+
+    def _restore_from_elastic_fp32_partitions(self, all_state_dict):
+        # Rebuild fp32 master weights from an elastic checkpoint that may have been saved with
+        # a different DP world size.
+        for sub_group_id, fp32_flat in enumerate(self.fp32_partitioned_groups_flat):
+            new_parts = []
+            for param_idx, param in enumerate(self.fp16_groups[sub_group_id]):
+                lean_parts = [sd[FP32_FLAT_GROUPS][sub_group_id][param_idx] for sd in all_state_dict]
+                new_parts.append(self._repartition_for_current_rank(lean_parts, param))
+            fp32_flat.data.copy_(torch.cat(new_parts).to(fp32_flat.dtype))
+
+    def _restore_elastic_optimizer_state(self, all_state_dict):
+        # Rebuild per-sub-group optimizer states from an elastic checkpoint.
+        step = None
+        if BASE_OPTIMIZER_STATE_STEP in all_state_dict[0]:
+            assert all(sd[BASE_OPTIMIZER_STATE_STEP] == all_state_dict[0][BASE_OPTIMIZER_STATE_STEP]
+                       for sd in all_state_dict), "Checkpoint ranks have inconsistent step values"
+            step = all_state_dict[0][BASE_OPTIMIZER_STATE_STEP]
+
+        for sub_group_id, _ in enumerate(self.fp16_groups):
+            fp32_param = self.fp32_partitioned_groups_flat[sub_group_id]
+            params = self.fp16_groups[sub_group_id]
+            all_sub_group_states = [sd[BASE_OPTIMIZER_STATE][sub_group_id] for sd in all_state_dict]
+            if not all_sub_group_states[0]:
+                continue
+            restored_state = {}
+            for key in all_sub_group_states[0].keys():
+                sample = all_sub_group_states[0][key]
+                if isinstance(sample, list) and len(sample) > 0 and torch.is_tensor(sample[0]):
+                    new_parts = [
+                        self._repartition_for_current_rank(
+                            [rank_state[key][param_idx] for rank_state in all_sub_group_states], param)
+                        for param_idx, param in enumerate(params)
+                    ]
+                    restored_state[key] = torch.cat(new_parts).to(fp32_param.dtype)
+                else:
+                    restored_state[key] = sample
+            self.optimizer.state[fp32_param] = restored_state
+
+        if step is not None:
+            for param_group in self.optimizer.param_groups:
+                param_group['step'] = step
+
+    def _elastic_load_state_dict(self, all_state_dict, load_optimizer_states=True, load_from_fp32_weights=False):
+        # Load a ZeRO-3 elastic checkpoint.  The checkpoint may have been saved with a different
+        # DP world size; elastic merge-and-repartition handles the mismatch transparently.
+        sd0 = all_state_dict[0]
+        self.loss_scaler = sd0[LOSS_SCALER]
+        self.dynamic_loss_scale = sd0['dynamic_loss_scale']
+        self.overflow = sd0['overflow']
+
+        if load_optimizer_states:
+            self._set_fp32_optimizer_param_groups()
+            self._restore_elastic_optimizer_state(all_state_dict)
+            self._clear_fp32_optimizer_param_groups()
+
+        if self.swap_optimizer:
+            self.optimizer_swapper.purge_state()
+            timer_names = set()
+            self._partition_all_parameters()
+            for sub_group_id, group in enumerate(self.fp16_groups):
+                self._prepare_sub_group(sub_group_id, timer_names)
+                self._reassign_or_swap_out_partitioned_parameters(sub_group_id)
+                self._release_sub_group(sub_group_id, timer_names)
+            self._post_step(timer_names)
+
+        if load_from_fp32_weights:
+            self._restore_from_elastic_fp32_partitions(all_state_dict)
+        else:
+            self._restore_from_bit16_weights()
+
+        # Sync fp16 partitions from the (now-updated) fp32 master weights.
+        for sub_group_id in range(len(self.fp32_partitioned_groups_flat)):
+            fp32_param = self.fp32_partitioned_groups_flat[sub_group_id]
+            if sum(fp32_param.size()) > 0:
+                fp16_param = self.fp16_partitioned_groups_flat[sub_group_id]
+                fp16_param.data.copy_(fp32_param.data)
+
+        for sub_group_id in range(len(self.fp16_partitioned_groups_flat)):
+            updated_params = self.unflatten(self.fp16_partitioned_groups_flat[sub_group_id],
+                                            self.fp16_partitioned_groups[sub_group_id])
+            for partitioned_param, q in zip(self.fp16_partitioned_groups[sub_group_id], updated_params):
+                partitioned_param.data = q.data
+
     def _rigid_load_state_dict(self, state_dict, load_optimizer_states=True):
         # I think it should actually be ok to reload the optimizer before the model.
         self.loss_scaler = state_dict[LOSS_SCALER]
@@ -3093,7 +3240,6 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             for partitioned_param, q in zip(self.fp16_partitioned_groups[sub_group_id], updated_params):
                 partitioned_param.data = q.data
 
-    # TODO: Support different/changing load/save DP degree.
     def load_state_dict(self,
                         state_dict_list,
                         load_optimizer_states=True,
@@ -3126,11 +3272,15 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             optimizer.load_state_dict(checkpoint['optimizer'])
         """
 
-        if self.elastic_checkpoint:
-            raise NotImplementedError("ZeRO-3 does not yet support elastic checkpointing, please disable for now.")
-
         if checkpoint_folder:
             self._load_universal_checkpoint(checkpoint_folder, load_optimizer_states, load_from_fp32_weights)
+            return
+
+        # Detect elastic vs. rigid format by the presence of BASE_OPTIMIZER_STATE.
+        # Elastic checkpoints store lean per-param tensors and support arbitrary DP world sizes.
+        ckpt_is_elastic = BASE_OPTIMIZER_STATE in state_dict_list[0]
+        if ckpt_is_elastic:
+            self._elastic_load_state_dict(state_dict_list, load_optimizer_states, load_from_fp32_weights)
         else:
             self._rigid_load_state_dict(state_dict_list[dist.get_rank(group=self.dp_process_group)],
                                         load_optimizer_states=load_optimizer_states)
@@ -3147,9 +3297,9 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                 if local_rank != rank_end:
                     dist.send(tensor=load_serial, dst=rank + 1)
 
-            if len(self.persistent_parameters) > 0:
-                self.persistent_parameters[0].partition(self.persistent_parameters)
-                # self.persistent_parameters[0].all_gather(self.persistent_parameters) # this will be done in checkpoint_event_epilogue() so remove it to prevent double all_gather
+        if len(self.persistent_parameters) > 0:
+            self.persistent_parameters[0].partition(self.persistent_parameters)
+            # self.persistent_parameters[0].all_gather(self.persistent_parameters) # this will be done in checkpoint_event_epilogue() so remove it to prevent double all_gather
 
     def _load_universal_checkpoint(self, checkpoint_folder, load_optimizer_states, load_from_fp32_weights):
         self.load_hp_checkpoint_state_from_checkpoint_dir_stage3(checkpoint_folder)
