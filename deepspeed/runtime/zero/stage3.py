@@ -2980,11 +2980,9 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         state_dict['overflow'] = self.overflow
         state_dict[PARTITION_COUNT] = self.partition_count
 
-        lean_fp32_groups = [
-            self._get_lean_tensors(fp32_flat, self.fp16_partitioned_groups[i], self.groups_padding[i])
-            for i, fp32_flat in enumerate(self.fp32_partitioned_groups_flat)
-        ]
-        state_dict[FP32_FLAT_GROUPS] = lean_fp32_groups
+        # Save padded flat tensors (same layout as rigid format) so that zero_to_fp32.py can
+        # reconstruct model weights without knowing the DP world size used at save time.
+        state_dict[FP32_FLAT_GROUPS] = list(self.fp32_partitioned_groups_flat)
 
         self._set_fp32_optimizer_param_groups()
         state_dict[BASE_OPTIMIZER_STATE] = self._get_elastic_optimizer_state()
@@ -3115,11 +3113,26 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
     def _restore_from_elastic_fp32_partitions(self, all_state_dict):
         # Rebuild fp32 master weights from an elastic checkpoint that may have been saved with
-        # a different DP world size.
+        # a different DP world size.  FP32_FLAT_GROUPS stores padded flat tensors (one per
+        # sub-group per checkpoint rank), identical in layout to the rigid format, so the same
+        # per-param partition-size arithmetic applies.
+        ckpt_world_size = len(all_state_dict)
         for sub_group_id, fp32_flat in enumerate(self.fp32_partitioned_groups_flat):
+            params = self.fp16_groups[sub_group_id]
+            # Compute each param's partition size under the checkpoint world size.
+            ckpt_partition_sizes = [(p.ds_numel + ckpt_world_size - 1) // ckpt_world_size for p in params]
             new_parts = []
-            for param_idx, param in enumerate(self.fp16_groups[sub_group_id]):
-                lean_parts = [sd[FP32_FLAT_GROUPS][sub_group_id][param_idx] for sd in all_state_dict]
+            for param_idx, param in enumerate(params):
+                ckpt_ps = ckpt_partition_sizes[param_idx]
+                lean_parts = []
+                for rank, sd in enumerate(all_state_dict):
+                    padded_flat = sd[FP32_FLAT_GROUPS][sub_group_id]
+                    # Split the rank's padded flat group into one chunk per param.
+                    per_param_chunks = padded_flat.split(ckpt_partition_sizes)
+                    padded_chunk = per_param_chunks[param_idx]
+                    # Strip padding: the real element count for this rank/param pair.
+                    lean_len = max(0, min(ckpt_ps, param.ds_numel - rank * ckpt_ps))
+                    lean_parts.append(padded_chunk[:lean_len])
                 new_parts.append(self._repartition_for_current_rank(lean_parts, param))
             fp32_flat.data.copy_(torch.cat(new_parts).to(fp32_flat.dtype))
 
@@ -3278,7 +3291,11 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
         # Detect elastic vs. rigid format by the presence of BASE_OPTIMIZER_STATE.
         # Elastic checkpoints store lean per-param tensors and support arbitrary DP world sizes.
-        ckpt_is_elastic = BASE_OPTIMIZER_STATE in state_dict_list[0]
+        # Use the current rank's own state dict for detection; other slots may be None when the
+        # engine used lazy-loading (only fetched the current rank's file).
+        my_rank = dist.get_rank(group=self.dp_process_group)
+        own_sd = state_dict_list[my_rank] if my_rank < len(state_dict_list) else None
+        ckpt_is_elastic = own_sd is not None and BASE_OPTIMIZER_STATE in own_sd
         if ckpt_is_elastic:
             self._elastic_load_state_dict(state_dict_list, load_optimizer_states, load_from_fp32_weights)
         else:

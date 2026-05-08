@@ -242,6 +242,52 @@ class ws4_model_checkpoint_zeropp(DistributedFixture):
         ds_model.save_checkpoint(class_tmpdir)
 
 
+# DistributedFixture that saves a ZeRO-3 elastic checkpoint from 4 GPUs so that
+# TestZeROStage3ElasticCheckpoint (world_size=2) can test cross-world-size loading.
+class ws4_zero3_elastic_checkpoint(DistributedFixture):
+    world_size = 4
+
+    def run(self, class_tmpdir):
+        config_dict = {
+            "train_batch_size": 4,
+            "optimizer": {
+                "type": "Adam"
+            },
+            "zero_optimization": {
+                "stage": 3,
+                "elastic_checkpoint": True
+            }
+        }
+        if get_accelerator().is_bf16_supported():
+            config_dict["bf16"] = {"enabled": True}
+        elif get_accelerator().is_fp16_supported():
+            config_dict["fp16"] = {"enabled": True, "initial_scale_power": 8}
+        hidden_dim = 10
+
+        with deepspeed.zero.Init(config_dict_or_path=config_dict):
+            model = SimpleModel(hidden_dim)
+        ds_model = create_deepspeed_model(config_dict=config_dict, model=model, base_optimizer=None)
+        data_loader = random_dataloader(model=ds_model, total_samples=8, hidden_dim=hidden_dim, device=ds_model.device)
+        for _, batch in enumerate(data_loader):
+            loss = ds_model(batch[0], batch[1])
+            ds_model.backward(loss)
+            ds_model.step()
+        ds_model.empty_partition_cache()
+        ds_model.save_checkpoint(class_tmpdir)
+
+        # Gather full fp32 parameters on rank 0 and save as a reference for the
+        # cross-world-size numerical correctness test.
+        ref_params = {}
+        params = list(ds_model.module.parameters())
+        with deepspeed.zero.GatheredParameters(params, modifier_rank=0):
+            if dist.get_rank() == 0:
+                for name, p in ds_model.module.named_parameters():
+                    ref_params[name] = p.detach().cpu().float().clone()
+        if dist.get_rank() == 0:
+            torch.save(ref_params, os.path.join(class_tmpdir, "reference_params.pt"))
+        dist.barrier()
+
+
 @pytest.mark.parametrize("elastic_save", [True, False])
 @pytest.mark.parametrize("elastic_load", [True, False])
 @pytest.mark.parametrize("load_optim", [True, False])
@@ -730,52 +776,6 @@ class TestZeROPPLoadCheckpoint(DistributedTest):
                 assert v == 1.0
 
 
-# DistributedFixture that saves a ZeRO-3 elastic checkpoint from 4 GPUs so that
-# TestZeROStage3ElasticCheckpoint (world_size=2) can test cross-world-size loading.
-class ws4_zero3_elastic_checkpoint(DistributedFixture):
-    world_size = 4
-
-    def run(self, class_tmpdir):
-        config_dict = {
-            "train_batch_size": 4,
-            "optimizer": {
-                "type": "Adam"
-            },
-            "zero_optimization": {
-                "stage": 3,
-                "elastic_checkpoint": True
-            }
-        }
-        if get_accelerator().is_bf16_supported():
-            config_dict["bf16"] = {"enabled": True}
-        elif get_accelerator().is_fp16_supported():
-            config_dict["fp16"] = {"enabled": True, "initial_scale_power": 8}
-        hidden_dim = 10
-
-        with deepspeed.zero.Init(config_dict_or_path=config_dict):
-            model = SimpleModel(hidden_dim)
-        ds_model = create_deepspeed_model(config_dict=config_dict, model=model, base_optimizer=None)
-        data_loader = random_dataloader(model=ds_model, total_samples=8, hidden_dim=hidden_dim, device=ds_model.device)
-        for _, batch in enumerate(data_loader):
-            loss = ds_model(batch[0], batch[1])
-            ds_model.backward(loss)
-            ds_model.step()
-        ds_model.empty_partition_cache()
-        ds_model.save_checkpoint(class_tmpdir)
-
-        # Gather full fp32 parameters on rank 0 and save as a reference for the
-        # cross-world-size numerical correctness test.
-        ref_params = {}
-        params = list(ds_model.module.parameters())
-        with deepspeed.zero.GatheredParameters(params, modifier_rank=0):
-            if dist.get_rank() == 0:
-                for name, p in ds_model.module.named_parameters():
-                    ref_params[name] = p.detach().cpu().float().clone()
-        if dist.get_rank() == 0:
-            torch.save(ref_params, os.path.join(class_tmpdir, "reference_params.pt"))
-        dist.barrier()
-
-
 class TestZeROStage3ElasticCheckpoint(DistributedTest):
     """Unit tests for ZeRO Stage 3 elastic checkpoint save/load."""
 
@@ -859,9 +859,11 @@ class TestZeROStage3ElasticCheckpoint(DistributedTest):
         assert BASE_OPTIMIZER_STATE in sd
         assert OPTIMIZER_STATE_DICT not in sd
         assert FP32_FLAT_GROUPS in sd
-        # Each sub-group entry in FP32_FLAT_GROUPS should be a list of per-param lean tensors.
+        # Each sub-group entry in FP32_FLAT_GROUPS should be a flat fp32 tensor (same layout as
+        # the rigid format so that zero_to_fp32.py can reconstruct model weights unchanged).
+        import torch
         for sub_group in sd[FP32_FLAT_GROUPS]:
-            assert isinstance(sub_group, list)
+            assert torch.is_tensor(sub_group)
 
     def test_rigid_state_dict_format(self, tmpdir):
         # Verify that elastic_checkpoint=False (default) produces a state dict with

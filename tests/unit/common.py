@@ -414,6 +414,28 @@ class DistributedFixture(DistributedExec):
     _pytestfixturefunction = FixtureFunctionMarker(scope="function", params=None)
     __name__ = ""
 
+    def __init_subclass__(cls, **kwargs):
+        super().__init_subclass__(**kwargs)
+        # pytest >= 9 no longer registers classes with _pytestfixturefunction as fixtures.
+        # Inject a proper @pytest.fixture wrapper into the subclass's defining module so
+        # that pytest discovers it during collection while keeping backward compatibility
+        # with older pytest (which uses _pytestfixturefunction on the class itself).
+        if int(pytest.__version__.split(".")[0]) < 9:
+            return
+        import sys
+        module = sys.modules.get(cls.__module__)
+        if module is None:
+            return
+        cls_ref = cls
+
+        def _fixture_fn(request):
+            cls_ref()(request)
+
+        _fixture_fn.__name__ = cls.__name__
+        _fixture_fn.__qualname__ = cls.__qualname__
+        _fixture_fn = pytest.fixture(scope="function", name=cls.__name__)(_fixture_fn)
+        setattr(module, f"_{cls.__name__}_fixture_fn_", _fixture_fn)
+
     def __init__(self):
         assert isinstance(self.world_size, int), "Only one world size is allowed for distributed fixtures"
         self.__name__ = type(self).__name__
