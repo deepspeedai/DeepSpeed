@@ -730,15 +730,14 @@ class TestZeROPPLoadCheckpoint(DistributedTest):
                 assert v == 1.0
 
 
-# DistributedFixture that saves a ZeRO-3 elastic checkpoint from 1 GPU so that
-# TestZeROStage3ElasticCheckpoint (world_size=2) can test cross-world-size loading
-# using only 2 GPUs in total.
-class ws1_zero3_elastic_checkpoint(DistributedFixture):
-    world_size = 1
+# DistributedFixture that saves a ZeRO-3 elastic checkpoint from 4 GPUs so that
+# TestZeROStage3ElasticCheckpoint (world_size=2) can test cross-world-size loading.
+class ws4_zero3_elastic_checkpoint(DistributedFixture):
+    world_size = 4
 
     def run(self, class_tmpdir):
         config_dict = {
-            "train_batch_size": 1,
+            "train_batch_size": 4,
             "optimizer": {
                 "type": "Adam"
             },
@@ -756,13 +755,25 @@ class ws1_zero3_elastic_checkpoint(DistributedFixture):
         with deepspeed.zero.Init(config_dict_or_path=config_dict):
             model = SimpleModel(hidden_dim)
         ds_model = create_deepspeed_model(config_dict=config_dict, model=model, base_optimizer=None)
-        data_loader = random_dataloader(model=ds_model, total_samples=4, hidden_dim=hidden_dim, device=ds_model.device)
+        data_loader = random_dataloader(model=ds_model, total_samples=8, hidden_dim=hidden_dim, device=ds_model.device)
         for _, batch in enumerate(data_loader):
             loss = ds_model(batch[0], batch[1])
             ds_model.backward(loss)
             ds_model.step()
         ds_model.empty_partition_cache()
         ds_model.save_checkpoint(class_tmpdir)
+
+        # Gather full fp32 parameters on rank 0 and save as a reference for the
+        # cross-world-size numerical correctness test.
+        ref_params = {}
+        params = list(ds_model.module.parameters())
+        with deepspeed.zero.GatheredParameters(params, modifier_rank=0):
+            if dist.get_rank() == 0:
+                for name, p in ds_model.module.named_parameters():
+                    ref_params[name] = p.detach().cpu().float().clone()
+        if dist.get_rank() == 0:
+            torch.save(ref_params, os.path.join(class_tmpdir, "reference_params.pt"))
+        dist.barrier()
 
 
 class TestZeROStage3ElasticCheckpoint(DistributedTest):
@@ -936,11 +947,12 @@ class TestZeROStage3ElasticCheckpoint(DistributedTest):
         ds_load.load_checkpoint(tmpdir, load_optimizer_states=True)
         compare_model_states(ds_save, ds_load, compare_optimizer=True)
 
-    def test_elastic_checkpoint_change_world_size(self, ws1_zero3_elastic_checkpoint, class_tmpdir):
-        # Load a ZeRO-3 elastic checkpoint saved with 1 GPU onto a 2-GPU engine.
-        # This is the primary use case for elastic checkpoints: changing DP world size.
+    def test_elastic_checkpoint_change_world_size(self, ws4_zero3_elastic_checkpoint, class_tmpdir):
+        # Load a ZeRO-3 elastic checkpoint saved with 4 GPUs onto a 2-GPU engine.
+        # Verifies both that loading succeeds and that the repartitioned parameters
+        # are numerically identical to the reference weights saved by the fixture.
         config_dict = {
-            "train_batch_size": 2,
+            "train_batch_size": 4,
             "optimizer": {
                 "type": "Adam"
             },
@@ -958,8 +970,16 @@ class TestZeROStage3ElasticCheckpoint(DistributedTest):
         with deepspeed.zero.Init(config_dict_or_path=config_dict):
             model = SimpleModel(hidden_dim)
         ds_model = create_deepspeed_model(config_dict=config_dict, model=model, base_optimizer=None)
-        # load_checkpoint returns a tuple; absence of exception means success
         ds_model.load_checkpoint(class_tmpdir, load_optimizer_states=True)
+
+        # Compare gathered parameters against the fp32 reference saved by the fixture.
+        ref_params = torch.load(os.path.join(class_tmpdir, "reference_params.pt"), weights_only=False)
+        params = list(ds_model.module.parameters())
+        with deepspeed.zero.GatheredParameters(params):
+            if dist.get_rank() == 0:
+                for name, p in ds_model.module.named_parameters():
+                    assert torch.allclose(p.data.float(), ref_params[name], rtol=1e-3, atol=1e-3), \
+                        f"Parameter '{name}' mismatch after cross-world-size elastic load"
 
         # Confirm training can proceed normally after cross-world-size checkpoint load.
         data_loader = random_dataloader(model=ds_model, total_samples=4, hidden_dim=hidden_dim, device=ds_model.device)
@@ -967,3 +987,27 @@ class TestZeROStage3ElasticCheckpoint(DistributedTest):
             loss = ds_model(batch[0], batch[1])
             ds_model.backward(loss)
             ds_model.step()
+
+    def test_elastic_checkpoint_load_from_fp32_weights(self, tmpdir):
+        # Verify the load_from_fp32_weights=True path: _restore_from_elastic_fp32_partitions()
+        # is exercised instead of _restore_from_bit16_weights().
+        config_dict = {
+            "train_batch_size": 2,
+            "optimizer": {
+                "type": "Adam"
+            },
+            "zero_optimization": {
+                "stage": 3,
+                "elastic_checkpoint": True,
+                "load_from_fp32_weights": True,
+            }
+        }
+        if get_accelerator().is_bf16_supported():
+            config_dict["bf16"] = {"enabled": True}
+        elif get_accelerator().is_fp16_supported():
+            config_dict["fp16"] = {"enabled": True, "initial_scale_power": 8}
+        hidden_dim = 10
+
+        with deepspeed.zero.Init(config_dict_or_path=config_dict):
+            models = [SimpleModel(hidden_dim) for _ in range(2)]
+        checkpoint_correctness_verification(config_dict, models, hidden_dim, tmpdir, load_optimizer_states=True)

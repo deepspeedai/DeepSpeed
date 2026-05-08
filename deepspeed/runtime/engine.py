@@ -3647,11 +3647,16 @@ class DeepSpeedEngine(Module):
             checkpoint_folder = f'{os.path.join(load_dir, tag)}'
         else:
             if load_optimizer_states and self.seq_dp_world_size != self.loaded_checkpoint_dp_world_size:
-                raise ZeRORuntimeException("The checkpoint being loaded used a DP " \
-                    f"world size of {self.loaded_checkpoint_dp_world_size} but the " \
-                    f"current world size is {self.seq_dp_world_size}. Automatic adjustment " \
-                    "of ZeRO's optimizer state partitioning with a new world size is not " \
-                    "currently supported.")
+                # ZeRO Stage 3 elastic checkpoint repartitions optimizer states internally
+                # across arbitrary DP world sizes; skip the guard for that case.
+                zero3_elastic = (self.zero_optimization_stage() == ZeroStageEnum.weights
+                                 and self.zero_elastic_checkpoint())
+                if not zero3_elastic:
+                    raise ZeRORuntimeException("The checkpoint being loaded used a DP " \
+                        f"world size of {self.loaded_checkpoint_dp_world_size} but the " \
+                        f"current world size is {self.seq_dp_world_size}. Automatic adjustment " \
+                        "of ZeRO's optimizer state partitioning with a new world size is not " \
+                        "currently supported.")
             checkpoint_folder = None
             zero_sd_list = self._get_all_zero_checkpoints(load_dir, tag)
             if zero_sd_list is None:
