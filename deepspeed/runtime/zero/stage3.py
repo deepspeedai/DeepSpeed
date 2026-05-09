@@ -3159,7 +3159,9 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                             [rank_state[key][param_idx] for rank_state in all_sub_group_states], param)
                         for param_idx, param in enumerate(params)
                     ]
-                    restored_state[key] = torch.cat(new_parts).to(fp32_param.dtype)
+                    # Move to the same device and dtype as fp32_param so the fused optimizer
+                    # does not raise "tensor not on same device" during step().
+                    restored_state[key] = torch.cat(new_parts).to(device=fp32_param.device, dtype=fp32_param.dtype)
                 else:
                     restored_state[key] = sample
             self.optimizer.state[fp32_param] = restored_state

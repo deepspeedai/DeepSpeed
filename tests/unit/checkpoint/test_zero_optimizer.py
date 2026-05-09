@@ -267,7 +267,8 @@ class ws4_zero3_elastic_checkpoint(DistributedFixture):
         with deepspeed.zero.Init(config_dict_or_path=config_dict):
             model = SimpleModel(hidden_dim)
         ds_model = create_deepspeed_model(config_dict=config_dict, model=model, base_optimizer=None)
-        data_loader = random_dataloader(model=ds_model, total_samples=8, hidden_dim=hidden_dim, device=ds_model.device)
+        # One step is enough to populate optimizer states; keeping it minimal reduces fixture time.
+        data_loader = random_dataloader(model=ds_model, total_samples=4, hidden_dim=hidden_dim, device=ds_model.device)
         for _, batch in enumerate(data_loader):
             loss = ds_model(batch[0], batch[1])
             ds_model.backward(loss)
@@ -278,11 +279,14 @@ class ws4_zero3_elastic_checkpoint(DistributedFixture):
         # Gather full fp32 parameters on rank 0 and save as a reference for the
         # cross-world-size numerical correctness test.
         ref_params = {}
+        param_names = [name for name, _ in ds_model.module.named_parameters()]
         params = list(ds_model.module.parameters())
+        dist.barrier()
         with deepspeed.zero.GatheredParameters(params, modifier_rank=0):
             if dist.get_rank() == 0:
-                for name, p in ds_model.module.named_parameters():
+                for name, p in zip(param_names, params):
                     ref_params[name] = p.detach().cpu().float().clone()
+            dist.barrier()
         if dist.get_rank() == 0:
             torch.save(ref_params, os.path.join(class_tmpdir, "reference_params.pt"))
         dist.barrier()
@@ -974,14 +978,30 @@ class TestZeROStage3ElasticCheckpoint(DistributedTest):
         ds_model = create_deepspeed_model(config_dict=config_dict, model=model, base_optimizer=None)
         ds_model.load_checkpoint(class_tmpdir, load_optimizer_states=True)
 
-        # Compare gathered parameters against the fp32 reference saved by the fixture.
+        # Compare repartitioned parameters against the fp32 reference saved by the fixture.
+        # Cloning must happen inside GatheredParameters (while params are gathered on rank 0)
+        # but comparison happens outside — torch.allclose on a GPU tensor vs. CPU tensor raises
+        # RuntimeError, which would skip the inner barrier and deadlock the broadcast in __exit__.
         ref_params = torch.load(os.path.join(class_tmpdir, "reference_params.pt"), weights_only=False)
+        # Build name list outside the context: named_parameters() inside GatheredParameters can
+        # trigger per-param ZeRO-3 all_gather hooks and cause a deadlock.
+        param_names = [name for name, _ in ds_model.module.named_parameters()]
         params = list(ds_model.module.parameters())
-        with deepspeed.zero.GatheredParameters(params):
+        loaded_fp32 = {}
+        dist.barrier()
+        with deepspeed.zero.GatheredParameters(params, modifier_rank=0):
             if dist.get_rank() == 0:
-                for name, p in ds_model.module.named_parameters():
-                    assert torch.allclose(p.data.float(), ref_params[name], rtol=1e-3, atol=1e-3), \
-                        f"Parameter '{name}' mismatch after cross-world-size elastic load"
+                for name, p in zip(param_names, params):
+                    loaded_fp32[name] = p.detach().cpu().float().clone()
+            # Both ranks must reach __exit__ together for the broadcast collective.
+            dist.barrier()
+
+        mismatches = []
+        if dist.get_rank() == 0:
+            for name in param_names:
+                if not torch.allclose(loaded_fp32[name], ref_params[name], rtol=1e-3, atol=1e-3):
+                    mismatches.append(name)
+        assert not mismatches, f"Parameter(s) mismatch after cross-world-size elastic load: {mismatches}"
 
         # Confirm training can proceed normally after cross-world-size checkpoint load.
         data_loader = random_dataloader(model=ds_model, total_samples=4, hidden_dim=hidden_dim, device=ds_model.device)
