@@ -63,14 +63,17 @@ public:
             _betta1_t = std::pow(_betta1, step);
             _betta2_t = std::pow(_betta2, step);
         } else {
-            _step++;
-            if (_step != step) {
+            if (step == _step + 1) {  // first optimizer step increase
+                _step++;
+                _betta1_t *= _betta1;
+                _betta2_t *= _betta2;
+            } else if (step ==
+                       _step) {  // no need to update step; beta1_t and beta2_t already updated
+                return;
+            } else {  // support step increase not equal to 1
                 _betta1_t = std::pow(_betta1, step);
                 _betta2_t = std::pow(_betta2, step);
                 _step = step;
-            } else {
-                _betta1_t *= _betta1;
-                _betta2_t *= _betta2;
             }
         }
     }

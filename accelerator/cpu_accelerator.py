@@ -202,12 +202,12 @@ class CPU_Accelerator(DeepSpeedAccelerator):
     def is_available(self):
         return True
 
-    def range_push(self, msg):
+    def range_push(self, msg, domain=None, category=None):
         # TODO itt is currently not supported yet
         # return torch.profiler.itt.range_push(msg)
         return
 
-    def range_pop(self):
+    def range_pop(self, domain=None):
         # TODO itt is currently not supported yet
         # return torch.profiler.itt.range_pop()
         return

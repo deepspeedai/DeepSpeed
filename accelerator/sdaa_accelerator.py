@@ -195,10 +195,10 @@ class SDAA_Accelerator(DeepSpeedAccelerator):
     def is_available(self):
         return torch.sdaa.is_available()
 
-    def range_push(self, msg):
+    def range_push(self, msg, domain=None, category=None):
         return
 
-    def range_pop(self):
+    def range_pop(self, domain=None):
         return
 
     def lazy_call(self, callback):
