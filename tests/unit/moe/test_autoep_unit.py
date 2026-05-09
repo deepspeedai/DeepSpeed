@@ -244,8 +244,8 @@ class TestAutoEPConfig:
             validate_autoep_post_detection(config, specs)
 
     def test_preset_models_complete(self):
-        """All 5 presets have required fields."""
-        expected = {"mixtral", "qwen2_moe", "qwen3_moe", "deepseek_v2", "deepseek_v3", "llama4"}
+        """All presets have required fields."""
+        expected = {"mixtral", "qwen2_moe", "qwen3_moe", "qwen3_5_moe", "deepseek_v2", "deepseek_v3", "llama4"}
         assert set(PRESET_MODELS.keys()) == expected
         for name, preset in PRESET_MODELS.items():
             assert isinstance(preset, MoEModelPreset), f"Preset {name} is not MoEModelPreset"
