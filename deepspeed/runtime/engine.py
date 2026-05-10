@@ -70,7 +70,7 @@ from deepspeed.compression.constants import \
     WEIGHT_QUANTIZE_ROUNDING, \
     WEIGHT_QUANTIZE_VERBOSE, \
     WEIGHT_QUANTIZE_KERNEL
-from deepspeed.checkpoint.constants import OPTIMIZER_STATE_DICT, FROZEN_PARAM_FRAGMENTS, UNIVERSAL_CHECKPOINT_INFO
+from deepspeed.checkpoint.constants import OPTIMIZER_STATE_DICT, FROZEN_PARAM_FRAGMENTS, UNIVERSAL_CHECKPOINT_INFO, BASE_OPTIMIZER_STATE
 from deepspeed.checkpoint.utils import clone_tensors_for_torch_save
 from deepspeed.checkpoint.ds_to_universal import dp_index_to_str
 from deepspeed.runtime.sparse_tensor import SparseTensor
@@ -2057,6 +2057,7 @@ class DeepSpeedEngine(Module):
                     enable_sanity_checks=self.is_sanity_checks_enabled(),
                     cpuadam_cores_perc=self.cpuadam_cores_perc(),
                     save_muon_momentum_buffer_in_memory=self.zero_save_muon_momentum_buffer_in_memory(),
+                    elastic_checkpoint=self.zero_elastic_checkpoint(),
                 )
 
         else:
@@ -3647,11 +3648,16 @@ class DeepSpeedEngine(Module):
             checkpoint_folder = f'{os.path.join(load_dir, tag)}'
         else:
             if load_optimizer_states and self.seq_dp_world_size != self.loaded_checkpoint_dp_world_size:
-                raise ZeRORuntimeException("The checkpoint being loaded used a DP " \
-                    f"world size of {self.loaded_checkpoint_dp_world_size} but the " \
-                    f"current world size is {self.seq_dp_world_size}. Automatic adjustment " \
-                    "of ZeRO's optimizer state partitioning with a new world size is not " \
-                    "currently supported.")
+                # ZeRO Stage 3 elastic checkpoint repartitions optimizer states internally
+                # across arbitrary DP world sizes; skip the guard for that case.
+                zero3_elastic = (self.zero_optimization_stage() == ZeroStageEnum.weights
+                                 and self.zero_elastic_checkpoint())
+                if not zero3_elastic:
+                    raise ZeRORuntimeException("The checkpoint being loaded used a DP " \
+                        f"world size of {self.loaded_checkpoint_dp_world_size} but the " \
+                        f"current world size is {self.seq_dp_world_size}. Automatic adjustment " \
+                        "of ZeRO's optimizer state partitioning with a new world size is not " \
+                        "currently supported.")
             checkpoint_folder = None
             zero_sd_list = self._get_all_zero_checkpoints(load_dir, tag)
             if zero_sd_list is None:
@@ -3702,13 +3708,26 @@ class DeepSpeedEngine(Module):
         return zero_ckpt_names
 
     def _get_all_zero_checkpoint_state_dicts(self, zero_ckpt_names):
+        cur_rank = dist.get_rank(group=self.optimizer.dp_process_group)
+        # Load the current rank's checkpoint first to detect whether the on-disk format is
+        # elastic.  This allows autodetection even when elastic_checkpoint=False in the config
+        # (e.g., loading a checkpoint that was saved with elastic_checkpoint=True).
+        cached = {}
+        if cur_rank < len(zero_ckpt_names) and zero_ckpt_names[cur_rank] is not None:
+            cached[cur_rank] = self.checkpoint_engine.load(zero_ckpt_names[cur_rank], map_location='cpu')
+            cur_optim_sd = cached[cur_rank].get(OPTIMIZER_STATE_DICT)
+            ckpt_is_elastic = self.zero_elastic_checkpoint() or (cur_optim_sd is not None
+                                                                 and BASE_OPTIMIZER_STATE in cur_optim_sd)
+        else:
+            ckpt_is_elastic = self.zero_elastic_checkpoint()
+
         zero_sd_list = []
         for i, ckpt_name in enumerate(zero_ckpt_names):
-            _state = None
-            if ckpt_name is None:
+            if i in cached:
+                _state = cached[i]
+            elif ckpt_name is None:
                 _state = {OPTIMIZER_STATE_DICT: None}
-            # Fully load state for current rank
-            elif self.zero_elastic_checkpoint() or dist.get_rank(group=self.optimizer.dp_process_group) == i:
+            elif ckpt_is_elastic or dist.get_rank(group=self.optimizer.dp_process_group) == i:
                 _state = self.checkpoint_engine.load(
                     ckpt_name,
                     map_location='cpu',

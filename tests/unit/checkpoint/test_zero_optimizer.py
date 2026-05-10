@@ -7,6 +7,7 @@ import deepspeed
 from types import SimpleNamespace
 from deepspeed.ops.op_builder import CPUAdamBuilder
 from deepspeed.checkpoint.utils import clone_tensors_for_torch_save, get_model_ckpt_name_for_rank
+from deepspeed.checkpoint.constants import (BASE_OPTIMIZER_STATE, FP32_FLAT_GROUPS, OPTIMIZER_STATE_DICT)
 from deepspeed.accelerator import get_accelerator
 from deepspeed.runtime.zero import ZeroParamStatus
 from deepspeed.utils.torch import required_torch_version
@@ -239,6 +240,56 @@ class ws4_model_checkpoint_zeropp(DistributedFixture):
         torch.save(model.state_dict(), os.path.join(class_tmpdir, "model.pt"))
         ds_model = create_deepspeed_model(config_dict=config_dict, model=model, base_optimizer=None)
         ds_model.save_checkpoint(class_tmpdir)
+
+
+# DistributedFixture that saves a ZeRO-3 elastic checkpoint from 4 GPUs so that
+# TestZeROStage3ElasticCheckpoint (world_size=2) can test cross-world-size loading.
+class ws4_zero3_elastic_checkpoint(DistributedFixture):
+    world_size = 4
+
+    def run(self, class_tmpdir):
+        config_dict = {
+            "train_batch_size": 4,
+            "optimizer": {
+                "type": "Adam"
+            },
+            "zero_optimization": {
+                "stage": 3,
+                "elastic_checkpoint": True
+            }
+        }
+        if get_accelerator().is_bf16_supported():
+            config_dict["bf16"] = {"enabled": True}
+        elif get_accelerator().is_fp16_supported():
+            config_dict["fp16"] = {"enabled": True, "initial_scale_power": 8}
+        hidden_dim = 10
+
+        with deepspeed.zero.Init(config_dict_or_path=config_dict):
+            model = SimpleModel(hidden_dim)
+        ds_model = create_deepspeed_model(config_dict=config_dict, model=model, base_optimizer=None)
+        # One step is enough to populate optimizer states; keeping it minimal reduces fixture time.
+        data_loader = random_dataloader(model=ds_model, total_samples=4, hidden_dim=hidden_dim, device=ds_model.device)
+        for _, batch in enumerate(data_loader):
+            loss = ds_model(batch[0], batch[1])
+            ds_model.backward(loss)
+            ds_model.step()
+        ds_model.empty_partition_cache()
+        ds_model.save_checkpoint(class_tmpdir)
+
+        # Gather full fp32 parameters on rank 0 and save as a reference for the
+        # cross-world-size numerical correctness test.
+        ref_params = {}
+        param_names = [name for name, _ in ds_model.module.named_parameters()]
+        params = list(ds_model.module.parameters())
+        dist.barrier()
+        with deepspeed.zero.GatheredParameters(params, modifier_rank=0):
+            if dist.get_rank() == 0:
+                for name, p in zip(param_names, params):
+                    ref_params[name] = p.detach().cpu().float().clone()
+            dist.barrier()
+        if dist.get_rank() == 0:
+            torch.save(ref_params, os.path.join(class_tmpdir, "reference_params.pt"))
+        dist.barrier()
 
 
 @pytest.mark.parametrize("elastic_save", [True, False])
@@ -728,33 +779,257 @@ class TestZeROPPLoadCheckpoint(DistributedTest):
             for v in ds_param.data.cpu().flatten().numpy():
                 assert v == 1.0
 
-    def test_load_zeropp_checkpoint(self, ws4_model_checkpoint_zeropp, class_tmpdir):
+
+class TestZeROStage3ElasticCheckpoint(DistributedTest):
+    """Unit tests for ZeRO Stage 3 elastic checkpoint save/load."""
+
+    world_size = 2
+
+    def test_elastic_checkpoint_same_world_size(self, tmpdir):
+        # Round-trip: save elastic checkpoint with world_size=2, load with world_size=2.
+        # Verifies that both model weights and optimizer states are faithfully restored.
         config_dict = {
-            "train_batch_size": 4,
+            "train_batch_size": 2,
             "optimizer": {
-                "type": 'Adam'
+                "type": "Adam"
             },
             "zero_optimization": {
                 "stage": 3,
-                "zero_hpz_partition_size": 2,
-                "stage3_param_persistence_threshold": 1
+                "elastic_checkpoint": True
             }
         }
-
-        # Init model and load zero checkpoint
+        if get_accelerator().is_bf16_supported():
+            config_dict["bf16"] = {"enabled": True}
+        elif get_accelerator().is_fp16_supported():
+            config_dict["fp16"] = {"enabled": True, "initial_scale_power": 8}
         hidden_dim = 10
-        model = SimpleModel(hidden_dim)
-        ds_model = create_deepspeed_model(config_dict=config_dict, model=model, base_optimizer=None)
-        ds_model.load_checkpoint(class_tmpdir,
-                                 load_optimizer_states=True,
-                                 load_lr_scheduler_states=False,
-                                 load_module_only=False)
 
-        # Check the parameters after gather
-        params_to_gather = [p for p in ds_model.module.parameters() if p.ds_status == ZeroParamStatus.NOT_AVAILABLE]
-        if len(params_to_gather) > 0:
-            handle = params_to_gather[0].all_gather_coalesced(params_to_gather)
-            handle.wait()
-        for ds_param in params_to_gather:
-            for v in ds_param.data.cpu().flatten().numpy():
-                assert v == 1.0
+        with deepspeed.zero.Init(config_dict_or_path=config_dict):
+            models = [SimpleModel(hidden_dim) for _ in range(2)]
+        checkpoint_correctness_verification(config_dict, models, hidden_dim, tmpdir, load_optimizer_states=True)
+
+    def test_elastic_checkpoint_no_optimizer_states(self, tmpdir):
+        # Round-trip: save elastic checkpoint, load without optimizer states.
+        # Only model weights should be compared; optimizer state is intentionally skipped.
+        config_dict = {
+            "train_batch_size": 2,
+            "optimizer": {
+                "type": "Adam"
+            },
+            "zero_optimization": {
+                "stage": 3,
+                "elastic_checkpoint": True
+            }
+        }
+        if get_accelerator().is_bf16_supported():
+            config_dict["bf16"] = {"enabled": True}
+        elif get_accelerator().is_fp16_supported():
+            config_dict["fp16"] = {"enabled": True, "initial_scale_power": 8}
+        hidden_dim = 10
+
+        with deepspeed.zero.Init(config_dict_or_path=config_dict):
+            models = [SimpleModel(hidden_dim) for _ in range(2)]
+        checkpoint_correctness_verification(config_dict, models, hidden_dim, tmpdir, load_optimizer_states=False)
+
+    def test_elastic_state_dict_format(self, tmpdir):
+        # Verify that elastic_checkpoint=True produces a state dict with BASE_OPTIMIZER_STATE
+        # (list of per-param lean tensors per sub-group) and not the rigid OPTIMIZER_STATE_DICT.
+        config_dict = {
+            "train_batch_size": 2,
+            "optimizer": {
+                "type": "Adam"
+            },
+            "zero_optimization": {
+                "stage": 3,
+                "elastic_checkpoint": True
+            }
+        }
+        if get_accelerator().is_bf16_supported():
+            config_dict["bf16"] = {"enabled": True}
+        elif get_accelerator().is_fp16_supported():
+            config_dict["fp16"] = {"enabled": True, "initial_scale_power": 8}
+        hidden_dim = 10
+
+        with deepspeed.zero.Init(config_dict_or_path=config_dict):
+            model = SimpleModel(hidden_dim)
+        ds_model = create_deepspeed_model(config_dict=config_dict, model=model, base_optimizer=None)
+        data_loader = random_dataloader(model=ds_model, total_samples=4, hidden_dim=hidden_dim, device=ds_model.device)
+        for _, batch in enumerate(data_loader):
+            loss = ds_model(batch[0], batch[1])
+            ds_model.backward(loss)
+            ds_model.step()
+
+        sd = ds_model.optimizer.state_dict()
+        assert BASE_OPTIMIZER_STATE in sd
+        assert OPTIMIZER_STATE_DICT not in sd
+        assert FP32_FLAT_GROUPS in sd
+        # Each sub-group entry in FP32_FLAT_GROUPS should be a flat fp32 tensor (same layout as
+        # the rigid format so that zero_to_fp32.py can reconstruct model weights unchanged).
+        import torch
+        for sub_group in sd[FP32_FLAT_GROUPS]:
+            assert torch.is_tensor(sub_group)
+
+    def test_rigid_state_dict_format(self, tmpdir):
+        # Verify that elastic_checkpoint=False (default) produces a state dict with
+        # OPTIMIZER_STATE_DICT and not BASE_OPTIMIZER_STATE.
+        config_dict = {
+            "train_batch_size": 2,
+            "optimizer": {
+                "type": "Adam"
+            },
+            "zero_optimization": {
+                "stage": 3,
+                "elastic_checkpoint": False
+            }
+        }
+        if get_accelerator().is_bf16_supported():
+            config_dict["bf16"] = {"enabled": True}
+        elif get_accelerator().is_fp16_supported():
+            config_dict["fp16"] = {"enabled": True, "initial_scale_power": 8}
+        hidden_dim = 10
+
+        with deepspeed.zero.Init(config_dict_or_path=config_dict):
+            model = SimpleModel(hidden_dim)
+        ds_model = create_deepspeed_model(config_dict=config_dict, model=model, base_optimizer=None)
+        data_loader = random_dataloader(model=ds_model, total_samples=4, hidden_dim=hidden_dim, device=ds_model.device)
+        for _, batch in enumerate(data_loader):
+            loss = ds_model(batch[0], batch[1])
+            ds_model.backward(loss)
+            ds_model.step()
+
+        sd = ds_model.optimizer.state_dict()
+        assert OPTIMIZER_STATE_DICT in sd
+        assert BASE_OPTIMIZER_STATE not in sd
+
+    def test_elastic_format_autodetected_on_load(self, tmpdir):
+        # A checkpoint saved with elastic_checkpoint=True must load correctly even when the
+        # loading engine is configured with elastic_checkpoint=False, because load_state_dict()
+        # auto-detects the format via the BASE_OPTIMIZER_STATE key.
+        save_config = {
+            "train_batch_size": 2,
+            "optimizer": {
+                "type": "Adam"
+            },
+            "zero_optimization": {
+                "stage": 3,
+                "elastic_checkpoint": True
+            }
+        }
+        load_config = {
+            "train_batch_size": 2,
+            "optimizer": {
+                "type": "Adam"
+            },
+            "zero_optimization": {
+                "stage": 3,
+                "elastic_checkpoint": False
+            }
+        }
+        if get_accelerator().is_bf16_supported():
+            save_config["bf16"] = {"enabled": True}
+            load_config["bf16"] = {"enabled": True}
+        elif get_accelerator().is_fp16_supported():
+            save_config["fp16"] = {"enabled": True, "initial_scale_power": 8}
+            load_config["fp16"] = {"enabled": True, "initial_scale_power": 8}
+        hidden_dim = 10
+
+        with deepspeed.zero.Init(config_dict_or_path=save_config):
+            model_save = SimpleModel(hidden_dim)
+        with deepspeed.zero.Init(config_dict_or_path=load_config):
+            model_load = SimpleModel(hidden_dim)
+
+        ds_save = create_deepspeed_model(config_dict=save_config, model=model_save, base_optimizer=None)
+        data_loader = random_dataloader(model=ds_save, total_samples=4, hidden_dim=hidden_dim, device=ds_save.device)
+        for _, batch in enumerate(data_loader):
+            loss = ds_save(batch[0], batch[1])
+            ds_save.backward(loss)
+            ds_save.step()
+        ds_save.empty_partition_cache()
+        ds_save.save_checkpoint(tmpdir)
+
+        dist.barrier()
+
+        ds_load = create_deepspeed_model(config_dict=load_config, model=model_load, base_optimizer=None)
+        ds_load.load_checkpoint(tmpdir, load_optimizer_states=True)
+        compare_model_states(ds_save, ds_load, compare_optimizer=True)
+
+    def test_elastic_checkpoint_change_world_size(self, ws4_zero3_elastic_checkpoint, class_tmpdir):
+        # Load a ZeRO-3 elastic checkpoint saved with 4 GPUs onto a 2-GPU engine.
+        # Verifies both that loading succeeds and that the repartitioned parameters
+        # are numerically identical to the reference weights saved by the fixture.
+        config_dict = {
+            "train_batch_size": 4,
+            "optimizer": {
+                "type": "Adam"
+            },
+            "zero_optimization": {
+                "stage": 3,
+                "elastic_checkpoint": True
+            }
+        }
+        if get_accelerator().is_bf16_supported():
+            config_dict["bf16"] = {"enabled": True}
+        elif get_accelerator().is_fp16_supported():
+            config_dict["fp16"] = {"enabled": True, "initial_scale_power": 8}
+        hidden_dim = 10
+
+        with deepspeed.zero.Init(config_dict_or_path=config_dict):
+            model = SimpleModel(hidden_dim)
+        ds_model = create_deepspeed_model(config_dict=config_dict, model=model, base_optimizer=None)
+        ds_model.load_checkpoint(class_tmpdir, load_optimizer_states=True)
+
+        # Compare repartitioned parameters against the fp32 reference saved by the fixture.
+        # Cloning must happen inside GatheredParameters (while params are gathered on rank 0)
+        # but comparison happens outside — torch.allclose on a GPU tensor vs. CPU tensor raises
+        # RuntimeError, which would skip the inner barrier and deadlock the broadcast in __exit__.
+        ref_params = torch.load(os.path.join(class_tmpdir, "reference_params.pt"), weights_only=False)
+        # Build name list outside the context: named_parameters() inside GatheredParameters can
+        # trigger per-param ZeRO-3 all_gather hooks and cause a deadlock.
+        param_names = [name for name, _ in ds_model.module.named_parameters()]
+        params = list(ds_model.module.parameters())
+        loaded_fp32 = {}
+        dist.barrier()
+        with deepspeed.zero.GatheredParameters(params, modifier_rank=0):
+            if dist.get_rank() == 0:
+                for name, p in zip(param_names, params):
+                    loaded_fp32[name] = p.detach().cpu().float().clone()
+            # Both ranks must reach __exit__ together for the broadcast collective.
+            dist.barrier()
+
+        mismatches = []
+        if dist.get_rank() == 0:
+            for name in param_names:
+                if not torch.allclose(loaded_fp32[name], ref_params[name], rtol=1e-3, atol=1e-3):
+                    mismatches.append(name)
+        assert not mismatches, f"Parameter(s) mismatch after cross-world-size elastic load: {mismatches}"
+
+        # Confirm training can proceed normally after cross-world-size checkpoint load.
+        data_loader = random_dataloader(model=ds_model, total_samples=4, hidden_dim=hidden_dim, device=ds_model.device)
+        for _, batch in enumerate(data_loader):
+            loss = ds_model(batch[0], batch[1])
+            ds_model.backward(loss)
+            ds_model.step()
+
+    def test_elastic_checkpoint_load_from_fp32_weights(self, tmpdir):
+        # Verify the load_from_fp32_weights=True path: _restore_from_elastic_fp32_partitions()
+        # is exercised instead of _restore_from_bit16_weights().
+        config_dict = {
+            "train_batch_size": 2,
+            "optimizer": {
+                "type": "Adam"
+            },
+            "zero_optimization": {
+                "stage": 3,
+                "elastic_checkpoint": True,
+                "load_from_fp32_weights": True,
+            }
+        }
+        if get_accelerator().is_bf16_supported():
+            config_dict["bf16"] = {"enabled": True}
+        elif get_accelerator().is_fp16_supported():
+            config_dict["fp16"] = {"enabled": True, "initial_scale_power": 8}
+        hidden_dim = 10
+
+        with deepspeed.zero.Init(config_dict_or_path=config_dict):
+            models = [SimpleModel(hidden_dim) for _ in range(2)]
+        checkpoint_correctness_verification(config_dict, models, hidden_dim, tmpdir, load_optimizer_states=True)
