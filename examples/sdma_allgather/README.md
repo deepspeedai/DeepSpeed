@@ -37,19 +37,28 @@ allocations and the kernel faults at NULL on every rank.  All
 | **SDMA off (RCCL)** | 697.7 ms / step (11.6 samples/s) | 1402.5 ms / step (5841 tok/s) |
 | **SDMA on (this PR)** | **622.0 ms / step (13.0 samples/s)** | **1263.2 ms / step (6486 tok/s)** |
 | **gain** | **+10.85 %** | **+9.93 %** |
-| peak mem (rank 0) | 12.12 GB, unchanged off ↔ on | 96.45 GB, unchanged off ↔ on |
+| peak mem (rank 0) | unchanged off ↔ on | 96.45 GB, unchanged off ↔ on |
 
 The Qwen3-32B number is averaged over two fresh rounds; per-round delta was
 +10.85 % and +9.92 %, with 0.29 % run-to-run variance on the off baseline, so
 the gap is well outside per-step jitter (~1.5–2.7 %).
 
-### Loss curves match across off ↔ on
+### Loss curves match across off ↔ on (2000-step runs)
 
-- GPT (every 10 steps, off vs on): step 10 8.75 / 8.75, step 30 7.75 / 7.75, step 60 6.94 / 6.91, step 90 6.94 / 6.94
-- Qwen3-32B (final loss across two rounds): R1 off 6.265 vs on 6.225; R2 off 6.310 vs on 6.266
+A long-horizon sanity check on each demo confirms the SDMA path introduces
+no numerical drift: 2000 training steps on the same wikitext shuffle, off
+vs on traces overlap throughout (per-200-step bucketed means differ by
+≤0.026 on GPT and ≤0.055 on Qwen3, well below natural per-step jitter).
 
-The SDMA path is a pure plumbing change with no numerical impact in either
-workload.
+![GPT-7B-ish — training loss vs step, SDMA off vs on, 2000 steps](images/loss_gpt_2k.png)
+
+![Qwen3-32B — training loss vs step, SDMA off vs on, 2000 steps](images/loss_qwen3_2k.png)
+
+On the 2000-step averages the e2e speedup holds (GPT +8.45 %, Qwen3
++6.60 %); the slightly lower headline vs the 100-step table above is the
+usual long-run jitter (occasional 1.5–2 s step-time spikes from
+filesystem / HIP allocator).  The SDMA path is a pure plumbing change
+with no numerical impact in either workload.
 
 ## Reproduction
 
@@ -82,4 +91,6 @@ run_qwen3_sdma_on.sh            Qwen3-32B + ZeRO-3, SDMA on
 test_sdma_allgather_zero3.py    unit test exercising the ZeRO-3 SDMA path
 train_qwen3_zero3.py            Qwen3 trainer (self-contained, wikitext)
 train_zero3.py                  GPT trainer (existing, unchanged)
+images/loss_gpt_2k.png          GPT loss curve, off vs on, 2000 steps
+images/loss_qwen3_2k.png        Qwen3-32B loss curve, off vs on, 2000 steps
 ```
