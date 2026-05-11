@@ -47,18 +47,19 @@ the gap is well outside per-step jitter (~1.5–2.7 %).
 
 A long-horizon sanity check on each demo confirms the SDMA path introduces
 no numerical drift: 2000 training steps on the same wikitext shuffle, off
-vs on traces overlap throughout (per-200-step bucketed means differ by
-≤0.026 on GPT and ≤0.055 on Qwen3, well below natural per-step jitter).
+vs on traces overlap throughout.  Both trainers use the standard "concat
+the corpus + slice into fixed `seq_length` chunks" pattern, so every
+sample has the same number of real tokens and per-step loss has no
+variance from padding fraction.  Bucketed mean |off − on| over the full
+2000 steps is ≤ **0.026** on GPT and ≤ **0.048** on Qwen3, well below
+natural per-step jitter.
 
 ![GPT-7B-ish — training loss vs step, SDMA off vs on, 2000 steps](images/loss_gpt_2k.png)
 
 ![Qwen3-32B — training loss vs step, SDMA off vs on, 2000 steps](images/loss_qwen3_2k.png)
 
-On the 2000-step averages the e2e speedup holds (GPT +8.45 %, Qwen3
-+6.60 %); the slightly lower headline vs the 100-step table above is the
-usual long-run jitter (occasional 1.5–2 s step-time spikes from
-filesystem / HIP allocator).  The SDMA path is a pure plumbing change
-with no numerical impact in either workload.
+The SDMA path is a pure plumbing change with no numerical impact in either
+workload.
 
 ## Reproduction
 

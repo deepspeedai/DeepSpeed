@@ -75,7 +75,15 @@ class _SyntheticDataset(Dataset):
 
 def _build_wikitext_loader(model_name, seq_length, batch_size, dataset_percentage,
                            rank, world_size, is_main):
-    """Stream wikitext-103-raw-v1, tokenise with the model's tokenizer."""
+    """Stream wikitext-103-raw-v1 as a concatenated token stream sliced into
+    fixed `seq_length` chunks.
+
+    This is the standard "group_texts" / GPT-style chunking pattern: every
+    sample is exactly seq_length REAL tokens with no padding and no per-row
+    boundaries.  Result is uniform-difficulty samples, so the per-step loss
+    has no variance from "this row was 90 % padding" effects — which is what
+    made the per-row+padding variant of this loader jittery on bs=1 demos.
+    """
     from datasets import DownloadConfig, load_dataset
     from datasets.utils.logging import disable_progress_bar
     if not is_main:
@@ -93,33 +101,42 @@ def _build_wikitext_loader(model_name, seq_length, batch_size, dataset_percentag
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token or tokenizer.convert_ids_to_tokens(2)
 
-    def tok_fn(batch):
-        return tokenizer(batch["text"], padding="max_length",
-                         max_length=seq_length, truncation=True)
-
     if is_main:
-        print(f"[trainer] tokenising {len(raw)} rows ...")
-    tokenised = raw.map(tok_fn, batched=True, num_proc=1, keep_in_memory=True)
-    tokenised.set_format(type="torch", columns=["input_ids", "attention_mask"])
+        print(f"[trainer] encoding {len(raw)} rows as a single stream ...")
+    text = "\n\n".join(t for t in raw["text"] if t.strip())
+    all_ids = tokenizer.encode(text, add_special_tokens=False)
 
-    class _Labelled(Dataset):
-        def __init__(self, base):
-            self.base = base
+    # Optional cap on number of chunks (env var) so the per-epoch length can
+    # be tuned for short demos.  0 = use all available chunks.
+    max_chunks = int(os.environ.get("QWEN3_MAX_CHUNKS", "0"))
+    n_full = len(all_ids) // seq_length
+    if max_chunks > 0:
+        n_full = min(n_full, max_chunks)
+    chunks = torch.tensor(all_ids[: n_full * seq_length],
+                          dtype=torch.long).view(n_full, seq_length)
+    if is_main:
+        print(f"[trainer] chunked: {len(all_ids)} tokens -> {n_full} "
+              f"sequences of {seq_length} (no padding)", flush=True)
+
+    class _ChunkDataset(Dataset):
+        def __init__(self, t):
+            self.t = t
 
         def __len__(self):
-            return len(self.base)
+            return self.t.shape[0]
 
         def __getitem__(self, idx):
-            it = self.base[idx]
+            ids = self.t[idx]
             return {
-                "input_ids": it["input_ids"],
-                "labels": it["input_ids"].clone(),
-                "attention_mask": it["attention_mask"],
+                "input_ids": ids,
+                "labels": ids.clone(),
+                "attention_mask": torch.ones(ids.shape[0], dtype=torch.long),
             }
 
-    sampler = DistributedSampler(tokenised, num_replicas=world_size, rank=rank)
-    return DataLoader(_Labelled(tokenised), batch_size=batch_size, sampler=sampler,
-                      num_workers=2, drop_last=True, pin_memory=True)
+    ds = _ChunkDataset(chunks)
+    sampler = DistributedSampler(ds, num_replicas=world_size, rank=rank)
+    return DataLoader(ds, batch_size=batch_size, sampler=sampler,
+                      num_workers=0, drop_last=True, pin_memory=True)
 
 
 def _build_loader(args, vocab_size, rank, world_size, is_main):
@@ -199,16 +216,12 @@ def main():
         ids = batch["input_ids"].to(device, non_blocking=True)
         labels = batch["labels"].to(device, non_blocking=True)
         attn = batch["attention_mask"].to(device, non_blocking=True)
-        # Wikitext rows are highly variable; many are nearly empty (section
-        # headers etc.) and become an all-pad batch after padding.  Such
-        # batches contribute nothing to LM training (loss would be NaN under
-        # the -100 mask below) and are skipped without consuming a step.
+        # Defensive: on the chunked wikitext loader every chunk is full of
+        # real tokens so these guards are no-ops, but they keep the trainer
+        # safe for the synthetic mode and any future padded variants.
         if int(attn.sum().item()) == 0:
             skipped_empty += 1
             continue
-        # Standard HF causal-LM training: padded positions must NOT contribute
-        # to the loss.  Without this masking the model trivially predicts
-        # pad_token on mostly-empty rows and reported loss collapses to ~0.
         labels = labels.masked_fill(attn == 0, -100)
         torch.cuda.synchronize()
         t0 = time.perf_counter()
