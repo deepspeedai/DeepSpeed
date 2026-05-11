@@ -449,6 +449,10 @@ class UlyssesSPAttentionHF(torch.nn.Module):
             # if we don't have the model yet at this stage
             hf_model_config = AutoConfig.from_pretrained(model_name_or_path)
 
+        # Multimodal-style configs (e.g. Qwen3.5) nest LLM attrs under `text_config`; unwrap.
+        if hasattr(hf_model_config, "text_config"):
+            hf_model_config = hf_model_config.text_config
+
         model_attn_implementation = getattr(hf_model_config, "_attn_implementation", None)
         if model_attn_implementation is not None and model_attn_implementation != core_attn_implementation:
             raise ValueError(
@@ -552,6 +556,13 @@ class UlyssesSPAttentionHF(torch.nn.Module):
         # will still be executed — we only intercept at the point of calling attention.
         # This is what we called "Being John Malkovich".
         ALL_ATTENTION_FUNCTIONS[core_attn_implementation] = uattn_wrapper
+
+        # Auto-install SP-aware GDN forward for Qwen3.5 GDN models; see gdn_sp.
+        model_type = getattr(hf_model_config, "model_type", None)
+        layer_types = getattr(hf_model_config, "layer_types", None) or []
+        if model_type in ("qwen3_5", "qwen3_5_text") and "linear_attention" in layer_types:
+            from deepspeed.runtime.sequence_parallel import gdn_sp
+            gdn_sp._install_sp_aware_gdn_forward()
 
         return mpu
 
