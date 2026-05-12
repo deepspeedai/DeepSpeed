@@ -45,7 +45,7 @@ We tested Muon optimizer by finetuning Moonlight-16B-A3B (a Mixture-of-Experts m
 | AdamW     | 2e-6         | —                 | 0.661 | 0.534 | 0.660  | 0.805  |
 | Muon      | 1e-4         | 2e-6              | 0.646 | 0.548 | 0.678  | 0.810  |
 
-Muon outperforms AdamW on 4 out of 5 metrics: MBPP+ (0.548 vs 0.534, +2.6%), MMLU (0.678 vs 0.660, +2.7%), and GSM8K (0.810 vs 0.805, +0.6%).  On MBPP base tests, AdamW edges out Muon (0.661 vs 0.646, -2.3%), though Muon achieves a higher score on the more rigorous MBPP+ with extra test cases (0.548 vs 0.534), suggesting better generalization.
+Muon outperforms AdamW on 3 out of 4 metrics: MBPP+ (0.548 vs 0.534, +2.6%), MMLU (0.678 vs 0.660, +2.7%), and GSM8K (0.810 vs 0.805, +0.6%).  On MBPP base tests, AdamW edges out Muon (0.661 vs 0.646, -2.3%), though Muon achieves a higher score on the more rigorous MBPP+ with extra test cases (0.548 vs 0.534), suggesting better generalization.
 
 ## Muon Optimizer Memory Savings
 Muon optimizer uses less memory for optimizer states than Adam, because it maintains one momentum buffer per parameter instead of two (first and second moment).
