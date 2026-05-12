@@ -411,3 +411,76 @@ class TestAsyncFileOffset(DistributedTest):
 
         if not use_cuda_pinned_tensor:
             h.free_cpu_locked_tensor(data_buffer)
+
+
+def _count_leaked_fds_for_deleted_files():
+    # /proc/<pid>/fd is Linux-only; the writer is also Linux-only (uses O_DIRECT).
+    fd_dir = f'/proc/{os.getpid()}/fd'
+    leaked = 0
+    for entry in os.listdir(fd_dir):
+        try:
+            target = os.readlink(os.path.join(fd_dir, entry))
+        except OSError:
+            continue
+        if target.endswith(' (deleted)'):
+            leaked += 1
+    return leaked
+
+
+@pytest.mark.parametrize("use_cuda_pinned_tensor", [True, False])
+class TestFastFileWriter(DistributedTest):
+    # Regression coverage for the FastFileWriter fd-leak: _fini used to overwrite the file
+    # descriptor attribute without calling os.close, so each save+unlink cycle left an
+    # orphan inode pinned by the leaked fd until the process exited.
+    world_size = 1
+    reuse_dist_env = True
+    requires_cuda_env = False
+    if not get_accelerator().is_available():
+        init_distributed = False
+        set_dist_env = False
+
+    @pytest.mark.parametrize("write_unaligned_tail", [False, True])
+    def test_close_releases_fd(self, tmpdir, use_cuda_pinned_tensor, write_unaligned_tail):
+        if not hasattr(os, 'O_DIRECT'):
+            pytest.skip("FastFileWriter requires O_DIRECT (Linux only).")
+        if not os.path.isdir(f'/proc/{os.getpid()}/fd'):
+            pytest.skip("Leak check requires /proc/<pid>/fd (Linux only).")
+        _skip_for_invalid_environment(use_cuda_pinned_tensor=use_cuda_pinned_tensor)
+
+        from deepspeed.io import FastFileWriter, FastFileWriterConfig
+        from deepspeed.io.utils import tensor_to_bytes
+
+        h = AsyncIOBuilder().load().aio_handle(block_size=BLOCK_SIZE,
+                                               queue_depth=QUEUE_DEPTH,
+                                               single_submit=False,
+                                               overlap_events=False,
+                                               intra_op_parallelism=1)
+
+        if use_cuda_pinned_tensor:
+            pinned = get_accelerator().pin_memory(torch.zeros(IO_SIZE, dtype=torch.uint8, device='cpu'))
+        else:
+            pinned = h.new_cpu_locked_tensor(IO_SIZE, torch.empty(0, dtype=torch.uint8))
+
+        # An unaligned-tail payload exercises the _unaligned_drain path, which re-opens the
+        # underlying fd; the aligned-only payload exercises just _fini.
+        payload_size = BLOCK_SIZE + 7 if write_unaligned_tail else BLOCK_SIZE
+        payload = torch.zeros(payload_size, dtype=torch.uint8)
+
+        baseline = _count_leaked_fds_for_deleted_files()
+        num_iterations = 5
+        for i in range(num_iterations):
+            path = os.path.join(tmpdir, f'ffw_leak_{i}.bin')
+            cfg = FastFileWriterConfig(dnvme_handle=h,
+                                       pinned_tensor=pinned,
+                                       double_buffer=True,
+                                       num_parallel_writers=1,
+                                       writer_rank=0)
+            writer = FastFileWriter(file_path=path, config=cfg)
+            writer.write(tensor_to_bytes(payload))
+            writer.close()
+            os.unlink(path)
+
+        leaked = _count_leaked_fds_for_deleted_files() - baseline
+        if not use_cuda_pinned_tensor:
+            h.free_cpu_locked_tensor(pinned)
+        assert leaked == 0, f"FastFileWriter leaked {leaked} fd(s) over {num_iterations} save+unlink cycles"

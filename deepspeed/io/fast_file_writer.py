@@ -114,6 +114,14 @@ class FastFileWriter(BaseFileWriter):
         if not self._io_buffer_is_empty():
             self._force_drain()
         self._io_buffer.reset()
+        # Close the OS-level fd opened in __init__ (or re-opened by _unaligned_drain) so the
+        # inode is released; otherwise unlink'd files stay in the ext4 orphan list and the
+        # filesystem fills up on long checkpoint-rotation runs.
+        if self._aio_fd != INVALID_FD:
+            try:
+                os.fsync(self._aio_fd)
+            finally:
+                os.close(self._aio_fd)
         self._aio_fd = INVALID_FD
 
     def _fill_io_buffer(self, src_tensor, src_offset):
