@@ -26,7 +26,7 @@ memory directly; without it mori's `SymmMemManager` falls back to cached
 allocations and the kernel faults at NULL on every rank.  All
 `run_*_sdma_on.sh` scripts in this directory export it for you.
 
-## Verified results on 8x MI300X (DeepSpeed default ZeRO-3 buckets)
+## Verified results on 8x MI300X 
 
 | | GPT-7B-ish | Qwen3-32B |
 |---|---|---|
