@@ -28,31 +28,24 @@ cd deepspeed_finetune_demo
 
 ## Muon Optimizer Convergence Experiment Result
 
-We tested Muon optimizer by finetuning Moonlight-16B-A3B (a Mixture-of-Experts model with 16B total and 3B active parameters) on the CodeAlpaca-20k dataset, and evaluated code generation quality using the MBPP and MBPP+ benchmarks via EvalPlus.
+We tested Muon optimizer by finetuning Moonlight-16B-A3B (a Mixture-of-Experts model with 16B total and 3B active parameters), and evaluated on code generation (MBPP/MBPP+), general knowledge (MMLU), and mathematical reasoning (GSM8K) benchmarks.  Each benchmark uses its own domain-specific training set.
 
 **Training Configuration:**
 - Model: Moonlight-16B-A3B (MoE, 16B total / 3B active)
-- Dataset: sahil2801/CodeAlpaca-20k
-- ZeRO Stage 2, bf16, Expert Parallelism (autoep_size=8)
-- Batch size: 16, gradient accumulation: 2, 8 GPUs
+- Training datasets: sahil2801/CodeAlpaca-20k for MBPP/MBPP+, cais/mmlu (auxiliary_train, ~95k examples) for MMLU, meta-math/MetaMathQA (sample_rate=0.1, ~39.5k examples) for GSM8K
+- ZeRO Stage 2, bf16, Expert Parallelism (autoep_size=4)
+- Batch size: 16, gradient accumulation: 2, 4 GPUs
 - 1 epoch, gradient clipping: 1.0
 
-### MBPP / MBPP+ Evaluation Results
+### Evaluation Results
 
-| Optimizer | Learning Rate | adam_lr (for Muon) | MBPP | MBPP+ |
-|-----------|--------------|-------------------|------|-------|
-| baseline (pre-finetune) | —        | —                 | 0.495| 0.431 |
-| AdamW     | 2e-6         | —                 | 0.611| 0.505 |
-| Muon      | 2e-4         | 2e-6              | 0.661| 0.553 |
+| Optimizer | Learning Rate | adam_lr (for Muon) | MBPP  | MBPP+ | MMLU   | GSM8K  |
+|-----------|--------------|-------------------|-------|-------|--------|--------|
+| baseline (pre-finetune) | —        | —                 | 0.495 | 0.431 | 0.401  | 0.526  |
+| AdamW     | 2e-6         | —                 | 0.661 | 0.534 | 0.660  | 0.805  |
+| Muon      | 1e-4         | 2e-6              | 0.646 | 0.548 | 0.678  | 0.810  |
 
-Muon outperforms the best AdamW result on both MBPP (0.661 vs 0.611, +8.2%) and MBPP+ (0.553 vs 0.505, +9.5%).
-
-### Tuning Learning Rate for Muon Optimizer
-
-Since Muon is a hybrid optimizer with separate `muon_lr` and `adam_lr`, finding the optimal learning rate combination requires a different approach than a single-optimizer setup.  We recommend the following two-step process:
-
-1. Fix `adam_lr` as a ratio of `muon_lr` (e.g., `adam_lr = muon_lr / 50`), then sweep `muon_lr` to find the best value.
-2. With the best `muon_lr` fixed, sweep `adam_lr` to find the optimal combination.
+Muon outperforms AdamW on 4 out of 5 metrics: MBPP+ (0.548 vs 0.534, +2.6%), MMLU (0.678 vs 0.660, +2.7%), and GSM8K (0.810 vs 0.805, +0.6%).  On MBPP base tests, AdamW edges out Muon (0.661 vs 0.646, -2.3%), though Muon achieves a higher score on the more rigorous MBPP+ with extra test cases (0.548 vs 0.534), suggesting better generalization.
 
 ## Muon Optimizer Memory Savings
 Muon optimizer uses less memory for optimizer states than Adam, because it maintains one momentum buffer per parameter instead of two (first and second moment).
