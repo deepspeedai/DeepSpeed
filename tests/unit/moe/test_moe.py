@@ -241,13 +241,13 @@ class TestTopkGate(DistributedTest):
         logits2 *= dist.get_rank() + 1
 
         #top3 full mask     #prob_mask          #postion_mask
-        #0 0 1 0 1 1        #0 0 1 0 1 1        #0 0 1 0 1 1
-        #0 1 0 1 0 1        #0 0 0 1 0 0        #0 1 0 1 0 1
+        #0 0 1 0 1 1        #0 0 1 0 1 0        #0 0 1 0 1 1
+        #0 1 0 1 0 1        #0 1 0 1 0 1        #0 1 0 1 0 1
         #0 1 1 1 0 0        #0 1 1 1 0 0        #0 1 1 1 0 0
-        #1 1 0 0 0 1        #1 1 0 0 0 1        #1 0 0 0 0 0
+        #1 1 0 0 0 1        #1 0 0 0 0 1        #1 0 0 0 0 0
         probs_dispatch_res = topkgating(logits2, 3, 1, min_capacity=1, drop_policy='probs')[2]
-        probs_sec_sparse = torch.tensor([[0, 2, 0], [0, 4, 0], [0, 5, 0], [1, 3, 0], [2, 1, 0], [2, 2, 1], [2, 3, 1],
-                                         [3, 0, 0], [3, 1, 1], [3, 5, 1]])
+        probs_sec_sparse = torch.tensor([[0, 2, 0], [0, 4, 0], [1, 1, 0], [1, 3, 0], [1, 5, 0], [2, 1, 1], [2, 2, 1],
+                                         [2, 3, 1], [3, 0, 0], [3, 5, 1]])
         check_equal(logits2, 2, probs_sec_sparse, probs_dispatch_res)
 
         position_sec_sparse = torch.tensor([[0, 2, 0], [0, 4, 0], [0, 5, 0], [1, 1, 0], [1, 3, 0], [1, 5, 1],
