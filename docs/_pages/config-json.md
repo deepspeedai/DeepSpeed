@@ -897,7 +897,7 @@ Configure AutoEP expert parallelism for MoE models. AutoEP automatically detects
 
 | Description                                                                                    | Default |
 | ---------------------------------------------------------------------------------------------- | ------- |
-| Use `torch._grouped_mm` for fused grouped GEMM. Falls back to sequential for-loop if unavailable. | `true`  |
+| Use `torch._grouped_mm` for fused grouped GEMM. Raises `RuntimeError` at `GroupedExperts` construction time when `torch._grouped_mm` is unavailable; set `use_grouped_mm=false` to use the sequential for-loop. | `true`  |
 
 ***moe_layer_pattern***: [string]
 
@@ -916,12 +916,6 @@ Configure AutoEP expert parallelism for MoE models. AutoEP automatically detects
 | Description                                                                                 | Default |
 | ------------------------------------------------------------------------------------------- | ------- |
 | Direct child attribute name for the experts module (e.g., `"experts"`). Not a regex.        | `null`  |
-
-***grouped_mm_backend***: [string]
-
-| Description                                                                                                                | Default  |
-| -------------------------------------------------------------------------------------------------------------------------- | -------- |
-| Backend for grouped GEMM: `"auto"` (select best available), `"torch"`, `"cutlass"`, or `"sequential"` (for-loop fallback). | `"auto"` |
 
 ***score_func***: [string]
 

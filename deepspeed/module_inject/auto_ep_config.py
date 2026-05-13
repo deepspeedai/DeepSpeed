@@ -85,7 +85,6 @@ class AutoEPConfig:
     expert_pattern: str | None = None
     router_pattern: str | None = None
     use_grouped_mm: bool = True
-    grouped_mm_backend: Literal["auto", "torch", "cutlass", "sequential"] = "auto"
     route_norm: bool | None = None  # None = auto-detect from model config
     route_scale: float = 1.0
     score_apply: Literal["auto", "pre", "post"] = "auto"
@@ -295,7 +294,6 @@ def parse_autoep_config(param_dict: dict) -> AutoEPConfig:
     config.expert_pattern = param_dict.get("expert_pattern", None)
     config.router_pattern = param_dict.get("router_pattern", None)
     config.use_grouped_mm = param_dict.get("use_grouped_mm", True)
-    config.grouped_mm_backend = param_dict.get("grouped_mm_backend", "auto")
     config.route_norm = param_dict.get("route_norm", None)
     config.route_scale = param_dict.get("route_scale", 1.0)
     config.score_apply = param_dict.get("score_apply", "auto")
@@ -359,12 +357,6 @@ def validate_autoep_config(
     if config.preset_model is not None and config.preset_model not in PRESET_MODELS:
         raise ValueError(f"Unknown preset_model '{config.preset_model}'. "
                          f"Available presets: {list(PRESET_MODELS.keys())}")
-
-    # Validate grouped_mm_backend
-    valid_backends = ("auto", "torch", "cutlass", "sequential")
-    if config.grouped_mm_backend not in valid_backends:
-        raise ValueError(f"grouped_mm_backend must be one of {valid_backends}, "
-                         f"got '{config.grouped_mm_backend}'")
 
     # Validate score_apply
     valid_score_apply = ("auto", "pre", "post")

@@ -38,7 +38,6 @@ class TestAutoEPConfig:
         assert config.expert_pattern is None
         assert config.router_pattern is None
         assert config.use_grouped_mm is True
-        assert config.grouped_mm_backend == "auto"
         assert config.route_norm is None
         assert config.route_scale == 1.0
         assert config.score_apply == "auto"
@@ -89,7 +88,6 @@ class TestAutoEPConfig:
             "expert_pattern": "experts",
             "router_pattern": "gate",
             "use_grouped_mm": False,
-            "grouped_mm_backend": "sequential",
             "route_norm": True,
             "route_scale": 2.0,
             "score_apply": "pre",
@@ -116,7 +114,6 @@ class TestAutoEPConfig:
         assert config.expert_pattern == "experts"
         assert config.router_pattern == "gate"
         assert config.use_grouped_mm is False
-        assert config.grouped_mm_backend == "sequential"
         assert config.route_norm is True
         assert config.route_scale == 2.0
         assert config.score_apply == "pre"
@@ -495,22 +492,18 @@ class TestGroupedExperts:
         assert experts.w2.grad is not None and experts.w2.grad.abs().sum() > 0
         assert experts.w3.grad is not None and experts.w3.grad.abs().sum() > 0
 
-    def test_grouped_mm_fallback_when_unavailable(self):
-        # Mock torch._grouped_mm as unavailable
-        original = getattr(torch, '_grouped_mm', None)
+    def test_grouped_mm_raises_when_unavailable(self):
+        original = getattr(torch, "_grouped_mm", None)
         try:
-            if hasattr(torch, '_grouped_mm'):
-                delattr(torch, '_grouped_mm')
-            experts = GroupedExperts(dim=64, hidden_dim=128, num_experts=4, use_grouped_mm=True)
-            assert experts.use_grouped_mm is False  # Should have fallen back
+            if hasattr(torch, "_grouped_mm"):
+                delattr(torch, "_grouped_mm")
+            with pytest.raises(RuntimeError, match=r"torch\._grouped_mm"):
+                GroupedExperts(dim=64, hidden_dim=128, num_experts=4, use_grouped_mm=True)
+            experts = GroupedExperts(dim=64, hidden_dim=128, num_experts=4, use_grouped_mm=False)
+            assert experts.use_grouped_mm is False
         finally:
             if original is not None:
                 torch._grouped_mm = original
-
-    def test_cutlass_backend_raises_not_implemented(self):
-        # Test that cutlass raises NotImplementedError if requested
-        # This is tested via the backend attribute, not constructor
-        pass  # CUTLASS path is out of scope for Phase 2
 
 
 class TestTokenReorderer:
