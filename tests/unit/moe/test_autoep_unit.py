@@ -575,6 +575,35 @@ class TestTokenChoiceTopKRouter:
         sums = top_scores.sum(dim=-1)
         assert torch.allclose(sums, torch.ones_like(sums), atol=1e-4)
 
+    @pytest.mark.parametrize("route_norm", [True, False])
+    def test_router_route_scale_applies_once(self, route_norm):
+        base_router = TokenChoiceTopKRouter(dim=64,
+                                            num_experts=8,
+                                            num_expert_groups=None,
+                                            num_limited_groups=None,
+                                            top_k=2,
+                                            score_func="softmax",
+                                            route_norm=route_norm,
+                                            route_scale=1.0,
+                                            gate_bias=False)
+        scaled_router = TokenChoiceTopKRouter(dim=64,
+                                              num_experts=8,
+                                              num_expert_groups=None,
+                                              num_limited_groups=None,
+                                              top_k=2,
+                                              score_func="softmax",
+                                              route_norm=route_norm,
+                                              route_scale=2.5,
+                                              gate_bias=False)
+        scaled_router.load_state_dict(base_router.state_dict())
+        x = torch.randn(50, 64)
+
+        base_scores, base_experts, _ = base_router(x)
+        scaled_scores, scaled_experts, _ = scaled_router(x)
+
+        assert torch.equal(scaled_experts, base_experts)
+        assert torch.allclose(scaled_scores, base_scores * 2.5, atol=1e-5)
+
     def test_router_sigmoid_scores_range(self):
         router = TokenChoiceTopKRouter(dim=64,
                                        num_experts=8,
@@ -743,7 +772,7 @@ class TestTokenReorderer:
 
 # === Phase 3: MoE Detection and Weight Repacking ===
 
-from deepspeed.module_inject.auto_ep import AutoEP
+from deepspeed.module_inject.auto_ep import AutoEP, _resolve_route_scale
 from deepspeed.module_inject.auto_ep_preset_adapters import get_preset_adapter
 from deepspeed.moe.ep_repack import repack_expert_weights
 
@@ -860,6 +889,42 @@ class MockLlama4Transformer(nn.Module):
             layer.feed_forward = MockLlama4MoEBlock(num_experts)
             layers.append(layer)
         self.model.layers = nn.ModuleList(layers)
+
+
+class TestAutoEPRouteScaleResolver:
+
+    def test_auto_routed_scaling_factor_uses_model_config(self):
+        config = AutoEPConfig(enabled=True, routed_scaling_factor="auto", route_scale=1.7)
+        model_config = type("C", (), {"routed_scaling_factor": 2.5})()
+
+        assert _resolve_route_scale(config, model_config) == pytest.approx(2.5)
+
+    def test_explicit_routed_scaling_factor_overrides_model_config_and_route_scale(self):
+        config = AutoEPConfig(enabled=True, routed_scaling_factor=3.0, route_scale=1.7)
+        model_config = type("C", (), {"routed_scaling_factor": 2.5})()
+
+        assert _resolve_route_scale(config, model_config) == pytest.approx(3.0)
+
+    def test_route_scale_fallback_without_model_config_value(self):
+        config = AutoEPConfig(enabled=True, routed_scaling_factor="auto", route_scale=1.7)
+
+        assert _resolve_route_scale(config, type("C", (), {})()) == pytest.approx(1.7)
+        assert _resolve_route_scale(config, None) == pytest.approx(1.7)
+
+    @pytest.mark.parametrize("value", ["2.5", True, float("nan"), float("inf")])
+    def test_invalid_explicit_routed_scaling_factor_rejected(self, value):
+        config = AutoEPConfig(enabled=True, routed_scaling_factor=value)
+
+        with pytest.raises(ValueError, match="routed_scaling_factor"):
+            _resolve_route_scale(config, None)
+
+    @pytest.mark.parametrize("value", ["2.5", True, float("nan"), float("inf")])
+    def test_invalid_model_config_routed_scaling_factor_rejected(self, value):
+        config = AutoEPConfig(enabled=True, routed_scaling_factor="auto")
+        model_config = type("C", (), {"routed_scaling_factor": value})()
+
+        with pytest.raises(ValueError, match="model.config.routed_scaling_factor"):
+            _resolve_route_scale(config, model_config)
 
 
 class TestMoEDetection:
@@ -1246,6 +1311,54 @@ class TestMoEDetection:
         assert specs[0].num_limited_groups == 1
         assert specs[0].group_score_func == "top2_sum"
         assert specs[0].route_scale == pytest.approx(2.5)
+
+    def test_detect_populates_route_scale_from_model_config(self):
+        model = MockMoETransformer(num_layers=1, num_experts=4, moe_every_n=1)
+        model.config.routed_scaling_factor = 2.5
+        config = parse_autoep_config({
+            "enabled": True,
+            "autoep_size": 1,
+            "preset_model": "mixtral",
+            "top_k": 2,
+            "route_scale": 1.7,
+        })
+
+        specs = AutoEP(model, config).ep_parser()
+
+        assert len(specs) == 1
+        assert specs[0].route_scale == pytest.approx(2.5)
+
+    def test_detect_explicit_routed_scaling_factor_overrides_model_config_and_route_scale(self):
+        model = MockMoETransformer(num_layers=1, num_experts=4, moe_every_n=1)
+        model.config.routed_scaling_factor = 2.5
+        config = parse_autoep_config({
+            "enabled": True,
+            "autoep_size": 1,
+            "preset_model": "mixtral",
+            "top_k": 2,
+            "route_scale": 1.7,
+            "routed_scaling_factor": 3.0,
+        })
+
+        specs = AutoEP(model, config).ep_parser()
+
+        assert len(specs) == 1
+        assert specs[0].route_scale == pytest.approx(3.0)
+
+    def test_detect_route_scale_fallback_is_preserved_without_model_config_value(self):
+        model = MockMoETransformer(num_layers=1, num_experts=4, moe_every_n=1)
+        config = parse_autoep_config({
+            "enabled": True,
+            "autoep_size": 1,
+            "preset_model": "mixtral",
+            "top_k": 2,
+            "route_scale": 1.7,
+        })
+
+        specs = AutoEP(model, config).ep_parser()
+
+        assert len(specs) == 1
+        assert specs[0].route_scale == pytest.approx(1.7)
 
     def test_qwen3_5_moe_adapter_sets_router_capture_contract(self, monkeypatch):
         """Qwen3.5 records router output through the AutoEP replacement tuple."""
@@ -1803,6 +1916,15 @@ class TestAutoEPMoELayerUnit:
 
         with pytest.raises(ValueError, match="source_router_bias"):
             AutoEPMoELayer(spec, source, ep_size=1, ep_rank=0, config=config)
+
+    def test_autoep_layer_uses_spec_route_scale(self):
+        source = MockMoEBlock(num_experts=4, ffn_hidden=128, hidden_size=64)
+        spec = _make_spec(route_scale=2.5)
+        config = AutoEPConfig(enabled=True, autoep_size=1, route_scale=1.7)
+
+        layer = AutoEPMoELayer(spec, source, ep_size=1, ep_rank=0, config=config)
+
+        assert layer.router.route_scale == pytest.approx(2.5)
 
     def test_autoep_layer_ep_size_1_forward(self):
         torch.manual_seed(42)
