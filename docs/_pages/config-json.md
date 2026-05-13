@@ -891,32 +891,27 @@ Configure AutoEP expert parallelism for MoE models. AutoEP automatically detects
 
 | Description                                                                                                                            | Default |
 | -------------------------------------------------------------------------------------------------------------------------------------- | ------- |
-| Built-in model preset for MoE detection: `mixtral`, `qwen2_moe`, `qwen3_moe`, `qwen3_5_moe`, `deepseek_v2`, `deepseek_v3`, `llama4`. Determines router, expert, and weight naming patterns. | `null`  |
+| Built-in model preset for MoE detection: `mixtral`, `qwen3_moe`, `qwen3_5_moe`, `deepseek_v2`, `deepseek_v3`, `llama4`. Determines router, expert, and weight naming patterns. | `null`  |
 
 Built-in AutoEP presets describe DeepSpeed's router/expert/weight-pattern support for a model family.
 Running a HuggingFace model also requires the installed Transformers package to expose the corresponding
 config/model classes, `model.config.model_type` value, and fused expert layout. The tiny HuggingFace
 smoke coverage used for this AutoEP surface produced the following version gates:
 
-| Preset | Minimum Transformers version | Smoke status | Notes |
-| ------ | ---------------------------- | ------------ | ----- |
-| `mixtral` | `5.0.0` | Forward parity | `4.48.0` through `4.57.6` expose classes but do not match the fused expert layout. |
-| `qwen2_moe` | `5.0.0` | Forward parity | `4.48.0` through `4.57.6` expose Qwen2-MoE classes but use a structure AutoEP does not detect with this preset. |
-| `qwen3_moe` | `5.0.0` | Forward parity | Qwen3-MoE classes appear in `4.51.3`, but `4.x` builds tested here do not match the fused expert layout. |
-| `qwen3_5_moe` | `5.2.0` | Forward parity | Requires the Qwen3.5 text-backbone `qwen3_5_moe_text` model type; earlier builds tested here do not expose the required classes. |
-| `deepseek_v2` | `5.0.0` | Replace | `4.54.1` and `4.57.6` expose classes but do not match the preset; forward parity was not established by this smoke. |
-| `deepseek_v3` | `5.0.0` | Replace | `4.51.3` through `4.57.6` expose classes but do not match the preset; forward parity was not established by this smoke. |
-| `llama4` | `5.0.0` | Forward parity | Some `4.x` builds pass the tiny smoke, but `4.51.3` and `4.54.1` did not; use `5.0.0` or newer for the validated path. |
-
-`Forward parity` means a one-layer CPU CausalLM smoke matched native HuggingFace logits and loss after
-AutoEP replacement. `Replace` means detection and replacement succeeded, but this smoke did not establish
-end-to-end forward parity.
+| Preset | Minimum Transformers version | Notes |
+| ------ | ---------------------------- | ----- |
+| `mixtral` | `5.0.0` |  |
+| `qwen3_moe` | `5.0.0` | Also covers Qwen2-MoE when the installed Transformers build uses the validated fused expert layout. Qwen3-MoE classes appear in `4.51.3`, but the tested `4.x` builds do not match the validated AutoEP layout. |
+| `qwen3_5_moe` | `5.2.0` | Requires the Qwen3.5 text-backbone `qwen3_5_moe_text` model type. For performance on Qwen3.5's Gated DeltaNet layers, install optimized kernels; see the [Hugging Face Transformers kernel loading docs](https://huggingface.co/docs/transformers/kernel_doc/loading_kernels) and the [Qwen FlashQLA blog](https://qwen.ai/blog?id=flashqla). |
+| `deepseek_v2` | `5.0.0` | `load_balance_coeff` / expert-bias auxiliary-loss-free load balancing is not currently supported; non-null values are rejected. |
+| `deepseek_v3` | `5.0.0` | `load_balance_coeff` / expert-bias auxiliary-loss-free load balancing is not currently supported; non-null values are rejected. |
+| `llama4` | `5.0.0` |  |
 
 ***use_grouped_mm***: [boolean]
 
 | Description                                                                                    | Default |
 | ---------------------------------------------------------------------------------------------- | ------- |
-| Use `torch._grouped_mm` for fused grouped GEMM. Falls back to sequential for-loop if unavailable. | `true`  |
+| Use `torch._grouped_mm` for fused grouped GEMM. Raises `RuntimeError` at `GroupedExperts` construction time when `torch._grouped_mm` is unavailable; set `use_grouped_mm=false` to use the sequential for-loop. | `true`  |
 
 ***moe_layer_pattern***: [string]
 
@@ -935,12 +930,6 @@ end-to-end forward parity.
 | Description                                                                                 | Default |
 | ------------------------------------------------------------------------------------------- | ------- |
 | Direct child attribute name for the experts module (e.g., `"experts"`). Not a regex.        | `null`  |
-
-***grouped_mm_backend***: [string]
-
-| Description                                                                                                                | Default  |
-| -------------------------------------------------------------------------------------------------------------------------- | -------- |
-| Backend for grouped GEMM: `"auto"` (select best available), `"torch"`, `"cutlass"`, or `"sequential"` (for-loop fallback). | `"auto"` |
 
 ***score_func***: [string]
 
@@ -994,7 +983,7 @@ end-to-end forward parity.
 
 | Description                                                                                          | Default |
 | ---------------------------------------------------------------------------------------------------- | ------- |
-| Coefficient for auxiliary-loss-free load balancing via expert bias. Set to `null` to disable.        | `1e-3`  |
+| Coefficient for auxiliary-loss-free load balancing via expert bias. Set to `null` to disable. DeepSeek-V2 and DeepSeek-V3 presets disable it by default for validated parity and reject explicit non-null values while expert bias is unsupported. | `1e-3`  |
 
 ***expert_w1***: [string]
 

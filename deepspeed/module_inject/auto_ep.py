@@ -10,7 +10,6 @@ Phase 5: Layer replacement (replace_moe_layer filled in).
 
 from __future__ import annotations
 
-import importlib.util
 import re
 from typing import Literal
 
@@ -25,32 +24,7 @@ from deepspeed.module_inject.auto_ep_config import (
     PRESET_MODELS,
     _UNSET,
 )
-
-_QWEN3_5_MOE_REQUIREMENT = {
-    "module": "transformers.models.qwen3_5_moe",
-    "classes": (
-        "Qwen3_5MoeConfig",
-        "Qwen3_5MoeTextConfig",
-        "Qwen3_5MoeModel",
-        "Qwen3_5MoeForCausalLM",
-        "Qwen3_5MoeForConditionalGeneration",
-    ),
-    "model_type_classes": {
-        "qwen3_5_moe": "Qwen3_5MoeConfig",
-        "qwen3_5_moe_text": "Qwen3_5MoeTextConfig",
-    },
-}
-
-_AUTOEP_MODEL_TYPE_PRESETS = {
-    'mixtral': 'mixtral',
-    'qwen3_moe': 'qwen3_moe',
-    'qwen2_moe': 'qwen2_moe',
-    'qwen3_5_moe_text': 'qwen3_5_moe',
-    'deepseek_v2': 'deepseek_v2',
-    'deepseek_v3': 'deepseek_v3',
-    'llama4': 'llama4',
-    'llama4_text': 'llama4',
-}
+from deepspeed.module_inject.auto_ep_preset_adapters import ForwardContract, get_preset_adapter
 
 
 def _remove_transformers_output_capture_hooks(model: nn.Module) -> int:
@@ -73,6 +47,27 @@ def _remove_transformers_output_capture_hooks(model: nn.Module) -> int:
             if hooks_always_called is not None:
                 hooks_always_called.pop(hook_id, None)
     return removed
+
+
+def _preset_name_for_hf_model_type(model_type: str) -> str | None:
+    for preset_name, preset in PRESET_MODELS.items():
+        if model_type in preset.hf_model_types:
+            return preset_name
+    return None
+
+
+def _unsupported_preset_for_hf_model_type(model_type: str) -> tuple[str, MoEModelPreset] | None:
+    for preset_name, preset in PRESET_MODELS.items():
+        if model_type in preset.unsupported_hf_model_type_notes:
+            return preset_name, preset
+    return None
+
+
+def _is_known_hf_model_type(model_type: str | None) -> bool:
+    if model_type is None:
+        return False
+    return (_preset_name_for_hf_model_type(model_type) is not None
+            or _unsupported_preset_for_hf_model_type(model_type) is not None)
 
 
 def _has_3d_expert_params(module: nn.Module, preset: MoEModelPreset) -> bool:
@@ -179,11 +174,11 @@ def _infer_hidden_and_ffn_size(
 def _detect_forward_contract(
     moe_module: nn.Module,
     router_module: nn.Module,
-) -> tuple[bool, Literal["moe_block", "router", "none"], int | None, str | None]:
+) -> ForwardContract:
     """Detect the forward contract for router logits capture.
 
     Returns:
-        (return_router_logits, capture_target, capture_index, capture_layer_name)
+        ForwardContract with router-logit return and capture metadata.
     """
     # Check for OutputRecorder on the model (transformers 5.0.0 pattern)
     # Look for _can_record_outputs attribute on parent modules
@@ -222,7 +217,12 @@ def _detect_forward_contract(
                     elif isinstance(val, int):
                         capture_index = val
 
-    return return_router_logits, capture_target, capture_index, capture_layer_name
+    return ForwardContract(
+        return_router_logits=return_router_logits,
+        capture_target=capture_target,
+        capture_index=capture_index,
+        capture_layer_name=capture_layer_name,
+    )
 
 
 class AutoEP:
@@ -242,6 +242,7 @@ class AutoEP:
         presets_to_try = self._resolve_presets()
 
         for preset_name, preset in presets_to_try:
+            adapter = get_preset_adapter(preset.preset_adapter)
             pattern = re.compile(preset.moe_layer_pattern)
 
             for module_name, module in self.model.named_modules():
@@ -348,40 +349,26 @@ class AutoEP:
                 else:
                     score_apply = preset.score_apply
 
-                # Resolve route_norm
-                if self.config.route_norm is not None:
-                    route_norm = self.config.route_norm
+                route_norm = adapter.resolve_route_norm(self.config, preset, self.model_config)
+
+                # Resolve routed scaling from model config when available; otherwise
+                # keep the AutoEP scale.
+                route_scale = self.config.route_scale
+                if self.config.routed_scaling_factor != "auto":
+                    route_scale = float(self.config.routed_scaling_factor)
                 else:
-                    cfg_norm = getattr(self.model_config, 'norm_topk_prob', None)
-                    if cfg_norm is not None:
-                        route_norm = bool(cfg_norm)
-                    else:
-                        route_norm = preset.route_norm
+                    cfg_route_scale = getattr(self.model_config, 'routed_scaling_factor', None)
+                    if cfg_route_scale is not None:
+                        route_scale = float(cfg_route_scale)
+
+                group_routing = adapter.resolve_group_routing(self.config, self.model_config)
 
                 # Check gate bias
                 gate_bias = preset.gate_bias
                 if router_weight is not None:
                     gate_bias = getattr(router_child, 'bias', None) is not None
 
-                # Detect forward contract
-                return_router_logits, capture_target, capture_index, capture_layer_name = \
-                    _detect_forward_contract(module, router_child)
-                if preset_name == "qwen3_5_moe":
-                    # Qwen3.5 HF captures softmaxed router output through an
-                    # OutputRecorder on Qwen3_5MoeTopKRouter. AutoEP replaces
-                    # the owning MoE block, so the replacement returns that
-                    # value at output index 1 for recorder retargeting during
-                    # layer replacement.
-                    return_router_logits = True
-                    capture_target = "router"
-                    capture_index = 1
-                if preset_name == "llama4":
-                    # HF Llama4TextMoe always returns (hidden_states, router_logits);
-                    # the decoder layer unpacks that tuple even when CausalLM loss
-                    # ignores router logits.
-                    return_router_logits = True
-                    if capture_target == "none":
-                        capture_target = "router"
+                forward_contract = adapter.adjust_forward_contract(_detect_forward_contract(module, router_child))
 
                 # Check shared experts
                 has_shared = False
@@ -425,13 +412,22 @@ class AutoEP:
                     score_apply=score_apply,
                     route_norm=route_norm,
                     gate_bias=gate_bias,
-                    return_router_logits=return_router_logits,
-                    router_logits_capture_target=capture_target,
-                    router_logits_capture_index=capture_index,
-                    router_logits_capture_layer_name=capture_layer_name,
+                    return_router_logits=forward_contract.return_router_logits,
+                    router_logits_capture_target=forward_contract.capture_target,
+                    router_logits_capture_index=forward_contract.capture_index,
+                    router_logits_capture_layer_name=forward_contract.capture_layer_name,
                     has_shared_experts=has_shared,
                     shared_experts_name=shared_name,
                     shared_experts_gate_name=shared_gate_name,
+                    route_scale=route_scale,
+                    num_expert_groups=group_routing.num_expert_groups,
+                    num_limited_groups=group_routing.num_limited_groups,
+                    group_score_func=group_routing.group_score_func,
+                    supports_expert_bias=preset.supports_expert_bias,
+                    unsupported_router_bias_names=preset.unsupported_router_bias_names,
+                    preset_adapter=preset.preset_adapter,
+                    router_logits_capture_mode=forward_contract.router_logits_capture_mode,
+                    moe_output_shape=forward_contract.moe_output_shape,
                 )
                 specs.append(spec)
                 logger.debug(f"Detected MoE layer: {module_name} (family={preset_name}, "
@@ -472,63 +468,18 @@ class AutoEP:
 
         # Replace in-place on parent
         setattr(parent, child_name, replacement)
-        self._retarget_transformers_output_recorders(spec, replacement)
+        adapter = get_preset_adapter(spec.preset_adapter)
+        adapter.retarget_transformers_output_recorders(
+            self.model,
+            spec,
+            replacement,
+            self._retargeted_transformers_output_recorders,
+            _remove_transformers_output_capture_hooks,
+        )
 
         logger.info(f"AutoEP: replaced '{spec.moe_module_name}' with AutoEPMoELayer "
                     f"(ep_size={ep_size}, ep_rank={ep_rank}, "
                     f"local_experts={replacement.num_local_experts})")
-
-    def _retarget_transformers_output_recorders(self, spec: MoELayerSpec, replacement: nn.Module) -> None:
-        """Retarget HF output capture after AutoEP replaces a recorded MoE module."""
-        if spec.model_family != "qwen3_5_moe":
-            return
-
-        recorder_key = f"{spec.model_family}:{replacement.__class__.__module__}.{replacement.__class__.__qualname__}"
-        if recorder_key in self._retargeted_transformers_output_recorders:
-            return
-        self._retargeted_transformers_output_recorders.add(recorder_key)
-
-        try:
-            from transformers.utils.output_capturing import _CAN_RECORD_REGISTRY, OutputRecorder
-        except Exception as exc:
-            logger.warning(f"AutoEP: could not retarget Qwen3.5 router-logit output capture: {exc}")
-            return
-
-        retargeted = 0
-        replacement_cls = replacement.__class__
-        for module in self.model.modules():
-            module_config = getattr(module, "config", None)
-            model_type = getattr(module_config, "model_type", None)
-            class_name = module.__class__.__name__
-            if model_type != "qwen3_5_moe_text" and "Qwen3_5Moe" not in class_name:
-                continue
-
-            registry_key = str(module.__class__)
-            record_outputs = getattr(module, "_can_record_outputs", None)
-            registry_outputs = _CAN_RECORD_REGISTRY.get(registry_key)
-            base_outputs = record_outputs if isinstance(record_outputs, dict) else registry_outputs
-            if not isinstance(base_outputs, dict) or "router_logits" not in base_outputs:
-                continue
-
-            retargeted_outputs = dict(base_outputs)
-            retargeted_outputs["router_logits"] = OutputRecorder(replacement_cls, index=1)
-            module._can_record_outputs = retargeted_outputs
-            _CAN_RECORD_REGISTRY[registry_key] = retargeted_outputs
-
-            if getattr(module, "_output_capturing_hooks_installed", False):
-                removed = _remove_transformers_output_capture_hooks(module)
-                if removed:
-                    logger.debug(f"AutoEP: removed {removed} stale HF output-capturing hook(s) "
-                                 f"from {class_name}.")
-            module._output_capturing_hooks_installed = False
-            retargeted += 1
-
-        if retargeted:
-            logger.info("AutoEP: retargeted Qwen3.5 HF router-logit output capture to record "
-                        f"{replacement_cls.__name__} output index 1 on {retargeted} module(s).")
-        else:
-            logger.warning("AutoEP: Qwen3.5 AutoEP conversion did not find a HF output-capture registry "
-                           "entry for router_logits.")
 
     def _apply_config_overrides(self, preset: MoEModelPreset) -> MoEModelPreset:
         """Apply user config field overrides to a resolved preset.
@@ -564,70 +515,9 @@ class AutoEP:
         from dataclasses import replace
         return replace(preset, **overrides)
 
-    # Qwen3.5 is stricter than the other presets because this path depends on
-    # the HF text-backbone model_type and OutputRecorder retargeting contract.
-    # Other presets can be supplied by compatible custom/trust_remote_code model
-    # classes, so they rely on structural detection errors instead of class
-    # import checks.
-    def _qwen3_5_transformers_availability(self) -> tuple[str | None, list[str], list[str], list[str], str | None]:
-        """Return installed Transformers availability for Qwen3.5 MoE support."""
-        try:
-            import transformers
-        except Exception as exc:
-            return None, list(_QWEN3_5_MOE_REQUIREMENT["classes"]), [
-                _QWEN3_5_MOE_REQUIREMENT["module"]
-            ], list(_QWEN3_5_MOE_REQUIREMENT["model_type_classes"]), str(exc)
-
-        version = getattr(transformers, "__version__", "unknown")
-        missing_classes = [name for name in _QWEN3_5_MOE_REQUIREMENT["classes"] if not hasattr(transformers, name)]
-        module_name = _QWEN3_5_MOE_REQUIREMENT["module"]
-        missing_modules = [] if importlib.util.find_spec(module_name) is not None else [module_name]
-
-        missing_model_types = []
-        for model_type, class_name in _QWEN3_5_MOE_REQUIREMENT["model_type_classes"].items():
-            config_cls = getattr(transformers, class_name, None)
-            if config_cls is None or getattr(config_cls, "model_type", None) != model_type:
-                missing_model_types.append(model_type)
-
-        return version, missing_classes, missing_modules, missing_model_types, None
-
-    def _validate_qwen3_5_transformers_available(self, requested_model_type: str | None = None) -> None:
-        version, missing_classes, missing_modules, missing_model_types, import_error = \
-            self._qwen3_5_transformers_availability()
-        if not (missing_classes or missing_modules or missing_model_types or import_error):
-            return
-
-        details = []
-        if import_error:
-            details.append(f"could not import transformers: {import_error}")
-        if missing_classes:
-            details.append(f"missing class(es): {', '.join(missing_classes)}")
-        if missing_modules:
-            details.append(f"missing module(s): {', '.join(missing_modules)}")
-        if missing_model_types:
-            details.append(f"missing model_type registration(s): {', '.join(missing_model_types)}")
-
-        model_type_msg = f" for model_type='{requested_model_type}'" if requested_model_type else ""
-        version_msg = f" (installed transformers=={version})" if version else ""
-        raise ValueError("AutoEP preset 'qwen3_5_moe'"
-                         f"{model_type_msg} requires a Hugging Face Transformers build with Qwen3.5 MoE support"
-                         f"{version_msg}, but the installed package is not compatible: {'; '.join(details)}. "
-                         "Upgrade Transformers or use an AutoEP preset/model supported by the installed "
-                         "Transformers version.")
-
-    def _raise_unsupported_qwen3_5_model_type(self, model_type: str) -> None:
-        try:
-            self._validate_qwen3_5_transformers_available(model_type)
-        except ValueError as exc:
-            raise ValueError(
-                f"AutoEP preset 'qwen3_5_moe' supports the Qwen3.5 text backbone model_type "
-                f"'qwen3_5_moe_text', but got model_type='{model_type}'. {exc}"
-            ) from exc
-
-        raise ValueError("AutoEP preset 'qwen3_5_moe' supports the Qwen3.5 text backbone model_type "
-                         f"'qwen3_5_moe_text', but got model_type='{model_type}'. Use a Qwen3.5 text "
-                         "model/backbone for AutoEP, or choose a preset/model combination supported by the "
-                         "installed Transformers version.")
+    def _validate_preset_compatibility(self, preset_name: str, preset: MoEModelPreset) -> None:
+        adapter = get_preset_adapter(preset.preset_adapter)
+        adapter.validate_compatibility(preset_name, preset, self.model_config)
 
     def _requires_selected_preset_detection(self) -> bool:
         """Return whether empty detection should fail for the selected preset."""
@@ -636,7 +526,7 @@ class AutoEP:
         if self.model_config is None:
             return False
         model_type = getattr(self.model_config, 'model_type', None)
-        return bool(model_type and model_type in _AUTOEP_MODEL_TYPE_PRESETS)
+        return _is_known_hf_model_type(model_type)
 
     def _raise_no_moe_layers_detected(self, presets_to_try: list[tuple[str, MoEModelPreset]]) -> None:
         model_type = getattr(self.model_config, 'model_type', None)
@@ -645,16 +535,14 @@ class AutoEP:
         else:
             source = f"model_type='{model_type}'"
 
-        expected = "; ".join(
-            f"{preset_name}: moe_layer_pattern='{preset.moe_layer_pattern}', "
-            f"router='{preset.router_pattern}', experts='{preset.experts_pattern}'"
-            for preset_name, preset in presets_to_try)
-        raise ValueError(
-            f"AutoEP: no MoE layers detected for {source}. "
-            f"Expected MoE structure for selected preset(s): {expected}. "
-            "This usually means the selected preset does not match the model implementation, "
-            "or the installed Transformers version exposes a different structure. Choose a matching "
-            "preset, upgrade Transformers, or provide custom AutoEP patterns.")
+        expected = "; ".join(f"{preset_name}: moe_layer_pattern='{preset.moe_layer_pattern}', "
+                             f"router='{preset.router_pattern}', experts='{preset.experts_pattern}'"
+                             for preset_name, preset in presets_to_try)
+        raise ValueError(f"AutoEP: no MoE layers detected for {source}. "
+                         f"Expected MoE structure for selected preset(s): {expected}. "
+                         "This usually means the selected preset does not match the model implementation, "
+                         "or the installed Transformers version exposes a different structure. Choose a matching "
+                         "preset, upgrade Transformers, or provide custom AutoEP patterns.")
 
     def _resolve_presets(self) -> list[tuple[str, MoEModelPreset]]:
         """Determine which preset(s) to use for detection."""
@@ -662,28 +550,26 @@ class AutoEP:
             if self.config.preset_model not in PRESET_MODELS:
                 raise ValueError(f"Unknown preset_model '{self.config.preset_model}'. "
                                  f"Available: {list(PRESET_MODELS.keys())}")
-            if self.config.preset_model == "qwen3_5_moe":
-                model_type = getattr(self.model_config, "model_type", None)
-                if model_type == "qwen3_5_moe":
-                    self._raise_unsupported_qwen3_5_model_type(model_type)
-                self._validate_qwen3_5_transformers_available(model_type)
             preset = self._apply_config_overrides(PRESET_MODELS[self.config.preset_model])
+            self._validate_preset_compatibility(self.config.preset_model, preset)
             return [(self.config.preset_model, preset)]
 
         # Auto-detect from model_type
         if self.model_config is not None:
             model_type = getattr(self.model_config, 'model_type', None)
             if model_type:
-                if model_type == 'qwen3_5_moe':
-                    self._raise_unsupported_qwen3_5_model_type(model_type)
                 # Map HF model_type to preset name
-                preset_name = _AUTOEP_MODEL_TYPE_PRESETS.get(model_type)
+                preset_name = _preset_name_for_hf_model_type(model_type)
                 if preset_name and preset_name in PRESET_MODELS:
-                    if preset_name == "qwen3_5_moe":
-                        self._validate_qwen3_5_transformers_available(model_type)
                     logger.info(f"AutoEP: auto-detected model_type='{model_type}', using preset '{preset_name}'")
                     preset = self._apply_config_overrides(PRESET_MODELS[preset_name])
+                    self._validate_preset_compatibility(preset_name, preset)
                     return [(preset_name, preset)]
+
+                unsupported_preset = _unsupported_preset_for_hf_model_type(model_type)
+                if unsupported_preset is not None:
+                    preset_name, preset = unsupported_preset
+                    self._validate_preset_compatibility(preset_name, preset)
 
         # If custom patterns are provided, build an ad-hoc preset
         if self.config.moe_layer_pattern:
