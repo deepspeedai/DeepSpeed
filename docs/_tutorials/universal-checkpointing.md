@@ -152,6 +152,7 @@ Current limits and failure cases:
 
 - ZeRO Stage 3 AutoEP Universal Checkpoint conversion is not supported. When AutoEP metadata is present, the converter raises `NotImplementedError` with the message that "AutoEP currently requires ZeRO Stage 1 or 2."
 - For ZeRO Stage 1 and ZeRO Stage 2 conversion, expert checkpoint files without `ds_autoep_layers` / `autoep_layers` metadata raise a `RuntimeError`.
+- Existing DeepSpeed MoE or Megatron-DeepSpeed expert checkpoint files may share the `layer_<moe_layer_id>_expert_<global_expert_id>_mp_rank_<NN>_model_states.pt` naming convention, but they use native `deepspeed_moe` expert parameter names and do not carry AutoEP metadata. Loading or converting those checkpoints into AutoEP requires a separate model-specific migration step.
 - If AutoEP metadata is present but an expected per-expert model file is missing, conversion raises `FileNotFoundError`.
 - More than one `mp_rank_*` expert file for the same `(layer, expert)` pair raises `NotImplementedError`; combined AutoEP + AutoTP topology changes are not documented by this path.
 - AutoEP optimizer-state consolidation is best effort. It succeeds for the usual ZeRO Stage 1 / 2 AutoEP training checkpoints that include matching expert optimizer shards. If `expp_rank_*_mp_rank_*_optim_states.pt` files or matching state entries are absent, the converter still writes the model parameter `fp32.pt` files and skips unavailable optimizer state files.
