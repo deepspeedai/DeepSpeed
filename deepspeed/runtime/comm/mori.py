@@ -1,5 +1,7 @@
-# Copyright (c) DeepSpeed Team.
+# Copyright (c) Microsoft Corporation.
 # SPDX-License-Identifier: Apache-2.0
+
+# DeepSpeed Team
 """mori SDMA backend, plugged into ``TorchBackend.all_gather_into_tensor``.
 
 When the user opts in, ``deepspeed.comm`` routes ``all_gather_into_tensor``
@@ -197,9 +199,7 @@ def supports(input_tensor: torch.Tensor, group=None) -> bool:
     return True
 
 
-def allgather_into_tensor(input_tensor: torch.Tensor,
-                          output_tensor: torch.Tensor,
-                          group=None) -> Optional[_SdmaWork]:
+def allgather_into_tensor(input_tensor: torch.Tensor, output_tensor: torch.Tensor, group=None) -> Optional[_SdmaWork]:
     """Run one allgather_into_tensor through the SDMA handle.
 
     Returns an ``_SdmaWork`` (Work-compatible) on success.  Returns
@@ -214,16 +214,15 @@ def allgather_into_tensor(input_tensor: torch.Tensor,
     try:
         stream = get_accelerator().current_stream()
         dtype = _dtype_map[input_tensor.dtype]
-        ok = _handle(input_tensor.data_ptr(), output_tensor.data_ptr(),
-                     input_tensor.numel(), dtype, stream.cuda_stream)
+        ok = _handle(input_tensor.data_ptr(), output_tensor.data_ptr(), input_tensor.numel(), dtype,
+                     stream.cuda_stream)
         if not ok:
             return None
         event = get_accelerator().Event()
         event.record(stream)
         return _SdmaWork(event)
     except Exception as e:
-        if (not _call_failed_warned and torch.distributed.is_initialized()
-                and torch.distributed.get_rank() == 0):
+        if (not _call_failed_warned and torch.distributed.is_initialized() and torch.distributed.get_rank() == 0):
             logger.warning(f"SDMA allgather failed ({e}); falling back to dist.allgather")
             _call_failed_warned = True
         return None
