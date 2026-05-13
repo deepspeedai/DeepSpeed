@@ -504,6 +504,8 @@ class AutoEP:
         """Return whether empty detection should fail for the selected preset."""
         if self.config.preset_model is not None:
             return True
+        if self.config.moe_layer_pattern is not None:
+            return True
         if self.model_config is None:
             return False
         model_type = getattr(self.model_config, 'model_type', None)
@@ -513,6 +515,8 @@ class AutoEP:
         model_type = getattr(self.model_config, 'model_type', None)
         if self.config.preset_model is not None:
             source = f"preset_model='{self.config.preset_model}'"
+        elif self.config.moe_layer_pattern is not None:
+            source = f"moe_layer_pattern='{self.config.moe_layer_pattern}'"
         else:
             source = f"model_type='{model_type}'"
 

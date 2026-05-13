@@ -4,6 +4,8 @@
 # DeepSpeed Team
 """Tests for AutoEP checkpointing (save/load, metadata, universal stubs)."""
 
+import ast
+import inspect
 import os
 import copy
 import pytest
@@ -747,6 +749,25 @@ class TestAutoEPCheckpoint2GPU(DistributedTest):
 
 class TestUniversalConvert(DistributedTest):
     world_size = 1
+
+    def test_universal_converter_main_uses_absolute_autoep_imports(self):
+        """Direct script execution of ds_to_universal.py must not hit package-relative imports."""
+        import deepspeed.checkpoint.ds_to_universal as ds_to_universal
+
+        main_tree = ast.parse(inspect.getsource(ds_to_universal.main))
+        relative_imports = [
+            node.module for node in ast.walk(main_tree) if isinstance(node, ast.ImportFrom) and node.level
+        ]
+
+        assert relative_imports == []
+
+    def test_load_hp_checkpoint_state_non_expert_groups_default_to_data_parallel(self, monkeypatch):
+        from deepspeed.runtime import base_optimizer
+        from deepspeed.utils import groups
+
+        monkeypatch.setattr(groups, "_EXPERT_PARALLEL_GROUP", {})
+
+        assert base_optimizer._get_universal_checkpoint_ep_info() == (0, 1)
 
     def test_universal_convert_autoep_metadata_written(self, tmpdir):
         """Run ds_to_universal on AutoEP checkpoint; verify universal_checkpoint_info."""

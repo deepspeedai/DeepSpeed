@@ -18,6 +18,21 @@ class DeepSpeedOptimizer(object):
     pass
 
 
+def _get_universal_checkpoint_ep_info() -> tuple[int, int]:
+    # Universal checkpoints use EP slicing only when an expert group exists.
+    try:
+        from deepspeed.utils import groups
+        expert_groups = groups._get_expert_parallel_group_dict()
+        if not expert_groups:
+            return 0, 1
+        max_ep_name = groups._get_max_expert_size_name()
+        if max_ep_name not in expert_groups:
+            return 0, 1
+        return groups._get_expert_parallel_rank(max_ep_name), groups._get_expert_parallel_world_size(max_ep_name)
+    except (RuntimeError, AttributeError, KeyError):
+        return 0, 1
+
+
 class BackwardHookStateManager:
     """Manages backward pass state for ZeRO optimizers.
 
@@ -314,15 +329,7 @@ class ZeROOptimizer(DeepSpeedOptimizer):
             tp_world_size = self.mpu.get_slice_parallel_world_size() if hasattr(self.mpu, "get_slice_parallel_world_size") \
                 else self.mpu.get_tensor_model_parallel_world_size()
 
-        # Obtain EP rank/size for universal checkpoint expert parameter slicing.
-        # Guarded for non-MoE models where expert groups don't exist.
-        try:
-            from deepspeed.utils import groups
-            max_ep_name = groups._get_max_expert_size_name()
-            ep_rank = groups._get_expert_parallel_rank(max_ep_name)
-            ep_size = groups._get_expert_parallel_world_size(max_ep_name)
-        except (RuntimeError, AttributeError, KeyError):
-            ep_rank, ep_size = 0, 1
+        ep_rank, ep_size = _get_universal_checkpoint_ep_info()
 
         for i, (param_group,
                 loaded_param_group) in enumerate(zip(self.optimizer.param_groups, optim_sd['param_groups'])):

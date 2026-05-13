@@ -502,8 +502,15 @@ def main(args):
         _merge_tp_slice_files(args, ds_checkpoint, slice_shapes, temp_dir)
 
         print('*** 2.5. Consolidating AutoEP expert files')
-        from .constants import AUTOEP_LAYERS_KEY, AUTOEP_LAYERS_KEY_LEGACY, EXPERT_PARAMETER_PATTERNS
-        from .autoep_universal import consolidate_autoep_expert_files, consolidate_autoep_optimizer_states
+        from deepspeed.checkpoint.constants import (
+            AUTOEP_LAYERS_KEY,
+            AUTOEP_LAYERS_KEY_LEGACY,
+            EXPERT_PARAMETER_PATTERNS,
+        )
+        from deepspeed.checkpoint.autoep_universal import (
+            consolidate_autoep_expert_files,
+            consolidate_autoep_optimizer_states,
+        )
 
         # Load AutoEP metadata from main checkpoint
         main_sd = torch.load(ds_checkpoint.mp_rank_files[0], map_location=torch.device('cpu'), weights_only=False)
