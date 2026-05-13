@@ -27,6 +27,22 @@ from deepspeed.module_inject.auto_ep_config import (
     validate_autoep_post_detection,
     _UNSET,
 )
+from deepspeed.module_inject.auto_ep_presets import registry as auto_ep_preset_registry
+from deepspeed.module_inject.auto_ep_presets.base import (
+    AutoEPConfig as RegistryAutoEPConfig,
+    AutoEPPresetAdapter as RegistryAutoEPPresetAdapter,
+    ForwardContract as RegistryForwardContract,
+    GroupRoutingConfig as RegistryGroupRoutingConfig,
+    MoELayerSpec as RegistryMoELayerSpec,
+    MoEModelPreset as RegistryMoEModelPreset,
+)
+from deepspeed.module_inject.auto_ep_presets.registry import (
+    apply_config_overrides,
+    available_preset_names,
+    preset_name_for_hf_model_type,
+    resolve_preset_candidates,
+    unsupported_preset_for_hf_model_type,
+)
 
 
 class TestAutoEPConfig:
@@ -285,6 +301,32 @@ class TestAutoEPConfig:
             assert preset.hf_model_types, f"Preset {name} missing HF model_type metadata"
             assert preset.min_transformers_version is not None, f"Preset {name} missing Transformers version gate"
 
+    def test_available_preset_names_match_compat_preset_models(self):
+        assert available_preset_names() == ("mixtral", "qwen3_moe", "qwen3_5_moe", "deepseek_v2", "deepseek_v3",
+                                            "llama4")
+        assert tuple(PRESET_MODELS.keys()) == available_preset_names()
+
+    @pytest.mark.parametrize(("model_type", "preset_name"), [
+        ("mixtral", "mixtral"),
+        ("qwen3_moe", "qwen3_moe"),
+        ("qwen2_moe", "qwen3_moe"),
+        ("qwen3_5_moe_text", "qwen3_5_moe"),
+        ("deepseek_v2", "deepseek_v2"),
+        ("deepseek_v3", "deepseek_v3"),
+        ("llama4", "llama4"),
+        ("llama4_text", "llama4"),
+    ])
+    def test_hf_model_type_mapping_uses_registry_metadata(self, model_type, preset_name):
+        assert preset_name_for_hf_model_type(model_type) == preset_name
+
+    def test_unsupported_qwen3_5_top_level_mapping_has_diagnostic(self):
+        unsupported = unsupported_preset_for_hf_model_type("qwen3_5_moe")
+
+        assert unsupported is not None
+        preset_name, preset = unsupported
+        assert preset_name == "qwen3_5_moe"
+        assert "qwen3_5_moe_text" in preset.unsupported_hf_model_type_notes["qwen3_5_moe"]
+
     def test_public_docs_list_all_autoep_presets(self):
         """Public AutoEP docs list built-in presets without exposing removed presets."""
         repo_root = Path(__file__).resolve().parents[3]
@@ -378,6 +420,23 @@ class TestAutoEPConfig:
         # Key present with string -> custom weight name
         c3 = parse_autoep_config({"expert_w3": "up_proj"})
         assert c3.expert_w3 == "up_proj"
+
+    def test_auto_ep_config_compat_exports_registry_objects(self):
+        import deepspeed.module_inject.auto_ep_config as compat_config
+
+        assert compat_config.AutoEPConfig is RegistryAutoEPConfig
+        assert compat_config.MoEModelPreset is RegistryMoEModelPreset
+        assert compat_config.MoELayerSpec is RegistryMoELayerSpec
+        assert compat_config.PRESET_MODELS is auto_ep_preset_registry.PRESET_MODELS
+        assert compat_config.resolve_autoep_config_defaults is auto_ep_preset_registry.resolve_autoep_config_defaults
+
+    def test_auto_ep_preset_adapter_compat_exports_registry_objects(self):
+        import deepspeed.module_inject.auto_ep_preset_adapters as compat_adapters
+
+        assert compat_adapters.AutoEPPresetAdapter is RegistryAutoEPPresetAdapter
+        assert compat_adapters.ForwardContract is RegistryForwardContract
+        assert compat_adapters.GroupRoutingConfig is RegistryGroupRoutingConfig
+        assert compat_adapters.get_preset_adapter is auto_ep_preset_registry.get_preset_adapter
 
 
 # === Phase 4: Generalized Group Creation ===
@@ -1251,6 +1310,20 @@ class TestMoEDetection:
         result = auto_ep._apply_config_overrides(original)
         assert result is original  # same object, not a copy
 
+    def test_registry_apply_config_overrides_does_not_mutate_registered_preset(self):
+        """Registry override copies preserve the shared built-in preset object."""
+        original = PRESET_MODELS["mixtral"]
+        config = AutoEPConfig(enabled=True, autoep_size=1, expert_w1="custom_w1", expert_w3="custom_w3")
+
+        overridden = apply_config_overrides(config, original)
+
+        assert overridden is not original
+        assert overridden.expert_w1 == "custom_w1"
+        assert overridden.expert_w3 == "custom_w3"
+        assert original.expert_w1 == "gate_up_proj"
+        assert original.expert_w3 is None
+        assert PRESET_MODELS["mixtral"] is original
+
     def test_apply_config_overrides_expert_w3_none_overrides(self):
         """expert_w3=None (fused) overrides preset's expert_w3."""
         model = MockMoETransformer(num_layers=2, moe_every_n=1)
@@ -1271,6 +1344,32 @@ class TestMoEDetection:
         auto_ep = AutoEP(model, config)
         p = auto_ep._apply_config_overrides(PRESET_MODELS["deepseek_v3"])
         assert p is PRESET_MODELS["deepseek_v3"]  # same object (no overrides)
+
+    @pytest.mark.parametrize(("expert_w3", "expected_w3"), [
+        (_UNSET, None),
+        (None, None),
+        ("up_proj", "up_proj"),
+    ])
+    def test_registry_custom_candidate_preserves_expert_w3_sentinel_semantics(self, expert_w3, expected_w3):
+        config = AutoEPConfig(
+            enabled=True,
+            autoep_size=1,
+            moe_layer_pattern=r"model\.layers\.\d+\.moe",
+            expert_w3=expert_w3,
+        )
+
+        candidates = resolve_preset_candidates(config, model_config=None)
+
+        assert len(candidates) == 1
+        preset_name, preset = candidates[0]
+        assert preset_name == "custom"
+        assert preset.expert_w3 == expected_w3
+
+    def test_auto_ep_engine_does_not_import_preset_models_directly(self):
+        auto_ep_path = Path(__file__).resolve().parents[3] / "deepspeed" / "module_inject" / "auto_ep.py"
+        auto_ep_source = auto_ep_path.read_text()
+
+        assert "PRESET_MODELS" not in auto_ep_source
 
 
 class TestWeightRepacking:
