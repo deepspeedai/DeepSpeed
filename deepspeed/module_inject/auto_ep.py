@@ -41,6 +41,17 @@ _QWEN3_5_MOE_REQUIREMENT = {
     },
 }
 
+_AUTOEP_MODEL_TYPE_PRESETS = {
+    'mixtral': 'mixtral',
+    'qwen3_moe': 'qwen3_moe',
+    'qwen2_moe': 'qwen2_moe',
+    'qwen3_5_moe_text': 'qwen3_5_moe',
+    'deepseek_v2': 'deepseek_v2',
+    'deepseek_v3': 'deepseek_v3',
+    'llama4': 'llama4',
+    'llama4_text': 'llama4',
+}
+
 
 def _remove_transformers_output_capture_hooks(model: nn.Module) -> int:
     """Remove HF output-capturing hooks so they can be reinstalled after AutoEP conversion."""
@@ -427,6 +438,8 @@ class AutoEP:
                              f"experts={num_experts}, top_k={top_k}, storage={storage})")
 
         if not specs:
+            if self._requires_selected_preset_detection():
+                self._raise_no_moe_layers_detected(presets_to_try)
             logger.warning("AutoEP: no MoE layers detected in model.")
 
         return specs
@@ -551,6 +564,11 @@ class AutoEP:
         from dataclasses import replace
         return replace(preset, **overrides)
 
+    # Qwen3.5 is stricter than the other presets because this path depends on
+    # the HF text-backbone model_type and OutputRecorder retargeting contract.
+    # Other presets can be supplied by compatible custom/trust_remote_code model
+    # classes, so they rely on structural detection errors instead of class
+    # import checks.
     def _qwen3_5_transformers_availability(self) -> tuple[str | None, list[str], list[str], list[str], str | None]:
         """Return installed Transformers availability for Qwen3.5 MoE support."""
         try:
@@ -611,6 +629,33 @@ class AutoEP:
                          "model/backbone for AutoEP, or choose a preset/model combination supported by the "
                          "installed Transformers version.")
 
+    def _requires_selected_preset_detection(self) -> bool:
+        """Return whether empty detection should fail for the selected preset."""
+        if self.config.preset_model is not None:
+            return True
+        if self.model_config is None:
+            return False
+        model_type = getattr(self.model_config, 'model_type', None)
+        return bool(model_type and model_type in _AUTOEP_MODEL_TYPE_PRESETS)
+
+    def _raise_no_moe_layers_detected(self, presets_to_try: list[tuple[str, MoEModelPreset]]) -> None:
+        model_type = getattr(self.model_config, 'model_type', None)
+        if self.config.preset_model is not None:
+            source = f"preset_model='{self.config.preset_model}'"
+        else:
+            source = f"model_type='{model_type}'"
+
+        expected = "; ".join(
+            f"{preset_name}: moe_layer_pattern='{preset.moe_layer_pattern}', "
+            f"router='{preset.router_pattern}', experts='{preset.experts_pattern}'"
+            for preset_name, preset in presets_to_try)
+        raise ValueError(
+            f"AutoEP: no MoE layers detected for {source}. "
+            f"Expected MoE structure for selected preset(s): {expected}. "
+            "This usually means the selected preset does not match the model implementation, "
+            "or the installed Transformers version exposes a different structure. Choose a matching "
+            "preset, upgrade Transformers, or provide custom AutoEP patterns.")
+
     def _resolve_presets(self) -> list[tuple[str, MoEModelPreset]]:
         """Determine which preset(s) to use for detection."""
         if self.config.preset_model is not None:
@@ -632,17 +677,7 @@ class AutoEP:
                 if model_type == 'qwen3_5_moe':
                     self._raise_unsupported_qwen3_5_model_type(model_type)
                 # Map HF model_type to preset name
-                type_map = {
-                    'mixtral': 'mixtral',
-                    'qwen3_moe': 'qwen3_moe',
-                    'qwen2_moe': 'qwen2_moe',
-                    'qwen3_5_moe_text': 'qwen3_5_moe',
-                    'deepseek_v2': 'deepseek_v2',
-                    'deepseek_v3': 'deepseek_v3',
-                    'llama4': 'llama4',
-                    'llama4_text': 'llama4',
-                }
-                preset_name = type_map.get(model_type)
+                preset_name = _AUTOEP_MODEL_TYPE_PRESETS.get(model_type)
                 if preset_name and preset_name in PRESET_MODELS:
                     if preset_name == "qwen3_5_moe":
                         self._validate_qwen3_5_transformers_available(model_type)
