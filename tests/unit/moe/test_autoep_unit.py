@@ -5,6 +5,10 @@
 """Unit tests for AutoEP feature (all phases append test classes here)."""
 
 import copy
+import re
+from pathlib import Path
+
+from packaging.version import Version
 
 import pytest
 import torch
@@ -38,7 +42,6 @@ class TestAutoEPConfig:
         assert config.expert_pattern is None
         assert config.router_pattern is None
         assert config.use_grouped_mm is True
-        assert config.grouped_mm_backend == "auto"
         assert config.route_norm is None
         assert config.route_scale == 1.0
         assert config.score_apply == "auto"
@@ -79,6 +82,28 @@ class TestAutoEPConfig:
 
         assert resolved.load_balance_coeff == pytest.approx(0.02)
 
+    @pytest.mark.parametrize("preset_model", ["deepseek_v2", "deepseek_v3"])
+    def test_deepseek_preset_default_sets_load_balance_coeff_none(self, preset_model):
+        """DeepSeek presets disable AutoEP expert_bias by default."""
+        config = parse_autoep_config({"enabled": True, "preset_model": preset_model})
+        assert config.load_balance_coeff == pytest.approx(1e-3)
+
+        resolved = resolve_autoep_config_defaults(config, config.preset_model)
+
+        assert resolved.load_balance_coeff is None
+        assert config.load_balance_coeff == pytest.approx(1e-3)
+
+    def test_deepseek_presets_mark_expert_bias_unsupported(self):
+        assert PRESET_MODELS["deepseek_v2"].supports_expert_bias is False
+        assert PRESET_MODELS["deepseek_v3"].supports_expert_bias is False
+        assert PRESET_MODELS["deepseek_v2"].unsupported_router_bias_names == ()
+        assert PRESET_MODELS["deepseek_v3"].unsupported_router_bias_names == ("e_score_correction_bias", )
+        for preset_name in ("deepseek_v2", "deepseek_v3"):
+            preset = PRESET_MODELS[preset_name]
+            assert preset.min_transformers_version == "5.0.0"
+            assert "load_balance_coeff" in preset.docs_support_notes
+            assert "non-null values are rejected" in preset.docs_support_notes
+
     def test_parse_autoep_config_full(self):
         """All fields parsed from complete JSON."""
         param_dict = {
@@ -89,7 +114,6 @@ class TestAutoEPConfig:
             "expert_pattern": "experts",
             "router_pattern": "gate",
             "use_grouped_mm": False,
-            "grouped_mm_backend": "sequential",
             "route_norm": True,
             "route_scale": 2.0,
             "score_apply": "pre",
@@ -116,7 +140,6 @@ class TestAutoEPConfig:
         assert config.expert_pattern == "experts"
         assert config.router_pattern == "gate"
         assert config.use_grouped_mm is False
-        assert config.grouped_mm_backend == "sequential"
         assert config.route_norm is True
         assert config.route_scale == 2.0
         assert config.score_apply == "pre"
@@ -245,7 +268,7 @@ class TestAutoEPConfig:
 
     def test_preset_models_complete(self):
         """All presets have required fields."""
-        expected = {"mixtral", "qwen2_moe", "qwen3_moe", "qwen3_5_moe", "deepseek_v2", "deepseek_v3", "llama4"}
+        expected = {"mixtral", "qwen3_moe", "qwen3_5_moe", "deepseek_v2", "deepseek_v3", "llama4"}
         assert set(PRESET_MODELS.keys()) == expected
         for name, preset in PRESET_MODELS.items():
             assert isinstance(preset, MoEModelPreset), f"Preset {name} is not MoEModelPreset"
@@ -259,6 +282,33 @@ class TestAutoEPConfig:
             assert preset.top_k_attr, f"Preset {name} missing top_k_attr"
             assert preset.score_func in ("softmax", "sigmoid")
             assert preset.score_apply in ("pre", "post")
+            assert preset.hf_model_types, f"Preset {name} missing HF model_type metadata"
+            assert preset.min_transformers_version is not None, f"Preset {name} missing Transformers version gate"
+
+    def test_public_docs_list_all_autoep_presets(self):
+        """Public AutoEP docs list built-in presets without exposing removed presets."""
+        repo_root = Path(__file__).resolve().parents[3]
+        docs = [
+            repo_root / "docs" / "code-docs" / "source" / "moe.rst",
+            repo_root / "docs" / "_pages" / "config-json.md",
+        ]
+
+        for doc in docs:
+            text = doc.read_text(encoding="utf-8")
+            missing = sorted(name for name in PRESET_MODELS if name not in text)
+            assert not missing, f"{doc.relative_to(repo_root)} missing AutoEP preset(s): {missing}"
+            assert "qwen2_moe" not in text
+            assert "Smoke status" not in text
+            assert "load_balance_coeff" in text
+            assert "non-null values are rejected" in text
+
+    def test_qwen2_moe_is_not_a_builtin_preset(self):
+        """Qwen2-MoE is covered through the qwen3_moe compatibility note, not its own preset."""
+        assert "qwen2_moe" not in PRESET_MODELS
+        config = AutoEPConfig(enabled=True, autoep_size=1, preset_model="qwen2_moe")
+
+        with pytest.raises(ValueError, match="qwen2_moe"):
+            validate_autoep_config(config, world_size=1, pp_size=1, tp_size=1, sp_size=1)
 
     def test_preset_field_values(self):
         """Spot-check Mixtral preset values."""
@@ -278,10 +328,24 @@ class TestAutoEPConfig:
         assert llama4.router_pattern == "router"
         assert llama4.has_shared_experts is True
 
-        qwen2 = PRESET_MODELS["qwen2_moe"]
-        assert qwen2.has_shared_experts is True
-        assert qwen2.shared_experts_pattern == "shared_expert"
-        assert qwen2.shared_experts_gate_pattern == "shared_expert_gate"
+        qwen3 = PRESET_MODELS["qwen3_moe"]
+        assert qwen3.has_shared_experts is True
+        assert qwen3.shared_experts_pattern == "shared_expert"
+        assert qwen3.shared_experts_gate_pattern == "shared_expert_gate"
+        assert qwen3.hf_model_types == ("qwen3_moe", "qwen2_moe")
+        assert qwen3.min_transformers_version == "5.0.0"
+        assert "Qwen2-MoE" in qwen3.docs_support_notes
+
+        qwen3_5 = PRESET_MODELS["qwen3_5_moe"]
+        assert qwen3_5.preset_adapter == "qwen3_5_moe"
+        assert qwen3_5.hf_model_types == ("qwen3_5_moe_text", )
+        assert qwen3_5.unsupported_hf_model_type_notes["qwen3_5_moe"]
+        assert qwen3_5.min_transformers_version == "5.2.0"
+
+        qwen35 = PRESET_MODELS["qwen3_5_moe"]
+        assert qwen35.has_shared_experts is True
+        assert qwen35.shared_experts_pattern == "shared_expert"
+        assert qwen35.shared_experts_gate_pattern == "shared_expert_gate"
 
     def test_validate_empty_expert_w1(self):
         """Empty expert_w1 raises ValueError."""
@@ -495,22 +559,18 @@ class TestGroupedExperts:
         assert experts.w2.grad is not None and experts.w2.grad.abs().sum() > 0
         assert experts.w3.grad is not None and experts.w3.grad.abs().sum() > 0
 
-    def test_grouped_mm_fallback_when_unavailable(self):
-        # Mock torch._grouped_mm as unavailable
-        original = getattr(torch, '_grouped_mm', None)
+    def test_grouped_mm_raises_when_unavailable(self):
+        original = getattr(torch, "_grouped_mm", None)
         try:
-            if hasattr(torch, '_grouped_mm'):
-                delattr(torch, '_grouped_mm')
-            experts = GroupedExperts(dim=64, hidden_dim=128, num_experts=4, use_grouped_mm=True)
-            assert experts.use_grouped_mm is False  # Should have fallen back
+            if hasattr(torch, "_grouped_mm"):
+                delattr(torch, "_grouped_mm")
+            with pytest.raises(RuntimeError, match=r"torch\._grouped_mm"):
+                GroupedExperts(dim=64, hidden_dim=128, num_experts=4, use_grouped_mm=True)
+            experts = GroupedExperts(dim=64, hidden_dim=128, num_experts=4, use_grouped_mm=False)
+            assert experts.use_grouped_mm is False
         finally:
             if original is not None:
                 torch._grouped_mm = original
-
-    def test_cutlass_backend_raises_not_implemented(self):
-        # Test that cutlass raises NotImplementedError if requested
-        # This is tested via the backend attribute, not constructor
-        pass  # CUTLASS path is out of scope for Phase 2
 
 
 class TestTokenReorderer:
@@ -558,6 +618,7 @@ class TestTokenReorderer:
 # === Phase 3: MoE Detection and Weight Repacking ===
 
 from deepspeed.module_inject.auto_ep import AutoEP
+from deepspeed.module_inject.auto_ep_preset_adapters import get_preset_adapter
 from deepspeed.moe.ep_repack import repack_expert_weights
 
 
@@ -696,6 +757,45 @@ class TestMoEDetection:
         module_names = [s.moe_module_name for s in specs]
         assert "model.layers.1.mlp" not in module_names
 
+    def test_explicit_preset_without_matching_moe_layers_fails_actionably(self):
+        """An explicit preset should not silently no-op when its structure is absent."""
+        model = MockMoETransformer(num_layers=1, moe_every_n=1)
+        config = AutoEPConfig(enabled=True, autoep_size=1, preset_model="llama4")
+
+        with pytest.raises(ValueError) as exc:
+            AutoEP(model, config).ep_parser()
+
+        message = str(exc.value)
+        assert "preset_model='llama4'" in message
+        assert "no MoE layers detected" in message
+        assert "moe_layer_pattern" in message
+        assert "Transformers" in message
+
+    def test_auto_detected_preset_without_matching_moe_layers_fails_actionably(self):
+        """A known model_type selects one preset, so empty detection is actionable."""
+
+        class DenseOnlyTransformer(nn.Module):
+
+            def __init__(self):
+                super().__init__()
+                self.config = MockHFConfig()
+                self.model = nn.Module()
+                layer = nn.Module()
+                layer.mlp = MockDenseBlock()
+                self.model.layers = nn.ModuleList([layer])
+
+        model = DenseOnlyTransformer()
+        config = AutoEPConfig(enabled=True, autoep_size=1)
+
+        with pytest.raises(ValueError) as exc:
+            AutoEP(model, config).ep_parser()
+
+        message = str(exc.value)
+        assert "model_type='mixtral'" in message
+        assert "mixtral" in message
+        assert "no MoE layers detected" in message
+        assert "moe_layer_pattern" in message
+
     def test_detect_fused_3d_storage(self):
         """Correctly identifies fused_3d expert storage."""
         model = MockMoETransformer(num_layers=2, moe_every_n=1)
@@ -735,6 +835,8 @@ class TestMoEDetection:
             assert spec.router_name == "router"
             assert spec.return_router_logits is True
             assert spec.router_logits_capture_target == "router"
+            assert spec.router_logits_capture_mode == "raw"
+            assert spec.moe_output_shape == "flat"
             assert spec.has_shared_experts is True
             assert spec.shared_experts_name == "shared_expert"
 
@@ -749,6 +851,8 @@ class TestMoEDetection:
         assert len(specs) == 1
         assert specs[0].return_router_logits is True
         assert specs[0].router_logits_capture_target == "router"
+        assert specs[0].router_logits_capture_mode == "raw"
+        assert specs[0].moe_output_shape == "flat"
 
     def test_llama4_preset_layer_disables_expert_bias_by_default(self):
         """preset_model='llama4' resolves load_balance_coeff=None for layer construction."""
@@ -801,6 +905,252 @@ class TestMoEDetection:
         replaced = model.model.layers[0].feed_forward
         assert replaced.load_balance_coeff is None
         assert replaced.expert_bias is None
+
+    def test_auto_detect_qwen3_5_model_type_alias(self, monkeypatch):
+        """model_type='qwen3_5_moe_text' resolves through metadata to qwen3_5_moe."""
+        model = MockMoETransformer(num_layers=1, moe_every_n=1)
+        model.config.model_type = "qwen3_5_moe_text"
+        model.config.num_experts = model.config.num_local_experts
+        config = parse_autoep_config({
+            "enabled": True,
+            "autoep_size": 1,
+        })
+        adapter = get_preset_adapter("qwen3_5_moe")
+        monkeypatch.setattr(adapter, "_installed_transformers_version", lambda: "5.2.0")
+
+        presets = AutoEP(model, config)._resolve_presets()
+
+        assert len(presets) == 1
+        assert presets[0][0] == "qwen3_5_moe"
+
+    def test_auto_detect_qwen2_model_type_uses_qwen3_preset(self):
+        """model_type='qwen2_moe' resolves through qwen3_moe metadata."""
+        model = MockMoETransformer(num_layers=1, moe_every_n=1)
+        model.config.model_type = "qwen2_moe"
+        model.config.num_experts = model.config.num_local_experts
+        config = parse_autoep_config({
+            "enabled": True,
+            "autoep_size": 1,
+        })
+
+        auto_ep = AutoEP(model, config)
+        presets = auto_ep._resolve_presets()
+        specs = auto_ep.ep_parser()
+
+        assert len(presets) == 1
+        assert presets[0][0] == "qwen3_moe"
+        assert len(specs) == 1
+        assert specs[0].model_family == "qwen3_moe"
+
+    def test_auto_detected_preset_delegates_compatibility_validation(self, monkeypatch):
+        """Generic model_type detection calls the preset adapter validation hook."""
+        model = MockMoETransformer(num_layers=1, moe_every_n=1)
+        config = parse_autoep_config({
+            "enabled": True,
+            "autoep_size": 1,
+        })
+        adapter = get_preset_adapter("default")
+        calls = []
+
+        def record_validation(preset_name, preset, model_config):
+            calls.append((preset_name, preset, model_config))
+
+        monkeypatch.setattr(adapter, "validate_compatibility", record_validation)
+
+        presets = AutoEP(model, config)._resolve_presets()
+
+        assert presets[0][0] == "mixtral"
+        assert calls == [("mixtral", PRESET_MODELS["mixtral"], model.config)]
+
+    def test_qwen3_5_missing_transformers_guard_uses_adapter_metadata(self, monkeypatch):
+        """Qwen3.5 preset fails early when Transformers is unavailable."""
+        model = MockMoETransformer(num_layers=1, moe_every_n=1)
+        model.config.model_type = "qwen3_5_moe_text"
+        model.config.num_experts = model.config.num_local_experts
+        adapter = get_preset_adapter("qwen3_5_moe")
+
+        def missing_transformers():
+            raise ModuleNotFoundError("No module named 'transformers'")
+
+        monkeypatch.setattr(adapter, "_installed_transformers_version", missing_transformers)
+        config = AutoEPConfig(enabled=True, autoep_size=1, preset_model="qwen3_5_moe")
+
+        with pytest.raises(ValueError, match="qwen3_5_moe.*qwen3_5_moe_text.*Transformers >= 5.2.0"):
+            AutoEP(model, config)._resolve_presets()
+
+    def test_qwen3_5_too_old_transformers_guard_uses_adapter_metadata(self, monkeypatch):
+        """Qwen3.5 preset requires Transformers >= 5.2.0 through adapter validation."""
+        model = MockMoETransformer(num_layers=1, moe_every_n=1)
+        model.config.model_type = "qwen3_5_moe_text"
+        model.config.num_experts = model.config.num_local_experts
+        adapter = get_preset_adapter("qwen3_5_moe")
+        monkeypatch.setattr(adapter, "_installed_transformers_version", lambda: "5.1.0")
+        config = AutoEPConfig(enabled=True, autoep_size=1, preset_model="qwen3_5_moe")
+
+        with pytest.raises(ValueError, match="requires Transformers >= 5.2.0.*installed transformers==5.1.0"):
+            AutoEP(model, config)._resolve_presets()
+
+    def test_qwen3_5_top_level_model_type_fails_actionably(self):
+        """Top-level Qwen3.5 multimodal model_type does not silently try every preset."""
+        model = MockMoETransformer(num_layers=1, moe_every_n=1)
+        model.config.model_type = "qwen3_5_moe"
+        config = parse_autoep_config({
+            "enabled": True,
+            "autoep_size": 1,
+        })
+
+        with pytest.raises(ValueError, match="qwen3_5_moe.*text.backbone.*qwen3_5_moe_text"):
+            AutoEP(model, config)._resolve_presets()
+
+    @pytest.mark.parametrize(("preset_model", "model_type"), [
+        ("deepseek_v2", "deepseek_v2"),
+        ("deepseek_v3", "deepseek_v3"),
+    ])
+    def test_deepseek_transformers_version_guard_uses_metadata(self, monkeypatch, preset_model, model_type):
+        """DeepSeek validated AutoEP paths require Transformers >= 5.0.0."""
+        model = MockMoETransformer(num_layers=1, moe_every_n=1)
+        model.config.model_type = model_type
+        adapter = get_preset_adapter(preset_model)
+        monkeypatch.setattr(adapter, "_installed_transformers_version", lambda: "4.57.6")
+        config = AutoEPConfig(enabled=True, autoep_size=1, preset_model=preset_model)
+
+        with pytest.raises(ValueError, match="requires Transformers >= 5.0.0.*installed transformers==4.57.6"):
+            AutoEP(model, config)._resolve_presets()
+
+    @pytest.mark.parametrize("preset_model", ["deepseek_v2", "deepseek_v3"])
+    def test_deepseek_preset_layer_disables_expert_bias_by_default(self, preset_model):
+        """DeepSeek preset defaults resolve to no AutoEP load-balance expert_bias."""
+        model = MockMoETransformer(num_layers=1, num_experts=4, moe_every_n=1)
+        config = parse_autoep_config({
+            "enabled": True,
+            "autoep_size": 1,
+            "preset_model": preset_model,
+            "top_k": 2,
+        })
+        auto_ep = AutoEP(model, config)
+        specs = auto_ep.ep_parser()
+        assert specs[0].supports_expert_bias is False
+        auto_ep.replace_moe_layer(specs[0], ep_size=1, ep_rank=0)
+
+        replaced = model.model.layers[0].mlp
+        assert replaced.load_balance_coeff is None
+        assert replaced.expert_bias is None
+        assert "expert_bias" not in dict(replaced.named_buffers())
+
+    @pytest.mark.parametrize("preset_model", ["deepseek_v2", "deepseek_v3"])
+    def test_deepseek_explicit_load_balance_coeff_rejected(self, preset_model):
+        """DeepSeek AutoEP fails explicitly instead of creating expert_bias."""
+        model = MockMoETransformer(num_layers=1, num_experts=4, moe_every_n=1)
+        config = parse_autoep_config({
+            "enabled": True,
+            "autoep_size": 1,
+            "preset_model": preset_model,
+            "top_k": 2,
+            "load_balance_coeff": 0.02,
+        })
+        auto_ep = AutoEP(model, config)
+        specs = auto_ep.ep_parser()
+        assert specs[0].supports_expert_bias is False
+
+        with pytest.raises(ValueError, match="load_balance_coeff/expert_bias"):
+            auto_ep.replace_moe_layer(specs[0], ep_size=1, ep_rank=0)
+
+    def test_deepseek_v3_nonzero_score_correction_bias_rejected(self):
+        """DeepSeek-V3 expert correction bias remains unsupported for AutoEP parity."""
+        model = MockMoETransformer(num_layers=1, num_experts=4, moe_every_n=1)
+        model.model.layers[0].mlp.gate.register_buffer("e_score_correction_bias", torch.ones(4))
+        config = parse_autoep_config({
+            "enabled": True,
+            "autoep_size": 1,
+            "preset_model": "deepseek_v3",
+            "top_k": 2,
+            "load_balance_coeff": None,
+        })
+        auto_ep = AutoEP(model, config)
+        specs = auto_ep.ep_parser()
+        assert specs[0].unsupported_router_bias_names == ("e_score_correction_bias", )
+
+        with pytest.raises(ValueError, match="e_score_correction_bias"):
+            auto_ep.replace_moe_layer(specs[0], ep_size=1, ep_rank=0)
+
+    def test_deepseek_v2_detection_keeps_native_topk_weights_unnormalized(self):
+        """DeepSeek-V2 HF forward does not renormalize top-k weights in Transformers 5."""
+        model = MockMoETransformer(num_layers=1, num_experts=4, moe_every_n=1)
+        model.config.norm_topk_prob = True
+        config = parse_autoep_config({
+            "enabled": True,
+            "autoep_size": 1,
+            "preset_model": "deepseek_v2",
+            "top_k": 2,
+        })
+
+        specs = AutoEP(model, config).ep_parser()
+
+        assert len(specs) == 1
+        assert specs[0].route_norm is False
+
+    def test_deepseek_v2_detection_reads_group_limited_routing_from_model_config(self):
+        """DeepSeek-V2 group_limited_greedy routing uses max group scoring."""
+        model = MockMoETransformer(num_layers=1, num_experts=4, moe_every_n=1)
+        model.config.topk_method = "group_limited_greedy"
+        model.config.n_group = 2
+        model.config.topk_group = 1
+        config = parse_autoep_config({
+            "enabled": True,
+            "autoep_size": 1,
+            "preset_model": "deepseek_v2",
+            "top_k": 2,
+        })
+
+        specs = AutoEP(model, config).ep_parser()
+
+        assert len(specs) == 1
+        assert specs[0].num_expert_groups == 2
+        assert specs[0].num_limited_groups == 1
+        assert specs[0].group_score_func == "max"
+
+    def test_deepseek_v3_detection_reads_group_routing_from_model_config(self):
+        """DeepSeek-V3 preset carries HF group-limited routing into AutoEP."""
+        model = MockMoETransformer(num_layers=1, num_experts=4, moe_every_n=1)
+        model.config.n_group = 2
+        model.config.topk_group = 1
+        model.config.norm_topk_prob = True
+        model.config.routed_scaling_factor = 2.5
+        config = parse_autoep_config({
+            "enabled": True,
+            "autoep_size": 1,
+            "preset_model": "deepseek_v3",
+            "top_k": 2,
+        })
+
+        specs = AutoEP(model, config).ep_parser()
+
+        assert len(specs) == 1
+        assert specs[0].num_expert_groups == 2
+        assert specs[0].num_limited_groups == 1
+        assert specs[0].group_score_func == "top2_sum"
+        assert specs[0].route_scale == pytest.approx(2.5)
+
+    def test_qwen3_5_moe_adapter_sets_router_capture_contract(self, monkeypatch):
+        """Qwen3.5 records router output through the AutoEP replacement tuple."""
+        model = MockMoETransformer(num_layers=1, num_experts=4, moe_every_n=1)
+        model.config.model_type = "qwen3_5_moe_text"
+        model.config.num_experts = 4
+        config = parse_autoep_config({
+            "enabled": True,
+            "autoep_size": 1,
+            "preset_model": "qwen3_5_moe",
+        })
+        adapter = get_preset_adapter("qwen3_5_moe")
+        monkeypatch.setattr(adapter, "_installed_transformers_version", lambda: "5.2.0")
+
+        specs = AutoEP(model, config).ep_parser()
+
+        assert len(specs) == 1
+        assert specs[0].return_router_logits is True
+        assert specs[0].router_logits_capture_target == "router"
+        assert specs[0].router_logits_capture_index == 1
+        assert specs[0].router_logits_capture_mode == "post_score"
 
     def test_replace_moe_layer_works(self):
         """replace_moe_layer creates AutoEPMoELayer replacement."""
@@ -1189,6 +1539,20 @@ class TestParamMarking:
             assert hasattr(p, 'allreduce') and p.allreduce is True
 
 
+def _require_transformers_5(transformers):
+    from packaging.version import Version
+    if Version(transformers.__version__) < Version("5.0.0"):
+        pytest.skip("DeepSeek AutoEP parity smoke requires Transformers >= 5.0.0")
+
+
+def _get_transformers_class(transformers, *names):
+    for name in names:
+        cls = getattr(transformers, name, None)
+        if cls is not None:
+            return cls
+    pytest.skip(f"Installed transformers does not expose any of: {names}")
+
+
 class TestAutoEPMoELayerUnit:
     """Phase 5 tests for AutoEPMoELayer (ep_size=1, no dist needed)."""
 
@@ -1198,6 +1562,40 @@ class TestAutoEPMoELayerUnit:
         config = AutoEPConfig(enabled=True, autoep_size=1)
         layer = AutoEPMoELayer(spec, source, ep_size=1, ep_rank=0, config=config)
         assert layer._is_autoep_layer is True
+
+    def test_autoep_layer_has_no_model_family_literal_hardcode(self):
+        layer_path = Path(__file__).resolve().parents[3] / "deepspeed" / "module_inject" / "auto_ep_layer.py"
+        layer_source = layer_path.read_text()
+        assert "_DEEPSEEK_PRESETS" not in layer_source
+        for model_family in ("deepseek_v2", "deepseek_v3", "qwen3_5_moe", "llama4"):
+            assert model_family not in layer_source
+
+    def test_autoep_parser_has_no_model_family_behavior_branches(self):
+        auto_ep_path = Path(__file__).resolve().parents[3] / "deepspeed" / "module_inject" / "auto_ep.py"
+        auto_ep_source = auto_ep_path.read_text()
+        for model_family in ("deepseek_v2", "deepseek_v3", "qwen3_5_moe", "llama4"):
+            assert not re.search(rf"(preset_name|spec\.model_family)\s*[!=]=\s*['\"]{model_family}['\"]",
+                                 auto_ep_source)
+
+    def test_spec_can_disable_expert_bias_without_model_family_branch(self):
+        source = MockMoEBlock(num_experts=4, ffn_hidden=128, hidden_size=64)
+        spec = _make_spec(model_family="custom_no_expert_bias", supports_expert_bias=False)
+        config = AutoEPConfig(enabled=True, autoep_size=1, load_balance_coeff=0.02)
+
+        with pytest.raises(ValueError, match="custom_no_expert_bias.*load_balance_coeff/expert_bias"):
+            AutoEPMoELayer(spec, source, ep_size=1, ep_rank=0, config=config)
+
+    def test_spec_unsupported_router_bias_name_rejects_nonzero_buffer(self):
+        source = MockMoEBlock(num_experts=4, ffn_hidden=128, hidden_size=64)
+        source.gate.register_buffer("source_router_bias", torch.ones(4))
+        spec = _make_spec(
+            model_family="custom_router_bias",
+            unsupported_router_bias_names=("source_router_bias", ),
+        )
+        config = AutoEPConfig(enabled=True, autoep_size=1, load_balance_coeff=None)
+
+        with pytest.raises(ValueError, match="source_router_bias"):
+            AutoEPMoELayer(spec, source, ep_size=1, ep_rank=0, config=config)
 
     def test_autoep_layer_ep_size_1_forward(self):
         torch.manual_seed(42)
@@ -1223,11 +1621,13 @@ class TestAutoEPMoELayerUnit:
         assert isinstance(replaced, AutoEPMoELayer)
         assert replaced._is_autoep_layer is True
 
-    def test_hf_qwen2_autoep_direct_moe_applies_shared_expert_gate(self):
-        """Qwen2 AutoEP carries shared_expert_gate and matches the direct MoE block."""
+    def test_hf_qwen2_direct_moe_can_use_qwen3_preset_when_fused_layout(self):
+        """Qwen2-MoE can use the qwen3_moe preset when Transformers exposes the fused layout."""
         transformers = pytest.importorskip("transformers")
         if not hasattr(transformers, "Qwen2MoeConfig") or not hasattr(transformers, "Qwen2MoeForCausalLM"):
             pytest.skip("Installed transformers does not expose Qwen2MoeConfig/Qwen2MoeForCausalLM")
+        if Version(transformers.__version__) < Version("5.0.0"):
+            pytest.skip("Qwen2 MoE AutoEP preset requires Transformers >= 5.0.0 for the fused expert layout")
 
         torch.manual_seed(1234)
         config = transformers.Qwen2MoeConfig(
@@ -1256,13 +1656,13 @@ class TestAutoEPMoELayerUnit:
         autoep_config = parse_autoep_config({
             "enabled": True,
             "autoep_size": 1,
-            "preset_model": "qwen2_moe",
+            "preset_model": "qwen3_moe",
             "use_grouped_mm": False,
         })
         auto_ep = AutoEP(autoep_model, autoep_config)
         specs = auto_ep.ep_parser()
         assert len(specs) == 1
-        assert specs[0].model_family == "qwen2_moe"
+        assert specs[0].model_family == "qwen3_moe"
         assert specs[0].has_shared_experts is True
         assert specs[0].shared_experts_name == "shared_expert"
         assert specs[0].shared_experts_gate_name == "shared_expert_gate"
@@ -1288,6 +1688,8 @@ class TestAutoEPMoELayerUnit:
         transformers = pytest.importorskip("transformers")
         if not hasattr(transformers, "Qwen3MoeConfig") or not hasattr(transformers, "Qwen3MoeForCausalLM"):
             pytest.skip("Installed transformers does not expose Qwen3MoeConfig/Qwen3MoeForCausalLM")
+        if Version(transformers.__version__) < Version("5.0.0"):
+            pytest.skip("Qwen3 MoE AutoEP preset requires Transformers >= 5.0.0 for the fused expert layout")
 
         torch.manual_seed(1234)
         config = transformers.Qwen3MoeConfig(
@@ -1343,12 +1745,210 @@ class TestAutoEPMoELayerUnit:
         torch.testing.assert_close(autoep_outputs.logits, native_outputs.logits, rtol=1e-5, atol=1e-6)
         torch.testing.assert_close(autoep_outputs.loss, native_outputs.loss, rtol=1e-5, atol=1e-6)
 
+    def test_hf_qwen3_5_causal_lm_matches_autoep_when_transformers_supports_it(self):
+        """Tiny Qwen3.5 CausalLM AutoEP coverage is conditional on Transformers support."""
+        transformers = pytest.importorskip("transformers")
+        required = ("Qwen3_5MoeTextConfig", "Qwen3_5MoeForCausalLM")
+        missing = [name for name in required if not hasattr(transformers, name)]
+        if Version(transformers.__version__) < Version("5.2.0"):
+            pytest.skip("Qwen3.5 MoE AutoEP preset requires Transformers >= 5.2.0")
+        if missing:
+            pytest.skip(f"Installed transformers does not expose Qwen3.5 MoE classes: {missing}")
+
+        torch.manual_seed(1234)
+        try:
+            config = transformers.Qwen3_5MoeTextConfig(
+                vocab_size=64,
+                hidden_size=32,
+                num_hidden_layers=1,
+                num_attention_heads=4,
+                num_key_value_heads=2,
+                max_position_embeddings=64,
+                moe_intermediate_size=16,
+                shared_expert_intermediate_size=32,
+                num_experts=4,
+                num_experts_per_tok=2,
+                output_router_logits=False,
+                tie_word_embeddings=False,
+                use_cache=False,
+                layer_types=["full_attention"],
+            )
+            native_model = transformers.Qwen3_5MoeForCausalLM(config)
+            autoep_model = transformers.Qwen3_5MoeForCausalLM(config)
+        except Exception as exc:
+            pytest.skip(f"Installed transformers Qwen3.5 MoE smoke setup is unavailable: {exc}")
+
+        autoep_model.load_state_dict(copy.deepcopy(native_model.state_dict()))
+
+        autoep_config = parse_autoep_config({
+            "enabled": True,
+            "autoep_size": 1,
+            "preset_model": "qwen3_5_moe",
+            "use_grouped_mm": False,
+        })
+        auto_ep = AutoEP(autoep_model, autoep_config)
+        specs = auto_ep.ep_parser()
+        assert len(specs) == 1
+        assert specs[0].model_family == "qwen3_5_moe"
+        assert specs[0].has_shared_experts is True
+        assert specs[0].shared_experts_name == "shared_expert"
+        assert specs[0].shared_experts_gate_name == "shared_expert_gate"
+        for spec in specs:
+            auto_ep.replace_moe_layer(spec, ep_size=1, ep_rank=0)
+
+        autoep_layers = [module for module in autoep_model.modules() if isinstance(module, AutoEPMoELayer)]
+        assert len(autoep_layers) == 1
+        assert autoep_layers[0].shared_experts is not None
+        assert autoep_layers[0].shared_experts_gate is not None
+
+        input_ids = torch.tensor([[1, 5, 7, 9, 11]], dtype=torch.long)
+        labels = input_ids.clone()
+        native_model.eval()
+        autoep_model.eval()
+        with torch.no_grad():
+            native_outputs = native_model(input_ids=input_ids, labels=labels, output_router_logits=False)
+            autoep_outputs = autoep_model(input_ids=input_ids, labels=labels, output_router_logits=False)
+
+        torch.testing.assert_close(autoep_outputs.logits, native_outputs.logits, rtol=1e-5, atol=1e-6)
+        torch.testing.assert_close(autoep_outputs.loss, native_outputs.loss, rtol=1e-5, atol=1e-6)
+
+    def test_hf_deepseek_v2_causal_lm_matches_autoep_without_load_balance_default(self):
+        """Tiny DeepSeek-V2 CausalLM reaches forward parity after AutoEP replacement."""
+        transformers = pytest.importorskip("transformers")
+        _require_transformers_5(transformers)
+        config_cls = _get_transformers_class(transformers, "DeepseekV2Config", "DeepSeekV2Config")
+        model_cls = _get_transformers_class(transformers, "DeepseekV2ForCausalLM", "DeepSeekV2ForCausalLM")
+
+        torch.manual_seed(1234)
+        config = config_cls(
+            vocab_size=64,
+            hidden_size=32,
+            intermediate_size=64,
+            num_hidden_layers=1,
+            num_attention_heads=4,
+            num_key_value_heads=2,
+            max_position_embeddings=64,
+            first_k_dense_replace=0,
+            moe_layer_freq=1,
+            moe_intermediate_size=16,
+            n_routed_experts=4,
+            n_shared_experts=0,
+            num_experts_per_tok=2,
+            norm_topk_prob=True,
+            scoring_func="softmax",
+            routed_scaling_factor=1.0,
+            output_router_logits=False,
+            tie_word_embeddings=False,
+            use_cache=False,
+        )
+        native_model = model_cls(config)
+        autoep_model = model_cls(config)
+        autoep_model.load_state_dict(copy.deepcopy(native_model.state_dict()))
+
+        autoep_config = parse_autoep_config({
+            "enabled": True,
+            "autoep_size": 1,
+            "preset_model": "deepseek_v2",
+            "use_grouped_mm": False,
+        })
+        auto_ep = AutoEP(autoep_model, autoep_config)
+        specs = auto_ep.ep_parser()
+        assert len(specs) == 1
+        assert specs[0].model_family == "deepseek_v2"
+        assert specs[0].route_norm is False
+        for spec in specs:
+            auto_ep.replace_moe_layer(spec, ep_size=1, ep_rank=0)
+
+        autoep_layers = [module for module in autoep_model.modules() if isinstance(module, AutoEPMoELayer)]
+        assert len(autoep_layers) == 1
+        assert autoep_layers[0].load_balance_coeff is None
+        assert autoep_layers[0].expert_bias is None
+
+        input_ids = torch.tensor([[1, 5, 7, 9, 11]], dtype=torch.long)
+        labels = input_ids.clone()
+        native_model.eval()
+        autoep_model.eval()
+        with torch.no_grad():
+            native_outputs = native_model(input_ids=input_ids, labels=labels, output_router_logits=False)
+            autoep_outputs = autoep_model(input_ids=input_ids, labels=labels, output_router_logits=False)
+
+        torch.testing.assert_close(autoep_outputs.logits, native_outputs.logits, rtol=1e-5, atol=1e-6)
+        torch.testing.assert_close(autoep_outputs.loss, native_outputs.loss, rtol=1e-5, atol=1e-6)
+
+    def test_hf_deepseek_v3_causal_lm_matches_autoep_without_load_balance_default(self):
+        """Tiny DeepSeek-V3 CausalLM reaches forward parity after AutoEP replacement."""
+        transformers = pytest.importorskip("transformers")
+        _require_transformers_5(transformers)
+        config_cls = _get_transformers_class(transformers, "DeepseekV3Config", "DeepSeekV3Config")
+        model_cls = _get_transformers_class(transformers, "DeepseekV3ForCausalLM", "DeepSeekV3ForCausalLM")
+
+        torch.manual_seed(1234)
+        config = config_cls(
+            vocab_size=64,
+            hidden_size=32,
+            intermediate_size=64,
+            num_hidden_layers=1,
+            num_attention_heads=4,
+            num_key_value_heads=2,
+            max_position_embeddings=64,
+            first_k_dense_replace=0,
+            moe_layer_freq=1,
+            moe_intermediate_size=16,
+            n_routed_experts=4,
+            n_shared_experts=0,
+            num_experts_per_tok=2,
+            norm_topk_prob=True,
+            scoring_func="sigmoid",
+            routed_scaling_factor=1.0,
+            n_group=2,
+            topk_group=1,
+            output_router_logits=False,
+            tie_word_embeddings=False,
+            use_cache=False,
+        )
+        native_model = model_cls(config)
+        autoep_model = model_cls(config)
+        autoep_model.load_state_dict(copy.deepcopy(native_model.state_dict()))
+
+        autoep_config = parse_autoep_config({
+            "enabled": True,
+            "autoep_size": 1,
+            "preset_model": "deepseek_v3",
+            "use_grouped_mm": False,
+        })
+        auto_ep = AutoEP(autoep_model, autoep_config)
+        specs = auto_ep.ep_parser()
+        assert len(specs) == 1
+        assert specs[0].model_family == "deepseek_v3"
+        assert specs[0].num_expert_groups == 2
+        assert specs[0].num_limited_groups == 1
+        for spec in specs:
+            auto_ep.replace_moe_layer(spec, ep_size=1, ep_rank=0)
+
+        autoep_layers = [module for module in autoep_model.modules() if isinstance(module, AutoEPMoELayer)]
+        assert len(autoep_layers) == 1
+        assert autoep_layers[0].load_balance_coeff is None
+        assert autoep_layers[0].expert_bias is None
+
+        input_ids = torch.tensor([[1, 5, 7, 9, 11]], dtype=torch.long)
+        labels = input_ids.clone()
+        native_model.eval()
+        autoep_model.eval()
+        with torch.no_grad():
+            native_outputs = native_model(input_ids=input_ids, labels=labels, output_router_logits=False)
+            autoep_outputs = autoep_model(input_ids=input_ids, labels=labels, output_router_logits=False)
+
+        torch.testing.assert_close(autoep_outputs.logits, native_outputs.logits, rtol=1e-5, atol=1e-6)
+        torch.testing.assert_close(autoep_outputs.loss, native_outputs.loss, rtol=1e-5, atol=1e-6)
+
     def test_hf_llama4_autoep_direct_moe_returns_flat_contract(self):
         """AutoEP's Llama4 replacement matches Llama4TextMoe's direct tuple shapes."""
         transformers = pytest.importorskip("transformers")
         if not hasattr(transformers, "Llama4ForCausalLM") or not hasattr(transformers, "Llama4TextConfig"):
             pytest.skip("Installed transformers does not expose Llama4ForCausalLM/Llama4TextConfig")
 
+        if Version(transformers.__version__) < Version("5.0.0"):
+            pytest.skip("Llama4 AutoEP preset is validated against Transformers >= 5.0.0")
         torch.manual_seed(1234)
         config = transformers.Llama4TextConfig(
             vocab_size=64,
@@ -1409,6 +2009,8 @@ class TestAutoEPMoELayerUnit:
         if not hasattr(transformers, "Llama4ForCausalLM") or not hasattr(transformers, "Llama4TextConfig"):
             pytest.skip("Installed transformers does not expose Llama4ForCausalLM/Llama4TextConfig")
 
+        if Version(transformers.__version__) < Version("5.0.0"):
+            pytest.skip("Llama4 AutoEP preset is validated against Transformers >= 5.0.0")
         torch.manual_seed(1234)
         config = transformers.Llama4TextConfig(
             vocab_size=64,

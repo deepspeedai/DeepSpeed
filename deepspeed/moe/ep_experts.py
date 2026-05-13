@@ -12,24 +12,19 @@ Grouped expert computation for expert parallelism.
 
 Ported from TorchTitan's GroupedExperts with adaptations for DeepSpeed:
   - Replaced hardcoded .bfloat16() with input-dtype-aware casting
-  - Runtime check for torch._grouped_mm availability with fallback
+  - Fail-fast RuntimeError when use_grouped_mm=True but torch._grouped_mm is unavailable
   - Removed DTensor-specific code paths
-  - CUTLASS backend raises NotImplementedError
 
 This module is self-contained: no imports from deepspeed.module_inject
 or deepspeed.runtime.
 """
 
-import logging
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-logger = logging.getLogger(__name__)
-
 # ---------------------------------------------------------------------------
-# Expert computation: for-loop fallback
+# Expert computation: sequential for-loop (reference path)
 # ---------------------------------------------------------------------------
 
 
@@ -141,13 +136,14 @@ def _run_experts_grouped_mm(
 class GroupedExperts(nn.Module):
     """Grouped expert computation for MoE layers.
 
-    Supports two backends:
+    Supports two execution paths:
       - **grouped_mm**: Uses ``torch._grouped_mm`` for fused grouped GEMM
         (requires a sufficiently recent PyTorch build).
       - **for-loop**: Sequential per-expert matmuls; always available.
 
-    If ``use_grouped_mm=True`` but ``torch._grouped_mm`` is not available,
-    falls back to the for-loop implementation with a warning.
+    If ``use_grouped_mm=True`` but ``torch._grouped_mm`` is not available, the
+    constructor raises ``RuntimeError``. Set ``use_grouped_mm=False`` to select
+    the sequential for-loop path without checking ``torch._grouped_mm``.
 
     Args:
         dim (int): Input / output dimension.
@@ -169,12 +165,12 @@ class GroupedExperts(nn.Module):
         self.w2 = nn.Parameter(torch.empty(num_experts, dim, hidden_dim))
         self.w3 = nn.Parameter(torch.empty(num_experts, hidden_dim, dim))
 
-        # Check grouped_mm availability at construction time
-        self._has_grouped_mm = hasattr(torch, "_grouped_mm")
-        if use_grouped_mm and not self._has_grouped_mm:
-            logger.warning("torch._grouped_mm not available, falling back to "
-                           "for-loop expert computation")
-        self.use_grouped_mm = use_grouped_mm and self._has_grouped_mm
+        if use_grouped_mm and not hasattr(torch, "_grouped_mm"):
+            raise RuntimeError("GroupedExperts was constructed with use_grouped_mm=True but "
+                               "torch._grouped_mm is not available in this PyTorch build. "
+                               "Upgrade PyTorch to a build that provides torch._grouped_mm, or "
+                               "set use_grouped_mm=False to use the sequential expert loop.")
+        self.use_grouped_mm = use_grouped_mm
 
     def forward(
         self,
