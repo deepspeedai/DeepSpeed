@@ -10,6 +10,7 @@ Phase 5: Layer replacement (replace_moe_layer filled in).
 
 from __future__ import annotations
 
+import math
 import re
 from typing import Literal
 
@@ -84,6 +85,38 @@ def _get_num_experts_from_config(model_config, preset: MoEModelPreset) -> int | 
 def _get_top_k_from_config(model_config, preset: MoEModelPreset) -> int | None:
     """Extract top_k from model.config using the preset's attribute name."""
     return getattr(model_config, preset.top_k_attr, None)
+
+
+def _as_finite_float(value, field_name: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{field_name} must be a finite number")
+
+    value = float(value)
+    if not math.isfinite(value):
+        raise ValueError(f"{field_name} must be a finite number")
+    return value
+
+
+def _resolve_route_scale(config: AutoEPConfig, model_config) -> float:
+    """Resolve the single scale applied by TokenChoiceTopKRouter."""
+    routed_scaling_factor = config.routed_scaling_factor
+
+    if routed_scaling_factor != "auto":
+        route_scale = _as_finite_float(routed_scaling_factor, "routed_scaling_factor")
+        if config.route_scale != 1.0:
+            logger.warning("AutoEP: routed_scaling_factor=%s overrides route_scale=%s.", routed_scaling_factor,
+                           config.route_scale)
+        return route_scale
+
+    cfg_routed_scaling_factor = getattr(model_config, 'routed_scaling_factor', None)
+    if cfg_routed_scaling_factor is not None:
+        route_scale = _as_finite_float(cfg_routed_scaling_factor, "model.config.routed_scaling_factor")
+        if config.route_scale != 1.0:
+            logger.warning("AutoEP: model.config.routed_scaling_factor=%s overrides route_scale=%s.",
+                           cfg_routed_scaling_factor, config.route_scale)
+        return route_scale
+
+    return _as_finite_float(config.route_scale, "route_scale")
 
 
 def _detect_expert_storage(experts_module: nn.Module, preset: MoEModelPreset) -> Literal["fused_3d", "module_list"]:
@@ -342,15 +375,7 @@ class AutoEP:
 
                 route_norm = adapter.resolve_route_norm(self.config, preset, self.model_config)
 
-                # Resolve routed scaling from model config when available; otherwise
-                # keep the AutoEP scale.
-                route_scale = self.config.route_scale
-                if self.config.routed_scaling_factor != "auto":
-                    route_scale = float(self.config.routed_scaling_factor)
-                else:
-                    cfg_route_scale = getattr(self.model_config, 'routed_scaling_factor', None)
-                    if cfg_route_scale is not None:
-                        route_scale = float(cfg_route_scale)
+                route_scale = _resolve_route_scale(self.config, self.model_config)
 
                 group_routing = adapter.resolve_group_routing(self.config, self.model_config)
 
