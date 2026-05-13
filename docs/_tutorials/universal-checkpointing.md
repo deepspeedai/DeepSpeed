@@ -58,6 +58,28 @@ metadata (`UNIVERSAL_CHECKPOINT_INFO`) to reconstruct tensor-parallel parameters
 correctly, including row-parallel, column-parallel, replicated, fused, and
 sub-parameter layouts.
 
+### Step 3: Resume Training with Universal Checkpoint
+
+With the Universal checkpoint ready, resume training by enabling Universal
+Checkpoint loading in your DeepSpeed config:
+
+```json
+{
+  "checkpoint": {
+    "load_universal": true
+  }
+}
+```
+
+Then load the converted checkpoint through the normal DeepSpeed checkpoint API:
+
+```python
+engine.load_checkpoint("/path/to/universal_checkpoint", tag=tag)
+```
+
+The target run still needs the DeepSpeed parallelism configuration that matches
+the model and topology you want to use for resumed training.
+
 ### AutoEP Requirements and Limitations
 
 AutoEP checkpoints are saved as regular DeepSpeed checkpoints, but routed expert
@@ -133,28 +155,6 @@ Additional AutoEP failure cases:
   expert optimizer shards. If `expp_rank_*_mp_rank_*_optim_states.pt` files or
   matching state entries are absent, the converter still writes the model
   parameter `fp32.pt` files and skips unavailable optimizer state files.
-
-### Step 3: Resume Training with Universal Checkpoint
-
-With the Universal checkpoint ready, resume training by enabling Universal
-Checkpoint loading in your DeepSpeed config:
-
-```json
-{
-  "checkpoint": {
-    "load_universal": true
-  }
-}
-```
-
-Then load the converted checkpoint through the normal DeepSpeed checkpoint API:
-
-```python
-engine.load_checkpoint("/path/to/universal_checkpoint", tag=tag)
-```
-
-The target run still needs the DeepSpeed parallelism configuration that matches
-the model and topology you want to use for resumed training.
 
 
 ## Conclusion
