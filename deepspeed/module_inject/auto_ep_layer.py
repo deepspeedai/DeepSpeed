@@ -350,6 +350,8 @@ class AutoEPMoELayer(nn.Module):
         self.return_router_logits = spec.return_router_logits
         self.router_logits_capture_target = spec.router_logits_capture_target
         self.router_logits_capture_index = spec.router_logits_capture_index
+        self.router_logits_capture_mode = spec.router_logits_capture_mode
+        self.moe_output_shape = spec.moe_output_shape
         self.top_k = spec.top_k
         self.score_apply = resolve_score_apply_mode(spec, config.score_apply)
         self.combine_impl = resolve_combine_impl(config.combine_impl)
@@ -469,9 +471,7 @@ class AutoEPMoELayer(nn.Module):
         def hook_fn(module, input, output):
             x = input[0]  # [T, H]
             logits = module.gate(x)  # [T, E_global]
-            # Llama4TextMoe captures raw gate logits. Other currently supported
-            # router-capture contracts expect post-score values.
-            if self.model_family != "llama4":
+            if self.router_logits_capture_mode == "post_score":
                 if self.router.score_func == "softmax":
                     logits = torch.softmax(logits.float(), dim=-1).to(logits.dtype)
                 elif self.router.score_func == "sigmoid":
@@ -515,7 +515,7 @@ class AutoEPMoELayer(nn.Module):
 
         Returns:
             [B, S, H] or ([B, S, H], [T, E]) if return_router_logits.
-            Llama4 returns ([T, H], [T, E]) to match HF Llama4TextMoe.
+            Some HF MoE contracts return ([T, H], [T, E]) instead.
         """
         bsz, seqlen, hdim = hidden_states.shape
         x = hidden_states.reshape(-1, hdim)  # [T, H]
@@ -576,7 +576,7 @@ class AutoEPMoELayer(nn.Module):
             shape=(bsz, seqlen, hdim),
         )
 
-        if self.model_family == "llama4":
+        if self.moe_output_shape == "flat":
             output = output.reshape(-1, hdim)
             shared_expert_input = x
         elif self.shared_experts_gate is not None:

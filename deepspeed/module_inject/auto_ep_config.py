@@ -45,6 +45,7 @@ class MoEModelPreset:
     autoep_config_defaults: dict[str, Any] = field(default_factory=dict)
     supports_expert_bias: bool = True
     unsupported_router_bias_names: tuple[str, ...] = ()
+    preset_adapter: str = "default"
 
 
 @dataclass
@@ -80,6 +81,9 @@ class MoELayerSpec:
     group_score_func: Literal["max", "top2_sum"] = "top2_sum"
     supports_expert_bias: bool = True
     unsupported_router_bias_names: tuple[str, ...] = ()
+    preset_adapter: str = "default"
+    router_logits_capture_mode: Literal["raw", "post_score"] = "post_score"
+    moe_output_shape: Literal["batched", "flat"] = "batched"
 
 
 @dataclass
@@ -199,6 +203,7 @@ PRESET_MODELS: dict[str, MoEModelPreset] = {
         has_shared_experts=True,
         shared_experts_pattern="shared_expert",
         shared_experts_gate_pattern="shared_expert_gate",
+        preset_adapter="qwen3_5_moe",
     ),
     "deepseek_v2":
     MoEModelPreset(
@@ -219,6 +224,7 @@ PRESET_MODELS: dict[str, MoEModelPreset] = {
         shared_experts_pattern="shared_experts",
         autoep_config_defaults={"load_balance_coeff": None},
         supports_expert_bias=False,
+        preset_adapter="deepseek_v2",
     ),
     "deepseek_v3":
     MoEModelPreset(
@@ -240,6 +246,7 @@ PRESET_MODELS: dict[str, MoEModelPreset] = {
         autoep_config_defaults={"load_balance_coeff": None},
         supports_expert_bias=False,
         unsupported_router_bias_names=("e_score_correction_bias", ),
+        preset_adapter="deepseek_v3",
     ),
     "llama4":
     MoEModelPreset(
@@ -259,6 +266,7 @@ PRESET_MODELS: dict[str, MoEModelPreset] = {
         has_shared_experts=True,
         shared_experts_pattern="shared_expert",
         autoep_config_defaults={"load_balance_coeff": None},
+        preset_adapter="llama4",
     ),
 }
 

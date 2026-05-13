@@ -5,6 +5,7 @@
 """Unit tests for AutoEP feature (all phases append test classes here)."""
 
 import copy
+import re
 from pathlib import Path
 
 import pytest
@@ -300,6 +301,10 @@ class TestAutoEPConfig:
         assert qwen2.has_shared_experts is True
         assert qwen2.shared_experts_pattern == "shared_expert"
         assert qwen2.shared_experts_gate_pattern == "shared_expert_gate"
+        assert qwen2.preset_adapter == "default"
+
+        qwen3_5 = PRESET_MODELS["qwen3_5_moe"]
+        assert qwen3_5.preset_adapter == "qwen3_5_moe"
 
     def test_validate_empty_expert_w1(self):
         """Empty expert_w1 raises ValueError."""
@@ -753,6 +758,8 @@ class TestMoEDetection:
             assert spec.router_name == "router"
             assert spec.return_router_logits is True
             assert spec.router_logits_capture_target == "router"
+            assert spec.router_logits_capture_mode == "raw"
+            assert spec.moe_output_shape == "flat"
             assert spec.has_shared_experts is True
             assert spec.shared_experts_name == "shared_expert"
 
@@ -767,6 +774,8 @@ class TestMoEDetection:
         assert len(specs) == 1
         assert specs[0].return_router_logits is True
         assert specs[0].router_logits_capture_target == "router"
+        assert specs[0].router_logits_capture_mode == "raw"
+        assert specs[0].moe_output_shape == "flat"
 
     def test_llama4_preset_layer_disables_expert_bias_by_default(self):
         """preset_model='llama4' resolves load_balance_coeff=None for layer construction."""
@@ -892,6 +901,26 @@ class TestMoEDetection:
         assert len(specs) == 1
         assert specs[0].route_norm is False
 
+    def test_deepseek_v2_detection_reads_group_limited_routing_from_model_config(self):
+        """DeepSeek-V2 group_limited_greedy routing uses max group scoring."""
+        model = MockMoETransformer(num_layers=1, num_experts=4, moe_every_n=1)
+        model.config.topk_method = "group_limited_greedy"
+        model.config.n_group = 2
+        model.config.topk_group = 1
+        config = parse_autoep_config({
+            "enabled": True,
+            "autoep_size": 1,
+            "preset_model": "deepseek_v2",
+            "top_k": 2,
+        })
+
+        specs = AutoEP(model, config).ep_parser()
+
+        assert len(specs) == 1
+        assert specs[0].num_expert_groups == 2
+        assert specs[0].num_limited_groups == 1
+        assert specs[0].group_score_func == "max"
+
     def test_deepseek_v3_detection_reads_group_routing_from_model_config(self):
         """DeepSeek-V3 preset carries HF group-limited routing into AutoEP."""
         model = MockMoETransformer(num_layers=1, num_experts=4, moe_every_n=1)
@@ -913,6 +942,24 @@ class TestMoEDetection:
         assert specs[0].num_limited_groups == 1
         assert specs[0].group_score_func == "top2_sum"
         assert specs[0].route_scale == pytest.approx(2.5)
+
+    def test_qwen3_5_moe_adapter_sets_router_capture_contract(self):
+        """Qwen3.5 records router output through the AutoEP replacement tuple."""
+        model = MockMoETransformer(num_layers=1, num_experts=4, moe_every_n=1)
+        model.config.num_experts = 4
+        config = parse_autoep_config({
+            "enabled": True,
+            "autoep_size": 1,
+            "preset_model": "qwen3_5_moe",
+        })
+
+        specs = AutoEP(model, config).ep_parser()
+
+        assert len(specs) == 1
+        assert specs[0].return_router_logits is True
+        assert specs[0].router_logits_capture_target == "router"
+        assert specs[0].router_logits_capture_index == 1
+        assert specs[0].router_logits_capture_mode == "post_score"
 
     def test_replace_moe_layer_works(self):
         """replace_moe_layer creates AutoEPMoELayer replacement."""
@@ -1325,12 +1372,19 @@ class TestAutoEPMoELayerUnit:
         layer = AutoEPMoELayer(spec, source, ep_size=1, ep_rank=0, config=config)
         assert layer._is_autoep_layer is True
 
-    def test_autoep_layer_has_no_deepseek_preset_hardcode(self):
+    def test_autoep_layer_has_no_model_family_literal_hardcode(self):
         layer_path = Path(__file__).resolve().parents[3] / "deepspeed" / "module_inject" / "auto_ep_layer.py"
         layer_source = layer_path.read_text()
         assert "_DEEPSEEK_PRESETS" not in layer_source
-        assert "deepseek_v2" not in layer_source
-        assert "deepseek_v3" not in layer_source
+        for model_family in ("deepseek_v2", "deepseek_v3", "qwen3_5_moe", "llama4"):
+            assert model_family not in layer_source
+
+    def test_autoep_parser_has_no_model_family_behavior_branches(self):
+        auto_ep_path = Path(__file__).resolve().parents[3] / "deepspeed" / "module_inject" / "auto_ep.py"
+        auto_ep_source = auto_ep_path.read_text()
+        for model_family in ("deepseek_v2", "deepseek_v3", "qwen3_5_moe", "llama4"):
+            assert not re.search(rf"(preset_name|spec\.model_family)\s*[!=]=\s*['\"]{model_family}['\"]",
+                                 auto_ep_source)
 
     def test_spec_can_disable_expert_bias_without_model_family_branch(self):
         source = MockMoEBlock(num_experts=4, ffn_hidden=128, hidden_size=64)
