@@ -1,18 +1,20 @@
-# SDMA AllGather (transparent backend in `deepspeed.comm`)
+# SDMA AllGather (opt-in backend in `deepspeed.comm`)
 
 End-to-end example for the SDMA fast-path inside
-`TorchBackend.all_gather_into_tensor`.  When the runtime is AMD/ROCm and
-the `mori` package is importable, `deepspeed.comm` auto-acquires the SDMA
-backend at `init_distributed()` time and transparently routes WORLD-group
+`TorchBackend.all_gather_into_tensor`.  When the runtime is AMD/ROCm,
+the `mori` package is importable, and the user opts in via
+`DS_SDMA_ALLGATHER=1`, `deepspeed.comm` acquires the SDMA backend at
+`init_distributed()` time and routes WORLD-group
 `all_gather_into_tensor` calls through `mori_cpp.AllGatherIntoTensor`
 (intra-node SDMA copy on MI300).  RCCL/NCCL is used as the fallback on
-any condition that makes the SDMA path unsafe (non-WORLD process group,
-shard larger than the transit buffer, unsupported dtype, init failure).
+any condition that makes the SDMA path unsafe (user did not opt in,
+non-WORLD process group, shard larger than the transit buffer,
+unsupported dtype, init failure).
 
 This means:
 
-- No `ds_config` knob — works out of the box for ZeRO-3 (sequential and
-  coalesced prefetch paths both benefit).
+- No `ds_config` knob — control is a single env var.  Works out of the
+  box for ZeRO-3 (sequential and coalesced prefetch paths both benefit).
 - No source modifications in `partition_parameters.py`: ZeRO-3 just calls
   `dist.allgather_fn`, which lands on the backend's
   `all_gather_into_tensor`.
@@ -20,19 +22,22 @@ This means:
   data-parallel group, or with a secondary zero-param group) are routed
   through RCCL/NCCL automatically, since the SDMA backend is bound to
   WORLD.
+- Even when mori is installed, the SDMA path stays off unless the user
+  sets `DS_SDMA_ALLGATHER=1`, so users keep explicit control over a
+  hardware-specific fast-path.
 
 ## Environment variables
 
 | Var | Purpose |
 |---|---|
-| `MORI_ENABLE_SDMA=1` | **Required for the SDMA path.**  Tells mori to allocate `hipExtMallocWithFlags + hipDeviceMallocUncached` transit buffers; without it the SDMA kernel reads cached memory and faults at NULL. |
-| `DS_DISABLE_SDMA_ALLGATHER=1` | Debug / A-B baseline switch.  Force-disables the SDMA fast-path even when mori is available. |
+| `DS_SDMA_ALLGATHER=1` | **Opt-in switch.**  Required to enable the SDMA fast-path; default is off even when mori is installed.  When set, `MORI_ENABLE_SDMA=1` is auto-exported on your behalf so mori allocates the uncached transit buffers the SDMA kernel needs. |
 | `DS_SDMA_ALLGATHER_MAX_NUMEL=N` | Transit buffer size in elements (default 64M = 256 MiB per-rank input, ~2 GiB output on 8 ranks).  Calls larger than this fall back to RCCL/NCCL. |
+| `MORI_ENABLE_SDMA=1` | mori's own knob for uncached transit buffers; normally set automatically by DeepSpeed when `DS_SDMA_ALLGATHER=1`.  Export it explicitly only if you want to override or pre-set it. |
 
-The `run_*_sdma_on.sh` scripts export `MORI_ENABLE_SDMA=1`; the
-`run_*_sdma_off.sh` scripts export `DS_DISABLE_SDMA_ALLGATHER=1`.  Both
-variants share the same `ds_config_zero3.json` — the SDMA decision is
-made entirely by env vars.
+The `run_*_sdma_on.sh` scripts export `DS_SDMA_ALLGATHER=1`; the
+`run_*_sdma_off.sh` scripts leave it unset (default).  Both variants
+share the same `ds_config_zero3.json` — the SDMA decision is made
+entirely by env vars.
 
 ## Verified results on 8x MI300X
 
@@ -76,8 +81,8 @@ well below natural per-step jitter.
 cd examples/sdma_allgather
 
 # Demo 1 — GPT-7B-ish, ~minute run, no HF download
-bash run_gpt_sdma_off.sh    # DS_DISABLE_SDMA_ALLGATHER=1, RCCL baseline
-bash run_gpt_sdma_on.sh     # MORI_ENABLE_SDMA=1, transparent SDMA path -> +10.85 %
+bash run_gpt_sdma_off.sh    # default (DS_SDMA_ALLGATHER unset), RCCL baseline
+bash run_gpt_sdma_on.sh     # DS_SDMA_ALLGATHER=1, SDMA fast-path -> +10.85 %
 
 # Demo 2 — Qwen3-32B, ~few-minute run, weight-free (random init via from_config)
 bash run_qwen3_sdma_off.sh  # ~1402 ms / step

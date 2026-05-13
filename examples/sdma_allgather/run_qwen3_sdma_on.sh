@@ -1,16 +1,16 @@
 #!/bin/bash
-# Qwen3-32B + DeepSpeed ZeRO-3 with the transparent SDMA fast-path.
+# Qwen3-32B + DeepSpeed ZeRO-3 with the SDMA fast-path opted in.
 #
-# On AMD MI300 with mori installed, deepspeed.comm auto-detects the SDMA
-# backend at init time and routes WORLD-group all_gather_into_tensor calls
-# through it.  No ds_config flag is required — this script uses the same
-# config as run_qwen3_sdma_off.sh; the only difference is the env vars.
+# DS_SDMA_ALLGATHER=1 is the single opt-in switch.  When set,
+# deepspeed.comm's TorchBackend tries to bring up the mori SDMA backend
+# at init time and routes WORLD-group all_gather_into_tensor through it.
+# Mori's MORI_ENABLE_SDMA=1 is auto-exported on the user's behalf when
+# DS_SDMA_ALLGATHER=1 is set, so users normally don't need to touch it.
+# This script otherwise uses the same ds_config as run_qwen3_sdma_off.sh;
+# the only difference is this env var.
 set -eu
 
-# REQUIRED for the SDMA path: tells mori to use hipExtMallocWithFlags +
-# hipDeviceMallocUncached for transit buffers.  Without this the SDMA
-# kernel reads cached memory and faults at NULL on every rank.
-export MORI_ENABLE_SDMA=1
+export DS_SDMA_ALLGATHER=1
 
 export PYTORCH_HIP_ALLOC_CONF=expandable_segments:True
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True

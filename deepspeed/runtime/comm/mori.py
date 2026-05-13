@@ -4,17 +4,23 @@
 # DeepSpeed Team
 """mori SDMA backend, plugged into ``TorchBackend.all_gather_into_tensor``.
 
-The backend is transparent to callers: ``deepspeed.comm`` auto-detects mori
-at backend init time and, when it is available, routes
-``all_gather_into_tensor`` on the WORLD process group through
-``mori_cpp.AllGatherIntoTensor`` (intra-node SDMA copy on AMD MI300).  Any
-failure (mori missing, non-AMD/ROCm runtime, shmem init error, oversized
-call, non-WORLD group) yields ``None`` and the caller falls back to the
-underlying RCCL/NCCL allgather.
+When the user opts in, ``deepspeed.comm`` routes ``all_gather_into_tensor``
+on the WORLD process group through ``mori_cpp.AllGatherIntoTensor``
+(intra-node SDMA copy on AMD MI300).  Any failure (mori missing,
+non-AMD/ROCm runtime, shmem init error, oversized call, non-WORLD group)
+yields ``None`` and the caller falls back to the underlying RCCL/NCCL
+allgather.
 
 User-visible controls (env vars, no ``ds_config`` field):
 
-* ``DS_DISABLE_SDMA_ALLGATHER=1``      force-disable the SDMA path
+* ``DS_SDMA_ALLGATHER=1``              opt in to the SDMA path.  Required:
+                                        even when mori is installed, the
+                                        SDMA fast-path stays off unless
+                                        the user sets this explicitly.
+                                        When set, ``MORI_ENABLE_SDMA=1`` is
+                                        auto-exported on the user's behalf
+                                        so mori allocates uncached transit
+                                        buffers.
 * ``DS_SDMA_ALLGATHER_MAX_NUMEL=N``   override the transit buffer size in
                                        elements (default 64M = 256 MiB
                                        per-rank input, ~2 GiB output on 8
@@ -82,8 +88,17 @@ def _build_dtype_map():
     }
 
 
-def _is_disabled_by_env() -> bool:
-    return os.environ.get("DS_DISABLE_SDMA_ALLGATHER", "0") not in ("0", "", "false", "False")
+_TRUTHY = {"1", "true", "True", "TRUE", "yes", "Yes", "YES", "on", "On", "ON"}
+
+
+def _is_enabled_by_env() -> bool:
+    """User must explicitly opt in via ``DS_SDMA_ALLGATHER=1``.
+
+    Default is off even when mori is installed: SDMA is a hardware-specific
+    fast-path and users may want bit-identical RCCL behaviour, or A/B
+    baseline comparisons, without having to uninstall mori.
+    """
+    return os.environ.get("DS_SDMA_ALLGATHER", "0") in _TRUTHY
 
 
 def _resolve_max_numel(default: int) -> int:
@@ -112,12 +127,17 @@ def init(max_numel: int = 64 * 1024 * 1024) -> None:
     _init_attempted = True
 
     is_rank0 = torch.distributed.is_initialized() and torch.distributed.get_rank() == 0
-    if _is_disabled_by_env():
-        if is_rank0:
-            logger.info("SDMA allgather disabled by DS_DISABLE_SDMA_ALLGATHER; using RCCL/NCCL")
+    if not _is_enabled_by_env():
+        # Silent no-op: SDMA stays off and dist.allgather is used.  We
+        # don't log here because most users never set DS_SDMA_ALLGATHER and
+        # rank-0 spam on every backend init is noise.
         return
 
     max_numel = _resolve_max_numel(max_numel)
+    # mori's SymmMemManager only allocates the uncached transit buffers
+    # required by the SDMA kernel when MORI_ENABLE_SDMA is set; setdefault
+    # so users who already exported it (or want to override) win.
+    os.environ.setdefault("MORI_ENABLE_SDMA", "1")
 
     try:
         _ensure_default_pg_registered()

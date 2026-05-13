@@ -684,12 +684,7 @@ def restore_init_context():
 
 class AllGatherHandle:
 
-    def __init__(self,
-                 handle,
-                 param: Parameter,
-                 quantization=None,
-                 param_buffer=None,
-                 original_dtype=None) -> None:
+    def __init__(self, handle, param: Parameter, quantization=None, param_buffer=None, original_dtype=None) -> None:
         if param.ds_status != ZeroParamStatus.INFLIGHT:
             raise RuntimeError(f"expected param {param.ds_summary()} to be available")
 
@@ -703,14 +698,12 @@ class AllGatherHandle:
         instrument_w_nvtx(self.__handle.wait)()
 
         if self.__param_buffer is not None:
-            gathered = self.__param_buffer.narrow(0, 0, self.__param.ds_numel).view(self.__param.ds_shape).to(
+            self.__param.data = self.__param_buffer.narrow(0, 0, self.__param.ds_numel).view(self.__param.ds_shape).to(
                 self.__original_dtype).to(self.__param.device)
-            self.__param.data = gathered
         elif self.__quantization:
             instrument_w_nvtx(self.__quantization.quant_handle.wait)()
             self.__param.data = self.__quantization.backend.dequantize(
                 self.__quantization.quantized_param, self.__quantization.scale_buffer).to(self.__param.device)
-
         self.__param.ds_status = ZeroParamStatus.AVAILABLE
 
 
@@ -1249,8 +1242,7 @@ class Init(InsertPostInitMethodToModuleSubClasses):
             if use_secondary_tensor:
                 partition_sz = sum(p.ds_tensor.ds_numel * p.ds_secondary_tensor_num_of_groups for p in params)
 
-            total_numel = partition_sz * world_size
-            flat_tensor = torch.empty(total_numel,
+            flat_tensor = torch.empty(partition_sz * world_size,
                                       dtype=allgather_dtype,
                                       device=get_accelerator().current_device_name(),
                                       requires_grad=False)
@@ -1269,8 +1261,8 @@ class Init(InsertPostInitMethodToModuleSubClasses):
                 instrument_w_nvtx(torch.cat)(
                     [p.ds_tensor.to(get_accelerator().current_device_name()).to(allgather_dtype) for p in params],
                     out=partitions[rank_in_group])
-            handle = instrument_w_nvtx(dist.allgather_fn)(
-                flat_tensor, partitions[rank_in_group], group=ds_process_group, async_op=True)
+            handle = _dist_allgather_fn(partitions[rank_in_group], flat_tensor, ds_process_group)
+            #Fix get_partition_dp_group(params[0]))
 
             return AllGatherCoalescedHandle(
                 allgather_handle=handle,
@@ -1308,13 +1300,25 @@ class Init(InsertPostInitMethodToModuleSubClasses):
                         ds_process_group,
                     )
 
-                    handles.append(
-                        AllGatherHandle(
-                            handle,
-                            param,
-                            param_buffer=param_buffer,
-                            original_dtype=original_dtype,
-                        ))
+                    if original_dtype == allgather_dtype:
+                        param.data = param_buffer.narrow(0, 0, param.ds_numel).view(param.ds_shape).to(param.device)
+                        handles.append(AllGatherHandle(handle, param))
+                    else:
+                        # This case is complicated:
+                        # We use `register_post_accumulate_grad_hook` to set allgather hooks. Normally, the hook is
+                        # called once per parameter, even if that parameter is tied to multiple layers.
+                        # However, when the dtype changes, the hook may be triggered multiple times.
+                        # If we directly do:
+                        #   param_buffer.narrow(0, 0, param.ds_numel).view(param.ds_shape).to(param.device)
+                        # as above, the dtype may differ, causing the gradient-reduce hook
+                        # to be invoked multiple times.
+                        # To avoid this, we leave `param.data` in a partitioned state.
+                        # This prevents duplicate gradient-reduce hook calls.
+                        # In theory, this path could be consolidated with the case where
+                        # (original_dtype == allgather_dtype), but because it changes the
+                        # state transition of DeepSpeed parameters, we keep it separate for safety.
+                        handles.append(
+                            AllGatherHandle(handle, param, param_buffer=param_buffer, original_dtype=original_dtype))
                 else:
                     if hasattr(param_ds_tensor, "ds_quant_scale"):
                         scales = param_ds_tensor.ds_quant_scale

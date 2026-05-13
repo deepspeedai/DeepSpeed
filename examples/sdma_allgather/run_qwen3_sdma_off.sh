@@ -1,9 +1,10 @@
 #!/bin/bash
 # Qwen3-32B + DeepSpeed ZeRO-3 baseline (RCCL allgather).
 #
-# Force-disables the transparent SDMA fast-path inside deepspeed.comm so
-# this script reproduces the RCCL/NCCL baseline.  Pair with
-# run_qwen3_sdma_on.sh (same ds_config; only env vars differ) for the A/B.
+# Default: deepspeed.comm's SDMA fast-path stays off unless the user
+# explicitly sets DS_SDMA_ALLGATHER=1, so this script simply doesn't
+# export it and pairs cleanly with run_qwen3_sdma_on.sh (same ds_config;
+# only env vars differ) for the A/B.
 #
 #   model      : Qwen/Qwen3-32B (full 64 layers, BF16, eager attention)
 #   data       : wikitext-103-raw-v1, 10% split, model's own tokenizer
@@ -21,9 +22,6 @@ set -eu
 export PYTORCH_HIP_ALLOC_CONF=expandable_segments:True
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export TORCH_NCCL_ENABLE_MONITORING=0  # quiets harmless TCPStore shutdown trace
-
-# Force-disable the SDMA fast-path even if mori is available on the node.
-export DS_DISABLE_SDMA_ALLGATHER=1
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 deepspeed --num_gpus "${NUM_GPUS:-8}" "${SCRIPT_DIR}/train_qwen3_zero3.py" \

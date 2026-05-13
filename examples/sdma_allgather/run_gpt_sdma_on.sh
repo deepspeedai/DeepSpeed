@@ -1,14 +1,13 @@
 #!/bin/bash
-# GPT-7B-ish + ZeRO-3 with the transparent SDMA fast-path.
+# GPT-7B-ish + ZeRO-3 with the SDMA fast-path opted in.
 #
-# On AMD MI300 with mori installed, deepspeed.comm auto-detects the SDMA
-# backend at init time and routes WORLD-group all_gather_into_tensor calls
-# through it.  No ds_config flag is required.
-#
-# MORI_ENABLE_SDMA=1 is REQUIRED for the SDMA path: it tells mori to use
-# hipExtMallocWithFlags + hipDeviceMallocUncached for transit buffers.
-# Without it the SDMA kernel reads cached memory and faults at NULL.
-export MORI_ENABLE_SDMA=1
+# DS_SDMA_ALLGATHER=1 is the single opt-in switch.  When set,
+# deepspeed.comm's TorchBackend tries to bring up the mori SDMA backend
+# at init time and routes WORLD-group all_gather_into_tensor through it.
+# Mori's MORI_ENABLE_SDMA=1 is auto-exported on the user's behalf when
+# DS_SDMA_ALLGATHER=1 is set, so users normally don't need to touch it.
+# Without DS_SDMA_ALLGATHER=1, even an mori-installed run stays on RCCL.
+export DS_SDMA_ALLGATHER=1
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 deepspeed --num_gpus 8 "${SCRIPT_DIR}/train_zero3.py" \

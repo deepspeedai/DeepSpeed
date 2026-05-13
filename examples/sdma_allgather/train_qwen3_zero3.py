@@ -7,11 +7,12 @@ time is measured rank-0 side and reported with peak memory and the average
 loss.  The same trainer is used for the SDMA-on and SDMA-off comparison runs
 in run_qwen3_sdma_{on,off}.sh.
 
-The SDMA fast-path is transparent: ``deepspeed.comm`` auto-detects mori at
-init time and routes WORLD-group ``all_gather_into_tensor`` through
+The SDMA fast-path is opt-in via a single env var: ``deepspeed.comm``
+brings up the mori SDMA backend at init time when ``DS_SDMA_ALLGATHER=1``
+and routes WORLD-group ``all_gather_into_tensor`` through
 ``mori_cpp.AllGatherIntoTensor`` on AMD MI300.  No ``ds_config`` flag is
-required.  Force the RCCL/NCCL fallback for an A/B baseline by exporting
-``DS_DISABLE_SDMA_ALLGATHER=1``.
+required.  Leaving ``DS_SDMA_ALLGATHER`` unset (the default) reproduces
+the RCCL/NCCL baseline for A/B comparisons even with mori installed.
 
 Real-data path uses HuggingFace `datasets` to stream wikitext-103 and the
 model's own tokenizer to pad/truncate to seq_length.  No external benchmark
