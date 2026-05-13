@@ -1,32 +1,32 @@
 #!/usr/bin/env python3
 """
-Unit test for SDMA allgather in the ZeRO-3 code path.
+Unit test for the transparent SDMA allgather path in deepspeed.comm.
 
-Simulates exactly how ZeRO-3's _all_gather_dtype calls _dist_allgather_fn:
-  1. Creates a flat_tensor and partitions (same as partition_parameters.py)
-  2. Each rank fills its partition with known data
-  3. Calls _dist_allgather_fn on a dedicated allgather stream (same as coordinator)
-  4. Rebuilds partitions from transit buffer (zero-copy path)
-  5. handle.wait() + stream sync (same as fetch_sub_module)
-  6. Verifies correctness and measures algorithm bandwidth
+After ``deepspeed.init_distributed()`` returns, ``dist.all_gather_into_tensor``
+on the WORLD process group is transparently routed through
+``mori_cpp.AllGatherIntoTensor`` on AMD MI300 when mori is available, with
+RCCL/NCCL as a fallback.  This test exercises that path the same way
+ZeRO-3's ``_all_gather_dtype`` does (flat output / per-rank shard input
+with ``async_op=True``) and verifies correctness and algorithm bandwidth
+for the common dtypes.
 
 Usage:
-    cd /root/wuyl/DeepSpeed/examples/zero3_overlap
+    cd examples/sdma_allgather
     deepspeed --num_gpus 8 test_sdma_allgather_zero3.py
     deepspeed --num_gpus 8 test_sdma_allgather_zero3.py --partition_sz 4194304 --iterations 50
 """
 
-import os
 import argparse
-import time
+import os
+
 import numpy as np
 import torch
 import torch.distributed as torch_dist
+
 import deepspeed
 from deepspeed import comm as dist
 from deepspeed.accelerator import get_accelerator
-
-import deepspeed.runtime.zero.partition_parameters as pp
+from deepspeed.runtime.comm import mori as _mori
 
 
 def verify_allgather(partitions, world_size, partition_sz, rank, dtype):
@@ -44,39 +44,22 @@ def verify_allgather(partitions, world_size, partition_sz, rank, dtype):
 
 
 def run_single_allgather(rank, world_size, dtype, partition_sz, ag_stream):
-    """Execute one allgather call following the exact ZeRO-3 _all_gather_dtype path."""
+    """Execute one allgather call following the ZeRO-3 ``_all_gather_dtype`` path."""
     device = get_accelerator().current_device_name()
 
-    flat_tensor = torch.empty(
-        partition_sz * world_size, dtype=dtype, device=device, requires_grad=False
-    )
-    partitions = []
-    for i in range(world_size):
-        partitions.append(flat_tensor.narrow(0, partition_sz * i, partition_sz))
-
+    flat_tensor = torch.empty(partition_sz * world_size, dtype=dtype,
+                              device=device, requires_grad=False)
+    partitions = [flat_tensor.narrow(0, partition_sz * i, partition_sz) for i in range(world_size)]
     partitions[rank].fill_(float(rank + 1))
 
     with get_accelerator().stream(ag_stream):
-        handle = pp._dist_allgather_fn(partitions[rank], flat_tensor)
-
-    if pp._sdma_allgather_enabled() and not pp._sdma_allgather_handle._copy:
-        transit_buf_u32 = pp._sdma_allgather_handle.get_output_transit_buffer()
-        transit_buf = transit_buf_u32.view(dtype)
-        partitions = []
-        for i in range(world_size):
-            partitions.append(transit_buf.narrow(0, partition_sz * i, partition_sz))
+        handle = dist.allgather_fn(flat_tensor, partitions[rank], async_op=True)
 
     with get_accelerator().stream(ag_stream):
         handle.wait()
     get_accelerator().current_stream().wait_stream(ag_stream)
 
     return partitions
-
-
-def run_correctness_test(rank, world_size, dtype, partition_sz, ag_stream):
-    """Run a single correctness test."""
-    partitions = run_single_allgather(rank, world_size, dtype, partition_sz, ag_stream)
-    return verify_allgather(partitions, world_size, partition_sz, rank, dtype)
 
 
 def run_bandwidth_test(rank, world_size, dtype, partition_sz, ag_stream,
@@ -91,19 +74,16 @@ def run_bandwidth_test(rank, world_size, dtype, partition_sz, ag_stream,
     times_ms = []
 
     for i in range(warmup + iterations):
-        flat_tensor = torch.empty(
-            partition_sz * world_size, dtype=dtype, device=device, requires_grad=False
-        )
-        partitions = []
-        for r in range(world_size):
-            partitions.append(flat_tensor.narrow(0, partition_sz * r, partition_sz))
+        flat_tensor = torch.empty(partition_sz * world_size, dtype=dtype,
+                                  device=device, requires_grad=False)
+        partitions = [flat_tensor.narrow(0, partition_sz * r, partition_sz) for r in range(world_size)]
         partitions[rank].fill_(float(rank + 1))
 
         dist.barrier()
 
         ev_start.record(ag_stream)
         with get_accelerator().stream(ag_stream):
-            handle = pp._dist_allgather_fn(partitions[rank], flat_tensor)
+            handle = dist.allgather_fn(flat_tensor, partitions[rank], async_op=True)
         with get_accelerator().stream(ag_stream):
             handle.wait()
         ev_end.record(ag_stream)
@@ -118,11 +98,9 @@ def run_bandwidth_test(rank, world_size, dtype, partition_sz, ag_stream,
 
 
 def main():
-    parser = argparse.ArgumentParser(description="SDMA allgather unit test (ZeRO-3 style)")
+    parser = argparse.ArgumentParser(description="Transparent SDMA allgather unit test")
     parser.add_argument("--partition_sz", type=int, default=1024 * 1024,
                         help="Elements per rank per allgather call")
-    parser.add_argument("--max_numel", type=int, default=4 * 1024 * 1024,
-                        help="Max uint32 elements for SDMA transit buffer")
     parser.add_argument("--iterations", type=int, default=20,
                         help="Number of measurement iterations")
     parser.add_argument("--warmup", type=int, default=5,
@@ -138,22 +116,14 @@ def main():
     get_accelerator().set_device(args.local_rank)
 
     if rank == 0:
+        backend = "SDMA (mori)" if _mori.is_enabled() else "RCCL/NCCL (mori unavailable or disabled)"
         print(f"\n{'=' * 65}")
-        print(f"  SDMA Allgather Unit Test (ZeRO-3 code path)")
+        print(f"  Transparent SDMA Allgather Unit Test")
         print(f"  world_size    : {world_size}")
         print(f"  partition_sz  : {args.partition_sz:,} elements")
         print(f"  iterations    : {args.iterations}  (warmup {args.warmup})")
-        print(f"{'=' * 65}")
-
-    pp._init_sdma_allgather(max_numel=args.max_numel)
-
-    if rank == 0:
-        if pp._sdma_allgather_enabled():
-            mode = "zero-copy transit buffer" if not pp._sdma_allgather_handle._copy else "copy-to-user"
-            print(f"  backend       : SDMA ({mode})")
-        else:
-            print(f"  backend       : RCCL (SDMA not available, handle is None)")
-        print()
+        print(f"  backend       : {backend}")
+        print(f"{'=' * 65}\n")
 
     ag_stream = get_accelerator().Stream()
 
@@ -163,14 +133,14 @@ def main():
         ("float32", torch.float32),
     ]
 
-    # ── 1. Correctness ────────────────────────────────────────────────
     if rank == 0:
         print("--- Correctness ---")
 
     all_correct = True
     for dtype_name, dtype in test_dtypes:
         dist.barrier()
-        passed = run_correctness_test(rank, world_size, dtype, args.partition_sz, ag_stream)
+        partitions = run_single_allgather(rank, world_size, dtype, args.partition_sz, ag_stream)
+        passed = verify_allgather(partitions, world_size, args.partition_sz, rank, dtype)
 
         passed_t = torch.tensor([1 if passed else 0], dtype=torch.int32)
         torch_dist.all_reduce(passed_t, op=torch_dist.ReduceOp.MIN)
@@ -178,24 +148,22 @@ def main():
 
         if rank == 0:
             elem_bytes = torch.tensor([], dtype=dtype).element_size()
-            data_mb = args.partition_sz * elem_bytes * world_size / (1024 ** 2)
+            data_mb = args.partition_sz * elem_bytes * world_size / (1024**2)
             status = "PASSED" if ok else "FAILED"
             print(f"  {dtype_name:10s}  data={data_mb:8.2f} MB  {status}")
         if not ok:
             all_correct = False
 
-    # ── 2. Bandwidth ──────────────────────────────────────────────────
     if rank == 0:
         print(f"\n--- Bandwidth (iterations={args.iterations}, warmup={args.warmup}) ---")
-        print(f"  {'dtype':10s}  {'data_MB':>10s}  {'avg_ms':>9s}  {'min_ms':>9s}  {'max_ms':>9s}  {'algo_BW':>12s}")
+        print(f"  {'dtype':10s}  {'data_MB':>10s}  {'avg_ms':>9s}  "
+              f"{'min_ms':>9s}  {'max_ms':>9s}  {'algo_BW':>12s}")
         print(f"  {'-'*10}  {'-'*10}  {'-'*9}  {'-'*9}  {'-'*9}  {'-'*12}")
 
     for dtype_name, dtype in test_dtypes:
         dist.barrier()
-        times_ms, total_bytes = run_bandwidth_test(
-            rank, world_size, dtype, args.partition_sz, ag_stream,
-            args.iterations, args.warmup,
-        )
+        times_ms, total_bytes = run_bandwidth_test(rank, world_size, dtype, args.partition_sz,
+                                                   ag_stream, args.iterations, args.warmup)
 
         avg_ms = np.mean(times_ms)
         min_ms = np.min(times_ms)
@@ -212,24 +180,20 @@ def main():
             g_avg_ms = avg_t.item() / world_size
             g_min_ms = min_t.item()
             g_max_ms = max_t.item()
-            data_mb = total_bytes / (1024 ** 2)
-            algo_bw_gbs = total_bytes / (g_avg_ms / 1000) / (1024 ** 3)
+            data_mb = total_bytes / (1024**2)
+            algo_bw_gbs = total_bytes / (g_avg_ms / 1000) / (1024**3)
             print(f"  {dtype_name:10s}  {data_mb:10.2f}  {g_avg_ms:9.3f}  "
                   f"{g_min_ms:9.3f}  {g_max_ms:9.3f}  {algo_bw_gbs:9.2f} GB/s")
 
-    # ── Summary ───────────────────────────────────────────────────────
     dist.barrier()
     if rank == 0:
         print()
-        if all_correct:
-            print("Result: All correctness tests PASSED")
-        else:
-            print("Result: Some correctness tests FAILED")
+        print(f"Result: {'All correctness tests PASSED' if all_correct else 'Some correctness tests FAILED'}")
         print(f"{'=' * 65}\n")
 
     get_accelerator().synchronize()
     dist.barrier()
-    if pp._sdma_allgather_enabled():
+    if _mori.is_enabled():
         import mori.shmem as shmem
         shmem.shmem_finalize()
 

@@ -28,7 +28,6 @@ from deepspeed.runtime.zero.config import DeepSpeedZeroConfig
 from deepspeed.runtime.zero.utils import assert_ints_same_as_other_ranks, is_zero_param
 from deepspeed.runtime.zero.offload_config import OffloadDeviceEnum
 from deepspeed.runtime.config_utils import get_config_default
-from deepspeed.runtime.comm import mori
 from deepspeed.utils import instrument_w_nvtx, logger
 from deepspeed.comm.comm import init_distributed
 from deepspeed.utils.debug import (debug_param2name_id_shape, debug_param2name_id_shape_device, debug_module2name,
@@ -107,9 +106,6 @@ class NoGatherCoalescedHandle:
 
 
 def _dist_allgather_fn(input_tensor: Tensor, output_tensor: Tensor, group=None):
-    work = mori.allgather_into_tensor(input_tensor, output_tensor)
-    if work is not None:
-        return work
     return instrument_w_nvtx(dist.allgather_fn)(output_tensor, input_tensor, group=group, async_op=True)
 
 
@@ -1122,12 +1118,6 @@ class Init(InsertPostInitMethodToModuleSubClasses):
         if _ds_config is not None:
             self.use_all_reduce_for_fetch_params = _ds_config.zero_config.use_all_reduce_for_fetch_params
             self.allgather_sequential = _ds_config.zero_config.allgather_sequential
-
-            if _ds_config.zero_config.sdma_allgather:
-                cfg_max = _ds_config.zero_config.sdma_allgather_max_numel
-                prefetch_partition = int(_ds_config.zero_config.prefetch_bucket_size) // self.num_partitions
-                safe_max = max(cfg_max, prefetch_partition * 2)
-                mori.init(max_numel=safe_max)
 
     def _update_persist_config(self, ds_config):
         Init.apply_param_persistence = True

@@ -7,10 +7,11 @@ time is measured rank-0 side and reported with peak memory and the average
 loss.  The same trainer is used for the SDMA-on and SDMA-off comparison runs
 in run_qwen3_sdma_{on,off}.sh.
 
-The ZeRO-3 config (passed via --ds_config) controls whether the SDMA path is
-taken: setting `sdma_allgather: true` makes _dist_allgather_fn route through
-mori_cpp.AllGatherIntoTensor (this PR), `false` falls back to the upstream
-RCCL/NCCL allgather.
+The SDMA fast-path is transparent: ``deepspeed.comm`` auto-detects mori at
+init time and routes WORLD-group ``all_gather_into_tensor`` through
+``mori_cpp.AllGatherIntoTensor`` on AMD MI300.  No ``ds_config`` flag is
+required.  Force the RCCL/NCCL fallback for an A/B baseline by exporting
+``DS_DISABLE_SDMA_ALLGATHER=1``.
 
 Real-data path uses HuggingFace `datasets` to stream wikitext-103 and the
 model's own tokenizer to pad/truncate to seq_length.  No external benchmark
@@ -150,8 +151,7 @@ def _build_loader(args, vocab_size, rank, world_size, is_main):
 
 # ---------------------------------------------------------------------------
 # Model construction under deepspeed.zero.Init so each rank only materialises
-# its shard.  Passing the config_path here is required: Init reads
-# zero_config.sdma_allgather and constructs the mori SDMA handle when true.
+# its shard.
 # ---------------------------------------------------------------------------
 def build_model(model_name, num_layers, ds_config_path):
     cfg = AutoConfig.from_pretrained(model_name, trust_remote_code=True)

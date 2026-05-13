@@ -2,32 +2,36 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # DeepSpeed Team
+"""mori SDMA backend, plugged into ``TorchBackend.all_gather_into_tensor``.
 
-"""mori SDMA backend for the ZeRO-3 all_gather_into_tensor hot path.
+The backend is transparent to callers: ``deepspeed.comm`` auto-detects mori
+at backend init time and, when it is available, routes
+``all_gather_into_tensor`` on the WORLD process group through
+``mori_cpp.AllGatherIntoTensor`` (intra-node SDMA copy on AMD MI300).  Any
+failure (mori missing, non-AMD/ROCm runtime, shmem init error, oversized
+call, non-WORLD group) yields ``None`` and the caller falls back to the
+underlying RCCL/NCCL allgather.
 
-Encapsulates every mori-specific import, handle construction and dtype
-dispatch so ``deepspeed/runtime/zero/partition_parameters.py`` only needs
-to call:
+User-visible controls (env vars, no ``ds_config`` field):
 
-    mori.init(max_numel)                          # one-shot, idempotent
-    work = mori.allgather_into_tensor(in_, out_)  # returns None on fallback
-
-The backend silently fails (no exceptions, ``init`` leaves the handle
-unset, ``allgather_into_tensor`` returns ``None``) when mori is missing,
-the platform isn't AMD/ROCm, or shmem initialization fails.  Callers are
-expected to fall back to ``dist.allgather_fn`` in that case.
+* ``DS_DISABLE_SDMA_ALLGATHER=1``      force-disable the SDMA path
+* ``DS_SDMA_ALLGATHER_MAX_NUMEL=N``   override the transit buffer size in
+                                       elements (default 64M = 256 MiB
+                                       per-rank input, ~2 GiB output on 8
+                                       ranks)
 """
 
+import os
 from typing import Optional
 
 import torch
 
-from deepspeed import comm as dist
 from deepspeed.accelerator import get_accelerator
 from deepspeed.utils import logger
 
 _handle = None
 _dtype_map = None
+_max_numel = 0
 _init_attempted = False
 _call_failed_warned = False
 
@@ -35,18 +39,16 @@ _call_failed_warned = False
 class _SdmaWork:
     """Duck-type compatible with ``torch.distributed.Work``.
 
-    Mirrors NCCL ``Work.wait()`` semantics: CPU-level blocking AND
-    GPU-level stream dependency so the current compute stream sees
-    SDMA-written data.
+    ``wait()`` issues a stream-level dependency only and does NOT block the
+    CPU, mirroring RCCL ``Work.wait()`` semantics.  ZeRO-3's prefetch
+    pipeline relies on the CPU staying free so the next bucket can be
+    queued ahead of time while bucket N is in flight.
     """
 
     def __init__(self, event):
         self._event = event
 
     def wait(self):
-        # Stream-level dependency only; do NOT block CPU.  RCCL Work.wait()
-        # is also non-CPU-blocking and the ZeRO-3 prefetch pipeline depends on
-        # the CPU staying free so the next bucket can be queued ahead of time.
         get_accelerator().current_stream().wait_event(self._event)
 
     def is_completed(self) -> bool:
@@ -56,8 +58,8 @@ class _SdmaWork:
 def _ensure_default_pg_registered():
     """Register the WORLD process group as 'default' in PyTorch's C++ GroupRegistry.
 
-    mori's shmem layer looks up the PG by name "default"; the standard
-    DeepSpeed init path doesn't register it under that label.
+    mori's shmem layer looks up the PG by the name "default"; the standard
+    DeepSpeed init path doesn't register WORLD under that label.
     """
     world_group = torch.distributed.group.WORLD
     assert world_group is not None, "torch.distributed must be initialized before SDMA allgather"
@@ -80,22 +82,42 @@ def _build_dtype_map():
     }
 
 
+def _is_disabled_by_env() -> bool:
+    return os.environ.get("DS_DISABLE_SDMA_ALLGATHER", "0") not in ("0", "", "false", "False")
+
+
+def _resolve_max_numel(default: int) -> int:
+    raw = os.environ.get("DS_SDMA_ALLGATHER_MAX_NUMEL")
+    if raw is None:
+        return default
+    try:
+        return max(int(raw), 0)
+    except ValueError:
+        return default
+
+
 def init(max_numel: int = 64 * 1024 * 1024) -> None:
     """Best-effort, idempotent SDMA handle construction.
 
     Builds one ``mori_cpp.AllGatherIntoTensor`` (NCCL/RCCL-style C++
     dispatcher) sized for the largest expected per-rank shard.  All
-    subsequent allgather calls reuse this handle.
-
-    Safe to call unconditionally: any failure (mori not installed,
-    non-AMD/ROCm runtime, shmem init error, ...) leaves ``_handle``
-    unset and logs a single rank-0 warning, so callers transparently
-    fall back to RCCL/NCCL via ``dist.allgather_fn``.
+    subsequent allgather calls reuse this handle.  Safe to call
+    unconditionally: any failure leaves ``_handle`` unset and logs a
+    single rank-0 info line, so callers transparently fall back to
+    RCCL/NCCL.
     """
-    global _handle, _dtype_map, _init_attempted
+    global _handle, _dtype_map, _max_numel, _init_attempted
     if _init_attempted:
         return
     _init_attempted = True
+
+    is_rank0 = torch.distributed.is_initialized() and torch.distributed.get_rank() == 0
+    if _is_disabled_by_env():
+        if is_rank0:
+            logger.info("SDMA allgather disabled by DS_DISABLE_SDMA_ALLGATHER; using RCCL/NCCL")
+        return
+
+    max_numel = _resolve_max_numel(max_numel)
 
     try:
         _ensure_default_pg_registered()
@@ -106,8 +128,8 @@ def init(max_numel: int = 64 * 1024 * 1024) -> None:
         my_pe = shmem.shmem_mype()
         npes = shmem.shmem_npes()
         # Per-rank input transit buffer must hold the largest shard we'll
-        # ever see; output transit buffer = npes * input.  4 B/element is
-        # the SDMA kernel's uint32 lane width.
+        # ever see; output buffer = npes * input.  4 B/element is the SDMA
+        # kernel's uint32 lane width.
         input_bytes = max_numel * 4
         _handle = AllGatherIntoTensor(
             my_pe=my_pe,
@@ -117,30 +139,57 @@ def init(max_numel: int = 64 * 1024 * 1024) -> None:
             copy_output_to_user=True,
         )
         _dtype_map = _build_dtype_map()
-        if dist.is_initialized() and dist.get_rank() == 0:
-            logger.info("SDMA allgather enabled via mori_cpp.AllGatherIntoTensor")
+        _max_numel = max_numel
+        if is_rank0:
+            logger.info(f"SDMA allgather enabled via mori_cpp.AllGatherIntoTensor "
+                        f"(max_numel={max_numel})")
     except Exception as e:
         _handle = None
         _dtype_map = None
-        if dist.is_initialized() and dist.get_rank() == 0:
-            logger.warning(f"SDMA allgather unavailable ({type(e).__name__}: {e}); "
-                           f"falling back to dist.allgather_fn")
+        _max_numel = 0
+        if is_rank0:
+            logger.info(f"SDMA allgather unavailable ({type(e).__name__}: {e}); "
+                        f"using RCCL/NCCL allgather")
 
 
 def is_enabled() -> bool:
     return _handle is not None
 
 
+def supports(input_tensor: torch.Tensor, group=None) -> bool:
+    """Cheap pre-check used by ``TorchBackend.all_gather_into_tensor``.
+
+    SDMA is only safe when:
+        - the backend is initialised (``_handle`` set),
+        - the call is on the WORLD process group (mori's shmem layer was
+          bound to "default"/WORLD at init time),
+        - the per-rank shard fits inside the pre-allocated transit buffer,
+        - the input dtype is in ``_dtype_map``.
+    """
+    if _handle is None:
+        return False
+    if group is not None and group is not torch.distributed.group.WORLD:
+        return False
+    if input_tensor.numel() > _max_numel:
+        return False
+    if _dtype_map is None or input_tensor.dtype not in _dtype_map:
+        return False
+    return True
+
+
 def allgather_into_tensor(input_tensor: torch.Tensor,
-                          output_tensor: torch.Tensor) -> Optional[_SdmaWork]:
+                          output_tensor: torch.Tensor,
+                          group=None) -> Optional[_SdmaWork]:
     """Run one allgather_into_tensor through the SDMA handle.
 
     Returns an ``_SdmaWork`` (Work-compatible) on success.  Returns
-    ``None`` if SDMA is disabled or the call fails for any reason — the
-    caller should then fall back to ``dist.allgather_fn``.
+    ``None`` when SDMA is not applicable for this call (uninitialised,
+    non-WORLD group, dtype not supported, shard larger than the transit
+    buffer) or the call fails for any reason — the caller falls back to
+    ``dist.allgather_fn``.
     """
     global _call_failed_warned
-    if _handle is None:
+    if not supports(input_tensor, group):
         return None
     try:
         stream = get_accelerator().current_stream()
@@ -153,7 +202,8 @@ def allgather_into_tensor(input_tensor: torch.Tensor,
         event.record(stream)
         return _SdmaWork(event)
     except Exception as e:
-        if not _call_failed_warned and dist.is_initialized() and dist.get_rank() == 0:
+        if (not _call_failed_warned and torch.distributed.is_initialized()
+                and torch.distributed.get_rank() == 0):
             logger.warning(f"SDMA allgather failed ({e}); falling back to dist.allgather")
             _call_failed_warned = True
         return None

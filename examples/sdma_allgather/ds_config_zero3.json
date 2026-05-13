@@ -36,9 +36,7 @@
     "stage3_prefetch_bucket_size": 5e7,
     "stage3_param_persistence_threshold": 1e5,
     "stage3_gather_16bit_weights_on_model_save": true,
-    "sub_group_size": 1e12,
-    "sdma_allgather": true,
-    "sdma_allgather_max_numel": 67108864
+    "sub_group_size": 1e12
   },
   "wall_clock_breakdown": false
 }
