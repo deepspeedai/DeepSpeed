@@ -1,4 +1,32 @@
-# SDMA AllGather (opt-in backend in `deepspeed.comm`)
+# SDMA-Accelerated ZeRO-3 on AMD GPUs
+
+## Motivation
+
+ZeRO-3 reconstructs each layer with an AllGather right before its forward / backward
+pass, and DeepSpeed's `PartitionedParameterCoordinator` prefetches these AllGathers
+on a separate stream so that collective and compute can overlap *in time*.  In
+practice the time-overlap is already quite good for typical ZeRO-3 workloads.
+
+What's left is **resource** overlap.  On AMD GPUs, RCCL AllGather kernels execute
+on the same compute units (CUs) that GEMM and attention run on, and tend to share
+wavefront slots, LDS, register file and HBM bandwidth with concurrent compute.
+Even when the time-overlap schedule looks near-perfect, the effective compute
+throughput during the overlap window can stay below peak because the two workloads
+sit on the same physical hardware.
+
+AMD MI300X / MI325X / MI355X contain dedicated **System DMA (SDMA)** copy engines —
+independent hardware queues that move data between GPUs over XGMI without using
+the CU array.  Routing ZeRO-3's AllGather through SDMA instead of CU-based RCCL
+kernels lets collective traffic and compute run on physically separate engines,
+leaving CUs largely free for GEMM / attention during the overlap window.  In
+workloads where overlap is a meaningful bottleneck this can translate into
+end-to-end step-time gains (workload-dependent; see the verified results table
+below).
+
+See [RFC #7884](https://github.com/deepspeedai/DeepSpeed/issues/7884) for the
+longer design rationale and discussion.
+
+## Overview
 
 End-to-end example for the SDMA fast-path inside
 `TorchBackend.all_gather_into_tensor`.  When the runtime is AMD/ROCm,
