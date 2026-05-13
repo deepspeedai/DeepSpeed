@@ -2402,6 +2402,42 @@ class TestAutoEPMoELayerUnit:
 class TestAutoTPSkipAutoEP:
     """Phase 6 tests for AutoTP skip logic on AutoEP-managed modules."""
 
+    class _MarkedAutoEPWrapper(nn.Module):
+
+        def __init__(self):
+            super().__init__()
+            self._is_autoep_layer = True
+            self.hidden_size = 8
+            self.inner_linear = nn.Linear(4, 4)
+            self.nested = nn.Module()
+            self.nested.deep_linear = nn.Linear(4, 4)
+            self.register_buffer("route_cache", torch.ones(1))
+
+        def _get_name(self):
+            return "MoEGate"
+
+    def _make_nested_model(self):
+        model = nn.Module()
+        model.autoep_wrapper = self._MarkedAutoEPWrapper()
+        model.sibling_linear = nn.Linear(4, 4)
+        return model
+
+    def _make_autotp(self, partition_config=None):
+        from deepspeed.module_inject.auto_tp import AutoTP
+
+        autotp = AutoTP.__new__(AutoTP)
+        autotp.mp_group = None
+        autotp.mp_size = 1
+        autotp.module = nn.Module()
+        autotp.prefix = "model"
+        autotp.state_dict = {
+            "model.autoep_wrapper.weight": torch.ones(4, 4),
+            "model.sibling_linear.weight": torch.ones(4, 4),
+        }
+        autotp.partition_config = partition_config
+        autotp.conv_linear_layer = False
+        return autotp
+
     def test_autotp_skip_autoep_marker(self):
         """AutoTP._replace() returns child unchanged when _is_autoep_layer=True."""
         from deepspeed.module_inject.auto_tp import AutoTP
@@ -2424,6 +2460,76 @@ class TestAutoTPSkipAutoEP:
         # A regular nn.Linear without _is_autoep_layer should not be returned as-is
         regular_module = nn.Linear(64, 64)
         assert not getattr(regular_module, "_is_autoep_layer", False)
+
+    def test_autotp_replace_module_skips_autoep_subtree(self, monkeypatch):
+        from deepspeed.module_inject import auto_tp as auto_tp_module
+
+        model = self._make_nested_model()
+        autotp = self._make_autotp()
+        load_calls = []
+        buffer_calls = []
+        replaced_calls = []
+        mp_param_calls = []
+
+        def record_load(module, state_dict, prefix, mp_group=None):
+            load_calls.append(prefix)
+
+        def record_load_buffer(module, state_dict, prefix):
+            buffer_calls.append(prefix)
+
+        def record_replace(child, name, conv_linear_layer):
+            replaced_calls.append(name)
+            return child
+
+        monkeypatch.setattr(auto_tp_module.Loading, "load", record_load)
+        monkeypatch.setattr(auto_tp_module.Loading, "load_buffer", record_load_buffer)
+        autotp.linear_policies = {nn.Linear: record_replace}
+        autotp.update_mp_params = lambda child: mp_param_calls.append(id(child))
+
+        autotp._replace_module(model)
+
+        assert not any("autoep_wrapper" in prefix for prefix in load_calls)
+        assert not any("autoep_wrapper" in prefix for prefix in buffer_calls)
+        assert not any("autoep_wrapper" in name for name in replaced_calls)
+        assert id(model.autoep_wrapper) not in mp_param_calls
+        assert id(model.autoep_wrapper.nested) not in mp_param_calls
+        assert replaced_calls == [".sibling_linear"]
+        assert load_calls == ["model.sibling_linear."]
+
+    def test_autotp_replace_module_skips_autoep_subtree_with_partition_config(self, monkeypatch):
+        from deepspeed.module_inject import auto_tp as auto_tp_module
+
+        model = self._make_nested_model()
+        autotp = self._make_autotp(partition_config=object())
+        load_calls = []
+        buffer_calls = []
+        replaced_calls = []
+        mp_param_calls = []
+
+        def record_load(module, state_dict, prefix, mp_group=None):
+            load_calls.append(prefix)
+
+        def record_load_buffer(module, state_dict, prefix):
+            buffer_calls.append(prefix)
+
+        def record_replace_with_config(child, name):
+            replaced_calls.append(name)
+            return child
+
+        monkeypatch.setattr(auto_tp_module.Loading, "load", record_load)
+        monkeypatch.setattr(auto_tp_module.Loading, "load_buffer", record_load_buffer)
+        autotp._replace_with_config = record_replace_with_config
+        autotp.update_mp_params = lambda child: mp_param_calls.append(id(child))
+
+        autotp._replace_module(model)
+
+        assert not any("autoep_wrapper" in prefix for prefix in load_calls)
+        assert not any("autoep_wrapper" in prefix for prefix in buffer_calls)
+        assert not any("autoep_wrapper" in name for name in replaced_calls)
+        assert id(model.autoep_wrapper) not in mp_param_calls
+        assert id(model.autoep_wrapper.nested) not in mp_param_calls
+        assert replaced_calls == ["sibling_linear"]
+        assert load_calls == ["model.sibling_linear."]
 
 
 class TestEngineAutoEPConfig:
