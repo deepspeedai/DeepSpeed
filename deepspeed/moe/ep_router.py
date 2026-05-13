@@ -55,6 +55,7 @@ class TokenChoiceTopKRouter(nn.Module):
         route_norm: bool,
         route_scale: float,
         gate_bias: bool,
+        group_score_func: str = "top2_sum",
     ):
         super().__init__()
         self.gate = nn.Linear(dim, num_experts, bias=gate_bias)
@@ -65,6 +66,7 @@ class TokenChoiceTopKRouter(nn.Module):
         self.score_func = score_func
         self.route_norm = route_norm
         self.route_scale = route_scale
+        self.group_score_func = group_score_func
 
     # ------------------------------------------------------------------
     # Node-limited (group-limited) routing
@@ -93,13 +95,18 @@ class TokenChoiceTopKRouter(nn.Module):
                              f"num_expert_groups ({self.num_expert_groups})")
 
         experts_per_group = self.num_experts // self.num_expert_groups
-        if experts_per_group < 2:
-            raise ValueError(f"experts_per_group ({experts_per_group}) must be >= 2")
 
         scores_grouped = scores_for_choice.view(-1, self.num_expert_groups, experts_per_group)
-        # Score each group by the sum of its top-2 expert scores
-        top2_scores_in_group, _ = scores_grouped.topk(2, dim=-1)
-        group_scores = top2_scores_in_group.sum(dim=-1)
+        if self.group_score_func == "max":
+            group_scores = scores_grouped.max(dim=-1).values
+        elif self.group_score_func == "top2_sum":
+            if experts_per_group < 2:
+                raise ValueError(f"experts_per_group ({experts_per_group}) must be >= 2")
+            # DeepSeek-V3 scores each group by the sum of its top-2 experts.
+            top2_scores_in_group, _ = scores_grouped.topk(2, dim=-1)
+            group_scores = top2_scores_in_group.sum(dim=-1)
+        else:
+            raise NotImplementedError(f"Unknown group score function: {self.group_score_func}")
 
         # Select top groups
         _, group_idx = torch.topk(group_scores, k=self.num_limited_groups, dim=-1, sorted=False)

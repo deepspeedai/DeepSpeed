@@ -5,6 +5,8 @@
 """Unit tests for AutoEP feature (all phases append test classes here)."""
 
 import copy
+import re
+from pathlib import Path
 
 import pytest
 import torch
@@ -77,6 +79,23 @@ class TestAutoEPConfig:
         resolved = resolve_autoep_config_defaults(config, config.preset_model)
 
         assert resolved.load_balance_coeff == pytest.approx(0.02)
+
+    @pytest.mark.parametrize("preset_model", ["deepseek_v2", "deepseek_v3"])
+    def test_deepseek_preset_default_sets_load_balance_coeff_none(self, preset_model):
+        """DeepSeek presets disable AutoEP expert_bias by default."""
+        config = parse_autoep_config({"enabled": True, "preset_model": preset_model})
+        assert config.load_balance_coeff == pytest.approx(1e-3)
+
+        resolved = resolve_autoep_config_defaults(config, config.preset_model)
+
+        assert resolved.load_balance_coeff is None
+        assert config.load_balance_coeff == pytest.approx(1e-3)
+
+    def test_deepseek_presets_mark_expert_bias_unsupported(self):
+        assert PRESET_MODELS["deepseek_v2"].supports_expert_bias is False
+        assert PRESET_MODELS["deepseek_v3"].supports_expert_bias is False
+        assert PRESET_MODELS["deepseek_v2"].unsupported_router_bias_names == ()
+        assert PRESET_MODELS["deepseek_v3"].unsupported_router_bias_names == ("e_score_correction_bias", )
 
     def test_parse_autoep_config_full(self):
         """All fields parsed from complete JSON."""
@@ -279,6 +298,10 @@ class TestAutoEPConfig:
         assert qwen2.has_shared_experts is True
         assert qwen2.shared_experts_pattern == "shared_expert"
         assert qwen2.shared_experts_gate_pattern == "shared_expert_gate"
+        assert qwen2.preset_adapter == "default"
+
+        qwen3_5 = PRESET_MODELS["qwen3_5_moe"]
+        assert qwen3_5.preset_adapter == "qwen3_5_moe"
 
     def test_validate_empty_expert_w1(self):
         """Empty expert_w1 raises ValueError."""
@@ -728,6 +751,8 @@ class TestMoEDetection:
             assert spec.router_name == "router"
             assert spec.return_router_logits is True
             assert spec.router_logits_capture_target == "router"
+            assert spec.router_logits_capture_mode == "raw"
+            assert spec.moe_output_shape == "flat"
             assert spec.has_shared_experts is True
             assert spec.shared_experts_name == "shared_expert"
 
@@ -742,6 +767,8 @@ class TestMoEDetection:
         assert len(specs) == 1
         assert specs[0].return_router_logits is True
         assert specs[0].router_logits_capture_target == "router"
+        assert specs[0].router_logits_capture_mode == "raw"
+        assert specs[0].moe_output_shape == "flat"
 
     def test_llama4_preset_layer_disables_expert_bias_by_default(self):
         """preset_model='llama4' resolves load_balance_coeff=None for layer construction."""
@@ -794,6 +821,138 @@ class TestMoEDetection:
         replaced = model.model.layers[0].feed_forward
         assert replaced.load_balance_coeff is None
         assert replaced.expert_bias is None
+
+    @pytest.mark.parametrize("preset_model", ["deepseek_v2", "deepseek_v3"])
+    def test_deepseek_preset_layer_disables_expert_bias_by_default(self, preset_model):
+        """DeepSeek preset defaults resolve to no AutoEP load-balance expert_bias."""
+        model = MockMoETransformer(num_layers=1, num_experts=4, moe_every_n=1)
+        config = parse_autoep_config({
+            "enabled": True,
+            "autoep_size": 1,
+            "preset_model": preset_model,
+            "top_k": 2,
+        })
+        auto_ep = AutoEP(model, config)
+        specs = auto_ep.ep_parser()
+        assert specs[0].supports_expert_bias is False
+        auto_ep.replace_moe_layer(specs[0], ep_size=1, ep_rank=0)
+
+        replaced = model.model.layers[0].mlp
+        assert replaced.load_balance_coeff is None
+        assert replaced.expert_bias is None
+        assert "expert_bias" not in dict(replaced.named_buffers())
+
+    @pytest.mark.parametrize("preset_model", ["deepseek_v2", "deepseek_v3"])
+    def test_deepseek_explicit_load_balance_coeff_rejected(self, preset_model):
+        """DeepSeek AutoEP fails explicitly instead of creating expert_bias."""
+        model = MockMoETransformer(num_layers=1, num_experts=4, moe_every_n=1)
+        config = parse_autoep_config({
+            "enabled": True,
+            "autoep_size": 1,
+            "preset_model": preset_model,
+            "top_k": 2,
+            "load_balance_coeff": 0.02,
+        })
+        auto_ep = AutoEP(model, config)
+        specs = auto_ep.ep_parser()
+        assert specs[0].supports_expert_bias is False
+
+        with pytest.raises(ValueError, match="load_balance_coeff/expert_bias"):
+            auto_ep.replace_moe_layer(specs[0], ep_size=1, ep_rank=0)
+
+    def test_deepseek_v3_nonzero_score_correction_bias_rejected(self):
+        """DeepSeek-V3 expert correction bias remains unsupported for AutoEP parity."""
+        model = MockMoETransformer(num_layers=1, num_experts=4, moe_every_n=1)
+        model.model.layers[0].mlp.gate.register_buffer("e_score_correction_bias", torch.ones(4))
+        config = parse_autoep_config({
+            "enabled": True,
+            "autoep_size": 1,
+            "preset_model": "deepseek_v3",
+            "top_k": 2,
+            "load_balance_coeff": None,
+        })
+        auto_ep = AutoEP(model, config)
+        specs = auto_ep.ep_parser()
+        assert specs[0].unsupported_router_bias_names == ("e_score_correction_bias", )
+
+        with pytest.raises(ValueError, match="e_score_correction_bias"):
+            auto_ep.replace_moe_layer(specs[0], ep_size=1, ep_rank=0)
+
+    def test_deepseek_v2_detection_keeps_native_topk_weights_unnormalized(self):
+        """DeepSeek-V2 HF forward does not renormalize top-k weights in Transformers 5."""
+        model = MockMoETransformer(num_layers=1, num_experts=4, moe_every_n=1)
+        model.config.norm_topk_prob = True
+        config = parse_autoep_config({
+            "enabled": True,
+            "autoep_size": 1,
+            "preset_model": "deepseek_v2",
+            "top_k": 2,
+        })
+
+        specs = AutoEP(model, config).ep_parser()
+
+        assert len(specs) == 1
+        assert specs[0].route_norm is False
+
+    def test_deepseek_v2_detection_reads_group_limited_routing_from_model_config(self):
+        """DeepSeek-V2 group_limited_greedy routing uses max group scoring."""
+        model = MockMoETransformer(num_layers=1, num_experts=4, moe_every_n=1)
+        model.config.topk_method = "group_limited_greedy"
+        model.config.n_group = 2
+        model.config.topk_group = 1
+        config = parse_autoep_config({
+            "enabled": True,
+            "autoep_size": 1,
+            "preset_model": "deepseek_v2",
+            "top_k": 2,
+        })
+
+        specs = AutoEP(model, config).ep_parser()
+
+        assert len(specs) == 1
+        assert specs[0].num_expert_groups == 2
+        assert specs[0].num_limited_groups == 1
+        assert specs[0].group_score_func == "max"
+
+    def test_deepseek_v3_detection_reads_group_routing_from_model_config(self):
+        """DeepSeek-V3 preset carries HF group-limited routing into AutoEP."""
+        model = MockMoETransformer(num_layers=1, num_experts=4, moe_every_n=1)
+        model.config.n_group = 2
+        model.config.topk_group = 1
+        model.config.norm_topk_prob = True
+        model.config.routed_scaling_factor = 2.5
+        config = parse_autoep_config({
+            "enabled": True,
+            "autoep_size": 1,
+            "preset_model": "deepseek_v3",
+            "top_k": 2,
+        })
+
+        specs = AutoEP(model, config).ep_parser()
+
+        assert len(specs) == 1
+        assert specs[0].num_expert_groups == 2
+        assert specs[0].num_limited_groups == 1
+        assert specs[0].group_score_func == "top2_sum"
+        assert specs[0].route_scale == pytest.approx(2.5)
+
+    def test_qwen3_5_moe_adapter_sets_router_capture_contract(self):
+        """Qwen3.5 records router output through the AutoEP replacement tuple."""
+        model = MockMoETransformer(num_layers=1, num_experts=4, moe_every_n=1)
+        model.config.num_experts = 4
+        config = parse_autoep_config({
+            "enabled": True,
+            "autoep_size": 1,
+            "preset_model": "qwen3_5_moe",
+        })
+
+        specs = AutoEP(model, config).ep_parser()
+
+        assert len(specs) == 1
+        assert specs[0].return_router_logits is True
+        assert specs[0].router_logits_capture_target == "router"
+        assert specs[0].router_logits_capture_index == 1
+        assert specs[0].router_logits_capture_mode == "post_score"
 
     def test_replace_moe_layer_works(self):
         """replace_moe_layer creates AutoEPMoELayer replacement."""
@@ -1182,6 +1341,20 @@ class TestParamMarking:
             assert hasattr(p, 'allreduce') and p.allreduce is True
 
 
+def _require_transformers_5(transformers):
+    from packaging.version import Version
+    if Version(transformers.__version__) < Version("5.0.0"):
+        pytest.skip("DeepSeek AutoEP parity smoke requires Transformers >= 5.0.0")
+
+
+def _get_transformers_class(transformers, *names):
+    for name in names:
+        cls = getattr(transformers, name, None)
+        if cls is not None:
+            return cls
+    pytest.skip(f"Installed transformers does not expose any of: {names}")
+
+
 class TestAutoEPMoELayerUnit:
     """Phase 5 tests for AutoEPMoELayer (ep_size=1, no dist needed)."""
 
@@ -1191,6 +1364,40 @@ class TestAutoEPMoELayerUnit:
         config = AutoEPConfig(enabled=True, autoep_size=1)
         layer = AutoEPMoELayer(spec, source, ep_size=1, ep_rank=0, config=config)
         assert layer._is_autoep_layer is True
+
+    def test_autoep_layer_has_no_model_family_literal_hardcode(self):
+        layer_path = Path(__file__).resolve().parents[3] / "deepspeed" / "module_inject" / "auto_ep_layer.py"
+        layer_source = layer_path.read_text()
+        assert "_DEEPSEEK_PRESETS" not in layer_source
+        for model_family in ("deepseek_v2", "deepseek_v3", "qwen3_5_moe", "llama4"):
+            assert model_family not in layer_source
+
+    def test_autoep_parser_has_no_model_family_behavior_branches(self):
+        auto_ep_path = Path(__file__).resolve().parents[3] / "deepspeed" / "module_inject" / "auto_ep.py"
+        auto_ep_source = auto_ep_path.read_text()
+        for model_family in ("deepseek_v2", "deepseek_v3", "qwen3_5_moe", "llama4"):
+            assert not re.search(rf"(preset_name|spec\.model_family)\s*[!=]=\s*['\"]{model_family}['\"]",
+                                 auto_ep_source)
+
+    def test_spec_can_disable_expert_bias_without_model_family_branch(self):
+        source = MockMoEBlock(num_experts=4, ffn_hidden=128, hidden_size=64)
+        spec = _make_spec(model_family="custom_no_expert_bias", supports_expert_bias=False)
+        config = AutoEPConfig(enabled=True, autoep_size=1, load_balance_coeff=0.02)
+
+        with pytest.raises(ValueError, match="custom_no_expert_bias.*load_balance_coeff/expert_bias"):
+            AutoEPMoELayer(spec, source, ep_size=1, ep_rank=0, config=config)
+
+    def test_spec_unsupported_router_bias_name_rejects_nonzero_buffer(self):
+        source = MockMoEBlock(num_experts=4, ffn_hidden=128, hidden_size=64)
+        source.gate.register_buffer("source_router_bias", torch.ones(4))
+        spec = _make_spec(
+            model_family="custom_router_bias",
+            unsupported_router_bias_names=("source_router_bias", ),
+        )
+        config = AutoEPConfig(enabled=True, autoep_size=1, load_balance_coeff=None)
+
+        with pytest.raises(ValueError, match="source_router_bias"):
+            AutoEPMoELayer(spec, source, ep_size=1, ep_rank=0, config=config)
 
     def test_autoep_layer_ep_size_1_forward(self):
         torch.manual_seed(42)
@@ -1324,6 +1531,135 @@ class TestAutoEPMoELayerUnit:
         assert len(autoep_layers) == 1
         assert autoep_layers[0].shared_experts is None
         assert autoep_layers[0].shared_experts_gate is None
+
+        input_ids = torch.tensor([[1, 5, 7, 9, 11]], dtype=torch.long)
+        labels = input_ids.clone()
+        native_model.eval()
+        autoep_model.eval()
+        with torch.no_grad():
+            native_outputs = native_model(input_ids=input_ids, labels=labels, output_router_logits=False)
+            autoep_outputs = autoep_model(input_ids=input_ids, labels=labels, output_router_logits=False)
+
+        torch.testing.assert_close(autoep_outputs.logits, native_outputs.logits, rtol=1e-5, atol=1e-6)
+        torch.testing.assert_close(autoep_outputs.loss, native_outputs.loss, rtol=1e-5, atol=1e-6)
+
+    def test_hf_deepseek_v2_causal_lm_matches_autoep_without_load_balance_default(self):
+        """Tiny DeepSeek-V2 CausalLM reaches forward parity after AutoEP replacement."""
+        transformers = pytest.importorskip("transformers")
+        _require_transformers_5(transformers)
+        config_cls = _get_transformers_class(transformers, "DeepseekV2Config", "DeepSeekV2Config")
+        model_cls = _get_transformers_class(transformers, "DeepseekV2ForCausalLM", "DeepSeekV2ForCausalLM")
+
+        torch.manual_seed(1234)
+        config = config_cls(
+            vocab_size=64,
+            hidden_size=32,
+            intermediate_size=64,
+            num_hidden_layers=1,
+            num_attention_heads=4,
+            num_key_value_heads=2,
+            max_position_embeddings=64,
+            first_k_dense_replace=0,
+            moe_layer_freq=1,
+            moe_intermediate_size=16,
+            n_routed_experts=4,
+            n_shared_experts=0,
+            num_experts_per_tok=2,
+            norm_topk_prob=True,
+            scoring_func="softmax",
+            routed_scaling_factor=1.0,
+            output_router_logits=False,
+            tie_word_embeddings=False,
+            use_cache=False,
+        )
+        native_model = model_cls(config)
+        autoep_model = model_cls(config)
+        autoep_model.load_state_dict(copy.deepcopy(native_model.state_dict()))
+
+        autoep_config = parse_autoep_config({
+            "enabled": True,
+            "autoep_size": 1,
+            "preset_model": "deepseek_v2",
+            "use_grouped_mm": False,
+        })
+        auto_ep = AutoEP(autoep_model, autoep_config)
+        specs = auto_ep.ep_parser()
+        assert len(specs) == 1
+        assert specs[0].model_family == "deepseek_v2"
+        assert specs[0].route_norm is False
+        for spec in specs:
+            auto_ep.replace_moe_layer(spec, ep_size=1, ep_rank=0)
+
+        autoep_layers = [module for module in autoep_model.modules() if isinstance(module, AutoEPMoELayer)]
+        assert len(autoep_layers) == 1
+        assert autoep_layers[0].load_balance_coeff is None
+        assert autoep_layers[0].expert_bias is None
+
+        input_ids = torch.tensor([[1, 5, 7, 9, 11]], dtype=torch.long)
+        labels = input_ids.clone()
+        native_model.eval()
+        autoep_model.eval()
+        with torch.no_grad():
+            native_outputs = native_model(input_ids=input_ids, labels=labels, output_router_logits=False)
+            autoep_outputs = autoep_model(input_ids=input_ids, labels=labels, output_router_logits=False)
+
+        torch.testing.assert_close(autoep_outputs.logits, native_outputs.logits, rtol=1e-5, atol=1e-6)
+        torch.testing.assert_close(autoep_outputs.loss, native_outputs.loss, rtol=1e-5, atol=1e-6)
+
+    def test_hf_deepseek_v3_causal_lm_matches_autoep_without_load_balance_default(self):
+        """Tiny DeepSeek-V3 CausalLM reaches forward parity after AutoEP replacement."""
+        transformers = pytest.importorskip("transformers")
+        _require_transformers_5(transformers)
+        config_cls = _get_transformers_class(transformers, "DeepseekV3Config", "DeepSeekV3Config")
+        model_cls = _get_transformers_class(transformers, "DeepseekV3ForCausalLM", "DeepSeekV3ForCausalLM")
+
+        torch.manual_seed(1234)
+        config = config_cls(
+            vocab_size=64,
+            hidden_size=32,
+            intermediate_size=64,
+            num_hidden_layers=1,
+            num_attention_heads=4,
+            num_key_value_heads=2,
+            max_position_embeddings=64,
+            first_k_dense_replace=0,
+            moe_layer_freq=1,
+            moe_intermediate_size=16,
+            n_routed_experts=4,
+            n_shared_experts=0,
+            num_experts_per_tok=2,
+            norm_topk_prob=True,
+            scoring_func="sigmoid",
+            routed_scaling_factor=1.0,
+            n_group=2,
+            topk_group=1,
+            output_router_logits=False,
+            tie_word_embeddings=False,
+            use_cache=False,
+        )
+        native_model = model_cls(config)
+        autoep_model = model_cls(config)
+        autoep_model.load_state_dict(copy.deepcopy(native_model.state_dict()))
+
+        autoep_config = parse_autoep_config({
+            "enabled": True,
+            "autoep_size": 1,
+            "preset_model": "deepseek_v3",
+            "use_grouped_mm": False,
+        })
+        auto_ep = AutoEP(autoep_model, autoep_config)
+        specs = auto_ep.ep_parser()
+        assert len(specs) == 1
+        assert specs[0].model_family == "deepseek_v3"
+        assert specs[0].num_expert_groups == 2
+        assert specs[0].num_limited_groups == 1
+        for spec in specs:
+            auto_ep.replace_moe_layer(spec, ep_size=1, ep_rank=0)
+
+        autoep_layers = [module for module in autoep_model.modules() if isinstance(module, AutoEPMoELayer)]
+        assert len(autoep_layers) == 1
+        assert autoep_layers[0].load_balance_coeff is None
+        assert autoep_layers[0].expert_bias is None
 
         input_ids = torch.tensor([[1, 5, 7, 9, 11]], dtype=torch.long)
         labels = input_ids.clone()

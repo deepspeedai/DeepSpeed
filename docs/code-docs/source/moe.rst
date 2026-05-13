@@ -14,7 +14,8 @@ with EP-enabled versions, requiring zero model code changes. It follows the
 pattern of AutoTP (Automatic Tensor Parallelism).
 
 **Supported models:** Mixtral, Qwen3-MoE, DeepSeek-V2, DeepSeek-V3, LLaMA-4
-(via built-in presets).
+(via built-in presets). DeepSeek-V2 and DeepSeek-V3 forward parity is validated
+with Transformers 5.x with AutoEP load-balance expert bias disabled.
 
 **ZeRO compatibility:** Stages 0, 1, and 2. Stage 3 is not supported.
 
@@ -47,3 +48,6 @@ pattern of AutoTP (Automatic Tensor Parallelism).
   for functional testing on a single GPU.
 - AutoTP and sequence parallelism cannot both be active simultaneously.
 - Checkpoint save/load requires matching ``autoep_size``.
+- DeepSeek-V2 and DeepSeek-V3 AutoEP do not support load-balance expert bias
+  yet. The built-in DeepSeek presets disable it by default; explicit non-null
+  values fail.

@@ -893,6 +893,8 @@ Configure AutoEP expert parallelism for MoE models. AutoEP automatically detects
 | -------------------------------------------------------------------------------------------------------------------------------------- | ------- |
 | Built-in model preset for MoE detection: `mixtral`, `qwen3_moe`, `deepseek_v2`, `deepseek_v3`, `llama4`. Determines router, expert, and weight naming patterns. | `null`  |
 
+DeepSeek-V2 and DeepSeek-V3 forward parity is validated with Transformers 5.x with AutoEP load-balance expert bias disabled.
+
 ***use_grouped_mm***: [boolean]
 
 | Description                                                                                    | Default |
@@ -969,7 +971,7 @@ Configure AutoEP expert parallelism for MoE models. AutoEP automatically detects
 
 | Description                                                                                          | Default |
 | ---------------------------------------------------------------------------------------------------- | ------- |
-| Coefficient for auxiliary-loss-free load balancing via expert bias. Set to `null` to disable.        | `1e-3`  |
+| Coefficient for auxiliary-loss-free load balancing via expert bias. Set to `null` to disable. DeepSeek-V2 and DeepSeek-V3 presets disable it by default for validated parity and reject explicit non-null values while expert bias is unsupported. | `1e-3`  |
 
 ***expert_w1***: [string]
 

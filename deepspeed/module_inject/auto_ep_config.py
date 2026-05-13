@@ -43,6 +43,9 @@ class MoEModelPreset:
     shared_experts_pattern: str = ""
     shared_experts_gate_pattern: str = ""
     autoep_config_defaults: dict[str, Any] = field(default_factory=dict)
+    supports_expert_bias: bool = True
+    unsupported_router_bias_names: tuple[str, ...] = ()
+    preset_adapter: str = "default"
 
 
 @dataclass
@@ -72,6 +75,15 @@ class MoELayerSpec:
     has_shared_experts: bool
     shared_experts_name: str
     shared_experts_gate_name: str = ""
+    route_scale: float = 1.0
+    num_expert_groups: int | None = None
+    num_limited_groups: int | None = None
+    group_score_func: Literal["max", "top2_sum"] = "top2_sum"
+    supports_expert_bias: bool = True
+    unsupported_router_bias_names: tuple[str, ...] = ()
+    preset_adapter: str = "default"
+    router_logits_capture_mode: Literal["raw", "post_score"] = "post_score"
+    moe_output_shape: Literal["batched", "flat"] = "batched"
 
 
 @dataclass
@@ -190,6 +202,7 @@ PRESET_MODELS: dict[str, MoEModelPreset] = {
         has_shared_experts=True,
         shared_experts_pattern="shared_expert",
         shared_experts_gate_pattern="shared_expert_gate",
+        preset_adapter="qwen3_5_moe",
     ),
     "deepseek_v2":
     MoEModelPreset(
@@ -204,10 +217,13 @@ PRESET_MODELS: dict[str, MoEModelPreset] = {
         top_k_attr="num_experts_per_tok",
         score_func="softmax",
         score_apply="post",
-        route_norm=True,
+        route_norm=False,
         gate_bias=False,
         has_shared_experts=True,
         shared_experts_pattern="shared_experts",
+        autoep_config_defaults={"load_balance_coeff": None},
+        supports_expert_bias=False,
+        preset_adapter="deepseek_v2",
     ),
     "deepseek_v3":
     MoEModelPreset(
@@ -226,6 +242,10 @@ PRESET_MODELS: dict[str, MoEModelPreset] = {
         gate_bias=False,
         has_shared_experts=True,
         shared_experts_pattern="shared_experts",
+        autoep_config_defaults={"load_balance_coeff": None},
+        supports_expert_bias=False,
+        unsupported_router_bias_names=("e_score_correction_bias", ),
+        preset_adapter="deepseek_v3",
     ),
     "llama4":
     MoEModelPreset(
@@ -245,6 +265,7 @@ PRESET_MODELS: dict[str, MoEModelPreset] = {
         has_shared_experts=True,
         shared_experts_pattern="shared_expert",
         autoep_config_defaults={"load_balance_coeff": None},
+        preset_adapter="llama4",
     ),
 }
 
@@ -425,6 +446,9 @@ def validate_autoep_config(
     if isinstance(config.top_k, int) and config.top_k_attr is not None:
         logger.warning("top_k is explicitly set; top_k_attr will be ignored.")
 
+    if config.routed_scaling_factor != "auto" and not isinstance(config.routed_scaling_factor, (int, float)):
+        raise ValueError("routed_scaling_factor must be a number or 'auto'")
+
     # Validate shared expert field pairing
     if config.has_shared_experts is True and not config.shared_experts_pattern:
         logger.warning("has_shared_experts=True but shared_experts_pattern is not set. "
@@ -495,11 +519,21 @@ def validate_autoep_post_detection(
                              f"autoep_size={config.autoep_size}. "
                              f"Suggested autoep_size values: {valid_sizes}")
 
+        num_expert_groups = spec.num_expert_groups if spec.num_expert_groups is not None else config.num_expert_groups
+        num_limited_groups = spec.num_limited_groups if spec.num_limited_groups is not None else config.num_limited_groups
+
         # Validate num_expert_groups divides num_experts
-        if config.num_expert_groups is not None:
-            if spec.num_experts % config.num_expert_groups != 0:
-                raise ValueError(f"num_expert_groups ({config.num_expert_groups}) must divide "
+        if num_expert_groups is not None:
+            if spec.num_experts % num_expert_groups != 0:
+                raise ValueError(f"num_expert_groups ({num_expert_groups}) must divide "
                                  f"num_experts ({spec.num_experts}) in layer "
+                                 f"'{spec.moe_module_name}'")
+            if num_limited_groups is None:
+                raise ValueError(f"num_limited_groups must be set when num_expert_groups is set "
+                                 f"in layer '{spec.moe_module_name}'")
+            if num_limited_groups > num_expert_groups:
+                raise ValueError(f"num_limited_groups ({num_limited_groups}) must be <= "
+                                 f"num_expert_groups ({num_expert_groups}) in layer "
                                  f"'{spec.moe_module_name}'")
 
 
