@@ -2,7 +2,7 @@
 
 End-to-end example for the SDMA fast-path inside
 `TorchBackend.all_gather_into_tensor`.  When the runtime is AMD/ROCm,
-the `mori` package is importable, and the user opts in via
+the [`mori`](https://github.com/ROCm/mori) package is importable, and the user opts in via
 `DS_SDMA_ALLGATHER=1`, `deepspeed.comm` acquires the SDMA backend at
 `init_distributed()` time and routes WORLD-group
 `all_gather_into_tensor` calls through `mori_cpp.AllGatherIntoTensor`
