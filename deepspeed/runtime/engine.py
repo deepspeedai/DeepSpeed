@@ -3674,7 +3674,9 @@ class DeepSpeedEngine(Module):
             # Pipeline parallelism uses this to load its own checkpoint files.
             self._curr_ckpt_path = os.path.join(load_dir, tag)
 
-        if self.has_moe_layers:
+        # Universal Checkpoint restores parameters from the zero/ layout, so
+        # do not require regular MoE expert checkpoint files in that path.
+        if self.has_moe_layers and not self.load_universal_checkpoint():
             # print(checkpoint.keys())
             old_moe_load = False
             if not isinstance(checkpoint['num_experts'], list):
