@@ -92,9 +92,11 @@ _TRUTHY = {"1", "true", "True", "TRUE", "yes", "Yes", "YES", "on", "On", "ON"}
 def _is_enabled_by_env() -> bool:
     """User must explicitly opt in via ``DS_SDMA_ALLGATHER=1``.
 
-    Default is off even when mori is installed: SDMA is a hardware-specific
-    fast-path and users may want bit-identical RCCL behaviour, or A/B
-    baseline comparisons, without having to uninstall mori.
+    Default is off even when mori happens to be importable: mori is an
+    external dependency and we don't want DeepSpeed's collective backend
+    to silently change behaviour based on which extra packages are
+    installed.  Keeping this opt-in also makes A/B baselines against the
+    stock RCCL path trivial without having to uninstall mori.
     """
     return os.environ.get("DS_SDMA_ALLGATHER", "0") in _TRUTHY
 
