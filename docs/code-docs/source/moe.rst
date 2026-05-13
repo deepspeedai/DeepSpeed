@@ -47,3 +47,8 @@ pattern of AutoTP (Automatic Tensor Parallelism).
   for functional testing on a single GPU.
 - AutoTP and sequence parallelism cannot both be active simultaneously.
 - Checkpoint save/load requires matching ``autoep_size``.
+  To change ``autoep_size`` across runs for the same AutoEP-detected model
+  topology, convert the checkpoint to Universal Checkpoint format and load it
+  with ``checkpoint.load_universal``; see the
+  `Universal Checkpointing tutorial </tutorials/universal-checkpointing/>`__
+  for the detailed flow and constraints.
