@@ -19,14 +19,58 @@ pattern of AutoTP (Automatic Tensor Parallelism).
 (LLaMA-4).
 
 The preset name means AutoEP knows the router, expert, and weight naming
-patterns for that model family. Running a HuggingFace model still requires an
-installed Transformers build that exposes the corresponding config/model
-classes and ``model.config.model_type`` value. For example, the
-``qwen3_5_moe`` preset is available in AutoEP, but Qwen3.5-MoE models require
-Transformers Qwen3.5-MoE support, including the ``qwen3_5_moe`` and
-``qwen3_5_moe_text`` config model types; older Transformers builds that do not
-expose those classes must be upgraded or used with another supported
-preset/model.
+patterns for that model family. Running a HuggingFace model also requires a
+Transformers build that exposes the matching config/model classes,
+``model.config.model_type`` value, and fused expert layout.
+
+The compatibility table below records the tiny HuggingFace smoke coverage used
+for this AutoEP surface. ``Forward parity`` means a one-layer CPU CausalLM smoke
+matched native HuggingFace logits and loss after AutoEP replacement. ``Replace``
+means detection and replacement succeeded, but this smoke did not establish
+end-to-end forward parity.
+
+.. list-table:: AutoEP preset compatibility by Transformers version
+   :header-rows: 1
+
+   * - Preset
+     - Minimum Transformers version
+     - Smoke status
+     - Notes
+   * - ``mixtral``
+     - ``5.0.0``
+     - Forward parity
+     - ``4.48.0`` through ``4.57.6`` expose the classes but do not match the
+       preset's fused expert layout.
+   * - ``qwen2_moe``
+     - ``5.0.0``
+     - Forward parity
+     - ``4.48.0`` through ``4.57.6`` expose Qwen2-MoE classes but use a
+       structure that AutoEP does not detect with this preset.
+   * - ``qwen3_moe``
+     - ``5.0.0``
+     - Forward parity
+     - Qwen3-MoE classes appear in ``4.51.3``, but ``4.x`` builds tested here
+       do not match the preset's fused expert layout.
+   * - ``qwen3_5_moe``
+     - ``5.2.0``
+     - Forward parity
+     - Requires the Qwen3.5 text-backbone ``qwen3_5_moe_text`` model type;
+       earlier builds tested here do not expose the required classes.
+   * - ``deepseek_v2``
+     - ``5.0.0``
+     - Replace
+     - ``4.54.1`` and ``4.57.6`` expose classes but do not match the preset;
+       forward parity was not established by this smoke.
+   * - ``deepseek_v3``
+     - ``5.0.0``
+     - Replace
+     - ``4.51.3`` through ``4.57.6`` expose classes but do not match the
+       preset; forward parity was not established by this smoke.
+   * - ``llama4``
+     - ``5.0.0``
+     - Forward parity
+     - Some ``4.x`` builds pass the tiny smoke, but ``4.51.3`` and ``4.54.1``
+       did not; use ``5.0.0`` or newer for the validated path.
 
 **ZeRO compatibility:** Stages 0, 1, and 2. Stage 3 is not supported.
 

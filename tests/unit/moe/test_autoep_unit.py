@@ -7,6 +7,8 @@
 import copy
 from pathlib import Path
 
+from packaging.version import Version
+
 import pytest
 import torch
 import torch.nn as nn
@@ -1338,6 +1340,8 @@ class TestAutoEPMoELayerUnit:
         transformers = pytest.importorskip("transformers")
         if not hasattr(transformers, "Qwen2MoeConfig") or not hasattr(transformers, "Qwen2MoeForCausalLM"):
             pytest.skip("Installed transformers does not expose Qwen2MoeConfig/Qwen2MoeForCausalLM")
+        if Version(transformers.__version__) < Version("5.0.0"):
+            pytest.skip("Qwen2 MoE AutoEP preset requires Transformers >= 5.0.0 for the fused expert layout")
 
         torch.manual_seed(1234)
         config = transformers.Qwen2MoeConfig(
@@ -1370,12 +1374,7 @@ class TestAutoEPMoELayerUnit:
             "use_grouped_mm": False,
         })
         auto_ep = AutoEP(autoep_model, autoep_config)
-        try:
-            specs = auto_ep.ep_parser()
-        except ValueError as exc:
-            if "no MoE layers detected" in str(exc):
-                pytest.skip(f"Installed transformers Qwen2 MoE structure is not compatible with AutoEP: {exc}")
-            raise
+        specs = auto_ep.ep_parser()
         assert len(specs) == 1
         assert specs[0].model_family == "qwen2_moe"
         assert specs[0].has_shared_experts is True
@@ -1403,6 +1402,8 @@ class TestAutoEPMoELayerUnit:
         transformers = pytest.importorskip("transformers")
         if not hasattr(transformers, "Qwen3MoeConfig") or not hasattr(transformers, "Qwen3MoeForCausalLM"):
             pytest.skip("Installed transformers does not expose Qwen3MoeConfig/Qwen3MoeForCausalLM")
+        if Version(transformers.__version__) < Version("5.0.0"):
+            pytest.skip("Qwen3 MoE AutoEP preset requires Transformers >= 5.0.0 for the fused expert layout")
 
         torch.manual_seed(1234)
         config = transformers.Qwen3MoeConfig(
@@ -1463,6 +1464,8 @@ class TestAutoEPMoELayerUnit:
         transformers = pytest.importorskip("transformers")
         required = ("Qwen3_5MoeTextConfig", "Qwen3_5MoeForCausalLM")
         missing = [name for name in required if not hasattr(transformers, name)]
+        if Version(transformers.__version__) < Version("5.2.0"):
+            pytest.skip("Qwen3.5 MoE AutoEP preset requires Transformers >= 5.2.0")
         if missing:
             pytest.skip(f"Installed transformers does not expose Qwen3.5 MoE classes: {missing}")
 
@@ -1528,6 +1531,8 @@ class TestAutoEPMoELayerUnit:
         if not hasattr(transformers, "Llama4ForCausalLM") or not hasattr(transformers, "Llama4TextConfig"):
             pytest.skip("Installed transformers does not expose Llama4ForCausalLM/Llama4TextConfig")
 
+        if Version(transformers.__version__) < Version("5.0.0"):
+            pytest.skip("Llama4 AutoEP preset is validated against Transformers >= 5.0.0")
         torch.manual_seed(1234)
         config = transformers.Llama4TextConfig(
             vocab_size=64,
@@ -1588,6 +1593,8 @@ class TestAutoEPMoELayerUnit:
         if not hasattr(transformers, "Llama4ForCausalLM") or not hasattr(transformers, "Llama4TextConfig"):
             pytest.skip("Installed transformers does not expose Llama4ForCausalLM/Llama4TextConfig")
 
+        if Version(transformers.__version__) < Version("5.0.0"):
+            pytest.skip("Llama4 AutoEP preset is validated against Transformers >= 5.0.0")
         torch.manual_seed(1234)
         config = transformers.Llama4TextConfig(
             vocab_size=64,

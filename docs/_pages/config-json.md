@@ -895,10 +895,22 @@ Configure AutoEP expert parallelism for MoE models. AutoEP automatically detects
 
 Built-in AutoEP presets describe DeepSpeed's router/expert/weight-pattern support for a model family.
 Running a HuggingFace model also requires the installed Transformers package to expose the corresponding
-config/model classes and `model.config.model_type` value. For example, `qwen3_5_moe` is an AutoEP preset,
-but Qwen3.5-MoE models require a Transformers build with Qwen3.5-MoE support, including the
-`qwen3_5_moe` and `qwen3_5_moe_text` model types. Upgrade Transformers or select a preset/model supported
-by the installed Transformers version if those classes or model types are unavailable.
+config/model classes, `model.config.model_type` value, and fused expert layout. The tiny HuggingFace
+smoke coverage used for this AutoEP surface produced the following version gates:
+
+| Preset | Minimum Transformers version | Smoke status | Notes |
+| ------ | ---------------------------- | ------------ | ----- |
+| `mixtral` | `5.0.0` | Forward parity | `4.48.0` through `4.57.6` expose classes but do not match the fused expert layout. |
+| `qwen2_moe` | `5.0.0` | Forward parity | `4.48.0` through `4.57.6` expose Qwen2-MoE classes but use a structure AutoEP does not detect with this preset. |
+| `qwen3_moe` | `5.0.0` | Forward parity | Qwen3-MoE classes appear in `4.51.3`, but `4.x` builds tested here do not match the fused expert layout. |
+| `qwen3_5_moe` | `5.2.0` | Forward parity | Requires the Qwen3.5 text-backbone `qwen3_5_moe_text` model type; earlier builds tested here do not expose the required classes. |
+| `deepseek_v2` | `5.0.0` | Replace | `4.54.1` and `4.57.6` expose classes but do not match the preset; forward parity was not established by this smoke. |
+| `deepseek_v3` | `5.0.0` | Replace | `4.51.3` through `4.57.6` expose classes but do not match the preset; forward parity was not established by this smoke. |
+| `llama4` | `5.0.0` | Forward parity | Some `4.x` builds pass the tiny smoke, but `4.51.3` and `4.54.1` did not; use `5.0.0` or newer for the validated path. |
+
+`Forward parity` means a one-layer CPU CausalLM smoke matched native HuggingFace logits and loss after
+AutoEP replacement. `Replace` means detection and replacement succeeded, but this smoke did not establish
+end-to-end forward parity.
 
 ***use_grouped_mm***: [boolean]
 
