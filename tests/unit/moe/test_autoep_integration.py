@@ -102,6 +102,7 @@ def _make_autoep_config(zero_stage=0, ep_size=2):
             "enabled": True,
             "autoep_size": ep_size,
             "preset_model": "mixtral",
+            "use_grouped_mm": False,
         },
         "zero_optimization": {
             "stage": zero_stage,

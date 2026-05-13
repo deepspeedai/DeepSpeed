@@ -88,6 +88,7 @@ def _make_autoep_zero2_config(clip_grad, ep_size):
         "autoep_size": ep_size,
         "preset_model": "mixtral",
         "load_balance_coeff": None,
+        "use_grouped_mm": False,
     }
     return config
 

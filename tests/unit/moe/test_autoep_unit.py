@@ -49,6 +49,11 @@ from deepspeed.module_inject.auto_ep_presets.registry import (
 _UNSUPPORTED_LOAD_BALANCE_VALUES = [0, 0.0, 1e-3, 0.02, False, True, "1e-3", [1e-3], {"coeff": 1e-3}]
 
 
+def _autoep_runtime_config(**kwargs):
+    kwargs.setdefault("use_grouped_mm", False)
+    return AutoEPConfig(**kwargs)
+
+
 def _assert_load_balance_coeff_rejection_message(exc: BaseException, value: object) -> None:
     text = str(exc)
     for needle in ("load_balance_coeff", "expert_bias", "not supported", "null", "omit"):
@@ -1052,6 +1057,7 @@ class TestMoEDetection:
             "enabled": True,
             "autoep_size": 1,
             "preset_model": "llama4",
+            "use_grouped_mm": False,
         })
         auto_ep = AutoEP(model, config)
         specs = auto_ep.ep_parser()
@@ -1080,6 +1086,7 @@ class TestMoEDetection:
         config = parse_autoep_config({
             "enabled": True,
             "autoep_size": 1,
+            "use_grouped_mm": False,
         })
         auto_ep = AutoEP(model, config)
         specs = auto_ep.ep_parser()
@@ -1211,6 +1218,7 @@ class TestMoEDetection:
             "autoep_size": 1,
             "preset_model": preset_model,
             "top_k": 2,
+            "use_grouped_mm": False,
         })
         auto_ep = AutoEP(model, config)
         specs = auto_ep.ep_parser()
@@ -1385,7 +1393,7 @@ class TestMoEDetection:
         """replace_moe_layer creates AutoEPMoELayer replacement."""
         from deepspeed.module_inject.auto_ep_layer import AutoEPMoELayer as _AutoEPMoELayer
         model = MockMoETransformer(num_layers=2, moe_every_n=1)
-        config = AutoEPConfig(enabled=True, autoep_size=1, preset_model="mixtral")
+        config = _autoep_runtime_config(enabled=True, autoep_size=1, preset_model="mixtral")
         auto_ep = AutoEP(model, config)
         specs = auto_ep.ep_parser()
         auto_ep.replace_moe_layer(specs[0], ep_size=1, ep_rank=0)
@@ -1844,7 +1852,7 @@ class TestParamMarking:
     def test_param_marking_expert(self):
         source = MockMoEBlock(num_experts=4, ffn_hidden=128, hidden_size=64)
         spec = _make_spec()
-        config = AutoEPConfig(enabled=True, autoep_size=1)
+        config = _autoep_runtime_config(enabled=True, autoep_size=1)
         layer = AutoEPMoELayer(spec, source, ep_size=1, ep_rank=0, config=config)
         for p in layer.experts.parameters():
             assert hasattr(p, 'allreduce') and p.allreduce is False
@@ -1853,7 +1861,7 @@ class TestParamMarking:
     def test_param_marking_router(self):
         source = MockMoEBlock(num_experts=4, ffn_hidden=128, hidden_size=64)
         spec = _make_spec()
-        config = AutoEPConfig(enabled=True, autoep_size=1)
+        config = _autoep_runtime_config(enabled=True, autoep_size=1)
         layer = AutoEPMoELayer(spec, source, ep_size=1, ep_rank=0, config=config)
         for p in layer.router.parameters():
             assert hasattr(p, 'allreduce') and p.allreduce is True
@@ -1879,7 +1887,7 @@ class TestAutoEPMoELayerUnit:
     def test_autoep_layer_marker_attribute(self):
         source = MockMoEBlock(num_experts=4, ffn_hidden=128, hidden_size=64)
         spec = _make_spec()
-        config = AutoEPConfig(enabled=True, autoep_size=1)
+        config = _autoep_runtime_config(enabled=True, autoep_size=1)
         layer = AutoEPMoELayer(spec, source, ep_size=1, ep_rank=0, config=config)
         assert layer._is_autoep_layer is True
 
@@ -1920,7 +1928,7 @@ class TestAutoEPMoELayerUnit:
     def test_autoep_layer_uses_spec_route_scale(self):
         source = MockMoEBlock(num_experts=4, ffn_hidden=128, hidden_size=64)
         spec = _make_spec(route_scale=2.5)
-        config = AutoEPConfig(enabled=True, autoep_size=1, route_scale=1.7)
+        config = _autoep_runtime_config(enabled=True, autoep_size=1, route_scale=1.7)
 
         layer = AutoEPMoELayer(spec, source, ep_size=1, ep_rank=0, config=config)
 
@@ -1930,7 +1938,7 @@ class TestAutoEPMoELayerUnit:
         torch.manual_seed(42)
         source = MockMoEBlock(num_experts=4, ffn_hidden=128, hidden_size=64)
         spec = _make_spec()
-        config = AutoEPConfig(enabled=True, autoep_size=1)
+        config = _autoep_runtime_config(enabled=True, autoep_size=1)
         layer = AutoEPMoELayer(spec, source, ep_size=1, ep_rank=0, config=config)
         x = torch.randn(2, 8, 64)
         out = layer(x)
@@ -1939,7 +1947,7 @@ class TestAutoEPMoELayerUnit:
 
     def test_autoep_layer_replace_in_model(self):
         model = MockMoETransformer(num_layers=2, moe_every_n=1)
-        config = AutoEPConfig(enabled=True, autoep_size=1, preset_model="mixtral")
+        config = _autoep_runtime_config(enabled=True, autoep_size=1, preset_model="mixtral")
         auto_ep = AutoEP(model, config)
         specs = auto_ep.ep_parser()
         assert len(specs) == 2
@@ -2548,7 +2556,7 @@ class TestEngineAutoEPConfig:
         """AutoEPMoELayer has set_deepspeed_parallelism for engine traversal."""
         source = MockMoEBlock(num_experts=4, ffn_hidden=128, hidden_size=64)
         spec = _make_spec()
-        config = AutoEPConfig(enabled=True, autoep_size=1)
+        config = _autoep_runtime_config(enabled=True, autoep_size=1)
         layer = AutoEPMoELayer(spec, source, ep_size=1, ep_rank=0, config=config)
         assert hasattr(layer, 'set_deepspeed_parallelism')
         assert callable(layer.set_deepspeed_parallelism)
@@ -2557,7 +2565,7 @@ class TestEngineAutoEPConfig:
         """AutoEPMoELayer exposes num_experts for engine MoE detection."""
         source = MockMoEBlock(num_experts=4, ffn_hidden=128, hidden_size=64)
         spec = _make_spec()
-        config = AutoEPConfig(enabled=True, autoep_size=1)
+        config = _autoep_runtime_config(enabled=True, autoep_size=1)
         layer = AutoEPMoELayer(spec, source, ep_size=1, ep_rank=0, config=config)
         assert layer.num_experts == 4
 
@@ -2569,7 +2577,7 @@ class TestEngineAutoEPConfig:
             router_logits_capture_target="router",
             router_logits_capture_layer_name=None,
         )
-        config = AutoEPConfig(enabled=True, autoep_size=1)
+        config = _autoep_runtime_config(enabled=True, autoep_size=1)
         layer = AutoEPMoELayer(spec, source, ep_size=1, ep_rank=0, config=config)
         assert hasattr(layer, 'gate')
         assert layer.gate is layer.router
@@ -2583,7 +2591,7 @@ class TestEngineAutoEPConfig:
             router_logits_capture_target="router",
             router_logits_capture_layer_name="gate",
         )
-        config = AutoEPConfig(enabled=True, autoep_size=1)
+        config = _autoep_runtime_config(enabled=True, autoep_size=1)
         layer = AutoEPMoELayer(spec, source, ep_size=1, ep_rank=0, config=config)
         assert hasattr(layer, 'gate')
         assert layer.gate is layer.router
@@ -2597,7 +2605,7 @@ class TestEngineAutoEPConfig:
             router_logits_capture_target="router",
             router_logits_capture_layer_name=None,
         )
-        config = AutoEPConfig(enabled=True, autoep_size=1)
+        config = _autoep_runtime_config(enabled=True, autoep_size=1)
         layer = AutoEPMoELayer(spec, source, ep_size=1, ep_rank=0, config=config)
         assert not hasattr(layer, 'gate')
 
@@ -2609,7 +2617,7 @@ class TestEngineAutoEPConfig:
             router_logits_capture_target="none",
             router_logits_capture_layer_name="gate",
         )
-        config = AutoEPConfig(enabled=True, autoep_size=1)
+        config = _autoep_runtime_config(enabled=True, autoep_size=1)
         layer = AutoEPMoELayer(spec, source, ep_size=1, ep_rank=0, config=config)
         # No gate alias because capture_target != "router"
         assert not hasattr(layer, 'gate')

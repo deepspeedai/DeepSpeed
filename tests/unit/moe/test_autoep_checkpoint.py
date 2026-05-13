@@ -135,6 +135,7 @@ def _make_autoep_config(zero_stage=0, ep_size=1, load_balance_coeff=_UNSET):
             "enabled": True,
             "autoep_size": ep_size,
             "preset_model": "mixtral",
+            "use_grouped_mm": False,
         },
         "zero_optimization": {
             "stage": zero_stage,
