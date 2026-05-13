@@ -50,7 +50,7 @@ entirely by env vars.
 | **SDMA off (RCCL)** | 697.7 ms / step (11.6 samples/s) | 1402.5 ms / step (5841 tok/s) |
 | **SDMA on (this PR)** | **622.0 ms / step (13.0 samples/s)** | **1263.2 ms / step (6486 tok/s)** |
 | **gain** | **+10.85 %** | **+9.93 %** |
-| peak mem (rank 0) | unchanged off ↔ on | 96.45 GB, unchanged off ↔ on |
+| peak mem (rank 0) | 12.12 GB, unchanged off ↔ on | 96.45 GB, unchanged off ↔ on |
 
 The Qwen3-32B number is averaged over two fresh rounds; per-round delta
 was +10.85 % and +9.92 %, with 0.29 % run-to-run variance on the off
