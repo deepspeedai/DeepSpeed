@@ -46,6 +46,11 @@ class MoEModelPreset:
     supports_expert_bias: bool = True
     unsupported_router_bias_names: tuple[str, ...] = ()
     preset_adapter: str = "default"
+    hf_model_types: tuple[str, ...] = ()
+    unsupported_hf_model_type_notes: dict[str, str] = field(default_factory=dict)
+    min_transformers_version: str | None = None
+    validated_transformers_versions: str = ""
+    docs_support_notes: str = ""
 
 
 @dataclass
@@ -146,6 +151,8 @@ PRESET_MODELS: dict[str, MoEModelPreset] = {
         score_apply="post",
         route_norm=True,
         gate_bias=False,
+        hf_model_types=("mixtral", ),
+        min_transformers_version="5.0.0",
     ),
     "qwen3_moe":
     MoEModelPreset(
@@ -164,25 +171,11 @@ PRESET_MODELS: dict[str, MoEModelPreset] = {
         gate_bias=False,
         has_shared_experts=True,
         shared_experts_pattern="shared_expert",
-    ),
-    "qwen2_moe":
-    MoEModelPreset(
-        moe_layer_pattern=r"model\.layers\.\d+\.mlp",
-        router_pattern="gate",
-        experts_pattern="experts",
-        expert_storage="fused_3d",
-        expert_w1="gate_up_proj",
-        expert_w2="down_proj",
-        expert_w3=None,
-        num_experts_attr="num_experts",
-        top_k_attr="num_experts_per_tok",
-        score_func="softmax",
-        score_apply="post",
-        route_norm=True,
-        gate_bias=False,
-        has_shared_experts=True,
-        shared_experts_pattern="shared_expert",
         shared_experts_gate_pattern="shared_expert_gate",
+        hf_model_types=("qwen3_moe", "qwen2_moe"),
+        min_transformers_version="5.0.0",
+        docs_support_notes=("Also covers Qwen2-MoE when the installed Transformers build uses the "
+                            "validated fused expert layout."),
     ),
     "qwen3_5_moe":
     MoEModelPreset(
@@ -203,6 +196,13 @@ PRESET_MODELS: dict[str, MoEModelPreset] = {
         shared_experts_pattern="shared_expert",
         shared_experts_gate_pattern="shared_expert_gate",
         preset_adapter="qwen3_5_moe",
+        hf_model_types=("qwen3_5_moe_text", ),
+        unsupported_hf_model_type_notes={
+            "qwen3_5_moe": ("AutoEP supports the Qwen3.5 text backbone preset path; pass the "
+                            "text-backbone model/config with model_type='qwen3_5_moe_text'.")
+        },
+        min_transformers_version="5.2.0",
+        docs_support_notes="Requires the Qwen3.5 text-backbone qwen3_5_moe_text model type.",
     ),
     "deepseek_v2":
     MoEModelPreset(
@@ -224,6 +224,10 @@ PRESET_MODELS: dict[str, MoEModelPreset] = {
         autoep_config_defaults={"load_balance_coeff": None},
         supports_expert_bias=False,
         preset_adapter="deepseek_v2",
+        hf_model_types=("deepseek_v2", ),
+        min_transformers_version="5.0.0",
+        docs_support_notes=("load_balance_coeff / expert-bias auxiliary-loss-free load balancing "
+                            "is not currently supported; non-null values are rejected."),
     ),
     "deepseek_v3":
     MoEModelPreset(
@@ -246,6 +250,10 @@ PRESET_MODELS: dict[str, MoEModelPreset] = {
         supports_expert_bias=False,
         unsupported_router_bias_names=("e_score_correction_bias", ),
         preset_adapter="deepseek_v3",
+        hf_model_types=("deepseek_v3", ),
+        min_transformers_version="5.0.0",
+        docs_support_notes=("load_balance_coeff / expert-bias auxiliary-loss-free load balancing "
+                            "is not currently supported; non-null values are rejected."),
     ),
     "llama4":
     MoEModelPreset(
@@ -266,6 +274,8 @@ PRESET_MODELS: dict[str, MoEModelPreset] = {
         shared_experts_pattern="shared_expert",
         autoep_config_defaults={"load_balance_coeff": None},
         preset_adapter="llama4",
+        hf_model_types=("llama4", "llama4_text"),
+        min_transformers_version="5.0.0",
     ),
 }
 

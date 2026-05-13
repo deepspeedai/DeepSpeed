@@ -49,6 +49,27 @@ def _remove_transformers_output_capture_hooks(model: nn.Module) -> int:
     return removed
 
 
+def _preset_name_for_hf_model_type(model_type: str) -> str | None:
+    for preset_name, preset in PRESET_MODELS.items():
+        if model_type in preset.hf_model_types:
+            return preset_name
+    return None
+
+
+def _unsupported_preset_for_hf_model_type(model_type: str) -> tuple[str, MoEModelPreset] | None:
+    for preset_name, preset in PRESET_MODELS.items():
+        if model_type in preset.unsupported_hf_model_type_notes:
+            return preset_name, preset
+    return None
+
+
+def _is_known_hf_model_type(model_type: str | None) -> bool:
+    if model_type is None:
+        return False
+    return (_preset_name_for_hf_model_type(model_type) is not None
+            or _unsupported_preset_for_hf_model_type(model_type) is not None)
+
+
 def _has_3d_expert_params(module: nn.Module, preset: MoEModelPreset) -> bool:
     """Check if module stores expert weights as 3D parameter tensors (transformers 5.0.0+).
 
@@ -413,6 +434,8 @@ class AutoEP:
                              f"experts={num_experts}, top_k={top_k}, storage={storage})")
 
         if not specs:
+            if self._requires_selected_preset_detection():
+                self._raise_no_moe_layers_detected(presets_to_try)
             logger.warning("AutoEP: no MoE layers detected in model.")
 
         return specs
@@ -492,6 +515,35 @@ class AutoEP:
         from dataclasses import replace
         return replace(preset, **overrides)
 
+    def _validate_preset_compatibility(self, preset_name: str, preset: MoEModelPreset) -> None:
+        adapter = get_preset_adapter(preset.preset_adapter)
+        adapter.validate_compatibility(preset_name, preset, self.model_config)
+
+    def _requires_selected_preset_detection(self) -> bool:
+        """Return whether empty detection should fail for the selected preset."""
+        if self.config.preset_model is not None:
+            return True
+        if self.model_config is None:
+            return False
+        model_type = getattr(self.model_config, 'model_type', None)
+        return _is_known_hf_model_type(model_type)
+
+    def _raise_no_moe_layers_detected(self, presets_to_try: list[tuple[str, MoEModelPreset]]) -> None:
+        model_type = getattr(self.model_config, 'model_type', None)
+        if self.config.preset_model is not None:
+            source = f"preset_model='{self.config.preset_model}'"
+        else:
+            source = f"model_type='{model_type}'"
+
+        expected = "; ".join(f"{preset_name}: moe_layer_pattern='{preset.moe_layer_pattern}', "
+                             f"router='{preset.router_pattern}', experts='{preset.experts_pattern}'"
+                             for preset_name, preset in presets_to_try)
+        raise ValueError(f"AutoEP: no MoE layers detected for {source}. "
+                         f"Expected MoE structure for selected preset(s): {expected}. "
+                         "This usually means the selected preset does not match the model implementation, "
+                         "or the installed Transformers version exposes a different structure. Choose a matching "
+                         "preset, upgrade Transformers, or provide custom AutoEP patterns.")
+
     def _resolve_presets(self) -> list[tuple[str, MoEModelPreset]]:
         """Determine which preset(s) to use for detection."""
         if self.config.preset_model is not None:
@@ -499,6 +551,7 @@ class AutoEP:
                 raise ValueError(f"Unknown preset_model '{self.config.preset_model}'. "
                                  f"Available: {list(PRESET_MODELS.keys())}")
             preset = self._apply_config_overrides(PRESET_MODELS[self.config.preset_model])
+            self._validate_preset_compatibility(self.config.preset_model, preset)
             return [(self.config.preset_model, preset)]
 
         # Auto-detect from model_type
@@ -506,21 +559,17 @@ class AutoEP:
             model_type = getattr(self.model_config, 'model_type', None)
             if model_type:
                 # Map HF model_type to preset name
-                type_map = {
-                    'mixtral': 'mixtral',
-                    'qwen3_moe': 'qwen3_moe',
-                    'qwen2_moe': 'qwen2_moe',
-                    'qwen3_5_moe_text': 'qwen3_5_moe',
-                    'deepseek_v2': 'deepseek_v2',
-                    'deepseek_v3': 'deepseek_v3',
-                    'llama4': 'llama4',
-                    'llama4_text': 'llama4',
-                }
-                preset_name = type_map.get(model_type)
+                preset_name = _preset_name_for_hf_model_type(model_type)
                 if preset_name and preset_name in PRESET_MODELS:
                     logger.info(f"AutoEP: auto-detected model_type='{model_type}', using preset '{preset_name}'")
                     preset = self._apply_config_overrides(PRESET_MODELS[preset_name])
+                    self._validate_preset_compatibility(preset_name, preset)
                     return [(preset_name, preset)]
+
+                unsupported_preset = _unsupported_preset_for_hf_model_type(model_type)
+                if unsupported_preset is not None:
+                    preset_name, preset = unsupported_preset
+                    self._validate_preset_compatibility(preset_name, preset)
 
         # If custom patterns are provided, build an ad-hoc preset
         if self.config.moe_layer_pattern:

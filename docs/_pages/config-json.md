@@ -891,9 +891,21 @@ Configure AutoEP expert parallelism for MoE models. AutoEP automatically detects
 
 | Description                                                                                                                            | Default |
 | -------------------------------------------------------------------------------------------------------------------------------------- | ------- |
-| Built-in model preset for MoE detection: `mixtral`, `qwen3_moe`, `deepseek_v2`, `deepseek_v3`, `llama4`. Determines router, expert, and weight naming patterns. | `null`  |
+| Built-in model preset for MoE detection: `mixtral`, `qwen3_moe`, `qwen3_5_moe`, `deepseek_v2`, `deepseek_v3`, `llama4`. Determines router, expert, and weight naming patterns. | `null`  |
 
-DeepSeek-V2 and DeepSeek-V3 forward parity is validated with Transformers 5.x with AutoEP load-balance expert bias disabled.
+Built-in AutoEP presets describe DeepSpeed's router/expert/weight-pattern support for a model family.
+Running a HuggingFace model also requires the installed Transformers package to expose the corresponding
+config/model classes, `model.config.model_type` value, and fused expert layout. The tiny HuggingFace
+smoke coverage used for this AutoEP surface produced the following version gates:
+
+| Preset | Minimum Transformers version | Notes |
+| ------ | ---------------------------- | ----- |
+| `mixtral` | `5.0.0` |  |
+| `qwen3_moe` | `5.0.0` | Also covers Qwen2-MoE when the installed Transformers build uses the validated fused expert layout. Qwen3-MoE classes appear in `4.51.3`, but the tested `4.x` builds do not match the validated AutoEP layout. |
+| `qwen3_5_moe` | `5.2.0` | Requires the Qwen3.5 text-backbone `qwen3_5_moe_text` model type. For performance on Qwen3.5's Gated DeltaNet layers, install optimized kernels; see the [Hugging Face Transformers kernel loading docs](https://huggingface.co/docs/transformers/kernel_doc/loading_kernels) and the [Qwen FlashQLA blog](https://qwen.ai/blog?id=flashqla). |
+| `deepseek_v2` | `5.0.0` | `load_balance_coeff` / expert-bias auxiliary-loss-free load balancing is not currently supported; non-null values are rejected. |
+| `deepseek_v3` | `5.0.0` | `load_balance_coeff` / expert-bias auxiliary-loss-free load balancing is not currently supported; non-null values are rejected. |
+| `llama4` | `5.0.0` |  |
 
 ***use_grouped_mm***: [boolean]
 

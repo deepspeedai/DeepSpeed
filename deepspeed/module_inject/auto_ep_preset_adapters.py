@@ -8,6 +8,7 @@ from dataclasses import dataclass, replace
 from typing import Callable, Literal
 
 import torch.nn as nn
+from packaging.version import InvalidVersion, Version
 
 from deepspeed.module_inject.auto_ep_config import AutoEPConfig, MoELayerSpec, MoEModelPreset
 from deepspeed.utils import logger
@@ -32,6 +33,77 @@ class ForwardContract:
 
 class AutoEPPresetAdapter:
     """Default behavior shared by presets without model-specific parser rules."""
+
+    def validate_compatibility(
+        self,
+        preset_name: str,
+        preset: MoEModelPreset,
+        model_config,
+    ) -> None:
+        """Validate public HF compatibility metadata for a selected preset."""
+        model_type = getattr(model_config, "model_type", None) if model_config is not None else None
+        self._validate_hf_model_type(preset_name, preset, model_type)
+        self._validate_transformers_version(preset_name, preset, model_type)
+
+    def _validate_hf_model_type(
+        self,
+        preset_name: str,
+        preset: MoEModelPreset,
+        model_type: str | None,
+    ) -> None:
+        if model_type is None:
+            return
+
+        unsupported_note = preset.unsupported_hf_model_type_notes.get(model_type)
+        if unsupported_note is None:
+            return
+
+        supported = ", ".join(repr(value) for value in preset.hf_model_types) or "none"
+        raise ValueError(f"AutoEP preset '{preset_name}' does not support model_type='{model_type}'. "
+                         f"{unsupported_note} Supported HF model_type value(s): {supported}.")
+
+    def _validate_transformers_version(
+        self,
+        preset_name: str,
+        preset: MoEModelPreset,
+        model_type: str | None,
+    ) -> None:
+        min_version = preset.min_transformers_version
+        if min_version is None or model_type is None:
+            return
+        if not self._requires_transformers_version_validation():
+            return
+        if model_type not in preset.hf_model_types and model_type not in preset.unsupported_hf_model_type_notes:
+            return
+
+        try:
+            installed_version = self._installed_transformers_version()
+        except Exception as exc:
+            raise ValueError(f"AutoEP preset '{preset_name}' for model_type='{model_type}' requires "
+                             f"Transformers >= {min_version}, but transformers could not be imported: {exc}.") from exc
+
+        try:
+            installed = Version(installed_version)
+            minimum = Version(min_version)
+        except InvalidVersion as exc:
+            raise ValueError(f"AutoEP preset '{preset_name}' for model_type='{model_type}' requires "
+                             f"Transformers >= {min_version}, but the installed Transformers version "
+                             f"'{installed_version}' could not be parsed.") from exc
+
+        if installed < minimum:
+            raise ValueError(f"AutoEP preset '{preset_name}' for model_type='{model_type}' requires "
+                             f"Transformers >= {min_version}, but installed transformers=={installed_version}. "
+                             "Upgrade Transformers or choose a preset/model combination supported by the "
+                             "installed Transformers version.")
+
+    def _installed_transformers_version(self) -> str:
+        import transformers
+        return getattr(transformers, "__version__", "unknown")
+
+    def _requires_transformers_version_validation(self) -> bool:
+        # The default adapter also covers non-HF/mock/custom-compatible configs;
+        # specialized HF-only adapters opt in to minimum Transformers checks.
+        return False
 
     def resolve_route_norm(
         self,
@@ -74,6 +146,9 @@ class AutoEPPresetAdapter:
 class DeepSeekV2PresetAdapter(AutoEPPresetAdapter):
     """DeepSeek-V2 keeps native top-k normalization and optional group-limited routing."""
 
+    def _requires_transformers_version_validation(self) -> bool:
+        return True
+
     def resolve_route_norm(
         self,
         config: AutoEPConfig,
@@ -103,6 +178,9 @@ class DeepSeekV2PresetAdapter(AutoEPPresetAdapter):
 class DeepSeekV3PresetAdapter(AutoEPPresetAdapter):
     """DeepSeek-V3 always carries group-limited routing fields when present."""
 
+    def _requires_transformers_version_validation(self) -> bool:
+        return True
+
     def resolve_group_routing(
         self,
         config: AutoEPConfig,
@@ -118,6 +196,9 @@ class DeepSeekV3PresetAdapter(AutoEPPresetAdapter):
 
 class Qwen35MoePresetAdapter(AutoEPPresetAdapter):
     """Qwen3.5 MoE exposes router logits through HF output recording."""
+
+    def _requires_transformers_version_validation(self) -> bool:
+        return True
 
     def adjust_forward_contract(self, contract: ForwardContract) -> ForwardContract:
         # HF records Qwen3.5 router output on Qwen3_5MoeTopKRouter. AutoEP replaces
