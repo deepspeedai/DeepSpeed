@@ -46,6 +46,15 @@ from deepspeed.module_inject.auto_ep_presets.registry import (
     unsupported_preset_for_hf_model_type,
 )
 
+_UNSUPPORTED_LOAD_BALANCE_VALUES = [0, 0.0, 1e-3, 0.02, False, True, "1e-3", [1e-3], {"coeff": 1e-3}]
+
+
+def _assert_load_balance_coeff_rejection_message(exc: BaseException, value: object) -> None:
+    text = str(exc)
+    for needle in ("load_balance_coeff", "expert_bias", "not supported", "null", "omit"):
+        assert needle in text
+    assert repr(value) in text
+
 
 class TestAutoEPConfig:
     """Phase 1 unit tests for configuration parsing and validation."""
@@ -67,7 +76,8 @@ class TestAutoEPConfig:
         assert config.num_limited_groups is None
         assert config.score_func == "auto"
         assert config.top_k == "auto"
-        assert config.load_balance_coeff == pytest.approx(1e-3)
+        assert config.load_balance_coeff is None
+        assert config._load_balance_coeff_explicit is False
         assert config.routed_scaling_factor == "auto"
         assert config.expert_w1 is None
         assert config.expert_w2 is None
@@ -79,37 +89,36 @@ class TestAutoEPConfig:
         assert config.shared_experts_gate_pattern is None
 
     def test_llama4_preset_default_sets_load_balance_coeff_none(self):
-        """Llama4 preset disables dynamic expert_bias unless the user opts in."""
+        """Llama4 preset remains disabled if the global default flips back."""
         config = parse_autoep_config({"enabled": True, "preset_model": "llama4"})
-        assert config.load_balance_coeff == pytest.approx(1e-3)
+        assert config.load_balance_coeff is None
 
         resolved = resolve_autoep_config_defaults(config, config.preset_model)
 
         assert resolved.load_balance_coeff is None
-        assert config.load_balance_coeff == pytest.approx(1e-3)
+        assert config.load_balance_coeff is None
 
-    def test_llama4_explicit_load_balance_coeff_overrides_preset_default(self):
-        """Explicit user load_balance_coeff survives Llama4 preset resolution."""
-        config = parse_autoep_config({
-            "enabled": True,
-            "preset_model": "llama4",
-            "load_balance_coeff": 0.02,
-        })
-
-        resolved = resolve_autoep_config_defaults(config, config.preset_model)
-
-        assert resolved.load_balance_coeff == pytest.approx(0.02)
+    @pytest.mark.parametrize("enabled", [True, False])
+    @pytest.mark.parametrize("value", _UNSUPPORTED_LOAD_BALANCE_VALUES)
+    def test_explicit_load_balance_coeff_is_rejected_at_parse(self, enabled, value):
+        """Non-None load_balance_coeff is rejected before preset resolution."""
+        with pytest.raises(ValueError) as exc_info:
+            parse_autoep_config({
+                "enabled": enabled,
+                "load_balance_coeff": value,
+            })
+        _assert_load_balance_coeff_rejection_message(exc_info.value, value)
 
     @pytest.mark.parametrize("preset_model", ["deepseek_v2", "deepseek_v3"])
     def test_deepseek_preset_default_sets_load_balance_coeff_none(self, preset_model):
         """DeepSeek presets disable AutoEP expert_bias by default."""
         config = parse_autoep_config({"enabled": True, "preset_model": preset_model})
-        assert config.load_balance_coeff == pytest.approx(1e-3)
+        assert config.load_balance_coeff is None
 
         resolved = resolve_autoep_config_defaults(config, config.preset_model)
 
         assert resolved.load_balance_coeff is None
-        assert config.load_balance_coeff == pytest.approx(1e-3)
+        assert config.load_balance_coeff is None
 
     def test_deepseek_presets_mark_expert_bias_unsupported(self):
         assert PRESET_MODELS["deepseek_v2"].supports_expert_bias is False
@@ -139,7 +148,7 @@ class TestAutoEPConfig:
             "num_limited_groups": 1,
             "score_func": "sigmoid",
             "top_k": 2,
-            "load_balance_coeff": 0.01,
+            "load_balance_coeff": None,
             "routed_scaling_factor": 1.5,
             "expert_w1": "w1",
             "expert_w2": "w2",
@@ -165,7 +174,8 @@ class TestAutoEPConfig:
         assert config.num_limited_groups == 1
         assert config.score_func == "sigmoid"
         assert config.top_k == 2
-        assert config.load_balance_coeff == pytest.approx(0.01)
+        assert config.load_balance_coeff is None
+        assert config._load_balance_coeff_explicit is True
         assert config.routed_scaling_factor == 1.5
         assert config.expert_w1 == "w1"
         assert config.expert_w2 == "w2"
@@ -175,6 +185,35 @@ class TestAutoEPConfig:
         assert config.has_shared_experts is True
         assert config.shared_experts_pattern == "shared_expert"
         assert config.shared_experts_gate_pattern == "shared_expert_gate"
+
+    def test_absent_load_balance_coeff_disables_and_validates(self):
+        config = parse_autoep_config({"enabled": True})
+        assert config.load_balance_coeff is None
+        assert config._load_balance_coeff_explicit is False
+
+        validate_autoep_config(config, world_size=1, pp_size=1, tp_size=1, sp_size=1)
+
+    def test_explicit_null_load_balance_coeff_disables_and_validates(self):
+        config = parse_autoep_config({"enabled": True, "load_balance_coeff": None})
+        assert config.load_balance_coeff is None
+        assert config._load_balance_coeff_explicit is True
+
+        validate_autoep_config(config, world_size=1, pp_size=1, tp_size=1, sp_size=1)
+
+    @pytest.mark.parametrize("enabled", [True, False])
+    @pytest.mark.parametrize("value", [0.01, False, "0.01"])
+    def test_direct_construction_load_balance_coeff_rejected_by_validate(self, enabled, value):
+        config = AutoEPConfig(enabled=enabled, load_balance_coeff=value)
+
+        with pytest.raises(ValueError) as exc_info:
+            validate_autoep_config(config, world_size=1, pp_size=1, tp_size=1, sp_size=1)
+        _assert_load_balance_coeff_rejection_message(exc_info.value, value)
+
+    @pytest.mark.parametrize("enabled", [True, False])
+    def test_direct_construction_null_load_balance_coeff_validates(self, enabled):
+        config = AutoEPConfig(enabled=enabled, load_balance_coeff=None)
+
+        validate_autoep_config(config, world_size=1, pp_size=1, tp_size=1, sp_size=1)
 
     def test_validate_ep_tp_mutual_exclusivity(self):
         """autotp_size>1 + sp_size>1 raises ValueError."""
@@ -958,23 +997,17 @@ class TestMoEDetection:
         assert replaced.expert_bias is None
         assert "expert_bias" not in dict(replaced.named_buffers())
 
-    def test_llama4_explicit_load_balance_coeff_keeps_expert_bias(self):
-        """Explicit load_balance_coeff for llama4 opts back into expert_bias."""
-        model = MockLlama4Transformer(num_layers=1, num_experts=4)
-        config = parse_autoep_config({
-            "enabled": True,
-            "autoep_size": 1,
-            "preset_model": "llama4",
-            "load_balance_coeff": 0.02,
-        })
-        auto_ep = AutoEP(model, config)
-        specs = auto_ep.ep_parser()
-        auto_ep.replace_moe_layer(specs[0], ep_size=1, ep_rank=0)
-
-        replaced = model.model.layers[0].feed_forward
-        assert replaced.load_balance_coeff == pytest.approx(0.02)
-        assert replaced.expert_bias is not None
-        assert "expert_bias" in dict(replaced.named_buffers())
+    @pytest.mark.parametrize("value", [1e-3, 0.02])
+    def test_llama4_explicit_load_balance_coeff_is_rejected_at_parse(self, value):
+        """Explicit load_balance_coeff is not an opt-in path for llama4."""
+        with pytest.raises(ValueError) as exc_info:
+            parse_autoep_config({
+                "enabled": True,
+                "autoep_size": 1,
+                "preset_model": "llama4",
+                "load_balance_coeff": value,
+            })
+        _assert_load_balance_coeff_rejection_message(exc_info.value, value)
 
     def test_auto_detect_llama4_layer_disables_expert_bias_by_default(self):
         """Auto-detected model_type='llama4' also applies the llama4 preset default."""
@@ -1126,21 +1159,17 @@ class TestMoEDetection:
 
     @pytest.mark.parametrize("preset_model", ["deepseek_v2", "deepseek_v3"])
     def test_deepseek_explicit_load_balance_coeff_rejected(self, preset_model):
-        """DeepSeek AutoEP fails explicitly instead of creating expert_bias."""
-        model = MockMoETransformer(num_layers=1, num_experts=4, moe_every_n=1)
-        config = parse_autoep_config({
-            "enabled": True,
-            "autoep_size": 1,
-            "preset_model": preset_model,
-            "top_k": 2,
-            "load_balance_coeff": 0.02,
-        })
-        auto_ep = AutoEP(model, config)
-        specs = auto_ep.ep_parser()
-        assert specs[0].supports_expert_bias is False
-
-        with pytest.raises(ValueError, match="load_balance_coeff/expert_bias"):
-            auto_ep.replace_moe_layer(specs[0], ep_size=1, ep_rank=0)
+        """DeepSeek AutoEP rejects load_balance_coeff before expert_bias exists."""
+        value = 0.02
+        with pytest.raises(ValueError) as exc_info:
+            parse_autoep_config({
+                "enabled": True,
+                "autoep_size": 1,
+                "preset_model": preset_model,
+                "top_k": 2,
+                "load_balance_coeff": value,
+            })
+        _assert_load_balance_coeff_rejection_message(exc_info.value, value)
 
     def test_deepseek_v3_nonzero_score_correction_bias_rejected(self):
         """DeepSeek-V3 expert correction bias remains unsupported for AutoEP parity."""

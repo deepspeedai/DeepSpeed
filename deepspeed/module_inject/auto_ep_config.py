@@ -6,7 +6,13 @@
 
 from __future__ import annotations
 
-from deepspeed.module_inject.auto_ep_presets.base import _UNSET, AutoEPConfig, MoELayerSpec, MoEModelPreset
+from deepspeed.module_inject.auto_ep_presets.base import (
+    _UNSET,
+    _raise_unsupported_load_balance_coeff,
+    AutoEPConfig,
+    MoELayerSpec,
+    MoEModelPreset,
+)
 from deepspeed.module_inject.auto_ep_presets.registry import (
     PRESET_MODELS,
     available_preset_names,
@@ -53,10 +59,13 @@ def parse_autoep_config(param_dict: dict) -> AutoEPConfig:
     config.score_func = param_dict.get("score_func", "auto")
     config.top_k = param_dict.get("top_k", "auto")
     if "load_balance_coeff" in param_dict:
-        config.load_balance_coeff = param_dict["load_balance_coeff"]
+        value = param_dict["load_balance_coeff"]
+        if value is not None:
+            _raise_unsupported_load_balance_coeff(value)
+        config.load_balance_coeff = None
         config._load_balance_coeff_explicit = True
     else:
-        config.load_balance_coeff = 1e-3
+        config.load_balance_coeff = None
         config._load_balance_coeff_explicit = False
     config.routed_scaling_factor = param_dict.get("routed_scaling_factor", "auto")
     config.expert_w1 = param_dict.get("expert_w1", None)
@@ -88,6 +97,9 @@ def validate_autoep_config(
     sp_size: int,
 ) -> None:
     """Validate config constraints. Raises ValueError on invalid config."""
+    if config.load_balance_coeff is not None:
+        _raise_unsupported_load_balance_coeff(config.load_balance_coeff)
+
     if not config.enabled:
         return
 

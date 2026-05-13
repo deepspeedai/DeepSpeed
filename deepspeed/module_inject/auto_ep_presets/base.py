@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Callable, Literal
+from typing import Any, Callable, Literal, NoReturn
 
 import torch.nn as nn
 from packaging.version import InvalidVersion, Version
@@ -14,6 +14,13 @@ from packaging.version import InvalidVersion, Version
 # Unlike None (which means "fused gate+up, no separate w3"), _UNSET means
 # the user did not set the field at all. Compare with `is _UNSET`.
 _UNSET = object()
+
+
+def _raise_unsupported_load_balance_coeff(value: object) -> NoReturn:
+    raise ValueError(f"load_balance_coeff={value!r} is not supported in this AutoEP build "
+                     "(would register expert_bias and route through unsupported "
+                     "auxiliary-loss-free load balancing). Set load_balance_coeff to null "
+                     "or omit the key.")
 
 
 @dataclass
@@ -118,7 +125,7 @@ class AutoEPConfig:
 
     def __post_init__(self) -> None:
         if self.load_balance_coeff is _UNSET:
-            self.load_balance_coeff = 1e-3
+            self.load_balance_coeff = None
             self._load_balance_coeff_explicit = False
         else:
             self._load_balance_coeff_explicit = True
