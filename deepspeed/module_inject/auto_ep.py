@@ -324,12 +324,37 @@ class AutoEP:
                 # Resolve route_norm
                 if self.config.route_norm is not None:
                     route_norm = self.config.route_norm
+                elif preset_name == "deepseek_v2":
+                    route_norm = preset.route_norm
                 else:
                     cfg_norm = getattr(self.model_config, 'norm_topk_prob', None)
                     if cfg_norm is not None:
                         route_norm = bool(cfg_norm)
                     else:
                         route_norm = preset.route_norm
+
+                # Resolve routed scaling. DeepSeek configs expose this as
+                # routed_scaling_factor; other presets keep the AutoEP scale.
+                route_scale = self.config.route_scale
+                if self.config.routed_scaling_factor != "auto":
+                    route_scale = float(self.config.routed_scaling_factor)
+                else:
+                    cfg_route_scale = getattr(self.model_config, 'routed_scaling_factor', None)
+                    if cfg_route_scale is not None:
+                        route_scale = float(cfg_route_scale)
+
+                num_expert_groups = self.config.num_expert_groups
+                num_limited_groups = self.config.num_limited_groups
+                group_score_func = "top2_sum"
+                if preset_name == "deepseek_v2":
+                    topk_method = getattr(self.model_config, 'topk_method', None)
+                    if topk_method == "group_limited_greedy":
+                        num_expert_groups = num_expert_groups or getattr(self.model_config, 'n_group', None)
+                        num_limited_groups = num_limited_groups or getattr(self.model_config, 'topk_group', None)
+                        group_score_func = "max"
+                elif preset_name == "deepseek_v3":
+                    num_expert_groups = num_expert_groups or getattr(self.model_config, 'n_group', None)
+                    num_limited_groups = num_limited_groups or getattr(self.model_config, 'topk_group', None)
 
                 # Check gate bias
                 gate_bias = preset.gate_bias
@@ -405,6 +430,10 @@ class AutoEP:
                     has_shared_experts=has_shared,
                     shared_experts_name=shared_name,
                     shared_experts_gate_name=shared_gate_name,
+                    route_scale=route_scale,
+                    num_expert_groups=num_expert_groups,
+                    num_limited_groups=num_limited_groups,
+                    group_score_func=group_score_func,
                 )
                 specs.append(spec)
                 logger.debug(f"Detected MoE layer: {module_name} (family={preset_name}, "

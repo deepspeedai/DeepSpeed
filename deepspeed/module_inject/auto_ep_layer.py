@@ -27,6 +27,8 @@ from deepspeed.moe.ep_experts import GroupedExperts
 from deepspeed.moe.ep_kernels import TokenReorderer
 from deepspeed.moe.ep_repack import repack_expert_weights
 
+_DEEPSEEK_PRESETS = {"deepseek_v2", "deepseek_v3"}
+
 # ---------------------------------------------------------------------------
 # Named tuples
 # ---------------------------------------------------------------------------
@@ -361,19 +363,28 @@ class AutoEPMoELayer(nn.Module):
         self.hidden_size = spec.hidden_size
         self.ep_group_name = f"ep_size_{ep_size}"
         self.ep_group = None  # Set by set_deepspeed_parallelism()
+        resolved_config = resolve_autoep_config_defaults(config, spec.model_family)
 
         # Router: copy gate weights from source
         source_gate = getattr(source_module, spec.router_name)
+        if spec.model_family in _DEEPSEEK_PRESETS:
+            if resolved_config.load_balance_coeff is not None:
+                raise ValueError("AutoEP DeepSeek presets do not support load_balance_coeff/expert_bias yet. "
+                                 "Set load_balance_coeff=None.")
+            score_correction_bias = getattr(source_gate, "e_score_correction_bias", None)
+            if score_correction_bias is not None and torch.count_nonzero(score_correction_bias.detach()).item() != 0:
+                raise ValueError("AutoEP DeepSeek presets do not support nonzero e_score_correction_bias yet.")
         self.router = TokenChoiceTopKRouter(
             dim=spec.hidden_size,
             num_experts=spec.num_experts,
-            num_expert_groups=config.num_expert_groups,
-            num_limited_groups=config.num_limited_groups,
+            num_expert_groups=spec.num_expert_groups,
+            num_limited_groups=spec.num_limited_groups,
             top_k=spec.top_k,
             score_func=spec.score_func,
             route_norm=route_norm,
-            route_scale=config.route_scale,
+            route_scale=spec.route_scale,
             gate_bias=spec.gate_bias,
+            group_score_func=spec.group_score_func,
         )
         # Copy gate weights
         self.router.gate.weight.data.copy_(source_gate.weight.data)
@@ -428,7 +439,6 @@ class AutoEPMoELayer(nn.Module):
                 param.allreduce = True
 
         # Load balancing buffers
-        resolved_config = resolve_autoep_config_defaults(config, spec.model_family)
         self.load_balance_coeff = resolved_config.load_balance_coeff
         buf_device = source_gate.weight.device
         if self.load_balance_coeff is not None:
