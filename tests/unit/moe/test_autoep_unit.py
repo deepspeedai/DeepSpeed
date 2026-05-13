@@ -992,6 +992,26 @@ class TestMoEDetection:
         assert "no MoE layers detected" in message
         assert "moe_layer_pattern" in message
 
+    def test_explicit_custom_pattern_without_matching_moe_layers_fails_actionably(self):
+        """A custom pattern typo should not silently leave the model unreplaced."""
+        model = MockMoETransformer(num_layers=1, moe_every_n=1)
+        model.config.model_type = "custom"
+        config = AutoEPConfig(
+            enabled=True,
+            autoep_size=1,
+            moe_layer_pattern=r"model\.layers\.\d+\.wrong",
+            router_pattern="gate",
+            expert_pattern="experts",
+        )
+
+        with pytest.raises(ValueError) as exc:
+            AutoEP(model, config).ep_parser()
+
+        message = str(exc.value)
+        assert "moe_layer_pattern='model\\.layers\\.\\d+\\.wrong'" in message
+        assert "custom" in message
+        assert "no MoE layers detected" in message
+
     def test_detect_fused_3d_storage(self):
         """Correctly identifies fused_3d expert storage."""
         model = MockMoETransformer(num_layers=2, moe_every_n=1)
