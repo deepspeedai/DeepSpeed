@@ -4,8 +4,10 @@
 # DeepSpeed Team
 """Unit tests for AutoEP feature (all phases append test classes here)."""
 
+import ast
 import copy
 import re
+from dataclasses import replace
 from pathlib import Path
 
 from packaging.version import Version
@@ -301,6 +303,18 @@ class TestAutoEPConfig:
             assert preset.hf_model_types, f"Preset {name} missing HF model_type metadata"
             assert preset.min_transformers_version is not None, f"Preset {name} missing Transformers version gate"
 
+    def test_registry_rejects_presets_with_missing_adapter(self):
+        """Registry startup check catches stale preset_adapter keys."""
+        preset_models = {
+            "broken": replace(PRESET_MODELS["mixtral"], preset_adapter="missing_adapter"),
+        }
+
+        with pytest.raises(RuntimeError, match="broken:missing_adapter"):
+            auto_ep_preset_registry._validate_registered_preset_adapters(
+                preset_models=preset_models,
+                preset_adapters={"default": RegistryAutoEPPresetAdapter()},
+            )
+
     def test_available_preset_names_match_compat_preset_models(self):
         assert available_preset_names() == ("mixtral", "qwen3_moe", "qwen3_5_moe", "deepseek_v2", "deepseek_v3",
                                             "llama4")
@@ -432,11 +446,25 @@ class TestAutoEPConfig:
 
     def test_auto_ep_preset_adapter_compat_exports_registry_objects(self):
         import deepspeed.module_inject.auto_ep_preset_adapters as compat_adapters
+        from deepspeed.module_inject.auto_ep_presets.deepseek_v2 import DeepSeekV2PresetAdapter
+        from deepspeed.module_inject.auto_ep_presets.deepseek_v3 import DeepSeekV3PresetAdapter
+        from deepspeed.module_inject.auto_ep_presets.llama4 import Llama4PresetAdapter
+        from deepspeed.module_inject.auto_ep_presets.qwen3_5_moe import Qwen35MoePresetAdapter
 
         assert compat_adapters.AutoEPPresetAdapter is RegistryAutoEPPresetAdapter
+        assert compat_adapters.DeepSeekV2PresetAdapter is DeepSeekV2PresetAdapter
+        assert compat_adapters.DeepSeekV3PresetAdapter is DeepSeekV3PresetAdapter
         assert compat_adapters.ForwardContract is RegistryForwardContract
         assert compat_adapters.GroupRoutingConfig is RegistryGroupRoutingConfig
+        assert compat_adapters.Llama4PresetAdapter is Llama4PresetAdapter
+        assert compat_adapters.Qwen35MoePresetAdapter is Qwen35MoePresetAdapter
         assert compat_adapters.get_preset_adapter is auto_ep_preset_registry.get_preset_adapter
+        assert {
+            "DeepSeekV2PresetAdapter",
+            "DeepSeekV3PresetAdapter",
+            "Llama4PresetAdapter",
+            "Qwen35MoePresetAdapter",
+        }.issubset(compat_adapters.__all__)
 
 
 # === Phase 4: Generalized Group Creation ===
@@ -1365,11 +1393,62 @@ class TestMoEDetection:
         assert preset_name == "custom"
         assert preset.expert_w3 == expected_w3
 
+    def test_resolve_preset_candidates_uses_explicit_preset_model(self):
+        config = AutoEPConfig(
+            enabled=True,
+            autoep_size=1,
+            preset_model="mixtral",
+            router_pattern="custom_router",
+        )
+
+        candidates = resolve_preset_candidates(config, model_config=None)
+
+        assert len(candidates) == 1
+        preset_name, preset = candidates[0]
+        assert preset_name == "mixtral"
+        assert preset.router_pattern == "custom_router"
+        assert preset is not PRESET_MODELS["mixtral"]
+
+    def test_resolve_preset_candidates_uses_supported_hf_model_type(self):
+        config = AutoEPConfig(enabled=True, autoep_size=1)
+        model_config = type("C", (), {"model_type": "qwen2_moe"})()
+
+        candidates = resolve_preset_candidates(config, model_config=model_config)
+
+        assert len(candidates) == 1
+        preset_name, preset = candidates[0]
+        assert preset_name == "qwen3_moe"
+        assert preset is PRESET_MODELS["qwen3_moe"]
+
+    def test_resolve_preset_candidates_rejects_unsupported_qwen35_model_type(self):
+        config = AutoEPConfig(enabled=True, autoep_size=1)
+        model_config = type("C", (), {"model_type": "qwen3_5_moe"})()
+
+        with pytest.raises(ValueError, match="qwen3_5_moe_text"):
+            resolve_preset_candidates(config, model_config=model_config)
+
+    def test_resolve_preset_candidates_falls_back_to_all_presets(self):
+        config = AutoEPConfig(enabled=True, autoep_size=1)
+        model_config = type("C", (), {"model_type": "unknown_moe"})()
+
+        candidates = resolve_preset_candidates(config, model_config=model_config)
+
+        assert tuple(preset_name for preset_name, _ in candidates) == available_preset_names()
+        assert [preset for _, preset in candidates] == [PRESET_MODELS[name] for name in available_preset_names()]
+
     def test_auto_ep_engine_does_not_import_preset_models_directly(self):
         auto_ep_path = Path(__file__).resolve().parents[3] / "deepspeed" / "module_inject" / "auto_ep.py"
-        auto_ep_source = auto_ep_path.read_text()
+        auto_ep_tree = ast.parse(auto_ep_path.read_text())
 
-        assert "PRESET_MODELS" not in auto_ep_source
+        direct_preset_model_imports = []
+        for node in ast.walk(auto_ep_tree):
+            if not isinstance(node, ast.ImportFrom):
+                continue
+            for alias in node.names:
+                if alias.name == "PRESET_MODELS":
+                    direct_preset_model_imports.append(node.module)
+
+        assert direct_preset_model_imports == []
 
 
 class TestWeightRepacking:

@@ -33,6 +33,29 @@ _PRESET_ADAPTERS: dict[str, AutoEPPresetAdapter] = {
 for _module in _PRESET_MODULES:
     _PRESET_ADAPTERS.update(getattr(_module, "PRESET_ADAPTERS", {}))
 
+
+def _validate_registered_preset_adapters(
+    preset_models: dict[str, MoEModelPreset] | None = None,
+    preset_adapters: dict[str, AutoEPPresetAdapter] | None = None,
+) -> None:
+    """Fail fast if a registered preset references an adapter that is not registered."""
+    preset_models = PRESET_MODELS if preset_models is None else preset_models
+    preset_adapters = _PRESET_ADAPTERS if preset_adapters is None else preset_adapters
+
+    missing_presets = []
+    for preset_name, preset in preset_models.items():
+        if preset.preset_adapter not in preset_adapters:
+            missing_presets.append((preset_name, preset.preset_adapter))
+
+    if not missing_presets:
+        return
+
+    details = ", ".join(f"{preset_name}:{adapter_name}" for preset_name, adapter_name in missing_presets)
+    raise RuntimeError(f"AutoEP preset registry is inconsistent; missing preset_adapter registration(s): {details}")
+
+
+_validate_registered_preset_adapters()
+
 _PRESET_DEFAULT_EXPLICIT_FLAGS = {
     "load_balance_coeff": "_load_balance_coeff_explicit",
 }
@@ -95,7 +118,11 @@ def resolve_autoep_config_defaults(config: AutoEPConfig, preset_name: str | None
 
 
 def apply_config_overrides(config: AutoEPConfig, preset: MoEModelPreset) -> MoEModelPreset:
-    """Apply explicit AutoEP config overrides to a preset without mutating the registered preset."""
+    """Apply explicit AutoEP config overrides to a preset.
+
+    Return the original preset object when there are no overrides. When overrides
+    are present, return a dataclass copy so the registered preset remains unchanged.
+    """
     overrides = {}
     if config.moe_layer_pattern is not None:
         overrides["moe_layer_pattern"] = config.moe_layer_pattern
