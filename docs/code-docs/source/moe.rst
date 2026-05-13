@@ -1,20 +1,59 @@
 Mixture of Experts (MoE)
 ========================
 
-Layer specification
---------------------
-.. autoclass:: deepspeed.moe.layer.MoE
-    :members:
+DeepSpeed provides two MoE implementations: AutoEP (Automatic Expert
+Parallelism), which automatically detects and replaces supported Hugging Face MoE
+layers, and DeepSpeed MoE, the explicit ``deepspeed.moe.layer.MoE`` API for
+constructing MoE layers in model code.
 
 AutoEP (Automatic Expert Parallelism)
 ---------------------------------------
 
-AutoEP automatically detects MoE layers in HuggingFace models and replaces them
+AutoEP automatically detects MoE layers in Hugging Face models and replaces them
 with EP-enabled versions, requiring zero model code changes. It follows the
 pattern of AutoTP (Automatic Tensor Parallelism).
 
-**Supported models:** Mixtral, Qwen3-MoE, DeepSeek-V2, DeepSeek-V3, LLaMA-4
-(via built-in presets).
+**Built-in AutoEP presets:** ``mixtral`` (Mixtral), ``qwen3_moe`` (Qwen3-MoE),
+``qwen3_5_moe`` (Qwen3.5-MoE), ``deepseek_v2`` (DeepSeek-V2),
+``deepseek_v3`` (DeepSeek-V3), and ``llama4`` (LLaMA-4).
+
+The preset name means AutoEP knows the router, expert, and weight naming
+patterns for that model family. Running a Hugging Face model also requires a
+Transformers build that exposes the matching config/model classes,
+``model.config.model_type`` value, and fused expert layout.
+
+.. list-table:: AutoEP preset compatibility by Transformers version
+   :header-rows: 1
+
+   * - Preset
+     - Minimum Transformers version
+     - Notes
+   * - ``mixtral``
+     - ``5.0.0``
+     -
+   * - ``qwen3_moe``
+     - ``5.0.0``
+     - Also covers Qwen2-MoE when the installed Transformers build uses the
+       validated fused expert layout. Qwen3-MoE classes appear in ``4.51.3``,
+       but the tested ``4.x`` builds do not match the validated AutoEP layout.
+   * - ``qwen3_5_moe``
+     - ``5.2.0``
+     - Requires the Qwen3.5 text-backbone ``qwen3_5_moe_text`` model type;
+       for performance on Qwen3.5's Gated DeltaNet layers, install optimized
+       kernels. See the `Hugging Face Transformers kernel loading docs
+       <https://huggingface.co/docs/transformers/kernel_doc/loading_kernels>`__
+       and the `Qwen FlashQLA blog <https://qwen.ai/blog?id=flashqla>`__.
+   * - ``deepseek_v2``
+     - ``5.0.0``
+     - ``load_balance_coeff`` / expert-bias auxiliary-loss-free load balancing
+       is not currently supported; non-null values are rejected.
+   * - ``deepseek_v3``
+     - ``5.0.0``
+     - ``load_balance_coeff`` / expert-bias auxiliary-loss-free load balancing
+       is not currently supported; non-null values are rejected.
+   * - ``llama4``
+     - ``5.0.0``
+     -
 
 **ZeRO compatibility:** Stages 0, 1, and 2. Stage 3 is not supported.
 
@@ -47,3 +86,22 @@ pattern of AutoTP (Automatic Tensor Parallelism).
   for functional testing on a single GPU.
 - AutoTP and sequence parallelism cannot both be active simultaneously.
 - Checkpoint save/load requires matching ``autoep_size``.
+  To change ``autoep_size`` across runs for the same AutoEP-detected model
+  topology, convert the checkpoint to Universal Checkpoint format and load it
+  with ``checkpoint.load_universal``; see the
+  `Universal Checkpointing tutorial </tutorials/universal-checkpointing/>`__
+  for the detailed flow and constraints.
+- DeepSeek-V2 and DeepSeek-V3 AutoEP do not support load-balance expert bias
+  yet. The built-in DeepSeek presets disable it by default; explicit non-null
+  values fail.
+
+DeepSpeed MoE
+-------------
+
+DeepSpeed MoE exposes the explicit ``deepspeed.moe.layer.MoE`` layer API for
+models that construct MoE layers directly. See the `Mixture of Experts
+(DeepSpeed MoE) tutorial </tutorials/mixture-of-experts/>`__ for training
+examples and configuration details.
+
+.. autoclass:: deepspeed.moe.layer.MoE
+    :members:

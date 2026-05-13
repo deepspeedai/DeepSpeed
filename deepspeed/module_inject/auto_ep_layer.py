@@ -350,6 +350,8 @@ class AutoEPMoELayer(nn.Module):
         self.return_router_logits = spec.return_router_logits
         self.router_logits_capture_target = spec.router_logits_capture_target
         self.router_logits_capture_index = spec.router_logits_capture_index
+        self.router_logits_capture_mode = spec.router_logits_capture_mode
+        self.moe_output_shape = spec.moe_output_shape
         self.top_k = spec.top_k
         self.score_apply = resolve_score_apply_mode(spec, config.score_apply)
         self.combine_impl = resolve_combine_impl(config.combine_impl)
@@ -361,19 +363,32 @@ class AutoEPMoELayer(nn.Module):
         self.hidden_size = spec.hidden_size
         self.ep_group_name = f"ep_size_{ep_size}"
         self.ep_group = None  # Set by set_deepspeed_parallelism()
+        resolved_config = resolve_autoep_config_defaults(config, spec.model_family)
 
         # Router: copy gate weights from source
         source_gate = getattr(source_module, spec.router_name)
+        if not spec.supports_expert_bias and resolved_config.load_balance_coeff is not None:
+            raise ValueError(f"AutoEP preset '{spec.model_family}' does not support load_balance_coeff/expert_bias "
+                             "yet. Set load_balance_coeff=None.")
+        for bias_name in spec.unsupported_router_bias_names:
+            router_bias = getattr(source_gate, bias_name, None)
+            if router_bias is None:
+                continue
+            if torch.is_tensor(router_bias) and torch.count_nonzero(router_bias.detach()).item() == 0:
+                continue
+            raise ValueError(f"AutoEP preset '{spec.model_family}' does not support nonzero router bias "
+                             f"'{bias_name}' yet.")
         self.router = TokenChoiceTopKRouter(
             dim=spec.hidden_size,
             num_experts=spec.num_experts,
-            num_expert_groups=config.num_expert_groups,
-            num_limited_groups=config.num_limited_groups,
+            num_expert_groups=spec.num_expert_groups,
+            num_limited_groups=spec.num_limited_groups,
             top_k=spec.top_k,
             score_func=spec.score_func,
             route_norm=route_norm,
-            route_scale=config.route_scale,
+            route_scale=spec.route_scale,
             gate_bias=spec.gate_bias,
+            group_score_func=spec.group_score_func,
         )
         # Copy gate weights
         self.router.gate.weight.data.copy_(source_gate.weight.data)
@@ -428,7 +443,6 @@ class AutoEPMoELayer(nn.Module):
                 param.allreduce = True
 
         # Load balancing buffers
-        resolved_config = resolve_autoep_config_defaults(config, spec.model_family)
         self.load_balance_coeff = resolved_config.load_balance_coeff
         buf_device = source_gate.weight.device
         if self.load_balance_coeff is not None:
@@ -457,9 +471,7 @@ class AutoEPMoELayer(nn.Module):
         def hook_fn(module, input, output):
             x = input[0]  # [T, H]
             logits = module.gate(x)  # [T, E_global]
-            # Llama4TextMoe captures raw gate logits. Other currently supported
-            # router-capture contracts expect post-score values.
-            if self.model_family != "llama4":
+            if self.router_logits_capture_mode == "post_score":
                 if self.router.score_func == "softmax":
                     logits = torch.softmax(logits.float(), dim=-1).to(logits.dtype)
                 elif self.router.score_func == "sigmoid":
@@ -503,7 +515,7 @@ class AutoEPMoELayer(nn.Module):
 
         Returns:
             [B, S, H] or ([B, S, H], [T, E]) if return_router_logits.
-            Llama4 returns ([T, H], [T, E]) to match HF Llama4TextMoe.
+            Some HF MoE contracts return ([T, H], [T, E]) instead.
         """
         bsz, seqlen, hdim = hidden_states.shape
         x = hidden_states.reshape(-1, hdim)  # [T, H]
@@ -564,7 +576,7 @@ class AutoEPMoELayer(nn.Module):
             shape=(bsz, seqlen, hdim),
         )
 
-        if self.model_family == "llama4":
+        if self.moe_output_shape == "flat":
             output = output.reshape(-1, hdim)
             shared_expert_input = x
         elif self.shared_experts_gate is not None:

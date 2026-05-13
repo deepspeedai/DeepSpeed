@@ -1037,3 +1037,76 @@ class TestUniversalLoad(DistributedTest):
 
         # Should work fine with ep_rank/ep_size passed
         step = mock_param.load_hp_checkpoint_state(param_dir, tp_rank=0, tp_world_size=1, ep_rank=0, ep_size=2)
+
+
+class TestAutoEPUniversalLoadGuard(DistributedTest):
+    world_size = 1
+
+    def _make_engine_for_load_guard(self, monkeypatch, tmpdir, load_universal):
+        from deepspeed.runtime.engine import DeepSpeedEngine
+        from deepspeed.runtime.state_dict_factory import SDLoaderFactory
+
+        checkpoint = {
+            "module": {},
+            "num_experts": [4],
+            "ds_autoep_layers": [],
+            "dp_world_size": 1,
+        }
+
+        class FakeLoader:
+            def load(self, *args, **kwargs):
+                return os.path.join(str(tmpdir), "mp_rank_00_model_states.pt"), checkpoint, None
+
+        monkeypatch.setattr(SDLoaderFactory, "get_sd_loader",
+                            staticmethod(lambda *args, **kwargs: FakeLoader()))
+
+        engine = object.__new__(DeepSpeedEngine)
+        nn.Module.__init__(engine)
+        engine.has_moe_layers = True
+        engine.num_experts = [4]
+        engine.__dict__["module"] = nn.Module()
+        engine.mpu = None
+        engine.mp_world_size = 1
+        engine.optimizer = None
+        engine.checkpoint_engine = object()
+        engine.load_universal_checkpoint = lambda: load_universal
+        engine.zero_optimization_partition_weights = lambda: False
+        engine._get_all_ckpt_names = lambda load_dir, tag: [
+            os.path.join(str(tmpdir), tag, "mp_rank_00_model_states.pt")
+        ]
+        engine.load_module_state_dict = lambda *args, **kwargs: None
+        return DeepSpeedEngine, engine
+
+    def test_load_moe_state_dict_skipped_when_universal(self, monkeypatch, tmpdir):
+        DeepSpeedEngine, engine = self._make_engine_for_load_guard(monkeypatch, tmpdir, load_universal=True)
+        assert engine.has_moe_layers
+        assert engine.load_universal_checkpoint()
+
+        calls = []
+        monkeypatch.setattr(DeepSpeedEngine, "load_moe_state_dict",
+                            staticmethod(lambda *args, **kwargs: calls.append((args, kwargs))))
+
+        engine._load_checkpoint(str(tmpdir),
+                                tag="dummy",
+                                load_module_only=True,
+                                load_optimizer_states=False,
+                                load_lr_scheduler_states=False)
+
+        assert calls == []
+
+    def test_load_moe_state_dict_called_when_not_universal(self, monkeypatch, tmpdir):
+        DeepSpeedEngine, engine = self._make_engine_for_load_guard(monkeypatch, tmpdir, load_universal=False)
+        assert engine.has_moe_layers
+        assert not engine.load_universal_checkpoint()
+
+        calls = []
+        monkeypatch.setattr(DeepSpeedEngine, "load_moe_state_dict",
+                            staticmethod(lambda *args, **kwargs: calls.append((args, kwargs))))
+
+        engine._load_checkpoint(str(tmpdir),
+                                tag="dummy",
+                                load_module_only=True,
+                                load_optimizer_states=False,
+                                load_lr_scheduler_states=False)
+
+        assert len(calls) == 1
