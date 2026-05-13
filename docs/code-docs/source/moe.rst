@@ -13,8 +13,20 @@ AutoEP automatically detects MoE layers in HuggingFace models and replaces them
 with EP-enabled versions, requiring zero model code changes. It follows the
 pattern of AutoTP (Automatic Tensor Parallelism).
 
-**Supported models:** Mixtral, Qwen3-MoE, DeepSeek-V2, DeepSeek-V3, LLaMA-4
-(via built-in presets).
+**Built-in AutoEP presets:** ``mixtral`` (Mixtral), ``qwen2_moe`` (Qwen2-MoE),
+``qwen3_moe`` (Qwen3-MoE), ``qwen3_5_moe`` (Qwen3.5-MoE),
+``deepseek_v2`` (DeepSeek-V2), ``deepseek_v3`` (DeepSeek-V3), and ``llama4``
+(LLaMA-4).
+
+The preset name means AutoEP knows the router, expert, and weight naming
+patterns for that model family. Running a HuggingFace model still requires an
+installed Transformers build that exposes the corresponding config/model
+classes and ``model.config.model_type`` value. For example, the
+``qwen3_5_moe`` preset is available in AutoEP, but Qwen3.5-MoE models require
+Transformers Qwen3.5-MoE support, including the ``qwen3_5_moe`` and
+``qwen3_5_moe_text`` config model types; older Transformers builds that do not
+expose those classes must be upgraded or used with another supported
+preset/model.
 
 **ZeRO compatibility:** Stages 0, 1, and 2. Stage 3 is not supported.
 

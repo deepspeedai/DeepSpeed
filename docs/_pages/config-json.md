@@ -891,7 +891,14 @@ Configure AutoEP expert parallelism for MoE models. AutoEP automatically detects
 
 | Description                                                                                                                            | Default |
 | -------------------------------------------------------------------------------------------------------------------------------------- | ------- |
-| Built-in model preset for MoE detection: `mixtral`, `qwen3_moe`, `deepseek_v2`, `deepseek_v3`, `llama4`. Determines router, expert, and weight naming patterns. | `null`  |
+| Built-in model preset for MoE detection: `mixtral`, `qwen2_moe`, `qwen3_moe`, `qwen3_5_moe`, `deepseek_v2`, `deepseek_v3`, `llama4`. Determines router, expert, and weight naming patterns. | `null`  |
+
+Built-in AutoEP presets describe DeepSpeed's router/expert/weight-pattern support for a model family.
+Running a HuggingFace model also requires the installed Transformers package to expose the corresponding
+config/model classes and `model.config.model_type` value. For example, `qwen3_5_moe` is an AutoEP preset,
+but Qwen3.5-MoE models require a Transformers build with Qwen3.5-MoE support, including the
+`qwen3_5_moe` and `qwen3_5_moe_text` model types. Upgrade Transformers or select a preset/model supported
+by the installed Transformers version if those classes or model types are unavailable.
 
 ***use_grouped_mm***: [boolean]
 

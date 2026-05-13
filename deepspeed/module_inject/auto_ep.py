@@ -10,6 +10,7 @@ Phase 5: Layer replacement (replace_moe_layer filled in).
 
 from __future__ import annotations
 
+import importlib.util
 import re
 from typing import Literal
 
@@ -24,6 +25,21 @@ from deepspeed.module_inject.auto_ep_config import (
     PRESET_MODELS,
     _UNSET,
 )
+
+_QWEN3_5_MOE_REQUIREMENT = {
+    "module": "transformers.models.qwen3_5_moe",
+    "classes": (
+        "Qwen3_5MoeConfig",
+        "Qwen3_5MoeTextConfig",
+        "Qwen3_5MoeModel",
+        "Qwen3_5MoeForCausalLM",
+        "Qwen3_5MoeForConditionalGeneration",
+    ),
+    "model_type_classes": {
+        "qwen3_5_moe": "Qwen3_5MoeConfig",
+        "qwen3_5_moe_text": "Qwen3_5MoeTextConfig",
+    },
+}
 
 
 def _remove_transformers_output_capture_hooks(model: nn.Module) -> int:
@@ -535,12 +551,77 @@ class AutoEP:
         from dataclasses import replace
         return replace(preset, **overrides)
 
+    def _qwen3_5_transformers_availability(self) -> tuple[str | None, list[str], list[str], list[str], str | None]:
+        """Return installed Transformers availability for Qwen3.5 MoE support."""
+        try:
+            import transformers
+        except Exception as exc:
+            return None, list(_QWEN3_5_MOE_REQUIREMENT["classes"]), [
+                _QWEN3_5_MOE_REQUIREMENT["module"]
+            ], list(_QWEN3_5_MOE_REQUIREMENT["model_type_classes"]), str(exc)
+
+        version = getattr(transformers, "__version__", "unknown")
+        missing_classes = [name for name in _QWEN3_5_MOE_REQUIREMENT["classes"] if not hasattr(transformers, name)]
+        module_name = _QWEN3_5_MOE_REQUIREMENT["module"]
+        missing_modules = [] if importlib.util.find_spec(module_name) is not None else [module_name]
+
+        missing_model_types = []
+        for model_type, class_name in _QWEN3_5_MOE_REQUIREMENT["model_type_classes"].items():
+            config_cls = getattr(transformers, class_name, None)
+            if config_cls is None or getattr(config_cls, "model_type", None) != model_type:
+                missing_model_types.append(model_type)
+
+        return version, missing_classes, missing_modules, missing_model_types, None
+
+    def _validate_qwen3_5_transformers_available(self, requested_model_type: str | None = None) -> None:
+        version, missing_classes, missing_modules, missing_model_types, import_error = \
+            self._qwen3_5_transformers_availability()
+        if not (missing_classes or missing_modules or missing_model_types or import_error):
+            return
+
+        details = []
+        if import_error:
+            details.append(f"could not import transformers: {import_error}")
+        if missing_classes:
+            details.append(f"missing class(es): {', '.join(missing_classes)}")
+        if missing_modules:
+            details.append(f"missing module(s): {', '.join(missing_modules)}")
+        if missing_model_types:
+            details.append(f"missing model_type registration(s): {', '.join(missing_model_types)}")
+
+        model_type_msg = f" for model_type='{requested_model_type}'" if requested_model_type else ""
+        version_msg = f" (installed transformers=={version})" if version else ""
+        raise ValueError("AutoEP preset 'qwen3_5_moe'"
+                         f"{model_type_msg} requires a Hugging Face Transformers build with Qwen3.5 MoE support"
+                         f"{version_msg}, but the installed package is not compatible: {'; '.join(details)}. "
+                         "Upgrade Transformers or use an AutoEP preset/model supported by the installed "
+                         "Transformers version.")
+
+    def _raise_unsupported_qwen3_5_model_type(self, model_type: str) -> None:
+        try:
+            self._validate_qwen3_5_transformers_available(model_type)
+        except ValueError as exc:
+            raise ValueError(
+                f"AutoEP preset 'qwen3_5_moe' supports the Qwen3.5 text backbone model_type "
+                f"'qwen3_5_moe_text', but got model_type='{model_type}'. {exc}"
+            ) from exc
+
+        raise ValueError("AutoEP preset 'qwen3_5_moe' supports the Qwen3.5 text backbone model_type "
+                         f"'qwen3_5_moe_text', but got model_type='{model_type}'. Use a Qwen3.5 text "
+                         "model/backbone for AutoEP, or choose a preset/model combination supported by the "
+                         "installed Transformers version.")
+
     def _resolve_presets(self) -> list[tuple[str, MoEModelPreset]]:
         """Determine which preset(s) to use for detection."""
         if self.config.preset_model is not None:
             if self.config.preset_model not in PRESET_MODELS:
                 raise ValueError(f"Unknown preset_model '{self.config.preset_model}'. "
                                  f"Available: {list(PRESET_MODELS.keys())}")
+            if self.config.preset_model == "qwen3_5_moe":
+                model_type = getattr(self.model_config, "model_type", None)
+                if model_type == "qwen3_5_moe":
+                    self._raise_unsupported_qwen3_5_model_type(model_type)
+                self._validate_qwen3_5_transformers_available(model_type)
             preset = self._apply_config_overrides(PRESET_MODELS[self.config.preset_model])
             return [(self.config.preset_model, preset)]
 
@@ -548,6 +629,8 @@ class AutoEP:
         if self.model_config is not None:
             model_type = getattr(self.model_config, 'model_type', None)
             if model_type:
+                if model_type == 'qwen3_5_moe':
+                    self._raise_unsupported_qwen3_5_model_type(model_type)
                 # Map HF model_type to preset name
                 type_map = {
                     'mixtral': 'mixtral',
@@ -561,6 +644,8 @@ class AutoEP:
                 }
                 preset_name = type_map.get(model_type)
                 if preset_name and preset_name in PRESET_MODELS:
+                    if preset_name == "qwen3_5_moe":
+                        self._validate_qwen3_5_transformers_available(model_type)
                     logger.info(f"AutoEP: auto-detected model_type='{model_type}', using preset '{preset_name}'")
                     preset = self._apply_config_overrides(PRESET_MODELS[preset_name])
                     return [(preset_name, preset)]
