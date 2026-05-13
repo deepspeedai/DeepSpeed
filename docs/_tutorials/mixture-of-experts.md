@@ -1,5 +1,5 @@
 ---
-title: "Mixture of Experts"
+title: "Mixture of Experts (DeepSpeed MoE)"
 tags: MoE training
 ---
 

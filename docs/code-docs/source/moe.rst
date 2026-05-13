@@ -1,15 +1,15 @@
 Mixture of Experts (MoE)
 ========================
 
-Layer specification
---------------------
-.. autoclass:: deepspeed.moe.layer.MoE
-    :members:
+DeepSpeed provides two MoE implementations: AutoEP (Automatic Expert
+Parallelism), which automatically detects and replaces supported Hugging Face MoE
+layers, and DeepSpeed MoE, the explicit ``deepspeed.moe.layer.MoE`` API for
+constructing MoE layers in model code.
 
 AutoEP (Automatic Expert Parallelism)
 ---------------------------------------
 
-AutoEP automatically detects MoE layers in HuggingFace models and replaces them
+AutoEP automatically detects MoE layers in Hugging Face models and replaces them
 with EP-enabled versions, requiring zero model code changes. It follows the
 pattern of AutoTP (Automatic Tensor Parallelism).
 
@@ -18,7 +18,7 @@ pattern of AutoTP (Automatic Tensor Parallelism).
 ``deepseek_v3`` (DeepSeek-V3), and ``llama4`` (LLaMA-4).
 
 The preset name means AutoEP knows the router, expert, and weight naming
-patterns for that model family. Running a HuggingFace model also requires a
+patterns for that model family. Running a Hugging Face model also requires a
 Transformers build that exposes the matching config/model classes,
 ``model.config.model_type`` value, and fused expert layout.
 
@@ -94,3 +94,14 @@ Transformers build that exposes the matching config/model classes,
 - DeepSeek-V2 and DeepSeek-V3 AutoEP do not support load-balance expert bias
   yet. The built-in DeepSeek presets disable it by default; explicit non-null
   values fail.
+
+DeepSpeed MoE
+-------------
+
+DeepSpeed MoE exposes the explicit ``deepspeed.moe.layer.MoE`` layer API for
+models that construct MoE layers directly. See the `Mixture of Experts
+(DeepSpeed MoE) tutorial </tutorials/mixture-of-experts/>`__ for training
+examples and configuration details.
+
+.. autoclass:: deepspeed.moe.layer.MoE
+    :members:
