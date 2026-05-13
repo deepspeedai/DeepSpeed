@@ -172,7 +172,7 @@ PRESET_MODELS: dict[str, MoEModelPreset] = {
         has_shared_experts=True,
         shared_experts_pattern="shared_expert",
         shared_experts_gate_pattern="shared_expert_gate",
-        hf_model_types=("qwen3_moe", ),
+        hf_model_types=("qwen3_moe", "qwen2_moe"),
         min_transformers_version="5.0.0",
         docs_support_notes=("Also covers Qwen2-MoE when the installed Transformers build uses the "
                             "validated fused expert layout."),

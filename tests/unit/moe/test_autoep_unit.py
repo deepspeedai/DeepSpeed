@@ -332,7 +332,7 @@ class TestAutoEPConfig:
         assert qwen3.has_shared_experts is True
         assert qwen3.shared_experts_pattern == "shared_expert"
         assert qwen3.shared_experts_gate_pattern == "shared_expert_gate"
-        assert qwen3.hf_model_types == ("qwen3_moe", )
+        assert qwen3.hf_model_types == ("qwen3_moe", "qwen2_moe")
         assert qwen3.min_transformers_version == "5.0.0"
         assert "Qwen2-MoE" in qwen3.docs_support_notes
 
@@ -922,6 +922,25 @@ class TestMoEDetection:
 
         assert len(presets) == 1
         assert presets[0][0] == "qwen3_5_moe"
+
+    def test_auto_detect_qwen2_model_type_uses_qwen3_preset(self):
+        """model_type='qwen2_moe' resolves through qwen3_moe metadata."""
+        model = MockMoETransformer(num_layers=1, moe_every_n=1)
+        model.config.model_type = "qwen2_moe"
+        model.config.num_experts = model.config.num_local_experts
+        config = parse_autoep_config({
+            "enabled": True,
+            "autoep_size": 1,
+        })
+
+        auto_ep = AutoEP(model, config)
+        presets = auto_ep._resolve_presets()
+        specs = auto_ep.ep_parser()
+
+        assert len(presets) == 1
+        assert presets[0][0] == "qwen3_moe"
+        assert len(specs) == 1
+        assert specs[0].model_family == "qwen3_moe"
 
     def test_auto_detected_preset_delegates_compatibility_validation(self, monkeypatch):
         """Generic model_type detection calls the preset adapter validation hook."""

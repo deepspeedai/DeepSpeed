@@ -101,6 +101,8 @@ class AutoEPPresetAdapter:
         return getattr(transformers, "__version__", "unknown")
 
     def _requires_transformers_version_validation(self) -> bool:
+        # The default adapter also covers non-HF/mock/custom-compatible configs;
+        # specialized HF-only adapters opt in to minimum Transformers checks.
         return False
 
     def resolve_route_norm(
