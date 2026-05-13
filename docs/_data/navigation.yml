@@ -93,7 +93,7 @@ lnav:
         url: /tutorials/lrrt/
       - title: 'Megatron-LM GPT2'
         url: /tutorials/megatron/
-      - title: 'Mixture-of-Experts (MoE)'
+      - title: 'Mixture of Experts (DeepSpeed MoE)'
         url: /tutorials/mixture-of-experts/
       - title: 'MoE for NLG'
         url: /tutorials/mixture-of-experts-nlg/
