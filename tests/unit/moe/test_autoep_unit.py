@@ -5,6 +5,7 @@
 """Unit tests for AutoEP feature (all phases append test classes here)."""
 
 import copy
+from pathlib import Path
 
 import pytest
 import torch
@@ -89,6 +90,12 @@ class TestAutoEPConfig:
 
         assert resolved.load_balance_coeff is None
         assert config.load_balance_coeff == pytest.approx(1e-3)
+
+    def test_deepseek_presets_mark_expert_bias_unsupported(self):
+        assert PRESET_MODELS["deepseek_v2"].supports_expert_bias is False
+        assert PRESET_MODELS["deepseek_v3"].supports_expert_bias is False
+        assert PRESET_MODELS["deepseek_v2"].unsupported_router_bias_names == ()
+        assert PRESET_MODELS["deepseek_v3"].unsupported_router_bias_names == ("e_score_correction_bias", )
 
     def test_parse_autoep_config_full(self):
         """All fields parsed from complete JSON."""
@@ -825,6 +832,7 @@ class TestMoEDetection:
         })
         auto_ep = AutoEP(model, config)
         specs = auto_ep.ep_parser()
+        assert specs[0].supports_expert_bias is False
         auto_ep.replace_moe_layer(specs[0], ep_size=1, ep_rank=0)
 
         replaced = model.model.layers[0].mlp
@@ -845,8 +853,9 @@ class TestMoEDetection:
         })
         auto_ep = AutoEP(model, config)
         specs = auto_ep.ep_parser()
+        assert specs[0].supports_expert_bias is False
 
-        with pytest.raises(ValueError, match="DeepSeek.*load_balance_coeff"):
+        with pytest.raises(ValueError, match="load_balance_coeff/expert_bias"):
             auto_ep.replace_moe_layer(specs[0], ep_size=1, ep_rank=0)
 
     def test_deepseek_v3_nonzero_score_correction_bias_rejected(self):
@@ -862,6 +871,7 @@ class TestMoEDetection:
         })
         auto_ep = AutoEP(model, config)
         specs = auto_ep.ep_parser()
+        assert specs[0].unsupported_router_bias_names == ("e_score_correction_bias", )
 
         with pytest.raises(ValueError, match="e_score_correction_bias"):
             auto_ep.replace_moe_layer(specs[0], ep_size=1, ep_rank=0)
@@ -1314,6 +1324,33 @@ class TestAutoEPMoELayerUnit:
         config = AutoEPConfig(enabled=True, autoep_size=1)
         layer = AutoEPMoELayer(spec, source, ep_size=1, ep_rank=0, config=config)
         assert layer._is_autoep_layer is True
+
+    def test_autoep_layer_has_no_deepseek_preset_hardcode(self):
+        layer_path = Path(__file__).resolve().parents[3] / "deepspeed" / "module_inject" / "auto_ep_layer.py"
+        layer_source = layer_path.read_text()
+        assert "_DEEPSEEK_PRESETS" not in layer_source
+        assert "deepseek_v2" not in layer_source
+        assert "deepseek_v3" not in layer_source
+
+    def test_spec_can_disable_expert_bias_without_model_family_branch(self):
+        source = MockMoEBlock(num_experts=4, ffn_hidden=128, hidden_size=64)
+        spec = _make_spec(model_family="custom_no_expert_bias", supports_expert_bias=False)
+        config = AutoEPConfig(enabled=True, autoep_size=1, load_balance_coeff=0.02)
+
+        with pytest.raises(ValueError, match="custom_no_expert_bias.*load_balance_coeff/expert_bias"):
+            AutoEPMoELayer(spec, source, ep_size=1, ep_rank=0, config=config)
+
+    def test_spec_unsupported_router_bias_name_rejects_nonzero_buffer(self):
+        source = MockMoEBlock(num_experts=4, ffn_hidden=128, hidden_size=64)
+        source.gate.register_buffer("source_router_bias", torch.ones(4))
+        spec = _make_spec(
+            model_family="custom_router_bias",
+            unsupported_router_bias_names=("source_router_bias", ),
+        )
+        config = AutoEPConfig(enabled=True, autoep_size=1, load_balance_coeff=None)
+
+        with pytest.raises(ValueError, match="source_router_bias"):
+            AutoEPMoELayer(spec, source, ep_size=1, ep_rank=0, config=config)
 
     def test_autoep_layer_ep_size_1_forward(self):
         torch.manual_seed(42)

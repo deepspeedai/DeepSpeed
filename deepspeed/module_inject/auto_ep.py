@@ -434,6 +434,8 @@ class AutoEP:
                     num_expert_groups=num_expert_groups,
                     num_limited_groups=num_limited_groups,
                     group_score_func=group_score_func,
+                    supports_expert_bias=preset.supports_expert_bias,
+                    unsupported_router_bias_names=preset.unsupported_router_bias_names,
                 )
                 specs.append(spec)
                 logger.debug(f"Detected MoE layer: {module_name} (family={preset_name}, "

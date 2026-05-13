@@ -27,8 +27,6 @@ from deepspeed.moe.ep_experts import GroupedExperts
 from deepspeed.moe.ep_kernels import TokenReorderer
 from deepspeed.moe.ep_repack import repack_expert_weights
 
-_DEEPSEEK_PRESETS = {"deepseek_v2", "deepseek_v3"}
-
 # ---------------------------------------------------------------------------
 # Named tuples
 # ---------------------------------------------------------------------------
@@ -367,13 +365,17 @@ class AutoEPMoELayer(nn.Module):
 
         # Router: copy gate weights from source
         source_gate = getattr(source_module, spec.router_name)
-        if spec.model_family in _DEEPSEEK_PRESETS:
-            if resolved_config.load_balance_coeff is not None:
-                raise ValueError("AutoEP DeepSeek presets do not support load_balance_coeff/expert_bias yet. "
-                                 "Set load_balance_coeff=None.")
-            score_correction_bias = getattr(source_gate, "e_score_correction_bias", None)
-            if score_correction_bias is not None and torch.count_nonzero(score_correction_bias.detach()).item() != 0:
-                raise ValueError("AutoEP DeepSeek presets do not support nonzero e_score_correction_bias yet.")
+        if not spec.supports_expert_bias and resolved_config.load_balance_coeff is not None:
+            raise ValueError(f"AutoEP preset '{spec.model_family}' does not support load_balance_coeff/expert_bias "
+                             "yet. Set load_balance_coeff=None.")
+        for bias_name in spec.unsupported_router_bias_names:
+            router_bias = getattr(source_gate, bias_name, None)
+            if router_bias is None:
+                continue
+            if torch.is_tensor(router_bias) and torch.count_nonzero(router_bias.detach()).item() == 0:
+                continue
+            raise ValueError(f"AutoEP preset '{spec.model_family}' does not support nonzero router bias "
+                             f"'{bias_name}' yet.")
         self.router = TokenChoiceTopKRouter(
             dim=spec.hidden_size,
             num_experts=spec.num_experts,
