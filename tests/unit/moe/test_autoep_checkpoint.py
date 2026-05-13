@@ -13,6 +13,7 @@ import torch.nn as nn
 import deepspeed
 import deepspeed.comm as dist
 from deepspeed.accelerator import get_accelerator
+from deepspeed.runtime.config import DeepSpeedConfig
 from unit.common import DistributedTest
 
 # ---------------------------------------------------------------------------
@@ -83,6 +84,13 @@ class MockMoETransformer(nn.Module):
 _UNSET = object()
 
 
+def _assert_load_balance_coeff_rejection_message(exc: BaseException, value: object) -> None:
+    text = str(exc)
+    for needle in ("load_balance_coeff", "expert_bias", "not supported", "null", "omit"):
+        assert needle in text
+    assert repr(value) in text
+
+
 def _mixed_precision_config():
     """Return a supported mixed-precision config for the current accelerator."""
     accelerator = get_accelerator()
@@ -108,8 +116,10 @@ def _mixed_precision_config():
 def _make_autoep_config(zero_stage=0, ep_size=1, load_balance_coeff=_UNSET):
     """Build a DeepSpeed config dict for AutoEP checkpoint tests.
 
-    load_balance_coeff: default _UNSET keeps the AutoEP default (1e-3).
-    Pass None to explicitly disable load balancing (no expert_bias).
+    load_balance_coeff: default _UNSET omits the key, which disables
+    load balancing. Pass None to exercise the explicit-null disabled path.
+    Non-None values are retained only for rejection tests and fail during
+    DeepSpeed config parsing or initialize.
     Uses a supported mixed-precision mode because the MoE checkpoint load
     path requires fp16 or bf16.
     """
@@ -160,6 +170,44 @@ def _init_engine(ep_size=1, zero_stage=0, load_balance_coeff=_UNSET):
     return engine
 
 
+@pytest.mark.parametrize("enabled", [True, False])
+@pytest.mark.parametrize("include_key", [False, True])
+def test_load_balance_coeff_disabled_values_accepted_by_deepspeed_config(enabled, include_key):
+    config = {
+        "train_micro_batch_size_per_gpu": 1,
+        "expert_parallel": {
+            "enabled": enabled,
+            "autoep_size": 1,
+            "preset_model": "mixtral",
+        },
+    }
+    if include_key:
+        config["expert_parallel"]["load_balance_coeff"] = None
+
+    ds_config = DeepSpeedConfig(config)
+
+    assert ds_config.expert_parallel_config.load_balance_coeff is None
+    assert ds_config.expert_parallel_config._load_balance_coeff_explicit is include_key
+
+
+@pytest.mark.parametrize("enabled", [True, False])
+@pytest.mark.parametrize("value", [0, 1e-3, 0.02, False, True, "1e-3"])
+def test_load_balance_coeff_rejected_by_deepspeed_config(enabled, value):
+    config = {
+        "train_micro_batch_size_per_gpu": 1,
+        "expert_parallel": {
+            "enabled": enabled,
+            "autoep_size": 1,
+            "preset_model": "mixtral",
+            "load_balance_coeff": value,
+        },
+    }
+
+    with pytest.raises(ValueError) as exc_info:
+        DeepSpeedConfig(config)
+    _assert_load_balance_coeff_rejection_message(exc_info.value, value)
+
+
 # ---------------------------------------------------------------------------
 # Phase 1 Tests: Non-MoE State Dict Filter
 # ---------------------------------------------------------------------------
@@ -169,7 +217,7 @@ class TestNonMoeStateDictFilter(DistributedTest):
     world_size = 1
 
     def test_non_moe_state_dict_filter_autoep(self):
-        """Verify filter keeps router, shared_experts, expert_bias; removes w1/w2/w3."""
+        """Verify filter keeps router/shared_experts and removes w1/w2/w3."""
         engine = _init_engine(ep_size=1)
         from deepspeed.module_inject.auto_ep_layer import AutoEPMoELayer
 
@@ -267,24 +315,19 @@ class TestNonMoeStateDictFilter(DistributedTest):
         assert 'model.layers.10.fake_expert_key' in filtered_sd, \
             "Filter incorrectly removed key from non-existent layer 10"
 
-    def test_expert_bias_presence(self):
-        """Save with load_balance_coeff set (default 1e-3) -> expert_bias in main checkpoint."""
-        engine = _init_engine(ep_size=1)  # default has load_balance_coeff=1e-3
-        full_sd = engine.module.state_dict()
-        bias_keys = [k for k in full_sd.keys() if 'expert_bias' in k]
-        assert len(bias_keys) > 0, "Expected expert_bias keys when load_balance_coeff is set"
-
-        filtered_sd = engine._get_non_moe_state_dict(copy.copy(full_sd))
-        for key in bias_keys:
-            assert key in filtered_sd, f"expert_bias key {key} should be preserved in main checkpoint"
-
-    def test_expert_bias_absence(self):
-        """Save with load_balance_coeff=None -> no expert_bias key."""
-        engine = _init_engine(ep_size=1, load_balance_coeff=None)
+    @pytest.mark.parametrize("include_key", [False, True])
+    def test_expert_bias_absent_by_default(self, include_key):
+        """Omitted and explicit-null load_balance_coeff do not register expert_bias."""
+        lbc = None if include_key else _UNSET
+        engine = _init_engine(ep_size=1, load_balance_coeff=lbc)
         full_sd = engine.module.state_dict()
         bias_keys = [k for k in full_sd.keys() if 'expert_bias' in k]
         assert len(bias_keys) == 0, \
-            f"Did not expect expert_bias keys with load_balance_coeff=None, found: {bias_keys}"
+            f"Did not expect expert_bias keys with load_balance_coeff={lbc!r}, found: {bias_keys}"
+
+        filtered_sd = engine._get_non_moe_state_dict(copy.copy(full_sd))
+        filtered_bias_keys = [k for k in filtered_sd.keys() if 'expert_bias' in k]
+        assert filtered_bias_keys == []
 
 
 # ---------------------------------------------------------------------------
@@ -1054,11 +1097,11 @@ class TestAutoEPUniversalLoadGuard(DistributedTest):
         }
 
         class FakeLoader:
+
             def load(self, *args, **kwargs):
                 return os.path.join(str(tmpdir), "mp_rank_00_model_states.pt"), checkpoint, None
 
-        monkeypatch.setattr(SDLoaderFactory, "get_sd_loader",
-                            staticmethod(lambda *args, **kwargs: FakeLoader()))
+        monkeypatch.setattr(SDLoaderFactory, "get_sd_loader", staticmethod(lambda *args, **kwargs: FakeLoader()))
 
         engine = object.__new__(DeepSpeedEngine)
         nn.Module.__init__(engine)
