@@ -4022,7 +4022,8 @@ class DeepSpeedEngine(Module):
         """Remove expert-param keys from state dict, keeping all non-expert params.
 
         Handles both native MoE (deepspeed_moe.experts.*) and AutoEP (experts.w1/w2/w3).
-        Preserves: router weights, shared_experts, expert_bias, all non-MoE params.
+        Preserves: router weights, shared_experts, any legacy/manually-built
+        expert_bias keys, all non-MoE params.
         """
         try:
             from deepspeed.module_inject.auto_ep_layer import AutoEPMoELayer as _AutoEPMoELayer

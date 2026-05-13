@@ -979,11 +979,11 @@ smoke coverage used for this AutoEP surface produced the following version gates
 | -------------------------------------------------------------------------------------------------- | ------- |
 | Number of groups to select from in group-limited routing. Must be <= `num_expert_groups` when set.  | `null`  |
 
-***load_balance_coeff***: [float]
+***load_balance_coeff***: [null]
 
 | Description                                                                                          | Default |
 | ---------------------------------------------------------------------------------------------------- | ------- |
-| Coefficient for auxiliary-loss-free load balancing via expert bias. Set to `null` to disable. DeepSeek-V2 and DeepSeek-V3 presets disable it by default for validated parity and reject explicit non-null values while expert bias is unsupported. | `1e-3`  |
+| Reserved for future auxiliary-loss-free load balancing via `expert_bias`. Currently unsupported - must be unset or `null`; any other value is rejected. | `null`  |
 
 ***expert_w1***: [string]
 
