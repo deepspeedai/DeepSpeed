@@ -8,13 +8,7 @@ Copyright 2021 The Microsoft DeepSpeed Team
 
 import torch
 from deepspeed.accelerator import get_accelerator
-try:
-    from deepspeed.ops.op_builder import NotImplementedBuilder
-except ModuleNotFoundError:
-    # Fallback for environments where deepspeed/ops symlinks are missing.
-    # This still allows DeepSpeed to run because CCL backend gracefully
-    # disables itself when op builders are unavailable.
-    from op_builder import NotImplementedBuilder
+from deepspeed.ops.op_builder import NotImplementedBuilder
 from .reduce_op import ReduceOp
 from .torch import TorchBackend
 

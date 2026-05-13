@@ -1,7 +1,5 @@
-# Copyright (c) Microsoft Corporation.
+# Copyright (c) DeepSpeed Team.
 # SPDX-License-Identifier: Apache-2.0
-
-# DeepSpeed Team
 """mori SDMA backend, plugged into ``TorchBackend.all_gather_into_tensor``.
 
 When the user opts in, ``deepspeed.comm`` routes ``all_gather_into_tensor``
