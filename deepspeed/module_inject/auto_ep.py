@@ -21,10 +21,15 @@ from deepspeed.module_inject.auto_ep_config import (
     AutoEPConfig,
     MoELayerSpec,
     MoEModelPreset,
-    PRESET_MODELS,
-    _UNSET,
 )
-from deepspeed.module_inject.auto_ep_preset_adapters import ForwardContract, get_preset_adapter
+from deepspeed.module_inject.auto_ep_presets.base import ForwardContract
+from deepspeed.module_inject.auto_ep_presets.registry import (
+    apply_config_overrides,
+    get_preset_adapter,
+    preset_name_for_hf_model_type,
+    resolve_preset_candidates,
+    unsupported_preset_for_hf_model_type,
+)
 
 
 def _remove_transformers_output_capture_hooks(model: nn.Module) -> int:
@@ -49,25 +54,11 @@ def _remove_transformers_output_capture_hooks(model: nn.Module) -> int:
     return removed
 
 
-def _preset_name_for_hf_model_type(model_type: str) -> str | None:
-    for preset_name, preset in PRESET_MODELS.items():
-        if model_type in preset.hf_model_types:
-            return preset_name
-    return None
-
-
-def _unsupported_preset_for_hf_model_type(model_type: str) -> tuple[str, MoEModelPreset] | None:
-    for preset_name, preset in PRESET_MODELS.items():
-        if model_type in preset.unsupported_hf_model_type_notes:
-            return preset_name, preset
-    return None
-
-
 def _is_known_hf_model_type(model_type: str | None) -> bool:
     if model_type is None:
         return False
-    return (_preset_name_for_hf_model_type(model_type) is not None
-            or _unsupported_preset_for_hf_model_type(model_type) is not None)
+    return (preset_name_for_hf_model_type(model_type) is not None
+            or unsupported_preset_for_hf_model_type(model_type) is not None)
 
 
 def _has_3d_expert_params(module: nn.Module, preset: MoEModelPreset) -> bool:
@@ -482,42 +473,7 @@ class AutoEP:
                     f"local_experts={replacement.num_local_experts})")
 
     def _apply_config_overrides(self, preset: MoEModelPreset) -> MoEModelPreset:
-        """Apply user config field overrides to a resolved preset.
-
-        Only applies overrides for fields explicitly set by the user (non-default values).
-        Returns the original preset unchanged if no overrides are set.
-        """
-        overrides = {}
-        if self.config.moe_layer_pattern is not None:
-            overrides['moe_layer_pattern'] = self.config.moe_layer_pattern
-        if self.config.router_pattern is not None:
-            overrides['router_pattern'] = self.config.router_pattern
-        if self.config.expert_pattern is not None:
-            overrides['experts_pattern'] = self.config.expert_pattern
-        if self.config.expert_w1 is not None:
-            overrides['expert_w1'] = self.config.expert_w1
-        if self.config.expert_w2 is not None:
-            overrides['expert_w2'] = self.config.expert_w2
-        if self.config.expert_w3 is not _UNSET:
-            overrides['expert_w3'] = self.config.expert_w3
-        if self.config.num_experts_attr is not None:
-            overrides['num_experts_attr'] = self.config.num_experts_attr
-        if self.config.top_k_attr is not None:
-            overrides['top_k_attr'] = self.config.top_k_attr
-        if self.config.has_shared_experts is not None:
-            overrides['has_shared_experts'] = self.config.has_shared_experts
-        if self.config.shared_experts_pattern is not None:
-            overrides['shared_experts_pattern'] = self.config.shared_experts_pattern
-        if self.config.shared_experts_gate_pattern is not None:
-            overrides['shared_experts_gate_pattern'] = self.config.shared_experts_gate_pattern
-        if not overrides:
-            return preset
-        from dataclasses import replace
-        return replace(preset, **overrides)
-
-    def _validate_preset_compatibility(self, preset_name: str, preset: MoEModelPreset) -> None:
-        adapter = get_preset_adapter(preset.preset_adapter)
-        adapter.validate_compatibility(preset_name, preset, self.model_config)
+        return apply_config_overrides(self.config, preset)
 
     def _requires_selected_preset_detection(self) -> bool:
         """Return whether empty detection should fail for the selected preset."""
@@ -546,53 +502,4 @@ class AutoEP:
 
     def _resolve_presets(self) -> list[tuple[str, MoEModelPreset]]:
         """Determine which preset(s) to use for detection."""
-        if self.config.preset_model is not None:
-            if self.config.preset_model not in PRESET_MODELS:
-                raise ValueError(f"Unknown preset_model '{self.config.preset_model}'. "
-                                 f"Available: {list(PRESET_MODELS.keys())}")
-            preset = self._apply_config_overrides(PRESET_MODELS[self.config.preset_model])
-            self._validate_preset_compatibility(self.config.preset_model, preset)
-            return [(self.config.preset_model, preset)]
-
-        # Auto-detect from model_type
-        if self.model_config is not None:
-            model_type = getattr(self.model_config, 'model_type', None)
-            if model_type:
-                # Map HF model_type to preset name
-                preset_name = _preset_name_for_hf_model_type(model_type)
-                if preset_name and preset_name in PRESET_MODELS:
-                    logger.info(f"AutoEP: auto-detected model_type='{model_type}', using preset '{preset_name}'")
-                    preset = self._apply_config_overrides(PRESET_MODELS[preset_name])
-                    self._validate_preset_compatibility(preset_name, preset)
-                    return [(preset_name, preset)]
-
-                unsupported_preset = _unsupported_preset_for_hf_model_type(model_type)
-                if unsupported_preset is not None:
-                    preset_name, preset = unsupported_preset
-                    self._validate_preset_compatibility(preset_name, preset)
-
-        # If custom patterns are provided, build an ad-hoc preset
-        if self.config.moe_layer_pattern:
-            custom_preset = MoEModelPreset(
-                moe_layer_pattern=self.config.moe_layer_pattern,
-                router_pattern=self.config.router_pattern or "gate",
-                experts_pattern=self.config.expert_pattern or "experts",
-                expert_storage="fused_3d",  # informational; actual detection by _detect_expert_storage()
-                expert_w1=self.config.expert_w1 or "gate_up_proj",
-                expert_w2=self.config.expert_w2 or "down_proj",
-                expert_w3=(None if self.config.expert_w3 is _UNSET else self.config.expert_w3),
-                num_experts_attr=self.config.num_experts_attr or "num_local_experts",
-                top_k_attr=self.config.top_k_attr or "num_experts_per_tok",
-                score_func=(self.config.score_func if self.config.score_func != "auto" else "softmax"),
-                score_apply=(self.config.score_apply if self.config.score_apply != "auto" else "post"),
-                route_norm=(self.config.route_norm if self.config.route_norm is not None else True),
-                gate_bias=False,  # always overridden by model introspection in ep_parser()
-                has_shared_experts=(self.config.has_shared_experts
-                                    if self.config.has_shared_experts is not None else False),
-                shared_experts_pattern=self.config.shared_experts_pattern or "",
-                shared_experts_gate_pattern=self.config.shared_experts_gate_pattern or "",
-            )
-            return [("custom", custom_preset)]
-
-        # Try all presets
-        return [(name, self._apply_config_overrides(p)) for name, p in PRESET_MODELS.items()]
+        return resolve_preset_candidates(self.config, self.model_config)

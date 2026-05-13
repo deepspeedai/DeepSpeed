@@ -6,314 +6,31 @@
 
 from __future__ import annotations
 
-import copy
-from dataclasses import dataclass, field
-from typing import Any, Literal, NoReturn
-
+from deepspeed.module_inject.auto_ep_presets.base import (
+    _UNSET,
+    _raise_unsupported_load_balance_coeff,
+    AutoEPConfig,
+    MoELayerSpec,
+    MoEModelPreset,
+)
+from deepspeed.module_inject.auto_ep_presets.registry import (
+    PRESET_MODELS,
+    available_preset_names,
+    resolve_autoep_config_defaults,
+)
 from deepspeed.utils import logger
 
-# Sentinel for "not specified in config, use preset default".
-# Unlike None (which means "fused gate+up, no separate w3"), _UNSET means
-# the user did not set the field at all.  Compare with `is _UNSET`.
-_UNSET = object()
-
-
-def _raise_unsupported_load_balance_coeff(value: object) -> NoReturn:
-    raise ValueError(f"load_balance_coeff={value!r} is not supported in this AutoEP build "
-                     "(would register expert_bias and route through unsupported "
-                     "auxiliary-loss-free load balancing). Set load_balance_coeff to null "
-                     "or omit the key.")
-
-
-# ---------------------------------------------------------------------------
-# Dataclasses
-# ---------------------------------------------------------------------------
-
-
-@dataclass
-class MoEModelPreset:
-    """Preset configuration for a known MoE model family."""
-
-    moe_layer_pattern: str  # Regex matching MoE module names
-    router_pattern: str  # Child name for router/gate (e.g., "gate")
-    experts_pattern: str  # Child name for experts (e.g., "experts")
-    expert_storage: Literal["fused_3d", "module_list"]
-    expert_w1: str  # Weight name: "gate_up_proj" (fused) or "gate_proj"/"w1"
-    expert_w2: str  # Weight name: "down_proj" or "w2"
-    expert_w3: str | None  # None (fused gate+up) or "up_proj"/"w3"
-    num_experts_attr: str  # model.config attribute name for num_experts
-    top_k_attr: str  # model.config attribute name for top_k
-    score_func: Literal["softmax", "sigmoid"]
-    score_apply: Literal["pre", "post"]
-    route_norm: bool  # Default top-k renormalization
-    gate_bias: bool  # Whether router gate has bias
-    has_shared_experts: bool = False
-    shared_experts_pattern: str = ""
-    shared_experts_gate_pattern: str = ""
-    autoep_config_defaults: dict[str, Any] = field(default_factory=dict)
-    supports_expert_bias: bool = True
-    unsupported_router_bias_names: tuple[str, ...] = ()
-    preset_adapter: str = "default"
-    hf_model_types: tuple[str, ...] = ()
-    unsupported_hf_model_type_notes: dict[str, str] = field(default_factory=dict)
-    min_transformers_version: str | None = None
-    validated_transformers_versions: str = ""
-    docs_support_notes: str = ""
-
-
-@dataclass
-class MoELayerSpec:
-    """Detected MoE layer specification for a single module in the model."""
-
-    moe_module_name: str  # e.g., "model.layers.0.mlp"
-    model_family: str  # e.g., "mixtral", "qwen3_moe"
-    router_name: str  # e.g., "gate"
-    experts_name: str  # e.g., "experts"
-    expert_storage: Literal["fused_3d", "module_list"]
-    expert_w1_name: str
-    expert_w2_name: str
-    expert_w3_name: str | None
-    num_experts: int
-    top_k: int
-    hidden_size: int
-    ffn_hidden_size: int
-    score_func: Literal["softmax", "sigmoid"]
-    score_apply: Literal["pre", "post"]
-    route_norm: bool
-    gate_bias: bool
-    return_router_logits: bool
-    router_logits_capture_target: Literal["moe_block", "router", "none"]
-    router_logits_capture_index: int | None
-    router_logits_capture_layer_name: str | None
-    has_shared_experts: bool
-    shared_experts_name: str
-    shared_experts_gate_name: str = ""
-    route_scale: float = 1.0
-    num_expert_groups: int | None = None
-    num_limited_groups: int | None = None
-    group_score_func: Literal["max", "top2_sum"] = "top2_sum"
-    supports_expert_bias: bool = True
-    unsupported_router_bias_names: tuple[str, ...] = ()
-    preset_adapter: str = "default"
-    router_logits_capture_mode: Literal["raw", "post_score"] = "post_score"
-    moe_output_shape: Literal["batched", "flat"] = "batched"
-
-
-@dataclass
-class AutoEPConfig:
-    """User-facing configuration parsed from DS config JSON."""
-
-    enabled: bool = False
-    autoep_size: int = 1
-    preset_model: str | None = None
-    moe_layer_pattern: str | None = None
-    expert_pattern: str | None = None
-    router_pattern: str | None = None
-    use_grouped_mm: bool = True
-    route_norm: bool | None = None  # None = auto-detect from model config
-    route_scale: float = 1.0
-    score_apply: Literal["auto", "pre", "post"] = "auto"
-    combine_impl: Literal["auto", "weighted_sum", "legacy_bmm"] = "auto"
-    num_expert_groups: int | None = None
-    num_limited_groups: int | None = None
-    score_func: Literal["auto", "softmax", "sigmoid"] = "auto"
-    top_k: int | str = "auto"  # int or "auto"
-    load_balance_coeff: float | None | object = _UNSET
-    routed_scaling_factor: float | str = "auto"  # float or "auto"
-    # Custom preset fields (override defaults in custom/built-in preset paths)
-    expert_w1: str | None = None
-    expert_w2: str | None = None
-    expert_w3: object = _UNSET  # _UNSET = use preset default; None = fused gate+up; str = custom name
-    num_experts_attr: str | None = None
-    top_k_attr: str | None = None
-    has_shared_experts: bool | None = None
-    shared_experts_pattern: str | None = None
-    shared_experts_gate_pattern: str | None = None
-    _load_balance_coeff_explicit: bool = field(default=False, init=False, repr=False)
-
-    def __post_init__(self) -> None:
-        if self.load_balance_coeff is _UNSET:
-            self.load_balance_coeff = None
-            self._load_balance_coeff_explicit = False
-        else:
-            self._load_balance_coeff_explicit = True
-
-
-# ---------------------------------------------------------------------------
-# Preset model definitions
-# ---------------------------------------------------------------------------
-
-PRESET_MODELS: dict[str, MoEModelPreset] = {
-    "mixtral":
-    MoEModelPreset(
-        moe_layer_pattern=r"model\.layers\.\d+\.mlp",
-        router_pattern="gate",
-        experts_pattern="experts",
-        expert_storage="fused_3d",
-        expert_w1="gate_up_proj",
-        expert_w2="down_proj",
-        expert_w3=None,
-        num_experts_attr="num_local_experts",
-        top_k_attr="num_experts_per_tok",
-        score_func="softmax",
-        score_apply="post",
-        route_norm=True,
-        gate_bias=False,
-        hf_model_types=("mixtral", ),
-        min_transformers_version="5.0.0",
-    ),
-    "qwen3_moe":
-    MoEModelPreset(
-        moe_layer_pattern=r"model\.layers\.\d+\.mlp",
-        router_pattern="gate",
-        experts_pattern="experts",
-        expert_storage="fused_3d",
-        expert_w1="gate_up_proj",
-        expert_w2="down_proj",
-        expert_w3=None,
-        num_experts_attr="num_experts",
-        top_k_attr="num_experts_per_tok",
-        score_func="softmax",
-        score_apply="post",
-        route_norm=True,
-        gate_bias=False,
-        has_shared_experts=True,
-        shared_experts_pattern="shared_expert",
-        shared_experts_gate_pattern="shared_expert_gate",
-        hf_model_types=("qwen3_moe", "qwen2_moe"),
-        min_transformers_version="5.0.0",
-        docs_support_notes=("Also covers Qwen2-MoE when the installed Transformers build uses the "
-                            "validated fused expert layout."),
-    ),
-    "qwen3_5_moe":
-    MoEModelPreset(
-        moe_layer_pattern=r"model\.layers\.\d+\.mlp",
-        router_pattern="gate",
-        experts_pattern="experts",
-        expert_storage="fused_3d",
-        expert_w1="gate_up_proj",
-        expert_w2="down_proj",
-        expert_w3=None,
-        num_experts_attr="num_experts",
-        top_k_attr="num_experts_per_tok",
-        score_func="softmax",
-        score_apply="post",
-        route_norm=True,
-        gate_bias=False,
-        has_shared_experts=True,
-        shared_experts_pattern="shared_expert",
-        shared_experts_gate_pattern="shared_expert_gate",
-        preset_adapter="qwen3_5_moe",
-        hf_model_types=("qwen3_5_moe_text", ),
-        unsupported_hf_model_type_notes={
-            "qwen3_5_moe": ("AutoEP supports the Qwen3.5 text backbone preset path; pass the "
-                            "text-backbone model/config with model_type='qwen3_5_moe_text'.")
-        },
-        min_transformers_version="5.2.0",
-        docs_support_notes="Requires the Qwen3.5 text-backbone qwen3_5_moe_text model type.",
-    ),
-    "deepseek_v2":
-    MoEModelPreset(
-        moe_layer_pattern=r"model\.layers\.\d+\.mlp",
-        router_pattern="gate",
-        experts_pattern="experts",
-        expert_storage="fused_3d",
-        expert_w1="gate_up_proj",
-        expert_w2="down_proj",
-        expert_w3=None,
-        num_experts_attr="n_routed_experts",
-        top_k_attr="num_experts_per_tok",
-        score_func="softmax",
-        score_apply="post",
-        route_norm=False,
-        gate_bias=False,
-        has_shared_experts=True,
-        shared_experts_pattern="shared_experts",
-        autoep_config_defaults={"load_balance_coeff": None},
-        supports_expert_bias=False,
-        preset_adapter="deepseek_v2",
-        hf_model_types=("deepseek_v2", ),
-        min_transformers_version="5.0.0",
-        docs_support_notes=("load_balance_coeff / expert-bias auxiliary-loss-free load balancing "
-                            "is not currently supported; non-null values are rejected."),
-    ),
-    "deepseek_v3":
-    MoEModelPreset(
-        moe_layer_pattern=r"model\.layers\.\d+\.mlp",
-        router_pattern="gate",
-        experts_pattern="experts",
-        expert_storage="fused_3d",
-        expert_w1="gate_up_proj",
-        expert_w2="down_proj",
-        expert_w3=None,
-        num_experts_attr="n_routed_experts",
-        top_k_attr="num_experts_per_tok",
-        score_func="sigmoid",
-        score_apply="post",
-        route_norm=False,
-        gate_bias=False,
-        has_shared_experts=True,
-        shared_experts_pattern="shared_experts",
-        autoep_config_defaults={"load_balance_coeff": None},
-        supports_expert_bias=False,
-        unsupported_router_bias_names=("e_score_correction_bias", ),
-        preset_adapter="deepseek_v3",
-        hf_model_types=("deepseek_v3", ),
-        min_transformers_version="5.0.0",
-        docs_support_notes=("load_balance_coeff / expert-bias auxiliary-loss-free load balancing "
-                            "is not currently supported; non-null values are rejected."),
-    ),
-    "llama4":
-    MoEModelPreset(
-        moe_layer_pattern=r"model\.layers\.\d+\.feed_forward",
-        router_pattern="router",
-        experts_pattern="experts",
-        expert_storage="fused_3d",
-        expert_w1="gate_up_proj",
-        expert_w2="down_proj",
-        expert_w3=None,
-        num_experts_attr="num_local_experts",
-        top_k_attr="num_experts_per_tok",
-        score_func="sigmoid",
-        score_apply="pre",
-        route_norm=False,
-        gate_bias=False,
-        has_shared_experts=True,
-        shared_experts_pattern="shared_expert",
-        autoep_config_defaults={"load_balance_coeff": None},
-        preset_adapter="llama4",
-        hf_model_types=("llama4", "llama4_text"),
-        min_transformers_version="5.0.0",
-    ),
-}
-
-_PRESET_DEFAULT_EXPLICIT_FLAGS = {
-    "load_balance_coeff": "_load_balance_coeff_explicit",
-}
-
-
-def resolve_autoep_config_defaults(config: AutoEPConfig, preset_name: str | None) -> AutoEPConfig:
-    """Return config with preset-level AutoEP defaults applied where the user did not override.
-
-    The returned config is a shallow copy so resolving one preset does not permanently
-    change the base config used for another preset or a later auto-detection pass.
-    """
-    if preset_name is None or preset_name not in PRESET_MODELS:
-        return config
-
-    preset_defaults = PRESET_MODELS[preset_name].autoep_config_defaults
-    if not preset_defaults:
-        return config
-
-    resolved = copy.copy(config)
-    for field_name, default_value in preset_defaults.items():
-        explicit_flag = _PRESET_DEFAULT_EXPLICIT_FLAGS.get(field_name)
-        if explicit_flag is None:
-            continue
-        if not getattr(config, explicit_flag, False):
-            setattr(resolved, field_name, default_value)
-    return resolved
-
+__all__ = [
+    "_UNSET",
+    "AutoEPConfig",
+    "MoELayerSpec",
+    "MoEModelPreset",
+    "PRESET_MODELS",
+    "parse_autoep_config",
+    "resolve_autoep_config_defaults",
+    "validate_autoep_config",
+    "validate_autoep_post_detection",
+]
 
 # ---------------------------------------------------------------------------
 # Config parsing
@@ -401,7 +118,7 @@ def validate_autoep_config(
     # Validate preset_model if specified
     if config.preset_model is not None and config.preset_model not in PRESET_MODELS:
         raise ValueError(f"Unknown preset_model '{config.preset_model}'. "
-                         f"Available presets: {list(PRESET_MODELS.keys())}")
+                         f"Available presets: {list(available_preset_names())}")
 
     # Validate score_apply
     valid_score_apply = ("auto", "pre", "post")
