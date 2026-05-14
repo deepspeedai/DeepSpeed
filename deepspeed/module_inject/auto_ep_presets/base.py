@@ -246,6 +246,13 @@ class AutoEPPresetAdapter:
             num_limited_groups=config.num_limited_groups,
         )
 
+    def resolve_expert_layout(
+        self,
+        experts_module: nn.Module,
+        preset: MoEModelPreset,
+    ) -> MoEModelPreset:
+        return preset
+
     def adjust_forward_contract(self, contract: ForwardContract) -> ForwardContract:
         return contract
 
