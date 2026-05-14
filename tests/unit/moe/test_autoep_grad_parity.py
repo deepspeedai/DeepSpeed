@@ -95,7 +95,9 @@ def _gather_autoep_expert_grad(param, group):
     group_size = dist.get_world_size(group=group)
     shards = [torch.zeros_like(grad) for _ in range(group_size)]
     dist.all_gather(shards, grad.detach(), group=group)
-    return torch.cat([shard.float().cpu() for shard in shards], dim=0) / group_size
+    # The gather reconstructs expert shards; gradient reduction has already
+    # applied the data-parallel normalization, so do not average by EP size.
+    return torch.cat([shard.float().cpu() for shard in shards], dim=0)
 
 
 def _collect_autoep_expert_grads(engine):
