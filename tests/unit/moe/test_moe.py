@@ -11,50 +11,12 @@ import random
 from unit.common import DistributedTest
 from unit.simple_model import SimplePRMoEModel, SimpleMoEModel, sequence_dataloader
 import deepspeed.comm as dist
+import deepspeed.moe.sharded_moe as sharded_moe
 from deepspeed import get_accelerator
-from deepspeed.moe import sharded_moe
-from deepspeed.moe.sharded_moe import MOELayer, top1gating, top2gating, topkgating
+from deepspeed.moe.layer import MoE
+from deepspeed.moe.sharded_moe import top1gating, top2gating, topkgating
 from deepspeed.moe.utils import split_params_into_different_moe_groups_for_optimizer, is_moe_param
 from deepspeed.utils.torch import required_torch_version
-
-
-class _DummyTop1Gate(torch.nn.Module):
-    k = 1
-
-    def _set_ep_group(self, ep_group):
-        self.ep_group = ep_group
-
-    def forward(self, reshaped_input, used_token=None):
-        tokens = reshaped_input.shape[0]
-        num_experts = 2
-        capacity = tokens
-        dispatch_mask = torch.zeros(tokens, num_experts, capacity, dtype=torch.bool, device=reshaped_input.device)
-        combine_weights = torch.zeros(tokens,
-                                      num_experts,
-                                      capacity,
-                                      dtype=reshaped_input.dtype,
-                                      device=reshaped_input.device)
-        for token_idx in range(tokens):
-            dispatch_mask[token_idx, token_idx % num_experts, token_idx] = True
-            combine_weights[token_idx, token_idx % num_experts, token_idx] = 1.0
-        l_aux = reshaped_input.new_tensor(0.0)
-        exp_counts = torch.tensor([tokens // 2, tokens - tokens // 2], device=reshaped_input.device)
-        return l_aux, combine_weights, dispatch_mask, exp_counts
-
-
-class _IdentityExperts(torch.nn.Module):
-
-    def forward(self, dispatched_input):
-        return dispatched_input
-
-
-def _run_no_drop_capacity_gating(gating_name, logits, ep_group):
-    if gating_name == "top1":
-        top1gating(logits, capacity_factor=1.0, min_capacity=0, drop_tokens=False, ep_group=ep_group)
-    elif gating_name == "top2":
-        top2gating(logits, capacity_factor=1.0, min_capacity=0, drop_tokens=False, ep_group=ep_group)
-    else:
-        topkgating(logits, k=2, capacity_factor=1.0, min_capacity=0, drop_tokens=False, ep_group=ep_group)
 
 
 @pytest.mark.parametrize("zero_stage", [0, 1, 2])
@@ -197,75 +159,6 @@ class TestMoE(DistributedTest):
             gc.collect()  # Must do this or we get a memory leak in this test
 
 
-class TestMoESingleton:
-
-    def test_ep_size_one_forward_skips_all_to_all(self, monkeypatch):
-        calls = []
-
-        def fail_all_to_all(*args, **kwargs):
-            calls.append((args, kwargs))
-            raise AssertionError("singleton MoE should not call all-to-all")
-
-        monkeypatch.setattr(sharded_moe._AllToAll, "apply", staticmethod(fail_all_to_all))
-        layer = MOELayer(_DummyTop1Gate(), _IdentityExperts(), "ep_size_1", ep_size=1, num_local_experts=2)
-        hidden_states = torch.randn(2, 3, 4)
-
-        output = layer(hidden_states, None)
-
-        assert output.shape == hidden_states.shape
-        assert calls == []
-
-    def test_multi_ep_forward_uses_all_to_all(self, monkeypatch):
-        calls = []
-
-        def passthrough_all_to_all(group, tensor):
-            calls.append((group, tensor.shape))
-            return tensor
-
-        monkeypatch.setattr(sharded_moe._AllToAll, "apply", staticmethod(passthrough_all_to_all))
-        layer = MOELayer(_DummyTop1Gate(), _IdentityExperts(), "ep_size_2", ep_size=2, num_local_experts=1)
-        hidden_states = torch.randn(2, 3, 4)
-
-        output = layer(hidden_states, None)
-
-        assert output.shape == hidden_states.shape
-        assert len(calls) == 2
-
-    @pytest.mark.parametrize("gating_name", ["top1", "top2", "topk"])
-    def test_capacity_no_all_reduce_when_ep_group_is_none(self, monkeypatch, gating_name):
-        calls = []
-        monkeypatch.setattr(sharded_moe.dist, "all_reduce", lambda *args, **kwargs: calls.append((args, kwargs)))
-        logits = torch.randn(8, 4)
-
-        _run_no_drop_capacity_gating(gating_name, logits, ep_group=None)
-
-        assert calls == []
-
-    @pytest.mark.parametrize("gating_name", ["top1", "top2", "topk"])
-    def test_capacity_no_all_reduce_for_singleton_ep_group(self, monkeypatch, gating_name):
-        calls = []
-        ep_group = object()
-        monkeypatch.setattr(sharded_moe.dist, "get_world_size", lambda group=None: 1)
-        monkeypatch.setattr(sharded_moe.dist, "all_reduce", lambda *args, **kwargs: calls.append((args, kwargs)))
-        logits = torch.randn(8, 4)
-
-        _run_no_drop_capacity_gating(gating_name, logits, ep_group=ep_group)
-
-        assert calls == []
-
-    @pytest.mark.parametrize("gating_name", ["top1", "top2", "topk"])
-    def test_capacity_all_reduce_for_multi_ep_group(self, monkeypatch, gating_name):
-        calls = []
-        ep_group = object()
-        monkeypatch.setattr(sharded_moe.dist, "get_world_size", lambda group=None: 2)
-        monkeypatch.setattr(sharded_moe.dist, "all_reduce", lambda *args, **kwargs: calls.append((args, kwargs)))
-        logits = torch.randn(8, 4)
-
-        _run_no_drop_capacity_gating(gating_name, logits, ep_group=ep_group)
-
-        assert len(calls) == 1
-
-
 @pytest.mark.parametrize("ep_size, use_residual", [(2, True), (2, False)])
 class TestPRMoE(DistributedTest):
     world_size = 4
@@ -318,6 +211,93 @@ class TestTopk(DistributedTest):
                             use_tutel=False)
 
 
+class TestMoESingleton(DistributedTest):
+    world_size = 2
+
+    @pytest.mark.parametrize("ep_size, expected_calls", [(1, 0), (2, 2)], ids=["single", "multi"])
+    def test_all_to_all(self, monkeypatch, ep_size, expected_calls):
+        if not required_torch_version(min_version=1.8):
+            pytest.skip("DeepSpeed MoE tests need torch 1.8 or higher to run correctly")
+
+        config_dict = {"train_micro_batch_size_per_gpu": 1, "steps_per_print": 1}
+        hidden_dim = 8
+        expert = torch.nn.Sequential(torch.nn.Linear(hidden_dim, hidden_dim), torch.nn.Linear(hidden_dim, hidden_dim))
+        model = MoE(hidden_size=hidden_dim, expert=expert, num_experts=2, ep_size=ep_size, k=1, min_capacity=0)
+        optimizer = torch.optim.AdamW(params=model.parameters())
+        model, _, _, _ = deepspeed.initialize(config=config_dict,
+                                              model=model,
+                                              optimizer=optimizer,
+                                              dist_init_required=False)
+
+        all_to_all_calls = []
+
+        def counted_all_to_all(group, input):
+            all_to_all_calls.append((group, input.shape))
+            return input
+
+        monkeypatch.setattr(sharded_moe._AllToAll, "apply", counted_all_to_all)
+
+        x = torch.randn(1, 4, hidden_dim, device=model.device, requires_grad=True)
+        output, l_aux, _ = model(x)
+        assert len(all_to_all_calls) == expected_calls
+
+        loss = output.float().sum() + l_aux.float()
+        model.backward(loss)
+        assert len(all_to_all_calls) == expected_calls
+        assert x.grad is not None
+        assert any(param.grad is not None for param in model.module.parameters())
+
+    @pytest.mark.parametrize("gate_fn, capacity_args", [(top1gating, (1, 0)), (top2gating, (1, 0)),
+                                                        (topkgating, (3, 1, 0))],
+                             ids=["top1", "top2", "topk"])
+    @pytest.mark.parametrize("ep_world_size, expected_calls", [(1, 0), (2, 1)], ids=["single", "multi"])
+    def test_capacity(self, monkeypatch, gate_fn, capacity_args, ep_world_size, expected_calls):
+        if not required_torch_version(min_version=1.8):
+            pytest.skip("DeepSpeed MoE tests need torch 1.8 or higher to run correctly")
+
+        ep_group = None
+        if ep_world_size == 1:
+            for rank in range(dist.get_world_size()):
+                group = dist.new_group([rank])
+                if rank == dist.get_rank():
+                    ep_group = group
+        else:
+            ep_group = dist.new_group(list(range(dist.get_world_size())))
+
+        all_reduce_calls = []
+        original_all_reduce = sharded_moe.dist.all_reduce
+
+        def counted_all_reduce(tensor, op=dist.ReduceOp.SUM, group=None):
+            all_reduce_calls.append((tensor, op, group))
+            return original_all_reduce(tensor, op=op, group=group)
+
+        monkeypatch.setattr(sharded_moe.dist, "all_reduce", counted_all_reduce)
+
+        device = get_accelerator().current_device_name()
+        logits = torch.randn(8, 4, device=device)
+        gate_fn(logits, *capacity_args, drop_tokens=False, ep_group=ep_group)
+
+        assert len(all_reduce_calls) == expected_calls
+        if all_reduce_calls:
+            _, op, group = all_reduce_calls[0]
+            assert op == dist.ReduceOp.MAX
+            assert group is ep_group
+
+    def test_no_ep_group(self, monkeypatch):
+        if not required_torch_version(min_version=1.8):
+            pytest.skip("DeepSpeed MoE tests need torch 1.8 or higher to run correctly")
+
+        def fail_collective(*args, **kwargs):
+            raise AssertionError("ep_group=None should not enter expert-parallel collective code")
+
+        monkeypatch.setattr(sharded_moe.dist, "get_world_size", fail_collective)
+        monkeypatch.setattr(sharded_moe.dist, "all_reduce", fail_collective)
+
+        device = get_accelerator().current_device_name()
+        logits = torch.randn(8, 4, device=device)
+        top2gating(logits, 1, 0, drop_tokens=False, ep_group=None, top2_2nd_expert_sampling=False)
+
+
 class TestTopkGate(DistributedTest):
 
     def test(self):
@@ -350,13 +330,13 @@ class TestTopkGate(DistributedTest):
         logits2 *= dist.get_rank() + 1
 
         #top3 full mask     #prob_mask          #postion_mask
-        #0 0 1 0 1 1        #0 0 1 0 1 1        #0 0 1 0 1 1
-        #0 1 0 1 0 1        #0 0 0 1 0 0        #0 1 0 1 0 1
+        #0 0 1 0 1 1        #0 0 1 0 1 0        #0 0 1 0 1 1
+        #0 1 0 1 0 1        #0 1 0 1 0 1        #0 1 0 1 0 1
         #0 1 1 1 0 0        #0 1 1 1 0 0        #0 1 1 1 0 0
-        #1 1 0 0 0 1        #1 1 0 0 0 1        #1 0 0 0 0 0
+        #1 1 0 0 0 1        #1 0 0 0 0 1        #1 0 0 0 0 0
         probs_dispatch_res = topkgating(logits2, 3, 1, min_capacity=1, drop_policy='probs')[2]
-        probs_sec_sparse = torch.tensor([[0, 2, 0], [0, 4, 0], [0, 5, 0], [1, 3, 0], [2, 1, 0], [2, 2, 1], [2, 3, 1],
-                                         [3, 0, 0], [3, 1, 1], [3, 5, 1]])
+        probs_sec_sparse = torch.tensor([[0, 2, 0], [0, 4, 0], [1, 1, 0], [1, 3, 0], [1, 5, 0], [2, 1, 1], [2, 2, 1],
+                                         [2, 3, 1], [3, 0, 0], [3, 5, 1]])
         check_equal(logits2, 2, probs_sec_sparse, probs_dispatch_res)
 
         position_sec_sparse = torch.tensor([[0, 2, 0], [0, 4, 0], [0, 5, 0], [1, 1, 0], [1, 3, 0], [1, 5, 1],

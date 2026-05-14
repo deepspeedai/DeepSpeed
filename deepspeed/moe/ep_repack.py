@@ -14,6 +14,7 @@ import torch
 import torch.nn as nn
 
 from deepspeed.module_inject.auto_ep_config import MoELayerSpec
+from deepspeed.moe.fused_expert_layout import classify_fused_gate_up_layout
 
 
 def repack_expert_weights(
@@ -75,28 +76,21 @@ def _repack_fused_3d(
     w2_local = w2_full[expert_start:expert_end].clone()
 
     if spec.expert_w3_name is None:
-        if w1_local.shape[1] % 2 == 0 and tuple(w2_local.shape[1:]) == (
-                w1_local.shape[2],
-                w1_local.shape[1] // 2,
-        ):
-            # Standard fused gate+up: gate_up_proj [E, 2*ffn, hidden]
-            ffn_hidden = w1_local.shape[1] // 2
-            w1 = w1_local[:, :ffn_hidden, :].contiguous()  # [E_local, ffn, hidden]
-            w3 = w1_local[:, ffn_hidden:, :].contiguous()  # [E_local, ffn, hidden]
-            w2 = w2_local.contiguous()  # [E_local, hidden, ffn]
-        elif w1_local.shape[2] % 2 == 0 and tuple(w2_local.shape[1:]) == (
-                w1_local.shape[2] // 2,
-                w1_local.shape[1],
-        ):
-            # Llama4 fused gate+up: gate_up_proj [E, hidden, 2*ffn]
-            ffn_hidden = w1_local.shape[2] // 2
-            w1 = w1_local[:, :, :ffn_hidden].transpose(1, 2).contiguous()  # [E_local, ffn, hidden]
-            w3 = w1_local[:, :, ffn_hidden:].transpose(1, 2).contiguous()  # [E_local, ffn, hidden]
-            w2 = w2_local.transpose(1, 2).contiguous()  # [E_local, hidden, ffn]
-        else:
+        layout = classify_fused_gate_up_layout(tuple(w1_local.shape), tuple(w2_local.shape))
+        if layout is None:
             raise ValueError("Unsupported fused expert weight layout for AutoEP repacking: "
                              f"{spec.expert_w1_name}={tuple(w1_local.shape)}, "
                              f"{spec.expert_w2_name}={tuple(w2_local.shape)}")
+
+        ffn_hidden = layout.ffn_hidden_size
+        if layout.layout == "gate_up_first":
+            w1 = w1_local[:, :ffn_hidden, :].contiguous()  # [E_local, ffn, hidden]
+            w3 = w1_local[:, ffn_hidden:, :].contiguous()  # [E_local, ffn, hidden]
+            w2 = w2_local.contiguous()  # [E_local, hidden, ffn]
+        else:
+            w1 = w1_local[:, :, :ffn_hidden].transpose(1, 2).contiguous()  # [E_local, ffn, hidden]
+            w3 = w1_local[:, :, ffn_hidden:].transpose(1, 2).contiguous()  # [E_local, ffn, hidden]
+            w2 = w2_local.transpose(1, 2).contiguous()  # [E_local, hidden, ffn]
     else:
         # Separate w1 (gate), w3 (up)
         w3_full = getattr(experts_source, spec.expert_w3_name)

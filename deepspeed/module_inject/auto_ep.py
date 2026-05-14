@@ -17,7 +17,6 @@ from typing import Literal
 import torch
 import torch.nn as nn
 
-from deepspeed.utils import logger
 from deepspeed.module_inject.auto_ep_config import (
     AutoEPConfig,
     MoELayerSpec,
@@ -31,6 +30,8 @@ from deepspeed.module_inject.auto_ep_presets.registry import (
     resolve_preset_candidates,
     unsupported_preset_for_hf_model_type,
 )
+from deepspeed.moe.fused_expert_layout import classify_fused_gate_up_layout
+from deepspeed.utils import logger
 
 
 def _remove_transformers_output_capture_hooks(model: nn.Module) -> int:
@@ -144,26 +145,14 @@ def _infer_hidden_and_ffn_size(
         w2_param = getattr(experts_module, preset.expert_w2, None)
         if w1_param is not None and w2_param is not None:
             if preset.expert_w3 is None:
-                # Most HF MoE families store fused gate+up as [E, 2*ffn, hidden]
-                # with down_proj as [E, hidden, ffn]. Llama4 stores the transpose:
-                # gate_up_proj [E, hidden, 2*ffn] and down_proj [E, ffn, hidden].
-                if w1_param.shape[1] % 2 == 0 and tuple(w2_param.shape[1:]) == (
-                        w1_param.shape[2],
-                        w1_param.shape[1] // 2,
-                ):
-                    hidden_size = w1_param.shape[2]
-                    ffn_hidden_size = w1_param.shape[1] // 2
-                elif w1_param.shape[2] % 2 == 0 and tuple(w2_param.shape[1:]) == (
-                        w1_param.shape[2] // 2,
-                        w1_param.shape[1],
-                ):
-                    hidden_size = w1_param.shape[1]
-                    ffn_hidden_size = w1_param.shape[2] // 2
-                else:
+                layout = classify_fused_gate_up_layout(tuple(w1_param.shape), tuple(w2_param.shape))
+                if layout is None:
                     raise ValueError("expert_w3=None expects fused gate+up weights with either "
                                      f"[E, 2*ffn, hidden]/[E, hidden, ffn] or [E, hidden, 2*ffn]/[E, ffn, hidden], "
                                      f"but got {preset.expert_w1}={tuple(w1_param.shape)} and "
                                      f"{preset.expert_w2}={tuple(w2_param.shape)}.")
+                hidden_size = layout.hidden_size
+                ffn_hidden_size = layout.ffn_hidden_size
             else:
                 # Separate gate and up: w1 shape is [E, ffn, hidden]
                 w3_param = getattr(experts_module, preset.expert_w3, None)
@@ -344,6 +333,9 @@ class AutoEP:
                     hidden_size, ffn_hidden_size = _infer_hidden_and_ffn_size(experts_child, expert_layout, storage,
                                                                               num_experts)
                 except ValueError as e:
+                    if self._requires_selected_preset_detection():
+                        raise ValueError(f"AutoEP: preset '{preset_name}' matched layer '{module_name}' "
+                                         f"with router and experts, but shape inference failed: {e}") from e
                     logger.warning(f"Skipping {module_name}: {e}")
                     continue
 

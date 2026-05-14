@@ -19,6 +19,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from deepspeed.moe.ep_count import count_tokens_per_expert
+
 
 class TokenChoiceTopKRouter(nn.Module):
     """Token-choice top-K routing for Mixture of Experts.
@@ -171,13 +173,6 @@ class TokenChoiceTopKRouter(nn.Module):
 
         top_scores = top_scores * self.route_scale
 
-        # Count tokens per expert
-        # histc requires float input on CPU, so cast indices
-        num_tokens_per_expert = torch.histc(
-            selected_experts_indices.view(-1).float(),
-            bins=self.num_experts,
-            min=0,
-            max=self.num_experts,
-        )
+        num_tokens_per_expert = count_tokens_per_expert(selected_experts_indices, self.num_experts)
 
         return top_scores, selected_experts_indices, num_tokens_per_expert
