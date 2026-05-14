@@ -191,7 +191,7 @@ def main():
     )
 
     if rank == 0:
-        from deepspeed.runtime.comm import mori as _mori
+        from deepspeed.comm import mori as _mori
         print(f"[trainer] SDMA handle is_enabled={_mori.is_enabled()}", flush=True)
 
     loader = _build_loader(args, cfg.vocab_size, rank, world, rank == 0)

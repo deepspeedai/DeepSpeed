@@ -26,7 +26,7 @@ import torch.distributed as torch_dist
 import deepspeed
 from deepspeed import comm as dist
 from deepspeed.accelerator import get_accelerator
-from deepspeed.runtime.comm import mori as _mori
+from deepspeed.comm import mori as _mori
 
 
 def verify_allgather(partitions, world_size, partition_sz, rank, dtype):

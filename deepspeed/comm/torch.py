@@ -121,29 +121,22 @@ class TorchBackend(Backend):
         if self.shm_comm_op != None:
             self.shm_comm_op.initialize(self.get_world_size(), self.get_rank())
         # Best-effort SDMA (mori) backend acquisition.  Stays None on
-        # non-AMD/ROCm, when mori is unavailable, or when the user did not
-        # opt in via ``DS_SDMA_ALLGATHER=1``.  The hot path in
-        # ``all_gather_into_tensor`` below only checks ``self._sdma_backend
-        # is None`` (one attribute load + None test, ~tens of ns), so the
-        # common no-SDMA case (e.g. CUDA + NCCL) pays effectively zero
-        # overhead for this PR.
-        self._sdma_backend = None
+        # non-AMD/ROCm or when mori is unavailable; in that case
+        # all_gather_into_tensor below transparently falls through to
+        # torch.distributed.all_gather_into_tensor.
         self._init_sdma_backend()
 
     def _init_sdma_backend(self):
-        """Try to enable the mori SDMA fast-path for ``all_gather_into_tensor``.
+        """Try to enable the mori SDMA path for ``all_gather_into_tensor``.
 
-        Any failure (non-AMD, mori not installed, user did not opt in,
-        shmem init error) leaves ``self._sdma_backend`` as ``None`` and the
-        standard ``torch.distributed.all_gather_into_tensor`` is used.
+        Failure (non-AMD, mori not installed, shmem init error) leaves the
+        handle unset and the standard torch.distributed allgather is used.
         """
         try:
-            from deepspeed.runtime.comm import mori as _mori
+            from . import mori as _mori
             _mori.init()
-            if _mori.is_enabled():
-                self._sdma_backend = _mori
         except Exception:
-            self._sdma_backend = None
+            pass
 
     @classmethod
     @disable_compiler_collective
@@ -257,16 +250,15 @@ class TorchBackend(Backend):
 
     @disable_compiler_collective
     def all_gather_into_tensor(self, output_tensor, input_tensor, group=None, async_op=False):
-        # Transparent SDMA fast-path (currently AMD MI300 via mori).
-        # ``self._sdma_backend`` is set at init time only when the user
-        # opted in (DS_SDMA_ALLGATHER=1) AND mori initialised successfully,
-        # so on all other systems (CUDA + NCCL, AMD without mori, opt-out,
-        # ...) this whole block is one attribute load + None check before
-        # falling through to torch.distributed.all_gather_into_tensor.
-        if self._sdma_backend is not None:
-            sdma_work = self._sdma_backend.allgather_into_tensor(input_tensor, output_tensor, group=group)
-            if sdma_work is not None:
-                return sdma_work
+        # Transparent SDMA fast-path on AMD/ROCm: when the mori backend is
+        # available and the call is on the WORLD process group, route
+        # through mori_cpp.AllGatherIntoTensor.  Any condition that makes
+        # SDMA unsafe (non-WORLD group, oversized shard, unsupported dtype,
+        # mori unavailable) yields None and we fall through to RCCL/NCCL.
+        from . import mori as _mori
+        sdma_work = _mori.allgather_into_tensor(input_tensor, output_tensor, group=group)
+        if sdma_work is not None:
+            return sdma_work
         if self.has_all_gather_into_tensor():
             return self.all_gather_function(output_tensor=output_tensor,
                                             input_tensor=input_tensor,
