@@ -84,7 +84,8 @@ Transformers build that exposes the matching config/model classes,
 - ``autoep_size`` must divide ``num_experts`` for all detected MoE layers.
 - ``autoep_size=1`` is valid: all experts remain local (no AllToAll), useful
   for functional testing on a single GPU.
-- AutoTP and sequence parallelism cannot both be active simultaneously.
+- AutoEP currently cannot be combined with AutoTP
+  (``tensor_parallel.autotp_size > 1``); support is planned as follow-up work.
 - Checkpoint save/load requires matching ``autoep_size``.
   To change ``autoep_size`` across runs for the same AutoEP-detected model
   topology, convert the checkpoint to Universal Checkpoint format and load it

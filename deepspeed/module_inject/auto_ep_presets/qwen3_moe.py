@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 
-from deepspeed.module_inject.auto_ep_presets.base import MoEModelPreset
+from deepspeed.module_inject.auto_ep_presets.base import MoEModelPreset, TransformersTopLevelRouterLogitsAdapter
 
 PRESET_NAME = "qwen3_moe"
 
@@ -25,8 +25,18 @@ PRESET = MoEModelPreset(
     has_shared_experts=True,
     shared_experts_pattern="shared_expert",
     shared_experts_gate_pattern="shared_expert_gate",
+    preset_adapter="qwen3_moe",
     hf_model_types=("qwen3_moe", "qwen2_moe"),
     min_transformers_version="5.0.0",
     docs_support_notes=("Also covers Qwen2-MoE when the installed Transformers build uses the "
                         "validated fused expert layout."),
 )
+
+PRESET_ADAPTERS = {
+    "qwen3_moe":
+    TransformersTopLevelRouterLogitsAdapter(
+        display_name="Qwen3-MoE/Qwen2-MoE",
+        hf_model_types=("qwen3_moe", "qwen2_moe"),
+        class_name_fragments=("Qwen3Moe", "Qwen2Moe"),
+    ),
+}

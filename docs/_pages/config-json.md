@@ -1070,7 +1070,7 @@ Use a built-in preset but override specific naming/weight fields for a fine-tune
 
 **Constraints:**
 - `autoep_size` must divide `num_experts` for all detected MoE layers
-- AutoTP (`autotp_size > 1`) and sequence parallelism (`sp_size > 1`) cannot both be active simultaneously
+- AutoEP currently cannot be combined with AutoTP (`tensor_parallel.autotp_size > 1`); support is planned as follow-up work
 - ZeRO Stage 3 is not supported with AutoEP (assertion will fire)
 
 ### Logging

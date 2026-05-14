@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 
-from deepspeed.module_inject.auto_ep_presets.base import MoEModelPreset
+from deepspeed.module_inject.auto_ep_presets.base import MoEModelPreset, TransformersTopLevelRouterLogitsAdapter
 
 PRESET_NAME = "mixtral"
 
@@ -22,6 +22,16 @@ PRESET = MoEModelPreset(
     score_apply="post",
     route_norm=True,
     gate_bias=False,
+    preset_adapter="mixtral",
     hf_model_types=("mixtral", ),
     min_transformers_version="5.0.0",
 )
+
+PRESET_ADAPTERS = {
+    "mixtral":
+    TransformersTopLevelRouterLogitsAdapter(
+        display_name="Mixtral",
+        hf_model_types=("mixtral", ),
+        class_name_fragments=("Mixtral", ),
+    ),
+}
