@@ -4,6 +4,10 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
+import torch.nn as nn
+
 from deepspeed.module_inject.auto_ep_presets.base import AutoEPConfig, AutoEPPresetAdapter, GroupRoutingConfig, MoEModelPreset
 
 PRESET_NAME = "deepseek_v3"
@@ -52,6 +56,40 @@ class DeepSeekV3PresetAdapter(AutoEPPresetAdapter):
             num_limited_groups=group_routing.num_limited_groups or getattr(model_config, 'topk_group', None),
             group_score_func=group_routing.group_score_func,
         )
+
+    def resolve_expert_layout(
+        self,
+        experts_module: nn.Module,
+        preset: MoEModelPreset,
+    ) -> MoEModelPreset:
+        if not isinstance(experts_module, nn.ModuleList) or len(experts_module) == 0:
+            return preset
+
+        default_fused_layout = (preset.expert_storage == "fused_3d" and preset.expert_w1 == "gate_up_proj"
+                                and preset.expert_w2 == "down_proj" and preset.expert_w3 is None)
+        if not default_fused_layout:
+            return preset
+
+        expert0 = experts_module[0]
+        if not all(_has_expert_projection(expert0, name) for name in ("gate_proj", "up_proj", "down_proj")):
+            return preset
+
+        return replace(
+            preset,
+            expert_storage="module_list",
+            expert_w1="gate_proj",
+            expert_w2="down_proj",
+            expert_w3="up_proj",
+        )
+
+
+def _has_expert_projection(expert_module: nn.Module, name: str) -> bool:
+    projection = getattr(expert_module, name, None)
+    if projection is None:
+        return False
+    if isinstance(projection, (nn.Linear, nn.Parameter)):
+        return True
+    return hasattr(projection, "weight")
 
 
 PRESET_ADAPTERS = {

@@ -283,9 +283,11 @@ class AutoEP:
                     )
                     continue
 
+                expert_layout = adapter.resolve_expert_layout(experts_child, preset)
+
                 # Accept both: nn.ModuleList (legacy) and Experts class (transformers 5.0.0+)
                 has_expert_params = (isinstance(experts_child, nn.ModuleList)
-                                     or _has_3d_expert_params(experts_child, preset))
+                                     or _has_3d_expert_params(experts_child, expert_layout))
                 if not has_expert_params:
                     logger.debug(
                         "Skipping %s: '%s' child exists but has no expert parameters",
@@ -305,7 +307,7 @@ class AutoEP:
                     continue
 
                 # Detect storage format
-                storage = _detect_expert_storage(experts_child, preset)
+                storage = _detect_expert_storage(experts_child, expert_layout)
 
                 # Get num_experts and top_k from config or weights
                 num_experts = None
@@ -339,7 +341,7 @@ class AutoEP:
 
                 # Infer hidden sizes
                 try:
-                    hidden_size, ffn_hidden_size = _infer_hidden_and_ffn_size(experts_child, preset, storage,
+                    hidden_size, ffn_hidden_size = _infer_hidden_and_ffn_size(experts_child, expert_layout, storage,
                                                                               num_experts)
                 except ValueError as e:
                     logger.warning(f"Skipping {module_name}: {e}")
@@ -417,9 +419,9 @@ class AutoEP:
                     router_name=preset.router_pattern,
                     experts_name=preset.experts_pattern,
                     expert_storage=storage,
-                    expert_w1_name=preset.expert_w1,
-                    expert_w2_name=preset.expert_w2,
-                    expert_w3_name=preset.expert_w3,
+                    expert_w1_name=expert_layout.expert_w1,
+                    expert_w2_name=expert_layout.expert_w2,
+                    expert_w3_name=expert_layout.expert_w3,
                     num_experts=num_experts,
                     top_k=top_k,
                     hidden_size=hidden_size,
