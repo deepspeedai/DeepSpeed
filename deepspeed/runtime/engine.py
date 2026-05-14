@@ -542,8 +542,7 @@ class DeepSpeedEngine(Module):
 
         if specs:
             validate_autoep_post_detection(autoep_config, specs)
-            for spec in specs:
-                auto_ep.replace_moe_layer(spec, ep_size=ep_size, ep_rank=ep_rank)
+            auto_ep.replace_moe_layers(specs, ep_size=ep_size, ep_rank=ep_rank)
             logger.info(f"AutoEP: replaced {len(specs)} MoE layer(s) with ep_size={ep_size}")
 
     def _configure_tensor_parallel(self, model, tp_config):

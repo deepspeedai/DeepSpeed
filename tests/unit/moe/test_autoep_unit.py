@@ -234,6 +234,17 @@ class TestAutoEPConfig:
         with pytest.raises(ValueError, match="must divide the stage size"):
             validate_autoep_config(config, world_size=8, pp_size=1, tp_size=1, sp_size=1)
 
+    def test_validate_limited_groups_without_config_expert_groups_allowed_before_detection(self):
+        config = AutoEPConfig(enabled=True, autoep_size=1, num_limited_groups=1)
+
+        validate_autoep_config(config, world_size=1, pp_size=1, tp_size=1, sp_size=1)
+
+    def test_validate_limited_groups_rejects_zero(self):
+        config = AutoEPConfig(enabled=True, autoep_size=1, num_expert_groups=2, num_limited_groups=0)
+
+        with pytest.raises(ValueError, match="num_limited_groups must be >= 1"):
+            validate_autoep_config(config, world_size=1, pp_size=1, tp_size=1, sp_size=1)
+
     def test_validate_post_detection_ep_gt_num_experts(self):
         """ep_size > num_experts raises with helpful message listing valid divisors."""
         config = AutoEPConfig(enabled=True, autoep_size=16)
@@ -329,6 +340,17 @@ class TestAutoEPConfig:
         ]
         with pytest.raises(ValueError, match="num_expert_groups.*must divide"):
             validate_autoep_post_detection(config, specs)
+
+    def test_validate_post_detection_rejects_config_limited_groups_without_expert_groups(self):
+        config = AutoEPConfig(enabled=True, autoep_size=1, num_limited_groups=1)
+
+        with pytest.raises(ValueError, match="num_limited_groups requires num_expert_groups"):
+            validate_autoep_post_detection(config, [_make_spec()])
+
+    def test_validate_post_detection_allows_spec_expert_groups_with_config_limited_groups(self):
+        config = AutoEPConfig(enabled=True, autoep_size=1, num_limited_groups=1)
+
+        validate_autoep_post_detection(config, [_make_spec(num_expert_groups=2)])
 
     def test_preset_models_complete(self):
         """All presets have required fields."""
@@ -1086,6 +1108,19 @@ class TestMoEDetection:
 
         assert AutoEP(model, config).ep_parser() == []
 
+    def test_generic_detection_rejects_ambiguous_duplicate_specs(self):
+        model = MockMoETransformer(num_layers=1, moe_every_n=1)
+        model.config.model_type = "unknown_moe"
+        config = AutoEPConfig(enabled=True, autoep_size=1)
+
+        with pytest.raises(ValueError) as exc:
+            AutoEP(model, config).ep_parser()
+
+        message = str(exc.value)
+        assert "ambiguous" in message
+        assert "model.layers.0.mlp" in message
+        assert "preset_model" in message
+
     def test_explicit_preset_without_matching_moe_layers_fails_actionably(self):
         """An explicit preset should not silently no-op when its structure is absent."""
         model = MockMoETransformer(num_layers=1, moe_every_n=1)
@@ -1494,11 +1529,14 @@ class TestMoEDetection:
         assert specs[0].num_limited_groups == 1
         assert specs[0].group_score_func == "max"
 
-    def test_deepseek_v3_detection_reads_group_routing_from_model_config(self):
+    def test_deepseek_v3_detection_reads_group_routing_from_model_config(self, monkeypatch):
         """DeepSeek-V3 preset carries HF group-limited routing into AutoEP."""
+        adapter = get_preset_adapter("deepseek_v3")
+        monkeypatch.setattr(adapter, "_installed_transformers_version", lambda: "5.0.0")
         model = MockMoETransformer(num_layers=1, num_experts=4, moe_every_n=1)
+        model.config.model_type = "deepseek_v3"
+        model.config.n_routed_experts = 4
         model.config.n_group = 2
-        model.config.topk_group = 1
         model.config.norm_topk_prob = True
         model.config.routed_scaling_factor = 2.5
         config = parse_autoep_config({
@@ -1506,9 +1544,13 @@ class TestMoEDetection:
             "autoep_size": 1,
             "preset_model": "deepseek_v3",
             "top_k": 2,
+            "num_limited_groups": 1,
         })
 
+        assert config.num_expert_groups is None
+        validate_autoep_config(config, world_size=1, pp_size=1, tp_size=1, sp_size=1)
         specs = AutoEP(model, config).ep_parser()
+        validate_autoep_post_detection(config, specs)
 
         assert len(specs) == 1
         assert specs[0].num_expert_groups == 2
@@ -1706,6 +1748,55 @@ class TestMoEDetection:
         assert installed_recorders
         assert installed_recorders[0].target_class is replacement.router.gate.__class__
         assert model._can_record_outputs["router_logits"].target_class is replacement.router.gate.__class__
+
+    def test_batched_replace_moe_layers_retargets_hf_capture_once(self, monkeypatch):
+        """Batched replacement scans/reinstalls HF output-capture hooks once for a multi-layer model."""
+
+        class FakeOutputRecorder:
+
+            def __init__(self, target_class, index=0, layer_name=None, class_name=None):
+                self.target_class = target_class
+                self.index = index
+                self.layer_name = layer_name
+                self.class_name = class_name
+
+        fake_output_capturing = types.ModuleType("transformers.utils.output_capturing")
+        fake_output_capturing.OutputRecorder = FakeOutputRecorder
+        fake_output_capturing._CAN_RECORD_REGISTRY = {}
+        installed_recorders = []
+
+        def maybe_install_capturing_hooks(hook_model):
+            recorder = fake_output_capturing._CAN_RECORD_REGISTRY[str(hook_model.__class__)]["router_logits"]
+            installed_recorders.append(recorder)
+            hook_model._output_capturing_hooks_installed = True
+
+        fake_output_capturing.maybe_install_capturing_hooks = maybe_install_capturing_hooks
+        _install_fake_output_capturing(monkeypatch, fake_output_capturing)
+
+        model = MockMoETransformer(num_layers=2, num_experts=4, moe_every_n=1)
+        model.config.model_type = "mixtral"
+        model.config.num_experts = 4
+        for layer in model.model.layers:
+            layer.mlp.gate = MockRecordingRouter(64, 4, bias=False)
+        original_outputs = {"router_logits": FakeOutputRecorder(MockRecordingRouter, index=0)}
+        registry_key = str(model.__class__)
+        fake_output_capturing._CAN_RECORD_REGISTRY[registry_key] = original_outputs
+        model._can_record_outputs = original_outputs
+        config = parse_autoep_config({
+            "enabled": True,
+            "autoep_size": 1,
+            "preset_model": "mixtral",
+            "use_grouped_mm": False,
+        })
+        auto_ep = AutoEP(model, config)
+        specs = auto_ep.ep_parser()
+
+        auto_ep.replace_moe_layers(specs, ep_size=1, ep_rank=0)
+
+        assert len(installed_recorders) == 1
+        assert all(isinstance(layer.mlp, AutoEPMoELayer) for layer in model.model.layers)
+        assert model._can_record_outputs["router_logits"].target_class is model.model.layers[
+            0].mlp.router.gate.__class__
 
     def test_replace_moe_layer_works(self):
         """replace_moe_layer creates AutoEPMoELayer replacement."""

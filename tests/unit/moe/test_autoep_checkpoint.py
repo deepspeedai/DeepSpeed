@@ -967,6 +967,18 @@ class TestUniversalConvert(DistributedTest):
             assert torch.equal(exp_avg_sq[PARAM], torch.full(shape, expected_avg_sq))
 
 
+class TestUniversalConvertNonDistributed:
+
+    def test_universal_converter_skips_native_moe_expert_files_without_autoep_metadata(self):
+        """Native DeepSpeed MoE expert files share AutoEP's filename pattern but have no AutoEP metadata."""
+        import deepspeed.checkpoint.ds_to_universal as ds_to_universal
+
+        expert_files = ["layer_0_expert_0_mp_rank_00_model_states.pt"]
+
+        assert ds_to_universal._classify_autoep_expert_file_consolidation(None, expert_files) == "native_moe"
+        assert ds_to_universal._classify_autoep_expert_file_consolidation([], expert_files) == "autoep"
+
+
 class TestUniversalLoad(DistributedTest):
     world_size = 1
 

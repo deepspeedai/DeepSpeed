@@ -138,7 +138,11 @@ def validate_autoep_config(
         raise ValueError(f"score_func must be one of {valid_score_func}, "
                          f"got '{config.score_func}'")
 
-    # Validate num_expert_groups constraints
+    # Validate group-limited routing constraints
+    if config.num_limited_groups is not None:
+        if config.num_limited_groups < 1:
+            raise ValueError(f"num_limited_groups must be >= 1, got {config.num_limited_groups}")
+
     if config.num_expert_groups is not None:
         if config.num_expert_groups < 1:
             raise ValueError(f"num_expert_groups must be >= 1, got {config.num_expert_groups}")
@@ -263,8 +267,15 @@ def validate_autoep_post_detection(
         num_expert_groups = spec.num_expert_groups if spec.num_expert_groups is not None else config.num_expert_groups
         num_limited_groups = spec.num_limited_groups if spec.num_limited_groups is not None else config.num_limited_groups
 
-        # Validate num_expert_groups divides num_experts
+        # Validate group-limited routing constraints after layer-specific defaults.
+        if num_limited_groups is not None and num_expert_groups is None:
+            raise ValueError(f"num_limited_groups requires num_expert_groups to be set "
+                             f"in layer '{spec.moe_module_name}'")
+
         if num_expert_groups is not None:
+            if num_expert_groups < 1:
+                raise ValueError(f"num_expert_groups must be >= 1 in layer '{spec.moe_module_name}', "
+                                 f"got {num_expert_groups}")
             if spec.num_experts % num_expert_groups != 0:
                 raise ValueError(f"num_expert_groups ({num_expert_groups}) must divide "
                                  f"num_experts ({spec.num_experts}) in layer "
@@ -272,6 +283,9 @@ def validate_autoep_post_detection(
             if num_limited_groups is None:
                 raise ValueError(f"num_limited_groups must be set when num_expert_groups is set "
                                  f"in layer '{spec.moe_module_name}'")
+            if num_limited_groups < 1:
+                raise ValueError(f"num_limited_groups must be >= 1 in layer '{spec.moe_module_name}', "
+                                 f"got {num_limited_groups}")
             if num_limited_groups > num_expert_groups:
                 raise ValueError(f"num_limited_groups ({num_limited_groups}) must be <= "
                                  f"num_expert_groups ({num_expert_groups}) in layer "
