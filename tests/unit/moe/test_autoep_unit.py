@@ -4,10 +4,13 @@
 # DeepSpeed Team
 """Compact critical-path tests for AutoEP."""
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 import torch.nn as nn
 
+import deepspeed.runtime.engine as ds_engine
 from deepspeed.module_inject.auto_ep import AutoEP, _resolve_route_scale
 from deepspeed.module_inject.auto_ep_config import (
     AutoEPConfig,
@@ -32,6 +35,8 @@ from deepspeed.moe.ep_experts import GroupedExperts
 from deepspeed.moe.ep_kernels import TokenReorderer
 from deepspeed.moe.ep_repack import repack_expert_weights
 from deepspeed.moe.ep_router import TokenChoiceTopKRouter
+from deepspeed.runtime.engine import DeepSpeedEngine
+from deepspeed.utils import groups
 from unit.moe.autoep_test_utils import (
     MockMoEBlock,
     MockMoETransformer,
@@ -230,6 +235,66 @@ class TestAutoEPConfig:
                                    sp_size=1)
         with pytest.raises(ValueError, match="exceeds num_experts"):
             validate_autoep_post_detection(AutoEPConfig(enabled=True, autoep_size=16), [_make_spec(num_experts=8)])
+
+    def test_configure_expert_parallel_uses_engine_mpu_sequence_parallel_size(self, monkeypatch):
+
+        class SequenceParallelMPU:
+
+            def get_sequence_parallel_world_size(self):
+                return 2
+
+        class EmptyAutoEP:
+
+            def __init__(self, model, config):
+                pass
+
+            def ep_parser(self):
+                return []
+
+        observed = {}
+
+        def record_validate(config, world_size, pp_size, tp_size, sp_size):
+            observed["validate"] = {
+                "world_size": world_size,
+                "pp_size": pp_size,
+                "tp_size": tp_size,
+                "sp_size": sp_size,
+            }
+
+        def record_create(**kwargs):
+            observed["create"] = kwargs
+
+        monkeypatch.setattr(groups, "mpu", None)
+        monkeypatch.setattr(groups, "_get_sequence_parallel_world_size", lambda: 1)
+        monkeypatch.setattr(groups, "_create_expert_and_data_parallel", record_create)
+        monkeypatch.setattr(groups, "_get_expert_parallel_group", lambda name: object())
+        monkeypatch.setattr(ds_engine.dist, "get_world_size", lambda: 4)
+        monkeypatch.setattr(ds_engine.dist, "get_rank", lambda group=None: 0)
+        monkeypatch.setattr("deepspeed.module_inject.auto_ep.AutoEP", EmptyAutoEP)
+        monkeypatch.setattr("deepspeed.module_inject.auto_ep_config.validate_autoep_config", record_validate)
+
+        engine = object.__new__(DeepSpeedEngine)
+        engine.mpu = SequenceParallelMPU()
+        engine._config = SimpleNamespace(
+            expert_parallel_config=AutoEPConfig(enabled=True, autoep_size=2),
+            tensor_parallel_config=SimpleNamespace(autotp_size=1),
+            use_data_before_expert_parallel_=False,
+        )
+
+        engine._configure_expert_parallel(model=nn.Module())
+
+        assert groups.mpu is None
+        assert observed["validate"]["sp_size"] == 2
+        assert observed["create"]["mp_size"] == 2
+        assert observed["create"]["mp_mode"] == "sp"
+
+    def test_autoep_sequence_parallel_size_falls_back_to_groups_helper(self, monkeypatch):
+        monkeypatch.setattr(groups, "_get_sequence_parallel_world_size", lambda: 3)
+
+        engine = object.__new__(DeepSpeedEngine)
+        engine.mpu = object()
+
+        assert engine._autoep_sequence_parallel_world_size() == 3
 
     def test_preset_registry_core_contracts(self):
         assert set(PRESET_MODELS) == {"mixtral", "qwen3_moe", "qwen3_5_moe", "deepseek_v2", "deepseek_v3", "llama4"}
