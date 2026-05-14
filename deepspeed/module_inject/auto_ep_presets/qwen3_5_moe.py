@@ -14,8 +14,8 @@ from deepspeed.module_inject.auto_ep_presets.base import (
     ForwardContract,
     MoELayerSpec,
     MoEModelPreset,
+    _retarget_transformers_output_recorders_for_modules,
 )
-from deepspeed.utils import logger
 
 PRESET_NAME = "qwen3_5_moe"
 
@@ -72,51 +72,24 @@ class Qwen35MoePresetAdapter(AutoEPPresetAdapter):
         remove_output_capture_hooks: Callable[[nn.Module], int],
     ) -> None:
         recorder_key = f"{spec.model_family}:{replacement.__class__.__module__}.{replacement.__class__.__qualname__}"
-        if recorder_key in retargeted_keys:
-            return
-        retargeted_keys.add(recorder_key)
 
-        try:
-            from transformers.utils.output_capturing import _CAN_RECORD_REGISTRY, OutputRecorder
-        except Exception as exc:
-            logger.warning(f"AutoEP: could not retarget Qwen3.5 router-logit output capture: {exc}")
-            return
-
-        retargeted = 0
         replacement_cls = replacement.__class__
-        for module in model.modules():
+
+        def module_matches(module: nn.Module) -> bool:
             module_config = getattr(module, "config", None)
             model_type = getattr(module_config, "model_type", None)
             class_name = module.__class__.__name__
-            if model_type != "qwen3_5_moe_text" and "Qwen3_5Moe" not in class_name:
-                continue
+            return model_type == "qwen3_5_moe_text" or "Qwen3_5Moe" in class_name
 
-            registry_key = str(module.__class__)
-            record_outputs = getattr(module, "_can_record_outputs", None)
-            registry_outputs = _CAN_RECORD_REGISTRY.get(registry_key)
-            base_outputs = record_outputs if isinstance(record_outputs, dict) else registry_outputs
-            if not isinstance(base_outputs, dict) or "router_logits" not in base_outputs:
-                continue
-
-            retargeted_outputs = dict(base_outputs)
-            retargeted_outputs["router_logits"] = OutputRecorder(replacement_cls, index=1)
-            module._can_record_outputs = retargeted_outputs
-            _CAN_RECORD_REGISTRY[registry_key] = retargeted_outputs
-
-            if getattr(module, "_output_capturing_hooks_installed", False):
-                removed = remove_output_capture_hooks(module)
-                if removed:
-                    logger.debug(f"AutoEP: removed {removed} stale HF output-capturing hook(s) "
-                                 f"from {class_name}.")
-            module._output_capturing_hooks_installed = False
-            retargeted += 1
-
-        if retargeted:
-            logger.info("AutoEP: retargeted Qwen3.5 HF router-logit output capture to record "
-                        f"{replacement_cls.__name__} output index 1 on {retargeted} module(s).")
-        else:
-            logger.warning("AutoEP: Qwen3.5 AutoEP conversion did not find a HF output-capture registry "
-                           "entry for router_logits.")
+        _retarget_transformers_output_recorders_for_modules(
+            model=model,
+            display_name="Qwen3.5 AutoEP",
+            recorder_key=recorder_key,
+            retargeted_keys=retargeted_keys,
+            remove_output_capture_hooks=remove_output_capture_hooks,
+            module_matches=module_matches,
+            make_output_recorder=lambda OutputRecorder: OutputRecorder(replacement_cls, index=1),
+        )
 
 
 PRESET_ADAPTERS = {

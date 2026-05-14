@@ -850,6 +850,16 @@ class MockRecordingRouter(nn.Linear):
     _can_record_outputs = {"router_logits": {"index": 1, "layer_name": "router"}}
 
 
+def _install_fake_output_capturing(monkeypatch, fake_output_capturing):
+    fake_transformers = types.ModuleType("transformers")
+    fake_transformers_utils = types.ModuleType("transformers.utils")
+    fake_transformers.utils = fake_transformers_utils
+    fake_transformers_utils.output_capturing = fake_output_capturing
+    monkeypatch.setitem(sys.modules, "transformers", fake_transformers)
+    monkeypatch.setitem(sys.modules, "transformers.utils", fake_transformers_utils)
+    monkeypatch.setitem(sys.modules, "transformers.utils.output_capturing", fake_output_capturing)
+
+
 class MockDenseBlock(nn.Module):
     """Dense FFN block (should be skipped by detection)."""
 
@@ -1456,7 +1466,7 @@ class TestMoEDetection:
         fake_output_capturing = types.ModuleType("transformers.utils.output_capturing")
         fake_output_capturing.OutputRecorder = FakeOutputRecorder
         fake_output_capturing._CAN_RECORD_REGISTRY = {}
-        monkeypatch.setitem(sys.modules, "transformers.utils.output_capturing", fake_output_capturing)
+        _install_fake_output_capturing(monkeypatch, fake_output_capturing)
 
         model = MockMoETransformer(num_layers=1, num_experts=4, moe_every_n=1)
         model.config.model_type = model_type
@@ -1482,6 +1492,56 @@ class TestMoEDetection:
         assert recorder.layer_name == "router.gate"
         output = replacement(torch.randn(2, 5, 64))
         assert isinstance(output, torch.Tensor)
+
+    def test_top_level_hf_router_capture_restores_registry_after_hook_install(self, monkeypatch):
+        """Real HF hook installation uses a temporary registry override for the converted instance."""
+
+        class FakeOutputRecorder:
+
+            def __init__(self, target_class, index=0, layer_name=None, class_name=None):
+                self.target_class = target_class
+                self.index = index
+                self.layer_name = layer_name
+                self.class_name = class_name
+
+        fake_output_capturing = types.ModuleType("transformers.utils.output_capturing")
+        fake_output_capturing.OutputRecorder = FakeOutputRecorder
+        fake_output_capturing._CAN_RECORD_REGISTRY = {}
+        installed_recorders = []
+
+        def maybe_install_capturing_hooks(hook_model):
+            recorder = fake_output_capturing._CAN_RECORD_REGISTRY[str(hook_model.__class__)]["router_logits"]
+            installed_recorders.append(recorder)
+            hook_model._output_capturing_hooks_installed = True
+
+        fake_output_capturing.maybe_install_capturing_hooks = maybe_install_capturing_hooks
+        _install_fake_output_capturing(monkeypatch, fake_output_capturing)
+
+        model = MockMoETransformer(num_layers=1, num_experts=4, moe_every_n=1)
+        model.config.model_type = "mixtral"
+        model.config.num_experts = 4
+        model.model.layers[0].mlp.gate = MockRecordingRouter(64, 4, bias=False)
+        original_outputs = {"router_logits": FakeOutputRecorder(MockRecordingRouter, index=0)}
+        registry_key = str(model.__class__)
+        fake_output_capturing._CAN_RECORD_REGISTRY[registry_key] = original_outputs
+        model._can_record_outputs = original_outputs
+        config = parse_autoep_config({
+            "enabled": True,
+            "autoep_size": 1,
+            "preset_model": "mixtral",
+            "use_grouped_mm": False,
+        })
+        auto_ep = AutoEP(model, config)
+        specs = auto_ep.ep_parser()
+
+        auto_ep.replace_moe_layer(specs[0], ep_size=1, ep_rank=0)
+
+        replacement = model.model.layers[0].mlp
+        assert isinstance(replacement, AutoEPMoELayer)
+        assert fake_output_capturing._CAN_RECORD_REGISTRY[registry_key] is original_outputs
+        assert installed_recorders
+        assert installed_recorders[0].target_class is replacement.router.gate.__class__
+        assert model._can_record_outputs["router_logits"].target_class is replacement.router.gate.__class__
 
     def test_replace_moe_layer_works(self):
         """replace_moe_layer creates AutoEPMoELayer replacement."""
