@@ -565,6 +565,8 @@ class TestTokenChoiceTopKRouter:
         assert top_scores.shape == (100, 2)
         assert selected_experts.shape == (100, 2)
         assert num_tokens.shape == (8, )
+        expected_counts = torch.bincount(selected_experts.reshape(-1), minlength=8).to(num_tokens.dtype)
+        assert torch.equal(num_tokens, expected_counts)
 
     def test_router_softmax_scores_sum(self):
         router = TokenChoiceTopKRouter(dim=64,
@@ -745,6 +747,8 @@ class TestTokenReorderer:
         assert scores_sorted.shape == (100, )
         assert indices_sorted.shape == (100, )
         assert num_tokens.shape == (8, )
+        expected_counts = torch.bincount(selected_experts.reshape(-1), minlength=8).to(num_tokens.dtype)
+        assert torch.equal(num_tokens, expected_counts)
 
     def test_token_reorderer_index_coverage(self):
         reorderer = TokenReorderer(num_experts=4, top_k=2)
@@ -808,6 +812,23 @@ class MockMoEBlock(nn.Module):
         super().__init__()
         self.gate = nn.Linear(hidden_size, num_experts, bias=False)
         self.experts = MockMoEExperts(num_experts, ffn_hidden, hidden_size)
+
+
+class MockUnsupportedFusedExperts(nn.Module):
+    """Fused expert storage with router-compatible but unsupported shapes."""
+
+    def __init__(self, num_experts=8, hidden_size=64):
+        super().__init__()
+        self.gate_up_proj = nn.Parameter(torch.randn(num_experts, hidden_size, hidden_size))
+        self.down_proj = nn.Parameter(torch.randn(num_experts, hidden_size, hidden_size))
+
+
+class MockUnsupportedFusedMoEBlock(nn.Module):
+
+    def __init__(self, num_experts=8, hidden_size=64):
+        super().__init__()
+        self.gate = nn.Linear(hidden_size, num_experts, bias=False)
+        self.experts = MockUnsupportedFusedExperts(num_experts, hidden_size)
 
 
 class MockLlama4Config:
@@ -964,6 +985,62 @@ class TestMoEDetection:
         assert len(specs) == 2
         module_names = [s.moe_module_name for s in specs]
         assert "model.layers.1.mlp" not in module_names
+
+    def test_explicit_preset_raises_on_matching_layer_with_unsupported_shapes(self):
+        model = MockMoETransformer(num_layers=1, moe_every_n=1)
+        model.model.layers[0].mlp = MockUnsupportedFusedMoEBlock()
+        config = AutoEPConfig(enabled=True, autoep_size=1, preset_model="mixtral")
+
+        with pytest.raises(ValueError) as exc:
+            AutoEP(model, config).ep_parser()
+
+        message = str(exc.value)
+        assert "preset 'mixtral'" in message
+        assert "model.layers.0.mlp" in message
+        assert "shape inference failed" in message
+        assert "gate_up_proj" in message
+
+    def test_auto_detected_known_preset_raises_on_matching_layer_with_unsupported_shapes(self):
+        model = MockMoETransformer(num_layers=1, moe_every_n=1)
+        model.model.layers[0].mlp = MockUnsupportedFusedMoEBlock()
+        config = AutoEPConfig(enabled=True, autoep_size=1)
+
+        with pytest.raises(ValueError) as exc:
+            AutoEP(model, config).ep_parser()
+
+        message = str(exc.value)
+        assert "preset 'mixtral'" in message
+        assert "model.layers.0.mlp" in message
+        assert "shape inference failed" in message
+
+    def test_explicit_custom_pattern_raises_on_matching_layer_with_unsupported_shapes(self):
+        model = MockMoETransformer(num_layers=1, moe_every_n=1)
+        model.config.model_type = "custom"
+        model.model.layers[0].mlp = MockUnsupportedFusedMoEBlock()
+        config = AutoEPConfig(
+            enabled=True,
+            autoep_size=1,
+            moe_layer_pattern=r"model\.layers\.\d+\.mlp",
+            router_pattern="gate",
+            expert_pattern="experts",
+            expert_w3=None,
+            top_k=2,
+        )
+
+        with pytest.raises(ValueError) as exc:
+            AutoEP(model, config).ep_parser()
+
+        message = str(exc.value)
+        assert "preset 'custom'" in message
+        assert "shape inference failed" in message
+
+    def test_generic_detection_skips_matching_layer_with_unsupported_shapes(self):
+        model = MockMoETransformer(num_layers=1, moe_every_n=1)
+        model.config.model_type = "custom"
+        model.model.layers[0].mlp = MockUnsupportedFusedMoEBlock()
+        config = AutoEPConfig(enabled=True, autoep_size=1)
+
+        assert AutoEP(model, config).ep_parser() == []
 
     def test_explicit_preset_without_matching_moe_layers_fails_actionably(self):
         """An explicit preset should not silently no-op when its structure is absent."""
@@ -1173,7 +1250,7 @@ class TestMoEDetection:
             "enabled": True,
             "autoep_size": 1,
         })
-        adapter = get_preset_adapter("default")
+        adapter = get_preset_adapter(PRESET_MODELS["mixtral"].preset_adapter)
         calls = []
 
         def record_validation(preset_name, preset, model_config):
