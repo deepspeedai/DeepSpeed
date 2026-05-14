@@ -252,7 +252,6 @@ class DeepSpeedEngine(Module):
         self.num_experts = []
         self.gate_modules = []
         self.moe_layers = []
-        self._autoep_output_grad_scale = 1.0
         self._step_applied = False
         self._global_grad_norm = None
         self.use_ds_comm = False  # False --> Use torch.dist, True --> Use ds.comm backend.
@@ -1562,17 +1561,6 @@ class DeepSpeedEngine(Module):
         self.expert_parallel_group = groups._get_expert_parallel_group_dict()
         self.expert_data_parallel_group = groups._get_expert_data_parallel_group_dict()
         self.sequence_parallel_size = groups._get_sequence_parallel_world_size()
-        if _AutoEPMoELayer is not None:
-            autoep_group_names = {
-                module.ep_group_name
-                for _, module in self.module.named_modules() if isinstance(module, _AutoEPMoELayer)
-            }
-            if autoep_group_names:
-                if len(autoep_group_names) > 1:
-                    raise RuntimeError(f"AutoEP backward scaling requires a single EP group size, but found "
-                                       f"{sorted(autoep_group_names)}")
-                group_name = next(iter(autoep_group_names))
-                self._autoep_output_grad_scale = float(groups._get_expert_parallel_world_size(group_name))
         if self.sequence_parallel_size > 1:
             # Inserted Warning for PyTorch < 2.3
             if not required_torch_version(min_version=2.3):
@@ -2587,13 +2575,6 @@ class DeepSpeedEngine(Module):
 
             self._backward_epilogue()
 
-    def _scale_loss_for_autoep(self, loss):
-        if self._autoep_output_grad_scale != 1.0:
-            # AutoEP runs one logical batch across an EP group, so each rank's scalar
-            # loss must be lifted back to the logical-batch view before backward.
-            return loss * self._autoep_output_grad_scale
-        return loss
-
     @contextmanager
     def no_sync(self):
         r"""
@@ -2655,7 +2636,7 @@ class DeepSpeedEngine(Module):
                                "When using AMP, you must call engine.backward(loss) instead of manual backward.")
 
         # Apply loss scaler based on optimizer type
-        scaled_loss = self._scale_loss_for_autoep(loss)
+        scaled_loss = loss
         if isinstance(self.optimizer, ZeROOptimizer):
             scaled_loss = self.optimizer.scale_if_loss(scaled_loss)
         elif self.torch_autocast_z0_gradscaler:
@@ -2693,8 +2674,6 @@ class DeepSpeedEngine(Module):
 
         # Used only for return value
         gas_scaled_loss = loss / self.gradient_accumulation_steps() if scale_wrt_gas else loss
-        loss = self._scale_loss_for_autoep(loss)
-        gas_scaled_loss = self._scale_loss_for_autoep(gas_scaled_loss)
 
         # TODO: handle these scaling with direct calls to loss.backward()
         if isinstance(self.optimizer, ZeROOptimizer):
