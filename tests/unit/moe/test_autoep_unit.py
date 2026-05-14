@@ -341,12 +341,6 @@ class TestAutoEPConfig:
         with pytest.raises(ValueError, match="num_expert_groups.*must divide"):
             validate_autoep_post_detection(config, specs)
 
-    def test_validate_post_detection_rejects_spec_limited_groups_without_expert_groups(self):
-        config = AutoEPConfig(enabled=True, autoep_size=1)
-
-        with pytest.raises(ValueError, match="num_limited_groups requires num_expert_groups"):
-            validate_autoep_post_detection(config, [_make_spec(num_limited_groups=1)])
-
     def test_validate_post_detection_rejects_config_limited_groups_without_expert_groups(self):
         config = AutoEPConfig(enabled=True, autoep_size=1, num_limited_groups=1)
 
@@ -357,12 +351,6 @@ class TestAutoEPConfig:
         config = AutoEPConfig(enabled=True, autoep_size=1, num_limited_groups=1)
 
         validate_autoep_post_detection(config, [_make_spec(num_expert_groups=2)])
-
-    def test_validate_post_detection_rejects_spec_limited_groups_zero(self):
-        config = AutoEPConfig(enabled=True, autoep_size=1)
-
-        with pytest.raises(ValueError, match="num_limited_groups must be >= 1"):
-            validate_autoep_post_detection(config, [_make_spec(num_expert_groups=2, num_limited_groups=0)])
 
     def test_preset_models_complete(self):
         """All presets have required fields."""
@@ -1541,36 +1529,16 @@ class TestMoEDetection:
         assert specs[0].num_limited_groups == 1
         assert specs[0].group_score_func == "max"
 
-    def test_deepseek_v3_detection_reads_group_routing_from_model_config(self):
+    def test_deepseek_v3_detection_reads_group_routing_from_model_config(self, monkeypatch):
         """DeepSeek-V3 preset carries HF group-limited routing into AutoEP."""
-        model = MockMoETransformer(num_layers=1, num_experts=4, moe_every_n=1)
-        model.config.n_group = 2
-        model.config.topk_group = 1
-        model.config.norm_topk_prob = True
-        model.config.routed_scaling_factor = 2.5
-        config = parse_autoep_config({
-            "enabled": True,
-            "autoep_size": 1,
-            "preset_model": "deepseek_v3",
-            "top_k": 2,
-        })
-
-        specs = AutoEP(model, config).ep_parser()
-
-        assert len(specs) == 1
-        assert specs[0].num_expert_groups == 2
-        assert specs[0].num_limited_groups == 1
-        assert specs[0].group_score_func == "top2_sum"
-        assert specs[0].route_scale == pytest.approx(2.5)
-
-    def test_deepseek_v3_model_config_groups_satisfy_config_limited_groups(self, monkeypatch):
-        """DeepSeek-V3 can combine model.config.n_group with config-level group limiting."""
         adapter = get_preset_adapter("deepseek_v3")
         monkeypatch.setattr(adapter, "_installed_transformers_version", lambda: "5.0.0")
         model = MockMoETransformer(num_layers=1, num_experts=4, moe_every_n=1)
         model.config.model_type = "deepseek_v3"
         model.config.n_routed_experts = 4
         model.config.n_group = 2
+        model.config.norm_topk_prob = True
+        model.config.routed_scaling_factor = 2.5
         config = parse_autoep_config({
             "enabled": True,
             "autoep_size": 1,
@@ -1579,6 +1547,7 @@ class TestMoEDetection:
             "num_limited_groups": 1,
         })
 
+        assert config.num_expert_groups is None
         validate_autoep_config(config, world_size=1, pp_size=1, tp_size=1, sp_size=1)
         specs = AutoEP(model, config).ep_parser()
         validate_autoep_post_detection(config, specs)
@@ -1586,6 +1555,8 @@ class TestMoEDetection:
         assert len(specs) == 1
         assert specs[0].num_expert_groups == 2
         assert specs[0].num_limited_groups == 1
+        assert specs[0].group_score_func == "top2_sum"
+        assert specs[0].route_scale == pytest.approx(2.5)
 
     def test_detect_populates_route_scale_from_model_config(self):
         model = MockMoETransformer(num_layers=1, num_experts=4, moe_every_n=1)

@@ -466,6 +466,14 @@ def _check_for_required_state(ds_checkpoint):
     assert universal_checkpoint_info is not None, f'Required {UNIVERSAL_CHECKPOINT_INFO} state is missing in checkpoint. Verify that client creates this state.'
 
 
+def _classify_autoep_expert_file_consolidation(autoep_metadata, expert_files):
+    if autoep_metadata is not None:
+        return 'autoep'
+    if expert_files:
+        return 'native_moe'
+    return 'none'
+
+
 def main(args):
     print('Convert DeepSpeed Checkpoint to Universal Checkpoint')
 
@@ -520,13 +528,14 @@ def main(args):
 
         # Check for expert files in checkpoint directory
         expert_files = glob.glob(os.path.join(args.input_folder, 'layer_*_expert_*_model_states.pt'))
+        autoep_expert_file_type = _classify_autoep_expert_file_consolidation(autoep_metadata, expert_files)
 
-        if autoep_metadata is not None:
+        if autoep_expert_file_type == 'autoep':
             consolidate_autoep_expert_files(args.input_folder, args.output_folder, autoep_metadata)
             ep_size = autoep_metadata[0]['ep_size'] if autoep_metadata else 1
             consolidate_autoep_optimizer_states(args.input_folder, args.output_folder, autoep_metadata, ep_size)
             print(f'    Consolidated {len(autoep_metadata)} AutoEP layer(s)')
-        elif expert_files:
+        elif autoep_expert_file_type == 'native_moe':
             print(f'    Found {len(expert_files)} expert checkpoint file(s) but no AutoEP metadata; '
                   'assuming native DeepSpeed MoE and skipping AutoEP consolidation')
         else:
