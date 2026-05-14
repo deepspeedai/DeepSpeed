@@ -7,6 +7,8 @@
 import ast
 import copy
 import re
+import sys
+import types
 from dataclasses import replace
 from pathlib import Path
 
@@ -220,11 +222,11 @@ class TestAutoEPConfig:
 
         validate_autoep_config(config, world_size=1, pp_size=1, tp_size=1, sp_size=1)
 
-    def test_validate_ep_tp_mutual_exclusivity(self):
-        """autotp_size>1 + sp_size>1 raises ValueError."""
+    def test_validate_ep_rejects_autotp(self):
+        """AutoEP + AutoTP is rejected before replacement/partitioning."""
         config = AutoEPConfig(enabled=True, autoep_size=2)
-        with pytest.raises(ValueError, match="simultaneous TP.*and SP"):
-            validate_autoep_config(config, world_size=8, pp_size=1, tp_size=2, sp_size=2)
+        with pytest.raises(ValueError, match="AutoEP.*AutoTP.*autotp_size=2"):
+            validate_autoep_config(config, world_size=8, pp_size=1, tp_size=2, sp_size=1)
 
     def test_validate_ep_size_divides_stage(self):
         """ep_size must divide world_size / pp_size."""
@@ -848,6 +850,16 @@ class MockRecordingRouter(nn.Linear):
     _can_record_outputs = {"router_logits": {"index": 1, "layer_name": "router"}}
 
 
+def _install_fake_output_capturing(monkeypatch, fake_output_capturing):
+    fake_transformers = types.ModuleType("transformers")
+    fake_transformers_utils = types.ModuleType("transformers.utils")
+    fake_transformers.utils = fake_transformers_utils
+    fake_transformers_utils.output_capturing = fake_output_capturing
+    monkeypatch.setitem(sys.modules, "transformers", fake_transformers)
+    monkeypatch.setitem(sys.modules, "transformers.utils", fake_transformers_utils)
+    monkeypatch.setitem(sys.modules, "transformers.utils.output_capturing", fake_output_capturing)
+
+
 class MockDenseBlock(nn.Module):
     """Dense FFN block (should be skipped by detection)."""
 
@@ -1408,6 +1420,128 @@ class TestMoEDetection:
         assert specs[0].router_logits_capture_target == "router"
         assert specs[0].router_logits_capture_index == 1
         assert specs[0].router_logits_capture_mode == "post_score"
+
+    @pytest.mark.parametrize(("preset_model", "model_type"), [
+        ("mixtral", "mixtral"),
+        ("qwen3_moe", "qwen3_moe"),
+        ("qwen3_moe", "qwen2_moe"),
+    ])
+    def test_top_level_hf_router_capture_contract_records_raw_logits_without_tuple_return(
+            self, preset_model, model_type):
+        """Mixtral/Qwen3/Qwen2 top-level OutputRecorder capture stays raw and tensor-returning."""
+        model = MockMoETransformer(num_layers=1, num_experts=4, moe_every_n=1)
+        model.config.model_type = model_type
+        model.config.num_experts = 4
+        model.model.layers[0].mlp.gate = MockRecordingRouter(64, 4, bias=False)
+        config = parse_autoep_config({
+            "enabled": True,
+            "autoep_size": 1,
+            "preset_model": preset_model,
+        })
+
+        specs = AutoEP(model, config).ep_parser()
+
+        assert len(specs) == 1
+        assert specs[0].return_router_logits is False
+        assert specs[0].router_logits_capture_target == "router"
+        assert specs[0].router_logits_capture_index == 0
+        assert specs[0].router_logits_capture_mode == "raw"
+
+    @pytest.mark.parametrize(("preset_model", "model_type"), [
+        ("mixtral", "mixtral"),
+        ("qwen3_moe", "qwen3_moe"),
+        ("qwen3_moe", "qwen2_moe"),
+    ])
+    def test_top_level_hf_router_capture_retargets_to_autoep_gate(self, monkeypatch, preset_model, model_type):
+        """HF OutputRecorder is retargeted from the native TopKRouter to AutoEP's raw gate projection."""
+
+        class FakeOutputRecorder:
+
+            def __init__(self, target_class, index=0, layer_name=None, class_name=None):
+                self.target_class = target_class
+                self.index = index
+                self.layer_name = layer_name
+                self.class_name = class_name
+
+        fake_output_capturing = types.ModuleType("transformers.utils.output_capturing")
+        fake_output_capturing.OutputRecorder = FakeOutputRecorder
+        fake_output_capturing._CAN_RECORD_REGISTRY = {}
+        _install_fake_output_capturing(monkeypatch, fake_output_capturing)
+
+        model = MockMoETransformer(num_layers=1, num_experts=4, moe_every_n=1)
+        model.config.model_type = model_type
+        model.config.num_experts = 4
+        model.model.layers[0].mlp.gate = MockRecordingRouter(64, 4, bias=False)
+        model._can_record_outputs = {"router_logits": FakeOutputRecorder(MockRecordingRouter, index=0)}
+        config = parse_autoep_config({
+            "enabled": True,
+            "autoep_size": 1,
+            "preset_model": preset_model,
+            "use_grouped_mm": False,
+        })
+        auto_ep = AutoEP(model, config)
+        specs = auto_ep.ep_parser()
+
+        auto_ep.replace_moe_layer(specs[0], ep_size=1, ep_rank=0)
+
+        replacement = model.model.layers[0].mlp
+        recorder = model._can_record_outputs["router_logits"]
+        assert isinstance(replacement, AutoEPMoELayer)
+        assert recorder.target_class is replacement.router.gate.__class__
+        assert recorder.index == 0
+        assert recorder.layer_name == "router.gate"
+        output = replacement(torch.randn(2, 5, 64))
+        assert isinstance(output, torch.Tensor)
+
+    def test_top_level_hf_router_capture_restores_registry_after_hook_install(self, monkeypatch):
+        """Real HF hook installation uses a temporary registry override for the converted instance."""
+
+        class FakeOutputRecorder:
+
+            def __init__(self, target_class, index=0, layer_name=None, class_name=None):
+                self.target_class = target_class
+                self.index = index
+                self.layer_name = layer_name
+                self.class_name = class_name
+
+        fake_output_capturing = types.ModuleType("transformers.utils.output_capturing")
+        fake_output_capturing.OutputRecorder = FakeOutputRecorder
+        fake_output_capturing._CAN_RECORD_REGISTRY = {}
+        installed_recorders = []
+
+        def maybe_install_capturing_hooks(hook_model):
+            recorder = fake_output_capturing._CAN_RECORD_REGISTRY[str(hook_model.__class__)]["router_logits"]
+            installed_recorders.append(recorder)
+            hook_model._output_capturing_hooks_installed = True
+
+        fake_output_capturing.maybe_install_capturing_hooks = maybe_install_capturing_hooks
+        _install_fake_output_capturing(monkeypatch, fake_output_capturing)
+
+        model = MockMoETransformer(num_layers=1, num_experts=4, moe_every_n=1)
+        model.config.model_type = "mixtral"
+        model.config.num_experts = 4
+        model.model.layers[0].mlp.gate = MockRecordingRouter(64, 4, bias=False)
+        original_outputs = {"router_logits": FakeOutputRecorder(MockRecordingRouter, index=0)}
+        registry_key = str(model.__class__)
+        fake_output_capturing._CAN_RECORD_REGISTRY[registry_key] = original_outputs
+        model._can_record_outputs = original_outputs
+        config = parse_autoep_config({
+            "enabled": True,
+            "autoep_size": 1,
+            "preset_model": "mixtral",
+            "use_grouped_mm": False,
+        })
+        auto_ep = AutoEP(model, config)
+        specs = auto_ep.ep_parser()
+
+        auto_ep.replace_moe_layer(specs[0], ep_size=1, ep_rank=0)
+
+        replacement = model.model.layers[0].mlp
+        assert isinstance(replacement, AutoEPMoELayer)
+        assert fake_output_capturing._CAN_RECORD_REGISTRY[registry_key] is original_outputs
+        assert installed_recorders
+        assert installed_recorders[0].target_class is replacement.router.gate.__class__
+        assert model._can_record_outputs["router_logits"].target_class is replacement.router.gate.__class__
 
     def test_replace_moe_layer_works(self):
         """replace_moe_layer creates AutoEPMoELayer replacement."""
@@ -1978,6 +2112,62 @@ class TestAutoEPMoELayerUnit:
         assert isinstance(replaced, AutoEPMoELayer)
         assert replaced._is_autoep_layer is True
 
+    def test_hf_mixtral_causal_lm_matches_autoep_with_router_logits(self):
+        """Tiny Mixtral CausalLM preserves router logits / aux loss after AutoEP replacement."""
+        transformers = pytest.importorskip("transformers")
+        if not hasattr(transformers, "MixtralConfig") or not hasattr(transformers, "MixtralForCausalLM"):
+            pytest.skip("Installed transformers does not expose MixtralConfig/MixtralForCausalLM")
+        if Version(transformers.__version__) < Version("5.0.0"):
+            pytest.skip("Mixtral AutoEP router-logit capture requires Transformers >= 5.0.0")
+
+        torch.manual_seed(1234)
+        config = transformers.MixtralConfig(
+            vocab_size=64,
+            hidden_size=32,
+            intermediate_size=64,
+            num_hidden_layers=1,
+            num_attention_heads=4,
+            num_key_value_heads=2,
+            max_position_embeddings=64,
+            num_local_experts=4,
+            num_experts_per_tok=2,
+            output_router_logits=True,
+            tie_word_embeddings=False,
+            use_cache=False,
+        )
+        native_model = transformers.MixtralForCausalLM(config)
+        autoep_model = transformers.MixtralForCausalLM(config)
+        autoep_model.load_state_dict(copy.deepcopy(native_model.state_dict()))
+
+        autoep_config = parse_autoep_config({
+            "enabled": True,
+            "autoep_size": 1,
+            "preset_model": "mixtral",
+            "use_grouped_mm": False,
+        })
+        auto_ep = AutoEP(autoep_model, autoep_config)
+        specs = auto_ep.ep_parser()
+        assert len(specs) == 1
+        for spec in specs:
+            auto_ep.replace_moe_layer(spec, ep_size=1, ep_rank=0)
+
+        input_ids = torch.tensor([[1, 5, 7, 9, 11]], dtype=torch.long)
+        labels = input_ids.clone()
+        native_model.eval()
+        autoep_model.eval()
+        with torch.no_grad():
+            native_outputs = native_model(input_ids=input_ids, labels=labels, output_router_logits=True)
+            autoep_outputs = autoep_model(input_ids=input_ids, labels=labels, output_router_logits=True)
+
+        assert autoep_outputs.router_logits
+        assert autoep_outputs.aux_loss is not None
+        torch.testing.assert_close(autoep_outputs.router_logits[0],
+                                   native_outputs.router_logits[0],
+                                   rtol=1e-5,
+                                   atol=1e-6)
+        torch.testing.assert_close(autoep_outputs.aux_loss, native_outputs.aux_loss, rtol=1e-5, atol=1e-6)
+        torch.testing.assert_close(autoep_outputs.loss, native_outputs.loss, rtol=1e-5, atol=1e-6)
+
     def test_hf_qwen2_direct_moe_can_use_qwen3_preset_when_fused_layout(self):
         """Qwen2-MoE can use the qwen3_moe preset when Transformers exposes the fused layout."""
         transformers = pytest.importorskip("transformers")
@@ -2001,7 +2191,7 @@ class TestAutoEPMoELayerUnit:
             num_experts=4,
             num_experts_per_tok=2,
             norm_topk_prob=True,
-            output_router_logits=False,
+            output_router_logits=True,
             tie_word_embeddings=False,
             use_cache=False,
             use_sliding_window=False,
@@ -2040,8 +2230,23 @@ class TestAutoEPMoELayerUnit:
 
         torch.testing.assert_close(autoep_output, native_output, rtol=1e-5, atol=1e-6)
 
-    def test_hf_qwen3_causal_lm_matches_autoep_ce_only(self):
-        """Tiny Qwen3 CE-only CausalLM matches AutoEP and stays ungated."""
+        input_ids = torch.tensor([[1, 5, 7, 9, 11]], dtype=torch.long)
+        labels = input_ids.clone()
+        with torch.no_grad():
+            native_outputs = native_model(input_ids=input_ids, labels=labels, output_router_logits=True)
+            autoep_outputs = autoep_model(input_ids=input_ids, labels=labels, output_router_logits=True)
+
+        assert autoep_outputs.router_logits
+        assert autoep_outputs.aux_loss is not None
+        torch.testing.assert_close(autoep_outputs.router_logits[0],
+                                   native_outputs.router_logits[0],
+                                   rtol=1e-5,
+                                   atol=1e-6)
+        torch.testing.assert_close(autoep_outputs.aux_loss, native_outputs.aux_loss, rtol=1e-5, atol=1e-6)
+        torch.testing.assert_close(autoep_outputs.loss, native_outputs.loss, rtol=1e-5, atol=1e-6)
+
+    def test_hf_qwen3_causal_lm_matches_autoep_with_router_logits(self):
+        """Tiny Qwen3 CausalLM preserves router logits / aux loss after AutoEP replacement."""
         transformers = pytest.importorskip("transformers")
         if not hasattr(transformers, "Qwen3MoeConfig") or not hasattr(transformers, "Qwen3MoeForCausalLM"):
             pytest.skip("Installed transformers does not expose Qwen3MoeConfig/Qwen3MoeForCausalLM")
@@ -2062,7 +2267,7 @@ class TestAutoEPMoELayerUnit:
             num_experts=4,
             num_experts_per_tok=2,
             norm_topk_prob=True,
-            output_router_logits=False,
+            output_router_logits=True,
             tie_word_embeddings=False,
             use_cache=False,
             use_sliding_window=False,
@@ -2096,9 +2301,16 @@ class TestAutoEPMoELayerUnit:
         native_model.eval()
         autoep_model.eval()
         with torch.no_grad():
-            native_outputs = native_model(input_ids=input_ids, labels=labels, output_router_logits=False)
-            autoep_outputs = autoep_model(input_ids=input_ids, labels=labels, output_router_logits=False)
+            native_outputs = native_model(input_ids=input_ids, labels=labels, output_router_logits=True)
+            autoep_outputs = autoep_model(input_ids=input_ids, labels=labels, output_router_logits=True)
 
+        assert autoep_outputs.router_logits
+        assert autoep_outputs.aux_loss is not None
+        torch.testing.assert_close(autoep_outputs.router_logits[0],
+                                   native_outputs.router_logits[0],
+                                   rtol=1e-5,
+                                   atol=1e-6)
+        torch.testing.assert_close(autoep_outputs.aux_loss, native_outputs.aux_loss, rtol=1e-5, atol=1e-6)
         torch.testing.assert_close(autoep_outputs.logits, native_outputs.logits, rtol=1e-5, atol=1e-6)
         torch.testing.assert_close(autoep_outputs.loss, native_outputs.loss, rtol=1e-5, atol=1e-6)
 

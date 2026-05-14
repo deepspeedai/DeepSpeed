@@ -2,7 +2,12 @@
 # DeepSpeed Team
 """Compatibility shim for AutoEP preset adapter APIs."""
 
-from deepspeed.module_inject.auto_ep_presets.base import AutoEPPresetAdapter, ForwardContract, GroupRoutingConfig
+from deepspeed.module_inject.auto_ep_presets.base import (
+    AutoEPPresetAdapter,
+    ForwardContract,
+    GroupRoutingConfig,
+    TransformersTopLevelRouterLogitsAdapter,
+)
 from deepspeed.module_inject.auto_ep_presets.deepseek_v2 import DeepSeekV2PresetAdapter
 from deepspeed.module_inject.auto_ep_presets.deepseek_v3 import DeepSeekV3PresetAdapter
 from deepspeed.module_inject.auto_ep_presets.llama4 import Llama4PresetAdapter
@@ -17,5 +22,6 @@ __all__ = [
     "GroupRoutingConfig",
     "Llama4PresetAdapter",
     "Qwen35MoePresetAdapter",
+    "TransformersTopLevelRouterLogitsAdapter",
     "get_preset_adapter",
 ]

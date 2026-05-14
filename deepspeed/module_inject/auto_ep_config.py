@@ -103,10 +103,10 @@ def validate_autoep_config(
     if not config.enabled:
         return
 
-    # TP + SP mutual exclusivity
-    if tp_size > 1 and sp_size > 1:
-        raise ValueError(f"AutoEP does not support simultaneous TP (autotp_size={tp_size}) "
-                         f"and SP (sequence_parallel_size={sp_size}). Use one or the other.")
+    if tp_size > 1:
+        raise ValueError("AutoEP does not currently support AutoTP "
+                         f"(tensor_parallel.autotp_size={tp_size}). Disable AutoTP for this run; "
+                         "AutoEP+AutoTP support is planned as follow-up work.")
 
     # ep_size must divide the stage size (world_size / pp_size)
     stage_size = world_size // pp_size

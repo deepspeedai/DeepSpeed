@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Literal, NoReturn
 
 import torch.nn as nn
@@ -258,3 +258,167 @@ class AutoEPPresetAdapter:
         remove_output_capture_hooks: Callable[[nn.Module], int],
     ) -> None:
         return
+
+
+_MISSING_REGISTRY_ENTRY = object()
+
+
+def _restore_transformers_output_capture_registry(
+    registry: dict[str, Any],
+    original_entries: dict[str, object],
+) -> None:
+    for registry_key, original_entry in original_entries.items():
+        if original_entry is _MISSING_REGISTRY_ENTRY:
+            registry.pop(registry_key, None)
+        else:
+            registry[registry_key] = original_entry
+
+
+def _install_instance_transformers_output_recorders(
+    model: nn.Module,
+    registry_entries: dict[str, dict[str, Any]],
+    output_capturing: Any,
+    remove_output_capture_hooks: Callable[[nn.Module], int],
+) -> bool:
+    maybe_install_capturing_hooks = getattr(output_capturing, "maybe_install_capturing_hooks", None)
+    registry = getattr(output_capturing, "_CAN_RECORD_REGISTRY", None)
+    if not callable(maybe_install_capturing_hooks) or not isinstance(registry, dict):
+        return False
+
+    remove_output_capture_hooks(model)
+    for module in model.modules():
+        if hasattr(module, "_output_capturing_hooks_installed"):
+            module._output_capturing_hooks_installed = False
+    model._output_capturing_hooks_installed = False
+
+    original_entries = {
+        registry_key: registry.get(registry_key, _MISSING_REGISTRY_ENTRY)
+        for registry_key in registry_entries
+    }
+    try:
+        registry.update(registry_entries)
+        maybe_install_capturing_hooks(model)
+    finally:
+        _restore_transformers_output_capture_registry(registry, original_entries)
+    return True
+
+
+def _retarget_transformers_output_recorders_for_modules(
+    *,
+    model: nn.Module,
+    display_name: str,
+    recorder_key: str,
+    retargeted_keys: set[str],
+    remove_output_capture_hooks: Callable[[nn.Module], int],
+    module_matches: Callable[[nn.Module], bool],
+    make_output_recorder: Callable[[Any], Any],
+) -> int:
+    try:
+        from transformers.utils import output_capturing
+    except Exception:
+        return 0
+
+    registry = getattr(output_capturing, "_CAN_RECORD_REGISTRY", None)
+    if not isinstance(registry, dict):
+        return 0
+
+    registry_entries: dict[str, dict[str, Any]] = {}
+    retargeted = 0
+    for module in model.modules():
+        if not module_matches(module):
+            continue
+
+        registry_key = str(module.__class__)
+        record_outputs = getattr(module, "_can_record_outputs", None)
+        registry_outputs = registry.get(registry_key)
+        base_outputs = record_outputs if isinstance(record_outputs, dict) else registry_outputs
+        if not isinstance(base_outputs, dict) or "router_logits" not in base_outputs:
+            continue
+
+        retargeted_outputs = dict(base_outputs)
+        retargeted_outputs["router_logits"] = make_output_recorder(output_capturing.OutputRecorder)
+        module._can_record_outputs = retargeted_outputs
+        registry_entries[registry_key] = retargeted_outputs
+        retargeted += 1
+
+    if retargeted == 0:
+        from deepspeed.utils import logger
+        logger.warning(f"AutoEP: {display_name} conversion did not find a HF output-capture registry "
+                       "entry for router_logits.")
+        return 0
+
+    if _install_instance_transformers_output_recorders(
+            model,
+            registry_entries,
+            output_capturing,
+            remove_output_capture_hooks,
+    ):
+        return retargeted
+
+    if recorder_key in retargeted_keys:
+        return retargeted
+    retargeted_keys.add(recorder_key)
+    registry.update(registry_entries)
+    if getattr(model, "_output_capturing_hooks_installed", False):
+        remove_output_capture_hooks(model)
+    model._output_capturing_hooks_installed = False
+    return retargeted
+
+
+class TransformersTopLevelRouterLogitsAdapter(AutoEPPresetAdapter):
+    """Retarget Transformers model-level router-logit recorders to AutoEP."""
+
+    def __init__(
+        self,
+        *,
+        display_name: str,
+        hf_model_types: tuple[str, ...],
+        class_name_fragments: tuple[str, ...],
+    ) -> None:
+        self.display_name = display_name
+        self.hf_model_types = hf_model_types
+        self.class_name_fragments = class_name_fragments
+
+    def adjust_forward_contract(self, contract: ForwardContract) -> ForwardContract:
+        # Mixtral/Qwen3/Qwen2 capture raw router logits through Transformers'
+        # model-level OutputRecorder hooks. AutoEP keeps the MoE block tensor
+        # return contract intact and retargets the recorder to router.gate.
+        return replace(
+            contract,
+            return_router_logits=False,
+            capture_target="router",
+            capture_index=0,
+            router_logits_capture_mode="raw",
+        )
+
+    def retarget_transformers_output_recorders(
+        self,
+        model: nn.Module,
+        spec: MoELayerSpec,
+        replacement: nn.Module,
+        retargeted_keys: set[str],
+        remove_output_capture_hooks: Callable[[nn.Module], int],
+    ) -> None:
+        recorder_key = f"{spec.model_family}:{replacement.__class__.__module__}.{replacement.__class__.__qualname__}"
+
+        router_gate = getattr(getattr(replacement, "router", None), "gate", None)
+        if router_gate is None:
+            return
+
+        def module_matches(module: nn.Module) -> bool:
+            module_config = getattr(module, "config", None)
+            model_type = getattr(module_config, "model_type", None)
+            class_name = module.__class__.__name__
+            return (model_type in self.hf_model_types
+                    or any(fragment in class_name for fragment in self.class_name_fragments))
+
+        _retarget_transformers_output_recorders_for_modules(
+            model=model,
+            display_name=self.display_name,
+            recorder_key=recorder_key,
+            retargeted_keys=retargeted_keys,
+            remove_output_capture_hooks=remove_output_capture_hooks,
+            module_matches=module_matches,
+            make_output_recorder=lambda OutputRecorder: OutputRecorder(
+                router_gate.__class__, index=0, layer_name="router.gate"),
+        )
