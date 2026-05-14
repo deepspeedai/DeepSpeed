@@ -527,8 +527,8 @@ def main(args):
             consolidate_autoep_optimizer_states(args.input_folder, args.output_folder, autoep_metadata, ep_size)
             print(f'    Consolidated {len(autoep_metadata)} AutoEP layer(s)')
         elif expert_files:
-            raise RuntimeError(f"Found {len(expert_files)} expert checkpoint files but no AutoEP metadata "
-                               f"(ds_autoep_layers) in the checkpoint. The checkpoint may be corrupt.")
+            print(f'    Found {len(expert_files)} expert checkpoint file(s) but no AutoEP metadata; '
+                  'assuming native DeepSpeed MoE and skipping AutoEP consolidation')
         else:
             print('    No AutoEP layers found, skipping')
 

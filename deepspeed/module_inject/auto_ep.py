@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import math
 import re
+from collections import OrderedDict
 from typing import Literal
 
 import torch
@@ -61,6 +62,22 @@ def _is_known_hf_model_type(model_type: str | None) -> bool:
         return False
     return (preset_name_for_hf_model_type(model_type) is not None
             or unsupported_preset_for_hf_model_type(model_type) is not None)
+
+
+def _raise_if_duplicate_moe_specs(specs: list[MoELayerSpec]) -> None:
+    by_module: dict[str, list[MoELayerSpec]] = {}
+    for spec in specs:
+        by_module.setdefault(spec.moe_module_name, []).append(spec)
+
+    duplicates = {name: matches for name, matches in by_module.items() if len(matches) > 1}
+    if not duplicates:
+        return
+
+    details = "; ".join(f"{name}: {', '.join(spec.model_family for spec in matches)}"
+                        for name, matches in sorted(duplicates.items()))
+    raise ValueError("AutoEP detection is ambiguous and produced multiple replacement specs for the same "
+                     f"MoE module(s): {details}. Set expert_parallel.preset_model or provide custom "
+                     "AutoEP patterns so each MoE module matches exactly one preset.")
 
 
 def _has_3d_expert_params(module: nn.Module, preset: MoEModelPreset) -> bool:
@@ -447,16 +464,17 @@ class AutoEP:
             if self._requires_selected_preset_detection():
                 self._raise_no_moe_layers_detected(presets_to_try)
             logger.warning("AutoEP: no MoE layers detected in model.")
+        else:
+            _raise_if_duplicate_moe_specs(specs)
 
         return specs
 
-    def replace_moe_layer(
+    def _replace_moe_layer_without_retarget(
         self,
         spec: MoELayerSpec,
         ep_size: int,
         ep_rank: int,
-    ) -> None:
-        """Replace a single MoE module with AutoEPMoELayer in-place on the model."""
+    ) -> nn.Module:
         from deepspeed.module_inject.auto_ep_layer import AutoEPMoELayer
 
         # Navigate to the parent module and get the child name
@@ -478,6 +496,9 @@ class AutoEP:
 
         # Replace in-place on parent
         setattr(parent, child_name, replacement)
+        return replacement
+
+    def _retarget_transformers_output_recorders(self, spec: MoELayerSpec, replacement: nn.Module) -> None:
         adapter = get_preset_adapter(spec.preset_adapter)
         adapter.retarget_transformers_output_recorders(
             self.model,
@@ -487,9 +508,42 @@ class AutoEP:
             _remove_transformers_output_capture_hooks,
         )
 
+    def replace_moe_layer(
+        self,
+        spec: MoELayerSpec,
+        ep_size: int,
+        ep_rank: int,
+    ) -> None:
+        """Replace a single MoE module with AutoEPMoELayer in-place on the model."""
+        replacement = self._replace_moe_layer_without_retarget(spec, ep_size, ep_rank)
+        self._retarget_transformers_output_recorders(spec, replacement)
+
         logger.info(f"AutoEP: replaced '{spec.moe_module_name}' with AutoEPMoELayer "
                     f"(ep_size={ep_size}, ep_rank={ep_rank}, "
                     f"local_experts={replacement.num_local_experts})")
+
+    def replace_moe_layers(
+        self,
+        specs: list[MoELayerSpec],
+        ep_size: int,
+        ep_rank: int,
+    ) -> None:
+        """Replace multiple MoE modules and batch post-replacement recorder retargeting."""
+        replacements: list[tuple[MoELayerSpec, nn.Module]] = []
+        for spec in specs:
+            replacement = self._replace_moe_layer_without_retarget(spec, ep_size, ep_rank)
+            replacements.append((spec, replacement))
+            logger.info(f"AutoEP: replaced '{spec.moe_module_name}' with AutoEPMoELayer "
+                        f"(ep_size={ep_size}, ep_rank={ep_rank}, "
+                        f"local_experts={replacement.num_local_experts})")
+
+        retarget_groups: OrderedDict[tuple[str, str, type], tuple[MoELayerSpec, nn.Module]] = OrderedDict()
+        for spec, replacement in replacements:
+            retarget_key = (spec.preset_adapter, spec.model_family, replacement.__class__)
+            retarget_groups.setdefault(retarget_key, (spec, replacement))
+
+        for spec, replacement in retarget_groups.values():
+            self._retarget_transformers_output_recorders(spec, replacement)
 
     def _apply_config_overrides(self, preset: MoEModelPreset) -> MoEModelPreset:
         return apply_config_overrides(self.config, preset)

@@ -92,6 +92,8 @@ class TokenChoiceTopKRouter(nn.Module):
         if self.num_limited_groups is None:
             raise ValueError("num_limited_groups must be set when num_expert_groups is set")
         assert self.num_expert_groups is not None
+        if self.num_limited_groups < 1:
+            raise ValueError(f"num_limited_groups must be >= 1, got {self.num_limited_groups}")
         if self.num_experts % self.num_expert_groups != 0:
             raise ValueError(f"num_experts ({self.num_experts}) must be divisible by "
                              f"num_expert_groups ({self.num_expert_groups})")
