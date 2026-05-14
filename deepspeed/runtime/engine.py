@@ -510,7 +510,7 @@ class DeepSpeedEngine(Module):
 
         ep_size = autoep_config.autoep_size
         tp_size = self.autotp_size()
-        sp_size = groups._get_sequence_parallel_world_size()
+        sp_size = self._autoep_sequence_parallel_world_size()
         pp_size = 1
         if self.mpu is not None:
             from deepspeed.utils.bwc import bwc_pipeline_parallel_world_size
@@ -543,6 +543,11 @@ class DeepSpeedEngine(Module):
             validate_autoep_post_detection(autoep_config, specs)
             auto_ep.replace_moe_layers(specs, ep_size=ep_size, ep_rank=ep_rank)
             logger.info(f"AutoEP: replaced {len(specs)} MoE layer(s) with ep_size={ep_size}")
+
+    def _autoep_sequence_parallel_world_size(self):
+        if self.mpu is not None and hasattr(self.mpu, 'get_sequence_parallel_world_size'):
+            return self.mpu.get_sequence_parallel_world_size()
+        return groups._get_sequence_parallel_world_size()
 
     def _configure_tensor_parallel(self, model, tp_config):
         self._configure_tensor_parallel_states(model)
