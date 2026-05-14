@@ -1,3 +1,7 @@
+# Copyright (c) Microsoft Corporation.
+# SPDX-License-Identifier: Apache-2.0
+
+# DeepSpeed Team
 """
 DeepSpeed ZeRO-3 training example with allgather overlap.
 Trains a GPT-2-style transformer on synthetic data for demonstration.
@@ -12,6 +16,8 @@ import time
 import torch
 import torch.nn as nn
 import deepspeed
+from deepspeed import comm as dist
+from deepspeed.accelerator import get_accelerator
 from torch.utils.data import Dataset, DataLoader
 
 
@@ -19,6 +25,7 @@ from torch.utils.data import Dataset, DataLoader
 # Model: minimal GPT-2-style transformer
 # ---------------------------------------------------------------------------
 class CausalSelfAttention(nn.Module):
+
     def __init__(self, hidden_size, num_heads, max_seq_len, dropout=0.1):
         super().__init__()
         assert hidden_size % num_heads == 0
@@ -51,6 +58,7 @@ class CausalSelfAttention(nn.Module):
 
 
 class TransformerBlock(nn.Module):
+
     def __init__(self, hidden_size, num_heads, max_seq_len, dropout=0.1):
         super().__init__()
         self.ln1 = nn.LayerNorm(hidden_size)
@@ -70,14 +78,14 @@ class TransformerBlock(nn.Module):
 
 
 class GPT2Model(nn.Module):
+
     def __init__(self, vocab_size, hidden_size, num_layers, num_heads, max_seq_len, dropout=0.1):
         super().__init__()
         self.tok_emb = nn.Embedding(vocab_size, hidden_size)
         self.pos_emb = nn.Embedding(max_seq_len, hidden_size)
         self.drop = nn.Dropout(dropout)
         self.blocks = nn.Sequential(
-            *[TransformerBlock(hidden_size, num_heads, max_seq_len, dropout) for _ in range(num_layers)]
-        )
+            *[TransformerBlock(hidden_size, num_heads, max_seq_len, dropout) for _ in range(num_layers)])
         self.ln_f = nn.LayerNorm(hidden_size)
         self.head = nn.Linear(hidden_size, vocab_size, bias=False)
 
@@ -118,13 +126,13 @@ class SyntheticTextDataset(Dataset):
         if self.mode == "random":
             g = torch.Generator()
             g.manual_seed(self.seed + idx)
-            tokens = torch.randint(0, self.vocab_size, (self.seq_len + 1,), generator=g)
+            tokens = torch.randint(0, self.vocab_size, (self.seq_len + 1, ), generator=g)
         elif self.mode == "arange":
             start = (self.seed + idx) % self.vocab_size
             tokens = (torch.arange(self.seq_len + 1, dtype=torch.long) + start) % self.vocab_size
         elif self.mode == "repeat":
             v = (self.seed + idx) % self.vocab_size
-            tokens = torch.full((self.seq_len + 1,), v, dtype=torch.long)
+            tokens = torch.full((self.seq_len + 1, ), v, dtype=torch.long)
         else:
             raise ValueError(f"Unsupported data mode: {self.mode}")
         return tokens[:-1], tokens[1:]
@@ -145,7 +153,7 @@ class WikitextDataset(Dataset):
         self.seq_len = seq_len
         self.samples = []
         for i in range(0, len(all_ids) - seq_len - 1, seq_len):
-            self.samples.append(torch.tensor(all_ids[i : i + seq_len + 1], dtype=torch.long))
+            self.samples.append(torch.tensor(all_ids[i:i + seq_len + 1], dtype=torch.long))
             if len(self.samples) >= num_samples:
                 break
 
@@ -191,10 +199,10 @@ def main():
 
     deepspeed.init_distributed(dist_backend="cpu:gloo,cuda:nccl")
     local_rank = args.local_rank
-    torch.cuda.set_device(local_rank)
+    get_accelerator().set_device(local_rank)
 
     torch.manual_seed(42)
-    torch.cuda.manual_seed_all(42)
+    get_accelerator().manual_seed_all(42)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
@@ -209,7 +217,7 @@ def main():
         )
 
     total_params = sum(p.numel() for p in model.parameters())
-    num_gpus = torch.distributed.get_world_size()
+    num_gpus = dist.get_world_size()
     if local_rank == 0:
         print(f"Model parameters: {total_params / 1e6:.1f}M")
         print(f"GPUs: {num_gpus}")
@@ -237,7 +245,9 @@ def main():
         model=model,
     )
     sampler = torch.utils.data.distributed.DistributedSampler(
-        dataset, shuffle=False, seed=42,
+        dataset,
+        shuffle=False,
+        seed=42,
     )
     train_loader = DataLoader(
         dataset,
@@ -261,7 +271,7 @@ def main():
             if step >= args.train_steps:
                 break
 
-            torch.cuda.synchronize()
+            get_accelerator().synchronize()
             t_step_start = time.time()
 
             input_ids = batch[0].to(device)
@@ -271,7 +281,7 @@ def main():
             model_engine.backward(loss)
             model_engine.step()
 
-            torch.cuda.synchronize()
+            get_accelerator().synchronize()
             step_time_ms = (time.time() - t_step_start) * 1000
 
             if step == warmup_steps:
@@ -291,13 +301,11 @@ def main():
                     avg_ms = step_time_ms
                     cur_tflops_per_gpu = 0.0
                     cur_samples_per_sec = 0.0
-                print(
-                    f"step {step:5d} | loss {loss.item():.4f} | "
-                    f"lr {lr_scheduler.get_last_lr()[0]:.6f} | "
-                    f"{cur_samples_per_sec:.1f} samples/s | "
-                    f"{cur_tflops_per_gpu:.2f} TFLOPS/GPU | "
-                    f"step {avg_ms:.1f} ms"
-                )
+                print(f"step {step:5d} | loss {loss.item():.4f} | "
+                      f"lr {lr_scheduler.get_last_lr()[0]:.6f} | "
+                      f"{cur_samples_per_sec:.1f} samples/s | "
+                      f"{cur_tflops_per_gpu:.2f} TFLOPS/GPU | "
+                      f"step {avg_ms:.1f} ms")
             step += 1
 
     if local_rank == 0:

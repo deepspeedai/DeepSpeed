@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# Copyright (c) Microsoft Corporation.
+# SPDX-License-Identifier: Apache-2.0
+
+# DeepSpeed Team
 """
 Unit test for the transparent SDMA allgather path in deepspeed.comm.
 
@@ -21,7 +25,6 @@ import os
 
 import numpy as np
 import torch
-import torch.distributed as torch_dist
 
 import deepspeed
 from deepspeed import comm as dist
@@ -47,8 +50,7 @@ def run_single_allgather(rank, world_size, dtype, partition_sz, ag_stream):
     """Execute one allgather call following the ZeRO-3 ``_all_gather_dtype`` path."""
     device = get_accelerator().current_device_name()
 
-    flat_tensor = torch.empty(partition_sz * world_size, dtype=dtype,
-                              device=device, requires_grad=False)
+    flat_tensor = torch.empty(partition_sz * world_size, dtype=dtype, device=device, requires_grad=False)
     partitions = [flat_tensor.narrow(0, partition_sz * i, partition_sz) for i in range(world_size)]
     partitions[rank].fill_(float(rank + 1))
 
@@ -62,20 +64,18 @@ def run_single_allgather(rank, world_size, dtype, partition_sz, ag_stream):
     return partitions
 
 
-def run_bandwidth_test(rank, world_size, dtype, partition_sz, ag_stream,
-                       iterations, warmup):
+def run_bandwidth_test(rank, world_size, dtype, partition_sz, ag_stream, iterations, warmup):
     """Measure allgather bandwidth following the ZeRO-3 overlap pattern."""
     device = get_accelerator().current_device_name()
     elem_size = torch.tensor([], dtype=dtype).element_size()
     total_bytes = partition_sz * elem_size * world_size
 
-    ev_start = torch.cuda.Event(enable_timing=True)
-    ev_end = torch.cuda.Event(enable_timing=True)
+    ev_start = get_accelerator().Event(enable_timing=True)
+    ev_end = get_accelerator().Event(enable_timing=True)
     times_ms = []
 
     for i in range(warmup + iterations):
-        flat_tensor = torch.empty(partition_sz * world_size, dtype=dtype,
-                                  device=device, requires_grad=False)
+        flat_tensor = torch.empty(partition_sz * world_size, dtype=dtype, device=device, requires_grad=False)
         partitions = [flat_tensor.narrow(0, partition_sz * r, partition_sz) for r in range(world_size)]
         partitions[rank].fill_(float(rank + 1))
 
@@ -99,14 +99,10 @@ def run_bandwidth_test(rank, world_size, dtype, partition_sz, ag_stream,
 
 def main():
     parser = argparse.ArgumentParser(description="Transparent SDMA allgather unit test")
-    parser.add_argument("--partition_sz", type=int, default=1024 * 1024,
-                        help="Elements per rank per allgather call")
-    parser.add_argument("--iterations", type=int, default=20,
-                        help="Number of measurement iterations")
-    parser.add_argument("--warmup", type=int, default=5,
-                        help="Number of warmup iterations")
-    parser.add_argument("--local_rank", type=int,
-                        default=int(os.environ.get("LOCAL_RANK", 0)))
+    parser.add_argument("--partition_sz", type=int, default=1024 * 1024, help="Elements per rank per allgather call")
+    parser.add_argument("--iterations", type=int, default=20, help="Number of measurement iterations")
+    parser.add_argument("--warmup", type=int, default=5, help="Number of warmup iterations")
+    parser.add_argument("--local_rank", type=int, default=int(os.environ.get("LOCAL_RANK", 0)))
     parser = deepspeed.add_config_arguments(parser)
     args = parser.parse_args()
 
@@ -143,7 +139,7 @@ def main():
         passed = verify_allgather(partitions, world_size, args.partition_sz, rank, dtype)
 
         passed_t = torch.tensor([1 if passed else 0], dtype=torch.int32)
-        torch_dist.all_reduce(passed_t, op=torch_dist.ReduceOp.MIN)
+        dist.all_reduce(passed_t, op=dist.ReduceOp.MIN)
         ok = passed_t.item() == 1
 
         if rank == 0:
@@ -162,8 +158,8 @@ def main():
 
     for dtype_name, dtype in test_dtypes:
         dist.barrier()
-        times_ms, total_bytes = run_bandwidth_test(rank, world_size, dtype, args.partition_sz,
-                                                   ag_stream, args.iterations, args.warmup)
+        times_ms, total_bytes = run_bandwidth_test(rank, world_size, dtype, args.partition_sz, ag_stream,
+                                                   args.iterations, args.warmup)
 
         avg_ms = np.mean(times_ms)
         min_ms = np.min(times_ms)
@@ -172,9 +168,9 @@ def main():
         avg_t = torch.tensor([avg_ms], dtype=torch.float64)
         min_t = torch.tensor([min_ms], dtype=torch.float64)
         max_t = torch.tensor([max_ms], dtype=torch.float64)
-        torch_dist.all_reduce(avg_t, op=torch_dist.ReduceOp.SUM)
-        torch_dist.all_reduce(min_t, op=torch_dist.ReduceOp.MIN)
-        torch_dist.all_reduce(max_t, op=torch_dist.ReduceOp.MAX)
+        dist.all_reduce(avg_t, op=dist.ReduceOp.SUM)
+        dist.all_reduce(min_t, op=dist.ReduceOp.MIN)
+        dist.all_reduce(max_t, op=dist.ReduceOp.MAX)
 
         if rank == 0:
             g_avg_ms = avg_t.item() / world_size

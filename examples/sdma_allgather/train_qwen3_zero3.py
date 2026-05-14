@@ -1,3 +1,7 @@
+# Copyright (c) Microsoft Corporation.
+# SPDX-License-Identifier: Apache-2.0
+
+# DeepSpeed Team
 """Qwen3 + DeepSpeed ZeRO-3 benchmark for the SDMA allgather feature.
 
 Loads a Qwen3 model with random initialisation under `deepspeed.zero.Init`
@@ -25,7 +29,8 @@ import time
 
 import deepspeed
 import torch
-import torch.distributed as dist
+from deepspeed import comm as dist
+from deepspeed.accelerator import get_accelerator
 from torch.utils.data import DataLoader, Dataset
 from torch.utils.data.distributed import DistributedSampler
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
@@ -34,7 +39,9 @@ from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("--model_name", default="Qwen/Qwen3-32B")
-    p.add_argument("--num_layers", type=int, default=0,
+    p.add_argument("--num_layers",
+                   type=int,
+                   default=0,
                    help="0 = use model default; smaller values for quick smoke runs")
     p.add_argument("--seq_length", type=int, default=1024)
     p.add_argument("--batch_size", type=int, default=1)
@@ -42,10 +49,13 @@ def parse_args():
     p.add_argument("--warmup_steps", type=int, default=10)
     p.add_argument("--log_interval", type=int, default=10)
     p.add_argument("--ds_config", required=True)
-    p.add_argument("--dataset", default="wikitext",
+    p.add_argument("--dataset",
+                   default="wikitext",
                    choices=["wikitext", "synthetic"],
                    help="Real text (wikitext-103) or pre-generated random ids")
-    p.add_argument("--dataset_percentage", type=float, default=10.0,
+    p.add_argument("--dataset_percentage",
+                   type=float,
+                   default=10.0,
                    help="Percentage of wikitext train split to load (1.0-100.0)")
     p.add_argument("--local_rank", type=int, default=-1)
     return p.parse_args()
@@ -59,8 +69,7 @@ class _SyntheticDataset(Dataset):
 
     def __init__(self, vocab_size, seq_length, num_samples=10000, seed=42):
         gen = torch.Generator().manual_seed(seed)
-        self.input_ids = torch.randint(0, vocab_size, (num_samples, seq_length),
-                                       generator=gen, dtype=torch.long)
+        self.input_ids = torch.randint(0, vocab_size, (num_samples, seq_length), generator=gen, dtype=torch.long)
         self.seq_length = seq_length
 
     def __len__(self):
@@ -75,8 +84,7 @@ class _SyntheticDataset(Dataset):
         }
 
 
-def _build_wikitext_loader(model_name, seq_length, batch_size, dataset_percentage,
-                           rank, world_size, is_main):
+def _build_wikitext_loader(model_name, seq_length, batch_size, dataset_percentage, rank, world_size, is_main):
     """Stream wikitext-103-raw-v1 as a concatenated token stream sliced into
     fixed `seq_length` chunks.
 
@@ -96,7 +104,9 @@ def _build_wikitext_loader(model_name, seq_length, batch_size, dataset_percentag
 
     if is_main:
         print(f"[trainer] loading wikitext-103-raw-v1 split={split}")
-    raw = load_dataset("wikitext", "wikitext-103-raw-v1", split=split,
+    raw = load_dataset("wikitext",
+                       "wikitext-103-raw-v1",
+                       split=split,
                        download_config=DownloadConfig(disable_tqdm=True))
 
     tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
@@ -114,13 +124,14 @@ def _build_wikitext_loader(model_name, seq_length, batch_size, dataset_percentag
     n_full = len(all_ids) // seq_length
     if max_chunks > 0:
         n_full = min(n_full, max_chunks)
-    chunks = torch.tensor(all_ids[: n_full * seq_length],
-                          dtype=torch.long).view(n_full, seq_length)
+    chunks = torch.tensor(all_ids[:n_full * seq_length], dtype=torch.long).view(n_full, seq_length)
     if is_main:
         print(f"[trainer] chunked: {len(all_ids)} tokens -> {n_full} "
-              f"sequences of {seq_length} (no padding)", flush=True)
+              f"sequences of {seq_length} (no padding)",
+              flush=True)
 
     class _ChunkDataset(Dataset):
+
         def __init__(self, t):
             self.t = t
 
@@ -137,17 +148,15 @@ def _build_wikitext_loader(model_name, seq_length, batch_size, dataset_percentag
 
     ds = _ChunkDataset(chunks)
     sampler = DistributedSampler(ds, num_replicas=world_size, rank=rank)
-    return DataLoader(ds, batch_size=batch_size, sampler=sampler,
-                      num_workers=0, drop_last=True, pin_memory=True)
+    return DataLoader(ds, batch_size=batch_size, sampler=sampler, num_workers=0, drop_last=True, pin_memory=True)
 
 
 def _build_loader(args, vocab_size, rank, world_size, is_main):
     if args.dataset == "wikitext":
-        return _build_wikitext_loader(args.model_name, args.seq_length, args.batch_size,
-                                      args.dataset_percentage, rank, world_size, is_main)
+        return _build_wikitext_loader(args.model_name, args.seq_length, args.batch_size, args.dataset_percentage, rank,
+                                      world_size, is_main)
     ds = _SyntheticDataset(vocab_size, args.seq_length)
-    return DataLoader(ds, batch_size=args.batch_size, shuffle=False, drop_last=True,
-                      num_workers=0, pin_memory=True)
+    return DataLoader(ds, batch_size=args.batch_size, shuffle=False, drop_last=True, num_workers=0, pin_memory=True)
 
 
 # ---------------------------------------------------------------------------
@@ -175,8 +184,10 @@ def main():
     deepspeed.init_distributed()
     rank = dist.get_rank()
     world = dist.get_world_size()
-    device = torch.device(f"cuda:{args.local_rank if args.local_rank >= 0 else rank % torch.cuda.device_count()}")
-    torch.cuda.set_device(device)
+    accel = get_accelerator()
+    device_idx = args.local_rank if args.local_rank >= 0 else rank % accel.device_count()
+    device = torch.device(accel.device_name(device_idx))
+    accel.set_device(device_idx)
 
     if rank == 0:
         print(f"[trainer] world={world}  device={device}  ds_config={args.ds_config}")
@@ -200,7 +211,7 @@ def main():
               f"running {args.num_steps} steps", flush=True)
 
     step_times, losses = [], []
-    torch.cuda.reset_peak_memory_stats()
+    get_accelerator().reset_peak_memory_stats()
     t_train_start = time.perf_counter()
     step, epoch = 0, 0
     data_iter = iter(loader)
@@ -224,12 +235,12 @@ def main():
             skipped_empty += 1
             continue
         labels = labels.masked_fill(attn == 0, -100)
-        torch.cuda.synchronize()
+        get_accelerator().synchronize()
         t0 = time.perf_counter()
         out = engine(input_ids=ids, labels=labels, attention_mask=attn)
         engine.backward(out.loss)
         engine.step()
-        torch.cuda.synchronize()
+        get_accelerator().synchronize()
         dt = time.perf_counter() - t0
 
         if step >= args.warmup_steps:
@@ -239,8 +250,10 @@ def main():
         if rank == 0 and step % args.log_interval == 0:
             tag = "warmup" if step < args.warmup_steps else "measured"
             tps = args.batch_size * args.seq_length * world / dt
-            print(f"[trainer] step {step:4d} ({tag:7s}) | loss {out.loss.item():8.4f} | "
-                  f"step {dt*1000:7.1f} ms | {tps:8.0f} tok/s", flush=True)
+            print(
+                f"[trainer] step {step:4d} ({tag:7s}) | loss {out.loss.item():8.4f} | "
+                f"step {dt*1000:7.1f} ms | {tps:8.0f} tok/s",
+                flush=True)
         step += 1
 
     t_train_end = time.perf_counter()
@@ -250,7 +263,7 @@ def main():
         avg_dt = sum(step_times) / n
         tokens_per_step = args.batch_size * args.seq_length * world
         tps = tokens_per_step / avg_dt
-        peak_gb = torch.cuda.max_memory_allocated() / 1e9
+        peak_gb = get_accelerator().max_memory_allocated() / 1e9
         avg_loss = sum(losses) / n
         print()
         print("=" * 70)
