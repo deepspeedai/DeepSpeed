@@ -581,7 +581,7 @@ class AutoTP():
                         setattr(r_module, name, new_child)
                 else:
                     self.update_mp_params(child)
-                    self._replace_module(child, name, class_name)
+                    self._replace_module(child, full_name, class_name)
             # Traditional path: use linear_policies for type-based routing
             elif child.__class__ in self.linear_policies:
                 setattr(r_module, name, self.linear_policies[child.__class__](child, prev_name + '.' + name,

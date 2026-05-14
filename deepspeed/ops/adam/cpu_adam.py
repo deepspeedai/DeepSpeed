@@ -236,14 +236,12 @@ class DeepSpeedCPUAdam(torch.optim.Optimizer):
                     f"CPUAdam param is on {param.device} and must be 'cpu', "
                     f"make sure you enabled 'offload_optimizer': 'cpu' in your ZeRO config.")
 
-                # Decrement step count
-                subgroup_state['step'] -= 1
-
-                # Extract hyperparameters
                 beta1, beta2 = group['betas']
 
                 self.ds_opt_adam.adam_rollback(self.opt_id, subgroup_state['step'], group['lr'], beta1, beta2,
                                                group['eps'], group['weight_decay'], group['bias_correction'],
                                                param.data, param.grad.data, subgroup_state['exp_avg'],
                                                subgroup_state['exp_avg_sq'])
+
+                subgroup_state['step'] -= 1
         return loss

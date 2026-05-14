@@ -366,6 +366,13 @@ class DeepSpeedZeroConfig(DeepSpeedConfigModel):
     Enable internal sanity checks, which could be useful for debugging
     """
 
+    save_muon_momentum_buffer_in_memory: bool = False
+    """
+    When using the Muon optimizer with ZeRO Stage 3, keeps the Muon momentum
+    buffer in GPU/CPU memory instead of swapping to NVMe with other optimizer
+    states. Only relevant when using NVMe offloading.
+    """
+
     leaf_module: DeepSpeedZeroLeafModuleConfig = Field(default_factory=DeepSpeedZeroLeafModuleConfig)
     """
     Configuration for modules that should be treated as ZeRO3 leaf modules.

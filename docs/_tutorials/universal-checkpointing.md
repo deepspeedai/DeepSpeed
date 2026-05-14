@@ -46,6 +46,50 @@ This script will process the ZeRO checkpoint and generate a new checkpoint in th
 With the Universal checkpoint ready, you can now resume training on potentially with different parallelism topologies or training configurations. To do this add `--universal-checkpoint` to your DeepSpeed config (json) file
 
 
+## Universal Checkpointing with AutoTP (Automatic Tensor Parallelism)
+
+DeepSpeed AutoTP (Automatic Tensor Parallelism) can produce checkpoints that are compatible with Universal
+Checkpoint conversion and restore.
+
+### What gets saved
+
+When AutoTP is enabled, DeepSpeed will attach Universal Checkpoint metadata (`UNIVERSAL_CHECKPOINT_INFO`)
+to the saved training checkpoint. This metadata describes how tensor-parallel parameters were partitioned
+(e.g. row-parallel vs column-parallel, replicated parameters, and fused/sub-parameter layouts).
+
+This enables:
+- converting a TP-sharded training checkpoint into a Universal checkpoint via `ds_to_universal.py`
+- restoring the checkpoint correctly even when TP partitioning uses fused weights (e.g. QKV)
+
+### Enablement
+
+AutoTP is enabled by setting `tensor_parallel` in your DeepSpeed config:
+
+```json
+{
+  "zero_optimization": { "stage": 2 },
+  "bf16": { "enabled": true },
+  "tensor_parallel": { "autotp_size": 4 }
+}
+```
+
+Save a regular DeepSpeed checkpoint during training:
+
+```
+engine.save_checkpoint(save_dir, tag=tag)
+```
+
+### Conversion
+
+Convert the saved DeepSpeed checkpoint to the universal format:
+
+```
+python deepspeed/checkpoint/ds_to_universal.py \
+  --input_folder /path/to/ds_checkpoint \
+  --output_folder /path/to/universal_checkpoint
+```
+
+
 ## Conclusion
 DeepSpeed Universal Checkpointing simplifies the management of model states, making it easier to save, load, and transfer model states across different training sessions and parallelism techniques. By following the steps outlined in this tutorial, you can integrate Universal Checkpointing into your DeepSpeed applications, enhancing your model training and development workflow.
 

@@ -78,6 +78,46 @@ class QKVLinearModel(torch.nn.Module):
         return self.self_attn(x)
 
 
+class DeepAttention(torch.nn.Module):
+    """Mimics HF attention module with separate projection layers."""
+
+    def __init__(self, hidden_dim):
+        super().__init__()
+        self.q_proj = torch.nn.Linear(hidden_dim, hidden_dim)
+        self.o_proj = torch.nn.Linear(hidden_dim, hidden_dim)
+
+    def forward(self, x):
+        return self.o_proj(self.q_proj(x))
+
+
+class DeepBlock(torch.nn.Module):
+    """Mimics a single HF transformer block."""
+
+    def __init__(self, hidden_dim):
+        super().__init__()
+        self.self_attn = DeepAttention(hidden_dim)
+
+    def forward(self, x):
+        return self.self_attn(x)
+
+
+class DeepModel(torch.nn.Module):
+    """Mimics HF transformer structure: model.layers.[N].self_attn.{q,o}_proj.
+
+    This creates a 4-level-deep module hierarchy to test that _replace_module
+    correctly propagates the full module path during recursion.
+    """
+
+    def __init__(self, hidden_dim, nlayers=2):
+        super().__init__()
+        self.layers = torch.nn.ModuleList([DeepBlock(hidden_dim) for _ in range(nlayers)])
+
+    def forward(self, x):
+        for layer in self.layers:
+            x = layer(x)
+        return x
+
+
 def init_tp_engine(tp_size, partition_config=None):
     config_dict = {
         "train_micro_batch_size_per_gpu": 1,
@@ -395,6 +435,41 @@ class TestAutoTPCustomPatterns(DistributedTest):
         model = apply_autotp_with_partition_config(model, tp_size=2, partition_config=partition_config)
 
         assert isinstance(model.linears[0], nn.Linear)
+
+    def test_deep_model_full_path_propagation(self):
+        """Verify _replace_module propagates accumulated paths through deep hierarchies.
+
+        Uses a 4-level-deep model (layers.N.self_attn.{q,o}_proj) with patterns
+        that require intermediate path components (layers.N). Without correct
+        full_name propagation, the recursive path is truncated and patterns
+        that include intermediate levels will silently fail to match.
+        """
+        skip_on_device()
+        partition_config = {
+            "use_default_specs":
+            False,
+            "layer_specs": [
+                {
+                    "patterns": [r".*layers\.\d+\.self_attn\.q_proj\.weight$"],
+                    "partition_type": "column",
+                },
+                {
+                    "patterns": [r".*layers\.\d+\.self_attn\.o_proj\.weight$"],
+                    "partition_type": "row",
+                },
+            ],
+        }
+        model = DeepModel(hidden_dim=16, nlayers=2)
+        model = apply_autotp_with_partition_config(model, tp_size=2, partition_config=partition_config)
+
+        # All 4 projections (2 layers x {q_proj, o_proj}) must be replaced.
+        # Before the full_name fix, 0 modules were replaced because the mangled
+        # path "self_attn.q_proj.weight" could not match "layers.N.self_attn...".
+        for i in range(2):
+            assert isinstance(model.layers[i].self_attn.q_proj, LinearLayer), \
+                f"layers.{i}.self_attn.q_proj was not replaced (path propagation bug?)"
+            assert isinstance(model.layers[i].self_attn.o_proj, LinearAllreduce), \
+                f"layers.{i}.self_attn.o_proj was not replaced (path propagation bug?)"
 
 
 def test_invalid_custom_shape_rejected():

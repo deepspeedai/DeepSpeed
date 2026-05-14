@@ -26,8 +26,7 @@ class DS_BloomContainer(MetaTensorContainer, HybridEngineContainer, BaseTransfor
         major = int(vers[0])
         minor = int(vers[1])
         if major > 4 or (major == 4 and minor > 43):
-            import sys
-            sys.exit(
+            raise RuntimeError(
                 f"Transformers version {v_transformers} exceeds version 4.43.4! After transformers version 4.43.4, BLOOM inference with DeepSpeed is no longer supported."
             )
 

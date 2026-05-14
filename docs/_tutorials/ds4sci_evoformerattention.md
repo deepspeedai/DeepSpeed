@@ -26,9 +26,42 @@ export CUTLASS_PATH=/path/to/cutlass
 ```
 The kernels will be compiled when `DS4Sci_EvoformerAttention` is called for the first time.
 
-`DS4Sci_EvoformerAttention` requires GPUs with compute capability 7.0 or higher (NVIDIA V100 or later GPUs) and the minimal CUDA version is 11.3. It is recommended to use CUDA 11.7 or later for better performance. Besides, the performance of backward kernel on V100 kernel is not as good as that on A100 for now.
-The extension checks both requirements and fails if any is not met. To disable the check, for example for cross-compiling in a system without GPUs, you can set the environment variable ```DS_IGNORE_CUDA_DETECTION=TRUE```
-and the environment value ```DS_EVOFORMER_GPU_ARCH={70|75|80}```, which controls the target GPU (80 being the last supported and meaning NVIDIA Ampere and later).
+`DS4Sci_EvoformerAttention` requires GPUs with compute capability 7.0 or higher
+(NVIDIA V100 or later GPUs) and the minimal CUDA version is 11.3. It is
+recommended to use CUDA 11.7 or later for better performance. Besides, the
+performance of backward kernel on V100 is not as good as on A100 for now.
+
+The extension checks both requirements and fails if any is not met. To disable
+the check (for example cross-compiling in a system without GPUs), set
+`DS_IGNORE_CUDA_DETECTION=TRUE`.
+
+### Multi-Arch Build Behavior
+
+Evoformer now supports mixed-architecture packaging directly via
+`TORCH_CUDA_ARCH_LIST`.
+
+Example:
+
+```shell
+CUTLASS_PATH=/path/to/cutlass \
+TORCH_CUDA_ARCH_LIST='7.0;8.0' \
+DS_BUILD_OPS=0 DS_BUILD_EVOFORMER_ATTN=1 \
+pip install -e .
+```
+
+- `TORCH_CUDA_ARCH_LIST` controls generated CUDA slices (order-independent).
+- Targets below `sm_70` are pruned for Evoformer because Tensor Cores are
+  required.
+- `DS_EVOFORMER_GPU_ARCH` is **deprecated** and ignored for Evoformer builds.
+  Use `TORCH_CUDA_ARCH_LIST` instead.
+
+Supported dtype matrix by architecture family:
+
+| Arch family | fp16 | bf16 |
+|-------------|------|------|
+| Sm70 (Volta) | Yes | No |
+| Sm75 (Turing) | Yes | No |
+| Sm80+ (Ampere/Ada/Hopper) | Yes | Yes |
 
 ### 3.2 Unit test and benchmark
 

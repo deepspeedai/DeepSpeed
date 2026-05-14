@@ -110,7 +110,7 @@ class DeepSpeedZeRoOffload(object):
         log_trace_cache_warnings=False,
     ):
 
-        see_memory_usage("DeepSpeedZeRoOffload initialize [begin]", force=True)
+        see_memory_usage("DeepSpeedZeRoOffload initialize [begin]", force=False)
 
         print_rank_0(f"initialized {__class__.__name__} with args: {locals()}", force=False)
 
@@ -184,7 +184,7 @@ class DeepSpeedZeRoOffload(object):
             f'Created module hooks: forward = {len(self.forward_hooks)}, backward = {len(self.backward_hooks)}',
             force=False)
 
-        see_memory_usage("DeepSpeedZeRoOffload initialize [end]", force=True)
+        see_memory_usage("DeepSpeedZeRoOffload initialize [end]", force=False)
 
     @instrument_w_nvtx
     def partition_all_parameters(self):
@@ -277,7 +277,7 @@ class DeepSpeedZeRoOffload(object):
 
         print_rank_0(
             f"Parameter Offload - Persistent parameters statistics: param_count = {params_count}, numel = {total_persistent_parameters}",
-            force=True)
+            force=False)
 
         return persistent_params
 
@@ -534,16 +534,16 @@ class DeepSpeedZeRoOffload(object):
     def _set_z3_leaf_modules_by_threshold(self, module, zero_module_granularity_threshold):
 
         self._get_granularity_recursively(module)
-        print_rank_0(f"{'MODULE NAME'.ljust(30)}|{'GRANULARITY VALUE'.rjust(20)}", force=True)
+        print_rank_0(f"{'MODULE NAME'.ljust(30)}|{'GRANULARITY VALUE'.rjust(20)}", force=False)
         for granularity in self.granularity_info:
-            print_rank_0(granularity, force=True)
+            print_rank_0(granularity, force=False)
 
         if self.min_granularity_value <= zero_module_granularity_threshold:
             self._set_leaf_by_threshold_preorder(module, zero_module_granularity_threshold)
             utils.logger.info(
                 f"z3_leaf_module was set by stage3_module_granularity_threshold:{zero_module_granularity_threshold}")
             for layer in self.z3_leaf_layers:
-                print_rank_0(f"{layer.__class__.__name__}:{layer.ds_model_granularity}", force=True)
+                print_rank_0(f"{layer.__class__.__name__}:{layer.ds_model_granularity}", force=False)
         else:
             utils.logger.warning(
                 f"The smallest module granularity is [{self.min_granularity_layer}:{self.min_granularity_value}]. "\

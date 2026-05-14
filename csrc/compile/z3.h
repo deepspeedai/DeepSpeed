@@ -53,5 +53,6 @@ void reload_parameter(at::Tensor tensor, long graph_id, long id);
 void offload_parameter(at::Tensor tensor, long graph_id, long id);
 void reload_parameter_meta(at::Tensor tensor, long graph_id, long id);
 void offload_parameter_meta(at::Tensor tensor, long graph_id, long id);
-void end_backward(long graph_id);
+void end_backward(const c10::IValue& deps, long graph_id);
+void end_backward_meta(const c10::IValue& deps, long graph_id);
 }  // namespace dc
