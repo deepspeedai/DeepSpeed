@@ -840,57 +840,6 @@ class TestUniversalConvert(DistributedTest):
         with pytest.raises(RuntimeError, match="metadata"):
             consolidate_autoep_expert_files(ckpt_dir, output_dir, None)
 
-    def test_universal_converter_skips_native_moe_expert_files_without_autoep_metadata(self, tmpdir, monkeypatch):
-        """Native DeepSpeed MoE expert files share AutoEP's filename pattern but have no AutoEP metadata."""
-        import deepspeed.checkpoint.ds_to_universal as ds_to_universal
-        from deepspeed.checkpoint import autoep_universal
-
-        input_dir = os.path.join(str(tmpdir), "native_moe_ckpt")
-        output_dir = os.path.join(str(tmpdir), "universal_output")
-        os.makedirs(input_dir)
-        os.makedirs(output_dir)
-
-        mp_file = os.path.join(input_dir, "mp_rank_00_model_states.pt")
-        torch.save({ds_to_universal.PARAM_SHAPES: []}, mp_file)
-        torch.save({}, os.path.join(input_dir, "layer_0_expert_0_mp_rank_00_model_states.pt"))
-
-        args = type(
-            "Args", (), {
-                "input_folder": input_dir,
-                "output_folder": output_dir,
-                "inject_missing_state": False,
-                "keep_temp_folder": False,
-            })()
-
-        class FakeDeepSpeedCheckpoint:
-            tp_degree = 1
-            pp_degree = 1
-            mp_rank_files = [mp_file]
-
-            def __init__(self, folder):
-                assert folder == input_dir
-
-            def get_iteration(self):
-                return 1
-
-        def fail_autoep_consolidation(*args, **kwargs):
-            pytest.fail("Native MoE expert files must not trigger AutoEP consolidation without metadata")
-
-        monkeypatch.setattr(ds_to_universal, "_get_optim_files",
-                            lambda folder: ["zero_pp_rank_0_mp_rank_00_optim_states.pt"])
-        monkeypatch.setattr(ds_to_universal, "_get_zero_stage", lambda optim_files: 2)
-        monkeypatch.setattr(ds_to_universal, "DeepSpeedCheckpoint", FakeDeepSpeedCheckpoint)
-        monkeypatch.setattr(ds_to_universal, "_check_for_required_state", lambda checkpoint: None)
-        monkeypatch.setattr(ds_to_universal, "_extract_zero_shard_files", lambda *args, **kwargs: None)
-        monkeypatch.setattr(ds_to_universal, "_merge_tp_slice_files", lambda *args, **kwargs: None)
-        monkeypatch.setattr(ds_to_universal, "_save_optimizer_state", lambda args, checkpoint: None)
-        monkeypatch.setattr(autoep_universal, "consolidate_autoep_expert_files", fail_autoep_consolidation)
-        monkeypatch.setattr(autoep_universal, "consolidate_autoep_optimizer_states", fail_autoep_consolidation)
-
-        ds_to_universal.main(args)
-
-        assert os.path.exists(os.path.join(output_dir, "mp_rank_00_model_states.pt"))
-
     def test_universal_convert_multi_match_rejected(self, tmpdir):
         """Duplicate expert file for same (layer, expert); verify NotImplementedError."""
         from deepspeed.checkpoint.autoep_universal import resolve_expert_ckpt_path
@@ -1016,6 +965,60 @@ class TestUniversalConvert(DistributedTest):
             exp_avg_sq = torch.load(os.path.join(state_dir, "exp_avg_sq.pt"), map_location='cpu', weights_only=False)
             assert torch.equal(exp_avg[PARAM], torch.full(shape, expected_avg))
             assert torch.equal(exp_avg_sq[PARAM], torch.full(shape, expected_avg_sq))
+
+
+class TestUniversalConvertNonDistributed:
+
+    def test_universal_converter_skips_native_moe_expert_files_without_autoep_metadata(self, tmpdir, monkeypatch):
+        """Native DeepSpeed MoE expert files share AutoEP's filename pattern but have no AutoEP metadata."""
+        import deepspeed.checkpoint.ds_to_universal as ds_to_universal
+        from deepspeed.checkpoint import autoep_universal
+
+        input_dir = os.path.join(str(tmpdir), "native_moe_ckpt")
+        output_dir = os.path.join(str(tmpdir), "universal_output")
+        os.makedirs(input_dir)
+        os.makedirs(output_dir)
+
+        mp_file = os.path.join(input_dir, "mp_rank_00_model_states.pt")
+        torch.save({ds_to_universal.PARAM_SHAPES: []}, mp_file)
+        torch.save({}, os.path.join(input_dir, "layer_0_expert_0_mp_rank_00_model_states.pt"))
+
+        args = type(
+            "Args", (), {
+                "input_folder": input_dir,
+                "output_folder": output_dir,
+                "inject_missing_state": False,
+                "keep_temp_folder": False,
+            })()
+
+        class FakeDeepSpeedCheckpoint:
+            tp_degree = 1
+            pp_degree = 1
+            mp_rank_files = [mp_file]
+
+            def __init__(self, folder):
+                assert folder == input_dir
+
+            def get_iteration(self):
+                return 1
+
+        def fail_autoep_consolidation(*args, **kwargs):
+            pytest.fail("Native MoE expert files must not trigger AutoEP consolidation without metadata")
+
+        monkeypatch.setattr(ds_to_universal, "_get_optim_files",
+                            lambda folder: ["zero_pp_rank_0_mp_rank_00_optim_states.pt"])
+        monkeypatch.setattr(ds_to_universal, "_get_zero_stage", lambda optim_files: 2)
+        monkeypatch.setattr(ds_to_universal, "DeepSpeedCheckpoint", FakeDeepSpeedCheckpoint)
+        monkeypatch.setattr(ds_to_universal, "_check_for_required_state", lambda checkpoint: None)
+        monkeypatch.setattr(ds_to_universal, "_extract_zero_shard_files", lambda *args, **kwargs: None)
+        monkeypatch.setattr(ds_to_universal, "_merge_tp_slice_files", lambda *args, **kwargs: None)
+        monkeypatch.setattr(ds_to_universal, "_save_optimizer_state", lambda args, checkpoint: None)
+        monkeypatch.setattr(autoep_universal, "consolidate_autoep_expert_files", fail_autoep_consolidation)
+        monkeypatch.setattr(autoep_universal, "consolidate_autoep_optimizer_states", fail_autoep_consolidation)
+
+        ds_to_universal.main(args)
+
+        assert os.path.exists(os.path.join(output_dir, "mp_rank_00_model_states.pt"))
 
 
 class TestUniversalLoad(DistributedTest):

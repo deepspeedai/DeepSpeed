@@ -140,8 +140,6 @@ def validate_autoep_config(
 
     # Validate group-limited routing constraints
     if config.num_limited_groups is not None:
-        if config.num_expert_groups is None:
-            raise ValueError("num_limited_groups requires num_expert_groups to be set")
         if config.num_limited_groups < 1:
             raise ValueError(f"num_limited_groups must be >= 1, got {config.num_limited_groups}")
 
