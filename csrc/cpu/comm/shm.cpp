@@ -157,10 +157,10 @@ void reduce_bf16_buffers(int start_elements, int num_elements, char* to_buffer, 
 #if TARGET_RISCV
     size_t vl = __riscv_vsetvl_e16m1(num_elements);
     vector_length_in_bytes = vl * element_size;
-#elif TARGET_ARM
-    const int vl = full_precision_elements_in_fixed_vector;
-    vector_length_in_bytes = vl * element_size;
-#else  // x86_64
+#else  // x86_64 or ARM
+     // earlier code
+    // vl = full_precision_elements_in_fixed_vector; // full_precision_elements_in_fixed_vector is defined as 4. So vl is 4, which means 4 bf16 elements can be processed at a time.
+    // vector_length_in_bytes = vl * element_size;
     const int vl = vector_length_in_bytes / element_size;
 #endif
     int main_elements = num_elements - (num_elements % vl);
@@ -190,11 +190,12 @@ void reduce_bf16_buffers(int start_elements, int num_elements, char* to_buffer, 
             case 1: break;
             default:
                 for (int j = 1; j < world_size; j++) {
-                    auto in_val = CVT_BF16_TO_FP32(VLOAD_U16(buffers[j] + i));
-                    inout_val = VADD_F32_2VL(inout_val, in_val);
+                    auto in_val = CVT_BF16_TO_FP32(VLOAD_U16(buffers[j] + i)); // CVT_BF16_TO_FP32 return float32x4_t as of now // with optimization, it returns float32x4x2_t
+                    inout_val = VADD_F32_2VL(inout_val, in_val); // VADD_F32_2VL deals with float32x4_t as of now. // with optimization, it deals with float32x4x2_t and returns float32x4x2_t
                 }
         }
-        VSTORE_U16(to_buffer + i, CVT_FP32_TO_BF16(inout_val));
+        VSTORE_U16(to_buffer + i, CVT_FP32_TO_BF16(inout_val)); // CVT_FP32_TO_BF16 takes uint16x4_t abd return uint16x4_t as of now. // with optimization, it takes float32x4x2_t and return uint16x8_t
+        // VSTORE_U16 is storing uint16x4_t as of now. // with optimization, it stores uint16x8_t
     }
 
     // process remaining part
@@ -220,10 +221,10 @@ void reduce_fp16_buffers(int start_elements, int num_elements, char* to_buffer, 
 #if TARGET_RISCV
     size_t vl = __riscv_vsetvl_e16m1(num_elements);
     vector_length_in_bytes = vl * element_size;
-#elif TARGET_ARM
-    const int vl = full_precision_elements_in_fixed_vector;
-    vector_length_in_bytes = vl * element_size;
-#else  // x86_64
+#else  // x86_64 or ARM
+    // earlier code
+    // vl = full_precision_elements_in_fixed_vector; // full_precision_elements_in_fixed_vector is defined as 4. So vl is 4, which means 4 fp16 elements can be processed at a time.
+    // vector_length_in_bytes = vl * element_size;
     const int vl = vector_length_in_bytes / element_size;
 #endif
     int main_elements = num_elements - (num_elements % vl);
@@ -253,11 +254,12 @@ void reduce_fp16_buffers(int start_elements, int num_elements, char* to_buffer, 
             case 1: break;
             default:
                 for (int j = 1; j < world_size; j++) {
-                    auto in_val = CVT_FP16_TO_FP32(VLOAD_F16(buffers[j] + i));
-                    inout_val = VADD_F32_2VL(inout_val, in_val);
+                    auto in_val = CVT_FP16_TO_FP32(VLOAD_F16(buffers[j] + i)); // CVT_FP16_TO_FP32 converts float16x4_t  to float32x4_t as of now. // with optimization, it converts float16x8_t to float32x4x2_t
+                    inout_val = VADD_F32_2VL(inout_val, in_val); // VADD_F32_2VL deals with float32x4_t as of now. // with optimization, it deals with float32x4x2_t and returns float32x4x2_t
                 }
         }
-        VSTORE_F16(to_buffer + i, CVT_FP32_TO_FP16(inout_val));
+        VSTORE_F16(to_buffer + i, CVT_FP32_TO_FP16(inout_val)); // CVT_FP32_TO_FP16 takes float32x4_t and return float16x4_t as of now. // with optimization, it takes float32x4x2_t and return float16x8_t
+        // VSTORE_F16 is storing float16x4_t as of now. // with optimization, it stores float16x8_t
     }
 
     // process remaining part
@@ -283,11 +285,11 @@ void reduce_fp32_buffers(int start_elements, int num_elements, char* to_buffer, 
 #if TARGET_RISCV
     size_t vl = __riscv_vsetvl_e32m1(num_elements);
     vector_length_in_bytes = vl * element_size;
-#elif TARGET_ARM
-    const int vl = full_precision_elements_in_fixed_vector;
-    vector_length_in_bytes = vl * element_size;
-#else  // x86_64
-    const int vl = vector_length_in_bytes / element_size;
+#else  // x86_64 or ARM
+    // earlier code
+    // vl = full_precision_elements_in_fixed_vector; // full_precision_elements_in_fixed_vector is defined as 4. So vl is 4, which means 4 fp32 elements can be processed at a time.
+    // vector_length_in_bytes = vl * element_size;
+    const int vl = vector_length_in_bytes / element_size; // with optimization, vector_length_in_bytes is 16, so vl is 4, which  means 4 fp32 elements can be processed at a time.
 #endif
     int main_elements = num_elements - (num_elements % vl);
     int remain_elements = num_elements % vl;
@@ -296,7 +298,7 @@ void reduce_fp32_buffers(int start_elements, int num_elements, char* to_buffer, 
 #pragma omp parallel for
     for (int i = start_elements * element_size; i < (start_elements + main_elements) * element_size;
          i += vector_length_in_bytes) {
-        auto inout_val = VLOAD_F32(buffers[0] + i);
+        auto inout_val = VLOAD_F32(buffers[0] + i); // loads float32x4_t as of now. // with optimization also it loads float32x4_t, but it processes 2 float32x4_t together as float32x4x2_t
         switch (world_size) {
             case 16: CVT_ADD_F32(15);
             case 15: CVT_ADD_F32(14);
