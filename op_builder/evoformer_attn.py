@@ -156,7 +156,7 @@ class EvoformerAttnBuilder(CUDAOpBuilder):
         repo_root = self._repo_root()
         python_prefixes = self._dedupe_paths([Path(sys.prefix), Path(sys.exec_prefix), Path(sys.base_prefix)])
         prefix_paths = self._env_paths("CUTLASS_ROOT", "CUTLASS_HOME", "CONDA_PREFIX", "VIRTUAL_ENV",
-                                      "CMAKE_PREFIX_PATH", "CUDA_HOME", "CUDA_PATH")
+                                       "CMAKE_PREFIX_PATH", "CUDA_HOME", "CUDA_PATH")
         include_paths = self._env_paths("CPATH", "CPLUS_INCLUDE_PATH", "C_INCLUDE_PATH")
 
         return self._dedupe_paths([
