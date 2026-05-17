@@ -1647,9 +1647,9 @@ class DeepSpeedEngine(Module):
         self.quantizer = self._configure_quantization()
 
     def _configure_basic_optimizer(self, model_parameters):
-        optimizer_parameters = self.optimizer_params()
-        if optimizer_parameters is None:
-            optimizer_parameters = {}
+        # Copy so the pop() calls below (torch_adam, adam_w_mode, fp32_optimizer_states) do not
+        # mutate the shared config dict returned by optimizer_params().
+        optimizer_parameters = dict(self.optimizer_params() or {})
         # print(optimizer_parameters.keys())
         if "max_grad_norm" in optimizer_parameters.keys():
             raise ValueError(
@@ -1674,9 +1674,24 @@ class DeepSpeedEngine(Module):
                     CPUAdam = ZenFlowCPUAdam if self.zenflow else DeepSpeedCPUAdam
 
                     zenflow_kwargs = {'overlap_step': self.overlap_step} if self.zenflow else {}
+                    # Pop so a user-supplied value does not collide with the keyword built below.
+                    # None means the user did not set it, so no override warning is needed.
+                    user_fp32_optimizer_states = optimizer_parameters.pop('fp32_optimizer_states', None)
+                    if self.bf16_optimizer_states():
+                        # bf16 moments are required so the offloaded state matches the bf16 master weights.
+                        if user_fp32_optimizer_states:
+                            logger.warning("bf16_optimizer_states is enabled; overriding fp32_optimizer_states "
+                                           "to False so CPU Adam moments are stored in bf16.")
+                        fp32_optimizer_states = False
+                    elif user_fp32_optimizer_states is None:
+                        # Default preserves the pre-existing fp32 optimizer-state behavior.
+                        fp32_optimizer_states = True
+                    else:
+                        fp32_optimizer_states = user_fp32_optimizer_states
                     optimizer = CPUAdam(model_parameters,
                                         **optimizer_parameters,
                                         adamw_mode=effective_adam_w_mode,
+                                        fp32_optimizer_states=fp32_optimizer_states,
                                         **zenflow_kwargs)
                 else:
                     from deepspeed.ops.adam import FusedAdam
