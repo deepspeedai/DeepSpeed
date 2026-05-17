@@ -38,11 +38,6 @@ class DeepSpeedCPUAdam(torch.optim.Optimizer):
         the overhead of the optimizer's latency on CPU. Please refer to ZeRO-Offload tutorial
         (https://www.deepspeed.ai/tutorials/zero-offload/) for more information on how to enable this technology.
 
-        For calling step function, there are two options available: (1) update optimizer's states and (2) update
-        optimizer's states and copy the parameters back to GPU at the same time. We have seen that the second
-        option can bring 30% higher throughput than the doing the copy separately using option one.
-
-
         .. note::
                 We recommend using our `config
                 <https://www.deepspeed.ai/docs/config-json/#optimizer-parameters>`_
