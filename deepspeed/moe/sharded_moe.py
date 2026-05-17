@@ -215,7 +215,7 @@ def top1gating(logits: Tensor,
     if not drop_tokens:
         new_capacity = torch.max(exp_counts).to(logits.device)
         # Communicate across expert processes to pick the maximum capacity.
-        if ep_group is not None:
+        if ep_group is not None and dist.get_world_size(group=ep_group) > 1:
             dist.all_reduce(new_capacity, op=dist.ReduceOp.MAX, group=ep_group)
         if groups._get_expert_model_parallel_world_size() == 1:
             # If the non-expert is tensor-parallel, we need to pad the capacity to 'tp'.
@@ -335,7 +335,7 @@ def top2gating(logits: Tensor,
     else:
         # Do not drop tokens - set capacity according to current expert assignments
         new_capacity = torch.max(exp_counts)
-        if ep_group is not None:
+        if ep_group is not None and dist.get_world_size(group=ep_group) > 1:
             dist.all_reduce(new_capacity, op=dist.ReduceOp.MAX, group=ep_group)
         if groups._get_expert_model_parallel_world_size() == 1:
             # If the non-expert is tensor-parallel, we need to pad the capacity to 'tp'.
@@ -421,7 +421,7 @@ def topkgating(
     else:
         # Do not drop tokens - set capacity according to current expert assignments
         new_capacity = torch.max(exp_counts)
-        if ep_group is not None:
+        if ep_group is not None and dist.get_world_size(group=ep_group) > 1:
             dist.all_reduce(new_capacity, op=dist.ReduceOp.MAX, group=ep_group)
         if groups._get_expert_model_parallel_world_size() == 1:
             # If the non-expert is tensor-parallel, we need to pad the capacity to 'tp'.
@@ -628,7 +628,10 @@ class MOELayer(Base):
             # an allgather to ensure correctness,
             dispatched_input = drop_tokens(dispatched_input, dim=1)
 
-        dispatched_input = _AllToAll.apply(self.ep_group, dispatched_input)
+        if self.ep_size > 1:
+            dispatched_input = _AllToAll.apply(self.ep_group, dispatched_input)
+        else:
+            dispatched_input = dispatched_input.contiguous()
 
         if self.wall_clock_breakdown:
             self.timers(FIRST_ALLTOALL_TIMER).stop()
@@ -654,7 +657,10 @@ class MOELayer(Base):
         if self.wall_clock_breakdown:
             self.timers(SECOND_ALLTOALL_TIMER).start()
 
-        expert_output = _AllToAll.apply(self.ep_group, expert_output)
+        if self.ep_size > 1:
+            expert_output = _AllToAll.apply(self.ep_group, expert_output)
+        else:
+            expert_output = expert_output.contiguous()
 
         if self.wall_clock_breakdown:
             self.timers(SECOND_ALLTOALL_TIMER).stop()
