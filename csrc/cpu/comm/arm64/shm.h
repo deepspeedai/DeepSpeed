@@ -47,6 +47,15 @@ static inline float32x4x2_t cvt_fp16_to_fp32(float16x8_t input)
 }
 
 // Convert 8 fp32 (2 x float32x4_t) -> 8 bf16 (uint16x8_t) with RNE rounding and NaN handling
+#ifdef __ARM_FEATURE_BF16
+// ARMv8.6+: hardware BFCVT instruction handles RNE rounding and NaN canonicalization
+static inline uint16x8_t cvt_fp32_to_bf16(float32x4x2_t src)
+{
+    bfloat16x4_t lo = vcvt_bf16_f32(src.val[0]);
+    bfloat16x4_t hi = vcvt_bf16_f32(src.val[1]);
+    return vreinterpretq_u16_bf16(vcombine_bf16(lo, hi));
+}
+#else
 static inline uint16x8_t cvt_fp32_to_bf16(float32x4x2_t src)
 {
     // Reinterpret float32 bits as uint32
@@ -84,6 +93,7 @@ static inline uint16x8_t cvt_fp32_to_bf16(float32x4x2_t src)
     // Select bf16 where not NaN, nan_bf16 where NaN
     return vbslq_u16(mask, bf16, nan_bf16);
 }
+#endif
 
 // Convert 8 fp32 (2 x float32x4_t) -> 8 fp16 (float16x8_t)
 static inline float16x8_t cvt_fp32_to_fp16(float32x4x2_t input)
