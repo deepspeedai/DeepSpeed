@@ -145,9 +145,9 @@ def muon_update(grad, momentum, beta=0.95, ns_steps=5, nesterov=True, ns_method=
     momentum.lerp_(grad, 1 - beta)
     update = grad.lerp_(momentum, beta) if nesterov else momentum
     if is_expert_group:
-        # (E, I, O) tensor: zeropower_via_newtonschulz5 supports batched ndim>=2
+        ns_fn = zeropower_via_gram_newtonschulz if ns_method == "gram" else zeropower_via_newtonschulz5
         scale = max(1, update.size(-2) / update.size(-1))**0.5
-        update = zeropower_via_newtonschulz5(update, steps=ns_steps) * scale
+        update = ns_fn(update, steps=ns_steps) * scale
     else:
         if update.ndim == 4:  # for the case of conv filters
             update = update.view(len(update), -1)
@@ -309,7 +309,8 @@ class MuonWithAuxAdam(torch.optim.Optimizer):
                 group["ns_method"] = group.get("ns_method", "gram")
                 assert group[
                     "ns_method"] in NS_METHODS, f"ns_method must be one of {NS_METHODS}, got {group['ns_method']}"
-                assert set(["params", "lr", "momentum", "weight_decay", "use_muon", "ns_method"]).issubset(set(group.keys()))
+                assert set(["params", "lr", "momentum", "weight_decay", "use_muon",
+                            "ns_method"]).issubset(set(group.keys()))
             else:
                 # defaults
                 group["lr"] = group.get("lr", 3e-4)
@@ -385,7 +386,8 @@ class SingleDeviceMuonWithAuxAdam(torch.optim.Optimizer):
                 group["ns_method"] = group.get("ns_method", "gram")
                 assert group[
                     "ns_method"] in NS_METHODS, f"ns_method must be one of {NS_METHODS}, got {group['ns_method']}"
-                assert set(["params", "lr", "momentum", "weight_decay", "use_muon", "ns_method"]).issubset(set(group.keys()))
+                assert set(["params", "lr", "momentum", "weight_decay", "use_muon",
+                            "ns_method"]).issubset(set(group.keys()))
             else:
                 # defaults
                 group["lr"] = group.get("lr", 3e-4)
