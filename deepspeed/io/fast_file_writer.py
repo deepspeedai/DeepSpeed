@@ -114,7 +114,13 @@ class FastFileWriter(BaseFileWriter):
         if not self._io_buffer_is_empty():
             self._force_drain()
         self._io_buffer.reset()
+        fd = self._aio_fd
         self._aio_fd = INVALID_FD
+        if fd != INVALID_FD:
+            try:
+                os.fsync(fd)
+            finally:
+                os.close(fd)
 
     def _fill_io_buffer(self, src_tensor, src_offset):
         st = time.time()
