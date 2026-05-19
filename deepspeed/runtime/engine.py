@@ -31,7 +31,7 @@ from deepspeed.runtime.zero.stage_1_and_2 import DeepSpeedZeroOptimizer
 from deepspeed.runtime.zenflow.zenflow_stage_1_and_2 import ZenFlowZeroOptimizer
 from deepspeed.runtime.zero.partition_parameters import ZeroParamStatus
 from deepspeed.runtime.zero.utils import is_zero_supported_optimizer, ZeRORuntimeException
-from deepspeed.runtime.zero.parameter_offload import DeepSpeedZeRoOffload
+from deepspeed.runtime.zero.parameter_offload import DeepSpeedZeRoOffload, ZeROOrderedDict, ensure_zero_ordered_dict
 from deepspeed.runtime.zero.config import ZERO_OPTIMIZATION
 from deepspeed.runtime.zenflow.engine import (configure_zenflow, zenflow_step, is_zenflow_update_boundary,
                                               sync_zenflow_optimizer_lr)
@@ -2304,6 +2304,7 @@ class DeepSpeedEngine(Module):
             # Enable automated discovery of external parameters by indicating that
             # we are in a forward pass.
             for module in self.module.modules():
+                ensure_zero_ordered_dict(module)
                 module._parameters._in_forward = True
 
         if self.fp16_auto_cast():
@@ -2317,7 +2318,8 @@ class DeepSpeedEngine(Module):
         if self.zero_optimization_partition_weights():
             # Disable automated discovery of external parameters
             for module in self.module.modules():
-                module._parameters._in_forward = False
+                if isinstance(module._parameters, ZeROOrderedDict):
+                    module._parameters._in_forward = False
 
         self._stop_timers(self.engine_timers.forward_timers)
 
