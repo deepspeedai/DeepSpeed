@@ -16,6 +16,18 @@ name: modal-torch-latest
 
 on:
   workflow_dispatch:
+    inputs:
+      torch_preset:
+        description: Modal PyTorch/CUDA image preset for manual runs
+        required: false
+        default: '2.9.1-cuda12.8'
+        type: choice
+        options:
+          - '2.7.1-cuda12.8'
+          - '2.8.0-cuda12.8'
+          - '2.9.1-cuda12.8'
+          - '2.10.0-cuda12.8'
+          - '2.11.0-cuda12.8'
 
   push:
     branches:
@@ -96,5 +108,7 @@ jobs:
           uv pip install --system modal
 
       - name: Run tests
+        env:
+          MODAL_TORCH_PRESET: ${{ github.event.inputs.torch_preset || '2.9.1-cuda12.8' }}
         run: |
           modal run -m ci.torch_latest
