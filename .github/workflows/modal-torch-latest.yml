@@ -102,7 +102,7 @@ jobs:
       # and it too is then updated at https://github.com/deepspeedai/deepspeed/settings/secrets/actions
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
 
-    if: needs.collect-tests.outputs.deepspeed == 'true'
+    if: github.event_name == 'workflow_dispatch' || needs.collect-tests.outputs.deepspeed == 'true'
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
