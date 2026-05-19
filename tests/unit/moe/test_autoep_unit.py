@@ -16,6 +16,7 @@ from deepspeed.module_inject.auto_ep_config import (
     AutoEPConfig,
     MoELayerSpec,
     PRESET_MODELS,
+    fill_autoep_config_from_hf,
     parse_autoep_config,
     validate_autoep_config,
     validate_autoep_post_detection,
@@ -142,6 +143,9 @@ class MockDeepSeekV3Config:
     num_experts_per_tok = 2
     hidden_size = 64
     moe_intermediate_size = 128
+    n_group = 4
+    topk_group = 2
+    routed_scaling_factor = 2.5
 
 
 class MockDeepSeekV3Expert(nn.Module):
@@ -306,8 +310,31 @@ class TestAutoEPConfig:
         assert qwen35 is not None
         assert "qwen3_5_moe_text" in qwen35[1].unsupported_hf_model_type_notes["qwen3_5_moe"]
         assert PRESET_MODELS["deepseek_v2"].supports_expert_bias is False
-        assert PRESET_MODELS["deepseek_v3"].unsupported_router_bias_names == ("e_score_correction_bias", )
+        assert PRESET_MODELS["deepseek_v3"].unsupported_router_bias_names == ()
         assert PRESET_MODELS["llama4"].has_shared_experts is True
+
+    def test_fill_autoep_config_from_hf_defaults(self):
+        config = AutoEPConfig(enabled=True, autoep_size=2)
+
+        fill_autoep_config_from_hf(config, MockDeepSeekV3Config())
+
+        assert config.num_expert_groups == 4
+        assert config.num_limited_groups == 2
+        assert config.route_scale == pytest.approx(2.5)
+
+    def test_fill_autoep_config_from_hf_preserves_explicit_values(self):
+        config = AutoEPConfig(enabled=True,
+                              autoep_size=2,
+                              num_expert_groups=8,
+                              num_limited_groups=1,
+                              routed_scaling_factor=3.0,
+                              route_scale=3.0)
+
+        fill_autoep_config_from_hf(config, MockDeepSeekV3Config())
+
+        assert config.num_expert_groups == 8
+        assert config.num_limited_groups == 1
+        assert config.route_scale == pytest.approx(3.0)
 
     @pytest.mark.parametrize("value", ["2.5", True, float("nan"), float("inf")])
     def test_invalid_routed_scaling_factor_rejected(self, value):
@@ -469,7 +496,7 @@ class TestModelDetectionAndReplacement:
         with pytest.raises(ValueError, match="qwen3_5_moe_text"):
             AutoEP(model, _runtime_config(enabled=True, autoep_size=1))._resolve_presets()
 
-    def test_deepseek_v3_detection_and_router_bias_guard(self, monkeypatch):
+    def test_deepseek_v3_detection_and_score_correction_bias_copy(self, monkeypatch):
         monkeypatch.setattr(get_preset_adapter("deepseek_v3"), "_installed_transformers_version", lambda: "5.0.0")
         model = MockDeepSeekV3Transformer(num_layers=1, num_experts=8)
         auto_ep = AutoEP(model, _runtime_config(enabled=True, autoep_size=2))
@@ -481,6 +508,12 @@ class TestModelDetectionAndReplacement:
         assert specs[0].expert_w1_name == "gate_proj"
         assert specs[0].has_shared_experts is True
 
-        model.model.layers[0].mlp.gate.register_buffer("e_score_correction_bias", torch.ones(8))
-        with pytest.raises(ValueError, match="e_score_correction_bias"):
-            auto_ep.replace_moe_layer(specs[0], ep_size=2, ep_rank=0)
+        source_bias = torch.arange(8, dtype=torch.float32)
+        model.model.layers[0].mlp.gate.e_score_correction_bias = nn.Parameter(source_bias.clone())
+
+        auto_ep.replace_moe_layer(specs[0], ep_size=2, ep_rank=0)
+
+        replaced = model.model.layers[0].mlp
+        assert isinstance(replaced, AutoEPMoELayer)
+        assert replaced.router.e_score_correction_bias is not None
+        torch.testing.assert_close(replaced.router.e_score_correction_bias, source_bias)

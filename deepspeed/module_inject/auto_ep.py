@@ -19,6 +19,7 @@ import torch
 import torch.nn as nn
 
 from deepspeed.module_inject.auto_ep_config import (
+    fill_autoep_config_from_hf,
     AutoEPConfig,
     MoELayerSpec,
     MoEModelPreset,
@@ -263,6 +264,7 @@ class AutoEP:
         self.config = config
         self.model_config = getattr(model, 'config', None)
         self._retargeted_transformers_output_recorders: set[str] = set()
+        fill_autoep_config_from_hf(self.config, self.model_config)
 
     def ep_parser(self) -> list[MoELayerSpec]:
         """Traverse model and detect MoE layers. Returns list of MoELayerSpec."""

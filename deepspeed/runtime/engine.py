@@ -544,6 +544,10 @@ class DeepSpeedEngine(Module):
             auto_ep.replace_moe_layers(specs, ep_size=ep_size, ep_rank=ep_rank)
             logger.info(f"AutoEP: replaced {len(specs)} MoE layer(s) with ep_size={ep_size}")
 
+            # Re-tag optimizer flags for newly created AutoEP parameters
+            from deepspeed import set_optimizer_flags
+            set_optimizer_flags(self._config, model)
+
     def _autoep_sequence_parallel_world_size(self):
         if self.mpu is not None and hasattr(self.mpu, 'get_sequence_parallel_world_size'):
             return self.mpu.get_sequence_parallel_world_size()
@@ -1803,12 +1807,19 @@ class DeepSpeedEngine(Module):
             optimizer = MuSGD(model_parameters, **optimizer_parameters)
         elif self.optimizer_name() == MUON_OPTIMIZER:
             zero_stage = self.zero_optimization_stage()
-            if not all([hasattr(p, 'use_muon') for p in model_parameters]):
+            # Flatten param group dicts (created by MoE/EP) into a raw parameter list
+            all_params = []
+            for item in model_parameters:
+                if isinstance(item, dict):
+                    all_params.extend(item['params'])
+                else:
+                    all_params.append(item)
+            if not all([hasattr(p, 'use_muon') for p in all_params]):
                 msg = "Muon optimizer is used, but the use_muon attribute is NOT configured for some of the model parameters, " \
                 "please set by `param.use_muon = True / False` for all params"
                 logger.error(msg)
-            muon_params = [p for p in model_parameters if p.use_muon and p.requires_grad]
-            non_muon_params = [p for p in model_parameters if (not p.use_muon) and p.requires_grad]
+            muon_params = [p for p in all_params if p.use_muon and p.requires_grad]
+            non_muon_params = [p for p in all_params if (not p.use_muon) and p.requires_grad]
             param_groups = []
             if muon_params:
                 accepted_parameters = dict()
@@ -1818,7 +1829,7 @@ class DeepSpeedEngine(Module):
                             accepted_parameters['lr'] = optimizer_parameters[key]
                         else:
                             accepted_parameters[key] = optimizer_parameters[key]
-                param_groups.append(dict(params=muon_params, use_muon=True, **accepted_parameters))
+                param_groups.append(dict(params=muon_params, use_muon=True, name='muon-params', **accepted_parameters))
             if non_muon_params:
                 accepted_parameters = dict()
                 for key in ["lr", "betas", "eps", "weight_decay", "adam_lr"]:
@@ -1827,7 +1838,11 @@ class DeepSpeedEngine(Module):
                             accepted_parameters['lr'] = optimizer_parameters[key]
                         else:
                             accepted_parameters[key] = optimizer_parameters[key]
-                param_groups.append(dict(params=non_muon_params, use_muon=False, **accepted_parameters))
+                param_groups.append(
+                    dict(params=non_muon_params, use_muon=False, name='adam-params', **accepted_parameters))
+            if self.has_moe_layers:
+                from deepspeed.moe.utils import split_params_into_different_moe_groups_for_optimizer
+                param_groups = split_params_into_different_moe_groups_for_optimizer(param_groups)
             optimizer = MuonWithAuxAdam(param_groups)
         else:
             torch_optimizer = getattr(torch.optim, self.optimizer_name())
