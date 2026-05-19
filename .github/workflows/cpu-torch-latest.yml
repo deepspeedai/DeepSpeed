@@ -13,10 +13,10 @@ on:
           - '2.8.0-cpu'
           - '2.9.1-cpu'
           - '2.10.0-cpu'
-      transformers_ref:
-        description: Hugging Face Transformers git ref/SHA to install
+      transformers_version:
+        description: Hugging Face Transformers PyPI package version to install
         required: false
-        default: '981c276'
+        default: '4.50.0'
         type: string
   pull_request:
     paths-ignore:
@@ -39,7 +39,7 @@ jobs:
 
     env:
       DEFAULT_TORCH_PRESET: '2.7.1-cpu'
-      DEFAULT_TRANSFORMERS_REF: '981c276'
+      DEFAULT_TRANSFORMERS_VERSION: '4.50.0'
 
     steps:
       - uses: actions/checkout@v4
@@ -55,7 +55,7 @@ jobs:
         env:
           GITHUB_EVENT_NAME: ${{ github.event_name }}
           MANUAL_TORCH_PRESET: ${{ github.event.inputs.torch_preset || '' }}
-          MANUAL_TRANSFORMERS_REF: ${{ github.event.inputs.transformers_ref || '' }}
+          MANUAL_TRANSFORMERS_VERSION: ${{ github.event.inputs.transformers_version || '' }}
         run: |
           if [ "$GITHUB_EVENT_NAME" = 'workflow_dispatch' ] && [ -n "$MANUAL_TORCH_PRESET" ]; then
             selected_preset="$MANUAL_TORCH_PRESET"
@@ -63,10 +63,10 @@ jobs:
             selected_preset="$DEFAULT_TORCH_PRESET"
           fi
 
-          if [ "$GITHUB_EVENT_NAME" = 'workflow_dispatch' ] && [ -n "$MANUAL_TRANSFORMERS_REF" ]; then
-            transformers_ref="$MANUAL_TRANSFORMERS_REF"
+          if [ "$GITHUB_EVENT_NAME" = 'workflow_dispatch' ] && [ -n "$MANUAL_TRANSFORMERS_VERSION" ]; then
+            transformers_version="$MANUAL_TRANSFORMERS_VERSION"
           else
-            transformers_ref="$DEFAULT_TRANSFORMERS_REF"
+            transformers_version="$DEFAULT_TRANSFORMERS_VERSION"
           fi
 
           case "$selected_preset" in
@@ -102,13 +102,13 @@ jobs:
             echo "TORCHVISION_INSTALL_VERSION=$torchvision_install_version"
             echo "TORCH_TEST_VERSION=$torch_test_version"
             echo "PYTORCH_INDEX_URL=https://download.pytorch.org/whl/cpu"
-            echo "TRANSFORMERS_REF=$transformers_ref"
+            echo "TRANSFORMERS_VERSION=$transformers_version"
           } >> "$GITHUB_ENV"
 
           echo "Selected PyTorch preset: $selected_preset"
           echo "Resolved install tuple: torch==$torch_install_version torchvision==$torchvision_install_version"
           echo "Resolved test expectation: torch=$torch_test_version"
-          echo "Resolved Transformers ref: $transformers_ref"
+          echo "Resolved Transformers version: $transformers_version"
 
       - name: Install PyTorch
         run: |
@@ -121,11 +121,8 @@ jobs:
 
       - name: Install Transformers
         run: |
-          git clone https://github.com/huggingface/transformers
-          cd transformers
-          git checkout "$TRANSFORMERS_REF"
-          git rev-parse --short HEAD
-          pip install .
+          pip install "transformers==$TRANSFORMERS_VERSION"
+          python -c "import transformers; print('transformers:', transformers.__version__, transformers)"
 
       - name: Install deepspeed
         run: |
