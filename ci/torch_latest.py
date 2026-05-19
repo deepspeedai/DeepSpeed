@@ -4,12 +4,14 @@
 # DeepSpeed Team
 
 import os
+import shlex
 from pathlib import Path
 
 import modal
 
 ROOT_PATH = Path(__file__).parents[1]
 DEFAULT_MODAL_TORCH_PRESET = "2.9.1-cuda12.8"
+DEFAULT_MODAL_TRANSFORMERS_SOURCE = "requirements"
 MODAL_TORCH_PRESETS = {
     "2.7.1-cuda12.8": {
         "image": "pytorch/pytorch:2.7.1-cuda12.8-cudnn9-devel",
@@ -53,7 +55,43 @@ def resolve_modal_torch_config():
     }
 
 
+def resolve_modal_transformers_config():
+    transformers_source = os.environ.get("MODAL_TRANSFORMERS_SOURCE") or DEFAULT_MODAL_TRANSFORMERS_SOURCE
+    supported_sources = {"requirements", "git"}
+    if transformers_source not in supported_sources:
+        supported = ", ".join(sorted(supported_sources))
+        raise ValueError(
+            f"Unsupported MODAL_TRANSFORMERS_SOURCE={transformers_source!r}; supported values: {supported}"
+        )
+
+    transformers_ref = os.environ.get("MODAL_TRANSFORMERS_REF") or ""
+    if transformers_source == "git" and not transformers_ref:
+        transformers_ref = "main"
+
+    return {
+        "source": transformers_source,
+        "ref": transformers_ref,
+    }
+
+
+def transformers_override_commands():
+    if MODAL_TRANSFORMERS_CONFIG["source"] == "requirements":
+        return ()
+
+    transformers_ref = shlex.quote(MODAL_TRANSFORMERS_CONFIG["ref"])
+    return (
+        "rm -rf /tmp/transformers",
+        "git clone --filter=blob:none https://github.com/huggingface/transformers /tmp/transformers",
+        "cd /tmp/transformers && "
+        f"git checkout {transformers_ref} && "
+        "resolved_ref=$(git rev-parse HEAD) && "
+        "echo \"Resolved Transformers git ref: ${resolved_ref}\" && "
+        "pip install .",
+    )
+
+
 MODAL_TORCH_CONFIG = resolve_modal_torch_config()
+MODAL_TRANSFORMERS_CONFIG = resolve_modal_transformers_config()
 MODAL_TORCH_IMAGE = MODAL_TORCH_CONFIG["image"]
 MODAL_TORCH_TEST_VERSION = MODAL_TORCH_CONFIG["torch_test_version"]
 MODAL_CUDA_TEST_VERSION = MODAL_TORCH_CONFIG["cuda_test_version"]
@@ -61,10 +99,17 @@ MODAL_CUDA_TEST_VERSION = MODAL_TORCH_CONFIG["cuda_test_version"]
 # yapf: disable
 image = (modal.Image
          .from_registry(MODAL_TORCH_IMAGE, add_python="3.10")
-         .run_commands("apt update && apt install -y libaio-dev")
+         .run_commands("apt update && apt install -y git libaio-dev")
          .pip_install_from_requirements(ROOT_PATH / "requirements/requirements.txt", gpu="any")
          .pip_install_from_requirements(ROOT_PATH / "requirements/requirements-dev.txt", gpu="any")
          .pip_install_from_requirements(ROOT_PATH / "requirements/requirements-deepcompile.txt", gpu="any")
+        )
+
+transformers_commands = transformers_override_commands()
+if transformers_commands:
+    image = image.run_commands(*transformers_commands)
+
+image = (image
          .add_local_dir(ROOT_PATH , remote_path="/root/", copy=True)
          .run_commands("pip install /root")
          .add_local_dir(ROOT_PATH / "accelerator", remote_path="/root/deepspeed/accelerator")
