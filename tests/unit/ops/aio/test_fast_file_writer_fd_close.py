@@ -33,10 +33,15 @@ if not sys.platform.startswith("linux"):
 if get_accelerator().device_name() != 'cuda':
     pytest.skip("FastFileWriter requires CUDA-pinned tensors", allow_module_level=True)
 
-BLOCK_SIZE = 1 * 1024 * 1024
+BLOCK_SIZE = 4 * 1024
 QUEUE_DEPTH = 8
-PINNED_BYTES = 8 * 1024 * 1024
-PAYLOAD_BYTES = 1 * 1024 * 1024
+PINNED_BYTES = 8 * BLOCK_SIZE
+PAYLOAD_BYTES = 4 * BLOCK_SIZE
+
+try:
+    torch.zeros(PINNED_BYTES, dtype=torch.uint8).pin_memory()
+except RuntimeError:
+    pytest.skip("FastFileWriter requires a working CUDA-pinned host buffer", allow_module_level=True)
 
 
 def _count_deleted_fds(target_dir):
