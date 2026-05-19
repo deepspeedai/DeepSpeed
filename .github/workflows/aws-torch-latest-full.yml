@@ -29,6 +29,11 @@ on:
           - '2.9.1-cu126'
           - '2.10.0-cu126'
           - '2.11.0-cu126'
+      transformers_version:
+        description: Hugging Face Transformers PyPI package version to install
+        required: false
+        default: '4.50.0'
+        type: string
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -82,6 +87,7 @@ jobs:
 
     env:
       DEFAULT_TORCH_PRESET: '2.7.1-cu126'
+      DEFAULT_TRANSFORMERS_VERSION: '4.50.0'
       CUTLASS_PATH: /opt/cutlass
       # Disable reuse_dist_env to prevent pool worker cleanup hangs in full test runs
       DS_DISABLE_REUSE_DIST_ENV: '1'
@@ -98,15 +104,22 @@ jobs:
         with:
           lfs: true
 
-      - name: Resolve PyTorch preset
+      - name: Resolve dependency inputs
         env:
           GITHUB_EVENT_NAME: ${{ github.event_name }}
           MANUAL_TORCH_PRESET: ${{ github.event.inputs.torch_preset || '' }}
+          MANUAL_TRANSFORMERS_VERSION: ${{ github.event.inputs.transformers_version || '' }}
         run: |
           if [ "$GITHUB_EVENT_NAME" = 'workflow_dispatch' ] && [ -n "$MANUAL_TORCH_PRESET" ]; then
             selected_preset="$MANUAL_TORCH_PRESET"
           else
             selected_preset="$DEFAULT_TORCH_PRESET"
+          fi
+
+          if [ "$GITHUB_EVENT_NAME" = 'workflow_dispatch' ] && [ -n "$MANUAL_TRANSFORMERS_VERSION" ]; then
+            transformers_version="$MANUAL_TRANSFORMERS_VERSION"
+          else
+            transformers_version="$DEFAULT_TRANSFORMERS_VERSION"
           fi
 
           case "$selected_preset" in
@@ -164,12 +177,14 @@ jobs:
             echo "TORCH_TEST_VERSION=$torch_test_version"
             echo "CUDA_TEST_VERSION=$cuda_test_version"
             echo "PYTORCH_INDEX_URL=$pytorch_index_url"
+            echo "TRANSFORMERS_VERSION=$transformers_version"
           } >> "$GITHUB_ENV"
 
-          echo "Selected preset: $selected_preset"
+          echo "Selected PyTorch preset: $selected_preset"
           echo "Resolved install tuple: torch==$torch_install_version torchvision==$torchvision_install_version torchaudio==$torchaudio_install_version"
           echo "Resolved test expectations: torch=$torch_test_version cuda=$cuda_test_version"
           echo "Resolved PyTorch index: $pytorch_index_url"
+          echo "Resolved Transformers version: $transformers_version"
 
       - name: Install CUTLASS
         run: |
@@ -185,12 +200,10 @@ jobs:
             torchaudio=="$TORCHAUDIO_INSTALL_VERSION" \
             --index-url "$PYTORCH_INDEX_URL"
 
-      - name: Install transformers
+      - name: Install Transformers
         run: |
-          git clone https://github.com/huggingface/transformers
-          cd transformers
-          git checkout 981c276
-          pip install .
+          pip install "transformers==$TRANSFORMERS_VERSION"
+          python -c "import transformers; print('transformers:', transformers.__version__, transformers)"
 
       - name: Install Python dependencies
         run: |
@@ -207,6 +220,7 @@ jobs:
           echo "Install tuple: torch==$TORCH_INSTALL_VERSION torchvision==$TORCHVISION_INSTALL_VERSION torchaudio==$TORCHAUDIO_INSTALL_VERSION"
           echo "PyTorch index URL: $PYTORCH_INDEX_URL"
           echo "Expected test versions: torch=$TORCH_TEST_VERSION cuda=$CUDA_TEST_VERSION"
+          echo "Transformers version: $TRANSFORMERS_VERSION"
           echo ""
           echo "=== GPU Information ==="
           nvidia-smi
