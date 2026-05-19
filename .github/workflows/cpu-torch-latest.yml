@@ -2,6 +2,22 @@ name: cpu-torch-latest
 
 on:
   workflow_dispatch:
+    inputs:
+      torch_preset:
+        description: PyTorch CPU preset to install for manual runs
+        required: false
+        default: '2.7.1-cpu'
+        type: choice
+        options:
+          - '2.7.1-cpu'
+          - '2.8.0-cpu'
+          - '2.9.1-cpu'
+          - '2.10.0-cpu'
+      transformers_ref:
+        description: Hugging Face Transformers git ref/SHA to install
+        required: false
+        default: '981c276'
+        type: string
   pull_request:
     paths-ignore:
       - 'docs/**'
@@ -21,6 +37,10 @@ jobs:
   unit-tests:
     runs-on: ubuntu-24.04
 
+    env:
+      DEFAULT_TORCH_PRESET: '2.7.1-cpu'
+      DEFAULT_TRANSFORMERS_REF: '981c276'
+
     steps:
       - uses: actions/checkout@v4
 
@@ -31,18 +51,79 @@ jobs:
         run: |
           sudo apt-get install -y numactl pdsh
 
-      - name: Install pytorch
+      - name: Resolve dependency inputs
+        env:
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          MANUAL_TORCH_PRESET: ${{ github.event.inputs.torch_preset || '' }}
+          MANUAL_TRANSFORMERS_REF: ${{ github.event.inputs.transformers_ref || '' }}
         run: |
-          pip install torch==2.7.1 torchvision==0.22.1 --index-url https://download.pytorch.org/whl/cpu
+          if [ "$GITHUB_EVENT_NAME" = 'workflow_dispatch' ] && [ -n "$MANUAL_TORCH_PRESET" ]; then
+            selected_preset="$MANUAL_TORCH_PRESET"
+          else
+            selected_preset="$DEFAULT_TORCH_PRESET"
+          fi
+
+          if [ "$GITHUB_EVENT_NAME" = 'workflow_dispatch' ] && [ -n "$MANUAL_TRANSFORMERS_REF" ]; then
+            transformers_ref="$MANUAL_TRANSFORMERS_REF"
+          else
+            transformers_ref="$DEFAULT_TRANSFORMERS_REF"
+          fi
+
+          case "$selected_preset" in
+            '2.7.1-cpu')
+              torch_install_version='2.7.1'
+              torchvision_install_version='0.22.1'
+              torch_test_version='2.7'
+              ;;
+            '2.8.0-cpu')
+              torch_install_version='2.8.0'
+              torchvision_install_version='0.23.0'
+              torch_test_version='2.8'
+              ;;
+            '2.9.1-cpu')
+              torch_install_version='2.9.1'
+              torchvision_install_version='0.24.1'
+              torch_test_version='2.9'
+              ;;
+            '2.10.0-cpu')
+              torch_install_version='2.10.0'
+              torchvision_install_version='0.25.0'
+              torch_test_version='2.10'
+              ;;
+            *)
+              echo "Unsupported torch_preset: $selected_preset" >&2
+              exit 1
+              ;;
+          esac
+
+          {
+            echo "SELECTED_TORCH_PRESET=$selected_preset"
+            echo "TORCH_INSTALL_VERSION=$torch_install_version"
+            echo "TORCHVISION_INSTALL_VERSION=$torchvision_install_version"
+            echo "TORCH_TEST_VERSION=$torch_test_version"
+            echo "PYTORCH_INDEX_URL=https://download.pytorch.org/whl/cpu"
+            echo "TRANSFORMERS_REF=$transformers_ref"
+          } >> "$GITHUB_ENV"
+
+          echo "Selected PyTorch preset: $selected_preset"
+          echo "Resolved install tuple: torch==$torch_install_version torchvision==$torchvision_install_version"
+          echo "Resolved test expectation: torch=$torch_test_version"
+          echo "Resolved Transformers ref: $transformers_ref"
+
+      - name: Install PyTorch
+        run: |
+          pip install \
+            torch=="$TORCH_INSTALL_VERSION" \
+            torchvision=="$TORCHVISION_INSTALL_VERSION" \
+            --index-url "$PYTORCH_INDEX_URL"
           python -c "import torch; print('torch:', torch.__version__, torch)"
           python -c "import torch; print('CUDA available:', torch.cuda.is_available())"
 
-      - name: Install transformers
+      - name: Install Transformers
         run: |
           git clone https://github.com/huggingface/transformers
           cd transformers
-          # if needed switch to the last known good SHA until transformers@master is fixed
-          # git checkout 981c276
+          git checkout "$TRANSFORMERS_REF"
           git rev-parse --short HEAD
           pip install .
 
@@ -59,5 +140,5 @@ jobs:
         run: |
           unset TORCH_CUDA_ARCH_LIST # only jit compile for current arch
           cd tests
-          HF_HOME=/tmp/hf_home/ pytest $PYTEST_OPTS --forked -n 4 unit/ --torch_ver="2.7.1+cpu"
-          HF_HOME=/tmp/hf_home/ pytest $PYTEST_OPTS --forked -m 'sequential' unit/ --torch_ver="2.7.1+cpu"
+          HF_HOME=/tmp/hf_home/ pytest $PYTEST_OPTS --forked -n 4 unit/ --torch_ver="$TORCH_TEST_VERSION"
+          HF_HOME=/tmp/hf_home/ pytest $PYTEST_OPTS --forked -m 'sequential' unit/ --torch_ver="$TORCH_TEST_VERSION"
