@@ -121,13 +121,16 @@ def zeropower_via_gram_newtonschulz(G, steps: int):
 
         if Q is None:
             Q = Z.clone()
-            Q.diagonal().add_(a)
+            if Q.ndim == 2:
+                Q.diagonal().add_(a)
+            else:
+                Q.diagonal(dim1=-2, dim2=-1).add_(a)
         else:
-            Q = torch.addmm(Q, Z, Q, beta=a, alpha=1.0)
+            Q = a * Q + Z @ Q
 
         if i < steps - 1 and (i + 1) != restart_at:
-            RZ = torch.addmm(R, Z, R, beta=a, alpha=1.0)
-            R = torch.addmm(RZ, Z, RZ, beta=a, alpha=1.0)
+            RZ = a * R + Z @ R
+            R = a * RZ + Z @ RZ
 
     if G.size(-2) > G.size(-1):
         X = X.mT @ Q.mT
