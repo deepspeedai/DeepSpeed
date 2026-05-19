@@ -37,7 +37,7 @@ concurrency:
 
 jobs:
   collect-tests:
-    name: Collect tests to run
+    name: modal-torch-latest / collect tests
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -65,7 +65,7 @@ jobs:
               - 'csrc/**'
 
   deploy:
-    name: DeepSpeedAI CI
+    name: modal-torch-latest / DeepSpeedAI CI
     runs-on: ubuntu-latest
     needs: collect-tests
     env:
