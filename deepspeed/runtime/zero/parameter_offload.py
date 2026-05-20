@@ -86,6 +86,29 @@ def _inject_parameters(module, cls):
         module._parameters = new_param
 
 
+def ensure_zero_ordered_dict(module):
+    """Wrap ``module._parameters`` in :class:`ZeROOrderedDict` if not already.
+
+    PyTorch 2.5+ defaults ``nn.Module._parameters`` to a plain ``dict``
+    (pytorch/pytorch#129164), which rejects the ``_in_forward`` attribute
+    the forward prologue sets. Modules not converted by ``_inject_parameters``
+    at engine init (e.g. submodules attached after ``deepspeed.initialize``,
+    or restored by ``deepspeed/compile/init_z3.py``) hit issue #6961.
+    Idempotent; no-op if already wrapped, missing, or a non-dict container.
+    """
+    params = getattr(module, "_parameters", None)
+    if isinstance(params, ZeROOrderedDict) or not isinstance(params, dict):
+        return
+    # Preserve the original container only on first wrap so the un-injection
+    # path in ``deepspeed/compile/init_z3.py`` can restore it.
+    if not hasattr(module, "_original_parameters"):
+        module._original_parameters = params
+    new_param = ZeROOrderedDict(parent_module=module)
+    for key, param in params.items():
+        new_param[key] = param
+    module._parameters = new_param
+
+
 class DeepSpeedZeRoOffload(object):
 
     def __init__(

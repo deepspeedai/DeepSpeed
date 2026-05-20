@@ -25,6 +25,7 @@ permissions:
 
 jobs:
   unit-tests:
+    name: nv-ds-chat / DeepSpeed-Chat tests
     runs-on: [self-hosted, nvidia, cu124, v100]
 
     steps:

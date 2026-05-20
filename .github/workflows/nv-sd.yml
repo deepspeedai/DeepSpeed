@@ -23,6 +23,7 @@ permissions:
 
 jobs:
   sd-tests:
+    name: nv-sd / stable diffusion tests
     runs-on: [self-hosted, nvidia, a6000]
     container:
       image: nvcr.io/nvidia/pytorch:24.03-py3

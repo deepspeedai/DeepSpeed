@@ -18,6 +18,7 @@ permissions:
 
 jobs:
   unit-tests:
+    name: hpu-gaudi2-nightly / unit tests
     # The type of runner that the job will run on
     runs-on: [self-hosted, intel, gaudi2]
     container:
