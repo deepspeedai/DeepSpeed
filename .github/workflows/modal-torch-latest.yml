@@ -16,6 +16,31 @@ name: modal-torch-latest
 
 on:
   workflow_dispatch:
+    inputs:
+      torch_preset:
+        description: Modal PyTorch/CUDA image preset for manual runs
+        required: false
+        default: '2.10.0-cuda12.8'
+        type: choice
+        options:
+          - '2.7.1-cuda12.8'
+          - '2.8.0-cuda12.8'
+          - '2.9.1-cuda12.8'
+          - '2.10.0-cuda12.8'
+          - '2.11.0-cuda12.8'
+      transformers_source:
+        description: Hugging Face Transformers source for manual runs
+        required: false
+        default: 'git'
+        type: choice
+        options:
+          - 'requirements'
+          - 'git'
+      transformers_ref:
+        description: Hugging Face Transformers git ref to install when source is git
+        required: false
+        default: 'main'
+        type: string
 
   push:
     branches:
@@ -52,7 +77,7 @@ jobs:
           lfs: true
 
       - name: Filter changed files
-        uses: dorny/paths-filter@v2
+        uses: dorny/paths-filter@v3
         id: filter
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
@@ -77,7 +102,7 @@ jobs:
       # and it too is then updated at https://github.com/deepspeedai/deepspeed/settings/secrets/actions
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
 
-    if: needs.collect-tests.outputs.deepspeed == 'true'
+    if: github.event_name == 'workflow_dispatch' || needs.collect-tests.outputs.deepspeed == 'true'
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
@@ -96,5 +121,9 @@ jobs:
           uv pip install --system modal
 
       - name: Run tests
+        env:
+          MODAL_TORCH_PRESET: ${{ github.event.inputs.torch_preset || '2.10.0-cuda12.8' }}
+          MODAL_TRANSFORMERS_SOURCE: ${{ github.event.inputs.transformers_source || 'git' }}
+          MODAL_TRANSFORMERS_REF: ${{ github.event.inputs.transformers_ref || 'main' }}
         run: |
           modal run -m ci.torch_latest
