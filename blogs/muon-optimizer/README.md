@@ -1,13 +1,13 @@
 # Using Muon Optimizer with DeepSpeed
 ## TL;DR
-Muon optimizer has gained momentum with more and more use from community and also from Large Foundation Model like Kimi-K2-Thinking.  Now DeepSpeed supports Muon optimizer.
+Muon optimizer has gained great momentum with significant adoption from frontier AI Labs.  For example, Moonshot AI adopted Muon Optimizer to train their Large Foundation Model like Kimi-K2-Thinking.  We are thrilled to announce that DeepSpeed now supports Muon optimizer.
 
 ## What is Muon optimizer?
 Muon is an optimizer designed for hidden 2D weights of a neural network.  It takes gradient of the weight, computes its momentum, and applies Newton-Schulz iterations to orthogonalize the momentum matrix, then uses this orthogonalized matrix to update the weight [[1]](https://kellerjordan.github.io/posts/muon/).  Because Muon only maintains one momentum buffer (versus Adam’s two), it uses less memory for optimizer states.
 
 The orthogonalization step is key to Muon’s convergence advantage in pretraining.  In practice, gradient updates for 2D weights in transformers tend to have very high condition numbers — they are nearly low-rank, dominated by a few large singular directions.  By orthogonalizing the momentum matrix, Muon equalizes all singular values, effectively amplifying rare but important update directions that would otherwise be overshadowed.  This leads to better sample efficiency: in NanoGPT speedrunning benchmarks [[2]](https://github.com/KellerJordan/modded-nanogpt), Muon improved training speed by 35% over AdamW, and at 1.5B parameter scale it reached GPT-2 XL level performance approximately 25% faster than AdamW [[1]](https://kellerjordan.github.io/posts/muon/).
 
-Different from Adam optimizer that requires two momentum buffer for each parameter, Muon optimizer only requires one momentum buffer.  This means that for parameters using Muon optimizer, we only need to allocate one buffer for momentum, which can save memory compared to Adam.
+Unlike Adam optimizer that requires two momentum buffer for each parameter, Muon optimizer only requires one momentum buffer.  This means that for parameters using Muon optimizer, we only need to allocate one buffer for momentum, which can save memory compared to Adam.
 
 Muon is used by Keller Jordan’s mod of NanoGPT [[2]](https://github.com/KellerJordan/modded-nanogpt), Andrej Karpathy’s nanochat [[3]](https://github.com/karpathy/nanochat), and a variant of Muon (MuonClip) is also used by the production-level LLM Kimi-K2 from MoonShot [[4]](https://arxiv.org/pdf/2507.20534).  More recently, Zhipu AI’s GLM-5 (744B parameters) confirmed the use of Muon optimizer in both GLM-4.5 and GLM-5 pretraining, along with a “Muon Split” technique that splits MLA up-projection matrices by attention head and orthogonalizes each head independently, addressing a performance gap between MLA and GQA when using Muon [[5]](https://arxiv.org/abs/2602.15763)  DeepSeek-V4 (1.6T parameters) also employs the Muon optimizer for faster convergence and greater training stability [[6]](https://huggingface.co/deepseek-ai/DeepSeek-V4-Pro).
 
@@ -77,7 +77,7 @@ Muon is rapidly gaining traction in the community, and production-level adoption
 - [ ] **CPU Offloading** — in progress
 - [ ] **MuonClip** — the variant used by Kimi-K2, planned
 
-If you have thoughts, feedback, or contributions on Muon optimizer, welcome to start an issue for discussion or submit a PR to DeepSpeed.  Let’s make Muon rock solid and lightning fast in DeepSpeed!
+We welcome any thoughts, feedback and contributions related to Muon optimizer support on DeepSpeed, welcome to start an issue for discussion or submit a PR to DeepSpeed.  Let’s make Muon rock solid and lightning fast in DeepSpeed!
 
 ## Contributors
 This work is contributed from Wang, Zhipeng (@PKUWZP); Peng Du (@pengdurice); Chi McIsaac(@qimcis) and Ma, Guokai (@delock)
