@@ -25,7 +25,7 @@ concurrency:
 
 jobs:
   check-paths:
-    name: Check Paths
+    name: aws-accelerate / check paths
     runs-on: ubuntu-latest
     outputs:
       should_run: ${{ steps.filter.outputs.run_tests }}
@@ -43,7 +43,7 @@ jobs:
               - '!tests/unit/inference/v2/**'
 
   accelerate-tests:
-    name: Accelerate Integration Tests
+    name: aws-accelerate / accelerate integration tests
     needs: check-paths
     if: needs.check-paths.outputs.should_run == 'true'
     runs-on: [self-hosted, gpu-ci, gpu-l40s, l40s-1gpu, aws]
