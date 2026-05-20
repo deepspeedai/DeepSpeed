@@ -18,6 +18,7 @@ permissions:
 
 jobs:
   compile-tests:
+    name: xpu-compile / compile tests
     runs-on: [self-hosted, intel, xpu]
     container:
       image: intel/oneapi-basekit:2025.0.2-0-devel-ubuntu22.04

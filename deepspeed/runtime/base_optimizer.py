@@ -448,11 +448,14 @@ class ZeROOptimizer(DeepSpeedOptimizer):
                                   fp16_master_weights_and_gradients=False,
                                   bf16_master_weights_and_gradients=False,
                                   bf16_optimizer_states=False,
+                                  offload_enabled=False,
                                   fp16_offload_validator=None,
-                                  bf16_fp32_offload_validator=None):
+                                  bf16_offload_validator=None):
         """
         Common validation and dtype selection for ZeRO optimizer master-weight settings.
         Optionally accepts callables that enforce backend-specific offload requirements.
+        ``offload_enabled`` tells this method whether optimizer-state offload is configured,
+        so the offload requirement is also enforced for the bf16-optimizer-states + offload case.
         """
         self.fp16_master_weights_and_gradients = fp16_master_weights_and_gradients
         self.bf16_master_weights_and_gradients = bf16_master_weights_and_gradients
@@ -464,9 +467,18 @@ class ZeROOptimizer(DeepSpeedOptimizer):
             assert self.bf16_master_weights_and_gradients, \
                 "bf16_optimizer_states requires bf16_master_weights_and_gradients."
 
-        if (self.bf16_master_weights_and_gradients and not self.bf16_optimizer_states
-                and bf16_fp32_offload_validator is not None):
-            bf16_fp32_offload_validator()
+        # bf16 master weights require ZeRO-Offload + DeepSpeedCPUAdam whenever the optimizer states
+        # cannot stay on the GPU: either because they remain fp32 (bf16_optimizer_states disabled),
+        # or because CPU offload is explicitly requested alongside bf16 optimizer states.
+        if (self.bf16_master_weights_and_gradients and bf16_offload_validator is not None
+                and (not self.bf16_optimizer_states or offload_enabled)):
+            bf16_offload_validator()
+            # Offloaded bf16 optimizer states need the CPU optimizer to store moments in the
+            # parameter (bf16) precision; otherwise they would silently expand back to fp32.
+            if self.bf16_optimizer_states:
+                assert not getattr(self.optimizer, 'fp32_optimizer_states', True), \
+                    "bf16_optimizer_states with ZeRO-Offload requires DeepSpeedCPUAdam constructed " \
+                    "with fp32_optimizer_states=False so optimizer moments are stored in bf16."
 
         if self.fp16_master_weights_and_gradients and fp16_offload_validator is not None:
             fp16_offload_validator()

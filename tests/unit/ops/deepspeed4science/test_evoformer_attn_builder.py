@@ -6,9 +6,20 @@
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from deepspeed.ops.op_builder.builder import CUDAOpBuilder
 # Import the concrete builder class instead of the accelerator-dispatched alias.
 from deepspeed.ops.op_builder.evoformer_attn import EvoformerAttnBuilder
+
+
+def make_cutlass_checkout(path):
+    include_dir = path / "include" / "cutlass"
+    include_dir.mkdir(parents=True)
+    (include_dir / "cutlass.h").write_text("// cutlass marker\n")
+    util_dir = path / "tools" / "util" / "include"
+    util_dir.mkdir(parents=True)
+    return path
 
 
 def test_filter_ccs_removes_below_70_and_keeps_ptx_suffix():
@@ -44,3 +55,64 @@ def test_no_cuda_arch_in_checkarch():
     end = text.index("};", start) + 2
     block = text[start:end]
     assert "__CUDA_ARCH__" not in block
+
+
+def test_include_paths_uses_cutlass_path_env(tmp_path):
+    cutlass_path = make_cutlass_checkout(tmp_path / "cutlass")
+
+    with patch.dict("os.environ", {"CUTLASS_PATH": str(cutlass_path)}, clear=False):
+        builder = EvoformerAttnBuilder()
+
+    assert builder.include_paths() == [
+        str(cutlass_path / "include"),
+        str(cutlass_path / "tools" / "util" / "include"),
+    ]
+
+
+def test_include_paths_finds_python_package_candidate_without_env(tmp_path):
+    cutlass_path = make_cutlass_checkout(tmp_path / "python_package_cutlass")
+
+    with patch.dict("os.environ", {}, clear=True):
+        builder = EvoformerAttnBuilder()
+
+    with patch.object(EvoformerAttnBuilder, "_python_package_cutlass_paths", return_value=[cutlass_path]):
+        assert builder.include_paths()[0] == str(cutlass_path / "include")
+
+
+def test_include_paths_finds_cutlass_from_cmake_prefix_path(tmp_path):
+    cutlass_path = make_cutlass_checkout(tmp_path / "prefix")
+
+    with patch.dict("os.environ", {"CMAKE_PREFIX_PATH": str(cutlass_path)}, clear=True):
+        builder = EvoformerAttnBuilder()
+        with patch.object(EvoformerAttnBuilder, "_python_package_cutlass_paths", return_value=[]):
+            assert builder.include_paths()[0] == str(cutlass_path / "include")
+
+
+def test_include_paths_finds_cutlass_from_compiler_include_path(tmp_path):
+    cutlass_path = make_cutlass_checkout(tmp_path / "prefix")
+
+    with patch.dict("os.environ", {"CPATH": str(cutlass_path / "include")}, clear=True):
+        builder = EvoformerAttnBuilder()
+        with patch.object(EvoformerAttnBuilder, "_python_package_cutlass_paths", return_value=[]):
+            assert builder.include_paths()[0] == str(cutlass_path / "include")
+
+
+def test_include_paths_accepts_cutlass_include_dir_directly(tmp_path):
+    cutlass_path = make_cutlass_checkout(tmp_path / "cutlass")
+
+    with patch.dict("os.environ", {"CUTLASS_PATH": str(cutlass_path / "include")}, clear=False):
+        builder = EvoformerAttnBuilder()
+
+    assert builder.include_paths() == [
+        str(cutlass_path / "include"),
+        str(cutlass_path / "tools" / "util" / "include"),
+    ]
+
+
+def test_include_paths_reports_missing_cutlass(tmp_path):
+    with patch.dict("os.environ", {}, clear=True):
+        builder = EvoformerAttnBuilder()
+
+    with patch.object(builder, "_candidate_cutlass_paths", return_value=[tmp_path / "missing"]):
+        with pytest.raises(RuntimeError, match="Unable to locate CUTLASS"):
+            builder.include_paths()

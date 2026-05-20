@@ -18,6 +18,7 @@ jobs:
 
   # formatting and basic install on cpu-only machine
   unit-tests:
+    name: formatting / formatting checks
     runs-on: ubuntu-22.04
 
     steps:
