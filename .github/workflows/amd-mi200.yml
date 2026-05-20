@@ -19,6 +19,7 @@ permissions:
 
 jobs:
   amd-tests:
+    name: amd-mi200 / AMD MI200 tests
     # The type of runner that the job will run on
     runs-on: [self-hosted, amd, mi200]
 
