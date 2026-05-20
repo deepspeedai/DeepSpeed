@@ -370,7 +370,7 @@ jobs:
           echo "Running sequential tests with TORCH_CUDA_ARCH_LIST=$TORCH_CUDA_ARCH_LIST on $GPU_COUNT GPUs"
           cd tests
           rm -rf /mnt/aio/pytest
-          pytest --instafail --timeout 600 --forked -m 'sequential' --basetemp=/mnt/aio/pytest unit/ \
+          pytest --instafail --timeout 600 -m 'sequential' --basetemp=/mnt/aio/pytest unit/ \
             --ignore=unit/runtime/zero/test_nvme_checkpointing.py \
             --ignore=unit/ops/aio/test_gds.py \
             --ignore=unit/launcher/test_user_args.py \
