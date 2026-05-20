@@ -15,30 +15,41 @@ DEFAULT_MODAL_TRANSFORMERS_SOURCE = "requirements"
 MODAL_TORCH_PRESETS = {
     "2.7.1-cuda12.8": {
         "image": "pytorch/pytorch:2.7.1-cuda12.8-cudnn9-devel",
+        "torch_package": "torch==2.7.1",
+        "torchvision_package": "torchvision==0.22.1",
         "torch_test_version": "2.7",
         "cuda_test_version": "12.8",
     },
     "2.8.0-cuda12.8": {
         "image": "pytorch/pytorch:2.8.0-cuda12.8-cudnn9-devel",
+        "torch_package": "torch==2.8.0",
+        "torchvision_package": "torchvision==0.23.0",
         "torch_test_version": "2.8",
         "cuda_test_version": "12.8",
     },
     "2.9.1-cuda12.8": {
         "image": "pytorch/pytorch:2.9.1-cuda12.8-cudnn9-devel",
+        "torch_package": "torch==2.9.1",
+        "torchvision_package": "torchvision==0.24.1",
         "torch_test_version": "2.9",
         "cuda_test_version": "12.8",
     },
     "2.10.0-cuda12.8": {
         "image": "pytorch/pytorch:2.10.0-cuda12.8-cudnn9-devel",
+        "torch_package": "torch==2.10.0",
+        "torchvision_package": "torchvision==0.25.0",
         "torch_test_version": "2.10",
         "cuda_test_version": "12.8",
     },
     "2.11.0-cuda12.8": {
         "image": "pytorch/pytorch:2.11.0-cuda12.8-cudnn9-devel",
+        "torch_package": "torch==2.11.0",
+        "torchvision_package": "torchvision==0.26.0",
         "torch_test_version": "2.11",
         "cuda_test_version": "12.8",
     },
 }
+PYTORCH_CUDA_128_INDEX_URL = "https://download.pytorch.org/whl/cu128"
 
 
 def resolve_modal_torch_config():
@@ -90,6 +101,20 @@ def transformers_override_commands():
     )
 
 
+def torch_package_reinstall_command():
+    command = [
+        "pip",
+        "install",
+        "--force-reinstall",
+        "--no-cache-dir",
+        "--index-url",
+        PYTORCH_CUDA_128_INDEX_URL,
+        MODAL_TORCH_CONFIG["torch_package"],
+        MODAL_TORCH_CONFIG["torchvision_package"],
+    ]
+    return " ".join(shlex.quote(part) for part in command)
+
+
 MODAL_TORCH_CONFIG = resolve_modal_torch_config()
 MODAL_TRANSFORMERS_CONFIG = resolve_modal_transformers_config()
 MODAL_TORCH_IMAGE = MODAL_TORCH_CONFIG["image"]
@@ -108,6 +133,7 @@ image = (modal.Image
          .pip_install_from_requirements(ROOT_PATH / "requirements/requirements.txt", gpu="any")
          .pip_install_from_requirements(ROOT_PATH / "requirements/requirements-dev.txt", gpu="any")
          .pip_install_from_requirements(ROOT_PATH / "requirements/requirements-deepcompile.txt", gpu="any")
+         .run_commands(torch_package_reinstall_command())
         )
 
 transformers_commands = transformers_override_commands()
@@ -132,6 +158,22 @@ app = modal.App("deepspeedai-torch-latest-ci", image=image)
 )
 def pytest():
     import subprocess
+
+    subprocess.run(
+        [
+            "python",
+            "-c",
+            "import json, torch, torchvision, transformers; "
+            "print('Modal Python package versions: ' + json.dumps({"
+            "'torch': torch.__version__, "
+            "'torch_cuda': torch.version.cuda, "
+            "'torchvision': torchvision.__version__, "
+            "'transformers': transformers.__version__"
+            "}, sort_keys=True))",
+        ],
+        check=True,
+        cwd=ROOT_PATH / ".",
+    )
     subprocess.run(
         f"pytest -n 4 --verbose tests/unit/v1/ --torch_ver={MODAL_TORCH_TEST_VERSION} "
         f"--cuda_ver={MODAL_CUDA_TEST_VERSION}".split(),
