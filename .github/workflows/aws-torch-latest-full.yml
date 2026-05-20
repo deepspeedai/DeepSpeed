@@ -21,7 +21,7 @@ on:
       torch_preset:
         description: PyTorch preset to install for manual runs
         required: false
-        default: '2.7.1-cu126'
+        default: '2.10.0-cu126'
         type: choice
         options:
           - '2.7.1-cu126'
@@ -37,7 +37,7 @@ on:
       transformers_source:
         description: Hugging Face Transformers source for manual runs
         required: false
-        default: 'pypi'
+        default: 'git'
         type: choice
         options:
           - 'pypi'
@@ -45,7 +45,7 @@ on:
       transformers_ref:
         description: Hugging Face Transformers git ref to install when source is git
         required: false
-        default: ''
+        default: 'main'
         type: string
 
 concurrency:
@@ -99,10 +99,10 @@ jobs:
       options: --gpus all --shm-size "32G" -v /mnt/aio:/mnt/aio
 
     env:
-      DEFAULT_TORCH_PRESET: '2.7.1-cu126'
-      DEFAULT_TRANSFORMERS_SOURCE: 'pypi'
+      DEFAULT_TORCH_PRESET: '2.10.0-cu126'
+      DEFAULT_TRANSFORMERS_SOURCE: 'git'
       DEFAULT_TRANSFORMERS_VERSION: '4.50.0'
-      DEFAULT_TRANSFORMERS_REF: ''
+      DEFAULT_TRANSFORMERS_REF: 'main'
       CUTLASS_PATH: /opt/cutlass
       # Disable reuse_dist_env to prevent pool worker cleanup hangs in full test runs
       DS_DISABLE_REUSE_DIST_ENV: '1'

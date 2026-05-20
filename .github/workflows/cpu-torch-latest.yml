@@ -6,7 +6,7 @@ on:
       torch_preset:
         description: PyTorch CPU preset to install for manual runs
         required: false
-        default: '2.7.1-cpu'
+        default: '2.10.0-cpu'
         type: choice
         options:
           - '2.7.1-cpu'
@@ -21,7 +21,7 @@ on:
       transformers_source:
         description: Hugging Face Transformers source for manual runs
         required: false
-        default: 'pypi'
+        default: 'git'
         type: choice
         options:
           - 'pypi'
@@ -29,7 +29,7 @@ on:
       transformers_ref:
         description: Hugging Face Transformers git ref to install when source is git
         required: false
-        default: ''
+        default: 'main'
         type: string
   pull_request:
     paths-ignore:
@@ -51,10 +51,10 @@ jobs:
     runs-on: ubuntu-24.04
 
     env:
-      DEFAULT_TORCH_PRESET: '2.7.1-cpu'
-      DEFAULT_TRANSFORMERS_SOURCE: 'pypi'
+      DEFAULT_TORCH_PRESET: '2.10.0-cpu'
+      DEFAULT_TRANSFORMERS_SOURCE: 'git'
       DEFAULT_TRANSFORMERS_VERSION: '4.50.0'
-      DEFAULT_TRANSFORMERS_REF: ''
+      DEFAULT_TRANSFORMERS_REF: 'main'
 
     steps:
       - uses: actions/checkout@v4

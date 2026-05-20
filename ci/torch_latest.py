@@ -10,8 +10,8 @@ from pathlib import Path
 import modal
 
 ROOT_PATH = Path(__file__).parents[1]
-DEFAULT_MODAL_TORCH_PRESET = "2.9.1-cuda12.8"
-DEFAULT_MODAL_TRANSFORMERS_SOURCE = "requirements"
+DEFAULT_MODAL_TORCH_PRESET = "2.10.0-cuda12.8"
+DEFAULT_MODAL_TRANSFORMERS_SOURCE = "git"
 MODAL_TORCH_PRESETS = {
     "2.7.1-cuda12.8": {
         "image": "pytorch/pytorch:2.7.1-cuda12.8-cudnn9-devel",
