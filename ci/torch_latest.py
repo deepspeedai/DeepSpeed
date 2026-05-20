@@ -99,6 +99,11 @@ MODAL_CUDA_TEST_VERSION = MODAL_TORCH_CONFIG["cuda_test_version"]
 # yapf: disable
 image = (modal.Image
          .from_registry(MODAL_TORCH_IMAGE, add_python="3.10")
+         .env({
+             "MODAL_TORCH_PRESET": MODAL_TORCH_CONFIG["preset"],
+             "MODAL_TRANSFORMERS_SOURCE": MODAL_TRANSFORMERS_CONFIG["source"],
+             "MODAL_TRANSFORMERS_REF": MODAL_TRANSFORMERS_CONFIG["ref"],
+         })
          .run_commands("apt update && apt install -y git libaio-dev")
          .pip_install_from_requirements(ROOT_PATH / "requirements/requirements.txt", gpu="any")
          .pip_install_from_requirements(ROOT_PATH / "requirements/requirements-dev.txt", gpu="any")
