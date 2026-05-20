@@ -43,6 +43,9 @@ from deepspeed.checkpoint import (
     PARAMETER_WITH_ROW_PARALLELISM_PATTERNS,
     PARAMETER_WITH_2_SUB_PARAMS_CAT_DIM_0,
     PARAMETER_WITH_SUB_PARAMS,
+    AUTOEP_LAYERS_KEY,
+    AUTOEP_LAYERS_KEY_LEGACY,
+    EXPERT_PARAMETER_PATTERNS,
     SubparamShape,
 )
 
@@ -436,6 +439,32 @@ def _get_model_state_files(checkpoint_dir):
     return _get_checkpoint_files(checkpoint_dir, "*_model_states.pt")
 
 
+def _is_expert_model_state_file(checkpoint_file):
+    basename = os.path.basename(checkpoint_file)
+    return basename.startswith('layer_') and '_expert_' in basename
+
+
+def _get_zero3_model_state_files(checkpoint_dir):
+    model_files = [f for f in _get_model_state_files(checkpoint_dir) if not _is_expert_model_state_file(f)]
+
+    if len(model_files) == 0:
+        raise FileNotFoundError(f"can't find ZeRO Stage 3 model state files in directory '{checkpoint_dir}'")
+
+    return model_files
+
+
+def _raise_if_stage3_autoep_universal_conversion(model_files):
+    for model_file in model_files:
+        model_state = torch.load(model_file, map_location=torch.device('cpu'), weights_only=False)
+        autoep_metadata = model_state.get(AUTOEP_LAYERS_KEY)
+        if autoep_metadata is None:
+            autoep_metadata = model_state.get(AUTOEP_LAYERS_KEY_LEGACY)
+
+        if autoep_metadata is not None:
+            raise NotImplementedError("Stage 3 universal checkpoint conversion with AutoEP is not supported. "
+                                      "Use regular same-topology ZeRO-3 checkpoint load for AutoEP checkpoints.")
+
+
 def _get_checkpoint_files(checkpoint_dir, glob_pattern):
     ckpt_files = sorted(glob.glob(os.path.join(checkpoint_dir, glob_pattern)), key=natural_keys)
 
@@ -510,11 +539,6 @@ def main(args):
         _merge_tp_slice_files(args, ds_checkpoint, slice_shapes, temp_dir)
 
         print('*** 2.5. Consolidating AutoEP expert files')
-        from deepspeed.checkpoint.constants import (
-            AUTOEP_LAYERS_KEY,
-            AUTOEP_LAYERS_KEY_LEGACY,
-            EXPERT_PARAMETER_PATTERNS,
-        )
         from deepspeed.checkpoint.autoep_universal import (
             consolidate_autoep_expert_files,
             consolidate_autoep_optimizer_states,
@@ -563,19 +587,8 @@ def main(args):
 
     else:
         # Stage 3 path
-        # Check for AutoEP metadata - Stage 3 + AutoEP is not supported
-        stage3_expert_files = glob.glob(os.path.join(args.input_folder, 'layer_*_expert_*_model_states.pt'))
-        stage3_model_files_for_meta = glob.glob(os.path.join(args.input_folder, 'mp_rank_*_model_states.pt'))
-        if stage3_model_files_for_meta:
-            _stage3_sd = torch.load(stage3_model_files_for_meta[0],
-                                    map_location=torch.device('cpu'),
-                                    weights_only=False)
-            _stage3_autoep = _stage3_sd.get('ds_autoep_layers') or _stage3_sd.get('autoep_layers')
-            if _stage3_autoep is not None:
-                raise NotImplementedError("Stage 3 universal checkpoint conversion with AutoEP is not supported. "
-                                          "AutoEP currently requires ZeRO Stage 1 or 2.")
-
-        model_files = _get_model_state_files(args.input_folder)
+        model_files = _get_zero3_model_state_files(args.input_folder)
+        _raise_if_stage3_autoep_universal_conversion(model_files)
         param_shapes = _parse_model_states_stage3(model_files)
         dp_degree = len(model_files)
 
@@ -596,8 +609,7 @@ def main(args):
 
         # Copy *model_states files into output folder, filtering out expert files
         for f in glob.glob(os.path.join(args.input_folder, '*model_states.pt')):
-            basename = os.path.basename(f)
-            if basename.startswith('layer_') and '_expert_' in basename:
+            if _is_expert_model_state_file(f):
                 continue  # Skip expert files (handled separately if AutoEP were supported)
             shutil.copy2(f, args.output_folder)
 

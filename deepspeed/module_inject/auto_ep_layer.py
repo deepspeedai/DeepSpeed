@@ -456,16 +456,21 @@ class AutoEPMoELayer(nn.Module):
         for param in self.experts.parameters():
             param.allreduce = False
             param.group_name = self.ep_group_name
+            param.ds_zero_placement_family = "autoep_expert"
+            param.ds_zero_partition_group_name = self.ep_group_name
 
         # Mark shared expert and router params for global DP reduction
         for param in self.router.parameters():
             param.allreduce = True
+            param.ds_zero_placement_family = "replicated"
         if self.shared_experts is not None:
             for param in self.shared_experts.parameters():
                 param.allreduce = True
+                param.ds_zero_placement_family = "replicated"
         if self.shared_experts_gate is not None:
             for param in self.shared_experts_gate.parameters():
                 param.allreduce = True
+                param.ds_zero_placement_family = "replicated"
 
         # Load balancing buffers
         self.load_balance_coeff = resolved_config.load_balance_coeff
