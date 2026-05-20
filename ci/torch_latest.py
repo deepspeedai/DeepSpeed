@@ -72,8 +72,7 @@ def resolve_modal_transformers_config():
     if transformers_source not in supported_sources:
         supported = ", ".join(sorted(supported_sources))
         raise ValueError(
-            f"Unsupported MODAL_TRANSFORMERS_SOURCE={transformers_source!r}; supported values: {supported}"
-        )
+            f"Unsupported MODAL_TRANSFORMERS_SOURCE={transformers_source!r}; supported values: {supported}")
 
     transformers_ref = os.environ.get("MODAL_TRANSFORMERS_REF") or ""
     if transformers_source == "git" and not transformers_ref:

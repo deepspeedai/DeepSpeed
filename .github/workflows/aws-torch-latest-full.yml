@@ -326,6 +326,23 @@ jobs:
           pip install --no-build-isolation .[dev,1bit,autotuning,deepcompile]
           ds_report
 
+      - name: Reinstall selected Transformers
+        run: |
+          case "$TRANSFORMERS_SOURCE" in
+            'pypi')
+              pip install --no-deps --force-reinstall "transformers==$TRANSFORMERS_VERSION"
+              ;;
+            'git')
+              cd /tmp/transformers
+              pip install --no-deps --force-reinstall .
+              ;;
+            *)
+              echo "Unsupported TRANSFORMERS_SOURCE: $TRANSFORMERS_SOURCE" >&2
+              exit 1
+              ;;
+          esac
+          python -c "import transformers; print('transformers:', transformers.__version__, transformers)"
+
       - name: Python environment
         run: |
           pip list
