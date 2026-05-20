@@ -24,8 +24,6 @@ from deepspeed.accelerator import get_accelerator
 from deepspeed.ops.op_builder import AsyncIOBuilder
 from deepspeed.io import FastFileWriter, FastFileWriterConfig
 
-pytestmark = pytest.mark.sequential
-
 if not deepspeed.ops.__compatible_ops__[AsyncIOBuilder.NAME]:
     pytest.skip("async_io op is not compatible on this system", allow_module_level=True)
 
@@ -72,6 +70,7 @@ def _build_writer(file_path):
     return FastFileWriter(file_path=str(file_path), config=cfg)
 
 
+@pytest.mark.sequential
 def test_close_releases_fd_after_unlink(tmp_path):
     """Single save + unlink must not leave a deleted-fd reference."""
     target = tmp_path / "ckpt_single.pt"
@@ -89,6 +88,7 @@ def test_close_releases_fd_after_unlink(tmp_path):
                              f"This indicates _fini() did not os.close(self._aio_fd).")
 
 
+@pytest.mark.sequential
 @pytest.mark.parametrize("n_iters", [5, 20])
 def test_rotation_loop_does_not_leak(tmp_path, n_iters):
     """N iterations of save+close+unlink should leave zero deleted-fds.
