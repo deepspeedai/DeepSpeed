@@ -21,6 +21,7 @@ concurrency:
 
 jobs:
   unit-tests:
+    name: nv-pre-compile-ops / precompile ops
     runs-on: ubuntu-24.04
     container:
       image: nvidia/cuda:12.6.3-devel-ubuntu22.04

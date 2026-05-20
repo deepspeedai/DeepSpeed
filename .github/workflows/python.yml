@@ -19,6 +19,7 @@ concurrency:
 
 jobs:
   unit-tests:
+    name: python / install smoke (Python ${{ matrix.pyVersion }})
     strategy:
       matrix:
         pyVersion: ["3.10", "3.11", "3.12"]
