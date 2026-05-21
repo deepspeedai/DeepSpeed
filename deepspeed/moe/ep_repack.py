@@ -1,4 +1,4 @@
-# Copyright (c) Microsoft Corporation.
+# Copyright (c) DeepSpeed Team.
 # SPDX-License-Identifier: Apache-2.0
 
 # DeepSpeed Team
@@ -13,127 +13,137 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-from deepspeed.module_inject.auto_ep_config import MoEModelPreset
+from deepspeed.module_inject.auto_ep_config import MoELayerSpec
+from deepspeed.moe.fused_expert_layout import classify_fused_gate_up_layout
 
 
 def repack_expert_weights(
-    moe_layer: nn.Module,
-    preset: MoEModelPreset,
+    experts_source: nn.Module,
+    spec: MoELayerSpec,
     ep_rank: int,
     ep_size: int,
-) -> dict | None:
-    """Repack expert weights from a HuggingFace MoE layer into grouped format.
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Repack expert weights from HF format to TorchTitan grouped format.
 
-    Args:
-        moe_layer:  The original MoE sub-layer (the one being replaced).
-                    The expert collection is accessed via ``preset.experts_attr``.
-        preset:     Model preset that describes the weight layout.
-                    If None, returns None (caller skips weight copy).
-        ep_rank:    This rank's index in the EP group.
-        ep_size:    Expert-parallel world size.
+    Returns (w1, w2, w3) where:
+        w1: [E_local, ffn_hidden_size, hidden_size]
+        w2: [E_local, hidden_size, ffn_hidden_size]
+        w3: [E_local, ffn_hidden_size, hidden_size]
 
-    Returns:
-        dict with keys ``"w1"``, ``"w2"``, ``"w3"`` where each tensor has
-        shape ``[E_local, ffn_hidden, hidden]`` / ``[E_local, hidden, ffn_hidden]``,
-        or None when preset is None (no-op, experts keep their random init).
+    For fused_3d storage where expert_w3 is None (gate+up fused):
+        Standard HF layout:
+            Source gate_up_proj: [E, 2*ffn_hidden, hidden]
+            Source down_proj: [E, hidden, ffn_hidden]
 
-    Weight conventions (TorchTitan / GroupedExperts):
-        w1: gate projection  [E_local, ffn_hidden, hidden]
-        w2: down projection  [E_local, hidden, ffn_hidden]
-        w3: up   projection  [E_local, ffn_hidden, hidden]
+        Llama4 layout:
+            Source gate_up_proj: [E, hidden, 2*ffn_hidden]
+            Source down_proj: [E, ffn_hidden, hidden]
+
+        In both cases, the returned grouped-expert tensors are normalized to:
+            w1 = gate_proj: [E_local, ffn_hidden, hidden]
+            w3 = up_proj:   [E_local, ffn_hidden, hidden]
+            w2 = down_proj: [E_local, hidden, ffn_hidden]
     """
-    if preset is None:
-        # No structural information — caller must handle weight init separately.
-        return None
-
-    experts_module = getattr(moe_layer, preset.experts_attr)
-    num_experts = getattr(moe_layer, preset.num_experts_attr)
-    num_local_experts = num_experts // ep_size
+    num_local_experts = spec.num_experts // ep_size
     expert_start = ep_rank * num_local_experts
     expert_end = expert_start + num_local_experts
 
-    if preset.expert_storage == "fused_3d":
-        w1, w2, w3 = _repack_fused_3d(experts_module, expert_start, expert_end)
-    elif preset.expert_storage == "module_list":
-        w1, w2, w3 = _repack_module_list(experts_module, expert_start, expert_end)
+    if spec.expert_storage == "fused_3d":
+        return _repack_fused_3d(experts_source, spec, expert_start, expert_end)
+    elif spec.expert_storage == "module_list":
+        return _repack_module_list(experts_source, spec, expert_start, expert_end)
     else:
-        raise ValueError(f"Unknown expert_storage format: {preset.expert_storage!r}")
-
-    return {"w1": w1, "w2": w2, "w3": w3}
+        raise ValueError(f"Unknown expert_storage type: {spec.expert_storage}")
 
 
 def _repack_fused_3d(
-    experts_module: nn.Module,
+    experts_source: nn.Module,
+    spec: MoELayerSpec,
     expert_start: int,
     expert_end: int,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Repack from fused 3D parameter tensors (transformers 5.0.0+).
+    """Repack from fused 3D parameter tensors (transformers 5.0.0+)."""
+    w1_full = getattr(experts_source, spec.expert_w1_name)
+    w2_full = getattr(experts_source, spec.expert_w2_name)
 
-    Expected layout on ``experts_module``:
-        gate_up_proj: [E, 2*ffn_hidden, hidden]   (gate + up fused)
-        down_proj:    [E, hidden, ffn_hidden]
-    """
-    gate_up_full = getattr(experts_module, "gate_up_proj")
-    down_full = getattr(experts_module, "down_proj")
+    if isinstance(w1_full, nn.Parameter):
+        w1_full = w1_full.data
+    if isinstance(w2_full, nn.Parameter):
+        w2_full = w2_full.data
 
-    if isinstance(gate_up_full, nn.Parameter):
-        gate_up_full = gate_up_full.data
-    if isinstance(down_full, nn.Parameter):
-        down_full = down_full.data
+    # Slice to local experts
+    w1_local = w1_full[expert_start:expert_end].clone()
+    w2_local = w2_full[expert_start:expert_end].clone()
 
-    gate_up_local = gate_up_full[expert_start:expert_end].clone()  # [E_local, 2*ffn, hidden]
-    down_local = down_full[expert_start:expert_end].clone()  # [E_local, hidden, ffn]
+    if spec.expert_w3_name is None:
+        layout = classify_fused_gate_up_layout(tuple(w1_local.shape), tuple(w2_local.shape))
+        if layout is None:
+            raise ValueError("Unsupported fused expert weight layout for AutoEP repacking: "
+                             f"{spec.expert_w1_name}={tuple(w1_local.shape)}, "
+                             f"{spec.expert_w2_name}={tuple(w2_local.shape)}")
 
-    ffn_hidden = gate_up_local.shape[1] // 2
-    w1 = gate_up_local[:, :ffn_hidden, :].contiguous()  # gate_proj [E_local, ffn, hidden]
-    w3 = gate_up_local[:, ffn_hidden:, :].contiguous()  # up_proj   [E_local, ffn, hidden]
-    w2 = down_local.contiguous()  # down_proj [E_local, hidden, ffn]
+        ffn_hidden = layout.ffn_hidden_size
+        if layout.layout == "gate_up_first":
+            w1 = w1_local[:, :ffn_hidden, :].contiguous()  # [E_local, ffn, hidden]
+            w3 = w1_local[:, ffn_hidden:, :].contiguous()  # [E_local, ffn, hidden]
+            w2 = w2_local.contiguous()  # [E_local, hidden, ffn]
+        else:
+            w1 = w1_local[:, :, :ffn_hidden].transpose(1, 2).contiguous()  # [E_local, ffn, hidden]
+            w3 = w1_local[:, :, ffn_hidden:].transpose(1, 2).contiguous()  # [E_local, ffn, hidden]
+            w2 = w2_local.transpose(1, 2).contiguous()  # [E_local, hidden, ffn]
+    else:
+        # Separate w1 (gate), w3 (up)
+        w3_full = getattr(experts_source, spec.expert_w3_name)
+        if isinstance(w3_full, nn.Parameter):
+            w3_full = w3_full.data
+        w3_local = w3_full[expert_start:expert_end].clone()
+
+        w1 = w1_local.contiguous()  # [E_local, ffn, hidden]
+        w2 = w2_local.contiguous()  # [E_local, hidden, ffn]
+        w3 = w3_local.contiguous()  # [E_local, ffn, hidden]
 
     return w1, w2, w3
 
 
 def _repack_module_list(
-    experts_module: nn.ModuleList,
+    experts_source: nn.Module,
+    spec: MoELayerSpec,
     expert_start: int,
     expert_end: int,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Repack from nn.ModuleList of individual expert modules (legacy transformers).
+    """Repack from nn.ModuleList of individual expert modules (legacy transformers)."""
+    assert isinstance(experts_source, nn.ModuleList), \
+        f"Expected nn.ModuleList for module_list storage, got {type(experts_source)}"
 
-    Probes common attribute names for each weight:
-        gate projection (w1): gate_proj, w1, fc1
-        down projection (w2): down_proj, w2, fc2
-        up   projection (w3): up_proj,   w3  (optional — fused in some models)
-    """
-    assert isinstance(experts_module, nn.ModuleList), \
-        f"Expected nn.ModuleList for module_list storage, got {type(experts_module)}"
-
-    _W1_NAMES = ("gate_proj", "w1", "fc1")
-    _W2_NAMES = ("down_proj", "w2", "fc2")
-    _W3_NAMES = ("up_proj", "w3")
-
-    w1_list, w2_list, w3_list = [], [], []
+    w1_list = []
+    w2_list = []
+    w3_list = []
 
     for expert_idx in range(expert_start, expert_end):
-        expert = experts_module[expert_idx]
+        expert = experts_source[expert_idx]
 
-        w1_param = _get_expert_weight(expert, _W1_NAMES)
-        w2_param = _get_expert_weight(expert, _W2_NAMES)
-        w3_param = _get_expert_weight(expert, _W3_NAMES, required=False)
+        # Get weight tensors - handle both nn.Linear children and direct attributes
+        w1_param = _get_expert_weight(expert, spec.expert_w1_name)
+        w2_param = _get_expert_weight(expert, spec.expert_w2_name)
 
-        # nn.Linear.weight is [out_features, in_features] = [ffn_hidden, hidden] for w1/w3
-        # which already matches the [E, ffn_hidden, hidden] convention — no transpose needed.
+        # nn.Linear stores weight as [out_features, in_features]
+        # TorchTitan expects [ffn_hidden, hidden] for w1/w3 and [hidden, ffn_hidden] for w2
+        # nn.Linear.weight is already [out, in] which matches TorchTitan's [ffn, hidden] for w1
+        # No transpose needed - store as-is
         w1_list.append(w1_param.data.clone())
         w2_list.append(w2_param.data.clone())
-        if w3_param is not None:
+
+        if spec.expert_w3_name is not None:
+            w3_param = _get_expert_weight(expert, spec.expert_w3_name)
             w3_list.append(w3_param.data.clone())
 
     w1 = torch.stack(w1_list)  # [E_local, ffn_hidden, hidden]
     w2 = torch.stack(w2_list)  # [E_local, hidden, ffn_hidden]
 
-    if w3_list:
+    if spec.expert_w3_name is not None:
         w3 = torch.stack(w3_list)  # [E_local, ffn_hidden, hidden]
     else:
-        # gate+up fused into w1: split evenly
+        # If no w3, this is fused gate+up - split w1
         ffn_hidden = w1.shape[1] // 2
         w3 = w1[:, ffn_hidden:, :].contiguous()
         w1 = w1[:, :ffn_hidden, :].contiguous()
@@ -141,38 +151,24 @@ def _repack_module_list(
     return w1, w2, w3
 
 
-def _get_expert_weight(
-    expert_module: nn.Module,
-    weight_names: tuple,
-    required: bool = True,
-) -> torch.Tensor | None:
-    """Get an expert weight tensor by probing a list of candidate attribute names.
+def _get_expert_weight(expert_module: nn.Module, weight_name: str) -> torch.Tensor:
+    """Get expert weight tensor by name, handling both attribute and child module patterns."""
+    # Direct attribute
+    param = getattr(expert_module, weight_name, None)
+    if param is not None:
+        if isinstance(param, nn.Linear):
+            return param.weight
+        if isinstance(param, (nn.Parameter, torch.Tensor)):
+            return param
 
-    Args:
-        expert_module: The individual expert sub-module.
-        weight_names:  Candidate attribute names to try in order.
-        required:      If True, raise ValueError when none found.
-                       If False, return None when none found.
-    """
-    for name in weight_names:
-        # Direct attribute (nn.Parameter or Tensor)
-        param = getattr(expert_module, name, None)
-        if param is not None:
-            if isinstance(param, nn.Linear):
-                return param.weight
-            if isinstance(param, (nn.Parameter, torch.Tensor)):
-                return param
-
-        # Child module with that name
-        child = dict(expert_module.named_children()).get(name)
-        if child is not None:
+    # Try as child module name
+    for name, child in expert_module.named_children():
+        if name == weight_name:
             if isinstance(child, nn.Linear):
                 return child.weight
-            if hasattr(child, "weight"):
+            if hasattr(child, 'weight'):
                 return child.weight
 
-    if required:
-        available = [n for n, _ in expert_module.named_parameters(recurse=False)]
-        raise ValueError(f"Could not find any of {weight_names} in expert module "
-                         f"{type(expert_module).__name__}. Available parameters: {available}")
-    return None
+    raise ValueError(f"Could not find weight '{weight_name}' in expert module "
+                     f"{type(expert_module).__name__}. Available attributes: "
+                     f"{[n for n, _ in expert_module.named_parameters(recurse=False)]}")

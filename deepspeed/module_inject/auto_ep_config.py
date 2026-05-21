@@ -1,272 +1,324 @@
-# Copyright (c) Microsoft Corporation.
+# Copyright (c) DeepSpeed Team.
 # SPDX-License-Identifier: Apache-2.0
 
 # DeepSpeed Team
-"""
-AutoEP configuration dataclasses and preset model specs.
+"""AutoEP configuration: config parsing, model presets, and validation."""
 
-Ported from the prototype branch (tohtana/add_autoep) with minor
-adaptations for DeepSpeed conventions:
-  - DeepSpeedConfigModel replaced with plain dataclass (avoids Pydantic dep)
-  - parse_autoep_config / validate_* helpers match original API
+from __future__ import annotations
 
-Usage in ds_config.json::
+from deepspeed.module_inject.auto_ep_presets.base import (
+    _UNSET,
+    _raise_unsupported_load_balance_coeff,
+    AutoEPConfig,
+    MoELayerSpec,
+    MoEModelPreset,
+)
+from deepspeed.module_inject.auto_ep_presets.registry import (
+    PRESET_MODELS,
+    available_preset_names,
+    resolve_autoep_config_defaults,
+)
+from deepspeed.utils import logger
 
-    {
-      "expert_parallel": {
-        "enabled": true,
-        "autoep_size": 8,
-        "preset_model": "mixtral"
-      }
-    }
-"""
-
-from dataclasses import dataclass, field
-from typing import Dict, List, Optional
-
-# ===================================================================
-# MoE layer specification
-# ===================================================================
-
-
-@dataclass
-class MoELayerSpec:
-    """Specification of a detected MoE layer in the model.
-
-    Attributes:
-        parent:      Parent module that contains *child_name*.
-        child_name:  Attribute name on *parent* that is the MoE layer.
-        layer_idx:   Global layer index (order in which layers were found).
-        num_experts: Total number of experts in this layer.
-        dim:         Model hidden dimension.
-        ffn_dim:     Expert FFN intermediate dimension.
-        gate_bias:   Whether the router gate has a bias term.
-        top_k:       Number of experts each token is routed to.
-    """
-    parent: object
-    child_name: str
-    layer_idx: int
-    num_experts: int
-    dim: int
-    ffn_dim: int
-    gate_bias: bool
-    top_k: int
-
-
-# ===================================================================
-# Model preset specs
-# ===================================================================
-
-
-@dataclass
-class MoEModelPreset:
-    """Structural description of a supported MoE architecture.
-
-    Fields map to attribute paths in the model's forward hierarchy.
-    """
-    # Attribute names to traverse from the root module to reach one MoE block
-    # e.g. ["model", "layers"]  means model.model.layers[i]
-    layers_path: List[str]
-
-    # Attribute name of the MoE sub-layer inside a single decoder block
-    # e.g. "block_sparse_moe" for Mixtral
-    moe_layer_attr: str
-
-    # Attribute name of the router/gate inside the MoE sub-layer
-    gate_attr: str
-
-    # Attribute names for the expert weights:
-    #   experts_attr  → module holding the expert collection
-    # For fused_3d format (transformers 5.0+): gate_up_proj / down_proj
-    # For module_list format: individual expert modules
-    experts_attr: str
-
-    # Number of activated experts per token
-    top_k: int
-
-    # Whether the gate linear has a bias
-    gate_bias: bool = False
-
-    # Storage format of expert weights
-    # "fused_3d"    → experts.gate_up_proj[E, 2*ffn, dim]  (HF ≥5.0)
-    # "module_list" → nn.ModuleList of individual expert modules
-    expert_storage: str = "fused_3d"
-
-    # Attribute that exposes num_experts from the MoE sub-layer
-    num_experts_attr: str = "num_experts"
-
-    # Attribute name for ffn_dim (inside the expert module or moe layer)
-    ffn_dim_attr: Optional[str] = None
-
+__all__ = [
+    "_UNSET",
+    "AutoEPConfig",
+    "MoELayerSpec",
+    "MoEModelPreset",
+    "PRESET_MODELS",
+    "parse_autoep_config",
+    "resolve_autoep_config_defaults",
+    "validate_autoep_config",
+    "validate_autoep_post_detection",
+]
 
 # ---------------------------------------------------------------------------
-# Preset registry
+# Config parsing
 # ---------------------------------------------------------------------------
-
-PRESET_MODELS: Dict[str, MoEModelPreset] = {
-    "mixtral":
-    MoEModelPreset(
-        layers_path=["model", "layers"],
-        moe_layer_attr="block_sparse_moe",
-        gate_attr="gate",
-        experts_attr="experts",
-        top_k=2,
-        gate_bias=False,
-        expert_storage="module_list",
-        num_experts_attr="num_experts",
-        ffn_dim_attr=None,  # auto-inferred from w1.out_features
-    ),
-    "qwen3_moe":
-    MoEModelPreset(
-        layers_path=["model", "layers"],
-        moe_layer_attr="mlp",
-        gate_attr="gate",
-        experts_attr="experts",
-        top_k=8,
-        gate_bias=False,
-        expert_storage="module_list",
-        num_experts_attr="num_experts",
-        ffn_dim_attr=None,
-    ),
-    "deepseek_v2":
-    MoEModelPreset(
-        layers_path=["model", "layers"],
-        moe_layer_attr="mlp",
-        gate_attr="gate",
-        experts_attr="experts",
-        top_k=6,
-        gate_bias=False,
-        expert_storage="module_list",
-        num_experts_attr="num_experts",
-        ffn_dim_attr=None,
-    ),
-    "deepseek_v3":
-    MoEModelPreset(
-        layers_path=["model", "layers"],
-        moe_layer_attr="mlp",
-        gate_attr="gate",
-        experts_attr="experts",
-        top_k=8,
-        gate_bias=False,
-        expert_storage="module_list",
-        num_experts_attr="num_experts",
-        ffn_dim_attr=None,
-    ),
-    "llama4":
-    MoEModelPreset(
-        layers_path=["model", "layers"],
-        moe_layer_attr="feed_forward",
-        gate_attr="router",
-        experts_attr="experts",
-        top_k=1,
-        gate_bias=False,
-        expert_storage="fused_3d",
-        num_experts_attr="num_experts",
-        ffn_dim_attr="intermediate_size",
-    ),
-}
-
-# ===================================================================
-# AutoEP configuration
-# ===================================================================
-
-
-@dataclass
-class AutoEPConfig:
-    """Runtime configuration for AutoEP.
-
-    Attributes:
-        enabled:      Whether AutoEP is active.
-        autoep_size:  Expert parallel world size (EP group size).
-                      Must evenly divide the total number of experts.
-        preset_model: Key into PRESET_MODELS, or None for manual spec.
-        layer_specs:  Optional list of per-layer overrides (advanced).
-    """
-    enabled: bool = False
-    autoep_size: int = 1
-    preset_model: Optional[str] = None
-    layer_specs: List[dict] = field(default_factory=list)
-
-
-# ===================================================================
-# Config parsing helpers
-# ===================================================================
 
 
 def parse_autoep_config(param_dict: dict) -> AutoEPConfig:
-    """Parse the ``expert_parallel`` block from a DeepSpeed config dict.
+    """Parse the 'expert_parallel' section from DS config JSON."""
+    if not param_dict:
+        return AutoEPConfig()
 
-    Args:
-        param_dict: The full DeepSpeed config dictionary.
+    config = AutoEPConfig()
+    config.enabled = param_dict.get("enabled", False)
+    config.autoep_size = param_dict.get("autoep_size", 1)
+    config.preset_model = param_dict.get("preset_model", None)
+    config.moe_layer_pattern = param_dict.get("moe_layer_pattern", None)
+    config.expert_pattern = param_dict.get("expert_pattern", None)
+    config.router_pattern = param_dict.get("router_pattern", None)
+    config.use_grouped_mm = param_dict.get("use_grouped_mm", True)
+    config.route_norm = param_dict.get("route_norm", None)
+    config.route_scale = param_dict.get("route_scale", 1.0)
+    config.score_apply = param_dict.get("score_apply", "auto")
+    config.combine_impl = param_dict.get("combine_impl", "auto")
+    config.num_expert_groups = param_dict.get("num_expert_groups", None)
+    config.num_limited_groups = param_dict.get("num_limited_groups", None)
+    config.score_func = param_dict.get("score_func", "auto")
+    config.top_k = param_dict.get("top_k", "auto")
+    if "load_balance_coeff" in param_dict:
+        value = param_dict["load_balance_coeff"]
+        if value is not None:
+            _raise_unsupported_load_balance_coeff(value)
+        config.load_balance_coeff = None
+        config._load_balance_coeff_explicit = True
+    else:
+        config.load_balance_coeff = None
+        config._load_balance_coeff_explicit = False
+    config.routed_scaling_factor = param_dict.get("routed_scaling_factor", "auto")
+    config.expert_w1 = param_dict.get("expert_w1", None)
+    config.expert_w2 = param_dict.get("expert_w2", None)
+    # expert_w3: key absent → _UNSET (preset default); key present with null → None (fused); key present with string → custom name
+    if "expert_w3" in param_dict:
+        config.expert_w3 = param_dict["expert_w3"]  # None or string
+    else:
+        config.expert_w3 = _UNSET
+    config.num_experts_attr = param_dict.get("num_experts_attr", None)
+    config.top_k_attr = param_dict.get("top_k_attr", None)
+    config.has_shared_experts = param_dict.get("has_shared_experts", None)
+    config.shared_experts_pattern = param_dict.get("shared_experts_pattern", None)
+    config.shared_experts_gate_pattern = param_dict.get("shared_experts_gate_pattern", None)
 
-    Returns:
-        An :class:`AutoEPConfig` instance (disabled if the block is absent).
-    """
-    ep_cfg = param_dict.get("expert_parallel", {})
-    if not ep_cfg:
-        return AutoEPConfig(enabled=False)
-
-    enabled = ep_cfg.get("enabled", False)
-    if not enabled:
-        return AutoEPConfig(enabled=False)
-
-    autoep_size = ep_cfg.get("autoep_size", 1)
-    preset_model = ep_cfg.get("preset_model", None)
-    layer_specs = ep_cfg.get("layer_specs", [])
-
-    return AutoEPConfig(
-        enabled=True,
-        autoep_size=autoep_size,
-        preset_model=preset_model,
-        layer_specs=layer_specs,
-    )
+    return config
 
 
-def validate_autoep_config(config: AutoEPConfig, world_size: int) -> None:
-    """Validate the AutoEP configuration before model initialisation.
+# ---------------------------------------------------------------------------
+# Validation helpers
+# ---------------------------------------------------------------------------
 
-    Args:
-        config:     Parsed AutoEP config.
-        world_size: Global process-group world size.
 
-    Raises:
-        ValueError: If the config is internally inconsistent.
-    """
+def validate_autoep_config(
+    config: AutoEPConfig,
+    world_size: int,
+    pp_size: int,
+    tp_size: int,
+    sp_size: int,
+) -> None:
+    """Validate config constraints. Raises ValueError on invalid config."""
+    if config.load_balance_coeff is not None:
+        _raise_unsupported_load_balance_coeff(config.load_balance_coeff)
+
     if not config.enabled:
         return
 
-    if config.autoep_size <= 0:
-        raise ValueError(f"autoep_size must be > 0, got {config.autoep_size}")
+    if tp_size > 1:
+        raise ValueError("AutoEP does not currently support AutoTP "
+                         f"(tensor_parallel.autotp_size={tp_size}). Disable AutoTP for this run; "
+                         "AutoEP+AutoTP support is planned as follow-up work.")
 
-    if world_size % config.autoep_size != 0:
-        raise ValueError(f"world_size ({world_size}) must be divisible by autoep_size ({config.autoep_size}).")
+    # ep_size must divide the stage size (world_size / pp_size)
+    stage_size = world_size // pp_size
+    if stage_size % config.autoep_size != 0:
+        raise ValueError(f"autoep_size={config.autoep_size} must divide the stage size "
+                         f"(world_size={world_size} / pp_size={pp_size} = {stage_size}). "
+                         f"Valid autoep_size values: {_divisors(stage_size)}")
 
+    # Validate preset_model if specified
     if config.preset_model is not None and config.preset_model not in PRESET_MODELS:
         raise ValueError(f"Unknown preset_model '{config.preset_model}'. "
-                         f"Available presets: {sorted(PRESET_MODELS.keys())}")
+                         f"Available presets: {list(available_preset_names())}")
+
+    # Validate score_apply
+    valid_score_apply = ("auto", "pre", "post")
+    if config.score_apply not in valid_score_apply:
+        raise ValueError(f"score_apply must be one of {valid_score_apply}, "
+                         f"got '{config.score_apply}'")
+
+    # Validate combine_impl
+    valid_combine_impl = ("auto", "weighted_sum", "legacy_bmm")
+    if config.combine_impl not in valid_combine_impl:
+        raise ValueError(f"combine_impl must be one of {valid_combine_impl}, "
+                         f"got '{config.combine_impl}'")
+
+    # Validate score_func
+    valid_score_func = ("auto", "softmax", "sigmoid")
+    if config.score_func not in valid_score_func:
+        raise ValueError(f"score_func must be one of {valid_score_func}, "
+                         f"got '{config.score_func}'")
+
+    # Validate group-limited routing constraints
+    if config.num_limited_groups is not None:
+        if config.num_limited_groups < 1:
+            raise ValueError(f"num_limited_groups must be >= 1, got {config.num_limited_groups}")
+
+    if config.num_expert_groups is not None:
+        if config.num_expert_groups < 1:
+            raise ValueError(f"num_expert_groups must be >= 1, got {config.num_expert_groups}")
+        if config.num_limited_groups is not None and config.num_limited_groups > config.num_expert_groups:
+            raise ValueError(f"num_limited_groups ({config.num_limited_groups}) must be <= "
+                             f"num_expert_groups ({config.num_expert_groups})")
+        logger.warning("num_expert_groups is set; interaction with EP topology "
+                       "is not yet optimized.")
+
+    # Warn if autoep_size == 1 (no EP needed)
+    if config.autoep_size == 1:
+        logger.warning("autoep_size=1 means every rank owns all experts with no AllToAll. "
+                       "AutoEP replacement remains enabled, but expert-parallel communication "
+                       "is bypassed because every rank owns all experts.")
+
+    # Helper validators (local to validate_autoep_config)
+    def _validate_attr_name(field_name: str, value, *, allow_dot: bool = False) -> None:
+        if value is None:
+            return
+        if not isinstance(value, str) or value == "":
+            raise ValueError(f"{field_name} must be a non-empty string")
+        if not allow_dot and "." in value:
+            raise ValueError(f"{field_name} must be a direct attribute name (no dots)")
+
+    # Validate expert weight names
+    _validate_attr_name("expert_w1", config.expert_w1)
+    _validate_attr_name("expert_w2", config.expert_w2)
+    if config.expert_w3 is not _UNSET and config.expert_w3 is not None:
+        _validate_attr_name("expert_w3", config.expert_w3)
+
+    # Validate model.config attribute names
+    _validate_attr_name("num_experts_attr", config.num_experts_attr)
+    _validate_attr_name("top_k_attr", config.top_k_attr)
+
+    # Validate child-name fields (direct attribute names, not regex/path)
+    _validate_attr_name("router_pattern", config.router_pattern)
+    _validate_attr_name("expert_pattern", config.expert_pattern)
+    _validate_attr_name("shared_experts_pattern", config.shared_experts_pattern)
+    _validate_attr_name("shared_experts_gate_pattern", config.shared_experts_gate_pattern)
+
+    # Validate has_shared_experts type
+    if config.has_shared_experts is not None and not isinstance(config.has_shared_experts, bool):
+        raise ValueError("has_shared_experts must be a boolean when set")
+
+    # Warn if explicit top_k overrides top_k_attr
+    if isinstance(config.top_k, int) and config.top_k_attr is not None:
+        logger.warning("top_k is explicitly set; top_k_attr will be ignored.")
+
+    if config.routed_scaling_factor != "auto" and not isinstance(config.routed_scaling_factor, (int, float)):
+        raise ValueError("routed_scaling_factor must be a number or 'auto'")
+
+    # Validate shared expert field pairing
+    if config.has_shared_experts is True and not config.shared_experts_pattern:
+        logger.warning("has_shared_experts=True but shared_experts_pattern is not set. "
+                       "Shared expert detection requires both fields.")
+    if config.shared_experts_pattern and config.has_shared_experts is not True:
+        logger.warning(f"shared_experts_pattern='{config.shared_experts_pattern}' is set "
+                       f"but has_shared_experts is not True. Pattern will be ignored.")
+    if config.shared_experts_gate_pattern and config.has_shared_experts is not True:
+        logger.warning(f"shared_experts_gate_pattern='{config.shared_experts_gate_pattern}' is set "
+                       f"but has_shared_experts is not True. Pattern will be ignored.")
+
+    # Warn if custom override fields are set alongside preset_model or auto-detect
+    custom_fields_set = []
+    if config.moe_layer_pattern is not None:
+        custom_fields_set.append("moe_layer_pattern")
+    if config.router_pattern is not None:
+        custom_fields_set.append("router_pattern")
+    if config.expert_pattern is not None:
+        custom_fields_set.append("expert_pattern")
+    if config.expert_w1 is not None:
+        custom_fields_set.append("expert_w1")
+    if config.expert_w2 is not None:
+        custom_fields_set.append("expert_w2")
+    if config.expert_w3 is not _UNSET:
+        custom_fields_set.append("expert_w3")
+    if config.num_experts_attr is not None:
+        custom_fields_set.append("num_experts_attr")
+    if config.top_k_attr is not None:
+        custom_fields_set.append("top_k_attr")
+    if config.has_shared_experts is not None:
+        custom_fields_set.append("has_shared_experts")
+    if config.shared_experts_pattern is not None:
+        custom_fields_set.append("shared_experts_pattern")
+    if config.shared_experts_gate_pattern is not None:
+        custom_fields_set.append("shared_experts_gate_pattern")
+    if custom_fields_set and config.preset_model is not None:
+        logger.warning(f"Custom preset fields {custom_fields_set} are set alongside "
+                       f"preset_model='{config.preset_model}'. Custom fields will override "
+                       f"preset defaults during detection.")
+    if custom_fields_set and config.preset_model is None and config.moe_layer_pattern is None:
+        logger.warning(f"Custom preset fields {custom_fields_set} are set without preset_model or "
+                       f"moe_layer_pattern. Overrides will apply to auto-detected presets or try-all.")
 
 
 def validate_autoep_post_detection(
     config: AutoEPConfig,
-    layer_specs: List[MoELayerSpec],
+    specs: list[MoELayerSpec],
 ) -> None:
-    """Validate EP config after the model has been scanned for MoE layers.
-
-    Args:
-        config:      Parsed AutoEP config.
-        layer_specs: List of detected :class:`MoELayerSpec` objects.
-
-    Raises:
-        ValueError: If num_experts is not divisible by autoep_size.
-    """
-    if not config.enabled:
+    """Post-detection validation: ep_size vs num_experts constraints."""
+    if not config.enabled or not specs:
         return
 
-    if not layer_specs:
-        raise ValueError("AutoEP is enabled but no MoE layers were detected in the model. "
-                         "Check preset_model or layer_specs.")
+    for spec in specs:
+        # ep_size must not exceed num_experts
+        if config.autoep_size > spec.num_experts:
+            valid_divisors = _divisors(spec.num_experts)
+            raise ValueError(f"autoep_size={config.autoep_size} exceeds num_experts="
+                             f"{spec.num_experts} in layer '{spec.moe_module_name}'. "
+                             f"Each rank must own at least one expert. "
+                             f"Valid autoep_size values (divisors of {spec.num_experts}): "
+                             f"{valid_divisors}")
 
-    for spec in layer_specs:
+        # num_experts must be divisible by ep_size
         if spec.num_experts % config.autoep_size != 0:
-            raise ValueError(f"num_experts ({spec.num_experts}) for layer {spec.layer_idx} "
-                             f"is not divisible by autoep_size ({config.autoep_size}).")
+            valid_sizes = [d for d in _divisors(spec.num_experts) if d <= spec.num_experts]
+            raise ValueError(f"num_experts={spec.num_experts} in layer "
+                             f"'{spec.moe_module_name}' is not divisible by "
+                             f"autoep_size={config.autoep_size}. "
+                             f"Suggested autoep_size values: {valid_sizes}")
+
+        num_expert_groups = spec.num_expert_groups if spec.num_expert_groups is not None else config.num_expert_groups
+        num_limited_groups = spec.num_limited_groups if spec.num_limited_groups is not None else config.num_limited_groups
+
+        # Validate group-limited routing constraints after layer-specific defaults.
+        if num_limited_groups is not None and num_expert_groups is None:
+            raise ValueError(f"num_limited_groups requires num_expert_groups to be set "
+                             f"in layer '{spec.moe_module_name}'")
+
+        if num_expert_groups is not None:
+            if num_expert_groups < 1:
+                raise ValueError(f"num_expert_groups must be >= 1 in layer '{spec.moe_module_name}', "
+                                 f"got {num_expert_groups}")
+            if spec.num_experts % num_expert_groups != 0:
+                raise ValueError(f"num_expert_groups ({num_expert_groups}) must divide "
+                                 f"num_experts ({spec.num_experts}) in layer "
+                                 f"'{spec.moe_module_name}'")
+            if num_limited_groups is None:
+                raise ValueError(f"num_limited_groups must be set when num_expert_groups is set "
+                                 f"in layer '{spec.moe_module_name}'")
+            if num_limited_groups < 1:
+                raise ValueError(f"num_limited_groups must be >= 1 in layer '{spec.moe_module_name}', "
+                                 f"got {num_limited_groups}")
+            if num_limited_groups > num_expert_groups:
+                raise ValueError(f"num_limited_groups ({num_limited_groups}) must be <= "
+                                 f"num_expert_groups ({num_expert_groups}) in layer "
+                                 f"'{spec.moe_module_name}'")
+
+
+def _divisors(n: int) -> list[int]:
+    """Return sorted list of positive divisors of n."""
+    divs = []
+    for i in range(1, int(n**0.5) + 1):
+        if n % i == 0:
+            divs.append(i)
+            if i != n // i:
+                divs.append(n // i)
+    return sorted(divs)
+
+
+def fill_autoep_config_from_hf(config: AutoEPConfig, model_config) -> None:
+    """Back-fill AutoEPConfig fields from HF model config when user hasn't set them.
+
+    HF field names (e.g. n_group, topk_group, routed_scaling_factor) differ from
+    AutoEP's internal names, so we map them explicitly rather than relying on the
+    user to duplicate these values in the DS config JSON.
+    """
+    if model_config is None:
+        return
+    # n_group / topk_group: DeepSeek-style node-limited routing groups
+    if config.num_expert_groups is None:
+        config.num_expert_groups = getattr(model_config, 'n_group', None)
+    if config.num_limited_groups is None:
+        config.num_limited_groups = getattr(model_config, 'topk_group', None)
+    # routed_scaling_factor: sigmoid score scaling (DeepSeek-V3 / Moonlight)
+    if config.routed_scaling_factor == "auto":
+        hf_scale = getattr(model_config, 'routed_scaling_factor', None)
+        if hf_scale is not None:
+            config.route_scale = float(hf_scale)

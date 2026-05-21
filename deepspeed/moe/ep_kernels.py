@@ -1,5 +1,10 @@
-# Copyright (c) Microsoft Corporation.
-# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) DeepSpeed Team.
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+# SPDX-License-Identifier: Apache-2.0 AND BSD-3-Clause
+#
+# Portions of this file are derived from TorchTitan.
+# See THIRD_PARTY_NOTICES.md for the BSD-3-Clause notice.
 
 # DeepSpeed Team
 """
@@ -19,6 +24,8 @@ from typing import Callable
 
 import torch
 import torch.nn as nn
+
+from deepspeed.moe.ep_count import count_tokens_per_expert
 
 logger = logging.getLogger(__name__)
 
@@ -129,6 +136,7 @@ def fill_indices_wrapper(
 
     num_blocks = min(experts_per_rank, max_blocks)
     grid = (num_blocks, )
+
     _fill_indices_kernel[grid](
         tokens_per_expert_group,
         start_index_values,
@@ -360,13 +368,7 @@ class TokenReorderer(nn.Module):
                   token-slot indices sorted by expert.
                 - num_tokens_per_expert ``(num_experts,)``: histogram.
         """
-        # histc requires float input on CPU, so cast indices
-        num_tokens_per_expert = torch.histc(
-            selected_experts_indices.view(-1).float(),
-            bins=self.num_experts,
-            min=0,
-            max=self.num_experts,
-        )
+        num_tokens_per_expert = count_tokens_per_expert(selected_experts_indices, self.num_experts)
 
         token_indices_experts_sorted = torch.argsort(selected_experts_indices.view(-1), stable=True)
 

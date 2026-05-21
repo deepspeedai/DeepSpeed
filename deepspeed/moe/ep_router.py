@@ -1,5 +1,10 @@
-# Copyright (c) Microsoft Corporation.
-# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) DeepSpeed Team.
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+# SPDX-License-Identifier: Apache-2.0 AND BSD-3-Clause
+#
+# Portions of this file are derived from TorchTitan.
+# See THIRD_PARTY_NOTICES.md for the BSD-3-Clause notice.
 
 # DeepSpeed Team
 """
@@ -13,6 +18,8 @@ or deepspeed.runtime.
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+from deepspeed.moe.ep_count import count_tokens_per_expert
 
 
 class TokenChoiceTopKRouter(nn.Module):
@@ -43,13 +50,14 @@ class TokenChoiceTopKRouter(nn.Module):
         self,
         dim: int,
         num_experts: int,
+        num_expert_groups: int | None,
+        num_limited_groups: int | None,
         top_k: int,
+        score_func: str,
+        route_norm: bool,
+        route_scale: float,
         gate_bias: bool,
-        num_expert_groups: int | None = None,
-        num_limited_groups: int | None = None,
-        score_func: str = "softmax",
-        route_norm: bool = False,
-        route_scale: float = 1.0,
+        group_score_func: str = "top2_sum",
     ):
         super().__init__()
         self.gate = nn.Linear(dim, num_experts, bias=gate_bias)
@@ -60,6 +68,10 @@ class TokenChoiceTopKRouter(nn.Module):
         self.score_func = score_func
         self.route_norm = route_norm
         self.route_scale = route_scale
+        self.group_score_func = group_score_func
+        # Trainable expert score correction bias (e.g. DeepSeek-V3/Moonlight noaux_tc).
+        # Separate from the dynamic load-balancing expert_bias passed in forward().
+        self.e_score_correction_bias = None
 
     # ------------------------------------------------------------------
     # Node-limited (group-limited) routing
@@ -83,18 +95,25 @@ class TokenChoiceTopKRouter(nn.Module):
         if self.num_limited_groups is None:
             raise ValueError("num_limited_groups must be set when num_expert_groups is set")
         assert self.num_expert_groups is not None
+        if self.num_limited_groups < 1:
+            raise ValueError(f"num_limited_groups must be >= 1, got {self.num_limited_groups}")
         if self.num_experts % self.num_expert_groups != 0:
             raise ValueError(f"num_experts ({self.num_experts}) must be divisible by "
                              f"num_expert_groups ({self.num_expert_groups})")
 
         experts_per_group = self.num_experts // self.num_expert_groups
-        if experts_per_group < 2:
-            raise ValueError(f"experts_per_group ({experts_per_group}) must be >= 2")
 
         scores_grouped = scores_for_choice.view(-1, self.num_expert_groups, experts_per_group)
-        # Score each group by the sum of its top-2 expert scores
-        top2_scores_in_group, _ = scores_grouped.topk(2, dim=-1)
-        group_scores = top2_scores_in_group.sum(dim=-1)
+        if self.group_score_func == "max":
+            group_scores = scores_grouped.max(dim=-1).values
+        elif self.group_score_func == "top2_sum":
+            if experts_per_group < 2:
+                raise ValueError(f"experts_per_group ({experts_per_group}) must be >= 2")
+            # DeepSeek-V3 scores each group by the sum of its top-2 experts.
+            top2_scores_in_group, _ = scores_grouped.topk(2, dim=-1)
+            group_scores = top2_scores_in_group.sum(dim=-1)
+        else:
+            raise NotImplementedError(f"Unknown group score function: {self.group_score_func}")
 
         # Select top groups
         _, group_idx = torch.topk(group_scores, k=self.num_limited_groups, dim=-1, sorted=False)
@@ -142,6 +161,10 @@ class TokenChoiceTopKRouter(nn.Module):
 
         scores_for_choice = (scores if expert_bias is None else scores + expert_bias)
 
+        # Apply pre-trained score correction bias (e.g. DeepSeek-V3 noaux_tc routing)
+        if self.e_score_correction_bias is not None:
+            scores_for_choice = scores_for_choice + self.e_score_correction_bias.unsqueeze(0)
+
         # Apply node-limited routing if configured
         if self.num_expert_groups is not None:
             scores_for_choice = self._get_node_limited_routing_scores(scores_for_choice)
@@ -159,13 +182,6 @@ class TokenChoiceTopKRouter(nn.Module):
 
         top_scores = top_scores * self.route_scale
 
-        # Count tokens per expert
-        # histc requires float input on CPU, so cast indices
-        num_tokens_per_expert = torch.histc(
-            selected_experts_indices.view(-1).float(),
-            bins=self.num_experts,
-            min=0,
-            max=self.num_experts,
-        )
+        num_tokens_per_expert = count_tokens_per_expert(selected_experts_indices, self.num_experts)
 
         return top_scores, selected_experts_indices, num_tokens_per_expert

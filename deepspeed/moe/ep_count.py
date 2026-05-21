@@ -1,31 +1,41 @@
-# Copyright (c) Microsoft Corporation.
+# Copyright (c) DeepSpeed Team.
 # SPDX-License-Identifier: Apache-2.0
 
 # DeepSpeed Team
-"""Token count utilities for expert parallelism."""
+"""Helpers for expert token counting in AutoEP routing paths."""
 
 import torch
 
+from deepspeed.accelerator import get_accelerator
+
 
 def count_tokens_per_expert(
-    selected_experts: torch.Tensor,
+    selected_experts_indices: torch.Tensor,
     num_experts: int,
+    *,
     out_dtype: torch.dtype = torch.float32,
+    deterministic_safe: bool = False,
 ) -> torch.Tensor:
-    """Count the number of tokens routed to each expert.
+    """Count routed tokens per expert.
 
-    Args:
-        selected_experts: Expert indices per token, shape ``(T, top_k)`` or ``(N,)``.
-        num_experts: Total number of experts (global, before EP slicing).
-        out_dtype: Output dtype.  Defaults to float32 because ``torch.histc``
-            requires float input on CPU.
-
-    Returns:
-        Token-count histogram, shape ``(num_experts,)``.
+    Fast path uses ``torch.bincount`` on the current device.
+    If ``deterministic_safe=True`` and deterministic algorithms are enabled
+    on CUDA, this falls back to CPU bincount to avoid non-deterministic kernel
+    restrictions.
     """
-    return torch.histc(
-        selected_experts.view(-1).float(),
-        bins=num_experts,
-        min=0,
-        max=num_experts,
-    ).to(out_dtype)
+    flat_indices = selected_experts_indices.reshape(-1).to(torch.int64)
+
+    if deterministic_safe and torch.are_deterministic_algorithms_enabled() and get_accelerator().on_accelerator(
+            flat_indices):
+        counts = torch.bincount(flat_indices.detach().cpu(), minlength=num_experts)
+        counts = counts.to(selected_experts_indices.device)
+    else:
+        counts = torch.bincount(flat_indices, minlength=num_experts)
+
+    if counts.numel() < num_experts:
+        pad = torch.zeros(num_experts - counts.numel(), device=counts.device, dtype=counts.dtype)
+        counts = torch.cat([counts, pad], dim=0)
+    elif counts.numel() > num_experts:
+        counts = counts[:num_experts]
+
+    return counts.to(out_dtype)
