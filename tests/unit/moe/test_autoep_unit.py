@@ -87,6 +87,11 @@ def _make_spec(**kwargs):
     return MoELayerSpec(**defaults)
 
 
+def _assert_same_dtype_device(actual, expected):
+    assert actual.dtype == expected.dtype
+    assert actual.device == expected.device
+
+
 class MockLlama4Config:
     model_type = "llama4"
     num_local_experts = 8
@@ -423,7 +428,7 @@ class TestModelDetectionAndReplacement:
         assert model(torch.randn(1, 4, 64)).shape == (1, 4, 100)
 
     def test_fused_replacement_preserves_frozen_experts_and_trainable_router(self):
-        model = MockMoETransformer(num_layers=1, num_experts=4, moe_every_n=1)
+        model = MockMoETransformer(num_layers=1, num_experts=4, moe_every_n=1).to(dtype=torch.bfloat16)
         source = model.model.layers[0].mlp
         source.experts.gate_up_proj.requires_grad_(False)
         source.experts.down_proj.requires_grad_(False)
@@ -439,16 +444,23 @@ class TestModelDetectionAndReplacement:
         assert replaced.experts.w2.requires_grad is False
         assert replaced.experts.w3.requires_grad is False
         assert replaced.router.gate.weight.requires_grad is True
+        _assert_same_dtype_device(replaced.router.gate.weight, source.gate.weight)
+        _assert_same_dtype_device(replaced.experts.w1, source.experts.gate_up_proj)
+        _assert_same_dtype_device(replaced.experts.w2, source.experts.down_proj)
+        _assert_same_dtype_device(replaced.experts.w3, source.experts.gate_up_proj)
 
     def test_module_list_replacement_preserves_frozen_experts_and_trainable_router(self, monkeypatch):
         monkeypatch.setattr(get_preset_adapter("deepseek_v3"), "_installed_transformers_version", lambda: "5.0.0")
-        model = MockDeepSeekV3Transformer(num_layers=1, num_experts=4)
+        model = MockDeepSeekV3Transformer(num_layers=1, num_experts=4).to(dtype=torch.bfloat16)
         source = model.model.layers[0].mlp
         for expert in source.experts:
             for param in expert.parameters():
                 param.requires_grad_(False)
         source.gate.weight.requires_grad_(True)
-        source.gate.e_score_correction_bias = nn.Parameter(torch.zeros(4), requires_grad=True)
+        source.gate.e_score_correction_bias = nn.Parameter(torch.zeros(4,
+                                                                        dtype=source.gate.weight.dtype,
+                                                                        device=source.gate.weight.device),
+                                                           requires_grad=True)
 
         auto_ep = AutoEP(model, _runtime_config(enabled=True, autoep_size=2))
         spec = auto_ep.ep_parser()[0]
@@ -461,6 +473,11 @@ class TestModelDetectionAndReplacement:
         assert replaced.experts.w3.requires_grad is False
         assert replaced.router.gate.weight.requires_grad is True
         assert replaced.router.e_score_correction_bias.requires_grad is True
+        _assert_same_dtype_device(replaced.router.gate.weight, source.gate.weight)
+        _assert_same_dtype_device(replaced.router.e_score_correction_bias, source.gate.e_score_correction_bias)
+        _assert_same_dtype_device(replaced.experts.w1, source.experts[0].gate_proj.weight)
+        _assert_same_dtype_device(replaced.experts.w2, source.experts[0].down_proj.weight)
+        _assert_same_dtype_device(replaced.experts.w3, source.experts[0].up_proj.weight)
 
     def test_module_list_mixed_expert_requires_grad_flags_are_rejected(self, monkeypatch):
         monkeypatch.setattr(get_preset_adapter("deepseek_v3"), "_installed_transformers_version", lambda: "5.0.0")
@@ -472,6 +489,15 @@ class TestModelDetectionAndReplacement:
         auto_ep = AutoEP(model, _runtime_config(enabled=True, autoep_size=2))
         spec = auto_ep.ep_parser()[0]
         with pytest.raises(ValueError, match="mixed requires_grad flags"):
+            auto_ep.replace_moe_layer(spec, ep_size=2, ep_rank=0)
+
+        model = MockDeepSeekV3Transformer(num_layers=1, num_experts=4)
+        source = model.model.layers[0].mlp
+        source.experts[1].gate_proj.to(dtype=torch.float64)
+
+        auto_ep = AutoEP(model, _runtime_config(enabled=True, autoep_size=2))
+        spec = auto_ep.ep_parser()[0]
+        with pytest.raises(ValueError, match="mixed dtype/device"):
             auto_ep.replace_moe_layer(spec, ep_size=2, ep_rank=0)
 
     def test_hf_mixtral_causal_lm_matches_autoep_with_router_logits(self):

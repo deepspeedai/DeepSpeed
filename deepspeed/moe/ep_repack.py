@@ -173,6 +173,11 @@ def _repack_module_list(
             w3_param = _get_expert_weight(expert, spec.expert_w3_name)
             w3_list.append(w3_param.data.clone())
 
+    _require_consistent_dtype_device(w1_list, spec.expert_w1_name, expert_start, expert_end)
+    _require_consistent_dtype_device(w2_list, spec.expert_w2_name, expert_start, expert_end)
+    if spec.expert_w3_name is not None:
+        _require_consistent_dtype_device(w3_list, spec.expert_w3_name, expert_start, expert_end)
+
     w1 = torch.stack(w1_list)  # [E_local, ffn_hidden, hidden]
     w2 = torch.stack(w2_list)  # [E_local, hidden, ffn_hidden]
 
@@ -256,6 +261,23 @@ def _get_expert_weight(expert_module: nn.Module, weight_name: str) -> torch.Tens
 
 def _requires_grad(weight: torch.Tensor | nn.Parameter) -> bool:
     return bool(getattr(weight, "requires_grad", False))
+
+
+def _require_consistent_dtype_device(
+    tensors: list[torch.Tensor],
+    weight_name: str,
+    expert_start: int,
+    expert_end: int,
+) -> None:
+    expected_dtype = tensors[0].dtype
+    expected_device = tensors[0].device
+    for expert_idx, tensor in enumerate(tensors, start=expert_start):
+        if tensor.dtype != expected_dtype or tensor.device != expected_device:
+            raise ValueError("AutoEP cannot preserve mixed dtype/device for "
+                             f"module_list experts {expert_start}:{expert_end} weight '{weight_name}' "
+                             "because they are packed into one grouped expert tensor. "
+                             f"Expected {expected_dtype} on {expected_device}, "
+                             f"found {tensor.dtype} on {tensor.device} at expert {expert_idx}.")
 
 
 def _require_consistent_requires_grad(

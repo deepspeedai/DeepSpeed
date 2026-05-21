@@ -68,6 +68,12 @@ def resolve_combine_impl(
     return "weighted_sum"
 
 
+def _copy_parameter_data(target: nn.Parameter, source: torch.Tensor) -> None:
+    with torch.no_grad():
+        target.data = torch.empty_like(source.data)
+        target.data.copy_(source.data)
+
+
 def apply_scores_before_experts_if_enabled(
     routed_input: torch.Tensor,
     top_scores: torch.Tensor,
@@ -391,10 +397,10 @@ class AutoEPMoELayer(nn.Module):
             group_score_func=spec.group_score_func,
         )
         # Copy gate weights
-        self.router.gate.weight.data.copy_(source_gate.weight.data)
+        _copy_parameter_data(self.router.gate.weight, source_gate.weight)
         self.router.gate.weight.requires_grad_(source_gate.weight.requires_grad)
         if spec.gate_bias and getattr(source_gate, 'bias', None) is not None:
-            self.router.gate.bias.data.copy_(source_gate.bias.data)
+            _copy_parameter_data(self.router.gate.bias, source_gate.bias)
             self.router.gate.bias.requires_grad_(source_gate.bias.requires_grad)
 
         # Copy pre-trained score correction bias (DeepSeek-V3/Moonlight noaux_tc routing)
@@ -433,9 +439,9 @@ class AutoEPMoELayer(nn.Module):
             num_experts=self.num_local_experts,
             use_grouped_mm=config.use_grouped_mm,
         )
-        self.experts.w1.data.copy_(w1)
-        self.experts.w2.data.copy_(w2)
-        self.experts.w3.data.copy_(w3)
+        _copy_parameter_data(self.experts.w1, w1)
+        _copy_parameter_data(self.experts.w2, w2)
+        _copy_parameter_data(self.experts.w3, w3)
         self.experts.w1.requires_grad_(w1_requires_grad)
         self.experts.w2.requires_grad_(w2_requires_grad)
         self.experts.w3.requires_grad_(w3_requires_grad)
