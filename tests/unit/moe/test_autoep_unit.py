@@ -458,8 +458,8 @@ class TestModelDetectionAndReplacement:
                 param.requires_grad_(False)
         source.gate.weight.requires_grad_(True)
         source.gate.e_score_correction_bias = nn.Parameter(torch.zeros(4,
-                                                                        dtype=source.gate.weight.dtype,
-                                                                        device=source.gate.weight.device),
+                                                                       dtype=source.gate.weight.dtype,
+                                                                       device=source.gate.weight.device),
                                                            requires_grad=True)
 
         auto_ep = AutoEP(model, _runtime_config(enabled=True, autoep_size=2))
