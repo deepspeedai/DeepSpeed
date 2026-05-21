@@ -59,7 +59,9 @@ class DeepSpeedCPUAdam(torch.optim.Optimizer):
                 (default: False) NOT SUPPORTED in DeepSpeed CPUAdam!
             adamw_mode: select between Adam and AdamW implementations (default: AdamW)
             fp32_optimizer_states: creates momentum and variance in full precision regardless of
-                        the precision of the parameters (default: True)
+                        the precision of the parameters. Set to False to keep optimizer states
+                        in the parameter dtype (e.g. bf16), which reduces the optimizer-state
+                        memory footprint at the cost of lower state precision. (default: True)
         """
 
         default_args = dict(lr=lr,
