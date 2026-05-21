@@ -280,8 +280,9 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             fp16_master_weights_and_gradients=fp16_master_weights_and_gradients,
             bf16_master_weights_and_gradients=bf16_master_weights_and_gradients,
             bf16_optimizer_states=bf16_optimizer_states,
+            offload_enabled=self.cpu_offload,
             fp16_offload_validator=_enforce_cpu_offload,
-            bf16_fp32_offload_validator=_enforce_cpu_offload)
+            bf16_offload_validator=_enforce_cpu_offload)
 
         self.low_precision_master_weights_and_grads = self.master_weights_and_grads_dtype != torch.float32
 

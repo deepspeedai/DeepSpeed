@@ -120,6 +120,23 @@ class TorchBackend(Backend):
         self.init_process_group(backend, timeout, init_method, rank, world_size)
         if self.shm_comm_op != None:
             self.shm_comm_op.initialize(self.get_world_size(), self.get_rank())
+        # Best-effort SDMA (mori) backend acquisition.  Stays None on
+        # non-AMD/ROCm or when mori is unavailable; in that case
+        # all_gather_into_tensor below transparently falls through to
+        # torch.distributed.all_gather_into_tensor.
+        self._init_sdma_backend()
+
+    def _init_sdma_backend(self):
+        """Try to enable the mori SDMA path for ``all_gather_into_tensor``.
+
+        Failure (non-AMD, mori not installed, shmem init error) leaves the
+        handle unset and the standard torch.distributed allgather is used.
+        """
+        try:
+            from . import mori as _mori
+            _mori.init()
+        except Exception:
+            pass
 
     @classmethod
     @disable_compiler_collective
@@ -233,6 +250,15 @@ class TorchBackend(Backend):
 
     @disable_compiler_collective
     def all_gather_into_tensor(self, output_tensor, input_tensor, group=None, async_op=False):
+        # Transparent SDMA fast-path on AMD/ROCm: when the mori backend is
+        # available and the call is on the WORLD process group, route
+        # through mori_cpp.AllGatherIntoTensor.  Any condition that makes
+        # SDMA unsafe (non-WORLD group, oversized shard, unsupported dtype,
+        # mori unavailable) yields None and we fall through to RCCL/NCCL.
+        from . import mori as _mori
+        sdma_work = _mori.allgather_into_tensor(input_tensor, output_tensor, group=group)
+        if sdma_work is not None:
+            return sdma_work
         if self.has_all_gather_into_tensor():
             return self.all_gather_function(output_tensor=output_tensor,
                                             input_tensor=input_tensor,
