@@ -56,6 +56,25 @@ def repack_expert_weights(
         raise ValueError(f"Unknown expert_storage type: {spec.expert_storage}")
 
 
+def repack_expert_requires_grad_flags(
+    experts_source: nn.Module,
+    spec: MoELayerSpec,
+    ep_rank: int,
+    ep_size: int,
+) -> tuple[bool, bool, bool]:
+    """Return the requires_grad flags for repacked (w1, w2, w3) tensors."""
+    num_local_experts = spec.num_experts // ep_size
+    expert_start = ep_rank * num_local_experts
+    expert_end = expert_start + num_local_experts
+
+    if spec.expert_storage == "fused_3d":
+        return _repack_fused_3d_requires_grad_flags(experts_source, spec)
+    elif spec.expert_storage == "module_list":
+        return _repack_module_list_requires_grad_flags(experts_source, spec, expert_start, expert_end)
+    else:
+        raise ValueError(f"Unknown expert_storage type: {spec.expert_storage}")
+
+
 def _repack_fused_3d(
     experts_source: nn.Module,
     spec: MoELayerSpec,
@@ -105,6 +124,23 @@ def _repack_fused_3d(
     return w1, w2, w3
 
 
+def _repack_fused_3d_requires_grad_flags(
+    experts_source: nn.Module,
+    spec: MoELayerSpec,
+) -> tuple[bool, bool, bool]:
+    w1_param = getattr(experts_source, spec.expert_w1_name)
+    w2_param = getattr(experts_source, spec.expert_w2_name)
+    w1_requires_grad = _requires_grad(w1_param)
+    w2_requires_grad = _requires_grad(w2_param)
+
+    if spec.expert_w3_name is None:
+        w3_requires_grad = w1_requires_grad
+    else:
+        w3_requires_grad = _requires_grad(getattr(experts_source, spec.expert_w3_name))
+
+    return w1_requires_grad, w2_requires_grad, w3_requires_grad
+
+
 def _repack_module_list(
     experts_source: nn.Module,
     spec: MoELayerSpec,
@@ -151,6 +187,50 @@ def _repack_module_list(
     return w1, w2, w3
 
 
+def _repack_module_list_requires_grad_flags(
+    experts_source: nn.Module,
+    spec: MoELayerSpec,
+    expert_start: int,
+    expert_end: int,
+) -> tuple[bool, bool, bool]:
+    assert isinstance(experts_source, nn.ModuleList), \
+        f"Expected nn.ModuleList for module_list storage, got {type(experts_source)}"
+
+    w1_flags = []
+    w2_flags = []
+    w3_flags = []
+    for expert_idx in range(expert_start, expert_end):
+        expert = experts_source[expert_idx]
+        w1_flags.append(_get_expert_weight(expert, spec.expert_w1_name).requires_grad)
+        w2_flags.append(_get_expert_weight(expert, spec.expert_w2_name).requires_grad)
+        if spec.expert_w3_name is not None:
+            w3_flags.append(_get_expert_weight(expert, spec.expert_w3_name).requires_grad)
+
+    w1_requires_grad = _require_consistent_requires_grad(
+        w1_flags,
+        spec.expert_w1_name,
+        expert_start,
+        expert_end,
+    )
+    w2_requires_grad = _require_consistent_requires_grad(
+        w2_flags,
+        spec.expert_w2_name,
+        expert_start,
+        expert_end,
+    )
+    if spec.expert_w3_name is None:
+        w3_requires_grad = w1_requires_grad
+    else:
+        w3_requires_grad = _require_consistent_requires_grad(
+            w3_flags,
+            spec.expert_w3_name,
+            expert_start,
+            expert_end,
+        )
+
+    return w1_requires_grad, w2_requires_grad, w3_requires_grad
+
+
 def _get_expert_weight(expert_module: nn.Module, weight_name: str) -> torch.Tensor:
     """Get expert weight tensor by name, handling both attribute and child module patterns."""
     # Direct attribute
@@ -172,3 +252,20 @@ def _get_expert_weight(expert_module: nn.Module, weight_name: str) -> torch.Tens
     raise ValueError(f"Could not find weight '{weight_name}' in expert module "
                      f"{type(expert_module).__name__}. Available attributes: "
                      f"{[n for n, _ in expert_module.named_parameters(recurse=False)]}")
+
+
+def _requires_grad(weight: torch.Tensor | nn.Parameter) -> bool:
+    return bool(getattr(weight, "requires_grad", False))
+
+
+def _require_consistent_requires_grad(
+    flags: list[bool],
+    weight_name: str,
+    expert_start: int,
+    expert_end: int,
+) -> bool:
+    if len(set(flags)) != 1:
+        raise ValueError("AutoEP cannot preserve mixed requires_grad flags for "
+                         f"module_list experts {expert_start}:{expert_end} weight '{weight_name}' "
+                         "because they are packed into one grouped expert tensor.")
+    return flags[0]

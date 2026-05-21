@@ -422,6 +422,58 @@ class TestModelDetectionAndReplacement:
         assert isinstance(model.model.layers[0].mlp, AutoEPMoELayer)
         assert model(torch.randn(1, 4, 64)).shape == (1, 4, 100)
 
+    def test_fused_replacement_preserves_frozen_experts_and_trainable_router(self):
+        model = MockMoETransformer(num_layers=1, num_experts=4, moe_every_n=1)
+        source = model.model.layers[0].mlp
+        source.experts.gate_up_proj.requires_grad_(False)
+        source.experts.down_proj.requires_grad_(False)
+        source.gate.weight.requires_grad_(True)
+
+        auto_ep = AutoEP(model, _runtime_config(enabled=True, autoep_size=1, preset_model="mixtral"))
+        spec = auto_ep.ep_parser()[0]
+        auto_ep.replace_moe_layer(spec, ep_size=1, ep_rank=0)
+
+        replaced = model.model.layers[0].mlp
+        assert isinstance(replaced, AutoEPMoELayer)
+        assert replaced.experts.w1.requires_grad is False
+        assert replaced.experts.w2.requires_grad is False
+        assert replaced.experts.w3.requires_grad is False
+        assert replaced.router.gate.weight.requires_grad is True
+
+    def test_module_list_replacement_preserves_frozen_experts_and_trainable_router(self, monkeypatch):
+        monkeypatch.setattr(get_preset_adapter("deepseek_v3"), "_installed_transformers_version", lambda: "5.0.0")
+        model = MockDeepSeekV3Transformer(num_layers=1, num_experts=4)
+        source = model.model.layers[0].mlp
+        for expert in source.experts:
+            for param in expert.parameters():
+                param.requires_grad_(False)
+        source.gate.weight.requires_grad_(True)
+        source.gate.e_score_correction_bias = nn.Parameter(torch.zeros(4), requires_grad=True)
+
+        auto_ep = AutoEP(model, _runtime_config(enabled=True, autoep_size=2))
+        spec = auto_ep.ep_parser()[0]
+        auto_ep.replace_moe_layer(spec, ep_size=2, ep_rank=0)
+
+        replaced = model.model.layers[0].mlp
+        assert isinstance(replaced, AutoEPMoELayer)
+        assert replaced.experts.w1.requires_grad is False
+        assert replaced.experts.w2.requires_grad is False
+        assert replaced.experts.w3.requires_grad is False
+        assert replaced.router.gate.weight.requires_grad is True
+        assert replaced.router.e_score_correction_bias.requires_grad is True
+
+    def test_module_list_mixed_expert_requires_grad_flags_are_rejected(self, monkeypatch):
+        monkeypatch.setattr(get_preset_adapter("deepseek_v3"), "_installed_transformers_version", lambda: "5.0.0")
+        model = MockDeepSeekV3Transformer(num_layers=1, num_experts=4)
+        source = model.model.layers[0].mlp
+        source.experts[0].gate_proj.weight.requires_grad_(False)
+        source.experts[1].gate_proj.weight.requires_grad_(True)
+
+        auto_ep = AutoEP(model, _runtime_config(enabled=True, autoep_size=2))
+        spec = auto_ep.ep_parser()[0]
+        with pytest.raises(ValueError, match="mixed requires_grad flags"):
+            auto_ep.replace_moe_layer(spec, ep_size=2, ep_rank=0)
+
     def test_hf_mixtral_causal_lm_matches_autoep_with_router_logits(self):
         transformers = pytest.importorskip("transformers")
         skip_unless_transformers_has(transformers,

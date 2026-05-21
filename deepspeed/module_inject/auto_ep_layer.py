@@ -25,7 +25,7 @@ from deepspeed.moe.ep_router import TokenChoiceTopKRouter
 from deepspeed.moe.ep_count import count_tokens_per_expert
 from deepspeed.moe.ep_experts import GroupedExperts
 from deepspeed.moe.ep_kernels import TokenReorderer
-from deepspeed.moe.ep_repack import repack_expert_weights
+from deepspeed.moe.ep_repack import repack_expert_requires_grad_flags, repack_expert_weights
 
 # ---------------------------------------------------------------------------
 # Named tuples
@@ -392,13 +392,16 @@ class AutoEPMoELayer(nn.Module):
         )
         # Copy gate weights
         self.router.gate.weight.data.copy_(source_gate.weight.data)
+        self.router.gate.weight.requires_grad_(source_gate.weight.requires_grad)
         if spec.gate_bias and getattr(source_gate, 'bias', None) is not None:
             self.router.gate.bias.data.copy_(source_gate.bias.data)
+            self.router.gate.bias.requires_grad_(source_gate.bias.requires_grad)
 
         # Copy pre-trained score correction bias (DeepSeek-V3/Moonlight noaux_tc routing)
         source_ecb = getattr(source_gate, 'e_score_correction_bias', None)
         if source_ecb is not None and isinstance(source_ecb, nn.Parameter):
-            self.router.e_score_correction_bias = nn.Parameter(source_ecb.data.clone())
+            self.router.e_score_correction_bias = nn.Parameter(source_ecb.data.clone(),
+                                                               requires_grad=source_ecb.requires_grad)
             logger.info('AutoEP: copied e_score_correction_bias from source gate '
                         '(shape=%s)', source_ecb.shape)
 
@@ -418,6 +421,12 @@ class AutoEPMoELayer(nn.Module):
             ep_rank=ep_rank,
             ep_size=ep_size,
         )
+        w1_requires_grad, w2_requires_grad, w3_requires_grad = repack_expert_requires_grad_flags(
+            experts_source=getattr(source_module, spec.experts_name),
+            spec=spec,
+            ep_rank=ep_rank,
+            ep_size=ep_size,
+        )
         self.experts = GroupedExperts(
             dim=spec.hidden_size,
             hidden_dim=spec.ffn_hidden_size,
@@ -427,6 +436,9 @@ class AutoEPMoELayer(nn.Module):
         self.experts.w1.data.copy_(w1)
         self.experts.w2.data.copy_(w2)
         self.experts.w3.data.copy_(w3)
+        self.experts.w1.requires_grad_(w1_requires_grad)
+        self.experts.w2.requires_grad_(w2_requires_grad)
+        self.experts.w3.requires_grad_(w3_requires_grad)
 
         self.reorderer = TokenReorderer(num_experts=self.num_experts, top_k=self.top_k)
         self.shared_experts = getattr(source_module, spec.shared_experts_name,
