@@ -689,6 +689,21 @@ class CUDAOpBuilder(OpBuilder):
             raise RuntimeError(
                 f"Unable to load {self.name} op due to no compute capabilities remaining after filtering")
 
+        # Sort and dedupe so the emitted -gencode sequence is deterministic and
+        # matches PyTorch's own canonicalisation (see #7871). Use a tuple key
+        # of (major, minor, has_PTX) so X.Y stays distinct from X.Y+PTX and the
+        # +PTX variant always sorts after the bare arch, with no ties left for
+        # hash-ordered iteration to resolve non-deterministically.
+        def _cc_sort_key(cc):
+            major = int(cc[0])
+            minor_part = cc[1]
+            has_ptx = minor_part.endswith('+PTX')
+            minor = int(minor_part.split('+')[0])
+            return (major, minor, has_ptx)
+
+        unique_ccs = {tuple(cc): None for cc in ccs}
+        ccs = [list(cc) for cc in sorted(unique_ccs, key=_cc_sort_key)]
+
         self.enable_bf16 = True
         for cc in ccs:
             if int(cc[0]) <= 7:

@@ -163,3 +163,37 @@ def test_non_jit_branch_unchanged():
         "-gencode=arch=compute_89,code=sm_89",
         "-gencode=arch=compute_89,code=compute_89",
     ]
+
+
+def test_non_jit_branch_sorts_and_dedupes_gencode_flags():
+    builder = make_builder(jit_mode=False)
+
+    with patch.dict(os.environ, {"TORCH_CUDA_ARCH_LIST": "8.0;7.5;8.0;7.0"}, clear=False):
+        args = builder.compute_capability_args()
+        assert os.environ["TORCH_CUDA_ARCH_LIST"] == "7.0;7.5;8.0"
+
+    assert args == [
+        "-gencode=arch=compute_70,code=sm_70",
+        "-gencode=arch=compute_75,code=sm_75",
+        "-gencode=arch=compute_80,code=sm_80",
+    ]
+
+
+def test_non_jit_branch_orders_ptx_after_bare_arch_deterministically():
+    # Regression for hash-ordered set iteration with mixed X.Y and X.Y+PTX
+    # entries. X.Y and X.Y+PTX must stay distinct and the +PTX variant must
+    # always sort after the bare arch, regardless of input order or hash seed.
+    expected_arch_list = "7.5;8.0;8.0+PTX"
+    expected_args = [
+        "-gencode=arch=compute_75,code=sm_75",
+        "-gencode=arch=compute_80,code=sm_80",
+        "-gencode=arch=compute_80,code=sm_80",
+        "-gencode=arch=compute_80,code=compute_80",
+    ]
+
+    for arch_input in ("8.0;8.0+PTX;7.5", "7.5;8.0+PTX;8.0", "8.0+PTX;7.5;8.0", "8.0;7.5;8.0+PTX"):
+        builder = make_builder(jit_mode=False)
+        with patch.dict(os.environ, {"TORCH_CUDA_ARCH_LIST": arch_input}, clear=False):
+            args = builder.compute_capability_args()
+            assert os.environ["TORCH_CUDA_ARCH_LIST"] == expected_arch_list, arch_input
+        assert args == expected_args, arch_input
