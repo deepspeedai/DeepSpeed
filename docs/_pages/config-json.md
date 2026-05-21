@@ -41,6 +41,17 @@ toc_label: "Contents"
 
 Muon optimizer is supported with ZeRO Stage 1, 2, and 3. To use Muon, set the optimizer name to `Muon`. The parameters applied for Muon are automatically determined by the matrix shape and name. For ZeRO Stage 3 with NVMe offloading, set `save_muon_momentum_buffer_in_memory` to `true` under `zero_optimization` to keep the Muon momentum buffer in GPU/CPU memory instead of swapping to NVMe.
 
+Muon supports the following params:
+
+| "params" key   | Description                                                                                                          | Default   |
+| -------------- | -------------------------------------------------------------------------------------------------------------------- | --------- |
+| lr             | Learning rate for all parameters. Overridden by `muon_lr` / `adam_lr` if set.                                        | 0.001     |
+| momentum       | Momentum coefficient for the Muon update.                                                                            | 0.95      |
+| weight\_decay  | Weight decay (AdamW-style).                                                                                          | 0.0       |
+| muon\_lr       | Learning rate override for Muon parameters. Defaults to `lr` if not set.                                             | -         |
+| adam\_lr       | Learning rate override for non-Muon (Adam) parameters. Defaults to `lr` if not set.                                  | -         |
+| ns\_method     | Newton-Schulz orthogonalization method: `"gram"` for Gram NS (~2x faster on rectangular matrices), `"standard"` for the original iteration. Use `"standard"` to fall back if you encounter convergence issues. | `"gram"`  |
+
   Example of <i>**optimizer**</i> with Adam
 
 ```json
@@ -73,7 +84,8 @@ If not set, muon_lr will default to lr.
       "lr": 0.001,
       "momentum": 0.9,
       "weight_decay": 0.0,
-      "muon_lr": 0.001
+      "muon_lr": 0.001,
+      "ns_method": "gram"
     }
   },
   "zero_optimization": {
@@ -350,14 +362,14 @@ Example of <i>**scheduler**</i>
 
 | Description | Default |
 | ----------- | ------- |
-| Keep optimizer states in bf16 as well. Requires `bf16_master_weights_and_grads=true`. Enabling this removes the offload requirement because optimizer states no longer stay fp32. | `false` |
+| Keep optimizer states in bf16 as well. Requires `bf16_master_weights_and_grads=true`. Offload is optional: without `offload_optimizer` the bf16 states stay on the GPU; with `offload_optimizer` (`DeepSpeedCPUAdam`) they are offloaded to CPU memory in bf16. The offloaded state (bf16 master weights plus the two bf16 Adam moments) is then ~6 bytes/param, versus ~10 bytes/param when the moments are kept in fp32. | `false` |
 
 **Support matrix (bf16 master weights/gradients)**
 
 | ZeRO stage | bf16_optimizer_states=False | bf16_optimizer_states=True |
 | ---------- | --------------------------- | -------------------------- |
 | 0 | Not supported | Not supported |
-| 1/2/3 | Requires ZeRO-Offload + `DeepSpeedCPUAdam` (optimizer states stay fp32 on CPU) | Supported without offload; optimizer states kept in bf16 |
+| 1/2/3 | Requires ZeRO-Offload + `DeepSpeedCPUAdam` (optimizer states stay fp32 on CPU) | On GPU without offload, or on CPU with `offload_optimizer` + `DeepSpeedCPUAdam`; optimizer states kept in bf16 either way |
 
 ### Automatic mixed precision (AMP) training options
 
@@ -1917,6 +1929,26 @@ Different pruning sets, this is used for different pruning parameters. In this e
 | Description                                                   | Default |
 | ------------------------------------------------------------- | ------- |
 | Use pipeline stages to parallelize the writing of checkpoints.| `false` |
+
+### AutoSP options
+
+DeepSpeed provides compiler-based optimization passes through the `compile` configuration. This includes enabling Ulysses-styled sequence paralllelism and a custom heuristic selective activation checkpointing pass. To enable Automatic Sequence Parallelism (AutoSP), configure the `compile` section:
+
+```json
+{
+    "zero_optimization": {"stage": 0},
+    "compile": {
+        "deepcompile": true,
+        "passes": ["autosp"],
+    }
+}
+```
+
+<i>**passes**</i>: [array of strings]
+
+| Description                                                              | Default |
+| ------------------------------------------------------------------------ | ------- |
+| List of compiler passes to apply. Currently supported: `["autosp"]`.     | `[]`    |
 
 ### Data Type options
 

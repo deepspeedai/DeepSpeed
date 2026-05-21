@@ -31,7 +31,7 @@ from deepspeed.runtime.zero.stage_1_and_2 import DeepSpeedZeroOptimizer
 from deepspeed.runtime.zenflow.zenflow_stage_1_and_2 import ZenFlowZeroOptimizer
 from deepspeed.runtime.zero.partition_parameters import ZeroParamStatus
 from deepspeed.runtime.zero.utils import is_zero_supported_optimizer, ZeRORuntimeException
-from deepspeed.runtime.zero.parameter_offload import DeepSpeedZeRoOffload
+from deepspeed.runtime.zero.parameter_offload import DeepSpeedZeRoOffload, ZeROOrderedDict, ensure_zero_ordered_dict
 from deepspeed.runtime.zero.config import ZERO_OPTIMIZATION
 from deepspeed.runtime.zenflow.engine import (configure_zenflow, zenflow_step, is_zenflow_update_boundary,
                                               sync_zenflow_optimizer_lr)
@@ -127,6 +127,7 @@ from deepspeed.compile.backend import register_compile_pass, opt_passes
 from deepspeed.compile.passes import zero3_compile, prefetch, selective_gather, offload_adam_states
 from deepspeed.compile.init_z1 import init_z1
 from deepspeed.compile.init_z3 import init_z3
+from deepspeed.compile.init_sp import init_autosp
 
 MEMORY_OPT_ALLREDUCE_SIZE = 500000000
 
@@ -1037,6 +1038,14 @@ class DeepSpeedEngine(Module):
     def zero_optimization_stage(self):
         return self._config.zero_optimization_stage
 
+    def compile_zero_optimization_stage(self):
+        """Determines if zero-pass is set in deepcompile's passes attributes."""
+        return "z1" in self._config.compile_config.passes or "z3" in self._config.compile_config.passes
+
+    def compile_autosp(self):
+        """Determines if AutoSP is set in deepcompile's passes attributes."""
+        return "autosp" in (getattr(self._config.compile_config, "passes", None) or [])
+
     def mics_shard_size(self):
         return self._config.mics_shard_size
 
@@ -1707,9 +1716,9 @@ class DeepSpeedEngine(Module):
         self.quantizer = self._configure_quantization()
 
     def _configure_basic_optimizer(self, model_parameters):
-        optimizer_parameters = self.optimizer_params()
-        if optimizer_parameters is None:
-            optimizer_parameters = {}
+        # Copy so the pop() calls below (torch_adam, adam_w_mode, fp32_optimizer_states) do not
+        # mutate the shared config dict returned by optimizer_params().
+        optimizer_parameters = dict(self.optimizer_params() or {})
         # print(optimizer_parameters.keys())
         if "max_grad_norm" in optimizer_parameters.keys():
             raise ValueError(
@@ -1734,9 +1743,24 @@ class DeepSpeedEngine(Module):
                     CPUAdam = ZenFlowCPUAdam if self.zenflow else DeepSpeedCPUAdam
 
                     zenflow_kwargs = {'overlap_step': self.overlap_step} if self.zenflow else {}
+                    # Pop so a user-supplied value does not collide with the keyword built below.
+                    # None means the user did not set it, so no override warning is needed.
+                    user_fp32_optimizer_states = optimizer_parameters.pop('fp32_optimizer_states', None)
+                    if self.bf16_optimizer_states():
+                        # bf16 moments are required so the offloaded state matches the bf16 master weights.
+                        if user_fp32_optimizer_states:
+                            logger.warning("bf16_optimizer_states is enabled; overriding fp32_optimizer_states "
+                                           "to False so CPU Adam moments are stored in bf16.")
+                        fp32_optimizer_states = False
+                    elif user_fp32_optimizer_states is None:
+                        # Default preserves the pre-existing fp32 optimizer-state behavior.
+                        fp32_optimizer_states = True
+                    else:
+                        fp32_optimizer_states = user_fp32_optimizer_states
                     optimizer = CPUAdam(model_parameters,
                                         **optimizer_parameters,
                                         adamw_mode=effective_adam_w_mode,
+                                        fp32_optimizer_states=fp32_optimizer_states,
                                         **zenflow_kwargs)
                 else:
                     from deepspeed.ops.adam import FusedAdam
@@ -1814,7 +1838,7 @@ class DeepSpeedEngine(Module):
             param_groups = []
             if muon_params:
                 accepted_parameters = dict()
-                for key in ["lr", "momentum", "weight_decay", "muon_lr"]:
+                for key in ["lr", "momentum", "weight_decay", "muon_lr", "ns_method"]:
                     if key in optimizer_parameters:
                         if key == "muon_lr":  # muon_lr will override lr
                             accepted_parameters['lr'] = optimizer_parameters[key]
@@ -2375,6 +2399,7 @@ class DeepSpeedEngine(Module):
             # Enable automated discovery of external parameters by indicating that
             # we are in a forward pass.
             for module in self.module.modules():
+                ensure_zero_ordered_dict(module)
                 module._parameters._in_forward = True
 
         if self.fp16_auto_cast():
@@ -2388,7 +2413,8 @@ class DeepSpeedEngine(Module):
         if self.zero_optimization_partition_weights():
             # Disable automated discovery of external parameters
             for module in self.module.modules():
-                module._parameters._in_forward = False
+                if isinstance(module._parameters, ZeROOrderedDict):
+                    module._parameters._in_forward = False
 
         self._stop_timers(self.engine_timers.forward_timers)
 
@@ -2486,7 +2512,7 @@ class DeepSpeedEngine(Module):
     def allreduce_gradients(self, bucket_size=MEMORY_OPT_ALLREDUCE_SIZE):
         # Skip gradient reduction when DeepCompile is enabled
         # DeepCompile handles its own gradient reduction through compiled graph operations
-        if self.is_deepcompile_active():
+        if self.is_deepcompile_active() and not self.compile_autosp():
             return
 
         # Pass (PP) gas boundary flag to optimizer (required for zero)
@@ -2541,12 +2567,20 @@ class DeepSpeedEngine(Module):
     def _backward_epilogue(self):
         self._stop_timers(self.engine_timers.backward_inner_timers)
         self._start_timers(self.engine_timers.backward_reduce_timers)
+        # BF16_Optimizer (without immediate_grad_update) accumulates low
+        # precision grads into a separate fp32 buffer in backward_epilogue().
+        # Run it before allreduce so the boundary microbatch is reduced.
+        bf16_optimizer = isinstance(self.optimizer, BF16_Optimizer)
+        if bf16_optimizer:
+            self.optimizer.backward_epilogue()
+
         if self.enable_backward_allreduce and not self.inside_no_sync_ctxt:
             # Traditional code path that allreduces the module parameter grads
             self.allreduce_gradients()
 
         if isinstance(self.optimizer, ZeROOptimizer):
-            self.optimizer.backward_epilogue()
+            if not bf16_optimizer:
+                self.optimizer.backward_epilogue()
             self.optimizer.exit_backward()
 
         see_memory_usage("Engine after backward", force=self.memory_breakdown())
@@ -4452,6 +4486,62 @@ class DeepSpeedEngine(Module):
             gc.collect()
             get_accelerator().empty_cache()
 
+    def get_autosp_backend(self, compile_kwargs):
+        if self.compile_autosp() and self.zero_optimization_stage() not in [
+                ZeroStageEnum.disabled, ZeroStageEnum.optimizer_states
+        ]:
+            logger.info(
+                f"Currently AutoSP does not compose with ZeRO stage 2 and 3. Falling back to the torch compiler.")
+            return None
+
+        compile_config = self._config.compile_config
+        compile_kwargs['fullgraph'] = True
+        return init_autosp(self._config)
+
+    def get_deepcompile_backend(self, backend, compile_kwargs, schedule):
+        if self.zero_optimization_stage() != ZeroStageEnum.optimizer_states \
+                and self.zero_optimization_stage() != ZeroStageEnum.weights \
+                and self.zero_optimization_stage() != ZeroStageEnum.gradients:
+            logger.info(
+                f"Currently DeepCompile supports ZeRO stage 1, 2, or 3 only, but ZeRO stage is set to {self.zero_optimization_stage()}. Falling back to the torch compiler."
+            )
+            return None
+
+        compile_config = self._config.compile_config
+        if (("zero_optimization" in self.config and "offload_optimizer" in self.config["zero_optimization"]
+             and "offload_param" in self.config["zero_optimization"])
+                and self._config.zero_config.offload_param.device == "cpu"
+                and self._config.zero_config.offload_optimizer.device == "cpu"):
+            compile_config.offload_parameters = True
+        if self.zero_optimization_stage() == ZeroStageEnum.optimizer_states:
+            return init_z1(self, backend, compile_config, compile_kwargs, schedule)
+        elif self.zero_optimization_stage() == ZeroStageEnum.gradients:
+            return init_z1(self, backend, compile_config, compile_kwargs, schedule, use_z2=True)
+        elif self.zero_optimization_stage() == ZeroStageEnum.weights:
+            return init_z3(self, backend, compile_config, compile_kwargs, schedule)
+        return None
+
+    def get_deepspeed_compile_backend(self, backend, compile_kwargs, schedule):
+        resolved_backend = None
+
+        if schedule is not None:
+
+            def passes_name_to_fn(passes):
+                for p in passes:
+                    assert callable(p) or p in opt_passes, f"Unknown pass {p}"
+                return [p if callable(p) else opt_passes[p] for p in passes]
+
+            schedule = [(step, passes_name_to_fn(passes)) for step, passes in schedule]
+
+        assert backend in ['inductor', 'eager'], f"Backend {backend} is not supported for DeepCompile."
+
+        if self.compile_autosp():
+            resolved_backend = self.get_autosp_backend(compile_kwargs)
+        else:
+            resolved_backend = self.get_deepcompile_backend(backend, compile_kwargs, schedule)
+
+        return resolved_backend, schedule
+
     def compile(self,
                 backend=get_accelerator().get_compile_backend(),
                 compile_kwargs={},
@@ -4474,53 +4564,23 @@ class DeepSpeedEngine(Module):
 
         logger.info(f"Compiling deepcompile={self.is_deepcompile_enabled()} backend={backend}")
 
-        enable_deepcompile = self.is_deepcompile_enabled()
-        if enable_deepcompile and self.zero_optimization_stage() != ZeroStageEnum.optimizer_states \
-                and self.zero_optimization_stage() != ZeroStageEnum.weights \
-                and self.zero_optimization_stage() != ZeroStageEnum.gradients:
-            logger.info(
-                f"Currently DeepCompile supports ZeRO stage 1, 2, or 3 only, but ZeRO stage is set to {self.zero_optimization_stage()}. Falling back to the torch compiler."
-            )
-            enable_deepcompile = False
+        resolved_backend = None
+        if self.is_deepcompile_enabled():
+            resolved_backend, schedule = self.get_deepspeed_compile_backend(backend, compile_kwargs, schedule)
 
-        if enable_deepcompile:
+        is_deepspeed_compile_backend = resolved_backend is not None
 
-            if schedule is not None:
-
-                def passes_name_to_fn(passes):
-                    for p in passes:
-                        assert callable(p) or p in opt_passes, f"Unknown pass {p}"
-                    return [p if callable(p) else opt_passes[p] for p in passes]
-
-                schedule = [(step, passes_name_to_fn(passes)) for step, passes in schedule]
-
-            assert backend in ['inductor', 'eager'], f"Backend {backend} is not supported for DeepCompile."
-
-            compile_config = self._config.compile_config
-            if (("zero_optimization" in self.config and "offload_optimizer" in self.config["zero_optimization"]
-                 and "offload_param" in self.config["zero_optimization"])
-                    and self._config.zero_config.offload_param.device == "cpu"
-                    and self._config.zero_config.offload_optimizer.device == "cpu"):
-                compile_config.offload_parameters = True
-            if self.zero_optimization_stage() == ZeroStageEnum.optimizer_states:
-                backend = init_z1(self, backend, compile_config, compile_kwargs, schedule)
-            elif self.zero_optimization_stage() == ZeroStageEnum.gradients:
-                backend = init_z1(self, backend, compile_config, compile_kwargs, schedule, use_z2=True)
-            elif self.zero_optimization_stage() == ZeroStageEnum.weights:
-                if required_torch_version(min_version=2.9):
-                    raise RuntimeError(
-                        "DeepCompile with ZeRO stage 3 is not currently supported on PyTorch >= 2.9. "
-                        "Please use ZeRO stage 1 or 2 with DeepCompile, or disable DeepCompile for ZeRO stage 3.")
-                backend = init_z3(self, backend, compile_config, compile_kwargs, schedule)
+        # default to torch.compiler backend if deepspeed config validation fails
+        backend = resolved_backend or backend
 
         # Hook state must align with whether DeepCompile is active.
-        self._set_deepcompile_active(enable_deepcompile)
+        self._set_deepcompile_active(is_deepspeed_compile_backend)
 
         # create new dict to avoid modifying original dict
         try:
             self.module.compile(**{**compile_kwargs, 'backend': backend})
         except Exception:
-            if enable_deepcompile:
+            if is_deepspeed_compile_backend:
                 # Restore default hooks if compilation fails before completing.
                 self._set_deepcompile_active(False)
             raise
@@ -4571,6 +4631,18 @@ class DeepSpeedEngine(Module):
     def is_compiled(self) -> bool:
         return self._is_compiled
 
+    def _refine_include_states(self, include: Container[OffloadStateTypeEnum]) -> Container[OffloadStateTypeEnum]:
+        if include is None:
+            include = list(OffloadStateTypeEnum)
+
+        if self.zero_use_cpu_optimizer():
+            exclude_states = [OffloadStateTypeEnum.hp_params, OffloadStateTypeEnum.optim_states]
+            if self.zero_optimization_partition_weights():
+                exclude_states.append(OffloadStateTypeEnum.lp_grads)
+            include = [x for x in include if x not in exclude_states]
+
+        return include
+
     def offload_states(self,
                        include: Container[OffloadStateTypeEnum] = None,
                        device: OffloadDeviceEnum = OffloadDeviceEnum.cpu,
@@ -4584,8 +4656,7 @@ class DeepSpeedEngine(Module):
             pin_memory: Optional. Whether to pin the memory of the offloaded states.
             non_blocking: Optional. Whether to offload the states asynchronously.
         """
-        opt_offload_config = self.zero_offload_optimizer()
-        assert opt_offload_config is None or opt_offload_config.device == OffloadDeviceEnum.none, "Moving states across devices is not supported for offloaded optimizer states."
+        include = self._refine_include_states(include)
         param_offload_config = self.zero_offload_param()
         assert param_offload_config is None or param_offload_config.device == OffloadDeviceEnum.none, "Moving states across devices is not supported for offloaded parameters."
 

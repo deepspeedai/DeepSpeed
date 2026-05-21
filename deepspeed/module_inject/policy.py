@@ -7,6 +7,7 @@ from abc import ABC, abstractmethod
 from deepspeed.utils.types import ActivationFuncType, NormType
 import torch
 from deepspeed.accelerator import get_accelerator
+from .utils import transpose
 
 transformer_param_names = (
         'attn_qkvw', \
@@ -107,16 +108,6 @@ class TransformerPolicy(DSPolicy):
         gamma and beta with shape: (hidden)
         """
         raise NotImplementedError
-
-
-# TODO (lekurile): This function exists in base container as well, consolidate as some point
-def transpose(data):
-    with torch.no_grad():
-        data = data.contiguous()
-        data1 = data.transpose(-1, -2).reshape(-1)
-        data.reshape(-1).copy_(data1)
-        data1 = None
-    return data.reshape(data.shape[-1], data.shape[-2])
 
 
 # TODO (lekurile): This function exists in megatron feature container as well, consolidate as some point

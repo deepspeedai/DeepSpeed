@@ -14,7 +14,19 @@
  <img src="docs/assets/images/DeepSpeed_dark_transparent.svg#gh-dark-mode-only" width="400px">
 </div>
 
+
+## Office Hours
+
+DeepSpeed hosts regular office hours on the last Tuesday of each month at 12:00 America/New_York to discuss development plans, features, etc.  This meeting is public for anyone to join and ask questions.
+The meeting is hosted on Zoom and can be joined [here](https://zoom-lfx.platform.linuxfoundation.org/meeting/93902569995?password=7d9c4fc9-3efa-4715-88f0-df8a6deb008b).
+
 ## Latest News
+
+* [2026/05] [Using Muon Optimizer with DeepSpeed](https://github.com/deepspeedai/DeepSpeed/blob/master/blogs/muon-optimizer/README.md)
+
+* [2026/05] [System DMA (SDMA) for ZeRO-3: offload collectives off compute units on AMD GPUs for better overlap](https://github.com/deepspeedai/DeepSpeed/blob/master/examples/sdma_allgather/README.md)
+
+* [2026/03] DeepSpeed Team gave a tutorial at ASPLOS 2026 titled ["Building Efficient Large-Scale Model Systems with DeepSpeed: From Open-Source Foundations to Emerging Research" ](https://supercomputing-system-ai-lab.github.io/events/asplos2026-llm-tutorial/index.html)
 
 * [2026/03] [Our SuperOffload work received an Honorable Mention for the ASPLOS 2026 Best Paper Award](https://dl.acm.org/doi/10.1145/3760250.3762217)
 
@@ -116,7 +128,7 @@ dynamically link them at runtime.
 
 ## Requirements
 * [PyTorch](https://pytorch.org/) must be installed _before_ installing DeepSpeed.
-* For full feature support we recommend a version of PyTorch that is >= 1.9 and ideally the latest PyTorch stable release.
+* For full feature support we recommend a version of PyTorch that is >= 2.0 and ideally the latest PyTorch stable release.
 * A CUDA or ROCm compiler such as [nvcc](https://docs.nvidia.com/cuda/cuda-compiler-driver-nvcc/#introduction) or [hipcc](https://github.com/ROCm-Developer-Tools/HIPCC) used to compile C++/CUDA/HIP extensions.
 * Specific GPUs we develop and test against are listed below, this doesn't mean your GPU will not work if it doesn't fall into this category it's just DeepSpeed is most well tested on the following:
   * NVIDIA: Pascal, Volta, Ampere, and Hopper architectures

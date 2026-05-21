@@ -91,7 +91,7 @@ class FPQuantizerBuilder(CUDAOpBuilder):
 
     def sources(self):
         return [
-            "csrc/fp_quantizer/fp_quantize.cu",
+            "csrc/fp_quantizer/fp_quantize_impl.cu",
             "csrc/fp_quantizer/fp_quantize.cpp",
         ]
 
