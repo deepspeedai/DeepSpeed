@@ -47,11 +47,6 @@ on:
       - master
 
   pull_request_target:
-    paths-ignore:
-      - 'docs/**'
-      - 'blogs/**'
-      - 'deepspeed/inference/v2/**'
-      - 'tests/unit/inference/v2/**'
     types: [review_requested, ready_for_review, synchronize]
     branches:
       - master
@@ -68,7 +63,7 @@ jobs:
       contents: read
       pull-requests: read
     outputs:
-      deepspeed: ${{ steps.filter.outputs.deepspeed }}
+      deepspeed: ${{ steps.filter.outputs.deepspeed == 'true' || steps.filter.outputs.modal_workflow == 'true' || steps.filter.outputs.ci == 'true' || steps.filter.outputs.unit_tests == 'true' || steps.filter.outputs.csrc == 'true' }}
 
     steps:
       - name: Checkout repository
@@ -81,29 +76,32 @@ jobs:
         id: filter
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+          predicate-quantifier: every
           filters: |
             deepspeed:
               - 'deepspeed/**'
+              - '!deepspeed/inference/v2/**'
+            modal_workflow:
               - '.github/workflows/modal*.yml'
+            ci:
               - 'ci/**'
+            unit_tests:
               - 'tests/unit/**'
+              - '!tests/unit/inference/v2/**'
+            csrc:
               - 'csrc/**'
 
   deploy:
     name: modal-torch-latest / DeepSpeedAI CI
     runs-on: ubuntu-latest
     needs: collect-tests
-    env:
-      # these are created at https://modal.com/settings/deepspeedai/tokens
-      # they are then added to the repo's secrets at https://github.com/deepspeedai/deepspeed/settings/secrets/actions
-      MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
-      MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
-      # this one comes from https://huggingface.co/settings/profile of the bot user
-      # and it too is then updated at https://github.com/deepspeedai/deepspeed/settings/secrets/actions
-      HF_TOKEN: ${{ secrets.HF_TOKEN }}
 
-    if: github.event_name == 'workflow_dispatch' || needs.collect-tests.outputs.deepspeed == 'true'
+    if: always() && (github.event_name == 'workflow_dispatch' || needs.collect-tests.result != 'success' || needs.collect-tests.outputs.deepspeed == 'true')
     steps:
+      - name: Fail if path filter failed
+        if: github.event_name != 'workflow_dispatch' && needs.collect-tests.result != 'success'
+        run: exit 1
+
       - name: Checkout Repository
         uses: actions/checkout@v4
         with:
@@ -125,5 +123,12 @@ jobs:
           MODAL_TORCH_PRESET: ${{ github.event.inputs.torch_preset || '2.10.0-cuda12.8' }}
           MODAL_TRANSFORMERS_SOURCE: ${{ github.event.inputs.transformers_source || 'git' }}
           MODAL_TRANSFORMERS_REF: ${{ github.event.inputs.transformers_ref || 'main' }}
+          # these are created at https://modal.com/settings/deepspeedai/tokens
+          # they are then added to the repo's secrets at https://github.com/deepspeedai/deepspeed/settings/secrets/actions
+          MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
+          MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
+          # this one comes from https://huggingface.co/settings/profile of the bot user
+          # and it too is then updated at https://github.com/deepspeedai/deepspeed/settings/secrets/actions
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           modal run -m ci.torch_latest
