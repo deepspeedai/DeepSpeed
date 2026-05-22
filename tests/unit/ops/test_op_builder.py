@@ -203,10 +203,10 @@ def test_non_jit_branch_canonical_dedupe_mixed_ptx_combinations():
     # behavior cannot regress on either ordering or duplication.
     builder = make_builder(jit_mode=False)
     cases = [
-        ("8.0;8.0+PTX", "8.0+PTX",
-         ["-gencode=arch=compute_80,code=sm_80", "-gencode=arch=compute_80,code=compute_80"]),
-        ("8.0+PTX;8.0", "8.0+PTX",
-         ["-gencode=arch=compute_80,code=sm_80", "-gencode=arch=compute_80,code=compute_80"]),
+        ("8.0;8.0+PTX", "8.0+PTX", ["-gencode=arch=compute_80,code=sm_80",
+                                    "-gencode=arch=compute_80,code=compute_80"]),
+        ("8.0+PTX;8.0", "8.0+PTX", ["-gencode=arch=compute_80,code=sm_80",
+                                    "-gencode=arch=compute_80,code=compute_80"]),
         ("8.0;8.0", "8.0", ["-gencode=arch=compute_80,code=sm_80"]),
         ("8.0+PTX;8.0+PTX", "8.0+PTX",
          ["-gencode=arch=compute_80,code=sm_80", "-gencode=arch=compute_80,code=compute_80"]),
