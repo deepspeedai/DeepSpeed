@@ -163,3 +163,56 @@ def test_non_jit_branch_unchanged():
         "-gencode=arch=compute_89,code=sm_89",
         "-gencode=arch=compute_89,code=compute_89",
     ]
+
+
+def test_non_jit_branch_sorts_and_dedupes_gencode_flags():
+    builder = make_builder(jit_mode=False)
+
+    with patch.dict(os.environ, {"TORCH_CUDA_ARCH_LIST": "8.0;7.5;8.0;7.0"}, clear=False):
+        args = builder.compute_capability_args()
+        assert os.environ["TORCH_CUDA_ARCH_LIST"] == "7.0;7.5;8.0"
+
+    assert args == [
+        "-gencode=arch=compute_70,code=sm_70",
+        "-gencode=arch=compute_75,code=sm_75",
+        "-gencode=arch=compute_80,code=sm_80",
+    ]
+
+
+def test_non_jit_branch_canonicalizes_mixed_ptx_variants_to_one_sm_and_one_ptx():
+    # For mixed inputs such as "8.0;8.0+PTX" or "8.0+PTX;8.0", PyTorch
+    # canonicalizes the architecture to one sm_80 entry plus one compute_80
+    # PTX entry. Dedupe by the canonical numeric arch so we match.
+    expected_arch_list = "7.5;8.0+PTX"
+    expected_args = [
+        "-gencode=arch=compute_75,code=sm_75",
+        "-gencode=arch=compute_80,code=sm_80",
+        "-gencode=arch=compute_80,code=compute_80",
+    ]
+
+    for arch_input in ("8.0;8.0+PTX;7.5", "7.5;8.0+PTX;8.0", "8.0+PTX;7.5;8.0", "8.0;7.5;8.0+PTX"):
+        builder = make_builder(jit_mode=False)
+        with patch.dict(os.environ, {"TORCH_CUDA_ARCH_LIST": arch_input}, clear=False):
+            args = builder.compute_capability_args()
+            assert os.environ["TORCH_CUDA_ARCH_LIST"] == expected_arch_list, arch_input
+        assert args == expected_args, arch_input
+
+
+def test_non_jit_branch_canonical_dedupe_mixed_ptx_combinations():
+    # Lock in the four mixed-PTX combinations for a single arch so the dedupe
+    # behavior cannot regress on either ordering or duplication.
+    builder = make_builder(jit_mode=False)
+    cases = [
+        ("8.0;8.0+PTX", "8.0+PTX", ["-gencode=arch=compute_80,code=sm_80",
+                                    "-gencode=arch=compute_80,code=compute_80"]),
+        ("8.0+PTX;8.0", "8.0+PTX", ["-gencode=arch=compute_80,code=sm_80",
+                                    "-gencode=arch=compute_80,code=compute_80"]),
+        ("8.0;8.0", "8.0", ["-gencode=arch=compute_80,code=sm_80"]),
+        ("8.0+PTX;8.0+PTX", "8.0+PTX",
+         ["-gencode=arch=compute_80,code=sm_80", "-gencode=arch=compute_80,code=compute_80"]),
+    ]
+    for arch_input, expected_arch_list, expected_args in cases:
+        with patch.dict(os.environ, {"TORCH_CUDA_ARCH_LIST": arch_input}, clear=False):
+            args = builder.compute_capability_args()
+            assert os.environ["TORCH_CUDA_ARCH_LIST"] == expected_arch_list, arch_input
+        assert args == expected_args, arch_input
