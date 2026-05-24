@@ -789,7 +789,7 @@ class MultipleAllGatherHandles:
 
     def wait(self, handle_dependency=True) -> None:
         for handle in self.handles:
-            handle.wait(handle_dependency)
+            handle.wait(handle_dependency=handle_dependency)
 
 
 class AllReduceCoalescedHandle:
