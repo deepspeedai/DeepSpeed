@@ -13,6 +13,7 @@ import torch.nn as nn
 
 import deepspeed.runtime.engine as ds_engine
 import deepspeed.runtime.zero.stage3 as zero_stage3
+import deepspeed.moe.ep_repack as ep_repack
 from deepspeed.module_inject.auto_ep import AutoEP, _resolve_route_scale
 from deepspeed.module_inject.auto_ep_config import (
     AutoEPConfig,
@@ -92,6 +93,47 @@ def _make_spec(**kwargs):
 def _assert_same_dtype_device(actual, expected):
     assert actual.dtype == expected.dtype
     assert actual.device == expected.device
+
+
+def _mark_fake_zero_param(param, full_data, partition_data=None, ds_id=0, name="param"):
+    param.ds_id = ds_id
+    param.ds_shape = torch.Size(full_data.shape)
+    param._autoep_test_full_data = full_data.detach().clone()
+    param._autoep_test_name = name
+    if partition_data is None:
+        partition_data = torch.zeros(1, dtype=full_data.dtype, device=full_data.device)
+    param.data = partition_data.detach().clone()
+    return param
+
+
+class FakeGatheredParameters:
+    calls = []
+
+    def __init__(self, params, modifier_rank=None, fwd_module=None, enabled=True):
+        self.params = list(params)
+        self.modifier_rank = modifier_rank
+        self.enabled = enabled
+        self._saved_data = []
+        FakeGatheredParameters.calls.append({
+            "names": [getattr(param, "_autoep_test_name", f"param{param.ds_id}") for param in self.params],
+            "modifier_rank":
+            modifier_rank,
+            "enabled":
+            enabled,
+        })
+
+    def __enter__(self):
+        if not self.enabled:
+            return
+        for param in self.params:
+            self._saved_data.append((param, param.data))
+            param.data = param._autoep_test_full_data.detach().clone()
+
+    def __exit__(self, *exc):
+        if not self.enabled:
+            return
+        for param, data in self._saved_data:
+            param.data = data
 
 
 class MockSharedExpert(nn.Module):
@@ -648,6 +690,40 @@ class TestModelDetectionAndReplacement:
         _assert_same_dtype_device(replaced.experts.w2, source.experts.down_proj)
         _assert_same_dtype_device(replaced.experts.w3, source.experts.gate_up_proj)
 
+    def test_zero_init_source_gathered_for_parser_router_and_fused_repack(self, monkeypatch):
+        FakeGatheredParameters.calls = []
+        monkeypatch.setattr(ep_repack, "GatheredParameters", FakeGatheredParameters)
+
+        model = MockMoETransformer(num_layers=1, num_experts=4, moe_every_n=1)
+        source = model.model.layers[0].mlp
+        expected_gate = source.gate.weight.detach().clone()
+        expected_gate_up = source.experts.gate_up_proj.detach().clone()
+        expected_down = source.experts.down_proj.detach().clone()
+
+        _mark_fake_zero_param(source.gate.weight, expected_gate, ds_id=1, name="router.weight")
+        _mark_fake_zero_param(source.experts.gate_up_proj, expected_gate_up, ds_id=2, name="experts.gate_up_proj")
+        _mark_fake_zero_param(source.experts.down_proj, expected_down, ds_id=3, name="experts.down_proj")
+
+        auto_ep = AutoEP(model, _runtime_config(enabled=True, autoep_size=1, preset_model="mixtral"))
+        specs = auto_ep.ep_parser()
+        assert len(specs) == 1
+        assert specs[0].expert_storage == "fused_3d"
+        assert specs[0].num_experts == 4
+        assert specs[0].hidden_size == 64
+
+        auto_ep.replace_moe_layer(specs[0], ep_size=1, ep_rank=0)
+
+        replaced = model.model.layers[0].mlp
+        torch.testing.assert_close(replaced.router.gate.weight, expected_gate)
+        torch.testing.assert_close(replaced.experts.w1, expected_gate_up[:, :128, :])
+        torch.testing.assert_close(replaced.experts.w3, expected_gate_up[:, 128:, :])
+        torch.testing.assert_close(replaced.experts.w2, expected_down)
+        assert [call["names"] for call in FakeGatheredParameters.calls] == [
+            ["router.weight"],
+            ["experts.gate_up_proj", "experts.down_proj"],
+        ]
+        assert all(call["modifier_rank"] is None for call in FakeGatheredParameters.calls)
+
     def test_module_list_replacement_preserves_frozen_experts_and_trainable_router(self, monkeypatch):
         monkeypatch.setattr(get_preset_adapter("deepseek_v3"), "_installed_transformers_version", lambda: "5.0.0")
         model = MockDeepSeekV3Transformer(num_layers=1, num_experts=4).to(dtype=torch.bfloat16)
@@ -677,6 +753,52 @@ class TestModelDetectionAndReplacement:
         _assert_same_dtype_device(replaced.experts.w1, source.experts[0].gate_proj.weight)
         _assert_same_dtype_device(replaced.experts.w2, source.experts[0].down_proj.weight)
         _assert_same_dtype_device(replaced.experts.w3, source.experts[0].up_proj.weight)
+
+    def test_module_list_zero_source_gathers_all_experts_in_global_order(self, monkeypatch):
+        FakeGatheredParameters.calls = []
+        monkeypatch.setattr(ep_repack, "GatheredParameters", FakeGatheredParameters)
+        monkeypatch.setattr(get_preset_adapter("deepseek_v3"), "_installed_transformers_version", lambda: "5.0.0")
+
+        model = MockDeepSeekV3Transformer(num_layers=1, num_experts=4)
+        source = model.model.layers[0].mlp
+        for expert_idx, expert in enumerate(source.experts):
+            for offset, (suffix, param) in enumerate((
+                ("w1", expert.gate_proj.weight),
+                ("w2", expert.down_proj.weight),
+                ("w3", expert.up_proj.weight),
+            )):
+                full_data = param.detach().clone()
+                _mark_fake_zero_param(param,
+                                      full_data,
+                                      ds_id=10 + 3 * expert_idx + offset,
+                                      name=f"e{expert_idx}.{suffix}")
+
+        auto_ep = AutoEP(model, _runtime_config(enabled=True, autoep_size=2))
+        spec = auto_ep.ep_parser()[0]
+        w1, w2, w3 = repack_expert_weights(source.experts, spec, ep_rank=1, ep_size=2)
+
+        expected_w1 = torch.stack([
+            source.experts[2].gate_proj.weight._autoep_test_full_data,
+            source.experts[3].gate_proj.weight._autoep_test_full_data
+        ])
+        expected_w2 = torch.stack([
+            source.experts[2].down_proj.weight._autoep_test_full_data,
+            source.experts[3].down_proj.weight._autoep_test_full_data
+        ])
+        expected_w3 = torch.stack([
+            source.experts[2].up_proj.weight._autoep_test_full_data,
+            source.experts[3].up_proj.weight._autoep_test_full_data
+        ])
+
+        torch.testing.assert_close(w1, expected_w1)
+        torch.testing.assert_close(w2, expected_w2)
+        torch.testing.assert_close(w3, expected_w3)
+        assert [call["names"] for call in FakeGatheredParameters.calls] == [
+            ["e0.w1", "e0.w2", "e0.w3"],
+            ["e1.w1", "e1.w2", "e1.w3"],
+            ["e2.w1", "e2.w2", "e2.w3"],
+            ["e3.w1", "e3.w2", "e3.w3"],
+        ]
 
     def test_module_list_mixed_expert_requires_grad_flags_are_rejected(self, monkeypatch):
         monkeypatch.setattr(get_preset_adapter("deepseek_v3"), "_installed_transformers_version", lambda: "5.0.0")
@@ -734,6 +856,8 @@ class TestModelDetectionAndReplacement:
             AutoEP(model, _runtime_config(enabled=True, autoep_size=1))._resolve_presets()
 
     def test_deepseek_v3_detection_and_score_correction_bias_copy(self, monkeypatch):
+        FakeGatheredParameters.calls = []
+        monkeypatch.setattr(ep_repack, "GatheredParameters", FakeGatheredParameters)
         monkeypatch.setattr(get_preset_adapter("deepseek_v3"), "_installed_transformers_version", lambda: "5.0.0")
         model = MockDeepSeekV3Transformer(num_layers=1, num_experts=8)
         auto_ep = AutoEP(model, _runtime_config(enabled=True, autoep_size=2))
@@ -747,6 +871,10 @@ class TestModelDetectionAndReplacement:
 
         source_bias = torch.arange(8, dtype=torch.float32)
         model.model.layers[0].mlp.gate.e_score_correction_bias = nn.Parameter(source_bias.clone())
+        _mark_fake_zero_param(model.model.layers[0].mlp.gate.e_score_correction_bias,
+                              source_bias,
+                              ds_id=100,
+                              name="router.e_score_correction_bias")
 
         auto_ep.replace_moe_layer(specs[0], ep_size=2, ep_rank=0)
 
@@ -754,3 +882,4 @@ class TestModelDetectionAndReplacement:
         assert isinstance(replaced, AutoEPMoELayer)
         assert replaced.router.e_score_correction_bias is not None
         torch.testing.assert_close(replaced.router.e_score_correction_bias, source_bias)
+        assert ["router.e_score_correction_bias"] in [call["names"] for call in FakeGatheredParameters.calls]

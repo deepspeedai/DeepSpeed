@@ -150,6 +150,32 @@ class TestAutoEPOnly(DistributedTest):
 class TestAutoEPZero3ReplicaGroups(DistributedTest):
     world_size = 4
 
+    def test_zero3_ep_source_zero_init_expert_replica_placement_4gpu(self):
+        _seed_everything(3456)
+
+        config = _make_autoep_config(zero_stage=3, ep_size=2)
+        with deepspeed.zero.Init(config_dict_or_path=config):
+            model = MockMoETransformer()
+        assert any(hasattr(param, "ds_id") for param in model.parameters())
+
+        engine, _, _, _ = deepspeed.initialize(model=model, config=config)
+
+        from deepspeed.module_inject.auto_ep_layer import AutoEPMoELayer
+        autoep_layers = [m for _, m in engine.module.named_modules() if isinstance(m, AutoEPMoELayer)]
+        assert len(autoep_layers) == 2
+
+        for layer in autoep_layers:
+            for param in layer.experts.parameters():
+                assert param.ds_zero_placement_family == "autoep_expert"
+                assert param.ds_zero_partition_group_name == layer.ep_group_name
+                assert param.ds_zero_partition_world_size == 2
+            for param in layer.router.parameters():
+                assert param.ds_zero_placement_family == "replicated"
+                assert param.ds_zero_partition_world_size == 4
+
+        losses, _ = _run_training_steps(engine, num_steps=1)
+        assert torch.isfinite(torch.tensor(losses[0]))
+
     def test_zero3_ep_expert_replica_group_train_save_load_4gpu(self, tmpdir):
         _seed_everything(9012)
 
