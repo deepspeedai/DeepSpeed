@@ -14,7 +14,7 @@ indexes empty bucket bookkeeping, surfacing either a ``RuntimeError`` (ZeRO-0)
 or ``IndexError`` (ZeRO-1/2).
 
 ``vmap`` alone runs only the forward graph so it does not exercise the same
-hooks; it is not covered here.
+hooks; ``vmap(grad)`` does, and is covered below.
 """
 
 import copy
@@ -96,6 +96,15 @@ class TestEngineTorchFunc(DistributedTest):
         j_engine = torch.func.jacrev(lambda xi: engine(xi))(x)
         j_baseline = torch.func.jacrev(lambda xi: baseline(xi))(x)
         assert torch.allclose(j_engine, j_baseline, atol=1e-5)
+
+    def test_vmap_grad_through_engine(self, stage):
+        # vmap(grad) still calls into autograd per slice, so it hits the same
+        # engine backward hooks the fix short-circuits.
+        engine, baseline, x = _build_engine(stage)
+        x_batch = torch.stack([x, x + 0.1, x - 0.1])
+        g_engine = torch.func.vmap(torch.func.grad(lambda xi: engine(xi)))(x_batch)
+        g_baseline = torch.func.vmap(torch.func.grad(lambda xi: baseline(xi)))(x_batch)
+        assert torch.allclose(g_engine, g_baseline, atol=1e-5)
 
     def test_engine_backward_still_works(self, stage):
         # Regression guard: the functorch shortcut must not break the normal
