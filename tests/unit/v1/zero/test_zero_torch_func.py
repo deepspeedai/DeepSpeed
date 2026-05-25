@@ -2,19 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # DeepSpeed Team
-"""``torch.func`` transforms must pass cleanly through the engine for ZeRO-0/1/2.
+"""Regression tests for torch.func transforms invoked directly on the engine.
 
-Calling ``torch.func.grad`` / ``grad_and_value`` / ``jacrev`` on a model wrapped
-by ``deepspeed.initialize`` invokes the autograd engine via
-``torch.autograd.grad``, which fires the engine's output-tensor hooks. Without
-the functorch-aware guard, the prologue/epilogue mutate ZeRO state that the
-transformed graph never populates (no per-param post-accumulate-grad hooks,
-since parameters are not leaves under the transform) and the epilogue then
-indexes empty bucket bookkeeping, surfacing either a ``RuntimeError`` (ZeRO-0)
-or ``IndexError`` (ZeRO-1/2).
-
-``vmap`` alone runs only the forward graph so it does not exercise the same
-hooks; ``vmap(grad)`` does, and is covered below.
+Covers grad / grad_and_value / jacrev / vmap(grad) for ZeRO-0/1/2. Plain
+``vmap`` skips the backward graph and already worked.
 """
 
 import copy
