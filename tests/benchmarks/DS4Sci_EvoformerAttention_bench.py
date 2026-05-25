@@ -6,7 +6,7 @@
 This script is to test the performance of the DS4Sci_EvoformerAttention op.
 To run the script,
 1. Clone the CUTLASS repo. E.g. git clone https://github.com/NVIDIA/cutlass.git
-2. Specify the CUTLASS_PATH environment variable. E.g. export CUTLASS_PATH=$(pwd)/cutlass
+2. DeepSpeed will detect a local or installed CUTLASS. If needed, set CUTLASS_PATH explicitly.
 3. Run the script. E.g. python DS4Sci_EvoformerAttention_bench.py
 """
 
