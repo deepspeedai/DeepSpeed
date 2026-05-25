@@ -20,10 +20,10 @@ from deepspeed.accelerator import get_accelerator
 from unit.common import DistributedTest
 
 
-def _config(stage):
+def _config(stage, gas=1):
     return {
         "train_micro_batch_size_per_gpu": 1,
-        "gradient_accumulation_steps": 1,
+        "gradient_accumulation_steps": gas,
         "steps_per_print": 2147483647,
         "fp16": {
             "enabled": False
@@ -54,10 +54,12 @@ class _Tiny(nn.Module):
         return self.fc2(torch.relu(self.fc1(x))).sum()
 
 
-def _build_engine(stage):
+def _build_engine(stage, gas=1):
     model = _Tiny()
     baseline = copy.deepcopy(model).to(get_accelerator().device_name())
-    engine, _, _, _ = deepspeed.initialize(model=model, config=_config(stage), model_parameters=model.parameters())
+    engine, _, _, _ = deepspeed.initialize(model=model,
+                                           config=_config(stage, gas),
+                                           model_parameters=model.parameters())
     dtype = next(engine.module.parameters()).dtype
     x = torch.randn(8, device=engine.device, dtype=dtype)
     return engine, baseline, x
@@ -95,6 +97,13 @@ class TestEngineTorchFunc(DistributedTest):
         x_batch = torch.stack([x, x + 0.1, x - 0.1])
         g_engine = torch.func.vmap(torch.func.grad(lambda xi: engine(xi)))(x_batch)
         g_baseline = torch.func.vmap(torch.func.grad(lambda xi: baseline(xi)))(x_batch)
+        assert torch.allclose(g_engine, g_baseline, atol=1e-5)
+
+    def test_grad_not_scaled_by_gas(self, stage):
+        # Per-tensor hook divides by GAS by default; the guard must suppress that under torch.func.
+        engine, baseline, x = _build_engine(stage, gas=4)
+        g_engine = torch.func.grad(lambda xi: engine(xi))(x)
+        g_baseline = torch.func.grad(lambda xi: baseline(xi))(x)
         assert torch.allclose(g_engine, g_baseline, atol=1e-5)
 
     def test_engine_backward_still_works(self, stage):
