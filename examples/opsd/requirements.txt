@@ -1,0 +1,5 @@
+datasets>=2.0.0
+numpy
+transformers>=4.40.0
+# Optional, only needed when rollout.engine == "vllm":
+# vllm>=0.6.4
