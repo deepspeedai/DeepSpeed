@@ -1,0 +1,49 @@
+{
+    "student": {
+        "model_name_or_path": "Qwen/Qwen2.5-0.5B-Instruct",
+        "dtype": "bfloat16",
+        "trust_remote_code": false,
+        "arch": "qwen2"
+    },
+    "teacher": {
+        "model_name_or_path": "Qwen/Qwen2.5-Math-7B-Instruct",
+        "dtype": "bfloat16",
+        "trust_remote_code": false,
+        "offload_to_cpu": true
+    },
+    "rollout": {
+        "engine": "hybrid_engine",
+        "max_prompt_length": 1024,
+        "max_response_length": 1024,
+        "temperature": 1.0,
+        "top_p": 1.0,
+        "top_k": -1,
+        "n_samples_per_prompt": 1,
+        "weight_sync_interval": 1
+    },
+    "distillation": {
+        "loss_type": "reverse_kl",
+        "temperature": 1.0,
+        "chunk_size": 512
+    },
+    "training": {
+        "train_batch_size": 8,
+        "micro_batch_size_per_gpu": 1,
+        "gradient_accumulation_steps": 1,
+        "learning_rate": 1e-6,
+        "weight_decay": 0.0,
+        "num_train_epochs": 1,
+        "max_steps": -1,
+        "warmup_steps": 0,
+        "save_steps": 500,
+        "logging_steps": 10,
+        "save_dir": "./opsd_ckpt_hybrid",
+        "seed": 42
+    },
+    "data": {
+        "path": "data/prompts.jsonl",
+        "prompt_field": "prompt",
+        "shuffle": true
+    },
+    "deepspeed_config": "configs/ds_zero3.json"
+}

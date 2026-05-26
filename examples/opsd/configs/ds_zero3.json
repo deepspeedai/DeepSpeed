@@ -1,0 +1,43 @@
+{
+    "bf16": {
+        "enabled": true
+    },
+    "zero_optimization": {
+        "stage": 3,
+        "overlap_comm": true,
+        "contiguous_gradients": true,
+        "reduce_bucket_size": 5e7,
+        "stage3_prefetch_bucket_size": 5e7,
+        "stage3_param_persistence_threshold": 1e6,
+        "stage3_max_live_parameters": 1e9,
+        "stage3_max_reuse_distance": 1e9,
+        "stage3_gather_16bit_weights_on_model_save": true
+    },
+    "optimizer": {
+        "type": "AdamW",
+        "params": {
+            "lr": 1e-6,
+            "betas": [0.9, 0.95],
+            "eps": 1e-8,
+            "weight_decay": 0.0
+        }
+    },
+    "scheduler": {
+        "type": "WarmupLR",
+        "params": {
+            "warmup_min_lr": 0,
+            "warmup_max_lr": 1e-6,
+            "warmup_num_steps": 0
+        }
+    },
+    "gradient_clipping": 1.0,
+    "hybrid_engine": {
+        "enabled": true,
+        "max_out_tokens": 2048,
+        "inference_tp_size": 1,
+        "release_inference_cache": false,
+        "pin_parameters": true,
+        "tp_gather_partition_size": 8
+    },
+    "wall_clock_breakdown": false
+}
