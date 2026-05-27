@@ -90,6 +90,10 @@ def _scheduled_names(graph):
     return [node.name for node in schedule_mod.fast_free_schedule(graph, 0, 0, debug_log=True).nodes]
 
 
+def _scheduled_names_with_mem(graph, available_mem, output_size=0):
+    return [node.name for node in schedule_mod.fast_free_schedule(graph, available_mem, output_size, debug_log=True).nodes]
+
+
 def test_fast_free_schedule_keeps_zero_free_acc_filter():
     graph = Graph()
 
@@ -180,6 +184,37 @@ def test_fast_free_schedule_uses_pressure_tiebreaker_in_fallback_bucket():
     names = _scheduled_names(graph)
 
     assert names.index(low_ag.name) < names.index(high_ag.name)
+
+
+def test_fast_free_schedule_finishes_fallback_path_when_it_fits_memory():
+    graph = Graph()
+
+    high_param = _placeholder(graph, "budget_high_param")
+    high_extra_param = _placeholder(graph, "budget_high_extra_param")
+    low_param = _placeholder(graph, "budget_low_param")
+    low_extra_param = _placeholder(graph, "budget_low_extra_param")
+
+    high_ag = _allgather(graph, high_param, 80, "budget_high", tensor_size=100)
+    high_wait = _wait(graph, high_ag, 80, "budget_high")
+    high_extra_ag = _allgather(graph, high_extra_param, 81, "budget_high_extra", tensor_size=10)
+    high_extra_wait = _wait(graph, high_extra_ag, 81, "budget_high_extra")
+    high_use = _add(graph, high_wait, high_extra_wait, "budget_high_use", device_time=1)
+    high_release = _release(graph, high_use, 80, "budget_high")
+
+    low_ag = _allgather(graph, low_param, 90, "budget_low", tensor_size=1)
+    low_wait = _wait(graph, low_ag, 90, "budget_low")
+    low_extra_ag = _allgather(graph, low_extra_param, 91, "budget_low_extra", tensor_size=10)
+    low_extra_wait = _wait(graph, low_extra_ag, 91, "budget_low_extra")
+    low_use = _add(graph, low_wait, low_extra_wait, "budget_low_use", device_time=100)
+    low_release = _release(graph, low_use, 90, "budget_low")
+
+    graph.output((high_release, low_release))
+    graph.lint()
+
+    names = _scheduled_names_with_mem(graph, available_mem=1000)
+
+    assert names.index(low_ag.name) < names.index(high_ag.name)
+    assert names.index(low_release.name) < names.index(high_ag.name)
 
 
 def test_fast_free_schedule_keeps_single_allgather_release_order():
