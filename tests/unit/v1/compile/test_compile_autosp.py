@@ -30,6 +30,7 @@ class TestAutoSPCompile(DistributedTest):
     world_size = 4
     non_daemonic_procs = True
 
+    @pytest.mark.sequential
     @pytest.mark.parametrize('dtype', [torch.bfloat16, torch.float32])
     @pytest.mark.parametrize('zero_stage', [0, 1])
     @pytest.mark.parametrize('sp_size', [2, 4])
@@ -78,6 +79,7 @@ class TestAutoSPCompile(DistributedTest):
 
 class TestSDPANodesCompile:
 
+    @pytest.mark.sequential
     @pytest.mark.parametrize('seq_len', [64, 128, 256])
     def test(self, seq_len):
         from deepspeed.compile.util import get_sdpa_nodes
@@ -92,6 +94,7 @@ class TestSDPANodesCompile:
 
 class TestInputIdCompile:
 
+    @pytest.mark.sequential
     @pytest.mark.parametrize('seq_len', [64, 128, 256])
     def test(self, seq_len):
         from deepspeed.compile.util import get_input_id_node
@@ -106,6 +109,7 @@ class TestInputIdCompile:
 
 class TestLabelIdCompile:
 
+    @pytest.mark.sequential
     @pytest.mark.parametrize('seq_len', [64, 128, 256])
     def test(self, seq_len):
         from deepspeed.compile.util import get_label_id_node
@@ -120,6 +124,7 @@ class TestLabelIdCompile:
 
 class TestPositionIdCompile:
 
+    @pytest.mark.sequential
     @pytest.mark.parametrize('seq_len', [64, 128, 256])
     def test(self, seq_len):
         from deepspeed.compile.util import get_position_id_node
@@ -135,6 +140,7 @@ class TestPositionIdCompile:
 
 class TestShardOffsetsCompile:
 
+    @pytest.mark.sequential
     @pytest.mark.parametrize('seq_len', [64, 128, 256])
     def test(self, seq_len):
         import deepspeed.comm as _dist
@@ -168,6 +174,7 @@ class TestShardOffsetsCompile:
 
 class TestSymSliceCompile:
 
+    @pytest.mark.sequential
     @pytest.mark.parametrize('seq_len', [64, 128, 256])
     def test(self, seq_len):
         import deepspeed.comm as _dist
@@ -208,6 +215,7 @@ class TestSymSliceCompile:
 
 class TestShardTensorCompile:
 
+    @pytest.mark.sequential
     @pytest.mark.parametrize('seq_len', [64, 128, 256])
     def test(self, seq_len):
         import deepspeed.comm as _dist
@@ -237,6 +245,7 @@ class TestShardTensorCompile:
             assert sliced_node in user.all_input_nodes, \
                 f"User '{user.name}' does not reference the sliced node"
 
+    @pytest.mark.sequential
     def test_preserves_topological_order_when_sym_placeholder_follows_input(self):
         import deepspeed.comm as _dist
         from deepspeed.compile.custom_ops import sp_dp_registry as _registry
