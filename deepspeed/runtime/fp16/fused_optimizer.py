@@ -86,7 +86,8 @@ class FP16_Optimizer(DeepSpeedOptimizer):
         # loop to deal with groups
         for i, param_group in enumerate(self.optimizer.param_groups):
             # push this group to list before modify
-            self.fp16_groups.append(param_group['params'])
+            trainable = [p for p in param_group['params'] if p.requires_grad]
+            self.fp16_groups.append(trainable)
             # init fp16 weight buffer, flattened
             self.fp16_groups_flat.append(_flatten_dense_tensors([p.clone().detach() for p in self.fp16_groups[i]]))
             # set model fp16 weight to slices of flattened buffer

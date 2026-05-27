@@ -91,6 +91,34 @@ def wrap_partition_fn(z3_partition: bool, partition_fn, real_inputs, param_indic
     return wrapped_partition_fn
 
 
+def _patch_deepcompile_aot_kwargs(kwargs: dict, *, graph_id: int, z3_partition: bool, make_fw_graph, make_bw_graph,
+                                  real_inputs, param_indices, param_manager, frame_id: int,
+                                  frames_partitioned: Set[int]) -> bool:
+    original_fw_compiler = kwargs.get("fw_compiler")
+    original_partition_fn = kwargs.get("partition_fn")
+    if not original_fw_compiler or not original_partition_fn:
+        return False
+
+    original_bw_compiler = kwargs.get("bw_compiler") or original_fw_compiler
+
+    kwargs["fw_compiler"] = patch_compiler(original_fw_compiler,
+                                           make_fw_graph,
+                                           z3_partition,
+                                           graph_id,
+                                           param_manager,
+                                           bwd=False)
+    kwargs["bw_compiler"] = patch_compiler(original_bw_compiler,
+                                           make_bw_graph,
+                                           z3_partition,
+                                           graph_id,
+                                           param_manager,
+                                           bwd=True)
+    kwargs["inference_compiler"] = kwargs["fw_compiler"]
+    kwargs["partition_fn"] = wrap_partition_fn(z3_partition, original_partition_fn, real_inputs, param_indices,
+                                               frame_id, frames_partitioned)
+    return True
+
+
 def patch_create_aot_dispatcher_function(graph_id: int, z3_partition: bool, make_fw_graph, make_bw_graph, real_inputs,
                                          param_indices, param_manager, frame_id: int, frames_partitioned: Set[int]):
 
@@ -106,22 +134,16 @@ def patch_create_aot_dispatcher_function(graph_id: int, z3_partition: bool, make
 
         @functools.wraps(original_init)
         def patched_init(self, **kwargs):
-            kwargs["fw_compiler"] = patch_compiler(kwargs["fw_compiler"],
-                                                   make_fw_graph,
-                                                   z3_partition,
-                                                   graph_id,
-                                                   param_manager,
-                                                   bwd=False)
-            kwargs["bw_compiler"] = patch_compiler(kwargs["bw_compiler"],
-                                                   make_bw_graph,
-                                                   z3_partition,
-                                                   graph_id,
-                                                   param_manager,
-                                                   bwd=True)
-            kwargs["inference_compiler"] = kwargs["fw_compiler"]
-
-            kwargs["partition_fn"] = wrap_partition_fn(z3_partition, kwargs["partition_fn"], real_inputs,
-                                                       param_indices, frame_id, frames_partitioned)
+            _patch_deepcompile_aot_kwargs(kwargs,
+                                          graph_id=graph_id,
+                                          z3_partition=z3_partition,
+                                          make_fw_graph=make_fw_graph,
+                                          make_bw_graph=make_bw_graph,
+                                          real_inputs=real_inputs,
+                                          param_indices=param_indices,
+                                          param_manager=param_manager,
+                                          frame_id=frame_id,
+                                          frames_partitioned=frames_partitioned)
 
             original_init(self, **kwargs)
 
