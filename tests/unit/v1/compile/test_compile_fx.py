@@ -12,6 +12,7 @@ from deepspeed.compile.util import get_deepcompile_handle, is_deepcompile_suppor
 
 
 @pytest.mark.skipif(not is_deepcompile_supported(), reason="DeepCompile requires CUDA and supported PyTorch")
+@pytest.mark.sequential
 def test_end_backward_depends_on_all_reduce_nodes():
     get_deepcompile_handle()
 
