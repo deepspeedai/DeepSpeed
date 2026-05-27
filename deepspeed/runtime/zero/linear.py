@@ -78,6 +78,8 @@ def _get_autocast_dtype(device_type):
 
 class LinearFunctionForZeroStage3(torch.autograd.Function):
 
+    generate_vmap_rule = True
+
     @staticmethod
     # bias is an optional argument
     def forward(input, weight, bias=None):
