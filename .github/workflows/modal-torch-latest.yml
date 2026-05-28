@@ -96,7 +96,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: collect-tests
 
-    if: always() && (github.event_name == 'workflow_dispatch' || needs.collect-tests.result != 'success' || needs.collect-tests.outputs.deepspeed == 'true')
+    if: ${{ !cancelled() && (github.event_name == 'workflow_dispatch' || needs.collect-tests.result != 'success' || needs.collect-tests.outputs.deepspeed == 'true') }}
     steps:
       - name: Fail if path filter failed
         if: github.event_name != 'workflow_dispatch' && needs.collect-tests.result != 'success'
