@@ -31,8 +31,12 @@ class HybridEngineRolloutConfig:
         continuous_batching_size: Number of decode slots for the custom CB loop.
             When > 0, uses shared-prefix prefill + CB + KV trim + early exit.
             When 0 (default), falls back to HF generate with num_return_sequences.
+        kv_trim_threshold: Minimum common leading padding before KV cache trim
+            is applied. 0 = never trim, 1 = trim every step, 16 = trim only
+            when >=16 tokens of common padding have accumulated (default).
     """
     continuous_batching_size: int = 0
+    kv_trim_threshold: int = 16
 
 
 def _hybrid_engine_has_accel(engine) -> bool:
@@ -47,14 +51,16 @@ class HybridEngineRollout(RolloutEngine):
         student_engine: DeepSpeed engine wrapping the student model.
         tokenizer: HuggingFace tokenizer (must have pad_token_id or eos_token_id).
         continuous_batching_size: Number of CB decode slots (0 = use HF generate).
+        kv_trim_threshold: Min common padding before KV trim fires (0 = disabled).
     """
 
     name = "hybrid_engine"
 
-    def __init__(self, student_engine, tokenizer, continuous_batching_size: int = 0):
+    def __init__(self, student_engine, tokenizer, continuous_batching_size: int = 0, kv_trim_threshold: int = 16):
         self.engine = student_engine
         self.tokenizer = tokenizer
         self.continuous_batching_size = continuous_batching_size
+        self.kv_trim_threshold = kv_trim_threshold
         self._has_accel = _hybrid_engine_has_accel(student_engine)
 
     @torch.no_grad()
@@ -276,17 +282,18 @@ class HybridEngineRollout(RolloutEngine):
                     slot_pad_start = [slot_pad_start[i] for i in keep]
 
                 # KV cache left-trim: remove common leading padding
-                active_pads = [slot_pad_start[i] for i in range(len(slot_pad_start))
-                               if slot_active[i]]
-                if active_pads:
-                    min_pad = min(active_pads)
-                    if min_pad >= 16:
-                        for layer_idx in range(len(past)):
-                            past.layers[layer_idx].keys = past.layers[layer_idx].keys[:, :, min_pad:]
-                            past.layers[layer_idx].values = past.layers[layer_idx].values[:, :, min_pad:]
-                        attn_mask = attn_mask[:, min_pad:]
-                        for i in range(len(slot_pad_start)):
-                            slot_pad_start[i] -= min_pad
+                if self.kv_trim_threshold > 0:
+                    active_pads = [slot_pad_start[i] for i in range(len(slot_pad_start))
+                                   if slot_active[i]]
+                    if active_pads:
+                        min_pad = min(active_pads)
+                        if min_pad >= self.kv_trim_threshold:
+                            for layer_idx in range(len(past)):
+                                past.layers[layer_idx].keys = past.layers[layer_idx].keys[:, :, min_pad:]
+                                past.layers[layer_idx].values = past.layers[layer_idx].values[:, :, min_pad:]
+                            attn_mask = attn_mask[:, min_pad:]
+                            for i in range(len(slot_pad_start)):
+                                slot_pad_start[i] -= min_pad
 
         finally:
             if gather_ctx is not None:
