@@ -79,17 +79,17 @@ class RolloutBatch:
 
 
 class RolloutEngine(ABC):
-    """Abstract base for student rollout engines."""
+    """Abstract base for rollout engines."""
 
     name: str = "base"
 
     @abstractmethod
     def generate(self, request: RolloutRequest, sampling: SamplingConfig) -> RolloutBatch:
-        """Run the student's generate, return prompt+response in one tensor."""
+        """Run generation, return prompt+response in one tensor."""
 
     @abstractmethod
-    def sync_weights_from_student(self, step: int) -> None:
-        """Push the student's current weights into the rollout backend.
+    def sync_weights(self, step: int) -> None:
+        """Push updated weights into the rollout backend.
 
         No-op for hybrid engine (reads weights live). Meaningful for vLLM.
         """

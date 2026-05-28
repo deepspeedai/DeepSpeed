@@ -16,12 +16,12 @@ from deepspeed.runtime.rollout import HybridEngineRollout as _HybridEngineRollou
 class HybridEngineRollout(_HybridEngineRollout):
     """OPSD-specific wrapper that reads config from RolloutConfig."""
 
-    def __init__(self, student_engine, tokenizer, cfg: RolloutConfig):
+    def __init__(self, engine, tokenizer, cfg: RolloutConfig):
         if cfg.engine != "hybrid_engine":
             raise ValueError(f"RolloutConfig.engine must be 'hybrid_engine'; got {cfg.engine!r}")
         cb_size = getattr(cfg, "continuous_batching_size", 0)
         super().__init__(
-            student_engine=student_engine,
+            engine=engine,
             tokenizer=tokenizer,
             continuous_batching_size=cb_size,
         )

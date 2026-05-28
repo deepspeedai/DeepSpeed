@@ -21,7 +21,7 @@ def build_rollout(rollout_cfg, student_engine=None, tokenizer=None, student_mode
 
         if student_engine is None or tokenizer is None:
             raise ValueError("hybrid_engine rollout needs both student_engine and tokenizer")
-        return HybridEngineRollout(student_engine=student_engine, tokenizer=tokenizer, cfg=rollout_cfg)
+        return HybridEngineRollout(engine=student_engine, tokenizer=tokenizer, cfg=rollout_cfg)
 
     if engine_name == "vllm":
         from opsd.rollout.vllm import VLLMRollout

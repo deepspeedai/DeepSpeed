@@ -48,7 +48,7 @@ class HybridEngineRollout(RolloutEngine):
     """Rollout engine using DeepSpeed hybrid engine or ZeRO-3 fallback.
 
     Args:
-        student_engine: DeepSpeed engine wrapping the student model.
+        engine: DeepSpeed engine wrapping the model.
         tokenizer: HuggingFace tokenizer (must have pad_token_id or eos_token_id).
         continuous_batching_size: Number of CB decode slots (0 = use HF generate).
         kv_trim_threshold: Min common padding before KV trim fires (0 = disabled).
@@ -56,12 +56,12 @@ class HybridEngineRollout(RolloutEngine):
 
     name = "hybrid_engine"
 
-    def __init__(self, student_engine, tokenizer, continuous_batching_size: int = 0, kv_trim_threshold: int = 16):
-        self.engine = student_engine
+    def __init__(self, engine, tokenizer, continuous_batching_size: int = 0, kv_trim_threshold: int = 16):
+        self.engine = engine
         self.tokenizer = tokenizer
         self.continuous_batching_size = continuous_batching_size
         self.kv_trim_threshold = kv_trim_threshold
-        self._has_accel = _hybrid_engine_has_accel(student_engine)
+        self._has_accel = _hybrid_engine_has_accel(engine)
 
     @torch.no_grad()
     def generate(self, request: RolloutRequest, sampling: SamplingConfig) -> RolloutBatch:
@@ -423,8 +423,8 @@ class HybridEngineRollout(RolloutEngine):
         return RolloutBatch(input_ids=seqs, attention_mask=attention_mask,
                            response_start_idx=response_start_idx)
 
-    def sync_weights_from_student(self, step: int) -> None:  # noqa: ARG002
-        """No-op: hybrid engine reads student weights live."""
+    def sync_weights(self, step: int) -> None:  # noqa: ARG002
+        """No-op: hybrid engine reads model weights live."""
         return None
 
     @torch.no_grad()
