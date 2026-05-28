@@ -5,11 +5,6 @@ on:
   pull_request:
     branches:
       '**'
-    paths-ignore:
-      - 'docs/**'
-      - 'blogs/**'
-      - 'deepspeed/inference/v2/**'
-      - 'tests/unit/inference/v2/**'
   merge_group:
     branches: [ master ]
   schedule:
@@ -20,13 +15,48 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  check-paths:
+    name: nv-pre-compile-ops / check paths
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      should_run: ${{ steps.non_pr.outputs.should_run || steps.filter.outputs.run_tests }}
+    steps:
+      - id: non_pr
+        if: github.event_name != 'pull_request'
+        run: echo "should_run=true" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+        if: github.event_name == 'pull_request'
+
+      - uses: dorny/paths-filter@v3
+        id: filter
+        if: github.event_name == 'pull_request'
+        with:
+          predicate-quantifier: every
+          filters: |
+            run_tests:
+              - '**'
+              - '!docs/**'
+              - '!blogs/**'
+              - '!deepspeed/inference/v2/**'
+              - '!tests/unit/inference/v2/**'
+
   unit-tests:
     name: nv-pre-compile-ops / precompile ops
+    needs: check-paths
+    if: always() && (needs.check-paths.result != 'success' || needs.check-paths.outputs.should_run == 'true')
     runs-on: ubuntu-24.04
     container:
       image: nvidia/cuda:12.6.3-devel-ubuntu22.04
 
     steps:
+        - name: Fail if path filter failed
+          if: needs.check-paths.result != 'success'
+          run: exit 1
+
         - name: Install system dependencies
           run: |
             apt-get update && apt-get install -y git python3 python3-pip libaio-dev ninja-build
