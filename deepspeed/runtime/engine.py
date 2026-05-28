@@ -31,7 +31,7 @@ from deepspeed.runtime.zero.stage_1_and_2 import DeepSpeedZeroOptimizer
 from deepspeed.runtime.zenflow.zenflow_stage_1_and_2 import ZenFlowZeroOptimizer
 from deepspeed.runtime.zero.partition_parameters import ZeroParamStatus
 from deepspeed.runtime.zero.utils import is_zero_supported_optimizer, ZeRORuntimeException
-from deepspeed.runtime.zero.parameter_offload import DeepSpeedZeRoOffload
+from deepspeed.runtime.zero.parameter_offload import DeepSpeedZeRoOffload, ZeROOrderedDict, ensure_zero_ordered_dict
 from deepspeed.runtime.zero.config import ZERO_OPTIMIZATION
 from deepspeed.runtime.zenflow.engine import (configure_zenflow, zenflow_step, is_zenflow_update_boundary,
                                               sync_zenflow_optimizer_lr)
@@ -78,7 +78,7 @@ from deepspeed.runtime.sparse_tensor import SparseTensor
 from deepspeed.runtime import lr_schedules
 from deepspeed.utils import groups
 from deepspeed.utils import logger, log_dist, log_dist_once, instrument_w_nvtx
-from deepspeed.utils.torch import required_torch_version
+from deepspeed.utils.torch import required_torch_version, is_functorch_transforming
 from deepspeed.utils.z3_leaf_module import apply_zero_leaf_module_config
 from deepspeed.utils.timer import NoopTimer, ThroughputTimer, SynchronizedWallClockTimer, \
     FORWARD_MICRO_TIMER, BACKWARD_MICRO_TIMER, BACKWARD_INNER_MICRO_TIMER, BACKWARD_REDUCE_MICRO_TIMER, \
@@ -1647,9 +1647,9 @@ class DeepSpeedEngine(Module):
         self.quantizer = self._configure_quantization()
 
     def _configure_basic_optimizer(self, model_parameters):
-        optimizer_parameters = self.optimizer_params()
-        if optimizer_parameters is None:
-            optimizer_parameters = {}
+        # Copy so the pop() calls below (torch_adam, adam_w_mode, fp32_optimizer_states) do not
+        # mutate the shared config dict returned by optimizer_params().
+        optimizer_parameters = dict(self.optimizer_params() or {})
         # print(optimizer_parameters.keys())
         if "max_grad_norm" in optimizer_parameters.keys():
             raise ValueError(
@@ -1674,9 +1674,24 @@ class DeepSpeedEngine(Module):
                     CPUAdam = ZenFlowCPUAdam if self.zenflow else DeepSpeedCPUAdam
 
                     zenflow_kwargs = {'overlap_step': self.overlap_step} if self.zenflow else {}
+                    # Pop so a user-supplied value does not collide with the keyword built below.
+                    # None means the user did not set it, so no override warning is needed.
+                    user_fp32_optimizer_states = optimizer_parameters.pop('fp32_optimizer_states', None)
+                    if self.bf16_optimizer_states():
+                        # bf16 moments are required so the offloaded state matches the bf16 master weights.
+                        if user_fp32_optimizer_states:
+                            logger.warning("bf16_optimizer_states is enabled; overriding fp32_optimizer_states "
+                                           "to False so CPU Adam moments are stored in bf16.")
+                        fp32_optimizer_states = False
+                    elif user_fp32_optimizer_states is None:
+                        # Default preserves the pre-existing fp32 optimizer-state behavior.
+                        fp32_optimizer_states = True
+                    else:
+                        fp32_optimizer_states = user_fp32_optimizer_states
                     optimizer = CPUAdam(model_parameters,
                                         **optimizer_parameters,
                                         adamw_mode=effective_adam_w_mode,
+                                        fp32_optimizer_states=fp32_optimizer_states,
                                         **zenflow_kwargs)
                 else:
                     from deepspeed.ops.adam import FusedAdam
@@ -2305,6 +2320,7 @@ class DeepSpeedEngine(Module):
             # Enable automated discovery of external parameters by indicating that
             # we are in a forward pass.
             for module in self.module.modules():
+                ensure_zero_ordered_dict(module)
                 module._parameters._in_forward = True
 
         if self.fp16_auto_cast():
@@ -2318,7 +2334,8 @@ class DeepSpeedEngine(Module):
         if self.zero_optimization_partition_weights():
             # Disable automated discovery of external parameters
             for module in self.module.modules():
-                module._parameters._in_forward = False
+                if isinstance(module._parameters, ZeROOrderedDict):
+                    module._parameters._in_forward = False
 
         self._stop_timers(self.engine_timers.forward_timers)
 
@@ -2437,6 +2454,8 @@ class DeepSpeedEngine(Module):
             self.optimizer.reduce_gradients(pipeline_parallel=self.pipeline_parallelism)
 
     def _backward_prologue(self):
+        if is_functorch_transforming():
+            return
         self._start_timers(self.engine_timers.backward_timers)
 
         # When necessary internal APIs are not available, we disable direct calls to tensor.backward()
@@ -2492,12 +2511,16 @@ class DeepSpeedEngine(Module):
         self._stop_timers(self.engine_timers.backward_timers)
 
     def _backward_prologue_per_tensor(self, grad):
+        if is_functorch_transforming():
+            return grad
         # Only scale gradients if scale_wrt_gas is True, consistent with backward() parameter
         if grad is not None and self._scale_wrt_gas:
             return grad / self.gradient_accumulation_steps()
         return grad
 
     def _backward_post_hook(self):
+        if is_functorch_transforming():
+            return
         if not self._running_engine_backward:
             # Check if loss scaling was required but not applied
             needs_scaler = False
@@ -2542,6 +2565,103 @@ class DeepSpeedEngine(Module):
             yield
         finally:
             self.inside_no_sync_ctxt = False
+
+    @contextmanager
+    def coalesce_grad_reduction(self):
+        r"""Coalesce ZeRO 1/2/3 gradient reduction across multiple engine.backward()
+        calls. One with-block == one optimizer step: every backward inside
+        leaves grads locally on params, and the flush on exit issues a single
+        reduction pass that populates averaged_gradients for the next step().
+
+        Constraints:
+            - engine.step() inside the block raises.
+            - Reentry / nesting with engine.no_sync() raises.
+            - Do not span multiple gradient_accumulation_steps with multiple
+              with-blocks; the flush overwrites averaged_gradients each exit.
+
+        Unsupported (NotImplementedError): ZeRO stage 0, BF16/FP16_Optimizer
+        wrappers, PipelineModule.
+        """
+        stage = self.zero_optimization_stage()
+        if stage not in (ZeroStageEnum.optimizer_states, ZeroStageEnum.gradients, ZeroStageEnum.weights):
+            raise NotImplementedError(f"coalesce_grad_reduction requires ZeRO stage 1/2/3, got stage {int(stage)}")
+        if self.pipeline_parallelism:
+            raise NotImplementedError("coalesce_grad_reduction is not supported under pipeline parallelism")
+        optimizer = self.optimizer
+        if not hasattr(optimizer, "_coalesce_grad_reduction"):
+            # BF16_Optimizer / FP16_Optimizer route grads through their own
+            # backward_epilogue path, bypassing DeepSpeedZeroOptimizer's
+            # per-param hooks that this context relies on.
+            raise NotImplementedError(
+                f"coalesce_grad_reduction does not yet support optimizer wrapper {type(optimizer).__name__}")
+        assert not self.inside_no_sync_ctxt, \
+            "coalesce_grad_reduction cannot be nested inside another no_sync context"
+
+        # Engine boundary is the source of truth; optimizer's copy is overwritten
+        # by _backward_prologue from the engine value on each backward, so we
+        # only need to save/restore the engine flag.
+        saved_engine_boundary = self._is_gradient_accumulation_boundary
+        self.inside_no_sync_ctxt = True
+        optimizer._coalesce_grad_reduction = True
+        try:
+            yield
+        finally:
+            # Reset _coalesce_grad_reduction BEFORE the flush so the reducer calls
+            # we drive in the flush helpers do NOT short-circuit at our guard
+            # in process_gradients / reduce_ready_partitions_and_remove_grads.
+            optimizer._coalesce_grad_reduction = False
+            self.inside_no_sync_ctxt = False
+            self._is_gradient_accumulation_boundary = True
+            optimizer.is_gradient_accumulation_boundary = True
+            try:
+                # Drive a single reduction pass over locally accumulated grads.
+                # Iterate explicitly (rather than calling reduce_gradients) so
+                # the path works regardless of overlap_comm / contiguous_gradients,
+                # both of which alter reduce_gradients's control flow.
+                if stage == ZeroStageEnum.weights:
+                    self._flush_coalesced_reduction_zero3(optimizer)
+                else:
+                    self._flush_coalesced_reduction_zero12(optimizer)
+            finally:
+                self._is_gradient_accumulation_boundary = saved_engine_boundary
+
+    def _flush_coalesced_reduction_zero12(self, optimizer):
+        # Quiesce the reduction stream before re-entering it (overlap_comm uses
+        # a separate stream + double-buffered ipg bucket). Without this the
+        # bucket.index swap in reduce_independent_p_g_buckets_and_remove_grads
+        # may race against the previous step's residual reduction.
+        if getattr(optimizer, "overlap_comm", False) and hasattr(optimizer, "reduction_stream"):
+            if not get_accelerator().resolves_data_dependency():
+                optimizer.reduction_stream.synchronize()
+        # Ensure ipg bucket buffers exist (process_gradients normally allocates
+        # them via setup_buckets, but we suppressed it during coalesce period).
+        # Note: micro_step_id increments by 1 here for the whole coalesce block,
+        # which is fine -- copy_grads_in_partition's accumulate condition uses
+        # micro_step_id > 0 OR not boundary, and we force boundary=True.
+        optimizer.setup_buckets()
+        for i, group in enumerate(optimizer.bit16_groups):
+            for param in group:
+                if not param.requires_grad:
+                    continue
+                # use_grad_accum_attribute=True parks the accumulated grad in
+                # param.grad_accum instead of param.grad (backward_epilogue
+                # routes it there each microbatch). get_gradient_for_reduction
+                # returns the right one for both modes.
+                if optimizer.get_gradient_for_reduction(param) is None:
+                    continue
+                optimizer.reduce_ready_partitions_and_remove_grads(param, i)
+        optimizer.overlapping_partition_gradients_reduce_epilogue()
+
+    def _flush_coalesced_reduction_zero3(self, optimizer):
+        # Leaf-module unused-param zero-fill (stage3.py:1336-1337) runs from
+        # the leaf module's own backward hook, BEFORE the reducer call we
+        # suppress. So by flush time the leaf params already have grads (real
+        # or zero-filled) populated by the hook regardless of _coalesce_grad_reduction.
+        for group in optimizer.fp16_groups:
+            for param in group:
+                if param.requires_grad and param.grad is not None:
+                    optimizer.reduce_ready_partitions_and_remove_grads(param)
+        optimizer.independent_gradient_partition_epilogue()
 
     def scale(self, loss):
         r"""Apply loss scaler for manual backward pass.

@@ -22,6 +22,7 @@ concurrency:
 
 jobs:
   unit-tests:
+    name: nv-inference / inference tests
     runs-on: [self-hosted, nvidia, cu124, v100]
 
     steps:

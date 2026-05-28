@@ -21,6 +21,7 @@ concurrency:
 
 jobs:
   unit-tests:
+    name: nv-a6000 / inference and MII tests
     runs-on: [self-hosted, nvidia, a6000]
     container:
       image: nvcr.io/nvidia/pytorch:25.01-py3

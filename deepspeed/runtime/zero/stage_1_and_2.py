@@ -242,6 +242,9 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
 
         self.is_gradient_accumulation_boundary = True
 
+        # Toggled by DeepSpeedEngine.coalesce_grad_reduction().
+        self._coalesce_grad_reduction = False
+
         # CPU-Offload requires contiguous gradients
         self.contiguous_gradients = contiguous_gradients or self.cpu_offload
 
@@ -280,8 +283,9 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             fp16_master_weights_and_gradients=fp16_master_weights_and_gradients,
             bf16_master_weights_and_gradients=bf16_master_weights_and_gradients,
             bf16_optimizer_states=bf16_optimizer_states,
+            offload_enabled=self.cpu_offload,
             fp16_offload_validator=_enforce_cpu_offload,
-            bf16_fp32_offload_validator=_enforce_cpu_offload)
+            bf16_offload_validator=_enforce_cpu_offload)
 
         self.low_precision_master_weights_and_grads = self.master_weights_and_grads_dtype != torch.float32
 
@@ -1612,6 +1616,8 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         #####################################################################
 
     def process_gradients(self, param, i):
+        if self._coalesce_grad_reduction:
+            return
         self.setup_buckets()
         if self.use_grad_accum_attribute:
             self._fill_param_grad_accum_attribute(param)
