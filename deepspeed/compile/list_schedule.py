@@ -280,13 +280,6 @@ def _fallback_allgather_key(task: AllgatherTask):
     return (task.free_acc_mem, task.n_scheduled_ags, task.allgather_acc_mem, task.free_cost, task.node.name)
 
 
-def _allgather_path_fits(task: AllgatherTask, available_mem: int, output_size: int):
-    memory_budget = max(available_mem - output_size, 0)
-    if memory_budget <= 0:
-        return False
-    return task.allgather_acc_mem + task.free_acc_mem <= memory_budget
-
-
 def fast_free_schedule(graph: Graph, available_mem: int, output_size: int, debug_log: bool) -> Graph:
     node_to_last_use, user_to_last_uses = get_last_uses(graph)
 
@@ -390,10 +383,7 @@ def fast_free_schedule(graph: Graph, available_mem: int, output_size: int, debug
             # sorted_ags = sorted(runnable_ags, key=lambda x: x.allgathered_mem)
             sorted_ags = sorted(runnable_ags, key=_fallback_allgather_key)
             next_ag = sorted_ags[0]
-            if _allgather_path_fits(next_ag, available_mem, output_size):
-                nodes_to_schedule = next_ag.schedule_until_free
-            else:
-                nodes_to_schedule = next_ag.schedule_until_ag
+            nodes_to_schedule = next_ag.schedule_until_ag
 
         # print(f" next_ag {next_ag}")
         for n in nodes_to_schedule:
