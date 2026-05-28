@@ -48,6 +48,12 @@ class RolloutConfig:
     top_k: int = -1
     n_samples_per_prompt: int = 1
 
+    # Continuous batching: number of decode slots. When > 0, uses a custom
+    # decode loop with shared-prefix prefill, slot replacement on EOS, KV
+    # cache left-trim (threshold=16), and early-exit batch compaction.
+    # When 0 (default), falls back to HF generate with num_return_sequences.
+    continuous_batching_size: int = 0
+
     # vLLM-specific. ``gpus`` is the disjoint set of CUDA device indices vLLM
     # may use; the training ranks must not overlap with these. If None, the
     # trainer will refuse to start in vllm mode.
