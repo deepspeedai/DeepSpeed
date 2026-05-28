@@ -426,6 +426,9 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
         self.is_gradient_accumulation_boundary: bool = True
 
+        # Toggled by DeepSpeedEngine.coalesce_grad_reduction().
+        self._coalesce_grad_reduction = False
+
         self.param_reduce_events: Deque[get_accelerator().Event] = collections.deque()
         # TODO. make this configurable via JSON
         self.max_param_reduce_events: int = 2
@@ -1812,6 +1815,8 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         return output
 
     def reduce_ready_partitions_and_remove_grads(self, param):
+        if self._coalesce_grad_reduction:
+            return
         #print_rank_0(f"Backward {debug_param2name_id_shape(param)}", force=True)
         self.reduce_independent_p_g_buckets_and_remove_grads(param)
 
