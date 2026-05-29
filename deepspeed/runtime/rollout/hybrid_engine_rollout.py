@@ -20,6 +20,7 @@ from typing import Optional
 
 import torch
 
+from deepspeed.accelerator import get_accelerator
 from deepspeed.runtime.rollout.base import RolloutBatch, RolloutEngine, RolloutRequest, SamplingConfig
 
 
@@ -37,6 +38,7 @@ class HybridEngineRolloutConfig:
     """
     continuous_batching_size: int = 0
     kv_trim_threshold: int = 16
+    use_graph_capture: bool = False
 
 
 def _hybrid_engine_has_accel(engine) -> bool:
@@ -56,16 +58,30 @@ class HybridEngineRollout(RolloutEngine):
 
     name = "hybrid_engine"
 
-    def __init__(self, engine, tokenizer, continuous_batching_size: int = 0, kv_trim_threshold: int = 16):
+    def __init__(self, engine, tokenizer, continuous_batching_size: int = 0,
+                 kv_trim_threshold: int = 16, use_graph_capture: bool = False):
         self.engine = engine
         self.tokenizer = tokenizer
         self.continuous_batching_size = continuous_batching_size
         self.kv_trim_threshold = kv_trim_threshold
+        self.use_graph_capture = use_graph_capture
         self._has_accel = _hybrid_engine_has_accel(engine)
+        # Graph capture state (lazily initialized)
+        self._graph = None
+        self._graph_batch_size: int = 0
+        self._graph_max_cache_len: int = 0
+        self._graph_input_ids: Optional[torch.Tensor] = None
+        self._graph_cache_pos: Optional[torch.Tensor] = None
+        self._graph_static_cache = None
+        self._graph_output_logits: Optional[torch.Tensor] = None
+        self._graph_attn_mask: Optional[torch.Tensor] = None
+        self._graph_position_ids: Optional[torch.Tensor] = None
 
     @torch.no_grad()
     def generate(self, request: RolloutRequest, sampling: SamplingConfig) -> RolloutBatch:
         if self.continuous_batching_size > 0:
+            if self.use_graph_capture:
+                return self._generate_graph_capture_cb(request, sampling, self.continuous_batching_size)
             return self._generate_continuous_batching(request, sampling, self.continuous_batching_size)
         return self._generate_naive(request, sampling)
 
@@ -322,6 +338,293 @@ class HybridEngineRollout(RolloutEngine):
             attention_mask=attention_mask,
             response_start_idx=response_start_idx,
         )
+
+    # ------------------------------------------------------------------
+    # Graph capture + continuous batching path
+    # ------------------------------------------------------------------
+
+    @torch.no_grad()
+    def _generate_graph_capture_cb(self, request: RolloutRequest, sampling: SamplingConfig,
+                                cb_size: int) -> RolloutBatch:
+        """Decode loop using graph capture for the forward pass.
+
+        Uses StaticCache (pre-allocated, fixed-shape KV) so the decode forward
+        can be captured as a graph and replayed each step.  Batch size
+        stays fixed (no compaction); finished slots are masked via attention_mask.
+        """
+        from transformers import StaticCache
+
+        device = request.prompt_ids.device
+        B = request.prompt_ids.shape[0]
+        n = sampling.n_samples_per_prompt
+        total = B * n
+        prompt_len = request.prompt_ids.shape[1]
+        max_new_tokens = sampling.max_new_tokens
+        eos_token_id = self.tokenizer.eos_token_id
+        pad_token_id = self.tokenizer.pad_token_id or eos_token_id
+        batch_size = min(total, cb_size)
+        # With CB, decode_pos advances globally: ceil(total/batch_size) rounds of max_new_tokens
+        import math
+        num_rounds = math.ceil(total / batch_size)
+        max_cache_len = prompt_len + num_rounds * max_new_tokens
+
+        temperature = max(sampling.temperature, 1e-8)
+        top_p = sampling.top_p
+
+        self.engine.eval()
+        gather_ctx = None
+        try:
+            module, gather_ctx = self._get_module_ctx()
+            if gather_ctx is not None:
+                gather_ctx.__enter__()
+            model_dtype = next(module.parameters()).dtype
+
+            # === Phase 1: Prefill into a reference cache ===
+            prefill_bs = 1 if B == 1 else B
+            prefill_cache = StaticCache(
+                module.config, batch_size=prefill_bs,
+                max_cache_len=max_cache_len, device=device, dtype=model_dtype)
+            cache_pos_prefill = torch.arange(prompt_len, device=device)
+            pfkw = dict(input_ids=request.prompt_ids[:prefill_bs],
+                        past_key_values=prefill_cache, use_cache=True,
+                        cache_position=cache_pos_prefill)
+            if B > 1:
+                pfkw['attention_mask'] = request.prompt_attention_mask
+            out = module(**pfkw)
+            first_logits = out.logits[:, -1, :]  # [prefill_bs, vocab]
+
+            # === Phase 2: Build batch static cache + static buffers ===
+            static_cache = StaticCache(
+                module.config, batch_size=batch_size,
+                max_cache_len=max_cache_len, device=device, dtype=model_dtype)
+
+            static_input_ids = torch.zeros(batch_size, 1, dtype=torch.long, device=device)
+            static_cache_position = torch.zeros(1, dtype=torch.long, device=device)
+            static_attn_mask = torch.zeros(
+                batch_size, max_cache_len, dtype=torch.long, device=device)
+            static_position_ids = torch.zeros(batch_size, 1, dtype=torch.long, device=device)
+
+            # Initialize static_cache with a dummy forward, then restore with prefill KV
+            dummy_cp = torch.zeros(1, dtype=torch.long, device=device)
+            module(torch.zeros(batch_size, 1, dtype=torch.long, device=device),
+                   past_key_values=static_cache, use_cache=True, cache_position=dummy_cp)
+
+            # === Phase 3: Warmup + capture (or reuse cached graph) ===
+            need_new_graph = (self._graph is None or
+                              self._graph_batch_size != batch_size or
+                              self._graph_max_cache_len != max_cache_len)
+
+            if need_new_graph:
+                # Warmup
+                static_cache_position[0] = prompt_len
+                static_input_ids[:, 0] = 0
+                static_position_ids[:, 0] = prompt_len
+                module(static_input_ids, past_key_values=static_cache, use_cache=True,
+                       cache_position=static_cache_position, attention_mask=static_attn_mask,
+                       position_ids=static_position_ids)
+                # Capture — must be on correct device
+                graph = get_accelerator().create_graph()
+                with torch.cuda.device(device):
+                    with get_accelerator().capture_to_graph(graph):
+                        graph_out = module(static_input_ids, past_key_values=static_cache,
+                                          use_cache=True, cache_position=static_cache_position,
+                                          attention_mask=static_attn_mask,
+                                          position_ids=static_position_ids)
+
+                # Cache graph state
+                self._graph = graph
+                self._graph_batch_size = batch_size
+                self._graph_max_cache_len = max_cache_len
+                self._graph_input_ids = static_input_ids
+                self._graph_cache_pos = static_cache_position
+                self._graph_static_cache = static_cache
+                self._graph_output_logits = graph_out.logits
+                self._graph_attn_mask = static_attn_mask
+                self._graph_position_ids = static_position_ids
+                graph_logits = graph_out.logits
+            else:
+                # Reuse cached graph — reassign static buffers to the cached ones
+                # The graph was captured with specific tensor addresses; we must
+                # use those same tensors.
+                graph = self._graph
+                static_input_ids = self._graph_input_ids
+                static_cache_position = self._graph_cache_pos
+                static_cache = self._graph_static_cache
+                static_attn_mask = self._graph_attn_mask
+                static_position_ids = self._graph_position_ids
+                graph_logits = self._graph_output_logits
+
+                # Just restore prefill KV + reset attn mask (no warmup/capture needed)
+
+            # === Phase 4: Restore prefill KV into all initial slots ===
+            init_count = min(batch_size, total)
+            for layer_idx in range(len(static_cache.layers)):
+                src_k = prefill_cache.layers[layer_idx].keys
+                src_v = prefill_cache.layers[layer_idx].values
+                for s in range(init_count):
+                    pi = s // n if B > 1 else 0
+                    static_cache.layers[layer_idx].keys[s] = src_k[pi]
+                    static_cache.layers[layer_idx].values[s] = src_v[pi]
+
+            static_attn_mask[:] = 0
+            static_attn_mask[:init_count, :prompt_len] = 1
+
+            if B == 1:
+                init_logits = first_logits.expand(init_count, -1)
+            else:
+                prompt_indices = torch.arange(init_count, device=device) // n
+                init_logits = first_logits[prompt_indices]
+
+            # === Phase 5: Slot state + sample first token ===
+            all_tokens = torch.full(
+                (total, max_new_tokens), pad_token_id, dtype=torch.long, device=device)
+            gen_lens = torch.zeros(total, dtype=torch.long, device=device)
+            completed_count = 0
+            next_rollout_idx = init_count
+
+            slot_rollout = list(range(init_count)) + [-1] * (batch_size - init_count)
+            slot_decode_step = [0] * batch_size
+            slot_active = [i < init_count for i in range(batch_size)]
+            slot_position = [prompt_len] * batch_size
+
+            first_tokens = self._sample_top_p(init_logits, temperature, top_p)
+            for i in range(init_count):
+                all_tokens[i, 0] = first_tokens[i, 0]
+                gen_lens[i] = 1
+                slot_decode_step[i] = 1
+
+            # Check immediate EOS
+            eos_now = (first_tokens.squeeze(1) == eos_token_id).cpu().tolist()
+            for i in range(init_count):
+                if eos_now[i]:
+                    completed_count += 1
+                    if next_rollout_idx < total:
+                        self._graph_capture_replace_slot_kv(
+                            i, static_cache, prefill_cache, static_attn_mask,
+                            first_logits, first_tokens, all_tokens, gen_lens,
+                            slot_rollout, slot_decode_step, slot_position,
+                            next_rollout_idx, prompt_len, B, n, device,
+                            temperature, top_p)
+                        next_rollout_idx += 1
+                    else:
+                        slot_active[i] = False
+
+            current_tokens = first_tokens
+            decode_pos = prompt_len
+
+            # Vectorized slot state tensors for the hot loop
+            slot_rollout_t = torch.tensor(slot_rollout, dtype=torch.long, device=device)
+            slot_decode_step_t = torch.tensor(slot_decode_step, dtype=torch.long, device=device)
+            slot_active_t = torch.tensor(slot_active, dtype=torch.bool, device=device)
+            slot_position_t = torch.tensor(slot_position, dtype=torch.long, device=device)
+
+            # === Phase 6: Main decode loop with graph replay ===
+            while completed_count < total and decode_pos < max_cache_len:
+                if not slot_active_t.any():
+                    break
+
+                # Update static buffers in-place (tensor ops, no Python loop)
+                static_input_ids[:, 0] = current_tokens[:, 0]
+                static_cache_position[0] = decode_pos
+                static_attn_mask[:, decode_pos] = slot_active_t.long()
+                static_position_ids[:, 0] = slot_position_t
+
+                get_accelerator().replay_graph(graph)
+
+                current_tokens = self._sample_top_p(
+                    graph_logits[:, -1, :], temperature, top_p)
+
+                # Store tokens for active slots (vectorized)
+                active_mask = slot_active_t & (slot_decode_step_t < max_new_tokens)
+                if active_mask.any():
+                    active_indices = active_mask.nonzero(as_tuple=True)[0]
+                    for idx in active_indices.tolist():
+                        ds = slot_decode_step_t[idx].item()
+                        ri = slot_rollout_t[idx].item()
+                        all_tokens[ri, ds] = current_tokens[idx, 0]
+                        gen_lens[ri] = ds + 1
+                slot_decode_step_t[slot_active_t] += 1
+                slot_position_t[slot_active_t] += 1
+
+                decode_pos += 1
+
+                # Check finished (EOS or max_len)
+                eos_hit = (current_tokens.squeeze(1) == eos_token_id) & slot_active_t
+                maxlen_hit = (slot_decode_step_t >= max_new_tokens) & slot_active_t
+                finished = eos_hit | maxlen_hit
+
+                if finished.any():
+                    for idx in finished.nonzero(as_tuple=True)[0].tolist():
+                        completed_count += 1
+                        if next_rollout_idx < total:
+                            self._graph_capture_replace_slot_kv(
+                                idx, static_cache, prefill_cache, static_attn_mask,
+                                first_logits, current_tokens, all_tokens, gen_lens,
+                                slot_rollout_t, slot_decode_step_t, slot_position_t,
+                                next_rollout_idx, prompt_len, B, n, device,
+                                temperature, top_p)
+                            next_rollout_idx += 1
+                        else:
+                            slot_active_t[idx] = False
+
+        finally:
+            if gather_ctx is not None:
+                gather_ctx.__exit__(None, None, None)
+            self.engine.train()
+            del prefill_cache
+
+        # === Build output ===
+        max_gen = gen_lens.max().item() if gen_lens.max().item() > 0 else 1
+        all_tokens = all_tokens[:, :max_gen]
+
+        if B == 1:
+            expanded_prompts = request.prompt_ids.repeat(total, 1)
+            expanded_prompt_mask = request.prompt_attention_mask.repeat(total, 1)
+        else:
+            expanded_prompts = request.prompt_ids.repeat_interleave(n, dim=0)
+            expanded_prompt_mask = request.prompt_attention_mask.repeat_interleave(n, dim=0)
+
+        seqs = torch.cat([expanded_prompts, all_tokens], dim=1)
+        response_mask = (all_tokens != pad_token_id).to(expanded_prompt_mask.dtype)
+        attention_mask = torch.cat([expanded_prompt_mask, response_mask], dim=1)
+        response_start_idx = torch.full((total,), prompt_len, dtype=torch.long, device=device)
+
+        return RolloutBatch(
+            input_ids=seqs,
+            attention_mask=attention_mask,
+            response_start_idx=response_start_idx,
+        )
+
+    def _graph_capture_replace_slot_kv(self, slot_idx, static_cache, prefill_cache,
+                                     static_attn_mask, first_logits, next_tokens,
+                                     all_tokens, gen_lens, slot_rollout,
+                                     slot_decode_step, slot_position,
+                                     new_rollout_idx,
+                                     prompt_len, B, n, device, temperature, top_p):
+        """Replace a finished slot by copying prompt KV from prefill_cache."""
+        src_prompt_idx = new_rollout_idx // n if B > 1 else 0
+
+        # Copy prompt KV from prefill cache
+        for layer_idx in range(len(static_cache.layers)):
+            static_cache.layers[layer_idx].keys[slot_idx] = \
+                prefill_cache.layers[layer_idx].keys[src_prompt_idx]
+            static_cache.layers[layer_idx].values[slot_idx] = \
+                prefill_cache.layers[layer_idx].values[src_prompt_idx]
+
+        # Reset attention mask: only prompt positions are valid
+        static_attn_mask[slot_idx] = 0
+        static_attn_mask[slot_idx, :prompt_len] = 1
+
+        # Sample first token for new slot
+        new_first_logits = first_logits[src_prompt_idx:src_prompt_idx + 1]
+        new_token = self._sample_top_p(new_first_logits, temperature, top_p)
+        next_tokens[slot_idx] = new_token[0]
+
+        slot_rollout[slot_idx] = new_rollout_idx
+        all_tokens[new_rollout_idx, 0] = new_token[0, 0]
+        gen_lens[new_rollout_idx] = 1
+        slot_decode_step[slot_idx] = 1
+        slot_position[slot_idx] = prompt_len
 
     # ------------------------------------------------------------------
     # CB helper: replace a finished slot with a new rollout
