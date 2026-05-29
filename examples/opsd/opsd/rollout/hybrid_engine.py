@@ -20,9 +20,11 @@ class HybridEngineRollout(_HybridEngineRollout):
         if cfg.engine != "hybrid_engine":
             raise ValueError(f"RolloutConfig.engine must be 'hybrid_engine'; got {cfg.engine!r}")
         cb_size = getattr(cfg, "continuous_batching_size", 0)
+        use_gc = getattr(cfg, "use_graph_capture", False)
         super().__init__(
             engine=engine,
             tokenizer=tokenizer,
             continuous_batching_size=cb_size,
+            use_graph_capture=use_gc,
         )
 

@@ -403,6 +403,13 @@ class HybridEngineRollout(RolloutEngine):
                 batch_size, max_cache_len, dtype=torch.long, device=device)
             static_position_ids = torch.zeros(batch_size, 1, dtype=torch.long, device=device)
 
+            # Temporarily remove DeepSpeed forward hooks (they call synchronize()
+            # which is illegal during CUDA graph capture).
+            _saved_pre_hooks = dict(module._forward_pre_hooks)
+            _saved_post_hooks = dict(module._forward_hooks)
+            module._forward_pre_hooks.clear()
+            module._forward_hooks.clear()
+
             # Initialize static_cache with a dummy forward, then restore with prefill KV
             dummy_cp = torch.zeros(1, dtype=torch.long, device=device)
             module(torch.zeros(batch_size, 1, dtype=torch.long, device=device),
@@ -585,6 +592,9 @@ class HybridEngineRollout(RolloutEngine):
                         slot_active_t[idx] = False
 
         finally:
+            # Restore DeepSpeed forward hooks
+            module._forward_pre_hooks.update(_saved_pre_hooks)
+            module._forward_hooks.update(_saved_post_hooks)
             if gather_ctx is not None:
                 gather_ctx.__exit__(None, None, None)
             self.engine.train()

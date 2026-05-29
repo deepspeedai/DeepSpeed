@@ -53,6 +53,8 @@ class RolloutConfig:
     # cache left-trim (threshold=16), and early-exit batch compaction.
     # When 0 (default), falls back to HF generate with num_return_sequences.
     continuous_batching_size: int = 0
+    # Use CUDA graph capture for decode acceleration (requires continuous_batching_size > 0)
+    use_graph_capture: bool = False
 
     # vLLM-specific. ``gpus`` is the disjoint set of CUDA device indices vLLM
     # may use; the training ranks must not overlap with these. If None, the

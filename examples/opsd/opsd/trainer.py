@@ -94,9 +94,11 @@ class OPSDTrainer:
         # Push student weights into the rollout backend if it's time to.
         # No-op for the hybrid engine; meaningful for vLLM.
         if self.step % self.cfg.rollout.weight_sync_interval == 0:
-            self.rollout.sync_weights_from_student(self.step)
+            self.rollout.sync_weights(self.step)
 
         # --- Phase 0: rollout (student generates responses) ---------------
+        # Switch hybrid engine to inference mode (gathers ZeRO-3 params).
+        self.student_engine.eval()
         sampling = SamplingConfig(
             max_new_tokens=self.cfg.rollout.max_response_length,
             temperature=self.cfg.rollout.temperature,
@@ -108,6 +110,7 @@ class OPSDTrainer:
             RolloutRequest(prompt_ids=prompt_ids, prompt_attention_mask=prompt_attn),
             sampling,
         )
+        self.student_engine.train()
         input_ids = roll.input_ids.to(self.device, non_blocking=True)
         attention_mask = roll.attention_mask.to(self.device, non_blocking=True)
         response_start_idx = roll.response_start_idx.to(self.device, non_blocking=True)
