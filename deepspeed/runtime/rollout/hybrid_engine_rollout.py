@@ -365,8 +365,7 @@ class HybridEngineRollout(RolloutEngine):
         batch_size = min(total, cb_size)
         # With CB, decode_pos advances globally: ceil(total/batch_size) rounds of max_new_tokens
         import math
-        num_rounds = math.ceil(total / batch_size)
-        max_cache_len = prompt_len + num_rounds * max_new_tokens
+        max_cache_len = prompt_len + max_new_tokens
 
         temperature = max(sampling.temperature, 1e-8)
         top_p = sampling.top_p
@@ -519,9 +518,36 @@ class HybridEngineRollout(RolloutEngine):
             slot_position_t = torch.tensor(slot_position, dtype=torch.long, device=device)
 
             # === Phase 6: Main decode loop with graph replay ===
-            while completed_count < total and decode_pos < max_cache_len:
+            while completed_count < total:
                 if not slot_active_t.any():
-                    break
+                    # Round complete: all batch slots finished.
+                    # Reset decode_pos and start a new round with fresh slots.
+                    if next_rollout_idx >= total:
+                        break
+                    decode_pos = prompt_len
+                    static_attn_mask[:] = 0
+                    refill_count = min(batch_size, total - next_rollout_idx)
+                    for s in range(refill_count):
+                        src_prompt_idx = next_rollout_idx // n if B > 1 else 0
+                        for layer_idx in range(len(static_cache.layers)):
+                            static_cache.layers[layer_idx].keys[s].copy_(
+                                prefill_cache.layers[layer_idx].keys[src_prompt_idx])
+                            static_cache.layers[layer_idx].values[s].copy_(
+                                prefill_cache.layers[layer_idx].values[src_prompt_idx])
+                        static_attn_mask[s, :prompt_len] = 1
+                        new_first_logits = first_logits[src_prompt_idx:src_prompt_idx + 1]
+                        new_token = self._sample_top_p(new_first_logits, temperature, top_p)
+                        current_tokens[s] = new_token[0]
+                        all_tokens[next_rollout_idx, 0] = new_token[0, 0]
+                        gen_lens[next_rollout_idx] = 1
+                        slot_rollout_t[s] = next_rollout_idx
+                        slot_decode_step_t[s] = 1
+                        slot_position_t[s] = prompt_len
+                        slot_active_t[s] = True
+                        next_rollout_idx += 1
+                    for s in range(refill_count, batch_size):
+                        slot_active_t[s] = False
+                    continue
 
                 # Update static buffers in-place (tensor ops, no Python loop)
                 static_input_ids[:, 0] = current_tokens[:, 0]
@@ -556,16 +582,7 @@ class HybridEngineRollout(RolloutEngine):
                 if finished.any():
                     for idx in finished.nonzero(as_tuple=True)[0].tolist():
                         completed_count += 1
-                        if next_rollout_idx < total:
-                            self._graph_capture_replace_slot_kv(
-                                idx, static_cache, prefill_cache, static_attn_mask,
-                                first_logits, current_tokens, all_tokens, gen_lens,
-                                slot_rollout_t, slot_decode_step_t, slot_position_t,
-                                next_rollout_idx, prompt_len, B, n, device,
-                                temperature, top_p)
-                            next_rollout_idx += 1
-                        else:
-                            slot_active_t[idx] = False
+                        slot_active_t[idx] = False
 
         finally:
             if gather_ctx is not None:
