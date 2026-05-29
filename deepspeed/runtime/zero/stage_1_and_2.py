@@ -2133,6 +2133,9 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         if self.overflow:
             see_memory_usage('After overflow before clearing gradients')
             self.zero_grad(set_to_none=True)
+            release_deepcompile_grad_buffers = getattr(self, "_deepcompile_z1_release_grad_buffers", None)
+            if release_deepcompile_grad_buffers is not None:
+                release_deepcompile_grad_buffers()
             if self.cpu_offload:
                 self.reset_cpu_buffers()
             else:
@@ -2184,13 +2187,24 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
 
                 # create a flat gradients for parameters updated by this process
                 # If we are last partition, ensure we have same size grads and partition size, if not pad with zero tensors
-                if partition_id == dist.get_world_size(group=self.real_dp_process_group[i]) - 1:
-                    single_grad_partition = self.flatten_dense_tensors_aligned(
-                        self.averaged_gradients[i],
-                        int(self.partition_size[i])).to(self.single_partition_of_fp32_groups[i].dtype)
-                else:
-                    single_grad_partition = self.flatten(self.averaged_gradients[i]).to(
-                        self.single_partition_of_fp32_groups[i].dtype)
+                deepcompile_flat_grad_buffers = getattr(self, "_deepcompile_z1_current_flat_grad_buffers", None)
+                flat_grad_partition = None
+                if deepcompile_flat_grad_buffers is not None:
+                    flat_grad_partition = deepcompile_flat_grad_buffers.get(i)
+                    if flat_grad_partition is not None:
+                        flat_grad_partition = flat_grad_partition.view(-1)
+                        assert flat_grad_partition.numel() == self.partition_size[i], \
+                            "DeepCompile flat gradient partition has different number of elements than partition size {} {} {} {}".format(
+                                flat_grad_partition.numel(), self.partition_size[i], i, partition_id)
+
+                if flat_grad_partition is None:
+                    if partition_id == dist.get_world_size(group=self.real_dp_process_group[i]) - 1:
+                        flat_grad_partition = self.flatten_dense_tensors_aligned(self.averaged_gradients[i],
+                                                                                 int(self.partition_size[i]))
+                    else:
+                        flat_grad_partition = self.flatten(self.averaged_gradients[i])
+                single_grad_partition = flat_grad_partition.to(self.single_partition_of_fp32_groups[i].dtype)
+                del flat_grad_partition
                 assert single_grad_partition.numel() == self.partition_size[i], \
                     "averaged gradients have different number of elements that partition size {} {} {} {}".format(
                         single_grad_partition.numel(), self.partition_size[i], i, partition_id)
@@ -2201,6 +2215,9 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
 
                 self.averaged_gradients[i] = None
                 self.all_grad_tensors[i] = None
+                release_deepcompile_grad_buffers = getattr(self, "_deepcompile_z1_release_grad_buffers", None)
+                if release_deepcompile_grad_buffers is not None:
+                    release_deepcompile_grad_buffers(i)
                 self.unscale_and_clip_grads([single_grad_partition], scaled_global_grad_norm)
 
                 self.timers(OPTIMIZER_GRADIENTS_TIMER).stop()

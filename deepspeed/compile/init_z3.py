@@ -72,7 +72,7 @@ def init_z3(engine, backend, compile_config, compile_kwargs, schedule=None):
 
     if use_opt:
 
-        def set_grad_buffer():
+        def set_grad_buffer(_is_gradient_accumulation_boundary):
             for i, sub_group in enumerate(optimizer.fp16_groups):
                 optimizer.averaged_gradients[i] = [
                     optimizer._DeepSpeedZeroOptimizer_Stage3__param_id_to_grad_partition[param.ds_id]
