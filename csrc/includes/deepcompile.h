@@ -488,10 +488,6 @@ public:
 
         // This synchronization ensures all of reduce calls are done before optimizer's step.
         at::cuda::stream_synchronize(rs_stream_);
-
-        // Match ZeRO's IPG buffer lifecycle: reduction buckets are backward work buffers and
-        // should not stay allocated while Adam creates optimizer temporaries.
-        reduce_buckets_->clear();
     }
 
     virtual at::Tensor reduceGrad(at::Tensor grad_tensor, long ds_id)

@@ -7,8 +7,16 @@ import pytest
 import torch
 from torch.fx import Graph
 
-from deepspeed.compile.fx import add_end_backward, replace_reduce_outputs_with_none, get_output_node
+from deepspeed.compile.fx import (add_end_backward, replace_reduce_outputs_with_none, get_output_node,
+                                  should_release_reduce_buckets)
 from deepspeed.compile.util import get_deepcompile_handle, is_deepcompile_supported
+
+
+def test_should_release_reduce_buckets_only_on_last_backward_graph():
+    graph_order = [(11, True), (22, False), (33, True)]
+
+    assert should_release_reduce_buckets(graph_order, 11)
+    assert not should_release_reduce_buckets(graph_order, 33)
 
 
 @pytest.mark.skipif(not is_deepcompile_supported(), reason="DeepCompile requires CUDA and supported PyTorch")
@@ -27,10 +35,11 @@ def test_end_backward_depends_on_all_reduce_nodes():
     graph.lint()
 
     end_backward = next(n for n in graph.nodes if n.target == torch.ops.dc.end_backward.default)
-    deps, graph_id = end_backward.args
+    deps, graph_id, release_reduce_buckets = end_backward.args
     output_node = get_output_node(graph)
 
     assert graph_id == 7
+    assert release_reduce_buckets is True
     assert list(deps) == [reduce_a, reduce_b]
     assert end_backward in reduce_a.users
     assert end_backward in reduce_b.users

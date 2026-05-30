@@ -24,7 +24,7 @@ TORCH_LIBRARY(dc, m)
     m.def("wait_reload(Tensor a, int id, int id) -> Tensor");
     m.def("offload_parameter(Tensor a, int id, int id) -> ()");
     m.def("reload_parameter(Tensor a, int id, int id) -> ()");
-    m.def("end_backward(Any deps, int graph_id) -> ()");
+    m.def("end_backward(Any deps, int graph_id, bool release_reduce_buckets) -> ()");
 
     m.def("test_call(Tensor a) -> Tensor");
 }
