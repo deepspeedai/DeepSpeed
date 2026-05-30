@@ -20,7 +20,8 @@ void register_z3_param(long ds_id,
                        const std::vector<int64_t>& ds_shape,
                        at::Tensor ds_tensor,
                        at::Tensor grad_buffer,
-                       bool persistent);
+                       bool persistent,
+                       std::optional<at::ScalarType> expected_grad_dtype);
 at::Tensor allgather_param(at::Tensor param_tensor,
                            long graph_id,
                            long ds_id,
