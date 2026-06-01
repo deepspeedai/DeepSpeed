@@ -252,8 +252,8 @@ class CUDA_Accelerator(DeepSpeedAccelerator):
     def create_graph(self):
         return torch.cuda.CUDAGraph()
 
-    def capture_to_graph(self, graph, pool=None, stream=None):
-        return torch.cuda.graph(graph, pool, stream)
+    def capture_to_graph(self, graph, pool=None, stream=None, capture_error_mode="global"):
+        return torch.cuda.graph(graph, pool, stream, capture_error_mode=capture_error_mode)
 
     def replay_graph(self, graph):
         graph.replay()

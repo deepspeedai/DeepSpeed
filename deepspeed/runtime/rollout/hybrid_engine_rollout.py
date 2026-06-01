@@ -378,6 +378,13 @@ class HybridEngineRollout(RolloutEngine):
                 gather_ctx.__enter__()
             model_dtype = next(module.parameters()).dtype
 
+            # Temporarily remove DeepSpeed forward hooks (they call synchronize()
+            # and data-consistency checks which are illegal during CUDA graph capture).
+            _saved_pre_hooks = dict(module._forward_pre_hooks)
+            _saved_post_hooks = dict(module._forward_hooks)
+            module._forward_pre_hooks.clear()
+            module._forward_hooks.clear()
+
             # === Phase 1: Prefill into a reference cache ===
             prefill_bs = 1 if B == 1 else B
             prefill_cache = StaticCache(
@@ -402,13 +409,6 @@ class HybridEngineRollout(RolloutEngine):
             static_attn_mask = torch.zeros(
                 batch_size, max_cache_len, dtype=torch.long, device=device)
             static_position_ids = torch.zeros(batch_size, 1, dtype=torch.long, device=device)
-
-            # Temporarily remove DeepSpeed forward hooks (they call synchronize()
-            # which is illegal during CUDA graph capture).
-            _saved_pre_hooks = dict(module._forward_pre_hooks)
-            _saved_post_hooks = dict(module._forward_hooks)
-            module._forward_pre_hooks.clear()
-            module._forward_hooks.clear()
 
             # Initialize static_cache with a dummy forward, then restore with prefill KV
             dummy_cp = torch.zeros(1, dtype=torch.long, device=device)
