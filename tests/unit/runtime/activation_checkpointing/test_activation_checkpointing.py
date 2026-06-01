@@ -318,9 +318,36 @@ def test_configure_with_contiguous_checkpointing_requires_num_checkpoints():
     # cryptic ``IndexError`` surfaced later from ``range(num_layers)``. With
     # the default switched to ``None`` (matching the module-level default),
     # the helpful assert message fires at the configure() call site.
-    with pytest.raises(AssertionError, match="number of layers"):
-        deepspeed.checkpointing.configure(
-            mpu_=None,
-            partition_activations=True,
-            contiguous_checkpointing=True,
-        )
+    #
+    # ``configure()`` mutates module globals before raising, so snapshot and
+    # restore them around the call to avoid order-dependent failures in other
+    # activation-checkpointing tests sharing the same pytest worker.
+    cp = deepspeed.checkpointing
+    saved = (
+        cp.PARTITION_ACTIVATIONS,
+        cp.CONTIGUOUS_CHECKPOINTING,
+        cp.num_layers,
+        cp.CPU_CHECKPOINT,
+        cp.SYNCHRONIZE,
+        cp.PROFILE_TIME,
+        cp.mpu,
+        cp.deepspeed_checkpointing_enabled,
+    )
+    try:
+        with pytest.raises(AssertionError, match="number of layers"):
+            deepspeed.checkpointing.configure(
+                mpu_=None,
+                partition_activations=True,
+                contiguous_checkpointing=True,
+            )
+    finally:
+        (
+            cp.PARTITION_ACTIVATIONS,
+            cp.CONTIGUOUS_CHECKPOINTING,
+            cp.num_layers,
+            cp.CPU_CHECKPOINT,
+            cp.SYNCHRONIZE,
+            cp.PROFILE_TIME,
+            cp.mpu,
+            cp.deepspeed_checkpointing_enabled,
+        ) = saved
