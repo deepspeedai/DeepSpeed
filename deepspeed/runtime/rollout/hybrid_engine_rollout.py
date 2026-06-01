@@ -378,10 +378,10 @@ class HybridEngineRollout(RolloutEngine):
                 gather_ctx.__enter__()
             model_dtype = next(module.parameters()).dtype
 
-            # Temporarily remove DeepSpeed forward hooks (they call synchronize()
-            # and data-consistency checks which are illegal during CUDA graph capture).
-            _saved_pre_hooks = dict(module._forward_pre_hooks)
-            _saved_post_hooks = dict(module._forward_hooks)
+            # Remove DeepSpeed forward hooks (they call synchronize() and
+            # data-consistency checks which are illegal during CUDA graph capture).
+            self._saved_pre_hooks = dict(module._forward_pre_hooks)
+            self._saved_post_hooks = dict(module._forward_hooks)
             module._forward_pre_hooks.clear()
             module._forward_hooks.clear()
 
@@ -593,8 +593,10 @@ class HybridEngineRollout(RolloutEngine):
 
         finally:
             # Restore DeepSpeed forward hooks
-            module._forward_pre_hooks.update(_saved_pre_hooks)
-            module._forward_hooks.update(_saved_post_hooks)
+            module._forward_pre_hooks.update(self._saved_pre_hooks)
+            module._forward_hooks.update(self._saved_post_hooks)
+            del self._saved_pre_hooks
+            del self._saved_post_hooks
             if gather_ctx is not None:
                 gather_ctx.__exit__(None, None, None)
             self.engine.train()

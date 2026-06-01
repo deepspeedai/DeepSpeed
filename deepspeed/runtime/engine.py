@@ -2288,6 +2288,8 @@ class DeepSpeedEngine(Module):
         if not self.autotuning_profile_model_info():
             see_memory_usage("Engine after forward", force=self.memory_breakdown())
 
+
+
     @instrument_w_nvtx
     def forward(self, *inputs, **kwargs):
         r"""Execute forward propagation
