@@ -309,3 +309,18 @@ class TestCheckpointableLayersConfig(DistributedTest):
         assert model._is_checkpointable([layers[0]]) == True  # ParallelTransformerLayerPipe
         assert model._is_checkpointable([layers[1]]) == True  # GMLPBlock
         assert model._is_checkpointable([layers[2]]) == False  # Linear layer
+
+
+def test_configure_with_contiguous_checkpointing_requires_num_checkpoints():
+    # Regression: ``_configure_defaults`` previously initialized ``num_layers``
+    # to ``False`` while the assert below uses ``is not None``; ``False is not
+    # None`` is True, so the missing-config assert silently passed and a
+    # cryptic ``IndexError`` surfaced later from ``range(num_layers)``. With
+    # the default switched to ``None`` (matching the module-level default),
+    # the helpful assert message fires at the configure() call site.
+    with pytest.raises(AssertionError, match="number of layers"):
+        deepspeed.checkpointing.configure(
+            mpu_=None,
+            partition_activations=True,
+            contiguous_checkpointing=True,
+        )
