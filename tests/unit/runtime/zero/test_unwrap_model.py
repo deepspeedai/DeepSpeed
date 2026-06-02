@@ -3,11 +3,13 @@
 
 # DeepSpeed Team
 
+import torch
+
 import deepspeed
 from deepspeed.runtime.zero import unwrap_model_for_generation
 from deepspeed.accelerator import get_accelerator
 
-from unit.common import DistributedTest
+from unit.common import DistributedTest, preferred_dtype
 from unit.simple_model import SimpleModel
 
 config = {
@@ -65,3 +67,26 @@ class TestUnwrapModel(DistributedTest):
 
         # assert hooks
         assert hooks_exist(engine)
+
+
+class TestUnwrapModelTraceInvalidate(DistributedTest):
+    # re-registering hooks on the root module (e.g. via unwrap_model_for_generation around
+    # an on-policy generate) must leave the coordinator's recorded trace invalidated so
+    # the next training forward re-records cleanly instead of popping a stale deque.
+    world_size = 2
+
+    def test(self):
+        model = SimpleModel(hidden_dim=100)
+        engine, _, _, _ = deepspeed.initialize(args=None, model=model, config=config)
+        coordinator = engine.optimizer.parameter_offload.get_param_coordinator()
+
+        # run one step so the coordinator records a trace (RECORD -> COMPLETE)
+        x = torch.randn(2, 100, device=engine.device, dtype=preferred_dtype())
+        y = torch.empty(2, dtype=torch.long, device=engine.device).random_(100)
+        engine(x, y)
+        assert not coordinator.is_invalid_trace()
+
+        # the wrap cycle around an out-of-band forward must invalidate the recorded trace
+        with unwrap_model_for_generation(engine):
+            pass
+        assert coordinator.is_invalid_trace()
