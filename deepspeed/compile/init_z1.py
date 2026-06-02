@@ -19,6 +19,17 @@ def _empty_grad_buffer(param):
     return torch.empty([0], dtype=param.dtype, device=param.device)
 
 
+class _FlatPartitionGradBufferGroup(list):
+
+    def __init__(self, grad_buffers, flat_partition, release_fn):
+        super().__init__(grad_buffers)
+        self.flat_partition = flat_partition
+        self._release_fn = release_fn
+
+    def release_grad_buffers(self):
+        self._release_fn()
+
+
 def _build_partition_grad_views(optimizer, group_idx):
     missing = object()
     original_all_grad_tensors = optimizer.all_grad_tensors.get(group_idx, missing)
@@ -133,7 +144,6 @@ def init_z1(engine, backend, compile_config, compile_kwargs, schedule=None, use_
 
         optimizer._deepcompile_z1_grad_buffer_metadata = grad_buffer_metadata
         optimizer._deepcompile_z1_current_grad_buffers = {}
-        optimizer._deepcompile_z1_current_flat_grad_buffers = {}
 
         def set_z1_grad_buffer(is_gradient_accumulation_boundary):
             if not is_gradient_accumulation_boundary:
@@ -142,14 +152,12 @@ def init_z1(engine, backend, compile_config, compile_kwargs, schedule=None, use_
                 return
 
             current_grad_buffers = {}
-            current_flat_grad_buffers = {}
             for group_idx in range(len(optimizer.bit16_groups)):
                 flat_grad_buffer, group_grad_buffers = _build_flat_partition_grad_views(optimizer, group_idx)
-                current_flat_grad_buffers[group_idx] = flat_grad_buffer
-                current_grad_buffers[group_idx] = group_grad_buffers
+                current_grad_buffers[group_idx] = _FlatPartitionGradBufferGroup(
+                    group_grad_buffers, flat_grad_buffer, lambda group_idx=group_idx: release_grad_buffer(group_idx))
                 for (param_id, _, offset), grad_buffer in zip(grad_buffer_metadata[group_idx], group_grad_buffers):
                     dc.update_param_grad_buffer(param_id, grad_buffer, offset)
-            optimizer._deepcompile_z1_current_flat_grad_buffers = current_flat_grad_buffers
             optimizer._deepcompile_z1_current_grad_buffers = current_grad_buffers
             optimizer.averaged_gradients = current_grad_buffers
 
@@ -160,8 +168,6 @@ def init_z1(engine, backend, compile_config, compile_kwargs, schedule=None, use_
                     dc.update_param_grad_buffer(param_id, _empty_grad_buffer(param), 0)
                 if idx in optimizer._deepcompile_z1_current_grad_buffers:
                     optimizer._deepcompile_z1_current_grad_buffers[idx] = None
-                if idx in optimizer._deepcompile_z1_current_flat_grad_buffers:
-                    optimizer._deepcompile_z1_current_flat_grad_buffers[idx] = None
 
         optimizer._deepcompile_z1_release_grad_buffers = release_grad_buffer
 
