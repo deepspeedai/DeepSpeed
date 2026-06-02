@@ -70,9 +70,8 @@ class TestUnwrapModel(DistributedTest):
 
 
 class TestUnwrapModelTraceInvalidate(DistributedTest):
-    # re-registering hooks on the root module (e.g. via unwrap_model_for_generation around
-    # an on-policy generate) must leave the coordinator's recorded trace invalidated so
-    # the next training forward re-records cleanly instead of popping a stale deque.
+    # unwrap_model_for_generation removes and re-registers the ZeRO-3 hooks; the
+    # coordinator's recorded trace must be invalidated so the next forward re-records.
     world_size = 2
 
     def test(self):
