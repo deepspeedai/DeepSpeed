@@ -160,6 +160,10 @@ class TestDeepCompile(DistributedTest):
         assert current_grad_buffers
         assert all(group_buffers is not None for group_buffers in current_grad_buffers.values())
         assert any(buffer.numel() > 0 for group_buffers in current_grad_buffers.values() for buffer in group_buffers)
+        assert not hasattr(optimizer, "_deepcompile_z1_current_flat_grad_buffers")
+        for group_idx, group_buffers in current_grad_buffers.items():
+            assert group_buffers.flat_partition.numel() == optimizer.partition_size[group_idx]
+            assert callable(group_buffers.release_grad_buffers)
 
         engine.step()
 
