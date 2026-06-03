@@ -278,6 +278,8 @@ def _process_selected_fp32_groups_grad(optimizer_z3, params_to_update, grad_part
         else:
             grad_2d = grad_partition.narrow(0, param.complete_column_offset,
                                             param.complete_numel).view(param.complete_numel // num_row, num_row)
+            if param.selected_indices.numel() == 0:
+                param.selected_indices = param.selected_indices.long()
             param.selected_grad = grad_2d[param.selected_indices, :].clone().detach()
 
             if optimizer_z3.auto_update:

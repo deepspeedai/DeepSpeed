@@ -287,8 +287,9 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             fp16_master_weights_and_gradients=fp16_master_weights_and_gradients,
             bf16_master_weights_and_gradients=bf16_master_weights_and_gradients,
             bf16_optimizer_states=bf16_optimizer_states,
+            offload_enabled=self.offload_optimizer,
             fp16_offload_validator=_enforce_optimizer_offload,
-            bf16_fp32_offload_validator=_enforce_optimizer_offload)
+            bf16_offload_validator=_enforce_optimizer_offload)
 
         # backup fused_adam optimizer init
         if self.offload_optimizer and self.partial_offload != 1.0:
@@ -424,6 +425,9 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             self._configure_tensor_swapping(offload_optimizer_config, aio_config)
 
         self.is_gradient_accumulation_boundary: bool = True
+
+        # Toggled by DeepSpeedEngine.coalesce_grad_reduction().
+        self._coalesce_grad_reduction = False
 
         self.param_reduce_events: Deque[get_accelerator().Event] = collections.deque()
         # TODO. make this configurable via JSON
@@ -1811,6 +1815,8 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         return output
 
     def reduce_ready_partitions_and_remove_grads(self, param):
+        if self._coalesce_grad_reduction:
+            return
         #print_rank_0(f"Backward {debug_param2name_id_shape(param)}", force=True)
         self.reduce_independent_p_g_buckets_and_remove_grads(param)
 
