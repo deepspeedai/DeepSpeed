@@ -2504,6 +2504,11 @@ class DeepSpeedEngine(Module):
             if not bf16_optimizer:
                 self.optimizer.backward_epilogue()
             self.optimizer.exit_backward()
+            # Clear the retained-backward flag here so it is reset for both the
+            # engine.backward() path and the torch-style manual path
+            # (engine.scale(loss).backward(retain_graph=True)), which both reach
+            # this epilogue after the gradient hooks have run.
+            self.optimizer.retain_graph_on_current_backward = False
 
         see_memory_usage("Engine after backward", force=self.memory_breakdown())
         self._stop_timers(self.engine_timers.backward_reduce_timers)
@@ -2662,7 +2667,7 @@ class DeepSpeedEngine(Module):
                     optimizer.reduce_ready_partitions_and_remove_grads(param)
         optimizer.independent_gradient_partition_epilogue()
 
-    def scale(self, loss):
+    def scale(self, loss, retain_graph=False):
         r"""Apply loss scaler for manual backward pass.
 
         Use this method when calling loss.backward() directly instead of engine.backward().
@@ -2680,6 +2685,12 @@ class DeepSpeedEngine(Module):
 
         Arguments:
             loss: Scalar loss tensor to be scaled
+            retain_graph: bool, default: false
+                Set to true when the upcoming manual backward keeps the graph alive
+                (``scaled_loss.backward(retain_graph=True)``) so a second backward can
+                run over the same forward. For ZeRO-3 this defers parameter release so
+                the retained graph's saved tensors stay valid, matching the behavior of
+                ``engine.backward(loss, retain_graph=True)``.
 
         Returns:
             Scaled loss tensor ready for .backward() call
@@ -2706,6 +2717,9 @@ class DeepSpeedEngine(Module):
         scaled_loss = loss
         if isinstance(self.optimizer, ZeROOptimizer):
             scaled_loss = self.optimizer.scale_if_loss(loss)
+            # The manual path bypasses engine.backward(), so propagate retain_graph here.
+            # Cleared in _backward_epilogue() once the gradient hooks have run.
+            self.optimizer.retain_graph_on_current_backward = retain_graph
         elif self.torch_autocast_z0_gradscaler:
             scaled_loss = self.torch_autocast_z0_gradscaler.scale(loss)
 
