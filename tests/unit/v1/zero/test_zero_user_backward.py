@@ -539,6 +539,66 @@ class TestZeroUserBackwardSeparateLoss(DistributedTest):
 
         model_engine.destroy()
 
+    def test_two_losses_separate_backward_gas1(self, zero_stage):
+        """Regression test for https://github.com/deepspeedai/DeepSpeed/issues/7352
+
+        A single forward followed by two separate backward passes, with
+        zero_grad() in between, must produce independent gradients for each
+        loss when gradient_accumulation_steps == 1. Previously the first
+        backward was treated as the accumulation boundary, which froze loss1's
+        gradients so that zero_grad() had no effect and loss2's gradients were
+        doubled (grad2 == grad1 + grad2). Each DeepSpeed gradient set is
+        compared against an equivalent PyTorch DDP baseline.
+        """
+        hidden_dim = 4
+        batch_size = 2
+
+        # Default gradient_accumulation_steps=1, which is the failing case.
+        model_ddp, optimizer_ddp, model_engine, device, dtype = setup_models_and_engines(
+            model_class=SimpleOutputModel, zero_stage=zero_stage, hidden_dim=hidden_dim)
+
+        loss_fn = torch.nn.CrossEntropyLoss()
+
+        # Two different targets so loss1 and loss2 yield distinct gradients;
+        # this makes accidental accumulation (grad1 + grad2) detectable.
+        torch.manual_seed(456)
+        x = torch.randn(batch_size, hidden_dim, device=device, dtype=dtype)
+        y1 = torch.randint(0, hidden_dim, (batch_size, ), device=device)
+        y2 = torch.randint(0, hidden_dim, (batch_size, ), device=device)
+
+        # DDP baseline: separate backward for each loss with zero_grad in between.
+        output_ddp = model_ddp(x)
+        loss1_ddp = loss_fn(output_ddp, y1)
+        loss2_ddp = loss_fn(output_ddp, y2)
+
+        optimizer_ddp.zero_grad()
+        loss1_ddp.backward(retain_graph=True)
+        grads1_ddp = collect_ddp_gradients(model_ddp)
+
+        optimizer_ddp.zero_grad()
+        loss2_ddp.backward()
+        grads2_ddp = collect_ddp_gradients(model_ddp)
+
+        # DeepSpeed: identical sequence.
+        output_ds = model_engine(x)
+        loss1_ds = loss_fn(output_ds, y1)
+        loss2_ds = loss_fn(output_ds, y2)
+
+        model_engine.zero_grad()
+        model_engine.backward(loss1_ds, retain_graph=True)
+        grads1_ds = collect_gradients_safe(model_engine)
+
+        model_engine.zero_grad()
+        model_engine.backward(loss2_ds)
+        grads2_ds = collect_gradients_safe(model_engine)
+
+        # The second backward must NOT accumulate loss1's gradients on top of
+        # loss2; both gradient sets must match their DDP counterparts.
+        compare_gradients(grads1_ddp, grads1_ds, "loss1")
+        compare_gradients(grads2_ddp, grads2_ds, "loss2")
+
+        model_engine.destroy()
+
 
 class LeafModuleModel(torch.nn.Module):
     """Model with ModuleList that uses all parameters - for testing leaf module compatibility"""

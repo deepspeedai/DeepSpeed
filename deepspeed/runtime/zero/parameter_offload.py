@@ -552,7 +552,13 @@ class DeepSpeedZeRoOffload(object):
             for param in params_to_fetch:
                 param.data = param.data.t() if len(param.ds_shape) != 1 else param.data
 
-        self.get_param_coordinator().release_sub_module(sub_module, forward=False)
+        # Keep gathered params alive when the current backward retains the graph,
+        # so a second backward over the same forward can reuse valid saved tensors.
+        zero_optimizer = getattr(self, "zero_optimizer", None)
+        retain_graph_backward = bool(zero_optimizer is not None
+                                     and getattr(zero_optimizer, "retain_graph_on_current_backward", False))
+        if not retain_graph_backward:
+            self.get_param_coordinator().release_sub_module(sub_module, forward=False)
 
         see_memory_usage(
             f"After sub module backward function {sub_module.__class__.__name__} {sub_module.ds_id} after release",
