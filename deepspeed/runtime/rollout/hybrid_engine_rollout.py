@@ -665,14 +665,18 @@ class HybridEngineRollout(RolloutEngine):
                          slot_pad_start, new_rollout_idx, prompt_len, B, n,
                          device, temperature, top_p):
         """Replace a finished slot with a new rollout by left-padding prompt KV."""
+        # Support both DynamicCache (transformers>=5, .layers[i].keys/.values) and
+        # legacy tuple-of-tuples cache (transformers<4, past[layer_idx] returns (k,v)).
         current_kv_len = past.layers[0].keys.shape[2]
         pad_len = current_kv_len - prompt_len
 
         src_prompt_idx = new_rollout_idx // n if B > 1 else 0
 
         for layer_idx in range(len(past)):
-            key, value = past[layer_idx]
-            src_key, src_value = prompt_past[layer_idx]
+            key = past.layers[layer_idx].keys
+            value = past.layers[layer_idx].values
+            src_key = prompt_past.layers[layer_idx].keys
+            src_value = prompt_past.layers[layer_idx].values
             heads = key.shape[1]
             head_dim = key.shape[3]
 
