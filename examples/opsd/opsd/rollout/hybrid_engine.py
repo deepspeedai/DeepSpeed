@@ -7,7 +7,7 @@
 The actual implementation lives in ``deepspeed.runtime.rollout``.
 """
 
-from opsd.config import RolloutConfig
+from deepspeed.runtime.rlhf.config import RolloutConfig
 from opsd.rollout.base import RolloutBatch, RolloutEngine, RolloutRequest, SamplingConfig
 
 from deepspeed.runtime.rollout import HybridEngineRollout as _HybridEngineRollout

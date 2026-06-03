@@ -2,13 +2,13 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # DeepSpeed Team
-"""On-policy distillation training loop.
+"""On-policy distillation (OPSD) training loop.
 
 Each step is three phases:
 
   0. **Rollout.** The student generates responses for the batch's prompts
-     (via the configured :class:`~opsd.rollout.RolloutEngine` — hybrid engine
-     or vLLM).
+     (via the configured :class:`~deepspeed.runtime.rollout.RolloutEngine` —
+     hybrid engine or vLLM).
   1. **Teacher.** The frozen teacher runs a forward over prompt+response. The
      full logit tensor is parked on the host via
      :class:`~opsd.teacher.TeacherLogitCache` so teacher GPU buffers can be
@@ -16,9 +16,9 @@ Each step is three phases:
   2. **Student.** The student runs forward+backward on prompt+response. The
      loss is the per-token divergence to the teacher, streamed from the
      host-resident cache one sequence chunk at a time
-     (:func:`~opsd.losses.streamed_distillation_loss`), so the full
-     ``[B, T, V]`` teacher tensor never co-resides with the student logits on
-     the training device.
+     (:func:`~deepspeed.runtime.rlhf.losses.streamed_distillation_loss`), so
+     the full ``[B, T, V]`` teacher tensor never co-resides with the student
+     logits on the training device.
 
 The trainer itself contains no DeepSpeed-specific control flow beyond the
 ``backward`` / ``step`` calls on the student engine; backend choice (ZeRO
@@ -33,17 +33,18 @@ import torch
 from deepspeed import comm as dist
 from deepspeed.accelerator import get_accelerator
 
-from opsd.config import OPSDConfig
-from opsd.losses import streamed_distillation_loss
-from opsd.rollout import RolloutEngine, RolloutRequest, SamplingConfig
-from opsd.utils import build_response_mask
+from deepspeed.runtime.rlhf.config import OPSDConfig
+from deepspeed.runtime.rlhf.losses import streamed_distillation_loss
+from deepspeed.runtime.rlhf.trainer.base import RLHFTrainer
+from deepspeed.runtime.rlhf.utils import build_response_mask
+from deepspeed.runtime.rollout import RolloutEngine, RolloutRequest, SamplingConfig
 
 
 def _is_rank_zero() -> bool:
     return (not dist.is_initialized()) or dist.get_rank() == 0
 
 
-class OPSDTrainer:
+class OPSDTrainer(RLHFTrainer):
 
     def __init__(
         self,

@@ -13,8 +13,8 @@ launcher. Run from the example root with::
 import pytest
 import torch
 
-from opsd.losses import chunked_distillation_loss, per_token_logprobs
-from opsd.utils import build_response_mask, shift_for_next_token_prediction
+from deepspeed.runtime.rlhf.losses import chunked_distillation_loss, per_token_logprobs
+from deepspeed.runtime.rlhf.utils import build_response_mask, shift_for_next_token_prediction
 
 
 @pytest.mark.parametrize("loss_type", ["forward_kl", "reverse_kl", "jsd"])

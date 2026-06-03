@@ -2,12 +2,12 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # DeepSpeed Team
-"""Configuration dataclasses for OPSD training.
+"""Configuration dataclasses for RLHF training.
 
-A single :class:`OPSDConfig` is loaded from a JSON file (see ``configs/`` for
-examples) and threaded through the rest of the pipeline. We use plain
-dataclasses instead of Hydra/pydantic to match the rest of the DeepSpeed
-example apps and to keep the dependency surface minimal.
+A single :class:`OPSDConfig` is loaded from a JSON file (see
+``examples/opsd/configs/`` for examples) and threaded through the rest of the
+pipeline. We use plain dataclasses instead of Hydra/pydantic to match the rest
+of the DeepSpeed codebase and to keep the dependency surface minimal.
 """
 
 import json

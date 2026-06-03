@@ -85,7 +85,7 @@ def test_streamed_chunked_loss_matches_full_loss():
     """End-to-end check: pulling teacher logits chunk-by-chunk through the
     cache yields the same distillation loss as passing the full teacher tensor
     to ``chunked_distillation_loss`` directly."""
-    from opsd.losses import chunked_distillation_loss
+    from deepspeed.runtime.rlhf.losses import chunked_distillation_loss
 
     torch.manual_seed(0)
     s = torch.randn(2, 64, 32)

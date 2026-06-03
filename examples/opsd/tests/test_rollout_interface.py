@@ -13,7 +13,7 @@ import pytest
 import torch
 
 from opsd.rollout import RolloutBatch, RolloutEngine, RolloutRequest, SamplingConfig
-from opsd.utils import build_response_mask
+from deepspeed.runtime.rlhf.utils import build_response_mask
 
 # --- dataclass invariants ---------------------------------------------------
 
@@ -141,7 +141,7 @@ def test_sync_records_steps():
 
 
 def test_engine_factory_unknown_raises():
-    from opsd.config import RolloutConfig
+    from deepspeed.runtime.rlhf.config import RolloutConfig
     from opsd.rollout import build_rollout
 
     with pytest.raises(ValueError, match="Unknown rollout engine"):
@@ -149,7 +149,7 @@ def test_engine_factory_unknown_raises():
 
 
 def test_engine_factory_hybrid_requires_student_engine():
-    from opsd.config import RolloutConfig
+    from deepspeed.runtime.rlhf.config import RolloutConfig
     from opsd.rollout import build_rollout
 
     with pytest.raises(ValueError, match="needs both"):

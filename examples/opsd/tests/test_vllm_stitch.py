@@ -12,7 +12,7 @@ import pytest
 import torch
 
 from opsd.rollout.vllm import stitch_rollout
-from opsd.utils import build_response_mask
+from deepspeed.runtime.rlhf.utils import build_response_mask
 
 
 def test_stitch_basic_single_sample():

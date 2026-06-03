@@ -56,7 +56,7 @@ from typing import Any, List, Optional
 
 import torch
 
-from opsd.config import RolloutConfig
+from deepspeed.runtime.rlhf.config import RolloutConfig
 from opsd.rollout.base import RolloutBatch, RolloutEngine, RolloutRequest, SamplingConfig
 from opsd.weight_bridge import WeightBridge, get_bridge
 

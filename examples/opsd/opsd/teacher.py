@@ -27,7 +27,7 @@ import torch
 
 # ``opsd.config`` is pure-Python (no distributed imports), so we can import it
 # at module load time without pulling in DeepSpeed.
-from opsd.config import TeacherConfig
+from deepspeed.runtime.rlhf.config import TeacherConfig
 
 
 @dataclass
