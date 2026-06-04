@@ -11,7 +11,7 @@ wrapped in a user-role message with ``add_generation_prompt=True`` so the
 student generates the assistant turn.
 
 Batches are **left-padded** because causal generation requires real tokens at
-the right edge — :class:`opsd.rollout.RolloutRequest` and the hybrid-engine
+    the right edge — :class:`deepspeed.runtime.rollout.RolloutRequest` and the hybrid-engine
 backend both assume this layout.
 """
 

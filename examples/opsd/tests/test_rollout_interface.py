@@ -12,7 +12,13 @@ backends are tested manually with a launched training script (see README).
 import pytest
 import torch
 
-from opsd.rollout import RolloutBatch, RolloutEngine, RolloutRequest, SamplingConfig
+from deepspeed.runtime.rollout import (
+    RolloutBatch,
+    RolloutEngine,
+    RolloutRequest,
+    SamplingConfig,
+    build_rollout,
+)
 from deepspeed.runtime.rlhf.utils import build_response_mask
 
 # --- dataclass invariants ---------------------------------------------------
@@ -142,7 +148,6 @@ def test_sync_records_steps():
 
 def test_engine_factory_unknown_raises():
     from deepspeed.runtime.rlhf.config import RolloutConfig
-    from opsd.rollout import build_rollout
 
     with pytest.raises(ValueError, match="Unknown rollout engine"):
         build_rollout(RolloutConfig(engine="totally_made_up"))
@@ -150,7 +155,6 @@ def test_engine_factory_unknown_raises():
 
 def test_engine_factory_hybrid_requires_student_engine():
     from deepspeed.runtime.rlhf.config import RolloutConfig
-    from opsd.rollout import build_rollout
 
     with pytest.raises(ValueError, match="needs both"):
         build_rollout(RolloutConfig(engine="hybrid_engine"))

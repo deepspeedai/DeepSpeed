@@ -11,7 +11,7 @@ manipulation and is the part most prone to silent index bugs.
 import pytest
 import torch
 
-from opsd.rollout.vllm import stitch_rollout
+from deepspeed.runtime.rollout import stitch_rollout
 from deepspeed.runtime.rlhf.utils import build_response_mask
 
 

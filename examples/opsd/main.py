@@ -26,7 +26,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from deepspeed.runtime.rlhf.config import OPSDConfig
 from opsd.data import LeftPaddedPromptCollator, PromptDataset
-from opsd.rollout import build_rollout
+from deepspeed.runtime.rollout import build_rollout
 from opsd.teacher import TeacherWrapper
 from deepspeed.runtime.rlhf.trainer.opsd import OPSDTrainer
 
