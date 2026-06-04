@@ -103,7 +103,7 @@ class RolloutEngine(ABC):
         """Run the student's generate, return prompt+response in one tensor."""
 
     @abstractmethod
-    def sync_weights_from_student(self, step: int) -> None:
+    def sync_weights(self, step: int) -> None:
         """Push the student's current weights into the rollout backend.
 
         No-op for :class:`HybridEngineRollout` (the engine reads weights live

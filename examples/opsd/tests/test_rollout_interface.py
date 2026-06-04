@@ -85,7 +85,7 @@ class FakeRollout(RolloutEngine):
         response_start_idx = torch.full((B * n, ), T_p, dtype=torch.long)
         return RolloutBatch(input_ids=input_ids, attention_mask=attention_mask, response_start_idx=response_start_idx)
 
-    def sync_weights_from_student(self, step: int) -> None:
+    def sync_weights(self, step: int) -> None:
         self.sync_calls.append(step)
 
 
@@ -135,8 +135,8 @@ def test_response_mask_from_rollout_output_matches_helper():
 
 def test_sync_records_steps():
     fake = FakeRollout()
-    fake.sync_weights_from_student(0)
-    fake.sync_weights_from_student(5)
+    fake.sync_weights(0)
+    fake.sync_weights(5)
     assert fake.sync_calls == [0, 5]
 
 

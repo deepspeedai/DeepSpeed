@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # DeepSpeed Team
-"""Rollout engines for OPSD: hybrid engine (built-in) or vLLM (disjoint GPUs)."""
+"""Rollout engines for OPSD: hybrid engine (built-in) or vLLM (external server)."""
 
 from opsd.rollout.base import RolloutBatch, RolloutEngine, RolloutRequest, SamplingConfig
 
@@ -33,7 +33,6 @@ def build_rollout(rollout_cfg, student_engine=None, tokenizer=None, student_mode
             tokenizer=tokenizer,
             student_engine=student_engine,
             student_model_path=student_model_path,
-            arch=arch,
         )
 
     raise ValueError(f"Unknown rollout engine {engine_name!r}; choose from 'hybrid_engine' | 'vllm'")

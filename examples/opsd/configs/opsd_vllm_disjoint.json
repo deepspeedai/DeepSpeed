@@ -24,7 +24,8 @@
         "gpu_memory_utilization": 0.85,
         "vllm_dtype": "bfloat16",
         "weight_sync_interval": 4,
-        "vllm_min_version": "0.6.4"
+        "vllm_min_version": "0.6.4",
+        "vllm_port": 8000
     },
     "distillation": {
         "loss_type": "reverse_kl",

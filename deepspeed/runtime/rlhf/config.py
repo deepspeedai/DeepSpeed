@@ -72,6 +72,11 @@ class RolloutConfig:
     # one-time compilation (worth it for smoke tests / short-lived runs);
     # leave False for steady-state throughput.
     vllm_enforce_eager: bool = False
+    # Port for the vLLM OpenAI-compatible API server. Only used when the
+    # vLLM rollout is configured to run as an external subprocess.
+    vllm_port: int = 8000
+    # Maximum seconds to wait for the vLLM server to become healthy.
+    vllm_start_timeout: int = 300
 
 
 @dataclass
