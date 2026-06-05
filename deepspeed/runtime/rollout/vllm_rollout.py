@@ -338,9 +338,9 @@ class VLLMRollout(RolloutEngine):
                     params.append((name, param.data.detach().clone()))
 
         if self.is_rank_zero:
-            self._rlhf_pause()
-            self._rlhf_update_weights_nccl(params)
-            self._rlhf_resume()
+            self._pause()
+            self._update_weights_nccl(params)
+            self._resume()
 
         from deepspeed import comm as dist
 
@@ -388,10 +388,10 @@ class VLLMRollout(RolloutEngine):
             raise TimeoutError("init_weight_transfer_engine did not complete within 30s")
 
         self._nccl_group = group
-        logger.info("[rlhf] NCCL weight-transfer engine initialised "
+        logger.info("NCCL weight-transfer engine initialised "
                     "(world_size=%d, vllm_workers=%d)", total_world_size, vllm_world_size)
 
-    def _rlhf_update_weights_nccl(self, params: List[Tuple[str, torch.Tensor]]) -> None:
+    def _update_weights_nccl(self, params: List[Tuple[str, torch.Tensor]]) -> None:
         """Push all gathered parameters to vLLM via the NCCL weight-transfer
         protocol.
 
@@ -440,7 +440,7 @@ class VLLMRollout(RolloutEngine):
             raise TimeoutError("update_weights HTTP call did not complete within 60s")
 
         self._post("/finish_weight_update", json={})
-        logger.info("[rlhf] pushed %d parameters via NCCL", len(names))
+        logger.info("pushed %d parameters via NCCL", len(names))
 
     # -- RLHF HTTP helpers -----------------------------------------------
 
@@ -449,13 +449,11 @@ class VLLMRollout(RolloutEngine):
         resp.raise_for_status()
         return resp
 
-    def _rlhf_pause(self) -> None:
+    def _pause(self) -> None:
         self._post("/pause", params={"mode": "abort"})
-        logger.info("[rlhf] server paused for weight update")
 
-    def _rlhf_resume(self) -> None:
+    def _resume(self) -> None:
         self._post("/resume")
-        logger.info("[rlhf] server resumed")
 
     @staticmethod
     def _get_own_ip() -> str:
