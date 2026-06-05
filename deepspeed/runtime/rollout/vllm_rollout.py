@@ -206,8 +206,9 @@ class VLLMRollout(RolloutEngine):
 
         env["VLLM_SERVER_DEV_MODE"] = "1"
 
+        python_bin = self.cfg.vllm_python or sys.executable
         cmd = [
-            sys.executable,
+            python_bin,
             "-m",
             "vllm.entrypoints.openai.api_server",
             "--model",
@@ -230,7 +231,7 @@ class VLLMRollout(RolloutEngine):
         self._server_proc = subprocess.Popen(
             cmd,
             env=env,
-            stdout=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
         )
 
@@ -239,8 +240,9 @@ class VLLMRollout(RolloutEngine):
         while time.monotonic() < deadline:
             if self._server_proc is not None and self._server_proc.poll() is not None:
                 rc = self._server_proc.returncode
-                stderr_tail = self._server_proc.stderr.read(4096).decode(
-                    errors="replace") if self._server_proc.stderr else ""
+                stderr_tail = ""
+                if self._server_proc.stderr is not None:
+                    stderr_tail = self._server_proc.stderr.read().decode(errors="replace")[-3000:]
                 raise RuntimeError(f"vLLM server exited prematurely (rc={rc}). stderr tail:\n{stderr_tail}")
             try:
                 resp = requests.get(f"{self._base_url}/health", timeout=2)

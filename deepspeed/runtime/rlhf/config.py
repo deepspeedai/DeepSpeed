@@ -82,6 +82,10 @@ class RolloutConfig:
     # "gdr"   – GPU-direct transfer (NCCL). Fastest but requires NVIDIA.
     # "http"  – serialize tensors over HTTP. Slower but accelerator-agnostic.
     weight_transfer_backend: str = "auto"
+    # Path to the Python interpreter that has vLLM installed.  When set, the
+    # vLLM server subprocess uses this interpreter instead of ``sys.executable``.
+    # Useful when vLLM lives in a separate virtual-env / conda env.
+    vllm_python: str = ""
 
 
 @dataclass
