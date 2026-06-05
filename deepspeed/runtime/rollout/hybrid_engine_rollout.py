@@ -2,16 +2,14 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # DeepSpeed Team
-"""Rollout engine backed by DeepSpeed's hybrid engine, with a ZeRO-3 fallback.
+"""Rollout engine backed by DeepSpeed's hybrid engine.
 
 Supports two generation strategies:
-  1. **naive** (default): HF generate with ``num_return_sequences``.
-  2. **continuous_batching**: Custom decode loop with shared-prefix prefill,
-     continuous batching (slot replacement on EOS), KV cache left-trim, and
-     early-exit batch compaction.
-
-The continuous batching path is activated when ``continuous_batching_size > 0``
-is passed to the constructor.
+  1. **continuous_batching** (default): Custom decode loop with shared-prefix
+      prefill, continuous batching (slot replacement on EOS), KV cache
+      left-trim, and early-exit batch compaction.
+  2. **graph_capture + continuous_batching**: Same CB loop but with CUDA graph
+      capture for the decode forward pass.
 """
 
 import copy
@@ -29,21 +27,14 @@ class HybridEngineRolloutConfig:
     """Configuration for HybridEngineRollout.
 
     Attributes:
-        continuous_batching_size: Number of decode slots for the custom CB loop.
-            When > 0, uses shared-prefix prefill + CB + KV trim + early exit.
-            When 0 (default), falls back to HF generate with num_return_sequences.
+        continuous_batching_size: Number of decode slots for the CB loop.
         kv_trim_threshold: Minimum common leading padding before KV cache trim
             is applied. 0 = never trim, 1 = trim every step, 16 = trim only
             when >=16 tokens of common padding have accumulated (default).
     """
-    continuous_batching_size: int = 0
+    continuous_batching_size: int = 1
     kv_trim_threshold: int = 16
     use_graph_capture: bool = False
-
-
-def _hybrid_engine_has_accel(engine) -> bool:
-    """Check if the DeepSpeed engine has accelerated inference containers."""
-    return getattr(engine, "_generate", None) is not None
 
 
 class HybridEngineRollout(RolloutEngine):
@@ -52,16 +43,14 @@ class HybridEngineRollout(RolloutEngine):
     Args:
         engine: DeepSpeed engine wrapping the model.
         tokenizer: HuggingFace tokenizer (must have pad_token_id or eos_token_id).
-        continuous_batching_size: Number of CB decode slots (0 = use HF generate).
+        continuous_batching_size: Number of CB decode slots.
         kv_trim_threshold: Min common padding before KV trim fires (0 = disabled).
     """
-
-    name = "hybrid_engine"
 
     def __init__(self,
                  engine,
                  tokenizer,
-                 continuous_batching_size: int = 0,
+                 continuous_batching_size: int = 1,
                  kv_trim_threshold: int = 16,
                  use_graph_capture: bool = False):
         self.engine = engine
@@ -69,7 +58,6 @@ class HybridEngineRollout(RolloutEngine):
         self.continuous_batching_size = continuous_batching_size
         self.kv_trim_threshold = kv_trim_threshold
         self.use_graph_capture = use_graph_capture
-        self._has_accel = _hybrid_engine_has_accel(engine)
         # Graph capture state (lazily initialized)
         self._graph = None
         self._graph_batch_size: int = 0
@@ -83,52 +71,10 @@ class HybridEngineRollout(RolloutEngine):
 
     @torch.no_grad()
     def generate(self, request: RolloutRequest, sampling: SamplingConfig) -> RolloutBatch:
-        if self.continuous_batching_size > 0:
-            if self.use_graph_capture:
-                return self._generate_graph_capture_cb(request, sampling, self.continuous_batching_size)
-            return self._generate_continuous_batching(request, sampling, self.continuous_batching_size)
-        return self._generate_naive(request, sampling)
-
-    # ------------------------------------------------------------------
-    # Naive path: delegate to HF generate
-    # ------------------------------------------------------------------
-
-    @torch.no_grad()
-    def _generate_naive(self, request: RolloutRequest, sampling: SamplingConfig) -> RolloutBatch:
-        pad_id = self.tokenizer.pad_token_id
-        if pad_id is None:
-            pad_id = self.tokenizer.eos_token_id
-
-        gen_kwargs = dict(
-            input_ids=request.prompt_ids,
-            attention_mask=request.prompt_attention_mask,
-            max_new_tokens=sampling.max_new_tokens,
-            do_sample=sampling.temperature > 0.0,
-            temperature=max(sampling.temperature, 1e-8),
-            top_p=sampling.top_p,
-            top_k=sampling.top_k if sampling.top_k > 0 else 0,
-            num_return_sequences=sampling.n_samples_per_prompt,
-            pad_token_id=pad_id,
-            eos_token_id=self.tokenizer.eos_token_id,
-        )
-
-        self.engine.eval()
-        module = self.engine.module
-        saved_pre = dict(module._forward_pre_hooks)
-        saved_post = dict(module._forward_hooks)
-        module._forward_pre_hooks.clear()
-        module._forward_hooks.clear()
-        try:
-            if self._has_accel:
-                seqs = self.engine.generate(**gen_kwargs)
-            else:
-                seqs = self._fallback_generate(**gen_kwargs)
-        finally:
-            module._forward_pre_hooks.update(saved_pre)
-            module._forward_hooks.update(saved_post)
-            self.engine.train()
-
-        return self._build_rollout_batch(request, seqs, sampling.n_samples_per_prompt, pad_id)
+        cb_size = self.continuous_batching_size
+        if self.use_graph_capture:
+            return self._generate_graph_capture_cb(request, sampling, cb_size)
+        return self._generate_continuous_batching(request, sampling, cb_size)
 
     # ------------------------------------------------------------------
     # Continuous batching path: shared prefix + CB + KV trim + early exit
@@ -742,30 +688,6 @@ class HybridEngineRollout(RolloutEngine):
             return module, ctx
         return module, None
 
-    def _build_rollout_batch(self, request, seqs, n, pad_id):
-        """Build RolloutBatch from HF generate output."""
-        B = request.prompt_ids.shape[0]
-        T_p = request.prompt_ids.shape[1]
-        if seqs.shape[0] != B * n:
-            raise RuntimeError(f"generate returned batch {seqs.shape[0]}, expected {B * n}")
-
-        response_start_idx = torch.full((B * n, ), T_p, dtype=torch.long, device=seqs.device)
-        attention_mask = (seqs != pad_id).to(request.prompt_attention_mask.dtype)
-        prompt_mask_expanded = request.prompt_attention_mask.repeat_interleave(n, dim=0)
-        attention_mask[:, :T_p] = prompt_mask_expanded
-
-        return RolloutBatch(input_ids=seqs, attention_mask=attention_mask, response_start_idx=response_start_idx)
-
     def sync_weights(self, step: int) -> None:  # noqa: ARG002
         """No-op: hybrid engine reads model weights live."""
         return None
-
-    @torch.no_grad()
-    def _fallback_generate(self, **gen_kwargs) -> torch.Tensor:
-        """Manual ZeRO-3 generate: gather all params, call HF generate."""
-        from deepspeed.runtime.zero import GatheredParameters
-
-        module = self.engine.module
-        all_params = list(module.parameters())
-        with GatheredParameters(all_params):
-            return module.generate(**gen_kwargs)
