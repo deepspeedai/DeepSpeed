@@ -39,7 +39,7 @@ We tested Muon optimizer by finetuning Moonlight-16B-A3B (a Mixture-of-Experts m
 
 ### Evaluation Results
 
-| Optimizer | muon_lr | adam_lr | MBPP  | MBPP+ | MMLU   | GSM8K  |
+| Optimizer | Learning Rate | adam_lr (for Muon) | MBPP  | MBPP+ | MMLU   | GSM8K  |
 |-----------|--------------|-------------------|-------|-------|--------|--------|
 | baseline (pre-finetune) | —        | —                 | 0.495 | 0.431 | 0.401  | 0.526  |
 | AdamW     | 2e-6         | —                 | 0.661 | 0.534 | 0.660  | 0.805  |
