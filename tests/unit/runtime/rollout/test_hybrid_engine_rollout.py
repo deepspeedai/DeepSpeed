@@ -36,7 +36,7 @@ def _make_tokenizer():
 
 def test_config_defaults():
     cfg = HybridEngineRolloutConfig()
-    assert cfg.continuous_batching_size == 1
+    assert cfg.continuous_batching_size == 0
     assert cfg.kv_trim_threshold == 16
     assert cfg.use_graph_capture is False
 

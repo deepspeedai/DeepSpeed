@@ -407,8 +407,7 @@ class VLLMRollout(RolloutEngine):
                                        }})
         init_thread.start()
 
-        from vllm.distributed.device_communicators.stateless_process_group import (
-            StatelessProcessGroup, )
+        from vllm.distributed.utils import StatelessProcessGroup
 
         group = StatelessProcessGroup.create(host=master_addr, port=master_port, rank=0, world_size=total_world_size)
         init_thread.join(timeout=30)
@@ -517,14 +516,7 @@ class VLLMRollout(RolloutEngine):
 
     @staticmethod
     def _get_own_ip() -> str:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        try:
-            s.connect(("8.8.8.8", 80))
-            return s.getsockname()[0]
-        except OSError:
-            return "127.0.0.1"
-        finally:
-            s.close()
+        return "127.0.0.1"
 
     # ------------------------------------------------------------------
     # Cleanup

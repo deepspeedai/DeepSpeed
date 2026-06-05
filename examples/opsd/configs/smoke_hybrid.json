@@ -27,7 +27,7 @@
         "chunk_size": 128
     },
     "training": {
-        "train_batch_size": 2,
+        "train_batch_size": 1,
         "micro_batch_size_per_gpu": 1,
         "gradient_accumulation_steps": 1,
         "learning_rate": 1e-6,
@@ -45,5 +45,5 @@
         "prompt_field": "prompt",
         "shuffle": true
     },
-    "deepspeed_config": "configs/smoke_ds_zero3.json"
+    "deepspeed_config": "configs/smoke_ds_zero0.json"
 }

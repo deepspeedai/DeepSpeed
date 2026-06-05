@@ -28,11 +28,12 @@ class HybridEngineRolloutConfig:
 
     Attributes:
         continuous_batching_size: Number of decode slots for the CB loop.
+            0 (default) means no limit — all rollouts decoded in one batch.
         kv_trim_threshold: Minimum common leading padding before KV cache trim
             is applied. 0 = never trim, 1 = trim every step, 16 = trim only
             when >=16 tokens of common padding have accumulated (default).
     """
-    continuous_batching_size: int = 1
+    continuous_batching_size: int = 0
     kv_trim_threshold: int = 16
     use_graph_capture: bool = False
 
@@ -43,21 +44,27 @@ class HybridEngineRollout(RolloutEngine):
     Args:
         engine: DeepSpeed engine wrapping the model.
         tokenizer: HuggingFace tokenizer (must have pad_token_id or eos_token_id).
-        continuous_batching_size: Number of CB decode slots.
+        continuous_batching_size: Number of CB decode slots. 0 = no limit.
         kv_trim_threshold: Min common padding before KV trim fires (0 = disabled).
     """
 
     def __init__(self,
                  engine,
                  tokenizer,
-                 continuous_batching_size: int = 1,
+                 cfg=None,
+                 continuous_batching_size: int = 0,
                  kv_trim_threshold: int = 16,
                  use_graph_capture: bool = False):
         self.engine = engine
         self.tokenizer = tokenizer
-        self.continuous_batching_size = continuous_batching_size
-        self.kv_trim_threshold = kv_trim_threshold
-        self.use_graph_capture = use_graph_capture
+        if cfg is not None:
+            self.continuous_batching_size = getattr(cfg, 'continuous_batching_size', continuous_batching_size)
+            self.kv_trim_threshold = getattr(cfg, 'kv_trim_threshold', kv_trim_threshold)
+            self.use_graph_capture = getattr(cfg, 'use_graph_capture', use_graph_capture)
+        else:
+            self.continuous_batching_size = continuous_batching_size
+            self.kv_trim_threshold = kv_trim_threshold
+            self.use_graph_capture = use_graph_capture
         # Graph capture state (lazily initialized)
         self._graph = None
         self._graph_batch_size: int = 0
@@ -97,7 +104,7 @@ class HybridEngineRollout(RolloutEngine):
         max_new_tokens = sampling.max_new_tokens
         eos_token_id = self.tokenizer.eos_token_id
         pad_token_id = self.tokenizer.pad_token_id or eos_token_id
-        batch_size = min(total, cb_size)
+        batch_size = total if cb_size <= 0 else min(total, cb_size)
 
         temperature = max(sampling.temperature, 1e-8)
         top_p = sampling.top_p
@@ -305,7 +312,7 @@ class HybridEngineRollout(RolloutEngine):
         max_new_tokens = sampling.max_new_tokens
         eos_token_id = self.tokenizer.eos_token_id
         pad_token_id = self.tokenizer.pad_token_id or eos_token_id
-        batch_size = min(total, cb_size)
+        batch_size = total if cb_size <= 0 else min(total, cb_size)
         # With CB, decode_pos advances globally: ceil(total/batch_size) rounds of max_new_tokens
         max_cache_len = prompt_len + max_new_tokens
 
@@ -382,7 +389,8 @@ class HybridEngineRollout(RolloutEngine):
                        position_ids=static_position_ids)
                 # Capture — must be on correct device
                 graph = get_accelerator().create_graph()
-                with get_accelerator().device(device):
+                dev_idx = device.index if isinstance(device, torch.device) else device
+                with get_accelerator().device(dev_idx):
                     with get_accelerator().capture_to_graph(graph):
                         graph_out = module(static_input_ids,
                                            past_key_values=static_cache,
