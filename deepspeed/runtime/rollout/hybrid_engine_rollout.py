@@ -58,8 +58,12 @@ class HybridEngineRollout(RolloutEngine):
 
     name = "hybrid_engine"
 
-    def __init__(self, engine, tokenizer, continuous_batching_size: int = 0,
-                 kv_trim_threshold: int = 16, use_graph_capture: bool = False):
+    def __init__(self,
+                 engine,
+                 tokenizer,
+                 continuous_batching_size: int = 0,
+                 kv_trim_threshold: int = 16,
+                 use_graph_capture: bool = False):
         self.engine = engine
         self.tokenizer = tokenizer
         self.continuous_batching_size = continuous_batching_size
@@ -109,12 +113,19 @@ class HybridEngineRollout(RolloutEngine):
         )
 
         self.engine.eval()
+        module = self.engine.module
+        saved_pre = dict(module._forward_pre_hooks)
+        saved_post = dict(module._forward_hooks)
+        module._forward_pre_hooks.clear()
+        module._forward_hooks.clear()
         try:
             if self._has_accel:
                 seqs = self.engine.generate(**gen_kwargs)
             else:
                 seqs = self._fallback_generate(**gen_kwargs)
         finally:
+            module._forward_pre_hooks.update(saved_pre)
+            module._forward_hooks.update(saved_post)
             self.engine.train()
 
         return self._build_rollout_batch(request, seqs, sampling.n_samples_per_prompt, pad_id)
@@ -161,9 +172,7 @@ class HybridEngineRollout(RolloutEngine):
             first_logits = out.logits[:, -1, :]  # [B, vocab]
 
             # Storage for all generated tokens
-            all_tokens = torch.full(
-                (total, max_new_tokens), pad_token_id,
-                dtype=torch.long, device=device)
+            all_tokens = torch.full((total, max_new_tokens), pad_token_id, dtype=torch.long, device=device)
             gen_lens = torch.zeros(total, dtype=torch.long, device=device)
             completed_count = 0
             next_rollout_idx = 0
@@ -205,10 +214,7 @@ class HybridEngineRollout(RolloutEngine):
                 slot_decode_step[i] = 1
 
             # Extend attn_mask for first generated token
-            attn_mask = torch.cat([
-                attn_mask,
-                torch.ones(init_count, 1, dtype=attn_mask.dtype, device=device)
-            ], dim=1)
+            attn_mask = torch.cat([attn_mask, torch.ones(init_count, 1, dtype=attn_mask.dtype, device=device)], dim=1)
 
             # Check immediate EOS
             eos_now = (next_tokens.squeeze(1) == eos_token_id).cpu().tolist()
@@ -216,12 +222,9 @@ class HybridEngineRollout(RolloutEngine):
                 if eos_now[i]:
                     completed_count += 1
                     if next_rollout_idx < total:
-                        self._cb_replace_slot(
-                            i, past, prompt_past, attn_mask, first_logits,
-                            next_tokens, all_tokens, gen_lens, slot_rollout,
-                            slot_decode_step, slot_position, slot_pad_start,
-                            next_rollout_idx, prompt_len, B, n, device,
-                            temperature, top_p)
+                        self._cb_replace_slot(i, past, prompt_past, attn_mask, first_logits, next_tokens, all_tokens,
+                                              gen_lens, slot_rollout, slot_decode_step, slot_position, slot_pad_start,
+                                              next_rollout_idx, prompt_len, B, n, device, temperature, top_p)
                         next_rollout_idx += 1
                     else:
                         slot_active[i] = False
@@ -234,23 +237,20 @@ class HybridEngineRollout(RolloutEngine):
                 num_slots = len(slot_rollout)
 
                 # Build position_ids
-                pos_ids = torch.tensor(
-                    [[slot_position[i]] for i in range(num_slots)],
-                    device=device)
+                pos_ids = torch.tensor([[slot_position[i]] for i in range(num_slots)], device=device)
 
                 # Forward pass (single token per slot)
-                out = module(
-                    next_tokens, attention_mask=attn_mask,
-                    position_ids=pos_ids,
-                    past_key_values=past, use_cache=True)
+                out = module(next_tokens,
+                             attention_mask=attn_mask,
+                             position_ids=pos_ids,
+                             past_key_values=past,
+                             use_cache=True)
                 past = out.past_key_values
                 next_tokens = self._sample_top_p(out.logits[:, -1, :], temperature, top_p)
 
                 # Extend attention mask
-                attn_mask = torch.cat([
-                    attn_mask,
-                    torch.ones(num_slots, 1, dtype=attn_mask.dtype, device=device)
-                ], dim=1)
+                attn_mask = torch.cat(
+                    [attn_mask, torch.ones(num_slots, 1, dtype=attn_mask.dtype, device=device)], dim=1)
 
                 # Update positions and store tokens
                 for i in range(num_slots):
@@ -272,12 +272,10 @@ class HybridEngineRollout(RolloutEngine):
                     if eos_mask[i] or slot_decode_step[i] >= max_new_tokens:
                         completed_count += 1
                         if next_rollout_idx < total:
-                            self._cb_replace_slot(
-                                i, past, prompt_past, attn_mask, first_logits,
-                                next_tokens, all_tokens, gen_lens, slot_rollout,
-                                slot_decode_step, slot_position, slot_pad_start,
-                                next_rollout_idx, prompt_len, B, n, device,
-                                temperature, top_p)
+                            self._cb_replace_slot(i, past, prompt_past, attn_mask, first_logits, next_tokens,
+                                                  all_tokens, gen_lens, slot_rollout, slot_decode_step, slot_position,
+                                                  slot_pad_start, next_rollout_idx, prompt_len, B, n, device,
+                                                  temperature, top_p)
                             next_rollout_idx += 1
                         else:
                             slots_finished.append(i)
@@ -299,8 +297,7 @@ class HybridEngineRollout(RolloutEngine):
 
                 # KV cache left-trim: remove common leading padding
                 if self.kv_trim_threshold > 0:
-                    active_pads = [slot_pad_start[i] for i in range(len(slot_pad_start))
-                                   if slot_active[i]]
+                    active_pads = [slot_pad_start[i] for i in range(len(slot_pad_start)) if slot_active[i]]
                     if active_pads:
                         min_pad = min(active_pads)
                         if min_pad >= self.kv_trim_threshold:
@@ -331,7 +328,7 @@ class HybridEngineRollout(RolloutEngine):
         seqs = torch.cat([expanded_prompts, all_tokens], dim=1)
         response_mask = (all_tokens != pad_token_id).to(expanded_prompt_mask.dtype)
         attention_mask = torch.cat([expanded_prompt_mask, response_mask], dim=1)
-        response_start_idx = torch.full((total,), prompt_len, dtype=torch.long, device=device)
+        response_start_idx = torch.full((total, ), prompt_len, dtype=torch.long, device=device)
 
         return RolloutBatch(
             input_ids=seqs,
@@ -345,7 +342,7 @@ class HybridEngineRollout(RolloutEngine):
 
     @torch.no_grad()
     def _generate_graph_capture_cb(self, request: RolloutRequest, sampling: SamplingConfig,
-                                cb_size: int) -> RolloutBatch:
+                                   cb_size: int) -> RolloutBatch:
         """Decode loop using graph capture for the forward pass.
 
         Uses StaticCache (pre-allocated, fixed-shape KV) so the decode forward
@@ -364,7 +361,6 @@ class HybridEngineRollout(RolloutEngine):
         pad_token_id = self.tokenizer.pad_token_id or eos_token_id
         batch_size = min(total, cb_size)
         # With CB, decode_pos advances globally: ceil(total/batch_size) rounds of max_new_tokens
-        import math
         max_cache_len = prompt_len + max_new_tokens
 
         temperature = max(sampling.temperature, 1e-8)
@@ -387,12 +383,15 @@ class HybridEngineRollout(RolloutEngine):
 
             # === Phase 1: Prefill into a reference cache ===
             prefill_bs = 1 if B == 1 else B
-            prefill_cache = StaticCache(
-                module.config, batch_size=prefill_bs,
-                max_cache_len=max_cache_len, device=device, dtype=model_dtype)
+            prefill_cache = StaticCache(module.config,
+                                        batch_size=prefill_bs,
+                                        max_cache_len=max_cache_len,
+                                        device=device,
+                                        dtype=model_dtype)
             cache_pos_prefill = torch.arange(prompt_len, device=device)
             pfkw = dict(input_ids=request.prompt_ids[:prefill_bs],
-                        past_key_values=prefill_cache, use_cache=True,
+                        past_key_values=prefill_cache,
+                        use_cache=True,
                         cache_position=cache_pos_prefill)
             if B > 1:
                 pfkw['attention_mask'] = request.prompt_attention_mask
@@ -400,42 +399,51 @@ class HybridEngineRollout(RolloutEngine):
             first_logits = out.logits[:, -1, :]  # [prefill_bs, vocab]
 
             # === Phase 2: Build batch static cache + static buffers ===
-            static_cache = StaticCache(
-                module.config, batch_size=batch_size,
-                max_cache_len=max_cache_len, device=device, dtype=model_dtype)
+            static_cache = StaticCache(module.config,
+                                       batch_size=batch_size,
+                                       max_cache_len=max_cache_len,
+                                       device=device,
+                                       dtype=model_dtype)
 
             static_input_ids = torch.zeros(batch_size, 1, dtype=torch.long, device=device)
             static_cache_position = torch.zeros(1, dtype=torch.long, device=device)
-            static_attn_mask = torch.zeros(
-                batch_size, max_cache_len, dtype=torch.long, device=device)
+            static_attn_mask = torch.zeros(batch_size, max_cache_len, dtype=torch.long, device=device)
             static_position_ids = torch.zeros(batch_size, 1, dtype=torch.long, device=device)
 
             # Initialize static_cache with a dummy forward, then restore with prefill KV
             dummy_cp = torch.zeros(1, dtype=torch.long, device=device)
             module(torch.zeros(batch_size, 1, dtype=torch.long, device=device),
-                   past_key_values=static_cache, use_cache=True, cache_position=dummy_cp)
+                   past_key_values=static_cache,
+                   use_cache=True,
+                   cache_position=dummy_cp)
 
             # === Phase 3: Warmup + capture (or reuse cached graph) ===
-            need_new_graph = (self._graph is None or
-                              self._graph_batch_size != batch_size or
-                              self._graph_max_cache_len != max_cache_len)
+            # NOTE: graph reuse across calls can leave stale KV data in the
+            # static cache that causes index_copy_() asserts on replay with
+            # AutoTP.  Force re-capture every call for safety.
+            need_new_graph = True
 
             if need_new_graph:
                 # Warmup
                 static_cache_position[0] = prompt_len
                 static_input_ids[:, 0] = 0
                 static_position_ids[:, 0] = prompt_len
-                module(static_input_ids, past_key_values=static_cache, use_cache=True,
-                       cache_position=static_cache_position, attention_mask=static_attn_mask,
+                module(static_input_ids,
+                       past_key_values=static_cache,
+                       use_cache=True,
+                       cache_position=static_cache_position,
+                       attention_mask=static_attn_mask,
                        position_ids=static_position_ids)
                 # Capture — must be on correct device
                 graph = get_accelerator().create_graph()
-                with torch.cuda.device(device):
+                with get_accelerator().device(device):
                     with get_accelerator().capture_to_graph(graph):
-                        graph_out = module(static_input_ids, past_key_values=static_cache,
-                                          use_cache=True, cache_position=static_cache_position,
-                                          attention_mask=static_attn_mask,
-                                          position_ids=static_position_ids)
+                        graph_out = module(static_input_ids,
+                                           past_key_values=static_cache,
+                                           use_cache=True,
+                                           cache_position=static_cache_position,
+                                           attention_mask=static_attn_mask,
+                                           position_ids=static_position_ids)
 
                 # Cache graph state
                 self._graph = graph
@@ -482,8 +490,7 @@ class HybridEngineRollout(RolloutEngine):
                 init_logits = first_logits[prompt_indices]
 
             # === Phase 5: Slot state + sample first token ===
-            all_tokens = torch.full(
-                (total, max_new_tokens), pad_token_id, dtype=torch.long, device=device)
+            all_tokens = torch.full((total, max_new_tokens), pad_token_id, dtype=torch.long, device=device)
             gen_lens = torch.zeros(total, dtype=torch.long, device=device)
             completed_count = 0
             next_rollout_idx = init_count
@@ -505,12 +512,11 @@ class HybridEngineRollout(RolloutEngine):
                 if eos_now[i]:
                     completed_count += 1
                     if next_rollout_idx < total:
-                        self._graph_capture_replace_slot_kv(
-                            i, static_cache, prefill_cache, static_attn_mask,
-                            first_logits, first_tokens, all_tokens, gen_lens,
-                            slot_rollout, slot_decode_step, slot_position,
-                            next_rollout_idx, prompt_len, B, n, device,
-                            temperature, top_p)
+                        self._graph_capture_replace_slot_kv(i, static_cache, prefill_cache, static_attn_mask,
+                                                            first_logits, first_tokens, all_tokens, gen_lens,
+                                                            slot_rollout, slot_decode_step, slot_position,
+                                                            next_rollout_idx, prompt_len, B, n, device, temperature,
+                                                            top_p)
                         next_rollout_idx += 1
                     else:
                         slot_active[i] = False
@@ -564,8 +570,7 @@ class HybridEngineRollout(RolloutEngine):
 
                 get_accelerator().replay_graph(graph)
 
-                current_tokens = self._sample_top_p(
-                    graph_logits[:, -1, :], temperature, top_p)
+                current_tokens = self._sample_top_p(graph_logits[:, -1, :], temperature, top_p)
 
                 # Store tokens for active slots (vectorized)
                 active_mask = slot_active_t & (slot_decode_step_t < max_new_tokens)
@@ -616,7 +621,7 @@ class HybridEngineRollout(RolloutEngine):
         seqs = torch.cat([expanded_prompts, all_tokens], dim=1)
         response_mask = (all_tokens != pad_token_id).to(expanded_prompt_mask.dtype)
         attention_mask = torch.cat([expanded_prompt_mask, response_mask], dim=1)
-        response_start_idx = torch.full((total,), prompt_len, dtype=torch.long, device=device)
+        response_start_idx = torch.full((total, ), prompt_len, dtype=torch.long, device=device)
 
         return RolloutBatch(
             input_ids=seqs,
@@ -624,12 +629,9 @@ class HybridEngineRollout(RolloutEngine):
             response_start_idx=response_start_idx,
         )
 
-    def _graph_capture_replace_slot_kv(self, slot_idx, static_cache, prefill_cache,
-                                     static_attn_mask, first_logits, next_tokens,
-                                     all_tokens, gen_lens, slot_rollout,
-                                     slot_decode_step, slot_position,
-                                     new_rollout_idx,
-                                     prompt_len, B, n, device, temperature, top_p):
+    def _graph_capture_replace_slot_kv(self, slot_idx, static_cache, prefill_cache, static_attn_mask, first_logits,
+                                       next_tokens, all_tokens, gen_lens, slot_rollout, slot_decode_step,
+                                       slot_position, new_rollout_idx, prompt_len, B, n, device, temperature, top_p):
         """Replace a finished slot by copying prompt KV from prefill_cache."""
         src_prompt_idx = new_rollout_idx // n if B > 1 else 0
 
@@ -659,11 +661,9 @@ class HybridEngineRollout(RolloutEngine):
     # CB helper: replace a finished slot with a new rollout
     # ------------------------------------------------------------------
 
-    def _cb_replace_slot(self, slot_idx, past, prompt_past, attn_mask,
-                         first_logits, next_tokens, all_tokens, gen_lens,
-                         slot_rollout, slot_decode_step, slot_position,
-                         slot_pad_start, new_rollout_idx, prompt_len, B, n,
-                         device, temperature, top_p):
+    def _cb_replace_slot(self, slot_idx, past, prompt_past, attn_mask, first_logits, next_tokens, all_tokens, gen_lens,
+                         slot_rollout, slot_decode_step, slot_position, slot_pad_start, new_rollout_idx, prompt_len, B,
+                         n, device, temperature, top_p):
         """Replace a finished slot with a new rollout by left-padding prompt KV."""
         # Support both DynamicCache (transformers>=5, .layers[i].keys/.values) and
         # legacy tuple-of-tuples cache (transformers<4, past[layer_idx] returns (k,v)).
@@ -680,8 +680,7 @@ class HybridEngineRollout(RolloutEngine):
             heads = key.shape[1]
             head_dim = key.shape[3]
 
-            pad_kv = torch.zeros(1, heads, pad_len, head_dim,
-                                 dtype=key.dtype, device=device)
+            pad_kv = torch.zeros(1, heads, pad_len, head_dim, dtype=key.dtype, device=device)
             new_key = torch.cat([pad_kv, src_key[src_prompt_idx:src_prompt_idx + 1]], dim=2)
             new_value = torch.cat([pad_kv, src_value[src_prompt_idx:src_prompt_idx + 1]], dim=2)
             key[slot_idx] = new_key[0]
@@ -713,8 +712,7 @@ class HybridEngineRollout(RolloutEngine):
         logits = logits / temperature
         if top_p < 1.0:
             sorted_logits, sorted_indices = torch.sort(logits, descending=True, dim=-1)
-            cumulative_probs = torch.cumsum(
-                torch.softmax(sorted_logits, dim=-1), dim=-1)
+            cumulative_probs = torch.cumsum(torch.softmax(sorted_logits, dim=-1), dim=-1)
             mask = (cumulative_probs - torch.softmax(sorted_logits, dim=-1)) >= top_p
             sorted_logits[mask] = -float('inf')
             probs = torch.softmax(sorted_logits, dim=-1)
@@ -751,13 +749,12 @@ class HybridEngineRollout(RolloutEngine):
         if seqs.shape[0] != B * n:
             raise RuntimeError(f"generate returned batch {seqs.shape[0]}, expected {B * n}")
 
-        response_start_idx = torch.full((B * n,), T_p, dtype=torch.long, device=seqs.device)
+        response_start_idx = torch.full((B * n, ), T_p, dtype=torch.long, device=seqs.device)
         attention_mask = (seqs != pad_id).to(request.prompt_attention_mask.dtype)
         prompt_mask_expanded = request.prompt_attention_mask.repeat_interleave(n, dim=0)
         attention_mask[:, :T_p] = prompt_mask_expanded
 
-        return RolloutBatch(input_ids=seqs, attention_mask=attention_mask,
-                           response_start_idx=response_start_idx)
+        return RolloutBatch(input_ids=seqs, attention_mask=attention_mask, response_start_idx=response_start_idx)
 
     def sync_weights(self, step: int) -> None:  # noqa: ARG002
         """No-op: hybrid engine reads model weights live."""
