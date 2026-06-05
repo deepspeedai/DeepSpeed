@@ -178,8 +178,16 @@ class TestMuonPartialModelTraining(DistributedTest):
     @pytest.mark.parametrize(
         "optimizer_params, expected_muon_lr, expected_adam_lr",
         [
-            ({"lr": 0.02, "weight_decay": 0.01}, 0.02, 0.02),
-            ({"lr": 0.02, "muon_lr": 0.04, "adam_lr": 0.001, "weight_decay": 0.01}, 0.04, 0.001),
+            ({
+                "lr": 0.02,
+                "weight_decay": 0.01
+            }, 0.02, 0.02),
+            ({
+                "lr": 0.02,
+                "muon_lr": 0.04,
+                "adam_lr": 0.001,
+                "weight_decay": 0.01
+            }, 0.04, 0.001),
         ],
     )
     def test_muon_adam_learning_rate_overrides(self, optimizer_params, expected_muon_lr, expected_adam_lr):
