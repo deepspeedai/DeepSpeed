@@ -77,6 +77,11 @@ class RolloutConfig:
     vllm_port: int = 8000
     # Maximum seconds to wait for the vLLM server to become healthy.
     vllm_start_timeout: int = 300
+    # Weight transfer backend for syncing student weights into vLLM.
+    # "auto"  – try GDR (GPU-direct) first, fall back to HTTP.
+    # "gdr"   – GPU-direct transfer (NCCL). Fastest but requires NVIDIA.
+    # "http"  – serialize tensors over HTTP. Slower but accelerator-agnostic.
+    weight_transfer_backend: str = "auto"
 
 
 @dataclass

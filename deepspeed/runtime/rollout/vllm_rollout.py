@@ -30,9 +30,16 @@
     ``VLLM_SERVER_DEV_MODE=1`` and ``--weight-transfer-config``.  The
     protocol is: ``pause`` -> ``start_weight_update`` ->
     ``update_weights`` -> ``finish_weight_update`` -> ``resume``.
-    The actual tensor transport uses NCCL broadcast over a
-    ``StatelessProcessGroup`` — far more efficient than serialising
-    tensors over HTTP JSON.
+
+    Two transport backends are supported:
+
+    * **GDR** (GPU-direct) – NCCL broadcast over a
+      ``StatelessProcessGroup``.  Fastest, but requires NCCL (NVIDIA).
+    * **HTTP** – serialize tensors and send over HTTP.  Slower but
+      accelerator-agnostic.
+
+    When ``weight_transfer_backend="auto"`` (default), GDR is tried
+    first and falls back to HTTP if NCCL is unavailable.
 """
 
 import logging
@@ -54,6 +61,14 @@ from deepspeed.runtime.rollout.base import RolloutBatch, RolloutEngine, RolloutR
 logger = logging.getLogger(__name__)
 
 _HTTP_TIMEOUT = 120
+_VLLM_NCCL_BACKEND = "nccl"
+
+
+def _gdr_available() -> bool:
+    try:
+        return torch.cuda.is_available() and torch.cuda.nccl.version() is not None  #ignore-cuda
+    except Exception:
+        return False
 
 
 def _is_rank_zero() -> bool:
@@ -152,6 +167,13 @@ class VLLMRollout(RolloutEngine):
         self._nccl_group = None
         self._weight_transfer_inited = False
 
+        backend = cfg.weight_transfer_backend
+        if backend == "auto":
+            backend = "gdr" if _gdr_available() else "http"
+        if backend not in ("gdr", "http"):
+            raise ValueError(f"weight_transfer_backend must be 'auto', 'gdr', or 'http'; got {backend!r}")
+        self._wt_backend = backend
+
     # ------------------------------------------------------------------
     # Lazy server lifecycle
     # ------------------------------------------------------------------
@@ -199,7 +221,7 @@ class VLLMRollout(RolloutEngine):
             "--port",
             str(self.cfg.vllm_port),
             "--weight-transfer-config",
-            '{"backend": "nccl"}',
+            f'{{"backend": "{_VLLM_NCCL_BACKEND}"}}' if self._wt_backend == "gdr" else '{"backend": "http"}',
         ]
         if self.cfg.vllm_enforce_eager:
             cmd.append("--enforce-eager")
@@ -315,7 +337,7 @@ class VLLMRollout(RolloutEngine):
         return []
 
     # ------------------------------------------------------------------
-    # Weight sync (vLLM 0.22.0 RLHF NCCL API)
+    # Weight sync (vLLM 0.22.0 RLHF API)
     # ------------------------------------------------------------------
 
     def sync_weights(self, step: int) -> None:
@@ -325,7 +347,8 @@ class VLLMRollout(RolloutEngine):
             return
 
         if not self._weight_transfer_inited and self.is_rank_zero:
-            self._init_weight_transfer()
+            if self._wt_backend == "gdr":
+                self._init_gdr_channel()
             self._weight_transfer_inited = True
 
         from deepspeed.runtime.zero import GatheredParameters
@@ -339,7 +362,10 @@ class VLLMRollout(RolloutEngine):
 
         if self.is_rank_zero:
             self._pause()
-            self._update_weights_nccl(params)
+            if self._wt_backend == "gdr":
+                self._update_weights_gdr(params)
+            else:
+                self._update_weights_http(params)
             self._resume()
 
         from deepspeed import comm as dist
@@ -347,10 +373,10 @@ class VLLMRollout(RolloutEngine):
         if dist.is_initialized() and dist.get_world_size() > 1:
             dist.barrier()
 
-    # -- Server init / weight transfer via NCCL --------------------------
+    # -- GDR (NCCL) weight transfer ----------------------------------------
 
-    def _init_weight_transfer(self) -> None:
-        """Bootstrap the NCCL weight-transfer engine.
+    def _init_gdr_channel(self) -> None:
+        """Bootstrap the GDR weight-transfer channel.
 
         vLLM's ``init_weight_transfer_engine`` endpoint and the trainer-side
         ``StatelessProcessGroup.create()`` must rendezvous concurrently
@@ -388,12 +414,11 @@ class VLLMRollout(RolloutEngine):
             raise TimeoutError("init_weight_transfer_engine did not complete within 30s")
 
         self._nccl_group = group
-        logger.info("NCCL weight-transfer engine initialised "
+        logger.info("GDR weight-transfer channel initialised "
                     "(world_size=%d, vllm_workers=%d)", total_world_size, vllm_world_size)
 
-    def _update_weights_nccl(self, params: List[Tuple[str, torch.Tensor]]) -> None:
-        """Push all gathered parameters to vLLM via the NCCL weight-transfer
-        protocol.
+    def _update_weights_gdr(self, params: List[Tuple[str, torch.Tensor]]) -> None:
+        """Push all gathered parameters to vLLM via GPU-direct (NCCL) transfer.
 
         The flow mirrors vLLM's official ``rlhf_http_nccl.py`` example:
 
@@ -440,7 +465,40 @@ class VLLMRollout(RolloutEngine):
             raise TimeoutError("update_weights HTTP call did not complete within 60s")
 
         self._post("/finish_weight_update", json={})
-        logger.info("pushed %d parameters via NCCL", len(names))
+        logger.info("pushed %d parameters via GDR", len(names))
+
+    # -- HTTP weight transfer -----------------------------------------------
+
+    def _update_weights_http(self, params: List[Tuple[str, torch.Tensor]]) -> None:
+        """Push all gathered parameters to vLLM via HTTP serialised transfer.
+
+        Each parameter is sent individually: metadata (name, dtype, shape)
+        goes in the JSON body alongside the tensor bytes (base64-encoded).
+        """
+        import base64
+
+        self._post("/start_weight_update", json={"is_checkpoint_format": True})
+
+        for name, tensor in params:
+            arr = tensor.cpu().numpy()
+            buf = arr.tobytes()
+            encoded = base64.b64encode(buf).decode("ascii")
+            self._post(
+                "/update_weights",
+                json={
+                    "update_info": {
+                        "names": [name],
+                        "dtype_names": [str(tensor.dtype).replace("torch.", "")],
+                        "shapes": [list(tensor.shape)],
+                        "packed": False,
+                    },
+                    "tensors": [encoded],
+                },
+                timeout=max(_HTTP_TIMEOUT, 30),
+            )
+
+        self._post("/finish_weight_update", json={})
+        logger.info("pushed %d parameters via HTTP", len(params))
 
     # -- RLHF HTTP helpers -----------------------------------------------
 
