@@ -18,7 +18,6 @@ from deepspeed.runtime.rlhf.config import RolloutConfig
 def _make_cfg(**overrides):
     defaults = dict(
         engine="vllm",
-        student_model_path="test-model",
         vllm_port=8999,
         gpu_memory_utilization=0.3,
         weight_transfer_backend="http",
@@ -33,9 +32,9 @@ def _make_cfg(**overrides):
 def test_init_rejects_wrong_engine():
     from deepspeed.runtime.rollout.vllm_rollout import VLLMRollout
 
-    cfg = RolloutConfig(engine="hybrid_engine", student_model_path="x")
+    cfg = RolloutConfig(engine="hybrid_engine")
     with pytest.raises(ValueError, match="must be 'vllm'"):
-        VLLMRollout(cfg=cfg, tokenizer=MagicMock())
+        VLLMRollout(cfg=cfg, tokenizer=MagicMock(), student_model_path="x")
 
 
 def test_init_requires_student_model_path():
@@ -50,7 +49,7 @@ def test_init_http_backend():
     from deepspeed.runtime.rollout.vllm_rollout import VLLMRollout
 
     cfg = _make_cfg(weight_transfer_backend="http")
-    rollout = VLLMRollout(cfg=cfg, tokenizer=MagicMock())
+    rollout = VLLMRollout(cfg=cfg, tokenizer=MagicMock(), student_model_path="test-model")
     assert rollout._wt_backend == "http"
 
 
@@ -98,7 +97,7 @@ def test_start_server_command_http_backend():
         vllm_enforce_eager=True,
         gpus=[0, 1],
     )
-    rollout = VLLMRollout(cfg=cfg, tokenizer=MagicMock())
+    rollout = VLLMRollout(cfg=cfg, tokenizer=MagicMock(), student_model_path="test-model")
 
     with patch("subprocess.Popen") as mock_popen:
         mock_popen.return_value = MagicMock()
@@ -129,7 +128,7 @@ def test_start_server_uses_vllm_python():
     from deepspeed.runtime.rollout.vllm_rollout import VLLMRollout
 
     cfg = _make_cfg(vllm_python="/custom/bin/python")
-    rollout = VLLMRollout(cfg=cfg, tokenizer=MagicMock())
+    rollout = VLLMRollout(cfg=cfg, tokenizer=MagicMock(), student_model_path="test-model")
 
     with patch("subprocess.Popen") as mock_popen:
         mock_popen.return_value = MagicMock()
@@ -146,7 +145,7 @@ def test_wait_for_health_raises_on_crash():
     from deepspeed.runtime.rollout.vllm_rollout import VLLMRollout
 
     cfg = _make_cfg(vllm_start_timeout=5)
-    rollout = VLLMRollout(cfg=cfg, tokenizer=MagicMock())
+    rollout = VLLMRollout(cfg=cfg, tokenizer=MagicMock(), student_model_path="test-model")
 
     proc = MagicMock()
     proc.poll.return_value = 1
@@ -163,7 +162,7 @@ def test_wait_for_health_raises_timeout():
     from deepspeed.runtime.rollout.vllm_rollout import VLLMRollout
 
     cfg = _make_cfg(vllm_start_timeout=0)
-    rollout = VLLMRollout(cfg=cfg, tokenizer=MagicMock())
+    rollout = VLLMRollout(cfg=cfg, tokenizer=MagicMock(), student_model_path="test-model")
     rollout._server_proc = MagicMock()
     rollout._server_proc.poll.return_value = None
 
