@@ -39,14 +39,10 @@ examples/opsd/
 │   ├── trainer.py                     # three-phase training loop
 │   ├── data.py                        # JSONL prompt dataset + left-pad collator
 │   ├── utils.py                       # response-mask + shift helpers
-│   ├── rollout/
-│   │   ├── base.py                    # RolloutEngine ABC, request/batch dataclasses
-│   │   ├── hybrid_engine.py           # DeepSpeed hybrid-engine rollout
-│   │   └── vllm.py                    # vLLM rollout on disjoint GPUs
-│   └── weight_bridge/
-│       ├── base.py                    # ParallelKind + per-rank slicer
-│       ├── qwen2.py                   # Qwen2 / Qwen2.5 TP mapping
-│       └── qwen3.py                   # Qwen3 dense (adds q_norm/k_norm)
+│   └── rollout/
+│       ├── base.py                    # RolloutEngine ABC, request/batch dataclasses
+│       ├── hybrid_engine.py           # DeepSpeed hybrid-engine rollout
+│       └── vllm.py                    # vLLM rollout on disjoint GPUs
 ├── configs/
 │   ├── ds_zero3.json                  # base DeepSpeed ZeRO-3 + hybrid engine
 │   ├── opsd_hybrid_engine.json        # production-ish hybrid-engine OPSD config
@@ -111,7 +107,7 @@ NUM_TRAIN_GPUS=2 INCLUDE_GPUS=0,1 deepspeed --num_gpus 2 --include localhost:0,1
 ## Unit tests
 
 The CPU-runnable test suite exercises the loss math, teacher caching, rollout
-contract, weight-bridge TP slicing, and vLLM stitch logic. Run with:
+contract, and vLLM stitch logic. Run with:
 
 ```
 cd examples/opsd
@@ -139,14 +135,9 @@ for fully-populated examples.
 
 ## Adding a new model architecture
 
-To support a model the bridge doesn't recognise yet:
-
-1. Add `opsd/weight_bridge/<arch>.py` subclassing `Qwen2WeightBridge` (or
-   `WeightBridge` directly) and override `parallel_kind` / `_extra_layer_kind`
-   for any parameters not in Qwen2's table.
-2. Register the new arch in `opsd/weight_bridge/__init__.py::get_bridge`.
-3. Add a test in `tests/test_weight_bridge.py` covering parallel-kind dispatch
-   and a slice-then-gather round trip for one layer of realistic shapes.
+No special steps are needed for new model architectures. vLLM's RLHF weight
+transfer API handles TP slicing internally; the caller only needs to send full
+tensors.
 
 ## Design notes
 
@@ -169,9 +160,9 @@ To support a model the bridge doesn't recognise yet:
   versa. A colocated topology using vLLM 0.6.4+'s `sleep_mode` is planned as
   a follow-up.
 
-* **Weight bridge does not pre-fuse QKV / gate-up.** vLLM's per-model loader
-  already knows how to fuse these from the standard HuggingFace layout, so
-  the bridge only handles per-rank slicing.
+* **Weight sync uses vLLM's RLHF API.** vLLM 0.22.0+ exposes
+  ``/update_weights`` which handles TP slicing internally. The trainer
+  sends full tensors and vLLM distributes them.
 
 ## vLLM status
 
@@ -192,7 +183,6 @@ the current `VLLMRollout` will be the basis for it once landed.
 
 What's verified for the vLLM path today:
 * `tests/test_vllm_stitch.py` — prompt + response stitching (CPU unit test)
-* `tests/test_weight_bridge.py` — TP-slice math for Qwen2 / Qwen3 (CPU)
 * `vllm.LLM` itself runs fine standalone on Qwen2.5-0.5B (validated)
 
 What's **not** verified:

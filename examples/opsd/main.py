@@ -97,7 +97,6 @@ def main() -> None:
         student_engine=student_engine,
         tokenizer=tokenizer,
         student_model_path=cfg.student.model_name_or_path,
-        arch=cfg.student.arch,
     )
 
     # --- dataloader --------------------------------------------------------
