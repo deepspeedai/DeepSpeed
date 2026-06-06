@@ -142,12 +142,13 @@ def init_z1(engine, backend, compile_config, compile_kwargs, schedule=None, use_
                 else:
                     dc.register_param(p.param_id, p.shape, p, _empty_grad_buffer(p), 0)
 
-        optimizer._deepcompile_z1_grad_buffer_metadata = grad_buffer_metadata
-        optimizer._deepcompile_z1_current_grad_buffers = {}
+        current_grad_buffers = {}
 
         def set_z1_grad_buffer(is_gradient_accumulation_boundary):
+            nonlocal current_grad_buffers
             if not is_gradient_accumulation_boundary:
                 release_grad_buffer()
+                current_grad_buffers = {}
                 optimizer.averaged_gradients = {}
                 return
 
@@ -158,7 +159,6 @@ def init_z1(engine, backend, compile_config, compile_kwargs, schedule=None, use_
                     group_grad_buffers, flat_grad_buffer, lambda group_idx=group_idx: release_grad_buffer(group_idx))
                 for (param_id, _, offset), grad_buffer in zip(grad_buffer_metadata[group_idx], group_grad_buffers):
                     dc.update_param_grad_buffer(param_id, grad_buffer, offset)
-            optimizer._deepcompile_z1_current_grad_buffers = current_grad_buffers
             optimizer.averaged_gradients = current_grad_buffers
 
         def release_grad_buffer(group_idx=None):
@@ -166,10 +166,8 @@ def init_z1(engine, backend, compile_config, compile_kwargs, schedule=None, use_
             for idx in group_indices:
                 for param_id, param, _ in grad_buffer_metadata[idx]:
                     dc.update_param_grad_buffer(param_id, _empty_grad_buffer(param), 0)
-                if idx in optimizer._deepcompile_z1_current_grad_buffers:
-                    optimizer._deepcompile_z1_current_grad_buffers[idx] = None
-
-        optimizer._deepcompile_z1_release_grad_buffers = release_grad_buffer
+                if idx in current_grad_buffers:
+                    current_grad_buffers[idx] = None
 
         add_pre_backward_hook(set_z1_grad_buffer)
 
