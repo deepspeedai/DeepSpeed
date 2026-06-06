@@ -6,6 +6,8 @@
 #include "z3.h"
 #include "deepcompile.h"
 
+#include <ATen/native/cuda/Resize.h>
+
 namespace dc {
 
 const size_t TIMEOUT_SYMMETRIC_MEMORY_BARRIER = 60000;
@@ -222,6 +224,14 @@ public:
             at::Tensor gathered_param = param_registry_->getGatheredParam(ds_id);
 
             if (gathered_param.defined()) {  // gathered param is undefined while profiling
+                auto storage = gathered_param.storage();
+                if (storage.nbytes() > 0) {
+                    // Required so the caching allocator defers reuse for consumer-stream kernels
+                    // queued behind wait_allgather.
+                    gathered_param.record_stream(at::cuda::getCurrentCUDAStream());
+                    at::native::resize_bytes_cuda(storage.unsafeGetStorageImpl(), 0);
+                }
+
                 const auto options = gathered_param.options();
                 at::Tensor empty_buffer = torch::empty({0}, options);
                 gathered_param.set_data(empty_buffer);
