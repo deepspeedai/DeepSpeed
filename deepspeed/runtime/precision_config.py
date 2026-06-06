@@ -130,6 +130,26 @@ class DeepSpeedFP16Config(DeepSpeedConfigModel):
             raise ValueError("fp16.loss_scale must be >= 0 (0 enables dynamic loss scaling)")
         return v
 
+    @field_validator("loss_scale_window", "min_loss_scale", mode="before")
+    @classmethod
+    def _validate_positive_dynamic_scale_param(cls, v, info):
+        # Both parameters drive dynamic loss scaling and must be strictly positive.
+        # loss_scale_window is used as `stable_interval % scale_window` in
+        # DynamicLossScaler.update_scale, so a value of 0 raises ZeroDivisionError,
+        # and min_loss_scale is the loss-scale floor, which collapses if <= 0.
+        name = info.field_name
+        if isinstance(v, bool):
+            raise ValueError(f"fp16.{name} must be a number, not bool")
+        try:
+            number = float(v)
+        except (TypeError, ValueError):
+            raise ValueError(f"fp16.{name} must be a number")
+        if not math.isfinite(number):
+            raise ValueError(f"fp16.{name} must be a finite number (not inf/-inf/nan)")
+        if number <= 0:
+            raise ValueError(f"fp16.{name} must be > 0")
+        return v
+
     initial_scale_power: int = 16
     """
     For dynamic loss scaling, set initial loss scale to 2^{initial_scale_power}.
