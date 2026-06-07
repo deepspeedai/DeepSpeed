@@ -54,9 +54,11 @@ class HybridEngineRollout(RolloutEngine):
                  cfg=None,
                  continuous_batching_size: int = 0,
                  kv_trim_threshold: int = 16,
-                 use_graph_capture: bool = False):
+                 use_graph_capture: bool = False,
+                 use_flashinfer: bool = False):
         self.engine = engine
         self.tokenizer = tokenizer
+        self._use_flashinfer = use_flashinfer
         if cfg is not None:
             self.continuous_batching_size = getattr(cfg, 'continuous_batching_size', continuous_batching_size)
             self.kv_trim_threshold = getattr(cfg, 'kv_trim_threshold', kv_trim_threshold)
@@ -79,6 +81,16 @@ class HybridEngineRollout(RolloutEngine):
     @torch.no_grad()
     def generate(self, request: RolloutRequest, sampling: SamplingConfig) -> RolloutBatch:
         cb_size = self.continuous_batching_size
+        use_flashinfer = getattr(self, '_use_flashinfer', False)
+        if use_flashinfer:
+            from deepspeed.runtime.rollout.flashinfer_kernels import FlashInferKernelManager
+            mgr = FlashInferKernelManager(self.engine, self)
+            with mgr:
+                return self._dispatch_generate(request, sampling, cb_size)
+        return self._dispatch_generate(request, sampling, cb_size)
+
+    @torch.no_grad()
+    def _dispatch_generate(self, request, sampling, cb_size):
         if self.use_graph_capture:
             return self._generate_graph_capture_cb(request, sampling, cb_size)
         return self._generate_continuous_batching(request, sampling, cb_size)
