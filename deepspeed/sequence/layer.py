@@ -15,6 +15,12 @@ from deepspeed.accelerator import get_accelerator
 from deepspeed.module_inject.tp_shard import get_shard_size_list, set_num_kv_heads, get_num_kv_heads
 from deepspeed.utils import groups
 
+try:
+    from torchembed._triton import fused_rope_forward as _torchembed_rope_forward
+    _torchembed_available = True
+except ImportError:
+    _torchembed_available = False
+
 
 def _generate_layout_params(scatter_idx, batch_dim_idx, seq_world_size, input):
     """
@@ -100,9 +106,15 @@ def apply_rotary_pos_emb(t, freqs_cos, freqs_sin):
     # ideally t_pass is empty so rotary pos embedding is applied to all tensor t
     t, t_pass = t[..., :rot_dim], t[..., rot_dim:]
 
-    # first part is cosine component
-    # second part is sine component, need to change signs with _rotate_half method
-    t = (t * freqs_cos) + (_rotate_half(t) * freqs_sin)
+    if _torchembed_available and t.is_cuda and t.device.type == 'cuda' and rot_dim % 2 == 0:
+        orig_shape = t.shape
+        t_2d = t.reshape(-1, orig_shape[-2], rot_dim)
+        t_out, _ = _torchembed_rope_forward(t_2d, t_2d, freqs_cos, freqs_sin)
+        t = t_out.reshape(orig_shape)
+    else:
+        # first part is cosine component
+        # second part is sine component, need to change signs with _rotate_half method
+        t = (t * freqs_cos) + (_rotate_half(t) * freqs_sin)
 
     res = t if t_pass.shape[-1] == 0 else torch.cat((t, t_pass), dim=-1)
     return res
