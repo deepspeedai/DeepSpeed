@@ -70,22 +70,24 @@ class TestUnwrapModel(DistributedTest):
 
 
 class TestUnwrapModelTraceInvalidate(DistributedTest):
-    # unwrap_model_for_generation removes and re-registers the ZeRO-3 hooks; the
-    # coordinator's recorded trace must be invalidated so the next forward re-records.
+    # unwrap_model_for_generation re-registers the ZeRO-3 hooks; without trace
+    # invalidation the next training step pops an empty fetch deque.
     world_size = 2
 
     def test(self):
         model = SimpleModel(hidden_dim=100)
         engine, _, _, _ = deepspeed.initialize(args=None, model=model, config=config)
-        coordinator = engine.optimizer.parameter_offload.get_param_coordinator()
 
-        # run one step so the coordinator records a trace (RECORD -> COMPLETE)
         x = torch.randn(2, 100, device=engine.device, dtype=preferred_dtype())
         y = torch.empty(2, dtype=torch.long, device=engine.device).random_(100)
-        engine(x, y)
-        assert not coordinator.is_invalid_trace()
 
-        # the wrap cycle around an out-of-band forward must invalidate the recorded trace
+        loss = engine(x, y)
+        engine.backward(loss)
+        engine.step()
+
         with unwrap_model_for_generation(engine):
             pass
-        assert coordinator.is_invalid_trace()
+
+        loss = engine(x, y)
+        engine.backward(loss)
+        engine.step()
