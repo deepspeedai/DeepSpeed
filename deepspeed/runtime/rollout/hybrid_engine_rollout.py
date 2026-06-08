@@ -315,6 +315,7 @@ class HybridEngineRollout(RolloutEngine):
         stays fixed (no compaction); finished slots are masked via attention_mask.
         """
         from transformers import StaticCache
+        from deepspeed.runtime.rollout.static_cache import DeepSpeedStaticCache
 
         device = request.prompt_ids.device
         B = request.prompt_ids.shape[0]
@@ -364,16 +365,18 @@ class HybridEngineRollout(RolloutEngine):
             first_logits = out.logits[:, -1, :]  # [prefill_bs, vocab]
 
             # === Phase 2: Build batch static cache + static buffers ===
-            static_cache = StaticCache(module.config,
-                                       batch_size=batch_size,
-                                       max_cache_len=max_cache_len,
-                                       device=device,
-                                       dtype=model_dtype)
+            static_cache = DeepSpeedStaticCache(module.config,
+                                                batch_size=batch_size,
+                                                max_cache_len=max_cache_len,
+                                                device=device,
+                                                dtype=model_dtype)
 
             static_input_ids = torch.zeros(batch_size, 1, dtype=torch.long, device=device)
             static_cache_position = torch.zeros(1, dtype=torch.long, device=device)
             static_attn_mask = torch.zeros(batch_size, max_cache_len, dtype=torch.long, device=device)
             static_position_ids = torch.zeros(batch_size, 1, dtype=torch.long, device=device)
+
+            static_cache.set_write_position(static_cache_position)
 
             # Initialize static_cache with a dummy forward, then restore with prefill KV
             dummy_cp = torch.zeros(1, dtype=torch.long, device=device)
