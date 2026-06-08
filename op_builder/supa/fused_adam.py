@@ -54,8 +54,10 @@ class SUPAFusedAdam:
                 m.mul_(beta1).add_(g, alpha=1.0 - beta1)
                 v.mul_(beta2).addcmul_(g, g, value=1.0 - beta2)
                 denom = (v.sqrt() / math.sqrt(bias_correction2)).add_(epsilon)
-                p.data.addcdiv_(m, denom, value=-(lr / bias_correction1))
+                # Decouple weight decay on the old param before the Adam step so the
+                # result matches the kernel's p_old*(1 - lr*wd) - lr*adam_update.
                 p.data.add_(p.data, alpha=-lr * weight_decay)
+                p.data.addcdiv_(m, denom, value=-(lr / bias_correction1))
             else:  # Adam: L2 regularization
                 g_wd = g.add(p.float(), alpha=weight_decay)
                 m.mul_(beta1).add_(g_wd, alpha=1.0 - beta1)
@@ -85,7 +87,6 @@ class FusedAdamBuilder(SUPAOpBuilder):
         if hasattr(torch.ops, 'deepspeed') and hasattr(torch.ops.deepspeed, 'multi_tensor_adam'):
             return True
         try:
-            import torch_supa_ext.deepspeed  # noqa: F401
             return hasattr(torch.ops, 'deepspeed') and hasattr(torch.ops.deepspeed, 'multi_tensor_adam')
         except Exception:
             return False

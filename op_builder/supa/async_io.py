@@ -41,7 +41,7 @@ class AsyncIOBuilder(SUPAOpBuilder):
     def cxx_args(self):
         args = super().cxx_args()
         # -O0 for improved debugging, since performance is bound by I/O
-        return [a for a in args if not a.startswith('-O')] + ['-O0', '-Wall', '-shared', '-fPIC', '-laio']
+        return [a for a in args if not a.startswith('-O')] + ['-O0', '-Wall', '-shared', '-fPIC']
 
     def extra_ldflags(self):
         return ['-laio']
