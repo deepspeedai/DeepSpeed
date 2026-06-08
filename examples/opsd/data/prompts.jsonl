@@ -9,12 +9,230 @@
 {"prompt": "Compute the sum of integers from 1 to 10."}
 {"prompt": "What is 2 to the power of 10?"}
 {"prompt": "Find the perimeter of a square with side length 9."}
-{"prompt": "If 5 apples cost $2.50, what is the cost of 12 apples?"}
+{"prompt": "If 5 apples cost 2.50, what is the cost of 12 apples?"}
 {"prompt": "What is the greatest common divisor of 24 and 36?"}
 {"prompt": "Convert 0.75 to a fraction in simplest form."}
 {"prompt": "If x + y = 10 and x - y = 4, find x and y."}
 {"prompt": "What is 1/4 + 1/3?"}
-{"prompt": "A circle has radius 5. What is its area? (Use pi = 3.14)"}
+{"prompt": "A circle has radius 5. What is its area?"}
 {"prompt": "Compute (3 + 4) * (5 - 2)."}
 {"prompt": "What is 81 divided by 9?"}
 {"prompt": "If a number doubled is 18, what is the number?"}
+{"prompt": "What is 3/5 expressed as a percentage?"}
+{"prompt": "Calculate the area of a triangle with base 10 and height 6."}
+{"prompt": "What is the least common multiple of 4 and 6?"}
+{"prompt": "If a shirt costs 25 after a 20% discount, what was the original price?"}
+{"prompt": "Simplify: 2(3x + 4) - x."}
+{"prompt": "What is the value of pi rounded to 4 decimal places?"}
+{"prompt": "How many sides does a hexagon have?"}
+{"prompt": "Compute 2^3 + 3^2."}
+{"prompt": "If you roll a standard die, what is the probability of getting a 4?"}
+{"prompt": "What is the average of 12, 15, and 18?"}
+{"prompt": "Solve: 5x - 3 = 22."}
+{"prompt": "What is the volume of a cube with side length 4?"}
+{"prompt": "Convert 3 kilometers to meters."}
+{"prompt": "What is 13 squared?"}
+{"prompt": "If a car uses 8 liters per 100km, how much for 350km?"}
+{"prompt": "What is the median of 3, 7, 9, 12, 15?"}
+{"prompt": "Calculate 25 * 4 + 30 / 6."}
+{"prompt": "What is the factorial of 5?"}
+{"prompt": "If 3x = 27, what is x?"}
+{"prompt": "What is 10% of 0.5?"}
+{"prompt": "Simplify the fraction 18/24."}
+{"prompt": "What is the next prime number after 7?"}
+{"prompt": "How many degrees are in a right angle?"}
+{"prompt": "Compute 1/2 * 3/4."}
+{"prompt": "What is the surface area of a cube with side 3?"}
+{"prompt": "If a population grows by 10% per year from 1000, what is it after 2 years?"}
+{"prompt": "What is the absolute value of -15?"}
+{"prompt": "Solve: x^2 = 49."}
+{"prompt": "How many minutes are in 2.5 hours?"}
+{"prompt": "What is 0.1 + 0.02 + 0.003?"}
+{"prompt": "A bag has 3 red and 5 blue marbles. What is the probability of picking red?"}
+{"prompt": "What is the perimeter of a rectangle with sides 8 and 12?"}
+{"prompt": "Compute the cube root of 27."}
+{"prompt": "If y = 2x + 1 and x = 5, what is y?"}
+{"prompt": "What is the difference between 100 and 37?"}
+{"prompt": "How many edges does a rectangular prism have?"}
+{"prompt": "Simplify: (x + 2)(x - 2)."}
+{"prompt": "What is 4! divided by 2!?"}
+{"prompt": "Convert 5/8 to a decimal."}
+{"prompt": "What is the hypotenuse of a right triangle with legs 3 and 4?"}
+{"prompt": "What is 999 + 1?"}
+{"prompt": "If you save 5 per day, how much in 30 days?"}
+{"prompt": "What is the reciprocal of 7?"}
+{"prompt": "Compute log10(1000)."}
+{"prompt": "A pizza is cut into 8 equal slices. If you eat 3, what fraction remains?"}
+{"prompt": "What is the sum of angles in a triangle?"}
+{"prompt": "Round 3.14159 to 2 decimal places."}
+{"prompt": "What is 50% of 50% of 200?"}
+{"prompt": "If a = 3 and b = 4, what is a^2 + b^2?"}
+{"prompt": "How many factors does 12 have?"}
+{"prompt": "What is the negative of -7?"}
+{"prompt": "Express 0.125 as a fraction."}
+{"prompt": "What is the slope of the line y = 3x + 5?"}
+{"prompt": "A clock shows 3:15. What is the angle between the hour and minute hands?"}
+{"prompt": "What is 11 * 11?"}
+{"prompt": "If gas costs 3.50 per gallon and you buy 10 gallons, what is the total?"}
+{"prompt": "What are the first 3 multiples of 7?"}
+{"prompt": "How many zeros are in one million?"}
+{"prompt": "What is 2/3 + 2/3?"}
+{"prompt": "Compute the area of a circle with diameter 10."}
+{"prompt": "If a book has 300 pages and you read 45 per day, how many days to finish?"}
+{"prompt": "What is the value of 5^0?"}
+{"prompt": "Solve: 4(x - 1) = 20."}
+{"prompt": "What is the complement of a 35 degree angle?"}
+{"prompt": "How many distinct permutations of the word MATH?"}
+{"prompt": "What is 1/10 as a percentage?"}
+{"prompt": "If temperature drops from 15C to -3C, what is the change?"}
+{"prompt": "What is the greatest common factor of 18 and 30?"}
+{"prompt": "A train is 200m long traveling at 20m/s. How long to pass a pole?"}
+{"prompt": "What is the sum of the first 5 odd numbers?"}
+{"prompt": "Convert 45 degrees Celsius to Fahrenheit."}
+{"prompt": "What is 0.001 * 1000?"}
+{"prompt": "How many diagonals does a pentagon have?"}
+{"prompt": "Simplify: 6 + 3 * 2."}
+{"prompt": "What is 20% of 20% of 500?"}
+{"prompt": "If you flip a coin 3 times, how many possible outcomes?"}
+{"prompt": "What is the ratio of 15 to 25 in simplest form?"}
+{"prompt": "Find x if 3/5 = x/25."}
+{"prompt": "What is the mean of 2, 4, 6, 8, 10?"}
+{"prompt": "What is 7 * 8 + 6 / 2?"}
+{"prompt": "A cylinder has radius 3 and height 10. What is its volume?"}
+{"prompt": "What is the smallest prime number?"}
+{"prompt": "If f(x) = x^2 + 1, what is f(3)?"}
+{"prompt": "How many seconds in one hour?"}
+{"prompt": "What is the result of 100 mod 7?"}
+{"prompt": "Simplify: sqrt(50) / sqrt(2)."}
+{"prompt": "What is the distance between points (1,2) and (4,6)?"}
+{"prompt": "A recipe needs 2 cups flour for 12 cookies. How many cups for 30 cookies?"}
+{"prompt": "What is 1.5 * 2.5?"}
+{"prompt": "What is A intersection B if A = {1,2,3} and B = {2,3,4}?"}
+{"prompt": "What is the 10th term of the arithmetic sequence 3, 7, 11, 15?"}
+{"prompt": "How many cubic centimeters in a cubic meter?"}
+{"prompt": "What is the value of 2^10?"}
+{"prompt": "Solve the inequality: 2x > 10."}
+{"prompt": "What is 3/7 rounded to 2 decimal places?"}
+{"prompt": "What is the tangent of 45 degrees?"}
+{"prompt": "How many ways to choose 2 items from 5?"}
+{"prompt": "What is the product of all integers from 1 to 5?"}
+{"prompt": "If 8 workers finish a job in 6 days, how many days for 12 workers?"}
+{"prompt": "What is 1000 - 587?"}
+{"prompt": "Express 2500 in scientific notation."}
+{"prompt": "What is the sum of interior angles of a hexagon?"}
+{"prompt": "What is the decimal equivalent of the binary number 1010?"}
+{"prompt": "What is the area of a trapezoid with bases 6 and 10 and height 4?"}
+{"prompt": "Calculate 15 * 15."}
+{"prompt": "What is the supplementary angle of 110 degrees?"}
+{"prompt": "A store buys an item for 40 and sells for 60. What is the markup percentage?"}
+{"prompt": "Solve: |x - 3| = 5."}
+{"prompt": "How many days are in a leap year?"}
+{"prompt": "What is the compound interest on 1000 at 10% for 2 years?"}
+{"prompt": "If the base of a triangle is 8 and height is 5, what is the area?"}
+{"prompt": "What is 100 divided by 3 rounded to 2 decimal places?"}
+{"prompt": "What is the 7th Fibonacci number?"}
+{"prompt": "Convert 1 mile to feet."}
+{"prompt": "What is the LCM of 6, 8, and 12?"}
+{"prompt": "Simplify: 4(x + 3) - 2(x - 1)."}
+{"prompt": "If 3a + 2b = 16 and a = 4, what is b?"}
+{"prompt": "What is the sine of 30 degrees?"}
+{"prompt": "How many ways can 4 people sit in a row?"}
+{"prompt": "What is 0.5^3?"}
+{"prompt": "Find the 20th term of 5, 8, 11, 14"}
+{"prompt": "A triangle has sides 3, 4, 5. What type of triangle is it?"}
+{"prompt": "What is the absolute difference between -5 and 3?"}
+{"prompt": "How many grams in 2.5 kilograms?"}
+{"prompt": "What is the product of -3 and -7?"}
+{"prompt": "If a clock shows 9:00, what is the angle between the hands?"}
+{"prompt": "What is the square root of 81?"}
+{"prompt": "What is 1/3 + 1/6 + 1/12?"}
+{"prompt": "If x^2 - 4 = 0, what are the solutions?"}
+{"prompt": "What is the geometric mean of 4 and 16?"}
+{"prompt": "Convert 72 km/h to m/s."}
+{"prompt": "What is the value of cos(60 degrees)?"}
+{"prompt": "A box has 5 red, 3 green, 2 blue balls. What is P(not red)?"}
+{"prompt": "What is 2^0 + 2^1 + 2^2 + 2^3?"}
+{"prompt": "Find the slope between points (1, 3) and (4, 9)."}
+{"prompt": "What is the sum of the first 20 natural numbers?"}
+{"prompt": "What is the value of e rounded to 3 decimal places?"}
+{"prompt": "How many total degrees in a quadrilateral?"}
+{"prompt": "Simplify: (2^3 * 2^4) / 2^5."}
+{"prompt": "What is the probability of drawing a king from a standard deck?"}
+{"prompt": "A car travels 180 miles in 3 hours. What is its average speed?"}
+{"prompt": "What is the decimal 0.375 as a fraction?"}
+{"prompt": "Solve: 2(x + 5) = 3(x - 1)."}
+{"prompt": "How many milliliters in 3 liters?"}
+{"prompt": "What is the cube of 5?"}
+{"prompt": "What is 5/6 as a repeating decimal?"}
+{"prompt": "Find the circumference of a circle with radius 7."}
+{"prompt": "If 2 pipes fill a tank in 6 and 12 hours, how long together?"}
+{"prompt": "What is the coefficient of x in 3x^2 + 5x - 7?"}
+{"prompt": "What is the result of (10^3) / (10^-1)?"}
+{"prompt": "Find the GCD of 48 and 72."}
+{"prompt": "What is the domain of f(x) = sqrt(x)?"}
+{"prompt": "Simplify: 8/12 - 3/12."}
+{"prompt": "What is the arithmetic mean of the first 10 even numbers?"}
+{"prompt": "Convert -40 Celsius to Fahrenheit."}
+{"prompt": "What is the median of 1, 3, 5, 7, 9, 11?"}
+{"prompt": "What is the next number: 1, 1, 2, 3, 5, 8, 13?"}
+{"prompt": "If 4 workers can paint a fence in 8 hours, how long for 2 workers?"}
+{"prompt": "What is the cosine of 0 degrees?"}
+{"prompt": "A polygon has 9 sides. What is the sum of its interior angles?"}
+{"prompt": "What is 1.2 * 10^3 in standard form?"}
+{"prompt": "What is the range of the data set 5, 8, 3, 12, 7?"}
+{"prompt": "What is the LCM of 4, 5, and 6?"}
+{"prompt": "If y varies directly as x and y = 10 when x = 2, find y when x = 7."}
+{"prompt": "What is the degree of the polynomial 3x^4 + 2x^2 - x + 5?"}
+{"prompt": "How many diagonals does a hexagon have?"}
+{"prompt": "What is 75% expressed as a fraction in lowest terms?"}
+{"prompt": "How many ounces in 3 pounds?"}
+{"prompt": "What is the volume of a sphere with radius 3?"}
+{"prompt": "Solve the system: x + y = 8, x - y = 2."}
+{"prompt": "A triangle has two angles of 50 and 70 degrees. What is the third angle?"}
+{"prompt": "What is the remainder when 100 is divided by 7?"}
+{"prompt": "Express 0.04 as a percentage."}
+{"prompt": "What is the value of the expression 2 + 3 * 4 - 1?"}
+{"prompt": "How many prime numbers are between 10 and 30?"}
+{"prompt": "If a laptop costs 800 after 20% off, what was the original price?"}
+{"prompt": "What is 5 factorial minus 3 factorial?"}
+{"prompt": "Find the length of the diagonal of a rectangle 6 by 8."}
+{"prompt": "What is the sine of 90 degrees?"}
+{"prompt": "If the ratio of boys to girls is 3:2 and there are 30 students, how many girls?"}
+{"prompt": "What is the value of log2(32)?"}
+{"prompt": "What is the sum of 1 + 2 + 3 ... + 50?"}
+{"prompt": "Convert 40 inches to feet."}
+{"prompt": "What is the derivative of x^3?"}
+{"prompt": "What is 10^0 + 10^1 + 10^2?"}
+{"prompt": "A bag has 4 green, 6 red marbles. What is P(green or red)?"}
+{"prompt": "How many multiples of 3 are between 10 and 50?"}
+{"prompt": "If 2x + y = 7 and x = 3, what is y?"}
+{"prompt": "What is the midpoint of the segment from (2,3) to (8,7)?"}
+{"prompt": "Simplify: 2(3x - 1) + 4(x + 2)."}
+{"prompt": "How many triangles can be formed from 6 non-collinear points?"}
+{"prompt": "What is the 5th root of 32?"}
+{"prompt": "What is the mode of 3, 5, 3, 7, 5, 3, 8?"}
+{"prompt": "Find the slope of the line passing through (0,0) and (2,6)."}
+{"prompt": "What is the supplementary angle of 72 degrees?"}
+{"prompt": "How many positive divisors does 36 have?"}
+{"prompt": "Simplify: (a + b)^2 - (a - b)^2."}
+{"prompt": "How many seconds in 1.5 hours?"}
+{"prompt": "If a machine produces 120 items in 8 hours, how many per hour?"}
+{"prompt": "What is the inverse of f(x) = 2x + 3?"}
+{"prompt": "What is the greatest integer less than sqrt(50)?"}
+{"prompt": "What is 4^3 - 3^4?"}
+{"prompt": "What is the distance from (0,0) to (3,4)?"}
+{"prompt": "If sin(x) = 0.5, what is x in degrees?"}
+{"prompt": "A rectangle has area 48 and width 6. What is its length?"}
+{"prompt": "How many degrees does the minute hand move in 20 minutes?"}
+{"prompt": "What is the probability of rolling a sum of 7 with two dice?"}
+{"prompt": "Simplify: 3(x + 2) - 2(x - 4)."}
+{"prompt": "What is the value of floor(3.7)?"}
+{"prompt": "What is the weighted average of 80 (weight 3) and 90 (weight 7)?"}
+{"prompt": "Find the y-intercept of y = 3x - 6."}
+{"prompt": "How many sides does a decagon have?"}
+{"prompt": "What is the integral of 2x dx?"}
+{"prompt": "What is 2 + 2 * 2?"}
+{"prompt": "If a triangle has sides 5, 5, 5, what is it called?"}
+{"prompt": "What is the decimal for 7/8?"}
+{"prompt": "If f(x) = 1/x, what is f(5)?"}
+{"prompt": "What is the remainder when 2^10 is divided by 7?"}
