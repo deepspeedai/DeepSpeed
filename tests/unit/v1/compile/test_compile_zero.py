@@ -12,6 +12,7 @@ from deepspeed.accelerator import get_accelerator
 
 from unit.v1.compile.util import compare_loss
 from unit.common import DistributedTest
+from unit.simple_model import SimpleModel
 from unit.util import bf16_required_version_check, skip_on_arch
 import deepspeed
 from deepspeed.ops.aio import AsyncIOBuilder
@@ -116,6 +117,57 @@ class TestDeepCompile(DistributedTest):
 
         # Need warmup steps
         compare_loss(self, config_dict, dtype, iteration=10)
+
+    def test_zero1_releases_grad_buffers_after_optimizer_step(self):
+        if not required_torch_version(min_version=2.6):
+            pytest.skip("DeepCompile requires PyTorch >= v2.6")
+
+        if get_accelerator().device_name() == "cpu":
+            pytest.skip("CPU does not support this test yet")
+
+        dtype = torch.float32
+        hidden_dim = 10
+        config_dict = {
+            "train_micro_batch_size_per_gpu": 1,
+            "steps_per_print": 1,
+            "optimizer": {
+                "type": "Adam",
+                "params": {
+                    "lr": 0.00015
+                }
+            },
+            "zero_optimization": {
+                "stage": 1,
+            },
+            "compile": {
+                "deepcompile": True
+            }
+        }
+
+        model = SimpleModel(hidden_dim)
+        engine, _, _, _ = deepspeed.initialize(config=config_dict, model=model, model_parameters=model.parameters())
+        engine.compile()
+
+        device = torch.device(get_accelerator().current_device_name())
+        x = torch.randn(config_dict["train_micro_batch_size_per_gpu"], hidden_dim, device=device, dtype=dtype)
+        y = torch.randn_like(x)
+
+        loss = engine(x, y)
+        engine.backward(loss)
+
+        optimizer = engine.optimizer
+        current_grad_buffers = optimizer.averaged_gradients
+        assert current_grad_buffers
+        assert all(group_buffers is not None for group_buffers in current_grad_buffers.values())
+        assert any(buffer.numel() > 0 for group_buffers in current_grad_buffers.values() for buffer in group_buffers)
+        for group_idx, group_buffers in current_grad_buffers.items():
+            assert group_buffers.flat_partition.numel() == optimizer.partition_size[group_idx]
+            assert callable(group_buffers.release_grad_buffers)
+
+        engine.step()
+
+        assert all(group_buffers is None for group_buffers in optimizer.averaged_gradients.values())
+        engine.destroy()
 
     @pytest.mark.parametrize('dtype', [torch.float32])
     @pytest.mark.parametrize('zero_stage', [3])
