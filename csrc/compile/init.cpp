@@ -24,7 +24,7 @@ TORCH_LIBRARY(dc, m)
     m.def("wait_reload(Tensor a, int id, int id) -> Tensor");
     m.def("offload_parameter(Tensor a, int id, int id) -> ()");
     m.def("reload_parameter(Tensor a, int id, int id) -> ()");
-    m.def("end_backward(Any deps, int graph_id) -> ()");
+    m.def("end_backward(Any deps, int graph_id, bool release_reduce_buckets) -> ()");
 
     m.def("test_call(Tensor a) -> Tensor");
 }
@@ -92,6 +92,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
     m.def("init", &dc::init, "Set the process group");
     m.def("cleanup", &dc::cleanup, "Cleanup the process group");
     m.def("register_param", &dc::register_param, "Register a parameter");
+    m.def("update_param_grad_buffer",
+          &dc::update_param_grad_buffer,
+          "Update a registered parameter grad buffer");
     m.def("register_graph_z1",
           &dc::register_graph_z1,
           "Register graph with a list of ds parameter ids");

@@ -5,20 +5,12 @@
 
 import pytest
 
-import itertools
-import pickle
 import os
 import time
-import requests
-import fcntl
-
-from dataclasses import dataclass
-from typing import List
 
 import deepspeed
 import torch
 
-from huggingface_hub import HfApi
 from packaging import version as pkg_version
 from torch import nn
 from transformers import pipeline
@@ -74,77 +66,38 @@ _test_tasks = [
     "fill-mask", "question-answering", "text-classification", "token-classification", "text-generation",
     "text2text-generation", "summarization", "translation"
 ]
+_test_model_list = _bert_models + _roberta_models + _gpt_models + _opt_models
 
+_model_pipeline_tags = {
+    "google-bert/bert-base-cased": "fill-mask",
+    "google-bert/bert-base-uncased": "fill-mask",
+    "google-bert/bert-large-cased": "fill-mask",
+    "google-bert/bert-large-uncased": "fill-mask",
+    "google-bert/bert-base-multilingual-cased": "fill-mask",
+    "google-bert/bert-base-multilingual-uncased": "fill-mask",
+    "deepset/minilm-uncased-squad2": "question-answering",
+    "cross-encoder/ms-marco-MiniLM-L-12-v2": "text-ranking",
+    "dslim/bert-base-NER": "token-classification",
+    "google-bert/bert-large-uncased-whole-word-masking-finetuned-squad": "question-answering",
+    "distilbert/distilbert-base-cased-distilled-squad": "question-answering",
+    "FacebookAI/roberta-large": "fill-mask",
+    "FacebookAI/roberta-base": "fill-mask",
+    "deepset/roberta-base-squad2": "question-answering",
+    "j-hartmann/emotion-english-distilroberta-base": "text-classification",
+    "Jean-Baptiste/roberta-large-ner-english": "token-classification",
+    "openai-community/gpt2": "text-generation",
+    "distilbert/distilgpt2": "text-generation",
+    "Norod78/hebrew-bad_wiki-gpt_neo-tiny": "text-generation",
+    "EleutherAI/gpt-j-6b": "text-generation",
+    "EleutherAI/pythia-70m-deduped": "text-generation",
+    "bigscience/bloom-560m": "text-generation",
+    "facebook/opt-125m": "text-generation",
+    "facebook/opt-350m": "text-generation",
+}
 
-@dataclass
-class ModelInfo:
-    id: str
-    pipeline_tag: str
-    tags: List[str]
-
-
-def _hf_model_list() -> List[ModelInfo]:
-    """ Caches HF model list to avoid repeated API calls """
-
-    cache_dir = os.getenv("HF_HOME", "~/.cache/huggingface")
-    cache_file_path = os.path.join(cache_dir, "DS_model_cache.pkl")
-    num_days = os.getenv("HF_CACHE_EXPIRY_DAYS", 1)
-    cache_expiration_seconds = num_days * 60 * 60 * 24
-
-    # Load or initialize the cache
-    model_data = {"cache_time": 0, "model_list": []}
-    if os.path.isfile(cache_file_path):
-        with open(cache_file_path, 'rb') as f:
-            try:
-                fcntl.flock(f, fcntl.LOCK_SH)
-                model_data = pickle.load(f)
-            except Exception as e:
-                print(f"Error loading cache file {cache_file_path}: {e}")
-            finally:
-                fcntl.flock(f, fcntl.LOCK_UN)
-
-    current_time = time.time()
-
-    # Update the cache if it has expired
-    if ((model_data["cache_time"] + cache_expiration_seconds) < current_time) or os.getenv("FORCE_UPDATE_HF_CACHE",
-                                                                                           default=False):
-        api = HfApi()
-        while True:
-            try:
-                model_list = []
-                for model in _test_models:
-                    model_list.extend(api.list_models(model_name=model))
-                model_data["model_list"] = [
-                    ModelInfo(id=m.id, pipeline_tag=m.pipeline_tag, tags=m.tags) for m in model_list
-                ]
-                break  # Exit the loop if the operation is successful
-            except requests.exceptions.HTTPError as e:
-                if e.response.status_code == 429:
-                    print("Rate limit exceeded. Retrying in 60 seconds...")
-                    time.sleep(60)
-                else:
-                    raise  # Re-raise the exception if it's not a 429 error
-        model_data["cache_time"] = current_time
-
-        # Save the updated cache
-        os.makedirs(cache_dir, exist_ok=True)
-        with open(cache_file_path, 'wb') as f:
-            try:
-                fcntl.flock(f, fcntl.LOCK_EX)
-                pickle.dump(model_data, f)
-            finally:
-                fcntl.flock(f, fcntl.LOCK_UN)
-
-    return model_data["model_list"]
-
-
-# Get a list of all models and mapping from task to supported models
-_hf_models = _hf_model_list()
-_hf_model_names = [m.id for m in _hf_models]
-_hf_task_to_models = {task: [m.id for m in _hf_models if m.pipeline_tag == task] for task in _test_tasks}
-
-# Get all combinations of task:model to test
-_model_w_tasks = [(m, t) for m, t in itertools.product(*[_test_models, _test_tasks]) if m in _hf_task_to_models[t]]
+# Build the deterministic model/task matrix without querying Hugging Face during collection.
+_model_w_tasks = [(model, task) for model in _test_model_list for task in [_model_pipeline_tags[model]]
+                  if task in _test_tasks]
 
 # Assign to pytest variables for testing
 pytest.model_w_tasks = _model_w_tasks
@@ -153,16 +106,17 @@ pytest.mt_names = [f"{m}-{t}" for m, t in pytest.model_w_tasks]
 
 @pytest.fixture(scope="module", autouse=True)
 def verify_models():
-    # Verify all test models are registered in HF
-    _test_models_not_found = [m for m in _test_models if m not in _hf_model_names]
-    if _test_models_not_found:
-        pytest.fail(f"Model(s) not found in HuggingFace: {_test_models_not_found}")
+    models_without_tags = _test_models.difference(_model_pipeline_tags)
+    if models_without_tags:
+        pytest.fail(f"Model(s) missing a test pipeline tag: {models_without_tags}")
 
-    # Verify all models are assigned to at least one task
-    _models_to_be_tested = set(m for m, t in _model_w_tasks)
-    _missing_task_models = _models_to_be_tested.difference(_test_models)
-    if _missing_task_models:
-        pytest.fail(f"Model(s) do not have an assigned task: {_missing_task_models}")
+    unknown_models = set(_model_pipeline_tags).difference(_test_models)
+    if unknown_models:
+        pytest.fail(f"Model pipeline tag mapping contains unknown model(s): {unknown_models}")
+
+    missing_tags = {model for model, tag in _model_pipeline_tags.items() if not tag}
+    if missing_tags:
+        pytest.fail(f"Model pipeline tag mapping contains empty tag(s): {missing_tags}")
 
 
 """ Fixtures for inference config """

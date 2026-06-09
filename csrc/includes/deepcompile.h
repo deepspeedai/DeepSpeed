@@ -292,6 +292,11 @@ public:
         return ds_tensor_;
     }
     at::Tensor getGradBuffer() const { return grad_buffer_; }
+    void setGradBuffer(at::Tensor grad_buffer, int64_t offset)
+    {
+        grad_buffer_ = grad_buffer;
+        offset_ = offset;
+    }
     bool isPartitioned() const { return partitioned_; }
     int64_t getOffset() const { return offset_; }
     void setPersistent(bool persistent) { persistent_ = persistent; }
@@ -402,6 +407,12 @@ public:
                                 persistent,
                                 expected_grad_dtype));
         valid_[ds_id] = false;
+    }
+
+    void updateGradBuffer(long ds_id, at::Tensor grad_buffer, int64_t offset)
+    {
+        if (grad_buffer.numel() > 0) { grad_buffer.zero_(); }
+        params_.at(ds_id).setGradBuffer(grad_buffer, offset);
     }
 
     void registerGatheredParam(long ds_id, at::Tensor ds_tensor)
