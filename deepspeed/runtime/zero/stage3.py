@@ -1584,8 +1584,8 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         if self.postscale_gradients and self.gradient_predivide_factor != world_sz:
             buffer_to_reduce = buffer_to_reduce.mul(self.gradient_predivide_factor)
 
-        if communication_data_type != self.dtype:
-            buffer_to_reduce = buffer_to_reduce.to(self.dtype)
+        if communication_data_type != self.gradient_accumulation_dtype:
+            buffer_to_reduce = buffer_to_reduce.to(self.gradient_accumulation_dtype)
 
         grad_partitions = []
         grad_offset_in_buffer = 0
@@ -1636,8 +1636,8 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                 self.dp_process_group):
             grad_partitions_for_rank = [g.mul(self.gradient_predivide_factor) for g in grad_partitions_for_rank]
 
-        if communication_data_type != self.dtype:
-            grad_partitions_for_rank = [g.to(self.dtype) for g in grad_partitions_for_rank]
+        if communication_data_type != self.gradient_accumulation_dtype:
+            grad_partitions_for_rank = [g.to(self.gradient_accumulation_dtype) for g in grad_partitions_for_rank]
 
         return grad_partitions_for_rank
 
