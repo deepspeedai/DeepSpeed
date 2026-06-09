@@ -283,12 +283,14 @@ class ZenFlowSelectiveAdamW_stage3(torch.optim.AdamW):
     def temp_copy_param(self, paramlist):
         for param in paramlist:
             if hasattr(param, "selected_grad"):
+                swapped_in = self._swap_in_if_offloaded(param)
                 num_column, num_row = param.ds_shape if len(param.ds_shape) != 1 else (param.ds_shape[0], 1)
 
                 if num_row != 1:
+                    indices = param.selected_indices.to(param.ds_tensor.data.device)
                     param_2d = param.ds_tensor.data.narrow(0, param.complete_column_offset, param.complete_numel).view(
                         param.complete_numel // num_row, num_row)
-                    temp_selected_param = param_2d[param.selected_indices, :].clone().detach()
+                    temp_selected_param = param_2d[indices, :].clone().detach()
                 else:
                     temp_selected_param = param.ds_tensor.data.clone().detach()
 
@@ -296,6 +298,8 @@ class ZenFlowSelectiveAdamW_stage3(torch.optim.AdamW):
                     param.temp_selected_param = temp_selected_param.cpu()
                 else:
                     param.temp_selected_param = temp_selected_param
+
+                self._release_if_offloaded(param, swapped_in)
 
     def clear_selected_mv(self):
         print("Zenflow: clearing selective optimizer states...")
@@ -314,6 +318,10 @@ class ZenFlowSelectiveAdamW_stage3(torch.optim.AdamW):
     @torch.no_grad()
     def _step_without_offload(self):
         for group in self.param_groups:
+
+            if any(hasattr(p, "selected_grad") and self._is_partition_offloaded(p) for p in group["params"]):
+                self._group_step_offloaded(group["params"], group)
+                continue
 
             params_with_grad: List[Tensor] = []
             grads: List[Tensor] = []
@@ -392,6 +400,129 @@ class ZenFlowSelectiveAdamW_stage3(torch.optim.AdamW):
             param.exp_avg = None
             param.exp_avg_sq = None
 
+    def _is_partition_offloaded(self, param):
+        """Whether the parameter partition needs the per-parameter offload path.
+
+        The selective update assumes the partition is resident on the compute device. When
+        parameters are offloaded this no longer holds: an NVMe partition is a 0-dim placeholder,
+        and a CPU partition lives on a different device than the gradients and optimizer state.
+        """
+        data = param.ds_tensor.data
+        return data.dim() == 0 or data.device != param.selected_grad.device
+
+    def _swap_in_if_offloaded(self, param):
+        """Read an NVMe-offloaded partition back into memory.
+
+        The swapper leaves ``ds_tensor.data`` as a 0-dim placeholder while a partition is on NVMe.
+        Returns True when this call performed the swap-in, so the caller owns the matching swap-out.
+        """
+        if param.ds_tensor.data.dim() == 0 and getattr(param, "nvme_swapper", None) is not None:
+            param.nvme_swapper.swap_in([param], async_op=False)
+            return True
+        return False
+
+    def _swap_out_if_offloaded(self, param, swapped_in):
+        """Persist an updated partition back to NVMe and free its compute buffer."""
+        if swapped_in:
+            param.nvme_swapper.swap_out_and_release([param])
+
+    def _release_if_offloaded(self, param, swapped_in):
+        """Free a partition that was swapped in only to be read.
+
+        Its contents are unchanged, so it is not written back to NVMe.
+        """
+        if swapped_in:
+            param.nvme_swapper.remove_partition_and_release_buffers([param])
+
+    def _selective_step_one_param(self, param, group, apply_temp=False):
+        """Run the selective AdamW update for a single parameter.
+
+        The partition (``ds_tensor.data``) may live on CPU when offloaded, while the gradient and
+        optimizer state live on the compute device. The math runs on the compute device and the
+        result is written back to wherever the partition resides.
+        """
+        amsgrad = group["amsgrad"]
+        beta1, beta2 = cast(Tuple[float, float], group["betas"])
+        num_column, num_row = param.ds_shape if len(param.ds_shape) != 1 else (param.ds_shape[0], 1)
+        data = param.ds_tensor.data
+        data_device = data.device
+        compute_device = param.selected_grad.device
+
+        if num_row != 1:
+            indices = param.selected_indices.to(data_device)
+            param_2d = data.narrow(0, param.complete_column_offset,
+                                   param.complete_numel).view(param.complete_numel // num_row, num_row)
+            selected_param = param_2d[indices, :].to(compute_device)
+        else:
+            selected_param = data.to(compute_device)
+
+        if apply_temp and getattr(param, "temp_selected_param", None) is not None:
+            selected_param.copy_(param.temp_selected_param.to(compute_device))
+
+        grad = param.selected_grad.to(compute_device)
+
+        state = self.state.setdefault(param, {})
+        if len(state) == 0:
+            state["step"] = torch.zeros((), dtype=param.dtype, device=compute_device)
+            if amsgrad:
+                state["max_exp_avg_sq"] = torch.zeros_like(selected_param)
+            if not self.offload:
+                state["exp_avg"] = torch.zeros_like(selected_param)
+                state["exp_avg_sq"] = torch.zeros_like(selected_param)
+
+        if self.offload:
+            # Restore the offloaded moment/variance to the compute device and keep the references
+            # so copy_mv_to_cpu writes the updated tensors back.
+            exp_avg_t = param.exp_avg.to(compute_device).view_as(selected_param)
+            exp_avg_sq_t = param.exp_avg_sq.to(compute_device).view_as(selected_param)
+            param.exp_avg = exp_avg_t
+            param.exp_avg_sq = exp_avg_sq_t
+        else:
+            exp_avg_t = state["exp_avg"]
+            exp_avg_sq_t = state["exp_avg_sq"]
+
+        adamw(
+            [selected_param],
+            [grad],
+            [exp_avg_t],
+            [exp_avg_sq_t],
+            [state["max_exp_avg_sq"]] if amsgrad else [],
+            [state["step"]],
+            amsgrad=amsgrad,
+            beta1=beta1,
+            beta2=beta2,
+            lr=group["lr"],
+            weight_decay=group["weight_decay"],
+            eps=group["eps"],
+            maximize=False,
+        )
+
+        if num_row != 1:
+            param_2d[indices, :] = selected_param.to(data_device)
+        else:
+            data.copy_(selected_param.to(data_device))
+
+    @torch.no_grad()
+    def _group_step_offloaded(self, params, group):
+        """Per-parameter selective update for offloaded partitions (CPU or NVMe).
+
+        NVMe partitions are swapped in, updated, and swapped back out one at a time so at most one
+        partition is resident and the swapper buffer pool is never exhausted.
+        """
+        for param in params:
+            if not hasattr(param, "selected_grad"):
+                continue
+            swapped_in = self._swap_in_if_offloaded(param)
+            if self.offload:
+                self.copy_mv_from_cpu([param])
+            self._selective_step_one_param(param, group, apply_temp=True)
+            if self.offload:
+                self.copy_mv_to_cpu([param])
+            self._swap_out_if_offloaded(param, swapped_in)
+            if hasattr(param, "temp_selected_param"):
+                param.temp_selected_param = None
+            param.selected_grad = None
+
     @torch.no_grad()
     def group_step(self, paramlist):
 
@@ -405,6 +536,10 @@ class ZenFlowSelectiveAdamW_stage3(torch.optim.AdamW):
         for group_id in sorted(group_to_paramlist.keys()):
             params = group_to_paramlist[group_id]
             group = self.param_groups[group_id]
+
+            if any(hasattr(p, "selected_grad") and self._is_partition_offloaded(p) for p in params):
+                self._group_step_offloaded(params, group)
+                continue
 
             if self.offload:
                 self.copy_mv_from_cpu(params)
@@ -507,6 +642,10 @@ class ZenFlowSelectiveAdamW_stage3(torch.optim.AdamW):
                     return
                 for param in bucket:
                     if hasattr(param, "temp_selected_param") and param.temp_selected_param is not None:
+                        # Offloaded partitions are not resident on the compute device here;
+                        # group_step applies the snapshot per-parameter on the right device.
+                        if self._is_partition_offloaded(param):
+                            continue
                         temp_selected_param = param.temp_selected_param.to(param.device, non_blocking=True)
                         num_column, num_row = param.ds_shape if len(param.ds_shape) != 1 else (param.ds_shape[0], 1)
                         if num_row != 1:
