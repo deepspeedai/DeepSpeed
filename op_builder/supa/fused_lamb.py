@@ -3,8 +3,6 @@
 
 import math
 
-import torch
-
 from .builder import SUPAOpBuilder
 
 try:
@@ -22,17 +20,19 @@ class SUPAFusedLamb:
     """
 
     @staticmethod
-    def lamb(p, p_copy, exp_avg, exp_avg_sq, grad, lr, beta1, beta2, max_coeff, min_coeff, eps,
-             combined_scale, step, eps_mode, bias_correction, weight_decay):
+    def lamb(p, p_copy, exp_avg, exp_avg_sq, grad, lr, beta1, beta2, max_coeff, min_coeff, eps, combined_scale, step,
+             eps_mode, bias_correction, weight_decay):
+        import torch  # ensure torch is available at runtime
+
         if hasattr(torch.ops, 'deepspeed') and hasattr(torch.ops.deepspeed, 'lamb'):
-            return torch.ops.deepspeed.lamb(p, p_copy, exp_avg, exp_avg_sq, grad, lr, beta1,
-                                            beta2, max_coeff, min_coeff, eps, combined_scale,
-                                            step, eps_mode, bias_correction, weight_decay)
+            return torch.ops.deepspeed.lamb(p, p_copy, exp_avg, exp_avg_sq, grad, lr, beta1, beta2, max_coeff,
+                                            min_coeff, eps, combined_scale, step, eps_mode, bias_correction,
+                                            weight_decay)
 
         # Pure-PyTorch fallback
         if bias_correction:
-            bc1 = 1.0 - beta1 ** step
-            bc2 = 1.0 - beta2 ** step
+            bc1 = 1.0 - beta1**step
+            bc2 = 1.0 - beta2**step
             step_size = lr * math.sqrt(bc2) / bc1
         else:
             step_size = lr

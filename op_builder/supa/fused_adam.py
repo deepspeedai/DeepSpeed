@@ -2,17 +2,19 @@
 # DeepSpeed Team
 
 import math
-import torch
-from .builder import SUPAOpBuilder
 
-# Load torch_supa_ext.deepspeed to register torch.ops.deepspeed.multi_tensor_adam.
-# The import is guarded so that the module still works (via PyTorch fallback)
-# when torch_supa_ext is not installed.
 try:
-    import torch_supa_ext.deepspeed  # noqa: F401 — side-effect: registers torch.ops.deepspeed
+    import torch
+    import torch_supa_ext.deepspeed  # noqa: F401 — registers torch.ops.deepspeed
+except ImportError:
+    pass
+
+try:
     _has_kernel = hasattr(torch.ops, 'deepspeed') and hasattr(torch.ops.deepspeed, 'multi_tensor_adam')
 except Exception:
     _has_kernel = False
+
+from .builder import SUPAOpBuilder
 
 
 class SUPAFusedAdam:
@@ -25,9 +27,10 @@ class SUPAFusedAdam:
     """
 
     @staticmethod
-    def multi_tensor_adam(chunk_size, noop_flag_buffer, tensor_lists,
-                          lr, beta1, beta2, epsilon, step, mode,
+    def multi_tensor_adam(chunk_size, noop_flag_buffer, tensor_lists, lr, beta1, beta2, epsilon, step, mode,
                           bias_correction, weight_decay):
+        import torch  # ensure torch is available at runtime
+
         # noop_flag guard (kernel also checks internally, but short-circuit here is cheap)
         if noop_flag_buffer.item() == 1:
             return
@@ -35,16 +38,13 @@ class SUPAFusedAdam:
         if _has_kernel:
             # MR #96 API: four separate Tensor-list arguments (not a nested list)
             grads, params, exp_avgs, exp_avg_sqs = tensor_lists
-            torch.ops.deepspeed.multi_tensor_adam(
-                chunk_size, noop_flag_buffer,
-                grads, params, exp_avgs, exp_avg_sqs,
-                lr, beta1, beta2, epsilon,
-                step, mode, bias_correction, weight_decay)
+            torch.ops.deepspeed.multi_tensor_adam(chunk_size, noop_flag_buffer, grads, params, exp_avgs, exp_avg_sqs,
+                                                  lr, beta1, beta2, epsilon, step, mode, bias_correction, weight_decay)
             return
 
         # Pure-PyTorch fallback (cmodel / no compiled backend)
-        bias_correction1 = 1.0 - beta1 ** step if bias_correction else 1.0
-        bias_correction2 = 1.0 - beta2 ** step if bias_correction else 1.0
+        bias_correction1 = 1.0 - beta1**step if bias_correction else 1.0
+        bias_correction2 = 1.0 - beta2**step if bias_correction else 1.0
         for i in range(len(tensor_lists[0])):
             g = tensor_lists[0][i].float()
             p = tensor_lists[1][i]
@@ -83,10 +83,5 @@ class FusedAdamBuilder(SUPAOpBuilder):
         return SUPAFusedAdam
 
     def is_compatible(self, verbose=False):
-        # Fast path: op already registered (e.g. torch_supa_ext imported elsewhere)
-        if hasattr(torch.ops, 'deepspeed') and hasattr(torch.ops.deepspeed, 'multi_tensor_adam'):
-            return True
-        try:
-            return hasattr(torch.ops, 'deepspeed') and hasattr(torch.ops.deepspeed, 'multi_tensor_adam')
-        except Exception:
-            return False
+        import torch  # ensure torch is available at runtime
+        return hasattr(torch.ops, 'deepspeed') and hasattr(torch.ops.deepspeed, 'multi_tensor_adam')

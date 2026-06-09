@@ -1,13 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # DeepSpeed Team
 
-import torch
-from .builder import SUPAOpBuilder
-
 try:
+    import torch
     import torch_supa_ext.deepspeed  # noqa: F401 — registers torch.ops.deepspeed
-except Exception:
+except ImportError:
     pass
+
+from .builder import SUPAOpBuilder
 
 
 class SUPAQuantizer:
@@ -22,10 +22,10 @@ class SUPAQuantizer:
     @staticmethod
     def _op(name):
         """Return torch.ops.deepspeed.<name>, raising clearly if not registered."""
+        import torch  # ensure torch is available at runtime
         if not hasattr(torch.ops, 'deepspeed') or not hasattr(torch.ops.deepspeed, name):
-            raise RuntimeError(
-                f"torch.ops.deepspeed.{name} is not available. "
-                "Ensure torch_supa_ext is built with quantization support and imported before use.")
+            raise RuntimeError(f"torch.ops.deepspeed.{name} is not available. "
+                               "Ensure torch_supa_ext is built with quantization support and imported before use.")
         return getattr(torch.ops.deepspeed, name)
 
     @staticmethod
@@ -73,41 +73,37 @@ class SUPAQuantizer:
         return SUPAQuantizer._op('dequantize_fp32')(quantized_data, params, groups, num_bits, int(quant_type))
 
     @staticmethod
-    def dequantize_int4_to_half_experimental(data_in, scale_buffer, min_val_buffer, num_group,
-                                             group_size):
+    def dequantize_int4_to_half_experimental(data_in, scale_buffer, min_val_buffer, num_group, group_size):
         return SUPAQuantizer._op('dequantize_int4_to_half_experimental')(data_in, scale_buffer, min_val_buffer,
-                                                           num_group, group_size)
+                                                                         num_group, group_size)
 
     @staticmethod
-    def dequantize_int8_to_half_experimental(data_in, scale_buffer, min_val_buffer, num_group,
-                                             group_size):
+    def dequantize_int8_to_half_experimental(data_in, scale_buffer, min_val_buffer, num_group, group_size):
         return SUPAQuantizer._op('dequantize_int8_to_half_experimental')(data_in, scale_buffer, min_val_buffer,
-                                                           num_group, group_size)
+                                                                         num_group, group_size)
 
     @staticmethod
-    def swizzle_quant(input_vals, groups, num_bits, quant_type, pipeline_size, nodes,
-                      devices_per_node):
-        return SUPAQuantizer._op('swizzle_quant')(input_vals, groups, num_bits, int(quant_type), pipeline_size,
-                                    nodes, devices_per_node)
+    def swizzle_quant(input_vals, groups, num_bits, quant_type, pipeline_size, nodes, devices_per_node):
+        return SUPAQuantizer._op('swizzle_quant')(input_vals, groups, num_bits, int(quant_type), pipeline_size, nodes,
+                                                  devices_per_node)
 
     @staticmethod
-    def quantized_reduction(input_vals, input_scales, in_groups, out_groups, num_bits, quant_type,
-                            devices_per_node):
-        return SUPAQuantizer._op('quantized_reduction')(input_vals, input_scales, in_groups, out_groups,
-                                          num_bits, int(quant_type), devices_per_node)
+    def quantized_reduction(input_vals, input_scales, in_groups, out_groups, num_bits, quant_type, devices_per_node):
+        return SUPAQuantizer._op('quantized_reduction')(input_vals, input_scales, in_groups, out_groups, num_bits,
+                                                        int(quant_type), devices_per_node)
 
     @staticmethod
-    def loco_swizzle_quant(input_vals, error_feedback, err_beta, groups, num_bits, quant_type,
-                           pipeline_size, nodes, devices_per_node):
+    def loco_swizzle_quant(input_vals, error_feedback, err_beta, groups, num_bits, quant_type, pipeline_size, nodes,
+                           devices_per_node):
         return SUPAQuantizer._op('loco_swizzle_quant')(input_vals, error_feedback, err_beta, groups, num_bits,
-                                         int(quant_type), pipeline_size, nodes, devices_per_node)
+                                                       int(quant_type), pipeline_size, nodes, devices_per_node)
 
     @staticmethod
-    def loco_quantized_reduction(input_vals, input_scales, error_feedback, err_beta, in_groups,
-                                 out_groups, num_bits, quant_type, devices_per_node):
-        return SUPAQuantizer._op('loco_quantized_reduction')(input_vals, input_scales, error_feedback, err_beta,
-                                               in_groups, out_groups, num_bits, int(quant_type),
-                                               devices_per_node)
+    def loco_quantized_reduction(input_vals, input_scales, error_feedback, err_beta, in_groups, out_groups, num_bits,
+                                 quant_type, devices_per_node):
+        return SUPAQuantizer._op('loco_quantized_reduction')(input_vals, input_scales,
+                                                             error_feedback, err_beta, in_groups, out_groups, num_bits,
+                                                             int(quant_type), devices_per_node)
 
 
 class QuantizerBuilder(SUPAOpBuilder):
@@ -127,11 +123,4 @@ class QuantizerBuilder(SUPAOpBuilder):
         return SUPAQuantizer
 
     def is_compatible(self, verbose=False):
-        if hasattr(torch.ops, 'deepspeed') and hasattr(torch.ops.deepspeed, 'ds_quantize_fp16'):
-            return True
-        try:
-            import torch_supa_ext.deepspeed  # noqa: F401
-            return hasattr(torch.ops, 'deepspeed') and hasattr(torch.ops.deepspeed,
-                                                                'ds_quantize_fp16')
-        except Exception:
-            return False
+        return hasattr(torch.ops, 'deepspeed') and hasattr(torch.ops.deepspeed, 'ds_quantize_fp16')

@@ -2,7 +2,6 @@
 # DeepSpeed Team
 
 from .builder import SUPAOpBuilder
-import torch
 
 try:
     import torch_supa_ext.deepspeed  # noqa: F401 — registers torch.ops.deepspeed
@@ -24,17 +23,16 @@ class SUPAFusedLion:
     """
 
     @staticmethod
-    def multi_tensor_lion(chunk_size, noop_flag_buffer, tensor_lists,
-                          lr, beta1, beta2, step, weight_decay):
+    def multi_tensor_lion(chunk_size, noop_flag_buffer, tensor_lists, lr, beta1, beta2, step, weight_decay):
+        import torch  # ensure torch is available at runtime
+
         if noop_flag_buffer.item() == 1:
             return
 
         if hasattr(torch.ops, 'deepspeed') and hasattr(torch.ops.deepspeed, 'multi_tensor_lion'):
             grads, params, exp_avgs = tensor_lists
-            torch.ops.deepspeed.multi_tensor_lion(
-                chunk_size, noop_flag_buffer,
-                grads, params, exp_avgs,
-                lr, beta1, beta2, step, weight_decay)
+            torch.ops.deepspeed.multi_tensor_lion(chunk_size, noop_flag_buffer, grads, params, exp_avgs, lr, beta1,
+                                                  beta2, step, weight_decay)
             return
 
         # Pure-PyTorch fallback
@@ -65,11 +63,5 @@ class FusedLionBuilder(SUPAOpBuilder):
         return SUPAFusedLion
 
     def is_compatible(self, verbose=False):
-        if hasattr(torch.ops, 'deepspeed') and hasattr(torch.ops.deepspeed, 'multi_tensor_lion'):
-            return True
-        try:
-            import torch_supa_ext.deepspeed  # noqa: F401
-            return hasattr(torch.ops, 'deepspeed') and hasattr(torch.ops.deepspeed,
-                                                                'multi_tensor_lion')
-        except Exception:
-            return False
+        import torch  # ensure torch is available at runtime
+        return hasattr(torch.ops, 'deepspeed') and hasattr(torch.ops.deepspeed, 'multi_tensor_lion')

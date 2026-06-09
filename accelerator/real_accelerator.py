@@ -169,7 +169,7 @@ def get_accelerator():
                 pass
         if accelerator_name is None:
             try:
-                # Detect Biren SUPA GPU. torch_supa spoofs torch.cuda so this
+                # Detect Biren SUPA GPU. torch_supa spoofs torch.cuda so this  #ignore-cuda
                 # check must come before the CUDA detection below.
                 import torch_supa  # noqa: F401,F811 # type: ignore
                 import torch

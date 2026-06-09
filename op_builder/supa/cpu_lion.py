@@ -21,4 +21,3 @@ class CPULionBuilder(SUPAOpBuilder):
         args = super().include_paths()
         args += ['csrc/includes']
         return args
-

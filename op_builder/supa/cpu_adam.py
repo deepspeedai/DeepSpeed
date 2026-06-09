@@ -14,7 +14,6 @@ class CPUAdamBuilder(SUPAOpBuilder):
     def absolute_name(self):
         return f'deepspeed.ops.adam.{self.NAME}_op'
 
-
     def sources(self):
         return ['csrc/adam/cpu_adam.cpp', 'csrc/adam/cpu_adam_impl.cpp']
 
@@ -22,4 +21,3 @@ class CPUAdamBuilder(SUPAOpBuilder):
         args = super().include_paths()
         args += ['csrc/includes']
         return args
-
