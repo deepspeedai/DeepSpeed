@@ -9,7 +9,8 @@ import torch
 from torch.fx import GraphModule
 
 from ..util import get_deepcompile_handle
-from ..fx import add_postprocess, move_primals_to_head, _make_node_meta, add_end_backward, replace_reduce_outputs_with_none
+from ..fx import (add_postprocess, move_primals_to_head, _make_node_meta, add_end_backward,
+                  replace_reduce_outputs_with_none, should_release_reduce_buckets)
 
 NAME = "zero1_compile"
 
@@ -27,7 +28,8 @@ def add_z1_reduce_fw(gm: GraphModule, graph_id: int, profiling_results, param_ma
     return gm
 
 
-def add_z1_reduce_bw(gm: GraphModule, graph_id: int, param_manager) -> GraphModule:
+def add_z1_reduce_bw(gm: GraphModule, graph_id: int, graph_order: List[Tuple[int, bool]],
+                     param_manager) -> GraphModule:
 
     graph = gm.graph
     pm = param_manager[graph_id]
@@ -50,7 +52,7 @@ def add_z1_reduce_bw(gm: GraphModule, graph_id: int, param_manager) -> GraphModu
 
     gm.graph = move_primals_to_head(graph)
 
-    add_end_backward(gm.graph, graph_id)
+    add_end_backward(gm.graph, graph_id, should_release_reduce_buckets(graph_order, graph_id))
     replace_reduce_outputs_with_none(gm.graph)
 
     return gm
@@ -59,12 +61,12 @@ def add_z1_reduce_bw(gm: GraphModule, graph_id: int, param_manager) -> GraphModu
 def add_z1_reduce(gm: GraphModule, graph_id: int, graph_order: List[Tuple[int, bool]], profiling_results,
                   create_inputs_fn, mem_budget: float, param_manager, bwd: bool) -> GraphModule:
     if bwd:
-        return add_z1_reduce_bw(gm, graph_id, param_manager)
+        return add_z1_reduce_bw(gm, graph_id, graph_order, param_manager)
     return add_z1_reduce_fw(gm, graph_id, profiling_results, param_manager, use_z2=False)
 
 
 def add_z2_reduce(gm: GraphModule, graph_id: int, graph_order: List[Tuple[int, bool]], profiling_results,
                   create_inputs_fn, mem_budget: float, param_manager, bwd: bool) -> GraphModule:
     if bwd:
-        return add_z1_reduce_bw(gm, graph_id, param_manager)
+        return add_z1_reduce_bw(gm, graph_id, graph_order, param_manager)
     return add_z1_reduce_fw(gm, graph_id, profiling_results, param_manager, use_z2=True)

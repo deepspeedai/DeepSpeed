@@ -179,12 +179,17 @@ void start_backward(bool update)
     for (auto& it : executors) { it.second->startBackward(update); }
 }
 
-void end_backward(const c10::IValue& deps, long graph_id)
+void end_backward(const c10::IValue& deps, long graph_id, bool release_reduce_buckets)
 {
     auto executor = getExecutor<CustomOpExecutor>(graph_id, executors);
     executor->endBackward();
+    if (release_reduce_buckets) {
+        // reduce_buckets is shared across graph executors, so release it once
+        // after the final backward graph has flushed its pending reductions.
+        reduce_buckets->clear();
+    }
 }
 
-void end_backward_meta(const c10::IValue& deps, long graph_id) {}
+void end_backward_meta(const c10::IValue& deps, long graph_id, bool release_reduce_buckets) {}
 
 }  // namespace dc
