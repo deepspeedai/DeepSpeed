@@ -1540,7 +1540,9 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                 start_offset = rank * chunk_sz
                 end_offset = start_offset + chunk_sz
                 if end_offset > param.grad.numel():
-                    buffer_to_update = torch.zeros(chunk_sz, device=param.grad.device, dtype=self.gradient_accumulation_dtype)
+                    buffer_to_update = torch.zeros(chunk_sz,
+                                                   device=param.grad.device,
+                                                   dtype=self.gradient_accumulation_dtype)
                     buffer_to_update[:param.grad.numel() -
                                      start_offset] = gathered_momentum.view(-1).data[start_offset:param.grad.numel()]
                 else:
@@ -1599,7 +1601,9 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
             partition = buffer_to_reduce[start_offset:end_offset]
             if param.partition_numel() != partition.numel():
-                padded_partition = torch.zeros(param.partition_numel(), device=grad.device, dtype=self.gradient_accumulation_dtype)
+                padded_partition = torch.zeros(param.partition_numel(),
+                                               device=grad.device,
+                                               dtype=self.gradient_accumulation_dtype)
                 if partition.numel() > 0:
                     padded_partition[:partition.numel()] = partition
                 grad_partitions.append(padded_partition)
