@@ -274,6 +274,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             zero_module_granularity_threshold=zero_module_granularity_threshold,
             log_trace_cache_warnings=log_trace_cache_warnings,
         )
+        self.parameter_offload.zero_optimizer = self
 
         self.persistent_parameters = self.parameter_offload.persistent_parameters
         self._configure_offloading(offload_optimizer_config, offload_param_config)
