@@ -364,12 +364,15 @@ def test_zenflow_adam_cross_process():
     proc.start()
     try:
         assert ready.wait(timeout=60), "optimizer process did not start"
+        # With no step submitted yet, a bounded wait must time out (return False) rather than
+        # block -- this is what lets the training side notice a dead optimizer process.
+        assert op.zenflow_adam_wait(ctrl.data_ptr(), 0.05) is False, "wait should time out when no step is pending"
         for step in range(1, 6):
             now = step & 1
             grad = torch.randn(n)
             g[now].copy_(grad)
             op.zenflow_adam_submit(ctrl.data_ptr(), now, step, [lr], [beta1], [beta2], [eps], [wd], [1])
-            op.zenflow_adam_wait(ctrl.data_ptr())
+            assert op.zenflow_adam_wait(ctrl.data_ptr(), 60.0), f"wait timed out step {step}"
             op.adam_update_multi(1, step, lr, beta1, beta2, eps, wd, True, [p_ref], [grad.clone()], [ea_ref[now]],
                                  [eq_ref[now]], [st_ref])
             assert torch.equal(param, p_ref), f"param mismatch step {step}"

@@ -23,6 +23,8 @@
 #include <pthread.h>
 #include <sched.h>
 #include <semaphore.h>
+#include <cerrno>
+#include <ctime>
 #endif
 
 using namespace std::string_literals;
@@ -737,10 +739,26 @@ void zenflow_adam_submit(uintptr_t control_ptr,
     sem_post(&ctrl->cmd_ready);  // release: hyperparameters above are visible to the worker
 }
 
-void zenflow_adam_wait(uintptr_t control_ptr)
+// Wait up to timeout_s for the optimizer process to post one completion. Returns true if a
+// completion was consumed, false on timeout -- so the training side can re-check that the
+// optimizer process is still alive and fail loudly instead of blocking forever if the process
+// died mid-step (e.g. an OOM or TORCH_CHECK in run_step after it signalled ready).
+bool zenflow_adam_wait(uintptr_t control_ptr, double timeout_s)
 {
     auto* ctrl = reinterpret_cast<ZenControl*>(control_ptr);
-    while (sem_wait(&ctrl->done) != 0) {}  // retry on EINTR
+    struct timespec deadline;
+    clock_gettime(CLOCK_REALTIME, &deadline);
+    deadline.tv_sec += (time_t)timeout_s;
+    deadline.tv_nsec += (long)((timeout_s - (double)(time_t)timeout_s) * 1e9);
+    if (deadline.tv_nsec >= 1000000000L) {
+        deadline.tv_sec += 1;
+        deadline.tv_nsec -= 1000000000L;
+    }
+    while (sem_timedwait(&ctrl->done, &deadline) != 0) {
+        if (errno == EINTR) continue;  // retry on signal
+        return false;                  // timed out (or error): caller re-checks process liveness
+    }
+    return true;
 }
 
 void zenflow_adam_ctrl_exit(uintptr_t control_ptr)

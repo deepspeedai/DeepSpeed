@@ -7,7 +7,7 @@ import torch
 from deepspeed import comm as dist
 
 from deepspeed.runtime.zero.stage_1_and_2 import DeepSpeedZeroOptimizer
-from deepspeed.runtime.zenflow.zenflow_utils import start_optimizer_process
+from deepspeed.runtime.zenflow.zenflow_utils import start_optimizer_process, ZENFLOW_OPTIMIZER_WAIT_POLL_SECONDS
 from deepspeed.runtime.utils import (see_memory_usage)
 from deepspeed.ops.adam import ZenFlowSelectiveAdamW
 
@@ -670,6 +670,20 @@ class ZenFlowZeroOptimizerParallel(ZenFlowZeroOptimizer):
         dest_tensor.copy_(src_tensor, non_blocking=True)
         param.grad = None  #offload only
 
+    def _wait_for_optimizer_process(self):
+        """Block until the optimizer process signals the submitted step is done.
+
+        The wait wakes up periodically to check the optimizer process is still alive: if it died
+        mid-step (e.g. an OOM or assertion in the native worker after it signalled ready), fail
+        loudly here instead of blocking this rank -- and the whole distributed job -- forever on
+        a semaphore the dead process will never post."""
+        while not self.zf_op.zenflow_adam_wait(self.zf_ctrl.data_ptr(), ZENFLOW_OPTIMIZER_WAIT_POLL_SECONDS):
+            proc = getattr(self, 'process', None)
+            if proc is not None and not proc.is_alive():
+                raise RuntimeError("ZenFlow optimizer process exited during a step (likely an error or OOM in "
+                                   "the optimizer process -- check its traceback above) instead of completing "
+                                   "the update. Aborting to avoid hanging distributed training.")
+
     def wait_last_update_and_copy(self):
 
         if not getattr(self, 'process_optimizer_established', False):
@@ -680,7 +694,7 @@ class ZenFlowZeroOptimizerParallel(ZenFlowZeroOptimizer):
             return
 
         self.timers(OPTIMIZER_RECV_PARAMS_TIMER).start()
-        self.zf_op.zenflow_adam_wait(self.zf_ctrl.data_ptr())
+        self._wait_for_optimizer_process()
         self.timers(OPTIMIZER_RECV_PARAMS_TIMER).stop()
 
         for i, group in enumerate(self.bit16_groups):

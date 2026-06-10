@@ -14,7 +14,7 @@ from deepspeed.runtime.utils import see_memory_usage
 from typing import List
 from deepspeed.accelerator import get_accelerator
 from typing import TYPE_CHECKING
-from deepspeed.runtime.zenflow.zenflow_utils import start_optimizer_process
+from deepspeed.runtime.zenflow.zenflow_utils import start_optimizer_process, ZENFLOW_OPTIMIZER_WAIT_POLL_SECONDS
 
 if TYPE_CHECKING:
     from deepspeed.runtime.zero.stage3 import DeepSpeedZeroOptimizer_Stage3
@@ -567,7 +567,16 @@ def wait_last_update_and_copy(optimizer_z3, timer_names):
         optimizer_z3.first_update_round_after_warmup = False
         return
 
-    optimizer_z3.zf_op.zenflow_adam_wait(optimizer_z3.zf_ctrl.data_ptr())
+    # Wake periodically to check the optimizer process is alive: if it died mid-step, fail loudly
+    # here instead of blocking this rank (and the whole job) forever on a semaphore it will never
+    # post.
+    while not optimizer_z3.zf_op.zenflow_adam_wait(optimizer_z3.zf_ctrl.data_ptr(),
+                                                   ZENFLOW_OPTIMIZER_WAIT_POLL_SECONDS):
+        proc = getattr(optimizer_z3, 'process', None)
+        if proc is not None and not proc.is_alive():
+            raise RuntimeError("ZenFlow optimizer process exited during a step (likely an error or OOM in the "
+                               "optimizer process -- check its traceback above) instead of completing the "
+                               "update. Aborting to avoid hanging distributed training.")
 
     for sub_group_id, group in enumerate(optimizer_z3.fp16_groups):
         if optimizer_z3.fp16_partitioned_groups_flat[sub_group_id] is not None:

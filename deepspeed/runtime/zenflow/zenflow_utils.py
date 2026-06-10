@@ -10,6 +10,11 @@ import psutil
 from deepspeed import comm as dist
 from deepspeed.accelerator import get_accelerator
 
+# How long the training side blocks on a single semaphore wait for the optimizer process before
+# waking up to check that the process is still alive. A normal step completes far sooner; this
+# only bounds how long we hang if the optimizer process dies mid-step.
+ZENFLOW_OPTIMIZER_WAIT_POLL_SECONDS = 60
+
 
 def _flatten_dense_tensors(tensors):
     """Flatten dense tensors into a contiguous 1D buffer. Assume tensors are of

@@ -288,6 +288,6 @@ void zenflow_adam_submit(uintptr_t control_ptr,
                          std::vector<float> eps,
                          std::vector<float> weight_decay,
                          std::vector<uint8_t> bias_correction);
-void zenflow_adam_wait(uintptr_t control_ptr);
+bool zenflow_adam_wait(uintptr_t control_ptr, double timeout_s);
 void zenflow_adam_ctrl_exit(uintptr_t control_ptr);
 #endif
