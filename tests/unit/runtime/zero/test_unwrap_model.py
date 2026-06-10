@@ -3,11 +3,13 @@
 
 # DeepSpeed Team
 
+import torch
+
 import deepspeed
 from deepspeed.runtime.zero import unwrap_model_for_generation
 from deepspeed.accelerator import get_accelerator
 
-from unit.common import DistributedTest
+from unit.common import DistributedTest, preferred_dtype
 from unit.simple_model import SimpleModel
 
 config = {
@@ -65,3 +67,27 @@ class TestUnwrapModel(DistributedTest):
 
         # assert hooks
         assert hooks_exist(engine)
+
+
+class TestUnwrapModelTraceInvalidate(DistributedTest):
+    # unwrap_model_for_generation re-registers the ZeRO-3 hooks; without trace
+    # invalidation the next training step pops an empty fetch deque.
+    world_size = 2
+
+    def test(self):
+        model = SimpleModel(hidden_dim=100)
+        engine, _, _, _ = deepspeed.initialize(args=None, model=model, config=config)
+
+        x = torch.randn(2, 100, device=engine.device, dtype=preferred_dtype())
+        y = torch.empty(2, dtype=torch.long, device=engine.device).random_(100)
+
+        loss = engine(x, y)
+        engine.backward(loss)
+        engine.step()
+
+        with unwrap_model_for_generation(engine):
+            pass
+
+        loss = engine(x, y)
+        engine.backward(loss)
+        engine.step()
