@@ -4,14 +4,25 @@
 // DeepSpeed Team
 
 #include <torch/extension.h>
+#include <algorithm>
 #include <cassert>
+#include <condition_variable>
+#include <cstdint>
+#include <cstring>
 #include <functional>
 #include <iostream>
 #include <map>
 #include <memory>
+#include <mutex>
+#include <thread>
 #include <type_traits>
 #include <unordered_map>
+#include <vector>
 #include "cpu_adam.h"
+#if defined(__linux__)
+#include <pthread.h>
+#include <sched.h>
+#endif
 
 using namespace std::string_literals;
 static std::unordered_map<int, std::shared_ptr<void>> s_optimizers;
@@ -396,4 +407,348 @@ int destroy_adam_optimizer(int optimizer_id)
     s_optimizers.erase(optimizer_id);
 
     return 0;
+}
+
+// ---------------------------------------------------------------------------
+// ZenFlowAdam: in-process, GIL-released CPU Adam for ZenFlow's overlapped step.
+//
+// Replaces the multiprocessing optimizer subprocess. The optimizer step runs on
+// a background dispatcher thread; the heavy per-element math is fanned out to a
+// pool of worker threads pinned to ZenFlow's dedicated cores, each running its
+// element slice through the serial (parallel=false) kernel. Because the workers
+// hold no GIL while computing, the Python training thread keeps running. Since
+// everything lives in one process the optimizer touches the same tensors the
+// main thread holds -- no shared memory, pipe, or per-step rebinding.
+// ---------------------------------------------------------------------------
+
+// A persistent pool of threads pinned to a fixed core set. parallel_for() splits
+// [0, total) into one contiguous chunk per thread and blocks until all finish.
+class PinnedThreadPool {
+public:
+    explicit PinnedThreadPool(const std::vector<int>& affinity)
+    {
+        n_ = std::max<size_t>(1, affinity.size());
+        for (size_t i = 0; i < n_; ++i) {
+            int core = affinity.empty() ? -1 : affinity[i % affinity.size()];
+            threads_.emplace_back([this, i, core] { worker(i, core); });
+        }
+    }
+
+    ~PinnedThreadPool()
+    {
+        {
+            std::lock_guard<std::mutex> lk(m_);
+            stop_ = true;
+            ++gen_;
+        }
+        cv_start_.notify_all();
+        for (auto& t : threads_) t.join();
+    }
+
+    size_t size() const { return n_; }
+
+    // Split [0, total) into one chunk per thread. Chunk boundaries are rounded up to a
+    // multiple of `align` so each slice's AVX/scalar split lines up with the whole-tensor
+    // kernel's split -- otherwise an element could be computed by AVX (FMA) in one layout
+    // and the scalar tail (mul+add) in another, which differ in the last bit.
+    void parallel_for(size_t total, size_t align, std::function<void(size_t, size_t)> fn)
+    {
+        {
+            std::unique_lock<std::mutex> lk(m_);
+            fn_ = std::move(fn);
+            total_ = total;
+            align_ = std::max<size_t>(1, align);
+            done_count_ = 0;
+            ++gen_;
+        }
+        cv_start_.notify_all();
+        std::unique_lock<std::mutex> lk(m_);
+        cv_done_.wait(lk, [this] { return done_count_ == n_; });
+    }
+
+private:
+    void worker(size_t tid, int core)
+    {
+#if defined(__linux__)
+        if (core >= 0) {
+            cpu_set_t set;
+            CPU_ZERO(&set);
+            CPU_SET(core, &set);
+            pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &set);
+        }
+#endif
+        long seen = 0;
+        while (true) {
+            std::function<void(size_t, size_t)> fn;
+            size_t total = 0;
+            size_t align = 1;
+            {
+                std::unique_lock<std::mutex> lk(m_);
+                cv_start_.wait(lk, [this, seen] { return gen_ != seen; });
+                seen = gen_;
+                if (stop_) return;
+                fn = fn_;
+                total = total_;
+                align = align_;
+            }
+            size_t chunk = (total + n_ - 1) / n_;
+            chunk = ((chunk + align - 1) / align) * align;  // round up to SIMD-block alignment
+            size_t begin = std::min(tid * chunk, total);
+            size_t end = std::min(begin + chunk, total);
+            if (end > begin) fn(begin, end);
+            {
+                std::lock_guard<std::mutex> lk(m_);
+                ++done_count_;
+                if (done_count_ == n_) cv_done_.notify_one();
+            }
+        }
+    }
+
+    size_t n_;
+    std::vector<std::thread> threads_;
+    std::mutex m_;
+    std::condition_variable cv_start_, cv_done_;
+    std::function<void(size_t, size_t)> fn_;
+    size_t total_ = 0;
+    size_t align_ = 1;
+    size_t done_count_ = 0;
+    long gen_ = 0;
+    bool stop_ = false;
+};
+
+// SIMD block the Adam AVX kernel rounds to (Step_8 => span 8). Slicing on multiples of
+// this keeps each slice's AVX/scalar boundary identical to the whole-tensor kernel.
+#if defined(__AVX512__) or defined(__AVX256__)
+static constexpr size_t kZenAdamAlign = SIMD_WIDTH * 8;
+#else
+static constexpr size_t kZenAdamAlign = 1;
+#endif
+
+struct ZenHP {
+    float lr, beta1, beta2, eps, weight_decay;
+    bool bias_correction;
+};
+
+struct ZenGroup {
+    torch::Tensor param;
+    torch::Tensor grad[2];
+    torch::Tensor exp_avg[2];
+    torch::Tensor exp_avg_sq[2];
+    torch::Tensor stale;  // may be undefined -> stale snapshot skipped
+};
+
+class ZenFlowAdam {
+public:
+    ZenFlowAdam(int optimizer_id, std::vector<int> zf_affinity) : opt_id_(optimizer_id)
+    {
+        pool_ = std::make_unique<PinnedThreadPool>(zf_affinity);
+        dispatcher_ = std::thread(&ZenFlowAdam::dispatcher_main, this);
+    }
+
+    ~ZenFlowAdam() { shutdown(); }
+
+    void register_group(torch::Tensor param,
+                        torch::Tensor grad0,
+                        torch::Tensor grad1,
+                        torch::Tensor exp_avg0,
+                        torch::Tensor exp_avg1,
+                        torch::Tensor exp_avg_sq0,
+                        torch::Tensor exp_avg_sq1,
+                        torch::Tensor stale)
+    {
+        TORCH_CHECK(param.is_contiguous(), "ZenFlowAdam: param must be contiguous");
+        ZenGroup g;
+        g.param = param;
+        g.grad[0] = grad0;
+        g.grad[1] = grad1;
+        g.exp_avg[0] = exp_avg0;
+        g.exp_avg[1] = exp_avg1;
+        g.exp_avg_sq[0] = exp_avg_sq0;
+        g.exp_avg_sq[1] = exp_avg_sq1;
+        g.stale = stale;
+        groups_.push_back(std::move(g));
+    }
+
+    // Hand a step to the dispatcher and return immediately (non-blocking).
+    void submit_step(int now_state,
+                     int64_t step,
+                     std::vector<float> lr,
+                     std::vector<float> beta1,
+                     std::vector<float> beta2,
+                     std::vector<float> eps,
+                     std::vector<float> weight_decay,
+                     std::vector<uint8_t> bias_correction)
+    {
+        const size_t ng = groups_.size();
+        TORCH_CHECK(lr.size() == ng && beta1.size() == ng && beta2.size() == ng &&
+                        eps.size() == ng && weight_decay.size() == ng &&
+                        bias_correction.size() == ng,
+                    "ZenFlowAdam::submit_step: hyperparameter length must match group count");
+        std::vector<ZenHP> hps(ng);
+        for (size_t g = 0; g < ng; ++g) {
+            hps[g] = {lr[g], beta1[g], beta2[g], eps[g], weight_decay[g], (bool)bias_correction[g]};
+        }
+        {
+            std::lock_guard<std::mutex> lk(mtx_);
+            TORCH_CHECK(!has_work_,
+                        "ZenFlowAdam::submit_step called before previous step was consumed");
+            now_state_ = now_state;
+            step_ = step;
+            hps_ = std::move(hps);
+            has_work_ = true;
+        }
+        cv_.notify_all();
+    }
+
+    // Block until one submitted step has completed. Uses a completion counter so a
+    // skipped wait (the engine's first post-warmup round) does not desync: each
+    // wait consumes exactly one completion, like draining one message from the pipe.
+    void wait_step()
+    {
+        std::unique_lock<std::mutex> lk(mtx_);
+        cv_.wait(lk, [this] { return completed_ > waited_; });
+        ++waited_;
+    }
+
+    void shutdown()
+    {
+        {
+            std::lock_guard<std::mutex> lk(mtx_);
+            if (exit_) return;
+            exit_ = true;
+        }
+        cv_.notify_all();
+        if (dispatcher_.joinable()) dispatcher_.join();
+        pool_.reset();
+    }
+
+private:
+    void dispatcher_main()
+    {
+        while (true) {
+            int now_state;
+            int64_t step;
+            std::vector<ZenHP> hps;
+            {
+                std::unique_lock<std::mutex> lk(mtx_);
+                cv_.wait(lk, [this] { return has_work_ || exit_; });
+                if (exit_) return;
+                now_state = now_state_;
+                step = step_;
+                hps = hps_;
+                has_work_ = false;
+            }
+            run_step(now_state, step, hps);
+            {
+                std::lock_guard<std::mutex> lk(mtx_);
+                ++completed_;
+            }
+            cv_.notify_all();
+        }
+    }
+
+    void run_step(int now_state, int64_t step, const std::vector<ZenHP>& hps)
+    {
+        auto opt = std::static_pointer_cast<Adam_Optimizer>(s_optimizers[opt_id_]);
+        for (size_t g = 0; g < groups_.size(); ++g) {
+            const ZenHP& hp = hps[g];
+            // Groups share one Adam_Optimizer; advance its bias-correction state for
+            // this group before the pool reads it (pool is idle here -> no race).
+            opt->IncrementStep(step, hp.beta1, hp.beta2);
+            opt->update_state(hp.lr, hp.eps, hp.weight_decay, hp.bias_correction);
+
+            ZenGroup& grp = groups_[g];
+            torch::Tensor& P = grp.param;
+            torch::Tensor& G = grp.grad[now_state];
+            torch::Tensor& M = grp.exp_avg[now_state];
+            torch::Tensor& V = grp.exp_avg_sq[now_state];
+
+            auto it = invokers.find(std::tuple(P.scalar_type(), M.scalar_type()));
+            TORCH_CHECK(it != invokers.end(),
+                        "ZenFlowAdam: unsupported param/state dtype combination");
+            auto fn = it->second;
+
+            char* pp = static_cast<char*>(P.data_ptr());
+            char* gp = static_cast<char*>(G.data_ptr());
+            char* mp = static_cast<char*>(M.data_ptr());
+            char* vp = static_cast<char*>(V.data_ptr());
+            char* sp = grp.stale.defined() ? static_cast<char*>(grp.stale.data_ptr()) : nullptr;
+            const size_t pe = P.element_size();
+            const size_t se = M.element_size();
+            const size_t numel = P.numel();
+
+            pool_->parallel_for(numel, kZenAdamAlign, [=](size_t b, size_t e) {
+                const size_t len = e - b;
+                // parallel=false: each pinned thread runs its slice serially.
+                fn(opt, pp + b * pe, gp + b * pe, mp + b * se, vp + b * se, len, false);
+                if (sp) std::memcpy(sp + b * pe, pp + b * pe, len * pe);
+            });
+        }
+    }
+
+    int opt_id_;
+    std::vector<ZenGroup> groups_;
+    std::unique_ptr<PinnedThreadPool> pool_;
+    std::thread dispatcher_;
+
+    std::mutex mtx_;
+    std::condition_variable cv_;
+    bool has_work_ = false;
+    bool exit_ = false;
+    int now_state_ = 0;
+    int64_t step_ = 0;
+    std::vector<ZenHP> hps_;
+    uint64_t completed_ = 0;
+    uint64_t waited_ = 0;
+};
+
+// Handle-indexed registry, mirroring s_optimizers, so the Python side refers to a
+// ZenFlowAdam by an int handle and the class itself stays encapsulated here.
+static std::unordered_map<int, std::unique_ptr<ZenFlowAdam>> s_zenflow_adams;
+static int s_next_zenflow_id = 0;
+
+int zenflow_adam_create(int optimizer_id, std::vector<int> zf_affinity)
+{
+    int handle = s_next_zenflow_id++;
+    s_zenflow_adams[handle] = std::make_unique<ZenFlowAdam>(optimizer_id, std::move(zf_affinity));
+    return handle;
+}
+
+void zenflow_adam_register_group(int handle,
+                                 torch::Tensor param,
+                                 torch::Tensor grad0,
+                                 torch::Tensor grad1,
+                                 torch::Tensor exp_avg0,
+                                 torch::Tensor exp_avg1,
+                                 torch::Tensor exp_avg_sq0,
+                                 torch::Tensor exp_avg_sq1,
+                                 torch::Tensor stale)
+{
+    s_zenflow_adams.at(handle)->register_group(
+        param, grad0, grad1, exp_avg0, exp_avg1, exp_avg_sq0, exp_avg_sq1, stale);
+}
+
+void zenflow_adam_submit(int handle,
+                         int now_state,
+                         int64_t step,
+                         std::vector<float> lr,
+                         std::vector<float> beta1,
+                         std::vector<float> beta2,
+                         std::vector<float> eps,
+                         std::vector<float> weight_decay,
+                         std::vector<uint8_t> bias_correction)
+{
+    s_zenflow_adams.at(handle)->submit_step(
+        now_state, step, lr, beta1, beta2, eps, weight_decay, bias_correction);
+}
+
+void zenflow_adam_wait(int handle) { s_zenflow_adams.at(handle)->wait_step(); }
+
+void zenflow_adam_destroy(int handle)
+{
+    auto it = s_zenflow_adams.find(handle);
+    if (it != s_zenflow_adams.end()) {
+        it->second->shutdown();
+        s_zenflow_adams.erase(it);
+    }
 }

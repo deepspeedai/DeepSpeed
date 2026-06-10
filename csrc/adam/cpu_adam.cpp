@@ -31,4 +31,23 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
     m.def("adam_rollback", &ds_adam_rollback, "DeepSpeed CPU Adam rollback (C++)");
     m.def("create_adam", &create_adam_optimizer, "DeepSpeed CPU Adam (C++)");
     m.def("destroy_adam", &destroy_adam_optimizer, "DeepSpeed CPU Adam destroy (C++)");
+
+    // ZenFlowAdam: in-process overlapped CPU Adam. wait/submit/destroy release the GIL
+    // so the optimizer thread overlaps the Python training thread.
+    m.def("zenflow_adam_create", &zenflow_adam_create, "ZenFlowAdam create (C++)");
+    m.def("zenflow_adam_register_group",
+          &zenflow_adam_register_group,
+          "ZenFlowAdam register a parameter group (C++)");
+    m.def("zenflow_adam_submit",
+          &zenflow_adam_submit,
+          "ZenFlowAdam submit an overlapped step (C++)",
+          pybind11::call_guard<pybind11::gil_scoped_release>());
+    m.def("zenflow_adam_wait",
+          &zenflow_adam_wait,
+          "ZenFlowAdam wait for a submitted step (C++)",
+          pybind11::call_guard<pybind11::gil_scoped_release>());
+    m.def("zenflow_adam_destroy",
+          &zenflow_adam_destroy,
+          "ZenFlowAdam destroy (C++)",
+          pybind11::call_guard<pybind11::gil_scoped_release>());
 }

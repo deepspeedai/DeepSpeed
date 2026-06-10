@@ -252,3 +252,31 @@ int ds_adam_rollback(int optimizer_id,
                      torch::Tensor& exp_avg_sq);
 
 int destroy_adam_optimizer(int optimizer_id);
+
+// ZenFlowAdam: in-process, GIL-released overlapped CPU Adam for ZenFlow. The handle
+// indexes a background dispatcher + pinned thread pool that drives the step.
+int zenflow_adam_create(int optimizer_id, std::vector<int> zf_affinity);
+
+void zenflow_adam_register_group(int handle,
+                                 torch::Tensor param,
+                                 torch::Tensor grad0,
+                                 torch::Tensor grad1,
+                                 torch::Tensor exp_avg0,
+                                 torch::Tensor exp_avg1,
+                                 torch::Tensor exp_avg_sq0,
+                                 torch::Tensor exp_avg_sq1,
+                                 torch::Tensor stale);
+
+void zenflow_adam_submit(int handle,
+                         int now_state,
+                         int64_t step,
+                         std::vector<float> lr,
+                         std::vector<float> beta1,
+                         std::vector<float> beta2,
+                         std::vector<float> eps,
+                         std::vector<float> weight_decay,
+                         std::vector<uint8_t> bias_correction);
+
+void zenflow_adam_wait(int handle);
+
+void zenflow_adam_destroy(int handle);

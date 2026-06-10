@@ -312,6 +312,114 @@ class TestCPUAdamFusedMultiTensor(DistributedTest):
             ds_opt_adam.destroy_adam(opt_id)
 
 
+class TestZenFlowAdamNative(DistributedTest):
+    """ZenFlowAdam (in-process background thread + pinned pool, sliced serial kernel)
+    must produce the same update as the reference fused path, with the alternating
+    double-buffered grads/moments that ZenFlow's overlap uses."""
+    world_size = 1
+    reuse_dist_env = True
+    requires_cuda_env = False
+    if not get_accelerator().is_available():
+        init_distributed = False
+        set_dist_env = False
+
+    @pytest.mark.parametrize('dtype', [torch.float, torch.bfloat16], ids=["fp32", "bf16"])
+    def test_matches_reference(self, dtype):
+        import os
+        ds = CPUAdamBuilder().load()
+        lr, beta1, beta2, eps, weight_decay = 1e-3, 0.9, 0.999, 1e-8, 0.0
+        # Sizes that exercise the multi-thread slicing: smaller than the pool, not a
+        # multiple of it, and large.
+        sizes = [3, 1000, 100003]
+
+        opt_zf, opt_ref = 5, 6
+        ds.create_adam(opt_zf, lr, beta1, beta2, eps, weight_decay, True, False)
+        ds.create_adam(opt_ref, lr, beta1, beta2, eps, weight_decay, True, False)
+
+        affinity = list(range(min(4, os.cpu_count() or 1)))
+        handle = ds.zenflow_adam_create(opt_zf, affinity)
+
+        torch.manual_seed(0)
+        # ZenFlowAdam state (double-buffered) and the reference mirror of it.
+        params_zf = [torch.randn(n, dtype=dtype) for n in sizes]
+        params_ref = [p.clone() for p in params_zf]
+        grad = [[torch.zeros(n, dtype=dtype) for n in sizes] for _ in range(2)]
+        ea = [[torch.zeros(n) for n in sizes] for _ in range(2)]
+        eq = [[torch.zeros(n) for n in sizes] for _ in range(2)]
+        stale = [torch.zeros(n, dtype=dtype) for n in sizes]
+        ea_ref = [[t.clone() for t in ea[s]] for s in range(2)]
+        eq_ref = [[t.clone() for t in eq[s]] for s in range(2)]
+        stale_ref = [t.clone() for t in stale]
+
+        for i in range(len(sizes)):
+            ds.zenflow_adam_register_group(handle, params_zf[i], grad[0][i], grad[1][i], ea[0][i], ea[1][i], eq[0][i],
+                                           eq[1][i], stale[i])
+
+        try:
+            for step in range(1, 6):
+                now = step & 1
+                grads = [torch.randn(n, dtype=dtype) for n in sizes]
+                for i in range(len(sizes)):
+                    grad[now][i].copy_(grads[i])
+
+                ds.zenflow_adam_submit(handle, now, step, [lr] * len(sizes), [beta1] * len(sizes),
+                                       [beta2] * len(sizes), [eps] * len(sizes), [weight_decay] * len(sizes),
+                                       [1] * len(sizes))
+                ds.zenflow_adam_wait(handle)
+
+                ds.adam_update_multi(opt_ref, step, lr, beta1, beta2, eps, weight_decay, True, params_ref,
+                                     [g.clone() for g in grads], ea_ref[now], eq_ref[now], stale_ref)
+
+                for i in range(len(sizes)):
+                    assert torch.equal(params_zf[i], params_ref[i]), f"param mismatch size {sizes[i]} step {step}"
+                    assert torch.equal(ea[now][i], ea_ref[now][i]), f"exp_avg mismatch size {sizes[i]} step {step}"
+                    assert torch.equal(eq[now][i], eq_ref[now][i]), f"exp_avg_sq mismatch size {sizes[i]}"
+                    assert torch.equal(stale[i], stale_ref[i]), f"stale mismatch size {sizes[i]} step {step}"
+        finally:
+            ds.zenflow_adam_destroy(handle)
+            ds.destroy_adam(opt_zf)
+            ds.destroy_adam(opt_ref)
+
+    def test_pipelined_submit_wait(self):
+        """Mirror the engine's pipeline: warmup does submit-then-wait, steady state does
+        wait-then-submit (each wait drains the *previous* submit), leaving one undrained
+        completion that destroy() cleans up. Must not hang or desync."""
+        import os
+        ds = CPUAdamBuilder().load()
+        lr, beta1, beta2, eps, wd = 1e-3, 0.9, 0.999, 1e-8, 0.0
+        n = 1024
+        opt_id = 7
+        ds.create_adam(opt_id, lr, beta1, beta2, eps, wd, True, False)
+        handle = ds.zenflow_adam_create(opt_id, list(range(min(4, os.cpu_count() or 1))))
+
+        param = torch.randn(n)
+        g = [torch.zeros(n), torch.zeros(n)]
+        ea = [torch.zeros(n), torch.zeros(n)]
+        eq = [torch.zeros(n), torch.zeros(n)]
+        stale = torch.zeros(n)
+        ds.zenflow_adam_register_group(handle, param, g[0], g[1], ea[0], ea[1], eq[0], eq[1], stale)
+
+        def submit(now, step):
+            g[now].copy_(torch.randn(n))
+            ds.zenflow_adam_submit(handle, now, step, [lr], [beta1], [beta2], [eps], [wd], [1])
+
+        try:
+            # warmup: submit then wait (no overlap)
+            submit(1, 1)
+            ds.zenflow_adam_wait(handle)
+            # steady: the first post-warmup wait is skipped, so this round is submit-only,
+            # and every later wait drains the submit from the previous round.
+            submit(0, 2)
+            for step in range(3, 8):
+                ds.zenflow_adam_wait(handle)
+                submit(step & 1, step)
+            ds.zenflow_adam_wait(handle)  # drain the last submitted step
+            assert torch.all(torch.isfinite(param))
+        finally:
+            ds.zenflow_adam_destroy(handle)
+            ds.destroy_adam(opt_id)
+
+
 class TestCPUAdamGPUError(DistributedTest):
 
     def test_cpu_adam_gpu_error(self):
