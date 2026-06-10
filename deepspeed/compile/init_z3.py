@@ -17,6 +17,20 @@ from .util import get_deepcompile_handle, add_pre_backward_hook
 
 WARMUP = 5
 
+_MISSING = object()
+
+
+def _resolve_expected_grad_dtype(param):
+    # Match PyTorch's leaf grad accumulation contract. grad_dtype can be a
+    # dtype, or None to allow any incoming gradient dtype:
+    # https://docs.pytorch.org/docs/main/generated/torch.sparse.semi_structured.SparseSemiStructuredTensorCUSPARSELT.html#torch.sparse.semi_structured.SparseSemiStructuredTensorCUSPARSELT.grad_dtype
+    grad_dtype = getattr(param, "grad_dtype", _MISSING)
+    if grad_dtype is None:
+        return None
+    if grad_dtype is not _MISSING:
+        return grad_dtype
+    return param.dtype
+
 
 def init_z3(engine, backend, compile_config, compile_kwargs, schedule=None):
 
@@ -56,7 +70,8 @@ def init_z3(engine, backend, compile_config, compile_kwargs, schedule=None):
 
         # Disable persistent param
         p.ds_persist = False
-        dc.register_z3_param(p.ds_id, p.ds_shape, p.ds_tensor, grad_buffer, p.ds_persist)
+        dc.register_z3_param(p.ds_id, p.ds_shape, p.ds_tensor, grad_buffer, p.ds_persist,
+                             _resolve_expected_grad_dtype(p))
 
     if schedule is None:
         schedule = []

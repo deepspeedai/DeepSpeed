@@ -256,9 +256,9 @@ public:
             at::Tensor ds_tensor,
             at::Tensor grad_buffer,
             bool partitioned,
-            int64_t offset,  // for Z1
-            bool persistent  // for Z3
-            )
+            int64_t offset,   // for Z1
+            bool persistent,  // for Z3
+            std::optional<at::ScalarType> expected_grad_dtype = std::nullopt)
         : id_(id),
           shape_(std::move(ds_shape)),
           ds_tensor_(ds_tensor),
@@ -266,7 +266,8 @@ public:
           grad_buffer_(grad_buffer),
           partitioned_(partitioned),
           offset_(offset),
-          persistent_(persistent)
+          persistent_(persistent),
+          expected_grad_dtype_(expected_grad_dtype)
     {
     }
 
@@ -300,6 +301,7 @@ public:
     int64_t getOffset() const { return offset_; }
     void setPersistent(bool persistent) { persistent_ = persistent; }
     bool isPersistent() const { return persistent_; }
+    std::optional<at::ScalarType> getExpectedGradDtype() const { return expected_grad_dtype_; }
 
     void offload()
     {
@@ -370,6 +372,7 @@ private:
     bool partitioned_;
     int64_t offset_;   // for Z1
     bool persistent_;  // for Z3
+    std::optional<at::ScalarType> expected_grad_dtype_;
     mutable bool is_reloaded = false;
 
     std::optional<at::cuda::CUDAStream> offload_stream_;
@@ -389,14 +392,20 @@ public:
                        at::Tensor ds_tensor,
                        at::Tensor grad_buffer,
                        bool partitioned,
-                       int64_t offset,  // for Z1
-                       bool persistent  // for Z3
-    )
+                       int64_t offset,   // for Z1
+                       bool persistent,  // for Z3
+                       std::optional<at::ScalarType> expected_grad_dtype = std::nullopt)
     {
         grad_buffer.zero_();
-        params_.emplace(
-            ds_id,
-            DSParam(ds_id, ds_shape, ds_tensor, grad_buffer, partitioned, offset, persistent));
+        params_.emplace(ds_id,
+                        DSParam(ds_id,
+                                ds_shape,
+                                ds_tensor,
+                                grad_buffer,
+                                partitioned,
+                                offset,
+                                persistent,
+                                expected_grad_dtype));
         valid_[ds_id] = false;
     }
 
@@ -494,6 +503,13 @@ public:
     {
         int world_size = process_group_->getSize();
         const DSParam& param = param_registry_->getParam(ds_id);
+        const auto expected_grad_dtype = param.getExpectedGradDtype();
+        // Match PyTorch's leaf grad accumulation dtype before bucket selection:
+        // https://docs.pytorch.org/docs/main/generated/torch.sparse.semi_structured.SparseSemiStructuredTensorCUSPARSELT.html#torch.sparse.semi_structured.SparseSemiStructuredTensorCUSPARSELT.grad_dtype
+        if (expected_grad_dtype.has_value() &&
+            grad_tensor.scalar_type() != expected_grad_dtype.value()) {
+            grad_tensor = grad_tensor.to(expected_grad_dtype.value());
+        }
         const auto scalar_type = grad_tensor.scalar_type();
         std::shared_ptr<ReduceBucket> reduce_bucket = reduce_buckets_->getBuffer(scalar_type);
 
