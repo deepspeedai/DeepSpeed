@@ -57,48 +57,6 @@ def disable_accelerator():
         accelerator._initialized = True
 
 
-def zenflow_optimizer_process(pipe, param_groups, shared_overlap_grad_map, shared_stale_param_map, zf_affinity):
-    disable_accelerator()
-
-    current_process = psutil.Process()
-    current_process.cpu_affinity(zf_affinity)
-    os.environ['OMP_NUM_THREADS'] = str(len(zf_affinity))
-
-    from deepspeed.ops.adam import ZenFlowCPUAdam
-    optimizer = ZenFlowCPUAdam(param_groups, overlap_step=True)
-
-    pipe.send({"type": "ready"})
-
-    # TODO: replace this with rpc
-
-    while True:
-        cmd = pipe.recv()
-        if cmd["type"] == "step":
-            now_state = cmd["now_state"]
-            micro_step = cmd["micro_step"]
-            group_infos = cmd["group_infos"]
-
-            for group_no, group_info in enumerate(group_infos):
-                original_param_groups = optimizer.param_groups
-                optimizer.param_groups = [original_param_groups[group_no]]
-                group = optimizer.param_groups[0]
-
-                for param_idx, param in enumerate(group["params"]):
-                    key = (group_no, param_idx)
-                    if key in shared_overlap_grad_map:
-                        param.overlap_grad = shared_overlap_grad_map[key]
-                    if key in shared_stale_param_map:
-                        param.stale_param = shared_stale_param_map[key]
-
-                optimizer.step(step_id=micro_step + 1, now_state=now_state, group_info=group_info)
-
-                optimizer.param_groups = original_param_groups
-
-            pipe.send({"type": "done"})
-        elif cmd["type"] == "exit":
-            break
-
-
 def all_tensors_equal(tensor_list):
     first_tensor = tensor_list[0]
     for tensor in tensor_list[1:]:
@@ -141,10 +99,10 @@ def _compute_zf_pt_affinity(zf_optimizer):
 
 
 def zenflow_optimizer_process_native(groups, ctrl, ready, zf_affinity, adamw_mode):
-    """ZeRO stage 1/2 optimizer process. Builds the native ZenFlowAdam pinned pool and runs
-    the worker loop driven by the shared-memory control block (no pickling pipe). The Adam
-    state is allocated here, in this process pinned to the optimizer cores, so it is
-    NUMA-local to the pool -- which is what makes a separate process worthwhile over an
+    """ZenFlow overlapped optimizer process (ZeRO stage 1/2/3). Builds the native ZenFlowAdam
+    pinned pool and runs the worker loop driven by the shared-memory control block (no pickling
+    pipe). The Adam state is allocated here, in this process pinned to the optimizer cores, so
+    it is NUMA-local to the pool -- which is what makes a separate process worthwhile over an
     in-process thread for large, memory-bandwidth-bound updates."""
     disable_accelerator()
     current_process = psutil.Process()
@@ -169,20 +127,27 @@ def zenflow_optimizer_process_native(groups, ctrl, ready, zf_affinity, adamw_mod
 
 
 def _start_native_optimizer(zf_optimizer):
-    """ZeRO stage 1/2 overlapped optimizer: run the native ZenFlowAdam in a separate process,
-    coordinated through a shared-memory semaphore control block instead of a pickling pipe.
-    Keeps the isolation of a separate process (NUMA-local state, no contention with the
-    training thread) while removing the per-step Python/IPC overhead of the old subprocess."""
+    """ZenFlow overlapped optimizer (ZeRO stage 1/2/3): run the native ZenFlowAdam in a
+    separate process, coordinated through a shared-memory semaphore control block instead of a
+    pickling pipe. Keeps the isolation of a separate process (NUMA-local state, no contention
+    with the training thread) while removing the per-step Python/IPC overhead of the old
+    subprocess."""
     from multiprocessing import get_context
     from deepspeed.ops.op_builder import CPUAdamBuilder
 
     op = CPUAdamBuilder().load()
     zf_optimizer.zf_op = op
 
+    # Stage 3 steps each flattened sub-group partition; stage 1/2 steps one flat partition per
+    # param group. Both carry overlap_grad double buffers and a stale snapshot.
+    if zf_optimizer.zf_stage3:
+        params = list(zf_optimizer.fp32_partitioned_groups_flat)
+    else:
+        params = [group["params"][0] for group in zf_optimizer.optimizer.param_groups]
+
     # Share the tensors the optimizer process reads/writes; the Adam state stays process-local.
     groups = []
-    for group in zf_optimizer.optimizer.param_groups:
-        param = group["params"][0]
+    for param in params:
         param.data.share_memory_()
         if not hasattr(param, "stale_param"):
             param.stale_param = torch.zeros_like(param.data, dtype=param.dtype, device=param.device)
@@ -212,60 +177,4 @@ def _start_native_optimizer(zf_optimizer):
 
 
 def start_optimizer_process(zf_optimizer):
-    if not zf_optimizer.zf_stage3:
-        _start_native_optimizer(zf_optimizer)
-        return
-
-    from multiprocessing import Pipe, get_context, Manager
-
-    ctx = get_context("spawn")
-    zf_optimizer.parent_conn, zf_optimizer.child_conn = Pipe()
-
-    manager = Manager()
-    zf_optimizer.shared_overlap_grad_map = manager.dict()
-    zf_optimizer.shared_stale_param_map = manager.dict()
-
-    if zf_optimizer.zf_stage3:
-        params_iter = [((group_no, 0), param)
-                       for group_no, param in enumerate(zf_optimizer.fp32_partitioned_groups_flat)]
-    else:
-        params_iter = [((group_no, param_idx), param)
-                       for group_no, group in enumerate(zf_optimizer.optimizer.param_groups)
-                       for param_idx, param in enumerate(group["params"])]
-
-    for key, param in params_iter:
-        param.data.share_memory_()
-
-        if not hasattr(param, "stale_param"):
-            param.stale_param = torch.zeros_like(param.data, dtype=param.dtype, device=param.device)
-            param.stale_param.data.share_memory_()
-            zf_optimizer.shared_stale_param_map[key] = param.stale_param
-
-        if getattr(param, "overlap_grad", None) is not None:
-            param.overlap_grad[0].data.share_memory_()
-            param.overlap_grad[1].data.share_memory_()
-            zf_optimizer.shared_overlap_grad_map[key] = param.overlap_grad
-
-    param_groups_data = ([{
-        "params": [param]
-    } for param in zf_optimizer.fp32_partitioned_groups_flat]
-                         if zf_optimizer.zf_stage3 else zf_optimizer.optimizer.param_groups)
-
-    current_process = psutil.Process()
-    zf_affinity, pt_affinity = _compute_zf_pt_affinity(zf_optimizer)
-
-    zf_optimizer.process = ctx.Process(
-        target=zenflow_optimizer_process,
-        args=(zf_optimizer.child_conn, param_groups_data, zf_optimizer.shared_overlap_grad_map,
-              zf_optimizer.shared_stale_param_map, zf_affinity),
-    )
-    zf_optimizer.process.daemon = True
-    zf_optimizer.process.start()
-
-    current_process.cpu_affinity(pt_affinity)
-    os.environ['OMP_NUM_THREADS'] = str(len(pt_affinity))
-
-    msg = zf_optimizer.parent_conn.recv()
-    assert msg["type"] == "ready", "Optimizer process did not initialize correctly."
-
-    zf_optimizer.process_optimizer_established = True
+    _start_native_optimizer(zf_optimizer)
