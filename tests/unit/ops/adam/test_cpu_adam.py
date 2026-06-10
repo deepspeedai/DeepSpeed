@@ -236,6 +236,64 @@ class TestCPUAdamFusedMultiTensor(DistributedTest):
             ds_opt_adam.destroy_adam(opt_single)
             ds_opt_adam.destroy_adam(opt_multi)
 
+    @pytest.mark.parametrize('dtype', [torch.half, torch.bfloat16, torch.float], ids=["fp16", "bf16", "fp32"])
+    def test_serial_matches_parallel(self, dtype):
+        """The serial kernel path (parallel=False, used by ZenFlow's pinned thread pool)
+        must match the OpenMP path (parallel=True) bit-for-bit."""
+        if ("amd" in pytest.cpu_vendor) and (dtype == torch.half):
+            pytest.skip("cpu-adam with half precision not supported on AMD CPUs")
+
+        ds_opt_adam = CPUAdamBuilder().load()
+        lr, beta1, beta2, eps, weight_decay = 1e-3, 0.9, 0.999, 1e-8, 0.0
+        sizes = [64, 22, 1024, 1048576]
+
+        opt_par, opt_ser = 3, 4
+        ds_opt_adam.create_adam(opt_par, lr, beta1, beta2, eps, weight_decay, True, False)
+        ds_opt_adam.create_adam(opt_ser, lr, beta1, beta2, eps, weight_decay, True, False)
+
+        torch.manual_seed(0)
+        params_par = [torch.randn(n, dtype=dtype) for n in sizes]
+        params_ser = [p.clone() for p in params_par]
+        ea_par = [torch.zeros(n) for n in sizes]
+        eq_par = [torch.zeros(n) for n in sizes]
+        ea_ser = [torch.zeros(n) for n in sizes]
+        eq_ser = [torch.zeros(n) for n in sizes]
+
+        try:
+            for step in range(1, 4):
+                grads = [torch.randn(n, dtype=dtype) for n in sizes]
+                ds_opt_adam.adam_update_multi(opt_par,
+                                              step,
+                                              lr,
+                                              beta1,
+                                              beta2,
+                                              eps,
+                                              weight_decay,
+                                              True,
+                                              params_par, [g.clone() for g in grads],
+                                              ea_par,
+                                              eq_par, [],
+                                              parallel=True)
+                ds_opt_adam.adam_update_multi(opt_ser,
+                                              step,
+                                              lr,
+                                              beta1,
+                                              beta2,
+                                              eps,
+                                              weight_decay,
+                                              True,
+                                              params_ser, [g.clone() for g in grads],
+                                              ea_ser,
+                                              eq_ser, [],
+                                              parallel=False)
+                for i in range(len(sizes)):
+                    assert torch.equal(params_par[i], params_ser[i]), f"param mismatch at size {sizes[i]}"
+                    assert torch.equal(ea_par[i], ea_ser[i]), f"exp_avg mismatch at size {sizes[i]}"
+                    assert torch.equal(eq_par[i], eq_ser[i]), f"exp_avg_sq mismatch at size {sizes[i]}"
+        finally:
+            ds_opt_adam.destroy_adam(opt_par)
+            ds_opt_adam.destroy_adam(opt_ser)
+
     def test_multi_without_stale(self):
         """An empty stale list is allowed and simply skips the snapshot."""
         ds_opt_adam = CPUAdamBuilder().load()

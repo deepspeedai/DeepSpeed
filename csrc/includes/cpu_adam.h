@@ -19,7 +19,8 @@
                      ds_params_precision_t* grads,                           \
                      ds_state_precision_t* _exp_avg,                         \
                      ds_state_precision_t* _exp_avg_sq,                      \
-                     size_t _param_size);
+                     size_t _param_size,                                     \
+                     bool parallel = true);
 
 class Adam_Optimizer {
 public:
@@ -49,7 +50,8 @@ public:
                   ds_params_precision_t* grads,
                   ds_state_precision_t* _exp_avg,
                   ds_state_precision_t* _exp_avg_sq,
-                  size_t param_size);
+                  size_t param_size,
+                  bool parallel = true);
 #endif
     STEP(1)
     STEP(4)
@@ -115,7 +117,8 @@ void Adam_Optimizer::Step_AVX(size_t* rounded_size,
                               ds_params_precision_t* grads,
                               ds_state_precision_t* _exp_avg,
                               ds_state_precision_t* _exp_avg_sq,
-                              size_t _param_size)
+                              size_t _param_size,
+                              bool parallel)
 {
 #if !defined(__AVX512__)
     if (std::is_same_v<ds_params_precision_t, c10::BFloat16> ||
@@ -156,7 +159,7 @@ void Adam_Optimizer::Step_AVX(size_t* rounded_size,
         size_t copy_size = TILE;
         if ((t + TILE) > new_rounded_size) copy_size = new_rounded_size - t;
         size_t offset = copy_size + t;
-#pragma omp parallel for
+#pragma omp parallel for if (parallel)
         for (size_t i = t; i < offset; i += SIMD_WIDTH * span) {
             AVX_Data grad_4[span];
             simd_load<span>(grad_4, grads + i);
@@ -232,7 +235,8 @@ int ds_adam_step_multi(int optimizer_id,
                        std::vector<torch::Tensor>& grads,
                        std::vector<torch::Tensor>& exp_avgs,
                        std::vector<torch::Tensor>& exp_avg_sqs,
-                       std::vector<torch::Tensor>& stale_params);
+                       std::vector<torch::Tensor>& stale_params,
+                       bool parallel = true);
 
 int ds_adam_rollback(int optimizer_id,
                      size_t step,

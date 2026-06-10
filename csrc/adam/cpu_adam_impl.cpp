@@ -23,11 +23,12 @@ void Adam_Optimizer::Step_1(ds_params_precision_t* _params,
                             ds_params_precision_t* grads,
                             ds_state_precision_t* _exp_avg,
                             ds_state_precision_t* _exp_avg_sq,
-                            size_t _param_size)
+                            size_t _param_size,
+                            bool parallel)
 {
     size_t rounded_size = 0;
 #if defined(__AVX512__) or defined(__AVX256__)
-    Step_AVX<1>(&rounded_size, _params, grads, _exp_avg, _exp_avg_sq, _param_size);
+    Step_AVX<1>(&rounded_size, _params, grads, _exp_avg, _exp_avg_sq, _param_size, parallel);
 #endif
     if (_param_size > rounded_size) {
         float betta1_minus1 = 1 - _betta1;
@@ -40,7 +41,7 @@ void Adam_Optimizer::Step_1(ds_params_precision_t* _params,
             size_t copy_size = TILE;
             if ((t + TILE) > _param_size) copy_size = _param_size - t;
             size_t offset = copy_size + t;
-#pragma omp parallel for
+#pragma omp parallel for if (parallel)
             for (size_t k = t; k < offset; k++) {
                 float grad = (float)grads[k];
                 float param = (float)_params[k];
@@ -72,18 +73,20 @@ void Adam_Optimizer::Step_4(ds_params_precision_t* _params,
                             ds_params_precision_t* grads,
                             ds_state_precision_t* _exp_avg,
                             ds_state_precision_t* _exp_avg_sq,
-                            size_t _param_size)
+                            size_t _param_size,
+                            bool parallel)
 {
     size_t rounded_size = 0;
 #if defined(__AVX512__) or defined(__AVX256__)
-    Step_AVX<4>(&rounded_size, _params, grads, _exp_avg, _exp_avg_sq, _param_size);
+    Step_AVX<4>(&rounded_size, _params, grads, _exp_avg, _exp_avg_sq, _param_size, parallel);
 #endif
     if (_param_size > rounded_size)
         Step_1((_params + rounded_size),
                (grads + rounded_size),
                (_exp_avg + rounded_size),
                (_exp_avg_sq + rounded_size),
-               (_param_size - rounded_size));
+               (_param_size - rounded_size),
+               parallel);
 }
 
 int create_adam_optimizer(int optimizer_id,
@@ -131,18 +134,20 @@ void Adam_Optimizer::Step_8(ds_params_precision_t* _params,
                             ds_params_precision_t* grads,
                             ds_state_precision_t* _exp_avg,
                             ds_state_precision_t* _exp_avg_sq,
-                            size_t _param_size)
+                            size_t _param_size,
+                            bool parallel)
 {
     size_t rounded_size = 0;
 #if defined(__AVX512__) or defined(__AVX256__)
-    Step_AVX<8>(&rounded_size, _params, grads, _exp_avg, _exp_avg_sq, _param_size);
+    Step_AVX<8>(&rounded_size, _params, grads, _exp_avg, _exp_avg_sq, _param_size, parallel);
 #endif
     if (_param_size > rounded_size)
         Step_4((_params + rounded_size),
                (grads + rounded_size),
                (_exp_avg + rounded_size),
                (_exp_avg_sq + rounded_size),
-               (_param_size - rounded_size));
+               (_param_size - rounded_size),
+               parallel);
 }
 
 template <typename ds_params_precision_t, typename ds_state_precision_t>
@@ -151,17 +156,20 @@ void step_invoker(std::shared_ptr<Adam_Optimizer> opt,
                   void* grads,
                   void* _exp_avg,
                   void* _exp_avg_sq,
-                  size_t _param_size)
+                  size_t _param_size,
+                  bool parallel)
 {
     opt->Step_8((ds_params_precision_t*)(_params),
                 (ds_params_precision_t*)(grads),
                 (ds_state_precision_t*)(_exp_avg),
                 (ds_state_precision_t*)(_exp_avg_sq),
-                _param_size);
+                _param_size,
+                parallel);
 }
 
-std::map<std::tuple<c10::ScalarType, c10::ScalarType>,
-         std::function<void(std::shared_ptr<Adam_Optimizer>, void*, void*, void*, void*, size_t)>>
+std::map<
+    std::tuple<c10::ScalarType, c10::ScalarType>,
+    std::function<void(std::shared_ptr<Adam_Optimizer>, void*, void*, void*, void*, size_t, bool)>>
     invokers;
 
 // Fill map with template functions for each type
@@ -188,7 +196,8 @@ void invoke(std::shared_ptr<Adam_Optimizer> opt,
             torch::Tensor& grads,
             torch::Tensor& exp_avg,
             torch::Tensor& exp_avg_sq,
-            size_t param_size)
+            size_t param_size,
+            bool parallel = true)
 {
     c10::ScalarType params_type = at::typeMetaToScalarType(params.options().dtype());
     c10::ScalarType state_type = at::typeMetaToScalarType(exp_avg.options().dtype());
@@ -205,7 +214,8 @@ void invoke(std::shared_ptr<Adam_Optimizer> opt,
                grads.data_ptr(),
                exp_avg.data_ptr(),
                exp_avg_sq.data_ptr(),
-               param_size);
+               param_size,
+               parallel);
 }
 
 int ds_adam_step(int optimizer_id,
@@ -254,7 +264,8 @@ int ds_adam_step_multi(int optimizer_id,
                        std::vector<torch::Tensor>& grads,
                        std::vector<torch::Tensor>& exp_avgs,
                        std::vector<torch::Tensor>& exp_avg_sqs,
-                       std::vector<torch::Tensor>& stale_params)
+                       std::vector<torch::Tensor>& stale_params,
+                       bool parallel)
 {
     const size_t num_tensors = params.size();
     TORCH_CHECK(grads.size() == num_tensors && exp_avgs.size() == num_tensors &&
@@ -276,7 +287,7 @@ int ds_adam_step_multi(int optimizer_id,
         auto exp_avg_c = exp_avgs[i].contiguous();
         auto exp_avg_sq_c = exp_avg_sqs[i].contiguous();
 
-        invoke(opt, params_c, grads_c, exp_avg_c, exp_avg_sq_c, params_c.numel());
+        invoke(opt, params_c, grads_c, exp_avg_c, exp_avg_sq_c, params_c.numel(), parallel);
 
         if (has_stale) { stale_params[i].copy_(params_c); }
     }
