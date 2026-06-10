@@ -22,6 +22,7 @@
 #if defined(__linux__)
 #include <pthread.h>
 #include <sched.h>
+#include <semaphore.h>
 #endif
 
 using namespace std::string_literals;
@@ -537,6 +538,27 @@ struct ZenGroup {
     torch::Tensor stale;  // may be undefined -> stale snapshot skipped
 };
 
+#if defined(__linux__)
+// Control block placed in a shared-memory buffer (a shared torch tensor's storage) so the
+// main process and the optimizer process coordinate through two process-shared semaphores
+// instead of a pickling pipe. The main process writes a command + per-group hyperparameters
+// and posts cmd_ready; the worker runs the step and posts done. `done` is a counting
+// semaphore, so a skipped wait (the engine's post-warmup transition) is drained later.
+static constexpr int ZEN_MAX_GROUPS = 1024;
+enum { ZEN_CMD_STEP = 0, ZEN_CMD_EXIT = 1 };
+
+struct ZenControl {
+    sem_t cmd_ready;
+    sem_t done;
+    int cmd;
+    int now_state;
+    int64_t step;
+    int num_groups;
+    float hp[ZEN_MAX_GROUPS * 5];  // lr, beta1, beta2, eps, weight_decay per group
+    uint8_t bias_correction[ZEN_MAX_GROUPS];
+};
+#endif
+
 class ZenFlowAdam {
 public:
     ZenFlowAdam(int optimizer_id, std::vector<int> zf_affinity) : opt_id_(optimizer_id)
@@ -621,6 +643,31 @@ public:
         if (dispatcher_.joinable()) dispatcher_.join();
         pool_.reset();
     }
+
+#if defined(__linux__)
+    // Process-mode driver: run in the optimizer process, block on the shared-memory control
+    // block, and run each requested step on the pinned pool. Returns on the exit command.
+    void run_worker(void* control_ptr)
+    {
+        ZenControl* ctrl = reinterpret_cast<ZenControl*>(control_ptr);
+        while (true) {
+            while (sem_wait(&ctrl->cmd_ready) != 0) {}  // retry on EINTR
+            if (ctrl->cmd == ZEN_CMD_EXIT) break;
+            const int ng = ctrl->num_groups;
+            std::vector<ZenHP> hps(ng);
+            for (int g = 0; g < ng; ++g) {
+                hps[g] = {ctrl->hp[g * 5 + 0],
+                          ctrl->hp[g * 5 + 1],
+                          ctrl->hp[g * 5 + 2],
+                          ctrl->hp[g * 5 + 3],
+                          ctrl->hp[g * 5 + 4],
+                          (bool)ctrl->bias_correction[g]};
+            }
+            run_step(ctrl->now_state, ctrl->step, hps);
+            sem_post(&ctrl->done);
+        }
+    }
+#endif
 
 private:
     void dispatcher_main()
@@ -752,3 +799,62 @@ void zenflow_adam_destroy(int handle)
         s_zenflow_adams.erase(it);
     }
 }
+
+#if defined(__linux__)
+// Size (bytes) the shared control tensor must hold.
+int64_t zenflow_adam_ctrl_size() { return (int64_t)sizeof(ZenControl); }
+
+// Called once by the main process before spawning the optimizer process.
+void zenflow_adam_ctrl_init(uintptr_t control_ptr, int num_groups)
+{
+    TORCH_CHECK(num_groups <= ZEN_MAX_GROUPS, "ZenFlowAdam: too many param groups");
+    auto* ctrl = reinterpret_cast<ZenControl*>(control_ptr);
+    ctrl->num_groups = num_groups;
+    ctrl->cmd = ZEN_CMD_STEP;
+    sem_init(&ctrl->cmd_ready, /*pshared=*/1, 0);
+    sem_init(&ctrl->done, /*pshared=*/1, 0);
+}
+
+// Called in the optimizer process; blocks running steps until the exit command.
+void zenflow_adam_run_worker(int handle, uintptr_t control_ptr)
+{ s_zenflow_adams.at(handle)->run_worker(reinterpret_cast<void*>(control_ptr)); }
+
+void zenflow_adam_ctrl_submit(uintptr_t control_ptr,
+                              int now_state,
+                              int64_t step,
+                              std::vector<float> lr,
+                              std::vector<float> beta1,
+                              std::vector<float> beta2,
+                              std::vector<float> eps,
+                              std::vector<float> weight_decay,
+                              std::vector<uint8_t> bias_correction)
+{
+    auto* ctrl = reinterpret_cast<ZenControl*>(control_ptr);
+    const int ng = (int)lr.size();
+    for (int g = 0; g < ng; ++g) {
+        ctrl->hp[g * 5 + 0] = lr[g];
+        ctrl->hp[g * 5 + 1] = beta1[g];
+        ctrl->hp[g * 5 + 2] = beta2[g];
+        ctrl->hp[g * 5 + 3] = eps[g];
+        ctrl->hp[g * 5 + 4] = weight_decay[g];
+        ctrl->bias_correction[g] = bias_correction[g];
+    }
+    ctrl->now_state = now_state;
+    ctrl->step = step;
+    ctrl->cmd = ZEN_CMD_STEP;
+    sem_post(&ctrl->cmd_ready);  // release: hyperparameters above are visible to the worker
+}
+
+void zenflow_adam_ctrl_wait(uintptr_t control_ptr)
+{
+    auto* ctrl = reinterpret_cast<ZenControl*>(control_ptr);
+    while (sem_wait(&ctrl->done) != 0) {}  // retry on EINTR
+}
+
+void zenflow_adam_ctrl_exit(uintptr_t control_ptr)
+{
+    auto* ctrl = reinterpret_cast<ZenControl*>(control_ptr);
+    ctrl->cmd = ZEN_CMD_EXIT;
+    sem_post(&ctrl->cmd_ready);
+}
+#endif

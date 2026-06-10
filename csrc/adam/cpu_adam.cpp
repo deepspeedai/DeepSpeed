@@ -50,4 +50,27 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
           &zenflow_adam_destroy,
           "ZenFlowAdam destroy (C++)",
           pybind11::call_guard<pybind11::gil_scoped_release>());
+
+#if defined(__linux__)
+    // Cross-process driver (optimizer in a separate process, shared-memory semaphore control).
+    m.def(
+        "zenflow_adam_ctrl_size", &zenflow_adam_ctrl_size, "ZenFlowAdam control block size (C++)");
+    m.def("zenflow_adam_ctrl_init", &zenflow_adam_ctrl_init, "ZenFlowAdam control init (C++)");
+    m.def("zenflow_adam_run_worker",
+          &zenflow_adam_run_worker,
+          "ZenFlowAdam optimizer-process worker loop (C++)",
+          pybind11::call_guard<pybind11::gil_scoped_release>());
+    m.def("zenflow_adam_ctrl_submit",
+          &zenflow_adam_ctrl_submit,
+          "ZenFlowAdam cross-process submit (C++)",
+          pybind11::call_guard<pybind11::gil_scoped_release>());
+    m.def("zenflow_adam_ctrl_wait",
+          &zenflow_adam_ctrl_wait,
+          "ZenFlowAdam cross-process wait (C++)",
+          pybind11::call_guard<pybind11::gil_scoped_release>());
+    m.def("zenflow_adam_ctrl_exit",
+          &zenflow_adam_ctrl_exit,
+          "ZenFlowAdam cross-process exit (C++)",
+          pybind11::call_guard<pybind11::gil_scoped_release>());
+#endif
 }

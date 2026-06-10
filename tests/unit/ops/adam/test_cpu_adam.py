@@ -3,6 +3,8 @@
 
 # DeepSpeed Team
 
+import os
+import sys
 import torch
 import numpy as np
 import pytest
@@ -418,6 +420,77 @@ class TestZenFlowAdamNative(DistributedTest):
         finally:
             ds.zenflow_adam_destroy(handle)
             ds.destroy_adam(opt_id)
+
+
+def _zenflow_adam_proc_worker(param, g0, g1, ea0, ea1, eq0, eq1, stale, ctrl, ready, affinity):
+    op = CPUAdamBuilder().load()
+    op.create_adam(0, 1e-3, 0.9, 0.999, 1e-8, 0.0, True, False)
+    handle = op.zenflow_adam_create(0, affinity)
+    op.zenflow_adam_register_group(handle, param, g0, g1, ea0, ea1, eq0, eq1, stale)
+    ready.set()
+    op.zenflow_adam_run_worker(handle, ctrl.data_ptr())  # blocks until the exit command
+    op.zenflow_adam_destroy(handle)
+    op.destroy_adam(0)
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="cross-process ZenFlowAdam is Linux-only")
+def test_zenflow_adam_cross_process():
+    """The optimizer-process driver (shared-memory semaphore control + native worker, the
+    production path for ZenFlow stage 1/2 overlap) must match the fused reference bit-for-bit
+    with alternating double buffers. Run as a plain test, not DistributedTest, so the pytest
+    process (non-daemonic) can spawn the optimizer process."""
+    import torch.multiprocessing as mp
+
+    op = CPUAdamBuilder().load()
+    if not hasattr(op, "zenflow_adam_ctrl_size"):
+        pytest.skip("cross-process ZenFlowAdam not available in this build")
+
+    lr, beta1, beta2, eps, wd = 1e-3, 0.9, 0.999, 1e-8, 0.0
+    n = 100003  # non-SIMD-aligned, exercises the scalar tail
+    affinity = list(range(min(4, os.cpu_count() or 1)))
+
+    ctrl = torch.zeros(op.zenflow_adam_ctrl_size(), dtype=torch.uint8).share_memory_()
+    op.zenflow_adam_ctrl_init(ctrl.data_ptr(), 1)
+
+    torch.manual_seed(0)
+    param = torch.randn(n).share_memory_()
+    g = [torch.zeros(n).share_memory_(), torch.zeros(n).share_memory_()]
+    ea = [torch.zeros(n).share_memory_(), torch.zeros(n).share_memory_()]
+    eq = [torch.zeros(n).share_memory_(), torch.zeros(n).share_memory_()]
+    stale = torch.zeros(n).share_memory_()
+
+    op.create_adam(1, lr, beta1, beta2, eps, wd, True, False)
+    p_ref = param.clone()
+    ea_ref = [ea[0].clone(), ea[1].clone()]
+    eq_ref = [eq[0].clone(), eq[1].clone()]
+    st_ref = stale.clone()
+
+    ctx = mp.get_context("spawn")
+    ready = ctx.Event()
+    proc = ctx.Process(target=_zenflow_adam_proc_worker,
+                       args=(param, g[0], g[1], ea[0], ea[1], eq[0], eq[1], stale, ctrl, ready, affinity))
+    proc.start()
+    try:
+        assert ready.wait(timeout=60), "optimizer process did not start"
+        for step in range(1, 6):
+            now = step & 1
+            grad = torch.randn(n)
+            g[now].copy_(grad)
+            op.zenflow_adam_ctrl_submit(ctrl.data_ptr(), now, step, [lr], [beta1], [beta2], [eps], [wd], [1])
+            op.zenflow_adam_ctrl_wait(ctrl.data_ptr())
+            op.adam_update_multi(1, step, lr, beta1, beta2, eps, wd, True, [p_ref], [grad.clone()], [ea_ref[now]],
+                                 [eq_ref[now]], [st_ref])
+            assert torch.equal(param, p_ref), f"param mismatch step {step}"
+            assert torch.equal(ea[now], ea_ref[now]), f"exp_avg mismatch step {step}"
+            assert torch.equal(eq[now], eq_ref[now]), f"exp_avg_sq mismatch step {step}"
+            assert torch.equal(stale, st_ref), f"stale mismatch step {step}"
+        op.zenflow_adam_ctrl_exit(ctrl.data_ptr())
+        proc.join(timeout=10)
+    finally:
+        if proc.is_alive():
+            proc.terminate()
+            proc.join(timeout=5)
+        op.destroy_adam(1)
 
 
 class TestCPUAdamGPUError(DistributedTest):

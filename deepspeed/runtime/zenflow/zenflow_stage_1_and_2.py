@@ -675,7 +675,7 @@ class ZenFlowZeroOptimizerParallel(ZenFlowZeroOptimizer):
             return
 
         self.timers(OPTIMIZER_RECV_PARAMS_TIMER).start()
-        self.zf_cpu_adam.wait_overlap_step()
+        self.zf_op.zenflow_adam_ctrl_wait(self.zf_ctrl.data_ptr())
         self.timers(OPTIMIZER_RECV_PARAMS_TIMER).stop()
 
         for i, group in enumerate(self.bit16_groups):
@@ -714,22 +714,21 @@ class ZenFlowZeroOptimizerParallel(ZenFlowZeroOptimizer):
         if not self.process_optimizer_established:
             self.start_optimizer_process()
 
-        group_infos = []
+        lr, beta1, beta2, eps, weight_decay, bias_correction = [], [], [], [], [], []
         for group_no, group in enumerate(self.bit16_groups):
             single_grad_partition = self.single_partition_of_fp32_groups[group_no].overlap_grad[now_state]
             self.unscale_and_clip_grads([single_grad_partition], scaled_global_grad_norm)
 
-            group_info = {
-                "lr": self.optimizer.param_groups[group_no]["lr"],
-                "betas": self.optimizer.param_groups[group_no]["betas"],
-                "eps": self.optimizer.param_groups[group_no]["eps"],
-                "weight_decay": self.optimizer.param_groups[group_no]["weight_decay"],
-                "bias_correction": self.optimizer.param_groups[group_no]["bias_correction"],
-            }
+            pg = self.optimizer.param_groups[group_no]
+            lr.append(pg["lr"])
+            beta1.append(pg["betas"][0])
+            beta2.append(pg["betas"][1])
+            eps.append(pg["eps"])
+            weight_decay.append(pg["weight_decay"])
+            bias_correction.append(1 if pg["bias_correction"] else 0)
 
-            group_infos.append(group_info)
-
-        self.zf_cpu_adam.submit_overlap_step(now_state, self.micro_step + 1, group_infos)
+        self.zf_op.zenflow_adam_ctrl_submit(self.zf_ctrl.data_ptr(), now_state, self.micro_step + 1, lr, beta1, beta2,
+                                            eps, weight_decay, bias_correction)
 
     def step(self, closure=None):
         """

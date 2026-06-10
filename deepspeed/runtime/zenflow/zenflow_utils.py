@@ -140,31 +140,73 @@ def _compute_zf_pt_affinity(zf_optimizer):
     return zf_affinity, pt_affinity
 
 
-def _start_native_optimizer(zf_optimizer):
-    """In-process overlapped optimizer (ZeRO stage 1/2): a native ZenFlowAdam handle with
-    a background dispatcher and a pinned thread pool, replacing the optimizer subprocess.
-    Tensors are shared directly (same process), so there is no pipe/shared-memory plumbing.
-    The main thread is then confined to the training cores so it does not contend with the
-    optimizer's pinned pool."""
-    from deepspeed.ops.adam import ZenFlowCPUAdam
+def zenflow_optimizer_process_native(groups, ctrl, ready, zf_affinity, adamw_mode):
+    """ZeRO stage 1/2 optimizer process. Builds the native ZenFlowAdam pinned pool and runs
+    the worker loop driven by the shared-memory control block (no pickling pipe). The Adam
+    state is allocated here, in this process pinned to the optimizer cores, so it is
+    NUMA-local to the pool -- which is what makes a separate process worthwhile over an
+    in-process thread for large, memory-bandwidth-bound updates."""
+    disable_accelerator()
+    current_process = psutil.Process()
+    current_process.cpu_affinity(zf_affinity)
+    os.environ['OMP_NUM_THREADS'] = str(len(zf_affinity))
 
-    # Shallow-copy the param groups so building the in-process optimizer does not mutate the
-    # client optimizer's groups; the parameter tensors themselves stay shared.
-    param_groups_data = [dict(group) for group in zf_optimizer.optimizer.param_groups]
-    for group in param_groups_data:
-        for param in group["params"]:
-            if not hasattr(param, "stale_param"):
-                param.stale_param = torch.zeros_like(param.data, dtype=param.dtype, device=param.device)
+    from deepspeed.ops.op_builder import CPUAdamBuilder
+    op = CPUAdamBuilder().load()
+    op.create_adam(0, 1e-3, 0.9, 0.999, 1e-8, 0.0, adamw_mode, False)
+    handle = op.zenflow_adam_create(0, list(zf_affinity))
+    for param, overlap_grad0, overlap_grad1, stale in groups:
+        exp_avg0 = torch.zeros_like(param)
+        exp_avg1 = torch.zeros_like(param)
+        exp_avg_sq0 = torch.zeros_like(param)
+        exp_avg_sq1 = torch.zeros_like(param)
+        op.zenflow_adam_register_group(handle, param, overlap_grad0, overlap_grad1, exp_avg0, exp_avg1, exp_avg_sq0,
+                                       exp_avg_sq1, stale)
+    ready.set()
+    op.zenflow_adam_run_worker(handle, ctrl.data_ptr())
+    op.zenflow_adam_destroy(handle)
+    op.destroy_adam(0)
+
+
+def _start_native_optimizer(zf_optimizer):
+    """ZeRO stage 1/2 overlapped optimizer: run the native ZenFlowAdam in a separate process,
+    coordinated through a shared-memory semaphore control block instead of a pickling pipe.
+    Keeps the isolation of a separate process (NUMA-local state, no contention with the
+    training thread) while removing the per-step Python/IPC overhead of the old subprocess."""
+    from multiprocessing import get_context
+    from deepspeed.ops.op_builder import CPUAdamBuilder
+
+    op = CPUAdamBuilder().load()
+    zf_optimizer.zf_op = op
+
+    # Share the tensors the optimizer process reads/writes; the Adam state stays process-local.
+    groups = []
+    for group in zf_optimizer.optimizer.param_groups:
+        param = group["params"][0]
+        param.data.share_memory_()
+        if not hasattr(param, "stale_param"):
+            param.stale_param = torch.zeros_like(param.data, dtype=param.dtype, device=param.device)
+        param.stale_param.data.share_memory_()
+        param.overlap_grad[0].data.share_memory_()
+        param.overlap_grad[1].data.share_memory_()
+        groups.append((param.data, param.overlap_grad[0].data, param.overlap_grad[1].data, param.stale_param.data))
+
+    ctrl = torch.zeros(op.zenflow_adam_ctrl_size(), dtype=torch.uint8).share_memory_()
+    op.zenflow_adam_ctrl_init(ctrl.data_ptr(), len(groups))
+    zf_optimizer.zf_ctrl = ctrl
 
     zf_affinity, pt_affinity = _compute_zf_pt_affinity(zf_optimizer)
 
-    optimizer = ZenFlowCPUAdam(param_groups_data, overlap_step=True)
-    optimizer.init_native_overlap(zf_affinity)
-    zf_optimizer.zf_cpu_adam = optimizer
+    ctx = get_context("spawn")
+    ready = ctx.Event()
+    proc = ctx.Process(target=zenflow_optimizer_process_native, args=(groups, ctrl, ready, zf_affinity, True))
+    proc.daemon = True
+    proc.start()
+    ready.wait()
+    zf_optimizer.process = proc
 
     psutil.Process().cpu_affinity(pt_affinity)
     os.environ['OMP_NUM_THREADS'] = str(len(pt_affinity))
-    torch.set_num_threads(len(pt_affinity))
 
     zf_optimizer.process_optimizer_established = True
 

@@ -11,6 +11,7 @@
 #include <stdio.h>
 #include <torch/extension.h>
 #include <cassert>
+#include <cstdint>
 #include "simd.h"
 
 #define STEP(SPAN)                                                           \
@@ -280,3 +281,22 @@ void zenflow_adam_submit(int handle,
 void zenflow_adam_wait(int handle);
 
 void zenflow_adam_destroy(int handle);
+
+#if defined(__linux__)
+// Cross-process driver: the optimizer runs in a separate process and coordinates with the
+// main process through two process-shared semaphores in a shared-memory control block.
+int64_t zenflow_adam_ctrl_size();
+void zenflow_adam_ctrl_init(uintptr_t control_ptr, int num_groups);
+void zenflow_adam_run_worker(int handle, uintptr_t control_ptr);
+void zenflow_adam_ctrl_submit(uintptr_t control_ptr,
+                              int now_state,
+                              int64_t step,
+                              std::vector<float> lr,
+                              std::vector<float> beta1,
+                              std::vector<float> beta2,
+                              std::vector<float> eps,
+                              std::vector<float> weight_decay,
+                              std::vector<uint8_t> bias_correction);
+void zenflow_adam_ctrl_wait(uintptr_t control_ptr);
+void zenflow_adam_ctrl_exit(uintptr_t control_ptr);
+#endif

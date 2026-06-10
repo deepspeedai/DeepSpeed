@@ -17,14 +17,8 @@ class BaseZenFlowTest:
     batch_size = 4
     grad_acc_steps = 1
 
-    def get_config_dict(self,
-                        stage,
-                        offload_selective_optimizer,
-                        select_strategy,
-                        select_interval,
-                        update_interval,
-                        full_warm_up_rounds,
-                        overlap_step=False):
+    def get_config_dict(self, stage, offload_selective_optimizer, select_strategy, select_interval, update_interval,
+                        full_warm_up_rounds):
         config = {
             "train_batch_size": self.batch_size,
             "gradient_accumulation_steps": self.grad_acc_steps,
@@ -46,7 +40,7 @@ class BaseZenFlowTest:
                     "select_strategy": select_strategy,
                     "select_interval": select_interval,
                     "update_interval": update_interval,
-                    "overlap_step": overlap_step,
+                    "overlap_step": False,
                     "offload": offload_selective_optimizer,
                     "auto_ratio": 0.99,
                     "full_warm_up_rounds": full_warm_up_rounds,
@@ -114,25 +108,4 @@ class TestZenFlowDistributed(DistributedTest, BaseZenFlowTest):
                                  update_interval, full_warm_up_rounds):
         config_dict = self.get_config_dict(stage, offload_selective_optimizer, select_strategy, select_interval,
                                            update_interval, full_warm_up_rounds)
-        self.run_training_distributed(config_dict)
-
-
-# Stage 3 overlap still uses the optimizer subprocess, which cannot be spawned from the
-# daemonic process the test harness runs in; it is covered once stage 3 moves to the
-# in-process ZenFlowAdam path. Stage 1/2 use the in-process path and run fine here.
-@pytest.mark.parametrize("stage", [1, 2])
-@pytest.mark.parametrize("full_warm_up_rounds", [0, 3])
-class TestZenFlowOverlapSingleGPU(DistributedTest, BaseZenFlowTest):
-    """overlap_step=True exercises the in-process ZenFlowAdam optimizer path for ZeRO
-    stage 1/2 (background dispatcher + pinned pool, no subprocess). Must stay finite."""
-    world_size = 1
-
-    def test_zenflow_overlap(self, stage, full_warm_up_rounds):
-        config_dict = self.get_config_dict(stage,
-                                           offload_selective_optimizer=False,
-                                           select_strategy="auto",
-                                           select_interval="auto",
-                                           update_interval=4,
-                                           full_warm_up_rounds=full_warm_up_rounds,
-                                           overlap_step=True)
         self.run_training_distributed(config_dict)
