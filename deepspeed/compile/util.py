@@ -69,7 +69,7 @@ def add_pre_backward_hook(hook):
 def deepcompile_backward_prologue(is_gradient_accumulation_boundary):
 
     for hook in pre_backward_hooks:
-        hook()
+        hook(is_gradient_accumulation_boundary)
 
     dc = get_deepcompile_handle()
     dc.start_backward(is_gradient_accumulation_boundary)
