@@ -560,7 +560,9 @@ struct ZenControl {
 class ZenFlowAdam {
 public:
     ZenFlowAdam(int optimizer_id, std::vector<int> zf_affinity) : opt_id_(optimizer_id)
-    { pool_ = std::make_unique<PinnedThreadPool>(zf_affinity); }
+    {
+        pool_ = std::make_unique<PinnedThreadPool>(zf_affinity);
+    }
 
     ~ZenFlowAdam() = default;
 
@@ -705,7 +707,9 @@ void zenflow_adam_ctrl_init(uintptr_t control_ptr, int num_groups)
 
 // Called in the optimizer process; blocks running steps until the exit command.
 void zenflow_adam_run_worker(int handle, uintptr_t control_ptr)
-{ s_zenflow_adams.at(handle)->run_worker(reinterpret_cast<void*>(control_ptr)); }
+{
+    s_zenflow_adams.at(handle)->run_worker(reinterpret_cast<void*>(control_ptr));
+}
 
 void zenflow_adam_submit(uintptr_t control_ptr,
                          int now_state,
