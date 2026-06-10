@@ -32,27 +32,21 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
     m.def("create_adam", &create_adam_optimizer, "DeepSpeed CPU Adam (C++)");
     m.def("destroy_adam", &destroy_adam_optimizer, "DeepSpeed CPU Adam destroy (C++)");
 
-    // ZenFlowAdam: in-process overlapped CPU Adam. wait/submit/destroy release the GIL
-    // so the optimizer thread overlaps the Python training thread.
+    // ZenFlowAdam: the native CPU Adam backing ZenFlow's overlapped optimizer step. create /
+    // register_group / destroy set up the handle-indexed pinned pool (used by the worker process).
     m.def("zenflow_adam_create", &zenflow_adam_create, "ZenFlowAdam create (C++)");
     m.def("zenflow_adam_register_group",
           &zenflow_adam_register_group,
           "ZenFlowAdam register a parameter group (C++)");
-    m.def("zenflow_adam_submit",
-          &zenflow_adam_submit,
-          "ZenFlowAdam submit an overlapped step (C++)",
-          pybind11::call_guard<pybind11::gil_scoped_release>());
-    m.def("zenflow_adam_wait",
-          &zenflow_adam_wait,
-          "ZenFlowAdam wait for a submitted step (C++)",
-          pybind11::call_guard<pybind11::gil_scoped_release>());
     m.def("zenflow_adam_destroy",
           &zenflow_adam_destroy,
           "ZenFlowAdam destroy (C++)",
           pybind11::call_guard<pybind11::gil_scoped_release>());
 
 #if defined(__linux__)
-    // Cross-process driver (optimizer in a separate process, shared-memory semaphore control).
+    // The optimizer runs in a separate process, coordinated through a shared-memory semaphore
+    // control block. submit/wait/run_worker release the GIL so the optimizer process overlaps
+    // the Python training thread.
     m.def(
         "zenflow_adam_ctrl_size", &zenflow_adam_ctrl_size, "ZenFlowAdam control block size (C++)");
     m.def("zenflow_adam_ctrl_init", &zenflow_adam_ctrl_init, "ZenFlowAdam control init (C++)");
@@ -60,13 +54,13 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
           &zenflow_adam_run_worker,
           "ZenFlowAdam optimizer-process worker loop (C++)",
           pybind11::call_guard<pybind11::gil_scoped_release>());
-    m.def("zenflow_adam_ctrl_submit",
-          &zenflow_adam_ctrl_submit,
-          "ZenFlowAdam cross-process submit (C++)",
+    m.def("zenflow_adam_submit",
+          &zenflow_adam_submit,
+          "ZenFlowAdam submit an overlapped step (C++)",
           pybind11::call_guard<pybind11::gil_scoped_release>());
-    m.def("zenflow_adam_ctrl_wait",
-          &zenflow_adam_ctrl_wait,
-          "ZenFlowAdam cross-process wait (C++)",
+    m.def("zenflow_adam_wait",
+          &zenflow_adam_wait,
+          "ZenFlowAdam wait for a submitted step (C++)",
           pybind11::call_guard<pybind11::gil_scoped_release>());
     m.def("zenflow_adam_ctrl_exit",
           &zenflow_adam_ctrl_exit,

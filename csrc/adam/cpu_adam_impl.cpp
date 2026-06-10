@@ -411,15 +411,13 @@ int destroy_adam_optimizer(int optimizer_id)
 }
 
 // ---------------------------------------------------------------------------
-// ZenFlowAdam: in-process, GIL-released CPU Adam for ZenFlow's overlapped step.
+// ZenFlowAdam: the native CPU Adam that backs ZenFlow's overlapped optimizer step.
 //
-// Replaces the multiprocessing optimizer subprocess. The optimizer step runs on
-// a background dispatcher thread; the heavy per-element math is fanned out to a
-// pool of worker threads pinned to ZenFlow's dedicated cores, each running its
-// element slice through the serial (parallel=false) kernel. Because the workers
-// hold no GIL while computing, the Python training thread keeps running. Since
-// everything lives in one process the optimizer touches the same tensors the
-// main thread holds -- no shared memory, pipe, or per-step rebinding.
+// The optimizer runs in a dedicated process (see zenflow_utils.start_optimizer_process):
+// run_worker() blocks on a shared-memory control block and, for each requested step, fans
+// the heavy per-element math out to a pool of worker threads pinned to ZenFlow's dedicated
+// cores, each running its element slice through the serial (parallel=false) kernel. The
+// Adam state lives in that process, NUMA-local to the pool.
 // ---------------------------------------------------------------------------
 
 // A persistent pool of threads pinned to a fixed core set. parallel_for() splits
@@ -562,12 +560,9 @@ struct ZenControl {
 class ZenFlowAdam {
 public:
     ZenFlowAdam(int optimizer_id, std::vector<int> zf_affinity) : opt_id_(optimizer_id)
-    {
-        pool_ = std::make_unique<PinnedThreadPool>(zf_affinity);
-        dispatcher_ = std::thread(&ZenFlowAdam::dispatcher_main, this);
-    }
+    { pool_ = std::make_unique<PinnedThreadPool>(zf_affinity); }
 
-    ~ZenFlowAdam() { shutdown(); }
+    ~ZenFlowAdam() = default;
 
     void register_group(torch::Tensor param,
                         torch::Tensor grad0,
@@ -589,59 +584,6 @@ public:
         g.exp_avg_sq[1] = exp_avg_sq1;
         g.stale = stale;
         groups_.push_back(std::move(g));
-    }
-
-    // Hand a step to the dispatcher and return immediately (non-blocking).
-    void submit_step(int now_state,
-                     int64_t step,
-                     std::vector<float> lr,
-                     std::vector<float> beta1,
-                     std::vector<float> beta2,
-                     std::vector<float> eps,
-                     std::vector<float> weight_decay,
-                     std::vector<uint8_t> bias_correction)
-    {
-        const size_t ng = groups_.size();
-        TORCH_CHECK(lr.size() == ng && beta1.size() == ng && beta2.size() == ng &&
-                        eps.size() == ng && weight_decay.size() == ng &&
-                        bias_correction.size() == ng,
-                    "ZenFlowAdam::submit_step: hyperparameter length must match group count");
-        std::vector<ZenHP> hps(ng);
-        for (size_t g = 0; g < ng; ++g) {
-            hps[g] = {lr[g], beta1[g], beta2[g], eps[g], weight_decay[g], (bool)bias_correction[g]};
-        }
-        {
-            std::lock_guard<std::mutex> lk(mtx_);
-            TORCH_CHECK(!has_work_,
-                        "ZenFlowAdam::submit_step called before previous step was consumed");
-            now_state_ = now_state;
-            step_ = step;
-            hps_ = std::move(hps);
-            has_work_ = true;
-        }
-        cv_.notify_all();
-    }
-
-    // Block until one submitted step has completed. Uses a completion counter so a
-    // skipped wait (the engine's first post-warmup round) does not desync: each
-    // wait consumes exactly one completion, like draining one message from the pipe.
-    void wait_step()
-    {
-        std::unique_lock<std::mutex> lk(mtx_);
-        cv_.wait(lk, [this] { return completed_ > waited_; });
-        ++waited_;
-    }
-
-    void shutdown()
-    {
-        {
-            std::lock_guard<std::mutex> lk(mtx_);
-            if (exit_) return;
-            exit_ = true;
-        }
-        cv_.notify_all();
-        if (dispatcher_.joinable()) dispatcher_.join();
-        pool_.reset();
     }
 
 #if defined(__linux__)
@@ -670,30 +612,6 @@ public:
 #endif
 
 private:
-    void dispatcher_main()
-    {
-        while (true) {
-            int now_state;
-            int64_t step;
-            std::vector<ZenHP> hps;
-            {
-                std::unique_lock<std::mutex> lk(mtx_);
-                cv_.wait(lk, [this] { return has_work_ || exit_; });
-                if (exit_) return;
-                now_state = now_state_;
-                step = step_;
-                hps = hps_;
-                has_work_ = false;
-            }
-            run_step(now_state, step, hps);
-            {
-                std::lock_guard<std::mutex> lk(mtx_);
-                ++completed_;
-            }
-            cv_.notify_all();
-        }
-    }
-
     void run_step(int now_state, int64_t step, const std::vector<ZenHP>& hps)
     {
         auto opt = std::static_pointer_cast<Adam_Optimizer>(s_optimizers[opt_id_]);
@@ -736,17 +654,6 @@ private:
     int opt_id_;
     std::vector<ZenGroup> groups_;
     std::unique_ptr<PinnedThreadPool> pool_;
-    std::thread dispatcher_;
-
-    std::mutex mtx_;
-    std::condition_variable cv_;
-    bool has_work_ = false;
-    bool exit_ = false;
-    int now_state_ = 0;
-    int64_t step_ = 0;
-    std::vector<ZenHP> hps_;
-    uint64_t completed_ = 0;
-    uint64_t waited_ = 0;
 };
 
 // Handle-indexed registry, mirroring s_optimizers, so the Python side refers to a
@@ -775,29 +682,10 @@ void zenflow_adam_register_group(int handle,
         param, grad0, grad1, exp_avg0, exp_avg1, exp_avg_sq0, exp_avg_sq1, stale);
 }
 
-void zenflow_adam_submit(int handle,
-                         int now_state,
-                         int64_t step,
-                         std::vector<float> lr,
-                         std::vector<float> beta1,
-                         std::vector<float> beta2,
-                         std::vector<float> eps,
-                         std::vector<float> weight_decay,
-                         std::vector<uint8_t> bias_correction)
-{
-    s_zenflow_adams.at(handle)->submit_step(
-        now_state, step, lr, beta1, beta2, eps, weight_decay, bias_correction);
-}
-
-void zenflow_adam_wait(int handle) { s_zenflow_adams.at(handle)->wait_step(); }
-
 void zenflow_adam_destroy(int handle)
 {
-    auto it = s_zenflow_adams.find(handle);
-    if (it != s_zenflow_adams.end()) {
-        it->second->shutdown();
-        s_zenflow_adams.erase(it);
-    }
+    // Erasing the unique_ptr runs ~ZenFlowAdam, which tears down the pinned pool.
+    s_zenflow_adams.erase(handle);
 }
 
 #if defined(__linux__)
@@ -819,15 +707,15 @@ void zenflow_adam_ctrl_init(uintptr_t control_ptr, int num_groups)
 void zenflow_adam_run_worker(int handle, uintptr_t control_ptr)
 { s_zenflow_adams.at(handle)->run_worker(reinterpret_cast<void*>(control_ptr)); }
 
-void zenflow_adam_ctrl_submit(uintptr_t control_ptr,
-                              int now_state,
-                              int64_t step,
-                              std::vector<float> lr,
-                              std::vector<float> beta1,
-                              std::vector<float> beta2,
-                              std::vector<float> eps,
-                              std::vector<float> weight_decay,
-                              std::vector<uint8_t> bias_correction)
+void zenflow_adam_submit(uintptr_t control_ptr,
+                         int now_state,
+                         int64_t step,
+                         std::vector<float> lr,
+                         std::vector<float> beta1,
+                         std::vector<float> beta2,
+                         std::vector<float> eps,
+                         std::vector<float> weight_decay,
+                         std::vector<uint8_t> bias_correction)
 {
     auto* ctrl = reinterpret_cast<ZenControl*>(control_ptr);
     const int ng = (int)lr.size();
@@ -845,7 +733,7 @@ void zenflow_adam_ctrl_submit(uintptr_t control_ptr,
     sem_post(&ctrl->cmd_ready);  // release: hyperparameters above are visible to the worker
 }
 
-void zenflow_adam_ctrl_wait(uintptr_t control_ptr)
+void zenflow_adam_wait(uintptr_t control_ptr)
 {
     auto* ctrl = reinterpret_cast<ZenControl*>(control_ptr);
     while (sem_wait(&ctrl->done) != 0) {}  // retry on EINTR

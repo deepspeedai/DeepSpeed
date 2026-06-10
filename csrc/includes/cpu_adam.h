@@ -254,8 +254,9 @@ int ds_adam_rollback(int optimizer_id,
 
 int destroy_adam_optimizer(int optimizer_id);
 
-// ZenFlowAdam: in-process, GIL-released overlapped CPU Adam for ZenFlow. The handle
-// indexes a background dispatcher + pinned thread pool that drives the step.
+// ZenFlowAdam: the native CPU Adam backing ZenFlow's overlapped optimizer step. The handle
+// indexes a pinned thread pool; the optimizer runs in a dedicated process (run_worker) and
+// is driven from the main process through the shared-memory control block below.
 int zenflow_adam_create(int optimizer_id, std::vector<int> zf_affinity);
 
 void zenflow_adam_register_group(int handle,
@@ -268,7 +269,17 @@ void zenflow_adam_register_group(int handle,
                                  torch::Tensor exp_avg_sq1,
                                  torch::Tensor stale);
 
-void zenflow_adam_submit(int handle,
+void zenflow_adam_destroy(int handle);
+
+#if defined(__linux__)
+// The optimizer runs in a separate process and coordinates with the main process through two
+// process-shared semaphores in a shared-memory control block. ctrl_size/ctrl_init/ctrl_exit
+// set it up and tear it down; the worker process loops in run_worker; the main process drives
+// each step with submit (non-blocking) / wait.
+int64_t zenflow_adam_ctrl_size();
+void zenflow_adam_ctrl_init(uintptr_t control_ptr, int num_groups);
+void zenflow_adam_run_worker(int handle, uintptr_t control_ptr);
+void zenflow_adam_submit(uintptr_t control_ptr,
                          int now_state,
                          int64_t step,
                          std::vector<float> lr,
@@ -277,26 +288,6 @@ void zenflow_adam_submit(int handle,
                          std::vector<float> eps,
                          std::vector<float> weight_decay,
                          std::vector<uint8_t> bias_correction);
-
-void zenflow_adam_wait(int handle);
-
-void zenflow_adam_destroy(int handle);
-
-#if defined(__linux__)
-// Cross-process driver: the optimizer runs in a separate process and coordinates with the
-// main process through two process-shared semaphores in a shared-memory control block.
-int64_t zenflow_adam_ctrl_size();
-void zenflow_adam_ctrl_init(uintptr_t control_ptr, int num_groups);
-void zenflow_adam_run_worker(int handle, uintptr_t control_ptr);
-void zenflow_adam_ctrl_submit(uintptr_t control_ptr,
-                              int now_state,
-                              int64_t step,
-                              std::vector<float> lr,
-                              std::vector<float> beta1,
-                              std::vector<float> beta2,
-                              std::vector<float> eps,
-                              std::vector<float> weight_decay,
-                              std::vector<uint8_t> bias_correction);
-void zenflow_adam_ctrl_wait(uintptr_t control_ptr);
+void zenflow_adam_wait(uintptr_t control_ptr);
 void zenflow_adam_ctrl_exit(uintptr_t control_ptr);
 #endif

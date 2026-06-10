@@ -554,9 +554,8 @@ def zenflow_cpu_optimizer_overlap_step(optimizer_z3, now_state, scaled_global_gr
         weight_decay.append(pg["weight_decay"])
         bias_correction.append(1 if pg["bias_correction"] else 0)
 
-    optimizer_z3.zf_op.zenflow_adam_ctrl_submit(optimizer_z3.zf_ctrl.data_ptr(), now_state,
-                                                optimizer_z3.micro_step + 1, lr, beta1, beta2, eps, weight_decay,
-                                                bias_correction)
+    optimizer_z3.zf_op.zenflow_adam_submit(optimizer_z3.zf_ctrl.data_ptr(), now_state, optimizer_z3.micro_step + 1, lr,
+                                           beta1, beta2, eps, weight_decay, bias_correction)
 
 
 def wait_last_update_and_copy(optimizer_z3, timer_names):
@@ -568,7 +567,7 @@ def wait_last_update_and_copy(optimizer_z3, timer_names):
         optimizer_z3.first_update_round_after_warmup = False
         return
 
-    optimizer_z3.zf_op.zenflow_adam_ctrl_wait(optimizer_z3.zf_ctrl.data_ptr())
+    optimizer_z3.zf_op.zenflow_adam_wait(optimizer_z3.zf_ctrl.data_ptr())
 
     for sub_group_id, group in enumerate(optimizer_z3.fp16_groups):
         if optimizer_z3.fp16_partitioned_groups_flat[sub_group_id] is not None:

@@ -98,7 +98,7 @@ def _compute_zf_pt_affinity(zf_optimizer):
     return zf_affinity, pt_affinity
 
 
-def zenflow_optimizer_process_native(groups, ctrl, ready, zf_affinity, adamw_mode):
+def zenflow_optimizer_process(groups, ctrl, ready, zf_affinity, adamw_mode):
     """ZenFlow overlapped optimizer process (ZeRO stage 1/2/3). Builds the native ZenFlowAdam
     pinned pool and runs the worker loop driven by the shared-memory control block (no pickling
     pipe). The Adam state is allocated here, in this process pinned to the optimizer cores, so
@@ -126,12 +126,11 @@ def zenflow_optimizer_process_native(groups, ctrl, ready, zf_affinity, adamw_mod
     op.destroy_adam(0)
 
 
-def _start_native_optimizer(zf_optimizer):
-    """ZenFlow overlapped optimizer (ZeRO stage 1/2/3): run the native ZenFlowAdam in a
-    separate process, coordinated through a shared-memory semaphore control block instead of a
-    pickling pipe. Keeps the isolation of a separate process (NUMA-local state, no contention
-    with the training thread) while removing the per-step Python/IPC overhead of the old
-    subprocess."""
+def start_optimizer_process(zf_optimizer):
+    """Start ZenFlow's overlapped optimizer (ZeRO stage 1/2/3) in a dedicated process,
+    coordinated through a shared-memory semaphore control block. A separate process keeps the
+    Adam state NUMA-local to the optimizer cores and free of contention with the training
+    thread, while the native control block avoids per-step Python/IPC overhead."""
     from multiprocessing import get_context
     from deepspeed.ops.op_builder import CPUAdamBuilder
 
@@ -164,7 +163,7 @@ def _start_native_optimizer(zf_optimizer):
 
     ctx = get_context("spawn")
     ready = ctx.Event()
-    proc = ctx.Process(target=zenflow_optimizer_process_native, args=(groups, ctrl, ready, zf_affinity, True))
+    proc = ctx.Process(target=zenflow_optimizer_process, args=(groups, ctrl, ready, zf_affinity, True))
     proc.daemon = True
     proc.start()
     # Wait for the optimizer process to finish building its pool and registering tensors.
@@ -180,7 +179,3 @@ def _start_native_optimizer(zf_optimizer):
     os.environ['OMP_NUM_THREADS'] = str(len(pt_affinity))
 
     zf_optimizer.process_optimizer_established = True
-
-
-def start_optimizer_process(zf_optimizer):
-    _start_native_optimizer(zf_optimizer)
