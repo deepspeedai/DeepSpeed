@@ -107,7 +107,73 @@ def all_tensors_equal(tensor_list):
     return True
 
 
+def _compute_zf_pt_affinity(zf_optimizer):
+    """Split this rank's cores into a ZenFlow-optimizer set and a training (PyTorch) set.
+    When every rank reports the same affinity the launcher did not bind workers, so do a
+    soft per-rank bind first, then carve off pt_reserved_cores_perc for training."""
+    curr_rank = dist.get_rank()
+    total_rank = dist.get_world_size()
+
+    current_affinity = psutil.Process().cpu_affinity()
+    all_affinities = [
+        torch.zeros(len(current_affinity),
+                    dtype=type(current_affinity[0]),
+                    device=get_accelerator().current_device_name()) for _ in range(total_rank)
+    ]
+    dist.all_gather(
+        all_affinities,
+        torch.tensor(current_affinity, dtype=type(current_affinity[0]),
+                     device=get_accelerator().current_device_name()))
+    if all_tensors_equal(all_affinities):
+        num_phy_cores = psutil.cpu_count(logical=False)
+        available_phy_cores = [i for i in current_affinity if i < num_phy_cores]
+        cores_per_rank = len(available_phy_cores) // total_rank
+        current_affinity = available_phy_cores[curr_rank * cores_per_rank:(curr_rank + 1) * cores_per_rank]
+
+    pt_num_cores = math.ceil(zf_optimizer.pt_reserved_cores_perc * len(current_affinity))
+    if pt_num_cores > 0 and pt_num_cores < len(current_affinity):
+        zf_affinity = current_affinity[pt_num_cores:]
+        pt_affinity = current_affinity[:pt_num_cores]
+    else:
+        zf_affinity = current_affinity
+        pt_affinity = current_affinity
+    return zf_affinity, pt_affinity
+
+
+def _start_native_optimizer(zf_optimizer):
+    """In-process overlapped optimizer (ZeRO stage 1/2): a native ZenFlowAdam handle with
+    a background dispatcher and a pinned thread pool, replacing the optimizer subprocess.
+    Tensors are shared directly (same process), so there is no pipe/shared-memory plumbing.
+    The main thread is then confined to the training cores so it does not contend with the
+    optimizer's pinned pool."""
+    from deepspeed.ops.adam import ZenFlowCPUAdam
+
+    # Shallow-copy the param groups so building the in-process optimizer does not mutate the
+    # client optimizer's groups; the parameter tensors themselves stay shared.
+    param_groups_data = [dict(group) for group in zf_optimizer.optimizer.param_groups]
+    for group in param_groups_data:
+        for param in group["params"]:
+            if not hasattr(param, "stale_param"):
+                param.stale_param = torch.zeros_like(param.data, dtype=param.dtype, device=param.device)
+
+    zf_affinity, pt_affinity = _compute_zf_pt_affinity(zf_optimizer)
+
+    optimizer = ZenFlowCPUAdam(param_groups_data, overlap_step=True)
+    optimizer.init_native_overlap(zf_affinity)
+    zf_optimizer.zf_cpu_adam = optimizer
+
+    psutil.Process().cpu_affinity(pt_affinity)
+    os.environ['OMP_NUM_THREADS'] = str(len(pt_affinity))
+    torch.set_num_threads(len(pt_affinity))
+
+    zf_optimizer.process_optimizer_established = True
+
+
 def start_optimizer_process(zf_optimizer):
+    if not zf_optimizer.zf_stage3:
+        _start_native_optimizer(zf_optimizer)
+        return
+
     from multiprocessing import Pipe, get_context, Manager
 
     ctx = get_context("spawn")
@@ -143,36 +209,8 @@ def start_optimizer_process(zf_optimizer):
     } for param in zf_optimizer.fp32_partitioned_groups_flat]
                          if zf_optimizer.zf_stage3 else zf_optimizer.optimizer.param_groups)
 
-    curr_rank = dist.get_rank()
-    total_rank = dist.get_world_size()
-
     current_process = psutil.Process()
-    current_affinity = current_process.cpu_affinity()
-    all_affinities = [
-        torch.zeros(len(current_affinity),
-                    dtype=type(current_affinity[0]),
-                    device=get_accelerator().current_device_name()) for _ in range(total_rank)
-    ]
-    dist.all_gather(
-        all_affinities,
-        torch.tensor(current_affinity, dtype=type(current_affinity[0]),
-                     device=get_accelerator().current_device_name()))
-    # When affinity across all ranks are the same, the workers are not binded.  Do a soft bind here
-    if all_tensors_equal(all_affinities):
-        num_phy_cores = psutil.cpu_count(logical=False)
-        available_phy_cores = [i for i in current_affinity if i < num_phy_cores]
-        num_available_phy_cores = len(available_phy_cores)
-        my_rank = curr_rank
-        my_size = total_rank
-        cores_per_rank = num_available_phy_cores // my_size
-        current_affinity = available_phy_cores[my_rank * cores_per_rank:(my_rank + 1) * cores_per_rank]
-    pt_num_cores = math.ceil(zf_optimizer.pt_reserved_cores_perc * len(current_affinity))
-    if pt_num_cores > 0 and pt_num_cores < len(current_affinity):
-        zf_affinity = current_affinity[pt_num_cores:]
-        pt_affinity = current_affinity[:pt_num_cores]
-    else:
-        zf_affinity = current_affinity
-        pt_affinity = current_affinity
+    zf_affinity, pt_affinity = _compute_zf_pt_affinity(zf_optimizer)
 
     zf_optimizer.process = ctx.Process(
         target=zenflow_optimizer_process,

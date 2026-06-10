@@ -667,7 +667,7 @@ class ZenFlowZeroOptimizerParallel(ZenFlowZeroOptimizer):
 
     def wait_last_update_and_copy(self):
 
-        if not hasattr(self, 'parent_conn'):
+        if not getattr(self, 'process_optimizer_established', False):
             return
 
         if self.micro_step + 1 > self.full_warm_up_rounds and self.first_update_round_after_warmup:
@@ -675,8 +675,7 @@ class ZenFlowZeroOptimizerParallel(ZenFlowZeroOptimizer):
             return
 
         self.timers(OPTIMIZER_RECV_PARAMS_TIMER).start()
-        msg = self.parent_conn.recv()
-        assert msg["type"] == "done", "Optimizer process did not finish stepping correctly."
+        self.zf_cpu_adam.wait_overlap_step()
         self.timers(OPTIMIZER_RECV_PARAMS_TIMER).stop()
 
         for i, group in enumerate(self.bit16_groups):
@@ -730,12 +729,7 @@ class ZenFlowZeroOptimizerParallel(ZenFlowZeroOptimizer):
 
             group_infos.append(group_info)
 
-        self.parent_conn.send({
-            "type": "step",
-            "now_state": now_state,
-            "micro_step": self.micro_step,
-            "group_infos": group_infos
-        })
+        self.zf_cpu_adam.submit_overlap_step(now_state, self.micro_step + 1, group_infos)
 
     def step(self, closure=None):
         """

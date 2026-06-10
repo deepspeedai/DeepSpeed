@@ -149,3 +149,56 @@ class ZenFlowCPUAdam(DeepSpeedCPUAdam):
                                            group_info['weight_decay'], group_info['bias_correction'], params, grads,
                                            exp_avgs, exp_avg_sqs, stale_params)
         return loss
+
+    @torch.no_grad()
+    def init_native_overlap(self, zf_affinity):
+        """Create the native ZenFlowAdam handle and register every parameter group with
+        it. The optimizer state (double-buffered moments) is allocated eagerly here,
+        since the in-process worker needs the tensors registered before the first step.
+        Replaces the multiprocessing optimizer subprocess."""
+        device = torch.device('cpu')
+        self.zf_handle = self.ds_opt_adam.zenflow_adam_create(self.opt_id, list(zf_affinity))
+
+        for group in self.param_groups:
+            for p in group['params']:
+                if not hasattr(p, 'overlap_grad'):
+                    continue
+                assert p.data.device == device, "ZenFlowCPUAdam params must be on CPU"
+
+                state = self.state[p]
+                if len(state) == 0:
+                    state['step'] = 0
+                    state_dtype = torch.float if self.fp32_optimizer_states else p.dtype
+                    exp_avg = torch.zeros_like(p.data, dtype=state_dtype, device=device)
+                    exp_avg_sq = torch.zeros_like(p.data, dtype=state_dtype, device=device)
+                    state['exp_avg'] = [exp_avg, exp_avg.clone()]
+                    state['exp_avg_sq'] = [exp_avg_sq, exp_avg_sq.clone()]
+
+                self.ds_opt_adam.zenflow_adam_register_group(self.zf_handle, p.data, p.overlap_grad[0].data,
+                                                             p.overlap_grad[1].data, state['exp_avg'][0],
+                                                             state['exp_avg'][1], state['exp_avg_sq'][0],
+                                                             state['exp_avg_sq'][1], p.stale_param.data)
+
+    def submit_overlap_step(self, now_state, step_id, group_infos):
+        """Hand one overlapped step to the native worker (non-blocking)."""
+        for group_id, group in enumerate(self.param_groups):
+            self.state[group['params'][0]]['step'] = step_id
+        lr, beta1, beta2, eps, weight_decay, bias_correction = [], [], [], [], [], []
+        for info in group_infos:
+            lr.append(info['lr'])
+            beta1.append(info['betas'][0])
+            beta2.append(info['betas'][1])
+            eps.append(info['eps'])
+            weight_decay.append(info['weight_decay'])
+            bias_correction.append(1 if info['bias_correction'] else 0)
+        self.ds_opt_adam.zenflow_adam_submit(self.zf_handle, now_state, step_id, lr, beta1, beta2, eps, weight_decay,
+                                             bias_correction)
+
+    def wait_overlap_step(self):
+        """Block (GIL released in C++) until the last submitted step finishes."""
+        self.ds_opt_adam.zenflow_adam_wait(self.zf_handle)
+
+    def __del__(self):
+        if hasattr(self, 'zf_handle'):
+            self.ds_opt_adam.zenflow_adam_destroy(self.zf_handle)
+        super().__del__()
