@@ -103,7 +103,15 @@ class ZenFlowCPUAdam(DeepSpeedCPUAdam):
         # intended device for step
         device = torch.device('cpu')
 
-        stale_param = None
+        # Collect the per-group tensors and drive the whole group through a single fused
+        # native call. This keeps the per-parameter loop in C++, avoiding one
+        # Python<->C++ crossing per parameter, and lets the stale snapshot be written
+        # natively (no Python-side clone()).
+        params = []
+        grads = []
+        exp_avgs = []
+        exp_avg_sqs = []
+        stale_params = []
 
         for group_id, group in enumerate(self.param_groups):
             for param_id, p in enumerate(group['params']):
@@ -117,8 +125,6 @@ class ZenFlowCPUAdam(DeepSpeedCPUAdam):
                 state = self.state[p]
                 # State initialization
                 if len(state) == 0:
-                    #print(f'group {group_id} param {param_id} = {p.numel()}')
-                    # print("creating", flush=True)
                     state['step'] = 0
 
                     #use full precision by default unless self.fp32_optimizer_states is off
@@ -129,10 +135,17 @@ class ZenFlowCPUAdam(DeepSpeedCPUAdam):
                     state['exp_avg_sq'] = [exp_avg_sq, exp_avg_sq.clone()]
 
                 state['step'] = step_id
-                beta1, beta2 = group_info['betas']
-                self.ds_opt_adam.adam_update(self.opt_id, state['step'], group_info['lr'], beta1, beta2,
-                                             group_info['eps'], group_info['weight_decay'],
-                                             group_info['bias_correction'], p.data, p.overlap_grad[now_state].data,
-                                             state['exp_avg'][now_state], state['exp_avg_sq'][now_state])
-                p.stale_param.data.copy_(p.data.clone())
+                params.append(p.data)
+                grads.append(p.overlap_grad[now_state].data)
+                exp_avgs.append(state['exp_avg'][now_state])
+                exp_avg_sqs.append(state['exp_avg_sq'][now_state])
+                stale_params.append(p.stale_param.data)
+
+        if not params:
+            return loss
+
+        beta1, beta2 = group_info['betas']
+        self.ds_opt_adam.adam_update_multi(self.opt_id, step_id, group_info['lr'], beta1, beta2, group_info['eps'],
+                                           group_info['weight_decay'], group_info['bias_correction'], params, grads,
+                                           exp_avgs, exp_avg_sqs, stale_params)
         return loss

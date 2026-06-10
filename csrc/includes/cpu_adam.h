@@ -220,6 +220,20 @@ int ds_adam_step(int optimizer_id,
                  torch::Tensor& exp_avg,
                  torch::Tensor& exp_avg_sq);
 
+int ds_adam_step_multi(int optimizer_id,
+                       size_t step,
+                       float lr,
+                       float beta1,
+                       float beta2,
+                       float epsilon,
+                       float weight_decay,
+                       bool bias_correction,
+                       std::vector<torch::Tensor>& params,
+                       std::vector<torch::Tensor>& grads,
+                       std::vector<torch::Tensor>& exp_avgs,
+                       std::vector<torch::Tensor>& exp_avg_sqs,
+                       std::vector<torch::Tensor>& stale_params);
+
 int ds_adam_rollback(int optimizer_id,
                      size_t step,
                      float lr,
