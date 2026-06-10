@@ -156,6 +156,14 @@ def test_get_bfloat16_enabled(bf16_key):
     assert get_bfloat16_config(cfg).enabled == True
 
 
+def test_quantized_eigenvalue_config_parses():
+    ds_config_path = get_test_path('model/BingBertSquad/deepspeed_bsz24_fp16_eigenvalue_quantize_config.json')
+
+    ds_config = DeepSpeedConfig(ds_config_path)
+
+    assert ds_config._param_dict["quantize_training"]["quantize_eigenvalue"] is True
+
+
 class TestConfigLoad(DistributedTest):
     world_size = 1
 
