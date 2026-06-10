@@ -167,7 +167,13 @@ def _start_native_optimizer(zf_optimizer):
     proc = ctx.Process(target=zenflow_optimizer_process_native, args=(groups, ctrl, ready, zf_affinity, True))
     proc.daemon = True
     proc.start()
-    ready.wait()
+    # Wait for the optimizer process to finish building its pool and registering tensors.
+    # If it crashed during init (e.g. it never signals), fail loudly instead of blocking the
+    # training process forever on the first step's wait.
+    if not ready.wait(timeout=600):
+        proc.terminate()
+        raise RuntimeError("ZenFlow optimizer process failed to become ready (it likely crashed "
+                           "during initialization; check the optimizer process traceback above)")
     zf_optimizer.process = proc
 
     psutil.Process().cpu_affinity(pt_affinity)
