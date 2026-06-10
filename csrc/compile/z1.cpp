@@ -127,4 +127,9 @@ void register_param(long ds_id,
     param_registry->registerParam(ds_id, ds_shape, ds_tensor, grad_buffer, false, offset, false);
 }
 
+void update_param_grad_buffer(long ds_id, at::Tensor grad_buffer, int64_t offset)
+{
+    param_registry->updateGradBuffer(ds_id, grad_buffer, offset);
+}
+
 }  // namespace dc
