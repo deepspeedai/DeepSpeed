@@ -523,6 +523,72 @@ class TestAutoEPConfig:
         assert calls == ["expert_data_parallel", "expert_parallel"]
         assert torch.isfinite(norm)
 
+    def test_zero3_autoep_reduce_scatter_grads_average_by_global_dp(self, monkeypatch):
+        optimizer = object.__new__(DeepSpeedZeroOptimizer_Stage3)
+        optimizer.dp_process_group = "global_data_parallel"
+        optimizer.dtype = torch.float32
+        optimizer.gradient_accumulation_dtype = torch.float32
+        optimizer.postscale_gradients = True
+        optimizer.gradient_predivide_factor = 1.0
+        optimizer.all2all_process_group = None
+        optimizer._assert_same_partition_group = lambda _: None
+        optimizer._get_param_partition_group = lambda _: "expert_data_parallel"
+        optimizer._autoep_expert_parallel_group = lambda _: "expert_parallel"
+        param = nn.Parameter(torch.ones(4))
+        param.grad = torch.ones(4)
+
+        class FakeAccelerator:
+
+            def device_count(self):
+                return 4
+
+        def fake_get_world_size(group=None):
+            return 2 if group == "expert_data_parallel" else 4
+
+        def fake_reduce_scatter(grads, process_group):
+            assert process_group == "expert_data_parallel"
+            return [torch.full((2, ), 8.0)]
+
+        monkeypatch.setattr(zero_stage3, "get_accelerator", lambda: FakeAccelerator())
+        monkeypatch.setattr(zero_stage3.dist, "get_world_size", fake_get_world_size)
+        monkeypatch.setattr(zero_stage3, "reduce_scatter_coalesced", fake_reduce_scatter)
+
+        grad_partitions = optimizer._DeepSpeedZeroOptimizer_Stage3__avg_scatter_grads([param], torch.float32)
+
+        torch.testing.assert_close(grad_partitions[0], torch.full((2, ), 4.0))
+
+    def test_zero3_autoep_contiguous_grads_average_by_global_dp(self, monkeypatch):
+        optimizer = object.__new__(DeepSpeedZeroOptimizer_Stage3)
+        optimizer.dp_process_group = "global_data_parallel"
+        optimizer.ipg_buckets = {torch.float32: SimpleNamespace(params=[], process_group="expert_data_parallel")}
+        optimizer.postscale_gradients = True
+        optimizer.gradient_predivide_factor = 1.0
+        optimizer.sequence_parallel_size = 1
+        optimizer.gradient_accumulation_dtype = torch.float32
+        optimizer._assert_same_partition_group = lambda _: None
+        optimizer._autoep_expert_parallel_group = lambda _: "expert_parallel"
+        optimizer._apply_distributed_muon_update = lambda communication_data_type, buffer: None
+        param = nn.Parameter(torch.empty(2))
+        param.grad = torch.zeros(2)
+        param.partition_numel = lambda: 1
+        optimizer.ipg_buckets[torch.float32].params = [param]
+
+        def fake_get_world_size(group=None):
+            return 2 if group == "expert_data_parallel" else 4
+
+        def fake_all_reduce(tensor, group=None):
+            assert group == "expert_data_parallel"
+            tensor.mul_(2)
+
+        monkeypatch.setattr(zero_stage3.dist, "get_world_size", fake_get_world_size)
+        monkeypatch.setattr(zero_stage3.dist, "get_rank", lambda group=None: 0)
+        monkeypatch.setattr(zero_stage3.dist, "all_reduce", fake_all_reduce)
+
+        grad_partitions = optimizer._DeepSpeedZeroOptimizer_Stage3__avg_scatter_contiguous_grads(
+            torch.tensor([4.0, 8.0]), torch.float32)
+
+        torch.testing.assert_close(grad_partitions[0], torch.tensor([2.0]))
+
     def test_pipeline_load_module_state_dict_accepts_autoep_zero3_fetch_kwarg(self):
         from deepspeed.runtime.pipe.engine import PipelineEngine
 

@@ -628,6 +628,11 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             raise RuntimeError("AutoEP expert ZeRO Stage 3 subgroup is missing an expert-parallel group name.")
         return groups._get_expert_parallel_group(group_name)
 
+    def _gradient_averaging_world_size(self, params, partition_world_size):
+        if self._autoep_expert_parallel_group(params) is None:
+            return partition_world_size
+        return dist.get_world_size(group=self.dp_process_group)
+
     def _get_trainable_parameter_groups(self):
         param_groups = []
         PARAMS_KEY = "params"
@@ -1656,11 +1661,12 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
         world_sz = dist.get_world_size(process_group)
         rank = dist.get_rank(process_group)
-        buffer_to_reduce.div_(world_sz / float(self.sequence_parallel_size))
+        averaging_world_sz = self._gradient_averaging_world_size(params_in_bucket, world_sz)
+        buffer_to_reduce.div_(averaging_world_sz / float(self.sequence_parallel_size))
 
         dist.all_reduce(buffer_to_reduce, group=process_group)
 
-        if self.postscale_gradients and self.gradient_predivide_factor != world_sz:
+        if self.postscale_gradients and self.gradient_predivide_factor != averaging_world_sz:
             buffer_to_reduce = buffer_to_reduce.mul(self.gradient_predivide_factor)
 
         if communication_data_type != self.gradient_accumulation_dtype:
@@ -1718,6 +1724,12 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         if self.postscale_gradients and self.gradient_predivide_factor != 1.0 and self.gradient_predivide_factor != dist.get_world_size(
                 process_group):
             grad_partitions_for_rank = [g.mul(self.gradient_predivide_factor) for g in grad_partitions_for_rank]
+
+        partition_world_size = dist.get_world_size(group=process_group)
+        averaging_world_size = self._gradient_averaging_world_size(params_to_reduce, partition_world_size)
+        if averaging_world_size != partition_world_size:
+            scale = partition_world_size / float(averaging_world_size)
+            grad_partitions_for_rank = [g.mul(scale) for g in grad_partitions_for_rank]
 
         if communication_data_type != self.gradient_accumulation_dtype:
             grad_partitions_for_rank = [g.to(self.gradient_accumulation_dtype) for g in grad_partitions_for_rank]
