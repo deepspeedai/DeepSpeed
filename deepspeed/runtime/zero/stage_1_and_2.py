@@ -2016,7 +2016,8 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                 grad_accum = muon_update(grad_accum,
                                          buffer,
                                          self.optimizer.param_groups[param_group_idx]['momentum'],
-                                         ns_method=ns_method)
+                                         ns_method=ns_method,
+                                         is_expert_group=getattr(tensor, 'is_expert_group', False))
             tensor = grad_accum
             num_elements = tensor.numel()
             buffer_idx += num_elements
