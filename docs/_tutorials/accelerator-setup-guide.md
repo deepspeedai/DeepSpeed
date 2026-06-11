@@ -8,6 +8,7 @@ tags: getting-started training accelerator
 - [Introduction](#introduction)
 - [Intel Architecture (IA) CPU](#intel-architecture-ia-cpu)
 - [Intel XPU](#intel-xpu)
+- [Google Cloud TPU](#google-cloud-tpu)
 - [Huawei Ascend NPU](#huawei-ascend-npu)
 - [Intel Gaudi](#intel-gaudi)
 
@@ -157,6 +158,31 @@ XPU available: True
 >>> from deepspeed.accelerator import get_accelerator; print('accelerator:', get_accelerator()._name)
 accelerator: xpu
 ```
+
+
+# Google Cloud TPU
+DeepSpeed TPU support targets ZeRO-1 and ZeRO-2 on top of PyTorch/XLA.
+
+## Installation steps for Google Cloud TPU
+1. Install PyTorch and PyTorch/XLA with TPU support following the matching wheel set for your runtime.
+2. Install DeepSpeed.
+
+## How to use DeepSpeed on Google Cloud TPU
+DeepSpeed uses the `xla` distributed backend on TPU through `torch.distributed`, and defaults to the `xla://` init method when `torch_xla` is available.
+
+To validate that TPU support is selected, here is an example:
+```
+$ python
+>>> import torch_xla
+>>> from deepspeed.accelerator import get_accelerator
+>>> accelerator = get_accelerator()
+>>> print(accelerator._name)
+xla
+>>> print(accelerator.communication_backend_name())
+xla
+```
+
+TPU support currently focuses on ZeRO-1 and ZeRO-2 training paths. Use `bf16` training on TPU because fp16 is not supported by the XLA accelerator path.
 
 
 # Huawei Ascend NPU
