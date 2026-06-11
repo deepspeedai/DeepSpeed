@@ -14,7 +14,7 @@ from deepspeed.runtime.utils import see_memory_usage
 from typing import List
 from deepspeed.accelerator import get_accelerator
 from typing import TYPE_CHECKING
-from deepspeed.runtime.zenflow.zenflow_utils import start_optimizer_process
+from deepspeed.runtime.zenflow.zenflow_utils import start_optimizer_process, ZENFLOW_OPTIMIZER_WAIT_POLL_SECONDS
 
 if TYPE_CHECKING:
     from deepspeed.runtime.zero.stage3 import DeepSpeedZeroOptimizer_Stage3
@@ -542,40 +542,41 @@ def zenflow_cpu_optimizer_overlap_step(optimizer_z3, now_state, scaled_global_gr
     if not optimizer_z3.process_optimizer_established:
         optimizer_z3.start_optimizer_process()
 
-    group_infos = []
+    lr, beta1, beta2, eps, weight_decay, bias_correction = [], [], [], [], [], []
     for group_no, group in enumerate(optimizer_z3.fp16_groups):
         optimizer_z3.unscale_and_clip_grads(group_no, scaled_global_grad_norm, now_state)
         param_group_id = optimizer_z3.sub_group_to_group_id[group_no]
+        pg = optimizer_z3.optimizer.param_groups[param_group_id]
+        lr.append(pg["lr"])
+        beta1.append(pg["betas"][0])
+        beta2.append(pg["betas"][1])
+        eps.append(pg["eps"])
+        weight_decay.append(pg["weight_decay"])
+        bias_correction.append(1 if pg["bias_correction"] else 0)
 
-        group_info = {
-            "lr": optimizer_z3.optimizer.param_groups[param_group_id]["lr"],
-            "betas": optimizer_z3.optimizer.param_groups[param_group_id]["betas"],
-            "eps": optimizer_z3.optimizer.param_groups[param_group_id]["eps"],
-            "weight_decay": optimizer_z3.optimizer.param_groups[param_group_id]["weight_decay"],
-            "bias_correction": optimizer_z3.optimizer.param_groups[param_group_id]["bias_correction"],
-        }
-
-        group_infos.append(group_info)
-
-    optimizer_z3.parent_conn.send({
-        "type": "step",
-        "now_state": now_state,
-        "micro_step": optimizer_z3.micro_step,
-        "group_infos": group_infos
-    })
+    optimizer_z3.zf_op.zenflow_adam_submit(optimizer_z3.zf_ctrl.data_ptr(), now_state, optimizer_z3.micro_step + 1, lr,
+                                           beta1, beta2, eps, weight_decay, bias_correction)
 
 
 def wait_last_update_and_copy(optimizer_z3, timer_names):
 
-    if not hasattr(optimizer_z3, 'parent_conn'):
+    if not getattr(optimizer_z3, 'process_optimizer_established', False):
         return
 
     if optimizer_z3.micro_step + 1 > optimizer_z3.full_warm_up_rounds and optimizer_z3.first_update_round_after_warmup:
         optimizer_z3.first_update_round_after_warmup = False
         return
 
-    msg = optimizer_z3.parent_conn.recv()
-    assert msg["type"] == "done", "Optimizer process did not finish stepping correctly."
+    # Wake periodically to check the optimizer process is alive: if it died mid-step, fail loudly
+    # here instead of blocking this rank (and the whole job) forever on a semaphore it will never
+    # post.
+    while not optimizer_z3.zf_op.zenflow_adam_wait(optimizer_z3.zf_ctrl.data_ptr(),
+                                                   ZENFLOW_OPTIMIZER_WAIT_POLL_SECONDS):
+        proc = getattr(optimizer_z3, 'process', None)
+        if proc is not None and not proc.is_alive():
+            raise RuntimeError("ZenFlow optimizer process exited during a step (likely an error or OOM in the "
+                               "optimizer process -- check its traceback above) instead of completing the "
+                               "update. Aborting to avoid hanging distributed training.")
 
     for sub_group_id, group in enumerate(optimizer_z3.fp16_groups):
         if optimizer_z3.fp16_partitioned_groups_flat[sub_group_id] is not None:

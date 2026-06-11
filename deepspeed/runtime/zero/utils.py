@@ -10,7 +10,7 @@ from typing import List, Tuple
 import torch
 from deepspeed import comm as dist
 from deepspeed.utils import logger
-from deepspeed.ops.adam import DeepSpeedCPUAdam
+from deepspeed.ops.adam import DeepSpeedCPUAdam, ZenFlowCPUAdam
 from deepspeed.ops.adagrad import DeepSpeedCPUAdagrad
 from deepspeed.ops.adam import FusedAdam
 from deepspeed.ops.lion import DeepSpeedCPULion, FusedLion
@@ -43,8 +43,8 @@ class ZeRORuntimeException(Exception):
 
 
 ZERO_SUPPORTED_OPTIMIZERS = [
-    torch.optim.Adam, torch.optim.AdamW, FusedAdam, DeepSpeedCPUAdam, torch.optim.Adagrad, DeepSpeedCPUAdagrad,
-    DeepSpeedCPULion, FusedLion
+    torch.optim.Adam, torch.optim.AdamW, FusedAdam, DeepSpeedCPUAdam, ZenFlowCPUAdam, torch.optim.Adagrad,
+    DeepSpeedCPUAdagrad, DeepSpeedCPULion, FusedLion
 ]
 
 # Add MuonWithAuxAdam to supported list if muon is installed
