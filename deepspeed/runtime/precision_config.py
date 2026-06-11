@@ -4,7 +4,7 @@
 # DeepSpeed Team
 
 import math
-from pydantic import field_validator
+from pydantic import field_validator, model_validator
 from deepspeed.runtime.config_utils import DeepSpeedConfigModel
 from .fp16.loss_scaler import (
     INITIAL_LOSS_SCALE,
@@ -159,6 +159,23 @@ class DeepSpeedFP16Config(DeepSpeedConfigModel):
     """
     Maintain master weights in optimizer state as fp16 instead of fp32 (valid with DeepSpeedCPUAdam only).
     """
+
+    @model_validator(mode="after")
+    def _validate_dynamic_loss_scale_params(self):
+        # loss_scale_window and min_loss_scale only take effect when dynamic loss
+        # scaling is active, i.e. fp16 is enabled and loss_scale == 0 (see
+        # DeepSpeedEngine.dynamic_loss_scale). Validating them otherwise would
+        # reject valid static-loss-scale configs that carry unused values.
+        if self.enabled and self.loss_scale == 0:
+            # loss_scale_window is used as `stable_interval % scale_window` in
+            # DynamicLossScaler.update_scale, so 0 raises ZeroDivisionError.
+            if self.loss_scale_window <= 0:
+                raise ValueError(
+                    "fp16.loss_scale_window must be > 0 when dynamic loss scaling is enabled (loss_scale=0)")
+            # min_loss_scale is the loss-scale floor, which collapses if <= 0.
+            if self.min_loss_scale <= 0:
+                raise ValueError("fp16.min_loss_scale must be > 0 when dynamic loss scaling is enabled (loss_scale=0)")
+        return self
 
     def initial_dynamic_scale(self):
         return 2**self.initial_scale_power
