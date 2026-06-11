@@ -2371,8 +2371,28 @@ class DeepSpeedEngine(Module):
             # We can't have this in forward prologue as the compiler compiles hooks including the forward prologue.
             self.launch_compile_passes(self.global_steps)
 
+        # When DeepCompile is active the per-module gather/release hooks are
+        # removed and all parameter gathering is handled by compiled graph ops.
+        # However, torch._dynamo may skip frames that contain graph breaks in
+        # loops.  Skipped frames execute eagerly without the compiled ops, so
+        # the ZeROOrderedDict safety-net must be enabled to auto-gather any
+        # parameter accessed in those frames.
+        _dc_z3_eager_fallback = (self.is_deepcompile_active() and self.zero_optimization_partition_weights())
+        if _dc_z3_eager_fallback:
+            for module in self.module.modules():
+                if isinstance(module._parameters, ZeROOrderedDict):
+                    module._parameters._in_forward = True
+
         with autocast_if_enabled(self):
             loss = self.module(*inputs, **kwargs)
+
+        if _dc_z3_eager_fallback:
+            for p in self.module.parameters():
+                if hasattr(p, "ds_status") and p.ds_status == ZeroParamStatus.AVAILABLE and not p.ds_persist:
+                    p.partition()
+            for module in self.module.modules():
+                if isinstance(module._parameters, ZeROOrderedDict):
+                    module._parameters._in_forward = False
 
         # Register output backward hooks
         # preprocess_once_fn is called for preprocessing
