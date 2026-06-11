@@ -513,7 +513,12 @@ class DeepSpeedEngine(Module):
         sp_size = self._autoep_sequence_parallel_world_size()
         pp_size = 1
         if self.mpu is not None:
-            from deepspeed.utils.bwc import bwc_pipeline_parallel_world_size
+            from deepspeed.utils.bwc import bwc_pipeline_parallel_world_size, bwc_tensor_model_parallel_world_size
+            bwc_tp_size = bwc_tensor_model_parallel_world_size(self.mpu)
+            if bwc_tp_size != 1:
+                raise ValueError("AutoEP does not currently support tensor model parallelism from mpu "
+                                 f"(bwc_tensor_model_parallel_world_size={bwc_tp_size}). Disable tensor model "
+                                 "parallelism for this run; AutoEP+TP support is planned as follow-up work.")
             pp_size = bwc_pipeline_parallel_world_size(self.mpu)
 
         world_size = dist.get_world_size()

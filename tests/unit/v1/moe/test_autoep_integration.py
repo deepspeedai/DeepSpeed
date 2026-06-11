@@ -7,7 +7,7 @@
 import pytest
 import torch
 import deepspeed
-from unit.moe.autoep_test_utils import (
+from unit.v1.moe.autoep_test_utils import (
     MockMoETransformer,
     make_autoep_integration_config as _make_autoep_config,
     run_training_steps as _run_training_steps,

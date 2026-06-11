@@ -38,7 +38,7 @@ from deepspeed.moe.ep_repack import repack_expert_weights
 from deepspeed.moe.ep_router import TokenChoiceTopKRouter
 from deepspeed.runtime.engine import DeepSpeedEngine
 from deepspeed.utils import groups
-from unit.moe.autoep_test_utils import (
+from unit.v1.moe.autoep_test_utils import (
     MockMoEBlock,
     MockMoETransformer,
     UNSUPPORTED_LOAD_BALANCE_VALUES,
@@ -296,6 +296,26 @@ class TestAutoEPConfig:
         assert observed["validate"]["sp_size"] == 2
         assert observed["create"]["mp_size"] == 2
         assert observed["create"]["mp_mode"] == "sp"
+
+    def test_configure_expert_parallel_rejects_bwc_tensor_model_parallel_mpu(self, monkeypatch):
+
+        class TensorParallelMPU:
+
+            def get_tensor_model_parallel_world_size(self):
+                return 2
+
+        monkeypatch.setattr(groups, "_get_sequence_parallel_world_size", lambda: 1)
+
+        engine = object.__new__(DeepSpeedEngine)
+        engine.mpu = TensorParallelMPU()
+        engine._config = SimpleNamespace(
+            expert_parallel_config=AutoEPConfig(enabled=True, autoep_size=2),
+            tensor_parallel_config=SimpleNamespace(autotp_size=1),
+            use_data_before_expert_parallel_=False,
+        )
+
+        with pytest.raises(ValueError, match="bwc_tensor_model_parallel_world_size=2"):
+            engine._configure_expert_parallel(model=nn.Module())
 
     def test_autoep_sequence_parallel_size_falls_back_to_groups_helper(self, monkeypatch):
         monkeypatch.setattr(groups, "_get_sequence_parallel_world_size", lambda: 3)

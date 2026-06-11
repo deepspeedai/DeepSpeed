@@ -12,7 +12,7 @@ import torch.nn as nn
 
 from deepspeed.runtime.config import DeepSpeedConfig
 from unit.common import DistributedTest
-from unit.moe.autoep_test_utils import (
+from unit.v1.moe.autoep_test_utils import (
     UNSUPPORTED_LOAD_BALANCE_VALUES,
     assert_load_balance_coeff_rejection_message,
     init_autoep_engine,

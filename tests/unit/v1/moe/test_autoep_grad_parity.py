@@ -9,7 +9,7 @@ import deepspeed.comm as dist
 import torch
 from deepspeed.utils import safe_get_full_grad
 from unit.common import DistributedTest
-from unit.moe.autoep_test_utils import (
+from unit.v1.moe.autoep_test_utils import (
     MockMoETransformer,
     engine_input_dtype as _engine_input_dtype,
     mixed_precision_config as _mixed_precision_config,
