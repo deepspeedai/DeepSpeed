@@ -34,7 +34,16 @@ from deepspeed.runtime.swap_tensor.partitioned_param_swapper import PartitionedP
 from deepspeed.runtime.swap_tensor.optimizer_utils import OptimizerSwapper
 from deepspeed.runtime.swap_tensor.partitioned_optimizer_swapper import PartitionedOptimizerSwapper
 from deepspeed.runtime.swap_tensor.pipelined_optimizer_swapper import PipelinedOptimizerSwapper
-from deepspeed.checkpoint.constants import OPTIMIZER_STATE_DICT, FP32_FLAT_GROUPS, PARTITION_COUNT, ZERO_STAGE, LOSS_SCALER
+from deepspeed.checkpoint.constants import (
+    EP_IS_EXPERT_PARAM,
+    EP_NUM_EXPERTS,
+    OPTIMIZER_STATE_DICT,
+    FP32_FLAT_GROUPS,
+    PARAM,
+    PARTITION_COUNT,
+    ZERO_STAGE,
+    LOSS_SCALER,
+)
 from deepspeed.accelerator import get_accelerator
 from deepspeed.runtime.zero.muon.original_muon import muon_update
 from deepspeed.runtime.zero.muon.muon_optimizer import MuonWithAuxAdam
@@ -3328,7 +3337,8 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                         raise ValueError(f"failed to find optimizer param in named params")
                     param_name = self.param_names[param]
                     key_layer_state_partition = self.load_hp_checkpoint_state(os.path.join(checkpoint_dir, param_name),
-                                                                              key)
+                                                                              key,
+                                                                              param=param)
                     key_tensor.narrow(0, offset, key_layer_state_partition.numel()).copy_(key_layer_state_partition)
                     offset += key_layer_state_partition.numel()
                 if key == "fp32":
@@ -3377,14 +3387,23 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         self.dynamic_loss_scale = sd.get('dynamic_loss_scale', self.dynamic_loss_scale)
         self.overflow = sd.get('overflow', self.overflow)
 
-    def load_hp_checkpoint_state(self, folder, key):
-        rank = dist.get_rank(group=self.dp_process_group)
+    def load_hp_checkpoint_state(self, folder, key, param=None):
+        partition_group = self._get_param_partition_group(param) if param is not None else self.dp_process_group
+        rank = dist.get_rank(group=partition_group)
 
         # Load tensors from files and reshape them to flat vectors
-        loaded_checkpoint_state = torch.load(os.path.join(folder, f"{key}.pt"), weights_only=False).view(-1)
+        loaded_checkpoint_state = torch.load(os.path.join(folder, f"{key}.pt"), weights_only=False)
+        if isinstance(loaded_checkpoint_state, dict):
+            if loaded_checkpoint_state.get(EP_IS_EXPERT_PARAM, False):
+                if param is None:
+                    raise ValueError(f"AutoEP universal expert checkpoint state in {folder} requires a target param")
+                loaded_checkpoint_state = self._slice_autoep_universal_expert_param(loaded_checkpoint_state, param)
+            else:
+                loaded_checkpoint_state = loaded_checkpoint_state[PARAM]
+        loaded_checkpoint_state = loaded_checkpoint_state.view(-1)
 
         # Partition the loaded data according to the local rank
-        world_size = dist.get_world_size(group=self.dp_process_group)
+        world_size = dist.get_world_size(group=partition_group)
         unpartitioned_numel = loaded_checkpoint_state.numel()
         partitioned_numel = math.ceil(unpartitioned_numel / world_size)
 
@@ -3395,6 +3414,31 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         checkpoint_state_partition = loaded_checkpoint_state.narrow(0, rank * partitioned_numel, partitioned_numel)
 
         return checkpoint_state_partition
+
+    def _slice_autoep_universal_expert_param(self, checkpoint_state, param):
+        full_expert_tensor = checkpoint_state[PARAM]
+        checkpoint_num_experts = checkpoint_state.get(EP_NUM_EXPERTS, full_expert_tensor.shape[0])
+        group_name = getattr(param, "ds_zero_partition_group_name", None)
+        if group_name is None:
+            raise ValueError("AutoEP universal expert checkpoint target parameter is missing its EP group name")
+        ep_rank = groups._get_expert_parallel_rank(group_name)
+        ep_world_size = groups._get_expert_parallel_world_size(group_name)
+        if checkpoint_num_experts % ep_world_size != 0:
+            raise ValueError("AutoEP universal expert checkpoint tensor cannot be evenly split across the target "
+                             f"EP topology: checkpoint_num_experts={checkpoint_num_experts}, "
+                             f"target_ep_size={ep_world_size}")
+        local_expert_count = param.ds_shape[0] if hasattr(param, "ds_shape") else param.shape[0]
+        expected_local_expert_count = checkpoint_num_experts // ep_world_size
+        if local_expert_count != expected_local_expert_count:
+            raise ValueError("AutoEP universal expert checkpoint tensor is incompatible with target parameter "
+                             f"shape: target_local_experts={local_expert_count}, "
+                             f"checkpoint_local_experts={expected_local_expert_count}")
+        expert_offset = ep_rank * local_expert_count
+        if expert_offset + local_expert_count > full_expert_tensor.shape[0]:
+            raise ValueError("AutoEP universal expert checkpoint tensor is incompatible with target EP topology: "
+                             f"ep_rank={ep_rank}, local_experts={local_expert_count}, "
+                             f"checkpoint_shape={tuple(full_expert_tensor.shape)}")
+        return full_expert_tensor.narrow(0, expert_offset, local_expert_count).contiguous()
 
     def reset_swap_buffers(self):
         timer_names = set()

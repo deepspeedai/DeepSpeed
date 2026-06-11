@@ -4,6 +4,8 @@
 # DeepSpeed Team
 """Integration tests for AutoEP (multi-GPU, requires distributed backend)."""
 
+import os
+
 import pytest
 import torch
 import torch.nn as nn
@@ -132,6 +134,26 @@ class TestAutoEPOnly(DistributedTest):
 
         save_dir = str(tmpdir)
         engine.save_checkpoint(save_dir, tag="autoep-zero3")
+        checkpoint_dir = os.path.join(save_dir, "autoep-zero3")
+        checkpoint_files = os.listdir(checkpoint_dir)
+        assert not any(name.startswith("layer_") and "_expert_" in name for name in checkpoint_files)
+
+        model_state = torch.load(os.path.join(checkpoint_dir, "zero_pp_rank_0_mp_rank_00_model_states.pt"),
+                                 map_location="cpu",
+                                 weights_only=False)
+        from deepspeed.checkpoint.constants import (
+            AUTOEP_ZERO3_EXPERT_STATE_FORMAT_VERSION,
+            AUTOEP_ZERO3_EXPERT_STATE_FORMAT_VERSION_KEY,
+            AUTOEP_ZERO3_EXPERT_STATE_FORMAT_KEY,
+            AUTOEP_ZERO3_PARTITIONED_EXPERT_STATE_FORMAT,
+            PARAM_SHAPES,
+        )
+        assert all(entry[AUTOEP_ZERO3_EXPERT_STATE_FORMAT_KEY] == AUTOEP_ZERO3_PARTITIONED_EXPERT_STATE_FORMAT
+                   for entry in model_state["ds_autoep_layers"])
+        assert all(entry[AUTOEP_ZERO3_EXPERT_STATE_FORMAT_VERSION_KEY] == AUTOEP_ZERO3_EXPERT_STATE_FORMAT_VERSION
+                   for entry in model_state["ds_autoep_layers"])
+        param_names = {name for group_shapes in model_state[PARAM_SHAPES] for name in group_shapes}
+        assert any(name.endswith("experts.w1") for name in param_names)
 
         reloaded = MockMoETransformer()
         reloaded_engine, _, _, _ = deepspeed.initialize(model=reloaded, config=config)
@@ -140,8 +162,18 @@ class TestAutoEPOnly(DistributedTest):
 
         module_only = MockMoETransformer()
         module_only_engine, _, _, _ = deepspeed.initialize(model=module_only, config=config)
-        with pytest.raises(NotImplementedError, match="load_optimizer_states=False"):
-            module_only_engine.load_checkpoint(save_dir, tag="autoep-zero3", load_optimizer_states=False)
+        module_only_engine.load_checkpoint(save_dir, tag="autoep-zero3", load_optimizer_states=False)
+
+        module_only_flag = MockMoETransformer()
+        module_only_flag_engine, _, _, _ = deepspeed.initialize(model=module_only_flag, config=config)
+        module_only_flag_engine.load_checkpoint(save_dir, tag="autoep-zero3", load_module_only=True)
+
+        for expected, restored in zip(engine.optimizer.fp16_partitioned_groups_flat,
+                                      module_only_engine.optimizer.fp16_partitioned_groups_flat):
+            torch.testing.assert_close(restored, expected)
+        for expected, restored in zip(engine.optimizer.fp16_partitioned_groups_flat,
+                                      module_only_flag_engine.optimizer.fp16_partitioned_groups_flat):
+            torch.testing.assert_close(restored, expected)
 
         losses, _ = _run_training_steps(reloaded_engine, num_steps=1)
         assert torch.isfinite(torch.tensor(losses[0]))

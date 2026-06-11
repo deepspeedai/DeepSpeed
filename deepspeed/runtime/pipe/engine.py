@@ -1330,7 +1330,8 @@ class PipelineEngine(DeepSpeedEngine):
                                strict=True,
                                custom_load_fn=None,
                                fetch_z3_params=False,
-                               z3_params_to_fetch=None):
+                               z3_params_to_fetch=None,
+                               allowed_missing_keys=None):
         """Override hack to instead use a directory path.
 
         This is important because pipeline models checkpoint by layer instead of rank.
@@ -1347,7 +1348,8 @@ class PipelineEngine(DeepSpeedEngine):
             super().load_module_state_dict(state_dict,
                                            strict,
                                            fetch_z3_params=fetch_z3_params,
-                                           z3_params_to_fetch=z3_params_to_fetch)
+                                           z3_params_to_fetch=z3_params_to_fetch,
+                                           allowed_missing_keys=allowed_missing_keys)
             return
 
         self.module.load_state_dir(load_dir=self._curr_ckpt_path,

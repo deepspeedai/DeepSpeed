@@ -5,6 +5,7 @@
 """Compact critical-path tests for AutoEP."""
 
 import inspect
+from collections import OrderedDict
 from types import SimpleNamespace
 
 import pytest
@@ -595,24 +596,131 @@ class TestAutoEPConfig:
         signature = inspect.signature(PipelineEngine.load_module_state_dict)
 
         assert "z3_params_to_fetch" in signature.parameters
+        assert "allowed_missing_keys" in signature.parameters
 
-    def test_universal_converter_rejects_zero3_autoep_model_state(self, tmp_path):
-        from deepspeed.checkpoint.constants import AUTOEP_LAYERS_KEY
+    def test_autoep_zero3_16bit_export_guard_directs_to_universal_conversion(self):
+        engine = object.__new__(DeepSpeedEngine)
+        engine.zero_optimization_partition_weights = lambda: True
+        engine._has_autoep_layers = lambda: True
+
+        with pytest.raises(NotImplementedError, match="ds_to_universal.py"):
+            engine._raise_if_autoep_zero3_consolidated_export("save_16bit_model")
+
+    def test_universal_converter_detects_zero3_partitioned_autoep_model_state(self, tmp_path):
+        from deepspeed.checkpoint.constants import (
+            AUTOEP_LAYERS_KEY,
+            AUTOEP_ZERO3_EXPERT_STATE_FORMAT_VERSION,
+            AUTOEP_ZERO3_EXPERT_STATE_FORMAT_VERSION_KEY,
+            AUTOEP_ZERO3_EXPERT_STATE_FORMAT_KEY,
+            AUTOEP_ZERO3_PARTITIONED_EXPERT_STATE_FORMAT,
+        )
         from deepspeed.checkpoint.ds_to_universal import (
+            _autoep_expert_param_names_by_rank,
             _get_zero3_model_state_files,
-            _raise_if_stage3_autoep_universal_conversion,
+            _uses_zero3_partitioned_autoep_metadata,
         )
 
         zero3_model_file = tmp_path / "zero_pp_rank_0_mp_rank_00_model_states.pt"
         expert_file = tmp_path / "layer_0_expert_0_mp_rank_00_model_states.pt"
-        torch.save({AUTOEP_LAYERS_KEY: [{"moe_layer_id": 0}]}, zero3_model_file)
+        metadata = [{
+            "moe_layer_id": 0,
+            "module_path": "model.layers.0.mlp",
+            "num_experts": 4,
+            "num_local_experts": 2,
+            "ep_size": 2,
+            "expert_key_prefix": "model.layers.0.mlp.experts",
+            AUTOEP_ZERO3_EXPERT_STATE_FORMAT_KEY: AUTOEP_ZERO3_PARTITIONED_EXPERT_STATE_FORMAT,
+            AUTOEP_ZERO3_EXPERT_STATE_FORMAT_VERSION_KEY: AUTOEP_ZERO3_EXPERT_STATE_FORMAT_VERSION,
+            "ep_group_name": "ep_size_2",
+            "ep_rank": 0,
+            "expert_data_parallel_rank": 0,
+            "expert_data_parallel_world_size": 1,
+            "global_expert_start": 0,
+            "global_expert_end": 2,
+        }]
+        torch.save({AUTOEP_LAYERS_KEY: metadata}, zero3_model_file)
         torch.save({"expert": torch.empty(1)}, expert_file)
 
         model_files = _get_zero3_model_state_files(str(tmp_path))
+        expert_param_names, metadata_by_rank = _autoep_expert_param_names_by_rank(model_files)
 
         assert model_files == [str(zero3_model_file)]
-        with pytest.raises(NotImplementedError, match="same-topology ZeRO-3 checkpoint load"):
-            _raise_if_stage3_autoep_universal_conversion(model_files)
+        assert expert_param_names == {
+            "model.layers.0.mlp.experts.w1",
+            "model.layers.0.mlp.experts.w2",
+            "model.layers.0.mlp.experts.w3",
+        }
+        assert _uses_zero3_partitioned_autoep_metadata(metadata_by_rank[0])
+
+    def test_universal_stage3_extract_accepts_tuple_param_shapes(self, tmp_path):
+        from deepspeed.checkpoint.constants import OPTIMIZER_STATE_DICT
+        from deepspeed.checkpoint.ds_to_universal import extract_zero_shards_stage3
+
+        optim_file = tmp_path / "zero_pp_rank_0_mp_rank_00_optim_states.pt"
+        torch.save(
+            {
+                OPTIMIZER_STATE_DICT: {
+                    "optimizer_state_dict": {
+                        "state": [{
+                            "exp_avg": torch.arange(6, dtype=torch.float32),
+                            "exp_avg_sq": torch.arange(6, dtype=torch.float32) + 10,
+                        }]
+                    },
+                    "fp32_flat_groups": [torch.arange(6, dtype=torch.float32) + 20],
+                }
+            },
+            optim_file,
+        )
+
+        temp_dir = tmp_path / "tmp"
+        extract_zero_shards_stage3([str(optim_file)], [OrderedDict([("dense.weight", (2, 3))])], 1, str(temp_dir), 0)
+
+        fp32_fragment = torch.load(temp_dir / "dense.weight" / "0" / "fp32.00", weights_only=False)
+        exp_avg_fragment = torch.load(temp_dir / "dense.weight" / "0" / "exp_avg.00", weights_only=False)
+        torch.testing.assert_close(fp32_fragment, torch.arange(6, dtype=torch.float32) + 20)
+        torch.testing.assert_close(exp_avg_fragment, torch.arange(6, dtype=torch.float32))
+
+    def test_zero_to_fp32_rejects_zero3_partitioned_autoep_checkpoint(self, tmp_path):
+        from deepspeed.checkpoint.constants import (
+            AUTOEP_LAYERS_KEY,
+            AUTOEP_ZERO3_EXPERT_STATE_FORMAT_VERSION,
+            AUTOEP_ZERO3_EXPERT_STATE_FORMAT_VERSION_KEY,
+            AUTOEP_ZERO3_EXPERT_STATE_FORMAT_KEY,
+            AUTOEP_ZERO3_PARTITIONED_EXPERT_STATE_FORMAT,
+            BUFFER_NAMES,
+            PARAM_SHAPES,
+        )
+        from deepspeed.utils.zero_to_fp32 import _raise_if_autoep_zero3_partitioned_checkpoint
+
+        model_file = tmp_path / "zero_pp_rank_0_mp_rank_00_model_states.pt"
+        torch.save(
+            {
+                BUFFER_NAMES: [],
+                PARAM_SHAPES: [],
+                "module": {},
+                "shared_params": {},
+                AUTOEP_LAYERS_KEY: [{
+                    "moe_layer_id": 0,
+                    "module_path": "model.layers.0.mlp",
+                    "num_experts": 4,
+                    "num_local_experts": 2,
+                    "ep_size": 2,
+                    "expert_key_prefix": "model.layers.0.mlp.experts",
+                    AUTOEP_ZERO3_EXPERT_STATE_FORMAT_KEY: AUTOEP_ZERO3_PARTITIONED_EXPERT_STATE_FORMAT,
+                    AUTOEP_ZERO3_EXPERT_STATE_FORMAT_VERSION_KEY: AUTOEP_ZERO3_EXPERT_STATE_FORMAT_VERSION,
+                    "ep_group_name": "ep_size_2",
+                    "ep_rank": 0,
+                    "expert_data_parallel_rank": 0,
+                    "expert_data_parallel_world_size": 1,
+                    "global_expert_start": 0,
+                    "global_expert_end": 2,
+                }],
+            },
+            model_file,
+        )
+
+        with pytest.raises(NotImplementedError, match="ds_to_universal.py"):
+            _raise_if_autoep_zero3_partitioned_checkpoint([str(model_file)])
 
     def test_preset_registry_core_contracts(self):
         assert set(PRESET_MODELS) == {"mixtral", "qwen3_moe", "qwen3_5_moe", "deepseek_v2", "deepseek_v3"}

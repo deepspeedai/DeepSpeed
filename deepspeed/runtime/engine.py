@@ -70,7 +70,18 @@ from deepspeed.compression.constants import \
     WEIGHT_QUANTIZE_ROUNDING, \
     WEIGHT_QUANTIZE_VERBOSE, \
     WEIGHT_QUANTIZE_KERNEL
-from deepspeed.checkpoint.constants import OPTIMIZER_STATE_DICT, FROZEN_PARAM_FRAGMENTS, UNIVERSAL_CHECKPOINT_INFO
+from deepspeed.checkpoint.constants import (
+    AUTOEP_ZERO3_EXPERT_STATE_FORMAT_VERSION,
+    AUTOEP_ZERO3_EXPERT_STATE_FORMAT_VERSION_KEY,
+    AUTOEP_ZERO3_EXPERT_STATE_FORMAT_KEY,
+    AUTOEP_ZERO3_PARTITIONED_EXPERT_STATE_FORMAT,
+    EXPERT_PARAMETER_PATTERNS,
+    FROZEN_PARAM_FRAGMENTS,
+    OPTIMIZER_STATE_DICT,
+    UNIVERSAL_CHECKPOINT_INFO,
+    UNIVERSAL_CHECKPOINT_VERSION_KEY,
+    UNIVERSAL_CHECKPOINT_VERSION_VALUE,
+)
 from deepspeed.checkpoint.utils import clone_tensors_for_torch_save
 from deepspeed.checkpoint.ds_to_universal import dp_index_to_str
 from deepspeed.runtime.sparse_tensor import SparseTensor
@@ -3640,7 +3651,8 @@ class DeepSpeedEngine(Module):
                                strict=True,
                                custom_load_fn=None,
                                fetch_z3_params=False,
-                               z3_params_to_fetch=None):
+                               z3_params_to_fetch=None,
+                               allowed_missing_keys=None):
         if z3_params_to_fetch is not None:
             params_to_fetch = [
                 p for p in z3_params_to_fetch if hasattr(p, 'ds_id') and p.ds_status == ZeroParamStatus.NOT_AVAILABLE
@@ -3658,9 +3670,17 @@ class DeepSpeedEngine(Module):
             if custom_load_fn:
                 custom_load_fn(src=module_state_dict, dst=self.module)
             else:
-                self.module.load_state_dict(
+                load_result = self.module.load_state_dict(
                     module_state_dict,  # TODO
-                    strict=strict)
+                    strict=strict and allowed_missing_keys is None)
+                if allowed_missing_keys is not None:
+                    missing_keys = set(load_result.missing_keys)
+                    unexpected_keys = set(load_result.unexpected_keys)
+                    unexpected_missing = missing_keys - set(allowed_missing_keys)
+                    if unexpected_missing or unexpected_keys:
+                        raise RuntimeError("Checkpoint module state did not match the model outside AutoEP expert "
+                                           f"parameters: missing={sorted(unexpected_missing)}, "
+                                           f"unexpected={sorted(unexpected_keys)}")
 
         if checkpoint.get(FROZEN_PARAM_FRAGMENTS, None) is not None:
             saved_frozen_params = checkpoint[FROZEN_PARAM_FRAGMENTS]
@@ -3813,8 +3833,13 @@ class DeepSpeedEngine(Module):
 
         load_zero_checkpoint = load_path is not None and self.zero_optimization()
         if load_zero_checkpoint and not self.zero_nvme_offload_optimizer():
-            if (load_optimizer_states and not load_module_only) or self.load_universal_checkpoint():
-                success = self._load_zero_checkpoint(load_dir, tag, load_optimizer_states=load_optimizer_states)
+            autoep_zero3_partition_native_load = self.has_moe_layers and self.zero_optimization_partition_weights()
+            if ((load_optimizer_states and not load_module_only) or self.load_universal_checkpoint()
+                    or autoep_zero3_partition_native_load):
+                success = self._load_zero_checkpoint(load_dir,
+                                                     tag,
+                                                     load_optimizer_states=load_optimizer_states
+                                                     and not load_module_only)
             else:
                 success = False
             if not success:
@@ -3843,6 +3868,149 @@ class DeepSpeedEngine(Module):
 
         return load_path, client_states
 
+    @staticmethod
+    def _uses_autoep_zero3_partitioned_experts(autoep_layers):
+        if not isinstance(autoep_layers, list):
+            return False
+        DeepSpeedEngine._validate_autoep_zero3_partitioned_metadata(autoep_layers, require_partitioned=False)
+        return any(
+            isinstance(entry, dict)
+            and entry.get(AUTOEP_ZERO3_EXPERT_STATE_FORMAT_KEY) == AUTOEP_ZERO3_PARTITIONED_EXPERT_STATE_FORMAT
+            for entry in autoep_layers)
+
+    @staticmethod
+    def _validate_autoep_zero3_partitioned_metadata(autoep_layers, model=None, require_partitioned=True):
+        if not isinstance(autoep_layers, list):
+            raise RuntimeError(f"ds_autoep_layers metadata is malformed: expected list, got "
+                               f"{type(autoep_layers).__name__}")
+
+        try:
+            from deepspeed.module_inject.auto_ep_layer import AutoEPMoELayer as _AutoEPMoELayer
+        except ImportError:
+            _AutoEPMoELayer = None
+
+        live_autoep_modules = {}
+        if _AutoEPMoELayer is not None and model is not None:
+            live_autoep_modules = {
+                module_name: module
+                for module_name, module in model.named_modules() if isinstance(module, _AutoEPMoELayer)
+            }
+
+        required_fields = {
+            'moe_layer_id',
+            'module_path',
+            'num_experts',
+            'num_local_experts',
+            'ep_size',
+            'expert_key_prefix',
+        }
+        partitioned_fields = {
+            AUTOEP_ZERO3_EXPERT_STATE_FORMAT_VERSION_KEY,
+            'ep_group_name',
+            'ep_rank',
+            'expert_data_parallel_rank',
+            'expert_data_parallel_world_size',
+            'global_expert_start',
+            'global_expert_end',
+        }
+        seen_layer_ids = set()
+        seen_prefixes = set()
+        partitioned_count = 0
+
+        for entry in autoep_layers:
+            if not isinstance(entry, dict):
+                raise RuntimeError(f"ds_autoep_layers entry is malformed: expected dict, got "
+                                   f"{type(entry).__name__}")
+            missing = required_fields - entry.keys()
+            if missing:
+                raise RuntimeError(f"ds_autoep_layers entry is invalid: missing fields {sorted(missing)}")
+
+            layer_id = entry['moe_layer_id']
+            if layer_id in seen_layer_ids:
+                raise RuntimeError(f"ds_autoep_layers metadata has duplicate moe_layer_id: {layer_id}")
+            seen_layer_ids.add(layer_id)
+
+            prefix = entry['expert_key_prefix']
+            if prefix in seen_prefixes:
+                raise RuntimeError(f"ds_autoep_layers metadata has duplicate expert_key_prefix: {prefix}")
+            seen_prefixes.add(prefix)
+
+            checkpoint_format = entry.get(AUTOEP_ZERO3_EXPERT_STATE_FORMAT_KEY)
+            if checkpoint_format is None:
+                continue
+            if checkpoint_format != AUTOEP_ZERO3_PARTITIONED_EXPERT_STATE_FORMAT:
+                continue
+
+            missing = partitioned_fields - entry.keys()
+            if missing:
+                raise RuntimeError(f"AutoEP ZeRO-3 checkpoint metadata is invalid: missing fields {sorted(missing)}")
+            if entry[AUTOEP_ZERO3_EXPERT_STATE_FORMAT_VERSION_KEY] != AUTOEP_ZERO3_EXPERT_STATE_FORMAT_VERSION:
+                raise RuntimeError("Unsupported AutoEP ZeRO-3 checkpoint format version: "
+                                   f"{entry[AUTOEP_ZERO3_EXPERT_STATE_FORMAT_VERSION_KEY]}. "
+                                   f"This DeepSpeed build supports version "
+                                   f"{AUTOEP_ZERO3_EXPERT_STATE_FORMAT_VERSION}.")
+
+            num_experts = entry['num_experts']
+            num_local_experts = entry['num_local_experts']
+            ep_size = entry['ep_size']
+            if num_local_experts * ep_size != num_experts:
+                raise RuntimeError("AutoEP ZeRO-3 checkpoint metadata is inconsistent: "
+                                   f"num_local_experts={num_local_experts}, ep_size={ep_size}, "
+                                   f"num_experts={num_experts}")
+
+            expected_start = entry['ep_rank'] * num_local_experts
+            expected_end = expected_start + num_local_experts
+            if entry['global_expert_start'] != expected_start or entry['global_expert_end'] != expected_end:
+                raise RuntimeError("AutoEP ZeRO-3 checkpoint metadata has inconsistent global expert range: "
+                                   f"got [{entry['global_expert_start']}, {entry['global_expert_end']}), "
+                                   f"expected [{expected_start}, {expected_end})")
+
+            module_path = entry['module_path']
+            if live_autoep_modules and module_path not in live_autoep_modules:
+                raise RuntimeError(f"AutoEP ZeRO-3 checkpoint metadata references missing module: {module_path}")
+            if live_autoep_modules:
+                expected_prefix = f"{module_path}.experts" if module_path else "experts"
+                if prefix != expected_prefix:
+                    raise RuntimeError("AutoEP ZeRO-3 checkpoint metadata has unexpected expert key prefix: "
+                                       f"got {prefix}, expected {expected_prefix}")
+
+            partitioned_count += 1
+
+        if require_partitioned and partitioned_count == 0:
+            raise RuntimeError("AutoEP ZeRO-3 partition-native checkpoint metadata was expected but no "
+                               "partitioned AutoEP layer entries were found")
+
+    @staticmethod
+    def _autoep_expert_parameter_names(autoep_layers, model):
+        names = set()
+        if isinstance(autoep_layers, list):
+            DeepSpeedEngine._validate_autoep_zero3_partitioned_metadata(autoep_layers, model=model)
+            for entry in autoep_layers:
+                if not isinstance(entry, dict):
+                    continue
+                if entry.get(AUTOEP_ZERO3_EXPERT_STATE_FORMAT_KEY) != AUTOEP_ZERO3_PARTITIONED_EXPERT_STATE_FORMAT:
+                    continue
+                prefix = entry.get('expert_key_prefix')
+                if prefix:
+                    names.update(f"{prefix}.{wname}" for wname in ('w1', 'w2', 'w3'))
+
+        if names:
+            return names
+
+        try:
+            from deepspeed.module_inject.auto_ep_layer import AutoEPMoELayer as _AutoEPMoELayer
+        except ImportError:
+            _AutoEPMoELayer = None
+        if _AutoEPMoELayer is None or model is None:
+            return names
+
+        for module_name, module in model.named_modules():
+            if not isinstance(module, _AutoEPMoELayer):
+                continue
+            module_prefix = f"{module_name}." if module_name else ""
+            names.update(f"{module_prefix}experts.{wname}" for wname in ('w1', 'w2', 'w3'))
+        return names
+
     def _load_checkpoint(self,
                          load_dir,
                          tag,
@@ -3867,12 +4035,9 @@ class DeepSpeedEngine(Module):
 
         fetch_z3_params = False
         z3_params_to_fetch = None
-        if self.has_moe_layers and self.zero_optimization_partition_weights() and (load_module_only
-                                                                                   or not load_optimizer_states):
-            raise NotImplementedError("AutoEP with ZeRO Stage 3 does not support module-only checkpoint load or "
-                                      "load_optimizer_states=False yet. Use same-topology checkpoint load with "
-                                      "optimizer states for this release.")
-        if self.zero_optimization_partition_weights() and not load_optimizer_states:
+        autoep_partitioned_experts = False
+        allowed_missing_keys = None
+        if self.zero_optimization_partition_weights() and not load_optimizer_states and not self.has_moe_layers:
             checkpoint['module'] = get_fp32_state_dict_from_zero_checkpoint(load_dir)
             fetch_z3_params = True
 
@@ -3891,15 +4056,23 @@ class DeepSpeedEngine(Module):
             autoep_layers = checkpoint.get(AUTOEP_LAYERS_KEY)
             if autoep_layers is None:
                 autoep_layers = checkpoint.get(AUTOEP_LAYERS_KEY_LEGACY)
-            DeepSpeedEngine.load_moe_state_dict(load_dir,
-                                                tag,
-                                                state_dict=checkpoint['module'],
-                                                old_moe_load=old_moe_load,
-                                                model=self.module,
-                                                mpu=self.mpu,
-                                                num_experts=self.num_experts,
-                                                checkpoint_engine=self.checkpoint_engine,
-                                                autoep_layers=autoep_layers)
+            autoep_partitioned_experts = (self.zero_optimization_partition_weights()
+                                          and DeepSpeedEngine._uses_autoep_zero3_partitioned_experts(autoep_layers))
+            if autoep_partitioned_experts:
+                allowed_missing_keys = DeepSpeedEngine._autoep_expert_parameter_names(autoep_layers, self.module)
+                if not allowed_missing_keys:
+                    raise RuntimeError("AutoEP ZeRO-3 partition-native checkpoint metadata did not identify any "
+                                       "live expert parameters to restore from ZeRO shards.")
+            else:
+                DeepSpeedEngine.load_moe_state_dict(load_dir,
+                                                    tag,
+                                                    state_dict=checkpoint['module'],
+                                                    old_moe_load=old_moe_load,
+                                                    model=self.module,
+                                                    mpu=self.mpu,
+                                                    num_experts=self.num_experts,
+                                                    checkpoint_engine=self.checkpoint_engine,
+                                                    autoep_layers=autoep_layers)
             if self.zero_optimization_partition_weights():
                 z3_params_to_fetch = []
                 try:
@@ -3915,7 +4088,8 @@ class DeepSpeedEngine(Module):
                                         strict=load_module_strict,
                                         custom_load_fn=custom_load_fn,
                                         fetch_z3_params=fetch_z3_params,
-                                        z3_params_to_fetch=z3_params_to_fetch)
+                                        z3_params_to_fetch=z3_params_to_fetch,
+                                        allowed_missing_keys=allowed_missing_keys)
 
         self.loaded_checkpoint_dp_world_size = checkpoint['dp_world_size']
 
@@ -4284,8 +4458,14 @@ class DeepSpeedEngine(Module):
         autoep_layer_info = []
         autoep_group_names = set()
         moe_layer_id = 0
+        found_native_moe = False
+        found_autoep = False
         for n_module, module in self.module.named_modules():
             if isinstance(module, MoE):  # and deepspeed.comm.get_rank() == 0:
+                found_native_moe = True
+                if self.zero_optimization_partition_weights() and found_autoep:
+                    raise RuntimeError("AutoEP with ZeRO Stage 3 checkpointing does not support models that also "
+                                       "contain native DeepSpeed MoE layers.")
                 group_name = module.expert_group_name
                 num_local_experts = module.num_local_experts
                 expp_rank = groups._get_expert_parallel_rank(group_name)
@@ -4335,20 +4515,60 @@ class DeepSpeedEngine(Module):
                 moe_layer_id += 1
 
             elif _AutoEPMoELayer is not None and isinstance(module, _AutoEPMoELayer):
+                found_autoep = True
+                if self.zero_optimization_partition_weights() and found_native_moe:
+                    raise RuntimeError("AutoEP with ZeRO Stage 3 checkpointing does not support models that also "
+                                       "contain native DeepSpeed MoE layers.")
+                if self.zero_optimization_partition_weights() and self.zero_nvme_offload_optimizer():
+                    raise RuntimeError("AutoEP with ZeRO Stage 3 checkpointing does not support NVMe optimizer "
+                                       "swapping yet because expert state is restored from ZeRO optimizer shards.")
                 group_name = module.ep_group_name
                 num_local_experts = module.num_local_experts
                 expp_rank = groups._get_expert_parallel_rank(group_name)
                 exp_dp_rank = groups._get_expert_data_parallel_rank(group_name)
                 module_prefix = f"{n_module}." if n_module else ""
+                expert_params = [getattr(module.experts, wname) for wname in ('w1', 'w2', 'w3')]
+                if self.zero_optimization_partition_weights():
+                    frozen_expert_names = [
+                        f"{module_prefix}experts.{wname}" for wname, param in zip(('w1', 'w2', 'w3'), expert_params)
+                        if not param.requires_grad
+                    ]
+                    if frozen_expert_names:
+                        raise RuntimeError("AutoEP with ZeRO Stage 3 checkpointing does not support frozen expert "
+                                           "parameters yet because frozen fragments are not stored in ZeRO optimizer "
+                                           f"shards: {frozen_expert_names}")
 
                 # Collect metadata on ALL ranks (before writer guard)
                 autoep_layer_info.append({
-                    'moe_layer_id': moe_layer_id,
-                    'module_path': n_module,
-                    'num_experts': module.num_experts,
-                    'num_local_experts': num_local_experts,
-                    'ep_size': module.ep_size,
-                    'expert_key_prefix': f"{module_prefix}experts",
+                    'moe_layer_id':
+                    moe_layer_id,
+                    'module_path':
+                    n_module,
+                    'num_experts':
+                    module.num_experts,
+                    'num_local_experts':
+                    num_local_experts,
+                    'ep_size':
+                    module.ep_size,
+                    'expert_key_prefix':
+                    f"{module_prefix}experts",
+                    AUTOEP_ZERO3_EXPERT_STATE_FORMAT_KEY:
+                    AUTOEP_ZERO3_PARTITIONED_EXPERT_STATE_FORMAT
+                    if self.zero_optimization_partition_weights() else 'per_expert_files',
+                    AUTOEP_ZERO3_EXPERT_STATE_FORMAT_VERSION_KEY:
+                    AUTOEP_ZERO3_EXPERT_STATE_FORMAT_VERSION if self.zero_optimization_partition_weights() else None,
+                    'ep_group_name':
+                    group_name,
+                    'ep_rank':
+                    expp_rank,
+                    'expert_data_parallel_rank':
+                    exp_dp_rank,
+                    'expert_data_parallel_world_size':
+                    groups._get_expert_data_parallel_world_size(group_name),
+                    'global_expert_start':
+                    expp_rank * num_local_experts,
+                    'global_expert_end':
+                    expp_rank * num_local_experts + num_local_experts,
                 })
                 autoep_group_names.add(group_name)
                 if len(autoep_group_names) > 1:
@@ -4356,7 +4576,10 @@ class DeepSpeedEngine(Module):
                                        f"multiple groups: {sorted(autoep_group_names)}. "
                                        f"All AutoEPMoELayer instances must use the same ep_size.")
 
-                expert_params = [getattr(module.experts, wname) for wname in ('w1', 'w2', 'w3')]
+                if self.zero_optimization_partition_weights():
+                    moe_layer_id += 1
+                    continue
+
                 with deepspeed.zero.GatheredParameters(expert_params):
                     if self.checkpoint_engine.is_data_parallel_writer(exp_dp_rank):
                         # Slice fused 3D tensors into per-expert state dicts.
@@ -4391,7 +4614,7 @@ class DeepSpeedEngine(Module):
         # zero_pp_rank_*_model_states.pt file so load can discover a checkpoint
         # on every rank.
         is_expert_dp_writer = self.checkpoint_engine.is_data_parallel_writer(exp_dp_rank)
-        if is_expert_dp_writer:
+        if is_expert_dp_writer and not self.zero_optimization_partition_weights():
             optimizer_state = {
                 'optimizer': self.optimizer.state_dict() if self.optimizer and not self.zero_optimization() else None
             }
@@ -4413,10 +4636,47 @@ class DeepSpeedEngine(Module):
             model_state_dict = self._get_non_moe_state_dict(
                 DeepSpeedEngine.module_state_dict(self, exclude_frozen_parameters=exclude_frozen_parameters))
 
-            # TODO: update num experts info,.. in checkpoint
+            zero_optimizer_state = self.zero_optimization()
+            save_frozen_param = self.zero_optimization_partition_gradients() and not exclude_frozen_parameters
+            zero_param_shapes = self._get_zero_param_shapes() if self.optimizer and zero_optimizer_state else None
+            if autoep_layer_info and self.zero_optimization_partition_weights():
+                DeepSpeedEngine._validate_autoep_zero3_partitioned_metadata(autoep_layer_info, model=self.module)
+                expert_param_names = DeepSpeedEngine._autoep_expert_parameter_names(autoep_layer_info, self.module)
+                zero_shape_names = {
+                    name
+                    for param_group_shapes in (zero_param_shapes or [])
+                    for name in param_group_shapes.keys()
+                }
+                missing_expert_shapes = expert_param_names - zero_shape_names
+                if missing_expert_shapes:
+                    raise RuntimeError("AutoEP ZeRO-3 checkpoint metadata references expert parameters that are "
+                                       f"missing from ZeRO param_shapes: {sorted(missing_expert_shapes)}")
+            universal_checkpoint_info = getattr(self.module, UNIVERSAL_CHECKPOINT_INFO, None)
+            if universal_checkpoint_info is not None:
+                universal_checkpoint_info = dict(universal_checkpoint_info)
+            elif autoep_layer_info:
+                universal_checkpoint_info = {}
+            if autoep_layer_info:
+                universal_checkpoint_info.setdefault(UNIVERSAL_CHECKPOINT_VERSION_KEY,
+                                                     UNIVERSAL_CHECKPOINT_VERSION_VALUE)
+                universal_checkpoint_info[EXPERT_PARAMETER_PATTERNS] = [r'.*\.experts\.w[123]$']
+                universal_checkpoint_info['ds_autoep_layers'] = autoep_layer_info
+
             state = {
                 'module':
                 model_state_dict,
+                'buffer_names':
+                self._get_buffer_names(),
+                'optimizer':
+                self.optimizer.state_dict() if self.optimizer and not zero_optimizer_state else None,
+                'param_shapes':
+                zero_param_shapes,
+                'frozen_param_shapes':
+                self._get_zero_frozen_param_attributes(self._get_param_shape_func) if save_frozen_param else None,
+                'shared_params':
+                self._get_shared_params() if self.optimizer and zero_optimizer_state else None,
+                'frozen_param_fragments':
+                self._get_zero_frozen_param_attributes(self._get_param_fragment_func) if save_frozen_param else None,
                 'lr_scheduler':
                 self.lr_scheduler.state_dict() if self.lr_scheduler is not None else None,
                 'data_sampler':
@@ -4440,9 +4700,15 @@ class DeepSpeedEngine(Module):
                 self.num_experts,
                 'ds_autoep_layers':
                 autoep_layer_info if autoep_layer_info else None,
+                'ds_config':
+                self.config,
+                'ds_version':
+                version,
             }
+            if universal_checkpoint_info is not None:
+                state[UNIVERSAL_CHECKPOINT_INFO] = universal_checkpoint_info
             # Check for reserved-key collisions with client_state
-            reserved_keys = {'ds_autoep_layers', 'autoep_layers'}
+            reserved_keys = {'ds_autoep_layers', 'autoep_layers', UNIVERSAL_CHECKPOINT_INFO}
             collisions = reserved_keys.intersection(client_state.keys())
             if collisions:
                 raise KeyError(f"client_state contains reserved checkpoint keys: {sorted(collisions)}. "
@@ -4718,6 +4984,20 @@ class DeepSpeedEngine(Module):
         raise ValueError("consolidated_16bit_state_dict is only applicable to cases where weights are partitioned, "
                          "including Zero Stage 3 and tensor parallelism.")
 
+    def _has_autoep_layers(self):
+        try:
+            from deepspeed.module_inject.auto_ep_layer import AutoEPMoELayer as _AutoEPMoELayer
+        except ImportError:
+            return False
+        return any(isinstance(module, _AutoEPMoELayer) for _, module in self.module.named_modules())
+
+    def _raise_if_autoep_zero3_consolidated_export(self, operation):
+        if self.zero_optimization_partition_weights() and self._has_autoep_layers():
+            raise NotImplementedError(f"{operation} is not supported for AutoEP with ZeRO Stage 3 checkpoint "
+                                      "partitions. AutoEP expert parameters are partitioned over expert replica "
+                                      "groups, so global-DP consolidation would produce incomplete expert tensors. "
+                                      "Use ds_to_universal.py for an expert-aware checkpoint conversion.")
+
     def _zero3_consolidated_16bit_state_dict(self, exclude_frozen_parameters=False):
         """
         Get a full non-partitioned state_dict with fp16 weights on cpu.
@@ -4732,6 +5012,7 @@ class DeepSpeedEngine(Module):
         """
         if not self.zero_optimization_partition_weights():
             raise ValueError("this function requires ZeRO-3 mode")
+        self._raise_if_autoep_zero3_consolidated_export("_zero3_consolidated_16bit_state_dict")
 
         state_dict = OrderedDict() if dist.get_rank() == 0 else None
         shared_params = {}
@@ -4811,6 +5092,7 @@ class DeepSpeedEngine(Module):
         path = os.path.join(save_dir, save_filename)
 
         if self.zero_optimization_partition_weights():
+            self._raise_if_autoep_zero3_consolidated_export("save_16bit_model")
             if self.zero_gather_16bit_weights_on_model_save():
                 # consolidation is expensive in time and memory and therefore isn't a default
                 state_dict = self._zero3_consolidated_16bit_state_dict(
