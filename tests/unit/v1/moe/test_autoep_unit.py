@@ -38,6 +38,7 @@ from deepspeed.module_inject.auto_ep_presets.registry import (
 from deepspeed.moe.layer import MoE
 from deepspeed.moe.ep_experts import GroupedExperts
 from deepspeed.moe.ep_kernels import TokenReorderer
+from deepspeed.moe.ep_repack import repack_expert_weights
 from deepspeed.moe.ep_router import TokenChoiceTopKRouter
 from deepspeed.runtime.engine import DeepSpeedEngine
 from deepspeed.runtime.zero.stage3 import DeepSpeedZeroOptimizer_Stage3
