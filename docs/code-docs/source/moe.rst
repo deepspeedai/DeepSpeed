@@ -1,12 +1,13 @@
 Mixture of Experts (DeepSpeed MoE)
 ==================================
 
+DeepSpeed provides two forms of MoE support: DeepSpeed MoE and :doc:`AutoEP
+(Automatic Expert Parallelism) <autoep>`.
+
 DeepSpeed MoE is the explicit ``deepspeed.moe.layer.MoE`` API for constructing
 MoE layers in model code.
 
-For AutoEP (Automatic Expert Parallelism), which automatically detects and
-replaces supported Hugging Face MoE layers from DeepSpeed config without model
-code changes, see :doc:`autoep`.
+This page introduces the DeepSpeed MoE API.
 
 See the `Mixture of Experts (DeepSpeed MoE) tutorial
 <https://www.deepspeed.ai/tutorials/mixture-of-experts/>`__ for training
