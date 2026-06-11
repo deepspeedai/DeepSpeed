@@ -20,13 +20,19 @@ def get_output_node(graph: Graph):
     raise ValueError("No output node found")
 
 
-def add_end_backward(graph: Graph, graph_id: int):
+def should_release_reduce_buckets(graph_order, graph_id: int) -> bool:
+    backward_graph_ids = [g_id for g_id, needs_backward in graph_order if needs_backward]
+    return not backward_graph_ids or graph_id == backward_graph_ids[0]
+
+
+def add_end_backward(graph: Graph, graph_id: int, release_reduce_buckets: bool = True):
     reduce_nodes = [n for n in graph.nodes if n.target == torch.ops.dc.reduce_grad.default]
     if len(reduce_nodes) == 0:
         return
 
     with graph.inserting_before(get_output_node(graph)):
-        graph.create_node("call_function", torch.ops.dc.end_backward.default, (reduce_nodes, graph_id))
+        graph.create_node("call_function", torch.ops.dc.end_backward.default,
+                          (reduce_nodes, graph_id, release_reduce_buckets))
 
 
 def replace_reduce_outputs_with_none(graph: Graph):

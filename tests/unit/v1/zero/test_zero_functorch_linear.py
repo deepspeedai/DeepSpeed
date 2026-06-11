@@ -201,3 +201,19 @@ class TestZeroLinearAutocast(DistributedTest):
         assert hasattr(grad_fn, "_dtype")
         out.sum().backward()
         assert torch.isfinite(weight.grad).all()
+
+
+class TestLinearFunctionVmap(DistributedTest):
+    """``LinearFunctionForZeroStage3`` must accept ``torch.func.vmap`` directly."""
+
+    world_size = 1
+
+    def test_vmap_over_linear_function(self):
+        from deepspeed.runtime.zero.linear import LinearFunctionForZeroStage3
+        device = get_accelerator().device_name()
+        weight = torch.randn(4, 8, device=device, requires_grad=True)
+        bias = torch.randn(4, device=device, requires_grad=True)
+        xs = torch.randn(3, 8, device=device)
+        y = torch.func.vmap(lambda xi: LinearFunctionForZeroStage3.apply(xi, weight, bias).sum())(xs)
+        ref = torch.func.vmap(lambda xi: (xi @ weight.t() + bias).sum())(xs)
+        assert torch.allclose(y, ref, atol=1e-5)

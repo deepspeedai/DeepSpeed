@@ -5,9 +5,6 @@ on:
   pull_request:
     branches:
       '**'
-    paths-ignore:
-      - 'docs/**'
-      - 'blogs/**'
   merge_group:
     branches: [ master ]
   schedule:
@@ -18,8 +15,37 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  check-paths:
+    name: python / check paths
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      should_run: ${{ steps.non_pr.outputs.should_run || steps.filter.outputs.run_tests }}
+    steps:
+      - id: non_pr
+        if: github.event_name != 'pull_request'
+        run: echo "should_run=true" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+        if: github.event_name == 'pull_request'
+
+      - uses: dorny/paths-filter@v3
+        id: filter
+        if: github.event_name == 'pull_request'
+        with:
+          predicate-quantifier: every
+          filters: |
+            run_tests:
+              - '**'
+              - '!docs/**'
+              - '!blogs/**'
+
   unit-tests:
     name: python / install smoke (Python ${{ matrix.pyVersion }})
+    needs: check-paths
+    if: always()
     strategy:
       matrix:
         pyVersion: ["3.10", "3.11", "3.12"]
@@ -30,21 +56,35 @@ jobs:
       image: python:${{ matrix.pyVersion }}-slim
 
     steps:
+        - name: Fail if path filter failed
+          if: needs.check-paths.result != 'success'
+          run: exit 1
+
+        - name: Skip ignored-path install smoke
+          if: needs.check-paths.outputs.should_run != 'true'
+          run: echo "Only ignored paths changed; install smoke intentionally skipped."
+
         - uses: actions/checkout@v4
+          if: needs.check-paths.outputs.should_run == 'true'
 
         - name: Install build dependencies
+          if: needs.check-paths.outputs.should_run == 'true'
           run: |
             apt-get update && apt-get install -y build-essential ninja-build
         - name: environment
+          if: needs.check-paths.outputs.should_run == 'true'
           run: |
             which python
             python --version
         - name: Install PyTorch (CPU)
+          if: needs.check-paths.outputs.should_run == 'true'
           run: |
             pip install torch --index-url https://download.pytorch.org/whl/cpu
         - name: Install deepspeed
+          if: needs.check-paths.outputs.should_run == 'true'
           run: |
             pip install .
         - name: DS Report
+          if: needs.check-paths.outputs.should_run == 'true'
           run: |
              ds_report

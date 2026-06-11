@@ -689,26 +689,47 @@ class CUDAOpBuilder(OpBuilder):
             raise RuntimeError(
                 f"Unable to load {self.name} op due to no compute capabilities remaining after filtering")
 
-        self.enable_bf16 = True
+        # Canonicalize by numeric (major, minor) so the emitted -gencode
+        # sequence matches PyTorch's own dedupe (see #7871). For mixed inputs
+        # such as "8.0;8.0+PTX" or "8.0+PTX;8.0", PyTorch collapses to one
+        # sm_80 entry plus one compute_80 PTX entry. Track has_PTX per arch
+        # as the OR across all variants of that arch so any +PTX appearance
+        # carries through after dedupe.
+        canonical = {}
         for cc in ccs:
-            if int(cc[0]) <= 7:
+            major = int(cc[0])
+            minor_part = cc[1]
+            has_ptx = minor_part.endswith('+PTX')
+            minor = int(minor_part.split('+')[0])
+            key = (major, minor)
+            canonical[key] = canonical.get(key, False) or has_ptx
+        canonical_archs = sorted(canonical.items())
+
+        self.enable_bf16 = True
+        for (major, _minor), _has_ptx in canonical_archs:
+            if major <= 7:
                 self.enable_bf16 = False
 
         # Keep TORCH_CUDA_ARCH_LIST in sync with the filtered arch list so
-        # PyTorch does not re-add archs that filter_ccs() removed.
-        arch_list = ";".join(f"{cc[0]}.{cc[1]}" for cc in ccs)
-        os.environ["TORCH_CUDA_ARCH_LIST"] = arch_list
+        # PyTorch does not re-add archs that filter_ccs() removed. Emit one
+        # token per arch using the X.Y or X.Y+PTX form, matching PyTorch's
+        # canonical parsing where +PTX on an arch token already implies both
+        # the sm and PTX emissions for that arch.
+        arch_tokens = [f"{major}.{minor}{'+PTX' if has_ptx else ''}" for (major, minor), has_ptx in canonical_archs]
+        os.environ["TORCH_CUDA_ARCH_LIST"] = ";".join(arch_tokens)
 
         if self.jit_mode:
             # Let PyTorch generate -gencode flags from the env var.
             return []
 
         # Non-JIT: return explicit flags per builder for extra_compile_args.
+        # Emit exactly one sm_X line per arch, followed by one compute_X PTX
+        # line when any variant of that arch carried +PTX.
         args = []
-        for cc in ccs:
-            num = cc[0] + cc[1].split('+')[0]
+        for (major, minor), has_ptx in canonical_archs:
+            num = f"{major}{minor}"
             args.append(f'-gencode=arch=compute_{num},code=sm_{num}')
-            if cc[1].endswith('+PTX'):
+            if has_ptx:
                 args.append(f'-gencode=arch=compute_{num},code=compute_{num}')
 
         return args

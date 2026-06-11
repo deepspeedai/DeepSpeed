@@ -426,6 +426,9 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
         self.is_gradient_accumulation_boundary: bool = True
 
+        # Toggled by DeepSpeedEngine.coalesce_grad_reduction().
+        self._coalesce_grad_reduction = False
+
         self.param_reduce_events: Deque[get_accelerator().Event] = collections.deque()
         # TODO. make this configurable via JSON
         self.max_param_reduce_events: int = 2
@@ -1537,7 +1540,9 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                 start_offset = rank * chunk_sz
                 end_offset = start_offset + chunk_sz
                 if end_offset > param.grad.numel():
-                    buffer_to_update = torch.zeros(chunk_sz, device=param.grad.device, dtype=param.grad.dtype)
+                    buffer_to_update = torch.zeros(chunk_sz,
+                                                   device=param.grad.device,
+                                                   dtype=self.gradient_accumulation_dtype)
                     buffer_to_update[:param.grad.numel() -
                                      start_offset] = gathered_momentum.view(-1).data[start_offset:param.grad.numel()]
                 else:
@@ -1581,8 +1586,8 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         if self.postscale_gradients and self.gradient_predivide_factor != world_sz:
             buffer_to_reduce = buffer_to_reduce.mul(self.gradient_predivide_factor)
 
-        if communication_data_type != self.dtype:
-            buffer_to_reduce = buffer_to_reduce.to(self.dtype)
+        if communication_data_type != self.gradient_accumulation_dtype:
+            buffer_to_reduce = buffer_to_reduce.to(self.gradient_accumulation_dtype)
 
         grad_partitions = []
         grad_offset_in_buffer = 0
@@ -1596,7 +1601,9 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
             partition = buffer_to_reduce[start_offset:end_offset]
             if param.partition_numel() != partition.numel():
-                padded_partition = torch.zeros(param.partition_numel(), device=grad.device, dtype=grad.dtype)
+                padded_partition = torch.zeros(param.partition_numel(),
+                                               device=grad.device,
+                                               dtype=self.gradient_accumulation_dtype)
                 if partition.numel() > 0:
                     padded_partition[:partition.numel()] = partition
                 grad_partitions.append(padded_partition)
@@ -1633,8 +1640,8 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                 self.dp_process_group):
             grad_partitions_for_rank = [g.mul(self.gradient_predivide_factor) for g in grad_partitions_for_rank]
 
-        if communication_data_type != self.dtype:
-            grad_partitions_for_rank = [g.to(self.dtype) for g in grad_partitions_for_rank]
+        if communication_data_type != self.gradient_accumulation_dtype:
+            grad_partitions_for_rank = [g.to(self.gradient_accumulation_dtype) for g in grad_partitions_for_rank]
 
         return grad_partitions_for_rank
 
@@ -1812,6 +1819,8 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         return output
 
     def reduce_ready_partitions_and_remove_grads(self, param):
+        if self._coalesce_grad_reduction:
+            return
         #print_rank_0(f"Backward {debug_param2name_id_shape(param)}", force=True)
         self.reduce_independent_p_g_buckets_and_remove_grads(param)
 
