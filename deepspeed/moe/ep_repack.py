@@ -35,7 +35,7 @@ def repack_expert_weights(
             Source gate_up_proj: [E, 2*ffn_hidden, hidden]
             Source down_proj: [E, hidden, ffn_hidden]
 
-        Llama4 layout:
+        Alternate Transformers fused layout:
             Source gate_up_proj: [E, hidden, 2*ffn_hidden]
             Source down_proj: [E, ffn_hidden, hidden]
 

@@ -34,7 +34,6 @@ from deepspeed.module_inject.auto_ep_presets.registry import (
 )
 from deepspeed.moe.ep_experts import GroupedExperts
 from deepspeed.moe.ep_kernels import TokenReorderer
-from deepspeed.moe.ep_repack import repack_expert_weights
 from deepspeed.moe.ep_router import TokenChoiceTopKRouter
 from deepspeed.runtime.engine import DeepSpeedEngine
 from deepspeed.utils import groups
@@ -47,7 +46,6 @@ from unit.v1.moe.autoep_test_utils import (
     replace_autoep_layers,
     skip_unless_transformers_has,
     state_matched_models,
-    tiny_llama4_text_config,
     tiny_mixtral_config,
 )
 
@@ -92,22 +90,6 @@ def _assert_same_dtype_device(actual, expected):
     assert actual.device == expected.device
 
 
-class MockLlama4Config:
-    model_type = "llama4"
-    num_local_experts = 8
-    num_experts_per_tok = 1
-    hidden_size = 64
-    intermediate_size = 128
-
-
-class MockLlama4Experts(nn.Module):
-
-    def __init__(self, num_experts=8, ffn_hidden=128, hidden_size=64):
-        super().__init__()
-        self.gate_up_proj = nn.Parameter(torch.randn(num_experts, hidden_size, 2 * ffn_hidden))
-        self.down_proj = nn.Parameter(torch.randn(num_experts, ffn_hidden, hidden_size))
-
-
 class MockSharedExpert(nn.Module):
 
     def __init__(self, hidden_size=64):
@@ -115,31 +97,6 @@ class MockSharedExpert(nn.Module):
         self.up_proj = nn.Linear(hidden_size, hidden_size, bias=False)
         self.gate_proj = nn.Linear(hidden_size, hidden_size, bias=False)
         self.down_proj = nn.Linear(hidden_size, hidden_size, bias=False)
-
-
-class MockLlama4MoEBlock(nn.Module):
-
-    def __init__(self, num_experts=8, ffn_hidden=128, hidden_size=64):
-        super().__init__()
-        self.router = nn.Linear(hidden_size, num_experts, bias=False)
-        self.experts = MockLlama4Experts(num_experts, ffn_hidden, hidden_size)
-        self.shared_expert = MockSharedExpert(hidden_size)
-
-
-class MockLlama4Transformer(nn.Module):
-
-    def __init__(self, num_layers=2, num_experts=8):
-        super().__init__()
-        self.config = MockLlama4Config()
-        self.config.num_local_experts = num_experts
-        self.model = nn.Module()
-        self.model.layers = nn.ModuleList([self._make_layer(num_experts) for _ in range(num_layers)])
-
-    @staticmethod
-    def _make_layer(num_experts):
-        layer = nn.Module()
-        layer.feed_forward = MockLlama4MoEBlock(num_experts)
-        return layer
 
 
 class MockDeepSeekV3Config:
@@ -249,6 +206,9 @@ class TestAutoEPConfig:
 
         class SequenceParallelMPU:
 
+            def get_model_parallel_world_size(self):
+                return 1
+
             def get_sequence_parallel_world_size(self):
                 return 2
 
@@ -326,17 +286,16 @@ class TestAutoEPConfig:
         assert engine._autoep_sequence_parallel_world_size() == 3
 
     def test_preset_registry_core_contracts(self):
-        assert set(PRESET_MODELS) == {"mixtral", "qwen3_moe", "qwen3_5_moe", "deepseek_v2", "deepseek_v3", "llama4"}
+        assert set(PRESET_MODELS) == {"mixtral", "qwen3_moe", "qwen3_5_moe", "deepseek_v2", "deepseek_v3"}
         assert preset_name_for_hf_model_type("mixtral") == "mixtral"
         assert preset_name_for_hf_model_type("qwen2_moe") == "qwen3_moe"
-        assert preset_name_for_hf_model_type("llama4_text") == "llama4"
+        assert preset_name_for_hf_model_type("llama4_text") is None
 
         qwen35 = unsupported_preset_for_hf_model_type("qwen3_5_moe")
         assert qwen35 is not None
         assert "qwen3_5_moe_text" in qwen35[1].unsupported_hf_model_type_notes["qwen3_5_moe"]
         assert PRESET_MODELS["deepseek_v2"].supports_expert_bias is False
         assert PRESET_MODELS["deepseek_v3"].unsupported_router_bias_names == ()
-        assert PRESET_MODELS["llama4"].has_shared_experts is True
 
     def test_fill_autoep_config_from_hf_defaults(self):
         config = AutoEPConfig(enabled=True, autoep_size=2)
@@ -538,46 +497,6 @@ class TestModelDetectionAndReplacement:
                                        compare_router_logits=True,
                                        compare_aux_loss=True,
                                        compare_logits=False)
-
-    def test_llama4_detection_and_repack_contract(self):
-        model = MockLlama4Transformer(num_layers=1, num_experts=8)
-        specs = AutoEP(model, _runtime_config(enabled=True, autoep_size=2, preset_model="llama4")).ep_parser()
-        spec = specs[0]
-
-        assert spec.model_family == "llama4"
-        assert spec.score_apply == "pre"
-        assert spec.return_router_logits is True
-        assert spec.moe_output_shape == "flat"
-        assert spec.has_shared_experts is True
-
-        experts = model.model.layers[0].feed_forward.experts
-        w1, w2, w3 = repack_expert_weights(experts, spec, ep_rank=0, ep_size=2)
-        assert w1.shape == (4, 128, 64)
-        assert w2.shape == (4, 64, 128)
-        assert w3.shape == (4, 128, 64)
-
-    def test_hf_llama4_autoep_direct_moe_returns_flat_contract(self):
-        transformers = pytest.importorskip("transformers")
-        skip_unless_transformers_has(transformers,
-                                     "Llama4ForCausalLM",
-                                     "Llama4TextConfig",
-                                     min_version="5.0.0",
-                                     reason="Llama4 AutoEP preset")
-        config = tiny_llama4_text_config(transformers)
-        native_model, autoep_model = state_matched_models(transformers.Llama4ForCausalLM, config)
-        replace_autoep_layers(autoep_model, "llama4")
-        native_moe = native_model.model.layers[0].feed_forward
-        autoep_moe = next(module for module in autoep_model.modules() if isinstance(module, AutoEPMoELayer))
-        hidden_states = torch.randn(2, 5, 32)
-
-        with torch.no_grad():
-            native_output, native_router_logits = native_moe(hidden_states)
-            autoep_output, autoep_router_logits = autoep_moe(hidden_states)
-
-        assert autoep_output.shape == (10, 32)
-        assert autoep_router_logits.shape == (10, 4)
-        torch.testing.assert_close(autoep_output, native_output, rtol=1e-5, atol=1e-6)
-        torch.testing.assert_close(autoep_router_logits, native_router_logits, rtol=1e-5, atol=1e-6)
 
     def test_qwen_adapter_guards(self, monkeypatch):
         monkeypatch.setattr(get_preset_adapter("qwen3_moe"), "_installed_transformers_version", lambda: "5.0.0")

@@ -7,6 +7,8 @@ DeepSpeed v0.5 introduces new support for training Mixture of Experts (MoE) mode
 
 For more details on results and further discussion, please see our press release: [DeepSpeed powers 8x larger MoE model training with high performance]({{ site.press_release_v5 }}).
 
+This tutorial covers the explicit DeepSpeed MoE layer API. For AutoEP (Automatic Expert Parallelism), which automatically detects and replaces supported Hugging Face MoE layers from DeepSpeed config, see the [AutoEP API docs](https://deepspeed.readthedocs.io/en/latest/autoep.html).
+
 ## Getting started with a simple MoE example
 
 **Note:** DeepSpeed MoE requires Pytorch 1.8 or above.

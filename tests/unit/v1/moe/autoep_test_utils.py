@@ -291,28 +291,3 @@ def tiny_mixtral_config(transformers):
         tie_word_embeddings=False,
         use_cache=False,
     )
-
-
-def tiny_llama4_text_config(transformers):
-    return transformers.Llama4TextConfig(
-        vocab_size=64,
-        hidden_size=32,
-        intermediate_size=16,
-        intermediate_size_mlp=16,
-        num_hidden_layers=1,
-        num_attention_heads=4,
-        num_key_value_heads=2,
-        head_dim=8,
-        max_position_embeddings=64,
-        num_local_experts=4,
-        num_experts_per_tok=1,
-        moe_layers=[0],
-        interleave_moe_layer_step=1,
-        output_router_logits=False,
-        router_jitter_noise=0.0,
-        tie_word_embeddings=False,
-        use_cache=False,
-        attention_chunk_size=64,
-        attn_temperature_tuning=False,
-        no_rope_layers=[0],
-    )
