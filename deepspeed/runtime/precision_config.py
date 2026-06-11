@@ -24,7 +24,7 @@ BFLOAT16 parameters should be of the format:
 "bf16": {
   "enabled": true,
   "immediate_grad_update": false,
-  "check_grad_overflow": false
+  "check_grad_overflow": true
 }
 '''
 BFLOAT16 = "bf16"
@@ -53,9 +53,20 @@ class DeepSpeedBF16Config(DeepSpeedConfigModel):
     Apply gradient updates immediately rather than delayed.
     """
 
-    check_grad_overflow: bool = False
+    check_grad_overflow: bool = True
     """
-    Check for gradient overflows and underflows
+    Detect gradient overflow/underflow before optimizer step and skip the step
+    when detected. Default True (matching fp16 default) because bf16 partition-flat
+    gradient accumulation in ZeRO-2 with heterogeneous per-sample loss masks (e.g.
+    Mixture-of-Transformers + per-sample validity dropout) can produce a bf16 element
+    that overflows to +inf in averaged_gradients[i]. Without this check, Adam.step
+    computes inf/sqrt(inf)=NaN inside a fused kernel, simultaneously corrupting
+    thousands of parameter tensors and ending the training run with no useful
+    diagnostic. Set False only if you have measured this check to be too expensive
+    and have separately confirmed your bf16 path cannot overflow.
+    See:
+      - github.com/deepspeedai/DeepSpeed/issues/5242
+      - github.com/deepspeedai/DeepSpeed/pull/6976 (introduced the option)
     """
 
     bf16_master_weights_and_grads: bool = False
