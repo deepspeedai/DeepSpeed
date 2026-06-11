@@ -2892,6 +2892,19 @@ class DeepSpeedEngine(Module):
         for param_name, param in self.module.named_parameters():
             param.grad = None
 
+    def _eigenvalue_summary_events(self):
+        if not (self.eigenvalue_enabled() and not self.gas_boundary_ctr % self.eigenvalue_gas_boundary_resolution()):
+            return []
+
+        events = []
+        for i, ev_value in enumerate(self.block_eigenvalue.values()):
+            events.append((
+                f"Train/Eigenvalues/ModelBlockParam_{i}",
+                ev_value[0],
+                self.global_samples,
+            ))
+        return events
+
     def clip_fp32_gradients(self):
         clip_grad_norm_(parameters=self.module.parameters(), max_norm=self.gradient_clipping(), mpu=self.mpu)
 
@@ -3041,15 +3054,7 @@ class DeepSpeedEngine(Module):
                             self.global_samples,
                         ))
 
-                    if (self.eigenvalue_enabled()
-                            and not self.gas_boundary_ctr % self.eigenvalue_gas_boundary_resolution()):
-                        ev_values = self.block_eigenvalue.values()
-                        for i in range(len(ev_values)):
-                            self.summary_events.append((
-                                f"Train/Eigenvalues/ModelBlockParam_{i}",
-                                self.ev_values[i][0],
-                                self.global_samples,
-                            ))
+                    self.summary_events.extend(self._eigenvalue_summary_events())
                     self.monitor.write_events(self.summary_events)
 
         # Check flops profiling
