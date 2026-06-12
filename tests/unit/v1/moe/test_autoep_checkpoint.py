@@ -173,3 +173,100 @@ class TestAutoEPZero3UniversalCheckpoint(DistributedTest):
 
         losses, _ = run_training_steps(reloaded_engine, num_steps=1)
         assert torch.isfinite(torch.tensor(losses[0]))
+
+
+class TestAutoEPZero3UniversalCheckpoint4GPU(DistributedTest):
+    world_size = 4
+
+    def test_zero3_partition_native_universal_round_trip_replica_groups_4gpu(self, tmpdir):
+        """Same round trip as the 2-GPU test, but with expert-DP world size 2 so
+        the converter consolidates multiple partition fragments per expert
+        parameter and the universal/module-only loads slice real shard offsets
+        instead of the degenerate world_size=1 case."""
+        seed_everything(1357)
+
+        config = make_autoep_integration_config(zero_stage=3, ep_size=2)
+        engine, _, _, _ = deepspeed.initialize(model=MockMoETransformer(), config=config)
+        run_training_steps(engine, num_steps=1)
+
+        from deepspeed.module_inject.auto_ep_layer import AutoEPMoELayer
+        autoep_modules = [(name, module) for name, module in engine.module.named_modules()
+                          if isinstance(module, AutoEPMoELayer)]
+        assert autoep_modules
+        for _, module in autoep_modules:
+            for param in module.experts.parameters():
+                assert param.ds_zero_partition_world_size == 2
+
+        save_dir = str(tmpdir)
+        tag = "autoep-zero3-4gpu"
+        engine.save_checkpoint(save_dir, tag=tag)
+
+        # Module-only restore must reassemble expert weights from two real
+        # partition shards per replica group.
+        module_only_engine, _, _, _ = deepspeed.initialize(model=MockMoETransformer(),
+                                                           config=make_autoep_integration_config(zero_stage=3,
+                                                                                                 ep_size=2))
+        module_only_engine.load_checkpoint(save_dir, tag=tag, load_optimizer_states=False)
+        for expected, restored in zip(engine.optimizer.fp16_partitioned_groups_flat,
+                                      module_only_engine.optimizer.fp16_partitioned_groups_flat):
+            torch.testing.assert_close(restored, expected)
+
+        checkpoint_dir = os.path.join(save_dir, tag)
+        universal_dir = os.path.join(save_dir, f"{tag}_universal")
+        args = SimpleNamespace(input_folder=checkpoint_dir,
+                               output_folder=universal_dir,
+                               num_extract_workers=1,
+                               num_merge_workers=1,
+                               keep_temp_folder=False,
+                               strict=True,
+                               inject_missing_state=False)
+
+        dist.barrier()
+        if dist.get_rank() == 0:
+            convert_to_universal(args)
+        dist.barrier()
+
+        from deepspeed.checkpoint.constants import PARAM
+        world_size = dist.get_world_size()
+        for module_name, module in autoep_modules:
+            module_prefix = f"{module_name}." if module_name else ""
+            ep_rank_tensor = torch.tensor([module.ep_rank], dtype=torch.long, device=engine.device)
+            ep_ranks = [torch.zeros_like(ep_rank_tensor) for _ in range(world_size)]
+            dist.all_gather(ep_ranks, ep_rank_tensor)
+            ep_ranks = [int(t.item()) for t in ep_ranks]
+            for wname in ("w1", "w2", "w3"):
+                param = getattr(module.experts, wname)
+                with deepspeed.zero.GatheredParameters([param]):
+                    local_experts = param.detach().clone()
+                gathered = [torch.zeros_like(local_experts) for _ in range(world_size)]
+                dist.all_gather(gathered, local_experts)
+                if dist.get_rank() == 0:
+                    # Replicas within an EP rank must agree; keep one
+                    # representative per EP rank in EP-rank order.
+                    representative = {}
+                    for global_rank, ep_rank in enumerate(ep_ranks):
+                        if ep_rank in representative:
+                            torch.testing.assert_close(gathered[global_rank], gathered[representative[ep_rank]])
+                        else:
+                            representative[ep_rank] = global_rank
+                    assert sorted(representative) == list(range(module.ep_size))
+                    expected = torch.cat([gathered[representative[ep_rank]] for ep_rank in range(module.ep_size)],
+                                         dim=0).cpu()
+                    universal = torch.load(
+                        os.path.join(universal_dir, "zero", f"{module_prefix}experts.{wname}", "fp32.pt"),
+                        map_location="cpu",
+                        weights_only=False,
+                    )[PARAM]
+                    torch.testing.assert_close(universal, expected)
+
+        universal_config = make_autoep_integration_config(zero_stage=3, ep_size=2)
+        universal_config["checkpoint"] = {"load_universal": True}
+        reloaded_engine, _, _, _ = deepspeed.initialize(model=MockMoETransformer(), config=universal_config)
+        reloaded_engine.load_checkpoint(save_dir, tag=f"{tag}_universal")
+
+        for expected, restored in zip(engine.optimizer.fp16_partitioned_groups_flat,
+                                      reloaded_engine.optimizer.fp16_partitioned_groups_flat):
+            torch.testing.assert_close(restored, expected)
+
+        losses, _ = run_training_steps(reloaded_engine, num_steps=1)
+        assert torch.isfinite(torch.tensor(losses[0]))

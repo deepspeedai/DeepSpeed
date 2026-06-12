@@ -113,20 +113,25 @@ def _has_autoep_zero3_partitioned_metadata(state_dict):
         for entry in autoep_layers)
 
 
+def _raise_if_autoep_zero3_partitioned_state(state_dict):
+    if _has_autoep_zero3_partitioned_metadata(state_dict):
+        raise NotImplementedError("zero_to_fp32 does not support AutoEP ZeRO-3 partition-native checkpoints. "
+                                  "AutoEP expert parameters are partitioned over expert replica groups, so "
+                                  "global data-parallel consolidation would produce incomplete expert tensors. "
+                                  "Use ds_to_universal.py for expert-aware conversion.")
+
+
 def _raise_if_autoep_zero3_partitioned_checkpoint(model_files):
     for file in model_files:
         state_dict = torch.load(file, map_location=device, weights_only=False)
-        if _has_autoep_zero3_partitioned_metadata(state_dict):
-            raise NotImplementedError("zero_to_fp32 does not support AutoEP ZeRO-3 partition-native checkpoints. "
-                                      "AutoEP expert parameters are partitioned over expert replica groups, so "
-                                      "global data-parallel consolidation would produce incomplete expert tensors. "
-                                      "Use ds_to_universal.py for expert-aware conversion.")
+        _raise_if_autoep_zero3_partitioned_state(state_dict)
 
 
 def parse_model_states(files):
     zero_model_states = []
     for file in files:
         state_dict = torch.load(file, map_location=device, weights_only=False)
+        _raise_if_autoep_zero3_partitioned_state(state_dict)
 
         if BUFFER_NAMES not in state_dict:
             raise ValueError(f"{file} is not a model state checkpoint")
@@ -219,15 +224,15 @@ def _get_fp32_state_dict_from_zero_checkpoint(ds_checkpoint_dir, exclude_frozen_
     """
     print(f"Processing zero checkpoint '{ds_checkpoint_dir}'")
 
+    # parse_model_states rejects AutoEP ZeRO-3 partition-native checkpoints
+    # before the expensive optimizer-shard load below.
     model_files = get_model_state_files(ds_checkpoint_dir)
-    _raise_if_autoep_zero3_partitioned_checkpoint(model_files)
+    zero_model_states = parse_model_states(model_files)
+    print(f'Parsing checkpoint created by deepspeed=={zero_model_states[0].ds_version}')
 
     optim_files = get_optim_files(ds_checkpoint_dir)
     zero_stage, world_size, fp32_flat_groups = parse_optim_states(optim_files, ds_checkpoint_dir)
     print(f"Detected checkpoint of type zero stage {zero_stage}, world_size: {world_size}")
-
-    zero_model_states = parse_model_states(model_files)
-    print(f'Parsing checkpoint created by deepspeed=={zero_model_states[0].ds_version}')
 
     if zero_stage <= 2:
         return _get_fp32_state_dict_from_zero2_checkpoint(world_size, fp32_flat_groups, zero_model_states,

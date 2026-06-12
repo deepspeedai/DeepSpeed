@@ -3673,7 +3673,9 @@ class DeepSpeedEngine(Module):
                 load_result = self.module.load_state_dict(
                     module_state_dict,  # TODO
                     strict=strict and allowed_missing_keys is None)
-                if allowed_missing_keys is not None:
+                # The expert-key allowance only tightens strict loads; a caller
+                # passing strict=False keeps the usual non-strict semantics.
+                if strict and allowed_missing_keys is not None:
                     missing_keys = set(load_result.missing_keys)
                     unexpected_keys = set(load_result.unexpected_keys)
                     unexpected_missing = missing_keys - set(allowed_missing_keys)

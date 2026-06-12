@@ -598,6 +598,19 @@ class TestAutoEPConfig:
         assert "z3_params_to_fetch" in signature.parameters
         assert "allowed_missing_keys" in signature.parameters
 
+    def test_load_module_state_dict_nonstrict_keeps_nonstrict_semantics_with_allowed_missing_keys(self):
+        engine = object.__new__(DeepSpeedEngine)
+        # bypass nn.Module.__setattr__, which requires Module.__init__
+        object.__setattr__(engine, "module", nn.Linear(2, 2))
+        checkpoint = {"module": {"unexpected_key": torch.zeros(1)}}
+
+        # strict=False must keep the documented non-strict load semantics even
+        # when AutoEP expert keys are allowed to be missing.
+        engine.load_module_state_dict(checkpoint, strict=False, allowed_missing_keys=["weight"])
+
+        with pytest.raises(RuntimeError, match="outside AutoEP expert"):
+            engine.load_module_state_dict(checkpoint, strict=True, allowed_missing_keys=["weight"])
+
     def test_autoep_zero3_16bit_export_guard_directs_to_universal_conversion(self):
         engine = object.__new__(DeepSpeedEngine)
         engine.zero_optimization_partition_weights = lambda: True
@@ -721,6 +734,13 @@ class TestAutoEPConfig:
 
         with pytest.raises(NotImplementedError, match="ds_to_universal.py"):
             _raise_if_autoep_zero3_partitioned_checkpoint([str(model_file)])
+
+        # parse_model_states is the guard point used by
+        # _get_fp32_state_dict_from_zero_checkpoint, which loads each model
+        # state file only once.
+        from deepspeed.utils.zero_to_fp32 import parse_model_states
+        with pytest.raises(NotImplementedError, match="ds_to_universal.py"):
+            parse_model_states([str(model_file)])
 
     def test_preset_registry_core_contracts(self):
         assert set(PRESET_MODELS) == {"mixtral", "qwen3_moe", "qwen3_5_moe", "deepseek_v2", "deepseek_v3"}
