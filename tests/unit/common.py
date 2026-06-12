@@ -113,6 +113,10 @@ def set_accelerator_visible():
         elif get_accelerator().device_name() == 'npu':
             npu_smi = subprocess.check_output(['npu-smi', 'info', '-l'])
             num_accelerators = int(npu_smi.decode('utf-8').strip().split('\n')[0].split(':')[1].strip())
+        elif get_accelerator().device_name() == 'supa':
+            br_smi = subprocess.check_output(['brsmi', 'gpu', 'list'])
+            gpu_ids = filter(lambda s: 'GPU' in s, br_smi.decode('utf-8').strip().split('\n'))
+            num_accelerators = len(list(gpu_ids))
         else:
             assert get_accelerator().device_name() == 'cpu'
             num_accelerators = _get_cpu_socket_count()
