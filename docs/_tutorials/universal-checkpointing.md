@@ -83,25 +83,37 @@ the model and topology you want to use for resumed training.
 ### AutoEP Requirements and Limitations
 
 AutoEP checkpoints are saved as regular DeepSpeed checkpoints, but routed expert
-weights have an additional layout. With AutoEP enabled, DeepSpeed writes the
-routed expert weights (`w1`, `w2`, and `w3`) into per-expert files named like
-`layer_<moe_layer_id>_expert_<global_expert_id>_mp_rank_<NN>_model_states.pt`.
-The regular model checkpoint records AutoEP metadata in `ds_autoep_layers`; older
-checkpoints may use the legacy `autoep_layers` key. For ZeRO Stage 1 and ZeRO
-Stage 2 checkpoints, router, gate, shared-expert, and other
-non-routed-expert parameters stay in the regular `mp_rank_*_model_states.pt`
-files and use the standard Universal Checkpointing path.
+weights have an additional layout that depends on the ZeRO stage. With ZeRO
+Stage 1 or ZeRO Stage 2, DeepSpeed writes the routed expert weights (`w1`,
+`w2`, and `w3`) into per-expert files named like
+`layer_<moe_layer_id>_expert_<global_expert_id>_mp_rank_<NN>_model_states.pt`,
+while router, gate, shared-expert, and other non-routed-expert parameters stay
+in the regular `mp_rank_*_model_states.pt` files and use the standard
+Universal Checkpointing path. With ZeRO Stage 3, AutoEP checkpoints are
+partition-native: no per-expert files are produced, and expert weights are
+stored as ZeRO partition shards in the `zero_pp_rank_*_model_states.pt` and
+optimizer shard files together with the recorded partition-group metadata. In
+both layouts the regular model checkpoint records AutoEP metadata in
+`ds_autoep_layers`; older checkpoints may use the legacy `autoep_layers`
+key.
 
-Use ZeRO Stage 1 or ZeRO Stage 2 for the current AutoEP Universal Checkpoint
-conversion path. ZeRO Stage 3 AutoEP Universal Checkpoint conversion is not
-supported; when AutoEP metadata is present in `zero_pp_rank_*_model_states.pt`,
-the converter raises `NotImplementedError` and instructs users to use regular
-same-topology ZeRO-3 checkpoint load for AutoEP checkpoints. AutoEP ZeRO Stage 3
-checkpoints do not support Universal conversion, topology-changing loads,
-module-only loads, or optimizer-state-free loads.
+Both ZeRO Stage 1/2 and ZeRO Stage 3 AutoEP checkpoints can be converted to
+Universal Checkpoint format. For ZeRO Stage 3, `ds_to_universal.py` detects the
+partition-native AutoEP metadata in `zero_pp_rank_*_model_states.pt`,
+consolidates each expert parameter from its partition shards across the expert
+replica group, and writes the same `zero/` parameter layout as the other
+stages. ZeRO Stage 3 AutoEP also supports module-only loads
+(`load_module_only=True`) and optimizer-state-free loads
+(`load_optimizer_states=False`) from the partition shards. The remaining Stage
+3 limitations are topology changes: universal load is currently supported for
+the same topology only (same `autoep_size` and data-parallel world size), and
+`zero_to_fp32.py` consolidation is not supported for partition-native AutoEP
+checkpoints (the script raises `NotImplementedError`; use `ds_to_universal.py`
+instead).
 
 During conversion, `ds_to_universal.py` reads `ds_autoep_layers` or the legacy
-`autoep_layers` key, consolidates each AutoEP layer's routed expert files, and
+`autoep_layers` key, consolidates each AutoEP layer's routed expert state (the
+per-expert files for ZeRO Stage 1/2, the partition shards for ZeRO Stage 3), and
 writes full expert tensors to paths such as `zero/<expert_key_prefix>.w1/fp32.pt`.
 These files are tagged with `is_expert_param` and `ep_num_experts`, which are the
 load-time signals used for AutoEP expert resharding. When matching expert
@@ -111,8 +123,10 @@ such as `exp_avg.pt` and `exp_avg_sq.pt` next to the converted parameter.
 Regular AutoEP checkpoint load requires the target run to use the same
 `autoep_size` as the save run. To change `autoep_size` for the same
 AutoEP-detected model topology, convert a ZeRO Stage 1 or ZeRO Stage 2 checkpoint
-to Universal format and load the Universal checkpoint. For ZeRO Stage 3 AutoEP
-checkpoints, use regular same-topology checkpoint load instead.
+to Universal format and load the Universal checkpoint. ZeRO Stage 3 AutoEP
+checkpoints can also be converted to and loaded from Universal format, but
+currently only with the same topology, so a Stage 3 universal load does not
+yet enable `autoep_size` or data-parallel world-size changes.
 
 In the Universal Checkpoint load path, AutoEP routed experts are restored from
 the `zero/` parameter layout rather than from the regular
