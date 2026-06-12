@@ -44,9 +44,8 @@ def init_z3(engine, backend, compile_config, compile_kwargs, schedule=None):
     dc = get_deepcompile_handle()
     dc.init(engine.data_parallel_group, compile_config, engine.zero_reduce_bucket_size())
 
-    # Unset hooks
-    for m in engine.module.modules():
-        m._parameters = m._original_parameters
+    # Keep ZeROOrderedDict as a fallback for dynamo-skipped frames that
+    # run eagerly without compiled allgather ops.
 
     if use_opt:
         optimizer.parameter_offload._remove_module_hooks()
