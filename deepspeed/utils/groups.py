@@ -29,6 +29,7 @@ from deepspeed import comm as dist
 from deepspeed.utils import log_dist
 from deepspeed.utils.bwc import bwc_tensor_model_parallel_world_size, bwc_pipeline_parallel_world_size
 from deepspeed.utils.exceptions import DeprecatedException
+from deepspeed.utils.validation import ensure_nonzero_divisor
 from deepspeed.accelerator import get_accelerator
 
 # Expert parallel group that the current rank belongs to.
@@ -63,6 +64,7 @@ def initialize(ep_size=1, mpu=None):
 
 def _ensure_divisibility(numerator, denominator):
     """Ensure that numerator is divisible by the denominator."""
+    ensure_nonzero_divisor(denominator, name="denominator")
     assert numerator % denominator == 0, '{} is not divisible by {}'.format(numerator, denominator)
 
 
