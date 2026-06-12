@@ -354,6 +354,10 @@ class AutoTP():
         if getattr(child, "replaced", False) == True:
             return
 
+        # Skip AutoEP-managed modules (expert weights are EP-sharded, not TP-sharded)
+        if getattr(child, "_is_autoep_layer", False):
+            return child
+
         weight_shape = child.weight.shape
         mp_replace = ReplaceWithTensorSlicing(mp_group=self.mp_group)
 
@@ -546,6 +550,9 @@ class AutoTP():
 
     def _replace_module(self, r_module, prev_name='', prev_class_name=''):
         for name, child in r_module.named_children():
+            if getattr(child, "_is_autoep_layer", False):
+                continue
+
             if prev_class_name == "":
                 class_name = prev_name
             elif prev_name == "":
