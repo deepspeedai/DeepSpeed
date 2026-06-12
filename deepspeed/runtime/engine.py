@@ -1656,6 +1656,14 @@ class DeepSpeedEngine(Module):
             raise AssertionError("AutoEP with ZeRO Stage 3 only supports "
                                  "expert_parallel.expert_tensor_parallel_size=1.")
 
+    @staticmethod
+    def _is_same_process_group(group_a, group_b):
+        if group_a is group_b:
+            return True
+        if group_a is None or group_b is None:
+            return False
+        return dist.get_all_ranks_from_group(group_a) == dist.get_all_ranks_from_group(group_b)
+
     def _resolve_zero3_param_placement(self):
         for name, param in self.module.named_parameters():
             family = getattr(param, "ds_zero_placement_family", "replicated")
@@ -1669,6 +1677,24 @@ class DeepSpeedEngine(Module):
                 partition_group = self.seq_data_parallel_group
             else:
                 raise AssertionError(f"Parameter '{name}' has unsupported ZeRO placement family '{family}'.")
+
+            if hasattr(param, "ds_id"):
+                # Already ZeRO-partitioned, e.g. converted under zero.Init.
+                # The partition group was fixed at conversion time and cannot
+                # be re-resolved here. An expert parameter partitioned over
+                # any other group would silently reduce-scatter different
+                # experts across the wrong ranks, so fail fast instead of
+                # recording placement metadata the partitioning does not match.
+                actual_group = getattr(param, "ds_process_group", None)
+                if family == "autoep_expert" and not self._is_same_process_group(actual_group, partition_group):
+                    raise AssertionError(f"AutoEP expert parameter '{name}' was already ZeRO-partitioned over a "
+                                         "non-expert process group. Build the model so AutoEP expert parameters are "
+                                         "created by the engine transform instead of wrapping AutoEPMoELayer modules "
+                                         "directly in zero.Init.")
+                if actual_group is not None:
+                    # Keep placement metadata consistent with the actual
+                    # partitioning rather than the freshly resolved target.
+                    partition_group = actual_group
 
             param.ds_zero_placement_family = family
             param.ds_zero_partition_group_name = group_name

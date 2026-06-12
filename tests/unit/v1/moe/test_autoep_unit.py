@@ -611,6 +611,37 @@ class TestAutoEPConfig:
         with pytest.raises(RuntimeError, match="outside AutoEP expert"):
             engine.load_module_state_dict(checkpoint, strict=True, allowed_missing_keys=["weight"])
 
+    def test_resolve_zero3_param_placement_rejects_pre_partitioned_expert_on_wrong_group(self, monkeypatch):
+        engine = object.__new__(DeepSpeedEngine)
+        model = nn.Linear(2, 2, bias=False)
+        # bypass nn.Module.__setattr__, which requires Module.__init__
+        object.__setattr__(engine, "module", model)
+
+        expert_group = object()
+        other_group = object()
+        monkeypatch.setattr(ds_engine.groups, "_get_expert_data_parallel_group", lambda name: expert_group)
+        monkeypatch.setattr(ds_engine.dist, "get_rank", lambda group=None: 0)
+        monkeypatch.setattr(ds_engine.dist, "get_world_size", lambda group=None: 1)
+        monkeypatch.setattr(ds_engine.dist,
+                            "get_all_ranks_from_group",
+                            lambda group: [0] if group is expert_group else [0, 1],
+                            raising=False)
+
+        param = model.weight
+        param.ds_zero_placement_family = "autoep_expert"
+        param.ds_zero_partition_group_name = "ep_size_2"
+        param.ds_id = 0
+        param.ds_process_group = other_group
+
+        with pytest.raises(AssertionError, match="already ZeRO-partitioned over a non-expert process group"):
+            engine._resolve_zero3_param_placement()
+
+        # A pre-partitioned expert param over the matching group is accepted
+        # and keeps metadata derived from its actual partition group.
+        param.ds_process_group = expert_group
+        engine._resolve_zero3_param_placement()
+        assert param.ds_zero_partition_process_group is expert_group
+
     def test_autoep_zero3_16bit_export_guard_directs_to_universal_conversion(self):
         engine = object.__new__(DeepSpeedEngine)
         engine.zero_optimization_partition_weights = lambda: True
