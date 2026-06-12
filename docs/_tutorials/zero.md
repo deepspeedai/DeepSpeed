@@ -246,6 +246,63 @@ registration and this step is no longer needed.
 {: .notice--info}
 
 
+## ZeRO-3 Elastic Checkpoints
+
+An *elastic checkpoint* is a checkpoint that can be saved with one data-parallel world size and loaded with a different one.
+This is useful when you need to scale training up or down, resume on fewer GPUs after a preemption, or do inference evaluation on a single machine.
+
+ZeRO Stage 1 and 2 have supported elastic checkpoints for a long time via the `elastic_checkpoint` configuration flag.
+**This PR extends the same support to ZeRO Stage 3.**
+
+### Enabling elastic checkpoints
+
+Set `elastic_checkpoint: true` in the `zero_optimization` block:
+
+```json
+{
+    "zero_optimization": {
+        "stage": 3,
+        "elastic_checkpoint": true
+    }
+}
+```
+
+No other code changes are required.
+`save_checkpoint()` and `load_checkpoint()` handle the rest automatically.
+
+### How it works
+
+**Saving.**  Instead of writing one flat optimizer-state tensor per rank (which encodes the world size in its offsets), the elastic format writes *lean* per-parameter tensors — the portion of each parameter that belongs to the saving rank, with alignment padding stripped.
+The fp32 master weights are saved in the same padded-flat layout as the rigid format so that `zero_to_fp32.py` still works unchanged.
+
+**Loading.**  On load, DeepSpeed auto-detects the format by checking for the `base_optimizer_state` key in the checkpoint files.
+If the key is present (elastic format), it:
+
+1. Merges the lean parameter shards from all checkpoint ranks into the full parameter tensor.
+2. Re-slices it for the current rank under the new world size.
+3. Restores Adam moment tensors (`exp_avg`, `exp_avg_sq`) using the same merge-and-repartition logic.
+
+This means a checkpoint saved with N GPUs loads correctly on M GPUs for any M.
+
+### Changing world size example
+
+```python
+# --- training run on 4 GPUs, elastic_checkpoint=True ---
+ds_engine.save_checkpoint(checkpoint_dir)
+
+# --- later, resume on 2 GPUs (same elastic_checkpoint=True config) ---
+ds_engine.load_checkpoint(checkpoint_dir, load_optimizer_states=True)
+# training continues normally
+```
+
+Because autodetection is based on checkpoint contents rather than the runtime config flag, you can also load an elastic checkpoint with `elastic_checkpoint: false` in your config and it will still work correctly.
+
+### Limitations
+
+- Elastic checkpoints require `stage: 3`. Stages 1 and 2 use a separate (older) implementation.
+- The `swap_optimizer` (NVMe offload) path is supported but has not been tested with world-size changes.
+- `load_from_fp32_weights: true` is compatible with elastic checkpoints and is the recommended path when resuming on different hardware for maximum precision.
+
 ## Extracting weights
 
 If you need to take the pretrained weights out of Deepspeed here is what you can do for getting fp16 weights:
