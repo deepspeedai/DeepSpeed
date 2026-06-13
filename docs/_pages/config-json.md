@@ -1077,7 +1077,7 @@ Use a built-in preset but override specific naming/weight fields for a fine-tune
 - `autoep_size` must divide `num_experts` for all detected MoE layers
 - AutoEP currently cannot be combined with AutoTP (`tensor_parallel.autotp_size > 1`); support is planned as follow-up work
 - AutoEP with ZeRO Stage 3 is supported only without AutoTP, sequence parallelism, MiCS, hpZeRO secondary tensor groups, non-1 `expert_tensor_parallel_size`, or quantized gradients
-- ZeRO Stage 3 saves AutoEP checkpoints partition-natively and supports same-topology save/load, module-only loads, optimizer-state-skipping loads, and universal checkpoint conversion with same-topology universal load; topology-changing loads (different `autoep_size` or data-parallel world size) are not supported yet
+- ZeRO Stage 3 saves AutoEP checkpoints partition-natively and supports same-topology save/load, module-only loads, optimizer-state-skipping loads, and universal checkpoint conversion. Optimizer-including universal loads can resume at a different data-parallel world size, a different `autoep_size`, or both (when the target `autoep_size` divides the expert count); weights-only/module-only universal loads for Stage 3 AutoEP are not supported yet
 
 ### Logging
 
