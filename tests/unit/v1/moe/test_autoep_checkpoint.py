@@ -49,12 +49,24 @@ def _convert_checkpoint_to_universal(save_dir, tag):
     return universal_dir
 
 
-def _load_universal_state(universal_dir, param_name, key):
-    from deepspeed.checkpoint.constants import PARAM
-
+def _load_universal_file(universal_dir, param_name, key):
     return torch.load(os.path.join(universal_dir, "zero", param_name, f"{key}.pt"),
                       map_location="cpu",
-                      weights_only=False)[PARAM]
+                      weights_only=False)
+
+
+def _load_universal_dense_state(universal_dir, param_name, key):
+    state = _load_universal_file(universal_dir, param_name, key)
+    assert torch.is_tensor(state), f"expected raw tensor state for dense ZeRO-3 parameter {param_name}/{key}"
+    return state
+
+
+def _load_universal_expert_state(universal_dir, param_name, key):
+    from deepspeed.checkpoint.constants import PARAM
+
+    state = _load_universal_file(universal_dir, param_name, key)
+    assert isinstance(state, dict), f"expected metadata dict for AutoEP expert parameter {param_name}/{key}"
+    return state[PARAM]
 
 
 def _load_universal_optimizer_step(universal_dir):
@@ -187,7 +199,7 @@ def _gather_optimizer_state_for_param(engine, param, key):
 def _assert_router_params_match_universal(engine, universal_dir):
     for param_name, param in _router_params(engine):
         restored = _gather_zero_param(param).cpu()
-        expected = _load_universal_state(universal_dir, param_name, "fp32")
+        expected = _load_universal_dense_state(universal_dir, param_name, "fp32").view_as(restored)
         torch.testing.assert_close(restored, expected, rtol=0, atol=0)
 
 
@@ -196,7 +208,7 @@ def _assert_expert_params_match_universal(engine, universal_dir):
         local_experts = _gather_zero_param(param)
         restored = _collect_by_ep_rank(local_experts, module.ep_rank, module.ep_size, engine.device)
         if dist.get_rank() == 0:
-            expected = _load_universal_state(universal_dir, param_name, "fp32")
+            expected = _load_universal_expert_state(universal_dir, param_name, "fp32")
             torch.testing.assert_close(restored, expected, rtol=0, atol=0)
 
 
@@ -207,7 +219,7 @@ def _assert_expert_optimizer_states_match_universal(engine, universal_dir):
             local_state = _gather_optimizer_state_for_param(engine, param, key)
             restored = _collect_by_ep_rank(local_state, module.ep_rank, module.ep_size, engine.device)
             if dist.get_rank() == 0:
-                expected = _load_universal_state(universal_dir, param_name, key)
+                expected = _load_universal_expert_state(universal_dir, param_name, key)
                 torch.testing.assert_close(restored, expected, rtol=0, atol=0)
                 if key in nonzero_moments and torch.count_nonzero(expected).item() > 0:
                     nonzero_moments[key] = True
