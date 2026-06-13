@@ -241,7 +241,8 @@ def _create_expert_and_data_parallel(expert_parallel_size_,
                                      mp_size=None,
                                      pp_size=None,
                                      mp_mode="tp",
-                                     use_data_before_expert_parallel_=False):
+                                     use_data_before_expert_parallel_=False,
+                                     folding_spec=None):
     """Create expert and data parallel groups.
 
     When mp_size is None or 1: legacy consecutive ordering (backward compatible).
@@ -342,6 +343,15 @@ def _create_expert_and_data_parallel(expert_parallel_size_,
         raise NotImplementedError("use_data_before_expert_parallel_ is not supported with mp_size > 1")
 
     if group_name in _EXPERT_PARALLEL_GROUP:
+        if folding_spec is not None:
+            from deepspeed.module_inject.auto_ep_folding import assert_group_matches_spec
+            assert_group_matches_spec(
+                {
+                    "ep": [_EXPERT_PARALLEL_GROUP_RANKS[group_name]],
+                    "edp": [_EXPERT_DATA_PARALLEL_GROUP_RANKS[group_name]],
+                },
+                folding_spec,
+            )
         return  # Already created
 
     for pp_stage_start in range(0, world_size, pp_stride):
