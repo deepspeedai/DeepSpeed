@@ -119,6 +119,25 @@ def test_zero2_tp_gradient_reducer_skips_incomplete_ds_grad(monkeypatch):
     torch.testing.assert_close(param.grad, torch.ones_like(param.grad))
 
 
+def test_zero2_tp_gradient_reducer_normalizes_partitioned_mode(monkeypatch):
+    param = torch.nn.Parameter(torch.ones(2))
+    param.grad = torch.ones_like(param)
+    optimizer = object.__new__(DeepSpeedZeroOptimizer)
+    optimizer.partition_gradients = True
+    optimizer.autoep_folding_tp_group = object()
+    optimizer.autoep_folding_partitioned_grad_mode = True
+
+    def fake_all_reduce(tensor, group=None):
+        tensor.mul_(2)
+
+    monkeypatch.setattr(dist, "all_reduce", fake_all_reduce)
+    monkeypatch.setattr(dist, "get_world_size", lambda group=None: 2)
+
+    optimizer._maybe_reduce_autoep_folding_tp_gradient(param, param.grad)
+
+    torch.testing.assert_close(param.grad, torch.ones_like(param.grad))
+
+
 def _folded_zero2_tp2_ep4_config():
     config = _folded_zero2_config(mixed_precision=False)
     config["expert_parallel"]["autoep_size"] = 4

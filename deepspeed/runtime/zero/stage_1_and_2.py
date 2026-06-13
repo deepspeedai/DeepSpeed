@@ -1038,13 +1038,17 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         if grad.data.is_sparse:
             return
         grad_data = grad.data
+        tp_world_size = dist.get_world_size(group=self.autoep_folding_tp_group)
         if self.autoep_folding_partitioned_grad_mode and grad_data.dtype != torch.float32:
             reduced = grad_data.float()
             dist.all_reduce(reduced, group=self.autoep_folding_tp_group)
+            reduced.div_(tp_world_size)
             grad_data.copy_(reduced.to(grad_data.dtype))
             return
         dist.all_reduce(grad_data, group=self.autoep_folding_tp_group)
-        if not self.autoep_folding_partitioned_grad_mode:
+        if self.autoep_folding_partitioned_grad_mode:
+            grad_data.div_(tp_world_size)
+        else:
             grad_data.div_(dist.get_world_size(group=self.autoep_folding_tp_group))
 
     def _fill_param_grad_accum_attribute(self, param):
