@@ -151,7 +151,8 @@ def _restore_combined_backward_parity_worker(rank, world_size, _shared_tmpdir):
                                    score_apply="post",
                                    combine_impl="weighted_sum",
                                    shape=(1, 4, 3))
-    expected.square().sum().backward()
+    expected_loss = sum((expected * float(peer_rank + 1)).square().sum() for peer_rank in range(world_size))
+    expected_loss.backward()
     expected_weight_grad = expected_top_scores.grad.reshape(-1).index_select(0, token_indices_sorted)
 
     actual_expert_output = full_expert_output.clone().requires_grad_(True)
@@ -161,7 +162,7 @@ def _restore_combined_backward_parity_worker(rank, world_size, _shared_tmpdir):
     restored = restore_combined(local_values, ctx, tp_group=tp_group)
 
     torch.testing.assert_close(restored.reshape(1, 4, 3), expected.detach(), rtol=0.0, atol=0.0)
-    restored.square().sum().backward()
+    (restored * float(rank + 1)).square().sum().backward()
 
     actual_value_grad = actual_expert_output.grad.detach().clone()
     actual_top_score_grad = actual_top_scores.grad.detach().clone()

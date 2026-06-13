@@ -213,10 +213,14 @@ class _AllGatherVariableRows(torch.autograd.Function):
         local_count = ctx.counts[ctx.group_rank]
         if ctx.max_rows == 0:
             return grad_output.new_empty((0, *grad_output.shape[1:])), None, None, None
-        chunks = torch.split(grad_output, ctx.counts, dim=0)
-        grad_padded = grad_output.new_zeros((ctx.max_rows, *grad_output.shape[1:]))
-        if local_count:
-            grad_padded[:local_count].copy_(chunks[ctx.group_rank])
+        reduced_chunks = []
+        for chunk, count in zip(torch.split(grad_output, ctx.counts, dim=0), ctx.counts):
+            grad_padded = grad_output.new_zeros((ctx.max_rows, *grad_output.shape[1:]))
+            if count:
+                grad_padded[:count].copy_(chunk)
+            dist.all_reduce(grad_padded, group=ctx.group)
+            reduced_chunks.append(grad_padded)
+        grad_padded = reduced_chunks[ctx.group_rank]
         return grad_padded[:local_count].contiguous(), None, None, None
 
 

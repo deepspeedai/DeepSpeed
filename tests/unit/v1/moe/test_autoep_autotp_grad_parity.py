@@ -17,6 +17,7 @@ from deepspeed.checkpoint.autoep_universal import validate_folding_metadata
 from deepspeed.checkpoint.constants import FOLDING_FAMILY, FOLDING_METADATA_KEY, FOLDING_PARAM_FAMILIES
 from deepspeed.module_inject.auto_ep_layer import AutoEPMoELayer
 from deepspeed.runtime.engine import DeepSpeedEngine
+from deepspeed.runtime.zero.stage_1_and_2 import DeepSpeedZeroOptimizer
 from deepspeed.utils import safe_get_full_grad
 from deepspeed.utils import groups
 from unit.common import DistributedTest
@@ -94,6 +95,28 @@ def test_tp_replicated_gradient_reducer_respects_parallel_mode(monkeypatch, mp_m
     engine._reduce_autoep_folding_tp_replicated_gradients()
 
     assert torch.equal(param.grad, torch.full_like(param.grad, expected_grad))
+
+
+def test_zero2_tp_gradient_reducer_skips_incomplete_ds_grad(monkeypatch):
+    param = torch.nn.Parameter(torch.ones(2))
+    param.grad = torch.ones_like(param)
+    param.ds_grad_is_ready = False
+    optimizer = object.__new__(DeepSpeedZeroOptimizer)
+    optimizer.partition_gradients = True
+    optimizer.autoep_folding_tp_group = object()
+    optimizer.autoep_folding_partitioned_grad_mode = True
+    calls = []
+
+    def fake_all_reduce(tensor, group=None):
+        calls.append(tensor.clone())
+        tensor.mul_(2)
+
+    monkeypatch.setattr(dist, "all_reduce", fake_all_reduce)
+
+    optimizer._maybe_reduce_autoep_folding_tp_gradient(param, param.grad)
+
+    assert calls == []
+    torch.testing.assert_close(param.grad, torch.ones_like(param.grad))
 
 
 def _folded_zero2_tp2_ep4_config():

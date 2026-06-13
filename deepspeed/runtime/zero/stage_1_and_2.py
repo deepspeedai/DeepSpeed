@@ -1031,6 +1031,8 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
     def _maybe_reduce_autoep_folding_tp_gradient(self, param, grad):
         if not self.partition_gradients or self.autoep_folding_tp_group is None or grad is None:
             return
+        if not getattr(param, "ds_grad_is_ready", True):
+            return
         if is_moe_param(param) or is_model_parallel_parameter(param):
             return
         if grad.data.is_sparse:
@@ -1118,7 +1120,6 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
     def reduce_independent_p_g_buckets_and_remove_grads(self, param, i):
 
         grad_reduc = self.get_gradient_for_reduction(param)
-        self._maybe_reduce_autoep_folding_tp_gradient(param, grad_reduc)
         comm_dtype = self.get_param_comm_dtype(param)
         bucket = self.ipg_buckets[comm_dtype]
         if bucket.elements + param.numel() > self.reduce_bucket_size:
@@ -1133,6 +1134,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         if not getattr(param, "ds_grad_is_ready", True):
             return
 
+        self._maybe_reduce_autoep_folding_tp_gradient(param, grad_reduc)
         param_id = self.get_param_id(param)
         assert self.params_already_reduced[param_id] == False, \
             f"The parameter {debug_param2name(param)} has already been reduced. \
