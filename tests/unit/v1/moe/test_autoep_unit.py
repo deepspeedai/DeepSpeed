@@ -187,12 +187,11 @@ class TestAutoEPConfig:
         assert_load_balance_coeff_rejection_message(exc_info.value, value)
 
     def test_ep_size_validation_rejects_invalid_topology(self):
-        with pytest.raises(ValueError, match="AutoTP"):
-            validate_autoep_config(AutoEPConfig(enabled=True, autoep_size=2),
-                                   world_size=8,
-                                   pp_size=1,
-                                   tp_size=2,
-                                   sp_size=1)
+        validate_autoep_config(AutoEPConfig(enabled=True, autoep_size=2),
+                               world_size=8,
+                               pp_size=1,
+                               tp_size=2,
+                               sp_size=1)
         with pytest.raises(ValueError, match="must divide the stage size"):
             validate_autoep_config(AutoEPConfig(enabled=True, autoep_size=3),
                                    world_size=8,
@@ -248,6 +247,8 @@ class TestAutoEPConfig:
             expert_parallel_config=AutoEPConfig(enabled=True, autoep_size=2),
             tensor_parallel_config=SimpleNamespace(autotp_size=1),
             use_data_before_expert_parallel_=False,
+            zero_config=SimpleNamespace(offload_optimizer=None, offload_param=None),
+            zero_optimization_stage=0,
         )
 
         engine._configure_expert_parallel(model=nn.Module())

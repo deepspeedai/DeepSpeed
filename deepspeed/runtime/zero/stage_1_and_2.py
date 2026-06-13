@@ -249,6 +249,8 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         self.contiguous_gradients = contiguous_gradients or self.cpu_offload
 
         self.has_moe_layers = has_moe_layers
+        self.autoep_folding_tp_group = None
+        self.autoep_folding_partitioned_grad_mode = False
         if self.has_moe_layers:
             self._configure_moe_settings()
         self._global_grad_norm = 0.
@@ -1018,6 +1020,31 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
     def overlapping_partition_gradients_reduce_epilogue(self):
         self.independent_gradient_partition_epilogue()
 
+    def configure_autoep_folding_tp_gradient_reduction(self, folding_spec):
+        if folding_spec is None or folding_spec.tp_size <= 1:
+            self.autoep_folding_tp_group = None
+            self.autoep_folding_partitioned_grad_mode = False
+            return
+        self.autoep_folding_tp_group = groups.get_tensor_model_parallel_group()
+        self.autoep_folding_partitioned_grad_mode = getattr(folding_spec, "mp_mode", "tp") in ("tp", "sp")
+
+    def _maybe_reduce_autoep_folding_tp_gradient(self, param, grad):
+        if not self.partition_gradients or self.autoep_folding_tp_group is None or grad is None:
+            return
+        if is_moe_param(param) or is_model_parallel_parameter(param):
+            return
+        if grad.data.is_sparse:
+            return
+        grad_data = grad.data
+        if self.autoep_folding_partitioned_grad_mode and grad_data.dtype != torch.float32:
+            reduced = grad_data.float()
+            dist.all_reduce(reduced, group=self.autoep_folding_tp_group)
+            grad_data.copy_(reduced.to(grad_data.dtype))
+            return
+        dist.all_reduce(grad_data, group=self.autoep_folding_tp_group)
+        if not self.autoep_folding_partitioned_grad_mode:
+            grad_data.div_(dist.get_world_size(group=self.autoep_folding_tp_group))
+
     def _fill_param_grad_accum_attribute(self, param):
         if param.grad is not None:
             if param.grad_accum is None:
@@ -1091,6 +1118,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
     def reduce_independent_p_g_buckets_and_remove_grads(self, param, i):
 
         grad_reduc = self.get_gradient_for_reduction(param)
+        self._maybe_reduce_autoep_folding_tp_gradient(param, grad_reduc)
         comm_dtype = self.get_param_comm_dtype(param)
         bucket = self.ipg_buckets[comm_dtype]
         if bucket.elements + param.numel() > self.reduce_bucket_size:
