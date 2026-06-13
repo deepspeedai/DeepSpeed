@@ -47,7 +47,20 @@ Transformers build that exposes the matching config/model classes,
      - ``load_balance_coeff`` / expert-bias auxiliary-loss-free load balancing
        is not currently supported; non-null values are rejected.
 
-**ZeRO compatibility:** Stages 0, 1, and 2. Stage 3 is not supported.
+**ZeRO compatibility:** Stages 0, 1, and 2, plus constrained Stage 3
+support. Stage 3 requires AutoEP-managed MoE layers and does not support native
+DeepSpeed MoE layers, AutoTP, tensor model parallelism from ``mpu``, sequence
+parallelism, MiCS, hpZeRO secondary tensor groups, non-1 expert tensor
+parallelism, or quantized gradients. Stage 3 AutoEP checkpoints are saved
+partition-natively in the ``zero_pp_rank_*`` shard files and support
+same-topology load, module-only loads (``load_module_only``),
+optimizer-state-free loads (``load_optimizer_states=False``), and Universal
+Checkpoint conversion. Optimizer-including Universal Checkpoint loads can
+resume with a different data-parallel world size, a different ``autoep_size``,
+or both, when the target ``autoep_size`` divides the model's expert count.
+Weights-only/module-only Universal Checkpoint loads use the converted
+``fp32.pt`` parameter files and support the same data-parallel and
+``autoep_size`` topology changes.
 
 **Usage:**
 
@@ -79,13 +92,13 @@ Transformers build that exposes the matching config/model classes,
 - AutoEP currently cannot be combined with AutoTP
   (``tensor_parallel.autotp_size > 1``) or tensor model parallelism from
   ``mpu``; support is planned as follow-up work.
-- AutoEP currently supports ZeRO stages 0, 1, and 2 only. ZeRO stage 3 and its
-  partitioned-parameter get/set APIs are outside the scope of the current AutoEP
-  support.
-- Checkpoint save/load requires matching ``autoep_size``.
-  To change ``autoep_size`` across runs for the same AutoEP-detected model
-  topology, convert the checkpoint to Universal Checkpoint format and load it
-  with ``checkpoint.load_universal``; see the
+- AutoEP with ZeRO Stage 3 is supported only without sequence parallelism,
+  MiCS, hpZeRO secondary tensor groups, non-1 expert tensor parallelism, or
+  quantized gradients.
+- Regular checkpoint save/load requires matching ``autoep_size``. To change
+  ``autoep_size`` or data-parallel world size across runs for the same
+  AutoEP-detected model topology, convert the checkpoint to Universal
+  Checkpoint format and load it with ``checkpoint.load_universal``; see the
   `Universal Checkpointing tutorial </tutorials/universal-checkpointing/>`__
   for the detailed flow and constraints.
 - DeepSeek-V2 and DeepSeek-V3 AutoEP do not support load-balance expert bias
