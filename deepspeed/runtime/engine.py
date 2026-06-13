@@ -4061,6 +4061,12 @@ class DeepSpeedEngine(Module):
         if checkpoint is None:
             return None, None
 
+        if (self.load_universal_checkpoint() and self.zero_optimization_partition_weights()
+                and self._has_autoep_layers() and (load_module_only or not load_optimizer_states)):
+            raise NotImplementedError("AutoEP ZeRO-3 universal checkpoint load currently requires optimizer state. "
+                                      "Set load_optimizer_states=True and load_module_only=False; weights-only "
+                                      "AutoEP ZeRO-3 universal loads are not supported yet.")
+
         fetch_z3_params = False
         z3_params_to_fetch = None
         autoep_partitioned_experts = False

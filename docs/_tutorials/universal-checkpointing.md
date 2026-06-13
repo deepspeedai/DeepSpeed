@@ -104,12 +104,14 @@ consolidates each expert parameter from its partition shards across the expert
 replica group, and writes the same `zero/` parameter layout as the other
 stages. ZeRO Stage 3 AutoEP also supports module-only loads
 (`load_module_only=True`) and optimizer-state-free loads
-(`load_optimizer_states=False`) from the partition shards. The remaining Stage
-3 limitations are topology changes: universal load is currently supported for
-the same topology only (same `autoep_size` and data-parallel world size), and
-`zero_to_fp32.py` consolidation is not supported for partition-native AutoEP
-checkpoints (the script raises `NotImplementedError`; use `ds_to_universal.py`
-instead).
+(`load_optimizer_states=False`) from the partition shards. After conversion to
+Universal Checkpoint format, ZeRO Stage 3 AutoEP can load optimizer-including
+checkpoints at a different data-parallel world size, a different `autoep_size`,
+or both, as long as the target AutoEP topology is valid for the same model
+parameter names and expert count. Weights-only/module-only universal loads for
+ZeRO Stage 3 AutoEP are not supported yet and fail fast. `zero_to_fp32.py`
+consolidation is not supported for partition-native AutoEP checkpoints (the
+script raises `NotImplementedError`; use `ds_to_universal.py` instead).
 
 During conversion, `ds_to_universal.py` reads `ds_autoep_layers` or the legacy
 `autoep_layers` key, consolidates each AutoEP layer's routed expert state (the
@@ -121,19 +123,19 @@ optimizer shards are available, the converter also writes optimizer state files
 such as `exp_avg.pt` and `exp_avg_sq.pt` next to the converted parameter.
 
 Regular AutoEP checkpoint load requires the target run to use the same
-`autoep_size` as the save run. To change `autoep_size` for the same
-AutoEP-detected model topology, convert a ZeRO Stage 1 or ZeRO Stage 2 checkpoint
-to Universal format and load the Universal checkpoint. ZeRO Stage 3 AutoEP
-checkpoints can also be converted to and loaded from Universal format, but
-currently only with the same topology, so a Stage 3 universal load does not
-yet enable `autoep_size` or data-parallel world-size changes.
+`autoep_size` as the save run. To change `autoep_size` or data-parallel world
+size for the same AutoEP-detected model topology, convert the checkpoint to
+Universal format and load the Universal checkpoint with optimizer state enabled.
+For ZeRO Stage 3 AutoEP this path reslices routed expert parameters and their
+Adam `fp32`, `exp_avg`, and `exp_avg_sq` states using the target runtime
+topology.
 
 In the Universal Checkpoint load path, AutoEP routed experts are restored from
 the `zero/` parameter layout rather than from the regular
 `layer_*_expert_*_model_states.pt` files. The target run's AutoEP process group
 supplies the load-side expert-parallel rank and size. For each tagged expert
 tensor, the loader slices the saved expert dimension by `ep_rank` and `ep_size`
-when `ep_size > 1`.
+and then applies the target ZeRO partitioning group and padding.
 
 The target model still needs to expose matching AutoEP parameter names and
 compatible shapes, for example `<module_path>.experts.w1`,
@@ -145,10 +147,11 @@ valid before checkpoint loading: `autoep_size` must divide the target pipeline
 stage size (`world_size / pp_size`) and every detected target layer's expert
 count.
 
-Topology changes are limited to `autoep_size` resharding for matching
-AutoEP-managed expert parameters. For every AutoEP layer in the checkpoint, the
-saved `ep_num_experts` must be divisible by the target `autoep_size` when the
-target `ep_size > 1`. For example, an 8-expert checkpoint can load with target
+Topology changes are limited to data-parallel world-size changes and
+`autoep_size` resharding for matching AutoEP-managed expert parameters. For
+every AutoEP layer in the checkpoint, the saved `ep_num_experts` must be
+divisible by the target `autoep_size`. For example, an 8-expert checkpoint can
+load with target
 `autoep_size` values of 1, 2, 4, or 8, but not 3. With `autoep_size=1`, the expert
 tensor is not sliced, but the target parameter must still have the compatible
 full expert shape.

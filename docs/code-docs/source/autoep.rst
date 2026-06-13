@@ -55,9 +55,11 @@ parallelism, or quantized gradients. Stage 3 AutoEP checkpoints are saved
 partition-natively in the ``zero_pp_rank_*`` shard files and support
 same-topology load, module-only loads (``load_module_only``),
 optimizer-state-free loads (``load_optimizer_states=False``), and Universal
-Checkpoint conversion with same-topology universal load. Topology-changing
-loads (different ``autoep_size`` or data-parallel world size) are not
-supported for Stage 3 yet.
+Checkpoint conversion. Optimizer-including Universal Checkpoint loads can
+resume with a different data-parallel world size, a different ``autoep_size``,
+or both, when the target ``autoep_size`` divides the model's expert count.
+Weights-only/module-only Universal Checkpoint loads are not supported for
+Stage 3 AutoEP yet.
 
 **Usage:**
 
@@ -92,16 +94,13 @@ supported for Stage 3 yet.
 - AutoEP with ZeRO Stage 3 is supported only without sequence parallelism,
   MiCS, hpZeRO secondary tensor groups, non-1 expert tensor parallelism, or
   quantized gradients.
-- Checkpoint save/load requires matching ``autoep_size``. To change
-  ``autoep_size`` across runs for the same AutoEP-detected model topology,
-  convert a ZeRO Stage 1 or ZeRO Stage 2 checkpoint to Universal Checkpoint
-  format and load it with ``checkpoint.load_universal``; see the
+- Regular checkpoint save/load requires matching ``autoep_size``. To change
+  ``autoep_size`` or data-parallel world size across runs for the same
+  AutoEP-detected model topology, convert the checkpoint to Universal
+  Checkpoint format and load it with ``checkpoint.load_universal`` and
+  optimizer state enabled; see the
   `Universal Checkpointing tutorial </tutorials/universal-checkpointing/>`__
-  for the detailed flow and constraints. ZeRO Stage 3 AutoEP checkpoints can
-  also be converted to Universal Checkpoint format, but Stage 3 universal load
-  currently supports the same topology only, so both regular and universal
-  Stage 3 loads must keep the same ``autoep_size`` and data-parallel world
-  size.
+  for the detailed flow and constraints.
 - DeepSeek-V2 and DeepSeek-V3 AutoEP do not support load-balance expert bias
   yet. The built-in DeepSeek presets disable it by default; explicit non-null
   values fail.
