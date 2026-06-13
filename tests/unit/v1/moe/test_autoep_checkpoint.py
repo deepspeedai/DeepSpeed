@@ -516,16 +516,11 @@ class TestAutoEPZero3UniversalCheckpoint4GPU(DistributedTest):
         assert torch.isfinite(torch.tensor(losses[0]))
 
 
-class _AutoEPTopologyBaselineWs4Ep2(DistributedFixture):
+class autoep_topology_baseline_ws4_ep2(DistributedFixture):
     world_size = 4
 
     def run(self, tmpdir):
         _train_save_convert_autoep_zero3(tmpdir, tag=TOPOLOGY_TAG, ep_size=2)
-
-
-@pytest.fixture(name="autoep_topology_baseline_ws4_ep2")
-def autoep_topology_baseline_ws4_ep2_fixture(request):
-    _AutoEPTopologyBaselineWs4Ep2()(request)
 
 
 class TestAutoEPZero3UniversalTopologyChange(DistributedTest):
