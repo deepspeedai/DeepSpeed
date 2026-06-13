@@ -58,8 +58,9 @@ optimizer-state-free loads (``load_optimizer_states=False``), and Universal
 Checkpoint conversion. Optimizer-including Universal Checkpoint loads can
 resume with a different data-parallel world size, a different ``autoep_size``,
 or both, when the target ``autoep_size`` divides the model's expert count.
-Weights-only/module-only Universal Checkpoint loads are not supported for
-Stage 3 AutoEP yet.
+Weights-only/module-only Universal Checkpoint loads use the converted
+``fp32.pt`` parameter files and support the same data-parallel and
+``autoep_size`` topology changes.
 
 **Usage:**
 
@@ -97,8 +98,7 @@ Stage 3 AutoEP yet.
 - Regular checkpoint save/load requires matching ``autoep_size``. To change
   ``autoep_size`` or data-parallel world size across runs for the same
   AutoEP-detected model topology, convert the checkpoint to Universal
-  Checkpoint format and load it with ``checkpoint.load_universal`` and
-  optimizer state enabled; see the
+  Checkpoint format and load it with ``checkpoint.load_universal``; see the
   `Universal Checkpointing tutorial </tutorials/universal-checkpointing/>`__
   for the detailed flow and constraints.
 - DeepSeek-V2 and DeepSeek-V3 AutoEP do not support load-balance expert bias

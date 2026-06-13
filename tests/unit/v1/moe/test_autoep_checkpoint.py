@@ -137,6 +137,14 @@ def _router_params(engine):
             yield f"{module_prefix}router.{router_name}", param
 
 
+def _shared_params(engine):
+    routed_expert_names = {param_name for param_name, _, _ in _expert_params(engine)}
+    router_names = {param_name for param_name, _ in _router_params(engine)}
+    for param_name, param in engine.module.named_parameters():
+        if param_name not in routed_expert_names and param_name not in router_names:
+            yield param_name, param
+
+
 def _gather_zero_param(param):
     with deepspeed.zero.GatheredParameters([param]):
         return param.detach().clone()
@@ -203,6 +211,13 @@ def _assert_router_params_match_universal(engine, universal_dir):
         torch.testing.assert_close(restored, expected, rtol=0, atol=0)
 
 
+def _assert_shared_params_match_universal(engine, universal_dir):
+    for param_name, param in _shared_params(engine):
+        restored = _gather_zero_param(param).cpu()
+        expected = _load_universal_dense_state(universal_dir, param_name, "fp32").view_as(restored)
+        torch.testing.assert_close(restored, expected, rtol=0, atol=0)
+
+
 def _assert_expert_params_match_universal(engine, universal_dir):
     for param_name, module, param in _expert_params(engine):
         local_experts = _gather_zero_param(param)
@@ -228,6 +243,12 @@ def _assert_expert_optimizer_states_match_universal(engine, universal_dir):
     dist.barrier()
 
 
+def _assert_module_params_match_universal(engine, universal_dir):
+    _assert_expert_params_match_universal(engine, universal_dir)
+    _assert_router_params_match_universal(engine, universal_dir)
+    _assert_shared_params_match_universal(engine, universal_dir)
+
+
 def _assert_optimizer_step_restored(engine, universal_dir):
     expected_step = _load_universal_optimizer_step(universal_dir)
     steps = []
@@ -240,19 +261,32 @@ def _assert_optimizer_step_restored(engine, universal_dir):
     assert steps[0] == expected_step
 
 
-def _assert_topology_load_matches_universal(tmpdir, *, target_ep_size, num_experts=4, tag=TOPOLOGY_TAG):
+def _assert_forward_runs(engine):
+    with torch.no_grad():
+        output = engine(torch.randn(1, 8, 64, device=engine.device))
+    assert torch.isfinite(output.float()).all()
+
+
+def _assert_topology_load_matches_universal(tmpdir,
+                                            *,
+                                            target_ep_size,
+                                            num_experts=4,
+                                            tag=TOPOLOGY_TAG,
+                                            load_kwargs=None,
+                                            check_optimizer_states=True):
     save_dir = str(tmpdir)
     universal_dir = os.path.join(save_dir, f"{tag}_universal")
     config = make_autoep_integration_config(zero_stage=3, ep_size=target_ep_size)
     config["checkpoint"] = {"load_universal": True}
     engine, _, _, _ = deepspeed.initialize(model=MockMoETransformer(num_experts=num_experts), config=config)
-    engine.load_checkpoint(save_dir, tag=f"{tag}_universal")
+    engine.load_checkpoint(save_dir, tag=f"{tag}_universal", **(load_kwargs or {}))
 
-    _assert_expert_params_match_universal(engine, universal_dir)
-    _assert_router_params_match_universal(engine, universal_dir)
-    _assert_expert_optimizer_states_match_universal(engine, universal_dir)
-    _assert_optimizer_step_restored(engine, universal_dir)
+    _assert_module_params_match_universal(engine, universal_dir)
+    if check_optimizer_states:
+        _assert_expert_optimizer_states_match_universal(engine, universal_dir)
+        _assert_optimizer_step_restored(engine, universal_dir)
 
+    _assert_forward_runs(engine)
     losses, _ = run_training_steps(engine, num_steps=1)
     assert torch.isfinite(torch.tensor(losses[0]))
     engine.destroy()
@@ -405,7 +439,7 @@ class TestAutoEPZero3UniversalCheckpoint(DistributedTest):
         losses, _ = run_training_steps(reloaded_engine, num_steps=1)
         assert torch.isfinite(torch.tensor(losses[0]))
 
-    def test_zero3_universal_weights_only_loads_fail_fast(self, tmpdir):
+    def _assert_zero3_universal_weights_only_load(self, tmpdir, load_kwargs):
         seed_everything(6420)
 
         config = make_autoep_integration_config(zero_stage=3, ep_size=2)
@@ -415,20 +449,26 @@ class TestAutoEPZero3UniversalCheckpoint(DistributedTest):
         save_dir = str(tmpdir)
         tag = "autoep-zero3-universal-flags"
         engine.save_checkpoint(save_dir, tag=tag)
-        _convert_checkpoint_to_universal(save_dir, tag)
+        universal_dir = _convert_checkpoint_to_universal(save_dir, tag)
 
         universal_config = make_autoep_integration_config(zero_stage=3, ep_size=2)
         universal_config["checkpoint"] = {"load_universal": True}
-        no_optimizer_engine, _, _, _ = deepspeed.initialize(model=MockMoETransformer(), config=universal_config)
-        with pytest.raises(NotImplementedError, match="requires optimizer state"):
-            no_optimizer_engine.load_checkpoint(save_dir, tag=f"{tag}_universal", load_optimizer_states=False)
-        no_optimizer_engine.destroy()
+        reloaded_engine, _, _, _ = deepspeed.initialize(model=MockMoETransformer(), config=universal_config)
+        reloaded_engine.load_checkpoint(save_dir, tag=f"{tag}_universal", **load_kwargs)
 
-        module_only_engine, _, _, _ = deepspeed.initialize(model=MockMoETransformer(), config=universal_config)
-        with pytest.raises(NotImplementedError, match="requires optimizer state"):
-            module_only_engine.load_checkpoint(save_dir, tag=f"{tag}_universal", load_module_only=True)
-        module_only_engine.destroy()
+        _assert_module_params_match_universal(reloaded_engine, universal_dir)
+        _assert_forward_runs(reloaded_engine)
+        losses, _ = run_training_steps(reloaded_engine, num_steps=1)
+        assert torch.isfinite(torch.tensor(losses[0]))
+
+        reloaded_engine.destroy()
         engine.destroy()
+
+    def test_zero3_universal_load_optimizer_states_false_same_topology(self, tmpdir):
+        self._assert_zero3_universal_weights_only_load(tmpdir, {"load_optimizer_states": False})
+
+    def test_zero3_universal_module_only_same_topology(self, tmpdir):
+        self._assert_zero3_universal_weights_only_load(tmpdir, {"load_module_only": True})
 
 
 class TestAutoEPZero3UniversalCheckpoint4GPU(DistributedTest):
@@ -562,6 +602,20 @@ class TestAutoEPZero3UniversalTopologyChange(DistributedTest):
     @pytest.mark.world_size(8)
     def test_dp_world_size_4to8_and_autoep_size_2to4(self, autoep_topology_baseline_ws4_ep2, tmpdir):
         _assert_topology_load_matches_universal(tmpdir, target_ep_size=4)
+
+    @pytest.mark.world_size(2)
+    def test_module_only_dp_world_size_4to2_fixed_ep_size(self, autoep_topology_baseline_ws4_ep2, tmpdir):
+        _assert_topology_load_matches_universal(tmpdir,
+                                                target_ep_size=2,
+                                                load_kwargs={"load_module_only": True},
+                                                check_optimizer_states=False)
+
+    @pytest.mark.world_size(4)
+    def test_load_optimizer_states_false_autoep_size_2to4(self, autoep_topology_baseline_ws4_ep2, tmpdir):
+        _assert_topology_load_matches_universal(tmpdir,
+                                                target_ep_size=4,
+                                                load_kwargs={"load_optimizer_states": False},
+                                                check_optimizer_states=False)
 
     @pytest.mark.world_size(4)
     def test_universal_load_rejects_mismatched_target_expert_shape(self, autoep_topology_baseline_ws4_ep2, tmpdir):

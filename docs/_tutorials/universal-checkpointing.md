@@ -104,14 +104,14 @@ consolidates each expert parameter from its partition shards across the expert
 replica group, and writes the same `zero/` parameter layout as the other
 stages. ZeRO Stage 3 AutoEP also supports module-only loads
 (`load_module_only=True`) and optimizer-state-free loads
-(`load_optimizer_states=False`) from the partition shards. After conversion to
-Universal Checkpoint format, ZeRO Stage 3 AutoEP can load optimizer-including
-checkpoints at a different data-parallel world size, a different `autoep_size`,
-or both, as long as the target AutoEP topology is valid for the same model
-parameter names and expert count. Weights-only/module-only universal loads for
-ZeRO Stage 3 AutoEP are not supported yet and fail fast. `zero_to_fp32.py`
-consolidation is not supported for partition-native AutoEP checkpoints (the
-script raises `NotImplementedError`; use `ds_to_universal.py` instead).
+(`load_optimizer_states=False`) from both partition shards and Universal
+Checkpoint format. After conversion to Universal Checkpoint format, ZeRO Stage 3
+AutoEP can load optimizer-including or weights-only/module-only checkpoints at a
+different data-parallel world size, a different `autoep_size`, or both, as long
+as the target AutoEP topology is valid for the same model parameter names and
+expert count. `zero_to_fp32.py` consolidation is not supported for
+partition-native AutoEP checkpoints (the script raises `NotImplementedError`;
+use `ds_to_universal.py` instead).
 
 During conversion, `ds_to_universal.py` reads `ds_autoep_layers` or the legacy
 `autoep_layers` key, consolidates each AutoEP layer's routed expert state (the
@@ -125,10 +125,11 @@ such as `exp_avg.pt` and `exp_avg_sq.pt` next to the converted parameter.
 Regular AutoEP checkpoint load requires the target run to use the same
 `autoep_size` as the save run. To change `autoep_size` or data-parallel world
 size for the same AutoEP-detected model topology, convert the checkpoint to
-Universal format and load the Universal checkpoint with optimizer state enabled.
-For ZeRO Stage 3 AutoEP this path reslices routed expert parameters and their
-Adam `fp32`, `exp_avg`, and `exp_avg_sq` states using the target runtime
-topology.
+Universal format and load the Universal checkpoint. For ZeRO Stage 3 AutoEP,
+optimizer-including loads reslice routed expert parameters and their Adam
+`fp32`, `exp_avg`, and `exp_avg_sq` states using the target runtime topology;
+weights-only/module-only loads reslice routed expert parameters and standard
+parameters from the universal `fp32.pt` files without requiring optimizer state.
 
 In the Universal Checkpoint load path, AutoEP routed experts are restored from
 the `zero/` parameter layout rather than from the regular

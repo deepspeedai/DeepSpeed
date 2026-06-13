@@ -3313,7 +3313,10 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                 # self.persistent_parameters[0].all_gather(self.persistent_parameters) # this will be done in checkpoint_event_epilogue() so remove it to prevent double all_gather
 
     def _load_universal_checkpoint(self, checkpoint_folder, load_optimizer_states, load_from_fp32_weights):
-        self.load_hp_checkpoint_state_from_checkpoint_dir_stage3(checkpoint_folder)
+        if load_optimizer_states:
+            self.load_hp_checkpoint_state_from_checkpoint_dir_stage3(checkpoint_folder)
+        else:
+            self.load_module_checkpoint_state_from_checkpoint_dir_stage3(checkpoint_folder)
 
     def load_hp_checkpoint_state_from_checkpoint_dir_stage3(self, checkpoint_dir):
         """ Load optimizer and model states from the checkpoint directory. """
@@ -3374,6 +3377,40 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             if sum(fp32_param.size()) > 0:
                 fp16_param = self.fp16_partitioned_groups_flat[sub_group_id]
                 fp16_param.data.copy_(fp32_param.data)
+
+        for sub_group_id in range(len(self.fp16_partitioned_groups_flat)):
+            updated_params = self.unflatten(self.fp16_partitioned_groups_flat[sub_group_id],
+                                            self.fp16_partitioned_groups[sub_group_id])
+
+            for partitioned_param, q in zip(self.fp16_partitioned_groups[sub_group_id], updated_params):
+                partitioned_param.data = q.data
+
+    def load_module_checkpoint_state_from_checkpoint_dir_stage3(self, checkpoint_dir):
+        """Load module parameter partitions from a ZeRO-3 universal checkpoint."""
+        checkpoint_dir = os.path.join(checkpoint_dir, "zero")
+        for sub_group_id, fp16_group in enumerate(self.fp16_groups):
+            fp16_param = self.fp16_partitioned_groups_flat[sub_group_id]
+            if fp16_param is None:
+                raise RuntimeError("ZeRO-3 universal module-only checkpoint load requires available parameter "
+                                   f"partitions for subgroup {sub_group_id}.")
+            module_param_partition = torch.zeros_like(fp16_param)
+            offset = 0
+            for param in fp16_group:
+                if param not in self.param_names:
+                    raise ValueError("failed to find optimizer param in named params")
+                param_name = self.param_names[param]
+                param_partition = self.load_hp_checkpoint_state(os.path.join(checkpoint_dir, param_name),
+                                                                "fp32",
+                                                                param=param)
+                numel = param_partition.numel()
+                module_param_partition.narrow(0, offset, numel).copy_(
+                    param_partition.to(device=module_param_partition.device, dtype=module_param_partition.dtype))
+                offset += numel
+            fp16_param.data.copy_(module_param_partition)
+
+        # Keep fp32 master weights consistent for warm-start/fine-tuning cases
+        # that intentionally skipped optimizer state.
+        self.refresh_fp32_params()
 
         for sub_group_id in range(len(self.fp16_partitioned_groups_flat)):
             updated_params = self.unflatten(self.fp16_partitioned_groups_flat[sub_group_id],
