@@ -20,7 +20,9 @@ from unit.v1.moe.autoep_test_utils import (
     MockMoETransformer,
     UNSUPPORTED_LOAD_BALANCE_VALUES,
     assert_load_balance_coeff_rejection_message,
+    engine_input_dtype,
     init_autoep_engine,
+    make_autoep_config,
     make_autoep_integration_config,
     run_training_steps,
     seed_everything,
@@ -243,6 +245,29 @@ def _assert_expert_optimizer_states_match_universal(engine, universal_dir):
     dist.barrier()
 
 
+def _assert_expert_fp32_master_params_match_universal(engine, universal_dir):
+    for param_name, module, param in _expert_params(engine):
+        local_state = _gather_optimizer_state_for_param(engine, param, "fp32")
+        restored = _collect_by_ep_rank(local_state, module.ep_rank, module.ep_size, engine.device)
+        if dist.get_rank() == 0:
+            expected = _load_universal_expert_state(universal_dir, param_name, "fp32")
+            torch.testing.assert_close(restored, expected, rtol=0, atol=0)
+    dist.barrier()
+
+
+def _assert_dense_fp32_master_params_match_universal(engine, universal_dir, param_iter):
+    for param_name, param in param_iter:
+        restored = _gather_optimizer_state_for_param(engine, param, "fp32").cpu()
+        expected = _load_universal_dense_state(universal_dir, param_name, "fp32").view_as(restored)
+        torch.testing.assert_close(restored, expected, rtol=0, atol=0)
+
+
+def _assert_fp32_master_params_match_universal(engine, universal_dir):
+    _assert_expert_fp32_master_params_match_universal(engine, universal_dir)
+    _assert_dense_fp32_master_params_match_universal(engine, universal_dir, _router_params(engine))
+    _assert_dense_fp32_master_params_match_universal(engine, universal_dir, _shared_params(engine))
+
+
 def _assert_module_params_match_universal(engine, universal_dir):
     _assert_expert_params_match_universal(engine, universal_dir)
     _assert_router_params_match_universal(engine, universal_dir)
@@ -263,8 +288,19 @@ def _assert_optimizer_step_restored(engine, universal_dir):
 
 def _assert_forward_runs(engine):
     with torch.no_grad():
-        output = engine(torch.randn(1, 8, 64, device=engine.device))
+        output = engine(torch.randn(1, 8, 64, device=engine.device, dtype=engine_input_dtype(engine)))
     assert torch.isfinite(output.float()).all()
+
+
+def _run_training_steps_with_engine_input_dtype(engine, num_steps=2, seq_len=8, hidden_dim=64):
+    losses = []
+    for _ in range(num_steps):
+        x = torch.randn(1, seq_len, hidden_dim, device=engine.device, dtype=engine_input_dtype(engine))
+        loss = engine(x).mean()
+        engine.backward(loss)
+        engine.step()
+        losses.append(loss.item())
+    return losses
 
 
 def _assert_topology_load_matches_universal(tmpdir,
@@ -469,6 +505,30 @@ class TestAutoEPZero3UniversalCheckpoint(DistributedTest):
 
     def test_zero3_universal_module_only_same_topology(self, tmpdir):
         self._assert_zero3_universal_weights_only_load(tmpdir, {"load_module_only": True})
+
+    @pytest.mark.parametrize("load_kwargs", [{"load_optimizer_states": False}, {"load_module_only": True}])
+    def test_zero3_universal_weights_only_preserves_fp32_master_weights(self, tmpdir, load_kwargs):
+        seed_everything(6421)
+
+        config = make_autoep_config(zero_stage=3, ep_size=2)
+        engine, _, _, _ = deepspeed.initialize(model=MockMoETransformer(), config=config)
+        _run_training_steps_with_engine_input_dtype(engine, num_steps=2)
+
+        save_dir = str(tmpdir)
+        tag = "autoep-zero3-universal-fp32-master"
+        engine.save_checkpoint(save_dir, tag=tag)
+        universal_dir = _convert_checkpoint_to_universal(save_dir, tag)
+
+        universal_config = make_autoep_config(zero_stage=3, ep_size=2)
+        universal_config["checkpoint"] = {"load_universal": True}
+        reloaded_engine, _, _, _ = deepspeed.initialize(model=MockMoETransformer(), config=universal_config)
+        reloaded_engine.load_checkpoint(save_dir, tag=f"{tag}_universal", **load_kwargs)
+
+        _assert_fp32_master_params_match_universal(reloaded_engine, universal_dir)
+        _assert_forward_runs(reloaded_engine)
+
+        reloaded_engine.destroy()
+        engine.destroy()
 
 
 class TestAutoEPZero3UniversalCheckpoint4GPU(DistributedTest):

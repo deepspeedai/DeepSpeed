@@ -3316,7 +3316,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         if load_optimizer_states:
             self.load_hp_checkpoint_state_from_checkpoint_dir_stage3(checkpoint_folder)
         else:
-            self.load_module_checkpoint_state_from_checkpoint_dir_stage3(checkpoint_folder)
+            self.load_module_checkpoint_state_from_checkpoint_dir_stage3(checkpoint_folder, load_from_fp32_weights)
 
     def load_hp_checkpoint_state_from_checkpoint_dir_stage3(self, checkpoint_dir):
         """ Load optimizer and model states from the checkpoint directory. """
@@ -3385,7 +3385,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             for partitioned_param, q in zip(self.fp16_partitioned_groups[sub_group_id], updated_params):
                 partitioned_param.data = q.data
 
-    def load_module_checkpoint_state_from_checkpoint_dir_stage3(self, checkpoint_dir):
+    def load_module_checkpoint_state_from_checkpoint_dir_stage3(self, checkpoint_dir, load_from_fp32_weights):
         """Load module parameter partitions from a ZeRO-3 universal checkpoint."""
         checkpoint_dir = os.path.join(checkpoint_dir, "zero")
         for sub_group_id, fp16_group in enumerate(self.fp16_groups):
@@ -3393,7 +3393,9 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             if fp16_param is None:
                 raise RuntimeError("ZeRO-3 universal module-only checkpoint load requires available parameter "
                                    f"partitions for subgroup {sub_group_id}.")
+            fp32_param = self.fp32_partitioned_groups_flat[sub_group_id]
             module_param_partition = torch.zeros_like(fp16_param)
+            fp32_param_partition = torch.zeros_like(fp32_param) if load_from_fp32_weights else None
             offset = 0
             for param in fp16_group:
                 if param not in self.param_names:
@@ -3405,12 +3407,16 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                 numel = param_partition.numel()
                 module_param_partition.narrow(0, offset, numel).copy_(
                     param_partition.to(device=module_param_partition.device, dtype=module_param_partition.dtype))
+                if load_from_fp32_weights:
+                    fp32_param_partition.narrow(0, offset, numel).copy_(
+                        param_partition.to(device=fp32_param_partition.device, dtype=fp32_param_partition.dtype))
                 offset += numel
             fp16_param.data.copy_(module_param_partition)
+            if load_from_fp32_weights:
+                fp32_param.data.copy_(fp32_param_partition)
 
-        # Keep fp32 master weights consistent for warm-start/fine-tuning cases
-        # that intentionally skipped optimizer state.
-        self.refresh_fp32_params()
+        if not load_from_fp32_weights:
+            self.refresh_fp32_params()
 
         for sub_group_id in range(len(self.fp16_partitioned_groups_flat)):
             updated_params = self.unflatten(self.fp16_partitioned_groups_flat[sub_group_id],
