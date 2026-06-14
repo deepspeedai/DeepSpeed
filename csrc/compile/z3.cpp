@@ -254,12 +254,15 @@ public:
 
         blockCopyEvents(scalar_type);
 
-        // Calculate temporary buffer size for accumulated gradients
+        // Calculate temporary buffer size for accumulated gradients or
+        // communication/storage dtype mismatches.
         int64_t tmp_recv_numel = 0;
         for (const ReduceTask& t : reduce_tasks_.at(scalar_type)) {
-            if (has_acc_grad_.at(t.getDSId())) {
-                tmp_recv_numel += param_registry_->getParam(t.getDSId()).getGradBuffer().numel();
-            }
+            auto recv_buf = param_registry_->getParam(t.getDSId()).getGradBuffer();
+            int64_t recv_numel = recv_buf.numel();
+            bool use_tmp_recv = recv_numel > 0 && (has_acc_grad_.at(t.getDSId()) ||
+                                                   recv_buf.scalar_type() != scalar_type);
+            if (use_tmp_recv) { tmp_recv_numel += recv_numel; }
         }
 
         // Allocate temporary buffer if needed
@@ -278,37 +281,51 @@ public:
         for (const ReduceTask& t : reduce_tasks_.at(scalar_type)) {
             auto recv_buf = param_registry_->getParam(t.getDSId()).getGradBuffer();
             bool acc_grad = has_acc_grad_.at(t.getDSId());
+            int64_t recv_numel = recv_buf.numel();
+            bool use_tmp_recv =
+                recv_numel > 0 && (acc_grad || recv_buf.scalar_type() != scalar_type);
 
-            if (acc_grad) {
+            if (use_tmp_recv) {
                 recv_buf =
-                    tmp_recv_buf.index({torch::indexing::Slice(offset, offset + recv_buf.numel())});
+                    tmp_recv_buf.index({torch::indexing::Slice(offset, offset + recv_numel)});
             }
 
             ncclResult_t result = ncclReduceScatter(t.getSendBuf().data_ptr(),
                                                     recv_buf.data_ptr(),
-                                                    recv_buf.numel(),
+                                                    recv_numel,
                                                     get_nccl_data_type(scalar_type),
                                                     getReductionOp(),
                                                     nccl_comm_,
                                                     rs_stream_);
             if (result != ncclSuccess) { throw std::runtime_error("NCCL ReduceScatter failed"); }
 
-            if (acc_grad) { offset += recv_buf.numel(); }
+            if (use_tmp_recv) { offset += recv_numel; }
         }
         ncclGroupEnd();
 
-        // Handle gradient accumulation with temporary buffer
+        // Move temporary receive results into the ZeRO grad buffer.
         {
             at::cuda::CUDAStreamGuard guard(rs_stream_);
             int64_t offset = 0;
             for (const ReduceTask& t : reduce_tasks_.at(scalar_type)) {
+                auto recv_buf = param_registry_->getParam(t.getDSId()).getGradBuffer();
                 bool acc_grad = has_acc_grad_.at(t.getDSId());
+                int64_t recv_numel = recv_buf.numel();
+                bool use_tmp_recv =
+                    recv_numel > 0 && (acc_grad || recv_buf.scalar_type() != scalar_type);
 
-                if (acc_grad) {
-                    auto recv_buf = param_registry_->getParam(t.getDSId()).getGradBuffer();
-                    recv_buf.add_(tmp_recv_buf.index(
-                        {torch::indexing::Slice(offset, offset + recv_buf.numel())}));
-                    offset += recv_buf.numel();
+                if (use_tmp_recv) {
+                    auto reduced_slice =
+                        tmp_recv_buf.index({torch::indexing::Slice(offset, offset + recv_numel)});
+                    if (reduced_slice.scalar_type() != recv_buf.scalar_type()) {
+                        reduced_slice = reduced_slice.to(recv_buf.scalar_type());
+                    }
+                    if (acc_grad) {
+                        recv_buf.add_(reduced_slice);
+                    } else {
+                        recv_buf.copy_(reduced_slice, true);
+                    }
+                    offset += recv_numel;
                 }
                 has_acc_grad_[t.getDSId()] = true;
             }
@@ -472,9 +489,11 @@ void register_z3_param(long ds_id,
                        const std::vector<int64_t>& ds_shape,
                        at::Tensor ds_tensor,
                        at::Tensor grad_buffer,
-                       bool persistent)
+                       bool persistent,
+                       std::optional<at::ScalarType> expected_grad_dtype)
 {
-    param_registry->registerParam(ds_id, ds_shape, ds_tensor, grad_buffer, true, 0, persistent);
+    param_registry->registerParam(
+        ds_id, ds_shape, ds_tensor, grad_buffer, true, 0, persistent, expected_grad_dtype);
     if (persistent) { param_registry->registerGatheredParam(ds_id, ds_tensor); }
 
     // Validate that padded shard sizes are uniform across ranks at registration time

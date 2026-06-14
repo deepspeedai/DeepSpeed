@@ -55,7 +55,7 @@ DS_VERSION = 'ds_version'
 UNIVERSAL_CHECKPOINT_INFO = 'universal_checkpoint_info'
 UNIVERSAL_CHECKPOINT_VERSION_KEY = 'universal_checkpoint_version'
 # Reserve version 0.1  for the hardcoded logic used in BLOOM-176B training
-UNIVERSAL_CHECKPOINT_VERSION_VALUE = 0.2
+UNIVERSAL_CHECKPOINT_VERSION_VALUE = 0.3
 # Attribute name used to store AutoTP universal-checkpoint metadata on torch Parameters.
 DS_AUTOTP_UC_META = "ds_autotp_universal_checkpoint_meta"
 
@@ -87,3 +87,16 @@ TP_REPLICATED_PARAMETER_PATTERNS = 'tp_replicated_parameter_patterns'
 PARAMETER_WITH_2_SUB_PARAMS_CAT_DIM_0 = 'parameter_with_2_sub_params_cat_dim_0'
 PARAMETER_WITH_SUB_PARAMS = 'parameter_with_sub_params'
 SUB_PARAMS_SHAPE = 'sub_params_shape'
+
+#########################################
+# AutoEP Checkpoint keys
+#########################################
+AUTOEP_LAYERS_KEY = 'ds_autoep_layers'
+AUTOEP_LAYERS_KEY_LEGACY = 'autoep_layers'
+
+#########################################
+# Universal Checkpoint EP keys
+#########################################
+EP_IS_EXPERT_PARAM = 'is_expert_param'
+EP_NUM_EXPERTS = 'ep_num_experts'
+EXPERT_PARAMETER_PATTERNS = 'expert_parameter_patterns'
