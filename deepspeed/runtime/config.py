@@ -518,17 +518,29 @@ def get_expert_data_topo_config(param_dict):
 
 def get_eigenvalue_config(param_dict):
     if get_quantize_enabled(param_dict):
-        param_dict = param_dict[QUANTIZE_TRAINING]
-        assert not get_eigenvalue_enabled(param_dict), "Eigenvalue based MoQ is temporarily disabled"
+        quantize_training_params = param_dict.get('quantize_training')
+        if quantize_training_params is None:
+            return (
+                EIGENVALUE_ENABLED_DEFAULT,
+                EIGENVALUE_VERBOSE_DEFAULT,
+                EIGENVALUE_MAX_ITER_DEFAULT,
+                EIGENVALUE_TOL_DEFAULT,
+                EIGENVALUE_STABILITY_DEFAULT,
+                EIGENVALUE_GAS_BOUNDARY_RESOLUTION_DEFAULT,
+                EIGENVALUE_LAYER_NAME_DEFAULT,
+                EIGENVALUE_LAYER_NUM_DEFAULT,
+            )
+
+        assert not get_eigenvalue_enabled(quantize_training_params), "Eigenvalue based MoQ is temporarily disabled"
         return (
-            get_eigenvalue_enabled(param_dict),
-            get_eigenvalue_verbose(param_dict),
-            get_eigenvalue_max_iter(param_dict),
-            get_eigenvalue_tol(param_dict),
-            get_eigenvalue_stability(param_dict),
-            get_eigenvalue_gas_boundary_resolution(param_dict),
-            get_eigenvalue_layer_name(param_dict),
-            get_eigenvalue_layer_num(param_dict),
+            get_eigenvalue_enabled(quantize_training_params),
+            get_eigenvalue_verbose(quantize_training_params),
+            get_eigenvalue_max_iter(quantize_training_params),
+            get_eigenvalue_tol(quantize_training_params),
+            get_eigenvalue_stability(quantize_training_params),
+            get_eigenvalue_gas_boundary_resolution(quantize_training_params),
+            get_eigenvalue_layer_name(quantize_training_params),
+            get_eigenvalue_layer_num(quantize_training_params),
         )
     else:
         return (
