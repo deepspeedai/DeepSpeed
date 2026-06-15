@@ -305,6 +305,12 @@ class DeepSpeedZeRoOffload(object):
         return persistent_params
 
     def _register_deepspeed_module(self, module, count=[0]):
+        # re-registering hooks on the root module leaves the coordinator trace stale;
+        # invalidate so it re-records on the next forward.
+        if module is self.module:
+            coordinator = self.get_param_coordinator()
+            if coordinator is not None and not coordinator.is_invalid_trace():
+                coordinator._invalidate_trace()
         my_count = count[0]
         module.ds_id = my_count
 
