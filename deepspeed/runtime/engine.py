@@ -1322,15 +1322,33 @@ class DeepSpeedEngine(Module):
             grad_accum_dtype = DtypeEnum(self._config.grad_accum_dtype).value
         return (model_dtype, grad_accum_dtype)
 
+    def _assert_valid_mixed_precision_config(self):
+        """param_dtype, if set, must match the enabled fp16/bf16 mode.
+
+        The optimizer/master-weight/reduction paths derive the model dtype from
+        the fp16/bf16 flags, so a divergent param_dtype is unsafe.
+        """
+        if self._config.param_dtype is None:
+            return
+        if self.fp16_enabled():
+            model_dtype = torch.half
+        elif self.bfloat16_enabled():
+            model_dtype = torch.bfloat16
+        else:
+            model_dtype = torch.float32
+        requested = DtypeEnum(self._config.param_dtype).value
+        assert requested == model_dtype, (f"data_types.param_dtype='{self._config.param_dtype}' conflicts with the "
+                                          f"enabled precision mode (model dtype {model_dtype}). Set the matching "
+                                          f"fp16/bf16 'enabled' flag or omit data_types.param_dtype.")
+
     def _mixed_precision_dtypes(self):
         """Resolve (param_dtype, buffer_dtype) for the module cast.
 
-        param_dtype: config override, else the fp16/bf16 enabled flag, else None.
-        buffer_dtype: config override, else None (buffers keep their loaded dtype).
+        param_dtype follows the enabled fp16/bf16 mode (None if neither).
+        buffer_dtype: config override, else None (buffers keep loaded dtype).
+        Mismatched param_dtype is rejected in _assert_valid_mixed_precision_config.
         """
-        if self._config.param_dtype is not None:
-            param_dtype = DtypeEnum(self._config.param_dtype).value
-        elif self.fp16_enabled():
+        if self.fp16_enabled():
             param_dtype = torch.half
         elif self.bfloat16_enabled():
             param_dtype = torch.bfloat16
@@ -1489,6 +1507,8 @@ class DeepSpeedEngine(Module):
 
         if self.bfloat16_enabled() and not get_accelerator().is_bf16_supported():
             raise ValueError("Type bf16 is not supported on your device.")
+
+        self._assert_valid_mixed_precision_config()
 
         expected_optim_types = self._supported_optims()
         expected_optim_types += [type(None), Callable]

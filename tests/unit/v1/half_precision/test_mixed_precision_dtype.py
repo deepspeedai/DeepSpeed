@@ -45,15 +45,31 @@ class TestMixedPrecisionDtypeResolution:
         param_dtype, buffer_dtype = DeepSpeedEngine._mixed_precision_dtypes(self._engine())
         assert param_dtype is None and buffer_dtype is None
 
-    def test_explicit_param_dtype_overrides_flag(self):
-        param_dtype, _ = DeepSpeedEngine._mixed_precision_dtypes(self._engine(param_dtype="fp32", bf16=True))
-        assert param_dtype == torch.float32
-
     @pytest.mark.parametrize("cfg_str,expected", [("bf16", torch.bfloat16), ("fp16", torch.half),
                                                   ("fp32", torch.float32)])
     def test_buffer_dtype_string_resolution(self, cfg_str, expected):
         _, buffer_dtype = DeepSpeedEngine._mixed_precision_dtypes(self._engine(buffer_dtype=cfg_str, bf16=True))
         assert buffer_dtype == expected
+
+
+class TestMixedPrecisionConfigValidation:
+
+    def _engine(self, param_dtype=None, fp16=False, bf16=False):
+        cfg = types.SimpleNamespace(param_dtype=param_dtype, buffer_dtype=None)
+        return types.SimpleNamespace(_config=cfg, fp16_enabled=lambda: fp16, bfloat16_enabled=lambda: bf16)
+
+    def test_unset_param_dtype_ok(self):
+        DeepSpeedEngine._assert_valid_mixed_precision_config(self._engine(bf16=True))  # no raise
+
+    def test_matching_param_dtype_ok(self):
+        DeepSpeedEngine._assert_valid_mixed_precision_config(self._engine(param_dtype="bf16", bf16=True))  # no raise
+
+    @pytest.mark.parametrize("param_dtype,fp16,bf16", [("fp16", False, True), ("fp32", False, True),
+                                                       ("bf16", True, False), ("bf16", False, False)])
+    def test_conflicting_param_dtype_rejected(self, param_dtype, fp16, bf16):
+        with pytest.raises(AssertionError):
+            DeepSpeedEngine._assert_valid_mixed_precision_config(
+                self._engine(param_dtype=param_dtype, fp16=fp16, bf16=bf16))
 
 
 class TestCastModuleMixedPrecision:
