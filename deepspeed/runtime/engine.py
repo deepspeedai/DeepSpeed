@@ -116,7 +116,7 @@ from ..moe.utils import is_moe_param, configure_moe_param_groups
 from ..git_version_info import version
 
 from deepspeed.profiling.flops_profiler.profiler import FlopsProfiler
-from deepspeed.utils.logging import print_json_dist, print_configuration
+from deepspeed.utils.logging import print_json_dist, print_configuration, set_log_level_from_string
 
 from deepspeed.accelerator import get_accelerator
 
@@ -277,6 +277,7 @@ class DeepSpeedEngine(Module):
         self._do_args_sanity_check(args)
         self._configure_with_arguments(args, mpu)
         self._do_sanity_check()
+        set_log_level_from_string(self.log_level())
         self._configure_expert_parallel(model)
         if self.autotp_size() > 1:
             self._configure_tensor_parallel(model, self.tensor_parallel_config())
@@ -1227,6 +1228,9 @@ class DeepSpeedEngine(Module):
 
     def load_universal_checkpoint(self):
         return self._config.load_universal_checkpoint
+
+    def log_level(self):
+        return self._config.log_level
 
     @property
     def communication_data_type(self):
