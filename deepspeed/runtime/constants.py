@@ -466,12 +466,22 @@ CHECKPOINT_PARALLEL_WRITE_PIPELINE_STAGE_DEFAULT = False
 #########################################
 # "data_types": {
 #   grad_accum_dtype=["bf16"|"fp16"|"fp32"]
+#   param_dtype=["bf16"|"fp16"|"fp32"]
+#   buffer_dtype=["bf16"|"fp16"|"fp32"]
 #   }
 # }
+# param_dtype / buffer_dtype mirror FSDP MixedPrecisionPolicy. When unset (None):
+#   - param_dtype falls back to the bf16/fp16 enabled flag (legacy behavior).
+#   - buffer_dtype keeps each buffer's loaded dtype (e.g. fp32 rotary inv_freq).
+#     Set it to a concrete dtype to force-cast buffers (legacy blanket cast).
 
 DATA_TYPES = "data_types"
 GRAD_ACCUM_DTYPE = "grad_accum_dtype"
 GRAD_ACCUM_DTYPE_DEFAULT = None
+PARAM_DTYPE = "param_dtype"
+PARAM_DTYPE_DEFAULT = None
+BUFFER_DTYPE = "buffer_dtype"
+BUFFER_DTYPE_DEFAULT = None
 
 #########################################
 # Drop the last incomplete Batch
