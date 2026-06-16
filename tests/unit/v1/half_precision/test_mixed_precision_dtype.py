@@ -20,6 +20,7 @@ def _module_with_fp32_buffer(hidden_dim=8):
     module.register_buffer("inv_freq", torch.ones(hidden_dim, dtype=torch.float32))
     return module
 
+
 class TestMixedPrecisionDtypeResolution:
 
     def _engine(self, param_dtype=None, buffer_dtype=None, fp16=False, bf16=False):
@@ -123,13 +124,17 @@ class TestMixedPrecisionDtypeEndToEnd(DistributedTest):
 
     def test_config_defaults(self, zero_stage):
         model = _module_with_fp32_buffer(1024)
-        engine, _, _, _ = deepspeed.initialize(config=self._config(zero_stage), model=model, model_parameters=model.parameters())
+        engine, _, _, _ = deepspeed.initialize(config=self._config(zero_stage),
+                                               model=model,
+                                               model_parameters=model.parameters())
         assert engine._config.param_dtype is None
         assert engine._config.buffer_dtype is None
 
     def test_buffer_preserved_by_default(self, zero_stage):
         model = _module_with_fp32_buffer(1024)
-        engine, _, _, _ = deepspeed.initialize(config=self._config(zero_stage), model=model, model_parameters=model.parameters())
+        engine, _, _, _ = deepspeed.initialize(config=self._config(zero_stage),
+                                               model=model,
+                                               model_parameters=model.parameters())
         assert all(p.dtype == torch.bfloat16 for p in engine.module.parameters())
         assert engine.module.inv_freq.dtype == torch.float32
 
