@@ -20,12 +20,6 @@ def _module_with_fp32_buffer(hidden_dim=8):
     module.register_buffer("inv_freq", torch.ones(hidden_dim, dtype=torch.float32))
     return module
 
-
-# ---------------------------------------------------------------------------
-# CPU tests: the new engine methods only read self._config, self.module, and
-# the fp16|bf16 flags, so they can be exercised on lightweight stand-ins
-# without an accelerator or distributed init.
-# ---------------------------------------------------------------------------
 class TestMixedPrecisionDtypeResolution:
 
     def _engine(self, param_dtype=None, buffer_dtype=None, fp16=False, bf16=False):
@@ -100,16 +94,12 @@ class TestCastModuleMixedPrecision:
         assert module.inv_freq.dtype == torch.bfloat16
 
 
-# ---------------------------------------------------------------------------
-# GPU test: the keys flow through DeepSpeedConfig and the cast happens at
-# engine init. This is the real-world regression check (fp32 inv_freq survives
-# a bf16 initialize), so it runs on the accelerator.
-# ---------------------------------------------------------------------------
 @pytest.mark.skipif(torch.bfloat16 not in get_accelerator().supported_dtypes(), reason="bf16 not supported")
+@pytest.mark.parametrize("zero_stage", [0, 3])
 class TestMixedPrecisionDtypeEndToEnd(DistributedTest):
     world_size = 1
 
-    def _config(self, buffer_dtype=None):
+    def _config(self, zero_stage, buffer_dtype=None):
         data_types = {}
         if buffer_dtype is not None:
             data_types["buffer_dtype"] = buffer_dtype
@@ -126,23 +116,26 @@ class TestMixedPrecisionDtypeEndToEnd(DistributedTest):
                 "enabled": True
             },
             "data_types": data_types,
+            "zero_optimization": {
+                "stage": zero_stage
+            }
         }
 
-    def test_config_defaults(self):
-        model = _module_with_fp32_buffer()
-        engine, _, _, _ = deepspeed.initialize(config=self._config(), model=model, model_parameters=model.parameters())
+    def test_config_defaults(self, zero_stage):
+        model = _module_with_fp32_buffer(1024)
+        engine, _, _, _ = deepspeed.initialize(config=self._config(zero_stage), model=model, model_parameters=model.parameters())
         assert engine._config.param_dtype is None
         assert engine._config.buffer_dtype is None
 
-    def test_buffer_preserved_by_default(self):
-        model = _module_with_fp32_buffer()
-        engine, _, _, _ = deepspeed.initialize(config=self._config(), model=model, model_parameters=model.parameters())
+    def test_buffer_preserved_by_default(self, zero_stage):
+        model = _module_with_fp32_buffer(1024)
+        engine, _, _, _ = deepspeed.initialize(config=self._config(zero_stage), model=model, model_parameters=model.parameters())
         assert all(p.dtype == torch.bfloat16 for p in engine.module.parameters())
         assert engine.module.inv_freq.dtype == torch.float32
 
-    def test_buffer_dtype_opt_in(self):
-        model = _module_with_fp32_buffer()
-        engine, _, _, _ = deepspeed.initialize(config=self._config(buffer_dtype="bf16"),
+    def test_buffer_dtype_opt_in(self, zero_stage):
+        model = _module_with_fp32_buffer(1024)
+        engine, _, _, _ = deepspeed.initialize(config=self._config(zero_stage, buffer_dtype="bf16"),
                                                model=model,
                                                model_parameters=model.parameters())
         assert engine.module.inv_freq.dtype == torch.bfloat16
