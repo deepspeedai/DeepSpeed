@@ -470,11 +470,9 @@ CHECKPOINT_PARALLEL_WRITE_PIPELINE_STAGE_DEFAULT = False
 #   buffer_dtype=["bf16"|"fp16"|"fp32"]
 #   }
 # }
-# param_dtype / buffer_dtype mirror FSDP MixedPrecisionPolicy. When unset (None):
-#   - param_dtype follows the enabled bf16/fp16 mode; if set it must match that
-#     mode (it is validated, not an independent override).
-#   - buffer_dtype keeps each buffer's loaded dtype (e.g. fp32 rotary inv_freq).
-#     Set it to a concrete dtype to force-cast buffers (legacy blanket cast).
+# param_dtype and buffer_dtype mirror FSDP's MixedPrecisionPolicy.
+#   - param_dtype: if None uses the specified mixed precision dtype, otherwise casts the params into the provided dtype
+#   - buffer_dtype: if None uses the buffers' dtype found when the model was loaded (e.g. fp32 rotary inv_freq), otherwise casts the buffers into the provided dtype (which is likely to lead to unintended consequences)
 
 DATA_TYPES = "data_types"
 GRAD_ACCUM_DTYPE = "grad_accum_dtype"
