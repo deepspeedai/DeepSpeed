@@ -67,6 +67,7 @@ The design is a small, self-contained take on HuggingFace `transformers`'
                     ┌─────────────┴─────────────┐
                     │        collect-tests       │   (no secrets; AST-only)
                     │  checkout PR head          │
+                    │  restore ci/ from base     │
                     │  self-test the fetcher     │
                     │  run tests_fetcher.py      │
                     │   → mode (all|subset|none) │
@@ -242,17 +243,27 @@ context and the `deploy` job has the modal/HF **secrets** in scope. To keep PRs
 from abusing that:
 
 - `collect-tests` holds **no secrets** and only **AST-parses** (never executes)
-  the PR tree, so reading PR code there is safe.
+  the PR tree.
+- **Both jobs restore `ci/` from the base branch** before using it:
+  - `collect-tests` runs the **base** selector + self-tests. This job decides
+    whether the Required `deploy` runs, so it must not trust the PR's own
+    `ci/tests_fetcher.py` — otherwise a PR could rewrite it to emit `mode=none`
+    and skip CI while still going green. The diff is computed from git history, so
+    a PR's `ci/` changes still appear in the diff and (via the base selector's
+    `ci/**` run-all glob) force a full run.
+  - `deploy` runs the **base** orchestration (which drives `modal run` with the
+    secrets), so a PR can't repoint it at the secrets to exfiltrate them.
+  In both jobs the PR's `deepspeed/` + `tests/` are what gets parsed/tested.
 - The workflow is gated on `review_requested` / `ready_for_review` — a maintainer
   vets the PR before CI with secrets runs.
-- `deploy` checks out the **PR's** `deepspeed/` + `tests/` (so selection is
-  meaningful) but **restores `ci/` from the base branch** before running. This
-  means a PR cannot modify the orchestration (which drives `modal run` with the
-  secrets) to exfiltrate them.
 
 > **Consequence:** changes to `ci/*` (including `tests_fetcher.py` itself) take
 > effect under `pull_request_target` only after they're **merged**. Validate
 > `ci/*` changes via a `pull_request`-triggered run or the `modal` CLI locally.
+>
+> **Bootstrap:** when the base branch has no selector yet (the PR that introduces
+> it), the restored base `ci/` won't contain `tests_fetcher.py`; `collect-tests`
+> detects this and falls back to running the full suite.
 
 
 ## Failure modes & guarantees

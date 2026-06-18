@@ -8,11 +8,24 @@ of the implementation**.
 _Last updated: 2026-06-18._
 
 
-## Status: complete & locally verified (not yet exercised in real CI)
+## Status: complete & locally verified; in review on PR #8077
 
-The system is implemented end-to-end and passes local checks. It has **not** yet
-run in a live PR on GitHub Actions / modal, so the first real PR against it should
-be watched.
+The system is implemented end-to-end and passes local checks. Opened as
+[deepspeedai/DeepSpeed#8077](https://github.com/deepspeedai/DeepSpeed/pull/8077)
+(scoped to `modal-torch-latest` first; replicate to other workflows if accepted).
+It has **not** yet run a live `subset`/`deploy` on modal, so the first real runs
+should be watched.
+
+### Review fixes applied (Codex bot, PR #8077)
+
+- **P1 — run the selector from trusted code.** `collect-tests` now restores `ci/`
+  from the base branch before running the selector + self-tests, so a PR can't
+  rewrite `tests_fetcher.py` to emit `mode=none` and skip the Required check. (A
+  PR's `ci/` changes still show in the diff and force a full run via `ci/**`.)
+  Includes a bootstrap fallback: if base has no `tests_fetcher.py` yet, run all.
+- **P1 — hidden-file artifact.** `actions/upload-artifact@v4` skips dot-prefixed
+  paths by default; `ci/.test_selection/` is one. Added `include-hidden-files:
+  true` so `deploy`'s download doesn't fail.
 
 > Reminder: under `pull_request_target`, `deploy` restores `ci/` from the base
 > branch, so changes under `ci/*` (the fetcher included) only take effect once
