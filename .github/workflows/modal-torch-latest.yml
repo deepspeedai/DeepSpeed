@@ -78,10 +78,11 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          # For PRs, check out the PR head so the fetcher sees the proposed code.
-          # This job holds NO secrets and the fetcher only AST-parses (never executes)
-          # the tree, so reading PR code here is safe. Falls back to the pushed/manual
-          # commit for non-PR events.
+          # For PRs, check out the PR head so the fetcher sees the proposed
+          # deepspeed/ + tests/ code. This job holds NO secrets. The selection
+          # *logic* (ci/) is restored from the base branch in a later step so a PR
+          # can't tamper with the decision (see "Use base-branch CI scripts").
+          # Falls back to the pushed/manual commit for non-PR events.
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           # Full history so the merge-base with the base branch is always present.
           # This is the robust (if slower) choice: a shallow clone that can't reach
@@ -107,23 +108,57 @@ jobs:
             echo "ref=" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Use base-branch CI scripts
+        # SECURITY: this job decides whether the Required `deploy` job runs. Under
+        # pull_request_target we must NOT trust the PR's own ci/ for that decision:
+        # a PR could rewrite ci/tests_fetcher.py to emit `mode=none` (or its self
+        # tests) and skip CI entirely while still satisfying the Required check.
+        # So run the selector + self-tests from the *base* branch's ci/. The diff is
+        # computed from git history, so a PR's ci/ changes still show up in the diff
+        # and (via the base selector's `ci/**` run-all glob) force a full run.
+        if: github.event_name == 'pull_request_target'
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          git config --global --add safe.directory '*'
+          git checkout "origin/$BASE_REF" -- ci/
+
       - name: Self-test the fetcher
         # Pure-stdlib self-tests for the selector (only needs git + python). Runs
-        # here so a broken selector is caught before it (mis)picks tests.
+        # here so a broken selector is caught before it (mis)picks tests. Skipped
+        # when the base branch has no selector yet (bootstrap; see below).
         run: |
-          python3 ci/test_tests_fetcher.py
+          if [ -f ci/test_tests_fetcher.py ]; then
+            python3 ci/test_tests_fetcher.py
+          else
+            echo "No base-branch ci/test_tests_fetcher.py (bootstrap) -> skipping self-tests."
+          fi
 
       - name: Select impacted tests
         id: fetch
         # Pure-stdlib script; the runner's system python is fine (no deps needed).
+        # If the base branch doesn't have the selector yet (e.g. the PR that
+        # introduces it), the restored base ci/ won't contain tests_fetcher.py, so
+        # fall back to the full suite -- safe, and unblocks the bootstrap PR.
         run: |
-          python3 ci/tests_fetcher.py --workflow modal-torch-latest --base "${{ steps.base.outputs.ref }}"
+          if [ -f ci/tests_fetcher.py ]; then
+            python3 ci/tests_fetcher.py --workflow modal-torch-latest --base "${{ steps.base.outputs.ref }}"
+          else
+            echo "No base-branch ci/tests_fetcher.py (bootstrap) -> running the full suite."
+            echo "mode=all" >> "$GITHUB_OUTPUT"
+            mkdir -p ci/.test_selection
+            printf 'tests/unit/v1\n' > ci/.test_selection/test_list.txt
+          fi
 
       - name: Upload test selection
         uses: actions/upload-artifact@v4
         with:
           name: modal-torch-latest-test-selection
           path: ci/.test_selection/test_list.txt
+          # The path lives under a dot-folder; upload-artifact treats dot-prefixed
+          # paths as hidden and skips them by default (only warns), which would make
+          # deploy's download fail. Opt in explicitly.
+          include-hidden-files: true
           retention-days: 3
 
   deploy:
