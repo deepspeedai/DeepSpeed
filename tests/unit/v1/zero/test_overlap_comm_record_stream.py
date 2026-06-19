@@ -95,3 +95,75 @@ def test_allreduce_and_copy_with_multiple_ranks_records_only_local_buffers(monke
     assert bucket[0].recorded_streams == [optimizer.reduction_stream]
     assert bucket[1].copied_from is None
     assert bucket[1].recorded_streams == []
+
+
+class _FakeWaitStream:
+    """A stream stand-in that records which streams it was told to wait on."""
+
+    def __init__(self):
+        self.waited_on = []
+
+    def wait_stream(self, other):
+        self.waited_on.append(other)
+
+
+class _FakeAcceleratorWithCurrentStream(_FakeAccelerator):
+
+    def __init__(self, resolves_data_dependency, current_stream):
+        super().__init__(resolves_data_dependency)
+        self._current_stream = current_stream
+
+    def current_stream(self):
+        return self._current_stream
+
+
+def _build_average_tensor_optimizer(monkeypatch, *, copy_streams):
+    optimizer = DeepSpeedZeroOptimizer.__new__(DeepSpeedZeroOptimizer)
+    optimizer.overlap_comm = True
+    optimizer.reduce_scatter = False  # take the early-return reduce path, isolating the wait logic
+    optimizer.reduction_stream = _FakeWaitStream()
+    comm_dtype = torch.float16
+    bucket = zero_stage12.IPGBucket()
+    bucket.copy_streams = set(copy_streams)
+    optimizer.ipg_buckets = {comm_dtype: bucket}
+    reduced = []
+    optimizer.gradient_reduction_w_predivide = lambda tensor, dt: reduced.append(dt)
+    current = _FakeWaitStream()
+    monkeypatch.setattr(
+        zero_stage12,
+        "get_accelerator",
+        lambda: _FakeAcceleratorWithCurrentStream(False, current),
+    )
+    return optimizer, comm_dtype, current, reduced
+
+
+def test_average_tensor_waits_on_all_ipg_bucket_producer_streams(monkeypatch):
+    # #8061: the reduction stream must wait on every stream that produced a copy into
+    # the contiguous IPG bucket, not just the current stream, because under
+    # torch.compile those copies can be issued on multiple autograd streams.
+    s1, s2 = object(), object()
+    optimizer, comm_dtype, _, reduced = _build_average_tensor_optimizer(monkeypatch, copy_streams=[s1, s2])
+
+    optimizer.average_tensor(torch.zeros(4), comm_dtype)
+
+    assert set(optimizer.reduction_stream.waited_on) == {s1, s2}
+    assert reduced == [comm_dtype]
+
+
+def test_average_tensor_falls_back_to_current_stream_without_producers(monkeypatch):
+    # The extra-large-param path reduces without copying into the bucket, so
+    # copy_streams is empty: preserve the original behavior of waiting on the
+    # current stream.
+    optimizer, comm_dtype, current, _ = _build_average_tensor_optimizer(monkeypatch, copy_streams=[])
+
+    optimizer.average_tensor(torch.zeros(4), comm_dtype)
+
+    assert optimizer.reduction_stream.waited_on == [current]
+
+
+def test_ipg_bucket_clear_resets_copy_streams():
+    bucket = zero_stage12.IPGBucket()
+    assert bucket.copy_streams == set()
+    bucket.copy_streams.add(object())
+    bucket.clear()
+    assert bucket.copy_streams == set()
