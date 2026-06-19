@@ -42,7 +42,9 @@ pytest --forked tests/unit/
 ```
 You can also provide the `-v` flag to `pytest` to see additional information about the
 tests. Note that [pytest-forked](https://github.com/pytest-dev/pytest-forked) and the
-`--forked` flag are required to test CUDA functionality in distributed tests.
+`--forked` flag are required to test CUDA functionality in distributed tests. Using
+`--forked` is safe because `import deepspeed` no longer initializes a CUDA context;
+earlier versions probed CUDA at import time, which poisoned `fork()`.
 
 You can also run:
 ```

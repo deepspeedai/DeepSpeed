@@ -4,6 +4,8 @@
 # DeepSpeed Team
 
 import os
+import sys
+import subprocess
 import importlib.util
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -216,3 +218,60 @@ def test_non_jit_branch_canonical_dedupe_mixed_ptx_combinations():
             args = builder.compute_capability_args()
             assert os.environ["TORCH_CUDA_ARCH_LIST"] == expected_arch_list, arch_input
         assert args == expected_args, arch_input
+
+
+def test_cuda_capability_major_skips_probe_when_context_not_initialized():
+    # Probing device properties forces a lazy CUDA-context init, which creates a
+    # CUDA context. Doing that while checking op compatibility at "import deepspeed"
+    # time poisons fork()-based multiprocessing (issue #7918): a forked child cannot
+    # reuse the parent's context. With no context yet, the probe must be skipped.
+    builder = make_builder()
+    with patch.object(CUDA_API, "is_initialized", return_value=False):
+        with patch.object(
+                CUDA_API, "get_device_properties",
+                side_effect=AssertionError("must not initialize CUDA / poison fork")) as get_device_properties:
+            assert builder.cuda_capability_major() is None
+    get_device_properties.assert_not_called()
+
+
+def test_cuda_capability_major_probes_when_context_already_initialized():
+    # When a CUDA context already exists (e.g. at op load time), probing is safe
+    # and must report the real compute-capability major.
+    builder = make_builder()
+    device_properties = MagicMock(major=8)
+    with patch.object(CUDA_API, "is_initialized", return_value=True):
+        with patch.object(CUDA_API, "_is_in_bad_fork", return_value=False):
+            with patch.object(CUDA_API, "get_device_properties",
+                              return_value=device_properties) as get_device_properties:
+                assert builder.cuda_capability_major() == 8
+    get_device_properties.assert_called_once_with(0)
+
+
+def test_cuda_capability_major_skips_probe_in_bad_fork():
+    # Inside a forked child that inherited an initialized-but-invalid context,
+    # probing would raise "Cannot re-initialize CUDA in forked subprocess", so it
+    # must be skipped there as well.
+    builder = make_builder()
+    with patch.object(CUDA_API, "is_initialized", return_value=True):
+        with patch.object(CUDA_API, "_is_in_bad_fork", return_value=True):
+            with patch.object(CUDA_API,
+                              "get_device_properties",
+                              side_effect=AssertionError("must not probe in a forked child")) as get_device_properties:
+                assert builder.cuda_capability_major() is None
+    get_device_properties.assert_not_called()
+
+
+def test_import_deepspeed_does_not_initialize_cuda():
+    # The core fork-safety guarantee of issue #7918: importing deepspeed must not
+    # create a CUDA context, otherwise any later fork() that touches CUDA fails
+    # with "Cannot re-initialize CUDA in forked subprocess". Run in a clean
+    # subprocess so the check is not contaminated by other tests that may have
+    # already initialized CUDA in this process.
+    check = (
+        "import torch, deepspeed; "
+        "assert not torch.cuda.is_initialized(), "  #ignore-cuda
+        "'import deepspeed initialized a CUDA context (issue #7918)'")
+    result = subprocess.run([sys.executable, "-c", check], capture_output=True, text=True)
+    if "ModuleNotFoundError" in result.stderr:
+        pytest.skip("deepspeed/torch not importable in a subprocess in this environment")
+    assert result.returncode == 0, result.stderr
