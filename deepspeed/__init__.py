@@ -11,7 +11,6 @@ from typing import Any, Callable, Dict, Optional, Tuple, Union
 import torch
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import _LRScheduler
-from torch.utils.data import DataLoader
 from packaging import version as pkg_version
 
 # Skip Triton import for AMD due to pytorch-triton-rocm module breaking device API in DeepSpeed
@@ -31,6 +30,8 @@ from .accelerator import get_accelerator
 from .constants import TORCH_DISTRIBUTED_DEFAULT_PORT
 from .runtime.engine import DeepSpeedEngine, DeepSpeedOptimizerCallable, DeepSpeedSchedulerCallable
 from .runtime.engine import ADAM_OPTIMIZER, LAMB_OPTIMIZER, MUON_OPTIMIZER
+from .runtime.base_optimizer import DeepSpeedOptimizer
+from .runtime.dataloader import DeepSpeedDataLoader
 from .runtime.hybrid_engine import DeepSpeedHybridEngine
 from .runtime.pipe.engine import PipelineEngine
 from .inference.engine import InferenceEngine
@@ -93,7 +94,7 @@ def initialize(
     config: Optional[Union[str, Dict[str, Any]]] = None,
     mesh_param: Any = None,
     config_params: Optional[Union[str, Dict[str, Any]]] = None
-) -> Tuple[DeepSpeedEngine, Optional[Optimizer], Optional[DataLoader], Optional[_LRScheduler]]:
+) -> Tuple[DeepSpeedEngine, Optional[Union[Optimizer, DeepSpeedOptimizer]], Optional[DeepSpeedDataLoader], Any]:
     """Initialize the DeepSpeed Engine.
 
     Arguments:
