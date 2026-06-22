@@ -14,11 +14,3 @@ def _check_autosp_compatibility():
     if torch_version < Version("2.9"):
         raise RuntimeError("AutoSP requires PyTorch >= 2.9, found "
                            f"{torch.__version__}.")
-
-    try:
-        import transformers
-        if Version(transformers.__version__) > Version("4.50.3"):
-            raise RuntimeError("AutoSP requires transformers <= 4.50.3, found "
-                               f"{transformers.__version__}.")
-    except ImportError:
-        pass  # transformers not installed; skip the check

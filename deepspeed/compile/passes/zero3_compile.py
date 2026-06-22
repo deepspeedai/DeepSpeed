@@ -11,7 +11,8 @@ import torch
 from torch.fx import Graph, Node, GraphModule
 
 from ..util import get_input_nodes, get_param_nodes, get_index_by_graph_id, get_deepcompile_handle, get_real_uses, is_cast_op
-from ..fx import add_postprocess, _make_node_meta, get_output_node, move_primals_to_head, add_end_backward, replace_reduce_outputs_with_none
+from ..fx import (add_postprocess, _make_node_meta, get_output_node, move_primals_to_head, add_end_backward,
+                  replace_reduce_outputs_with_none, should_release_reduce_buckets)
 from ..profilers.graph_profile import ProfilingInterpreter
 from ..list_schedule import fast_free_schedule
 
@@ -209,7 +210,7 @@ def add_z3_gather_release_bw(gm: GraphModule,
         0,  # unused
         debug_log=debug_log)
 
-    add_end_backward(gm.graph, graph_id)
+    add_end_backward(gm.graph, graph_id, should_release_reduce_buckets(graph_order, graph_id))
     replace_reduce_outputs_with_none(gm.graph)
 
     return gm
