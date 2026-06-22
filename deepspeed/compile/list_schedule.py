@@ -272,6 +272,14 @@ class AllgatherTask:
     schedule_until_free: List[Node]
 
 
+def _free_path_allgather_key(task: AllgatherTask):
+    return (task.n_scheduled_ags, task.allgather_acc_mem, task.free_cost, task.node.name)
+
+
+def _fallback_allgather_key(task: AllgatherTask):
+    return (task.free_acc_mem, task.n_scheduled_ags, task.allgather_acc_mem, task.free_cost, task.node.name)
+
+
 def fast_free_schedule(graph: Graph, available_mem: int, output_size: int, debug_log: bool) -> Graph:
     node_to_last_use, user_to_last_uses = get_last_uses(graph)
 
@@ -367,12 +375,13 @@ def fast_free_schedule(graph: Graph, available_mem: int, output_size: int, debug
         # If there is no such node, we choose the one with the smallest free_cost to minimize the period of occupying memory for the gathered param.
         ags_with_no_additional_ag = [ag for ag in runnable_ags if ag.free_acc_mem == 0]
         if len(ags_with_no_additional_ag) > 0:
-            sorted_ags = sorted(runnable_ags, key=lambda x: x.free_cost)
+            sorted_ags = sorted(ags_with_no_additional_ag, key=_free_path_allgather_key)
             next_ag = sorted_ags[0]
+            assert not debug_log or next_ag.free_acc_mem == 0
             nodes_to_schedule = next_ag.schedule_until_free
         else:
             # sorted_ags = sorted(runnable_ags, key=lambda x: x.allgathered_mem)
-            sorted_ags = sorted(runnable_ags, key=lambda x: x.free_acc_mem)
+            sorted_ags = sorted(runnable_ags, key=_fallback_allgather_key)
             next_ag = sorted_ags[0]
             nodes_to_schedule = next_ag.schedule_until_ag
 
