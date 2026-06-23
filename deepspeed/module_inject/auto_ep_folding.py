@@ -22,6 +22,15 @@ AUTOEP_FOLDING_SP_SHARDED_LAYERNORM_PARAM = "sp_sharded_layernorm"
 AUTOEP_FOLDING_GRAD_REDUCE_SKIP = "skip"
 AUTOEP_FOLDING_GRAD_REDUCE_SUM = "sum"
 AUTOEP_FOLDING_GRAD_REDUCE_AVERAGE = "average"
+# Divide by tp_size with NO TP all_reduce. Used for routed-expert parameters: the
+# folded forward all-gathers expert outputs into a replicated full view in
+# ``restore_combined``, whose backward injects a ``tp_size`` factor (same factor the
+# replicated router cancels via AVERAGE). Routed experts are not TP-replicated, so
+# they must not be TP all_reduced; they only need that spurious ``tp_size`` factor
+# divided out. The remaining data-parallel reduction is owned by the expert-data
+# -parallel (EDP) path, and ``/tp_size`` is linear so it composes with that EDP
+# all_reduce in either order.
+AUTOEP_FOLDING_GRAD_REDUCE_EXPERT_TP_CANCEL = "expert_tp_cancel"
 
 
 @dataclass(frozen=True)
@@ -209,21 +218,19 @@ def validate_folding_global(
                          "expert-internal tensor parallelism and is not supported yet. Use 1; ETP support "
                          "is planned as follow-up work.")
 
-    expert_width = spec.ep_size * spec.etp_size
-    if spec.tp_size > 1 and expert_width > spec.dp_size:
-        raise ValueError("AutoEP+AutoTP folding does not yet support cross-lane expert-parallel groups where "
-                         "expert_parallel.autoep_size * expert_parallel.expert_tensor_parallel_size exceeds "
-                         f"the derived dense data-parallel size (ep * etp = {expert_width}, dp = {spec.dp_size}, "
-                         f"stage_size = {spec.stage_size}). This is a temporary limitation; use a shape with "
-                         "ep * etp <= dp or run a follow-up implementation for cross-lane EP groups.")
-
-    if spec.tp_size > 1 and spec.dp_size % expert_width != 0:
-        raise ValueError("AutoEP+AutoTP folding requires the derived dense data-parallel size to be divisible by "
-                         "expert_parallel.autoep_size * expert_parallel.expert_tensor_parallel_size so expert "
-                         "groups stay within dense data-parallel lanes "
-                         f"(dp = {spec.dp_size}, ep * etp = {expert_width}, stage_size = {spec.stage_size}). "
-                         "Use a shape where dp % (ep * etp) == 0 or run a follow-up implementation for "
-                         "cross-lane EP groups.")
+    # Cross-lane expert parallelism (expert_width = ep * etp need NOT be a subset of
+    # the dense data-parallel size) is supported: ``expected_folding_group_tables``
+    # lays EP groups across the tp-lane-major rank ordering, so an EP group may span
+    # TP lanes and dense-DP ranks. The only structural requirement is that the
+    # expert width tiles the stage cleanly, which ``build_folding_spec`` already
+    # enforces (``stage_size % expert_width == 0``, so ``edp`` is integral). The
+    # gradient convention holds across the pool because each family's reduction is
+    # keyed to its replication structure, not the EP layout: router/gate and dense
+    # /LayerNorm AVERAGE over the TP (token-replication) group; routed experts cancel
+    # the restore ``tp_size`` factor (EXPERT_TP_CANCEL) and reduce data-parallel over
+    # the EDP group. The earlier ``expert_width <= dp`` / ``dp % expert_width == 0``
+    # fail-fast limitation is therefore removed; only genuinely non-tiling shapes are
+    # rejected above (in ``build_folding_spec``).
 
     if tp_preset is not None and ep_preset is not None and tp_preset != ep_preset:
         raise ValueError("tensor_parallel.preset_model and expert_parallel.preset_model must match when both "
@@ -357,8 +364,18 @@ def autoep_folding_gradient_reduction_strategy(
       LayerNorm parameters that way; the marker and strategy boundary exist so
       future SP support has an explicit contract instead of reusing the dense
       replicated default by accident.
-    - Expert parameters and model-parallel parameters are SKIP because their
-      EP/TP-specific paths own their reductions.
+    - Model-parallel (genuinely TP-sharded) parameters are SKIP because the
+      TP-specific path owns their reduction.
+    - Routed-expert parameters are EXPERT_TP_CANCEL: their data-parallel
+      reduction is owned by the EP/EDP path, but the folded forward all-gathers
+      their outputs into a replicated full view in ``restore_combined`` (whose
+      backward injects a ``tp_size`` factor), so the expert-weight gradient
+      reaches the optimizer ``tp_size`` times too large. Experts are not
+      TP-replicated, so the fix is a plain ``/tp_size`` (no TP all_reduce), which
+      is linear and composes with the EDP all_reduce in any order. Without this,
+      folded expert gradients are over-scaled by ``tp_size`` -- invisible to
+      scale-invariant Adam but real for SGD/Lion/Muon and for gradient clipping
+      (it inflates the expert contribution to the global grad norm).
 
     Underlying rule and mechanism: a folded parameter is replicated (AVERAGE)
     when the forward reconstructs its partitioned work into an identical full
@@ -380,8 +397,18 @@ def autoep_folding_gradient_reduction_strategy(
     """
     if folding_spec is None or getattr(folding_spec, "tp_size", 1) <= 1:
         return AUTOEP_FOLDING_GRAD_REDUCE_SKIP
-    if _is_moe_param_marker(param) or _is_model_parallel_param_marker(param):
+    if _is_model_parallel_param_marker(param):
+        # Genuinely TP-sharded (column/row-parallel) params: the TP-specific path
+        # owns their reduction. Not produced by the folded skip-partition MVP.
         return AUTOEP_FOLDING_GRAD_REDUCE_SKIP
+    if _is_moe_param_marker(param):
+        # Routed-expert params. Their EP/EDP data-parallel reduction is owned by
+        # the expert path, but the folded forward routes their outputs through the
+        # ``restore_combined`` all-gather, whose backward leaves a ``tp_size``
+        # factor on the expert-weight gradient (the same factor the replicated
+        # router cancels with AVERAGE). Experts are NOT TP-replicated, so they must
+        # not be TP all_reduced; the factor is cancelled with a plain ``/tp_size``.
+        return AUTOEP_FOLDING_GRAD_REDUCE_EXPERT_TP_CANCEL
 
     family = _autoep_folding_param_family(param, param_name=param_name)
     mp_mode = getattr(folding_spec, "mp_mode", "tp")
@@ -411,6 +438,16 @@ def reduce_autoep_folding_gradient(
 
     grad_data = grad.data
     tp_world_size = dist.get_world_size(group=tp_group)
+
+    # Routed experts: cancel the ``tp_size`` factor the restore all-gather leaves,
+    # WITHOUT a TP all_reduce (experts are not TP-replicated; cross-TP summation of
+    # disjoint expert-token slices is owned by the EDP all_reduce). ``/tp_size`` is
+    # linear, so it composes with that EDP reduction in either order.
+    if strategy == AUTOEP_FOLDING_GRAD_REDUCE_EXPERT_TP_CANCEL:
+        if tp_world_size > 1:
+            grad_data.div_(tp_world_size)
+        return strategy
+
     if grad_data.dtype != torch.float32:
         reduced = grad_data.float()
         dist.all_reduce(reduced, group=tp_group)

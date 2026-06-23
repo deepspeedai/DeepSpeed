@@ -131,9 +131,43 @@ def test_validation_rule_g11_zero_offload_rejected(offload_key):
     _assert_rejects("offload", **{offload_key: True})
 
 
-def test_validation_rule_g12_cross_lane_ep_groups_temporarily_rejected():
-    _assert_rejects("temporary limitation", world_size=8, tp_size=4, ep_size=4)
+@pytest.mark.parametrize(
+    "world_size,tp_size,ep_size,expected_dp,expected_edp",
+    [
+        (4, 4, 4, 1, 1),  # EP group == TP group == {0,1,2,3}
+        (4, 2, 4, 2, 1),  # ep>dp AND dp % ep != 0; EP spans both TP lanes and both DP ranks
+        (8, 4, 4, 2, 2),  # cross-lane with expert replication (edp>1)
+    ],
+)
+def test_cross_lane_ep_groups_accepted(world_size, tp_size, ep_size, expected_dp, expected_edp):
+    # Cross-lane EP (expert_width = ep*etp may exceed dp, and need not divide dp) is now
+    # supported: EP groups may span TP lanes. The earlier "temporary limitation" and
+    # "dp % (ep*etp) == 0" fail-fasts are removed; only non-tiling shapes are rejected.
+    config = AutoEPConfig(enabled=True, autoep_size=ep_size, expert_tensor_parallel_size=1)
+    validate_autoep_config(config, world_size=world_size, pp_size=1, tp_size=tp_size, sp_size=1)
+    spec = build_folding_spec(world_size=world_size, pp_size=1, tp_size=tp_size, ep_size=ep_size, etp_size=1)
+    assert spec.dp_size == expected_dp
+    assert spec.edp_size == expected_edp
 
 
-def test_validation_rule_g13_expert_width_must_tile_dense_dp_lane():
-    _assert_rejects("dp % \\(ep \\* etp\\) == 0", world_size=12, tp_size=3, ep_size=3)
+def test_cross_lane_expected_folding_tables():
+    # world=4 tp4 ep4 dp1: the EP group is the whole TP group; one expert per rank (edp=1).
+    spec_tp4 = build_folding_spec(world_size=4, pp_size=1, tp_size=4, ep_size=4, etp_size=1)
+    tables_tp4 = expected_folding_group_tables(spec_tp4)
+    assert tables_tp4.tp_groups == ((0, 1, 2, 3), )
+    assert tables_tp4.ep_groups == ((0, 1, 2, 3), )
+    assert tables_tp4.edp_groups == ((0, ), (1, ), (2, ), (3, ))
+
+    # world=4 tp2 ep4: EP group spans both TP lanes (lane-major ordering 0,2,1,3).
+    spec_tp2 = build_folding_spec(world_size=4, pp_size=1, tp_size=2, ep_size=4, etp_size=1)
+    tables_tp2 = expected_folding_group_tables(spec_tp2)
+    assert tables_tp2.tp_groups == ((0, 1), (2, 3))
+    assert tables_tp2.ep_groups == ((0, 2, 1, 3), )
+    assert tables_tp2.edp_groups == ((0, ), (2, ), (1, ), (3, ))
+
+    # world=8 tp4 ep4 (edp=2): two EP groups, each spanning TP lanes and DP ranks.
+    spec_w8 = build_folding_spec(world_size=8, pp_size=1, tp_size=4, ep_size=4, etp_size=1)
+    tables_w8 = expected_folding_group_tables(spec_w8)
+    assert tables_w8.tp_groups == ((0, 1, 2, 3), (4, 5, 6, 7))
+    assert tables_w8.ep_groups == ((0, 4, 1, 5), (2, 6, 3, 7))
+    assert tables_w8.edp_groups == ((0, 2), (4, 6), (1, 3), (5, 7))

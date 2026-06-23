@@ -17,6 +17,7 @@ from deepspeed.checkpoint.autoep_universal import validate_folding_metadata
 from deepspeed.checkpoint.constants import FOLDING_FAMILY, FOLDING_METADATA_KEY, FOLDING_PARAM_FAMILIES
 from deepspeed.module_inject.auto_ep_folding import (
     AUTOEP_FOLDING_GRAD_REDUCE_AVERAGE,
+    AUTOEP_FOLDING_GRAD_REDUCE_EXPERT_TP_CANCEL,
     AUTOEP_FOLDING_GRAD_REDUCE_SKIP,
     AUTOEP_FOLDING_GRAD_REDUCE_SUM,
     autoep_folding_gradient_reduction_strategy,
@@ -113,9 +114,15 @@ def test_autoep_folding_gradient_strategy_uses_parameter_family():
     assert (autoep_folding_gradient_reduction_strategy(_folding_spec("tp"),
                                                        sp_layernorm) == AUTOEP_FOLDING_GRAD_REDUCE_AVERAGE)
 
+    # Routed experts cancel the restore all-gather tp_size factor (divide-by-tp, no
+    # TP all_reduce); their data-parallel reduction stays on the EP/EDP path.
     expert = torch.nn.Parameter(torch.ones(2))
     expert.allreduce = False
-    assert autoep_folding_gradient_reduction_strategy(_folding_spec("tp"), expert) == AUTOEP_FOLDING_GRAD_REDUCE_SKIP
+    assert (autoep_folding_gradient_reduction_strategy(_folding_spec("tp"),
+                                                       expert) == AUTOEP_FOLDING_GRAD_REDUCE_EXPERT_TP_CANCEL)
+    # With folding disabled (tp_size == 1) experts still SKIP.
+    assert (autoep_folding_gradient_reduction_strategy(_folding_spec("tp", tp_size=1),
+                                                       expert) == AUTOEP_FOLDING_GRAD_REDUCE_SKIP)
 
     model_parallel = torch.nn.Parameter(torch.ones(2))
     model_parallel.tensor_model_parallel = True
@@ -417,6 +424,258 @@ def test_cpu_gloo_folded_zero0_router_gate_and_layernorm_grad_parity(tmpdir):
 
 def test_cpu_gloo_folded_zero2_router_gate_and_layernorm_grad_parity(tmpdir):
     run_cpu_gloo_test(_cpu_folded_zero2_router_gate_and_layernorm_worker, tmpdir, world_size=8)
+
+
+# ---------------------------------------------------------------------------
+# Cross-lane EP (expert parallel spanning TP lanes; expert_width = ep need NOT be a
+# subset of dp). These reuse the tp2/ep4 workers at world_size=4 (where ep=4 > dp=2)
+# and add a tp4/ep4/dp1 worker (EP group == TP group). The router/gate and LayerNorm
+# AVERAGE-over-TP convention is unchanged because the dedup/restore key on the
+# token-replication (TP) group, independent of the EP layout.
+# ---------------------------------------------------------------------------
+
+
+def _folded_zero0_tp4_ep4_config():
+    config = make_autoep_config(zero_stage=0, ep_size=4, mixed_precision=False)
+    config["gradient_accumulation_steps"] = 2
+    config["gradient_clipping"] = 0.0
+    config["communication_data_type"] = "fp32"
+    config["optimizer"]["params"]["torch_adam"] = True
+    config["expert_parallel"]["autoep_size"] = 4
+    config["tensor_parallel"] = {
+        "autotp_size": 4,
+        "partition_config": {
+            "use_default_specs": False,
+            "layer_specs": [{
+                "patterns": [".*\\.weight$"],
+                "partition_type": "skip",
+            }],
+        },
+    }
+    return config
+
+
+def _cpu_folded_tp4_ep4_router_gate_and_layernorm_worker(rank, world_size, _shared_tmpdir):
+    seed = 1234
+    tp_size = 4
+    logical_dp_world_size = world_size // tp_size
+    logical_dp_rank = rank // tp_size
+
+    seed_everything(seed)
+    reference_state = _router_grad_model().state_dict()
+
+    baseline_model = _router_grad_model()
+    baseline_model.load_state_dict(reference_state)
+    baseline_engine, _, _, _ = deepspeed.initialize(model=baseline_model, config=_zero0_baseline_config())
+    _run_router_grad_boundary(baseline_engine,
+                              logical_dp_world_size=logical_dp_world_size,
+                              logical_dp_rank=logical_dp_rank,
+                              seed=seed)
+    baseline_gate = _full_grad_by_suffix(baseline_engine, GATE_BASELINE)
+    baseline_layernorm = _full_grad_by_suffix(baseline_engine, INPUT_LAYERNORM)
+
+    folded_model = _router_grad_model()
+    folded_model.load_state_dict(reference_state)
+    folded_engine, _, _, _ = deepspeed.initialize(model=folded_model, config=_folded_zero0_tp4_ep4_config())
+    _run_router_grad_boundary(folded_engine,
+                              logical_dp_world_size=logical_dp_world_size,
+                              logical_dp_rank=logical_dp_rank,
+                              seed=seed)
+    folded_gate = _full_grad_by_suffix(folded_engine, GATE_FOLDED)
+    folded_layernorm = _full_grad_by_suffix(folded_engine, INPUT_LAYERNORM)
+
+    metrics = {
+        "rank": rank,
+        "gate": _grad_parity_metrics(folded_gate, baseline_gate),
+        "layernorm": _grad_parity_metrics(folded_layernorm, baseline_layernorm)
+    }
+    if rank == 0:
+        print("FOLDED_CROSSLANE_TP4_EP4_GRAD_PARITY " + json.dumps(metrics, sort_keys=True))
+    torch.testing.assert_close(folded_gate,
+                               baseline_gate,
+                               atol=1e-1,
+                               rtol=5e-3,
+                               msg=f"Cross-lane tp4/ep4 router/gate grad must match baseline; metrics={metrics}")
+    torch.testing.assert_close(folded_layernorm,
+                               baseline_layernorm,
+                               atol=1e-1,
+                               rtol=5e-3,
+                               msg=f"Cross-lane tp4/ep4 LayerNorm grad must match baseline; metrics={metrics}")
+
+
+def test_cpu_gloo_crosslane_tp2_ep4_zero0_router_gate_and_layernorm_grad_parity(tmpdir):
+    # world=4: tp2/ep4 => ep=4 > dp=2 (cross-lane; EP group spans both TP lanes and DP ranks).
+    run_cpu_gloo_test(_cpu_folded_zero0_router_gate_and_layernorm_worker, tmpdir, world_size=4)
+
+
+def test_cpu_gloo_crosslane_tp2_ep4_zero2_router_gate_and_layernorm_grad_parity(tmpdir):
+    run_cpu_gloo_test(_cpu_folded_zero2_router_gate_and_layernorm_worker, tmpdir, world_size=4)
+
+
+def test_cpu_gloo_crosslane_tp4_ep4_dp1_zero0_router_gate_and_layernorm_grad_parity(tmpdir):
+    # world=4: tp4/ep4/dp1 => EP group == TP group == {0,1,2,3}.
+    run_cpu_gloo_test(_cpu_folded_tp4_ep4_router_gate_and_layernorm_worker, tmpdir, world_size=4)
+
+
+# ---------------------------------------------------------------------------
+# Expert-weight gradient parity. The folded forward all-gathers expert outputs into
+# a replicated full view in ``restore_combined`` (backward injects a ``tp_size``
+# factor); routed experts must cancel it (EXPERT_TP_CANCEL ``/tp_size``) or their
+# gradients reach the optimizer ``tp_size`` times too large. This is invisible to
+# scale-invariant Adam, so this test uses SGD and compares the post-step expert
+# weights against a non-folded baseline. It covers the MVP shape and cross-lane
+# shapes including edp>1.
+# ---------------------------------------------------------------------------
+
+EXPERTS_W1 = "experts.w1"  # folded GroupedExperts gate half (num_local, ffn, hidden)
+EXPERTS_W3 = "experts.w3"  # folded GroupedExperts up half  (num_local, ffn, hidden)
+EXPERTS_W2 = "experts.w2"  # folded GroupedExperts down     (num_local, hidden, ffn)
+GATE_UP_PROJ = "mlp.experts.gate_up_proj"  # baseline fused gate||up (num_experts, 2*ffn, hidden)
+DOWN_PROJ = "mlp.experts.down_proj"  # baseline down (num_experts, hidden, ffn)
+
+
+def _sgd_baseline_config(zero_stage=0):
+    config = {
+        key: value
+        for key, value in make_autoep_config(zero_stage=zero_stage, ep_size=1, mixed_precision=False).items()
+        if key != "expert_parallel"
+    }
+    config["gradient_accumulation_steps"] = 1
+    config["gradient_clipping"] = 0.0
+    config["communication_data_type"] = "fp32"
+    config["optimizer"] = {"type": "SGD", "params": {"lr": 1.0}}
+    config["zero_allow_untested_optimizer"] = True  # SGD under ZeRO is "untested"; this is a grad-parity probe
+    return config
+
+
+def _folded_sgd_config(tp_size, ep_size, zero_stage=0):
+    config = make_autoep_config(zero_stage=zero_stage, ep_size=ep_size, mixed_precision=False)
+    config["gradient_accumulation_steps"] = 1
+    config["gradient_clipping"] = 0.0
+    config["communication_data_type"] = "fp32"
+    config["optimizer"] = {"type": "SGD", "params": {"lr": 1.0}}
+    config["zero_allow_untested_optimizer"] = True  # SGD under ZeRO is "untested"; this is a grad-parity probe
+    config["expert_parallel"]["autoep_size"] = ep_size
+    config["tensor_parallel"] = {
+        "autotp_size": tp_size,
+        "partition_config": {
+            "use_default_specs": False,
+            "layer_specs": [{
+                "patterns": [".*\\.weight$"],
+                "partition_type": "skip",
+            }],
+        },
+    }
+    return config
+
+
+def _one_sgd_step(engine, *, tp_size, seed):
+    rank = dist.get_rank()
+    generator = torch.Generator().manual_seed(seed + (rank // tp_size))
+    x = torch.randn((1, 4, 64), generator=generator, dtype=engine_input_dtype(engine)).to(engine.device)
+    loss = engine(x).float().mean()
+    engine.backward(loss)
+    engine.step()
+    return loss
+
+
+def _local_param_by_suffix(module, suffix):
+    for name, param in module.named_parameters():
+        if name.endswith(suffix):
+            return param.detach().float().cpu()
+    raise AssertionError(f"Missing parameter ending with {suffix}")
+
+
+def _gather_full_experts(layer, suffix):
+    """All-gather a local routed-expert tensor over the EP group into the full
+    (num_experts, ...) tensor, ordered by ep_rank (expert_start = ep_rank * num_local)."""
+    local = None
+    for name, param in layer.named_parameters():
+        if name.endswith(suffix):
+            local = param.detach().contiguous()
+            break
+    assert local is not None, f"Missing parameter ending with {suffix}"
+    ep_group = layer.ep_group
+    ep_world = dist.get_world_size(group=ep_group)
+    gathered = [torch.empty_like(local) for _ in range(ep_world)]
+    dist.all_gather(gathered, local, group=ep_group)
+    return torch.cat([chunk.float().cpu() for chunk in gathered], dim=0)
+
+
+def _expert_weight_parity_worker(rank, world_size, tp_size, ep_size, zero_stage=0):
+    seed = 1234
+    seed_everything(seed)
+    reference_state = _router_grad_model().state_dict()
+
+    baseline_model = _router_grad_model()
+    baseline_model.load_state_dict(reference_state)
+    baseline_engine, _, _, _ = deepspeed.initialize(model=baseline_model, config=_sgd_baseline_config(zero_stage))
+    _one_sgd_step(baseline_engine, tp_size=tp_size, seed=seed)
+    base_gate_up = _local_param_by_suffix(baseline_engine.module, GATE_UP_PROJ)  # (E, 2*ffn, h)
+    base_down = _local_param_by_suffix(baseline_engine.module, DOWN_PROJ)  # (E, h, ffn)
+
+    folded_model = _router_grad_model()
+    folded_model.load_state_dict(reference_state)
+    folded_engine, _, _, _ = deepspeed.initialize(model=folded_model,
+                                                  config=_folded_sgd_config(tp_size, ep_size, zero_stage))
+    _one_sgd_step(folded_engine, tp_size=tp_size, seed=seed)
+    layer = folded_engine.module.model.layers[0].mlp
+    full_w1 = _gather_full_experts(layer, EXPERTS_W1)
+    full_w3 = _gather_full_experts(layer, EXPERTS_W3)
+    full_w2 = _gather_full_experts(layer, EXPERTS_W2)
+    folded_gate_up = torch.cat([full_w1, full_w3], dim=1)  # (E, 2*ffn, h)
+
+    if rank == 0:
+        gu_scale = folded_gate_up.mul(base_gate_up).sum().item() / base_gate_up.square().sum().item()
+        dn_scale = full_w2.mul(base_down).sum().item() / base_down.square().sum().item()
+        print(f"EXPERT_WEIGHT_PARITY tp{tp_size}_ep{ep_size}_w{world_size}_z{zero_stage} "
+              f"gate_up_post_step_scale={gu_scale:.6f} down_post_step_scale={dn_scale:.6f}")
+    # Post-step weight equality proves the *applied* expert update matches the baseline.
+    # A tp_size over-scaling would diverge these by ~lr*(tp-1)*grad (lr=1), far above tol.
+    torch.testing.assert_close(
+        folded_gate_up,
+        base_gate_up,
+        atol=1e-4,
+        rtol=1e-4,
+        msg="Folded routed-expert gate/up weights must match non-folded baseline after one SGD step")
+    torch.testing.assert_close(
+        full_w2,
+        base_down,
+        atol=1e-4,
+        rtol=1e-4,
+        msg="Folded routed-expert down weights must match non-folded baseline after one SGD step")
+
+
+def _expert_weight_parity_mvp_tp2_ep4_z0(rank, world_size, _tmp):
+    _expert_weight_parity_worker(rank, world_size, tp_size=2, ep_size=4, zero_stage=0)
+
+
+def _expert_weight_parity_tp4_ep4_z0(rank, world_size, _tmp):
+    _expert_weight_parity_worker(rank, world_size, tp_size=4, ep_size=4, zero_stage=0)
+
+
+def _expert_weight_parity_tp4_ep4_z2(rank, world_size, _tmp):
+    _expert_weight_parity_worker(rank, world_size, tp_size=4, ep_size=4, zero_stage=2)
+
+
+def test_cpu_gloo_expert_weight_parity_mvp_tp2_ep4(tmpdir):
+    # MVP shape (ep=4 <= dp=4, edp=2). Guards the pre-existing expert over-scaling fix.
+    run_cpu_gloo_test(_expert_weight_parity_mvp_tp2_ep4_z0, tmpdir, world_size=8)
+
+
+def test_cpu_gloo_expert_weight_parity_crosslane_tp4_ep4_dp1(tmpdir):
+    # Cross-lane, edp=1: EP group == TP group == {0,1,2,3}.
+    run_cpu_gloo_test(_expert_weight_parity_tp4_ep4_z0, tmpdir, world_size=4)
+
+
+def test_cpu_gloo_expert_weight_parity_crosslane_tp4_ep4_edp2(tmpdir):
+    # Cross-lane, edp=2: EP groups span TP lanes and DP ranks.
+    run_cpu_gloo_test(_expert_weight_parity_tp4_ep4_z0, tmpdir, world_size=8)
+
+
+def test_cpu_gloo_expert_weight_parity_crosslane_tp4_ep4_dp1_zero2(tmpdir):
+    # Cross-lane expert fix must also apply on the ZeRO-2 reducer path (different hook).
+    run_cpu_gloo_test(_expert_weight_parity_tp4_ep4_z2, tmpdir, world_size=4)
 
 
 def _assert_zero_optimizer_folding_metadata(checkpoint_dir):
