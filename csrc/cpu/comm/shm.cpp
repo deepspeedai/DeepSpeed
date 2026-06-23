@@ -393,9 +393,8 @@ void shm_initialize(int size, int rank, char* addr_string, char* port_string)
     }
 }
 
-void parallel_memcpy(void* to, void* from, size_t n_bytes, size_t max_bytes)
+void parallel_memcpy(void* to, void* from, size_t n_bytes)
 {
-    if (n_bytes > max_bytes) return;
 #if TARGET_RISCV
     size_t vl = __riscv_vsetvl_e8m1(n_bytes);
     vector_length_in_bytes = vl;
@@ -510,7 +509,7 @@ void symmetric_naive_all_reduce(char* data_ptr,
     }
     state_idx = (state_idx + 1) % 3;
 
-    parallel_memcpy(symmetric_buffer[current_buffer][world_rank], data_ptr, chunk_size, NAIVE_ALLREDUCE_THRESHOLD);
+    parallel_memcpy(symmetric_buffer[current_buffer][world_rank], data_ptr, chunk_size);
     std::atomic_thread_fence(std::memory_order_release);
     workspace[world_rank]->states[state_group] = copy_current;
 
@@ -591,7 +590,7 @@ void distributed_naive_reduce(char* data_ptr,
     state_idx = (state_idx + 1) % 2;
 
     int data_size = chunk_size / chunk_el;
-    parallel_memcpy(distributed_buffer[current_buffer][world_rank], data_ptr, chunk_size, MAX_BUF_SIZE);
+    parallel_memcpy(distributed_buffer[current_buffer][world_rank], data_ptr, chunk_size);
     std::atomic_thread_fence(std::memory_order_release);
     workspace[world_rank]->states[state_group] = copy_current;
 
@@ -636,8 +635,7 @@ void distributed_naive_reduce(char* data_ptr,
             slice_data(data_ptr, chunk_el, data_size, rank),
             slice_data(
                 distributed_buffer[current_buffer][rank], chunk_el, chunk_size / chunk_el, rank),
-            slice_size(chunk_el, rank) * data_size,
-            MAX_BUF_SIZE);
+            slice_size(chunk_el, rank) * data_size);
     }
 
     current_buffer = 1 - current_buffer;
