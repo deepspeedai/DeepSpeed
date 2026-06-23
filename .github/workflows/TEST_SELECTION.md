@@ -254,8 +254,11 @@ from abusing that:
   - `deploy` runs the **base** orchestration (which drives `modal run` with the
     secrets), so a PR can't repoint it at the secrets to exfiltrate them.
   In both jobs the PR's `deepspeed/` + `tests/` are what gets parsed/tested.
-- The workflow is gated on `review_requested` / `ready_for_review` — a maintainer
-  vets the PR before CI with secrets runs.
+- The `pull_request_target` trigger types are `review_requested`,
+  `ready_for_review`, and `synchronize`. Because `synchronize` re-runs on every
+  push to an open PR (not just on a maintainer action), the maintainer review is a
+  mitigation, **not** an absolute barrier — the base-`ci/` restore above is the
+  primary protection for the secrets.
 
 > **Consequence:** changes to `ci/*` (including `tests_fetcher.py` itself) take
 > effect under `pull_request_target` only after they're **merged**. Validate
