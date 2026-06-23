@@ -156,7 +156,16 @@ def partition_assignments(
     tp_rank: int,
     tp_size: int,
 ) -> tuple[RoutedAssignmentPayload, RestoreContext]:
-    """Partition routed assignments across TP peers by stable per-expert ordinal."""
+    """Partition routed assignments across TP peers by stable per-expert ordinal.
+
+    Each peer keeps only ``assignment_index % tp_size == tp_rank`` of the
+    (token, expert) assignments and drops the rest *before* the EP dispatch
+    all-to-all, so the dispatch carries the full token set exactly once (split
+    across peers) instead of ``tp_size`` redundant copies. The dropped work is
+    reconstructed afterwards by ``restore_combined``'s all-gather; that
+    reconstruction is what makes the folded router/gate gradient replicated
+    (AVERAGE) rather than a true SUM partial -- see ``_AllGatherVariableRows``.
+    """
     active = ~payload.drop_mask & ~payload.pad_mask
     if tp_size <= 1:
         keep = active
@@ -194,6 +203,31 @@ def _pad_rows(tensor: torch.Tensor, rows: int) -> torch.Tensor:
 
 
 class _AllGatherVariableRows(torch.autograd.Function):
+    """Differentiable all-gather of row-variable tensors across the TP folding group.
+
+    Forward concatenates every TP peer's local rows into one tensor that is
+    identical on every peer: a replicated full view of the rows that
+    ``partition_assignments`` had split across peers before the EP dispatch.
+
+    Backward is the matching reduce-scatter. Because the forward output is
+    consumed identically on every peer, each peer holds the same ``grad_output``;
+    summing those replicas with ``all_reduce`` and keeping this peer's own
+    row-slice is the correct vector-Jacobian product.
+
+    Gradient-reduction consequence (important -- this is why the folded
+    router/gate uses AVERAGE, not SUM): the ``all_reduce`` in backward scales
+    each peer's slice gradient by ``tp_size``. A parameter whose gradient flows
+    through this restore all-gather -- the folded router/gate scores, see
+    ``restore_combined`` -- therefore reaches the optimizer's TP reducer carrying
+    ``tp_size`` times its own routed-token slice. The TP reducer all_reduce then
+    produces ``tp_size * full_grad``, and the AVERAGE strategy in
+    ``auto_ep_folding.autoep_folding_gradient_reduction_strategy`` divides by
+    ``tp_size`` to recover the true gradient. Reducing with SUM instead leaves
+    the uncancelled ``tp_size`` factor -- exactly the 2.0x router/gate gradient
+    regression the CPU/Gloo parity tests guard against. The partition is
+    reconstructed into a replicated full view here, so it is not a genuine SUM
+    partial; a future true-SP path that kept the shard to the loss would be.
+    """
 
     @staticmethod
     def forward(ctx, tensor, group, counts, max_rows):
@@ -218,6 +252,9 @@ class _AllGatherVariableRows(torch.autograd.Function):
             grad_padded = grad_output.new_zeros((ctx.max_rows, *grad_output.shape[1:]))
             if count:
                 grad_padded[:count].copy_(chunk)
+            # grad_output is replicated across TP peers (the gathered full view
+            # is consumed identically), so this all_reduce sums tp_size copies
+            # and injects the tp_size factor documented in the class docstring.
             dist.all_reduce(grad_padded, group=ctx.group)
             reduced_chunks.append(grad_padded)
         grad_padded = reduced_chunks[ctx.group_rank]
@@ -278,7 +315,17 @@ def _debug_validate_restore_coverage(payload: RoutedAssignmentPayload, ctx: Rest
 
 
 def restore_combined(local_combined: torch.Tensor, ctx: RestoreContext, *, tp_group) -> torch.Tensor:
-    """Gather TP-partitioned assignment outputs and combine back by token index."""
+    """Gather TP-partitioned assignment outputs and combine back by token index.
+
+    The all-gather rebuilds an identical full output on every TP peer, so all
+    downstream compute (and the router/gate score gradient) is replicated across
+    the folding group. Its differentiable backward injects a ``tp_size`` factor
+    (see ``_AllGatherVariableRows``) that the optimizer's TP gradient reducer
+    cancels with the AVERAGE strategy. A future true-SP path that kept
+    activations sequence-sharded instead of gathering them here would make those
+    parameters genuine SUM partials -- the reason the SUM family markers exist
+    in ``deepspeed.module_inject.auto_ep_folding``.
+    """
     payload = ctx.original_payload
     local_token_indices = payload.token_indices.index_select(0, ctx.local_indices)
     local_expert_indices = payload.expert_indices.index_select(0, ctx.local_indices)

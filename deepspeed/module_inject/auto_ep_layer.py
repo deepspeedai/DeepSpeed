@@ -489,7 +489,11 @@ class AutoEPMoELayer(nn.Module):
             param.allreduce = False
             param.group_name = self.ep_group_name
 
-        # Mark shared expert and router params for global DP reduction
+        # Mark shared expert and router params for global DP reduction.
+        # The router runs redundantly on every TP peer and its gradient is
+        # rebuilt into a replicated full view by the restore all-gather, so it
+        # is tagged as the replicated family (AVERAGE TP reduction); a SUM would
+        # double it under tp_size=2. See mark_autoep_folding_router_parameter.
         for param in self.router.parameters():
             param.allreduce = True
             mark_autoep_folding_router_parameter(param)

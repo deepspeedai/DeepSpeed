@@ -256,14 +256,51 @@ def validate_folding_global(
 
 
 def mark_autoep_folding_router_parameter(param) -> None:
+    """Tag a router/gate parameter as the *replicated* folded family (AVERAGE).
+
+    This is the ONLY family marker applied on the live forward path today:
+    ``AutoEPMoELayer.__init__`` marks every ``router.*`` parameter with it. The
+    folded router runs redundantly on every TP peer (same tokens, same routing)
+    and its gradient is reconstructed into a replicated full view by the restore
+    all-gather (see ``deepspeed.moe.ep_tp_dispatch._AllGatherVariableRows`` and
+    ``restore_combined``). That all-gather backward scales each peer's slice by
+    ``tp_size``, so the extra TP reduction must AVERAGE (all_reduce then divide
+    by ``tp_size``); SUM would leave the ``tp_size`` factor, i.e. the 2.0x
+    parity regression the CPU/Gloo tests guard.
+    """
     setattr(param, AUTOEP_FOLDING_PARAM_FAMILY_ATTR, AUTOEP_FOLDING_ROUTER_GATE_REPLICATED_PARAM)
 
 
 def mark_autoep_folding_partial_router_parameter(param) -> None:
+    """Tag a router/gate parameter as a *routed-token partial* family (SUM).
+
+    Forward-looking contract; NOT used on the current forward path -- only the
+    unit tests in ``tests/unit/v1/moe/test_autoep_autotp_grad_parity.py`` set
+    it. Use it only for a future design where the router's per-token work is
+    genuinely partitioned across peers and the slices are NOT all-gathered back
+    into a replicated full view, so each peer holds a real partial gradient that
+    must be SUMed. Such a router is a SUM partial in any token-partitioned mode
+    (``mp_mode in {"tp", "sp"}``) because its partition can ride the existing
+    expert-dispatch all-to-all without changing the dense activation layout.
+    Prove the SUM with a parity test (like the existing router/gate cases)
+    before enabling it on a real forward path.
+    """
     setattr(param, AUTOEP_FOLDING_PARAM_FAMILY_ATTR, AUTOEP_FOLDING_ROUTER_GATE_PARTIAL_PARAM)
 
 
 def mark_autoep_folding_sp_sharded_layernorm_parameter(param) -> None:
+    """Tag a LayerNorm parameter as *SP-sequence-sharded* family (SUM under SP).
+
+    Forward-looking contract; NOT used on the current forward path -- only the
+    unit tests set it. Unlike the router, a LayerNorm has no adjacent dispatch
+    all-to-all to ride on, so the only way to token-partition it is to shard the
+    sequence dimension of the dense activations, which is Sequence Parallel by
+    definition. It therefore becomes a SUM partial only when ``mp_mode == "sp"``
+    and otherwise falls back to the replicated AVERAGE. Today ``tp_size > 1``
+    with sequence parallelism is rejected in ``validate_folding_global``; this
+    marker is the explicit contract for when that restriction is lifted, and
+    must be backed by a parity test before use.
+    """
     setattr(param, AUTOEP_FOLDING_PARAM_FAMILY_ATTR, AUTOEP_FOLDING_SP_SHARDED_LAYERNORM_PARAM)
 
 
@@ -276,6 +313,16 @@ def _is_model_parallel_param_marker(param) -> bool:
 
 
 def _autoep_folding_param_family(param, *, param_name: str | None = None) -> str | None:
+    """Resolve a parameter's folded reduction family.
+
+    An explicit ``mark_autoep_folding_*`` tag always wins. The ``.router.`` name
+    match is only a redundant safety net: ``AutoEPMoELayer`` already tags router
+    params, so this fallback merely keeps the conservative *replicated* (AVERAGE)
+    classification if some router param ever reaches the reducer untagged. It
+    never returns a SUM family by name -- SUM families are opt-in via explicit
+    markers only, so any unrecognized replicated/dense/LayerNorm param falls
+    through to the AVERAGE default rather than being silently over-scaled.
+    """
     family = getattr(param, AUTOEP_FOLDING_PARAM_FAMILY_ATTR, None)
     if family is not None:
         return family
@@ -312,6 +359,21 @@ def autoep_folding_gradient_reduction_strategy(
       replicated default by accident.
     - Expert parameters and model-parallel parameters are SKIP because their
       EP/TP-specific paths own their reductions.
+
+    Underlying rule and mechanism: a folded parameter is replicated (AVERAGE)
+    when the forward reconstructs its partitioned work into an identical full
+    view inside the layer, and a genuine partial (SUM) only when the shard is
+    kept all the way to the loss. Today the router/gate is partitioned across
+    TP peers for dispatch but then all-gathered back by ``restore_combined``
+    (see ``deepspeed.moe.ep_tp_dispatch``), whose backward scales each peer's
+    gradient by ``tp_size``; the TP all_reduce then yields ``tp_size *
+    full_grad`` and AVERAGE divides it out. Reducing with SUM would leave that
+    factor -- the 2.0x router/gate parity regression the CPU/Gloo tests guard.
+    The router can be a SUM partial in either ``tp`` or ``sp`` mode because its
+    token partition can ride the existing dispatch all-to-all, whereas a
+    LayerNorm becomes a partial only under true ``sp`` (sequence sharding): it
+    has no adjacent all-to-all, so partitioning it requires changing the dense
+    activation layout, which is Sequence Parallel by definition.
 
     Both the DeepSpeedEngine path and the ZeRO-2 path call this helper so the
     policy cannot silently drift between optimizers.
