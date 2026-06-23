@@ -1,0 +1,415 @@
+# Copyright (c) DeepSpeed Team.
+# SPDX-License-Identifier: Apache-2.0
+
+# DeepSpeed Team
+
+name: DCO
+
+on:
+  pull_request:
+    branches:
+      - master
+  merge_group:
+    branches:
+      - master
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  DCO:
+    name: DCO
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Validate commit signoffs
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import re
+          import sys
+          import urllib.error
+          import urllib.parse
+          import urllib.request
+
+
+          def load_event(path):
+              with open(path, encoding="utf-8") as f:
+                  return json.load(f)
+
+
+          def fail(message):
+              print(f"::error::{message}")
+              sys.exit(1)
+
+
+          def extract_pr_numbers_from_refs(*refs):
+              numbers = []
+              text = "\n".join(value for value in refs if value)
+              for match in re.finditer(r"(?:^|[/-])pr-(\d+)(?=$|[/-])", text):
+                  number = int(match.group(1))
+                  if number not in numbers:
+                      numbers.append(number)
+              return numbers
+
+
+          def extract_pull_request_number_from_refs(*refs):
+              text = "\n".join(value for value in refs if value)
+              match = re.search(r"(?:^|/)pull/(\d+)(?=/|$)", text)
+              if match:
+                  return int(match.group(1))
+              return None
+
+
+          def discover_pr_numbers(event_name, event, github_ref):
+              if event_name == "pull_request":
+                  number = event.get("number")
+                  if number is not None:
+                      try:
+                          return [int(number)]
+                      except (TypeError, ValueError):
+                          fail(f"pull_request event had non-integer number: {number!r}")
+
+                  try:
+                      return [int(event["pull_request"]["number"])]
+                  except (KeyError, TypeError, ValueError):
+                      ref_number = extract_pull_request_number_from_refs(
+                          os.environ.get("GITHUB_REF"),
+                          github_ref,
+                          event.get("ref"),
+                      )
+                      if ref_number is not None:
+                          return [ref_number]
+                      fail("pull_request event did not include a pull request number")
+
+              if event_name == "merge_group":
+                  merge_group = event.get("merge_group", {})
+                  numbers = extract_pr_numbers_from_refs(
+                      merge_group.get("head_ref"),
+                      os.environ.get("GITHUB_REF_NAME"),
+                      github_ref,
+                      event.get("ref"),
+                  )
+                  if numbers:
+                      return numbers
+
+                  fail(
+                      "merge_group event did not include a parseable PR number. "
+                      f"head_ref={merge_group.get('head_ref')!r} "
+                      f"GITHUB_REF_NAME={os.environ.get('GITHUB_REF_NAME')!r} "
+                      f"GITHUB_REF={github_ref!r}"
+                  )
+
+              fail(f"Unsupported event for DCO check: {event_name}")
+
+
+          def graphql_request(query, variables, token):
+              body = json.dumps({"query": query, "variables": variables}).encode("utf-8")
+              req = urllib.request.Request(
+                  "https://api.github.com/graphql",
+                  data=body,
+                  headers={
+                      "Accept": "application/vnd.github+json",
+                      "Authorization": f"Bearer {token}",
+                      "Content-Type": "application/json",
+                      "X-GitHub-Api-Version": "2022-11-28",
+                      "User-Agent": "deepspeed-dco-check",
+                  },
+              )
+              try:
+                  with urllib.request.urlopen(req, timeout=30) as response:
+                      payload = json.loads(response.read().decode("utf-8"))
+              except urllib.error.HTTPError as exc:
+                  detail = exc.read().decode("utf-8", errors="replace")
+                  fail(f"GitHub GraphQL request failed: HTTP {exc.code} {detail}")
+              except urllib.error.URLError as exc:
+                  fail(f"GitHub GraphQL request failed: {exc}")
+
+              if payload.get("errors"):
+                  fail(f"GitHub GraphQL returned errors: {payload['errors']}")
+              return payload["data"]
+
+
+          def rest_request(path, token):
+              url = f"https://api.github.com/repos/{os.environ['GITHUB_REPOSITORY']}{path}"
+              items = []
+              while url:
+                  req = urllib.request.Request(
+                      url,
+                      headers={
+                          "Accept": "application/vnd.github+json",
+                          "Authorization": f"Bearer {token}",
+                          "X-GitHub-Api-Version": "2022-11-28",
+                          "User-Agent": "deepspeed-dco-check",
+                      },
+                  )
+                  try:
+                      with urllib.request.urlopen(req, timeout=30) as response:
+                          data = json.loads(response.read().decode("utf-8"))
+                          link = response.headers.get("Link", "")
+                  except urllib.error.HTTPError as exc:
+                      detail = exc.read().decode("utf-8", errors="replace")
+                      fail(f"GitHub REST request failed for {path}: HTTP {exc.code} {detail}")
+                  except urllib.error.URLError as exc:
+                      fail(f"GitHub REST request failed for {path}: {exc}")
+
+                  if isinstance(data, list):
+                      items.extend(data)
+                  else:
+                      commits = data.get("commits")
+                      if isinstance(commits, list):
+                          items.extend(commits)
+                      else:
+                          return data
+
+                  next_url = None
+                  for part in link.split(","):
+                      if 'rel="next"' in part:
+                          next_url = part[part.find("<") + 1:part.find(">")]
+                          break
+                  url = next_url
+              return items
+
+
+          def fetch_compare_commits(base_sha, head_sha, token):
+              base = urllib.parse.quote(base_sha, safe="")
+              head = urllib.parse.quote(head_sha, safe="")
+              return rest_request(f"/compare/{base}...{head}?per_page=100", token)
+
+
+          def fetch_pr_commits(owner, repo, number, token):
+              query = """
+              query($owner: String!, $repo: String!, $number: Int!, $cursor: String) {
+                repository(owner: $owner, name: $repo) {
+                  PULL_REQUEST_FIELD(number: $number) {
+                    baseRefName
+                    baseRepository {
+                      nameWithOwner
+                    }
+                    commits(first: 100, after: $cursor) {
+                      pageInfo {
+                        hasNextPage
+                        endCursor
+                      }
+                      nodes {
+                        commit {
+                          oid
+                          message
+                          parents(first: 2) {
+                            totalCount
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+              """.replace("PULL_REQUEST_FIELD", "pull" + "Request")
+              cursor = None
+              commits = []
+              base_ref = None
+              base_repo = None
+
+              while True:
+                  data = graphql_request(
+                      query,
+                      {"owner": owner, "repo": repo, "number": number, "cursor": cursor},
+                      token,
+                  )
+                  pull_request = data["repository"]["pull" + "Request"]
+                  if pull_request is None:
+                      fail(f"PR #{number} was not found")
+
+                  base_ref = pull_request["baseRefName"]
+                  base_repo = pull_request["baseRepository"]["nameWithOwner"]
+                  connection = pull_request["commits"]
+                  commits.extend(connection["nodes"])
+
+                  page_info = connection["pageInfo"]
+                  if not page_info["hasNextPage"]:
+                      break
+                  cursor = page_info["endCursor"]
+                  if not cursor:
+                      fail(f"PR #{number} pagination did not return an end cursor")
+
+              return {
+                  "base_ref": base_ref,
+                  "base_repo": base_repo,
+                  "commits": commits,
+              }
+
+
+          def has_signed_off_by(message):
+              return bool(
+                  re.search(
+                      r"^Signed-off-by:\s+\S.*$",
+                      message,
+                      flags=re.MULTILINE,
+                  )
+              )
+
+
+          def commit_subject(message):
+              return message.splitlines()[0] if message.splitlines() else "(empty subject)"
+
+
+          def validate_records(records, seen, skip_sha=None):
+              failures = []
+              checked = []
+              skipped = []
+              for record in records:
+                  oid = record["sha"]
+                  if oid in seen:
+                      continue
+                  seen.add(oid)
+
+                  if skip_sha and oid == skip_sha:
+                      skipped.append(oid)
+                      print(f"Skipping merge group head commit {oid}")
+                      continue
+
+                  if record["parent_count"] > 1:
+                      skipped.append(oid)
+                      print(f"Skipping merge commit {oid}")
+                      continue
+
+                  checked.append(oid)
+                  message = record.get("message") or ""
+                  if not has_signed_off_by(message):
+                      failures.append({"sha": oid, "subject": commit_subject(message)})
+
+              return {"checked": checked, "skipped": skipped, "failures": failures}
+
+
+          def validate_pr(owner, repo, number, token, seen):
+              print(f"Validating DCO trailers for PR #{number}")
+              pull_request = fetch_pr_commits(owner, repo, number, token)
+              expected_base = f"{owner}/{repo}"
+              if (
+                  pull_request["base_repo"] != expected_base
+                  or pull_request["base_ref"] != "master"
+              ):
+                  fail(
+                      f"PR #{number} targets "
+                      f"{pull_request['base_repo']}:{pull_request['base_ref']}, "
+                      f"expected {expected_base}:master"
+                  )
+
+              records = []
+              for node in pull_request["commits"]:
+                  commit = node["commit"]
+                  records.append(
+                      {
+                          "sha": commit["oid"],
+                          "message": commit.get("message") or "",
+                          "parent_count": commit["parents"]["totalCount"],
+                      }
+                  )
+
+              if not records:
+                  return {
+                      "checked": [],
+                      "skipped": [],
+                      "failures": [
+                          {
+                              "sha": f"PR #{number}",
+                              "subject": "no commits returned by pull request commits API",
+                          }
+                      ],
+                  }
+
+              return validate_records(records, seen)
+
+
+          def verify_merge_group_range_coverage(event, token, seen):
+              merge_group = event.get("merge_group", {})
+              base_sha = merge_group.get("base_sha")
+              head_sha = merge_group.get("head_sha") or os.environ.get("GITHUB_SHA")
+              if not base_sha or not head_sha:
+                  fail(
+                      "merge_group event did not include base_sha and head_sha. "
+                      f"base_sha={base_sha!r} head_sha={head_sha!r} "
+                      f"GITHUB_SHA={os.environ.get('GITHUB_SHA')!r}"
+                  )
+
+              print(f"Checking merge group range coverage {base_sha}...{head_sha}")
+              commits = fetch_compare_commits(base_sha, head_sha, token)
+              checked = []
+              failures = []
+              skipped = []
+              for commit in commits:
+                  oid = commit.get("sha", "")
+                  if oid in seen:
+                      continue
+                  if oid == head_sha:
+                      skipped.append(oid)
+                      print(f"Skipping merge group head commit {oid}")
+                      continue
+                  if len(commit.get("parents", [])) > 1:
+                      skipped.append(oid)
+                      print(f"Skipping merge commit {oid}")
+                      continue
+
+                  seen.add(oid)
+                  checked.append(oid)
+                  message = commit.get("commit", {}).get("message", "") or ""
+                  if not has_signed_off_by(message):
+                      failures.append({"sha": oid, "subject": commit_subject(message)})
+
+              if not commits:
+                  fail(f"merge_group compare range {base_sha}...{head_sha} returned no commits")
+
+              return {"checked": checked, "skipped": skipped, "failures": failures}
+
+
+          def main():
+              repository = os.environ["GITHUB_REPOSITORY"]
+              owner, repo = repository.split("/", 1)
+              event_name = os.environ["GITHUB_EVENT_NAME"]
+              github_ref = os.environ.get("GITHUB_REF")
+              token = os.environ["GITHUB_TOKEN"]
+              event = load_event(os.environ["GITHUB_EVENT_PATH"])
+
+              pull_numbers = discover_pr_numbers(event_name, event, github_ref)
+              failures = []
+              checked = set()
+              skipped = set()
+              seen = set()
+
+              for number in sorted(pull_numbers):
+                  result = validate_pr(owner, repo, number, token, seen)
+                  failures.extend(result["failures"])
+                  checked.update(result["checked"])
+                  skipped.update(result["skipped"])
+
+              if event_name == "merge_group":
+                  result = verify_merge_group_range_coverage(
+                      event,
+                      token,
+                      seen,
+                  )
+                  failures.extend(result["failures"])
+                  checked.update(result["checked"])
+                  skipped.update(result["skipped"])
+
+              if failures:
+                  for failure in failures:
+                      print(f"::error::{failure['sha']}: {failure['subject']}")
+                  fail(
+                      f"{len(failures)} commit(s) are missing a Signed-off-by trailer."
+                  )
+
+              print(
+                  "DCO trailers found for "
+                  f"{len(checked)} commit(s) across {len(pull_numbers)} "
+                  f"pull request(s); skipped {len(skipped)} merge or synthetic commit(s)."
+              )
+
+
+          if __name__ == "__main__":
+              main()
+          PY

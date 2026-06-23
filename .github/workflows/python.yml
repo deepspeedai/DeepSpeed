@@ -45,7 +45,7 @@ jobs:
   unit-tests:
     name: python / install smoke (Python ${{ matrix.pyVersion }})
     needs: check-paths
-    if: always()
+    if: ${{ !cancelled() }}
     strategy:
       matrix:
         pyVersion: ["3.10", "3.11", "3.12"]
