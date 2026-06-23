@@ -244,8 +244,8 @@ TORCH_AUTOCAST_LOWER_PRECISION_SAFE_MODULES = "lower_precision_safe_modules"
 #########################################
 # Gradient clipping
 #########################################
-# Gradient clipping. By default, this feature is not enabled.
-# Users can configure in ds_config.json as below example:
+# Gradient clipping. By default, this feature is enabled with a value of 1.0.
+# Users can configure in ds_config.json as below example (set to 0.0 to disable):
 GRADIENT_CLIPPING_FORMAT = '''
 Gradient clipping should be enabled as:
 "gradient_clipping": 1.0
