@@ -11,6 +11,7 @@ from deepspeed.runtime.config import get_gradient_clipping
 from deepspeed.runtime.constants import GRADIENT_CLIPPING_DEFAULT
 from unit.common import DistributedTest
 from unit.simple_model import SimpleModel
+import pytest
 
 
 class TestGradientClippingConfig:
@@ -18,12 +19,14 @@ class TestGradientClippingConfig:
     def test_default_is_one(self):
         assert get_gradient_clipping({}) == GRADIENT_CLIPPING_DEFAULT == 1.0
 
-    def test_explicit_zero_disables(self):
-        assert get_gradient_clipping({"gradient_clipping": 0.0}) == 0.0
+    @pytest.mark.parametrize("gradient_clipping", [0.5, 0.0])
+    def test_explicit_value_is_used(self, gradient_clipping):
+        assert get_gradient_clipping({"gradient_clipping": gradient_clipping}) == gradient_clipping
 
-    def test_engine_getter_returns_config_value(self):
-        engine = types.SimpleNamespace(_config=types.SimpleNamespace(gradient_clipping=0.0))
-        assert DeepSpeedEngine.gradient_clipping(engine) == 0.0
+    @pytest.mark.parametrize("gradient_clipping", [0.5, 0.0])
+    def test_engine_getter_returns_config_value(self, gradient_clipping):
+        engine = types.SimpleNamespace(_config=types.SimpleNamespace(gradient_clipping=gradient_clipping))
+        assert DeepSpeedEngine.gradient_clipping(engine) == gradient_clipping
 
 
 class TestGradientClippingEndToEnd(DistributedTest):
