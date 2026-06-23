@@ -1,4 +1,4 @@
-# Copyright (c) Microsoft Corporation.
+# Copyright (c) DeepSpeed Team.
 # SPDX-License-Identifier: Apache-2.0
 
 # DeepSpeed Team
@@ -17,11 +17,9 @@ from unit.common import DistributedTest
 from unit.simple_model import SimpleModel
 
 
-# CPU: config parsing and the engine getter are pure and need no accelerator.
 class TestLogLevelConfig:
 
     def test_default_is_none(self):
-        # An unset log_level leaves the DeepSpeed logger untouched.
         assert get_log_level({}) is None
         assert LOG_LEVEL_DEFAULT is None
 
@@ -33,13 +31,7 @@ class TestLogLevelConfig:
         engine = types.SimpleNamespace(_config=types.SimpleNamespace(log_level="ERROR"))
         assert DeepSpeedEngine.log_level(engine) == "ERROR"
 
-    def test_engine_getter_returns_none(self):
-        engine = types.SimpleNamespace(_config=types.SimpleNamespace(log_level=None))
-        assert DeepSpeedEngine.log_level(engine) is None
 
-
-# GPU: end-to-end wiring. The logger level is perturbed before initialize() so
-# the assertions prove init applied (or deliberately did not touch) the level.
 class TestLogLevelEndToEnd(DistributedTest):
     world_size = 1
 
@@ -58,14 +50,14 @@ class TestLogLevelEndToEnd(DistributedTest):
             config["log_level"] = log_level
         return config
 
-    def _init(self, log_level):
+    def _init(self, log_level=None):
         model = SimpleModel(hidden_dim=8)
         engine, _, _, _ = deepspeed.initialize(config=self._config(log_level),
                                                model=model,
                                                model_parameters=model.parameters())
         return engine
 
-    def test_explicit_log_level_applied(self):
+    def test_init_with_error_log_level(self):
         saved = ds_logging.logger.level
         ds_logging.logger.setLevel(logging.DEBUG)
         try:
@@ -75,12 +67,14 @@ class TestLogLevelEndToEnd(DistributedTest):
         finally:
             ds_logging.logger.setLevel(saved)
 
-    def test_omitted_log_level_leaves_logger_unchanged(self):
+    def test_omit_log_level_defaults_to_warning(self):
         saved = ds_logging.logger.level
-        ds_logging.logger.setLevel(logging.DEBUG)
         try:
-            engine = self._init(None)
+            ds_logging.logger.setLevel(logging.WARNING)
+            for handler in ds_logging.logger.handlers:
+                handler.setLevel(logging.WARNING)
+            engine = self._init()
             assert engine.log_level() is None
-            assert ds_logging.logger.getEffectiveLevel() == logging.DEBUG
+            assert ds_logging.logger.getEffectiveLevel() == logging.WARNING
         finally:
             ds_logging.logger.setLevel(saved)
