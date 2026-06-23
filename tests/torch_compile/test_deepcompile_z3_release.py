@@ -38,7 +38,7 @@ class TestDeepCompileZ3ReleaseStorage(DistributedTest):
         rank = dist.get_rank()
         values = torch.arange(rank * shard_numel, (rank + 1) * shard_numel, device=device, dtype=torch.float32)
         grad_buffer = torch.zeros_like(values)
-        dc.register_z3_param(ds_id, list(shape), values, grad_buffer, persistent)
+        dc.register_z3_param(ds_id, list(shape), values, grad_buffer, persistent, values.dtype)
         dc.register_graph_z3(graph_id, [ds_id])
         return values
 

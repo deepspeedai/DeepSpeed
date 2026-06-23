@@ -1951,8 +1951,7 @@ class Init(InsertPostInitMethodToModuleSubClasses):
             allgather_quantize_scale = []
         for param, psize in zip(param_list, partition_sizes):
             tensor_size = psize * self._partition_world_size(param)
-            flat_tensor = torch.empty(tensor_size, dtype=param_list[0].ds_tensor.dtype,
-                                      device=self.local_device).view(-1)
+            flat_tensor = torch.empty(tensor_size, dtype=param.ds_tensor.dtype, device=self.local_device).view(-1)
             flat_tensor.requires_grad = False
             allgather_params.append(flat_tensor)
         if quantize:

@@ -860,6 +860,11 @@ class DeepSpeedConfig(object):
 
         data_types_params = get_data_types_params(param_dict)
         self.grad_accum_dtype = data_types_params.get(GRAD_ACCUM_DTYPE, GRAD_ACCUM_DTYPE_DEFAULT)
+        # Raw strings ("bf16"/"fp16"/"fp32") or None; resolved via DtypeEnum at
+        # use-time.
+        self.param_dtype = data_types_params.get(PARAM_DTYPE, PARAM_DTYPE_DEFAULT)
+        # buffer_dtype=None keeps buffers at their loaded dtype.
+        self.buffer_dtype = data_types_params.get(BUFFER_DTYPE, BUFFER_DTYPE_DEFAULT)
 
         par_write_pipe = get_checkpoint_parallel_write_pipeline(checkpoint_params)
         self.checkpoint_parallel_write_pipeline = par_write_pipe

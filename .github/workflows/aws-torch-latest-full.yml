@@ -88,7 +88,7 @@ jobs:
     name: Unit Tests (Full)
     needs: [check-changes]
     if: |
-      always() &&
+      !cancelled() &&
       (github.event_name == 'workflow_dispatch' || needs.check-changes.outputs.has_changes == 'true')
     runs-on: [self-hosted, gpu-ci, gpu-l40s, l40s-4gpu, aws]
     timeout-minutes: 180
