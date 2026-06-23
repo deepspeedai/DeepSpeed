@@ -45,14 +45,14 @@ from deepspeed.checkpoint import (
     PARAMETER_WITH_SUB_PARAMS,
     AUTOEP_LAYERS_KEY,
     AUTOEP_LAYERS_KEY_LEGACY,
-    AUTOEP_ZERO3_EXPERT_STATE_FORMAT_VERSION,
-    AUTOEP_ZERO3_EXPERT_STATE_FORMAT_VERSION_KEY,
-    AUTOEP_ZERO3_EXPERT_STATE_FORMAT_KEY,
-    AUTOEP_ZERO3_PARTITIONED_EXPERT_STATE_FORMAT,
     EP_IS_EXPERT_PARAM,
     EP_NUM_EXPERTS,
     EXPERT_PARAMETER_PATTERNS,
     SubparamShape,
+)
+from deepspeed.checkpoint.autoep_zero3_metadata import (
+    is_autoep_zero3_partitioned_entry,
+    validate_autoep_zero3_partitioned_metadata,
 )
 
 
@@ -449,80 +449,13 @@ def _uses_zero3_partitioned_autoep_metadata(autoep_metadata):
     if not isinstance(autoep_metadata, list):
         return False
     _validate_zero3_partitioned_autoep_metadata(autoep_metadata, require_partitioned=False)
-    return any(
-        isinstance(entry, dict)
-        and entry.get(AUTOEP_ZERO3_EXPERT_STATE_FORMAT_KEY) == AUTOEP_ZERO3_PARTITIONED_EXPERT_STATE_FORMAT
-        for entry in autoep_metadata)
+    return any(is_autoep_zero3_partitioned_entry(entry) for entry in autoep_metadata)
 
 
 def _validate_zero3_partitioned_autoep_metadata(autoep_metadata, require_partitioned=True):
-    if not isinstance(autoep_metadata, list):
-        raise RuntimeError(f"ds_autoep_layers metadata is malformed: expected list, got "
-                           f"{type(autoep_metadata).__name__}")
-
-    required_fields = {
-        'moe_layer_id',
-        'module_path',
-        'num_experts',
-        'num_local_experts',
-        'ep_size',
-        'expert_key_prefix',
-    }
-    partitioned_fields = {
-        AUTOEP_ZERO3_EXPERT_STATE_FORMAT_VERSION_KEY,
-        'ep_rank',
-        'expert_data_parallel_rank',
-        'expert_data_parallel_world_size',
-        'global_expert_start',
-        'global_expert_end',
-    }
-    seen_layer_ids = set()
-    seen_prefixes = set()
-    partitioned_count = 0
-
-    for entry in autoep_metadata:
-        if not isinstance(entry, dict):
-            raise RuntimeError(f"ds_autoep_layers entry is malformed: expected dict, got {type(entry).__name__}")
-        missing = required_fields - entry.keys()
-        if missing:
-            raise RuntimeError(f"ds_autoep_layers entry is invalid: missing fields {sorted(missing)}")
-        layer_id = entry['moe_layer_id']
-        if layer_id in seen_layer_ids:
-            raise RuntimeError(f"ds_autoep_layers metadata has duplicate moe_layer_id: {layer_id}")
-        seen_layer_ids.add(layer_id)
-        prefix = entry['expert_key_prefix']
-        if prefix in seen_prefixes:
-            raise RuntimeError(f"ds_autoep_layers metadata has duplicate expert_key_prefix: {prefix}")
-        seen_prefixes.add(prefix)
-
-        checkpoint_format = entry.get(AUTOEP_ZERO3_EXPERT_STATE_FORMAT_KEY)
-        if checkpoint_format is None:
-            continue
-        if checkpoint_format != AUTOEP_ZERO3_PARTITIONED_EXPERT_STATE_FORMAT:
-            continue
-
-        missing = partitioned_fields - entry.keys()
-        if missing:
-            raise RuntimeError(f"AutoEP ZeRO-3 checkpoint metadata is invalid: missing fields {sorted(missing)}")
-        version = entry[AUTOEP_ZERO3_EXPERT_STATE_FORMAT_VERSION_KEY]
-        if version != AUTOEP_ZERO3_EXPERT_STATE_FORMAT_VERSION:
-            raise RuntimeError("Unsupported AutoEP ZeRO-3 checkpoint format version: "
-                               f"{version}. This converter supports version "
-                               f"{AUTOEP_ZERO3_EXPERT_STATE_FORMAT_VERSION}.")
-        if entry['num_local_experts'] * entry['ep_size'] != entry['num_experts']:
-            raise RuntimeError("AutoEP ZeRO-3 checkpoint metadata is inconsistent: "
-                               f"num_local_experts={entry['num_local_experts']}, ep_size={entry['ep_size']}, "
-                               f"num_experts={entry['num_experts']}")
-        expected_start = entry['ep_rank'] * entry['num_local_experts']
-        expected_end = expected_start + entry['num_local_experts']
-        if entry['global_expert_start'] != expected_start or entry['global_expert_end'] != expected_end:
-            raise RuntimeError("AutoEP ZeRO-3 checkpoint metadata has inconsistent global expert range: "
-                               f"got [{entry['global_expert_start']}, {entry['global_expert_end']}), "
-                               f"expected [{expected_start}, {expected_end})")
-        partitioned_count += 1
-
-    if require_partitioned and partitioned_count == 0:
-        raise RuntimeError("Expected AutoEP ZeRO-3 partition-native metadata but found no partitioned entries")
+    validate_autoep_zero3_partitioned_metadata(autoep_metadata,
+                                               require_partitioned=require_partitioned,
+                                               version_context="This converter")
 
 
 def _autoep_expert_param_info(autoep_metadata):
@@ -533,7 +466,7 @@ def _autoep_expert_param_info(autoep_metadata):
     for entry in autoep_metadata:
         if not isinstance(entry, dict):
             continue
-        if entry.get(AUTOEP_ZERO3_EXPERT_STATE_FORMAT_KEY) != AUTOEP_ZERO3_PARTITIONED_EXPERT_STATE_FORMAT:
+        if not is_autoep_zero3_partitioned_entry(entry):
             continue
         prefix = entry.get('expert_key_prefix')
         if not prefix:
