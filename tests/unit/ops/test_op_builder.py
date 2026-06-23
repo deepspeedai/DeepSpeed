@@ -261,17 +261,40 @@ def test_cuda_capability_major_skips_probe_in_bad_fork():
     get_device_properties.assert_not_called()
 
 
-def test_import_deepspeed_does_not_initialize_cuda():
-    # The core fork-safety guarantee of issue #7918: importing deepspeed must not
-    # create a CUDA context, otherwise any later fork() that touches CUDA fails
-    # with "Cannot re-initialize CUDA in forked subprocess". Run in a clean
-    # subprocess so the check is not contaminated by other tests that may have
-    # already initialized CUDA in this process.
-    check = (
-        "import torch, deepspeed; "
-        "assert not torch.cuda.is_initialized(), "  #ignore-cuda
-        "'import deepspeed initialized a CUDA context (issue #7918)'")
-    result = subprocess.run([sys.executable, "-c", check], capture_output=True, text=True)
-    if "ModuleNotFoundError" in result.stderr:
+def test_forked_child_can_use_cuda_after_importing_deepspeed():
+    # Core contract of issue #7918: after the parent process runs
+    # ``import deepspeed``, a forked child must still be able to initialize and
+    # use CUDA. If import created a CUDA context in the parent, the child fails
+    # with "Cannot re-initialize CUDA in forked subprocess". Everything runs in a
+    # dedicated subprocess so a poisoned parent cannot leak into the pytest worker
+    # or other tests.
+    program = "\n".join([
+        "import os, sys",
+        "import torch",
+        "import deepspeed  # must not create a CUDA context in the parent",
+        # device_count() is NVML-based and never initializes a context, so it is
+        # a fork-safe way to check for a GPU before forking.
+        "if torch.cuda.device_count() == 0:",  #ignore-cuda
+        "    print('NO_CUDA'); sys.exit(0)",
+        "pid = os.fork()",
+        "if pid == 0:",
+        "    try:",
+        "        torch.ones(1, device='cuda')",
+        "        os._exit(0)",
+        "    except Exception as exc:",
+        "        sys.stderr.write(repr(exc))",
+        "        os._exit(1)",
+        "_, status = os.waitpid(pid, 0)",
+        "sys.exit(os.waitstatus_to_exitcode(status))",
+    ])
+    env = os.environ.copy()
+    repo_root = str(Path(__file__).resolve().parents[3])
+    env["PYTHONPATH"] = repo_root + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
+    result = subprocess.run([sys.executable, "-c", program], capture_output=True, text=True, env=env, timeout=300)
+    if result.returncode != 0 and ("No module named 'deepspeed'" in result.stderr
+                                   or "No module named 'torch'" in result.stderr):
         pytest.skip("deepspeed/torch not importable in a subprocess in this environment")
-    assert result.returncode == 0, result.stderr
+    if result.stdout.strip() == "NO_CUDA":
+        pytest.skip("no CUDA device available")
+    assert result.returncode == 0, ("forked child could not use CUDA after 'import deepspeed' "
+                                    "(a CUDA context was created during import, issue #7918):\n" + result.stderr)
