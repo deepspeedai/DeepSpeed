@@ -22,6 +22,7 @@ from deepspeed.runtime.utils import see_memory_usage
 from deepspeed.utils.torch import required_torch_version
 from deepspeed.accelerator import get_accelerator
 from deepspeed.ops.op_builder import FusedAdamBuilder
+from deepspeed import _is_ds_initialized
 
 
 # Ensure client multiprocessing is not broken by deepspeed import
@@ -491,3 +492,73 @@ class TestClientLrSchedulerInit(DistributedTest):
         else:
             # callable
             assert isinstance(ds_lr_scheduler, OneCycleLR)
+
+
+# https://github.com/microsoft/DeepSpeed/issues/6770
+class TestNoRepeatedInitializationAllowed(DistributedTest):
+    world_size = 1
+
+    @pytest.mark.parametrize('optimizer_type', [None, Optimizer, Callable])
+    def test_objs_marked_ds_inited(self, optimizer_type):
+        hidden_dim = 10
+        model = SimpleModel(hidden_dim)
+
+        def _optimizer_callable(params) -> Optimizer:
+            return AdamW(params=params)
+
+        config_dict = {'train_batch_size': 1}
+        if optimizer_type is None:
+            client_optimizer = None
+            config_dict['optimizer'] = {'type': ADAM_OPTIMIZER}
+        elif optimizer_type is Optimizer:
+            client_optimizer = Adam(model.parameters())
+        else:
+            client_optimizer = _optimizer_callable
+
+        # Initialize DeepSpeed engine
+        model_engine, optim, _, _ = deepspeed.initialize(model=model,
+                                                         optimizer=client_optimizer,
+                                                         config_params=config_dict)
+
+        # arguments should be marked as initialized now
+        assert _is_ds_initialized(model), "Client model should be marked as initialized"
+        if optimizer_type is Optimizer:
+            assert _is_ds_initialized(client_optimizer), "Client optimizer should be marked as initialized"
+
+        # return values should also be marked as initialized
+        assert _is_ds_initialized(model_engine), "Model engine should be marked as initialized"
+        assert _is_ds_initialized(optim), "Optimizer should be marked as initialized"
+
+    @pytest.mark.parametrize('optimizer_type', [None, Optimizer, Callable])
+    def test_repeated_initialization_raises_error(self, optimizer_type):
+        hidden_dim = 10
+        model = SimpleModel(hidden_dim)
+
+        def _optimizer_callable(params) -> Optimizer:
+            return AdamW(params=params)
+
+        config_dict = {'train_batch_size': 1}
+        if optimizer_type is None:
+            client_optimizer = None
+            config_dict['optimizer'] = {'type': ADAM_OPTIMIZER}
+        elif optimizer_type is Optimizer:
+            client_optimizer = Adam(model.parameters())
+        else:
+            client_optimizer = _optimizer_callable
+
+        # Initialize DeepSpeed engine
+        model_engine, optim, _, _ = deepspeed.initialize(model=model,
+                                                         optimizer=client_optimizer,
+                                                         config_params=config_dict)
+        err_msg_pattern = "has already been initialized"
+        with pytest.raises(ValueError, match=err_msg_pattern):
+            deepspeed.initialize(model=model, optimizer=client_optimizer, config_params=config_dict)
+
+        with pytest.raises(ValueError, match=err_msg_pattern):
+            deepspeed.initialize(model=model_engine, optimizer=client_optimizer, config_params=config_dict)
+
+        with pytest.raises(ValueError, match=err_msg_pattern):
+            deepspeed.initialize(model=model, optimizer=optim, config_params=config_dict)
+
+        with pytest.raises(ValueError, match=err_msg_pattern):
+            deepspeed.initialize(model=model_engine, optimizer=optim, config_params=config_dict)

@@ -6,7 +6,7 @@
 import sys
 import types
 import json
-from typing import Optional, Union
+from typing import Callable, Optional, Union
 import torch
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import _LRScheduler
@@ -27,6 +27,8 @@ from . import module_inject
 
 from .accelerator import get_accelerator
 from .constants import TORCH_DISTRIBUTED_DEFAULT_PORT
+from .runtime.base_optimizer import DeepSpeedOptimizer
+from .runtime.dataloader import DeepSpeedDataLoader, RepeatingLoader
 from .runtime.engine import DeepSpeedEngine, DeepSpeedOptimizerCallable, DeepSpeedSchedulerCallable
 from .runtime.engine import ADAM_OPTIMIZER, LAMB_OPTIMIZER, MUON_OPTIMIZER
 from .runtime.hybrid_engine import DeepSpeedHybridEngine
@@ -66,6 +68,44 @@ __git_branch__ = git_branch
 
 # Set to torch's distributed package or deepspeed.comm based inside DeepSpeedEngine init
 dist = None
+
+DS_PRIM_TYPES = (DeepSpeedEngine, DeepSpeedHybridEngine, DeepSpeedOptimizer, DeepSpeedDataLoader, RepeatingLoader)
+
+
+def _mark_ds_initialized(trainobj: Union[torch.nn.Module, Optimizer, _LRScheduler]):
+    """Mark a trainobj as initialized by setting the ds_is_inited attribute to True."""
+    if not isinstance(trainobj, DS_PRIM_TYPES):  # only mark non-DeepSpeed objects
+        trainobj.ds_is_inited = True
+
+
+def _is_ds_initialized(trainobj: Union[torch.nn.Module, Optimizer, _LRScheduler]):
+    """Check if a trainobj has been initialized by checking the ds_is_inited attribute."""
+    if isinstance(trainobj, DS_PRIM_TYPES):
+        return True
+    else:
+        return getattr(trainobj, 'ds_is_inited', False)
+
+
+def _ensure_and_mark_trainobjs_inited(
+    model: torch.nn.Module,
+    optimizer: Optional[Union[Optimizer, DeepSpeedOptimizerCallable]],
+    lr_scheduler: Optional[Union[_LRScheduler, DeepSpeedSchedulerCallable]],
+    ensures_not_inited: bool = False,
+):
+    trainobjs = {"model": model, "optimizer": optimizer, "lr_scheduler": lr_scheduler}
+
+    for name, trainobj in trainobjs.items():
+        if trainobj is None:
+            continue
+        if name in ("optimizer", "lr_scheduler") and not isinstance(trainobj, (Optimizer, _LRScheduler)):
+            # skipping DeepSpeedOptimizerCallable and DeepSpeedSchedulerCallable
+            continue
+        if ensures_not_inited:
+            if _is_ds_initialized(trainobj):
+                raise ValueError(
+                    f"{name} has already been initialized, please make sure to only call deepspeed.initialize on a {name} once."
+                )
+        _mark_ds_initialized(trainobj)
 
 
 def set_optimizer_flags(config_class, model):
@@ -148,6 +188,8 @@ def initialize(args=None,
     zero.partition_parameters.shutdown_init_context()
 
     assert model is not None, "deepspeed.initialize requires a model"
+    # enforce that model, optimizer, and lr_scheduler have not been used in a previous deepspeed.initialize call
+    _ensure_and_mark_trainobjs_inited(model, optimizer, lr_scheduler, ensures_not_inited=True)
 
     global dist
     from deepspeed import comm as dist
@@ -242,6 +284,9 @@ def initialize(args=None,
 
     # Restore zero.Init context if necessary
     zero.partition_parameters.restore_init_context()
+
+    # mark engine, optimizer, and lr_scheduler as initialized
+    _ensure_and_mark_trainobjs_inited(engine, engine.optimizer, engine.lr_scheduler, ensures_not_inited=False)
 
     return_items = [
         engine,
