@@ -1322,6 +1322,60 @@ class DeepSpeedEngine(Module):
             grad_accum_dtype = DtypeEnum(self._config.grad_accum_dtype).value
         return (model_dtype, grad_accum_dtype)
 
+    def _assert_valid_mixed_precision_config(self):
+        """param_dtype, if set, must match the enabled fp16/bf16 mode.
+
+        The optimizer/master-weight/reduction paths derive the model dtype from
+        the fp16/bf16 flags, so a divergent param_dtype is unsafe.
+        """
+        if self._config.param_dtype is None:
+            return
+        if self.fp16_enabled():
+            model_dtype = torch.half
+        elif self.bfloat16_enabled():
+            model_dtype = torch.bfloat16
+        else:
+            model_dtype = torch.float32
+        requested = DtypeEnum(self._config.param_dtype).value
+        assert requested == model_dtype, (f"data_types.param_dtype='{self._config.param_dtype}' conflicts with the "
+                                          f"enabled precision mode (model dtype {model_dtype}). Set the matching "
+                                          f"fp16/bf16 'enabled' flag or omit data_types.param_dtype.")
+
+    def _mixed_precision_dtypes(self):
+        """Resolve (param_dtype, buffer_dtype) for the module cast.
+
+        param_dtype follows the enabled fp16/bf16 mode (None if neither).
+        buffer_dtype: config override, else None (buffers keep loaded dtype).
+        Mismatched param_dtype is rejected in _assert_valid_mixed_precision_config.
+        """
+        if self.fp16_enabled():
+            param_dtype = torch.half
+        elif self.bfloat16_enabled():
+            param_dtype = torch.bfloat16
+        else:
+            param_dtype = None
+
+        buffer_dtype = None
+        if self._config.buffer_dtype is not None:
+            buffer_dtype = DtypeEnum(self._config.buffer_dtype).value
+
+        return param_dtype, buffer_dtype
+
+    def _cast_module_mixed_precision(self, param_dtype, buffer_dtype, is_zero_init_model):
+        """Cast params to param_dtype; cast buffers only when buffer_dtype is set."""
+        # ZeRO-Init params are already at the configured dtype and partitioned, so
+        # the per-parameter cast applies only in the non-zero-init path.
+        if param_dtype is not None and not is_zero_init_model:
+            for p in self.module.parameters(recurse=True):
+                if p.is_floating_point() and p.dtype != param_dtype:
+                    p.data = p.data.to(param_dtype)
+
+        # Buffers are never ZeRO-partitioned.
+        if buffer_dtype is not None:
+            for b in self.module.buffers(recurse=True):
+                if b.is_floating_point() and b.dtype != buffer_dtype:
+                    b.data = b.data.to(buffer_dtype)
+
     def _optimizer_has_ckpt_event_prologue(self):
         return self.optimizer is not None and hasattr(self.optimizer, 'checkpoint_event_prologue')
 
@@ -1454,6 +1508,8 @@ class DeepSpeedEngine(Module):
         if self.bfloat16_enabled() and not get_accelerator().is_bf16_supported():
             raise ValueError("Type bf16 is not supported on your device.")
 
+        self._assert_valid_mixed_precision_config()
+
         expected_optim_types = self._supported_optims()
         expected_optim_types += [type(None), Callable]
         assert isinstance(self.client_optimizer, tuple(expected_optim_types)), \
@@ -1513,14 +1569,14 @@ class DeepSpeedEngine(Module):
         is_zero_init_model = self.zero_optimization_partition_weights() and any(
             [hasattr(param, "ds_id") for param in self.module.parameters()])
 
-        if self.fp16_enabled():
+        if self.fp16_enabled() or self.bfloat16_enabled():
+            check_dtype = torch.half if self.fp16_enabled() else torch.bfloat16
             if is_zero_init_model:
-                self.__check_params(self.module, torch.half)
-            self.module.half()
-        elif self.bfloat16_enabled():
-            if is_zero_init_model:
-                self.__check_params(self.module, torch.bfloat16)
-            self.module.bfloat16()
+                self.__check_params(self.module, check_dtype)
+            # Cast params only; preserve fp32 buffers (e.g. rotary inv_freq)
+            # unless buffer_dtype is set. Replaces blanket module.half()/bfloat16().
+            param_dtype, buffer_dtype = self._mixed_precision_dtypes()
+            self._cast_module_mixed_precision(param_dtype, buffer_dtype, is_zero_init_model)
         else:
             self.__check_params(self.module, torch.float)
 
