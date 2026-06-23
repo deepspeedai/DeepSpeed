@@ -41,6 +41,17 @@ toc_label: "Contents"
 
 Muon optimizer is supported with ZeRO Stage 1, 2, and 3. To use Muon, set the optimizer name to `Muon`. The parameters applied for Muon are automatically determined by the matrix shape and name. For ZeRO Stage 3 with NVMe offloading, set `save_muon_momentum_buffer_in_memory` to `true` under `zero_optimization` to keep the Muon momentum buffer in GPU/CPU memory instead of swapping to NVMe.
 
+Muon supports the following params:
+
+| "params" key   | Description                                                                                                          | Default   |
+| -------------- | -------------------------------------------------------------------------------------------------------------------- | --------- |
+| lr             | Learning rate for all parameters. Overridden by `muon_lr` / `adam_lr` if set.                                        | 0.001     |
+| momentum       | Momentum coefficient for the Muon update.                                                                            | 0.95      |
+| weight\_decay  | Weight decay (AdamW-style).                                                                                          | 0.0       |
+| muon\_lr       | Learning rate override for Muon parameters. Defaults to `lr` if not set.                                             | -         |
+| adam\_lr       | Learning rate override for non-Muon (Adam) parameters. Defaults to `lr` if not set.                                  | -         |
+| ns\_method     | Newton-Schulz orthogonalization method: `"gram"` for Gram NS (~2x faster on rectangular matrices), `"standard"` for the original iteration. Use `"standard"` to fall back if you encounter convergence issues. | `"gram"`  |
+
   Example of <i>**optimizer**</i> with Adam
 
 ```json
@@ -73,7 +84,8 @@ If not set, muon_lr will default to lr.
       "lr": 0.001,
       "momentum": 0.9,
       "weight_decay": 0.0,
-      "muon_lr": 0.001
+      "muon_lr": 0.001,
+      "ns_method": "gram"
     }
   },
   "zero_optimization": {
@@ -350,14 +362,14 @@ Example of <i>**scheduler**</i>
 
 | Description | Default |
 | ----------- | ------- |
-| Keep optimizer states in bf16 as well. Requires `bf16_master_weights_and_grads=true`. Enabling this removes the offload requirement because optimizer states no longer stay fp32. | `false` |
+| Keep optimizer states in bf16 as well. Requires `bf16_master_weights_and_grads=true`. Offload is optional: without `offload_optimizer` the bf16 states stay on the GPU; with `offload_optimizer` (`DeepSpeedCPUAdam`) they are offloaded to CPU memory in bf16. The offloaded state (bf16 master weights plus the two bf16 Adam moments) is then ~6 bytes/param, versus ~10 bytes/param when the moments are kept in fp32. | `false` |
 
 **Support matrix (bf16 master weights/gradients)**
 
 | ZeRO stage | bf16_optimizer_states=False | bf16_optimizer_states=True |
 | ---------- | --------------------------- | -------------------------- |
 | 0 | Not supported | Not supported |
-| 1/2/3 | Requires ZeRO-Offload + `DeepSpeedCPUAdam` (optimizer states stay fp32 on CPU) | Supported without offload; optimizer states kept in bf16 |
+| 1/2/3 | Requires ZeRO-Offload + `DeepSpeedCPUAdam` (optimizer states stay fp32 on CPU) | On GPU without offload, or on CPU with `offload_optimizer` + `DeepSpeedCPUAdam`; optimizer states kept in bf16 either way |
 
 ### Automatic mixed precision (AMP) training options
 
@@ -847,6 +859,218 @@ When a HuggingFace model provides a built-in `tp_plan` (via `model.config.base_m
 | Description                                                                                                                                                                                                                                                                                                                                                     | Default |
 | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
 | Unused parameters in modules may be unexpected in static networks, but could be normal in dynamic networks. This controls whether or not training should terminate with an error message when unused parameters are detected. This is set to `True` by default, which means unused parameters are ignored and training continues. Now is just used in stage 2. | `True`  |
+
+### Expert Parallel (AutoEP)
+Configure AutoEP expert parallelism for MoE models. AutoEP automatically detects MoE layers in HuggingFace models and replaces them with EP-enabled versions using TorchTitan's grouped GEMM kernels. Requires zero model code changes. Supports ZeRO stages 0, 1, and 2 (stage 3 is not supported).
+```json
+  "expert_parallel": {
+    "enabled": true,
+    "autoep_size": 4,
+    "preset_model": "mixtral"
+  }
+```
+<i>**expert_parallel**</i>: [dictionary]
+
+| Description                                                                                | Default |
+| ------------------------------------------------------------------------------------------ | ------- |
+| Enable AutoEP expert parallelism and configure MoE layer detection and replacement.        | `{}`    |
+
+***enabled***: [boolean]
+
+| Description                                                                 | Default |
+| --------------------------------------------------------------------------- | ------- |
+| Enable AutoEP. When `false`, all other expert_parallel settings are ignored. | `false` |
+
+***autoep_size***: [integer]
+
+| Description                                                                                        | Default |
+| -------------------------------------------------------------------------------------------------- | ------- |
+| Expert-parallel degree (number of ranks sharing expert computation). Must divide `world_size / pp_size`. `1` = all experts local (no AllToAll), useful for testing. | `1`     |
+
+***preset_model***: [string]
+
+| Description                                                                                                                            | Default |
+| -------------------------------------------------------------------------------------------------------------------------------------- | ------- |
+| Built-in model preset for MoE detection: `mixtral`, `qwen3_moe`, `qwen3_5_moe`, `deepseek_v2`, `deepseek_v3`. Determines router, expert, and weight naming patterns. | `null`  |
+
+Built-in AutoEP presets describe DeepSpeed's router/expert/weight-pattern support for a model family.
+Running a HuggingFace model also requires the installed Transformers package to expose the corresponding
+config/model classes, `model.config.model_type` value, and fused expert layout. The tiny HuggingFace
+smoke coverage used for this AutoEP surface produced the following version gates:
+
+| Preset | Minimum Transformers version | Notes |
+| ------ | ---------------------------- | ----- |
+| `mixtral` | `5.0.0` |  |
+| `qwen3_moe` | `5.0.0` | Also covers Qwen2-MoE when the installed Transformers build uses the validated fused expert layout. Qwen3-MoE classes appear in `4.51.3`, but the tested `4.x` builds do not match the validated AutoEP layout. |
+| `qwen3_5_moe` | `5.2.0` | Requires the Qwen3.5 text-backbone `qwen3_5_moe_text` model type. For performance on Qwen3.5's Gated DeltaNet layers, install optimized kernels; see the [Hugging Face Transformers kernel loading docs](https://huggingface.co/docs/transformers/kernel_doc/loading_kernels) and the [Qwen FlashQLA blog](https://qwen.ai/blog?id=flashqla). |
+| `deepseek_v2` | `5.0.0` | `load_balance_coeff` / expert-bias auxiliary-loss-free load balancing is not currently supported; non-null values are rejected. |
+| `deepseek_v3` | `5.0.0` | `load_balance_coeff` / expert-bias auxiliary-loss-free load balancing is not currently supported; non-null values are rejected. |
+
+***use_grouped_mm***: [boolean]
+
+| Description                                                                                    | Default |
+| ---------------------------------------------------------------------------------------------- | ------- |
+| Use `torch._grouped_mm` for fused grouped GEMM. Raises `RuntimeError` at `GroupedExperts` construction time when `torch._grouped_mm` is unavailable; set `use_grouped_mm=false` to use the sequential for-loop. | `true`  |
+
+***moe_layer_pattern***: [string]
+
+| Description                                                                                                   | Default |
+| ------------------------------------------------------------------------------------------------------------- | ------- |
+| Regex pattern matching MoE module names (e.g., `"model\\.layers\\.\\d+\\.mlp"`). When set, uses the custom preset path instead of auto-detecting from `model_type`. | `null`  |
+
+***router_pattern***: [string]
+
+| Description                                                                                  | Default |
+| -------------------------------------------------------------------------------------------- | ------- |
+| Direct child attribute name for the router/gate module (e.g., `"gate"`, `"router"`). Not a regex. | `null`  |
+
+***expert_pattern***: [string]
+
+| Description                                                                                 | Default |
+| ------------------------------------------------------------------------------------------- | ------- |
+| Direct child attribute name for the experts module (e.g., `"experts"`). Not a regex.        | `null`  |
+
+***score_func***: [string]
+
+| Description                                                                                                              | Default  |
+| ------------------------------------------------------------------------------------------------------------------------ | -------- |
+| Router scoring function: `"softmax"`, `"sigmoid"`, or `"auto"` (detect from `model.config.scoring_func` or use preset). | `"auto"` |
+
+***score_apply***: [string]
+
+| Description                                                                                                    | Default  |
+| -------------------------------------------------------------------------------------------------------------- | -------- |
+| When to apply router scores: `"pre"` (before experts), `"post"` (during combine), or `"auto"` (from preset). | `"auto"` |
+
+***route_norm***: [boolean]
+
+| Description                                                                                                     | Default |
+| --------------------------------------------------------------------------------------------------------------- | ------- |
+| Renormalize top-k router scores. `null` = auto-detect from `model.config.norm_topk_prob` or use preset default. | `null`  |
+
+***route_scale***: [float]
+
+| Description                                              | Default |
+| -------------------------------------------------------- | ------- |
+| Scale factor applied to router scores after computation. | `1.0`   |
+
+***top_k***: [integer|string]
+
+| Description                                                                                                                                         | Default  |
+| --------------------------------------------------------------------------------------------------------------------------------------------------- | -------- |
+| Number of experts each token is routed to. An explicit integer overrides `top_k_attr` lookup. `"auto"` = read from `model.config` using `top_k_attr`. | `"auto"` |
+
+***routed_scaling_factor***: [float|string]
+
+| Description                                                                                    | Default  |
+| ---------------------------------------------------------------------------------------------- | -------- |
+| Scaling factor for routed expert outputs. `"auto"` = detect from `model.config` if available.  | `"auto"` |
+
+***num_expert_groups***: [integer]
+
+| Description                                                                | Default |
+| -------------------------------------------------------------------------- | ------- |
+| Number of expert groups for group-limited routing (DeepSeek-V3 style).     | `null`  |
+
+***num_limited_groups***: [integer]
+
+| Description                                                                                        | Default |
+| -------------------------------------------------------------------------------------------------- | ------- |
+| Number of groups to select from in group-limited routing. Must be <= `num_expert_groups` when set.  | `null`  |
+
+***load_balance_coeff***: [null]
+
+| Description                                                                                          | Default |
+| ---------------------------------------------------------------------------------------------------- | ------- |
+| Reserved for future auxiliary-loss-free load balancing via `expert_bias`. Currently unsupported - must be unset or `null`; any other value is rejected. | `null`  |
+
+***expert_w1***: [string]
+
+| Description                                                                                              | Default |
+| -------------------------------------------------------------------------------------------------------- | ------- |
+| Expert weight name for gate (or fused gate+up) projection (e.g., `"gate_up_proj"`, `"w1"`). `null` = use preset default. | `null`  |
+
+***expert_w2***: [string]
+
+| Description                                                                                  | Default |
+| -------------------------------------------------------------------------------------------- | ------- |
+| Expert weight name for down projection (e.g., `"down_proj"`, `"w2"`). `null` = use preset default. | `null`  |
+
+***expert_w3***: [string|null]
+
+| Description                                                                                                                                                    | Default       |
+| -------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------- |
+| Expert weight name for up projection (separate from gate). Three states: key absent = use preset default; `null` = fused gate+up (no separate w3); string = custom weight name. | absent (preset default) |
+
+***num_experts_attr***: [string]
+
+| Description                                                                                              | Default |
+| -------------------------------------------------------------------------------------------------------- | ------- |
+| Name of `model.config` attribute for number of experts (e.g., `"num_local_experts"`). `null` = use preset default. | `null`  |
+
+***top_k_attr***: [string]
+
+| Description                                                                                                                      | Default |
+| -------------------------------------------------------------------------------------------------------------------------------- | ------- |
+| Name of `model.config` attribute for top-k value (e.g., `"num_experts_per_tok"`). `null` = use preset default. If `top_k` is explicitly set as an integer, `top_k_attr` is ignored. | `null`  |
+
+***has_shared_experts***: [boolean]
+
+| Description                                                                                                | Default |
+| ---------------------------------------------------------------------------------------------------------- | ------- |
+| Whether the MoE layer has shared (non-routed) experts. `null` = auto-detect from preset. Must be paired with `shared_experts_pattern`. | `null`  |
+
+***shared_experts_pattern***: [string]
+
+| Description                                                                                              | Default |
+| -------------------------------------------------------------------------------------------------------- | ------- |
+| Direct child attribute name for shared experts (e.g., `"shared_expert"`). `null` = use preset default.   | `null`  |
+
+#### Custom Model Example
+
+For a model with non-standard naming conventions that is not covered by built-in presets:
+
+```json
+{
+  "expert_parallel": {
+    "enabled": true,
+    "autoep_size": 4,
+    "moe_layer_pattern": "model\\.layers\\.\\d+\\.moe",
+    "router_pattern": "router",
+    "expert_pattern": "mlp_experts",
+    "expert_w1": "w1",
+    "expert_w2": "w2",
+    "expert_w3": "w3",
+    "num_experts_attr": "num_moe_experts",
+    "top_k_attr": "moe_top_k",
+    "has_shared_experts": false
+  }
+}
+```
+
+#### Preset Override Example
+
+Use a built-in preset but override specific naming/weight fields for a fine-tuned model with renamed module paths:
+
+```json
+{
+  "expert_parallel": {
+    "enabled": true,
+    "preset_model": "mixtral",
+    "moe_layer_pattern": "model\\.layers\\.\\d+\\.moe",
+    "router_pattern": "router",
+    "expert_w1": "w1",
+    "expert_w2": "w2"
+  }
+}
+```
+
+> **Note:** `expert_storage` and `gate_bias` are auto-detected from model weights and cannot be overridden. `router_pattern`, `expert_pattern`, and `shared_experts_pattern` are direct child attribute names, not regex patterns.
+
+**Constraints:**
+- `autoep_size` must divide `num_experts` for all detected MoE layers
+- AutoEP currently cannot be combined with AutoTP (`tensor_parallel.autotp_size > 1`); support is planned as follow-up work
+- ZeRO Stage 3 is not supported with AutoEP (assertion will fire)
 
 ### Logging
 

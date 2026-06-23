@@ -215,7 +215,7 @@ def top1gating(logits: Tensor,
     if not drop_tokens:
         new_capacity = torch.max(exp_counts).to(logits.device)
         # Communicate across expert processes to pick the maximum capacity.
-        if ep_group is not None:
+        if ep_group is not None and dist.get_world_size(group=ep_group) > 1:
             dist.all_reduce(new_capacity, op=dist.ReduceOp.MAX, group=ep_group)
         if groups._get_expert_model_parallel_world_size() == 1:
             # If the non-expert is tensor-parallel, we need to pad the capacity to 'tp'.
@@ -335,7 +335,7 @@ def top2gating(logits: Tensor,
     else:
         # Do not drop tokens - set capacity according to current expert assignments
         new_capacity = torch.max(exp_counts)
-        if ep_group is not None:
+        if ep_group is not None and dist.get_world_size(group=ep_group) > 1:
             dist.all_reduce(new_capacity, op=dist.ReduceOp.MAX, group=ep_group)
         if groups._get_expert_model_parallel_world_size() == 1:
             # If the non-expert is tensor-parallel, we need to pad the capacity to 'tp'.
@@ -384,14 +384,12 @@ def topkgating(
     """Implements TopKGating on logits."""
 
     # everything is in fp32 in this function
-    # get topk gates
-    top_gate, top_idx = torch.topk(logits, k=k, dim=1)
     # gating decisions
     gates = F.softmax(logits, dim=1)
     num_experts = int(gates.shape[1])
 
-    # get topk mask
-    topk_masked_gates = torch.zeros_like(logits).scatter(1, top_idx, top_gate)
+    # get topk gates
+    top_gate, top_idx = torch.topk(gates, k=k, dim=1)
 
     mask = torch.zeros_like(gates, dtype=torch.bool).scatter_(1, top_idx, 1)
 
@@ -408,9 +406,10 @@ def topkgating(
         # update mask and locations by capacity
 
         if drop_policy == 'probs':
-            capacity_probs, capacity_indices = torch.topk(topk_masked_gates, k=capacity, dim=0, sorted=False)
-            capacity_mask = torch.zeros_like(logits).scatter(0, capacity_indices, 1)
-            mask = torch.logical_and(mask, capacity_mask)
+            topk_masked_gates = torch.zeros_like(gates).scatter(1, top_idx, top_gate)
+            _, capacity_indices = torch.topk(topk_masked_gates, k=capacity, dim=0, sorted=False)
+            capacity_mask = torch.zeros_like(gates, dtype=torch.bool).scatter_(0, capacity_indices, True)
+            mask &= capacity_mask
             locations = torch.cumsum(mask, dim=0) - 1
 
         elif drop_policy == "position":
@@ -422,7 +421,7 @@ def topkgating(
     else:
         # Do not drop tokens - set capacity according to current expert assignments
         new_capacity = torch.max(exp_counts)
-        if ep_group is not None:
+        if ep_group is not None and dist.get_world_size(group=ep_group) > 1:
             dist.all_reduce(new_capacity, op=dist.ReduceOp.MAX, group=ep_group)
         if groups._get_expert_model_parallel_world_size() == 1:
             # If the non-expert is tensor-parallel, we need to pad the capacity to 'tp'.
@@ -629,7 +628,10 @@ class MOELayer(Base):
             # an allgather to ensure correctness,
             dispatched_input = drop_tokens(dispatched_input, dim=1)
 
-        dispatched_input = _AllToAll.apply(self.ep_group, dispatched_input)
+        if self.ep_size > 1:
+            dispatched_input = _AllToAll.apply(self.ep_group, dispatched_input)
+        else:
+            dispatched_input = dispatched_input.contiguous()
 
         if self.wall_clock_breakdown:
             self.timers(FIRST_ALLTOALL_TIMER).stop()
@@ -655,7 +657,10 @@ class MOELayer(Base):
         if self.wall_clock_breakdown:
             self.timers(SECOND_ALLTOALL_TIMER).start()
 
-        expert_output = _AllToAll.apply(self.ep_group, expert_output)
+        if self.ep_size > 1:
+            expert_output = _AllToAll.apply(self.ep_group, expert_output)
+        else:
+            expert_output = expert_output.contiguous()
 
         if self.wall_clock_breakdown:
             self.timers(SECOND_ALLTOALL_TIMER).stop()

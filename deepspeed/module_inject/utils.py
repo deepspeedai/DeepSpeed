@@ -3,17 +3,11 @@
 
 # DeepSpeed Team
 
-import torch
 from deepspeed.utils import log_dist
 
 
 def transpose(data):
-    with torch.no_grad():
-        data = data.contiguous()
-        data1 = data.transpose(-1, -2).reshape(-1)
-        data.reshape(-1).copy_(data1)
-        data1 = None
-    return data.reshape(data.shape[-1], data.shape[-2])
+    return data.transpose(-1, -2).contiguous()
 
 
 # helper function to map between DS policies and DS containers

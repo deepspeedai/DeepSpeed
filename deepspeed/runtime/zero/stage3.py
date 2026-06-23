@@ -287,8 +287,9 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             fp16_master_weights_and_gradients=fp16_master_weights_and_gradients,
             bf16_master_weights_and_gradients=bf16_master_weights_and_gradients,
             bf16_optimizer_states=bf16_optimizer_states,
+            offload_enabled=self.offload_optimizer,
             fp16_offload_validator=_enforce_optimizer_offload,
-            bf16_fp32_offload_validator=_enforce_optimizer_offload)
+            bf16_offload_validator=_enforce_optimizer_offload)
 
         # backup fused_adam optimizer init
         if self.offload_optimizer and self.partial_offload != 1.0:
@@ -424,6 +425,9 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             self._configure_tensor_swapping(offload_optimizer_config, aio_config)
 
         self.is_gradient_accumulation_boundary: bool = True
+
+        # Toggled by DeepSpeedEngine.coalesce_grad_reduction().
+        self._coalesce_grad_reduction = False
 
         self.param_reduce_events: Deque[get_accelerator().Event] = collections.deque()
         # TODO. make this configurable via JSON
@@ -759,6 +763,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         if self.use_muon:
             self.sub_groups_using_muon = []
             self.muon_beta = None
+            self.muon_ns_method = None
             for idx, param_group in enumerate(fp16_param_groups):
                 if getattr(param_group['params'][0], 'use_muon', False):
                     self.sub_groups_using_muon.extend([True] * len(param_groups[idx]))
@@ -767,6 +772,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                         raise ValueError(f"All Muon parameter groups must have the same momentum (beta). "
                                          f"Found {self.muon_beta} and {group_beta}.")
                     self.muon_beta = group_beta
+                    self.muon_ns_method = param_group.get('ns_method', 'gram')
                 else:
                     self.sub_groups_using_muon.extend([False] * len(param_groups[idx]))
         # bookkeeping related to param groups
@@ -1515,7 +1521,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                     param = params[base_i + rank]
                     g = param.grad
                     m = gathered_momentums_pad[base_i + rank]
-                    update = muon_update(g, m, beta=self.muon_beta)
+                    update = muon_update(g, m, beta=self.muon_beta, ns_method=getattr(self, 'muon_ns_method', 'gram'))
                     g.data.copy_(update, non_blocking=False)
                 grad_handle = dist.all_gather(grads_pad[base_i:base_i + world_sz],
                                               grads_pad[base_i + rank],
@@ -1534,7 +1540,9 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                 start_offset = rank * chunk_sz
                 end_offset = start_offset + chunk_sz
                 if end_offset > param.grad.numel():
-                    buffer_to_update = torch.zeros(chunk_sz, device=param.grad.device, dtype=param.grad.dtype)
+                    buffer_to_update = torch.zeros(chunk_sz,
+                                                   device=param.grad.device,
+                                                   dtype=self.gradient_accumulation_dtype)
                     buffer_to_update[:param.grad.numel() -
                                      start_offset] = gathered_momentum.view(-1).data[start_offset:param.grad.numel()]
                 else:
@@ -1578,8 +1586,8 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         if self.postscale_gradients and self.gradient_predivide_factor != world_sz:
             buffer_to_reduce = buffer_to_reduce.mul(self.gradient_predivide_factor)
 
-        if communication_data_type != self.dtype:
-            buffer_to_reduce = buffer_to_reduce.to(self.dtype)
+        if communication_data_type != self.gradient_accumulation_dtype:
+            buffer_to_reduce = buffer_to_reduce.to(self.gradient_accumulation_dtype)
 
         grad_partitions = []
         grad_offset_in_buffer = 0
@@ -1593,7 +1601,9 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
             partition = buffer_to_reduce[start_offset:end_offset]
             if param.partition_numel() != partition.numel():
-                padded_partition = torch.zeros(param.partition_numel(), device=grad.device, dtype=grad.dtype)
+                padded_partition = torch.zeros(param.partition_numel(),
+                                               device=grad.device,
+                                               dtype=self.gradient_accumulation_dtype)
                 if partition.numel() > 0:
                     padded_partition[:partition.numel()] = partition
                 grad_partitions.append(padded_partition)
@@ -1630,8 +1640,8 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                 self.dp_process_group):
             grad_partitions_for_rank = [g.mul(self.gradient_predivide_factor) for g in grad_partitions_for_rank]
 
-        if communication_data_type != self.dtype:
-            grad_partitions_for_rank = [g.to(self.dtype) for g in grad_partitions_for_rank]
+        if communication_data_type != self.gradient_accumulation_dtype:
+            grad_partitions_for_rank = [g.to(self.gradient_accumulation_dtype) for g in grad_partitions_for_rank]
 
         return grad_partitions_for_rank
 
@@ -1809,6 +1819,8 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         return output
 
     def reduce_ready_partitions_and_remove_grads(self, param):
+        if self._coalesce_grad_reduction:
+            return
         #print_rank_0(f"Backward {debug_param2name_id_shape(param)}", force=True)
         self.reduce_independent_p_g_buckets_and_remove_grads(param)
 
@@ -3269,11 +3281,12 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
         self.empty_partition_cache()
 
-        assert self.optimizer.__class__ == deepspeed.ops.adam.fused_adam.FusedAdam, "Offloading is supported only for DeepSpeed FusedAdam."
-
         def needs_offload(target):
             # return True
             return target not in self.offloaded_states and (include == None or target in include)
+
+        if needs_offload(OffloadStateTypeEnum.optim_states) or needs_offload(OffloadStateTypeEnum.hp_params):
+            assert self.optimizer.__class__ == deepspeed.ops.adam.fused_adam.FusedAdam, "Offloading is supported only for DeepSpeed FusedAdam."
 
         # HP param
         if needs_offload(OffloadStateTypeEnum.hp_params):
