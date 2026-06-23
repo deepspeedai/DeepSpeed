@@ -179,11 +179,14 @@ jobs:
         uses: actions/checkout@v4
         with:
           # Test the PR's code (not the base) so diff-driven selection is meaningful.
-          # NOTE: under pull_request_target this runs PR-authored code; the modal/HF
-          # secrets live on this runner, which is why the workflow is gated on
-          # review_requested / ready_for_review (a maintainer vets the PR first). The
-          # CI orchestration itself is restored from base in the next step so a PR
-          # can't repoint it at the secrets.
+          # SECURITY NOTE: under pull_request_target this runs PR-authored code while
+          # the modal/HF secrets are on this runner. The trigger types include
+          # `synchronize`, so this re-runs on every push to an open PR (not only on a
+          # maintainer's review_requested / ready_for_review action) -- do not treat
+          # the maintainer gate as an absolute barrier. The primary protection is that
+          # the CI orchestration (which actually receives the secrets) is restored
+          # from the base branch in the next step, so a PR can't repoint it at the
+          # secrets; only the PR's deepspeed/ + tests/ run, inside modal.
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           lfs: true
 

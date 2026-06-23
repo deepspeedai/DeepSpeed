@@ -31,7 +31,7 @@ Design principles
   run-all triggers via ``--workflow``.
 * **Testable.** All repo/config state lives on ``TestSelector`` (constructed with
   an arbitrary ``repo_root``), so the logic can be unit-tested against synthetic
-  repos -- see ``tests/unit/test_tests_fetcher.py``.
+  repos -- see ``ci/test_tests_fetcher.py``.
 
 Escape hatches (for humans)
 ---------------------------
@@ -58,6 +58,7 @@ import os
 import subprocess
 import sys
 import traceback
+from collections import deque
 from dataclasses import dataclass, field
 from fnmatch import fnmatch
 from pathlib import Path
@@ -216,8 +217,9 @@ class TestSelector:
     def _diff_files(self, base_rev: str) -> tuple[list[str], list[str]]:
         """Return (changed, deleted) repo-root-relative paths for ``base_rev..HEAD``.
 
-        'changed' = added / modified / renamed-new; 'deleted' = deleted / renamed-old.
-        ``base_rev`` should be the merge-base commit so two-dot == three-dot.
+        'changed' = added / modified / renamed-new / copied-new; 'deleted' =
+        deleted / renamed-old. ``base_rev`` should be the merge-base commit so
+        two-dot == three-dot.
         """
         out = self._run_git(["diff", "--name-status", "--find-renames", f"{base_rev}", "HEAD"])
         changed: list[str] = []
@@ -228,7 +230,12 @@ class TestSelector:
             parts = line.split("\t")
             status = parts[0]
             if status.startswith("R") and len(parts) >= 3:
+                # rename: old path goes away, new path is what changed.
                 deleted.append(parts[1])
+                changed.append(parts[2])
+            elif status.startswith("C") and len(parts) >= 3:
+                # copy: source is untouched (do NOT mark it deleted); the new
+                # destination path is the one that's effectively "changed".
                 changed.append(parts[2])
             elif status.startswith("D"):
                 deleted.append(parts[1])
@@ -437,15 +444,19 @@ class TestSelector:
 
     @staticmethod
     def _reachable_with_parents(seed: Path, reverse: dict[Path, set[Path]]) -> dict[Path, Path | None]:
-        """BFS from ``seed`` recording a predecessor for each node (for --explain)."""
+        """BFS from ``seed`` recording a predecessor for each node (for --explain).
+
+        Uses a FIFO queue so each node's recorded parent is on a *shortest* path,
+        giving the most concise import chain in ``--explain`` output.
+        """
         parent: dict[Path, Path | None] = {seed: None}
-        stack = [seed]
-        while stack:
-            cur = stack.pop()
-            for imp in reverse.get(cur, ()):
+        queue: deque[Path] = deque([seed])
+        while queue:
+            cur = queue.popleft()
+            for imp in sorted(reverse.get(cur, ()), key=str):
                 if imp not in parent:
                     parent[imp] = cur
-                    stack.append(imp)
+                    queue.append(imp)
         return parent
 
     def _matches_glob(self, rel_posix: str, globs: tuple[str, ...]) -> bool:
