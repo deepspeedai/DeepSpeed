@@ -277,7 +277,8 @@ class DeepSpeedEngine(Module):
         self._do_args_sanity_check(args)
         self._configure_with_arguments(args, mpu)
         self._do_sanity_check()
-        set_log_level_from_string(self.log_level())
+        if self.log_level() is not None:
+            set_log_level_from_string(self.log_level())
         self._configure_expert_parallel(model)
         if self.autotp_size() > 1:
             self._configure_tensor_parallel(model, self.tensor_parallel_config())
