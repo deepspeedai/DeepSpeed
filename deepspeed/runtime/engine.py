@@ -24,7 +24,7 @@ from typing import Callable, Dict, Union, Iterable, Container, List
 import deepspeed
 
 from deepspeed import comm as dist
-from deepspeed.runtime.utils import see_memory_usage, DummyOptim, register_output_backward_hooks, check_internal_apis_for_count_used_parameters, is_model_parallel_parameter
+from deepspeed.runtime.utils import see_memory_usage, DummyOptim, register_output_backward_hooks, check_internal_apis_for_count_used_parameters
 from .zero.offload_config import OffloadDeviceEnum, OffloadStateTypeEnum
 from deepspeed.runtime.base_optimizer import ZeROOptimizer
 from deepspeed.runtime.zero.stage_1_and_2 import DeepSpeedZeroOptimizer
@@ -43,6 +43,7 @@ from deepspeed.runtime.bf16_optimizer import BF16_Optimizer
 
 from deepspeed.linear.optimized_linear import LoRAOptimizedLinear
 from deepspeed.module_inject.layers import GatherReplacedLayerParams, configure_tensor_parallel_runtime, collect_autotp_universal_checkpoint_info
+from deepspeed.module_inject.auto_ep_folding import reduce_autoep_folding_gradient
 from deepspeed.runtime.config import DEEPSPEED_OPTIMIZERS, \
     ADAGRAD_OPTIMIZER, ADAM_OPTIMIZER, ADAMW_OPTIMIZER, LAMB_OPTIMIZER, ONEBIT_ADAM_OPTIMIZER, ONEBIT_LAMB_OPTIMIZER, \
     TORCH_ADAM_PARAM, ADAM_W_MODE, ADAM_W_MODE_DEFAULT, ZERO_ONE_ADAM_OPTIMIZER, MUADAM_OPTIMIZER, MUADAMW_OPTIMIZER, \
@@ -2603,26 +2604,10 @@ class DeepSpeedEngine(Module):
         if tp_group is None:
             return
 
-        # TP and SP folding modes produce disjoint per-lane router/shared partials.
-        # Duplicated-token modes already hold a full replicated gradient per lane.
-        partitioned_grad_mode = getattr(folding_spec, "mp_mode", "tp") in ("tp", "sp")
-        tp_world_size = dist.get_world_size(group=tp_group)
-        for _, param in self.module.named_parameters():
+        for param_name, param in self.module.named_parameters():
             if not param.requires_grad or param.grad is None:
                 continue
-            if is_moe_param(param) or is_model_parallel_parameter(param):
-                continue
-            if param.grad.data.is_sparse:
-                continue
-            grad = param.grad.data
-            if partitioned_grad_mode and grad.dtype != torch.float32:
-                reduced = grad.float()
-                dist.all_reduce(reduced, group=tp_group)
-                grad.copy_(reduced.to(grad.dtype))
-                continue
-            dist.all_reduce(grad, group=tp_group)
-            if not partitioned_grad_mode:
-                grad.div_(tp_world_size)
+            reduce_autoep_folding_gradient(folding_spec, param, param.grad, tp_group=tp_group, param_name=param_name)
 
     def _backward_prologue(self):
         if is_functorch_transforming():

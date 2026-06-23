@@ -35,6 +35,7 @@ from deepspeed.git_version_info import version
 from deepspeed.runtime.constants import PIPE_REPLICATED
 from deepspeed.accelerator import get_accelerator
 from deepspeed.runtime.zero.muon.original_muon import muon_update
+from deepspeed.module_inject.auto_ep_folding import reduce_autoep_folding_gradient
 from deepspeed.checkpoint.constants import (DS_VERSION, GROUP_PADDINGS, PARTITION_COUNT, LOSS_SCALER,
                                             SINGLE_PARTITION_OF_FP32_GROUPS, BASE_OPTIMIZER_STATE,
                                             BASE_OPTIMIZER_STATE_STEP, CLIP_GRAD, ZERO_STAGE, PARAM_SLICE_MAPPINGS)
@@ -250,7 +251,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
 
         self.has_moe_layers = has_moe_layers
         self.autoep_folding_tp_group = None
-        self.autoep_folding_partitioned_grad_mode = False
+        self.autoep_folding_spec = None
         if self.has_moe_layers:
             self._configure_moe_settings()
         self._global_grad_norm = 0.
@@ -1023,33 +1024,17 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
     def configure_autoep_folding_tp_gradient_reduction(self, folding_spec):
         if folding_spec is None or folding_spec.tp_size <= 1:
             self.autoep_folding_tp_group = None
-            self.autoep_folding_partitioned_grad_mode = False
+            self.autoep_folding_spec = None
             return
         self.autoep_folding_tp_group = groups.get_tensor_model_parallel_group()
-        self.autoep_folding_partitioned_grad_mode = getattr(folding_spec, "mp_mode", "tp") in ("tp", "sp")
+        self.autoep_folding_spec = folding_spec
 
     def _maybe_reduce_autoep_folding_tp_gradient(self, param, grad):
         if not self.partition_gradients or self.autoep_folding_tp_group is None or grad is None:
             return
         if not getattr(param, "ds_grad_is_ready", True):
             return
-        if is_moe_param(param) or is_model_parallel_parameter(param):
-            return
-        if grad.data.is_sparse:
-            return
-        grad_data = grad.data
-        tp_world_size = dist.get_world_size(group=self.autoep_folding_tp_group)
-        if self.autoep_folding_partitioned_grad_mode and grad_data.dtype != torch.float32:
-            reduced = grad_data.float()
-            dist.all_reduce(reduced, group=self.autoep_folding_tp_group)
-            reduced.div_(tp_world_size)
-            grad_data.copy_(reduced.to(grad_data.dtype))
-            return
-        dist.all_reduce(grad_data, group=self.autoep_folding_tp_group)
-        if self.autoep_folding_partitioned_grad_mode:
-            grad_data.div_(tp_world_size)
-        else:
-            grad_data.div_(dist.get_world_size(group=self.autoep_folding_tp_group))
+        reduce_autoep_folding_gradient(self.autoep_folding_spec, param, grad, tp_group=self.autoep_folding_tp_group)
 
     def _fill_param_grad_accum_attribute(self, param):
         if param.grad is not None:

@@ -133,3 +133,7 @@ def test_validation_rule_g11_zero_offload_rejected(offload_key):
 
 def test_validation_rule_g12_cross_lane_ep_groups_temporarily_rejected():
     _assert_rejects("temporary limitation", world_size=8, tp_size=4, ep_size=4)
+
+
+def test_validation_rule_g13_expert_width_must_tile_dense_dp_lane():
+    _assert_rejects("dp % \\(ep \\* etp\\) == 0", world_size=12, tp_size=3, ep_size=3)

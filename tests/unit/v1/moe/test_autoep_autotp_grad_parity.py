@@ -15,6 +15,15 @@ import deepspeed
 import deepspeed.comm as dist
 from deepspeed.checkpoint.autoep_universal import validate_folding_metadata
 from deepspeed.checkpoint.constants import FOLDING_FAMILY, FOLDING_METADATA_KEY, FOLDING_PARAM_FAMILIES
+from deepspeed.module_inject.auto_ep_folding import (
+    AUTOEP_FOLDING_GRAD_REDUCE_AVERAGE,
+    AUTOEP_FOLDING_GRAD_REDUCE_SKIP,
+    AUTOEP_FOLDING_GRAD_REDUCE_SUM,
+    autoep_folding_gradient_reduction_strategy,
+    mark_autoep_folding_partial_router_parameter,
+    mark_autoep_folding_router_parameter,
+    mark_autoep_folding_sp_sharded_layernorm_parameter,
+)
 from deepspeed.module_inject.auto_ep_layer import AutoEPMoELayer
 from deepspeed.runtime.engine import DeepSpeedEngine
 from deepspeed.runtime.zero.stage_1_and_2 import DeepSpeedZeroOptimizer
@@ -31,6 +40,10 @@ from unit.v1.moe.autoep_test_utils import (
 )
 
 from deepspeed.module_inject.auto_ep_config import AutoEPConfig, validate_autoep_config
+
+
+def _folding_spec(mp_mode="tp", tp_size=2):
+    return type("Spec", (), {"tp_size": tp_size, "mp_mode": mp_mode})()
 
 
 def test_zero_offload_paths_fail_fast_until_per_family_replica_groups_are_proven():
@@ -74,15 +87,62 @@ def _folded_zero2_config(*, mixed_precision=True):
     return config
 
 
-@pytest.mark.parametrize(("mp_mode", "expected_grad"), (("tp", 2.0), ("sp", 2.0), ("replicated", 1.0)))
-def test_tp_replicated_gradient_reducer_respects_parallel_mode(monkeypatch, mp_mode, expected_grad):
+def test_autoep_folding_gradient_strategy_uses_parameter_family():
+    router = torch.nn.Parameter(torch.ones(2))
+    mark_autoep_folding_router_parameter(router)
+    assert (autoep_folding_gradient_reduction_strategy(_folding_spec("tp"),
+                                                       router) == AUTOEP_FOLDING_GRAD_REDUCE_AVERAGE)
+
+    partial_router = torch.nn.Parameter(torch.ones(2))
+    mark_autoep_folding_partial_router_parameter(partial_router)
+    assert (autoep_folding_gradient_reduction_strategy(_folding_spec("tp"),
+                                                       partial_router) == AUTOEP_FOLDING_GRAD_REDUCE_SUM)
+    assert (autoep_folding_gradient_reduction_strategy(_folding_spec("sp"),
+                                                       partial_router) == AUTOEP_FOLDING_GRAD_REDUCE_SUM)
+    assert (autoep_folding_gradient_reduction_strategy(_folding_spec("replicated"),
+                                                       router) == AUTOEP_FOLDING_GRAD_REDUCE_AVERAGE)
+
+    dense_or_layernorm = torch.nn.Parameter(torch.ones(2))
+    assert (autoep_folding_gradient_reduction_strategy(_folding_spec("tp"),
+                                                       dense_or_layernorm) == AUTOEP_FOLDING_GRAD_REDUCE_AVERAGE)
+
+    sp_layernorm = torch.nn.Parameter(torch.ones(2))
+    mark_autoep_folding_sp_sharded_layernorm_parameter(sp_layernorm)
+    assert (autoep_folding_gradient_reduction_strategy(_folding_spec("sp"),
+                                                       sp_layernorm) == AUTOEP_FOLDING_GRAD_REDUCE_SUM)
+    assert (autoep_folding_gradient_reduction_strategy(_folding_spec("tp"),
+                                                       sp_layernorm) == AUTOEP_FOLDING_GRAD_REDUCE_AVERAGE)
+
+    expert = torch.nn.Parameter(torch.ones(2))
+    expert.allreduce = False
+    assert autoep_folding_gradient_reduction_strategy(_folding_spec("tp"), expert) == AUTOEP_FOLDING_GRAD_REDUCE_SKIP
+
+    model_parallel = torch.nn.Parameter(torch.ones(2))
+    model_parallel.tensor_model_parallel = True
+    assert (autoep_folding_gradient_reduction_strategy(_folding_spec("tp"),
+                                                       model_parallel) == AUTOEP_FOLDING_GRAD_REDUCE_SKIP)
+
+
+@pytest.mark.parametrize(
+    ("param_name", "mark_router", "mp_mode", "expected_grad"),
+    (
+        ("model.layers.0.mlp.router.gate.weight", True, "tp", 1.0),
+        ("model.layers.0.mlp.router.gate.weight", True, "sp", 1.0),
+        ("model.layers.0.mlp.router.gate.weight", True, "replicated", 1.0),
+        ("model.layers.0.input_layernorm.weight", False, "tp", 1.0),
+    ),
+)
+def test_tp_replicated_gradient_reducer_respects_param_family(monkeypatch, param_name, mark_router, mp_mode,
+                                                              expected_grad):
     param = torch.nn.Parameter(torch.ones(2))
     param.grad = torch.ones_like(param)
+    if mark_router:
+        mark_autoep_folding_router_parameter(param)
     engine = object.__new__(DeepSpeedEngine)
-    engine._autoep_folding_spec = type("Spec", (), {"tp_size": 2, "mp_mode": mp_mode})()
+    engine._autoep_folding_spec = _folding_spec(mp_mode)
     engine.__dict__["optimizer"] = None
     engine.__dict__["module"] = type("ModuleStub", (),
-                                     {"named_parameters": lambda self: iter([("dense.weight", param)])})()
+                                     {"named_parameters": lambda self: iter([(param_name, param)])})()
     monkeypatch.setattr(dist, "is_initialized", lambda: True)
     monkeypatch.setattr(groups, "get_tensor_model_parallel_group", lambda: object())
     monkeypatch.setattr(dist, "get_world_size", lambda group=None: 2)
@@ -104,7 +164,7 @@ def test_zero2_tp_gradient_reducer_skips_incomplete_ds_grad(monkeypatch):
     optimizer = object.__new__(DeepSpeedZeroOptimizer)
     optimizer.partition_gradients = True
     optimizer.autoep_folding_tp_group = object()
-    optimizer.autoep_folding_partitioned_grad_mode = True
+    optimizer.autoep_folding_spec = _folding_spec("tp")
     calls = []
 
     def fake_all_reduce(tensor, group=None):
@@ -119,13 +179,16 @@ def test_zero2_tp_gradient_reducer_skips_incomplete_ds_grad(monkeypatch):
     torch.testing.assert_close(param.grad, torch.ones_like(param.grad))
 
 
-def test_zero2_tp_gradient_reducer_normalizes_partitioned_mode(monkeypatch):
+@pytest.mark.parametrize(("mark_router", "expected_grad"), ((True, 1.0), (False, 1.0)))
+def test_zero2_tp_gradient_reducer_uses_shared_param_family_strategy(monkeypatch, mark_router, expected_grad):
     param = torch.nn.Parameter(torch.ones(2))
     param.grad = torch.ones_like(param)
+    if mark_router:
+        mark_autoep_folding_router_parameter(param)
     optimizer = object.__new__(DeepSpeedZeroOptimizer)
     optimizer.partition_gradients = True
     optimizer.autoep_folding_tp_group = object()
-    optimizer.autoep_folding_partitioned_grad_mode = True
+    optimizer.autoep_folding_spec = _folding_spec("tp")
 
     def fake_all_reduce(tensor, group=None):
         tensor.mul_(2)
@@ -135,13 +198,33 @@ def test_zero2_tp_gradient_reducer_normalizes_partitioned_mode(monkeypatch):
 
     optimizer._maybe_reduce_autoep_folding_tp_gradient(param, param.grad)
 
-    torch.testing.assert_close(param.grad, torch.ones_like(param.grad))
+    torch.testing.assert_close(param.grad, torch.full_like(param.grad, expected_grad))
 
 
 def _folded_zero2_tp2_ep4_config():
     config = _folded_zero2_config(mixed_precision=False)
     config["expert_parallel"]["autoep_size"] = 4
     config["communication_data_type"] = "fp32"
+    return config
+
+
+def _folded_zero0_tp2_ep4_config():
+    config = make_autoep_config(zero_stage=0, ep_size=4, mixed_precision=False)
+    config["gradient_accumulation_steps"] = 2
+    config["gradient_clipping"] = 0.0
+    config["communication_data_type"] = "fp32"
+    config["optimizer"]["params"]["torch_adam"] = True
+    config["expert_parallel"]["autoep_size"] = 4
+    config["tensor_parallel"] = {
+        "autotp_size": 2,
+        "partition_config": {
+            "use_default_specs": False,
+            "layer_specs": [{
+                "patterns": [".*\\.weight$"],
+                "partition_type": "skip",
+            }],
+        },
+    }
     return config
 
 
@@ -157,6 +240,25 @@ def _zero2_baseline_config():
     config["communication_data_type"] = "fp32"
     config["optimizer"]["params"]["torch_adam"] = True
     return config
+
+
+def _zero0_baseline_config():
+    config = {
+        **{
+            key: value
+            for key, value in make_autoep_config(zero_stage=0, ep_size=1, mixed_precision=False).items() if key != "expert_parallel"
+        },
+        "gradient_accumulation_steps": 2,
+        "gradient_clipping": 0.0,
+    }
+    config["communication_data_type"] = "fp32"
+    config["optimizer"]["params"]["torch_adam"] = True
+    return config
+
+
+GATE_BASELINE = "model.layers.0.mlp.gate.weight"
+GATE_FOLDED = "model.layers.0.mlp.router.gate.weight"
+INPUT_LAYERNORM = "model.layers.0.input_layernorm.weight"
 
 
 def _router_grad_model():
@@ -195,6 +297,102 @@ def _full_grad_by_suffix(engine, suffix):
     raise AssertionError(f"Missing parameter ending with {suffix}")
 
 
+def _cpu_folded_zero0_router_gate_and_layernorm_worker(rank, world_size, _shared_tmpdir):
+    seed = 1234
+    tp_size = 2
+    logical_dp_world_size = world_size // tp_size
+    logical_dp_rank = rank // tp_size
+
+    seed_everything(seed)
+    reference_state = _router_grad_model().state_dict()
+
+    baseline_model = _router_grad_model()
+    baseline_model.load_state_dict(reference_state)
+    baseline_engine, _, _, _ = deepspeed.initialize(model=baseline_model, config=_zero0_baseline_config())
+    _run_router_grad_boundary(baseline_engine,
+                              logical_dp_world_size=logical_dp_world_size,
+                              logical_dp_rank=logical_dp_rank,
+                              seed=seed)
+    baseline_gate = _full_grad_by_suffix(baseline_engine, GATE_BASELINE)
+    baseline_layernorm = _full_grad_by_suffix(baseline_engine, INPUT_LAYERNORM)
+
+    folded_model = _router_grad_model()
+    folded_model.load_state_dict(reference_state)
+    folded_engine, _, _, _ = deepspeed.initialize(model=folded_model, config=_folded_zero0_tp2_ep4_config())
+    _run_router_grad_boundary(folded_engine,
+                              logical_dp_world_size=logical_dp_world_size,
+                              logical_dp_rank=logical_dp_rank,
+                              seed=seed)
+    folded_gate = _full_grad_by_suffix(folded_engine, GATE_FOLDED)
+    folded_layernorm = _full_grad_by_suffix(folded_engine, INPUT_LAYERNORM)
+
+    metrics = {
+        "rank": rank,
+        "gate": _grad_parity_metrics(folded_gate, baseline_gate),
+        "layernorm": _grad_parity_metrics(folded_layernorm, baseline_layernorm),
+    }
+    if rank == 0:
+        print("FOLDED_ENGINE_ZERO0_ROUTER_GATE_LAYERNORM_GRAD_PARITY " + json.dumps(metrics, sort_keys=True))
+    torch.testing.assert_close(folded_gate,
+                               baseline_gate,
+                               atol=1e-1,
+                               rtol=5e-3,
+                               msg=f"Folded zero_stage=0 router/gate grad must match baseline; metrics={metrics}")
+    torch.testing.assert_close(folded_layernorm,
+                               baseline_layernorm,
+                               atol=1e-1,
+                               rtol=5e-3,
+                               msg=f"Folded zero_stage=0 LayerNorm grad must match baseline; metrics={metrics}")
+
+
+def _cpu_folded_zero2_router_gate_and_layernorm_worker(rank, world_size, _shared_tmpdir):
+    seed = 1234
+    tp_size = 2
+    logical_dp_world_size = world_size // tp_size
+    logical_dp_rank = rank // tp_size
+
+    seed_everything(seed)
+    reference_state = _router_grad_model().state_dict()
+
+    baseline_model = _router_grad_model()
+    baseline_model.load_state_dict(reference_state)
+    baseline_engine, _, _, _ = deepspeed.initialize(model=baseline_model, config=_zero2_baseline_config())
+    _run_router_grad_boundary(baseline_engine,
+                              logical_dp_world_size=logical_dp_world_size,
+                              logical_dp_rank=logical_dp_rank,
+                              seed=seed)
+    baseline_gate = _full_grad_by_suffix(baseline_engine, GATE_BASELINE)
+    baseline_layernorm = _full_grad_by_suffix(baseline_engine, INPUT_LAYERNORM)
+
+    folded_model = _router_grad_model()
+    folded_model.load_state_dict(reference_state)
+    folded_engine, _, _, _ = deepspeed.initialize(model=folded_model, config=_folded_zero2_tp2_ep4_config())
+    _run_router_grad_boundary(folded_engine,
+                              logical_dp_world_size=logical_dp_world_size,
+                              logical_dp_rank=logical_dp_rank,
+                              seed=seed)
+    folded_gate = _full_grad_by_suffix(folded_engine, GATE_FOLDED)
+    folded_layernorm = _full_grad_by_suffix(folded_engine, INPUT_LAYERNORM)
+
+    metrics = {
+        "rank": rank,
+        "gate": _grad_parity_metrics(folded_gate, baseline_gate),
+        "layernorm": _grad_parity_metrics(folded_layernorm, baseline_layernorm),
+    }
+    if rank == 0:
+        print("FOLDED_ZERO2_ROUTER_GATE_LAYERNORM_GRAD_PARITY " + json.dumps(metrics, sort_keys=True))
+    torch.testing.assert_close(folded_gate,
+                               baseline_gate,
+                               atol=1e-1,
+                               rtol=5e-3,
+                               msg=f"Folded ZeRO-2 router/gate grad must match baseline; metrics={metrics}")
+    torch.testing.assert_close(folded_layernorm,
+                               baseline_layernorm,
+                               atol=1e-1,
+                               rtol=5e-3,
+                               msg=f"Folded ZeRO-2 LayerNorm grad must match baseline; metrics={metrics}")
+
+
 def _grad_parity_metrics(actual, expected):
     diff = actual - expected
     expected_norm_sq = expected.square().sum().item()
@@ -211,6 +409,14 @@ def _grad_parity_metrics(actual, expected):
         "folded_norm": actual_norm,
         "baseline_norm": expected_norm,
     }
+
+
+def test_cpu_gloo_folded_zero0_router_gate_and_layernorm_grad_parity(tmpdir):
+    run_cpu_gloo_test(_cpu_folded_zero0_router_gate_and_layernorm_worker, tmpdir, world_size=8)
+
+
+def test_cpu_gloo_folded_zero2_router_gate_and_layernorm_grad_parity(tmpdir):
+    run_cpu_gloo_test(_cpu_folded_zero2_router_gate_and_layernorm_worker, tmpdir, world_size=8)
 
 
 def _assert_zero_optimizer_folding_metadata(checkpoint_dir):
@@ -291,8 +497,8 @@ class TestH100FoldedRouterGateGradParityTP2EP4(DistributedTest):
     world_size = 8
     reuse_dist_env = False
 
-    def test_folded_router_gate_grad_matches_nonfolded_zero2_baseline(self):
-        skip_unless_h100_tests_enabled("H100 folded router/gate gradient parity node")
+    def test_folded_router_gate_and_layernorm_grad_match_nonfolded_zero2_baseline(self):
+        skip_unless_h100_tests_enabled("H100 folded router/gate and LayerNorm gradient parity node")
 
         seed = 1234
         tp_size = 2
@@ -308,7 +514,8 @@ class TestH100FoldedRouterGateGradParityTP2EP4(DistributedTest):
                                   logical_dp_world_size=logical_dp_world_size,
                                   logical_dp_rank=logical_dp_rank,
                                   seed=seed)
-        baseline_grad = _full_grad_by_suffix(baseline_engine, "model.layers.0.mlp.gate.weight")
+        baseline_gate_grad = _full_grad_by_suffix(baseline_engine, GATE_BASELINE)
+        baseline_layernorm_grad = _full_grad_by_suffix(baseline_engine, INPUT_LAYERNORM)
 
         folded_model = _router_grad_model()
         folded_model.load_state_dict(reference_state)
@@ -318,26 +525,28 @@ class TestH100FoldedRouterGateGradParityTP2EP4(DistributedTest):
                                   logical_dp_rank=logical_dp_rank,
                                   seed=seed)
 
-        folded_grad = _full_grad_by_suffix(folded_engine, "model.layers.0.mlp.router.gate.weight")
+        folded_gate_grad = _full_grad_by_suffix(folded_engine, GATE_FOLDED)
+        folded_layernorm_grad = _full_grad_by_suffix(folded_engine, INPUT_LAYERNORM)
         metrics = {
-            **_grad_parity_metrics(folded_grad, baseline_grad),
-            "nodeid":
-            "tests/unit/v1/moe/test_autoep_autotp_grad_parity.py::"
+            "nodeid": "tests/unit/v1/moe/test_autoep_autotp_grad_parity.py::"
             "TestH100FoldedRouterGateGradParityTP2EP4::"
-            "test_folded_router_gate_grad_matches_nonfolded_zero2_baseline",
-            "rank":
-            dist.get_rank(),
-            "target_param":
-            "model.layers.0.mlp.gate.weight",
-            "folded_param":
-            "model.layers.0.mlp.router.gate.weight",
+            "test_folded_router_gate_and_layernorm_grad_match_nonfolded_zero2_baseline",
+            "rank": dist.get_rank(),
+            "gate": _grad_parity_metrics(folded_gate_grad, baseline_gate_grad),
+            "layernorm": _grad_parity_metrics(folded_layernorm_grad, baseline_layernorm_grad),
         }
         if dist.get_rank() == 0:
-            print("FOLDED_ROUTER_GATE_GRAD_PARITY " + json.dumps(metrics, sort_keys=True))
+            print("FOLDED_ROUTER_GATE_LAYERNORM_GRAD_PARITY " + json.dumps(metrics, sort_keys=True))
 
-        torch.testing.assert_close(folded_grad,
-                                   baseline_grad,
+        torch.testing.assert_close(folded_gate_grad,
+                                   baseline_gate_grad,
                                    atol=1e-1,
                                    rtol=5e-3,
                                    msg=("Folded TP2-EP4 router/gate grad must match the non-folded ZeRO-2 "
+                                        f"baseline; metrics={metrics}"))
+        torch.testing.assert_close(folded_layernorm_grad,
+                                   baseline_layernorm_grad,
+                                   atol=1e-1,
+                                   rtol=5e-3,
+                                   msg=("Folded TP2-EP4 LayerNorm grad must match the non-folded ZeRO-2 "
                                         f"baseline; metrics={metrics}"))

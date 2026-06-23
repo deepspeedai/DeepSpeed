@@ -20,6 +20,7 @@ import torch
 import torch.nn as nn
 import deepspeed.comm as dist
 from deepspeed.module_inject.auto_ep_config import AutoEPConfig, MoELayerSpec, resolve_autoep_config_defaults
+from deepspeed.module_inject.auto_ep_folding import mark_autoep_folding_router_parameter
 from deepspeed.utils import logger
 from deepspeed.moe.ep_router import TokenChoiceTopKRouter
 from deepspeed.moe.ep_count import count_tokens_per_expert
@@ -491,6 +492,7 @@ class AutoEPMoELayer(nn.Module):
         # Mark shared expert and router params for global DP reduction
         for param in self.router.parameters():
             param.allreduce = True
+            mark_autoep_folding_router_parameter(param)
         if self.shared_experts is not None:
             for param in self.shared_experts.parameters():
                 param.allreduce = True

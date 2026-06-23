@@ -13,6 +13,16 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Iterable
 
+import torch
+
+AUTOEP_FOLDING_PARAM_FAMILY_ATTR = "ds_autoep_folding_param_family"
+AUTOEP_FOLDING_ROUTER_GATE_REPLICATED_PARAM = "router_gate_replicated"
+AUTOEP_FOLDING_ROUTER_GATE_PARTIAL_PARAM = "router_gate_partial"
+AUTOEP_FOLDING_SP_SHARDED_LAYERNORM_PARAM = "sp_sharded_layernorm"
+AUTOEP_FOLDING_GRAD_REDUCE_SKIP = "skip"
+AUTOEP_FOLDING_GRAD_REDUCE_SUM = "sum"
+AUTOEP_FOLDING_GRAD_REDUCE_AVERAGE = "average"
+
 
 @dataclass(frozen=True)
 class ParallelFoldingSpec:
@@ -207,6 +217,14 @@ def validate_folding_global(
                          f"stage_size = {spec.stage_size}). This is a temporary limitation; use a shape with "
                          "ep * etp <= dp or run a follow-up implementation for cross-lane EP groups.")
 
+    if spec.tp_size > 1 and spec.dp_size % expert_width != 0:
+        raise ValueError("AutoEP+AutoTP folding requires the derived dense data-parallel size to be divisible by "
+                         "expert_parallel.autoep_size * expert_parallel.expert_tensor_parallel_size so expert "
+                         "groups stay within dense data-parallel lanes "
+                         f"(dp = {spec.dp_size}, ep * etp = {expert_width}, stage_size = {spec.stage_size}). "
+                         "Use a shape where dp % (ep * etp) == 0 or run a follow-up implementation for "
+                         "cross-lane EP groups.")
+
     if tp_preset is not None and ep_preset is not None and tp_preset != ep_preset:
         raise ValueError("tensor_parallel.preset_model and expert_parallel.preset_model must match when both "
                          f"are set (tensor_parallel.preset_model={tp_preset!r}, "
@@ -235,6 +253,114 @@ def validate_folding_global(
     mpu_pp = _mpu_world_size(mpu, "get_pipeline_model_parallel_world_size", "get_pipeline_parallel_world_size")
     if mpu_pp not in (None, spec.pp_size):
         raise ValueError(f"mpu pipeline parallel world size ({mpu_pp}) conflicts with pp_size={spec.pp_size}.")
+
+
+def mark_autoep_folding_router_parameter(param) -> None:
+    setattr(param, AUTOEP_FOLDING_PARAM_FAMILY_ATTR, AUTOEP_FOLDING_ROUTER_GATE_REPLICATED_PARAM)
+
+
+def mark_autoep_folding_partial_router_parameter(param) -> None:
+    setattr(param, AUTOEP_FOLDING_PARAM_FAMILY_ATTR, AUTOEP_FOLDING_ROUTER_GATE_PARTIAL_PARAM)
+
+
+def mark_autoep_folding_sp_sharded_layernorm_parameter(param) -> None:
+    setattr(param, AUTOEP_FOLDING_PARAM_FAMILY_ATTR, AUTOEP_FOLDING_SP_SHARDED_LAYERNORM_PARAM)
+
+
+def _is_moe_param_marker(param) -> bool:
+    return hasattr(param, "allreduce") and not param.allreduce
+
+
+def _is_model_parallel_param_marker(param) -> bool:
+    return bool(getattr(param, "model_parallel", False) or getattr(param, "tensor_model_parallel", False))
+
+
+def _autoep_folding_param_family(param, *, param_name: str | None = None) -> str | None:
+    family = getattr(param, AUTOEP_FOLDING_PARAM_FAMILY_ATTR, None)
+    if family is not None:
+        return family
+    if param_name is not None and ".router." in param_name:
+        return AUTOEP_FOLDING_ROUTER_GATE_REPLICATED_PARAM
+    return None
+
+
+def autoep_folding_gradient_reduction_strategy(
+    folding_spec: ParallelFoldingSpec | None,
+    param,
+    *,
+    param_name: str | None = None,
+) -> str:
+    """Classify one folded TP/SP gradient as ``sum``, ``average``, or ``skip``.
+
+    TP means Tensor Parallel and SP means Sequence Parallel. The parallel mode
+    alone is not a safe SUM-vs-AVG selector because different parameter
+    families see different backward semantics:
+
+    - Router/gate parameters that are explicitly marked as routed-token
+      partials in TP/SP token-partitioned modes receive one partial gradient per
+      lane, so their TP/SP reduction is a SUM. The current AutoEP folded router
+      gate is marked ``router_gate_replicated`` because the full-flow backward
+      reaches this reducer as a lane-replicated gradient; that family uses the
+      same AVERAGE normalization as other replicated parameters.
+    - Dense and LayerNorm parameters that are merely replicated by TP folding
+      are not routed-token partials; blindly SUMing them scales gradients by
+      the TP size, so their extra TP reduction is an AVERAGE.
+    - A true SP-sharded LayerNorm would be a partial-gradient parameter and
+      should SUM. The current AutoEP folding path does not mark runtime
+      LayerNorm parameters that way; the marker and strategy boundary exist so
+      future SP support has an explicit contract instead of reusing the dense
+      replicated default by accident.
+    - Expert parameters and model-parallel parameters are SKIP because their
+      EP/TP-specific paths own their reductions.
+
+    Both the DeepSpeedEngine path and the ZeRO-2 path call this helper so the
+    policy cannot silently drift between optimizers.
+    """
+    if folding_spec is None or getattr(folding_spec, "tp_size", 1) <= 1:
+        return AUTOEP_FOLDING_GRAD_REDUCE_SKIP
+    if _is_moe_param_marker(param) or _is_model_parallel_param_marker(param):
+        return AUTOEP_FOLDING_GRAD_REDUCE_SKIP
+
+    family = _autoep_folding_param_family(param, param_name=param_name)
+    mp_mode = getattr(folding_spec, "mp_mode", "tp")
+    token_partitioned_mode = mp_mode in ("tp", "sp")
+    if family == AUTOEP_FOLDING_ROUTER_GATE_PARTIAL_PARAM:
+        return AUTOEP_FOLDING_GRAD_REDUCE_SUM if token_partitioned_mode else AUTOEP_FOLDING_GRAD_REDUCE_AVERAGE
+    if family == AUTOEP_FOLDING_ROUTER_GATE_REPLICATED_PARAM:
+        return AUTOEP_FOLDING_GRAD_REDUCE_AVERAGE
+    if family == AUTOEP_FOLDING_SP_SHARDED_LAYERNORM_PARAM and mp_mode == "sp":
+        return AUTOEP_FOLDING_GRAD_REDUCE_SUM
+    return AUTOEP_FOLDING_GRAD_REDUCE_AVERAGE
+
+
+def reduce_autoep_folding_gradient(
+    folding_spec: ParallelFoldingSpec | None,
+    param,
+    grad,
+    *,
+    tp_group,
+    param_name: str | None = None,
+) -> str:
+    strategy = autoep_folding_gradient_reduction_strategy(folding_spec, param, param_name=param_name)
+    if strategy == AUTOEP_FOLDING_GRAD_REDUCE_SKIP or grad is None or grad.data.is_sparse:
+        return strategy
+
+    from deepspeed import comm as dist
+
+    grad_data = grad.data
+    tp_world_size = dist.get_world_size(group=tp_group)
+    if grad_data.dtype != torch.float32:
+        reduced = grad_data.float()
+        dist.all_reduce(reduced, group=tp_group)
+        if strategy == AUTOEP_FOLDING_GRAD_REDUCE_AVERAGE:
+            reduced.div_(tp_world_size)
+        grad_data.copy_(reduced.to(grad_data.dtype))
+        return strategy
+
+    dist.all_reduce(grad_data, group=tp_group)
+    if strategy == AUTOEP_FOLDING_GRAD_REDUCE_AVERAGE:
+        grad_data.div_(tp_world_size)
+    return strategy
 
 
 def _normalize_rank_groups(groups: Iterable[Iterable[int]]) -> set[tuple[int, ...]]:
