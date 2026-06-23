@@ -12,6 +12,7 @@ from deepspeed.compile.util import get_deepcompile_handle, is_deepcompile_suppor
 
 
 @pytest.mark.skipif(not is_deepcompile_supported(), reason="DeepCompile requires CUDA and supported PyTorch")
+@pytest.mark.sequential
 def test_end_backward_depends_on_all_reduce_nodes():
     get_deepcompile_handle()
 
@@ -26,7 +27,7 @@ def test_end_backward_depends_on_all_reduce_nodes():
     graph.lint()
 
     end_backward = next(n for n in graph.nodes if n.target == torch.ops.dc.end_backward.default)
-    deps, graph_id = end_backward.args
+    deps, graph_id, _ = end_backward.args
     output_node = get_output_node(graph)
 
     assert graph_id == 7

@@ -120,6 +120,61 @@ class TestCPUAdam(DistributedTest):
                             optimizer2=ref_optimizer)
 
 
+class TestCPUAdamBf16OptimizerStates(DistributedTest):
+    world_size = 1
+    reuse_dist_env = True
+    requires_cuda_env = False
+    if not get_accelerator().is_available():
+        init_distributed = False
+        set_dist_env = False
+
+    @pytest.mark.parametrize('model_size', [64, 1024])
+    def test_bf16_optimizer_states_dtype(self, model_size):
+        """fp32_optimizer_states=False keeps the Adam moments in the bf16 parameter precision."""
+        from deepspeed.ops.adam import DeepSpeedCPUAdam
+
+        param = torch.nn.Parameter(torch.randn(model_size, device='cpu', dtype=torch.bfloat16))
+        optimizer = DeepSpeedCPUAdam([param], fp32_optimizer_states=False)
+        param.grad = torch.randn(model_size, device='cpu', dtype=torch.bfloat16)
+        optimizer.step()
+
+        state = optimizer.state[param]
+        assert state['exp_avg'].dtype == torch.bfloat16
+        assert state['exp_avg_sq'].dtype == torch.bfloat16
+        assert state['exp_avg'].device == torch.device('cpu')
+        assert state['exp_avg_sq'].device == torch.device('cpu')
+
+    @pytest.mark.parametrize('model_size', [64, 1024])
+    def test_bf16_optimizer_states_match_fp32(self, model_size):
+        """bf16 moments should track fp32 moments within bf16 tolerance over several steps."""
+        from deepspeed.ops.adam import DeepSpeedCPUAdam
+
+        torch.manual_seed(0)
+        base = torch.randn(model_size, device='cpu', dtype=torch.float32).to(torch.bfloat16)
+        param_fp32_states = torch.nn.Parameter(base.clone())
+        param_bf16_states = torch.nn.Parameter(base.clone())
+
+        opt_fp32_states = DeepSpeedCPUAdam([param_fp32_states], fp32_optimizer_states=True)
+        opt_bf16_states = DeepSpeedCPUAdam([param_bf16_states], fp32_optimizer_states=False)
+
+        for _ in range(10):
+            grad = torch.randn(model_size, device='cpu', dtype=torch.bfloat16)
+            param_fp32_states.grad = grad.clone()
+            param_bf16_states.grad = grad.clone()
+            opt_fp32_states.step()
+            opt_bf16_states.step()
+
+        assert opt_fp32_states.state[param_fp32_states]['exp_avg'].dtype == torch.float32
+        assert opt_bf16_states.state[param_bf16_states]['exp_avg'].dtype == torch.bfloat16
+
+        # bf16 moments round every Adam update to an 8-bit mantissa, so over 10 steps they
+        # diverge from fp32 moments more than the same-precision comparison in _compare_optimizers
+        # (1e-2). A wider 5% band keeps this stable while still catching gross errors; the dtype
+        # assertions above guard the precision itself. Norm comparison follows _compare_optimizers.
+        tolerance = param_fp32_states.float().norm().detach().numpy() * 5e-2
+        check_equal(param_fp32_states.float().norm(), param_bf16_states.float().norm(), atol=tolerance)
+
+
 class TestCPUAdamGPUError(DistributedTest):
 
     def test_cpu_adam_gpu_error(self):
@@ -312,3 +367,59 @@ class TestCPUAdamSubgroup(DistributedTest):
         optimizer.rollback_subgroup(0)
         assert optimizer.state[0]['step'] == 1, "Subgroup 0 step count should be decremented"
         assert optimizer.state[1]['step'] == 1, "Subgroup 1 step count should be unchanged"
+
+    def test_step_subgroup_same_step_idempotent_across_subgroups(self):
+        """Repeated same-step subgroup updates should remain bit-identical."""
+        from deepspeed.ops.adam import DeepSpeedCPUAdam
+
+        model_size = 128
+        steps = 4
+        base = torch.randn(model_size, device='cpu', dtype=torch.float32)
+        param_a = torch.nn.Parameter(base.clone())
+        param_b = torch.nn.Parameter(base.clone())
+
+        optimizer = DeepSpeedCPUAdam([param_a])
+        for logical_step in range(1, steps + 1):
+            grad = torch.randn(model_size, device='cpu', dtype=torch.float32)
+
+            optimizer.param_groups[0]['params'] = [param_a]
+            param_a.grad = grad.clone()
+            optimizer.step_subgroup(0)
+
+            optimizer.param_groups[0]['params'] = [param_b]
+            param_b.grad = grad.clone()
+            optimizer.step_subgroup(1)
+
+            assert optimizer.state[0]['step'] == logical_step
+            assert optimizer.state[1]['step'] == logical_step
+            assert torch.equal(param_a.data, param_b.data)
+            assert torch.equal(optimizer.state[0]['exp_avg'], optimizer.state[1]['exp_avg'])
+            assert torch.equal(optimizer.state[0]['exp_avg_sq'], optimizer.state[1]['exp_avg_sq'])
+
+    def test_step_same_step_idempotent_across_param_keys(self):
+        """Repeated optimizer.step() with swapped param keys should be deterministic."""
+        from deepspeed.ops.adam import DeepSpeedCPUAdam
+
+        model_size = 128
+        steps = 4
+        base = torch.randn(model_size, device='cpu', dtype=torch.float32)
+        param_a = torch.nn.Parameter(base.clone())
+        param_b = torch.nn.Parameter(base.clone())
+
+        optimizer = DeepSpeedCPUAdam([param_a])
+        for logical_step in range(1, steps + 1):
+            grad = torch.randn(model_size, device='cpu', dtype=torch.float32)
+
+            optimizer.param_groups[0]['params'] = [param_a]
+            param_a.grad = grad.clone()
+            optimizer.step()
+
+            optimizer.param_groups[0]['params'] = [param_b]
+            param_b.grad = grad.clone()
+            optimizer.step()
+
+            assert optimizer.state[param_a]['step'] == logical_step
+            assert optimizer.state[param_b]['step'] == logical_step
+            assert torch.equal(param_a.data, param_b.data)
+            assert torch.equal(optimizer.state[param_a]['exp_avg'], optimizer.state[param_b]['exp_avg'])
+            assert torch.equal(optimizer.state[param_a]['exp_avg_sq'], optimizer.state[param_b]['exp_avg_sq'])

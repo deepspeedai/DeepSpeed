@@ -30,6 +30,7 @@ SOFTWARE.
 import torch
 import deepspeed.comm as dist  # replace torch's distributed package with deepspeed.comm to resolve deepspeed check
 from deepspeed.runtime import compiler
+from deepspeed.accelerator import get_accelerator
 
 
 @compiler.compile()
@@ -45,7 +46,9 @@ def zeropower_via_newtonschulz5(G, steps: int):
     """
     assert G.ndim >= 2  # batched Muon implementation by @scottjmaddox, and put into practice in the record by @YouJiacheng
     a, b, c = (3.4445, -4.7750, 2.0315)
-    X = G.bfloat16()
+    # Use bf16 when hardware supports it; fp32 otherwise
+    compute_dtype = torch.bfloat16 if get_accelerator().is_bf16_supported() else torch.float32
+    X = G.to(compute_dtype)
     if G.size(-2) > G.size(-1):
         X = X.mT
 
@@ -63,13 +66,101 @@ def zeropower_via_newtonschulz5(G, steps: int):
 
 
 @compiler.compile()
-def muon_update(grad, momentum, beta=0.95, ns_steps=5, nesterov=True):
+def zeropower_via_gram_newtonschulz(G, steps: int):
+    """
+    Gram Newton-Schulz iteration for orthogonalization.
+
+    Mathematically equivalent to standard Newton-Schulz but iterates on the
+    small square Gram matrix R = X @ X.T (n x n) instead of the full rectangular
+    X (n x m). This reduces FLOPs significantly when m >> n (typical for
+    transformer weight matrices with aspect ratio ~5).
+
+    Uses fp16 instead of bf16 for better numerical precision at the same
+    compute cost. Includes a restart at iteration 2 to maintain stability
+    in half-precision.
+
+    Falls back to standard Newton-Schulz for square matrices (n == m)
+    where there is no FLOP advantage.
+
+    Reference: https://tridao.me/blog/2026/gram-newton-schulz/
+    """
+    assert G.ndim >= 2
+    a, b, c = (3.4445, -4.7750, 2.0315)
+    # Use fp16 for better precision than bf16 when hardware supports it; fp32 otherwise
+    compute_dtype = torch.float16 if get_accelerator().is_fp16_supported() else torch.float32
+    X = G.to(compute_dtype)
+    if G.size(-2) > G.size(-1):
+        X = X.mT
+
+    n, m = X.size(-2), X.size(-1)
+
+    X = X / (X.norm(dim=(-2, -1), keepdim=True) + 1e-7)
+
+    # For square matrices, no FLOP advantage; use standard iteration
+    if m <= n:
+        for _ in range(steps):
+            A = X @ X.mT
+            B = b * A + c * A @ A
+            X = a * X + B @ X
+        if G.size(-2) > G.size(-1):
+            X = X.mT
+        return X
+
+    # Gram NS: iterate on R = X @ X.T (n x n) instead of X (n x m)
+    R = X @ X.mT
+    Q = None
+    restart_at = 2
+
+    for i in range(steps):
+        if i == restart_at and i != 0:
+            X = Q @ X
+            R = X @ X.mT
+            Q = None
+
+        Z = b * R + c * R @ R
+
+        if Q is None:
+            Q = Z.clone()
+            if Q.ndim == 2:
+                Q.diagonal().add_(a)
+            else:
+                Q.diagonal(dim1=-2, dim2=-1).add_(a)
+        else:
+            Q = a * Q + Z @ Q
+
+        if i < steps - 1 and (i + 1) != restart_at:
+            RZ = a * R + Z @ R
+            R = a * RZ + Z @ RZ
+
+    if G.size(-2) > G.size(-1):
+        X = X.mT @ Q.mT
+    else:
+        X = Q @ X
+    return X
+
+
+NS_METHODS = {"standard", "gram"}
+
+
+@compiler.compile()
+def muon_update(grad, momentum, beta=0.95, ns_steps=5, nesterov=True, ns_method="gram", is_expert_group=False):
+    orig_dtype = grad.dtype
     momentum.lerp_(grad, 1 - beta)
     update = grad.lerp_(momentum, beta) if nesterov else momentum
-    if update.ndim == 4:  # for the case of conv filters
-        update = update.view(len(update), -1)
-    update = zeropower_via_newtonschulz5(update, steps=ns_steps)
-    update *= max(1, grad.size(-2) / grad.size(-1))**0.5
+    if is_expert_group:
+        ns_fn = zeropower_via_gram_newtonschulz if ns_method == "gram" else zeropower_via_newtonschulz5
+        scale = max(1, update.size(-2) / update.size(-1))**0.5
+        update = ns_fn(update, steps=ns_steps) * scale
+    else:
+        if update.ndim == 4:  # for the case of conv filters
+            update = update.view(len(update), -1)
+        if ns_method == "gram":
+            update = zeropower_via_gram_newtonschulz(update, steps=ns_steps)
+        else:
+            update = zeropower_via_newtonschulz5(update, steps=ns_steps)
+        update *= max(1, grad.size(-2) / grad.size(-1))**0.5
+    if update.dtype != orig_dtype:
+        update = update.to(orig_dtype)
     return update
 
 
@@ -93,10 +184,12 @@ class Muon(torch.optim.Optimizer):
         lr: The learning rate, in units of spectral norm per update.
         weight_decay: The AdamW-style weight decay.
         momentum: The momentum. A value of 0.95 here is usually fine.
+        ns_method: Newton-Schulz method. "gram" (default) uses Gram NS for ~2x speedup
+                   on rectangular matrices. "standard" uses the original iteration.
     """
 
-    def __init__(self, params, lr=0.02, weight_decay=0, momentum=0.95):
-        defaults = dict(lr=lr, weight_decay=weight_decay, momentum=momentum)
+    def __init__(self, params, lr=0.02, weight_decay=0, momentum=0.95, ns_method="gram"):
+        defaults = dict(lr=lr, weight_decay=weight_decay, momentum=momentum, ns_method=ns_method)
         assert isinstance(params, list) and len(params) >= 1 and isinstance(params[0], torch.nn.Parameter)
         params = sorted(params, key=lambda x: x.size(), reverse=True)
         super().__init__(params, defaults)
@@ -122,7 +215,11 @@ class Muon(torch.optim.Optimizer):
                     state = self.state[p]
                     if len(state) == 0:
                         state["momentum_buffer"] = torch.zeros_like(p)
-                    update = muon_update(p.grad, state["momentum_buffer"], beta=group["momentum"])
+                    update = muon_update(p.grad,
+                                         state["momentum_buffer"],
+                                         beta=group["momentum"],
+                                         ns_method=group.get("ns_method", "gram"),
+                                         is_expert_group=getattr(p, 'is_expert_group', False))
                     p.mul_(1 - group["lr"] * group["weight_decay"])
                     p.add_(update.reshape(p.shape), alpha=-group["lr"])
                 dist.all_gather(params_pad[base_i:base_i + dist.get_world_size()],
@@ -136,8 +233,8 @@ class SingleDeviceMuon(torch.optim.Optimizer):
     Muon variant for usage in non-distributed settings.
     """
 
-    def __init__(self, params, lr=0.02, weight_decay=0, momentum=0.95):
-        defaults = dict(lr=lr, weight_decay=weight_decay, momentum=momentum)
+    def __init__(self, params, lr=0.02, weight_decay=0, momentum=0.95, ns_method="gram"):
+        defaults = dict(lr=lr, weight_decay=weight_decay, momentum=momentum, ns_method=ns_method)
         super().__init__(params, defaults)
 
     @torch.no_grad()
@@ -156,7 +253,11 @@ class SingleDeviceMuon(torch.optim.Optimizer):
                 state = self.state[p]
                 if len(state) == 0:
                     state["momentum_buffer"] = torch.zeros_like(p)
-                update = muon_update(p.grad, state["momentum_buffer"], beta=group["momentum"])
+                update = muon_update(p.grad,
+                                     state["momentum_buffer"],
+                                     beta=group["momentum"],
+                                     ns_method=group.get("ns_method", "gram"),
+                                     is_expert_group=getattr(p, 'is_expert_group', False))
                 p.mul_(1 - group["lr"] * group["weight_decay"])
                 p.add_(update.reshape(p.shape), alpha=-group["lr"])
 
@@ -208,14 +309,18 @@ class MuonWithAuxAdam(torch.optim.Optimizer):
                 group["lr"] = group.get("lr", 0.02)
                 group["momentum"] = group.get("momentum", 0.95)
                 group["weight_decay"] = group.get("weight_decay", 0)
-                assert set(group.keys()) == set(["params", "lr", "momentum", "weight_decay", "use_muon"])
+                group["ns_method"] = group.get("ns_method", "gram")
+                assert group[
+                    "ns_method"] in NS_METHODS, f"ns_method must be one of {NS_METHODS}, got {group['ns_method']}"
+                assert set(["params", "lr", "momentum", "weight_decay", "use_muon",
+                            "ns_method"]).issubset(set(group.keys()))
             else:
                 # defaults
                 group["lr"] = group.get("lr", 3e-4)
                 group["betas"] = group.get("betas", (0.9, 0.95))
                 group["eps"] = group.get("eps", 1e-10)
                 group["weight_decay"] = group.get("weight_decay", 0)
-                assert set(group.keys()) == set(["params", "lr", "betas", "eps", "weight_decay", "use_muon"])
+                assert set(["params", "lr", "betas", "eps", "weight_decay", "use_muon"]).issubset(set(group.keys()))
         super().__init__(param_groups, dict())
 
     @torch.no_grad()
@@ -240,7 +345,11 @@ class MuonWithAuxAdam(torch.optim.Optimizer):
                         state = self.state[p]
                         if len(state) == 0:
                             state["momentum_buffer"] = torch.zeros_like(p)
-                        update = muon_update(p.grad, state["momentum_buffer"], beta=group["momentum"])
+                        update = muon_update(p.grad,
+                                             state["momentum_buffer"],
+                                             beta=group["momentum"],
+                                             ns_method=group.get("ns_method", "gram"),
+                                             is_expert_group=getattr(p, 'is_expert_group', False))
                         p.mul_(1 - group["lr"] * group["weight_decay"])
                         p.add_(update.reshape(p.shape), alpha=-group["lr"])
                     dist.all_gather(params_pad[base_i:base_i + dist.get_world_size()],
@@ -277,14 +386,18 @@ class SingleDeviceMuonWithAuxAdam(torch.optim.Optimizer):
                 group["lr"] = group.get("lr", 0.02)
                 group["momentum"] = group.get("momentum", 0.95)
                 group["weight_decay"] = group.get("weight_decay", 0)
-                assert set(group.keys()) == set(["params", "lr", "momentum", "weight_decay", "use_muon"])
+                group["ns_method"] = group.get("ns_method", "gram")
+                assert group[
+                    "ns_method"] in NS_METHODS, f"ns_method must be one of {NS_METHODS}, got {group['ns_method']}"
+                assert set(["params", "lr", "momentum", "weight_decay", "use_muon",
+                            "ns_method"]).issubset(set(group.keys()))
             else:
                 # defaults
                 group["lr"] = group.get("lr", 3e-4)
                 group["betas"] = group.get("betas", (0.9, 0.95))
                 group["eps"] = group.get("eps", 1e-10)
                 group["weight_decay"] = group.get("weight_decay", 0)
-                assert set(group.keys()) == set(["params", "lr", "betas", "eps", "weight_decay", "use_muon"])
+                assert set(["params", "lr", "betas", "eps", "weight_decay", "use_muon"]).issubset(set(group.keys()))
         super().__init__(param_groups, dict())
 
     @torch.no_grad()
@@ -304,7 +417,11 @@ class SingleDeviceMuonWithAuxAdam(torch.optim.Optimizer):
                     state = self.state[p]
                     if len(state) == 0:
                         state["momentum_buffer"] = torch.zeros_like(p)
-                    update = muon_update(p.grad, state["momentum_buffer"], beta=group["momentum"])
+                    update = muon_update(p.grad,
+                                         state["momentum_buffer"],
+                                         beta=group["momentum"],
+                                         ns_method=group.get("ns_method", "gram"),
+                                         is_expert_group=getattr(p, 'is_expert_group', False))
                     p.mul_(1 - group["lr"] * group["weight_decay"])
                     p.add_(update.reshape(p.shape), alpha=-group["lr"])
             else:

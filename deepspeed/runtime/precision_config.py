@@ -4,7 +4,7 @@
 # DeepSpeed Team
 
 import math
-from pydantic import field_validator
+from pydantic import field_validator, model_validator
 from deepspeed.runtime.config_utils import DeepSpeedConfigModel
 from .fp16.loss_scaler import (
     INITIAL_LOSS_SCALE,
@@ -159,6 +159,40 @@ class DeepSpeedFP16Config(DeepSpeedConfigModel):
     """
     Maintain master weights in optimizer state as fp16 instead of fp32 (valid with DeepSpeedCPUAdam only).
     """
+
+    @field_validator("loss_scale_window", "min_loss_scale", mode="before")
+    @classmethod
+    def _reject_non_integer_scale_params(cls, v, info):
+        # Pydantic coerces bool to int (True -> 1, False -> 0) and floats to int,
+        # so a bool or non-finite value would silently pass the positivity check
+        # in _validate_dynamic_loss_scale_params. Reject those here before coercion.
+        field = f"fp16.{info.field_name}"
+        if isinstance(v, bool):
+            raise ValueError(f"{field} must be an integer, not bool")
+        if isinstance(v, float) and not math.isfinite(v):
+            raise ValueError(f"{field} must be a finite number (not inf/-inf/nan)")
+        try:
+            int(v)
+        except (TypeError, ValueError):
+            raise ValueError(f"{field} must be an integer")
+        return v
+
+    @model_validator(mode="after")
+    def _validate_dynamic_loss_scale_params(self):
+        # loss_scale_window and min_loss_scale only take effect when dynamic loss
+        # scaling is active, i.e. fp16 is enabled and loss_scale == 0 (see
+        # DeepSpeedEngine.dynamic_loss_scale). Validating them otherwise would
+        # reject valid static-loss-scale configs that carry unused values.
+        if self.enabled and self.loss_scale == 0:
+            # loss_scale_window is used as `stable_interval % scale_window` in
+            # DynamicLossScaler.update_scale, so 0 raises ZeroDivisionError.
+            if self.loss_scale_window <= 0:
+                raise ValueError(
+                    "fp16.loss_scale_window must be > 0 when dynamic loss scaling is enabled (loss_scale=0)")
+            # min_loss_scale is the loss-scale floor, which collapses if <= 0.
+            if self.min_loss_scale <= 0:
+                raise ValueError("fp16.min_loss_scale must be > 0 when dynamic loss scaling is enabled (loss_scale=0)")
+        return self
 
     def initial_dynamic_scale(self):
         return 2**self.initial_scale_power

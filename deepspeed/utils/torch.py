@@ -27,6 +27,16 @@ def required_torch_version(min_version=None, max_version=None):
     return True
 
 
+def is_functorch_transforming():
+    """True when called under torch.func.grad / vmap / jacrev / etc."""
+    # peek_interpreter_stack is private; getattr keeps this working if it moves.
+    _functorch = getattr(torch._C, "_functorch", None)
+    if _functorch is None:
+        return False
+    peek = getattr(_functorch, "peek_interpreter_stack", None)
+    return peek is not None and peek() is not None
+
+
 def register_grad_hook(param, hook):
     if required_torch_version(min_version=2.1):
         return param.register_post_accumulate_grad_hook(hook)

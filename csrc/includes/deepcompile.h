@@ -256,9 +256,9 @@ public:
             at::Tensor ds_tensor,
             at::Tensor grad_buffer,
             bool partitioned,
-            int64_t offset,  // for Z1
-            bool persistent  // for Z3
-            )
+            int64_t offset,   // for Z1
+            bool persistent,  // for Z3
+            std::optional<at::ScalarType> expected_grad_dtype = std::nullopt)
         : id_(id),
           shape_(std::move(ds_shape)),
           ds_tensor_(ds_tensor),
@@ -267,8 +267,7 @@ public:
           partitioned_(partitioned),
           offset_(offset),
           persistent_(persistent),
-          offload_stream_(at::cuda::getStreamFromPool()),
-          reload_stream_(at::cuda::getStreamFromPool())
+          expected_grad_dtype_(expected_grad_dtype)
     {
     }
 
@@ -293,27 +292,34 @@ public:
         return ds_tensor_;
     }
     at::Tensor getGradBuffer() const { return grad_buffer_; }
+    void setGradBuffer(at::Tensor grad_buffer, int64_t offset)
+    {
+        grad_buffer_ = grad_buffer;
+        offset_ = offset;
+    }
     bool isPartitioned() const { return partitioned_; }
     int64_t getOffset() const { return offset_; }
     void setPersistent(bool persistent) { persistent_ = persistent; }
     bool isPersistent() const { return persistent_; }
+    std::optional<at::ScalarType> getExpectedGradDtype() const { return expected_grad_dtype_; }
 
     void offload()
     {
         // If a reloaded tensor exists, offload its data back to ds_tensor_
         if (ds_reload_tensor_.defined()) {
+            auto offload_stream = getOffloadStream();
             auto comp_stream = at::cuda::getCurrentCUDAStream();
             comp_done_event_ = std::make_shared<at::cuda::CUDAEvent>(cudaEventDisableTiming);
             // Record completion and wait on the offload stream
             comp_done_event_->record(comp_stream);
-            comp_done_event_->block(offload_stream_);
+            comp_done_event_->block(offload_stream);
             offload_done_event_ = std::make_shared<at::cuda::CUDAEvent>(cudaEventDisableTiming);
 
             {
-                at::cuda::CUDAStreamGuard guard(offload_stream_);
+                at::cuda::CUDAStreamGuard guard(offload_stream);
                 ds_tensor_.copy_(ds_reload_tensor_, /*non_blocking=*/true);
                 ds_reload_tensor_.reset();  // Clear the reloaded tensor
-                offload_done_event_->record(offload_stream_);
+                offload_done_event_->record(offload_stream);
             }
             // Reset the reload event to indicate that no valid reload is present.
             if (reload_done_event_) { reload_done_event_.reset(); }
@@ -324,19 +330,20 @@ public:
     {
         // Reload only if the current ds_tensor_ is on CPU
         if (ds_tensor_.device().is_cpu()) {
+            auto reload_stream = getReloadStream();
             auto comp_stream = at::cuda::getCurrentCUDAStream();
             comp_done_event_ = std::make_shared<at::cuda::CUDAEvent>(cudaEventDisableTiming);
             // Record and wait on the reload stream
             comp_done_event_->record(comp_stream);
-            comp_done_event_->block(reload_stream_);
+            comp_done_event_->block(reload_stream);
             reload_done_event_ = std::make_shared<at::cuda::CUDAEvent>(cudaEventDisableTiming);
 
             {
-                at::cuda::CUDAStreamGuard guard(reload_stream_);
+                at::cuda::CUDAStreamGuard guard(reload_stream);
                 ds_reload_tensor_ =
                     at::empty_like(ds_tensor_, ds_tensor_.options().device(torch::kCUDA));
                 ds_reload_tensor_.copy_(ds_tensor_, /*non_blocking=*/true);
-                reload_done_event_->record(reload_stream_);
+                reload_done_event_->record(reload_stream);
             }
             // Reset offload_done_event if it exists to clear any stale offload state.
             if (offload_done_event_) { offload_done_event_.reset(); }
@@ -344,6 +351,18 @@ public:
     }
 
 private:
+    at::cuda::CUDAStream getOffloadStream()
+    {
+        if (!offload_stream_) { offload_stream_.emplace(at::cuda::getStreamFromPool()); }
+        return *offload_stream_;
+    }
+
+    at::cuda::CUDAStream getReloadStream()
+    {
+        if (!reload_stream_) { reload_stream_.emplace(at::cuda::getStreamFromPool()); }
+        return *reload_stream_;
+    }
+
     long id_;
     std::vector<int64_t> shape_;
     at::ScalarType ds_dtype_;
@@ -353,10 +372,11 @@ private:
     bool partitioned_;
     int64_t offset_;   // for Z1
     bool persistent_;  // for Z3
+    std::optional<at::ScalarType> expected_grad_dtype_;
     mutable bool is_reloaded = false;
 
-    at::cuda::CUDAStream offload_stream_;
-    at::cuda::CUDAStream reload_stream_;
+    std::optional<at::cuda::CUDAStream> offload_stream_;
+    std::optional<at::cuda::CUDAStream> reload_stream_;
     std::shared_ptr<at::cuda::CUDAEvent> comp_done_event_;
     std::shared_ptr<at::cuda::CUDAEvent> offload_done_event_;
     std::shared_ptr<at::cuda::CUDAEvent> reload_done_event_;
@@ -372,15 +392,27 @@ public:
                        at::Tensor ds_tensor,
                        at::Tensor grad_buffer,
                        bool partitioned,
-                       int64_t offset,  // for Z1
-                       bool persistent  // for Z3
-    )
+                       int64_t offset,   // for Z1
+                       bool persistent,  // for Z3
+                       std::optional<at::ScalarType> expected_grad_dtype = std::nullopt)
     {
         grad_buffer.zero_();
-        params_.emplace(
-            ds_id,
-            DSParam(ds_id, ds_shape, ds_tensor, grad_buffer, partitioned, offset, persistent));
+        params_.emplace(ds_id,
+                        DSParam(ds_id,
+                                ds_shape,
+                                ds_tensor,
+                                grad_buffer,
+                                partitioned,
+                                offset,
+                                persistent,
+                                expected_grad_dtype));
         valid_[ds_id] = false;
+    }
+
+    void updateGradBuffer(long ds_id, at::Tensor grad_buffer, int64_t offset)
+    {
+        if (grad_buffer.numel() > 0) { grad_buffer.zero_(); }
+        params_.at(ds_id).setGradBuffer(grad_buffer, offset);
     }
 
     void registerGatheredParam(long ds_id, at::Tensor ds_tensor)
@@ -471,6 +503,13 @@ public:
     {
         int world_size = process_group_->getSize();
         const DSParam& param = param_registry_->getParam(ds_id);
+        const auto expected_grad_dtype = param.getExpectedGradDtype();
+        // Match PyTorch's leaf grad accumulation dtype before bucket selection:
+        // https://docs.pytorch.org/docs/main/generated/torch.sparse.semi_structured.SparseSemiStructuredTensorCUSPARSELT.html#torch.sparse.semi_structured.SparseSemiStructuredTensorCUSPARSELT.grad_dtype
+        if (expected_grad_dtype.has_value() &&
+            grad_tensor.scalar_type() != expected_grad_dtype.value()) {
+            grad_tensor = grad_tensor.to(expected_grad_dtype.value());
+        }
         const auto scalar_type = grad_tensor.scalar_type();
         std::shared_ptr<ReduceBucket> reduce_bucket = reduce_buckets_->getBuffer(scalar_type);
 

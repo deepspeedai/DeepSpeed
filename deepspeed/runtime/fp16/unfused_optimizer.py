@@ -69,11 +69,12 @@ class FP16_UnfusedOptimizer(DeepSpeedOptimizer):
         # loop to deal with groups
         for i, param_group in enumerate(self.optimizer.param_groups):
             #fp16 weights that represents the actual model weights
-            self.fp16_groups.append(param_group['params'])
+            trainable = [p for p in param_group['params'] if p.requires_grad]
+            self.fp16_groups.append(trainable)
 
             #creating a fp32 copy of the weights that will be updated first then
             #copied to fp16 weights
-            fp32_group = [p.clone().float().detach() for p in param_group['params']]
+            fp32_group = [p.clone().float().detach() for p in self.fp16_groups[i]]
 
             #in case the internal optimizer needs it
             for p in fp32_group:

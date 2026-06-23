@@ -66,6 +66,7 @@ from .data_pipeline.constants import *
 from ..utils.config import get_timers_config
 
 TENSOR_CORE_ALIGN_SIZE = 8
+EXPERT_PARALLEL = "expert_parallel"
 
 ADAGRAD_OPTIMIZER = 'adagrad'
 ADAM_OPTIMIZER = 'adam'
@@ -122,6 +123,14 @@ class DtypeEnum(Enum):
             self._name_,
             ", ".join([repr(v) for v in self._all_values]),
         )
+
+
+def get_expert_parallel_config(param_dict):
+    if EXPERT_PARALLEL in param_dict:
+        from deepspeed.module_inject.auto_ep_config import parse_autoep_config
+        return parse_autoep_config(param_dict[EXPERT_PARALLEL])
+    from deepspeed.module_inject.auto_ep_config import AutoEPConfig
+    return AutoEPConfig()
 
 
 def get_pld_enabled(param_dict):
@@ -851,6 +860,11 @@ class DeepSpeedConfig(object):
 
         data_types_params = get_data_types_params(param_dict)
         self.grad_accum_dtype = data_types_params.get(GRAD_ACCUM_DTYPE, GRAD_ACCUM_DTYPE_DEFAULT)
+        # Raw strings ("bf16"/"fp16"/"fp32") or None; resolved via DtypeEnum at
+        # use-time.
+        self.param_dtype = data_types_params.get(PARAM_DTYPE, PARAM_DTYPE_DEFAULT)
+        # buffer_dtype=None keeps buffers at their loaded dtype.
+        self.buffer_dtype = data_types_params.get(BUFFER_DTYPE, BUFFER_DTYPE_DEFAULT)
 
         par_write_pipe = get_checkpoint_parallel_write_pipeline(checkpoint_params)
         self.checkpoint_parallel_write_pipeline = par_write_pipe
@@ -870,6 +884,7 @@ class DeepSpeedConfig(object):
 
         self.timers_config = get_timers_config(param_dict)
         self.tensor_parallel_config = get_tensor_parallel_config(param_dict)
+        self.expert_parallel_config = get_expert_parallel_config(param_dict)
 
     def _batch_assertion(self):
 
