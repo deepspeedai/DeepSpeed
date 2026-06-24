@@ -24,7 +24,7 @@ BFLOAT16 parameters should be of the format:
 "bf16": {
   "enabled": true,
   "immediate_grad_update": false,
-  "check_grad_overflow": false
+  "check_grad_overflow": true
 }
 '''
 BFLOAT16 = "bf16"
@@ -53,9 +53,11 @@ class DeepSpeedBF16Config(DeepSpeedConfigModel):
     Apply gradient updates immediately rather than delayed.
     """
 
-    check_grad_overflow: bool = False
+    check_grad_overflow: bool = True
     """
-    Check for gradient overflows and underflows
+    Detect gradient overflow/underflow before the optimizer step and skip the step
+    when detected. Defaults to True to match the fp16 default. See issue #5242 and
+    PR #6976 for context.
     """
 
     bf16_master_weights_and_grads: bool = False
