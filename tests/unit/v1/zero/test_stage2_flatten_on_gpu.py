@@ -8,11 +8,14 @@ Parametrized over zero_stage (1, 2) and dtype (fp32, fp16, bf16).
 """
 
 import pytest
+import torch
 import deepspeed
 from deepspeed.accelerator import get_accelerator
 from deepspeed.utils import set_log_level_from_string
 from unit.common import DistributedTest
-from unit.simple_model import SimpleModel
+from unit.simple_model import SimpleModel, random_dataloader
+
+_DTYPE_MAP = {"fp32": torch.float32, "fp16": torch.float16, "bf16": torch.bfloat16}
 
 
 def _apply_dtype_to_config(config_dict, dtype):
@@ -70,10 +73,10 @@ class TestStage2FlattenOnGPU(DistributedTest):
             model_parameters=model.parameters(),
         )
 
-        # Small model + no CPU offload => GPU path; that path logs "on GPU"
-        gpu_path_logs = [m for m in log_messages if "Flattening param group" in m and "on GPU" in m]
-        assert gpu_path_logs, (
-            f"Expected GPU flatten path (logger.info should be called with 'Flattening param group' and 'on GPU'). "
+        # Small model + no CPU offload => accelerator path logs "Flattening param group ... (sufficient memory)"
+        accel_path_logs = [m for m in log_messages if "Flattening param group" in m and "(sufficient memory)" in m]
+        assert accel_path_logs, (
+            f"Expected accelerator flatten path (log should contain 'Flattening param group' and '(sufficient memory)'). "
             f"Captured messages: {log_messages}")
 
     def test_flat_buffers_on_accelerator(self, zero_stage, dtype):
@@ -107,3 +110,44 @@ class TestStage2FlattenOnGPU(DistributedTest):
         device_type = get_accelerator().device_name()
         for i, flat in enumerate(opt.bit16_groups_flat):
             assert flat.device.type == device_type, (f"Flat buffer {i} must be on {device_type}, got {flat.device}")
+
+    @pytest.mark.world_size(1)
+    def test_flatten_on_accelerator_training_step(self, zero_stage, dtype):
+        """Regression: flat buffer must be detached so inplace ops during step don't crash."""
+        if not get_accelerator().is_available():
+            pytest.skip("Accelerator not available")
+        config_dict = {
+            "train_micro_batch_size_per_gpu": 2,
+            "gradient_accumulation_steps": 1,
+            "zero_optimization": {
+                "stage": zero_stage
+            },
+            "optimizer": {
+                "type": "Adam",
+                "params": {
+                    "lr": 1e-3
+                }
+            },
+        }
+        _apply_dtype_to_config(config_dict, dtype)
+
+        hidden_dim = 64
+        model = SimpleModel(hidden_dim=hidden_dim, nlayers=2)
+        engine, _, _, _ = deepspeed.initialize(
+            config=config_dict,
+            model=model,
+            model_parameters=model.parameters(),
+        )
+        for flat in engine.optimizer.bit16_groups_flat:
+            assert flat.grad_fn is None, ("Flat buffer must be detached from autograd graph"
+                                          " to prevent inplace-modification errors during optimizer step")
+
+        data_loader = random_dataloader(model=engine,
+                                        total_samples=8,
+                                        hidden_dim=hidden_dim,
+                                        device=engine.device,
+                                        dtype=_DTYPE_MAP[dtype])
+        for batch in data_loader:
+            loss = engine(batch[0], batch[1])
+            engine.backward(loss)
+            engine.step()

@@ -160,6 +160,9 @@ class PartitionedParameterCoordinator:
         self.__submodule_order = []
         self.__param_order = []
         self.__most_recent_step_id_param_fetched_for = collections.defaultdict(lambda: int(-1e10))
+        # clear the fetch-step deque too; a stale entry here causes record_parameters() to
+        # pop an empty deque (IndexError) after trace invalidation.
+        self.__step_id_module_fetched_for = collections.defaultdict(lambda: collections.deque())
         self.__param_queue = None
 
     def is_complete_trace(self) -> bool:

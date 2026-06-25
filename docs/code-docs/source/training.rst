@@ -59,6 +59,75 @@ Gradient Accumulation
 ---------------------
 .. autofunction:: deepspeed.DeepSpeedEngine.is_gradient_accumulation_boundary
 
+Coalesced Gradient Reduction
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+.. autofunction:: deepspeed.DeepSpeedEngine.coalesce_grad_reduction
+
+Use this when one optimizer step needs multiple ``engine.backward()`` calls
+and per-backward reduction is wasted work. Typical cases are GradCache-style
+cached contrastive losses that replay backward over chunked representations,
+and custom ``torch.autograd.Function`` subclasses that call
+``torch.autograd.backward`` from inside their ``forward``. Results are
+bit-exact against the per-backward baseline.
+
+Under ZeRO-3, each backward inside the block leaves param-shaped gradients
+on the leaf modules instead of triggering the per-backward reduce-scatter.
+On exit, a single pass drives the reducer over the accumulated grads and
+restores the partitioned ``averaged_gradients`` for ``step()``.
+
+.. code-block:: python
+
+    for batch in data_loader:
+        chunks = batch.split(chunk_size)
+        with model_engine.coalesce_grad_reduction():
+            for chunk in chunks:
+                loss = model_engine(chunk)
+                model_engine.backward(loss)
+        model_engine.step()
+
+Communication
+^^^^^^^^^^^^^
+
+With ``N`` back-to-back ``backward()`` calls per step, ZeRO-2 and ZeRO-3
+normally issue ``N`` gradient collectives (one per backward). Inside
+``coalesce_grad_reduction()`` those collapse to one collective on exit.
+ZeRO-1 already reduces only at the accumulation boundary, so its collective
+count is unchanged; the context still removes the per-backward bucket setup
+cost.
+
+Memory
+^^^^^^
+
+Suppressing the per-backward reduction means each rank holds a full local
+gradient copy for the duration of the ``with`` block.
+
+* ZeRO-2: window-resident memory equals ZeRO-1 with
+  :meth:`deepspeed.DeepSpeedEngine.no_sync`, one full gradient per rank
+  held until flush. On a 2-GPU, 134M-param bf16 rig with ``N=4``, peak
+  window memory drops from 640 MiB (baseline) to 384 MiB.
+* ZeRO-3: window-resident is one full gradient per rank vs the
+  ``1/world_size`` partition the per-backward path holds throughout. Peak
+  is roughly equal to baseline (the in-flight backward already needs
+  full-grad room and the accumulator reuses it).
+
+Constraints
+^^^^^^^^^^^
+
+* ZeRO stage 0 and pipeline parallelism raise ``NotImplementedError``.
+* The BF16/FP16 optimizer wrappers (``BF16_Optimizer``, ``FP16_Optimizer``)
+  route grads through their own ``backward_epilogue`` path and are not yet
+  supported; the context raises ``NotImplementedError`` at entry. Use raw
+  ZeRO-1/2/3 for now.
+* ``engine.step()`` inside the ``with`` block raises.
+* Cannot be nested inside :meth:`deepspeed.DeepSpeedEngine.no_sync`.
+* Do not split one ``gradient_accumulation_steps`` window across multiple
+  ``with`` blocks: the flush overwrites ``averaged_gradients`` on each exit.
+
+:meth:`deepspeed.DeepSpeedEngine.no_sync` raises ``AssertionError`` for
+ZeRO-2 and ZeRO-3 (``zero_optimization_partition_gradients()`` is true for
+stage >= 2), so it cannot collapse collectives for those stages.
+``coalesce_grad_reduction()`` is the equivalent for ZeRO-2/3.
+
 
 Mixed Precision Training
 -------------------------

@@ -17,16 +17,23 @@ try:
 except ImportError:
     pass
 
+try:
+    import nvtx
+except ImportError:
+    nvtx = None
+
 # Delay import pynvml to avoid import error when CUDA is not available
 pynvml = None
 
 
 class CUDA_Accelerator(DeepSpeedAccelerator):
+    supports_nvtx_domain = True
 
     def __init__(self):
         self._name = 'cuda'
         self._communication_backend_name = 'nccl' if sys.platform != 'win32' else 'gloo'
         self._compile_backend = "inductor"
+        self._nvtx_domains = {}
         if pynvml is None:
             self._init_pynvml()
 
@@ -225,13 +232,28 @@ class CUDA_Accelerator(DeepSpeedAccelerator):
     def is_available(self):
         return torch.cuda.is_available()
 
-    def range_push(self, msg):
-        if hasattr(torch.cuda.nvtx, 'range_push'):
-            return torch.cuda.nvtx.range_push(msg)
+    def _get_nvtx_domain(self, domain):
+        if nvtx is None or domain is None:
+            return None
+        if domain not in self._nvtx_domains:
+            self._nvtx_domains[domain] = nvtx.get_domain(domain)
+        return self._nvtx_domains[domain]
 
-    def range_pop(self):
-        if hasattr(torch.cuda.nvtx, 'range_pop'):
-            return torch.cuda.nvtx.range_pop()
+    def range_push(self, msg, domain=None, category=None):
+        nvtx_domain = self._get_nvtx_domain(domain)
+        if nvtx_domain is not None:
+            return nvtx_domain.push_range(message=msg, category=category)
+        torch_nvtx = getattr(torch.cuda, 'nvtx', None)
+        if torch_nvtx is not None and hasattr(torch_nvtx, 'range_push'):
+            return torch_nvtx.range_push(msg)
+
+    def range_pop(self, domain=None):
+        nvtx_domain = self._get_nvtx_domain(domain)
+        if nvtx_domain is not None:
+            return nvtx_domain.pop_range()
+        torch_nvtx = getattr(torch.cuda, 'nvtx', None)
+        if torch_nvtx is not None and hasattr(torch_nvtx, 'range_pop'):
+            return torch_nvtx.range_pop()
 
     def lazy_call(self, callback):
         return torch.cuda._lazy_call(callback)

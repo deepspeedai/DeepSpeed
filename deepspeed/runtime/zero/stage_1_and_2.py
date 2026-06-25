@@ -242,6 +242,9 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
 
         self.is_gradient_accumulation_boundary = True
 
+        # Toggled by DeepSpeedEngine.coalesce_grad_reduction().
+        self._coalesce_grad_reduction = False
+
         # CPU-Offload requires contiguous gradients
         self.contiguous_gradients = contiguous_gradients or self.cpu_offload
 
@@ -280,8 +283,9 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             fp16_master_weights_and_gradients=fp16_master_weights_and_gradients,
             bf16_master_weights_and_gradients=bf16_master_weights_and_gradients,
             bf16_optimizer_states=bf16_optimizer_states,
+            offload_enabled=self.cpu_offload,
             fp16_offload_validator=_enforce_cpu_offload,
-            bf16_fp32_offload_validator=_enforce_cpu_offload)
+            bf16_offload_validator=_enforce_cpu_offload)
 
         self.low_precision_master_weights_and_grads = self.master_weights_and_grads_dtype != torch.float32
 
@@ -368,7 +372,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             # not sure why apex was cloning the weights before flattening
             # removing cloning here
 
-            # Compute group size for VRAM check (need 2x model size on GPU to flatten in place: params + flat copy)
+            # Compute group size for memory check (need 2x model size on accelerator to flatten in place: params + flat copy)
             orig_group_numel = sum(param.numel() for param in self.bit16_groups[i])
             alignment = self.nccl_start_alignment_factor * dist.get_world_size(group=self.real_dp_process_group[i])
             aligned_numel = int(math.ceil(orig_group_numel / alignment)) * alignment
@@ -378,13 +382,13 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
 
             empty_cache()
             accelerator = get_accelerator()
-            available_vram = accelerator.available_memory() if accelerator.is_available() else 0
-            # Flatten on GPU only if we have enough VRAM for the flat buffer (2x = params already there + copy)
-            flatten_on_gpu = (accelerator.is_available() and (available_vram >= flat_buffer_bytes))
+            available_memory = accelerator.available_memory() if accelerator.is_available() else 0
+            # Flatten on accelerator device if we have enough memory for the flat buffer
+            flatten_on_accelerator = (accelerator.is_available() and (available_memory >= flat_buffer_bytes))
 
-            if not flatten_on_gpu:
+            if not flatten_on_accelerator:
                 see_memory_usage(f"Before moving param group {i} to CPU")
-                # move all the parameters to cpu to free up GPU space for creating flat buffer
+                # move all the parameters to cpu to free up accelerator memory for creating flat buffer
                 for param in self.bit16_groups[i]:
                     param.cpu_data = param.data.cpu()
                     param.data = torch.empty(1).to(param.device)
@@ -409,21 +413,21 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             # Create meta tensors list, ordered according to round_robin_tensors
             meta_tensors = []
             for param in round_robin_tensors:
-                if flatten_on_gpu:
+                if flatten_on_accelerator:
                     meta_tensors.append(torch.zeros_like(param.data, device="meta"))
                 else:
                     meta_tensors.append(torch.zeros_like(param.cpu_data, device="meta"))
             self.round_robin_bit16_meta.append(meta_tensors)
 
-            if flatten_on_gpu:
-                logger.info(f"Flattening param group {i} on GPU (sufficient VRAM)")
+            if flatten_on_accelerator:
+                logger.info(f"Flattening param group {i} on {accelerator.device_name()} (sufficient memory)")
                 flattened_buffer = self.flatten_dense_tensors_aligned(self.round_robin_bit16_groups[i],
                                                                       alignment,
-                                                                      use_cpu_data=False)
+                                                                      use_cpu_data=False).detach()
                 self.bit16_groups_flat.append(flattened_buffer)
-                see_memory_usage(f"After flattening param group {i} on GPU", force=False)
+                see_memory_usage(f"After flattening param group {i} on {accelerator.device_name()}", force=False)
             else:
-                logger.info(f"Flattening param group {i} on CPU (insufficient VRAM)")
+                logger.info(f"Flattening param group {i} on CPU (insufficient memory)")
 
                 flattened_buffer = self.flatten_dense_tensors_aligned(self.round_robin_bit16_groups[i],
                                                                       alignment,
@@ -437,7 +441,8 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                 self.bit16_groups_flat.append(flattened_buffer.to(get_accelerator().current_device_name()))
                 del flattened_buffer
 
-                see_memory_usage(f"After flattening and moving param group {i} to GPU", force=False)
+                see_memory_usage(f"After flattening and moving param group {i} to {get_accelerator().device_name()}",
+                                 force=False)
 
             if dist.get_rank(group=self.real_dp_process_group[i]) == 0:
                 see_memory_usage(f"After Flattening and after emptying param group {i} cache", force=False)
@@ -1178,9 +1183,13 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                                            log=log,
                                            divide=divide,
                                            process_group=process_group)
+        if self.overlap_comm and not get_accelerator().resolves_data_dependency():
+            allreduced.record_stream(self.reduction_stream)
         for buf, synced, bucket_rank in zip(small_bucket, self.unflatten(allreduced, small_bucket), bucket_ranks):
             if dist.get_rank(group=process_group) == bucket_rank:
                 buf.copy_(synced)
+                if self.overlap_comm and not get_accelerator().resolves_data_dependency():
+                    buf.record_stream(self.reduction_stream)
 
     def allreduce_and_scatter(self,
                               bucket,
@@ -1410,8 +1419,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
 
         if self.micro_step_id > 0:
             accumulate_gradients()
-        else:
-            copy_gradients_to_cpu()
+        copy_gradients_to_cpu()
 
     def set_norm_for_param_grad(self, param):
         param_id = self.get_param_id(param)
@@ -1503,8 +1511,11 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
     ############################################################################################
     def copy_grads_in_partition(self, param):
         if self.cpu_offload:
-
-            if self.gradient_accumulation_steps > 1:
+            # Accumulate when there were prior backwards in this step (restore from
+            # CPU buffer) or more will follow (save to CPU buffer). Skipping only
+            # the lone backward of a step preserves the existing fast path for
+            # ga_steps=1 + single backward.
+            if self.micro_step_id > 0 or not self.is_gradient_accumulation_boundary:
                 self.async_accumulate_grad_in_cpu_via_gpu(param)
 
             if self.is_gradient_accumulation_boundary:
@@ -1605,6 +1616,8 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         #####################################################################
 
     def process_gradients(self, param, i):
+        if self._coalesce_grad_reduction:
+            return
         self.setup_buckets()
         if self.use_grad_accum_attribute:
             self._fill_param_grad_accum_attribute(param)
@@ -1746,9 +1759,13 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                 divide=divide,
                 process_group=process_group,
             )
+            if self.overlap_comm and not get_accelerator().resolves_data_dependency():
+                allreduced.record_stream(stream)
             if rank is None or rank == dist.get_rank(group=self.dp_process_group):
                 for buf, synced in zip(small_bucket, self.unflatten(allreduced, small_bucket)):
                     buf.copy_(synced)
+                    if self.overlap_comm and not get_accelerator().resolves_data_dependency():
+                        buf.record_stream(stream)
 
     def allreduce_no_retain(
         self,
@@ -1995,7 +2012,12 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                 assert tensor.ndim > 1, f"if use muon, then tensor dim > 1, got {tensor.size()}"
                 buffer = torch.narrow(self.optimizer.state[flatten_copy]["momentum_buffer"], 0, buffer_idx,
                                       tensor.numel()).view(tensor.size())
-                grad_accum = muon_update(grad_accum, buffer, self.optimizer.param_groups[param_group_idx]['momentum'])
+                ns_method = self.optimizer.param_groups[param_group_idx].get('ns_method', 'gram')
+                grad_accum = muon_update(grad_accum,
+                                         buffer,
+                                         self.optimizer.param_groups[param_group_idx]['momentum'],
+                                         ns_method=ns_method,
+                                         is_expert_group=getattr(tensor, 'is_expert_group', False))
             tensor = grad_accum
             num_elements = tensor.numel()
             buffer_idx += num_elements
@@ -2032,6 +2054,26 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         for p in param_list:
             p.grad = None  # in step
             p.grad_accum = None
+
+    # DeepCompile passes may provide a gradient group that already owns a flat ZeRO partition.
+    def _get_preflattened_grad_partition(self, group_idx):
+        grad_group = self.averaged_gradients[group_idx]
+        flat_grad_partition = getattr(grad_group, "flat_partition", None)
+        if flat_grad_partition is None:
+            return None
+        return flat_grad_partition.view(-1)
+
+    def _release_preflattened_grad_buffers(self, group_idx=None):
+        if group_idx is None:
+            group_indices = list(self.averaged_gradients.keys())
+        else:
+            group_indices = [group_idx]
+
+        for idx in group_indices:
+            grad_group = self.averaged_gradients.get(idx)
+            release_grad_buffers = getattr(grad_group, "release_grad_buffers", None)
+            if callable(release_grad_buffers):
+                release_grad_buffers()
 
     def reset_cpu_buffers(self):
         self.norm_for_param_grads = {}
@@ -2112,6 +2154,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         if self.overflow:
             see_memory_usage('After overflow before clearing gradients')
             self.zero_grad(set_to_none=True)
+            self._release_preflattened_grad_buffers()
             if self.cpu_offload:
                 self.reset_cpu_buffers()
             else:
@@ -2163,13 +2206,19 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
 
                 # create a flat gradients for parameters updated by this process
                 # If we are last partition, ensure we have same size grads and partition size, if not pad with zero tensors
-                if partition_id == dist.get_world_size(group=self.real_dp_process_group[i]) - 1:
-                    single_grad_partition = self.flatten_dense_tensors_aligned(
-                        self.averaged_gradients[i],
-                        int(self.partition_size[i])).to(self.single_partition_of_fp32_groups[i].dtype)
-                else:
-                    single_grad_partition = self.flatten(self.averaged_gradients[i]).to(
-                        self.single_partition_of_fp32_groups[i].dtype)
+                flat_grad_partition = self._get_preflattened_grad_partition(i)
+                if flat_grad_partition is not None:
+                    assert flat_grad_partition.numel() == self.partition_size[i], \
+                        "Pre-flattened gradient partition has different number of elements than partition size {} {} {} {}".format(
+                            flat_grad_partition.numel(), self.partition_size[i], i, partition_id)
+                if flat_grad_partition is None:
+                    if partition_id == dist.get_world_size(group=self.real_dp_process_group[i]) - 1:
+                        flat_grad_partition = self.flatten_dense_tensors_aligned(self.averaged_gradients[i],
+                                                                                 int(self.partition_size[i]))
+                    else:
+                        flat_grad_partition = self.flatten(self.averaged_gradients[i])
+                single_grad_partition = flat_grad_partition.to(self.single_partition_of_fp32_groups[i].dtype)
+                del flat_grad_partition
                 assert single_grad_partition.numel() == self.partition_size[i], \
                     "averaged gradients have different number of elements that partition size {} {} {} {}".format(
                         single_grad_partition.numel(), self.partition_size[i], i, partition_id)
@@ -2178,6 +2227,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                 # release all the gradient since we have already created a necessary copy in dp_grad_partition(ZeRO stage2)
                 self.free_grad_in_param_list(self.params_in_partition[i])
 
+                self._release_preflattened_grad_buffers(i)
                 self.averaged_gradients[i] = None
                 self.all_grad_tensors[i] = None
                 self.unscale_and_clip_grads([single_grad_partition], scaled_global_grad_norm)

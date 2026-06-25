@@ -29,7 +29,7 @@ from .custom_ops import sp_dp_registry
 
 
 def is_deepcompile_supported() -> bool:
-    return required_torch_version(min_version=2.6, max_version=2.9) and get_accelerator().device_name() == "cuda"
+    return required_torch_version(min_version=2.6) and get_accelerator().device_name() == "cuda"
 
 
 dc_handle = None
@@ -69,7 +69,7 @@ def add_pre_backward_hook(hook):
 def deepcompile_backward_prologue(is_gradient_accumulation_boundary):
 
     for hook in pre_backward_hooks:
-        hook()
+        hook(is_gradient_accumulation_boundary)
 
     dc = get_deepcompile_handle()
     dc.start_backward(is_gradient_accumulation_boundary)

@@ -15,4 +15,5 @@ void register_param(long ds_id,
                     at::Tensor ds_tensor,
                     at::Tensor grad_buffer,
                     int64_t offset);
+void update_param_grad_buffer(long ds_id, at::Tensor grad_buffer, int64_t offset);
 }  // namespace dc
