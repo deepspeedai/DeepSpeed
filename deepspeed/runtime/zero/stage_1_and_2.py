@@ -1119,6 +1119,11 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
 
         if self.contiguous_gradients:
             if param.numel() > self.reduce_bucket_size:
+                # Scope note (#8061): extra-large params are reduced directly and
+                # never copied into the contiguous IPG bucket, so no producer stream
+                # is recorded for them. average_tensor falls back to waiting on the
+                # current stream for this path; the producer-stream tracking only
+                # covers the bucketed path below.
                 self.extra_large_param_to_reduce[comm_dtype] = param
             else:
                 # keeping the gradients contiguous to prevent memory fragmentation, and avoid flattening
