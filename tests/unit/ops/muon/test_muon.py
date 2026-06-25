@@ -177,3 +177,37 @@ class TestGramNewtonSchulz(DistributedTest):
             loss = engine(x, y)
             engine.backward(loss)
             engine.step()
+
+
+class TestMuonRejectsReduceScatter(DistributedTest):
+    """Muon needs the full all-reduced gradient matrix on each rank for its Newton-Schulz
+    orthogonalization. reduce_scatter only delivers each rank its own partition slice, which
+    silently corrupts cross-partition parameters in ZeRO-1/2 (#7807). Initialization must fail
+    loudly, consistent with the ZeRO-3 guard in stage3.py (added in #7919)."""
+
+    world_size = 1
+
+    @pytest.mark.parametrize('zero_stage', [1, 2])
+    def test_muon_reduce_scatter_raises(self, zero_stage):
+        config_dict = {
+            "train_batch_size": 4,
+            "optimizer": {
+                "type": "muon",
+                "params": {
+                    "lr": 0.01
+                }
+            },
+            "fp16": {
+                "enabled": True
+            },
+            "zero_optimization": {
+                "stage": zero_stage,
+                "reduce_scatter": True,
+            },
+        }
+        model = SimpleModel(hidden_dim=32, nlayers=2)
+        with pytest.raises(ValueError, match="Muon and reduce scatter cannot be used together"):
+            deepspeed.initialize(config=config_dict,
+                                 model=model,
+                                 model_parameters=model.parameters(),
+                                 dist_init_required=False)
