@@ -4,13 +4,17 @@
 # DeepSpeed Team
 
 import operator
+from types import SimpleNamespace
 
 import pytest
 import torch
-from torch.fx import Graph
+from torch.fx import Graph, GraphModule
 
 import deepspeed.compile.util as compile_util
 from deepspeed.compile import list_schedule as schedule_mod
+from deepspeed.compile.passes import selective_gather as selective_gather_mod
+from deepspeed.compile.profilers import ProfilingResult
+from deepspeed.compile.profilers.graph_profile import _backfill_missing_profile_metadata
 
 _DC_LIBRARIES = []
 
@@ -49,7 +53,8 @@ def stub_deepcompile_ops(monkeypatch):
 
 def _with_meta(node, tensor_size=0, device_time=0):
     node.meta["tensor_size"] = tensor_size
-    node.meta["device_time"] = device_time
+    if device_time is not None:
+        node.meta["device_time"] = device_time
     return node
 
 
@@ -199,3 +204,71 @@ def test_fast_free_schedule_keeps_single_allgather_release_order():
     assert names.index(ag.name) < names.index(wait.name)
     assert names.index(wait.name) < names.index(use.name)
     assert names.index(use.name) < names.index(release.name)
+
+
+def test_profile_backfill_makes_partial_profile_safe_for_scheduler_and_selective_gather(monkeypatch):
+    graph = Graph()
+
+    param = _placeholder(graph, "partial_profile_param")
+    ag = _allgather(graph, param, 90, "partial_profile", device_time=None)
+    wait = _wait(graph, ag, 90, "partial_profile")
+    use = _neg(graph, wait, "partial_profile_use", device_time=None)
+    release = _release(graph, use, 90, "partial_profile")
+
+    for node in (ag, use):
+        node.meta.pop("wall_time", None)
+        node.meta.pop("alloc_mem", None)
+        node.meta.pop("max_mem", None)
+
+    graph.output((release, ))
+    graph.lint()
+
+    _backfill_missing_profile_metadata(graph)
+
+    for node in graph.nodes:
+        if node in (ag, use):
+            assert node.meta["device_time"] == 0.0
+        else:
+            assert "device_time" in node.meta
+        assert "wall_time" in node.meta
+        assert "tensor_size" in node.meta
+        assert "alloc_mem" in node.meta
+        assert "max_mem" in node.meta
+
+    names = _scheduled_names(graph)
+    assert names.index(ag.name) < names.index(wait.name)
+    assert names.index(wait.name) < names.index(use.name)
+    assert names.index(use.name) < names.index(release.name)
+
+    class FakeAccelerator:
+
+        def current_device(self):
+            return "cpu"
+
+        def total_memory(self):
+            return 1024
+
+        def available_memory(self):
+            return 1024
+
+    fake_ds_param = SimpleNamespace(numel=1,
+                                    dtype=torch.float16,
+                                    param=SimpleNamespace(ds_persist=False, ds_shape=(1, )))
+    fake_param_manager = {
+        0: SimpleNamespace(params={"partial_profile_param": fake_ds_param}, ds_ids={"partial_profile_param": 90})
+    }
+    profiling_results = {0: ProfilingResult(fwd_graph=graph, bwd_graph=None)}
+    gm = GraphModule(torch.nn.Module(), graph)
+
+    monkeypatch.setattr(selective_gather_mod, "print_rank_0", lambda *args, **kwargs: None)
+    monkeypatch.setattr(selective_gather_mod, "get_accelerator", lambda: FakeAccelerator())
+    monkeypatch.setattr(selective_gather_mod.dist, "all_reduce", lambda *args, **kwargs: None)
+
+    selective_gather_mod.selective_gather(gm,
+                                          graph_id=0,
+                                          graph_order=[(0, True)],
+                                          profiling_results=profiling_results,
+                                          create_inputs_fn=lambda: (),
+                                          mem_budget=0,
+                                          param_manager=fake_param_manager,
+                                          bwd=True)

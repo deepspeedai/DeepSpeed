@@ -8,7 +8,7 @@ from typing import Any, Tuple, Dict
 import statistics
 
 import torch
-from torch.fx import GraphModule, Interpreter
+from torch.fx import Graph, GraphModule, Interpreter
 from torch.fx.node import map_aggregate
 
 try:
@@ -52,6 +52,21 @@ def _args_to_key(v):
 
 def _node_size(out):
     return sum([v.element_size() * v.numel() for v in tree_leaves(out) if torch.is_tensor(v)])
+
+
+_PROFILE_META_DEFAULTS = {
+    "device_time": 0.0,
+    "wall_time": 0.0,
+    "tensor_size": 0,
+    "alloc_mem": 0,
+    "max_mem": 0,
+}
+
+
+def _backfill_missing_profile_metadata(graph: Graph):
+    for node in graph.nodes:
+        for key, default in _PROFILE_META_DEFAULTS.items():
+            node.meta.setdefault(key, default)
 
 
 def _get_mem_usage_out_of_torch():
@@ -110,10 +125,16 @@ class ProfilingInterpreter(Interpreter):
                     return_val = super().run(*args)
         except Exception as e:
             msg = e.msg if "msg" in dir(e) else str(e)
-            print(f"Profiling error {msg}")
+            if not self.distributed or dist.get_rank() == 0:
+                print(f"DeepCompile profiling failed; using default profile metadata for incomplete nodes: {msg}")
         finally:
-            self.nz3.clear_all_gathered_params()
-            self.nz3.enable_profiling(False)
+            try:
+                self.nz3.clear_all_gathered_params()
+            finally:
+                try:
+                    self.nz3.enable_profiling(False)
+                finally:
+                    _backfill_missing_profile_metadata(self.graph)
         return return_val
 
     def run_node(self, n: torch.fx.Node) -> Any:
