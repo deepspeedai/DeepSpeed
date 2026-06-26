@@ -28,7 +28,7 @@ def print_rank_0(message):
 
 
 def _maybe_update_size_from_profile(ds_id_to_size: Dict[int, int], ds_id: int, tensor_size: int) -> None:
-    if tensor_size is not None and tensor_size > 0:
+    if tensor_size > 0:
         ds_id_to_size[ds_id] = tensor_size
 
 
