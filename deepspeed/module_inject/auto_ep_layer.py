@@ -402,6 +402,7 @@ class AutoEPMoELayer(nn.Module):
         self.folding_group_handles = None
         self.tp_group = None
         resolved_config = resolve_autoep_config_defaults(config, spec.model_family)
+        self.validate_folding_routing = bool(resolved_config.validate_folding_routing)
 
         # Router: copy gate weights from source
         source_gate = getattr(source_module, spec.router_name)
@@ -630,9 +631,10 @@ class AutoEPMoELayer(nn.Module):
                     "num_tokens": torch.tensor(bsz * seqlen, device=hidden_states.device, dtype=torch.long),
                 },
             )
-            assert_tp_payload_consistent(payload,
-                                         tp_group=self.tp_group,
-                                         tp_size=self.folding_group_handles.spec.tp_size)
+            if self.validate_folding_routing:
+                assert_tp_payload_consistent(payload,
+                                             tp_group=self.tp_group,
+                                             tp_size=self.folding_group_handles.spec.tp_size)
             tp_rank = dist.get_rank(group=self.tp_group)
             local_payload, restore_ctx = partition_assignments(payload,
                                                                tp_group=self.tp_group,
@@ -692,7 +694,10 @@ class AutoEPMoELayer(nn.Module):
             expert_output = _AllToAllV.apply(self.ep_group, expert_output, plan.output_splits, plan.input_splits)
 
         if folded_tp:
-            output = restore_combined(expert_output, restore_ctx, tp_group=self.tp_group).reshape(bsz, seqlen, hdim)
+            output = restore_combined(expert_output,
+                                      restore_ctx,
+                                      tp_group=self.tp_group,
+                                      validate_coverage=self.validate_folding_routing).reshape(bsz, seqlen, hdim)
             self._last_folding_dispatch_counters = dispatch_counters(restore_ctx)
         else:
             output = combine_from_routed(

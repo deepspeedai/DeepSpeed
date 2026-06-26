@@ -150,6 +150,7 @@ class TestAutoEPConfig:
         disabled = parse_autoep_config({})
         assert disabled.enabled is False
         assert disabled.autoep_size == 1
+        assert disabled.validate_folding_routing is False
         assert disabled.load_balance_coeff is None
         assert disabled._load_balance_coeff_explicit is False
 
@@ -160,16 +161,26 @@ class TestAutoEPConfig:
             "load_balance_coeff": None,
             "score_apply": "pre",
             "route_scale": 2.0,
+            "validate_folding_routing": True,
         })
 
         assert config.enabled is True
         assert config.autoep_size == 4
         assert config.preset_model == "mixtral"
+        assert config.validate_folding_routing is True
         assert config.load_balance_coeff is None
         assert config._load_balance_coeff_explicit is True
         assert config.score_apply == "pre"
         assert config.route_scale == 2.0
         validate_autoep_config(config, world_size=4, pp_size=1, tp_size=1, sp_size=1)
+
+    def test_validate_folding_routing_requires_boolean(self):
+        with pytest.raises(ValueError, match="validate_folding_routing"):
+            validate_autoep_config(AutoEPConfig(enabled=True, validate_folding_routing="true"),
+                                   world_size=1,
+                                   pp_size=1,
+                                   tp_size=1,
+                                   sp_size=1)
 
     @pytest.mark.parametrize("value", UNSUPPORTED_LOAD_BALANCE_VALUES)
     def test_load_balance_coeff_rejected_at_parse(self, value):

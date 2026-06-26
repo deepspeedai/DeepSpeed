@@ -47,6 +47,7 @@ def parse_autoep_config(param_dict: dict) -> AutoEPConfig:
     config.enabled = param_dict.get("enabled", False)
     config.autoep_size = param_dict.get("autoep_size", 1)
     config.expert_tensor_parallel_size = param_dict.get("expert_tensor_parallel_size", 1)
+    config.validate_folding_routing = param_dict.get("validate_folding_routing", False)
     config.preset_model = param_dict.get("preset_model", None)
     config.moe_layer_pattern = param_dict.get("moe_layer_pattern", None)
     config.expert_pattern = param_dict.get("expert_pattern", None)
@@ -108,6 +109,9 @@ def validate_autoep_config(
     """Validate config constraints. Raises ValueError on invalid config."""
     if config.load_balance_coeff is not None:
         _raise_unsupported_load_balance_coeff(config.load_balance_coeff)
+
+    if not isinstance(config.validate_folding_routing, bool):
+        raise ValueError("expert_parallel.validate_folding_routing must be a boolean")
 
     if not config.enabled:
         return

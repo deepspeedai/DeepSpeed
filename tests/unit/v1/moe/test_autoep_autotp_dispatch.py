@@ -181,14 +181,45 @@ def test_restore_combined_tp_backward_matches_non_partitioned_combine(tmpdir):
     run_cpu_gloo_test(_restore_combined_backward_parity_worker, tmpdir, world_size=2)
 
 
+def _restore_combined_topk_slot_order_worker(rank, world_size, _shared_tmpdir):
+    payload = RoutedAssignmentPayload(
+        token_indices=torch.tensor([0, 0, 0], dtype=torch.long),
+        expert_indices=torch.tensor([0, 0, 0], dtype=torch.long),
+        assignment_indices=torch.tensor([0, 1, 2], dtype=torch.long),
+        capacity_slots=torch.tensor([0, 1, 2], dtype=torch.long),
+        combine_weights=torch.ones(3, dtype=torch.float32),
+        drop_mask=torch.zeros(3, dtype=torch.bool),
+        pad_mask=torch.zeros(3, dtype=torch.bool),
+        input_splits=[3],
+        output_splits=[3],
+        extra={
+            "destination_ranks": torch.zeros(3, dtype=torch.long),
+            "num_tokens": torch.tensor(1, dtype=torch.long),
+        },
+    )
+    tp_group = dist.get_world_group()
+    local, ctx = partition_assignments(payload, tp_group=tp_group, tp_rank=rank, tp_size=world_size)
+    full_values = torch.tensor([[1.0e20], [1.0], [-1.0e20]], dtype=torch.float32)
+    restored = restore_combined(full_values.index_select(0, ctx.local_indices), ctx, tp_group=tp_group)
+
+    torch.testing.assert_close(restored, torch.zeros_like(restored), rtol=0.0, atol=0.0)
+
+
+def test_restore_combined_tp_forward_uses_topk_slot_order(tmpdir):
+    run_cpu_gloo_test(_restore_combined_topk_slot_order_worker, tmpdir, world_size=2)
+
+
 def test_restore_coverage_assertion_detects_missing_assignment():
     payload = _payload()
     local, ctx = partition_assignments(payload, tp_group=None, tp_rank=0, tp_size=1)
     ctx.local_indices = ctx.local_indices[:-1]
     values = torch.ones((local.token_indices.numel() - 1, 2), dtype=torch.float32)
 
+    restored = restore_combined(values, ctx, tp_group=None)
+    assert restored.shape == (5, 2)
+
     with pytest.raises(RuntimeError, match="restore coverage mismatch"):
-        restore_combined(values, ctx, tp_group=None)
+        restore_combined(values, ctx, tp_group=None, validate_coverage=True)
 
 
 def test_tp_payload_consistency_detects_divergent_large_payload(monkeypatch):

@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 
 import torch
 import deepspeed.comm as dist
@@ -135,6 +136,77 @@ def _payload_digest(payload: RoutedAssignmentPayload) -> torch.Tensor:
     return digest
 
 
+def _payload_digest_components(payload: RoutedAssignmentPayload) -> dict[str, torch.Tensor]:
+    device = payload.token_indices.device
+    active = (~payload.drop_mask & ~payload.pad_mask).to(torch.long)
+    fields = {
+        "token_indices": payload.token_indices,
+        "expert_indices": payload.expert_indices,
+        "assignment_indices": payload.assignment_indices,
+        "capacity_slots": payload.capacity_slots,
+        "combine_weights": payload.combine_weights,
+        "drop_mask": payload.drop_mask,
+        "pad_mask": payload.pad_mask,
+        "active": active,
+        "destination_ranks": payload.extra.get("destination_ranks", torch.empty(0, device=device, dtype=torch.long)),
+    }
+    components: dict[str, torch.Tensor] = {}
+    for index, (name, field) in enumerate(fields.items(), start=1):
+        if not torch.is_tensor(field):
+            continue
+        words = _tensor_digest_words(field)
+        components[name] = torch.stack((
+            torch.tensor(words.numel(), device=device, dtype=torch.long),
+            _digest_words(words, salt=17 * index, modulus=_FOLDING_DIGEST_MOD_A),
+            _digest_words(words, salt=31 * index, modulus=_FOLDING_DIGEST_MOD_B),
+        ))
+    return components
+
+
+def _format_payload_debug(payload: RoutedAssignmentPayload, *, digest: torch.Tensor, max_digest: torch.Tensor,
+                          min_digest: torch.Tensor, tp_group) -> str:
+    if os.environ.get("AUTOEP_FOLDING_DEBUG_PAYLOAD", "0") not in {"1", "true", "TRUE", "yes"}:
+        return ""
+
+    differing_fields = []
+    for name, component in _payload_digest_components(payload).items():
+        component_max = component.clone()
+        component_min = component.clone()
+        dist.all_reduce(component_max, op=dist.ReduceOp.MAX, group=tp_group)
+        dist.all_reduce(component_min, op=dist.ReduceOp.MIN, group=tp_group)
+        if not torch.equal(component_max, component_min):
+            differing_fields.append({
+                "field": name,
+                "local": [int(value) for value in component.detach().cpu().tolist()],
+                "min": [int(value) for value in component_min.detach().cpu().tolist()],
+                "max": [int(value) for value in component_max.detach().cpu().tolist()],
+            })
+
+    sample_limit = int(os.environ.get("AUTOEP_FOLDING_DEBUG_SAMPLE_LIMIT", "12"))
+    samples = {
+        "token_indices": payload.token_indices[:sample_limit].detach().cpu().tolist(),
+        "expert_indices": payload.expert_indices[:sample_limit].detach().cpu().tolist(),
+        "assignment_indices": payload.assignment_indices[:sample_limit].detach().cpu().tolist(),
+        "capacity_slots": payload.capacity_slots[:sample_limit].detach().cpu().tolist(),
+        "combine_weights": payload.combine_weights[:sample_limit].detach().float().cpu().tolist(),
+    }
+    try:
+        tp_group_ranks = dist.get_all_ranks_from_group(tp_group)
+    except Exception:
+        tp_group_ranks = []
+    details = {
+        "rank": dist.get_rank(),
+        "tp_rank": dist.get_rank(group=tp_group),
+        "tp_group_ranks": tp_group_ranks,
+        "digest": [int(value) for value in digest.detach().cpu().tolist()],
+        "digest_min": [int(value) for value in min_digest.detach().cpu().tolist()],
+        "digest_max": [int(value) for value in max_digest.detach().cpu().tolist()],
+        "differing_fields": differing_fields,
+        "samples": samples,
+    }
+    return f" Debug details: {details}"
+
+
 def assert_tp_payload_consistent(payload: RoutedAssignmentPayload, *, tp_group, tp_size: int) -> None:
     if tp_size <= 1 or not dist.is_initialized():
         return
@@ -145,8 +217,14 @@ def assert_tp_payload_consistent(payload: RoutedAssignmentPayload, *, tp_group, 
     dist.all_reduce(max_digest, op=dist.ReduceOp.MAX, group=tp_group)
     dist.all_reduce(min_digest, op=dist.ReduceOp.MIN, group=tp_group)
     if not torch.equal(max_digest, min_digest):
+        debug_details = _format_payload_debug(payload,
+                                              digest=digest,
+                                              max_digest=max_digest,
+                                              min_digest=min_digest,
+                                              tp_group=tp_group)
         raise RuntimeError("AutoEP+AutoTP routing decisions differ across tensor-parallel lanes. "
-                           "Folded dispatch requires identical routed-token payloads before TP partitioning.")
+                           "Folded dispatch requires identical routed-token payloads before TP partitioning."
+                           f"{debug_details}")
 
 
 def partition_assignments(
@@ -285,18 +363,20 @@ def _all_gather_variable_rows(tensor: torch.Tensor,
 
 def _debug_validate_restore_coverage(payload: RoutedAssignmentPayload, ctx: RestoreContext,
                                      all_token_indices: torch.Tensor, all_expert_indices: torch.Tensor,
-                                     all_assignment_indices: torch.Tensor) -> None:
+                                     all_assignment_indices: torch.Tensor, all_capacity_slots: torch.Tensor) -> None:
     active = ~payload.drop_mask & ~payload.pad_mask
     expected_rows = torch.stack((
         payload.token_indices[active].to(torch.long),
         payload.expert_indices[active].to(torch.long),
         payload.assignment_indices[active].to(torch.long),
+        payload.capacity_slots[active].to(torch.long),
     ),
                                 dim=1)
     observed_rows = torch.stack((
         all_token_indices.to(torch.long),
         all_expert_indices.to(torch.long),
         all_assignment_indices.to(torch.long),
+        all_capacity_slots.to(torch.long),
     ),
                                 dim=1)
     if expected_rows.numel() == 0 and observed_rows.numel() == 0:
@@ -314,7 +394,11 @@ def _debug_validate_restore_coverage(payload: RoutedAssignmentPayload, ctx: Rest
                                f"missing={missing} unexpected={duplicate_or_stale}")
 
 
-def restore_combined(local_combined: torch.Tensor, ctx: RestoreContext, *, tp_group) -> torch.Tensor:
+def restore_combined(local_combined: torch.Tensor,
+                     ctx: RestoreContext,
+                     *,
+                     tp_group,
+                     validate_coverage: bool = False) -> torch.Tensor:
     """Gather TP-partitioned assignment outputs and combine back by token index.
 
     The all-gather rebuilds an identical full output on every TP peer, so all
@@ -328,8 +412,7 @@ def restore_combined(local_combined: torch.Tensor, ctx: RestoreContext, *, tp_gr
     """
     payload = ctx.original_payload
     local_token_indices = payload.token_indices.index_select(0, ctx.local_indices)
-    local_expert_indices = payload.expert_indices.index_select(0, ctx.local_indices)
-    local_assignment_indices = payload.assignment_indices.index_select(0, ctx.local_indices)
+    local_capacity_slots = payload.capacity_slots.index_select(0, ctx.local_indices)
     local_weights = payload.combine_weights.index_select(0, ctx.local_indices).to(local_combined.dtype)
 
     all_outputs = _all_gather_variable_rows(local_combined,
@@ -337,19 +420,30 @@ def restore_combined(local_combined: torch.Tensor, ctx: RestoreContext, *, tp_gr
                                             ctx.tp_size,
                                             preserve_grad=local_combined.requires_grad)
     all_token_indices = _all_gather_variable_rows(local_token_indices, tp_group, ctx.tp_size).to(torch.long)
-    all_expert_indices = _all_gather_variable_rows(local_expert_indices, tp_group, ctx.tp_size).to(torch.long)
-    all_assignment_indices = _all_gather_variable_rows(local_assignment_indices, tp_group, ctx.tp_size).to(torch.long)
+    all_capacity_slots = _all_gather_variable_rows(local_capacity_slots, tp_group, ctx.tp_size).to(torch.long)
     all_weights = _all_gather_variable_rows(local_weights,
                                             tp_group,
                                             ctx.tp_size,
                                             preserve_grad=local_weights.requires_grad).to(local_combined.dtype)
-    _debug_validate_restore_coverage(payload, ctx, all_token_indices, all_expert_indices, all_assignment_indices)
+    if validate_coverage:
+        local_expert_indices = payload.expert_indices.index_select(0, ctx.local_indices)
+        local_assignment_indices = payload.assignment_indices.index_select(0, ctx.local_indices)
+        all_expert_indices = _all_gather_variable_rows(local_expert_indices, tp_group, ctx.tp_size).to(torch.long)
+        all_assignment_indices = _all_gather_variable_rows(local_assignment_indices, tp_group, ctx.tp_size).to(torch.long)
+        _debug_validate_restore_coverage(payload, ctx, all_token_indices, all_expert_indices, all_assignment_indices,
+                                         all_capacity_slots)
 
     if ctx.num_tokens <= 0:
         ctx.num_tokens = int(payload.token_indices.max().item()) + 1 if payload.token_indices.numel() else 0
     output = local_combined.new_zeros((ctx.num_tokens, local_combined.shape[-1]))
     if all_outputs.numel() > 0:
-        output.index_add_(0, all_token_indices, all_outputs * all_weights.reshape(-1, 1))
+        weight_shape = (-1, ) + (1, ) * (all_outputs.dim() - 1)
+        weighted_outputs = all_outputs * all_weights.reshape(weight_shape)
+        # Add one top-k slot at a time so token accumulation order stays stable
+        # without materializing a [tokens, top_k, hidden] buffer.
+        for slot in torch.unique(all_capacity_slots, sorted=True).tolist():
+            rows = all_capacity_slots == int(slot)
+            output.index_add_(0, all_token_indices[rows], weighted_outputs[rows])
     return output
 
 
