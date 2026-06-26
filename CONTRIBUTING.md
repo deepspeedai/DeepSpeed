@@ -49,6 +49,51 @@ You can also run:
 make test
 ```
 
+### Diff-based CI test selection
+Some GPU CI workflows (currently `modal-torch-latest`, which runs `tests/unit/v1/`)
+don't run the whole suite on every PR. Instead, `ci/tests_fetcher.py` looks at the
+files your PR changes, builds an import graph over `deepspeed/` and the `unit` test
+helpers, and runs only the tests that could be affected. This keeps CI fast without
+losing coverage (`push` to `master` always runs everything). The full design — and
+how to drive and extend it — is in
+[`.github/workflows/TEST_SELECTION.md`](.github/workflows/TEST_SELECTION.md).
+
+How it decides:
+* It diffs your branch against the base branch's merge-base.
+* Each changed Python file is traced *forward* to the tests that import it
+  (directly or transitively); those tests are selected.
+* It **falls back to the full suite** (never to "no tests") whenever it can't
+  safely narrow: a missing base / merge-base, a changed shared fixture, build
+  system, CI script, or core runtime file, a deleted module that something still
+  imports, or any unexpected error in the selector itself.
+
+Escape hatches:
+* **Force the full suite for a push:** put `[test all]` (or `[no filter]`) anywhere
+  in a commit message on the branch.
+* **Run all by touching infra:** changes to the run-all globs (CI config, build
+  system, `deepspeed/__init__.py`, collectives/accelerator, shared fixtures, etc.)
+  always trigger everything. See `COMMON_RUN_ALL_GLOBS` / `extra_run_all_globs` in
+  `ci/tests_fetcher.py`.
+* **Runtime/dynamic deps the import graph can't see** (monkey-patching, plugin
+  registries, JIT ops, `deepspeed.initialize()`-time injection) are wired up via
+  the curated `DYNAMIC_EDGES` map in `ci/tests_fetcher.py` — add an entry there if
+  you find a gap.
+
+Preview/debug locally (pure stdlib, no DeepSpeed install needed):
+```bash
+# What would CI run for your branch?
+python ci/tests_fetcher.py --base origin/master
+cat ci/.test_selection/test_list.txt
+
+# Why was a test (de)selected? Prints the import chains.
+python ci/tests_fetcher.py --base origin/master --explain
+```
+
+> Note: under `pull_request_target` the `deploy` job runs the PR's `deepspeed/` and
+> `tests/` but restores `ci/` from the base branch (the CI scripts hold the modal/HF
+> secrets). So changes to `ci/*` only take effect once merged — validate them via a
+> `pull_request`-triggered run or the `modal` CLI.
+
 ### Model Tests
 To execute model tests, first [install DeepSpeed](#installation). The
 [DeepSpeedExamples](https://github.com/deepspeedai/DeepSpeedExamples/) repository is cloned

@@ -637,6 +637,10 @@ def get_dataloader_drop_last(param_dict):
     return get_scalar_param(param_dict, DATALOADER_DROP_LAST, DATALOADER_DROP_LAST_DEFAULT)
 
 
+def get_log_level(param_dict):
+    return get_scalar_param(param_dict, LOG_LEVEL, LOG_LEVEL_DEFAULT)
+
+
 '''Write deepspeed config files by modifying basic templates.
 Can be used for quickly changing parameters via command line parameters.'''
 
@@ -860,6 +864,11 @@ class DeepSpeedConfig(object):
 
         data_types_params = get_data_types_params(param_dict)
         self.grad_accum_dtype = data_types_params.get(GRAD_ACCUM_DTYPE, GRAD_ACCUM_DTYPE_DEFAULT)
+        # Raw strings ("bf16"/"fp16"/"fp32") or None; resolved via DtypeEnum at
+        # use-time.
+        self.param_dtype = data_types_params.get(PARAM_DTYPE, PARAM_DTYPE_DEFAULT)
+        # buffer_dtype=None keeps buffers at their loaded dtype.
+        self.buffer_dtype = data_types_params.get(BUFFER_DTYPE, BUFFER_DTYPE_DEFAULT)
 
         par_write_pipe = get_checkpoint_parallel_write_pipeline(checkpoint_params)
         self.checkpoint_parallel_write_pipeline = par_write_pipe
@@ -867,6 +876,8 @@ class DeepSpeedConfig(object):
         self.aio_config = get_aio_config(param_dict)
 
         self.dataloader_drop_last = get_dataloader_drop_last(param_dict)
+
+        self.log_level = get_log_level(param_dict)
 
         self.nebula_config = DeepSpeedNebulaConfig(param_dict)
         self.datastates_config = DeepSpeedDataStatesConfig(param_dict)

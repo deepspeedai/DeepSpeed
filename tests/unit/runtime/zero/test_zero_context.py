@@ -8,9 +8,10 @@ from types import SimpleNamespace
 import torch
 import pytest
 import deepspeed
-from deepspeed.runtime.zero.partition_parameters import ZeroParamStatus, partitioned_param_data_shape
 import deepspeed.comm as dist
 from deepspeed.accelerator import get_accelerator
+from deepspeed.runtime.zero.partition_parameters import (MultipleAllGatherHandles, ZeroParamStatus,
+                                                         partitioned_param_data_shape)
 
 from unit.common import DistributedTest, preferred_dtype, reduce_boolean_flags
 from unit.simple_model import SimpleModel
@@ -59,6 +60,41 @@ if get_accelerator().is_bf16_supported():
     config["bf16"] = {"enabled": True}
 elif get_accelerator().is_fp16_supported():
     config["fp16"] = {"enabled": True, "loss_scale": 138.}
+
+
+def test_multiple_all_gather_handles_wait_passes_dependency_by_keyword():
+
+    class PositionalWaitHandle:
+
+        def __init__(self):
+            self.handle_dependency = None
+
+        def wait(self, handle_dependency=True):
+            self.handle_dependency = handle_dependency
+
+    class KeywordOnlyWaitHandle:
+
+        def __init__(self):
+            self.handle_dependency = None
+
+        def wait(self, *, handle_dependency=True):
+            self.handle_dependency = handle_dependency
+
+    class KwargsWaitHandle:
+
+        def __init__(self):
+            self.kwargs = None
+
+        def wait(self, **kwargs):
+            self.kwargs = kwargs
+
+    handles = [PositionalWaitHandle(), KeywordOnlyWaitHandle(), KwargsWaitHandle()]
+
+    MultipleAllGatherHandles(handles).wait(handle_dependency=False)
+
+    assert handles[0].handle_dependency is False
+    assert handles[1].handle_dependency is False
+    assert handles[2].kwargs == {"handle_dependency": False}
 
 
 class TestZeroGatheredParametersFree(DistributedTest):

@@ -244,14 +244,14 @@ TORCH_AUTOCAST_LOWER_PRECISION_SAFE_MODULES = "lower_precision_safe_modules"
 #########################################
 # Gradient clipping
 #########################################
-# Gradient clipping. By default, this feature is not enabled.
-# Users can configure in ds_config.json as below example:
+# Gradient clipping. By default, this feature is enabled with a value of 1.0.
+# Users can configure in ds_config.json as below example (set to 0.0 to disable):
 GRADIENT_CLIPPING_FORMAT = '''
 Gradient clipping should be enabled as:
 "gradient_clipping": 1.0
 '''
 GRADIENT_CLIPPING = 'gradient_clipping'
-GRADIENT_CLIPPING_DEFAULT = 0.
+GRADIENT_CLIPPING_DEFAULT = 1.0
 
 #########################################
 # Capture graph for short kernels sequences
@@ -466,12 +466,21 @@ CHECKPOINT_PARALLEL_WRITE_PIPELINE_STAGE_DEFAULT = False
 #########################################
 # "data_types": {
 #   grad_accum_dtype=["bf16"|"fp16"|"fp32"]
+#   param_dtype=["bf16"|"fp16"|"fp32"]
+#   buffer_dtype=["bf16"|"fp16"|"fp32"]
 #   }
 # }
+# param_dtype and buffer_dtype mirror FSDP's MixedPrecisionPolicy.
+#   - param_dtype: if None uses the specified mixed precision dtype, otherwise casts the params into the provided dtype
+#   - buffer_dtype: if None uses the buffers' dtype found when the model was loaded (e.g. fp32 rotary inv_freq), otherwise casts the buffers into the provided dtype (which is likely to lead to unintended consequences)
 
 DATA_TYPES = "data_types"
 GRAD_ACCUM_DTYPE = "grad_accum_dtype"
 GRAD_ACCUM_DTYPE_DEFAULT = None
+PARAM_DTYPE = "param_dtype"
+PARAM_DTYPE_DEFAULT = None
+BUFFER_DTYPE = "buffer_dtype"
+BUFFER_DTYPE_DEFAULT = None
 
 #########################################
 # Drop the last incomplete Batch
@@ -501,3 +510,6 @@ GLOBAL_RANK = "global_rank"
 #########################################
 USE_DATA_BEFORE_EXPERT_PARALLEL = "use_data_before_expert_parallelism"
 USE_DATA_BEFORE_EXPERT_PARALLEL_DEFAULT = False
+
+LOG_LEVEL = "log_level"
+LOG_LEVEL_DEFAULT = None

@@ -1,0 +1,87 @@
+# SPDX-License-Identifier: Apache-2.0
+# DeepSpeed Team
+
+import shutil
+import subprocess
+
+from .builder import SUPAOpBuilder
+
+
+class AsyncIOBuilder(SUPAOpBuilder):
+    BUILD_VAR = "DS_BUILD_AIO"
+    NAME = "async_io"
+
+    def __init__(self):
+        super().__init__(name=self.NAME)
+
+    def absolute_name(self):
+        return f'deepspeed.ops.aio.{self.NAME}_op'
+
+    def sources(self):
+        return [
+            'csrc/aio/py_lib/deepspeed_py_copy.cpp',
+            'csrc/aio/py_lib/py_ds_aio.cpp',
+            'csrc/aio/py_lib/deepspeed_py_aio.cpp',
+            'csrc/aio/py_lib/deepspeed_py_aio_handle.cpp',
+            'csrc/aio/py_lib/deepspeed_aio_thread.cpp',
+            'csrc/aio/common/deepspeed_aio_utils.cpp',
+            'csrc/aio/common/deepspeed_aio_common.cpp',
+            'csrc/aio/common/deepspeed_aio_types.cpp',
+            'csrc/aio/py_lib/deepspeed_pin_tensor.cpp',
+            'csrc/aio/py_lib/deepspeed_py_io_handle.cpp',
+            'csrc/aio/py_lib/deepspeed_cpu_op.cpp',
+            'csrc/aio/py_lib/deepspeed_aio_op_desc.cpp',
+        ]
+
+    def include_paths(self):
+        args = super().include_paths()
+        args += ['csrc/aio/py_lib', 'csrc/aio/common']
+        return args
+
+    def cxx_args(self):
+        args = super().cxx_args()
+        # -O0 for improved debugging, since performance is bound by I/O
+        return [a for a in args if not a.startswith('-O')] + ['-O0', '-Wall', '-shared', '-fPIC']
+
+    def extra_ldflags(self):
+        return ['-laio']
+
+    def check_for_libaio_pkg(self):
+        libs = dict(
+            dpkg=["-l", "libaio-dev", "apt"],
+            pacman=["-Q", "libaio", "pacman"],
+            rpm=["-q", "libaio-devel", "yum"],
+        )
+
+        found = False
+        for pkgmgr, data in libs.items():
+            flag, lib, tool = data
+            path = shutil.which(pkgmgr)
+            if path is not None:
+                cmd = [pkgmgr, flag, lib]
+                result = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                if result.wait() == 0:
+                    found = True
+                else:
+                    self.warning(f"{self.NAME}: please install the {lib} package with {tool}")
+                break
+        return found
+
+    def is_compatible(self, verbose=False):
+        # Check for the existence of libaio by using distutils
+        # to compile and link a test program that calls io_submit,
+        # which is a function provided by libaio that is used in the async_io op.
+        # If needed, one can define -I and -L entries in CFLAGS and LDFLAGS
+        # respectively to specify the directories for libaio.h and libaio.so.
+        aio_compatible = self.has_function('io_pgetevents', ('aio', ))
+        if verbose and not aio_compatible:
+            self.warning(f"{self.NAME} requires the dev libaio .so object and headers but these were not found.")
+
+            # Check for the libaio package via known package managers
+            # to print suggestions on which package to install.
+            self.check_for_libaio_pkg()
+
+            self.warning(
+                "If libaio is already installed (perhaps from source), try setting the CFLAGS and LDFLAGS environment variables to where it can be found."
+            )
+        return super().is_compatible(verbose) and aio_compatible

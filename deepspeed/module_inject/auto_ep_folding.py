@@ -215,8 +215,8 @@ def validate_folding_global(
 
     if spec.etp_size != 1:
         raise ValueError(f"expert_parallel.expert_tensor_parallel_size={spec.etp_size} is reserved for "
-                         "expert-internal tensor parallelism and is not supported yet. Use 1; ETP support "
-                         "is planned as follow-up work.")
+                         "expert-internal tensor parallelism and is not supported yet. Use "
+                         "expert_tensor_parallel_size=1; ETP support is planned as follow-up work.")
 
     # Cross-lane expert parallelism (expert_width = ep * etp need NOT be a subset of
     # the dense data-parallel size) is supported: ``expected_folding_group_tables``
