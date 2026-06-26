@@ -429,7 +429,8 @@ def restore_combined(local_combined: torch.Tensor,
         local_expert_indices = payload.expert_indices.index_select(0, ctx.local_indices)
         local_assignment_indices = payload.assignment_indices.index_select(0, ctx.local_indices)
         all_expert_indices = _all_gather_variable_rows(local_expert_indices, tp_group, ctx.tp_size).to(torch.long)
-        all_assignment_indices = _all_gather_variable_rows(local_assignment_indices, tp_group, ctx.tp_size).to(torch.long)
+        all_assignment_indices = _all_gather_variable_rows(local_assignment_indices, tp_group,
+                                                           ctx.tp_size).to(torch.long)
         _debug_validate_restore_coverage(payload, ctx, all_token_indices, all_expert_indices, all_assignment_indices,
                                          all_capacity_slots)
 
