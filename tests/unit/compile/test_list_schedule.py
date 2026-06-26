@@ -215,6 +215,7 @@ def test_profile_backfill_makes_partial_profile_safe_for_scheduler_and_selective
     use = _neg(graph, wait, "partial_profile_use", device_time=None)
     release = _release(graph, use, 90, "partial_profile")
 
+    ag.meta.pop("tensor_size", None)
     for node in (ag, use):
         node.meta.pop("wall_time", None)
         node.meta.pop("alloc_mem", None)
@@ -234,6 +235,7 @@ def test_profile_backfill_makes_partial_profile_safe_for_scheduler_and_selective
         assert "tensor_size" in node.meta
         assert "alloc_mem" in node.meta
         assert "max_mem" in node.meta
+    assert ag.meta["tensor_size"] == 0
 
     names = _scheduled_names(graph)
     assert names.index(ag.name) < names.index(wait.name)
@@ -251,17 +253,23 @@ def test_profile_backfill_makes_partial_profile_safe_for_scheduler_and_selective
         def available_memory(self):
             return 1024
 
-    fake_ds_param = SimpleNamespace(numel=1,
+    fake_ds_param = SimpleNamespace(numel=7,
                                     dtype=torch.float16,
                                     param=SimpleNamespace(ds_persist=False, ds_shape=(1, )))
     fake_param_manager = {
         0: SimpleNamespace(params={"partial_profile_param": fake_ds_param}, ds_ids={"partial_profile_param": 90})
     }
-    profiling_results = {0: ProfilingResult(fwd_graph=graph, bwd_graph=None)}
+    profiling_results = {
+        0: ProfilingResult(fwd_graph=graph, bwd_graph=None, fwd_mem=[("profiled_before_abort", 0, 0, 0)])
+    }
     gm = GraphModule(torch.nn.Module(), graph)
+    logs = []
+    persisted = []
 
-    monkeypatch.setattr(selective_gather_mod, "print_rank_0", lambda *args, **kwargs: None)
+    monkeypatch.setattr(selective_gather_mod, "print_rank_0", lambda message: logs.append(message))
     monkeypatch.setattr(selective_gather_mod, "get_accelerator", lambda: FakeAccelerator())
+    monkeypatch.setattr(selective_gather_mod, "get_deepcompile_handle",
+                        lambda: SimpleNamespace(set_persistent=persisted.append))
     monkeypatch.setattr(selective_gather_mod.dist, "all_reduce", lambda *args, **kwargs: None)
 
     selective_gather_mod.selective_gather(gm,
@@ -272,3 +280,6 @@ def test_profile_backfill_makes_partial_profile_safe_for_scheduler_and_selective
                                           mem_budget=0,
                                           param_manager=fake_param_manager,
                                           bwd=True)
+    assert persisted == [90]
+    assert any("candidate_bytes=14" in message for message in logs)
+    assert any("size: 14" in message for message in logs)
