@@ -861,7 +861,7 @@ When a HuggingFace model provides a built-in `tp_plan` (via `model.config.base_m
 | Unused parameters in modules may be unexpected in static networks, but could be normal in dynamic networks. This controls whether or not training should terminate with an error message when unused parameters are detected. This is set to `True` by default, which means unused parameters are ignored and training continues. Now is just used in stage 2. | `True`  |
 
 ### Expert Parallel (AutoEP)
-Configure AutoEP expert parallelism for MoE models. AutoEP automatically detects MoE layers in HuggingFace models and replaces them with EP-enabled versions using TorchTitan's grouped GEMM kernels. Requires zero model code changes. Supports ZeRO stages 0, 1, and 2 (stage 3 is not supported).
+Configure AutoEP expert parallelism for MoE models. AutoEP automatically detects MoE layers in HuggingFace models and replaces them with EP-enabled versions using TorchTitan's grouped GEMM kernels. Requires zero model code changes. Supports ZeRO stages 0, 1, 2, and constrained ZeRO Stage 3.
 ```json
   "expert_parallel": {
     "enabled": true,
@@ -886,6 +886,12 @@ Configure AutoEP expert parallelism for MoE models. AutoEP automatically detects
 | Description                                                                                        | Default |
 | -------------------------------------------------------------------------------------------------- | ------- |
 | Expert-parallel degree (number of ranks sharing expert computation). Must divide `world_size / pp_size`. `1` = all experts local (no AllToAll), useful for testing. | `1`     |
+
+***expert_tensor_parallel_size***: [integer]
+
+| Description                                                                                        | Default |
+| -------------------------------------------------------------------------------------------------- | ------- |
+| Reserved for expert tensor parallelism. AutoEP currently accepts only `1`; non-1 values are rejected. | `1`     |
 
 ***preset_model***: [string]
 
@@ -1070,7 +1076,8 @@ Use a built-in preset but override specific naming/weight fields for a fine-tune
 **Constraints:**
 - `autoep_size` must divide `num_experts` for all detected MoE layers
 - AutoEP currently cannot be combined with AutoTP (`tensor_parallel.autotp_size > 1`); support is planned as follow-up work
-- ZeRO Stage 3 is not supported with AutoEP (assertion will fire)
+- AutoEP with ZeRO Stage 3 is supported only without AutoTP, sequence parallelism, MiCS, hpZeRO secondary tensor groups, non-1 `expert_tensor_parallel_size`, or quantized gradients
+- ZeRO Stage 3 saves AutoEP checkpoints partition-natively and supports same-topology save/load, module-only loads, optimizer-state-skipping loads, and universal checkpoint conversion. Universal loads can resume at a different data-parallel world size, a different `autoep_size`, or both (when the target `autoep_size` divides the expert count), including weights-only/module-only loads from the converted `fp32.pt` parameter files
 
 ### Logging
 

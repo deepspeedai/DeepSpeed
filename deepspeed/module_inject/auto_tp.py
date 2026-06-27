@@ -571,7 +571,7 @@ class AutoTP():
             # When using partition_config (custom patterns/presets), use pattern-based routing
             # instead of linear_policies. This keeps all pattern logic centralized here.
             if self.partition_config is not None:
-                full_name = prev_name + '.' + name if prev_name else name
+                full_name = class_name + '.' + name if class_name else name
                 if isinstance(child, nn.Embedding):
                     # Check if embedding matches any pattern
                     param_name = full_name + ".weight"
@@ -588,7 +588,7 @@ class AutoTP():
                         setattr(r_module, name, new_child)
                 else:
                     self.update_mp_params(child)
-                    self._replace_module(child, full_name, class_name)
+                    self._replace_module(child, name, class_name)
             # Traditional path: use linear_policies for type-based routing
             elif child.__class__ in self.linear_policies:
                 setattr(r_module, name, self.linear_policies[child.__class__](child, prev_name + '.' + name,

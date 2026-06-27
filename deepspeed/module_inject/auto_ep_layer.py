@@ -25,7 +25,7 @@ from deepspeed.moe.ep_router import TokenChoiceTopKRouter
 from deepspeed.moe.ep_count import count_tokens_per_expert
 from deepspeed.moe.ep_experts import GroupedExperts
 from deepspeed.moe.ep_kernels import TokenReorderer
-from deepspeed.moe.ep_repack import repack_expert_requires_grad_flags, repack_expert_weights
+from deepspeed.moe.ep_repack import _gather_source_zero_params, repack_expert_requires_grad_flags, repack_expert_weights
 
 # ---------------------------------------------------------------------------
 # Named tuples
@@ -69,9 +69,16 @@ def resolve_combine_impl(
 
 
 def _copy_parameter_data(target: nn.Parameter, source: torch.Tensor) -> None:
+    full_shape = torch.Size(getattr(source, "ds_shape", source.shape))
     with torch.no_grad():
-        target.data = torch.empty_like(source.data)
-        target.data.copy_(source.data)
+        source_data = source.data
+        if torch.Size(source_data.shape) != full_shape:
+            raise RuntimeError("AutoEP source parameter must be gathered before copying: "
+                               f"expected full shape {tuple(full_shape)}, got {tuple(source_data.shape)}")
+        if (torch.Size(target.data.shape) != full_shape or target.data.dtype != source_data.dtype
+                or target.data.device != source_data.device):
+            target.data = torch.empty(full_shape, dtype=source_data.dtype, device=source_data.device)
+        target.data.copy_(source_data)
 
 
 def apply_scores_before_experts_if_enabled(
@@ -373,43 +380,48 @@ class AutoEPMoELayer(nn.Module):
 
         # Router: copy gate weights from source
         source_gate = getattr(source_module, spec.router_name)
+        source_gate_bias = getattr(source_gate, 'bias', None)
+        source_ecb = getattr(source_gate, 'e_score_correction_bias', None)
+        unsupported_router_biases = [
+            getattr(source_gate, bias_name, None) for bias_name in spec.unsupported_router_bias_names
+        ]
         if not spec.supports_expert_bias and resolved_config.load_balance_coeff is not None:
             raise ValueError(f"AutoEP preset '{spec.model_family}' does not support load_balance_coeff/expert_bias "
                              "yet. Set load_balance_coeff=None.")
-        for bias_name in spec.unsupported_router_bias_names:
-            router_bias = getattr(source_gate, bias_name, None)
-            if router_bias is None:
-                continue
-            if torch.is_tensor(router_bias) and torch.count_nonzero(router_bias.detach()).item() == 0:
-                continue
-            raise ValueError(f"AutoEP preset '{spec.model_family}' does not support nonzero router bias "
-                             f"'{bias_name}' yet.")
-        self.router = TokenChoiceTopKRouter(
-            dim=spec.hidden_size,
-            num_experts=spec.num_experts,
-            num_expert_groups=spec.num_expert_groups,
-            num_limited_groups=spec.num_limited_groups,
-            top_k=spec.top_k,
-            score_func=spec.score_func,
-            route_norm=route_norm,
-            route_scale=spec.route_scale,
-            gate_bias=spec.gate_bias,
-            group_score_func=spec.group_score_func,
-        )
-        # Copy gate weights
-        _copy_parameter_data(self.router.gate.weight, source_gate.weight)
-        self.router.gate.weight.requires_grad_(source_gate.weight.requires_grad)
-        if spec.gate_bias and getattr(source_gate, 'bias', None) is not None:
-            _copy_parameter_data(self.router.gate.bias, source_gate.bias)
-            self.router.gate.bias.requires_grad_(source_gate.bias.requires_grad)
+        with _gather_source_zero_params([source_gate.weight, source_gate_bias, source_ecb,
+                                         *unsupported_router_biases]):
+            for bias_name, router_bias in zip(spec.unsupported_router_bias_names, unsupported_router_biases):
+                if router_bias is None:
+                    continue
+                if torch.is_tensor(router_bias) and torch.count_nonzero(router_bias.detach()).item() == 0:
+                    continue
+                raise ValueError(f"AutoEP preset '{spec.model_family}' does not support nonzero router bias "
+                                 f"'{bias_name}' yet.")
+            self.router = TokenChoiceTopKRouter(
+                dim=spec.hidden_size,
+                num_experts=spec.num_experts,
+                num_expert_groups=spec.num_expert_groups,
+                num_limited_groups=spec.num_limited_groups,
+                top_k=spec.top_k,
+                score_func=spec.score_func,
+                route_norm=route_norm,
+                route_scale=spec.route_scale,
+                gate_bias=spec.gate_bias,
+                group_score_func=spec.group_score_func,
+            )
+            # Copy gate weights
+            _copy_parameter_data(self.router.gate.weight, source_gate.weight)
+            self.router.gate.weight.requires_grad_(source_gate.weight.requires_grad)
+            if spec.gate_bias and source_gate_bias is not None:
+                _copy_parameter_data(self.router.gate.bias, source_gate_bias)
+                self.router.gate.bias.requires_grad_(source_gate_bias.requires_grad)
 
-        # Copy pre-trained score correction bias (DeepSeek-V3/Moonlight noaux_tc routing)
-        source_ecb = getattr(source_gate, 'e_score_correction_bias', None)
-        if source_ecb is not None and isinstance(source_ecb, nn.Parameter):
-            self.router.e_score_correction_bias = nn.Parameter(source_ecb.data.clone(),
-                                                               requires_grad=source_ecb.requires_grad)
-            logger.info('AutoEP: copied e_score_correction_bias from source gate '
-                        '(shape=%s)', source_ecb.shape)
+            # Copy pre-trained score correction bias (DeepSeek-V3/Moonlight noaux_tc routing)
+            if source_ecb is not None and isinstance(source_ecb, nn.Parameter):
+                self.router.e_score_correction_bias = nn.Parameter(source_ecb.data.clone(),
+                                                                   requires_grad=source_ecb.requires_grad)
+                logger.info('AutoEP: copied e_score_correction_bias from source gate '
+                            '(shape=%s)', source_ecb.shape)
 
         # Alias router under the name OutputRecorder expects (layer_name if provided),
         # but only when OutputRecorder captures from the router child and the alias is safe.
@@ -456,16 +468,21 @@ class AutoEPMoELayer(nn.Module):
         for param in self.experts.parameters():
             param.allreduce = False
             param.group_name = self.ep_group_name
+            param.ds_zero_placement_family = "autoep_expert"
+            param.ds_zero_partition_group_name = self.ep_group_name
 
         # Mark shared expert and router params for global DP reduction
         for param in self.router.parameters():
             param.allreduce = True
+            param.ds_zero_placement_family = "replicated"
         if self.shared_experts is not None:
             for param in self.shared_experts.parameters():
                 param.allreduce = True
+                param.ds_zero_placement_family = "replicated"
         if self.shared_experts_gate is not None:
             for param in self.shared_experts_gate.parameters():
                 param.allreduce = True
+                param.ds_zero_placement_family = "replicated"
 
         # Load balancing buffers
         self.load_balance_coeff = resolved_config.load_balance_coeff

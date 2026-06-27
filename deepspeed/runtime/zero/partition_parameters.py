@@ -789,7 +789,7 @@ class MultipleAllGatherHandles:
 
     def wait(self, handle_dependency=True) -> None:
         for handle in self.handles:
-            handle.wait(handle_dependency)
+            handle.wait(handle_dependency=handle_dependency)
 
 
 class AllReduceCoalescedHandle:
@@ -1119,11 +1119,11 @@ class Init(InsertPostInitMethodToModuleSubClasses):
 
     def _zero_init_param(self, param):
         self._convert_to_deepspeed_param(param)
-        if dist.get_world_group() == self.get_dp_process_group():
-            dist.broadcast(param.data, 0, self.get_dp_process_group())
+        partition_group = self.get_partition_dp_group(param)
+        if dist.get_world_group() == partition_group:
+            dist.broadcast(param.data, 0, partition_group)
         else:
-            dist.broadcast(param.data, dist.get_global_rank(self.get_dp_process_group(), 0),
-                           self.get_dp_process_group())
+            dist.broadcast(param.data, dist.get_global_rank(partition_group, 0), partition_group)
         param.partition()
 
     def _convert_to_zero_parameters(self, param_list):
@@ -1205,7 +1205,9 @@ class Init(InsertPostInitMethodToModuleSubClasses):
         param.is_external_param = False
 
         # The group that the parameter is scattered across.
-        param.ds_process_group = self.ds_process_group
+        param.ds_process_group = getattr(param, "ds_zero_partition_process_group", self.ds_process_group)
+        param.ds_zero_partition_rank = dist.get_rank(group=param.ds_process_group)
+        param.ds_zero_partition_world_size = dist.get_world_size(group=param.ds_process_group)
         param.ds_enable_sanity_checks = self.enable_sanity_checks
 
         # Stores the secondary partitioned copy of the tensor
@@ -1357,7 +1359,7 @@ class Init(InsertPostInitMethodToModuleSubClasses):
                 start_param = 0
                 for param in params:
                     param.data = flat_tensor.narrow(0, start_param, param.ds_numel).view(param.ds_shape)
-                    start = start_param + param.ds_tensor.ds_numel * self.get_partition_rank()
+                    start = start_param + param.ds_tensor.ds_numel * rank_in_group
                     flat_tensor.narrow(0, start, param.ds_tensor.ds_numel).copy_(param.ds_tensor)
 
                     start_param += param.ds_numel
@@ -1442,11 +1444,23 @@ class Init(InsertPostInitMethodToModuleSubClasses):
         def all_gather_coalesced(params: Iterable[Parameter],
                                  safe_mode: bool = False,
                                  quantize: bool = False) -> AllGatherCoalescedHandle:
+            params = list(params)
+            if len(params) == 0:
+                return _no_gather_coalesced(params)
 
             # fetches from nvme if the partition is not available and in nvme
             self._ensure_availability_of_partitioned_params(params)
 
-            if self.num_partitions == 1:
+            params_by_group = {}
+            for param in params:
+                params_by_group.setdefault(id(self.get_partition_dp_group(param)), []).append(param)
+            if len(params_by_group) > 1:
+                return MultipleAllGatherHandles([
+                    all_gather_coalesced(group_params, safe_mode=safe_mode, quantize=quantize)
+                    for group_params in params_by_group.values()
+                ])
+
+            if all(self._partition_world_size(param) == 1 for param in params):
                 return _no_gather_coalesced(params)
 
             for param in params:
@@ -1455,9 +1469,9 @@ class Init(InsertPostInitMethodToModuleSubClasses):
                 param.ds_status = ZeroParamStatus.INFLIGHT
 
             #use appropriate all gather process group
-            ds_process_group = self.ds_process_group
-            rank_in_group = self.rank
-            world_size = self.dp_world_size
+            ds_process_group = self.get_partition_dp_group(params[0])
+            rank_in_group = self._partition_rank(params[0])
+            world_size = self._partition_world_size(params[0])
             use_secondary_tensor = params[0].ds_secondary_tensor is not None
             if self.zero_param_process_group and use_secondary_tensor:
                 ds_process_group = self.zero_param_process_group  #intragroup
@@ -1581,11 +1595,18 @@ class Init(InsertPostInitMethodToModuleSubClasses):
         return param.ds_numel + self._padding_size(param)
 
     def _padding_size(self, param):
-        remainder = param.ds_numel % self.num_partitions
-        return (self.num_partitions - remainder) if remainder else 0
+        partition_world_size = self._partition_world_size(param)
+        remainder = param.ds_numel % partition_world_size
+        return (partition_world_size - remainder) if remainder else 0
 
     def _partition_numel(self, param):
         return param.ds_tensor.ds_numel
+
+    def _partition_world_size(self, param):
+        return dist.get_world_size(group=self.get_partition_dp_group(param))
+
+    def _partition_rank(self, param):
+        return dist.get_rank(group=self.get_partition_dp_group(param))
 
     def _ensure_availability_of_partitioned_params(self, params):
         swap_in_list = []
@@ -1620,21 +1641,25 @@ class Init(InsertPostInitMethodToModuleSubClasses):
                     all_gather_list.append(param)
         # note: param_list may contain params that are already in flight / aviailable. So we need to use all_gather_list
         if not async_op:
-            if self.allgather_sequential or len(all_gather_list) == 1:
-                ret_value = self._allgather_params_sequential(all_gather_list, hierarchy=hierarchy)
-            else:
-                all_gather_quantize_list = []
-                all_gather_nonquantize_list = []
-                for param in all_gather_list:
-                    if hasattr(param.ds_tensor,
-                               "ds_quant_scale") or (hasattr(param, "ds_secondary_tensor")
-                                                     and hasattr(param.ds_secondary_tensor, "ds_quant_scale")):
-                        all_gather_quantize_list.append(param)
-                    else:
-                        all_gather_nonquantize_list.append(param)
-                # _allgather_params_coalesced always return None
-                self._allgather_params_coalesced(all_gather_nonquantize_list, hierarchy, quantize=False)
-                self._allgather_params_coalesced(all_gather_quantize_list, hierarchy, quantize=True)
+            all_gather_by_group = {}
+            for param in all_gather_list:
+                all_gather_by_group.setdefault(id(self.get_partition_dp_group(param)), []).append(param)
+            for group_params in all_gather_by_group.values():
+                if self.allgather_sequential or len(group_params) == 1:
+                    ret_value = self._allgather_params_sequential(group_params, hierarchy=hierarchy)
+                else:
+                    all_gather_quantize_list = []
+                    all_gather_nonquantize_list = []
+                    for param in group_params:
+                        if hasattr(param.ds_tensor,
+                                   "ds_quant_scale") or (hasattr(param, "ds_secondary_tensor")
+                                                         and hasattr(param.ds_secondary_tensor, "ds_quant_scale")):
+                            all_gather_quantize_list.append(param)
+                        else:
+                            all_gather_nonquantize_list.append(param)
+                    # _allgather_params_coalesced always return None
+                    self._allgather_params_coalesced(all_gather_nonquantize_list, hierarchy, quantize=False)
+                    self._allgather_params_coalesced(all_gather_quantize_list, hierarchy, quantize=True)
             for param in all_gather_list:
                 param.ds_status = ZeroParamStatus.AVAILABLE
             return None
@@ -1693,7 +1718,7 @@ class Init(InsertPostInitMethodToModuleSubClasses):
                 return
 
             tensor_size = self._aligned_size(param)
-            partition_size = tensor_size // self.num_partitions
+            partition_size = tensor_size // self._partition_world_size(param)
             if param.ds_tensor is None:
                 final_location = None
                 if self.remote_device == OffloadDeviceEnum.nvme and self.param_swapper.swappable_tensor(
@@ -1728,7 +1753,7 @@ class Init(InsertPostInitMethodToModuleSubClasses):
                 param.ds_tensor.final_location = final_location
                 param.ds_numel_aligned = tensor_size
 
-            start = partition_size * self.get_partition_rank()
+            start = partition_size * self._partition_rank(param)
             end = start + partition_size
 
             one_dim_param = param.contiguous().view(-1)
@@ -1844,7 +1869,9 @@ class Init(InsertPostInitMethodToModuleSubClasses):
 
         partition_size = param.ds_tensor.ds_numel
 
-        tensor_size = partition_size * self.num_partitions
+        partition_world_size = self._partition_world_size(param)
+        partition_rank = self._partition_rank(param)
+        tensor_size = partition_size * partition_world_size
         aligned_param_size = self._aligned_size(param)
         assert tensor_size == aligned_param_size, f'param id {param.ds_id} aligned size {aligned_param_size} does not match tensor size {tensor_size}'
 
@@ -1879,14 +1906,14 @@ class Init(InsertPostInitMethodToModuleSubClasses):
                                                  async_op=async_op)
         else:
             partitions = []
-            for i in range(self.num_partitions):
+            for i in range(partition_world_size):
                 partitions.append(flat_tensor.narrow(0, partition_size * i, partition_size))
 
-                if i == dist.get_rank(group=self.get_partition_dp_group(param)):
+                if i == partition_rank:
                     partitions[i].data.copy_(param.ds_tensor.data, non_blocking=True)
 
             handle = dist.all_gather(partitions,
-                                     partitions[self.get_partition_rank()],
+                                     partitions[partition_rank],
                                      group=self.get_partition_dp_group(param),
                                      async_op=async_op)
 
@@ -1901,7 +1928,7 @@ class Init(InsertPostInitMethodToModuleSubClasses):
         if len(param_list) == 0:
             return
 
-        if self.num_partitions == 1:
+        if all(self._partition_world_size(param) == 1 for param in param_list):
             handle = _no_gather_coalesced(param_list)
             handle.wait()
             return None
@@ -1922,15 +1949,15 @@ class Init(InsertPostInitMethodToModuleSubClasses):
         allgather_params = []
         if quantize:
             allgather_quantize_scale = []
-        for i, psize in enumerate(partition_sizes):
-            tensor_size = psize * self.num_partitions
-            flat_tensor = torch.empty(tensor_size, dtype=param_list[i].ds_tensor.dtype,
-                                      device=self.local_device).view(-1)
+        for param, psize in zip(param_list, partition_sizes):
+            tensor_size = psize * self._partition_world_size(param)
+            flat_tensor = torch.empty(tensor_size, dtype=param.ds_tensor.dtype, device=self.local_device).view(-1)
             flat_tensor.requires_grad = False
             allgather_params.append(flat_tensor)
         if quantize:
             for psize in quantize_scale_sizes:
-                tensor_size = psize * self.num_partitions
+                param = param_list[len(allgather_quantize_scale)]
+                tensor_size = psize * self._partition_world_size(param)
                 flat_tensor = torch.empty(tensor_size,
                                           dtype=param_list[0].ds_tensor.ds_quant_scale.dtype,
                                           device=self.local_device).view(-1)
@@ -1957,7 +1984,8 @@ class Init(InsertPostInitMethodToModuleSubClasses):
                     launch_quantize_handles.append(quantize_handle)
             else:
                 output_list = []
-                for i in range(self.num_partitions):
+                partition_world_size = self._partition_world_size(param)
+                for i in range(partition_world_size):
                     psize = partition_sizes[param_idx]
                     partition = allgather_params[param_idx].narrow(0, i * psize, psize)
                     output_list.append(partition)
@@ -1969,7 +1997,7 @@ class Init(InsertPostInitMethodToModuleSubClasses):
                 h = dist.all_gather(output_list, input_tensor, group=self.get_partition_dp_group(param), async_op=True)
                 if quantize:
                     output_scale_list = []
-                    for i in range(self.num_partitions):
+                    for i in range(partition_world_size):
                         psize = quantize_scale_sizes[param_idx]
                         partition = allgather_quantize_scale[param_idx].narrow(0, i * psize, psize)
                         output_scale_list.append(partition)
@@ -2005,7 +2033,9 @@ class Init(InsertPostInitMethodToModuleSubClasses):
 
         for param in param_list:
             partition_size = param.ds_tensor.ds_numel
-            tensor_size = partition_size * self.num_partitions
+            partition_world_size = self._partition_world_size(param)
+            partition_rank = self._partition_rank(param)
+            tensor_size = partition_size * partition_world_size
 
             flat_tensor = torch.empty(tensor_size, dtype=param.ds_tensor.dtype, device=self.local_device)
             flat_tensor.requires_grad = False
@@ -2016,18 +2046,18 @@ class Init(InsertPostInitMethodToModuleSubClasses):
                                             async_op=False)
             else:
                 partitions = []
-                for i in range(self.num_partitions):
+                for i in range(partition_world_size):
                     partitions.append(flat_tensor.narrow(0, partition_size * i, partition_size))
-                    if i == self.get_partition_rank():
+                    if i == partition_rank:
                         partitions[i].data.copy_(param.ds_tensor.data, non_blocking=True)
                 dist.all_gather(partitions,
-                                partitions[self.get_partition_rank()],
+                                partitions[partition_rank],
                                 group=self.get_partition_dp_group(param),
                                 async_op=False)
 
             if hasattr(param.ds_tensor, 'ds_quant_scale'):
                 scale_size = param.ds_tensor.ds_quant_scale.numel()
-                scale_tensor_size = scale_size * self.num_partitions
+                scale_tensor_size = scale_size * partition_world_size
                 flat_scale_tensor = torch.empty(scale_tensor_size,
                                                 dtype=param.ds_tensor.ds_quant_scale.dtype,
                                                 device=self.local_device)
@@ -2039,12 +2069,12 @@ class Init(InsertPostInitMethodToModuleSubClasses):
                                                 async_op=False)
                 else:
                     scale_partitions = []
-                    for i in range(self.num_partitions):
+                    for i in range(partition_world_size):
                         scale_partitions.append(flat_scale_tensor.narrow(0, scale_size * i, scale_size))
-                        if i == self.get_partition_rank():
+                        if i == partition_rank:
                             scale_partitions[i].data.copy_(param.ds_tensor.ds_quant_scale.data, non_blocking=True)
                     dist.all_gather(scale_partitions,
-                                    scale_partitions[self.get_partition_rank()],
+                                    scale_partitions[partition_rank],
                                     group=self.get_partition_dp_group(param),
                                     async_op=False)
                 flat_tensor = self.quantizer_module.dequantize(flat_tensor, flat_scale_tensor)
@@ -2076,7 +2106,7 @@ class Init(InsertPostInitMethodToModuleSubClasses):
             # For these ranks the output of reduce scatter is a separate buffer and needs
             # to be copied in
             partition_size = param.ds_tensor.ds_numel
-            start = self.get_partition_rank() * partition_size
+            start = self._partition_rank(param) * partition_size
             end = start + partition_size
             #print_rank_0("REduce scatter was executed for param {param.ds_id}")
             if start < param.ds_numel < end:
@@ -2088,10 +2118,10 @@ class Init(InsertPostInitMethodToModuleSubClasses):
         partition_size = param.ds_tensor.ds_numel
         #output = torch.empty(partition_size, dtype=param.dtype, device=param.device)
 
-        total_size = partition_size * self.num_partitions
+        partition_world_size = self._partition_world_size(param)
         input_list = []
 
-        for i in range(self.num_partitions):
+        for i in range(partition_world_size):
 
             start = i * partition_size
             end = start + partition_size
@@ -2313,12 +2343,16 @@ class GatheredParameters:
         )  # remove the duplicates to prevent racing condition, we must also make sure the order is the same on all ranks otherwise we'll get deadlocks
         self.enable_sanity_checks = getattr(self.params[0], "ds_enable_sanity_checks", False)
         self.src_rank = None
+        self.src_rank_by_group = {}
         if modifier_rank is not None:
-            if self.params[0].ds_process_group == dist.get_world_group():
-                self.src_rank = modifier_rank
-            else:
-                # A group was specified; convert DP rank to global rank
-                self.src_rank = dist.get_global_rank(self.params[0].ds_process_group, modifier_rank)
+            for p in self.params:
+                if p.ds_process_group == dist.get_world_group():
+                    src_rank = modifier_rank
+                else:
+                    # A group was specified; convert DP rank to global rank
+                    src_rank = dist.get_global_rank(p.ds_process_group, modifier_rank)
+                self.src_rank_by_group[id(p.ds_process_group)] = src_rank
+            self.src_rank = self.src_rank_by_group[id(self.params[0].ds_process_group)]
         self.fwd_module = fwd_module
         if self.fwd_module is not None:
             # is a no-op if already registered
@@ -2370,7 +2404,12 @@ class GatheredParameters:
                     f"When using GatheredParameters with modifier_rank set, parameters must remain on "
                     f"the accelerator device. If you don't need to broadcast updates, use modifier_rank=None.")
 
-        handles = [dist.broadcast(p.data, self.src_rank, group=p.ds_process_group, async_op=True) for p in self.params]
+        handles = [
+            dist.broadcast(p.data,
+                           self.src_rank_by_group[id(p.ds_process_group)],
+                           group=p.ds_process_group,
+                           async_op=True) for p in self.params
+        ]
         for h in handles:
             h.wait()
         self.params[0].partition(param_list=self.params, has_been_updated=True)
