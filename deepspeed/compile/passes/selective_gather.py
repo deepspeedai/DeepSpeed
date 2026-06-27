@@ -132,7 +132,6 @@ def selective_gather(gm: GraphModule, graph_id: int, graph_order: List[Tuple[int
             if n.target == torch.ops.dc.allgather_param.default:
                 assert "tensor_size" in n.meta
                 _maybe_update_size_from_profile(ds_id_to_size, n.args[2], n.meta["tensor_size"])
-                # Profiling backfills missing allgather timing with 0.0, so absence here is an invariant failure.
                 assert "device_time" in n.meta
                 ds_id_to_time[n.args[2]] += n.meta["device_time"]
 
@@ -144,7 +143,6 @@ def selective_gather(gm: GraphModule, graph_id: int, graph_order: List[Tuple[int
                 if n.target == torch.ops.dc.allgather_param.default:
                     assert "tensor_size" in n.meta
                     _maybe_update_size_from_profile(ds_id_to_size, n.args[2], n.meta["tensor_size"])
-                    # Profiling backfills missing allgather timing with 0.0, so absence here is an invariant failure.
                     assert "device_time" in n.meta
                     ds_id_to_time[n.args[2]] += n.meta["device_time"]
 
