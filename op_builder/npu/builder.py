@@ -30,7 +30,7 @@ class NPUOpBuilder(OpBuilder):
         self._torch_npu_path = os.path.join(os.path.dirname(os.path.abspath(torch_npu.__file__)))
         try:
             self._cann_version = self.installed_cann_version(self.name)
-        except BaseException:
+        except Exception:
             print(f"{self.name} ascend_cann is missing, npu ops cannot be compiled!")
 
     def cann_defs(self):
