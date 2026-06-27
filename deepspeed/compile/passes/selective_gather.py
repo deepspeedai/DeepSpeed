@@ -15,6 +15,7 @@ from deepspeed.utils import log_dist
 
 from ..util import get_deepcompile_handle
 from ..graph_param import DSGraphParamManager
+from ..profilers.graph_profile import is_profile_incomplete
 
 NAME = "selective_gather"
 
@@ -66,6 +67,10 @@ def _compute_persistence_budget(all_graph_mem_records: List[List[Tuple[str, int,
     }
 
 
+def _profile_result_incomplete(prof) -> bool:
+    return is_profile_incomplete(prof.fwd_graph) or is_profile_incomplete(prof.bwd_graph)
+
+
 def selective_gather(gm: GraphModule, graph_id: int, graph_order: List[Tuple[int, bool]], profiling_results,
                      create_inputs_fn, mem_budget: float, param_manager: DSGraphParamManager,
                      bwd: bool) -> GraphModule:
@@ -82,6 +87,14 @@ def selective_gather(gm: GraphModule, graph_id: int, graph_order: List[Tuple[int
 
     # Run only on the last backward graph
     if last_backward_graph_id is None or graph_id != last_backward_graph_id:
+        return gm
+
+    incomplete_profile_ids = [
+        profile_graph_id for profile_graph_id, prof in profiling_results.items() if _profile_result_incomplete(prof)
+    ]
+    if incomplete_profile_ids:
+        print_rank_0(f"selective_gather incomplete profiling data for graph_ids={incomplete_profile_ids}; "
+                     "skipping persistence update")
         return gm
 
     all_graph_mem_records = []
