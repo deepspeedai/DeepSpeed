@@ -3,6 +3,7 @@
 
 # DeepSpeed Team
 
+import logging
 import time
 from typing import Any, Tuple, Dict
 import statistics
@@ -20,6 +21,7 @@ except ImportError:
 
 import deepspeed.comm as dist
 from deepspeed.accelerator import get_accelerator
+from deepspeed.utils import log_dist
 from ..util import is_comm_op, is_release_node, get_deepcompile_handle
 
 
@@ -125,16 +127,17 @@ class ProfilingInterpreter(Interpreter):
                     return_val = super().run(*args)
         except Exception as e:
             msg = e.msg if "msg" in dir(e) else str(e)
-            if not self.distributed or dist.get_rank() == 0:
-                print(f"DeepCompile profiling failed; using default profile metadata for incomplete nodes: {msg}")
+            log_dist(f"DeepCompile profiling failed; using default profile metadata for incomplete nodes: {msg}",
+                     ranks=[0],
+                     level=logging.WARNING)
         finally:
             try:
                 self.nz3.clear_all_gathered_params()
             finally:
-                try:
-                    self.nz3.enable_profiling(False)
-                finally:
-                    _backfill_missing_profile_metadata(self.graph)
+                # Profiling must be disabled even if parameter cleanup fails. Backfill only makes incomplete
+                # profiling results consumable; cleanup failures still propagate.
+                self.nz3.enable_profiling(False)
+                _backfill_missing_profile_metadata(self.graph)
         return return_val
 
     def run_node(self, n: torch.fx.Node) -> Any:
