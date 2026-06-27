@@ -11,6 +11,7 @@ import torch
 from torch.fx import Graph, GraphModule
 
 import deepspeed.compile.util as compile_util
+from deepspeed.compile import inductor as inductor_mod
 from deepspeed.compile import list_schedule as schedule_mod
 from deepspeed.compile.passes import selective_gather as selective_gather_mod
 from deepspeed.compile.profilers import ProfilingResult
@@ -35,6 +36,8 @@ def _define_dc_ops():
             "wait_allgather(Tensor(a) a, int graph_id, int id) -> Tensor(a)",
             "release_param(Tensor(a) a, int graph_id, int id, int n_users) -> Tensor(a)",
             "reduce_grad(Tensor a, int graph_id, int id) -> Tensor",
+            "free_tensors(Tensor[] tensors) -> ()",
+            "end_backward(Tensor[] tensors, int graph_id, bool release_reduce_buckets = True) -> ()",
     ):
         try:
             lib.define(schema)
@@ -283,3 +286,46 @@ def test_profile_backfill_makes_partial_profile_safe_for_scheduler_and_selective
     assert persisted == [90]
     assert any("candidate_bytes=14" in message for message in logs)
     assert any("size: 14" in message for message in logs)
+
+
+def test_graphsafe_rng_state_outputs_are_registered_no_reuse():
+    graphsafe_run_with_rng_state = inductor_mod._get_graphsafe_run_with_rng_state()
+    if graphsafe_run_with_rng_state is None:
+        pytest.skip("graphsafe_run_with_rng_state is unavailable in this torch build")
+
+    calls = []
+
+    def fake_register(op_overload, **kwargs):
+        calls.append((op_overload, kwargs))
+
+    assert inductor_mod._register_graphsafe_rng_state_no_reuse(fake_register)
+    assert calls == [(graphsafe_run_with_rng_state, {"never_reuse_output": True})]
+
+
+def test_register_custom_ops_includes_graphsafe_rng_state_no_reuse(monkeypatch):
+    graphsafe_run_with_rng_state = inductor_mod._get_graphsafe_run_with_rng_state()
+    if graphsafe_run_with_rng_state is None:
+        pytest.skip("graphsafe_run_with_rng_state is unavailable in this torch build")
+
+    _define_dc_ops()
+    registered_ops = []
+
+    def fake_add_needs_realized_inputs(_op_overload):
+        return None
+
+    def fake_register_lowering(op_overload, **_kwargs):
+
+        def record_handler(handler):
+            registered_ops.append(op_overload)
+            return handler
+
+        return record_handler
+
+    monkeypatch.setattr(inductor_mod, "add_needs_realized_inputs", fake_add_needs_realized_inputs)
+    monkeypatch.setattr(inductor_mod, "register_lowering", fake_register_lowering)
+    monkeypatch.setattr(inductor_mod, "fallbacks", set())
+    monkeypatch.setattr(inductor_mod.Scheduler, "is_dc_patched", True, raising=False)
+
+    inductor_mod.register_custom_ops()
+
+    assert graphsafe_run_with_rng_state in registered_ops
