@@ -273,8 +273,8 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             zero_quantized_nontrainable_weights=zero_quantized_nontrainable_weights,
             zero_module_granularity_threshold=zero_module_granularity_threshold,
             log_trace_cache_warnings=log_trace_cache_warnings,
+            retain_graph_checker=lambda: self.retain_graph_on_current_backward,
         )
-        self.parameter_offload.zero_optimizer = self
 
         self.persistent_parameters = self.parameter_offload.persistent_parameters
         self._configure_offloading(offload_optimizer_config, offload_param_config)
@@ -558,6 +558,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         zero_quantized_nontrainable_weights,
         zero_module_granularity_threshold,
         log_trace_cache_warnings,
+        retain_graph_checker=None,
     ):
         return DeepSpeedZeRoOffload(module=module,
                                     timers=timers,
@@ -576,7 +577,8 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                                     zero_quantized_weights=zero_quantized_weights,
                                     zero_quantized_nontrainable_weights=zero_quantized_nontrainable_weights,
                                     zero_module_granularity_threshold=zero_module_granularity_threshold,
-                                    log_trace_cache_warnings=log_trace_cache_warnings)
+                                    log_trace_cache_warnings=log_trace_cache_warnings,
+                                    retain_graph_checker=retain_graph_checker)
 
     def _get_trainable_parameter_groups(self):
         param_groups = []
