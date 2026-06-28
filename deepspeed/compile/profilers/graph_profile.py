@@ -91,6 +91,25 @@ def _backfill_missing_profile_metadata(graph: Graph, profile_complete: bool = Tr
             node.meta.setdefault(key, default)
 
 
+def _run_warmup_for_profile(call_fn, warmup):
+    for _ in range(warmup):
+        warmup_out = call_fn()
+        del warmup_out
+
+
+def _run_repeatedly_for_profile(call_fn, iteration, start_events, end_events):
+    out = None
+    for i in range(iteration):
+        start_events[i].record()
+        out = call_fn()
+        end_events[i].record()
+        if i + 1 < iteration:
+            del out
+            out = None
+
+    return out
+
+
 def _get_mem_usage_out_of_torch():
 
     adjust = 0
@@ -218,19 +237,18 @@ class ProfilingInterpreter(Interpreter):
         alloc_mem_start = get_accelerator().memory_allocated()
         max_mem_start = get_accelerator().max_memory_allocated()
 
-        if not run_only_once:
-            for i in range(self.warmup):
-                out = getattr(self, n.op)(n.target, args, kwargs)
+        def run_target():
+            return getattr(self, n.op)(n.target, args, kwargs)
+
+        warmup = 0 if run_only_once else self.warmup
+        _run_warmup_for_profile(run_target, warmup)
 
         if is_comm_op(n):
             assert self.distributed, f"Distributed environment is not initialized but comm operator {n.name} {n.target} is used."
             dist.barrier()
 
         start = time.time()
-        for i in range(iteration):
-            start_events[i].record()
-            out = getattr(self, n.op)(n.target, args, kwargs)
-            end_events[i].record()
+        out = _run_repeatedly_for_profile(run_target, iteration, start_events, end_events)
         accelerator.synchronize()
         walltime_sum = time.time() - start
 
@@ -295,6 +313,7 @@ class MemoryProfilingInterpreter(Interpreter):
         self.device = torch.device(get_accelerator().current_device())
         self.mem_record = []
         self.last_alloc = get_accelerator().memory_allocated()
+        self.profile_complete = True
 
         self.node_counter = 0
         self.node_num = len(gm.graph.nodes)
@@ -302,6 +321,7 @@ class MemoryProfilingInterpreter(Interpreter):
 
     def run(self, *args) -> Any:
         return_val = None
+        self.profile_complete = True
         try:
             assert _all_real_if_tensor(args), "Inputs must be real tensors"
             self.nz3.enable_profiling(True)
@@ -311,9 +331,14 @@ class MemoryProfilingInterpreter(Interpreter):
                 with get_accelerator().random().fork_rng(devices=[self.device]):
                     return_val = super().run(*args)
         except Exception as e:
+            self.profile_complete = False
+            self.mem_record.clear()
             print(f"MemoryProfiling error {e}")
         finally:
-            self.nz3.enable_profiling(False)
+            try:
+                self.nz3.clear_all_gathered_params()
+            finally:
+                self.nz3.enable_profiling(False)
 
         return return_val
 
