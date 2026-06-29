@@ -45,6 +45,7 @@ def parse_autoep_config(param_dict: dict) -> AutoEPConfig:
     config = AutoEPConfig()
     config.enabled = param_dict.get("enabled", False)
     config.autoep_size = param_dict.get("autoep_size", 1)
+    config.expert_tensor_parallel_size = param_dict.get("expert_tensor_parallel_size", 1)
     config.preset_model = param_dict.get("preset_model", None)
     config.moe_layer_pattern = param_dict.get("moe_layer_pattern", None)
     config.expert_pattern = param_dict.get("expert_pattern", None)
@@ -107,6 +108,10 @@ def validate_autoep_config(
         raise ValueError("AutoEP does not currently support AutoTP "
                          f"(tensor_parallel.autotp_size={tp_size}). Disable AutoTP for this run; "
                          "AutoEP+AutoTP support is planned as follow-up work.")
+
+    if config.expert_tensor_parallel_size != 1:
+        raise ValueError("AutoEP only supports expert_parallel.expert_tensor_parallel_size=1 in this release; "
+                         "expert tensor parallelism is planned as follow-up work.")
 
     # ep_size must divide the stage size (world_size / pp_size)
     stage_size = world_size // pp_size
