@@ -1019,7 +1019,7 @@ def _configure_defaults():
 
     PARTITION_ACTIVATIONS = False
     CONTIGUOUS_CHECKPOINTING = False
-    num_layers = False
+    num_layers = None
     CPU_CHECKPOINT = False
     SYNCHRONIZE = False
     PROFILE_TIME = False

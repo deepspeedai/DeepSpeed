@@ -4,6 +4,8 @@
 # DeepSpeed Team
 """Compact critical-path tests for AutoEP."""
 
+import inspect
+from collections import OrderedDict
 from types import SimpleNamespace
 
 import pytest
@@ -11,6 +13,8 @@ import torch
 import torch.nn as nn
 
 import deepspeed.runtime.engine as ds_engine
+import deepspeed.runtime.zero.stage3 as zero_stage3
+import deepspeed.moe.ep_repack as ep_repack
 from deepspeed.module_inject.auto_ep import AutoEP, _resolve_route_scale
 from deepspeed.module_inject.auto_ep_config import (
     AutoEPConfig,
@@ -32,10 +36,13 @@ from deepspeed.module_inject.auto_ep_presets.registry import (
     preset_name_for_hf_model_type,
     unsupported_preset_for_hf_model_type,
 )
+from deepspeed.moe.layer import MoE
 from deepspeed.moe.ep_experts import GroupedExperts
 from deepspeed.moe.ep_kernels import TokenReorderer
+from deepspeed.moe.ep_repack import repack_expert_weights
 from deepspeed.moe.ep_router import TokenChoiceTopKRouter
 from deepspeed.runtime.engine import DeepSpeedEngine
+from deepspeed.runtime.zero.stage3 import DeepSpeedZeroOptimizer_Stage3
 from deepspeed.utils import groups
 from unit.v1.moe.autoep_test_utils import (
     MockMoEBlock,
@@ -88,6 +95,47 @@ def _make_spec(**kwargs):
 def _assert_same_dtype_device(actual, expected):
     assert actual.dtype == expected.dtype
     assert actual.device == expected.device
+
+
+def _mark_fake_zero_param(param, full_data, partition_data=None, ds_id=0, name="param"):
+    param.ds_id = ds_id
+    param.ds_shape = torch.Size(full_data.shape)
+    param._autoep_test_full_data = full_data.detach().clone()
+    param._autoep_test_name = name
+    if partition_data is None:
+        partition_data = torch.zeros(1, dtype=full_data.dtype, device=full_data.device)
+    param.data = partition_data.detach().clone()
+    return param
+
+
+class FakeGatheredParameters:
+    calls = []
+
+    def __init__(self, params, modifier_rank=None, fwd_module=None, enabled=True):
+        self.params = list(params)
+        self.modifier_rank = modifier_rank
+        self.enabled = enabled
+        self._saved_data = []
+        FakeGatheredParameters.calls.append({
+            "names": [getattr(param, "_autoep_test_name", f"param{param.ds_id}") for param in self.params],
+            "modifier_rank":
+            modifier_rank,
+            "enabled":
+            enabled,
+        })
+
+    def __enter__(self):
+        if not self.enabled:
+            return
+        for param in self.params:
+            self._saved_data.append((param, param.data))
+            param.data = param._autoep_test_full_data.detach().clone()
+
+    def __exit__(self, *exc):
+        if not self.enabled:
+            return
+        for param, data in self._saved_data:
+            param.data = data
 
 
 class MockSharedExpert(nn.Module):
@@ -202,6 +250,18 @@ class TestAutoEPConfig:
         with pytest.raises(ValueError, match="exceeds num_experts"):
             validate_autoep_post_detection(AutoEPConfig(enabled=True, autoep_size=16), [_make_spec(num_experts=8)])
 
+    def test_expert_tensor_parallel_size_is_parsed_but_limited_to_one(self):
+        config = parse_autoep_config({
+            "enabled": True,
+            "autoep_size": 2,
+            "expert_tensor_parallel_size": 1,
+        })
+        assert config.expert_tensor_parallel_size == 1
+
+        config.expert_tensor_parallel_size = 2
+        with pytest.raises(ValueError, match="expert_tensor_parallel_size=1"):
+            validate_autoep_config(config, world_size=4, pp_size=1, tp_size=1, sp_size=1)
+
     def test_configure_expert_parallel_uses_engine_mpu_sequence_parallel_size(self, monkeypatch):
 
         class SequenceParallelMPU:
@@ -284,6 +344,434 @@ class TestAutoEPConfig:
         engine.mpu = object()
 
         assert engine._autoep_sequence_parallel_world_size() == 3
+
+    def test_zero3_compatibility_gate_rejects_native_moe(self):
+        engine = object.__new__(DeepSpeedEngine)
+        engine.__dict__["module"] = nn.Sequential(MoE(hidden_size=4, expert=nn.Linear(4, 4), num_experts=1))
+        engine.has_moe_layers = True
+        engine.sequence_parallel_size = 1
+        engine._config = SimpleNamespace(
+            tensor_parallel_config=SimpleNamespace(autotp_size=1),
+            expert_parallel_config=AutoEPConfig(enabled=True, autoep_size=1),
+        )
+
+        with pytest.raises(AssertionError, match="Native DeepSpeed MoE"):
+            engine._validate_zero3_moe_compatibility()
+
+    def test_zero3_compatibility_gate_allows_constrained_autoep(self):
+        model = MockMoETransformer(num_layers=1)
+        replace_autoep_layers(model, "mixtral")
+        engine = object.__new__(DeepSpeedEngine)
+        engine.__dict__["module"] = model
+        engine.has_moe_layers = True
+        engine.sequence_parallel_size = 1
+        engine.zero_quantized_gradients = lambda: False
+        engine._config = SimpleNamespace(
+            tensor_parallel_config=SimpleNamespace(autotp_size=1),
+            expert_parallel_config=AutoEPConfig(enabled=True, autoep_size=1),
+        )
+
+        engine._validate_zero3_moe_compatibility()
+
+    def test_zero3_compatibility_gate_rejects_sequence_parallel(self):
+        model = MockMoETransformer(num_layers=1)
+        replace_autoep_layers(model, "mixtral")
+        engine = object.__new__(DeepSpeedEngine)
+        engine.__dict__["module"] = model
+        engine.has_moe_layers = True
+        engine.sequence_parallel_size = 2
+        engine.zero_quantized_gradients = lambda: False
+        engine._config = SimpleNamespace(
+            tensor_parallel_config=SimpleNamespace(autotp_size=1),
+            expert_parallel_config=AutoEPConfig(enabled=True, autoep_size=1),
+        )
+
+        with pytest.raises(AssertionError, match="sequence parallelism"):
+            engine._validate_zero3_moe_compatibility()
+
+    def test_zero3_compatibility_gate_rejects_active_autotp(self):
+        model = MockMoETransformer(num_layers=1)
+        replace_autoep_layers(model, "mixtral")
+        engine = object.__new__(DeepSpeedEngine)
+        engine.__dict__["module"] = model
+        engine.has_moe_layers = True
+        engine.sequence_parallel_size = 1
+        engine.zero_quantized_gradients = lambda: False
+        engine._config = SimpleNamespace(
+            tensor_parallel_config=SimpleNamespace(autotp_size=2),
+            expert_parallel_config=AutoEPConfig(enabled=True, autoep_size=1),
+        )
+
+        with pytest.raises(AssertionError, match="AutoTP"):
+            engine._validate_zero3_moe_compatibility()
+
+    def test_zero3_compatibility_gate_rejects_quantized_gradients(self):
+        model = MockMoETransformer(num_layers=1)
+        replace_autoep_layers(model, "mixtral")
+        engine = object.__new__(DeepSpeedEngine)
+        engine.__dict__["module"] = model
+        engine.has_moe_layers = True
+        engine.sequence_parallel_size = 1
+        engine.zero_quantized_gradients = lambda: True
+        engine._config = SimpleNamespace(
+            tensor_parallel_config=SimpleNamespace(autotp_size=1),
+            expert_parallel_config=AutoEPConfig(enabled=True, autoep_size=1),
+        )
+
+        with pytest.raises(AssertionError, match="zero_quantized_gradients"):
+            engine._validate_zero3_moe_compatibility()
+
+    def test_zero3_compatibility_gate_rejects_mics(self):
+        model = MockMoETransformer(num_layers=1)
+        replace_autoep_layers(model, "mixtral")
+        engine = object.__new__(DeepSpeedEngine)
+        engine.__dict__["module"] = model
+        engine.has_moe_layers = True
+        engine.sequence_parallel_size = 1
+        engine.zero_quantized_gradients = lambda: False
+        engine._config = SimpleNamespace(
+            mics_shard_size=2,
+            zero_config=SimpleNamespace(zero_hpz_partition_size=1),
+            tensor_parallel_config=SimpleNamespace(autotp_size=1),
+            expert_parallel_config=AutoEPConfig(enabled=True, autoep_size=1),
+        )
+
+        with pytest.raises(AssertionError, match="MiCS"):
+            engine._validate_zero3_moe_compatibility()
+
+    def test_zero3_compatibility_gate_rejects_hpzero(self):
+        model = MockMoETransformer(num_layers=1)
+        replace_autoep_layers(model, "mixtral")
+        engine = object.__new__(DeepSpeedEngine)
+        engine.__dict__["module"] = model
+        engine.has_moe_layers = True
+        engine.sequence_parallel_size = 1
+        engine.zero_quantized_gradients = lambda: False
+        engine._config = SimpleNamespace(
+            mics_shard_size=0,
+            zero_config=SimpleNamespace(zero_hpz_partition_size=2),
+            tensor_parallel_config=SimpleNamespace(autotp_size=1),
+            expert_parallel_config=AutoEPConfig(enabled=True, autoep_size=1),
+        )
+
+        with pytest.raises(AssertionError, match="hpZeRO"):
+            engine._validate_zero3_moe_compatibility()
+
+    def test_autoep_layer_marks_zero3_param_placement_families(self):
+        model = MockMoETransformer(num_layers=1)
+        replace_autoep_layers(model, "mixtral")
+        autoep_layer = next(module for module in model.modules() if isinstance(module, AutoEPMoELayer))
+
+        for param in autoep_layer.experts.parameters():
+            assert param.ds_zero_placement_family == "autoep_expert"
+            assert param.ds_zero_partition_group_name == autoep_layer.ep_group_name
+
+        for param in autoep_layer.router.parameters():
+            assert param.ds_zero_placement_family == "replicated"
+
+    def test_zero3_checkpoint_metadata_includes_partition_group_ranks(self):
+        optimizer = object.__new__(DeepSpeedZeroOptimizer_Stage3)
+        param = nn.Parameter(torch.empty(1))
+        param.ds_zero_placement_family = "autoep_expert"
+        param.ds_zero_partition_group_name = "ep_size_2"
+        optimizer.fp16_groups = [[param]]
+        optimizer._get_sub_group_partition_count = lambda _: 2
+        optimizer._get_sub_group_partition_rank = lambda _: 1
+        optimizer._get_sub_group_partition_ranks = lambda _: [1, 3]
+
+        metadata = optimizer._zero3_partition_group_metadata()
+
+        assert metadata == [{
+            "sub_group": 0,
+            "partition_count": 2,
+            "partition_rank": 1,
+            "partition_ranks": [1, 3],
+            "families": ["autoep_expert"],
+            "group_names": ["ep_size_2"],
+        }]
+
+        param.ds_zero_placement_family = "replicated"
+        param.ds_zero_partition_group_name = None
+        assert optimizer._zero3_partition_group_metadata() is None
+
+    def test_zero3_cpu_offload_grad_norm_reduces_autoep_expert_parallel_group(self, monkeypatch):
+        optimizer = object.__new__(DeepSpeedZeroOptimizer_Stage3)
+        param = nn.Parameter(torch.empty(1))
+        param.ds_zero_placement_family = "autoep_expert"
+        param.ds_zero_partition_group_name = "ep_size_2"
+        optimizer.model_parallel_rank = 0
+        optimizer.norm_for_param_grads = {7: 3.0}
+        optimizer.get_param_id = lambda _: 7
+        optimizer._assert_same_partition_group = lambda _: None
+        optimizer._get_param_partition_group = lambda _: "expert_data_parallel"
+        optimizer._model_parallel_all_reduce = lambda tensor, op: None
+        optimizer._autoep_expert_parallel_group = lambda _: "expert_parallel"
+        calls = []
+
+        def fake_all_reduce(tensor, op=None, group=None):
+            calls.append(group)
+
+        class FakeAccelerator:
+
+            def FloatTensor(self, values):
+                return torch.FloatTensor(values)
+
+        monkeypatch.setattr(zero_stage3, "get_accelerator", lambda: FakeAccelerator())
+        monkeypatch.setattr(zero_stage3.dist, "all_reduce", fake_all_reduce)
+
+        norm = optimizer.complete_grad_norm_calculation_for_cpu_offload([param])
+
+        assert calls == ["expert_data_parallel", "expert_parallel"]
+        assert torch.isfinite(norm)
+
+    def test_zero3_autoep_reduce_scatter_grads_average_by_global_dp(self, monkeypatch):
+        optimizer = object.__new__(DeepSpeedZeroOptimizer_Stage3)
+        optimizer.dp_process_group = "global_data_parallel"
+        optimizer.dtype = torch.float32
+        optimizer.gradient_accumulation_dtype = torch.float32
+        optimizer.postscale_gradients = True
+        optimizer.gradient_predivide_factor = 1.0
+        optimizer.all2all_process_group = None
+        optimizer._assert_same_partition_group = lambda _: None
+        optimizer._get_param_partition_group = lambda _: "expert_data_parallel"
+        optimizer._autoep_expert_parallel_group = lambda _: "expert_parallel"
+        param = nn.Parameter(torch.ones(4))
+        param.grad = torch.ones(4)
+
+        class FakeAccelerator:
+
+            def device_count(self):
+                return 4
+
+        def fake_get_world_size(group=None):
+            return 2 if group == "expert_data_parallel" else 4
+
+        def fake_reduce_scatter(grads, process_group):
+            assert process_group == "expert_data_parallel"
+            return [torch.full((2, ), 8.0)]
+
+        monkeypatch.setattr(zero_stage3, "get_accelerator", lambda: FakeAccelerator())
+        monkeypatch.setattr(zero_stage3.dist, "get_world_size", fake_get_world_size)
+        monkeypatch.setattr(zero_stage3, "reduce_scatter_coalesced", fake_reduce_scatter)
+
+        grad_partitions = optimizer._DeepSpeedZeroOptimizer_Stage3__avg_scatter_grads([param], torch.float32)
+
+        torch.testing.assert_close(grad_partitions[0], torch.full((2, ), 4.0))
+
+    def test_zero3_autoep_contiguous_grads_average_by_global_dp(self, monkeypatch):
+        optimizer = object.__new__(DeepSpeedZeroOptimizer_Stage3)
+        optimizer.dp_process_group = "global_data_parallel"
+        optimizer.ipg_buckets = {torch.float32: SimpleNamespace(params=[], process_group="expert_data_parallel")}
+        optimizer.postscale_gradients = True
+        optimizer.gradient_predivide_factor = 1.0
+        optimizer.sequence_parallel_size = 1
+        optimizer.gradient_accumulation_dtype = torch.float32
+        optimizer._assert_same_partition_group = lambda _: None
+        optimizer._autoep_expert_parallel_group = lambda _: "expert_parallel"
+        optimizer._apply_distributed_muon_update = lambda communication_data_type, buffer: None
+        param = nn.Parameter(torch.empty(2))
+        param.grad = torch.zeros(2)
+        param.partition_numel = lambda: 1
+        optimizer.ipg_buckets[torch.float32].params = [param]
+
+        def fake_get_world_size(group=None):
+            return 2 if group == "expert_data_parallel" else 4
+
+        def fake_all_reduce(tensor, group=None):
+            assert group == "expert_data_parallel"
+            tensor.mul_(2)
+
+        monkeypatch.setattr(zero_stage3.dist, "get_world_size", fake_get_world_size)
+        monkeypatch.setattr(zero_stage3.dist, "get_rank", lambda group=None: 0)
+        monkeypatch.setattr(zero_stage3.dist, "all_reduce", fake_all_reduce)
+
+        grad_partitions = optimizer._DeepSpeedZeroOptimizer_Stage3__avg_scatter_contiguous_grads(
+            torch.tensor([4.0, 8.0]), torch.float32)
+
+        torch.testing.assert_close(grad_partitions[0], torch.tensor([2.0]))
+
+    def test_pipeline_load_module_state_dict_accepts_autoep_zero3_fetch_kwarg(self):
+        from deepspeed.runtime.pipe.engine import PipelineEngine
+
+        signature = inspect.signature(PipelineEngine.load_module_state_dict)
+
+        assert "z3_params_to_fetch" in signature.parameters
+        assert "allowed_missing_keys" in signature.parameters
+
+    def test_load_module_state_dict_nonstrict_keeps_nonstrict_semantics_with_allowed_missing_keys(self):
+        engine = object.__new__(DeepSpeedEngine)
+        # bypass nn.Module.__setattr__, which requires Module.__init__
+        object.__setattr__(engine, "module", nn.Linear(2, 2))
+        checkpoint = {"module": {"unexpected_key": torch.zeros(1)}}
+
+        # strict=False must keep the documented non-strict load semantics even
+        # when AutoEP expert keys are allowed to be missing.
+        engine.load_module_state_dict(checkpoint, strict=False, allowed_missing_keys=["weight"])
+
+        with pytest.raises(RuntimeError, match="outside AutoEP expert"):
+            engine.load_module_state_dict(checkpoint, strict=True, allowed_missing_keys=["weight"])
+
+    def test_resolve_zero3_param_placement_rejects_pre_partitioned_expert_on_wrong_group(self, monkeypatch):
+        engine = object.__new__(DeepSpeedEngine)
+        model = nn.Linear(2, 2, bias=False)
+        # bypass nn.Module.__setattr__, which requires Module.__init__
+        object.__setattr__(engine, "module", model)
+
+        expert_group = object()
+        other_group = object()
+        monkeypatch.setattr(ds_engine.groups, "_get_expert_data_parallel_group", lambda name: expert_group)
+        monkeypatch.setattr(ds_engine.dist, "get_rank", lambda group=None: 0)
+        monkeypatch.setattr(ds_engine.dist, "get_world_size", lambda group=None: 1)
+        monkeypatch.setattr(ds_engine.dist,
+                            "get_all_ranks_from_group",
+                            lambda group: [0] if group is expert_group else [0, 1],
+                            raising=False)
+
+        param = model.weight
+        param.ds_zero_placement_family = "autoep_expert"
+        param.ds_zero_partition_group_name = "ep_size_2"
+        param.ds_id = 0
+        param.ds_process_group = other_group
+
+        with pytest.raises(AssertionError, match="already ZeRO-partitioned over a non-expert process group"):
+            engine._resolve_zero3_param_placement()
+
+        # A pre-partitioned expert param over the matching group is accepted
+        # and keeps metadata derived from its actual partition group.
+        param.ds_process_group = expert_group
+        engine._resolve_zero3_param_placement()
+        assert param.ds_zero_partition_process_group is expert_group
+
+    def test_autoep_zero3_16bit_export_guard_directs_to_universal_conversion(self):
+        engine = object.__new__(DeepSpeedEngine)
+        engine.zero_optimization_partition_weights = lambda: True
+        engine._has_autoep_layers = lambda: True
+
+        with pytest.raises(NotImplementedError, match="ds_to_universal.py"):
+            engine._raise_if_autoep_zero3_consolidated_export("save_16bit_model")
+
+    def test_universal_converter_detects_zero3_partitioned_autoep_model_state(self, tmp_path):
+        from deepspeed.checkpoint.constants import (
+            AUTOEP_LAYERS_KEY,
+            AUTOEP_ZERO3_EXPERT_STATE_FORMAT_VERSION,
+            AUTOEP_ZERO3_EXPERT_STATE_FORMAT_VERSION_KEY,
+            AUTOEP_ZERO3_EXPERT_STATE_FORMAT_KEY,
+            AUTOEP_ZERO3_PARTITIONED_EXPERT_STATE_FORMAT,
+        )
+        from deepspeed.checkpoint.ds_to_universal import (
+            _autoep_expert_param_names_by_rank,
+            _get_zero3_model_state_files,
+            _uses_zero3_partitioned_autoep_metadata,
+        )
+
+        zero3_model_file = tmp_path / "zero_pp_rank_0_mp_rank_00_model_states.pt"
+        expert_file = tmp_path / "layer_0_expert_0_mp_rank_00_model_states.pt"
+        metadata = [{
+            "moe_layer_id": 0,
+            "module_path": "model.layers.0.mlp",
+            "num_experts": 4,
+            "num_local_experts": 2,
+            "ep_size": 2,
+            "expert_key_prefix": "model.layers.0.mlp.experts",
+            AUTOEP_ZERO3_EXPERT_STATE_FORMAT_KEY: AUTOEP_ZERO3_PARTITIONED_EXPERT_STATE_FORMAT,
+            AUTOEP_ZERO3_EXPERT_STATE_FORMAT_VERSION_KEY: AUTOEP_ZERO3_EXPERT_STATE_FORMAT_VERSION,
+            "ep_group_name": "ep_size_2",
+            "ep_rank": 0,
+            "expert_data_parallel_rank": 0,
+            "expert_data_parallel_world_size": 1,
+            "global_expert_start": 0,
+            "global_expert_end": 2,
+        }]
+        torch.save({AUTOEP_LAYERS_KEY: metadata}, zero3_model_file)
+        torch.save({"expert": torch.empty(1)}, expert_file)
+
+        model_files = _get_zero3_model_state_files(str(tmp_path))
+        expert_param_names, metadata_by_rank = _autoep_expert_param_names_by_rank(model_files)
+
+        assert model_files == [str(zero3_model_file)]
+        assert expert_param_names == {
+            "model.layers.0.mlp.experts.w1",
+            "model.layers.0.mlp.experts.w2",
+            "model.layers.0.mlp.experts.w3",
+        }
+        assert _uses_zero3_partitioned_autoep_metadata(metadata_by_rank[0])
+
+    def test_universal_stage3_extract_accepts_tuple_param_shapes(self, tmp_path):
+        from deepspeed.checkpoint.constants import OPTIMIZER_STATE_DICT
+        from deepspeed.checkpoint.ds_to_universal import extract_zero_shards_stage3
+
+        optim_file = tmp_path / "zero_pp_rank_0_mp_rank_00_optim_states.pt"
+        torch.save(
+            {
+                OPTIMIZER_STATE_DICT: {
+                    "optimizer_state_dict": {
+                        "state": [{
+                            "exp_avg": torch.arange(6, dtype=torch.float32),
+                            "exp_avg_sq": torch.arange(6, dtype=torch.float32) + 10,
+                        }]
+                    },
+                    "fp32_flat_groups": [torch.arange(6, dtype=torch.float32) + 20],
+                }
+            },
+            optim_file,
+        )
+
+        temp_dir = tmp_path / "tmp"
+        extract_zero_shards_stage3([str(optim_file)], [OrderedDict([("dense.weight", (2, 3))])], 1, str(temp_dir), 0)
+
+        fp32_fragment = torch.load(temp_dir / "dense.weight" / "0" / "fp32.00", weights_only=False)
+        exp_avg_fragment = torch.load(temp_dir / "dense.weight" / "0" / "exp_avg.00", weights_only=False)
+        torch.testing.assert_close(fp32_fragment, torch.arange(6, dtype=torch.float32) + 20)
+        torch.testing.assert_close(exp_avg_fragment, torch.arange(6, dtype=torch.float32))
+
+    def test_zero_to_fp32_rejects_zero3_partitioned_autoep_checkpoint(self, tmp_path):
+        from deepspeed.checkpoint.constants import (
+            AUTOEP_LAYERS_KEY,
+            AUTOEP_ZERO3_EXPERT_STATE_FORMAT_VERSION,
+            AUTOEP_ZERO3_EXPERT_STATE_FORMAT_VERSION_KEY,
+            AUTOEP_ZERO3_EXPERT_STATE_FORMAT_KEY,
+            AUTOEP_ZERO3_PARTITIONED_EXPERT_STATE_FORMAT,
+            BUFFER_NAMES,
+            PARAM_SHAPES,
+        )
+        from deepspeed.utils.zero_to_fp32 import _raise_if_autoep_zero3_partitioned_checkpoint
+
+        model_file = tmp_path / "zero_pp_rank_0_mp_rank_00_model_states.pt"
+        torch.save(
+            {
+                BUFFER_NAMES: [],
+                PARAM_SHAPES: [],
+                "module": {},
+                "shared_params": {},
+                AUTOEP_LAYERS_KEY: [{
+                    "moe_layer_id": 0,
+                    "module_path": "model.layers.0.mlp",
+                    "num_experts": 4,
+                    "num_local_experts": 2,
+                    "ep_size": 2,
+                    "expert_key_prefix": "model.layers.0.mlp.experts",
+                    AUTOEP_ZERO3_EXPERT_STATE_FORMAT_KEY: AUTOEP_ZERO3_PARTITIONED_EXPERT_STATE_FORMAT,
+                    AUTOEP_ZERO3_EXPERT_STATE_FORMAT_VERSION_KEY: AUTOEP_ZERO3_EXPERT_STATE_FORMAT_VERSION,
+                    "ep_group_name": "ep_size_2",
+                    "ep_rank": 0,
+                    "expert_data_parallel_rank": 0,
+                    "expert_data_parallel_world_size": 1,
+                    "global_expert_start": 0,
+                    "global_expert_end": 2,
+                }],
+            },
+            model_file,
+        )
+
+        with pytest.raises(NotImplementedError, match="ds_to_universal.py"):
+            _raise_if_autoep_zero3_partitioned_checkpoint([str(model_file)])
+
+        # parse_model_states is the guard point used by
+        # _get_fp32_state_dict_from_zero_checkpoint, which loads each model
+        # state file only once.
+        from deepspeed.utils.zero_to_fp32 import parse_model_states
+        with pytest.raises(NotImplementedError, match="ds_to_universal.py"):
+            parse_model_states([str(model_file)])
 
     def test_preset_registry_core_contracts(self):
         assert set(PRESET_MODELS) == {"mixtral", "qwen3_moe", "qwen3_5_moe", "deepseek_v2", "deepseek_v3"}
@@ -428,6 +916,40 @@ class TestModelDetectionAndReplacement:
         _assert_same_dtype_device(replaced.experts.w2, source.experts.down_proj)
         _assert_same_dtype_device(replaced.experts.w3, source.experts.gate_up_proj)
 
+    def test_zero_init_source_gathered_for_parser_router_and_fused_repack(self, monkeypatch):
+        FakeGatheredParameters.calls = []
+        monkeypatch.setattr(ep_repack, "GatheredParameters", FakeGatheredParameters)
+
+        model = MockMoETransformer(num_layers=1, num_experts=4, moe_every_n=1)
+        source = model.model.layers[0].mlp
+        expected_gate = source.gate.weight.detach().clone()
+        expected_gate_up = source.experts.gate_up_proj.detach().clone()
+        expected_down = source.experts.down_proj.detach().clone()
+
+        _mark_fake_zero_param(source.gate.weight, expected_gate, ds_id=1, name="router.weight")
+        _mark_fake_zero_param(source.experts.gate_up_proj, expected_gate_up, ds_id=2, name="experts.gate_up_proj")
+        _mark_fake_zero_param(source.experts.down_proj, expected_down, ds_id=3, name="experts.down_proj")
+
+        auto_ep = AutoEP(model, _runtime_config(enabled=True, autoep_size=1, preset_model="mixtral"))
+        specs = auto_ep.ep_parser()
+        assert len(specs) == 1
+        assert specs[0].expert_storage == "fused_3d"
+        assert specs[0].num_experts == 4
+        assert specs[0].hidden_size == 64
+
+        auto_ep.replace_moe_layer(specs[0], ep_size=1, ep_rank=0)
+
+        replaced = model.model.layers[0].mlp
+        torch.testing.assert_close(replaced.router.gate.weight, expected_gate)
+        torch.testing.assert_close(replaced.experts.w1, expected_gate_up[:, :128, :])
+        torch.testing.assert_close(replaced.experts.w3, expected_gate_up[:, 128:, :])
+        torch.testing.assert_close(replaced.experts.w2, expected_down)
+        assert [call["names"] for call in FakeGatheredParameters.calls] == [
+            ["router.weight"],
+            ["experts.gate_up_proj", "experts.down_proj"],
+        ]
+        assert all(call["modifier_rank"] is None for call in FakeGatheredParameters.calls)
+
     def test_module_list_replacement_preserves_frozen_experts_and_trainable_router(self, monkeypatch):
         monkeypatch.setattr(get_preset_adapter("deepseek_v3"), "_installed_transformers_version", lambda: "5.0.0")
         model = MockDeepSeekV3Transformer(num_layers=1, num_experts=4).to(dtype=torch.bfloat16)
@@ -457,6 +979,52 @@ class TestModelDetectionAndReplacement:
         _assert_same_dtype_device(replaced.experts.w1, source.experts[0].gate_proj.weight)
         _assert_same_dtype_device(replaced.experts.w2, source.experts[0].down_proj.weight)
         _assert_same_dtype_device(replaced.experts.w3, source.experts[0].up_proj.weight)
+
+    def test_module_list_zero_source_gathers_all_experts_in_global_order(self, monkeypatch):
+        FakeGatheredParameters.calls = []
+        monkeypatch.setattr(ep_repack, "GatheredParameters", FakeGatheredParameters)
+        monkeypatch.setattr(get_preset_adapter("deepseek_v3"), "_installed_transformers_version", lambda: "5.0.0")
+
+        model = MockDeepSeekV3Transformer(num_layers=1, num_experts=4)
+        source = model.model.layers[0].mlp
+        for expert_idx, expert in enumerate(source.experts):
+            for offset, (suffix, param) in enumerate((
+                ("w1", expert.gate_proj.weight),
+                ("w2", expert.down_proj.weight),
+                ("w3", expert.up_proj.weight),
+            )):
+                full_data = param.detach().clone()
+                _mark_fake_zero_param(param,
+                                      full_data,
+                                      ds_id=10 + 3 * expert_idx + offset,
+                                      name=f"e{expert_idx}.{suffix}")
+
+        auto_ep = AutoEP(model, _runtime_config(enabled=True, autoep_size=2))
+        spec = auto_ep.ep_parser()[0]
+        w1, w2, w3 = repack_expert_weights(source.experts, spec, ep_rank=1, ep_size=2)
+
+        expected_w1 = torch.stack([
+            source.experts[2].gate_proj.weight._autoep_test_full_data,
+            source.experts[3].gate_proj.weight._autoep_test_full_data
+        ])
+        expected_w2 = torch.stack([
+            source.experts[2].down_proj.weight._autoep_test_full_data,
+            source.experts[3].down_proj.weight._autoep_test_full_data
+        ])
+        expected_w3 = torch.stack([
+            source.experts[2].up_proj.weight._autoep_test_full_data,
+            source.experts[3].up_proj.weight._autoep_test_full_data
+        ])
+
+        torch.testing.assert_close(w1, expected_w1)
+        torch.testing.assert_close(w2, expected_w2)
+        torch.testing.assert_close(w3, expected_w3)
+        assert [call["names"] for call in FakeGatheredParameters.calls] == [
+            ["e0.w1", "e0.w2", "e0.w3"],
+            ["e1.w1", "e1.w2", "e1.w3"],
+            ["e2.w1", "e2.w2", "e2.w3"],
+            ["e3.w1", "e3.w2", "e3.w3"],
+        ]
 
     def test_module_list_mixed_expert_requires_grad_flags_are_rejected(self, monkeypatch):
         monkeypatch.setattr(get_preset_adapter("deepseek_v3"), "_installed_transformers_version", lambda: "5.0.0")
@@ -514,6 +1082,8 @@ class TestModelDetectionAndReplacement:
             AutoEP(model, _runtime_config(enabled=True, autoep_size=1))._resolve_presets()
 
     def test_deepseek_v3_detection_and_score_correction_bias_copy(self, monkeypatch):
+        FakeGatheredParameters.calls = []
+        monkeypatch.setattr(ep_repack, "GatheredParameters", FakeGatheredParameters)
         monkeypatch.setattr(get_preset_adapter("deepseek_v3"), "_installed_transformers_version", lambda: "5.0.0")
         model = MockDeepSeekV3Transformer(num_layers=1, num_experts=8)
         auto_ep = AutoEP(model, _runtime_config(enabled=True, autoep_size=2))
@@ -527,6 +1097,10 @@ class TestModelDetectionAndReplacement:
 
         source_bias = torch.arange(8, dtype=torch.float32)
         model.model.layers[0].mlp.gate.e_score_correction_bias = nn.Parameter(source_bias.clone())
+        _mark_fake_zero_param(model.model.layers[0].mlp.gate.e_score_correction_bias,
+                              source_bias,
+                              ds_id=100,
+                              name="router.e_score_correction_bias")
 
         auto_ep.replace_moe_layer(specs[0], ep_size=2, ep_rank=0)
 
@@ -534,3 +1108,4 @@ class TestModelDetectionAndReplacement:
         assert isinstance(replaced, AutoEPMoELayer)
         assert replaced.router.e_score_correction_bias is not None
         torch.testing.assert_close(replaced.router.e_score_correction_bias, source_bias)
+        assert ["router.e_score_correction_bias"] in [call["names"] for call in FakeGatheredParameters.calls]

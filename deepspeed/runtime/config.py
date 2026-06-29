@@ -637,6 +637,10 @@ def get_dataloader_drop_last(param_dict):
     return get_scalar_param(param_dict, DATALOADER_DROP_LAST, DATALOADER_DROP_LAST_DEFAULT)
 
 
+def get_log_level(param_dict):
+    return get_scalar_param(param_dict, LOG_LEVEL, LOG_LEVEL_DEFAULT)
+
+
 '''Write deepspeed config files by modifying basic templates.
 Can be used for quickly changing parameters via command line parameters.'''
 
@@ -872,6 +876,8 @@ class DeepSpeedConfig(object):
         self.aio_config = get_aio_config(param_dict)
 
         self.dataloader_drop_last = get_dataloader_drop_last(param_dict)
+
+        self.log_level = get_log_level(param_dict)
 
         self.nebula_config = DeepSpeedNebulaConfig(param_dict)
         self.datastates_config = DeepSpeedDataStatesConfig(param_dict)

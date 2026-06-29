@@ -35,6 +35,7 @@ from deepspeed.git_version_info import version
 from deepspeed.runtime.constants import PIPE_REPLICATED
 from deepspeed.accelerator import get_accelerator
 from deepspeed.runtime.zero.muon.original_muon import muon_update
+from deepspeed.runtime.zero.muon.muon_optimizer import MuonWithAuxAdam
 from deepspeed.checkpoint.constants import (DS_VERSION, GROUP_PADDINGS, PARTITION_COUNT, LOSS_SCALER,
                                             SINGLE_PARTITION_OF_FP32_GROUPS, BASE_OPTIMIZER_STATE,
                                             BASE_OPTIMIZER_STATE_STEP, CLIP_GRAD, ZERO_STAGE, PARAM_SLICE_MAPPINGS)
@@ -217,6 +218,12 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         self.timers = timers
 
         self.reduce_scatter = reduce_scatter
+
+        # Muon's Newton-Schulz orthogonalization needs the full all-reduced gradient on each
+        # rank; reduce_scatter delivers only this rank's partition slice and silently corrupts
+        # cross-partition parameters (#7807). ZeRO-3 already guards this (see stage3.py).
+        if isinstance(self.optimizer, MuonWithAuxAdam) and self.reduce_scatter:
+            raise ValueError("Muon and reduce scatter cannot be used together")
 
         self.overlap_comm = overlap_comm
 
