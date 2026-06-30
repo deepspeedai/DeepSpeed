@@ -574,6 +574,13 @@ Enabling and configuring ZeRO memory optimizations
 | Do not partition parameters smaller than this threshold. Smaller values use less memory, but can greatly increase communication (especially latency-bound messages). | `1e5`   |
 
 
+***stage3_partition_stream_chunk_size***: [integer]
+
+| Description                                                                                                                                                                                                                                                                                               | Default |
+| -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
+| Partition parameters with more than this many elements by streaming their flattened data through fixed-size chunks of this size, bounding peak device memory during `zero.Init` instead of materializing the full parameter on one device. Needed when a single (e.g. fused MoE-expert) parameter is too large to fit on one device. `0` disables streaming. | `0`     |
+
+
 ***stage3_gather_16bit_weights_on_model_save***: [boolean]
 
 | Description                                                                                                                                                                                                                                                                    | Default |
