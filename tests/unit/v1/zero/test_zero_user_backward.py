@@ -554,8 +554,9 @@ class TestZeroUserBackwardSeparateLoss(DistributedTest):
         batch_size = 2
 
         # Default gradient_accumulation_steps=1, which is the failing case.
-        model_ddp, optimizer_ddp, model_engine, device, dtype = setup_models_and_engines(
-            model_class=SimpleOutputModel, zero_stage=zero_stage, hidden_dim=hidden_dim)
+        model_ddp, optimizer_ddp, model_engine, device, dtype = setup_models_and_engines(model_class=SimpleOutputModel,
+                                                                                         zero_stage=zero_stage,
+                                                                                         hidden_dim=hidden_dim)
 
         loss_fn = torch.nn.CrossEntropyLoss()
 
@@ -614,8 +615,9 @@ class TestZeroUserBackwardSeparateLoss(DistributedTest):
         batch_size = 2
 
         # Default gradient_accumulation_steps=1, which is the failing case.
-        model_ddp, optimizer_ddp, model_engine, device, dtype = setup_models_and_engines(
-            model_class=SimpleOutputModel, zero_stage=zero_stage, hidden_dim=hidden_dim)
+        model_ddp, optimizer_ddp, model_engine, device, dtype = setup_models_and_engines(model_class=SimpleOutputModel,
+                                                                                         zero_stage=zero_stage,
+                                                                                         hidden_dim=hidden_dim)
 
         loss_fn = torch.nn.CrossEntropyLoss()
 

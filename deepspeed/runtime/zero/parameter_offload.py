@@ -131,6 +131,7 @@ class DeepSpeedZeRoOffload(object):
         zero_quantized_nontrainable_weights=False,
         zero_module_granularity_threshold=0,
         log_trace_cache_warnings=False,
+        retain_graph_checker=None,
     ):
 
         see_memory_usage("DeepSpeedZeRoOffload initialize [begin]", force=False)
@@ -148,6 +149,7 @@ class DeepSpeedZeRoOffload(object):
         self.zero_quantized_weights = zero_quantized_weights
         self.zero_quantized_nontrainable_weights = zero_quantized_nontrainable_weights
         self.log_trace_cache_warnings = log_trace_cache_warnings
+        self.retain_graph_checker = retain_graph_checker
 
         if offload_param_config is not None and offload_param_config.device != OffloadDeviceEnum.none:
             self.offload_device = offload_param_config.device
@@ -554,9 +556,7 @@ class DeepSpeedZeRoOffload(object):
 
         # Keep gathered params alive when the current backward retains the graph,
         # so a second backward over the same forward can reuse valid saved tensors.
-        zero_optimizer = getattr(self, "zero_optimizer", None)
-        retain_graph_backward = bool(zero_optimizer is not None
-                                     and getattr(zero_optimizer, "retain_graph_on_current_backward", False))
+        retain_graph_backward = bool(self.retain_graph_checker()) if self.retain_graph_checker is not None else False
         if not retain_graph_backward:
             self.get_param_coordinator().release_sub_module(sub_module, forward=False)
 
