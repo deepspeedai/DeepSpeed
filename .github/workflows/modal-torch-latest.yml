@@ -9,8 +9,17 @@ name: modal-torch-latest
 # Both files are annotated to what's important and how one might change or update things if needed.
 #
 # Note that since this is a Required job we can't use `on.push.path` file filter - we are using
-# collect-tests job to do the filtering for us so that the job can be skipped and satisfy the
+# the collect-tests job to do the filtering for us so that the job can be skipped and satisfy the
 # Required status for PRs to pass.
+#
+# Test selection: collect-tests runs ci/tests_fetcher.py, which traces the import
+# graph from the PR's changed files to the impacted tests/unit/v1 tests. It emits a
+# `mode` (all | subset | none) and a test-list file:
+#   - none   -> deploy is skipped (Required status is still satisfied by the skip)
+#   - subset -> deploy runs pytest on only the impacted test files
+#   - all    -> deploy runs the whole tests/unit/v1 suite
+#
+# Full design / how to drive & change it: .github/workflows/TEST_SELECTION.md
 #
 
 
@@ -63,55 +72,150 @@ jobs:
       contents: read
       pull-requests: read
     outputs:
-      deepspeed: ${{ steps.filter.outputs.deepspeed == 'true' || steps.filter.outputs.modal_workflow == 'true' || steps.filter.outputs.ci == 'true' || steps.filter.outputs.unit_tests == 'true' || steps.filter.outputs.csrc == 'true' }}
+      mode: ${{ steps.fetch.outputs.mode }}
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
+          # For PRs, check out the PR head so the fetcher sees the proposed
+          # deepspeed/ + tests/ code. This job holds NO secrets. The selection
+          # *logic* (ci/) is restored from the base branch in a later step so a PR
+          # can't tamper with the decision (see "Use base-branch CI scripts").
+          # Falls back to the pushed/manual commit for non-PR events.
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          # Full history so the merge-base with the base branch is always present.
+          # This is the robust (if slower) choice: a shallow clone that can't reach
+          # the fork point would produce a wrong diff. The fetcher additionally
+          # guards against a missing merge-base by falling back to the full suite,
+          # so we never run a narrow (false-negative) selection on a bad base.
+          fetch-depth: 0
           lfs: true
 
-      - name: Filter changed files
-        uses: dorny/paths-filter@v3
-        id: filter
+      - name: Determine base ref
+        id: base
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          git config --global --add safe.directory '*'
+          if [ "$EVENT_NAME" = "pull_request_target" ]; then
+            # Fetch the base branch's full history too, so a merge-base always exists.
+            git fetch --no-tags origin "$BASE_REF"
+            echo "ref=origin/$BASE_REF" >> "$GITHUB_OUTPUT"
+          else
+            # push to master / manual dispatch -> no diff base -> run the full suite
+            echo "ref=" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Use base-branch CI scripts
+        # SECURITY: this job decides whether the Required `deploy` job runs. Under
+        # pull_request_target we must NOT trust the PR's own ci/ for that decision:
+        # a PR could rewrite ci/tests_fetcher.py to emit `mode=none` (or its self
+        # tests) and skip CI entirely while still satisfying the Required check.
+        # So run the selector + self-tests from the *base* branch's ci/. The diff is
+        # computed from git history, so a PR's ci/ changes still show up in the diff
+        # and (via the base selector's `ci/**` run-all glob) force a full run.
+        if: github.event_name == 'pull_request_target'
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          git config --global --add safe.directory '*'
+          git checkout "origin/$BASE_REF" -- ci/
+
+      - name: Self-test the fetcher
+        # Pure-stdlib self-tests for the selector (only needs git + python). Runs
+        # here so a broken selector is caught before it (mis)picks tests. Skipped
+        # when the base branch has no selector yet (bootstrap; see below).
+        run: |
+          if [ -f ci/test_tests_fetcher.py ]; then
+            python3 ci/test_tests_fetcher.py
+          else
+            echo "No base-branch ci/test_tests_fetcher.py (bootstrap) -> skipping self-tests."
+          fi
+
+      - name: Select impacted tests
+        id: fetch
+        # Pure-stdlib script; the runner's system python is fine (no deps needed).
+        # If the base branch doesn't have the selector yet (e.g. the PR that
+        # introduces it), the restored base ci/ won't contain tests_fetcher.py, so
+        # fall back to the full suite -- safe, and unblocks the bootstrap PR.
+        run: |
+          if [ -f ci/tests_fetcher.py ]; then
+            python3 ci/tests_fetcher.py --workflow modal-torch-latest --base "${{ steps.base.outputs.ref }}"
+          else
+            echo "No base-branch ci/tests_fetcher.py (bootstrap) -> running the full suite."
+            echo "mode=all" >> "$GITHUB_OUTPUT"
+            mkdir -p ci/.test_selection
+            printf 'tests/unit/v1\n' > ci/.test_selection/test_list.txt
+          fi
+
+      - name: Upload test selection
+        uses: actions/upload-artifact@v4
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          predicate-quantifier: every
-          filters: |
-            deepspeed:
-              - 'deepspeed/**'
-              - '!deepspeed/inference/v2/**'
-            modal_workflow:
-              - '.github/workflows/modal*.yml'
-            ci:
-              - 'ci/**'
-            unit_tests:
-              - 'tests/unit/**'
-              - '!tests/unit/inference/v2/**'
-            csrc:
-              - 'csrc/**'
+          name: modal-torch-latest-test-selection
+          path: ci/.test_selection/test_list.txt
+          # The path lives under a dot-folder; upload-artifact treats dot-prefixed
+          # paths as hidden and skips them by default (only warns), which would make
+          # deploy's download fail. Opt in explicitly.
+          include-hidden-files: true
+          retention-days: 3
 
   deploy:
     name: modal-torch-latest / DeepSpeedAI CI
     runs-on: ubuntu-latest
     needs: collect-tests
 
-    if: ${{ !cancelled() && (github.event_name == 'workflow_dispatch' || needs.collect-tests.result != 'success' || needs.collect-tests.outputs.deepspeed == 'true') }}
+    # Run when: manual dispatch, OR the selector failed (fail closed so the Required
+    # check doesn't silently pass), OR the diff impacts at least one test (mode != none).
+    # (!cancelled() adopted from upstream so a cancelled run doesn't trigger deploy.)
+    if: ${{ !cancelled() && (github.event_name == 'workflow_dispatch' || needs.collect-tests.result != 'success' || needs.collect-tests.outputs.mode != 'none') }}
     steps:
-      - name: Fail if path filter failed
+      - name: Fail if test selection failed
         if: github.event_name != 'workflow_dispatch' && needs.collect-tests.result != 'success'
         run: exit 1
 
       - name: Checkout Repository
         uses: actions/checkout@v4
         with:
+          # Test the PR's code (not the base) so diff-driven selection is meaningful.
+          # SECURITY NOTE: under pull_request_target this runs PR-authored code while
+          # the modal/HF secrets are on this runner. The trigger types include
+          # `synchronize`, so this re-runs on every push to an open PR (not only on a
+          # maintainer's review_requested / ready_for_review action) -- do not treat
+          # the maintainer gate as an absolute barrier. The primary protection is that
+          # the CI orchestration (which actually receives the secrets) is restored
+          # from the base branch in the next step, so a PR can't repoint it at the
+          # secrets; only the PR's deepspeed/ + tests/ run, inside modal.
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           lfs: true
+
+      - name: Use base-branch CI scripts
+        # Run the *base* version of ci/ (which drives `modal run` with the secrets in
+        # scope) rather than the PR's, so a PR can't modify the orchestration to
+        # exfiltrate secrets. The PR's deepspeed/ + tests/ are still what gets tested.
+        # (As noted in the header, changes to ci/* must be validated via `pull_request`
+        # or the modal CLI, since pull_request_target always uses the base ci/ here.)
+        if: github.event_name == 'pull_request_target'
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          git config --global --add safe.directory '*'
+          git fetch --no-tags --depth=1 origin "$BASE_REF"
+          git checkout "origin/$BASE_REF" -- ci/
 
       - name: Install Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.10"
           cache: 'pip' # caching pip dependencies
+
+      - name: Download test selection
+        if: needs.collect-tests.result == 'success'
+        uses: actions/download-artifact@v4
+        with:
+          name: modal-torch-latest-test-selection
+          path: ci/.test_selection
 
       - name: Install build dependencies
         run: |
@@ -123,6 +227,9 @@ jobs:
           MODAL_TORCH_PRESET: ${{ github.event.inputs.torch_preset || '2.10.0-cuda12.8' }}
           MODAL_TRANSFORMERS_SOURCE: ${{ github.event.inputs.transformers_source || 'git' }}
           MODAL_TRANSFORMERS_REF: ${{ github.event.inputs.transformers_ref || 'main' }}
+          # Diff-selected pytest targets produced by collect-tests (falls back to the
+          # full tests/unit/v1 suite if the file is missing/empty).
+          DS_TEST_LIST_FILE: ci/.test_selection/test_list.txt
           # these are created at https://modal.com/settings/deepspeedai/tokens
           # they are then added to the repo's secrets at https://github.com/deepspeedai/deepspeed/settings/secrets/actions
           MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}

@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # DeepSpeed Team
-"""One ZeRO-2 AutoEP gradient parity path."""
+"""AutoEP gradient parity paths."""
 
 import deepspeed
 import deepspeed.comm as dist
@@ -55,6 +55,17 @@ def _make_autoep_zero2_config(ep_size):
         "preset_model": "mixtral",
         "load_balance_coeff": None,
         "use_grouped_mm": False,
+    }
+    return config
+
+
+def _make_autoep_zero3_config(ep_size):
+    config = _make_autoep_zero2_config(ep_size)
+    config["zero_optimization"] = {
+        "stage": 3,
+        "overlap_comm": True,
+        "reduce_scatter": True,
+        "reduce_bucket_size": 5e8,
     }
     return config
 
@@ -178,3 +189,43 @@ class TestAutoEPGradParity(DistributedTest):
             return
 
         _assert_grad_maps_close(autoep_expert, zero2_expert, lhs_name="AutoEP expert", rhs_name="ZeRO-2 expert")
+
+    def test_zero3_autoep_expert_grads_match_zero2_autoep(self):
+        ep_size = 2
+        seed = 2345
+
+        _seed_everything(seed)
+        reference_state = _make_model().state_dict()
+
+        zero2_model = _make_model()
+        zero3_model = _make_model()
+        zero2_model.load_state_dict(reference_state)
+        zero3_model.load_state_dict(reference_state)
+
+        zero2_engine, _, _, _ = deepspeed.initialize(model=zero2_model, config=_make_autoep_zero2_config(ep_size))
+        zero3_engine, _, _, _ = deepspeed.initialize(model=zero3_model, config=_make_autoep_zero3_config(ep_size))
+
+        logical_rank = dist.get_rank() // ep_size
+        logical_world_size = self.world_size // ep_size
+        _run_until_boundary(zero2_engine,
+                            logical_dp_world_size=logical_world_size,
+                            logical_dp_rank=logical_rank,
+                            grad_accum=2,
+                            seed=seed)
+        _run_until_boundary(zero3_engine,
+                            logical_dp_world_size=logical_world_size,
+                            logical_dp_rank=logical_rank,
+                            grad_accum=2,
+                            seed=seed)
+
+        zero2_expert = _collect_autoep_expert_grads(zero2_engine)
+        zero3_expert = _collect_autoep_expert_grads(zero3_engine)
+
+        dist.barrier()
+        if dist.get_rank() != 0:
+            return
+
+        _assert_grad_maps_close(zero3_expert,
+                                zero2_expert,
+                                lhs_name="ZeRO-3 AutoEP expert",
+                                rhs_name="ZeRO-2 AutoEP expert")
