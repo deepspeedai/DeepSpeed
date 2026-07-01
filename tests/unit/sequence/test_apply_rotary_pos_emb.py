@@ -6,7 +6,7 @@
 import pytest
 import torch
 
-from deepspeed.sequence.layer import apply_rotary_pos_emb, _rotate_half
+from deepspeed.sequence.layer import apply_rotary_pos_emb, _rotate_half, _torchembed_available
 
 
 def _make_freqs(seq_len, rot_dim, theta=10000.0, device="cpu"):
@@ -62,3 +62,37 @@ def test_apply_rotary_pos_emb_grad_flow(dtype):
     assert t.grad is not None
     assert not torch.isnan(t.grad).any(), "NaNs in gradient"
     assert t.grad.shape == t.shape, f"grad shape {t.grad.shape} != {t.shape}"
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16])
+def test_apply_rotary_pos_emb_fused_gradient_correctness(dtype):
+    """When torchembed+CUDA are available, the fused path's gradient must numerically
+    match the reference path's, not just be non-NaN with the right shape.
+
+    Guards against bugs in the optional torchembed dependency itself, e.g.
+    https://github.com/liodon-ai/torchembed/issues/2, where the fused kernel's
+    backward silently produced wrong gradients while still passing shape/NaN checks.
+    """
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA not available")
+    if not _torchembed_available:
+        pytest.skip("torchembed not installed")
+
+    seq_len, n_heads, dim = 8, 4, 64
+    rot_dim = 64
+    torch.manual_seed(0)
+    t_base = torch.randn(seq_len, n_heads, dim, dtype=dtype)
+    grad_out = torch.randn(seq_len, n_heads, dim, dtype=dtype)
+    freqs_cos, freqs_sin = _make_freqs(seq_len, rot_dim)
+    freqs_cos = freqs_cos[:, :rot_dim].unsqueeze(1)
+    freqs_sin = freqs_sin[:, :rot_dim].unsqueeze(1)
+
+    t_ref = t_base.clone().requires_grad_(True)
+    out_ref = _ref_apply_rotary(t_ref, freqs_cos, freqs_sin)
+    out_ref.backward(grad_out)
+
+    t_cuda = t_base.clone().cuda().requires_grad_(True)
+    out_cuda = apply_rotary_pos_emb(t_cuda, freqs_cos.cuda(), freqs_sin.cuda())
+    out_cuda.backward(grad_out.cuda())
+
+    torch.testing.assert_close(t_cuda.grad.cpu(), t_ref.grad, atol=1e-3, rtol=1e-3)

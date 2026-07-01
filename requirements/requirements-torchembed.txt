@@ -1,1 +1,1 @@
-torchembed>=0.3.0
+torchembed>=0.3.1
