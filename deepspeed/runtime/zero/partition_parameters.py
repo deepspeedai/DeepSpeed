@@ -316,6 +316,27 @@ def free_param(param: Parameter) -> None:
     param.ds_status = ZeroParamStatus.NOT_AVAILABLE
 
 
+def _partition_chunk_overlap(chunk_offset, chunk_numel, partition_start, partition_numel):
+    """Locate where a streamed chunk of a flattened parameter lands in a partition.
+
+    When a parameter is partitioned by streaming its flattened data in fixed-size
+    chunks, each rank owns the flat slice ``[partition_start, partition_start +
+    partition_numel)``. This returns the part of the chunk ``[chunk_offset,
+    chunk_offset + chunk_numel)`` that falls inside that partition as
+    ``(dst_offset, src_offset, numel)`` -- ``dst_offset`` indexes the partition and
+    ``src_offset`` indexes the chunk -- or ``None`` when the chunk does not overlap
+    the partition.
+    """
+    overlap_start = max(chunk_offset, partition_start)
+    overlap_end = min(chunk_offset + chunk_numel, partition_start + partition_numel)
+    if overlap_start >= overlap_end:
+        return None
+    dst_offset = overlap_start - partition_start
+    src_offset = overlap_start - chunk_offset
+    numel = overlap_end - overlap_start
+    return dst_offset, src_offset, numel
+
+
 reuse_buffers = False
 temp_contiguous_tensor = None
 empty_buffers = {}
@@ -1096,6 +1117,12 @@ class Init(InsertPostInitMethodToModuleSubClasses):
         else:
             self.param_swapper = None
 
+        # Threshold/chunk size for streaming the partitioning of very large parameters.
+        # Read before the module conversion below since partitioning happens there.
+        self.partition_stream_chunk_size = get_config_default(DeepSpeedZeroConfig, "partition_stream_chunk_size")
+        if _ds_config is not None:
+            self.partition_stream_chunk_size = _ds_config.zero_config.partition_stream_chunk_size
+
         # If we are provided an already-allocated module to prepare.
         if module is not None:
             assert isinstance(module, torch.nn.Module)
@@ -1119,6 +1146,9 @@ class Init(InsertPostInitMethodToModuleSubClasses):
 
     def _zero_init_param(self, param):
         self._convert_to_deepspeed_param(param)
+        if self._should_stream_partition(param):
+            self._partition_param_streaming(param)
+            return
         partition_group = self.get_partition_dp_group(param)
         if dist.get_world_group() == partition_group:
             dist.broadcast(param.data, 0, partition_group)
@@ -1126,12 +1156,69 @@ class Init(InsertPostInitMethodToModuleSubClasses):
             dist.broadcast(param.data, dist.get_global_rank(partition_group, 0), partition_group)
         param.partition()
 
+    def _should_stream_partition(self, param):
+        # Stream the broadcast and partitioning of a parameter that is too large to
+        # safely materialize in full on a single device. The nvme / quantized /
+        # ZeRO++ secondary-partition paths stage parameters differently and are left
+        # on the standard path.
+        if self.partition_stream_chunk_size <= 0 or self.num_partitions <= 1:
+            return False
+        if param.numel() <= self.partition_stream_chunk_size:
+            return False
+        if self.remote_device == OffloadDeviceEnum.nvme:
+            return False
+        if self.quantized_initialization or self.quantized_nontrainable_weights:
+            return False
+        if self.zero_param_process_group is not None:
+            return False
+        return True
+
+    def _partition_param_streaming(self, param):
+        # Partition a very large parameter without ever materializing the full tensor
+        # on a single device. The full parameter stays on its current (host) device;
+        # each chunk is staged on the accelerator, broadcast from the owner rank for
+        # consistency, and only the slice that belongs to this rank's partition is
+        # copied into ds_tensor.
+        tensor_size = self._aligned_size(param)
+        partition_size = tensor_size // self._partition_world_size(param)
+
+        partition_device = self.local_device if param.ds_persist else self.remote_device
+        partitioned_tensor = torch.empty(partition_size, dtype=param.dtype, device=partition_device)
+        if partition_device == OffloadDeviceEnum.cpu and self.pin_memory:
+            partitioned_tensor = get_accelerator().pin_memory(partitioned_tensor)
+        partitioned_tensor.requires_grad = False
+        param.ds_tensor = partitioned_tensor
+        param.ds_tensor.ds_numel = partition_size
+        param.ds_tensor.status = PartitionedParamStatus.AVAILABLE
+        param.ds_tensor.final_location = None
+        param.ds_numel_aligned = tensor_size
+
+        partition_start = partition_size * self._partition_rank(param)
+        src_rank = dist.get_global_rank(self.get_partition_dp_group(param), 0)
+        compute_device = get_accelerator().current_device_name()
+        full_param = param.data.contiguous().view(-1)
+
+        chunk_offset = 0
+        while chunk_offset < param.ds_numel:
+            chunk_numel = min(self.partition_stream_chunk_size, param.ds_numel - chunk_offset)
+            chunk = full_param.narrow(0, chunk_offset, chunk_numel).to(compute_device)
+            dist.broadcast(chunk, src_rank, self.get_partition_dp_group(param))
+            overlap = _partition_chunk_overlap(chunk_offset, chunk_numel, partition_start, partition_size)
+            if overlap is not None:
+                dst_offset, src_offset, numel = overlap
+                with torch.no_grad():
+                    param.ds_tensor.narrow(0, dst_offset, numel).copy_(chunk.narrow(0, src_offset, numel))
+            chunk_offset += chunk_numel
+
+        free_param(param)
+
     def _convert_to_zero_parameters(self, param_list):
         for param in param_list:
             if is_zero_param(param):
                 continue
 
-            param.data = param.data.to(self.local_device)
+            if not self._should_stream_partition(param):
+                param.data = param.data.to(self.local_device)
             self._zero_init_param(param)
 
     def _validate_remote_device(self, remote_device, ds_config):
@@ -1159,7 +1246,7 @@ class Init(InsertPostInitMethodToModuleSubClasses):
             InsertPostInitMethodToModuleSubClasses.num_module_parameters += 1
             InsertPostInitMethodToModuleSubClasses.num_module_elements += param.numel()
             if not is_zero_param(param):
-                if not get_accelerator().on_accelerator(param):
+                if not get_accelerator().on_accelerator(param) and not self._should_stream_partition(param):
                     param.data = param.data.to(self.local_device)
 
                 if name == 'weight' and self.quantized_initialization and type(module) in WEIGHT_QUANTIZATION_LAYERS:
