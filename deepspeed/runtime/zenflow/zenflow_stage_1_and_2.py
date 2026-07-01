@@ -538,15 +538,15 @@ class ZenFlowZeroOptimizer(DeepSpeedZeroOptimizer):
                 self._process_selected_fp32_groups_grad(tensor, curr_selected_reduce_size, communication_data_type)
                 self.timers(SELECTIVE_OPTIMIZER_PROCESS_TIMER).stop()
 
-    def backward(self, loss, retain_graph=False):
-        """
-        :attr:`backward` performs the following steps:
+    def backward_prologue(self):
+        """Prepare ZenFlow's per-microbatch state before the backward pass.
 
-        1. fp32_loss = loss.float()
-        2. scaled_loss = fp32_loss*loss_scale
-        3. scaled_loss.backward(), which accumulates scaled gradients into the ``.grad`` attributes of the model's fp16 leaves
+        Called by the engine at the start of each backward. Advances the
+        micro-step counter and, on an auto-update step, refreshes the
+        update-interval bookkeeping. At a selection boundary, resyncs the fp32
+        master partition from the bit16 weights and clears the selective
+        optimizer's moments so the next top-k update starts clean.
         """
-        self.backward_prologue()
         self.micro_step += 1
 
         if self.auto_update:
@@ -564,16 +564,6 @@ class ZenFlowZeroOptimizer(DeepSpeedZeroOptimizer):
             self.sync_fp32_param_from_gpu()
             self.selective_optimizer.clear_selected_mv()
             self.timers(SELECTIVE_OPTIMIZER_SYNC_TIMER).stop()
-
-        self.enter_backward()
-        if self.custom_loss_scaler:
-            scaled_loss = self.external_loss_scale * loss
-            scaled_loss.backward(retain_graph=retain_graph)
-        else:
-            self.loss_scaler.backward(loss.float(), retain_graph=retain_graph)
-
-        self.backward_epilogue()
-        self.exit_backward()
 
     def log_selective_optimizer_timers(self):
         self.timers.log(SELECTIVE_OPTIMIZER_TIMERS)

@@ -12,6 +12,7 @@ from deepspeed.accelerator import get_accelerator
 import deepspeed.comm as dist
 
 from ..profilers.comm_profile import create_predictor
+from ..profilers.graph_profile import is_profile_incomplete
 from ..graph_param import DSGraphParamManager
 
 NAME = "prefetch"
@@ -37,6 +38,11 @@ def get_ds_id(node: Node):
 def schedule_prefetch(gm: GraphModule, graph_id: int, graph_order: List[Tuple[int, bool]], profiling_results,
                       create_inputs_fn, mem_budget: float, param_manager: DSGraphParamManager,
                       bwd: bool) -> GraphModule:
+
+    profile_graph = profiling_results[graph_id].bwd_graph if bwd else profiling_results[graph_id].fwd_graph
+    if is_profile_incomplete(profile_graph):
+        print_rank_0(f"schedule_prefetch graph_id={graph_id} incomplete profiling data; skipping prefetch")
+        return gm
 
     max_mem = get_accelerator().total_memory() * (1 - MARGIN)
     vals_to_bcast = torch.tensor([max_mem], device=torch.device(get_accelerator().current_device()))
