@@ -111,8 +111,8 @@ def apply_rotary_pos_emb(t, freqs_cos, freqs_sin):
     # pass tensors where the sequence dim isn't at position 0, so only take the fused path
     # when t's dim 0 unambiguously matches the freqs' sequence dim (with no other
     # non-broadcast dims in freqs); otherwise fall back to the reference path.
-    if (_torchembed_available and t.is_cuda and rot_dim % 2 == 0 and freqs_cos.shape[0] == t.shape[0]
-            and freqs_cos.numel() == freqs_cos.shape[0] * rot_dim):
+    if (_torchembed_available and get_accelerator().on_accelerator(t) and rot_dim % 2 == 0
+            and freqs_cos.shape[0] == t.shape[0] and freqs_cos.numel() == freqs_cos.shape[0] * rot_dim):
         freqs_cos_2d = freqs_cos.reshape(freqs_cos.shape[0], rot_dim)
         freqs_sin_2d = freqs_sin.reshape(freqs_sin.shape[0], rot_dim)
         # torchembed expects the sequence dim second-to-last: (*leading, seq_len, dim)

@@ -6,11 +6,12 @@
 import pytest
 import torch
 
+from deepspeed.accelerator import get_accelerator
 from deepspeed.sequence.layer import apply_rotary_pos_emb, _rotate_half, _torchembed_available
 
 
 def _make_freqs(seq_len, rot_dim, theta=10000.0, device="cpu"):
-    inv_freq = 1.0 / (theta ** (torch.arange(0, rot_dim, 2, device=device).float() / rot_dim))
+    inv_freq = 1.0 / (theta**(torch.arange(0, rot_dim, 2, device=device).float() / rot_dim))
     t = torch.arange(seq_len, device=device).float()
     freqs = torch.einsum("i,j->ij", t, inv_freq)
     emb = torch.cat((freqs, freqs), dim=-1)
@@ -42,8 +43,7 @@ def test_apply_rotary_pos_emb(seq_len, dim, rotary_dim):
     expected = _ref_apply_rotary(t, freqs_cos, freqs_sin)
 
     assert torch.allclose(result, expected, atol=1e-6), (
-        f"seq_len={seq_len}, dim={dim}, rot_dim={rot_dim}: max diff={((result - expected).abs().max()).item()}"
-    )
+        f"seq_len={seq_len}, dim={dim}, rot_dim={rot_dim}: max diff={((result - expected).abs().max()).item()}")
 
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float16])
@@ -73,8 +73,8 @@ def test_apply_rotary_pos_emb_fused_gradient_correctness(dtype):
     https://github.com/liodon-ai/torchembed/issues/2, where the fused kernel's
     backward silently produced wrong gradients while still passing shape/NaN checks.
     """
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA not available")
+    if not get_accelerator().is_available():
+        pytest.skip("accelerator not available")
     if not _torchembed_available:
         pytest.skip("torchembed not installed")
 
@@ -91,8 +91,9 @@ def test_apply_rotary_pos_emb_fused_gradient_correctness(dtype):
     out_ref = _ref_apply_rotary(t_ref, freqs_cos, freqs_sin)
     out_ref.backward(grad_out)
 
-    t_cuda = t_base.clone().cuda().requires_grad_(True)
-    out_cuda = apply_rotary_pos_emb(t_cuda, freqs_cos.cuda(), freqs_sin.cuda())
-    out_cuda.backward(grad_out.cuda())
+    device = get_accelerator().device_name()
+    t_acc = t_base.clone().to(device).requires_grad_(True)
+    out_acc = apply_rotary_pos_emb(t_acc, freqs_cos.to(device), freqs_sin.to(device))
+    out_acc.backward(grad_out.to(device))
 
-    torch.testing.assert_close(t_cuda.grad.cpu(), t_ref.grad, atol=1e-3, rtol=1e-3)
+    torch.testing.assert_close(t_acc.grad.cpu(), t_ref.grad, atol=1e-3, rtol=1e-3)
