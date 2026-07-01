@@ -180,7 +180,7 @@ Below we provide a brief feature list, see our detailed [feature overview](https
   * Efficient and robust compressed training
   * Up to 2.5x convergence speedup for pre-training
 * [Performance Analysis and Debugging](https://www.deepspeed.ai/features/#performance-analysis-and-debugging)
-* [Mixture of Experts (MoE)](https://www.deepspeed.ai/tutorials/mixture-of-experts/)
+* [Mixture of Experts (DeepSpeed MoE)](https://www.deepspeed.ai/tutorials/mixture-of-experts/)
 
 
 ---

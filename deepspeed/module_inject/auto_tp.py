@@ -354,6 +354,10 @@ class AutoTP():
         if getattr(child, "replaced", False) == True:
             return
 
+        # Skip AutoEP-managed modules (expert weights are EP-sharded, not TP-sharded)
+        if getattr(child, "_is_autoep_layer", False):
+            return child
+
         weight_shape = child.weight.shape
         mp_replace = ReplaceWithTensorSlicing(mp_group=self.mp_group)
 
@@ -546,6 +550,9 @@ class AutoTP():
 
     def _replace_module(self, r_module, prev_name='', prev_class_name=''):
         for name, child in r_module.named_children():
+            if getattr(child, "_is_autoep_layer", False):
+                continue
+
             if prev_class_name == "":
                 class_name = prev_name
             elif prev_name == "":
@@ -564,7 +571,7 @@ class AutoTP():
             # When using partition_config (custom patterns/presets), use pattern-based routing
             # instead of linear_policies. This keeps all pattern logic centralized here.
             if self.partition_config is not None:
-                full_name = prev_name + '.' + name if prev_name else name
+                full_name = class_name + '.' + name if class_name else name
                 if isinstance(child, nn.Embedding):
                     # Check if embedding matches any pattern
                     param_name = full_name + ".weight"
@@ -581,7 +588,7 @@ class AutoTP():
                         setattr(r_module, name, new_child)
                 else:
                     self.update_mp_params(child)
-                    self._replace_module(child, full_name, class_name)
+                    self._replace_module(child, name, class_name)
             # Traditional path: use linear_policies for type-based routing
             elif child.__class__ in self.linear_policies:
                 setattr(r_module, name, self.linear_policies[child.__class__](child, prev_name + '.' + name,

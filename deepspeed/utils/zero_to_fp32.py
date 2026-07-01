@@ -33,7 +33,9 @@ from dataclasses import dataclass
 from deepspeed.utils import logger
 from deepspeed.checkpoint.constants import (DS_VERSION, OPTIMIZER_STATE_DICT, SINGLE_PARTITION_OF_FP32_GROUPS,
                                             FP32_FLAT_GROUPS, ZERO_STAGE, PARTITION_COUNT, PARAM_SHAPES, BUFFER_NAMES,
-                                            FROZEN_PARAM_SHAPES, FROZEN_PARAM_FRAGMENTS)
+                                            FROZEN_PARAM_SHAPES, FROZEN_PARAM_FRAGMENTS, AUTOEP_LAYERS_KEY,
+                                            AUTOEP_LAYERS_KEY_LEGACY, AUTOEP_ZERO3_EXPERT_STATE_FORMAT_KEY,
+                                            AUTOEP_ZERO3_PARTITIONED_EXPERT_STATE_FORMAT)
 
 
 @dataclass
@@ -99,10 +101,37 @@ def get_model_state_files(checkpoint_dir):
     return get_checkpoint_files(checkpoint_dir, "*_model_states.pt")
 
 
+def _has_autoep_zero3_partitioned_metadata(state_dict):
+    autoep_layers = state_dict.get(AUTOEP_LAYERS_KEY)
+    if autoep_layers is None:
+        autoep_layers = state_dict.get(AUTOEP_LAYERS_KEY_LEGACY)
+    if not isinstance(autoep_layers, list):
+        return False
+    return any(
+        isinstance(entry, dict)
+        and entry.get(AUTOEP_ZERO3_EXPERT_STATE_FORMAT_KEY) == AUTOEP_ZERO3_PARTITIONED_EXPERT_STATE_FORMAT
+        for entry in autoep_layers)
+
+
+def _raise_if_autoep_zero3_partitioned_state(state_dict):
+    if _has_autoep_zero3_partitioned_metadata(state_dict):
+        raise NotImplementedError("zero_to_fp32 does not support AutoEP ZeRO-3 partition-native checkpoints. "
+                                  "AutoEP expert parameters are partitioned over expert replica groups, so "
+                                  "global data-parallel consolidation would produce incomplete expert tensors. "
+                                  "Use ds_to_universal.py for expert-aware conversion.")
+
+
+def _raise_if_autoep_zero3_partitioned_checkpoint(model_files):
+    for file in model_files:
+        state_dict = torch.load(file, map_location=device, weights_only=False)
+        _raise_if_autoep_zero3_partitioned_state(state_dict)
+
+
 def parse_model_states(files):
     zero_model_states = []
     for file in files:
         state_dict = torch.load(file, map_location=device, weights_only=False)
+        _raise_if_autoep_zero3_partitioned_state(state_dict)
 
         if BUFFER_NAMES not in state_dict:
             raise ValueError(f"{file} is not a model state checkpoint")
@@ -195,14 +224,15 @@ def _get_fp32_state_dict_from_zero_checkpoint(ds_checkpoint_dir, exclude_frozen_
     """
     print(f"Processing zero checkpoint '{ds_checkpoint_dir}'")
 
+    # parse_model_states rejects AutoEP ZeRO-3 partition-native checkpoints
+    # before the expensive optimizer-shard load below.
+    model_files = get_model_state_files(ds_checkpoint_dir)
+    zero_model_states = parse_model_states(model_files)
+    print(f'Parsing checkpoint created by deepspeed=={zero_model_states[0].ds_version}')
+
     optim_files = get_optim_files(ds_checkpoint_dir)
     zero_stage, world_size, fp32_flat_groups = parse_optim_states(optim_files, ds_checkpoint_dir)
     print(f"Detected checkpoint of type zero stage {zero_stage}, world_size: {world_size}")
-
-    model_files = get_model_state_files(ds_checkpoint_dir)
-
-    zero_model_states = parse_model_states(model_files)
-    print(f'Parsing checkpoint created by deepspeed=={zero_model_states[0].ds_version}')
 
     if zero_stage <= 2:
         return _get_fp32_state_dict_from_zero2_checkpoint(world_size, fp32_flat_groups, zero_model_states,

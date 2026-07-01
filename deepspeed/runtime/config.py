@@ -66,6 +66,7 @@ from .data_pipeline.constants import *
 from ..utils.config import get_timers_config
 
 TENSOR_CORE_ALIGN_SIZE = 8
+EXPERT_PARALLEL = "expert_parallel"
 
 ADAGRAD_OPTIMIZER = 'adagrad'
 ADAM_OPTIMIZER = 'adam'
@@ -122,6 +123,14 @@ class DtypeEnum(Enum):
             self._name_,
             ", ".join([repr(v) for v in self._all_values]),
         )
+
+
+def get_expert_parallel_config(param_dict):
+    if EXPERT_PARALLEL in param_dict:
+        from deepspeed.module_inject.auto_ep_config import parse_autoep_config
+        return parse_autoep_config(param_dict[EXPERT_PARALLEL])
+    from deepspeed.module_inject.auto_ep_config import AutoEPConfig
+    return AutoEPConfig()
 
 
 def get_pld_enabled(param_dict):
@@ -509,17 +518,29 @@ def get_expert_data_topo_config(param_dict):
 
 def get_eigenvalue_config(param_dict):
     if get_quantize_enabled(param_dict):
-        param_dict = param_dict[QUANTIZE_TRAINING]
-        assert not get_eigenvalue_enabled(param_dict), "Eigenvalue based MoQ is temporarily disabled"
+        quantize_training_params = param_dict.get('quantize_training')
+        if quantize_training_params is None:
+            return (
+                EIGENVALUE_ENABLED_DEFAULT,
+                EIGENVALUE_VERBOSE_DEFAULT,
+                EIGENVALUE_MAX_ITER_DEFAULT,
+                EIGENVALUE_TOL_DEFAULT,
+                EIGENVALUE_STABILITY_DEFAULT,
+                EIGENVALUE_GAS_BOUNDARY_RESOLUTION_DEFAULT,
+                EIGENVALUE_LAYER_NAME_DEFAULT,
+                EIGENVALUE_LAYER_NUM_DEFAULT,
+            )
+
+        assert not get_eigenvalue_enabled(quantize_training_params), "Eigenvalue based MoQ is temporarily disabled"
         return (
-            get_eigenvalue_enabled(param_dict),
-            get_eigenvalue_verbose(param_dict),
-            get_eigenvalue_max_iter(param_dict),
-            get_eigenvalue_tol(param_dict),
-            get_eigenvalue_stability(param_dict),
-            get_eigenvalue_gas_boundary_resolution(param_dict),
-            get_eigenvalue_layer_name(param_dict),
-            get_eigenvalue_layer_num(param_dict),
+            get_eigenvalue_enabled(quantize_training_params),
+            get_eigenvalue_verbose(quantize_training_params),
+            get_eigenvalue_max_iter(quantize_training_params),
+            get_eigenvalue_tol(quantize_training_params),
+            get_eigenvalue_stability(quantize_training_params),
+            get_eigenvalue_gas_boundary_resolution(quantize_training_params),
+            get_eigenvalue_layer_name(quantize_training_params),
+            get_eigenvalue_layer_num(quantize_training_params),
         )
     else:
         return (
@@ -626,6 +647,10 @@ def get_checkpoint_parallel_write_pipeline(checkpoint_params):
 
 def get_dataloader_drop_last(param_dict):
     return get_scalar_param(param_dict, DATALOADER_DROP_LAST, DATALOADER_DROP_LAST_DEFAULT)
+
+
+def get_log_level(param_dict):
+    return get_scalar_param(param_dict, LOG_LEVEL, LOG_LEVEL_DEFAULT)
 
 
 '''Write deepspeed config files by modifying basic templates.
@@ -851,6 +876,11 @@ class DeepSpeedConfig(object):
 
         data_types_params = get_data_types_params(param_dict)
         self.grad_accum_dtype = data_types_params.get(GRAD_ACCUM_DTYPE, GRAD_ACCUM_DTYPE_DEFAULT)
+        # Raw strings ("bf16"/"fp16"/"fp32") or None; resolved via DtypeEnum at
+        # use-time.
+        self.param_dtype = data_types_params.get(PARAM_DTYPE, PARAM_DTYPE_DEFAULT)
+        # buffer_dtype=None keeps buffers at their loaded dtype.
+        self.buffer_dtype = data_types_params.get(BUFFER_DTYPE, BUFFER_DTYPE_DEFAULT)
 
         par_write_pipe = get_checkpoint_parallel_write_pipeline(checkpoint_params)
         self.checkpoint_parallel_write_pipeline = par_write_pipe
@@ -858,6 +888,8 @@ class DeepSpeedConfig(object):
         self.aio_config = get_aio_config(param_dict)
 
         self.dataloader_drop_last = get_dataloader_drop_last(param_dict)
+
+        self.log_level = get_log_level(param_dict)
 
         self.nebula_config = DeepSpeedNebulaConfig(param_dict)
         self.datastates_config = DeepSpeedDataStatesConfig(param_dict)
@@ -870,6 +902,7 @@ class DeepSpeedConfig(object):
 
         self.timers_config = get_timers_config(param_dict)
         self.tensor_parallel_config = get_tensor_parallel_config(param_dict)
+        self.expert_parallel_config = get_expert_parallel_config(param_dict)
 
     def _batch_assertion(self):
 
