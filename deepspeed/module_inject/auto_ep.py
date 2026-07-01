@@ -33,6 +33,7 @@ from deepspeed.module_inject.auto_ep_presets.registry import (
     unsupported_preset_for_hf_model_type,
 )
 from deepspeed.moe.fused_expert_layout import classify_fused_gate_up_layout
+from deepspeed.runtime.zero.utils import is_zero_param
 from deepspeed.utils import logger
 
 
@@ -81,6 +82,16 @@ def _raise_if_duplicate_moe_specs(specs: list[MoELayerSpec]) -> None:
                      "AutoEP patterns so each MoE module matches exactly one preset.")
 
 
+def _source_param_shape(param: torch.Tensor | nn.Parameter) -> torch.Size:
+    if is_zero_param(param):
+        return torch.Size(param.ds_shape)
+    return torch.Size(param.shape)
+
+
+def _source_param_ndim(param: torch.Tensor | nn.Parameter) -> int:
+    return len(_source_param_shape(param))
+
+
 def _has_3d_expert_params(module: nn.Module, preset: MoEModelPreset) -> bool:
     """Check if module stores expert weights as 3D parameter tensors (transformers 5.0.0+).
 
@@ -92,7 +103,7 @@ def _has_3d_expert_params(module: nn.Module, preset: MoEModelPreset) -> bool:
     if param is None:
         return False
     if isinstance(param, nn.Parameter) or isinstance(param, torch.Tensor):
-        return param.ndim == 3
+        return _source_param_ndim(param) == 3
     return False
 
 
@@ -146,7 +157,7 @@ def _detect_expert_storage(experts_module: nn.Module, preset: MoEModelPreset) ->
         return "module_list"
     # Check children for 3D params as fallback
     for name, param in experts_module.named_parameters(recurse=False):
-        if param.ndim == 3:
+        if _source_param_ndim(param) == 3:
             return "fused_3d"
     return "module_list"
 
@@ -162,13 +173,15 @@ def _infer_hidden_and_ffn_size(
         w1_param = getattr(experts_module, preset.expert_w1, None)
         w2_param = getattr(experts_module, preset.expert_w2, None)
         if w1_param is not None and w2_param is not None:
+            w1_shape = _source_param_shape(w1_param)
+            w2_shape = _source_param_shape(w2_param)
             if preset.expert_w3 is None:
-                layout = classify_fused_gate_up_layout(tuple(w1_param.shape), tuple(w2_param.shape))
+                layout = classify_fused_gate_up_layout(tuple(w1_shape), tuple(w2_shape))
                 if layout is None:
                     raise ValueError("expert_w3=None expects fused gate+up weights with either "
                                      f"[E, 2*ffn, hidden]/[E, hidden, ffn] or [E, hidden, 2*ffn]/[E, ffn, hidden], "
-                                     f"but got {preset.expert_w1}={tuple(w1_param.shape)} and "
-                                     f"{preset.expert_w2}={tuple(w2_param.shape)}.")
+                                     f"but got {preset.expert_w1}={tuple(w1_shape)} and "
+                                     f"{preset.expert_w2}={tuple(w2_shape)}.")
                 hidden_size = layout.hidden_size
                 ffn_hidden_size = layout.ffn_hidden_size
             else:
@@ -177,8 +190,8 @@ def _infer_hidden_and_ffn_size(
                 if w3_param is None:
                     raise ValueError(f"expert_w3='{preset.expert_w3}' is set but no such weight "
                                      f"exists on experts module.")
-                hidden_size = w1_param.shape[2]
-                ffn_hidden_size = w1_param.shape[1]
+                hidden_size = w1_shape[2]
+                ffn_hidden_size = w1_shape[1]
             return hidden_size, ffn_hidden_size
     elif storage == "module_list":
         # Legacy: individual expert modules
@@ -195,8 +208,9 @@ def _infer_hidden_and_ffn_size(
                 if isinstance(w1, nn.Linear):
                     return w1.in_features, w1.out_features
                 elif isinstance(w1, (nn.Parameter, torch.Tensor)):
-                    if w1.ndim == 2:
-                        return w1.shape[1], w1.shape[0]
+                    w1_shape = _source_param_shape(w1)
+                    if len(w1_shape) == 2:
+                        return w1_shape[1], w1_shape[0]
 
     raise ValueError(f"Could not infer hidden_size/ffn_hidden_size from experts module "
                      f"with storage={storage}, preset.expert_w1={preset.expert_w1}")
@@ -327,12 +341,13 @@ class AutoEP:
 
                 # Validate/derive from router weight shape
                 router_weight = getattr(router_child, 'weight', None)
-                if router_weight is not None and router_weight.ndim == 2:
-                    num_experts_from_weight = router_weight.shape[0]
-                    hidden_from_weight = router_weight.shape[1]
+                router_weight_shape = _source_param_shape(router_weight) if router_weight is not None else None
+                if router_weight_shape is not None and len(router_weight_shape) == 2:
+                    num_experts_from_weight = router_weight_shape[0]
+                    hidden_from_weight = router_weight_shape[1]
                     if num_experts is not None and num_experts != num_experts_from_weight:
                         raise ValueError(f"Config num_experts={num_experts} mismatches router weight "
-                                         f"shape {router_weight.shape} (expected {num_experts_from_weight}) "
+                                         f"shape {router_weight_shape} (expected {num_experts_from_weight}) "
                                          f"in layer '{module_name}'")
                     num_experts = num_experts_from_weight
 
@@ -359,10 +374,10 @@ class AutoEP:
                     continue
 
                 # Cross-validate hidden_size with router
-                if router_weight is not None and router_weight.ndim == 2:
-                    if hidden_size != router_weight.shape[1]:
+                if router_weight_shape is not None and len(router_weight_shape) == 2:
+                    if hidden_size != router_weight_shape[1]:
                         raise ValueError(f"hidden_size={hidden_size} from expert weights mismatches "
-                                         f"router weight dim={router_weight.shape[1]} in '{module_name}'")
+                                         f"router weight dim={router_weight_shape[1]} in '{module_name}'")
 
                 # Validate top_k <= num_experts
                 if top_k > num_experts:

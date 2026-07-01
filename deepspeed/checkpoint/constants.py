@@ -93,6 +93,10 @@ SUB_PARAMS_SHAPE = 'sub_params_shape'
 #########################################
 AUTOEP_LAYERS_KEY = 'ds_autoep_layers'
 AUTOEP_LAYERS_KEY_LEGACY = 'autoep_layers'
+AUTOEP_ZERO3_EXPERT_STATE_FORMAT_KEY = 'checkpoint_format'
+AUTOEP_ZERO3_PARTITIONED_EXPERT_STATE_FORMAT = 'zero3_partitioned'
+AUTOEP_ZERO3_EXPERT_STATE_FORMAT_VERSION_KEY = 'checkpoint_format_version'
+AUTOEP_ZERO3_EXPERT_STATE_FORMAT_VERSION = 1
 
 #########################################
 # Universal Checkpoint EP keys

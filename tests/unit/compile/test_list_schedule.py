@@ -4,13 +4,19 @@
 # DeepSpeed Team
 
 import operator
+from types import SimpleNamespace
 
 import pytest
 import torch
-from torch.fx import Graph
+from torch.fx import Graph, GraphModule
 
 import deepspeed.compile.util as compile_util
+from deepspeed.compile import inductor as inductor_mod
 from deepspeed.compile import list_schedule as schedule_mod
+from deepspeed.compile.passes import prefetch as prefetch_mod
+from deepspeed.compile.passes import selective_gather as selective_gather_mod
+from deepspeed.compile.profilers import ProfilingResult
+from deepspeed.compile.profilers.graph_profile import _backfill_missing_profile_metadata, is_profile_incomplete
 
 _DC_LIBRARIES = []
 
@@ -31,6 +37,8 @@ def _define_dc_ops():
             "wait_allgather(Tensor(a) a, int graph_id, int id) -> Tensor(a)",
             "release_param(Tensor(a) a, int graph_id, int id, int n_users) -> Tensor(a)",
             "reduce_grad(Tensor a, int graph_id, int id) -> Tensor",
+            "free_tensors(Tensor[] tensors) -> ()",
+            "end_backward(Tensor[] tensors, int graph_id, bool release_reduce_buckets = True) -> ()",
     ):
         try:
             lib.define(schema)
@@ -49,7 +57,8 @@ def stub_deepcompile_ops(monkeypatch):
 
 def _with_meta(node, tensor_size=0, device_time=0):
     node.meta["tensor_size"] = tensor_size
-    node.meta["device_time"] = device_time
+    if device_time is not None:
+        node.meta["device_time"] = device_time
     return node
 
 
@@ -199,3 +208,137 @@ def test_fast_free_schedule_keeps_single_allgather_release_order():
     assert names.index(ag.name) < names.index(wait.name)
     assert names.index(wait.name) < names.index(use.name)
     assert names.index(use.name) < names.index(release.name)
+
+
+def test_profile_backfill_makes_partial_profile_safe_for_profile_dependent_passes(monkeypatch):
+    graph = Graph()
+
+    param = _placeholder(graph, "partial_profile_param")
+    ag = _allgather(graph, param, 90, "partial_profile", device_time=None)
+    wait = _wait(graph, ag, 90, "partial_profile")
+    use = _neg(graph, wait, "partial_profile_use", device_time=None)
+    release = _release(graph, use, 90, "partial_profile")
+
+    ag.meta.pop("tensor_size", None)
+    for node in (ag, use):
+        node.meta.pop("wall_time", None)
+        node.meta.pop("alloc_mem", None)
+        node.meta.pop("max_mem", None)
+
+    graph.output((release, ))
+    graph.lint()
+
+    _backfill_missing_profile_metadata(graph)
+    assert is_profile_incomplete(graph)
+
+    for node in graph.nodes:
+        if node in (ag, use):
+            assert node.meta["device_time"] == 0.0
+        else:
+            assert "device_time" in node.meta
+        assert "wall_time" in node.meta
+        assert "tensor_size" in node.meta
+        assert "alloc_mem" in node.meta
+        assert "max_mem" in node.meta
+    assert ag.meta["tensor_size"] == 0
+
+    names = _scheduled_names(graph)
+    assert names.index(ag.name) < names.index(wait.name)
+    assert names.index(wait.name) < names.index(use.name)
+    assert names.index(use.name) < names.index(release.name)
+
+    class FakeAccelerator:
+
+        def current_device(self):
+            return "cpu"
+
+        def total_memory(self):
+            return 1024
+
+        def available_memory(self):
+            return 1024
+
+    fake_ds_param = SimpleNamespace(numel=7,
+                                    dtype=torch.float16,
+                                    param=SimpleNamespace(ds_persist=False, ds_shape=(1, )))
+    fake_param_manager = {
+        0: SimpleNamespace(params={"partial_profile_param": fake_ds_param}, ds_ids={"partial_profile_param": 90})
+    }
+    profiling_results = {
+        0: ProfilingResult(fwd_graph=graph, bwd_graph=None, fwd_mem=[("profiled_before_abort", 0, 0, 0)])
+    }
+    gm = GraphModule(torch.nn.Module(), graph)
+    logs = []
+    prefetch_logs = []
+    persisted = []
+
+    monkeypatch.setattr(prefetch_mod, "print_rank_0", lambda message: prefetch_logs.append(message))
+    assert prefetch_mod.schedule_prefetch(gm,
+                                          graph_id=0,
+                                          graph_order=[(0, True)],
+                                          profiling_results=profiling_results,
+                                          create_inputs_fn=lambda: (),
+                                          mem_budget=0,
+                                          param_manager=fake_param_manager,
+                                          bwd=False) is gm
+    assert any("incomplete profiling data" in message for message in prefetch_logs)
+
+    monkeypatch.setattr(selective_gather_mod, "print_rank_0", lambda message: logs.append(message))
+    monkeypatch.setattr(selective_gather_mod, "get_accelerator", lambda: FakeAccelerator())
+    monkeypatch.setattr(selective_gather_mod, "get_deepcompile_handle",
+                        lambda: SimpleNamespace(set_persistent=persisted.append))
+    monkeypatch.setattr(selective_gather_mod.dist, "all_reduce", lambda *args, **kwargs: None)
+
+    selective_gather_mod.selective_gather(gm,
+                                          graph_id=0,
+                                          graph_order=[(0, True)],
+                                          profiling_results=profiling_results,
+                                          create_inputs_fn=lambda: (),
+                                          mem_budget=0,
+                                          param_manager=fake_param_manager,
+                                          bwd=True)
+    assert persisted == []
+    assert any("incomplete profiling data" in message for message in logs)
+
+
+def test_graphsafe_rng_state_outputs_are_registered_no_reuse():
+    graphsafe_run_with_rng_state = inductor_mod._get_graphsafe_run_with_rng_state()
+    if graphsafe_run_with_rng_state is None:
+        pytest.skip("graphsafe_run_with_rng_state is unavailable in this torch build")
+
+    calls = []
+
+    def fake_register(op_overload, **kwargs):
+        calls.append((op_overload, kwargs))
+
+    assert inductor_mod._register_graphsafe_rng_state_no_reuse(fake_register)
+    assert calls == [(graphsafe_run_with_rng_state, {"never_reuse_output": True})]
+
+
+def test_register_custom_ops_includes_graphsafe_rng_state_no_reuse(monkeypatch):
+    graphsafe_run_with_rng_state = inductor_mod._get_graphsafe_run_with_rng_state()
+    if graphsafe_run_with_rng_state is None:
+        pytest.skip("graphsafe_run_with_rng_state is unavailable in this torch build")
+
+    _define_dc_ops()
+    registered_ops = []
+
+    def fake_add_needs_realized_inputs(_op_overload):
+        return None
+
+    def fake_register_lowering(op_overload, **_kwargs):
+
+        def record_handler(handler):
+            registered_ops.append(op_overload)
+            return handler
+
+        return record_handler
+
+    monkeypatch.setattr(inductor_mod, "add_needs_realized_inputs", fake_add_needs_realized_inputs)
+    monkeypatch.setattr(inductor_mod, "register_lowering", fake_register_lowering)
+    monkeypatch.setattr(inductor_mod, "fallbacks", set())
+    monkeypatch.setattr(inductor_mod.Scheduler, "is_dc_patched", True, raising=False)
+
+    inductor_mod.register_custom_ops()
+
+    assert graphsafe_run_with_rng_state in registered_ops

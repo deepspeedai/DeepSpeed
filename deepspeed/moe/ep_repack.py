@@ -10,11 +10,30 @@ grouped tensors [E_local, hidden_dim, dim] for grouped GEMM.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
+
 import torch
 import torch.nn as nn
 
 from deepspeed.module_inject.auto_ep_config import MoELayerSpec
 from deepspeed.moe.fused_expert_layout import classify_fused_gate_up_layout
+from deepspeed.runtime.zero import GatheredParameters
+from deepspeed.runtime.zero.utils import is_zero_param
+
+
+@contextmanager
+def _gather_source_zero_params(params):
+    """Gather source ZeRO params while AutoEP reads full tensor values."""
+    zero_params = [param for param in params if is_zero_param(param)]
+    if not zero_params:
+        yield
+        return
+    with GatheredParameters(zero_params, modifier_rank=None, enabled=True):
+        yield
+
+
+def _source_data(param: torch.Tensor | nn.Parameter) -> torch.Tensor:
+    return param.data if torch.is_tensor(param) else param
 
 
 def repack_expert_weights(
@@ -85,41 +104,42 @@ def _repack_fused_3d(
     w1_full = getattr(experts_source, spec.expert_w1_name)
     w2_full = getattr(experts_source, spec.expert_w2_name)
 
-    if isinstance(w1_full, nn.Parameter):
-        w1_full = w1_full.data
-    if isinstance(w2_full, nn.Parameter):
-        w2_full = w2_full.data
+    source_params = [w1_full, w2_full]
+    if spec.expert_w3_name is not None:
+        source_params.append(getattr(experts_source, spec.expert_w3_name))
 
-    # Slice to local experts
-    w1_local = w1_full[expert_start:expert_end].clone()
-    w2_local = w2_full[expert_start:expert_end].clone()
+    with _gather_source_zero_params(source_params):
+        w1_full_data = _source_data(w1_full)
+        w2_full_data = _source_data(w2_full)
 
-    if spec.expert_w3_name is None:
-        layout = classify_fused_gate_up_layout(tuple(w1_local.shape), tuple(w2_local.shape))
-        if layout is None:
-            raise ValueError("Unsupported fused expert weight layout for AutoEP repacking: "
-                             f"{spec.expert_w1_name}={tuple(w1_local.shape)}, "
-                             f"{spec.expert_w2_name}={tuple(w2_local.shape)}")
+        # Slice to local experts
+        w1_local = w1_full_data[expert_start:expert_end].clone()
+        w2_local = w2_full_data[expert_start:expert_end].clone()
 
-        ffn_hidden = layout.ffn_hidden_size
-        if layout.layout == "gate_up_first":
-            w1 = w1_local[:, :ffn_hidden, :].contiguous()  # [E_local, ffn, hidden]
-            w3 = w1_local[:, ffn_hidden:, :].contiguous()  # [E_local, ffn, hidden]
-            w2 = w2_local.contiguous()  # [E_local, hidden, ffn]
+        if spec.expert_w3_name is None:
+            layout = classify_fused_gate_up_layout(tuple(w1_local.shape), tuple(w2_local.shape))
+            if layout is None:
+                raise ValueError("Unsupported fused expert weight layout for AutoEP repacking: "
+                                 f"{spec.expert_w1_name}={tuple(w1_local.shape)}, "
+                                 f"{spec.expert_w2_name}={tuple(w2_local.shape)}")
+
+            ffn_hidden = layout.ffn_hidden_size
+            if layout.layout == "gate_up_first":
+                w1 = w1_local[:, :ffn_hidden, :].contiguous()  # [E_local, ffn, hidden]
+                w3 = w1_local[:, ffn_hidden:, :].contiguous()  # [E_local, ffn, hidden]
+                w2 = w2_local.contiguous()  # [E_local, hidden, ffn]
+            else:
+                w1 = w1_local[:, :, :ffn_hidden].transpose(1, 2).contiguous()  # [E_local, ffn, hidden]
+                w3 = w1_local[:, :, ffn_hidden:].transpose(1, 2).contiguous()  # [E_local, ffn, hidden]
+                w2 = w2_local.transpose(1, 2).contiguous()  # [E_local, hidden, ffn]
         else:
-            w1 = w1_local[:, :, :ffn_hidden].transpose(1, 2).contiguous()  # [E_local, ffn, hidden]
-            w3 = w1_local[:, :, ffn_hidden:].transpose(1, 2).contiguous()  # [E_local, ffn, hidden]
-            w2 = w2_local.transpose(1, 2).contiguous()  # [E_local, hidden, ffn]
-    else:
-        # Separate w1 (gate), w3 (up)
-        w3_full = getattr(experts_source, spec.expert_w3_name)
-        if isinstance(w3_full, nn.Parameter):
-            w3_full = w3_full.data
-        w3_local = w3_full[expert_start:expert_end].clone()
+            # Separate w1 (gate), w3 (up)
+            w3_full = getattr(experts_source, spec.expert_w3_name)
+            w3_local = _source_data(w3_full)[expert_start:expert_end].clone()
 
-        w1 = w1_local.contiguous()  # [E_local, ffn, hidden]
-        w2 = w2_local.contiguous()  # [E_local, hidden, ffn]
-        w3 = w3_local.contiguous()  # [E_local, ffn, hidden]
+            w1 = w1_local.contiguous()  # [E_local, ffn, hidden]
+            w2 = w2_local.contiguous()  # [E_local, hidden, ffn]
+            w3 = w3_local.contiguous()  # [E_local, ffn, hidden]
 
     return w1, w2, w3
 
@@ -155,23 +175,23 @@ def _repack_module_list(
     w2_list = []
     w3_list = []
 
-    for expert_idx in range(expert_start, expert_end):
+    for expert_idx in range(len(experts_source)):
         expert = experts_source[expert_idx]
 
         # Get weight tensors - handle both nn.Linear children and direct attributes
         w1_param = _get_expert_weight(expert, spec.expert_w1_name)
         w2_param = _get_expert_weight(expert, spec.expert_w2_name)
+        w3_param = _get_expert_weight(expert, spec.expert_w3_name) if spec.expert_w3_name is not None else None
 
-        # nn.Linear stores weight as [out_features, in_features]
-        # TorchTitan expects [ffn_hidden, hidden] for w1/w3 and [hidden, ffn_hidden] for w2
-        # nn.Linear.weight is already [out, in] which matches TorchTitan's [ffn, hidden] for w1
-        # No transpose needed - store as-is
-        w1_list.append(w1_param.data.clone())
-        w2_list.append(w2_param.data.clone())
-
-        if spec.expert_w3_name is not None:
-            w3_param = _get_expert_weight(expert, spec.expert_w3_name)
-            w3_list.append(w3_param.data.clone())
+        with _gather_source_zero_params([w1_param, w2_param, w3_param]):
+            if expert_start <= expert_idx < expert_end:
+                # nn.Linear stores weight as [out_features, in_features].
+                # TorchTitan expects [ffn_hidden, hidden] for w1/w3 and [hidden, ffn_hidden] for w2.
+                # nn.Linear.weight is already [out, in], which matches TorchTitan's [ffn, hidden] for w1.
+                w1_list.append(w1_param.data.clone())
+                w2_list.append(w2_param.data.clone())
+                if w3_param is not None:
+                    w3_list.append(w3_param.data.clone())
 
     _require_consistent_dtype_device(w1_list, spec.expert_w1_name, expert_start, expert_end)
     _require_consistent_dtype_device(w2_list, spec.expert_w2_name, expert_start, expert_end)
