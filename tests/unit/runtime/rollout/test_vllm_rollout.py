@@ -37,6 +37,24 @@ def test_init_rejects_wrong_engine():
         VLLMRollout(cfg=cfg, tokenizer=MagicMock(), student_model_path="x")
 
 
+def test_gpus_from_env_var(monkeypatch):
+    monkeypatch.setenv("ROLLOUT_VISIBLE_DEVICE", "6,7")
+    cfg = RolloutConfig(engine="vllm")
+    assert cfg.gpus == [6, 7]
+
+
+def test_env_var_overrides_json_gpus(monkeypatch):
+    monkeypatch.setenv("ROLLOUT_VISIBLE_DEVICE", "6,7")
+    cfg = RolloutConfig(engine="vllm", gpus=[0, 1])
+    assert cfg.gpus == [6, 7]
+
+
+def test_no_env_var_keeps_json_gpus(monkeypatch):
+    monkeypatch.delenv("ROLLOUT_VISIBLE_DEVICE", raising=False)
+    cfg = RolloutConfig(engine="vllm", gpus=[0, 1])
+    assert cfg.gpus == [0, 1]
+
+
 def test_init_requires_student_model_path():
     from deepspeed.runtime.rollout.vllm_rollout import VLLMRollout
 
@@ -86,9 +104,10 @@ def test_extract_token_ids_empty_on_no_data():
 # -- _start_server command construction --------------------------------
 
 
-def test_start_server_command_http_backend():
+def test_start_server_command_http_backend(monkeypatch):
     from deepspeed.runtime.rollout.vllm_rollout import VLLMRollout
 
+    monkeypatch.delenv("ROLLOUT_VISIBLE_DEVICE", raising=False)
     cfg = _make_cfg(
         weight_transfer_backend="http",
         tensor_parallel_size=2,

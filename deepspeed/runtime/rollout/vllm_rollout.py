@@ -216,7 +216,7 @@ class VLLMRollout(RolloutEngine):
             "--tensor-parallel-size",
             str(self.cfg.tensor_parallel_size),
             "--dtype",
-            self.cfg.vllm_dtype,
+            self.cfg.engine_dtype,
             "--gpu-memory-utilization",
             str(self.cfg.gpu_memory_utilization),
             "--port",

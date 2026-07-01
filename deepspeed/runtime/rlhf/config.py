@@ -11,6 +11,7 @@ of the DeepSpeed codebase and to keep the dependency surface minimal.
 """
 
 import json
+import os
 from dataclasses import dataclass, field, asdict
 from typing import List, Optional
 
@@ -50,12 +51,22 @@ class RolloutConfig:
     use_graph_capture: bool = False
 
     # vLLM-specific. ``gpus`` is the disjoint set of CUDA device indices vLLM
-    # may use; the training ranks must not overlap with these. If None, the
-    # trainer will refuse to start in vllm mode.
+    # may use; the training ranks must not overlap with these. If None/empty,
+    # vLLM runs in "shared" mode on the same GPU as training rank 0.
+    # At construction time this field is populated from the
+    # ``ROLLOUT_VISIBLE_DEVICE`` environment variable (comma-separated device
+    # indices, e.g. ``ROLLOUT_VISIBLE_DEVICE=6,7``) when that variable is set,
+    # taking precedence over any value supplied in the JSON config.
     gpus: Optional[List[int]] = None
+
+    def __post_init__(self):
+        env_gpus = os.environ.get("ROLLOUT_VISIBLE_DEVICE")
+        if env_gpus:
+            self.gpus = [int(g.strip()) for g in env_gpus.split(",")]
+
     tensor_parallel_size: int = 1
     gpu_memory_utilization: float = 0.85
-    vllm_dtype: str = "bfloat16"
+    engine_dtype: str = "bfloat16"
     # Push student weights into vLLM every N optimizer steps. Larger values
     # trade staleness for throughput.
     weight_sync_interval: int = 1
