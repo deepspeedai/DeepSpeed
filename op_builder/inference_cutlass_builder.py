@@ -31,12 +31,12 @@ class InferenceCutlassBuilder(CUDAOpBuilder):
             if not self.is_rocm_pytorch() and torch.cuda.is_available():  #ignore-cuda
                 sys_cuda_major, _ = installed_cuda_version()
                 torch_cuda_major = int(torch.version.cuda.split('.')[0])
-                cuda_capability = torch.cuda.get_device_properties(0).major  #ignore-cuda
-                if cuda_capability < 6:
+                cuda_capability = self.cuda_capability_major()
+                if cuda_capability is not None and cuda_capability < 6:
                     if verbose:
                         self.warning("NVIDIA Inference is only supported on Pascal and newer architectures")
                     cuda_okay = False
-                if cuda_capability >= 8:
+                if cuda_capability is not None and cuda_capability >= 8:
                     if torch_cuda_major < 11 or sys_cuda_major < 11:
                         if verbose:
                             self.warning("On Ampere and higher architectures please use CUDA 11+")

@@ -21,6 +21,7 @@ try:
 except ImportError:
     pass
 
+import deepspeed.comm as dist
 from deepspeed.accelerator import get_accelerator
 
 from .fx import add_free_activations
@@ -107,7 +108,7 @@ def launch_compile_passes(global_steps: int):
         frames_partitioned.clear()
 
 
-def set_time_and_tensor_size(graph_id, graph: Graph, mem, bwd, profiling_results):
+def set_time_and_tensor_size(graph_id, graph: Graph, mem, bwd, profiling_results, mem_complete=True):
     node_time = []
     tensor_sizes = []
 
@@ -121,11 +122,22 @@ def set_time_and_tensor_size(graph_id, graph: Graph, mem, bwd, profiling_results
         profiling_results[graph_id].bwd_time = node_time
         profiling_results[graph_id].bwd_tensor_sizes = tensor_sizes
         profiling_results[graph_id].bwd_mem = mem
+        profiling_results[graph_id].bwd_mem_complete = mem_complete
     else:
         profiling_results[graph_id].fwd_graph = graph
         profiling_results[graph_id].fwd_time = node_time
         profiling_results[graph_id].fwd_tensor_sizes = tensor_sizes
         profiling_results[graph_id].fwd_mem = mem
+        profiling_results[graph_id].fwd_mem_complete = mem_complete
+
+
+def _sync_memory_profile_complete(profile_complete: bool) -> bool:
+    if not dist.is_initialized():
+        return profile_complete
+
+    complete = torch.tensor([1 if profile_complete else 0], device=torch.device(get_accelerator().current_device()))
+    dist.all_reduce(complete, dist.ReduceOp.MIN)
+    return bool(complete.item())
 
 
 def evaluate_symint_from_shape_env(sym_int_v):
@@ -213,9 +225,13 @@ def run_opt_passes(opt_passes: List[Callable],
 
             mem_prof = MemoryProfilingInterpreter(gm, debug_log=debug_log)
             mem_prof.run(*create_inputs_fn())
-            mem = [(name, current_alloc, delta, peak) for name, current_alloc, delta, peak in mem_prof.mem_record]
+            profile_complete = _sync_memory_profile_complete(mem_prof.profile_complete)
+            if profile_complete:
+                mem = [(name, current_alloc, delta, peak) for name, current_alloc, delta, peak in mem_prof.mem_record]
+            else:
+                mem = []
 
-            set_time_and_tensor_size(graph_id, gm.graph, mem, bwd, profiling_results)
+            set_time_and_tensor_size(graph_id, gm.graph, mem, bwd, profiling_results, profile_complete)
 
         with unset_fake_temporarily():
             get_accelerator().synchronize()
