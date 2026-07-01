@@ -60,10 +60,15 @@ def is_backend_inductor(backend):
 
 backward_started = False
 pre_backward_hooks = []
+post_backward_hooks = []
 
 
 def add_pre_backward_hook(hook):
     pre_backward_hooks.append(hook)
+
+
+def add_post_backward_hook(hook):
+    post_backward_hooks.append(hook)
 
 
 def deepcompile_backward_prologue(is_gradient_accumulation_boundary):
@@ -73,6 +78,11 @@ def deepcompile_backward_prologue(is_gradient_accumulation_boundary):
 
     dc = get_deepcompile_handle()
     dc.start_backward(is_gradient_accumulation_boundary)
+
+
+def deepcompile_backward_epilogue():
+    for hook in post_backward_hooks:
+        hook()
 
 
 def log_rank0(msg: str, enable: bool = False):
