@@ -157,7 +157,7 @@ def test_get_bfloat16_enabled(bf16_key):
 
 
 def test_quantized_eigenvalue_config_parses():
-    ds_config_path = get_test_path('model/BingBertSquad/deepspeed_bsz24_fp16_eigenvalue_quantize_config.json')
+    ds_config_path = get_test_path('../model/BingBertSquad/deepspeed_bsz24_fp16_eigenvalue_quantize_config.json')
 
     ds_config = DeepSpeedConfig(ds_config_path)
 
