@@ -51,10 +51,10 @@ class MixedDtypeAdapterModule(torch.nn.Module):
 
     def attach_fp32_adapter(self, rank):
         device = get_accelerator().current_device_name()
-        self.adapter_a = torch.nn.Parameter(torch.randn(rank, self.hidden_dim, device=device, dtype=torch.float32) *
-                                            0.01)
-        self.adapter_b = torch.nn.Parameter(torch.randn(self.hidden_dim, rank, device=device, dtype=torch.float32) *
-                                            0.01)
+        self.adapter_a = torch.nn.Parameter(
+            torch.randn(rank, self.hidden_dim, device=device, dtype=torch.float32) * 0.01)
+        self.adapter_b = torch.nn.Parameter(
+            torch.randn(self.hidden_dim, rank, device=device, dtype=torch.float32) * 0.01)
 
         assert hasattr(self.base_weight, "convert_to_zero_parameters")
         self.base_weight.convert_to_zero_parameters([self.adapter_a, self.adapter_b])
