@@ -150,8 +150,8 @@ class DeepSpeedZeroConfig(DeepSpeedConfigModel):
 
     elastic_checkpoint: bool = False
     """
-    Enable loading checkpoint that was saved by job with different GPU count.
-    No longer supported.
+    Legacy elastic checkpoint support. ZeRO-3 elastic checkpointing is no
+    longer supported; use Universal Checkpointing instead.
     """
 
     offload_param: Optional[DeepSpeedZeroOffloadParamConfig] = None
@@ -390,4 +390,12 @@ class DeepSpeedZeroConfig(DeepSpeedConfigModel):
         offload_config = self.offload_optimizer
         if offload_config and offload_config.ratio < 1.0:
             assert self.stage == ZeroStageEnum.weights, "Partial offloading only supported for ZeRO Stage 3."
+        return self
+
+    @model_validator(mode="after")
+    def elastic_checkpoint_deprecated(self):
+        if self.stage == ZeroStageEnum.weights and self.elastic_checkpoint:
+            logger.warning(
+                "ZeRO-3 elastic checkpointing is deprecated and no longer supported. Use Universal Checkpointing instead."
+            )
         return self

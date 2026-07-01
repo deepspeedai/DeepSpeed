@@ -222,6 +222,11 @@ class EngineTimers(object):
         return self.micro_timers + self.global_timers
 
 
+def _eigenvalue_summary_events(block_eigenvalue, global_samples):
+    return [(f"Train/Eigenvalues/ModelBlockParam_{i}", ev_value[0], global_samples)
+            for i, ev_value in enumerate(block_eigenvalue.values())]
+
+
 class DeepSpeedEngine(Module):
     r"""DeepSpeed engine for training."""
 
@@ -3218,13 +3223,8 @@ class DeepSpeedEngine(Module):
 
                     if (self.eigenvalue_enabled()
                             and not self.gas_boundary_ctr % self.eigenvalue_gas_boundary_resolution()):
-                        ev_values = self.block_eigenvalue.values()
-                        for i in range(len(ev_values)):
-                            self.summary_events.append((
-                                f"Train/Eigenvalues/ModelBlockParam_{i}",
-                                self.ev_values[i][0],
-                                self.global_samples,
-                            ))
+                        self.summary_events.extend(
+                            _eigenvalue_summary_events(self.block_eigenvalue, self.global_samples))
                     self.monitor.write_events(self.summary_events)
 
         # Check flops profiling
