@@ -22,6 +22,7 @@ ensuring empty parameter groups are properly handled.
 
 import torch.nn as nn
 import deepspeed
+import pytest
 from unit.common import DistributedTest
 
 
@@ -173,3 +174,43 @@ class TestMuonPartialModelTraining(DistributedTest):
 
         # Verify the model was initialized successfully
         assert model_engine is not None
+
+    @pytest.mark.parametrize(
+        "optimizer_params, expected_muon_lr, expected_adam_lr",
+        [
+            ({
+                "lr": 0.02,
+                "weight_decay": 0.01
+            }, 0.02, 0.02),
+            ({
+                "lr": 0.02,
+                "muon_lr": 0.04,
+                "adam_lr": 0.001,
+                "weight_decay": 0.01
+            }, 0.04, 0.001),
+        ],
+    )
+    def test_muon_adam_learning_rate_overrides(self, optimizer_params, expected_muon_lr, expected_adam_lr):
+        model = PartialTrainableModel()
+
+        ds_config = {
+            "train_micro_batch_size_per_gpu": 1,
+            "optimizer": {
+                "type": "Muon",
+                "params": optimizer_params
+            },
+            "zero_optimization": {
+                "stage": 2
+            },
+        }
+
+        model_engine, _, _, _ = deepspeed.initialize(model=model,
+                                                     model_parameters=model.parameters(),
+                                                     config=ds_config)
+
+        group_lrs = {
+            param_group["use_muon"]: param_group["lr"]
+            for param_group in model_engine.basic_optimizer.param_groups
+        }
+        assert group_lrs[True] == expected_muon_lr
+        assert group_lrs[False] == expected_adam_lr

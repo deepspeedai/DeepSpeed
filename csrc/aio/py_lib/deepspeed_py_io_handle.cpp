@@ -210,7 +210,7 @@ int deepspeed_io_handle_t::wait()
 
         completed_op->finish();
 
-        if (!completed_op->_filename.empty()) { (completed_op->_fd); }
+        if (!completed_op->_filename.empty()) { close(completed_op->_fd); }
 
         --_num_pending_ops;
         ++num_completed_ops;
