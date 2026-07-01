@@ -92,7 +92,7 @@ extras_require = {
     'sd': fetch_requirements('requirements/requirements-sd.txt'),
     'triton': fetch_requirements('requirements/requirements-triton.txt'),
     'deepcompile': fetch_requirements('requirements/requirements-deepcompile.txt'),
-    'torchembed': ['torchembed'],
+    'torchembed': ['torchembed>=0.3.0'],
 }
 
 # Only install pynvml on nvidia gpus.
