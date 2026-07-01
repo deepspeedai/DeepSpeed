@@ -223,10 +223,8 @@ class EngineTimers(object):
 
 
 def _eigenvalue_summary_events(block_eigenvalue, global_samples):
-    return [
-        (f"Train/Eigenvalues/ModelBlockParam_{i}", ev_value[0], global_samples)
-        for i, ev_value in enumerate(block_eigenvalue.values())
-    ]
+    return [(f"Train/Eigenvalues/ModelBlockParam_{i}", ev_value[0], global_samples)
+            for i, ev_value in enumerate(block_eigenvalue.values())]
 
 
 class DeepSpeedEngine(Module):
