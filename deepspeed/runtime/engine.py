@@ -2504,10 +2504,6 @@ class DeepSpeedEngine(Module):
             if not bf16_optimizer:
                 self.optimizer.backward_epilogue()
             self.optimizer.exit_backward()
-            # Clear the retained-backward flag here so it is reset for both the
-            # engine.backward() path and the torch-style manual path
-            # (engine.scale(loss).backward(retain_graph=True)), which both reach
-            # this epilogue after the gradient hooks have run.
             self.optimizer.retain_graph_on_current_backward = False
 
         see_memory_usage("Engine after backward", force=self.memory_breakdown())
@@ -2686,11 +2682,7 @@ class DeepSpeedEngine(Module):
         Arguments:
             loss: Scalar loss tensor to be scaled
             retain_graph: bool, default: false
-                Set to true when the upcoming manual backward keeps the graph alive
-                (``scaled_loss.backward(retain_graph=True)``) so a second backward can
-                run over the same forward. For ZeRO-3 this defers parameter release so
-                the retained graph's saved tensors stay valid, matching the behavior of
-                ``engine.backward(loss, retain_graph=True)``.
+                forward on user defined choice of retain_graph
 
         Returns:
             Scaled loss tensor ready for .backward() call
@@ -2717,8 +2709,6 @@ class DeepSpeedEngine(Module):
         scaled_loss = loss
         if isinstance(self.optimizer, ZeROOptimizer):
             scaled_loss = self.optimizer.scale_if_loss(loss)
-            # The manual path bypasses engine.backward(), so propagate retain_graph here.
-            # Cleared in _backward_epilogue() once the gradient hooks have run.
             self.optimizer.retain_graph_on_current_backward = retain_graph
         elif self.torch_autocast_z0_gradscaler:
             scaled_loss = self.torch_autocast_z0_gradscaler.scale(loss)
@@ -2763,23 +2753,22 @@ class DeepSpeedEngine(Module):
         elif self.torch_autocast_z0_gradscaler:
             loss = self.torch_autocast_z0_gradscaler.scale(loss)
 
-        try:
-            with compiled_autograd(self._is_compiled_autograd_enabled, self._compile_kwargs):
-                if self.zero_optimization() or not self.amp_enabled():
-                    loss.backward(**backward_kwargs)
-                elif self.amp_enabled():
-                    # AMP requires delaying unscale when inside gradient accumulation boundaries
-                    # https://nvidia.github.io/apex/advanced.html#gradient-accumulation-across-iterations
-                    delay_unscale = not self.is_gradient_accumulation_boundary()
-                    with amp.scale_loss(loss, self.optimizer, delay_unscale=delay_unscale) as scaled_loss:
-                        scaled_loss.backward(**backward_kwargs)
+        with compiled_autograd(self._is_compiled_autograd_enabled, self._compile_kwargs):
+            if self.zero_optimization() or not self.amp_enabled():
+                loss.backward(**backward_kwargs)
+            elif self.amp_enabled():
+                # AMP requires delaying unscale when inside gradient accumulation boundaries
+                # https://nvidia.github.io/apex/advanced.html#gradient-accumulation-across-iterations
+                delay_unscale = not self.is_gradient_accumulation_boundary()
+                with amp.scale_loss(loss, self.optimizer, delay_unscale=delay_unscale) as scaled_loss:
+                    scaled_loss.backward(**backward_kwargs)
 
-                # backward_epilogue is not called in a hook when self._support_torch_style_backward is False
-                self._backward_epilogue()
-        finally:
-            self._running_engine_backward = False
-            if isinstance(self.optimizer, ZeROOptimizer):
-                self.optimizer.retain_graph_on_current_backward = False
+            # backward_epilogue is not called in a hook when self._support_torch_style_backward is False
+            self._backward_epilogue()
+
+        self._running_engine_backward = False
+        if isinstance(self.optimizer, ZeROOptimizer):
+            self.optimizer.retain_graph_on_current_backward = False
 
         return gas_scaled_loss
 
