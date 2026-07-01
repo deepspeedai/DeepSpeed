@@ -15,6 +15,7 @@ from deepspeed.utils import log_dist
 
 from ..util import get_deepcompile_handle
 from ..graph_param import DSGraphParamManager
+from ..profilers.graph_profile import is_profile_incomplete
 
 NAME = "selective_gather"
 
@@ -25,6 +26,18 @@ MEM_MARGIN = 0.1
 
 def print_rank_0(message):
     log_dist(message, ranks=[0])
+
+
+def _maybe_update_size_from_profile(ds_id_to_size: Dict[int, int], ds_id: int, tensor_size: int) -> None:
+    if tensor_size > 0:
+        ds_id_to_size[ds_id] = tensor_size
+
+
+def _time_per_byte(ds_id_to_time: Dict[int, float], ds_id_to_size: Dict[int, int], ds_id: int) -> float:
+    size = ds_id_to_size.get(ds_id, 0)
+    if size <= 0:
+        return 0.0
+    return ds_id_to_time[ds_id] / size
 
 
 def _compute_persistence_budget(all_graph_mem_records: List[List[Tuple[str, int, int, int]]], total_mem: int,
@@ -54,6 +67,10 @@ def _compute_persistence_budget(all_graph_mem_records: List[List[Tuple[str, int,
     }
 
 
+def _profile_result_incomplete(prof) -> bool:
+    return is_profile_incomplete(prof.fwd_graph) or is_profile_incomplete(prof.bwd_graph)
+
+
 def selective_gather(gm: GraphModule, graph_id: int, graph_order: List[Tuple[int, bool]], profiling_results,
                      create_inputs_fn, mem_budget: float, param_manager: DSGraphParamManager,
                      bwd: bool) -> GraphModule:
@@ -70,6 +87,14 @@ def selective_gather(gm: GraphModule, graph_id: int, graph_order: List[Tuple[int
 
     # Run only on the last backward graph
     if last_backward_graph_id is None or graph_id != last_backward_graph_id:
+        return gm
+
+    incomplete_profile_ids = [
+        profile_graph_id for profile_graph_id, prof in profiling_results.items() if _profile_result_incomplete(prof)
+    ]
+    if incomplete_profile_ids:
+        print_rank_0(f"selective_gather incomplete profiling data for graph_ids={incomplete_profile_ids}; "
+                     "skipping persistence update")
         return gm
 
     all_graph_mem_records = []
@@ -106,7 +131,7 @@ def selective_gather(gm: GraphModule, graph_id: int, graph_order: List[Tuple[int
         for n in profile.fwd_graph.nodes:
             if n.target == torch.ops.dc.allgather_param.default:
                 assert "tensor_size" in n.meta
-                ds_id_to_size[n.args[2]] = n.meta["tensor_size"]
+                _maybe_update_size_from_profile(ds_id_to_size, n.args[2], n.meta["tensor_size"])
                 assert "device_time" in n.meta
                 ds_id_to_time[n.args[2]] += n.meta["device_time"]
 
@@ -117,12 +142,12 @@ def selective_gather(gm: GraphModule, graph_id: int, graph_order: List[Tuple[int
             for n in profile.bwd_graph.nodes:
                 if n.target == torch.ops.dc.allgather_param.default:
                     assert "tensor_size" in n.meta
-                    ds_id_to_size[n.args[2]] = n.meta["tensor_size"]
+                    _maybe_update_size_from_profile(ds_id_to_size, n.args[2], n.meta["tensor_size"])
                     assert "device_time" in n.meta
                     ds_id_to_time[n.args[2]] += n.meta["device_time"]
 
     ds_ids = [ds_id for ds_id in ds_id_to_size if ds_id not in persistent_ds_ids]
-    ds_ids.sort(key=lambda ds_id: ds_id_to_time[ds_id] / ds_id_to_size[ds_id], reverse=True)
+    ds_ids.sort(key=lambda ds_id: _time_per_byte(ds_id_to_time, ds_id_to_size, ds_id), reverse=True)
 
     # print(f"ds_id_to_size={ds_id_to_size}")
     # print(f"ds_id_to_time={ds_id_to_time}")

@@ -13,9 +13,24 @@ from deepspeed.runtime.zero.parameter_offload import DeepSpeedZeRoOffload
 from .passes import zero3_compile, prefetch, selective_gather, offload_parameters
 from .backend import make_backend, launch_compile_passes, init_schedule
 from .patch_fake_tensor import patch_fake_tensor
-from .util import get_deepcompile_handle, add_pre_backward_hook
+from .util import get_deepcompile_handle, add_pre_backward_hook, add_post_backward_hook
+from .z3_eager_fallback import DeepCompileZ3EagerFallback
 
 WARMUP = 5
+
+_MISSING = object()
+
+
+def _resolve_expected_grad_dtype(param):
+    # Match PyTorch's leaf grad accumulation contract. grad_dtype can be a
+    # dtype, or None to allow any incoming gradient dtype:
+    # https://docs.pytorch.org/docs/main/generated/torch.sparse.semi_structured.SparseSemiStructuredTensorCUSPARSELT.html#torch.sparse.semi_structured.SparseSemiStructuredTensorCUSPARSELT.grad_dtype
+    grad_dtype = getattr(param, "grad_dtype", _MISSING)
+    if grad_dtype is None:
+        return None
+    if grad_dtype is not _MISSING:
+        return grad_dtype
+    return param.dtype
 
 
 def init_z3(engine, backend, compile_config, compile_kwargs, schedule=None):
@@ -30,9 +45,8 @@ def init_z3(engine, backend, compile_config, compile_kwargs, schedule=None):
     dc = get_deepcompile_handle()
     dc.init(engine.data_parallel_group, compile_config, engine.zero_reduce_bucket_size())
 
-    # Unset hooks
-    for m in engine.module.modules():
-        m._parameters = m._original_parameters
+    engine._deepcompile_z3_eager_fallback = DeepCompileZ3EagerFallback(engine)
+    add_post_backward_hook(engine._deepcompile_z3_eager_fallback.release_gathered_params)
 
     if use_opt:
         optimizer.parameter_offload._remove_module_hooks()
@@ -56,7 +70,8 @@ def init_z3(engine, backend, compile_config, compile_kwargs, schedule=None):
 
         # Disable persistent param
         p.ds_persist = False
-        dc.register_z3_param(p.ds_id, p.ds_shape, p.ds_tensor, grad_buffer, p.ds_persist)
+        dc.register_z3_param(p.ds_id, p.ds_shape, p.ds_tensor, grad_buffer, p.ds_persist,
+                             _resolve_expected_grad_dtype(p))
 
     if schedule is None:
         schedule = []
@@ -72,7 +87,7 @@ def init_z3(engine, backend, compile_config, compile_kwargs, schedule=None):
 
     if use_opt:
 
-        def set_grad_buffer():
+        def set_grad_buffer(_is_gradient_accumulation_boundary):
             for i, sub_group in enumerate(optimizer.fp16_groups):
                 optimizer.averaged_gradients[i] = [
                     optimizer._DeepSpeedZeroOptimizer_Stage3__param_id_to_grad_partition[param.ds_id]

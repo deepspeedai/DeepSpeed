@@ -7,10 +7,31 @@ import torch
 
 from unit.common import DistributedTest
 
-from transformers import VisionEncoderDecoderModel
+from transformers import GPT2Config, VisionEncoderDecoderConfig, VisionEncoderDecoderModel, ViTConfig
 from transformers.integrations.deepspeed import HfDeepSpeedConfig
 
 import deepspeed
+
+
+def _create_tiny_vision_encoder_decoder_model(model_path):
+    encoder_config = ViTConfig(image_size=8,
+                               patch_size=4,
+                               num_hidden_layers=1,
+                               hidden_size=8,
+                               num_attention_heads=2,
+                               intermediate_size=16)
+    decoder_config = GPT2Config(vocab_size=32,
+                                n_positions=16,
+                                n_embd=8,
+                                n_layer=1,
+                                n_head=2,
+                                bos_token_id=0,
+                                eos_token_id=1,
+                                add_cross_attention=True,
+                                is_decoder=True)
+    config = VisionEncoderDecoderConfig.from_encoder_decoder_configs(encoder_config, decoder_config)
+    model = VisionEncoderDecoderModel(config)
+    model.save_pretrained(model_path, safe_serialization=False)
 
 
 class TestNestingInit(DistributedTest):
@@ -64,9 +85,9 @@ class TestNestedParallelInit(DistributedTest):
     # VisionEncoderDecoderModel.from_pretrained(...)
     # which calls this constructor inside zero.Init
 
-    def test_nested_parallel_init(self):
+    def test_nested_parallel_init(self, tmp_path):
         ds_config = dict(train_batch_size=1, zero_optimization=dict(stage=3))
+        _create_tiny_vision_encoder_decoder_model(tmp_path)
         dschf = HfDeepSpeedConfig(ds_config)  # keep this object alive
-        model = VisionEncoderDecoderModel.from_pretrained(
-            "hf-internal-testing/tiny-random-VisionEncoderDecoderModel-vit-gpt2")
+        model = VisionEncoderDecoderModel.from_pretrained(str(tmp_path), local_files_only=True)
         assert all([hasattr(p, 'ds_id') for p in model.parameters()])

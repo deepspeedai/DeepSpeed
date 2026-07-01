@@ -614,6 +614,24 @@ class OpBuilder(ABC):
 
 class CUDAOpBuilder(OpBuilder):
 
+    def cuda_capability_major(self):
+        """Compute-capability major of CUDA device 0, or ``None`` when it cannot
+        be read without side effects.
+
+        ``torch.cuda.get_device_properties`` calls ``torch.cuda._lazy_init()``,
+        which creates a CUDA context. Doing that merely to check op compatibility
+        at ``import deepspeed`` time would poison ``fork()``-based multiprocessing,
+        because a forked child cannot reuse the parent's context (issue #7918).
+        We therefore probe only when a context already exists and we are not
+        inside such a forked child; otherwise the caller skips the
+        compute-capability check and defers it to build/load time.
+        """
+        if not torch.cuda.is_initialized():
+            return None
+        if hasattr(torch.cuda, '_is_in_bad_fork') and torch.cuda._is_in_bad_fork():
+            return None
+        return torch.cuda.get_device_properties(0).major
+
     def compute_capability_args(self, cross_compile_archs=None):
         """
         Returns nvcc compute capability compile flags.

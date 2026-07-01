@@ -120,6 +120,35 @@ MODAL_TORCH_IMAGE = MODAL_TORCH_CONFIG["image"]
 MODAL_TORCH_TEST_VERSION = MODAL_TORCH_CONFIG["torch_test_version"]
 MODAL_CUDA_TEST_VERSION = MODAL_TORCH_CONFIG["cuda_test_version"]
 
+# Full test sub-tree this workflow runs by default.
+DEFAULT_TEST_TARGET = "tests/unit/v1/"
+
+
+def resolve_selected_tests():
+    """pytest targets selected by the diff-driven fetcher (ci/tests_fetcher.py).
+
+    The fetcher writes one target per line (individual test files for a narrowed
+    run, or just ``tests/unit/v1`` for a full run). The ``collect-tests`` CI job
+    produces this file and the ``deploy`` job downloads it into place before
+    ``modal run``. We read it here on the runner (at image-build time) and bake the
+    targets into the image env so the remote ``pytest`` picks them up.
+
+    Falls back to the whole v1 suite when the file is missing or empty (local runs,
+    or selection skipped), so behavior is unchanged unless a selection is provided.
+    """
+    env_path = os.environ.get("DS_TEST_LIST_FILE", "")
+    list_file = Path(env_path) if env_path else ROOT_PATH / "ci" / ".test_selection" / "test_list.txt"
+    if not list_file.is_absolute():
+        list_file = ROOT_PATH / list_file
+    try:
+        targets = [line.strip() for line in list_file.read_text().splitlines() if line.strip()]
+    except OSError:
+        targets = []
+    return targets or [DEFAULT_TEST_TARGET]
+
+
+SELECTED_TESTS = resolve_selected_tests()
+
 # yapf: disable
 image = (modal.Image
          .from_registry(MODAL_TORCH_IMAGE, add_python="3.10")
@@ -127,6 +156,7 @@ image = (modal.Image
              "MODAL_TORCH_PRESET": MODAL_TORCH_CONFIG["preset"],
              "MODAL_TRANSFORMERS_SOURCE": MODAL_TRANSFORMERS_CONFIG["source"],
              "MODAL_TRANSFORMERS_REF": MODAL_TRANSFORMERS_CONFIG["ref"],
+             "DS_SELECTED_TESTS": " ".join(SELECTED_TESTS),
          })
          .run_commands("apt update && apt install -y git libaio-dev")
          .pip_install_from_requirements(ROOT_PATH / "requirements/requirements.txt", gpu="any")
@@ -173,9 +203,18 @@ def pytest():
         check=True,
         cwd=ROOT_PATH / ".",
     )
+    selected_tests = os.environ.get("DS_SELECTED_TESTS", DEFAULT_TEST_TARGET).split()
+    print(f"Running pytest on diff-selected targets: {selected_tests}")
     subprocess.run(
-        f"pytest -n 4 --verbose tests/unit/v1/ --torch_ver={MODAL_TORCH_TEST_VERSION} "
-        f"--cuda_ver={MODAL_CUDA_TEST_VERSION}".split(),
+        [
+            "pytest",
+            "-n",
+            "4",
+            "--verbose",
+            *selected_tests,
+            f"--torch_ver={MODAL_TORCH_TEST_VERSION}",
+            f"--cuda_ver={MODAL_CUDA_TEST_VERSION}",
+        ],
         check=True,
         cwd=ROOT_PATH / ".",
     )
