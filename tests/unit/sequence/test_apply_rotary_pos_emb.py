@@ -34,8 +34,9 @@ def test_apply_rotary_pos_emb(seq_len, dim, rotary_dim):
 
     t = torch.randn(seq_len, 4, dim)
     freqs_cos, freqs_sin = _make_freqs(seq_len, rot_dim)
-    freqs_cos = freqs_cos[:, :rot_dim]
-    freqs_sin = freqs_sin[:, :rot_dim]
+    # unsqueeze a broadcastable heads dim: t is [seq_len, n_heads, dim], freqs is [seq_len, dim]
+    freqs_cos = freqs_cos[:, :rot_dim].unsqueeze(1)
+    freqs_sin = freqs_sin[:, :rot_dim].unsqueeze(1)
 
     result = apply_rotary_pos_emb(t, freqs_cos, freqs_sin)
     expected = _ref_apply_rotary(t, freqs_cos, freqs_sin)
@@ -51,8 +52,8 @@ def test_apply_rotary_pos_emb_grad_flow(dtype):
     rot_dim = 64
     t = torch.randn(seq_len, n_heads, dim, dtype=dtype, requires_grad=True)
     freqs_cos, freqs_sin = _make_freqs(seq_len, rot_dim)
-    freqs_cos = freqs_cos[:, :rot_dim]
-    freqs_sin = freqs_sin[:, :rot_dim]
+    freqs_cos = freqs_cos[:, :rot_dim].unsqueeze(1)
+    freqs_sin = freqs_sin[:, :rot_dim].unsqueeze(1)
 
     out = apply_rotary_pos_emb(t, freqs_cos, freqs_sin)
     loss = out.sum()

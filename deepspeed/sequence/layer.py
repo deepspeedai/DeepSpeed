@@ -106,11 +106,19 @@ def apply_rotary_pos_emb(t, freqs_cos, freqs_sin):
     # ideally t_pass is empty so rotary pos embedding is applied to all tensor t
     t, t_pass = t[..., :rot_dim], t[..., rot_dim:]
 
-    if _torchembed_available and t.is_cuda and t.device.type == 'cuda' and rot_dim % 2 == 0:
-        orig_shape = t.shape
-        t_2d = t.reshape(-1, orig_shape[-2], rot_dim)
-        t_out, _ = _torchembed_rope_forward(t_2d, t_2d, freqs_cos, freqs_sin)
-        t = t_out.reshape(orig_shape)
+    # torchembed's fused kernel takes cos/sin caches of shape [seq_length, rot_dim] and
+    # applies them along the second-to-last axis of t. Some callers (e.g. fpdt_layer.py)
+    # pass tensors where the sequence dim isn't at position 0, so only take the fused path
+    # when t's dim 0 unambiguously matches the freqs' sequence dim (with no other
+    # non-broadcast dims in freqs); otherwise fall back to the reference path.
+    if (_torchembed_available and t.is_cuda and rot_dim % 2 == 0 and freqs_cos.shape[0] == t.shape[0]
+            and freqs_cos.numel() == freqs_cos.shape[0] * rot_dim):
+        freqs_cos_2d = freqs_cos.reshape(freqs_cos.shape[0], rot_dim)
+        freqs_sin_2d = freqs_sin.reshape(freqs_sin.shape[0], rot_dim)
+        # torchembed expects the sequence dim second-to-last: (*leading, seq_len, dim)
+        t_kernel = t.movedim(0, -2).contiguous()
+        t_out, _ = _torchembed_rope_forward(t_kernel, t_kernel, freqs_cos_2d, freqs_sin_2d)
+        t = t_out.movedim(-2, 0).contiguous()
     else:
         # first part is cosine component
         # second part is sine component, need to change signs with _rotate_half method
