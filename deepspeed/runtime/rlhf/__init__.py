@@ -13,20 +13,11 @@ trainer  : Algorithm-specific training loops (OPSD, GRPO, …).
 """
 
 from deepspeed.runtime.rlhf.config import (  # noqa: F401
-    OPSDConfig,
-    StudentConfig,
-    TeacherConfig,
-    RolloutConfig,
-    DistillationConfig,
-    TrainingConfig,
-    DataConfig,
+    OPSDConfig, StudentConfig, TeacherConfig, RolloutConfig, DistillationConfig, TrainingConfig, DataConfig,
 )
 from deepspeed.runtime.rlhf.losses import (  # noqa: F401
-    chunked_distillation_loss,
-    streamed_distillation_loss,
-    per_token_logprobs,
+    chunked_distillation_loss, streamed_distillation_loss, per_token_logprobs,
 )
 from deepspeed.runtime.rlhf.utils import (  # noqa: F401
-    build_response_mask,
-    shift_for_next_token_prediction,
+    build_response_mask, shift_for_next_token_prediction,
 )

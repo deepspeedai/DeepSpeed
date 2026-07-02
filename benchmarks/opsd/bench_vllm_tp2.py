@@ -1,3 +1,7 @@
+# Copyright (c) Microsoft Corporation.
+# SPDX-License-Identifier: Apache-2.0
+
+# DeepSpeed Team
 """Benchmark vLLM TP=2 on 14B, 1P1R.
 
 Launched as a subprocess wrapper to avoid CUDA fork issues.

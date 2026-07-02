@@ -1,10 +1,14 @@
+# Copyright (c) Microsoft Corporation.
+# SPDX-License-Identifier: Apache-2.0
+
+# DeepSpeed Team
 """Comprehensive 14B rollout benchmark: Naive, GC, TP=2 GC, TP=4 GC."""
 import time
 import os
-import sys
 import torch
 import deepspeed
 from deepspeed.runtime.rollout import HybridEngineRollout, RolloutRequest, SamplingConfig
+from deepspeed.runtime.rollout.hybrid_engine_rollout import HybridEngineRolloutConfig
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 MODEL = "Qwen/Qwen2.5-14B-Instruct"
@@ -21,18 +25,17 @@ def bench_rollout(engine, tokenizer, use_graph_capture, cb_size, label):
     device = torch.device(f"cuda:{local_rank}")
 
     rollout = HybridEngineRollout(
-        engine=engine,
-        tokenizer=tokenizer,
-        continuous_batching_size=cb_size,
-        use_graph_capture=use_graph_capture,
+        engine,
+        tokenizer,
+        cfg=HybridEngineRolloutConfig(use_graph_capture=use_graph_capture),
     )
 
     ids = tokenizer(PROMPT, return_tensors="pt").input_ids.to(device)
     req = RolloutRequest(prompt_ids=ids, prompt_attention_mask=torch.ones_like(ids))
-    sampling = SamplingConfig(
-        max_new_tokens=MAX_NEW_TOKENS, temperature=0.8, top_p=0.95,
-        n_samples_per_prompt=N_SAMPLES
-    )
+    sampling = SamplingConfig(max_new_tokens=MAX_NEW_TOKENS,
+                              temperature=0.8,
+                              top_p=0.95,
+                              n_samples_per_prompt=N_SAMPLES)
 
     # Warmup
     torch.manual_seed(42)
@@ -46,10 +49,10 @@ def bench_rollout(engine, tokenizer, use_graph_capture, cb_size, label):
     for i in range(N_RUNS):
         torch.manual_seed(42 + i)
         engine.eval()
-        torch.cuda.synchronize()
+        torch.cuda.synchronize()  #ignore-cuda
         t0 = time.time()
         batch = rollout.generate(req, sampling)
-        torch.cuda.synchronize()
+        torch.cuda.synchronize()  #ignore-cuda
         times.append(time.time() - t0)
         engine.train()
 
@@ -72,7 +75,7 @@ def main():
     deepspeed.init_distributed()
     rank = torch.distributed.get_rank()
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
-    torch.cuda.set_device(local_rank)
+    torch.cuda.set_device(local_rank)  #ignore-cuda
 
     world_size = torch.distributed.get_world_size()
     tp_size = world_size  # all GPUs used for TP
@@ -81,8 +84,12 @@ def main():
     model = AutoModelForCausalLM.from_pretrained(MODEL, dtype=torch.bfloat16, trust_remote_code=True)
 
     ds_config = {
-        "bf16": {"enabled": True},
-        "zero_optimization": {"stage": 0},
+        "bf16": {
+            "enabled": True
+        },
+        "zero_optimization": {
+            "stage": 0
+        },
         "train_micro_batch_size_per_gpu": 1,
         "train_batch_size": world_size,
         "gradient_accumulation_steps": 1,
@@ -100,7 +107,9 @@ def main():
         ds_config["tensor_parallel"] = {
             "autotp_size": tp_size,
             "preset_model": "qwen2",
-            "tp": {"tp_size": tp_size},
+            "tp": {
+                "tp_size": tp_size
+            },
         }
 
     engine, *_ = deepspeed.initialize(model=model, config=ds_config)
@@ -116,7 +125,8 @@ def main():
     except Exception as e:
         if rank == 0:
             print(f"[TP{tp_size} CB={CB_SIZE}] FAILED: {e}")
-            import traceback; traceback.print_exc()
+            import traceback
+            traceback.print_exc()
 
     # 1P1R with CUDA graph capture
     try:
@@ -124,7 +134,8 @@ def main():
     except Exception as e:
         if rank == 0:
             print(f"[TP{tp_size} CB={CB_SIZE}+GC] FAILED: {e}")
-            import traceback; traceback.print_exc()
+            import traceback
+            traceback.print_exc()
 
     if rank == 0:
         print(f"{'='*60}\n")

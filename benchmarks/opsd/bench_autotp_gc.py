@@ -1,31 +1,41 @@
+# Copyright (c) Microsoft Corporation.
+# SPDX-License-Identifier: Apache-2.0
+
+# DeepSpeed Team
 """Benchmark rollout with AutoTP + graph capture on 14B model."""
 import time
 import torch
 import deepspeed
 from deepspeed.runtime.rollout import HybridEngineRollout, RolloutRequest, SamplingConfig
+from deepspeed.runtime.rollout.hybrid_engine_rollout import HybridEngineRolloutConfig
 from transformers import AutoModelForCausalLM, AutoTokenizer
+
 
 def main():
     deepspeed.init_distributed()
     rank = torch.distributed.get_rank()
-    local_rank = int(torch.distributed.get_rank()) % torch.cuda.device_count()
-    torch.cuda.set_device(local_rank)
+    local_rank = int(torch.distributed.get_rank()) % torch.cuda.device_count()  #ignore-cuda
+    torch.cuda.set_device(local_rank)  #ignore-cuda
     device = torch.device(f"cuda:{local_rank}")
 
     model_name = "Qwen/Qwen2.5-14B-Instruct"
     tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
 
-    model = AutoModelForCausalLM.from_pretrained(
-        model_name, dtype=torch.bfloat16, trust_remote_code=True
-    )
+    model = AutoModelForCausalLM.from_pretrained(model_name, dtype=torch.bfloat16, trust_remote_code=True)
 
     ds_config = {
-        "bf16": {"enabled": True},
-        "zero_optimization": {"stage": 0},
+        "bf16": {
+            "enabled": True
+        },
+        "zero_optimization": {
+            "stage": 0
+        },
         "tensor_parallel": {
             "autotp_size": 2,
             "preset_model": "qwen2",
-            "tp": {"tp_size": 2},
+            "tp": {
+                "tp_size": 2
+            },
         },
         "train_micro_batch_size_per_gpu": 1,
         "train_batch_size": 2,
@@ -43,10 +53,9 @@ def main():
     engine, *_ = deepspeed.initialize(model=model, config=ds_config)
 
     rollout = HybridEngineRollout(
-        engine=engine,
-        tokenizer=tokenizer,
-        continuous_batching_size=2,
-        use_graph_capture=True,
+        engine,
+        tokenizer,
+        cfg=HybridEngineRolloutConfig(use_graph_capture=True),
     )
 
     # Prepare prompt
@@ -66,10 +75,10 @@ def main():
     for i in range(5):
         torch.manual_seed(42)
         engine.eval()
-        torch.cuda.synchronize()
+        torch.cuda.synchronize()  #ignore-cuda
         t0 = time.time()
         batch = rollout.generate(req, sampling)
-        torch.cuda.synchronize()
+        torch.cuda.synchronize()  #ignore-cuda
         times.append(time.time() - t0)
         engine.train()
 
