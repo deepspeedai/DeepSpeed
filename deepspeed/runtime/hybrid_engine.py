@@ -216,6 +216,16 @@ class DeepSpeedHybridEngine(DeepSpeedEngine):
                 input_cont = inputs[0].contiguous() if len(inputs) > 0 else kwargs['input_ids'].contiguous()
                 dist.all_gather_into_tensor(output, input_cont, group=self.mp_group)
 
+                if kwargs.get('attention_mask', None) is not None:
+                    attention_mask = kwargs.get('attention_mask')
+                    new_atention_mask = torch.zeros(
+                        (input_shape[0] * self._config.hybrid_engine.inference_tp_size, ) + input_shape[1:],
+                        dtype=inputs[0].dtype if len(inputs) > 0 else kwargs['input_ids'].dtype,
+                        device=inputs[0].device if len(inputs) > 0 else kwargs['input_ids'].device)
+                    attention_mask_cont = attention_mask.contiguous()
+                    dist.all_gather_into_tensor( new_atention_mask, attention_mask_cont, group=self.mp_group)
+                    kwargs['attention_mask'] = new_atention_mask
+                    
                 if len(inputs) > 0:
                     inputs = (output, *inputs[1:])
                 else:
