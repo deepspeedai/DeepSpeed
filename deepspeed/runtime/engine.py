@@ -43,7 +43,9 @@ from deepspeed.runtime.bf16_optimizer import BF16_Optimizer
 
 from deepspeed.linear.optimized_linear import LoRAOptimizedLinear
 from deepspeed.module_inject.layers import GatherReplacedLayerParams, configure_tensor_parallel_runtime, collect_autotp_universal_checkpoint_info
-from deepspeed.module_inject.auto_ep_folding import reduce_autoep_folding_gradient
+from deepspeed.module_inject.auto_ep_folding import (clear_autoep_folding_gradient_corrected,
+                                                     is_autoep_folding_gradient_corrected,
+                                                     reduce_autoep_folding_gradient)
 from deepspeed.runtime.config import DEEPSPEED_OPTIMIZERS, \
     ADAGRAD_OPTIMIZER, ADAM_OPTIMIZER, ADAMW_OPTIMIZER, LAMB_OPTIMIZER, ONEBIT_ADAM_OPTIMIZER, ONEBIT_LAMB_OPTIMIZER, \
     TORCH_ADAM_PARAM, ADAM_W_MODE, ADAM_W_MODE_DEFAULT, ZERO_ONE_ADAM_OPTIMIZER, MUADAM_OPTIMIZER, MUADAMW_OPTIMIZER, \
@@ -2785,6 +2787,9 @@ class DeepSpeedEngine(Module):
 
         for param_name, param in self.module.named_parameters():
             if not param.requires_grad or param.grad is None:
+                continue
+            if is_autoep_folding_gradient_corrected(param):
+                clear_autoep_folding_gradient_corrected(param)
                 continue
             reduce_autoep_folding_gradient(folding_spec, param, param.grad, tp_group=tp_group, param_name=param_name)
 

@@ -19,6 +19,7 @@ AUTOEP_FOLDING_PARAM_FAMILY_ATTR = "ds_autoep_folding_param_family"
 AUTOEP_FOLDING_ROUTER_GATE_REPLICATED_PARAM = "router_gate_replicated"
 AUTOEP_FOLDING_ROUTER_GATE_PARTIAL_PARAM = "router_gate_partial"
 AUTOEP_FOLDING_SP_SHARDED_LAYERNORM_PARAM = "sp_sharded_layernorm"
+AUTOEP_FOLDING_GRAD_CORRECTED_ATTR = "ds_autoep_folding_grad_corrected"
 AUTOEP_FOLDING_GRAD_REDUCE_SKIP = "skip"
 AUTOEP_FOLDING_GRAD_REDUCE_SUM = "sum"
 AUTOEP_FOLDING_GRAD_REDUCE_AVERAGE = "average"
@@ -464,6 +465,32 @@ def reduce_autoep_folding_gradient(
     dist.all_reduce(grad_data, group=tp_group)
     if strategy == AUTOEP_FOLDING_GRAD_REDUCE_AVERAGE:
         grad_data.div_(tp_world_size)
+    return strategy
+
+
+def is_autoep_folding_gradient_corrected(param) -> bool:
+    return bool(getattr(param, AUTOEP_FOLDING_GRAD_CORRECTED_ATTR, False))
+
+
+def clear_autoep_folding_gradient_corrected(param) -> None:
+    if hasattr(param, AUTOEP_FOLDING_GRAD_CORRECTED_ATTR):
+        setattr(param, AUTOEP_FOLDING_GRAD_CORRECTED_ATTR, False)
+
+
+def apply_folding_correction_to_grad_buffer(
+    folding_spec: ParallelFoldingSpec | None,
+    param,
+    grad,
+    *,
+    tp_group,
+    param_name: str | None = None,
+) -> str:
+    if is_autoep_folding_gradient_corrected(param):
+        return AUTOEP_FOLDING_GRAD_REDUCE_SKIP
+
+    strategy = reduce_autoep_folding_gradient(folding_spec, param, grad, tp_group=tp_group, param_name=param_name)
+    if strategy != AUTOEP_FOLDING_GRAD_REDUCE_SKIP:
+        setattr(param, AUTOEP_FOLDING_GRAD_CORRECTED_ATTR, True)
     return strategy
 
 
