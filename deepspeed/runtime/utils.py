@@ -1435,16 +1435,24 @@ def count_used_parameters_in_backward(parameters: Sequence[torch.nn.Parameter]) 
     its verification on tensor shapes throws an error with ZeRO3 (it expects original tensor shape).
     So this function simplifies register_multi_grad_hook just to count used parameters.
 
+    When the required PyTorch internal APIs are not available (e.g. PyTorch < 2.3),
+    this function falls back to counting all parameters that require gradients, which
+    is conservative but correct — it may delay the epilogue slightly but will never
+    trigger it prematurely.
+
     Args:
         parameters: Iterable of model parameters to inspect.
 
     Returns:
         The number of parameters whose gradient nodes will be executed by the autograd engine
-        for the active backward call.
+        for the active backward call.  When internal APIs are unavailable, returns the total
+        count of parameters that require gradients (conservative fallback).
     """
-    assert check_internal_apis_for_count_used_parameters(), (
-        "count_used_parameters_in_backward requires internal PyTorch APIs that are not available "
-        "in this PyTorch build.")
+    if not check_internal_apis_for_count_used_parameters():
+        # Fallback for older PyTorch versions (< 2.3) that lack the internal APIs.
+        # Return the total number of grad-requiring parameters as a conservative
+        # upper bound. This ensures the epilogue never fires prematurely.
+        return sum(1 for p in parameters if isinstance(p, torch.Tensor) and p.requires_grad)
 
     from torch.autograd.graph import _get_grad_fn_or_grad_acc
     if torch._C._current_graph_task_id() == -1:
