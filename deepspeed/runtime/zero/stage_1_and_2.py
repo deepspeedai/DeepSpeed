@@ -35,7 +35,7 @@ from deepspeed.git_version_info import version
 from deepspeed.runtime.constants import PIPE_REPLICATED
 from deepspeed.accelerator import get_accelerator
 from deepspeed.runtime.zero.muon.original_muon import muon_update
-from deepspeed.module_inject.auto_ep_folding import reduce_autoep_folding_gradient
+from deepspeed.module_inject.auto_ep_folding import apply_folding_correction_to_grad_buffer
 from deepspeed.runtime.zero.muon.muon_optimizer import MuonWithAuxAdam
 from deepspeed.checkpoint.constants import (DS_VERSION, GROUP_PADDINGS, PARTITION_COUNT, LOSS_SCALER,
                                             SINGLE_PARTITION_OF_FP32_GROUPS, BASE_OPTIMIZER_STATE,
@@ -1037,11 +1037,15 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         self.autoep_folding_spec = folding_spec
 
     def _maybe_reduce_autoep_folding_tp_gradient(self, param, grad):
-        if not self.partition_gradients or self.autoep_folding_tp_group is None or grad is None:
+        if ((not self.partition_gradients and not self.overlap_comm) or self.autoep_folding_tp_group is None
+                or grad is None):
             return
         if not getattr(param, "ds_grad_is_ready", True):
             return
-        reduce_autoep_folding_gradient(self.autoep_folding_spec, param, grad, tp_group=self.autoep_folding_tp_group)
+        apply_folding_correction_to_grad_buffer(self.autoep_folding_spec,
+                                                param,
+                                                grad,
+                                                tp_group=self.autoep_folding_tp_group)
 
     def _fill_param_grad_accum_attribute(self, param):
         if param.grad is not None:
