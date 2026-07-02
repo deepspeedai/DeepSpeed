@@ -15,6 +15,12 @@ from deepspeed.accelerator import get_accelerator
 from deepspeed.module_inject.tp_shard import get_shard_size_list, set_num_kv_heads, get_num_kv_heads
 from deepspeed.utils import groups
 
+try:
+    from torchembed._triton import fused_rope_forward as _torchembed_rope_forward
+    _torchembed_available = True
+except ImportError:
+    _torchembed_available = False
+
 
 def _generate_layout_params(scatter_idx, batch_dim_idx, seq_world_size, input):
     """
@@ -100,9 +106,23 @@ def apply_rotary_pos_emb(t, freqs_cos, freqs_sin):
     # ideally t_pass is empty so rotary pos embedding is applied to all tensor t
     t, t_pass = t[..., :rot_dim], t[..., rot_dim:]
 
-    # first part is cosine component
-    # second part is sine component, need to change signs with _rotate_half method
-    t = (t * freqs_cos) + (_rotate_half(t) * freqs_sin)
+    # torchembed's fused kernel takes cos/sin caches of shape [seq_length, rot_dim] and
+    # applies them along the second-to-last axis of t. Some callers (e.g. fpdt_layer.py)
+    # pass tensors where the sequence dim isn't at position 0, so only take the fused path
+    # when t's dim 0 unambiguously matches the freqs' sequence dim (with no other
+    # non-broadcast dims in freqs); otherwise fall back to the reference path.
+    if (_torchembed_available and get_accelerator().on_accelerator(t) and rot_dim % 2 == 0
+            and freqs_cos.shape[0] == t.shape[0] and freqs_cos.numel() == freqs_cos.shape[0] * rot_dim):
+        freqs_cos_2d = freqs_cos.reshape(freqs_cos.shape[0], rot_dim)
+        freqs_sin_2d = freqs_sin.reshape(freqs_sin.shape[0], rot_dim)
+        # torchembed expects the sequence dim second-to-last: (*leading, seq_len, dim)
+        t_kernel = t.movedim(0, -2).contiguous()
+        t_out, _ = _torchembed_rope_forward(t_kernel, t_kernel, freqs_cos_2d, freqs_sin_2d)
+        t = t_out.movedim(-2, 0).contiguous()
+    else:
+        # first part is cosine component
+        # second part is sine component, need to change signs with _rotate_half method
+        t = (t * freqs_cos) + (_rotate_half(t) * freqs_sin)
 
     res = t if t_pass.shape[-1] == 0 else torch.cat((t, t_pass), dim=-1)
     return res
