@@ -37,9 +37,13 @@ def bwc_tensor_model_parallel_rank(mpu=None):
     elif hasattr(mpu, 'get_slice_parallel_rank'):
         # Some DeepSpeed + pipeline parallelism versions
         return mpu.get_slice_parallel_rank()
-    else:
+    elif hasattr(mpu, 'get_model_parallel_rank'):
         # Deprecated Megatron and DeepSpeed convention
         return mpu.get_model_parallel_rank()
+    else:
+        # mpu does not provide any known tensor/model-parallel rank API.
+        # Treat as "no tensor model parallelism".
+        return 0
 
 
 def bwc_tensor_model_parallel_world_size(mpu=None):
