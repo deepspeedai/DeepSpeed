@@ -24,6 +24,7 @@ from deepspeed.checkpoint.constants import UNIVERSAL_CHECKPOINT_INFO
 from deepspeed.checkpoint.constants import (DS_VERSION, PARTITION_COUNT, BASE_OPTIMIZER_STATE,
                                             SINGLE_PARTITION_OF_FP32_GROUPS, CLIP_GRAD, GROUP_PADDINGS,
                                             PARAM_SLICE_MAPPINGS)
+from deepspeed.module_inject.auto_ep_folding import apply_folding_correction_to_grad_buffer
 
 setattr(sys.modules[__name__], 'fragment_address', fragment_address)
 
@@ -70,6 +71,8 @@ class BF16_Optimizer(ZeROOptimizer):
         self.clip_grad = clip_grad
         self.norm_type = norm_type
         self.mpu = mpu
+        self.autoep_folding_tp_group = None
+        self.autoep_folding_spec = None
         self.allgather_bucket_size = int(allgather_bucket_size)
         self.dp_process_group = dp_process_group
         self.dp_rank = dist.get_rank(group=self.dp_process_group)
@@ -218,6 +221,14 @@ class BF16_Optimizer(ZeROOptimizer):
         self._enable_universal_checkpoint()
         self._param_slice_mappings = self._create_param_mapping()
 
+    def configure_autoep_folding_tp_gradient_reduction(self, folding_spec):
+        if folding_spec is None or folding_spec.tp_size <= 1:
+            self.autoep_folding_tp_group = None
+            self.autoep_folding_spec = None
+            return
+        self.autoep_folding_tp_group = groups.get_tensor_model_parallel_group()
+        self.autoep_folding_spec = folding_spec
+
     def _enable_universal_checkpoint(self):
         self._universal_checkpoint_info = None
         for lp_param_group in self.bf16_groups:
@@ -345,6 +356,13 @@ class BF16_Optimizer(ZeROOptimizer):
     def _update_hp_grad(self, lp, group_idx, param_idx, clear_lp_grads):
         if lp.grad is None:
             return
+
+        if self.autoep_folding_tp_group is not None and getattr(lp, "ds_grad_is_ready", True):
+            apply_folding_correction_to_grad_buffer(self.autoep_folding_spec,
+                                                    lp,
+                                                    lp.grad,
+                                                    tp_group=self.autoep_folding_tp_group,
+                                                    param_name=self.param_names.get(lp))
 
         hp_grad = self.fp32_groups_gradients[group_idx][param_idx]
         assert hp_grad is not None, \
