@@ -41,7 +41,9 @@ def test_bf16_hp_grad_update_uses_folded_correction_before_hp_buffer(monkeypatch
         param.ds_autoep_folding_grad_corrected = True
         return "average"
 
-    monkeypatch.setattr(bf16_mod, "apply_folding_correction_to_grad_buffer", fake_apply_folding_correction,
+    monkeypatch.setattr(bf16_mod,
+                        "apply_folding_correction_to_grad_buffer",
+                        fake_apply_folding_correction,
                         raising=False)
 
     optimizer._update_hp_grad(lp, group_idx=0, param_idx=0, clear_lp_grads=False)
@@ -67,7 +69,9 @@ def test_bf16_immediate_grad_update_hook_reuses_corrected_hp_update(monkeypatch)
         _param.ds_autoep_folding_grad_corrected = True
         return "expert_tp_cancel"
 
-    monkeypatch.setattr(bf16_mod, "apply_folding_correction_to_grad_buffer", fake_apply_folding_correction,
+    monkeypatch.setattr(bf16_mod,
+                        "apply_folding_correction_to_grad_buffer",
+                        fake_apply_folding_correction,
                         raising=False)
 
     optimizer.accumulate_hp_grads_and_remove_lp(lp, group_idx=0, param_idx=0)

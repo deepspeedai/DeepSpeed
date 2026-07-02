@@ -134,22 +134,12 @@ def test_validation_rule_g11_zero_offload_rejected(offload_key):
 def test_deepcompile_folded_rejected():
     config = AutoEPConfig(enabled=True, autoep_size=2, expert_tensor_parallel_size=1)
     with pytest.raises(ValueError, match="DeepCompile.*AutoEP\\+AutoTP folding"):
-        validate_autoep_config(config,
-                               world_size=4,
-                               pp_size=1,
-                               tp_size=2,
-                               sp_size=1,
-                               deepcompile_enabled=True)
+        validate_autoep_config(config, world_size=4, pp_size=1, tp_size=2, sp_size=1, deepcompile_enabled=True)
 
 
 def test_deepcompile_nonfolded_accepted():
     config = AutoEPConfig(enabled=True, autoep_size=2, expert_tensor_parallel_size=1)
-    validate_autoep_config(config,
-                           world_size=4,
-                           pp_size=1,
-                           tp_size=1,
-                           sp_size=1,
-                           deepcompile_enabled=True)
+    validate_autoep_config(config, world_size=4, pp_size=1, tp_size=1, sp_size=1, deepcompile_enabled=True)
 
 
 @pytest.mark.parametrize(

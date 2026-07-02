@@ -58,6 +58,7 @@ def _patch_tp_group_creation(monkeypatch, *, rank=2, initialize_mesh_device=None
 
 
 def test_init_tp_mesh_device_debug_detail_uses_explicit_groups(monkeypatch):
+
     def fail_initialize_mesh_device(*args, **kwargs):
         raise AssertionError("DeviceMesh should be skipped when TORCH_DISTRIBUTED_DEBUG=DETAIL")
 
@@ -74,6 +75,7 @@ def test_init_tp_mesh_device_debug_detail_uses_explicit_groups(monkeypatch):
 
 
 def test_init_tp_mesh_device_split_error_falls_back_to_explicit_groups(monkeypatch):
+
     def raise_split_error(*args, **kwargs):
         raise RuntimeError(groups._DEVICE_MESH_SPLIT_UNSUPPORTED)
 

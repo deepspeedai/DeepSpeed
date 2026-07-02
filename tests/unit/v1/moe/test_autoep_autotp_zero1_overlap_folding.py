@@ -38,7 +38,9 @@ def test_zero1_overlap_applies_folding_before_hook_consumes_grad(monkeypatch):
         param.ds_autoep_folding_grad_corrected = True
         return "average"
 
-    monkeypatch.setattr(zero_mod, "apply_folding_correction_to_grad_buffer", fake_apply_folding_correction,
+    monkeypatch.setattr(zero_mod,
+                        "apply_folding_correction_to_grad_buffer",
+                        fake_apply_folding_correction,
                         raising=False)
 
     optimizer._maybe_reduce_autoep_folding_tp_gradient(param, grad)
@@ -55,7 +57,8 @@ def test_zero1_nonoverlap_leaves_engine_boundary_sweep_owner(monkeypatch):
     param = torch.nn.Parameter(torch.ones(2))
     grad = torch.full((2, ), 4.0)
     calls = []
-    monkeypatch.setattr(zero_mod, "apply_folding_correction_to_grad_buffer",
+    monkeypatch.setattr(zero_mod,
+                        "apply_folding_correction_to_grad_buffer",
                         lambda *args, **kwargs: calls.append((args, kwargs)),
                         raising=False)
 
@@ -76,7 +79,9 @@ def test_zero2_partitioned_path_still_applies_folding(monkeypatch):
         grad.data.div_(2.0)
         return "expert_tp_cancel"
 
-    monkeypatch.setattr(zero_mod, "apply_folding_correction_to_grad_buffer", fake_apply_folding_correction,
+    monkeypatch.setattr(zero_mod,
+                        "apply_folding_correction_to_grad_buffer",
+                        fake_apply_folding_correction,
                         raising=False)
 
     optimizer._maybe_reduce_autoep_folding_tp_gradient(param, grad)

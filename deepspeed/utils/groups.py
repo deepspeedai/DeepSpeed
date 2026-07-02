@@ -156,7 +156,8 @@ def _init_tp_mesh_device(tensor_model_parallel_size=1, data_parallel_size=None):
     except RuntimeError as exc:
         if _DEVICE_MESH_SPLIT_UNSUPPORTED not in str(exc):
             raise
-        log_dist("DeviceMesh process-group splitting is unsupported; falling back to new_group TP mesh groups", ranks=[0])
+        log_dist("DeviceMesh process-group splitting is unsupported; falling back to new_group TP mesh groups",
+                 ranks=[0])
         return _init_tp_groups_with_new_group(tensor_model_parallel_size, data_parallel_size)
 
     _TENSOR_MODEL_PARALLEL_GROUP = mesh_device.get_group(mesh_dim="tensor_parallel")
