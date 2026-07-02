@@ -110,6 +110,11 @@ class TPLayerSpec:
     #   (n_experts, -1, hidden) -> MoE reshape
     shape: Optional[Tuple[Union[int, Tuple[int, ...]], ...]] = None
 
+    # Optional: resolver name for dynamic shape inference when a static shape
+    # cannot be expressed in a preset. This is intended for built-in presets
+    # that need model-config-derived sub-parameter sizes.
+    shape_resolver: Optional[str] = None
+
     # Which dimension to partition (after optional reshape)
     # Default: 0 for COLUMN, 1 for ROW (standard 2D weight matrix)
     partition_dim: Optional[int] = None
@@ -286,6 +291,7 @@ class AutoTPConfig:
                     patterns=spec_dict.get("patterns", []),
                     partition_type=partition_type,
                     shape=shape,
+                    shape_resolver=spec_dict.get("shape_resolver"),
                     partition_dim=spec_dict.get("partition_dim"),
                     model_types=spec_dict.get("model_types"),
                 ))
@@ -508,6 +514,58 @@ class AutoTPPresets:
         ], )
 
     @staticmethod
+    def qwen3_5() -> AutoTPConfig:
+        """Qwen 3.5 dense model with gated linear-attention coverage.
+
+        This preset covers:
+        - standard self_attn projections in full-attention layers
+        - mlp projections in every decoder layer
+        - linear_attn.in_proj_qkv via config-derived unequal fused QKV splits
+        - linear_attn.in_proj_z, linear_attn.in_proj_a, linear_attn.in_proj_b,
+          and linear_attn.out_proj
+
+        The built-in AutoTP replacement also shards the remaining local-head
+        state inside the gated linear-attention block, including conv1d,
+        dt_bias, and A_log.
+        """
+        return AutoTPConfig(layer_specs=[
+            TPLayerSpec(
+                patterns=[r".*\.self_attn\.o_proj\.weight$"],
+                partition_type=PartitionType.ROW,
+            ),
+            TPLayerSpec(
+                patterns=[r".*\.self_attn\.[qkv]_proj\.weight$"],
+                partition_type=PartitionType.COLUMN,
+            ),
+            TPLayerSpec(
+                patterns=[r".*\.linear_attn\.out_proj\.weight$"],
+                partition_type=PartitionType.ROW,
+            ),
+            TPLayerSpec(
+                patterns=[r".*\.linear_attn\.in_proj_qkv\.weight$"],
+                partition_type=PartitionType.COLUMN,
+                shape_resolver="qwen3_5_linear_attn_qkv",
+                partition_dim=0,
+            ),
+            TPLayerSpec(
+                patterns=[r".*\.linear_attn\.in_proj_z\.weight$"],
+                partition_type=PartitionType.COLUMN,
+            ),
+            TPLayerSpec(
+                patterns=[r".*\.linear_attn\.in_proj_[ab]\.weight$"],
+                partition_type=PartitionType.COLUMN,
+            ),
+            TPLayerSpec(
+                patterns=[r".*\.mlp\.down_proj\.weight$"],
+                partition_type=PartitionType.ROW,
+            ),
+            TPLayerSpec(
+                patterns=[r".*\.mlp\.(up|gate)_proj\.weight$"],
+                partition_type=PartitionType.COLUMN,
+            ),
+        ], )
+
+    @staticmethod
     def phi3() -> AutoTPConfig:
         """Phi3 model with fused QKV and chunked MLP."""
         return AutoTPConfig(
@@ -546,6 +604,7 @@ class AutoTPPresets:
             "mixtral": AutoTPPresets.mixtral,
             "deepseek_v2": AutoTPPresets.deepseek_v2,
             "qwen2": AutoTPPresets.qwen2,
+            "qwen3_5": AutoTPPresets.qwen3_5,
             "phi3": AutoTPPresets.phi3,
         }
         preset_fn = presets.get(model_type.lower())
