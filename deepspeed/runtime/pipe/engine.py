@@ -1292,7 +1292,7 @@ class PipelineEngine(DeepSpeedEngine):
                 self._grad_layer_buf[idx] = new_buf
             return self._grad_layer_buf[idx]
         else:
-            return self._grad_layer_buf[idx].flatten()[:numel].view(shape)
+            return self._grad_layer_buf[idx].flatten()[:numel].view(shape).to(dtype)
 
     def forward(self, *args, **kwargs):
         """Disabled for pipeline parallel training. See ``train_batch()``. """
