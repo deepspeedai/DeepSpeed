@@ -193,6 +193,7 @@ def validate_folding_global(
     *,
     zero_stage: int = 0,
     sp_size: int = 1,
+    deepcompile_enabled: bool = False,
     use_data_before_expert_parallel: bool = False,
     mpu=None,
     autoep_enabled: bool = True,
@@ -204,6 +205,10 @@ def validate_folding_global(
     """Validate global folding policy before any process group is created."""
     if not autoep_enabled:
         return
+
+    if deepcompile_enabled and spec.tp_size > 1:
+        raise ValueError("DeepCompile with AutoEP+AutoTP folding is not supported; "
+                         "disable compile.deepcompile or use non-folded AutoEP with tensor_parallel.autotp_size=1.")
 
     if spec.tp_size > 1 and spec.pp_size > 1:
         raise ValueError("AutoEP+AutoTP folding currently supports pp_size=1 only; "

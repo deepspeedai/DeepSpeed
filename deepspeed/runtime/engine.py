@@ -564,6 +564,7 @@ class DeepSpeedEngine(Module):
             folding_spec,
             zero_stage=self.zero_optimization_stage(),
             sp_size=sp_size,
+            deepcompile_enabled=self._config.compile_config.deepcompile,
             use_data_before_expert_parallel=self._config.use_data_before_expert_parallel_,
             mpu=self.mpu,
             autoep_enabled=autoep_config.enabled,
