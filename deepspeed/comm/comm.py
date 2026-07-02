@@ -881,6 +881,11 @@ def mpi_discovery(distributed_port=TORCH_DISTRIBUTED_DEFAULT_PORT, verbose=True)
     all_procs = comm.allgather(proc_name)
     local_rank = sum([i == proc_name for i in all_procs[:rank]])
 
+    if 'CUDA_VISIBLE_DEVICES' in os.environ:
+        local_rank %= len(os.environ['CUDA_VISIBLE_DEVICES'].split(','))
+    elif 'ROCR_VISIBLE_DEVICES' in os.environ:
+        local_rank %= len(os.environ['ROCR_VISIBLE_DEVICES'].split(','))
+
     os.environ['RANK'] = str(rank)
     os.environ['WORLD_SIZE'] = str(world_size)
     os.environ['LOCAL_RANK'] = str(local_rank)
