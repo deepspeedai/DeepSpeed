@@ -167,9 +167,9 @@ class HybridEngineRollout(RolloutEngine):
         try:
             # Warmup on side stream
             static_token.copy_(next_token)
-            s = torch.cuda.Stream()  #ignore-cuda
-            s.wait_stream(torch.cuda.current_stream())  #ignore-cuda
-            with torch.cuda.stream(s):  #ignore-cuda
+            s = get_accelerator().Stream()
+            s.wait_stream(get_accelerator().current_stream())
+            with get_accelerator().stream(s):
                 for _ in range(3):
                     out = module(
                         static_token,
@@ -179,11 +179,11 @@ class HybridEngineRollout(RolloutEngine):
                         cache_position=static_cache_pos,
                         position_ids=static_pos_ids,
                     )
-            torch.cuda.current_stream().wait_stream(s)  #ignore-cuda
+            get_accelerator().current_stream().wait_stream(s)
 
             # Capture
-            graph = get_accelerator().create_graph()  #ignore-cuda
-            with get_accelerator().capture_to_graph(graph):  #ignore-cuda
+            graph = get_accelerator().create_graph()
+            with get_accelerator().capture_to_graph(graph):
                 out = module(
                     static_token,
                     attention_mask=static_attn,
