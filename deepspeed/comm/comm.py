@@ -24,6 +24,7 @@
 import torch
 from torch.distributed import GradBucket  # noqa: F401
 import os
+from typing import Any, Dict, Optional
 
 from ..constants import TORCH_DISTRIBUTED_DEFAULT_PORT, default_pg_timeout
 from .constants import *
@@ -166,7 +167,7 @@ def init_deepspeed_backend(ds_backend, timeout, init_method):
         utils.logger.debug(f"DeepSpeed does not support {ds_backend} backend")
 
 
-def is_initialized():
+def is_initialized() -> bool:
     #assert cdb is not None, 'DeepSpeed backend not set, please initialize it using init_process_group()'
     if cdb is None:
         return False
@@ -174,7 +175,7 @@ def is_initialized():
         return cdb.is_initialized()
 
 
-def destroy_process_group(group=None):
+def destroy_process_group(group: Optional[Any] = None) -> None:
     global cdb
     return cdb.destroy_process_group(group=group)
 
@@ -685,7 +686,7 @@ def get_world_group():
     return cdb.get_world_group()
 
 
-def get_world_size(group=None) -> int:
+def get_world_size(group: Optional[Any] = None) -> int:
     """
     Returns the number of processes in the current process group
     Args:
@@ -702,7 +703,7 @@ def get_world_size(group=None) -> int:
     return cdb.get_world_size(group)
 
 
-def get_rank(group=None):
+def get_rank(group: Optional[Any] = None) -> int:
     """
     Returns the rank of the current process in the provided ``group`` or the
     default group if none was provided.
@@ -722,7 +723,7 @@ def get_rank(group=None):
     return cdb.get_rank(group)
 
 
-def get_local_rank():
+def get_local_rank() -> int:
     """
         Helper function to get local rank after a backend has been set and initialized
         Args:
@@ -736,7 +737,7 @@ def get_local_rank():
     return get_local_rank_from_launcher()
 
 
-def get_global_rank(group=None, group_rank=0):
+def get_global_rank(group: Optional[Any] = None, group_rank: int = 0) -> int:
     global cdb
     assert cdb is not None and cdb.is_initialized(
     ), 'DeepSpeed backend not set, please initialize it using init_process_group()'
@@ -785,16 +786,16 @@ def enable_symm_mem_for_group(group_name: str):
 
 
 # Main DeepSpeed Comms. public API.
-def init_distributed(dist_backend=None,
-                     auto_mpi_discovery=True,
-                     distributed_port=TORCH_DISTRIBUTED_DEFAULT_PORT,
-                     verbose=True,
-                     timeout=default_pg_timeout,
-                     init_method=None,
-                     dist_init_required=None,
-                     config=None,
-                     rank=-1,
-                     world_size=-1):
+def init_distributed(dist_backend: Optional[str] = None,
+                     auto_mpi_discovery: bool = True,
+                     distributed_port: int = TORCH_DISTRIBUTED_DEFAULT_PORT,
+                     verbose: bool = True,
+                     timeout: timedelta = default_pg_timeout,
+                     init_method: Optional[str] = None,
+                     dist_init_required: Optional[bool] = None,
+                     config: Optional[Dict[str, Any]] = None,
+                     rank: int = -1,
+                     world_size: int = -1) -> None:
     ''' Initialize dist backend, potentially performing MPI discovery if needed
 
     Arguments:
