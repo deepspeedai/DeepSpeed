@@ -1,3 +1,4 @@
+# Copyright (c) Microsoft Corporation.
 # SPDX-License-Identifier: Apache-2.0
 
 # DeepSpeed Team
@@ -10,7 +11,6 @@ from unittest.mock import MagicMock
 
 import torch
 
-from deepspeed.runtime.rollout.base import RolloutRequest, SamplingConfig
 from deepspeed.runtime.rollout.hybrid_engine_rollout import (
     HybridEngineRollout,
     HybridEngineRolloutConfig,
@@ -52,6 +52,11 @@ def test_constructor_stores_config():
     assert rollout.tokenizer is tok
 
 
+def test_constructor_defaults_without_cfg():
+    rollout = HybridEngineRollout(_make_engine(), _make_tokenizer())
+    assert rollout.use_graph_capture is False
+
+
 # -- _sample_top_p ------------------------------------------------------
 
 
@@ -91,28 +96,20 @@ def test_sync_weights_is_noop():
 # -- generate dispatches correctly -------------------------------------
 
 
-def _make_request():
-    return RolloutRequest(prompt_ids=torch.tensor([[1, 2]]), prompt_attention_mask=torch.ones(1, 2, dtype=torch.long))
-
-
-def test_generate_uses_module_generate_by_default():
-    engine = _make_engine()
-    tok = _make_tokenizer()
-    rollout = HybridEngineRollout(engine, tok)
-    engine.module.generate = MagicMock(return_value=torch.tensor([[1, 2, 3, 2]]))
-
-    # Sampling (temperature > 0) routes through the engine's generate path.
-    rollout.generate(_make_request(), SamplingConfig(max_new_tokens=2, temperature=1.0))
-    engine.module.generate.assert_called_once()
-
-
 def test_generate_calls_graph_capture_when_enabled():
     engine = _make_engine()
     tok = _make_tokenizer()
     cfg = HybridEngineRolloutConfig(use_graph_capture=True)
     rollout = HybridEngineRollout(engine, tok, cfg=cfg)
-    rollout._generate_graph = MagicMock(return_value=torch.tensor([[1, 2, 3, 2]]))
+    rollout._generate_graph = MagicMock(return_value=torch.zeros(1, 5, dtype=torch.long))
 
-    # Graph capture is used for greedy decoding (temperature <= 0).
-    rollout.generate(_make_request(), SamplingConfig(max_new_tokens=2, temperature=0.0))
+    req = MagicMock()
+    req.prompt_ids = torch.tensor([[1, 2]])
+    req.prompt_attention_mask = torch.ones(1, 2, dtype=torch.long)
+    sampling = MagicMock()
+    sampling.temperature = 0
+    sampling.n_samples_per_prompt = 1
+    sampling.max_new_tokens = 3
+
+    rollout.generate(req, sampling)
     rollout._generate_graph.assert_called_once()

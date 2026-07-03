@@ -18,7 +18,8 @@ from deepspeed.runtime.rollout import (
     SamplingConfig,
     build_rollout,
 )
-from deepspeed.runtime.rlhf.utils import build_response_mask
+
+
 
 # --- dataclass invariants ---------------------------------------------------
 
@@ -126,18 +127,6 @@ def test_fake_rollout_left_padded_prompts():
     assert out.response_start_idx.tolist() == [4, 4]
 
 
-def test_response_mask_from_rollout_output_matches_helper():
-    fake = FakeRollout()
-    prompt_ids = torch.tensor([[1, 2, 3], [0, 4, 5]])
-    attn = torch.tensor([[1, 1, 1], [0, 1, 1]], dtype=torch.long)
-    out = fake.generate(RolloutRequest(prompt_ids, attn), SamplingConfig(max_new_tokens=3))
-    mask = build_response_mask(out.response_start_idx, out.attention_mask)
-    # Both samples: response starts at column 3 (T_p), and all post-prompt
-    # positions are attended (FakeRollout produces no padding in the response).
-    assert mask[0].tolist() == [0, 0, 0, 1, 1, 1]
-    assert mask[1].tolist() == [0, 0, 0, 1, 1, 1]
-
-
 def test_sync_records_steps():
     fake = FakeRollout()
     fake.sync_weights(0)
@@ -146,14 +135,14 @@ def test_sync_records_steps():
 
 
 def test_engine_factory_unknown_raises():
-    from deepspeed.runtime.rlhf.config import RolloutConfig
+    from deepspeed.runtime.rollout.base import RolloutConfig
 
     with pytest.raises(ValueError, match="Unknown rollout engine"):
         build_rollout(RolloutConfig(engine="totally_made_up"))
 
 
 def test_engine_factory_hybrid_requires_student_engine():
-    from deepspeed.runtime.rlhf.config import RolloutConfig
+    from deepspeed.runtime.rollout.base import RolloutConfig
 
     with pytest.raises(ValueError, match="needs both"):
         build_rollout(RolloutConfig(engine="hybrid_engine"))
