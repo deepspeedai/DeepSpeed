@@ -98,7 +98,7 @@ class HybridEngineRollout(RolloutEngine):
     def _generate_graph(self, prompt_ids, prompt_attn, max_new_tokens, pad_token_id, module, device):
         """Greedy decode with DeepSpeedStaticCache + CUDA graph capture."""
         from transformers import StaticCache
-        from deepspeed.runtime.rollout.static_cache import DeepSpeedStaticCache
+        from deepspeed.utils.static_cache import DeepSpeedStaticCache
 
         batch_size = prompt_ids.shape[0]
         prompt_len = prompt_ids.shape[1]
