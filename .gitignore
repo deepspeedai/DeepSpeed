@@ -66,4 +66,3 @@ tests/unit/saved_checkpoint/
 
 # virtual env directory for format
 venv
-tags
