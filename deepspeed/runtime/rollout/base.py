@@ -5,8 +5,7 @@
 
 The trainer talks to its rollout engine through three small dataclasses
 (``RolloutRequest`` in / ``RolloutBatch`` out / ``SamplingConfig``) and one
-ABC. This keeps the engine-specific concerns (hybrid-engine vs vLLM, weight
-sync, process topology) out of the trainer loop.
+ABC. This keeps engine-specific concerns out of the trainer loop.
 """
 
 from abc import ABC, abstractmethod
@@ -99,7 +98,8 @@ class RolloutEngine(ABC):
     def sync_weights(self, step: int) -> None:
         """Push updated weights into the rollout backend.
 
-        No-op for hybrid engine (reads weights live). Meaningful for vLLM.
+        No-op when the rollout engine is co-located with the training engine
+        (e.g. hybrid engine shares weights directly).
         """
 
     def shutdown(self) -> None:
