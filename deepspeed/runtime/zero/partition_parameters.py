@@ -1035,6 +1035,17 @@ class Init(InsertPostInitMethodToModuleSubClasses):
         self.rank = dist.get_rank(group=self.ds_process_group)
         self.dp_world_size = dist.get_world_size(group=self.ds_process_group)
 
+        # Detect silent single-rank fallback when multi-GPU launcher env is present
+        env_world_size = int(os.environ.get('WORLD_SIZE', '1'))
+        if env_world_size > 1 and self.dp_world_size == 1:
+            logger.warning(
+                f"[!] zero.Init detected WORLD_SIZE={env_world_size} in env but process group has "
+                f"world_size={self.dp_world_size}. This usually means torch.distributed was not "
+                f"initialized before model construction. Each rank will load the FULL model, "
+                f"causing OOM on large models. Fix: call deepspeed.init_distributed() BEFORE "
+                f"model construction (e.g., before from_pretrained())."
+            )
+
         self.zero_param_process_group = zero_param_parallel_group
         if _ds_config is not None and _ds_config.zero_config.zero_hpz_partition_size > 1 and self.zero_param_process_group is None:
             groups._create_zero_param_parallel_group(_ds_config.zero_config.zero_hpz_partition_size)
