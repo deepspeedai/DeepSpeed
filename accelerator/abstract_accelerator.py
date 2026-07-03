@@ -209,7 +209,7 @@ class DeepSpeedAccelerator(ABC):
         ...
 
     @abc.abstractmethod
-    def capture_to_graph(self, graph, pool=None, stream=None, capture_error_mode="global"):
+    def capture_to_graph(self, graph, pool=None, stream=None):
         ...
 
     @abc.abstractmethod
