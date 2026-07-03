@@ -20,14 +20,6 @@ class RolloutConfig:
     """Configuration for the rollout engine."""
     engine: str = "hybrid_engine"
 
-    # Generation knobs
-    max_prompt_length: int = 1024
-    max_response_length: int = 1024
-    temperature: float = 1.0
-    top_p: float = 1.0
-    top_k: int = -1
-    n_samples_per_prompt: int = 1
-
     # Use CUDA graph capture for decode acceleration.
     use_graph_capture: bool = False
 
