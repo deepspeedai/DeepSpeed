@@ -3,10 +3,12 @@
 
 # DeepSpeed Team
 
+import re
 import torch
 import pytest
 import deepspeed
-from deepspeed.profiling.flops_profiler import get_model_profile
+from types import SimpleNamespace
+from deepspeed.profiling.flops_profiler import get_model_profile, FlopsProfiler
 from unit.simple_model import SimpleModel, random_dataloader
 from unit.common import DistributedTest
 from deepspeed.utils.torch import required_torch_version
@@ -119,3 +121,33 @@ class TestFlopsProfiler(DistributedTest):
         assert within_range(flops, 866076672, TOLERANCE)
         assert within_range(macs, 426516480, TOLERANCE)
         assert params == 61706
+
+
+def test_print_model_profile_with_none_dp_world_size(capsys):
+    # Regression test for https://github.com/deepspeedai/DeepSpeed/issues/7483
+    # Under sequence parallelism (Ulysses) the engine reports dp_world_size as None, which used to
+    # crash print_model_profile with "unsupported format string passed to NoneType.__format__".
+    model = torch.nn.Sequential(torch.nn.Linear(128, 128))
+    prof = FlopsProfiler(model)
+    # Mimic a DeepSpeed engine configured with Ulysses sequence parallelism, where dp_world_size is
+    # None and the effective data-parallel replication is the sequence-data-parallel group.
+    prof.ds_engine = SimpleNamespace(world_size=8,
+                                     dp_world_size=None,
+                                     seq_dp_world_size=4,
+                                     mp_world_size=1,
+                                     has_moe_layers=False,
+                                     train_micro_batch_size_per_gpu=lambda: 1,
+                                     wall_clock_breakdown=lambda: False)
+
+    prof.start_profile()
+    # A few forward passes give the profiled modules a non-zero measured duration.
+    for _ in range(3):
+        model(torch.randn(64, 128))
+    prof.print_model_profile(profile_step=1, detailed=False)
+    prof.end_profile()
+
+    out = capsys.readouterr().out
+    match = re.search(r"data parallel size:\s+(\S+)", out)
+    assert match is not None
+    # The sequence-data-parallel world size is reported in place of the None dp_world_size.
+    assert match.group(1) == "4"
