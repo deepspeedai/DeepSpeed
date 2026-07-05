@@ -34,11 +34,6 @@ OPTIMIZER_TIMERS = [
 ]
 INITIAL_MICRO_STEP_ID = -1
 
-# Number of elements copied per chunk when streaming the updated fp32 master partition
-# back to the GPU bit16 partition. Bounds the transient fp32 staging tensor on the GPU
-# (chunk * 4 bytes) instead of materializing the whole partition at once.
-ZENFLOW_COPYBACK_CHUNK_NUMEL = 32 * 1024 * 1024
-
 SELECTIVE_OPTIMIZER_UPDATE_TIMER = 'selective_optimizer_update'
 SELECTIVE_OPTIMIZER_PROCESS_TIMER = 'selective_optimizer_process'
 SELECTIVE_OPTIMIZER_STEP_TIMER = 'selective_optimizer_step'
@@ -702,7 +697,10 @@ class ZenFlowZeroOptimizerParallel(ZenFlowZeroOptimizer):
             bit16_partitions = self.parallel_partitioned_bit16_groups[i]
             fp32_partition = self.optimizer.param_groups[i]['params'][0].stale_param.data
             self.timers(OPTIMIZER_TRANSMIT_TIMER).start()
-            self._copyback_fp32_partition_to_bit16(fp32_partition, bit16_partitions[partition_id].data)
+            # copy_ moves CPU->GPU and casts fp32->bit16 in a single step. Going through an
+            # explicit .to(device) first would materialize the whole fp32 partition on the GPU
+            # (a transient ~2x-bit16 spike, e.g. ~3GB for a 0.75B-param partition) for no benefit.
+            bit16_partitions[partition_id].data.copy_(fp32_partition)
             self.timers(OPTIMIZER_TRANSMIT_TIMER).stop()
 
         see_memory_usage('After optimizer before all-gather')
@@ -727,24 +725,6 @@ class ZenFlowZeroOptimizerParallel(ZenFlowZeroOptimizer):
 
         self.timers.log(OPTIMIZER_TIMERS)
         see_memory_usage('After zero_optimizer step')
-
-    def _copyback_fp32_partition_to_bit16(self, fp32_partition, bit16_partition):
-        """Stream the updated fp32 master partition back to its GPU bit16 partition in chunks.
-
-        The straightforward ``bit16.copy_(fp32.to(device))`` first materializes the whole
-        fp32 partition on the GPU, a transient spike of ~2x the bit16 partition (~3GB for a
-        0.75B-param partition) stacked on top of the model -- exactly the memory the offload
-        is meant to save. Copying chunk by chunk keeps only one chunk's fp32 staging tensor
-        resident, so the peak drops to the chunk size; the bit16 result is unchanged.
-        """
-        device = get_accelerator().current_device_name()
-        fp32_flat = fp32_partition.view(-1)
-        bit16_flat = bit16_partition.view(-1)
-        numel = fp32_flat.numel()
-        for offset in range(0, numel, ZENFLOW_COPYBACK_CHUNK_NUMEL):
-            end = min(offset + ZENFLOW_COPYBACK_CHUNK_NUMEL, numel)
-            gpu_chunk = fp32_flat[offset:end].to(device, non_blocking=True)
-            bit16_flat[offset:end].copy_(gpu_chunk)
 
     def zenflow_cpu_optimizer_step(self, now_state, scaled_global_grad_norm):
 
