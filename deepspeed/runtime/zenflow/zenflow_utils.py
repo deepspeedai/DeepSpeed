@@ -70,6 +70,17 @@ def all_tensors_equal(tensor_list):
     return True
 
 
+def _split_affinity(cores, pt_reserved_cores_perc):
+    """Split a rank's core list into (zf_affinity, pt_affinity): reserve the first
+    ceil(pt_reserved_cores_perc * n) cores for the training thread and give the rest to the
+    optimizer. If the reserve rounds to zero or to every core, both share the full set (there
+    is nothing to gain from isolating an empty side)."""
+    pt_num_cores = math.ceil(pt_reserved_cores_perc * len(cores))
+    if 0 < pt_num_cores < len(cores):
+        return cores[pt_num_cores:], cores[:pt_num_cores]
+    return cores, cores
+
+
 def _compute_zf_pt_affinity(zf_optimizer):
     """Split this rank's cores into a ZenFlow-optimizer set and a training (PyTorch) set.
     When every rank reports the same affinity the launcher did not bind workers, so do a
@@ -93,14 +104,7 @@ def _compute_zf_pt_affinity(zf_optimizer):
         cores_per_rank = len(available_phy_cores) // total_rank
         current_affinity = available_phy_cores[curr_rank * cores_per_rank:(curr_rank + 1) * cores_per_rank]
 
-    pt_num_cores = math.ceil(zf_optimizer.pt_reserved_cores_perc * len(current_affinity))
-    if pt_num_cores > 0 and pt_num_cores < len(current_affinity):
-        zf_affinity = current_affinity[pt_num_cores:]
-        pt_affinity = current_affinity[:pt_num_cores]
-    else:
-        zf_affinity = current_affinity
-        pt_affinity = current_affinity
-    return zf_affinity, pt_affinity
+    return _split_affinity(current_affinity, zf_optimizer.pt_reserved_cores_perc)
 
 
 def zenflow_optimizer_process(groups, ctrl, ready, zf_affinity, adamw_mode):
