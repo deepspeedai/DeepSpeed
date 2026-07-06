@@ -177,143 +177,6 @@ class TestCPUAdamBf16OptimizerStates(DistributedTest):
         check_equal(param_fp32_states.float().norm(), param_bf16_states.float().norm(), atol=tolerance)
 
 
-class TestCPUAdamFusedMultiTensor(DistributedTest):
-    """adam_update_multi (fused multi-tensor, used by ZenFlow overlap) must match a
-    per-parameter sequence of adam_update bit-for-bit, and write the post-update
-    parameter snapshot into the stale buffer."""
-    world_size = 1
-    reuse_dist_env = True
-    requires_cuda_env = False
-    if not get_accelerator().is_available():
-        init_distributed = False
-        set_dist_env = False
-
-    @pytest.mark.parametrize('dtype', [torch.half, torch.bfloat16, torch.float], ids=["fp16", "bf16", "fp32"])
-    def test_multi_matches_single(self, dtype):
-        if ("amd" in pytest.cpu_vendor) and (dtype == torch.half):
-            pytest.skip("cpu-adam with half precision not supported on AMD CPUs")
-
-        ds_opt_adam = CPUAdamBuilder().load()
-
-        lr, beta1, beta2, eps, weight_decay = 1e-3, 0.9, 0.999, 1e-8, 0.0
-        adamw_mode, bias_correction = True, True
-        # Mixed sizes (including ones that don't divide the SIMD width) exercise both the
-        # vectorized and scalar tails inside the fused C++ loop.
-        sizes = [64, 22, 1024, 1048576]
-
-        opt_single, opt_multi = 0, 1
-        ds_opt_adam.create_adam(opt_single, lr, beta1, beta2, eps, weight_decay, adamw_mode, False)
-        ds_opt_adam.create_adam(opt_multi, lr, beta1, beta2, eps, weight_decay, adamw_mode, False)
-
-        torch.manual_seed(0)
-        params_single = [torch.randn(n, dtype=dtype) for n in sizes]
-        params_multi = [p.clone() for p in params_single]
-        exp_avg_single = [torch.zeros(n, dtype=torch.float) for n in sizes]
-        exp_avg_sq_single = [torch.zeros(n, dtype=torch.float) for n in sizes]
-        exp_avg_multi = [torch.zeros(n, dtype=torch.float) for n in sizes]
-        exp_avg_sq_multi = [torch.zeros(n, dtype=torch.float) for n in sizes]
-        stale_multi = [torch.zeros(n, dtype=dtype) for n in sizes]
-
-        try:
-            for step in range(1, 6):
-                grads = [torch.randn(n, dtype=dtype) for n in sizes]
-
-                for i in range(len(sizes)):
-                    ds_opt_adam.adam_update(opt_single, step, lr, beta1, beta2, eps, weight_decay, bias_correction,
-                                            params_single[i], grads[i].clone(), exp_avg_single[i],
-                                            exp_avg_sq_single[i])
-
-                ds_opt_adam.adam_update_multi(opt_multi, step, lr, beta1, beta2, eps, weight_decay, bias_correction,
-                                              params_multi, [g.clone() for g in grads], exp_avg_multi,
-                                              exp_avg_sq_multi, stale_multi)
-
-                for i in range(len(sizes)):
-                    assert torch.equal(params_single[i], params_multi[i]), f"param mismatch at size {sizes[i]}"
-                    assert torch.equal(exp_avg_single[i], exp_avg_multi[i]), f"exp_avg mismatch at size {sizes[i]}"
-                    assert torch.equal(exp_avg_sq_single[i],
-                                       exp_avg_sq_multi[i]), f"exp_avg_sq mismatch at size {sizes[i]}"
-                    # stale must hold the post-update parameter snapshot
-                    assert torch.equal(stale_multi[i], params_multi[i]), f"stale mismatch at size {sizes[i]}"
-        finally:
-            ds_opt_adam.destroy_adam(opt_single)
-            ds_opt_adam.destroy_adam(opt_multi)
-
-    @pytest.mark.parametrize('dtype', [torch.half, torch.bfloat16, torch.float], ids=["fp16", "bf16", "fp32"])
-    def test_serial_matches_parallel(self, dtype):
-        """The serial kernel path (parallel=False, used by ZenFlow's pinned thread pool)
-        must match the OpenMP path (parallel=True) bit-for-bit."""
-        if ("amd" in pytest.cpu_vendor) and (dtype == torch.half):
-            pytest.skip("cpu-adam with half precision not supported on AMD CPUs")
-
-        ds_opt_adam = CPUAdamBuilder().load()
-        lr, beta1, beta2, eps, weight_decay = 1e-3, 0.9, 0.999, 1e-8, 0.0
-        sizes = [64, 22, 1024, 1048576]
-
-        opt_par, opt_ser = 3, 4
-        ds_opt_adam.create_adam(opt_par, lr, beta1, beta2, eps, weight_decay, True, False)
-        ds_opt_adam.create_adam(opt_ser, lr, beta1, beta2, eps, weight_decay, True, False)
-
-        torch.manual_seed(0)
-        params_par = [torch.randn(n, dtype=dtype) for n in sizes]
-        params_ser = [p.clone() for p in params_par]
-        ea_par = [torch.zeros(n) for n in sizes]
-        eq_par = [torch.zeros(n) for n in sizes]
-        ea_ser = [torch.zeros(n) for n in sizes]
-        eq_ser = [torch.zeros(n) for n in sizes]
-
-        try:
-            for step in range(1, 4):
-                grads = [torch.randn(n, dtype=dtype) for n in sizes]
-                ds_opt_adam.adam_update_multi(opt_par,
-                                              step,
-                                              lr,
-                                              beta1,
-                                              beta2,
-                                              eps,
-                                              weight_decay,
-                                              True,
-                                              params_par, [g.clone() for g in grads],
-                                              ea_par,
-                                              eq_par, [],
-                                              parallel=True)
-                ds_opt_adam.adam_update_multi(opt_ser,
-                                              step,
-                                              lr,
-                                              beta1,
-                                              beta2,
-                                              eps,
-                                              weight_decay,
-                                              True,
-                                              params_ser, [g.clone() for g in grads],
-                                              ea_ser,
-                                              eq_ser, [],
-                                              parallel=False)
-                for i in range(len(sizes)):
-                    assert torch.equal(params_par[i], params_ser[i]), f"param mismatch at size {sizes[i]}"
-                    assert torch.equal(ea_par[i], ea_ser[i]), f"exp_avg mismatch at size {sizes[i]}"
-                    assert torch.equal(eq_par[i], eq_ser[i]), f"exp_avg_sq mismatch at size {sizes[i]}"
-        finally:
-            ds_opt_adam.destroy_adam(opt_par)
-            ds_opt_adam.destroy_adam(opt_ser)
-
-    def test_multi_without_stale(self):
-        """An empty stale list is allowed and simply skips the snapshot."""
-        ds_opt_adam = CPUAdamBuilder().load()
-        opt_id = 2
-        ds_opt_adam.create_adam(opt_id, 1e-3, 0.9, 0.999, 1e-8, 0.0, True, False)
-        try:
-            params = [torch.randn(64, dtype=torch.float)]
-            grads = [torch.randn(64, dtype=torch.float)]
-            exp_avg = [torch.zeros(64, dtype=torch.float)]
-            exp_avg_sq = [torch.zeros(64, dtype=torch.float)]
-            before = params[0].clone()
-            ds_opt_adam.adam_update_multi(opt_id, 1, 1e-3, 0.9, 0.999, 1e-8, 0.0, True, params, grads, exp_avg,
-                                          exp_avg_sq, [])
-            assert not torch.equal(params[0], before), "params should be updated even without stale buffers"
-        finally:
-            ds_opt_adam.destroy_adam(opt_id)
-
-
 def _zenflow_adam_proc_worker(param, g0, g1, ea0, ea1, eq0, eq1, stale, ctrl, ready, affinity):
     op = CPUAdamBuilder().load()
     op.create_adam(0, 1e-3, 0.9, 0.999, 1e-8, 0.0, True, False)
@@ -328,9 +191,9 @@ def _zenflow_adam_proc_worker(param, g0, g1, ea0, ea1, eq0, eq1, stale, ctrl, re
 @pytest.mark.skipif(not sys.platform.startswith("linux"), reason="cross-process ZenFlowAdam is Linux-only")
 def test_zenflow_adam_cross_process():
     """The optimizer-process driver (shared-memory semaphore control + native worker, the
-    production path for ZenFlow stage 1/2 overlap) must match the fused reference bit-for-bit
-    with alternating double buffers. Run as a plain test, not DistributedTest, so the pytest
-    process (non-daemonic) can spawn the optimizer process."""
+    production path for ZenFlow stage 1/2 overlap) must match a per-parameter adam_update
+    reference bit-for-bit with alternating double buffers. Run as a plain test, not
+    DistributedTest, so the pytest process (non-daemonic) can spawn the optimizer process."""
     import torch.multiprocessing as mp
 
     op = CPUAdamBuilder().load()
@@ -373,8 +236,10 @@ def test_zenflow_adam_cross_process():
             g[now].copy_(grad)
             op.zenflow_adam_submit(ctrl.data_ptr(), now, step, [lr], [beta1], [beta2], [eps], [wd], [1])
             assert op.zenflow_adam_wait(ctrl.data_ptr(), 60.0), f"wait timed out step {step}"
-            op.adam_update_multi(1, step, lr, beta1, beta2, eps, wd, True, [p_ref], [grad.clone()], [ea_ref[now]],
-                                 [eq_ref[now]], [st_ref])
+            # Reference: single-tensor adam_update on the mirror, then snapshot the updated
+            # param into the stale buffer -- exactly what the native worker does per group.
+            op.adam_update(1, step, lr, beta1, beta2, eps, wd, True, p_ref, grad.clone(), ea_ref[now], eq_ref[now])
+            st_ref.copy_(p_ref)
             assert torch.equal(param, p_ref), f"param mismatch step {step}"
             assert torch.equal(ea[now], ea_ref[now]), f"exp_avg mismatch step {step}"
             assert torch.equal(eq[now], eq_ref[now]), f"exp_avg_sq mismatch step {step}"

@@ -260,55 +260,6 @@ int ds_adam_step(int optimizer_id,
     return 0;
 }
 
-// Fused multi-tensor variant used by ZenFlow's overlapped optimizer. Driving the
-// per-parameter loop in C++ avoids one Python<->C++ crossing (and one OpenMP region
-// spawn) per parameter, which dominates on ZeRO Stage 1/2 where a group holds many
-// small parameters. When stale_params is non-empty, the post-update parameter is
-// snapshotted into it here, replacing the Python-side clone()+copy that ZenFlow used
-// to keep a stale copy for the GPU sync.
-int ds_adam_step_multi(int optimizer_id,
-                       size_t step,
-                       float lr,
-                       float beta1,
-                       float beta2,
-                       float epsilon,
-                       float weight_decay,
-                       bool bias_correction,
-                       std::vector<torch::Tensor>& params,
-                       std::vector<torch::Tensor>& grads,
-                       std::vector<torch::Tensor>& exp_avgs,
-                       std::vector<torch::Tensor>& exp_avg_sqs,
-                       std::vector<torch::Tensor>& stale_params,
-                       bool parallel)
-{
-    const size_t num_tensors = params.size();
-    TORCH_CHECK(grads.size() == num_tensors && exp_avgs.size() == num_tensors &&
-                    exp_avg_sqs.size() == num_tensors,
-                "ds_adam_step_multi: params/grads/exp_avgs/exp_avg_sqs length mismatch");
-    const bool has_stale = !stale_params.empty();
-    TORCH_CHECK(!has_stale || stale_params.size() == num_tensors,
-                "ds_adam_step_multi: stale_params length mismatch");
-
-    std::shared_ptr<Adam_Optimizer> opt =
-        std::static_pointer_cast<Adam_Optimizer>(s_optimizers[optimizer_id]);
-    // All tensors share one optimizer step, so advance bias-correction state once.
-    opt->IncrementStep(step, beta1, beta2);
-    opt->update_state(lr, epsilon, weight_decay, bias_correction);
-
-    for (size_t i = 0; i < num_tensors; ++i) {
-        auto params_c = params[i].contiguous();
-        auto grads_c = grads[i].contiguous();
-        auto exp_avg_c = exp_avgs[i].contiguous();
-        auto exp_avg_sq_c = exp_avg_sqs[i].contiguous();
-
-        invoke(opt, params_c, grads_c, exp_avg_c, exp_avg_sq_c, params_c.numel(), parallel);
-
-        if (has_stale) { stale_params[i].copy_(params_c); }
-    }
-
-    return 0;
-}
-
 void adamw_rollback_inplace(float* params,
                             const float* grads,
                             float* momentum,
