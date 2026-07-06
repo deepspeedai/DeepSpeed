@@ -381,7 +381,7 @@ public:
     {
         n_ = std::max<size_t>(1, affinity.size());
         for (size_t i = 0; i < n_; ++i) {
-            int core = affinity.empty() ? -1 : affinity[i % affinity.size()];
+            int core = affinity.empty() ? -1 : affinity[i];
             threads_.emplace_back([this, i, core] { worker(i, core); });
         }
     }
@@ -496,6 +496,8 @@ struct ZenGroup {
 // and posts cmd_ready; the worker runs the step and posts done. `done` is a counting
 // semaphore, so a skipped wait (the engine's post-warmup transition) is drained later.
 static constexpr int ZEN_MAX_GROUPS = 1024;
+// Hyperparameters packed per group in hp[]: lr, beta1, beta2, eps, weight_decay.
+static constexpr int ZEN_HP_PER_GROUP = 5;
 enum { ZEN_CMD_STEP = 0, ZEN_CMD_EXIT = 1 };
 
 struct ZenControl {
@@ -505,7 +507,7 @@ struct ZenControl {
     int now_state;
     int64_t step;
     int num_groups;
-    float hp[ZEN_MAX_GROUPS * 5];  // lr, beta1, beta2, eps, weight_decay per group
+    float hp[ZEN_MAX_GROUPS * ZEN_HP_PER_GROUP];
     uint8_t bias_correction[ZEN_MAX_GROUPS];
 };
 #endif
@@ -553,11 +555,11 @@ public:
             const int ng = ctrl->num_groups;
             std::vector<ZenHP> hps(ng);
             for (int g = 0; g < ng; ++g) {
-                hps[g] = {ctrl->hp[g * 5 + 0],
-                          ctrl->hp[g * 5 + 1],
-                          ctrl->hp[g * 5 + 2],
-                          ctrl->hp[g * 5 + 3],
-                          ctrl->hp[g * 5 + 4],
+                hps[g] = {ctrl->hp[g * ZEN_HP_PER_GROUP + 0],
+                          ctrl->hp[g * ZEN_HP_PER_GROUP + 1],
+                          ctrl->hp[g * ZEN_HP_PER_GROUP + 2],
+                          ctrl->hp[g * ZEN_HP_PER_GROUP + 3],
+                          ctrl->hp[g * ZEN_HP_PER_GROUP + 4],
                           (bool)ctrl->bias_correction[g]};
             }
             run_step(ctrl->now_state, ctrl->step, hps);
@@ -677,11 +679,11 @@ void zenflow_adam_submit(uintptr_t control_ptr,
     auto* ctrl = reinterpret_cast<ZenControl*>(control_ptr);
     const int ng = (int)lr.size();
     for (int g = 0; g < ng; ++g) {
-        ctrl->hp[g * 5 + 0] = lr[g];
-        ctrl->hp[g * 5 + 1] = beta1[g];
-        ctrl->hp[g * 5 + 2] = beta2[g];
-        ctrl->hp[g * 5 + 3] = eps[g];
-        ctrl->hp[g * 5 + 4] = weight_decay[g];
+        ctrl->hp[g * ZEN_HP_PER_GROUP + 0] = lr[g];
+        ctrl->hp[g * ZEN_HP_PER_GROUP + 1] = beta1[g];
+        ctrl->hp[g * ZEN_HP_PER_GROUP + 2] = beta2[g];
+        ctrl->hp[g * ZEN_HP_PER_GROUP + 3] = eps[g];
+        ctrl->hp[g * ZEN_HP_PER_GROUP + 4] = weight_decay[g];
         ctrl->bias_correction[g] = bias_correction[g];
     }
     ctrl->now_state = now_state;
