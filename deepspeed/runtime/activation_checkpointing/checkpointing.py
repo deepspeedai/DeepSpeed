@@ -704,14 +704,14 @@ class CheckpointFunction(torch.autograd.Function):
 def non_reentrant_checkpoint(function, *args):
     """This function is union of `torch.utils.checkpoint._checkpoint_without_reentrant` and `CheckpointFunction` in this module
 
-    This function is aim to solve the back probagation error raised from all input requires no grad.
+    This function is aim to solve the back propagation error raised from all input requires no grad.
     * has already been implemented in pytorch for a while, the solution is stable at most time except for jit module mode.
     * can help to solve the issue which is hacked by `deepspeed.runtime.pipe.module.PipelineModule._is_checkpointable`
 
     Main modifications compared to the implementation of torch:
     1. adapt to the signature of `checkpoint` function in this module
     2. solve the non-deterministic by random state management consistent with deepspeed `CheckpointFunction`
-    3. when there is partition or cpu checkpointing, gather them in the unpack_hook during back probagation
+    3. when there is partition or cpu checkpointing, gather them in the unpack_hook during back propagation
     4. make all after backward blocks in the hook which will executed after all leaf nodes backward execution.
     5. above 4. is inspired by `torch.autograd.graph.register_multi_grad_hook`, which is only implemented after 2.0.0
     """
@@ -801,7 +801,7 @@ def non_reentrant_checkpoint(function, *args):
         """retrieve the activations from recompute"""
         nonlocal deepspeed_saved_tensors, non_tensor_args, tensor_flags
 
-        # if this is the first step of backward probagation, recompute the graph and save
+        # if this is the first step of backward propagation, recompute the graph and save
         # all the activations with the same order as `checkpoint_pack` does
         if len(storage) == 0:
             unpack_counter = 0
