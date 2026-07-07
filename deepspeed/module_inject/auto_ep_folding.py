@@ -484,12 +484,13 @@ def apply_folding_correction_to_grad_buffer(
     *,
     tp_group,
     param_name: str | None = None,
+    use_correction_marker: bool = True,
 ) -> str:
-    if is_autoep_folding_gradient_corrected(param):
+    if use_correction_marker and is_autoep_folding_gradient_corrected(param):
         return AUTOEP_FOLDING_GRAD_REDUCE_SKIP
 
     strategy = reduce_autoep_folding_gradient(folding_spec, param, grad, tp_group=tp_group, param_name=param_name)
-    if strategy != AUTOEP_FOLDING_GRAD_REDUCE_SKIP:
+    if use_correction_marker and strategy != AUTOEP_FOLDING_GRAD_REDUCE_SKIP:
         setattr(param, AUTOEP_FOLDING_GRAD_CORRECTED_ATTR, True)
     return strategy
 

@@ -27,12 +27,19 @@ def test_zero1_overlap_applies_folding_before_hook_consumes_grad(monkeypatch):
     grad = torch.full((2, ), 4.0)
     calls = []
 
-    def fake_apply_folding_correction(folding_spec, param, grad, *, tp_group, param_name=None):
+    def fake_apply_folding_correction(folding_spec,
+                                      param,
+                                      grad,
+                                      *,
+                                      tp_group,
+                                      param_name=None,
+                                      use_correction_marker=True):
         calls.append({
             "folding_spec": folding_spec,
             "param": param,
             "tp_group": tp_group,
             "grad_before": grad.detach().clone(),
+            "use_correction_marker": use_correction_marker,
         })
         grad.data.mul_(0.5)
         param.ds_autoep_folding_grad_corrected = True
@@ -47,6 +54,7 @@ def test_zero1_overlap_applies_folding_before_hook_consumes_grad(monkeypatch):
 
     assert len(calls) == 1
     assert calls[0]["param"] is param
+    assert calls[0]["use_correction_marker"] is True
     torch.testing.assert_close(calls[0]["grad_before"], torch.full((2, ), 4.0))
     torch.testing.assert_close(grad, torch.full((2, ), 2.0))
     assert param.ds_autoep_folding_grad_corrected is True
@@ -74,8 +82,14 @@ def test_zero2_partitioned_path_still_applies_folding(monkeypatch):
     grad = torch.full((2, ), 4.0)
     calls = []
 
-    def fake_apply_folding_correction(_folding_spec, _param, grad, *, tp_group, param_name=None):
-        calls.append(_param)
+    def fake_apply_folding_correction(_folding_spec,
+                                      _param,
+                                      grad,
+                                      *,
+                                      tp_group,
+                                      param_name=None,
+                                      use_correction_marker=True):
+        calls.append((_param, use_correction_marker))
         grad.data.div_(2.0)
         return "expert_tp_cancel"
 
@@ -86,5 +100,5 @@ def test_zero2_partitioned_path_still_applies_folding(monkeypatch):
 
     optimizer._maybe_reduce_autoep_folding_tp_gradient(param, grad)
 
-    assert calls == [param]
+    assert calls == [(param, False)]
     torch.testing.assert_close(grad, torch.full((2, ), 2.0))

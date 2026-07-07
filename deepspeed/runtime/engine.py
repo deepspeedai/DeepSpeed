@@ -562,11 +562,12 @@ class DeepSpeedEngine(Module):
             etp_size=autoep_config.expert_tensor_parallel_size,
             mp_mode="tp" if tp_size > 1 else "sp",
         )
+        compile_config = getattr(self._config, "compile_config", None)
         validate_folding_global(
             folding_spec,
             zero_stage=self.zero_optimization_stage(),
             sp_size=sp_size,
-            deepcompile_enabled=self._config.compile_config.deepcompile,
+            deepcompile_enabled=bool(getattr(compile_config, "deepcompile", False)),
             use_data_before_expert_parallel=self._config.use_data_before_expert_parallel_,
             mpu=self.mpu,
             autoep_enabled=autoep_config.enabled,

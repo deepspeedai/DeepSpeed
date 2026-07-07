@@ -1045,7 +1045,8 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         apply_folding_correction_to_grad_buffer(self.autoep_folding_spec,
                                                 param,
                                                 grad,
-                                                tp_group=self.autoep_folding_tp_group)
+                                                tp_group=self.autoep_folding_tp_group,
+                                                use_correction_marker=not self.partition_gradients)
 
     def _fill_param_grad_accum_attribute(self, param):
         if param.grad is not None:
