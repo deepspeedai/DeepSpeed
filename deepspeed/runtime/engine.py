@@ -4327,6 +4327,9 @@ class DeepSpeedEngine(Module):
         process with rank 0.
 
         """
+        if not save_dir:
+            raise ValueError(f"save_dir must be a non-empty string, got {save_dir!r}")
+
         if self._optimizer_has_ckpt_event_prologue():
             # Custom preparation for checkpoint save, if applicable
             self.optimizer.checkpoint_event_prologue()
