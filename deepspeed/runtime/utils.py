@@ -32,6 +32,8 @@ from deepspeed.runtime.constants import PIPE_REPLICATED
 from deepspeed.accelerator import get_accelerator
 from deepspeed.module_inject.policy import transpose
 
+from transformers.cache_utils import (DynamicCache, StaticCache, QuantizedCache)
+
 torch_memory_reserved = get_accelerator().memory_reserved
 torch_max_memory_reserved = get_accelerator().max_memory_reserved
 
@@ -1198,11 +1200,15 @@ def compare_tensors_in_structures(inputs1: Union[List, Dict], inputs2: Union[Lis
     """
     if type(inputs1) != type(inputs2):  # Ensure types match
         return False
+    
+    ignore_types = (DynamicCache, StaticCache, QuantizedCache)
 
     if isinstance(inputs1, list) and isinstance(inputs2, list):
         if len(inputs1) != len(inputs2):
             return False
         for val1, val2 in zip(inputs1, inputs2):
+            if isinstance(val1, ignore_types) and isinstance(val2, ignore_types):
+                continue
             if isinstance(val1, torch.Tensor) and isinstance(val2, torch.Tensor):
                 val1 = val1.to(torch.device(get_accelerator().current_device_name()))
                 val2 = val2.to(torch.device(get_accelerator().current_device_name()))
@@ -1217,6 +1223,8 @@ def compare_tensors_in_structures(inputs1: Union[List, Dict], inputs2: Union[Lis
             return False
         for key in inputs1:
             val1, val2 = inputs1[key], inputs2[key]
+            if isinstance(val1, ignore_types) and isinstance(val2, ignore_types):
+                continue
             if isinstance(val1, torch.Tensor) and isinstance(val2, torch.Tensor):
                 val1 = val1.to(torch.device(get_accelerator().current_device_name()))
                 val2 = val2.to(torch.device(get_accelerator().current_device_name()))
