@@ -7,7 +7,7 @@ import torch
 from deepspeed import comm as dist
 
 from deepspeed.runtime.zero.stage_1_and_2 import DeepSpeedZeroOptimizer
-from deepspeed.runtime.zenflow.zenflow_utils import start_optimizer_process
+from deepspeed.runtime.zenflow.zenflow_utils import start_optimizer_process, ZENFLOW_OPTIMIZER_WAIT_POLL_SECONDS
 from deepspeed.runtime.utils import (see_memory_usage)
 from deepspeed.ops.adam import ZenFlowSelectiveAdamW
 
@@ -665,9 +665,23 @@ class ZenFlowZeroOptimizerParallel(ZenFlowZeroOptimizer):
         dest_tensor.copy_(src_tensor, non_blocking=True)
         param.grad = None  #offload only
 
+    def _wait_for_optimizer_process(self):
+        """Block until the optimizer process signals the submitted step is done.
+
+        The wait wakes up periodically to check the optimizer process is still alive: if it died
+        mid-step (e.g. an OOM or assertion in the native worker after it signalled ready), fail
+        loudly here instead of blocking this rank -- and the whole distributed job -- forever on
+        a semaphore the dead process will never post."""
+        while not self.zf_op.zenflow_adam_wait(self.zf_ctrl.data_ptr(), ZENFLOW_OPTIMIZER_WAIT_POLL_SECONDS):
+            proc = getattr(self, 'process', None)
+            if proc is not None and not proc.is_alive():
+                raise RuntimeError("ZenFlow optimizer process exited during a step (likely an error or OOM in "
+                                   "the optimizer process -- check its traceback above) instead of completing "
+                                   "the update. Aborting to avoid hanging distributed training.")
+
     def wait_last_update_and_copy(self):
 
-        if not hasattr(self, 'parent_conn'):
+        if not getattr(self, 'process_optimizer_established', False):
             return
 
         if self.micro_step + 1 > self.full_warm_up_rounds and self.first_update_round_after_warmup:
@@ -675,8 +689,7 @@ class ZenFlowZeroOptimizerParallel(ZenFlowZeroOptimizer):
             return
 
         self.timers(OPTIMIZER_RECV_PARAMS_TIMER).start()
-        msg = self.parent_conn.recv()
-        assert msg["type"] == "done", "Optimizer process did not finish stepping correctly."
+        self._wait_for_optimizer_process()
         self.timers(OPTIMIZER_RECV_PARAMS_TIMER).stop()
 
         for i, group in enumerate(self.bit16_groups):
@@ -684,7 +697,10 @@ class ZenFlowZeroOptimizerParallel(ZenFlowZeroOptimizer):
             bit16_partitions = self.parallel_partitioned_bit16_groups[i]
             fp32_partition = self.optimizer.param_groups[i]['params'][0].stale_param.data
             self.timers(OPTIMIZER_TRANSMIT_TIMER).start()
-            bit16_partitions[partition_id].data.copy_(fp32_partition.to(get_accelerator().current_device_name()).data)
+            # copy_ moves CPU->GPU and casts fp32->bit16 in a single step. Going through an
+            # explicit .to(device) first would materialize the whole fp32 partition on the GPU
+            # (a transient ~2x-bit16 spike, e.g. ~3GB for a 0.75B-param partition) for no benefit.
+            bit16_partitions[partition_id].data.copy_(fp32_partition)
             self.timers(OPTIMIZER_TRANSMIT_TIMER).stop()
 
         see_memory_usage('After optimizer before all-gather')
@@ -715,27 +731,21 @@ class ZenFlowZeroOptimizerParallel(ZenFlowZeroOptimizer):
         if not self.process_optimizer_established:
             self.start_optimizer_process()
 
-        group_infos = []
+        lr, beta1, beta2, eps, weight_decay, bias_correction = [], [], [], [], [], []
         for group_no, group in enumerate(self.bit16_groups):
             single_grad_partition = self.single_partition_of_fp32_groups[group_no].overlap_grad[now_state]
             self.unscale_and_clip_grads([single_grad_partition], scaled_global_grad_norm)
 
-            group_info = {
-                "lr": self.optimizer.param_groups[group_no]["lr"],
-                "betas": self.optimizer.param_groups[group_no]["betas"],
-                "eps": self.optimizer.param_groups[group_no]["eps"],
-                "weight_decay": self.optimizer.param_groups[group_no]["weight_decay"],
-                "bias_correction": self.optimizer.param_groups[group_no]["bias_correction"],
-            }
+            pg = self.optimizer.param_groups[group_no]
+            lr.append(pg["lr"])
+            beta1.append(pg["betas"][0])
+            beta2.append(pg["betas"][1])
+            eps.append(pg["eps"])
+            weight_decay.append(pg["weight_decay"])
+            bias_correction.append(1 if pg["bias_correction"] else 0)
 
-            group_infos.append(group_info)
-
-        self.parent_conn.send({
-            "type": "step",
-            "now_state": now_state,
-            "micro_step": self.micro_step,
-            "group_infos": group_infos
-        })
+        self.zf_op.zenflow_adam_submit(self.zf_ctrl.data_ptr(), now_state, self.micro_step + 1, lr, beta1, beta2, eps,
+                                       weight_decay, bias_correction)
 
     def step(self, closure=None):
         """
