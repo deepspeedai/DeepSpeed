@@ -13,7 +13,8 @@ from deepspeed.runtime.zero.parameter_offload import DeepSpeedZeRoOffload
 from .passes import zero3_compile, prefetch, selective_gather, offload_parameters
 from .backend import make_backend, launch_compile_passes, init_schedule
 from .patch_fake_tensor import patch_fake_tensor
-from .util import get_deepcompile_handle, add_pre_backward_hook
+from .util import get_deepcompile_handle, add_pre_backward_hook, add_post_backward_hook
+from .z3_eager_fallback import DeepCompileZ3EagerFallback
 
 WARMUP = 5
 
@@ -44,9 +45,8 @@ def init_z3(engine, backend, compile_config, compile_kwargs, schedule=None):
     dc = get_deepcompile_handle()
     dc.init(engine.data_parallel_group, compile_config, engine.zero_reduce_bucket_size())
 
-    # Unset hooks
-    for m in engine.module.modules():
-        m._parameters = m._original_parameters
+    engine._deepcompile_z3_eager_fallback = DeepCompileZ3EagerFallback(engine)
+    add_post_backward_hook(engine._deepcompile_z3_eager_fallback.release_gathered_params)
 
     if use_opt:
         optimizer.parameter_offload._remove_module_hooks()

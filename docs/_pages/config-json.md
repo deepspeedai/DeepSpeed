@@ -459,7 +459,7 @@ Enabling and configuring ZeRO memory optimizations
     "stage3_prefetch_bucket_size" : 5e8,
     "stage3_param_persistence_threshold" : 1e6,
     "sub_group_size" : 1e12,
-    "elastic_checkpoint" : [true|false],
+    "elastic_checkpoint" : [true|false] (deprecated; use Universal Checkpointing for ZeRO-3),
     "stage3_gather_16bit_weights_on_model_save": [true|false],
     "ignore_unused_parameters": [true|false],
     "round_robin_gradients": [true|false],

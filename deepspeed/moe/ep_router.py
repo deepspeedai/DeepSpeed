@@ -15,6 +15,8 @@ This module is self-contained: no imports from deepspeed.module_inject
 or deepspeed.runtime.
 """
 
+from __future__ import annotations
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F

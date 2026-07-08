@@ -16,6 +16,8 @@ class ProfilingResult:
     needs_backward: bool = False
     fwd_mem: List[Tuple[str, int, int, int]] = field(default_factory=list)  # name, current_alloc, delta, peak
     bwd_mem: List[Tuple[str, int, int, int]] = field(default_factory=list)
+    fwd_mem_complete: bool = True
+    bwd_mem_complete: bool = True
     fwd_time: List[Tuple[str, int, int]] = field(default_factory=list)  # name, device_time, wall_time
     bwd_time: List[Tuple[str, int, int]] = field(default_factory=list)
     fwd_tensor_sizes: List[Tuple[str, int]] = field(default_factory=list)  # name, size
