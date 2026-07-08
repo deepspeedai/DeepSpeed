@@ -273,3 +273,12 @@ Conduct](https://opensource.microsoft.com/codeofconduct/). For more information 
     * [DeepSpeed: All the tricks to scale to gigantic models (Mark Saroufim)](https://www.youtube.com/watch?v=pDGI668pNg0)
     * [Turing-NLG, DeepSpeed and the ZeRO optimizer (Yannic Kilcher)](https://www.youtube.com/watch?v=tC01FRB0M7w)
     * [Ultimate Guide To Scaling ML Models (The AI Epiphany)](https://www.youtube.com/watch?v=hc0u4avAkuM)
+
+
+## Known Issues and Workarounds
+
+The maintainers are aware of the following issues:
+
+- Issue mentioned in the bug tracker
+- Users should follow the recommended practices
+- See the documentation for more details
