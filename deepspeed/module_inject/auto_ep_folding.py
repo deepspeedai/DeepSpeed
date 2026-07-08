@@ -144,8 +144,7 @@ def expected_folding_group_tables(spec: ParallelFoldingSpec) -> FoldingGroupTabl
             dense_dp_groups.append(tuple(stage_ranks[tp_lane::spec.tp_size]))
 
         local_ep_groups = [
-            tuple(stage_ranks[start:start + spec.ep_size])
-            for start in range(0, len(stage_ranks), spec.ep_size)
+            tuple(stage_ranks[start:start + spec.ep_size]) for start in range(0, len(stage_ranks), spec.ep_size)
         ]
         ep_groups.extend(local_ep_groups)
         for pos in range(spec.ep_size):

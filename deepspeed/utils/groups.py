@@ -430,13 +430,9 @@ def _create_expert_and_data_parallel(expert_parallel_size_,
         stage_rank_set = set(stage_ranks)
 
         if folding_tables is not None:
-            ep_groups_list = [
-                list(group) for group in folding_tables.ep_groups
-                if set(group).issubset(stage_rank_set)
-            ]
+            ep_groups_list = [list(group) for group in folding_tables.ep_groups if set(group).issubset(stage_rank_set)]
             edp_groups_list = [
-                list(group) for group in folding_tables.edp_groups
-                if set(group).issubset(stage_rank_set)
+                list(group) for group in folding_tables.edp_groups if set(group).issubset(stage_rank_set)
             ]
         else:
             # Preserve the existing TP-strided native MoE topology when no
@@ -455,10 +451,8 @@ def _create_expert_and_data_parallel(expert_parallel_size_,
                 ordered_stage_ranks[g * expert_parallel_size_:(g + 1) * expert_parallel_size_]
                 for g in range(num_ep_groups)
             ]
-            edp_groups_list = [
-                [ep_groups_list[g][pos] for g in range(num_ep_groups)]
-                for pos in range(expert_parallel_size_)
-            ]
+            edp_groups_list = [[ep_groups_list[g][pos] for g in range(num_ep_groups)]
+                               for pos in range(expert_parallel_size_)]
 
         for ep_ranks in ep_groups_list:
             group = dist.new_group(ep_ranks)
