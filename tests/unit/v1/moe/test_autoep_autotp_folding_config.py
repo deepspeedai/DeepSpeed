@@ -48,13 +48,32 @@ def test_expected_folding_tables_match_design_examples():
     tables8 = expected_folding_group_tables(spec8)
     assert tables8.tp_groups == ((0, 1), (2, 3), (4, 5), (6, 7))
     assert tables8.dense_dp_groups == ((0, 2, 4, 6), (1, 3, 5, 7))
-    assert tables8.ep_groups == ((0, 2, 4, 6), (1, 3, 5, 7))
-    assert tables8.edp_groups == ((0, 1), (2, 3), (4, 5), (6, 7))
+    assert tables8.ep_groups == ((0, 1, 2, 3), (4, 5, 6, 7))
+    assert tables8.edp_groups == ((0, 4), (1, 5), (2, 6), (3, 7))
 
     spec16 = build_folding_spec(world_size=16, pp_size=1, tp_size=2, ep_size=4, etp_size=1)
     tables16 = expected_folding_group_tables(spec16)
-    assert tables16.ep_groups == ((0, 2, 4, 6), (8, 10, 12, 14), (1, 3, 5, 7), (9, 11, 13, 15))
-    assert tables16.edp_groups == ((0, 8, 1, 9), (2, 10, 3, 11), (4, 12, 5, 13), (6, 14, 7, 15))
+    assert tables16.ep_groups == ((0, 1, 2, 3), (4, 5, 6, 7), (8, 9, 10, 11), (12, 13, 14, 15))
+    assert tables16.edp_groups == ((0, 4, 8, 12), (1, 5, 9, 13), (2, 6, 10, 14), (3, 7, 11, 15))
+
+
+def test_expected_folding_tables_keep_ep8_node_local_with_node_contiguous_ranks():
+    spec = build_folding_spec(world_size=16, pp_size=1, tp_size=2, ep_size=8, etp_size=1)
+    tables = expected_folding_group_tables(spec)
+
+    assert tables.tp_groups == ((0, 1), (2, 3), (4, 5), (6, 7), (8, 9), (10, 11), (12, 13), (14, 15))
+    assert tables.dense_dp_groups == ((0, 2, 4, 6, 8, 10, 12, 14), (1, 3, 5, 7, 9, 11, 13, 15))
+    assert tables.ep_groups == ((0, 1, 2, 3, 4, 5, 6, 7), (8, 9, 10, 11, 12, 13, 14, 15))
+    assert tables.edp_groups == (
+        (0, 8),
+        (1, 9),
+        (2, 10),
+        (3, 11),
+        (4, 12),
+        (5, 13),
+        (6, 14),
+        (7, 15),
+    )
 
 
 def _assert_rejects(match, **kwargs):
@@ -169,16 +188,16 @@ def test_cross_lane_expected_folding_tables():
     assert tables_tp4.ep_groups == ((0, 1, 2, 3), )
     assert tables_tp4.edp_groups == ((0, ), (1, ), (2, ), (3, ))
 
-    # world=4 tp2 ep4: EP group spans both TP lanes (lane-major ordering 0,2,1,3).
+    # world=4 tp2 ep4: EP group spans both TP lanes.
     spec_tp2 = build_folding_spec(world_size=4, pp_size=1, tp_size=2, ep_size=4, etp_size=1)
     tables_tp2 = expected_folding_group_tables(spec_tp2)
     assert tables_tp2.tp_groups == ((0, 1), (2, 3))
-    assert tables_tp2.ep_groups == ((0, 2, 1, 3), )
-    assert tables_tp2.edp_groups == ((0, ), (2, ), (1, ), (3, ))
+    assert tables_tp2.ep_groups == ((0, 1, 2, 3), )
+    assert tables_tp2.edp_groups == ((0, ), (1, ), (2, ), (3, ))
 
-    # world=8 tp4 ep4 (edp=2): two EP groups, each spanning TP lanes and DP ranks.
+    # world=8 tp4 ep4 (edp=2): two EP groups, each spanning TP lanes.
     spec_w8 = build_folding_spec(world_size=8, pp_size=1, tp_size=4, ep_size=4, etp_size=1)
     tables_w8 = expected_folding_group_tables(spec_w8)
     assert tables_w8.tp_groups == ((0, 1, 2, 3), (4, 5, 6, 7))
-    assert tables_w8.ep_groups == ((0, 4, 1, 5), (2, 6, 3, 7))
-    assert tables_w8.edp_groups == ((0, 2), (4, 6), (1, 3), (5, 7))
+    assert tables_w8.ep_groups == ((0, 1, 2, 3), (4, 5, 6, 7))
+    assert tables_w8.edp_groups == ((0, 4), (1, 5), (2, 6), (3, 7))

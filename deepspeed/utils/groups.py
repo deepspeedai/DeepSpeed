@@ -310,6 +310,7 @@ def _create_expert_and_data_parallel(expert_parallel_size_,
     """Create expert and data parallel groups.
 
     When mp_size is None or 1: legacy consecutive ordering (backward compatible).
+    When mp_size > 1 and folding_spec is not None: AutoEP+AutoTP folding tables.
     When mp_size > 1 and mp_mode=="tp": TP-strided rank ordering.
     When mp_size > 1 and mp_mode=="sp": consecutive rank ordering.
 
@@ -328,6 +329,7 @@ def _create_expert_and_data_parallel(expert_parallel_size_,
         pp_size (int, optional): Pipeline parallel size. None falls back to mpu.
         mp_mode (str): "tp" for TP-strided ordering, "sp" for consecutive ordering.
         use_data_before_expert_parallel_ (bool): Use the D + E instead of E + D topology.
+        folding_spec: Optional AutoEP+AutoTP folding topology spec.
     """
     assert dist.is_initialized()
 
@@ -418,37 +420,54 @@ def _create_expert_and_data_parallel(expert_parallel_size_,
             )
         return  # Already created
 
+    folding_tables = None
+    if folding_spec is not None:
+        from deepspeed.module_inject.auto_ep_folding import expected_folding_group_tables
+        folding_tables = expected_folding_group_tables(folding_spec)
+
     for pp_stage_start in range(0, world_size, pp_stride):
         stage_ranks = list(range(pp_stage_start, pp_stage_start + pp_stride))
+        stage_rank_set = set(stage_ranks)
 
-        # Build ordered_stage_ranks based on mp_mode
-        if mp_mode == "tp" and effective_mp_size > 1:
-            # TP-strided: group by TP, then interleave DP lanes
-            num_tp_groups = len(stage_ranks) // effective_mp_size
-            ordered = []
-            for dp_lane in range(effective_mp_size):
-                for tp_group_idx in range(num_tp_groups):
-                    ordered.append(stage_ranks[tp_group_idx * effective_mp_size + dp_lane])
-            ordered_stage_ranks = ordered
+        if folding_tables is not None:
+            ep_groups_list = [
+                list(group) for group in folding_tables.ep_groups
+                if set(group).issubset(stage_rank_set)
+            ]
+            edp_groups_list = [
+                list(group) for group in folding_tables.edp_groups
+                if set(group).issubset(stage_rank_set)
+            ]
         else:
-            # SP or no-MP: consecutive
-            ordered_stage_ranks = stage_ranks
+            # Preserve the existing TP-strided native MoE topology when no
+            # folding spec was provided by the AutoEP+AutoTP path.
+            if mp_mode == "tp" and effective_mp_size > 1:
+                num_tp_groups = len(stage_ranks) // effective_mp_size
+                ordered_stage_ranks = []
+                for dp_lane in range(effective_mp_size):
+                    for tp_group_idx in range(num_tp_groups):
+                        ordered_stage_ranks.append(stage_ranks[tp_group_idx * effective_mp_size + dp_lane])
+            else:
+                ordered_stage_ranks = stage_ranks
 
-        # Create EP groups by chunking ordered ranks
-        num_ep_groups = len(ordered_stage_ranks) // expert_parallel_size_
-        ep_groups_list = []
-        for g in range(num_ep_groups):
-            ep_ranks = ordered_stage_ranks[g * expert_parallel_size_:(g + 1) * expert_parallel_size_]
-            ep_groups_list.append(ep_ranks)
+            num_ep_groups = len(ordered_stage_ranks) // expert_parallel_size_
+            ep_groups_list = [
+                ordered_stage_ranks[g * expert_parallel_size_:(g + 1) * expert_parallel_size_]
+                for g in range(num_ep_groups)
+            ]
+            edp_groups_list = [
+                [ep_groups_list[g][pos] for g in range(num_ep_groups)]
+                for pos in range(expert_parallel_size_)
+            ]
+
+        for ep_ranks in ep_groups_list:
             group = dist.new_group(ep_ranks)
             log_dist(f'creating expert parallel process group named {group_name} with ranks: {ep_ranks}', [0])
             if rank in ep_ranks:
                 _EXPERT_PARALLEL_GROUP[group_name] = group
                 _EXPERT_PARALLEL_GROUP_RANKS[group_name] = ep_ranks
 
-        # Create EDP groups: same position across EP groups
-        for pos in range(expert_parallel_size_):
-            edp_ranks = [ep_groups_list[g][pos] for g in range(num_ep_groups)]
+        for edp_ranks in edp_groups_list:
             group = dist.new_group(edp_ranks)
             log_dist(f'Creating expert data parallel process group named {group_name} with ranks: {edp_ranks}', [0])
             if rank in edp_ranks:

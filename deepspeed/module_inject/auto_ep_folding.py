@@ -143,16 +143,9 @@ def expected_folding_group_tables(spec: ParallelFoldingSpec) -> FoldingGroupTabl
         for tp_lane in range(spec.tp_size):
             dense_dp_groups.append(tuple(stage_ranks[tp_lane::spec.tp_size]))
 
-        if spec.mp_mode == "tp" and spec.tp_size > 1:
-            ordered_stage_ranks = []
-            for tp_lane in range(spec.tp_size):
-                ordered_stage_ranks.extend(stage_ranks[tp_lane::spec.tp_size])
-        else:
-            ordered_stage_ranks = stage_ranks
-
         local_ep_groups = [
-            tuple(ordered_stage_ranks[start:start + spec.ep_size])
-            for start in range(0, len(ordered_stage_ranks), spec.ep_size)
+            tuple(stage_ranks[start:start + spec.ep_size])
+            for start in range(0, len(stage_ranks), spec.ep_size)
         ]
         ep_groups.extend(local_ep_groups)
         for pos in range(spec.ep_size):
@@ -226,14 +219,16 @@ def validate_folding_global(
 
     # Cross-lane expert parallelism (expert_width = ep * etp need NOT be a subset of
     # the dense data-parallel size) is supported: ``expected_folding_group_tables``
-    # lays EP groups across the tp-lane-major rank ordering, so an EP group may span
-    # TP lanes and dense-DP ranks. The only structural requirement is that the
-    # expert width tiles the stage cleanly, which ``build_folding_spec`` already
-    # enforces (``stage_size % expert_width == 0``, so ``edp`` is integral). The
-    # gradient convention holds across the pool because each family's reduction is
-    # keyed to its replication structure, not the EP layout: router/gate and dense
-    # /LayerNorm AVERAGE over the TP (token-replication) group; routed experts cancel
-    # the restore ``tp_size`` factor (EXPERT_TP_CANCEL) and reduce data-parallel over
+    # lays EP groups across consecutive stage ranks while dense DP remains TP-lane
+    # strided, so an EP group may span TP lanes and dense-DP ranks while preserving
+    # node-local EP groups under node-contiguous rank mappings. The only structural
+    # requirement is that the expert width tiles the stage cleanly, which
+    # ``build_folding_spec`` already enforces (``stage_size % expert_width == 0``,
+    # so ``edp`` is integral). The gradient convention holds across the pool
+    # because each family's reduction is keyed to its replication structure, not
+    # the EP layout: router/gate and dense/LayerNorm AVERAGE over the TP
+    # (token-replication) group; routed experts cancel the restore ``tp_size``
+    # factor (EXPERT_TP_CANCEL) and reduce data-parallel over
     # the EDP group. The earlier ``expert_width <= dp`` / ``dp % expert_width == 0``
     # fail-fast limitation is therefore removed; only genuinely non-tiling shapes are
     # rejected above (in ``build_folding_spec``).
