@@ -32,7 +32,6 @@ from deepspeed.runtime.constants import PIPE_REPLICATED
 from deepspeed.accelerator import get_accelerator
 from deepspeed.module_inject.policy import transpose
 
-
 torch_memory_reserved = get_accelerator().memory_reserved
 torch_max_memory_reserved = get_accelerator().max_memory_reserved
 
@@ -1192,7 +1191,7 @@ def is_transformers_cache(obj):
         from transformers.cache_utils import (DynamicCache, StaticCache, QuantizedCache)
     except ImportError:
         return False
-    
+
     return isinstance(obj, (DynamicCache, StaticCache, QuantizedCache))
 
 
