@@ -1230,7 +1230,7 @@ def compare_tensors_in_structures(inputs1: Union[List, Dict], inputs2: Union[Lis
             return False
         for key in inputs1:
             val1, val2 = inputs1[key], inputs2[key]
-            if isinstance(val1, ignore_types) and isinstance(val2, ignore_types):
+            if is_transformers_cache(val1) and is_transformers_cache(val2):
                 continue
             if isinstance(val1, torch.Tensor) and isinstance(val2, torch.Tensor):
                 val1 = val1.to(torch.device(get_accelerator().current_device_name()))
