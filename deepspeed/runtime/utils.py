@@ -32,7 +32,6 @@ from deepspeed.runtime.constants import PIPE_REPLICATED
 from deepspeed.accelerator import get_accelerator
 from deepspeed.module_inject.policy import transpose
 
-from transformers.cache_utils import (DynamicCache, StaticCache, QuantizedCache)
 
 torch_memory_reserved = get_accelerator().memory_reserved
 torch_max_memory_reserved = get_accelerator().max_memory_reserved
@@ -1187,6 +1186,16 @@ def reload_adam_states(optimizer, device, non_blocking: bool = False):
             move_back_key(state, "exp_avg_sq")
 
 
+def is_transformers_cache(obj):
+    """Skip checks for the `transformers` cache class when performing AutoTP tensor comparisons."""
+    try:
+        from transformers.cache_utils import (DynamicCache, StaticCache, QuantizedCache)
+    except ImportError:
+        return False
+    
+    return isinstance(obj, (DynamicCache, StaticCache, QuantizedCache))
+
+
 def compare_tensors_in_structures(inputs1: Union[List, Dict], inputs2: Union[List, Dict]) -> bool:
     """
     Compare two lists or dictionaries for equality, including any tensors they may contain.
@@ -1200,14 +1209,12 @@ def compare_tensors_in_structures(inputs1: Union[List, Dict], inputs2: Union[Lis
     """
     if type(inputs1) != type(inputs2):  # Ensure types match
         return False
-    
-    ignore_types = (DynamicCache, StaticCache, QuantizedCache)
 
     if isinstance(inputs1, list) and isinstance(inputs2, list):
         if len(inputs1) != len(inputs2):
             return False
         for val1, val2 in zip(inputs1, inputs2):
-            if isinstance(val1, ignore_types) and isinstance(val2, ignore_types):
+            if is_transformers_cache(val1) and is_transformers_cache(val2):
                 continue
             if isinstance(val1, torch.Tensor) and isinstance(val2, torch.Tensor):
                 val1 = val1.to(torch.device(get_accelerator().current_device_name()))
