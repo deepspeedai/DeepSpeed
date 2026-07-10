@@ -482,14 +482,14 @@ class PartitionedParameterCoordinator:
             # wait for the computation to finish and launch as early as possible.
             empty_buffer = torch.empty(1, device=torch.device(get_accelerator().current_device_name()))
 
-        # A non-reentrant checkpoint recompute re-fires this forward hook inside backward;
-        # partitioning frozen params here shrinks the live tensor torch saved and trips its
-        # recompute metadata check. They are released by the ensuing backward pass. See #4332.
+        # A non-reentrant checkpoint recompute re-fires this forward hook inside backward
+        # (torch._C._current_graph_task_id() != -1). Partitioning a frozen param here shrinks the
+        # tensor torch saved for the recompute and trips its metadata check. See #4332.
         in_checkpoint_recompute = forward and torch._C._current_graph_task_id() != -1
 
         for param in iter_params(submodule, recurse=z3_leaf_module(submodule)):
             param.ds_active_sub_modules.discard(submodule.ds_id)
-            if in_checkpoint_recompute:
+            if in_checkpoint_recompute and not param.requires_grad:
                 continue
             if param.ds_id in params_to_release and not param.is_external_param:
                 self.__release_param(param, free_data)
