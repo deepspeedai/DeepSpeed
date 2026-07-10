@@ -109,3 +109,28 @@ class TestZenFlowDistributed(DistributedTest, BaseZenFlowTest):
         config_dict = self.get_config_dict(stage, offload_selective_optimizer, select_strategy, select_interval,
                                            update_interval, full_warm_up_rounds)
         self.run_training_distributed(config_dict)
+
+
+@pytest.mark.parametrize(
+    "cores,perc,expected_zf,expected_pt",
+    [
+        # Normal split: ceil(0.25 * 8) = 2 cores reserved for training.
+        ([0, 1, 2, 3, 4, 5, 6, 7], 0.25, [2, 3, 4, 5, 6, 7], [0, 1]),
+        # Rounds up: ceil(0.1 * 8) = 1.
+        ([0, 1, 2, 3, 4, 5, 6, 7], 0.1, [1, 2, 3, 4, 5, 6, 7], [0]),
+        # Two cores, half each.
+        ([10, 11], 0.5, [11], [10]),
+        # Reserve rounds to 0 -> both sides share the full set.
+        ([0, 1, 2, 3], 0.0, [0, 1, 2, 3], [0, 1, 2, 3]),
+        # Reserve rounds to every core -> both sides share the full set.
+        ([0, 1, 2, 3], 1.0, [0, 1, 2, 3], [0, 1, 2, 3]),
+    ])
+def test_split_affinity(cores, perc, expected_zf, expected_pt):
+    from deepspeed.runtime.zenflow.zenflow_utils import _split_affinity
+    zf, pt = _split_affinity(cores, perc)
+    assert zf == expected_zf
+    assert pt == expected_pt
+    # When the sides are actually isolated they must partition the cores exactly.
+    if zf != pt:
+        assert sorted(zf + pt) == sorted(cores)
+        assert not (set(zf) & set(pt))
