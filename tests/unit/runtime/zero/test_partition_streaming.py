@@ -8,7 +8,7 @@ import torch
 
 import deepspeed
 from deepspeed.runtime.zero import partition_parameters as pp
-from deepspeed.runtime.zero.partition_parameters import _partition_chunk_overlap
+from deepspeed.runtime.zero.partition_parameters import _partition_chunk_overlap, _stream_construction_device
 
 from unit.common import DistributedTest
 
@@ -39,6 +39,25 @@ def _stream_one_partition(full_flat, rank, num_partitions, chunk_numel):
     return out
 
 
+@pytest.mark.parametrize(
+    "target,size_args,chunk,expected",
+    [
+        ("cuda", (5000, 5000), 1_000_000, "cpu"),  # large -> host
+        ("cuda", (100, 100), 1_000_000, "cuda"),  # small -> accelerator
+        ("cuda", ((5000, 5000), ), 1_000_000, "cpu"),  # size passed as a tuple
+        ("cuda", (5000, 5000), 0, "cuda"),  # streaming disabled -> accelerator
+        ("cpu", (5000, 5000), 1_000_000, "cpu"),  # cpu target unchanged
+        ("cuda", ("not_a_shape", ), 1_000_000, "cuda"),  # non-shape args -> fall back
+    ])
+def test_stream_construction_device(target, size_args, chunk, expected):
+    device = _stream_construction_device(torch.device(target), size_args, chunk)
+    assert torch.device(device).type == expected
+
+
+def test_stream_construction_device_none_target():
+    assert _stream_construction_device(None, (5000, 5000), 1_000_000) is None
+
+
 @pytest.mark.parametrize("numel,num_partitions,chunk_numel", [
     (64, 4, 8),
     (64, 4, 7),
@@ -66,6 +85,19 @@ def test_streamed_partitions_match_direct_slicing(numel, num_partitions, chunk_n
         assert torch.all(padding == -1.0)
 
 
+class _DeterministicLinear(torch.nn.Module):
+    """A linear layer with device-independent weights. Random init draws from a
+    device-specific RNG, so a CPU-constructed (streamed) weight and a GPU-constructed
+    (reference) weight would differ; fixed values make the two directly comparable."""
+
+    def __init__(self, n):
+        super().__init__()
+        self.weight = torch.nn.Parameter(torch.empty(n, n))
+        with torch.no_grad():
+            values = torch.arange(self.weight.numel()) % 97
+            self.weight.view(-1).copy_(values.to(self.weight.dtype))
+
+
 class TestStreamingPartitionMatchesStandard(DistributedTest):
     world_size = 2
 
@@ -79,9 +111,8 @@ class TestStreamingPartitionMatchesStandard(DistributedTest):
                     "stage3_partition_stream_chunk_size": chunk_size,
                 },
             }
-            torch.manual_seed(1234)
             with deepspeed.zero.Init(config_dict_or_path=config):
-                linear = torch.nn.Linear(64, 64, bias=False)
+                linear = _DeterministicLinear(64)
             return linear
 
         # Reference: the standard broadcast-then-partition path (streaming disabled).
