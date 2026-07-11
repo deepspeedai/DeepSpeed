@@ -38,6 +38,10 @@ jobs:
           import urllib.request
 
 
+          # GitHub App ID for https://github.com/apps/dco.
+          PROBOT_DCO_APP_ID = 1861
+
+
           def load_event(path):
               with open(path, encoding="utf-8") as f:
                   return json.load(f)
@@ -213,7 +217,7 @@ jobs:
 
               for check_run in payload.get("check_runs", []):
                   app = check_run.get("app") or {}
-                  is_probot_dco = app.get("slug") == "dco" or app.get("id") == 1861
+                  is_probot_dco = app.get("slug") == "dco" or app.get("id") == PROBOT_DCO_APP_ID
                   if (
                       check_run.get("name") == "DCO"
                       and is_probot_dco
