@@ -1432,3 +1432,95 @@ class TestZeroUserBackwardWithCheckpointing(DistributedTest):
             model_engine.step()
 
         model_engine.destroy()
+
+
+class FrozenParamCheckpointedModel(torch.nn.Module):
+    """Checkpointed model with a frozen parameter inside the checkpointed block.
+
+    Mirrors the common PEFT / quantized setup where the base is frozen and only a small
+    adapter trains. Under ZeRO-3 the frozen parameter is partitioned, and with non-reentrant
+    checkpointing it used to be re-partitioned to shape [0] during the recompute, tripping
+    torch's checkpoint metadata validation. See #4332.
+    """
+
+    def __init__(self, hidden_dim, use_reentrant=False):
+        super().__init__()
+        self.use_reentrant = use_reentrant
+        self.norm = torch.nn.LayerNorm(hidden_dim)
+        self.linear1 = torch.nn.Linear(hidden_dim, hidden_dim)
+        self.linear2 = torch.nn.Linear(hidden_dim, hidden_dim)
+        # Freeze the norm: this is the parameter that tripped the recompute metadata check.
+        self.norm.weight.requires_grad_(False)
+        self.norm.bias.requires_grad_(False)
+
+    def _checkpointed_block(self, x):
+        x = self.norm(x)
+        x = self.linear1(x)
+        x = torch.nn.functional.relu(x)
+        return x
+
+    def forward(self, x):
+        if self.training:
+            from torch.utils.checkpoint import checkpoint
+            x = checkpoint(self._checkpointed_block, x, use_reentrant=self.use_reentrant)
+        else:
+            x = self._checkpointed_block(x)
+        x = self.linear2(x)
+        return x
+
+
+@pytest.mark.parametrize("zero_stage", [1, 2, 3])
+@pytest.mark.parametrize("use_reentrant", [True, False])
+class TestZeroUserBackwardFrozenParamCheckpointing(DistributedTest):
+    """Regression test for ZeRO + gradient checkpointing with a frozen parameter.
+
+    A frozen (non-grad) parameter inside a checkpointed block used to be partitioned to
+    shape [0] during the non-reentrant recompute under ZeRO-3, tripping torch's checkpoint
+    metadata validation with a CheckpointError. This verifies training runs and matches a
+    PyTorch DDP reference. See #4332.
+    """
+    world_size = 2
+
+    def test_checkpointed_frozen_param(self, zero_stage, use_reentrant):
+        hidden_dim = 8
+        batch_size = 2
+
+        device, rank, dtype = initialize_distributed()
+
+        # DDP reference: no parameter partitioning, so no checkpoint metadata issue.
+        torch.manual_seed(42)
+        model_ddp = FrozenParamCheckpointedModel(hidden_dim=hidden_dim, use_reentrant=use_reentrant)
+        model_ddp = model_ddp.to(device=device, dtype=dtype)
+        model_ddp = DDP(model_ddp, device_ids=[rank], output_device=rank)
+
+        # DeepSpeed engine with ZeRO partitioning. Only trainable params go to the optimizer;
+        # the frozen norm is still partitioned by ZeRO-3, which is what triggers the failure.
+        torch.manual_seed(42)
+        model_ds = FrozenParamCheckpointedModel(hidden_dim=hidden_dim, use_reentrant=use_reentrant)
+        config = get_config_dict(zero_stage)
+        trainable_params = [p for p in model_ds.parameters() if p.requires_grad]
+        model_engine, _, _, _ = deepspeed.initialize(config=config, model=model_ds, model_parameters=trainable_params)
+
+        torch.manual_seed(123)
+        x_ddp = torch.randn(batch_size, hidden_dim, device=device, dtype=dtype, requires_grad=True)
+        output_ddp = model_ddp(x_ddp)
+        output_ddp.backward(torch.ones_like(output_ddp))
+        get_accelerator().synchronize()
+        dist.barrier()
+        ddp_grads = collect_ddp_gradients(model_ddp)
+
+        # Before the fix this backward raised CheckpointError for ZeRO-3 + use_reentrant=False.
+        torch.manual_seed(123)
+        x_ds = torch.randn(batch_size, hidden_dim, device=device, dtype=dtype, requires_grad=True)
+        output_ds = model_engine(x_ds)
+        output_ds.backward(torch.ones_like(output_ds))
+        get_accelerator().synchronize()
+        dist.barrier()
+        ds_grads = collect_gradients_safe(model_engine)
+
+        assert len(ds_grads) > 0, \
+            f"No gradients with frozen param, use_reentrant={use_reentrant}, stage {zero_stage}"
+        compare_gradients(ddp_grads, ds_grads, f"frozen-param checkpointing use_reentrant={use_reentrant}")
+
+        model_engine.step()
+        model_engine.destroy()
