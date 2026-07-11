@@ -16,6 +16,7 @@ from deepspeed.runtime.lr_schedules import ONE_CYCLE, CYCLE_MIN_LR, CYCLE_MAX_LR
 from deepspeed.runtime.lr_schedules import CYCLE_MIN_MOM, CYCLE_MAX_MOM, DECAY_MOM_RATE
 from deepspeed.runtime.lr_schedules import WARMUP_DECAY_LR, TOTAL_NUM_STEPS
 from deepspeed.runtime.lr_schedules import WARMUP_COSINE_LR, WARMUP_MIN_RATIO, COS_MIN_RATIO, WarmupCosineLR
+from deepspeed.runtime.lr_schedules import WarmupLR, WarmupDecayLR
 
 
 def _verify_continuous_decrease(values):
@@ -543,3 +544,17 @@ def test_warmup_cosine_lr_initializes_all_param_groups():
     assert scheduler.get_lr() == pytest.approx(expected_lrs)
     assert scheduler.get_last_lr() == pytest.approx(expected_lrs)
     assert [group["lr"] for group in optimizer.param_groups] == pytest.approx(expected_lrs)
+
+
+@pytest.mark.parametrize("scheduler_cls", [WarmupLR, WarmupDecayLR, WarmupCosineLR])
+@pytest.mark.parametrize("bad_warmup_num_steps", [None, -5])
+def test_warmup_schedulers_reject_invalid_warmup_num_steps(scheduler_cls, bad_warmup_num_steps):
+    param = torch.nn.Parameter(torch.zeros(1))
+    optimizer = torch.optim.Adam([param], lr=0.001)
+
+    kwargs = {"optimizer": optimizer, "warmup_num_steps": bad_warmup_num_steps}
+    if scheduler_cls in (WarmupDecayLR, WarmupCosineLR):
+        kwargs["total_num_steps"] = 100
+
+    with pytest.raises(ValueError):
+        scheduler_cls(**kwargs)

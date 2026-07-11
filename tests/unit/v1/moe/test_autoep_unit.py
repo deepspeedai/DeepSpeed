@@ -4,6 +4,7 @@
 # DeepSpeed Team
 """Compact critical-path tests for AutoEP."""
 
+import ast
 import inspect
 from collections import OrderedDict
 from types import SimpleNamespace
@@ -1109,3 +1110,66 @@ class TestModelDetectionAndReplacement:
         assert replaced.router.e_score_correction_bias is not None
         torch.testing.assert_close(replaced.router.e_score_correction_bias, source_bias)
         assert ["router.e_score_correction_bias"] in [call["names"] for call in FakeGatheredParameters.calls]
+
+
+def _eager_pep604_lines(module):
+    """Line numbers where a module evaluates PEP 604 unions at import time."""
+    tree = ast.parse(inspect.getsource(module))
+    defers_annotations = any(
+        isinstance(node, ast.ImportFrom) and node.module == "__future__" and any(alias.name == "annotations"
+                                                                                 for alias in node.names)
+        for node in tree.body)
+    if defers_annotations:
+        return []
+    offending_lines = []
+    for node in ast.walk(tree):
+        annotations = []
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            arguments = node.args
+            for arg in arguments.args + arguments.posonlyargs + arguments.kwonlyargs + [
+                    arguments.vararg, arguments.kwarg
+            ]:
+                if arg is not None and arg.annotation is not None:
+                    annotations.append(arg.annotation)
+            if node.returns is not None:
+                annotations.append(node.returns)
+        elif isinstance(node, ast.AnnAssign):
+            annotations.append(node.annotation)
+        for annotation in annotations:
+            for sub_node in ast.walk(annotation):
+                if isinstance(sub_node, ast.BinOp) and isinstance(sub_node.op, ast.BitOr):
+                    offending_lines.append(sub_node.lineno)
+    return sorted(set(offending_lines))
+
+
+class TestPy39AnnotationSafety:
+
+    def test_autoep_import_chain_defers_pep604_annotations(self):
+        """PEP 604 unions (``int | None``) in def signatures or class-level
+        annotations are evaluated at import time, so on Python 3.9 they raise
+        TypeError while the module is imported; that escapes the engine's
+        ``except ImportError`` guards around AutoEP and breaks every
+        ``deepspeed.initialize()`` (issue #8102). Every module in the AutoEP
+        import chain must defer annotation evaluation with
+        ``from __future__ import annotations``."""
+        import deepspeed.moe.ep_count as ep_count
+        import deepspeed.moe.ep_experts as ep_experts
+        import deepspeed.moe.ep_kernels as ep_kernels
+        import deepspeed.moe.ep_router as ep_router
+        import deepspeed.module_inject.auto_ep as auto_ep
+        import deepspeed.module_inject.auto_ep_config as auto_ep_config
+        import deepspeed.module_inject.auto_ep_layer as auto_ep_layer
+        import deepspeed.module_inject.auto_ep_preset_adapters as preset_adapters
+        import deepspeed.module_inject.auto_ep_presets.base as presets_base
+        import deepspeed.module_inject.auto_ep_presets.registry as presets_registry
+
+        autoep_import_chain = [
+            ep_count, ep_experts, ep_kernels, ep_router, ep_repack, auto_ep, auto_ep_config, auto_ep_layer,
+            preset_adapters, presets_base, presets_registry
+        ]
+        for module in autoep_import_chain:
+            offending_lines = _eager_pep604_lines(module)
+            assert not offending_lines, (
+                f"{module.__name__} evaluates PEP 604 unions at import time (lines {offending_lines}); "
+                f"on Python 3.9 this raises TypeError during import and escapes the engine's "
+                f"except-ImportError guards (issue #8102). Add 'from __future__ import annotations'.")
