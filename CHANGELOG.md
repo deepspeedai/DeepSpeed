@@ -1,3 +1,6 @@
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<!-- DeepSpeed Team -->
+
 # Changelog
 
 All notable changes to this project will be documented in this file.
@@ -32,7 +35,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Simplified module_inject.transpose ([#8028](https://github.com/deepspeedai/DeepSpeed/pull/8028))
 - Removed AutoSP assertion against Transformers version ([#8044](https://github.com/deepspeedai/DeepSpeed/pull/8044))
 
-## [0.19.1] - 2026-05-27
+## [0.19.1] - 2026-05-30
 
 ### Added
 - SDMA allgather via mori for ZeRO-3 ([#7999](https://github.com/deepspeedai/DeepSpeed/pull/7999))
