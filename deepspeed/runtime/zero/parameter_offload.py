@@ -61,11 +61,16 @@ class ZeROOrderedDict(OrderedDict):
         if param is None:
             return param
 
-        # TODO: only weaken this check during compilation
         if hasattr(param, "ds_status") and param.ds_status == ZeroParamStatus.NOT_AVAILABLE:
-            if self._parent_module._parameters._in_forward:
-                register_external_parameter(FWD_MODULE_STACK[-1], param)
-                param.all_gather()
+            if self._parent_module._parameters._in_forward and not torch.compiler.is_compiling():
+                from deepspeed.compile.z3_eager_fallback import get_active_z3_eager_fallback
+                fallback = get_active_z3_eager_fallback()
+                if fallback is None:
+                    register_external_parameter(FWD_MODULE_STACK[-1], param)
+                    param.all_gather()
+                else:
+                    param.all_gather()
+                    fallback.record_gathered_param(param)
                 print_rank_0(f'Registering external parameter from getter {key} ds_id = {param.ds_id}', force=False)
 
         return param

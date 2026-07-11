@@ -8,7 +8,7 @@ from typing import Any, Tuple, Dict
 import statistics
 
 import torch
-from torch.fx import GraphModule, Interpreter
+from torch.fx import Graph, GraphModule, Interpreter
 from torch.fx.node import map_aggregate
 
 try:
@@ -52,6 +52,62 @@ def _args_to_key(v):
 
 def _node_size(out):
     return sum([v.element_size() * v.numel() for v in tree_leaves(out) if torch.is_tensor(v)])
+
+
+_PROFILE_META_DEFAULTS = {
+    "device_time": 0.0,
+    "wall_time": 0.0,
+    "tensor_size": 0,
+    "alloc_mem": 0,
+    "max_mem": 0,
+}
+_PROFILE_INCOMPLETE_ATTR = "_deepcompile_profile_incomplete"
+_PROFILE_INCOMPLETE_META_KEY = "deepcompile_profile_incomplete"
+
+
+def _mark_profile_incomplete(graph: Graph):
+    setattr(graph, _PROFILE_INCOMPLETE_ATTR, True)
+    for node in graph.nodes:
+        node.meta[_PROFILE_INCOMPLETE_META_KEY] = True
+
+
+def is_profile_incomplete(graph: Graph):
+    if graph is None:
+        return False
+    if getattr(graph, _PROFILE_INCOMPLETE_ATTR, False):
+        return True
+    return any(node.meta.get(_PROFILE_INCOMPLETE_META_KEY, False) for node in graph.nodes)
+
+
+def _has_missing_profile_metadata(graph: Graph):
+    return any(key not in node.meta for node in graph.nodes for key in _PROFILE_META_DEFAULTS)
+
+
+def _backfill_missing_profile_metadata(graph: Graph, profile_complete: bool = True):
+    if not profile_complete or _has_missing_profile_metadata(graph):
+        _mark_profile_incomplete(graph)
+    for node in graph.nodes:
+        for key, default in _PROFILE_META_DEFAULTS.items():
+            node.meta.setdefault(key, default)
+
+
+def _run_warmup_for_profile(call_fn, warmup):
+    for _ in range(warmup):
+        warmup_out = call_fn()
+        del warmup_out
+
+
+def _run_repeatedly_for_profile(call_fn, iteration, start_events, end_events):
+    out = None
+    for i in range(iteration):
+        start_events[i].record()
+        out = call_fn()
+        end_events[i].record()
+        if i + 1 < iteration:
+            del out
+            out = None
+
+    return out
 
 
 def _get_mem_usage_out_of_torch():
@@ -100,6 +156,7 @@ class ProfilingInterpreter(Interpreter):
         returns: The output of the graph. Tensor in the output is real tensors.
         """
         return_val = None
+        profile_complete = True
         try:
             assert _all_real_if_tensor(args), "Inputs must be real tensors"
             self.nz3.enable_profiling(True)
@@ -109,11 +166,18 @@ class ProfilingInterpreter(Interpreter):
                     self.mem_usage_out_of_torch = _get_mem_usage_out_of_torch()
                     return_val = super().run(*args)
         except Exception as e:
+            profile_complete = False
             msg = e.msg if "msg" in dir(e) else str(e)
-            print(f"Profiling error {msg}")
+            if not self.distributed or dist.get_rank() == 0:
+                print(f"DeepCompile profiling failed; using default profile metadata for incomplete nodes: {msg}")
         finally:
-            self.nz3.clear_all_gathered_params()
-            self.nz3.enable_profiling(False)
+            try:
+                self.nz3.clear_all_gathered_params()
+            finally:
+                try:
+                    self.nz3.enable_profiling(False)
+                finally:
+                    _backfill_missing_profile_metadata(self.graph, profile_complete=profile_complete)
         return return_val
 
     def run_node(self, n: torch.fx.Node) -> Any:
@@ -173,19 +237,18 @@ class ProfilingInterpreter(Interpreter):
         alloc_mem_start = get_accelerator().memory_allocated()
         max_mem_start = get_accelerator().max_memory_allocated()
 
-        if not run_only_once:
-            for i in range(self.warmup):
-                out = getattr(self, n.op)(n.target, args, kwargs)
+        def run_target():
+            return getattr(self, n.op)(n.target, args, kwargs)
+
+        warmup = 0 if run_only_once else self.warmup
+        _run_warmup_for_profile(run_target, warmup)
 
         if is_comm_op(n):
             assert self.distributed, f"Distributed environment is not initialized but comm operator {n.name} {n.target} is used."
             dist.barrier()
 
         start = time.time()
-        for i in range(iteration):
-            start_events[i].record()
-            out = getattr(self, n.op)(n.target, args, kwargs)
-            end_events[i].record()
+        out = _run_repeatedly_for_profile(run_target, iteration, start_events, end_events)
         accelerator.synchronize()
         walltime_sum = time.time() - start
 
@@ -250,6 +313,7 @@ class MemoryProfilingInterpreter(Interpreter):
         self.device = torch.device(get_accelerator().current_device())
         self.mem_record = []
         self.last_alloc = get_accelerator().memory_allocated()
+        self.profile_complete = True
 
         self.node_counter = 0
         self.node_num = len(gm.graph.nodes)
@@ -257,6 +321,7 @@ class MemoryProfilingInterpreter(Interpreter):
 
     def run(self, *args) -> Any:
         return_val = None
+        self.profile_complete = True
         try:
             assert _all_real_if_tensor(args), "Inputs must be real tensors"
             self.nz3.enable_profiling(True)
@@ -266,9 +331,14 @@ class MemoryProfilingInterpreter(Interpreter):
                 with get_accelerator().random().fork_rng(devices=[self.device]):
                     return_val = super().run(*args)
         except Exception as e:
+            self.profile_complete = False
+            self.mem_record.clear()
             print(f"MemoryProfiling error {e}")
         finally:
-            self.nz3.enable_profiling(False)
+            try:
+                self.nz3.clear_all_gathered_params()
+            finally:
+                self.nz3.enable_profiling(False)
 
         return return_val
 

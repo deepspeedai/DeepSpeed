@@ -47,7 +47,7 @@ jobs:
   unit-tests:
     name: nv-pre-compile-ops / precompile ops
     needs: check-paths
-    if: always() && (needs.check-paths.result != 'success' || needs.check-paths.outputs.should_run == 'true')
+    if: ${{ !cancelled() && (needs.check-paths.result != 'success' || needs.check-paths.outputs.should_run == 'true') }}
     runs-on: ubuntu-24.04
     container:
       image: nvidia/cuda:12.6.3-devel-ubuntu22.04

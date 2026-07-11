@@ -74,7 +74,7 @@ jobs:
   unit-tests:
     name: cpu-torch-latest / unit tests
     needs: check-paths
-    if: always() && (needs.check-paths.result != 'success' || needs.check-paths.outputs.should_run == 'true')
+    if: ${{ !cancelled() && (needs.check-paths.result != 'success' || needs.check-paths.outputs.should_run == 'true') }}
     runs-on: ubuntu-24.04
 
     env:
