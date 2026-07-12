@@ -1233,9 +1233,11 @@ class Init(InsertPostInitMethodToModuleSubClasses):
             return self._all_gather(param_list, async_op=async_op, hierarchy=hierarchy)
 
         def _all_gather_dtype(params, world_size, rank_in_group, ds_process_group, allgather_dtype):
-            # make sure all params have the same dtype
-            dtype = params[0].dtype  # we assume len(params) > 0
-            assert all(p.dtype == dtype for p in params), "all params must have the same dtype"
+            comm_dtypes = [get_allgather_dtype(p, p.ds_tensor) for p in params]
+            assert all(
+                dtype == allgather_dtype
+                for dtype in comm_dtypes), ("all params in a coalesced bucket must have the same communication dtype; "
+                                            f"expected {allgather_dtype}, got {comm_dtypes}")
 
             partition_sz = sum(p.ds_tensor.ds_numel for p in params)
 
@@ -1959,7 +1961,7 @@ class Init(InsertPostInitMethodToModuleSubClasses):
                 param = param_list[len(allgather_quantize_scale)]
                 tensor_size = psize * self._partition_world_size(param)
                 flat_tensor = torch.empty(tensor_size,
-                                          dtype=param_list[0].ds_tensor.ds_quant_scale.dtype,
+                                          dtype=param.ds_tensor.ds_quant_scale.dtype,
                                           device=self.local_device).view(-1)
                 flat_tensor.requires_grad = False
                 allgather_quantize_scale.append(flat_tensor)

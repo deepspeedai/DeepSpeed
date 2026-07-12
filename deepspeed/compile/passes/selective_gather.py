@@ -54,7 +54,7 @@ def _compute_persistence_budget(all_graph_mem_records: List[List[Tuple[str, int,
             "profiled_list_count": 0,
         }
 
-    # Persistent parameters add to live allocations that remain resident past an op boundary.
+    # Persistent parameters stay live during transient allocations inside an op.
     peak_resident_alloc = max(record[1] for mem_records in non_empty_records for record in mem_records)
     transient_peak = max(record[3] for mem_records in non_empty_records for record in mem_records)
 
@@ -62,13 +62,14 @@ def _compute_persistence_budget(all_graph_mem_records: List[List[Tuple[str, int,
         "usable_mem": usable_mem,
         "peak_resident_alloc": peak_resident_alloc,
         "transient_peak": transient_peak,
-        "available_mem": max(0, usable_mem - peak_resident_alloc),
+        "available_mem": max(0, usable_mem - transient_peak),
         "profiled_list_count": len(non_empty_records),
     }
 
 
 def _profile_result_incomplete(prof) -> bool:
-    return is_profile_incomplete(prof.fwd_graph) or is_profile_incomplete(prof.bwd_graph)
+    return (is_profile_incomplete(prof.fwd_graph) or is_profile_incomplete(prof.bwd_graph) or not prof.fwd_mem_complete
+            or (prof.needs_backward and not prof.bwd_mem_complete))
 
 
 def selective_gather(gm: GraphModule, graph_id: int, graph_order: List[Tuple[int, bool]], profiling_results,
@@ -171,7 +172,8 @@ def selective_gather(gm: GraphModule, graph_id: int, graph_order: List[Tuple[int
     current_available_mem = vals_to_bcast[1].item()
 
     budget = _compute_persistence_budget(all_graph_mem_records, total_mem, MEM_MARGIN)
-    available_mem = int(current_available_mem * (1 - MEM_MARGIN))
+    profiled_available_mem = budget["available_mem"]
+    available_mem = profiled_available_mem
 
     ds_id_to_param = {}
     for g_id, g_pm in param_manager.items():
@@ -185,7 +187,7 @@ def selective_gather(gm: GraphModule, graph_id: int, graph_order: List[Tuple[int
         f"selective_gather target_graph_id={target_graph_id} profiled_mem_lists={budget['profiled_list_count']} "
         f"total_mem={total_mem} usable_mem={budget['usable_mem']} peak_resident_alloc={budget['peak_resident_alloc']} "
         f"transient_peak={budget['transient_peak']} current_available_mem={current_available_mem} "
-        f"usable_available_mem={available_mem} "
+        f"profiled_transient_available_mem={profiled_available_mem} "
         f"persistent_count={len(persistent_ds_ids)} persistent_bytes={persistent_bytes} "
         f"candidate_count={len(ds_ids)} candidate_bytes={candidate_bytes}")
 
@@ -198,7 +200,7 @@ def selective_gather(gm: GraphModule, graph_id: int, graph_order: List[Tuple[int
         return gm
 
     if available_mem == 0:
-        print_rank_0("selective_gather no currently available memory for new persistent params")
+        print_rank_0("selective_gather no profiled headroom for new persistent params")
         return gm
 
     persistent_mem = 0
