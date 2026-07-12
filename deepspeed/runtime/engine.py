@@ -4726,7 +4726,7 @@ class DeepSpeedEngine(Module):
             checkpoint_name = name_function(save_dir, tag)
             path = os.path.dirname(checkpoint_name)
             self.checkpoint_engine.makedirs(path, exist_ok=True)
-        except Exception:
+        except OSError:
             logger.error(f"Failed saving model checkpoint to {save_dir} with tag {tag}")
             return False
 
@@ -5201,7 +5201,7 @@ class DeepSpeedEngine(Module):
         # create new dict to avoid modifying original dict
         try:
             self.module.compile(**{**compile_kwargs, 'backend': backend})
-        except Exception:
+        except BaseException:
             if is_deepspeed_compile_backend:
                 # Restore default hooks if compilation fails before completing.
                 self._set_deepcompile_active(False)

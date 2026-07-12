@@ -323,7 +323,7 @@ def _retarget_transformers_output_recorders_for_modules(
 ) -> int:
     try:
         from transformers.utils import output_capturing
-    except Exception:
+    except ImportError:
         return 0
 
     registry = getattr(output_capturing, "_CAN_RECORD_REGISTRY", None)
