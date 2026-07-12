@@ -73,21 +73,13 @@ Available `DS_BUILD` options include:
 * `DS_BUILD_TRANSFORMER_INFERENCE` builds the transformer-inference op.
 * `DS_BUILD_STOCHASTIC_TRANSFORMER` builds the stochastic transformer op.
 
-To speed up the build-all process, you can parallelize the compilation process with:
-
-```bash
-DS_BUILD_OPS=1 pip install deepspeed --global-option="build_ext" --global-option="-j8"
-```
-
-This should complete the full build 2-3 times faster. You can adjust `-j` to specify how many cpu-cores are to be used during the build. In the example it is set to 8 cores.
-
 You can also build a binary wheel and install it on multiple machines that have the same type of GPUs and the same software environment (CUDA toolkit, PyTorch, Python, etc.)
 
 ```bash
-DS_BUILD_OPS=1 python -m build --wheel --no-isolation --config-setting="--build-option=build_ext" --config-setting="--build-option=-j8"
+DS_BUILD_OPS=1 python -m build --wheel --no-isolation
 ```
 
-This will create a pypi binary wheel under `dist`, e.g., ``dist/deepspeed-0.3.13+8cd046f-cp38-cp38-linux_x86_64.whl`` and then you can install it directly on multiple machines, in our example:
+This will create a PyPI binary wheel under `dist`, e.g., `dist/deepspeed-0.3.13+8cd046f-cp38-cp38-linux_x86_64.whl`, and then you can install it directly on multiple machines, in our example:
 
 ```bash
 pip install dist/deepspeed-0.3.13+8cd046f-cp38-cp38-linux_x86_64.whl

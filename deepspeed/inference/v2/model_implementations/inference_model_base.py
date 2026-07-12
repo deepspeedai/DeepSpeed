@@ -233,7 +233,7 @@ class DSInferenceModelBase(torch.nn.Module, ABC):
 
     def maybe_free_kv(self, sequence: DSSequenceDescriptor) -> None:
         """
-        After completing a forward pass, determine whether or not the there are any KV blocks
+        After completing a forward pass, determine whether or not there are any KV blocks
         that maybe freed since they are no longer in use.
 
         Consider the following example:

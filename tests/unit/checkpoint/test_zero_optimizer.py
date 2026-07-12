@@ -9,6 +9,7 @@ from deepspeed.ops.op_builder import CPUAdamBuilder
 from deepspeed.checkpoint.utils import clone_tensors_for_torch_save, get_model_ckpt_name_for_rank
 from deepspeed.accelerator import get_accelerator
 from deepspeed.runtime.zero import ZeroParamStatus
+from deepspeed.runtime.zero.config import DeepSpeedZeroConfig
 from deepspeed.utils.torch import required_torch_version
 
 from unit.common import DistributedTest, DistributedFixture
@@ -649,6 +650,19 @@ class TestSaveTensorClone(DistributedTest):
 
         compare_state_dicts(torch.load(ref_ckpt_file, weights_only=False),
                             torch.load(clone_ckpt_file, weights_only=False))
+
+
+def test_elastic_checkpoint_is_deprecated_for_zero3(monkeypatch):
+    warning_messages = []
+
+    def mock_logger_warning(message, *args, **kwargs):
+        warning_messages.append(message)
+
+    monkeypatch.setattr("deepspeed.utils.logger.warning", mock_logger_warning)
+
+    DeepSpeedZeroConfig(stage=3, elastic_checkpoint=True)
+
+    assert any("elastic checkpointing is deprecated" in str(message).lower() for message in warning_messages)
 
 
 class TestZeRONonDistributed(DistributedTest):

@@ -291,7 +291,7 @@ class VariableBatchSizeLR(LRScheduler):
 
         self.base_lr_scheduler.step(epoch)  # set unscaled lr, _step_count, last_epoch, _last_lr for new epoch
 
-        # scale the learning rate for the the next iteration for each parameter group.
+        # scale the learning rate for the next iteration for each parameter group.
         self.last_epoch = self.last_epoch + 1 if epoch is None else epoch
         # batch sizes are precomputed and stored in batch_sizes se we loop around to get the next one
         batch_size = self.batch_sizes[self.last_epoch % len(self.batch_sizes)]

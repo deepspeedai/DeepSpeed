@@ -335,7 +335,12 @@ class FlopsProfiler(object):
         line_fmt = '{:<70}  {:<8}'
         if self.ds_engine:
             print(line_fmt.format('world size: ', self.ds_engine.world_size))
-            print(line_fmt.format('data parallel size: ', self.ds_engine.dp_world_size))
+            # With sequence parallelism (Ulysses) the data-parallel replication is folded into the
+            # sequence-data-parallel group, so dp_world_size is None; report that group's size instead.
+            dp_world_size = self.ds_engine.dp_world_size
+            if dp_world_size is None:
+                dp_world_size = self.ds_engine.seq_dp_world_size
+            print(line_fmt.format('data parallel size: ', dp_world_size))
             print(line_fmt.format('model parallel size: ', self.ds_engine.mp_world_size))
             print(line_fmt.format('batch size per GPU: ', self.ds_engine.train_micro_batch_size_per_gpu()))
             if self.ds_engine.has_moe_layers:
