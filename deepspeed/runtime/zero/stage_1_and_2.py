@@ -2306,6 +2306,13 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             clip = torch.clamp(clip, min=1.0)
             combined_scale = clip * self.loss_scale
 
+        # Only convert to a Python float on the CPU-offload path.  On GPU ZeRO,
+        # total_norm / combined_scale may live on the accelerator; an unconditional
+        # float() would force a device sync every step.  The allocator concern in
+        # #7693 is CPU-specific, so keep the GPU path on-device. See #7693 / #8132.
+        if self.cpu_offload:
+            combined_scale = float(combined_scale)
+
         for grad in grad_groups_flat:
             if isinstance(grad, list):
                 sub_partitions = grad

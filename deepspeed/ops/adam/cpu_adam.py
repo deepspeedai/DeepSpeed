@@ -10,6 +10,26 @@ from deepspeed.utils.logging import should_log_le
 from deepspeed.ops.op_builder import CPUAdamBuilder
 
 
+def _malloc_trim():
+    """Release freed CPU memory back to the OS on Linux.
+
+    PyTorch's CPU allocator caches freed memory blocks by size rather than
+    returning them to the OS.  After the first optimizer step several large
+    temporary tensors (contiguous copies, gradient scale buffers, etc.) have
+    been created and freed, but their memory remains pinned in the allocator
+    cache and is not reused by subsequent differently-sized allocations.
+
+    malloc_trim(0) asks glibc to release freed arena memory back to the OS.
+    This is a best-effort RSS mitigation for CPU-offload workloads, not a
+    correctness fix.  This is a no-op on non-Linux platforms.
+    """
+    try:
+        import ctypes
+        ctypes.CDLL("libc.so.6").malloc_trim(0)
+    except (OSError, AttributeError):
+        pass
+
+
 class DeepSpeedCPUAdam(torch.optim.Optimizer):
     optimizer_id = 0
 
@@ -160,6 +180,18 @@ class DeepSpeedCPUAdam(torch.optim.Optimizer):
                 self.ds_opt_adam.adam_update(self.opt_id, state['step'], group['lr'], beta1, beta2, group['eps'],
                                              group['weight_decay'], group['bias_correction'], p.data, p.grad.data,
                                              state['exp_avg'], state['exp_avg_sq'])
+
+            # ZeRO-2 CPU offload calls step() once per param group.  Trim after
+            # each group's first step so later groups' lazy state init is also
+            # released. See #7693 / Codex review on #8132.
+            trimmed = getattr(self, '_trimmed_groups', None)
+            if trimmed is None:
+                trimmed = set()
+                self._trimmed_groups = trimmed
+            if group_id not in trimmed:
+                trimmed.add(group_id)
+                _malloc_trim()
+
         return loss
 
     @torch.no_grad()
@@ -197,6 +229,16 @@ class DeepSpeedCPUAdam(torch.optim.Optimizer):
                 self.ds_opt_adam.adam_update(self.opt_id, state['step'], group['lr'], beta1, beta2, group['eps'],
                                              group['weight_decay'], group['bias_correction'], p.data, p.grad.data,
                                              state['exp_avg'], state['exp_avg_sq'])
+
+        # Trim after this subgroup's first step (ZeRO-3 subgroup path).
+        trimmed = getattr(self, '_trimmed_groups', None)
+        if trimmed is None:
+            trimmed = set()
+            self._trimmed_groups = trimmed
+        if subgroup_id not in trimmed:
+            trimmed.add(subgroup_id)
+            _malloc_trim()
+
         return loss
 
     @torch.no_grad()
