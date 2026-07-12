@@ -4,6 +4,8 @@
 
 # DeepSpeed Team
 
+import math
+
 import torch
 try:
     # is op_builder from deepspeed or a 3p version? this should only succeed if it's deepspeed
@@ -54,6 +56,15 @@ class FPQuantizer:
 
     @classmethod
     def dequantize(cls, fp_out, input_q, scale, group_size, q_mantisa_bits, q_exponent_bits):
+        # Reject zero / non-finite scales before inverse-scale computation to avoid
+        # silently propagating inf/nan into dequantized outputs (#7838).
+        if torch.is_tensor(scale):
+            if (not torch.isfinite(scale).all()) or (scale == 0).any():
+                raise ValueError("FPQuantizer.dequantize requires finite non-zero scale values")
+        else:
+            scale_f = float(scale)
+            if scale_f == 0.0 or not math.isfinite(scale_f):
+                raise ValueError("FPQuantizer.dequantize requires a finite non-zero scale")
         orig_shape = fp_out.shape
         orig_dtype = fp_out.dtype
         dequant_out = torch.ops.hpu.cast_from_fp8(input_q, (1.0 / scale), orig_dtype).view(orig_shape)

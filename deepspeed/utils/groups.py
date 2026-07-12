@@ -63,6 +63,7 @@ def initialize(ep_size=1, mpu=None):
 
 def _ensure_divisibility(numerator, denominator):
     """Ensure that numerator is divisible by the denominator."""
+    assert denominator != 0, f'denominator must be non-zero (got numerator={numerator}, denominator={denominator})'
     assert numerator % denominator == 0, '{} is not divisible by {}'.format(numerator, denominator)
 
 
