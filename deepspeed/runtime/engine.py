@@ -2961,7 +2961,6 @@ class DeepSpeedEngine(Module):
         # Apply loss scaler based on optimizer type
         scaled_loss = loss
         if isinstance(self.optimizer, ZeROOptimizer):
-            scaled_loss = self.optimizer.scale_if_loss(loss)
             self.optimizer.retain_graph_on_current_backward = retain_graph
             scaled_loss = self.optimizer.scale_if_loss(scaled_loss)
         elif self.torch_autocast_z0_gradscaler:
@@ -3007,24 +3006,25 @@ class DeepSpeedEngine(Module):
         elif self.torch_autocast_z0_gradscaler:
             loss = self.torch_autocast_z0_gradscaler.scale(loss)
 
-        with compiled_autograd(self._is_compiled_autograd_enabled, self._compile_kwargs):
-            if self.zero_optimization() or not self.amp_enabled():
-                loss.backward(**backward_kwargs)
-            elif self.amp_enabled():
-                # AMP requires delaying unscale when inside gradient accumulation boundaries
-                # https://nvidia.github.io/apex/advanced.html#gradient-accumulation-across-iterations
-                delay_unscale = not self.is_gradient_accumulation_boundary()
-                with amp.scale_loss(loss, self.optimizer, delay_unscale=delay_unscale) as scaled_loss:
-                    scaled_loss.backward(**backward_kwargs)
+        try:
+            with compiled_autograd(self._is_compiled_autograd_enabled, self._compile_kwargs):
+                if self.zero_optimization() or not self.amp_enabled():
+                    loss.backward(**backward_kwargs)
+                elif self.amp_enabled():
+                    # AMP requires delaying unscale when inside gradient accumulation boundaries
+                    # https://nvidia.github.io/apex/advanced.html#gradient-accumulation-across-iterations
+                    delay_unscale = not self.is_gradient_accumulation_boundary()
+                    with amp.scale_loss(loss, self.optimizer, delay_unscale=delay_unscale) as scaled_loss:
+                        scaled_loss.backward(**backward_kwargs)
 
-            # backward_epilogue is not called in a hook when self._support_torch_style_backward is False
-            self._backward_epilogue()
+                # backward_epilogue is not called in a hook when self._support_torch_style_backward is False
+                self._backward_epilogue()
 
-        self._running_engine_backward = False
-        if isinstance(self.optimizer, ZeROOptimizer):
-            self.optimizer.retain_graph_on_current_backward = False
-
-        return gas_scaled_loss
+            return gas_scaled_loss
+        finally:
+            self._running_engine_backward = False
+            if isinstance(self.optimizer, ZeROOptimizer):
+                self.optimizer.retain_graph_on_current_backward = False
 
     def is_gradient_accumulation_boundary(self):
         """
