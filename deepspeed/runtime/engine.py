@@ -222,11 +222,6 @@ class EngineTimers(object):
         return self.micro_timers + self.global_timers
 
 
-def _eigenvalue_summary_events(block_eigenvalue, global_samples):
-    return [(f"Train/Eigenvalues/ModelBlockParam_{i}", ev_value[0], global_samples)
-            for i, ev_value in enumerate(block_eigenvalue.values())]
-
-
 class DeepSpeedEngine(Module):
     r"""DeepSpeed engine for training."""
 
@@ -2759,6 +2754,7 @@ class DeepSpeedEngine(Module):
             if not bf16_optimizer:
                 self.optimizer.backward_epilogue()
             self.optimizer.exit_backward()
+            self.optimizer.retain_graph_on_current_backward = False
 
         if self.is_deepcompile_active():
             deepcompile_backward_epilogue()
@@ -2920,7 +2916,7 @@ class DeepSpeedEngine(Module):
                     optimizer.reduce_ready_partitions_and_remove_grads(param)
         optimizer.independent_gradient_partition_epilogue()
 
-    def scale(self, loss):
+    def scale(self, loss, retain_graph=False):
         r"""Apply loss scaler for manual backward pass.
 
         Use this method when calling loss.backward() directly instead of engine.backward().
@@ -2938,6 +2934,8 @@ class DeepSpeedEngine(Module):
 
         Arguments:
             loss: Scalar loss tensor to be scaled
+            retain_graph: bool, default: false
+                forward on user defined choice of retain_graph
 
         Returns:
             Scaled loss tensor ready for .backward() call
@@ -2963,6 +2961,8 @@ class DeepSpeedEngine(Module):
         # Apply loss scaler based on optimizer type
         scaled_loss = loss
         if isinstance(self.optimizer, ZeROOptimizer):
+            scaled_loss = self.optimizer.scale_if_loss(loss)
+            self.optimizer.retain_graph_on_current_backward = retain_graph
             scaled_loss = self.optimizer.scale_if_loss(scaled_loss)
         elif self.torch_autocast_z0_gradscaler:
             scaled_loss = self.torch_autocast_z0_gradscaler.scale(scaled_loss)
@@ -3003,6 +3003,7 @@ class DeepSpeedEngine(Module):
         # TODO: handle these scaling with direct calls to loss.backward()
         if isinstance(self.optimizer, ZeROOptimizer):
             loss = self.optimizer.scale_if_loss(loss)
+            self.optimizer.retain_graph_on_current_backward = retain_graph
         elif self.torch_autocast_z0_gradscaler:
             loss = self.torch_autocast_z0_gradscaler.scale(loss)
 
@@ -3020,6 +3021,8 @@ class DeepSpeedEngine(Module):
             self._backward_epilogue()
 
         self._running_engine_backward = False
+        if isinstance(self.optimizer, ZeROOptimizer):
+            self.optimizer.retain_graph_on_current_backward = False
 
         return gas_scaled_loss
 
@@ -3223,8 +3226,13 @@ class DeepSpeedEngine(Module):
 
                     if (self.eigenvalue_enabled()
                             and not self.gas_boundary_ctr % self.eigenvalue_gas_boundary_resolution()):
-                        self.summary_events.extend(
-                            _eigenvalue_summary_events(self.block_eigenvalue, self.global_samples))
+                        ev_values = self.block_eigenvalue.values()
+                        for i in range(len(ev_values)):
+                            self.summary_events.append((
+                                f"Train/Eigenvalues/ModelBlockParam_{i}",
+                                self.ev_values[i][0],
+                                self.global_samples,
+                            ))
                     self.monitor.write_events(self.summary_events)
 
         # Check flops profiling
@@ -4327,9 +4335,6 @@ class DeepSpeedEngine(Module):
         process with rank 0.
 
         """
-        if not save_dir:
-            raise ValueError(f"save_dir must be a non-empty string, got {save_dir!r}")
-
         if self._optimizer_has_ckpt_event_prologue():
             # Custom preparation for checkpoint save, if applicable
             self.optimizer.checkpoint_event_prologue()

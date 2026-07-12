@@ -285,6 +285,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             zero_quantized_nontrainable_weights=zero_quantized_nontrainable_weights,
             zero_module_granularity_threshold=zero_module_granularity_threshold,
             log_trace_cache_warnings=log_trace_cache_warnings,
+            retain_graph_checker=lambda: self.retain_graph_on_current_backward,
         )
 
         self.persistent_parameters = self.parameter_offload.persistent_parameters
@@ -571,6 +572,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         zero_quantized_nontrainable_weights,
         zero_module_granularity_threshold,
         log_trace_cache_warnings,
+        retain_graph_checker=None,
     ):
         return DeepSpeedZeRoOffload(module=module,
                                     timers=timers,
@@ -589,7 +591,8 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                                     zero_quantized_weights=zero_quantized_weights,
                                     zero_quantized_nontrainable_weights=zero_quantized_nontrainable_weights,
                                     zero_module_granularity_threshold=zero_module_granularity_threshold,
-                                    log_trace_cache_warnings=log_trace_cache_warnings)
+                                    log_trace_cache_warnings=log_trace_cache_warnings,
+                                    retain_graph_checker=retain_graph_checker)
 
     def _get_param_partition_group(self, param):
         return getattr(param, "ds_process_group", self.dp_process_group)
@@ -3128,8 +3131,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             torch.save(checkpoint, "saved.pth")
         """
         if self.elastic_checkpoint:
-            raise NotImplementedError(
-                "ZeRO-3 elastic checkpointing is deprecated and unsupported. Use Universal Checkpointing instead.")
+            raise NotImplementedError("ZeRO-3 does not yet support elastic checkpointing, please disable for now.")
 
         return self._rigid_state_dict()
 
@@ -3289,8 +3291,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         """
 
         if self.elastic_checkpoint:
-            raise NotImplementedError(
-                "ZeRO-3 elastic checkpointing is deprecated and unsupported. Use Universal Checkpointing instead.")
+            raise NotImplementedError("ZeRO-3 does not yet support elastic checkpointing, please disable for now.")
 
         if checkpoint_folder:
             self._load_universal_checkpoint(checkpoint_folder, load_optimizer_states, load_from_fp32_weights)
