@@ -58,6 +58,51 @@ def test_stream_construction_device_none_target():
     assert _stream_construction_device(None, (5000, 5000), 1_000_000) is None
 
 
+@pytest.mark.parametrize(
+    "dtype,expected",
+    [
+        (torch.float32, "cpu"),
+        (torch.float16, "cpu"),
+        (torch.bfloat16, "cpu"),
+        (None, "cpu"),  # unspecified dtype defaults to floating point
+        (torch.long, "cuda"),  # integer buffers (masks, position ids) stay on the accelerator
+        (torch.bool, "cuda"),
+    ])
+def test_stream_construction_device_only_floating_point(dtype, expected):
+    device = _stream_construction_device(torch.device("cuda"), (5000, 5000), 1_000_000, dtype)
+    assert torch.device(device).type == expected
+
+
+@pytest.mark.parametrize(
+    "call_kwargs,expected",
+    [
+        ({
+            "size": (5000, 5000)
+        }, "cpu"),  # size passed as a keyword must still be inspected
+        ({
+            "size": (10, 10)
+        }, "cuda"),
+        ({
+            "size": (5000, 5000),
+            "dtype": torch.long
+        }, "cuda"),  # integer size= stays on accelerator
+    ])
+def test_wrapper_inspects_size_keyword(call_kwargs, expected):
+    captured = {}
+
+    def fake_constructor(*args, **kwargs):
+        captured["device"] = kwargs.get("device")
+        return torch.empty(0)
+
+    wrapper = pp.zero_wrapper_for_fp_tensor_constructor(fake_constructor,
+                                                        target_fp_dtype=None,
+                                                        target_device=torch.device("cuda"),
+                                                        stream_chunk_size=1_000_000,
+                                                        shape_args=True)
+    wrapper(**call_kwargs)
+    assert torch.device(captured["device"]).type == expected
+
+
 @pytest.mark.parametrize("numel,num_partitions,chunk_numel", [
     (64, 4, 8),
     (64, 4, 7),
@@ -162,3 +207,29 @@ class TestStreamingPartitionMatchesStandard(DistributedTest):
         streamed = build(512)
         assert torch.equal(streamed.weight.ds_tensor, reference.weight.ds_tensor)
         assert torch.equal(streamed.bias.ds_tensor, reference.bias.ds_tensor)
+
+    def test_streaming_keeps_buffers_on_accelerator(self):
+        # The construction override redirects large tensors to the host, but a buffer
+        # is not partitioned, so it must be restored to the accelerator (otherwise it
+        # would be stranded on the host and break the forward pass).
+        from deepspeed.accelerator import get_accelerator
+
+        class _WithBuffer(torch.nn.Module):
+
+            def __init__(self):
+                super().__init__()
+                self.weight = torch.nn.Parameter(torch.empty(64, 64))  # streamed
+                self.register_buffer("cache", torch.zeros(1024))  # above the 512 chunk
+
+        config = {
+            "train_batch_size": self.world_size,
+            "zero_optimization": {
+                "stage": 3,
+                "stage3_partition_stream_chunk_size": 512,
+            },
+        }
+        with deepspeed.zero.Init(config_dict_or_path=config):
+            module = _WithBuffer()
+
+        assert module.weight.ds_tensor is not None
+        assert get_accelerator().on_accelerator(module.cache)

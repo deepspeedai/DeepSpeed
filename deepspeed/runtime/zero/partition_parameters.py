@@ -246,21 +246,26 @@ _orig_torch_eye = torch.eye
 _orig_torch_randn = torch.randn
 
 
-def _stream_construction_device(target_device, size_args, stream_chunk_size):
+def _stream_construction_device(target_device, size_args, stream_chunk_size, dtype=None):
     """Choose the device on which to construct a new tensor under ``zero.Init``.
 
-    When streaming very large parameters (``stream_chunk_size > 0``), tensors whose
-    element count exceeds the threshold are built on the host instead of the
-    accelerator, so a giant parameter created inside the ``zero.Init`` context (e.g.
-    ``with zero.Init(): model = Model()``) is never fully materialized on a single
-    device -- the streaming partition then stages only one chunk at a time onto the
-    accelerator. ``size_args`` are the shape arguments passed to the constructor; if
-    they are not a plain shape the accelerator device is used unchanged.
+    When streaming very large parameters (``stream_chunk_size > 0``), floating-point
+    tensors whose element count exceeds the threshold are built on the host instead of
+    the accelerator, so a giant parameter created inside the ``zero.Init`` context
+    (e.g. ``with zero.Init(): model = Model()``) is never fully materialized on a
+    single device -- the streaming partition then stages only one chunk at a time onto
+    the accelerator. Only floating-point tensors are redirected, since parameters are
+    floating point while large integer tensors (attention masks, position ids, ...)
+    are typically non-partitioned buffers that must stay on the accelerator.
+    ``size_args`` is the shape (positional args or the ``size`` keyword); if it is not
+    a plain shape the accelerator device is used unchanged.
     """
     if not stream_chunk_size or target_device is None:
         return target_device
     device = target_device if isinstance(target_device, torch.device) else torch.device(target_device)
     if device.type == "cpu":
+        return target_device
+    if dtype is not None and not (isinstance(dtype, torch.dtype) and dtype.is_floating_point):
         return target_device
     if len(size_args) == 1 and isinstance(size_args[0], (list, tuple, torch.Size)):
         dims = size_args[0]
@@ -284,7 +289,8 @@ def zero_wrapper_for_fp_tensor_constructor(fn: Callable,
         if kwargs.get("device", None) is None and target_device is not None:
             device = target_device
             if shape_args:
-                device = _stream_construction_device(target_device, args, stream_chunk_size)
+                size = kwargs["size"] if "size" in kwargs else args
+                device = _stream_construction_device(target_device, size, stream_chunk_size, kwargs.get("dtype"))
             kwargs['device'] = device
         tensor: Tensor = fn(*args, **kwargs)
         if target_fp_dtype is not None and tensor.is_floating_point():
@@ -302,7 +308,8 @@ def get_new_tensor_fn_for_dtype(target_fp_dtype: torch.dtype,
     def new_tensor(cls, *args, **kwargs) -> Tensor:
         if not args:
             args = (0, )
-        device = _stream_construction_device(target_device, args, stream_chunk_size)
+        size = kwargs["size"] if "size" in kwargs else args
+        device = _stream_construction_device(target_device, size, stream_chunk_size, kwargs.get("dtype"))
         if device is None:
             tensor = _orig_torch_empty(0).new_empty(*args, **kwargs)
         else:
@@ -1307,6 +1314,16 @@ class Init(InsertPostInitMethodToModuleSubClasses):
                 self._zero_init_param(param)
                 print_rank_0(
                     f"Partitioning param {debug_param2name_id_shape(param)} module={debug_module2name(module)}")
+
+        # The construction override cannot distinguish a parameter from a buffer, so a
+        # large buffer may have been built on the host. Buffers are not partitioned;
+        # move any that landed on the host back to the accelerator.
+        if self.partition_stream_chunk_size > 0 and DeepSpeedTensorOverride.device in self.tensor_overrides:
+            for name in list(module._buffers):
+                buffer = module._buffers[name]
+                if buffer is not None and buffer.device.type == "cpu" and buffer.numel(
+                ) > self.partition_stream_chunk_size:
+                    module._buffers[name] = buffer.to(self.local_device)
 
         see_memory_usage(
             f"Param count {InsertPostInitMethodToModuleSubClasses.num_module_elements}. After converting and partitioning params in {module.__class__.__name__}",
