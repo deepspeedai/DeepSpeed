@@ -286,6 +286,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             zero_module_granularity_threshold=zero_module_granularity_threshold,
             log_trace_cache_warnings=log_trace_cache_warnings,
             retain_graph_checker=lambda: self.retain_graph_on_current_backward,
+            retain_graph_owner=self,
         )
 
         self.persistent_parameters = self.parameter_offload.persistent_parameters
@@ -573,6 +574,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         zero_module_granularity_threshold,
         log_trace_cache_warnings,
         retain_graph_checker=None,
+        retain_graph_owner=None,
     ):
         return DeepSpeedZeRoOffload(module=module,
                                     timers=timers,
@@ -592,7 +594,8 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                                     zero_quantized_nontrainable_weights=zero_quantized_nontrainable_weights,
                                     zero_module_granularity_threshold=zero_module_granularity_threshold,
                                     log_trace_cache_warnings=log_trace_cache_warnings,
-                                    retain_graph_checker=retain_graph_checker)
+                                    retain_graph_checker=retain_graph_checker,
+                                    retain_graph_owner=retain_graph_owner)
 
     def _get_param_partition_group(self, param):
         return getattr(param, "ds_process_group", self.dp_process_group)

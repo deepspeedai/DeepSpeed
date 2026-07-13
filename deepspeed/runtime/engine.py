@@ -2756,9 +2756,12 @@ class DeepSpeedEngine(Module):
             self.allreduce_gradients()
 
         if isinstance(self.optimizer, ZeROOptimizer):
+            should_flush_deferred_releases = not self.optimizer.retain_graph_on_current_backward
             if not bf16_optimizer:
                 self.optimizer.backward_epilogue()
             self.optimizer.exit_backward()
+            if should_flush_deferred_releases:
+                self.optimizer.flush_deferred_backward_releases()
             self.optimizer.retain_graph_on_current_backward = False
 
         if self.is_deepcompile_active():
