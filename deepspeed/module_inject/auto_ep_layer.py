@@ -20,6 +20,7 @@ import torch
 import torch.nn as nn
 import deepspeed.comm as dist
 from deepspeed.module_inject.auto_ep_config import AutoEPConfig, MoELayerSpec, resolve_autoep_config_defaults
+from deepspeed.module_inject.auto_ep_folding import mark_autoep_folding_router_parameter
 from deepspeed.utils import logger
 from deepspeed.moe.ep_router import TokenChoiceTopKRouter
 from deepspeed.moe.ep_count import count_tokens_per_expert
@@ -170,6 +171,35 @@ def compute_split_plan(
         local_counts=local_counts,
         local_counts_by_source=received_counts,
     )
+
+
+def compute_split_plan_from_expert_indices(
+    expert_indices: torch.Tensor,
+    num_experts: int,
+    ep_size: int,
+    num_local_experts: int,
+    ep_group: dist.ProcessGroup | None,
+) -> SplitPlan:
+    """Compute EP AllToAllV splits for an already partitioned assignment list."""
+    if ep_size == 1:
+        counts = count_tokens_per_expert(expert_indices, num_experts, out_dtype=torch.int32)
+        return SplitPlan([int(expert_indices.numel())], [int(expert_indices.numel())], counts,
+                         counts.view(1, num_local_experts))
+
+    counts = count_tokens_per_expert(expert_indices, num_experts, out_dtype=torch.int32)
+    count_matrix = counts.view(ep_size, num_local_experts)
+    input_splits = count_matrix.sum(dim=1).cpu().tolist()
+    local_counts_tensor = count_matrix.sum(dim=1).clone()
+    remote_counts_tensor = torch.zeros_like(local_counts_tensor)
+    dist.all_to_all_single(remote_counts_tensor, local_counts_tensor, group=ep_group)
+    output_splits = remote_counts_tensor.cpu().tolist()
+
+    local_expert_counts_flat = count_matrix.reshape(-1).contiguous()
+    received_counts_flat = torch.zeros_like(local_expert_counts_flat)
+    dist.all_to_all_single(received_counts_flat, local_expert_counts_flat, group=ep_group)
+    received_counts = received_counts_flat.view(ep_size, num_local_experts)
+    local_counts = received_counts.sum(dim=0)
+    return SplitPlan(input_splits, output_splits, local_counts, received_counts)
 
 
 class _AllToAllV(torch.autograd.Function):
@@ -376,7 +406,10 @@ class AutoEPMoELayer(nn.Module):
         self.hidden_size = spec.hidden_size
         self.ep_group_name = f"ep_size_{ep_size}"
         self.ep_group = None  # Set by set_deepspeed_parallelism()
+        self.folding_group_handles = None
+        self.tp_group = None
         resolved_config = resolve_autoep_config_defaults(config, spec.model_family)
+        self.validate_folding_routing = bool(resolved_config.validate_folding_routing)
 
         # Router: copy gate weights from source
         source_gate = getattr(source_module, spec.router_name)
@@ -471,9 +504,14 @@ class AutoEPMoELayer(nn.Module):
             param.ds_zero_placement_family = "autoep_expert"
             param.ds_zero_partition_group_name = self.ep_group_name
 
-        # Mark shared expert and router params for global DP reduction
+        # Mark shared expert and router params for global DP reduction.
+        # The router runs redundantly on every TP peer and its gradient is
+        # rebuilt into a replicated full view by the restore all-gather, so it
+        # is tagged as the replicated family (AVERAGE TP reduction); a SUM would
+        # double it under tp_size=2. See mark_autoep_folding_router_parameter.
         for param in self.router.parameters():
             param.allreduce = True
+            mark_autoep_folding_router_parameter(param)
             param.ds_zero_placement_family = "replicated"
         if self.shared_experts is not None:
             for param in self.shared_experts.parameters():
@@ -525,10 +563,19 @@ class AutoEPMoELayer(nn.Module):
     def set_deepspeed_parallelism(
         self,
         use_data_before_expert_parallel_: bool = False,
+        folding_group_handles=None,
     ) -> None:
         """Bind EP group handle to this module."""
         from deepspeed.utils import groups
         from deepspeed.utils.bwc import bwc_pipeline_parallel_world_size
+
+        if folding_group_handles is not None:
+            self.folding_group_handles = folding_group_handles
+            self.ep_group_name = folding_group_handles.ep_group_name
+            self.ep_group = folding_group_handles.ep_group
+            self.tp_group = folding_group_handles.tp_group
+            self.ep_rank = dist.get_rank(group=self.ep_group)
+            return
 
         if self.ep_group_name not in groups._get_expert_parallel_group_dict():
             mp_size = max(
@@ -571,10 +618,56 @@ class AutoEPMoELayer(nn.Module):
 
         # Reorder tokens by expert
         top_scores_sorted, token_indices_sorted, _ = self.reorderer(ro.top_scores, ro.selected_experts)
+        expert_indices_sorted = ro.selected_experts.reshape(-1).index_select(0, token_indices_sorted)
 
-        routed_input = x[token_indices_sorted // self.top_k]  # [N, H]
+        folded_tp = self.folding_group_handles is not None and self.folding_group_handles.spec.tp_size > 1
+        restore_ctx = None
+        if folded_tp:
+            from deepspeed.moe.ep_tp_dispatch import (
+                RoutedAssignmentPayload,
+                assignment_ordinals_by_expert,
+                assert_tp_payload_consistent,
+                dispatch_counters,
+                partition_assignments,
+                restore_combined,
+            )
+            payload = RoutedAssignmentPayload(
+                token_indices=(token_indices_sorted // self.top_k).to(torch.long),
+                expert_indices=expert_indices_sorted.to(torch.long),
+                assignment_indices=assignment_ordinals_by_expert(expert_indices_sorted.to(torch.long)),
+                capacity_slots=(token_indices_sorted % self.top_k).to(torch.long),
+                combine_weights=top_scores_sorted
+                if self.score_apply == "post" else torch.ones_like(top_scores_sorted),
+                drop_mask=torch.zeros_like(top_scores_sorted, dtype=torch.bool),
+                pad_mask=torch.zeros_like(top_scores_sorted, dtype=torch.bool),
+                input_splits=[0 for _ in range(self.ep_size)],
+                output_splits=[0 for _ in range(self.ep_size)],
+                extra={
+                    "destination_ranks": (expert_indices_sorted // self.num_local_experts).to(torch.long),
+                    "top_scores": top_scores_sorted,
+                    "num_tokens": torch.tensor(bsz * seqlen, device=hidden_states.device, dtype=torch.long),
+                },
+            )
+            if self.validate_folding_routing:
+                assert_tp_payload_consistent(payload,
+                                             tp_group=self.tp_group,
+                                             tp_size=self.folding_group_handles.spec.tp_size)
+            tp_rank = dist.get_rank(group=self.tp_group)
+            local_payload, restore_ctx = partition_assignments(payload,
+                                                               tp_group=self.tp_group,
+                                                               tp_rank=tp_rank,
+                                                               tp_size=self.folding_group_handles.spec.tp_size)
+            token_indices_for_compute = token_indices_sorted.index_select(0, restore_ctx.local_indices)
+            top_scores_for_compute = top_scores_sorted.index_select(0, restore_ctx.local_indices)
+            expert_indices_for_plan = local_payload.expert_indices
+        else:
+            token_indices_for_compute = token_indices_sorted
+            top_scores_for_compute = top_scores_sorted
+            expert_indices_for_plan = expert_indices_sorted
+
+        routed_input = x[token_indices_for_compute // self.top_k]  # [N, H]
         routed_input = apply_scores_before_experts_if_enabled(routed_input,
-                                                              top_scores_sorted,
+                                                              top_scores_for_compute,
                                                               score_apply=self.score_apply)
 
         if self.ep_size == 1:
@@ -591,13 +684,22 @@ class AutoEPMoELayer(nn.Module):
             expert_output = unpermute_by_local_expert(expert_output, perm_indices, n_tokens)
         else:
             # EP dispatch/compute/combine
-            plan = compute_split_plan(
-                selected_experts=ro.selected_experts,
-                num_experts=self.num_experts,
-                ep_size=self.ep_size,
-                num_local_experts=self.num_local_experts,
-                ep_group=self.ep_group,
-            )
+            if folded_tp:
+                plan = compute_split_plan_from_expert_indices(
+                    expert_indices=expert_indices_for_plan,
+                    num_experts=self.num_experts,
+                    ep_size=self.ep_size,
+                    num_local_experts=self.num_local_experts,
+                    ep_group=self.ep_group,
+                )
+            else:
+                plan = compute_split_plan(
+                    selected_experts=ro.selected_experts,
+                    num_experts=self.num_experts,
+                    ep_size=self.ep_size,
+                    num_local_experts=self.num_local_experts,
+                    ep_group=self.ep_group,
+                )
 
             routed_input = _AllToAllV.apply(self.ep_group, routed_input, plan.input_splits, plan.output_splits)
 
@@ -608,15 +710,22 @@ class AutoEPMoELayer(nn.Module):
 
             expert_output = _AllToAllV.apply(self.ep_group, expert_output, plan.output_splits, plan.input_splits)
 
-        output = combine_from_routed(
-            expert_output,
-            top_scores=ro.top_scores,
-            token_indices_sorted=token_indices_sorted,
-            top_k=self.top_k,
-            score_apply=self.score_apply,
-            combine_impl=self.combine_impl,
-            shape=(bsz, seqlen, hdim),
-        )
+        if folded_tp:
+            output = restore_combined(expert_output,
+                                      restore_ctx,
+                                      tp_group=self.tp_group,
+                                      validate_coverage=self.validate_folding_routing).reshape(bsz, seqlen, hdim)
+            self._last_folding_dispatch_counters = dispatch_counters(restore_ctx)
+        else:
+            output = combine_from_routed(
+                expert_output,
+                top_scores=ro.top_scores,
+                token_indices_sorted=token_indices_sorted,
+                top_k=self.top_k,
+                score_apply=self.score_apply,
+                combine_impl=self.combine_impl,
+                shape=(bsz, seqlen, hdim),
+            )
 
         if self.moe_output_shape == "flat":
             output = output.reshape(-1, hdim)

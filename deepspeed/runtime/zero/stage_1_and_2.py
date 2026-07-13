@@ -35,6 +35,7 @@ from deepspeed.git_version_info import version
 from deepspeed.runtime.constants import PIPE_REPLICATED
 from deepspeed.accelerator import get_accelerator
 from deepspeed.runtime.zero.muon.original_muon import muon_update
+from deepspeed.module_inject.auto_ep_folding import apply_folding_correction_to_grad_buffer
 from deepspeed.runtime.zero.muon.muon_optimizer import MuonWithAuxAdam
 from deepspeed.checkpoint.constants import (DS_VERSION, GROUP_PADDINGS, PARTITION_COUNT, LOSS_SCALER,
                                             SINGLE_PARTITION_OF_FP32_GROUPS, BASE_OPTIMIZER_STATE,
@@ -256,6 +257,8 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         self.contiguous_gradients = contiguous_gradients or self.cpu_offload
 
         self.has_moe_layers = has_moe_layers
+        self.autoep_folding_tp_group = None
+        self.autoep_folding_spec = None
         if self.has_moe_layers:
             self._configure_moe_settings()
         self._global_grad_norm = 0.
@@ -1025,6 +1028,26 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
     def overlapping_partition_gradients_reduce_epilogue(self):
         self.independent_gradient_partition_epilogue()
 
+    def configure_autoep_folding_tp_gradient_reduction(self, folding_spec):
+        if folding_spec is None or folding_spec.tp_size <= 1:
+            self.autoep_folding_tp_group = None
+            self.autoep_folding_spec = None
+            return
+        self.autoep_folding_tp_group = groups.get_tensor_model_parallel_group()
+        self.autoep_folding_spec = folding_spec
+
+    def _maybe_reduce_autoep_folding_tp_gradient(self, param, grad):
+        if ((not self.partition_gradients and not self.overlap_comm) or self.autoep_folding_tp_group is None
+                or grad is None):
+            return
+        if not getattr(param, "ds_grad_is_ready", True):
+            return
+        apply_folding_correction_to_grad_buffer(self.autoep_folding_spec,
+                                                param,
+                                                grad,
+                                                tp_group=self.autoep_folding_tp_group,
+                                                use_correction_marker=not self.partition_gradients)
+
     def _fill_param_grad_accum_attribute(self, param):
         if param.grad is not None:
             if param.grad_accum is None:
@@ -1112,6 +1135,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         if not getattr(param, "ds_grad_is_ready", True):
             return
 
+        self._maybe_reduce_autoep_folding_tp_gradient(param, grad_reduc)
         param_id = self.get_param_id(param)
         assert self.params_already_reduced[param_id] == False, \
             f"The parameter {debug_param2name(param)} has already been reduced. \
