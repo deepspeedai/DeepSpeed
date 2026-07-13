@@ -1188,11 +1188,11 @@ def reload_adam_states(optimizer, device, non_blocking: bool = False):
 def is_transformers_cache(obj):
     """Skip checks for the `transformers` cache class when performing AutoTP tensor comparisons."""
     try:
-        from transformers.cache_utils import (DynamicCache, StaticCache, QuantizedCache)
+        from transformers.cache_utils import Cache
     except ImportError:
         return False
 
-    return isinstance(obj, (DynamicCache, StaticCache, QuantizedCache))
+    return isinstance(obj, Cache)
 
 
 def compare_tensors_in_structures(inputs1: Union[List, Dict], inputs2: Union[List, Dict]) -> bool:
