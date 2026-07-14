@@ -97,16 +97,25 @@ def cifar_trainset(fp16=False):
 
     local_rank = get_accelerator().current_device()
 
+    data_root = os.getenv("TEST_DATA_DIR", "/tmp/")
+    real_cifar_path = os.getenv("CIFAR10_DATASET_PATH")
+    download_real_cifar = os.getenv("DEEPSPEED_UNIT_DOWNLOAD_CIFAR10", "0") == "1"
+    if not real_cifar_path and not download_real_cifar:
+        return torchvision.datasets.FakeData(size=2048,
+                                             image_size=(3, 32, 32),
+                                             num_classes=10,
+                                             transform=transform,
+                                             random_offset=0)
+
     # Only one rank per machine downloads.
     dist.barrier()
     if local_rank != 0:
         dist.barrier()
-    data_root = os.getenv("TEST_DATA_DIR", "/tmp/")
-    if os.getenv("CIFAR10_DATASET_PATH"):
-        data_root = os.getenv("CIFAR10_DATASET_PATH")
+    if real_cifar_path:
+        data_root = real_cifar_path
         download = False
     else:
-        data_root = os.path.join(os.getenv("TEST_DATA_DIR", "/tmp"), "cifar10-data")
+        data_root = os.path.join(data_root, "cifar10-data")
         download = True
     trainset = torchvision.datasets.CIFAR10(root=data_root, train=True, download=download, transform=transform)
     if local_rank == 0:
