@@ -11,6 +11,7 @@ import torch
 from torch.fx import Graph, GraphModule
 
 import deepspeed.compile.util as compile_util
+from deepspeed.compile import backend as backend_mod
 from deepspeed.compile import inductor as inductor_mod
 from deepspeed.compile import list_schedule as schedule_mod
 from deepspeed.compile.passes import prefetch as prefetch_mod
@@ -64,6 +65,31 @@ def _with_meta(node, tensor_size=0, device_time=0):
 
 def _placeholder(graph, name):
     return _with_meta(graph.placeholder(name))
+
+
+def test_sync_memory_profile_complete_noops_without_distributed(monkeypatch):
+    monkeypatch.setattr(backend_mod.dist, "is_initialized", lambda: False)
+
+    def fail_all_reduce(*args, **kwargs):
+        raise AssertionError("all_reduce should not run without distributed init")
+
+    monkeypatch.setattr(backend_mod.dist, "all_reduce", fail_all_reduce)
+
+    assert backend_mod._sync_memory_profile_complete(True)
+    assert not backend_mod._sync_memory_profile_complete(False)
+
+
+def test_sync_memory_profile_complete_reduces_asymmetric_failure(monkeypatch):
+    monkeypatch.setattr(backend_mod.dist, "is_initialized", lambda: True)
+    monkeypatch.setattr(backend_mod, "get_accelerator", lambda: SimpleNamespace(current_device=lambda: "cpu"))
+
+    def mark_any_rank_failed(tensor, op):
+        assert op == backend_mod.dist.ReduceOp.MIN
+        tensor[0] = 0
+
+    monkeypatch.setattr(backend_mod.dist, "all_reduce", mark_any_rank_failed)
+
+    assert not backend_mod._sync_memory_profile_complete(True)
 
 
 def _allgather(graph, arg, ds_id, name, tensor_size=1, device_time=1):
@@ -298,6 +324,42 @@ def test_profile_backfill_makes_partial_profile_safe_for_profile_dependent_passe
                                           param_manager=fake_param_manager,
                                           bwd=True)
     assert persisted == []
+    assert any("incomplete profiling data" in message for message in logs)
+
+
+def test_schedule_prefetch_skips_when_memory_profile_incomplete(monkeypatch):
+    graph = Graph()
+
+    param = _placeholder(graph, "mem_incomplete_param")
+    ag = _allgather(graph, param, 91, "mem_incomplete")
+    wait = _wait(graph, ag, 91, "mem_incomplete")
+    use = _neg(graph, wait, "mem_incomplete_use")
+    release = _release(graph, use, 91, "mem_incomplete")
+
+    graph.output((release, ))
+    graph.lint()
+
+    profiling_results = {
+        0:
+        ProfilingResult(fwd_graph=graph,
+                        bwd_graph=None,
+                        fwd_mem=[("profiled_before_abort", 0, 0, 0)],
+                        fwd_mem_complete=False)
+    }
+    gm = GraphModule(torch.nn.Module(), graph)
+    logs = []
+
+    monkeypatch.setattr(prefetch_mod, "print_rank_0", lambda message: logs.append(message))
+
+    assert prefetch_mod.schedule_prefetch(gm,
+                                          graph_id=0,
+                                          graph_order=[(0, False)],
+                                          profiling_results=profiling_results,
+                                          create_inputs_fn=lambda: (),
+                                          mem_budget=0,
+                                          param_manager={},
+                                          bwd=False) is gm
+    assert gm.graph is graph
     assert any("incomplete profiling data" in message for message in logs)
 
 

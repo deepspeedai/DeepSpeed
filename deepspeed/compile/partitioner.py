@@ -75,10 +75,9 @@ def _recompute_param_aliases(joint_graph: Graph, param_indices: List[Tuple[int, 
             any([(isinstance(a, Node) and (a in ds_param_inputs or a in recomputed_nodes)) for a in node.args]):
             node.meta["recompute"] = CheckpointPolicy.MUST_RECOMPUTE
             recomputed_nodes.add(node)
-        else:
-            # If checkpointing is not enabled for this graph, assume all
-            # activations required by the backward pass should be saved.
-            node.meta.setdefault("recompute", CheckpointPolicy.MUST_SAVE)
+        # Leave non-parameter activations to the default min-cut policy. Forcing
+        # every other node to MUST_SAVE prevents safe activation rematerialization
+        # and can make long-sequence compiled backward graphs OOM.
 
 
 def get_wrapped_partitioner(

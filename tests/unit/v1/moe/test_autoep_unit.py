@@ -4,6 +4,7 @@
 # DeepSpeed Team
 """Compact critical-path tests for AutoEP."""
 
+import ast
 import inspect
 from collections import OrderedDict
 from types import SimpleNamespace
@@ -198,6 +199,7 @@ class TestAutoEPConfig:
         disabled = parse_autoep_config({})
         assert disabled.enabled is False
         assert disabled.autoep_size == 1
+        assert disabled.validate_folding_routing is False
         assert disabled.load_balance_coeff is None
         assert disabled._load_balance_coeff_explicit is False
 
@@ -208,16 +210,26 @@ class TestAutoEPConfig:
             "load_balance_coeff": None,
             "score_apply": "pre",
             "route_scale": 2.0,
+            "validate_folding_routing": True,
         })
 
         assert config.enabled is True
         assert config.autoep_size == 4
         assert config.preset_model == "mixtral"
+        assert config.validate_folding_routing is True
         assert config.load_balance_coeff is None
         assert config._load_balance_coeff_explicit is True
         assert config.score_apply == "pre"
         assert config.route_scale == 2.0
         validate_autoep_config(config, world_size=4, pp_size=1, tp_size=1, sp_size=1)
+
+    def test_validate_folding_routing_requires_boolean(self):
+        with pytest.raises(ValueError, match="validate_folding_routing"):
+            validate_autoep_config(AutoEPConfig(enabled=True, validate_folding_routing="true"),
+                                   world_size=1,
+                                   pp_size=1,
+                                   tp_size=1,
+                                   sp_size=1)
 
     @pytest.mark.parametrize("value", UNSUPPORTED_LOAD_BALANCE_VALUES)
     def test_load_balance_coeff_rejected_at_parse(self, value):
@@ -235,12 +247,11 @@ class TestAutoEPConfig:
         assert_load_balance_coeff_rejection_message(exc_info.value, value)
 
     def test_ep_size_validation_rejects_invalid_topology(self):
-        with pytest.raises(ValueError, match="AutoTP"):
-            validate_autoep_config(AutoEPConfig(enabled=True, autoep_size=2),
-                                   world_size=8,
-                                   pp_size=1,
-                                   tp_size=2,
-                                   sp_size=1)
+        validate_autoep_config(AutoEPConfig(enabled=True, autoep_size=2),
+                               world_size=8,
+                               pp_size=1,
+                               tp_size=2,
+                               sp_size=1)
         with pytest.raises(ValueError, match="must divide the stage size"):
             validate_autoep_config(AutoEPConfig(enabled=True, autoep_size=3),
                                    world_size=8,
@@ -308,6 +319,8 @@ class TestAutoEPConfig:
             expert_parallel_config=AutoEPConfig(enabled=True, autoep_size=2),
             tensor_parallel_config=SimpleNamespace(autotp_size=1),
             use_data_before_expert_parallel_=False,
+            zero_config=SimpleNamespace(offload_optimizer=None, offload_param=None),
+            zero_optimization_stage=0,
         )
 
         engine._configure_expert_parallel(model=nn.Module())
@@ -1109,3 +1122,66 @@ class TestModelDetectionAndReplacement:
         assert replaced.router.e_score_correction_bias is not None
         torch.testing.assert_close(replaced.router.e_score_correction_bias, source_bias)
         assert ["router.e_score_correction_bias"] in [call["names"] for call in FakeGatheredParameters.calls]
+
+
+def _eager_pep604_lines(module):
+    """Line numbers where a module evaluates PEP 604 unions at import time."""
+    tree = ast.parse(inspect.getsource(module))
+    defers_annotations = any(
+        isinstance(node, ast.ImportFrom) and node.module == "__future__" and any(alias.name == "annotations"
+                                                                                 for alias in node.names)
+        for node in tree.body)
+    if defers_annotations:
+        return []
+    offending_lines = []
+    for node in ast.walk(tree):
+        annotations = []
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            arguments = node.args
+            for arg in arguments.args + arguments.posonlyargs + arguments.kwonlyargs + [
+                    arguments.vararg, arguments.kwarg
+            ]:
+                if arg is not None and arg.annotation is not None:
+                    annotations.append(arg.annotation)
+            if node.returns is not None:
+                annotations.append(node.returns)
+        elif isinstance(node, ast.AnnAssign):
+            annotations.append(node.annotation)
+        for annotation in annotations:
+            for sub_node in ast.walk(annotation):
+                if isinstance(sub_node, ast.BinOp) and isinstance(sub_node.op, ast.BitOr):
+                    offending_lines.append(sub_node.lineno)
+    return sorted(set(offending_lines))
+
+
+class TestPy39AnnotationSafety:
+
+    def test_autoep_import_chain_defers_pep604_annotations(self):
+        """PEP 604 unions (``int | None``) in def signatures or class-level
+        annotations are evaluated at import time, so on Python 3.9 they raise
+        TypeError while the module is imported; that escapes the engine's
+        ``except ImportError`` guards around AutoEP and breaks every
+        ``deepspeed.initialize()`` (issue #8102). Every module in the AutoEP
+        import chain must defer annotation evaluation with
+        ``from __future__ import annotations``."""
+        import deepspeed.moe.ep_count as ep_count
+        import deepspeed.moe.ep_experts as ep_experts
+        import deepspeed.moe.ep_kernels as ep_kernels
+        import deepspeed.moe.ep_router as ep_router
+        import deepspeed.module_inject.auto_ep as auto_ep
+        import deepspeed.module_inject.auto_ep_config as auto_ep_config
+        import deepspeed.module_inject.auto_ep_layer as auto_ep_layer
+        import deepspeed.module_inject.auto_ep_preset_adapters as preset_adapters
+        import deepspeed.module_inject.auto_ep_presets.base as presets_base
+        import deepspeed.module_inject.auto_ep_presets.registry as presets_registry
+
+        autoep_import_chain = [
+            ep_count, ep_experts, ep_kernels, ep_router, ep_repack, auto_ep, auto_ep_config, auto_ep_layer,
+            preset_adapters, presets_base, presets_registry
+        ]
+        for module in autoep_import_chain:
+            offending_lines = _eager_pep604_lines(module)
+            assert not offending_lines, (
+                f"{module.__name__} evaluates PEP 604 unions at import time (lines {offending_lines}); "
+                f"on Python 3.9 this raises TypeError during import and escapes the engine's "
+                f"except-ImportError guards (issue #8102). Add 'from __future__ import annotations'.")

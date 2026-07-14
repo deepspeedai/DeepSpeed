@@ -18,6 +18,7 @@ from deepspeed.module_inject.auto_ep_presets.registry import (
     available_preset_names,
     resolve_autoep_config_defaults,
 )
+from deepspeed.module_inject.auto_ep_folding import build_folding_spec, validate_folding_global
 from deepspeed.utils import logger
 
 __all__ = [
@@ -46,6 +47,7 @@ def parse_autoep_config(param_dict: dict) -> AutoEPConfig:
     config.enabled = param_dict.get("enabled", False)
     config.autoep_size = param_dict.get("autoep_size", 1)
     config.expert_tensor_parallel_size = param_dict.get("expert_tensor_parallel_size", 1)
+    config.validate_folding_routing = param_dict.get("validate_folding_routing", False)
     config.preset_model = param_dict.get("preset_model", None)
     config.moe_layer_pattern = param_dict.get("moe_layer_pattern", None)
     config.expert_pattern = param_dict.get("expert_pattern", None)
@@ -96,29 +98,46 @@ def validate_autoep_config(
     pp_size: int,
     tp_size: int,
     sp_size: int,
+    *,
+    zero_stage: int = 0,
+    deepcompile_enabled: bool = False,
+    tp_preset_model: str | None = None,
+    use_data_before_expert_parallel: bool = False,
+    mpu=None,
+    zero_offload_optimizer: bool = False,
+    zero_offload_param: bool = False,
 ) -> None:
     """Validate config constraints. Raises ValueError on invalid config."""
     if config.load_balance_coeff is not None:
         _raise_unsupported_load_balance_coeff(config.load_balance_coeff)
 
+    if not isinstance(config.validate_folding_routing, bool):
+        raise ValueError("expert_parallel.validate_folding_routing must be a boolean")
+
     if not config.enabled:
         return
 
-    if tp_size > 1:
-        raise ValueError("AutoEP does not currently support AutoTP "
-                         f"(tensor_parallel.autotp_size={tp_size}). Disable AutoTP for this run; "
-                         "AutoEP+AutoTP support is planned as follow-up work.")
-
-    if config.expert_tensor_parallel_size != 1:
-        raise ValueError("AutoEP only supports expert_parallel.expert_tensor_parallel_size=1 in this release; "
-                         "expert tensor parallelism is planned as follow-up work.")
-
-    # ep_size must divide the stage size (world_size / pp_size)
-    stage_size = world_size // pp_size
-    if stage_size % config.autoep_size != 0:
-        raise ValueError(f"autoep_size={config.autoep_size} must divide the stage size "
-                         f"(world_size={world_size} / pp_size={pp_size} = {stage_size}). "
-                         f"Valid autoep_size values: {_divisors(stage_size)}")
+    folding_spec = build_folding_spec(
+        world_size=world_size,
+        pp_size=pp_size,
+        tp_size=max(tp_size, 1),
+        ep_size=config.autoep_size,
+        etp_size=config.expert_tensor_parallel_size,
+        mp_mode="tp" if tp_size > 1 else "sp",
+    )
+    validate_folding_global(
+        folding_spec,
+        zero_stage=zero_stage,
+        sp_size=sp_size,
+        deepcompile_enabled=deepcompile_enabled,
+        use_data_before_expert_parallel=use_data_before_expert_parallel,
+        mpu=mpu,
+        autoep_enabled=config.enabled,
+        tp_preset=tp_preset_model,
+        ep_preset=config.preset_model,
+        zero_offload_optimizer=zero_offload_optimizer,
+        zero_offload_param=zero_offload_param,
+    )
 
     # Validate preset_model if specified
     if config.preset_model is not None and config.preset_model not in PRESET_MODELS:
