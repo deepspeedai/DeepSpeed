@@ -226,11 +226,9 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
 
         self.reduce_scatter = reduce_scatter
 
-        # Muon's Newton-Schulz orthogonalization needs the full all-reduced gradient on each
-        # rank; reduce_scatter delivers only this rank's partition slice and silently corrupts
-        # cross-partition parameters (#7807). ZeRO-3 already guards this (see stage3.py).
-        if isinstance(self.optimizer, MuonWithAuxAdam) and self.reduce_scatter:
-            raise ValueError("Muon and reduce scatter cannot be used together")
+        if isinstance(self.optimizer, MuonWithAuxAdam) and self.reduce_scatter and self.cpu_offload:
+            raise ValueError("Muon with reduce scatter does not support optimizer offload because offload retains "
+                             "only partition slices; disable reduce scatter or optimizer offload")
 
         self.overlap_comm = overlap_comm
 
@@ -1231,8 +1229,11 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                                            process_group=process_group)
         if self.overlap_comm and not get_accelerator().resolves_data_dependency():
             allreduced.record_stream(self.reduction_stream)
+        local_rank = dist.get_rank(group=process_group)
         for buf, synced, bucket_rank in zip(small_bucket, self.unflatten(allreduced, small_bucket), bucket_ranks):
-            if dist.get_rank(group=process_group) == bucket_rank:
+            copy_to_local_rank = local_rank in bucket_rank if isinstance(bucket_rank,
+                                                                         frozenset) else local_rank == bucket_rank
+            if copy_to_local_rank:
                 buf.copy_(synced)
                 if self.overlap_comm and not get_accelerator().resolves_data_dependency():
                     buf.record_stream(self.reduction_stream)
@@ -1302,7 +1303,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             rank_and_offsets = []
             real_dp_process_group = []
             curr_size = 0
-            prev_id, prev_process_group = -1, None
+            prev_id, prev_process_group, prev_copy_ranks = -1, None, None
 
             process_group = self.dp_process_group
             # count = 0
@@ -1319,6 +1320,8 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                 partition_ids = self.param_to_partition_ids[i][param_id]
                 assert all([p_id < dist.get_world_size(group=process_group) for p_id in partition_ids
                             ]), f"world size {dist.get_world_size(group=process_group)} and p_ids: {partition_ids}"
+                muon_copy_ranks = (frozenset(partition_ids) if isinstance(self.optimizer, MuonWithAuxAdam)
+                                   and getattr(param, "use_muon", False) and len(partition_ids) > 1 else None)
                 partition_size = self.partition_size[i]
                 # Get all partition ids + their offsets
                 partition_ids_w_offsets = []
@@ -1343,39 +1346,46 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                         # Set numel to next partition's offset
                         numel = partition_ids_w_offsets[idx + 1][1] - offset
 
-                    # Merge bucket ranges if they belong to the same rank
-                    if partition_id == prev_id and process_group == prev_process_group:
-                        prev_pid, prev_size, prev_numel = rank_and_offsets[-1]
-                        rank_and_offsets[-1] = (prev_pid, prev_size, prev_numel + numel)
+                    copy_ranks = muon_copy_ranks or frozenset((partition_id, ))
+
+                    # Merge bucket ranges if they share the same reduction and consumers.
+                    if (partition_id == prev_id and process_group == prev_process_group
+                            and copy_ranks == prev_copy_ranks):
+                        prev_pid, prev_size, prev_numel, _ = rank_and_offsets[-1]
+                        rank_and_offsets[-1] = (prev_pid, prev_size, prev_numel + numel, copy_ranks)
                     else:
-                        rank_and_offsets.append((partition_id, curr_size, numel))
+                        rank_and_offsets.append((partition_id, curr_size, numel, copy_ranks))
                         real_dp_process_group.append(process_group)
                     curr_size += numel
-                    prev_id, prev_process_group = partition_id, process_group
+                    prev_id, prev_process_group, prev_copy_ranks = partition_id, process_group, copy_ranks
 
             tensor.div_(dist.get_world_size(group=self.dp_process_group) / float(self.sequence_parallel_size))
 
             buckets = {}
-            for i, (dst, bucket_offset, numel) in enumerate(rank_and_offsets):
+            for i, (dst, bucket_offset, numel, copy_ranks) in enumerate(rank_and_offsets):
                 grad_slice = tensor.narrow(0, int(bucket_offset), int(numel))
-                bucket_key = real_dp_process_group[i] if self.use_multi_rank_bucket_allreduce else (
-                    dst, real_dp_process_group[i])
+                process_group = real_dp_process_group[i]
+                # Split Muon matrices require all-reduce even when multi-rank bucket all-reduce is disabled.
+                if self.use_multi_rank_bucket_allreduce or len(copy_ranks) > 1:
+                    bucket_key = ("allreduce", process_group)
+                else:
+                    bucket_key = ("reduce", dst, process_group)
                 if bucket_key not in buckets:
                     buckets[bucket_key] = []
-                if self.use_multi_rank_bucket_allreduce:
-                    buckets[bucket_key].append((dst, grad_slice))
+                if bucket_key[0] == "allreduce":
+                    buckets[bucket_key].append((copy_ranks, grad_slice))
                 else:
                     buckets[bucket_key].append(grad_slice)
 
             for bucket_key in buckets:
-                if self.use_multi_rank_bucket_allreduce:
+                if bucket_key[0] == "allreduce":
                     self.allreduce_and_scatter(buckets[bucket_key],
                                                communication_data_type,
                                                numel_per_bucket=self.reduce_bucket_size,
                                                divide=False,
-                                               process_group=bucket_key)
+                                               process_group=bucket_key[1])
                 else:
-                    dst, process_group = bucket_key
+                    _, dst, process_group = bucket_key
                     self.allreduce_no_retain(buckets[bucket_key],
                                              communication_data_type,
                                              numel_per_bucket=self.reduce_bucket_size,
