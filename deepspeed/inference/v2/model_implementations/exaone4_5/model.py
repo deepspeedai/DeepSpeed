@@ -135,7 +135,7 @@ class Exaone4_5InferenceModel(Exaone4InferenceModel):
         self._global_attn = self._build_global_attention()
 
         rope_inv_freqs = _llama3_inverse_frequencies(config, get_accelerator().current_device())
-        self.register_buffer("_rope_inv_freqs", rope_inv_freqs.to(self.activation_dtype.value), persistent=False)
+        self.register_buffer("_rope_inv_freqs", rope_inv_freqs.float(), persistent=False)
 
     def _build_global_attention(self):
         attn_config = DSSelfAttentionConfig(

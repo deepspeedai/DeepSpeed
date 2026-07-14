@@ -13,6 +13,7 @@ pytest.importorskip("transformers", minversion="5.3.0")
 from transformers import Exaone4Config
 from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
 
+from deepspeed.inference.v2.model_implementations.exaone4_5 import model as exaone4_5_model
 from deepspeed.inference.v2.model_implementations.exaone4_5.model import (
     Exaone4_5InferenceModel,
     _llama3_inverse_frequencies,
@@ -48,6 +49,7 @@ def test_llama3_inverse_frequencies_match_transformers() -> None:
     actual = _llama3_inverse_frequencies(config, torch.device("cpu"))
 
     assert attention_factor == 1.0
+    assert actual.dtype == torch.float32
     torch.testing.assert_close(actual, expected)
 
 
@@ -55,6 +57,26 @@ def test_attention_uses_supplied_inverse_frequencies() -> None:
     rope_config = Exaone4_5InferenceModel.positional_embedding_config.fget(SimpleNamespace())
 
     assert rope_config.use_trained_freqs
+
+
+def test_model_retains_inverse_frequencies_in_fp32(monkeypatch) -> None:
+
+    def initialize_base_model(model, config, engine_config, base_mp_group) -> None:
+        torch.nn.Module.__init__(model)
+        model._config = config
+        model._engine_config = engine_config
+
+    monkeypatch.setattr(exaone4_5_model.Exaone4InferenceModel, "__init__", initialize_base_model)
+    monkeypatch.setattr(Exaone4_5InferenceModel, "_build_global_attention", lambda model: object())
+    monkeypatch.setattr(
+        exaone4_5_model,
+        "get_accelerator",
+        lambda: SimpleNamespace(current_device=lambda: torch.device("cpu")),
+    )
+
+    model = Exaone4_5InferenceModel(_model_config(), SimpleNamespace(), None)
+
+    assert model._rope_inv_freqs.dtype == torch.float32
 
 
 def test_sequence_length_is_capped_to_sliding_window() -> None:
