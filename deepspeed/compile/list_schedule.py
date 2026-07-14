@@ -248,6 +248,12 @@ def get_node_requirements(target_node: Node, scheduled: List[Node]):
             args.append(n)
 
         map_arg(node.args, register_arg)
+        # Node dependencies can also live in kwargs (e.g. some aten/backward ops emit tensor
+        # operands as kwargs). make_graph_from_schedule -> node_copy remaps BOTH args and kwargs,
+        # so any kwarg-Node dependency must be scheduled before its user; traversing only args
+        # here schedules the user first and make_graph_from_schedule then raises KeyError on the
+        # not-yet-copied kwarg node (e.g. "KeyError: 'view_1667'").
+        map_arg(node.kwargs, register_arg)
 
         for arg in args:
             dfs(arg)

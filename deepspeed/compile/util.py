@@ -261,7 +261,14 @@ def get_last_uses(graph: Graph):
         update = False
         known_last_use = None
 
-        if user.target in no_copy_ops and n in node_to_last_use:
+        # Only "skip through" a no-copy op (view/alias) to *its* last use when that op actually has
+        # one recorded. A no-copy node with no downstream use in this subgraph (e.g. a DeepCompile-
+        # inserted wait_allgather_ds_param whose result is not consumed here) has no node_to_last_use
+        # entry; dereferencing it raised "KeyError: wait_allgather_ds_param__...". In that case the
+        # no-copy op itself is the terminal use, so fall back to attributing n's last use to `user`.
+        skip_through = user.target in no_copy_ops and user in node_to_last_use
+
+        if skip_through and n in node_to_last_use:
             last_user = node_to_last_use[user]
             last_use_position = position[last_user]
 
@@ -270,7 +277,7 @@ def get_last_uses(graph: Graph):
             update = last_use_position > known_last_use_position
 
         if n not in node_to_last_use or update:
-            if user.target in no_copy_ops:
+            if skip_through:
                 user = node_to_last_use[user]
 
             node_to_last_use[n] = user
