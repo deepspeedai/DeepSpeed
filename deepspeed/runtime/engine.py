@@ -135,7 +135,7 @@ from ..moe.utils import is_moe_param, configure_moe_param_groups
 from ..git_version_info import version
 
 from deepspeed.profiling.flops_profiler.profiler import FlopsProfiler
-from deepspeed.utils.logging import print_json_dist, print_configuration, set_log_level_from_string
+from deepspeed.utils.logging import print_dist, print_json_dist, print_configuration, set_log_level_from_string
 
 from deepspeed.accelerator import get_accelerator
 
@@ -703,6 +703,43 @@ class DeepSpeedEngine(Module):
         if hasattr(tp_config, "get_partition_config_object"):
             partition_config = tp_config.get_partition_config_object()
 
+        model_config = getattr(model, "config", None)
+        base_tp_plan = getattr(model_config, "base_model_tp_plan", None) if model_config is not None else None
+        class_tp_plan = getattr(type(model), "_tp_plan", None)
+        runtime_tp_plan = getattr(model, "__dict__", {}).get("_tp_plan")
+        from deepspeed.runtime.tensor_parallel.config import _get_hf_tp_plan
+        hf_tp_plan = _get_hf_tp_plan(model)
+
+        def lm_head_entries(tp_plan):
+            if not isinstance(tp_plan, dict):
+                return {}
+            return {
+                pattern: style
+                for pattern, style in tp_plan.items()
+                if any(part in ("lm_head", "embed_out") for part in pattern.split('.'))
+            }
+
+        lm_head_modules = [
+            name for name, _ in model.named_modules()
+            if name and any(part in ("lm_head", "embed_out") for part in name.split('.'))
+        ]
+        selected_route = "custom partition_config" if partition_config is not None else "HuggingFace tp_plan or AutoTP"
+        model_class = f"{type(model).__module__}.{type(model).__qualname__}"
+        print_dist(
+            f"AutoTP tp_plan diagnostics: model_class={model_class}; route={selected_route}; "
+            f"base_model_tp_plan={base_tp_plan!r}; type(model)._tp_plan={class_tp_plan!r}; "
+            f"instance_tp_plan={runtime_tp_plan!r}; "
+            f"effective_tp_plan={hf_tp_plan!r}",
+            ranks=[0],
+        )
+        print_dist(
+            f"AutoTP lm_head diagnostics: modules={lm_head_modules!r}; "
+            f"base_entries={lm_head_entries(base_tp_plan)!r}; class_entries={lm_head_entries(class_tp_plan)!r}; "
+            f"runtime_entries={lm_head_entries(runtime_tp_plan)!r}; "
+            f"effective_entries={lm_head_entries(hf_tp_plan)!r}",
+            ranks=[0],
+        )
+
         if partition_config is not None:
             autotp = AutoTP(module=model,
                             all_reduce_linears=(),
@@ -723,19 +760,22 @@ class DeepSpeedEngine(Module):
             setattr(model, "ds_autotp_parsed", True)
             return
 
-        model_config = getattr(model, "config", None)
         from deepspeed.module_inject import replace_transformer_layer
-
-        from deepspeed.runtime.tensor_parallel.config import _get_hf_tp_plan
-
-        hf_tp_plan = _get_hf_tp_plan(model)
         if hf_tp_plan:
             from deepspeed.module_inject.tp_plan_converter import TPPlanConverter
             from deepspeed.module_inject.autotp_config import AutoTPConfig
 
             layer_specs = TPPlanConverter.convert(hf_tp_plan)
             if layer_specs is not None:
-                logger.info(f"Using HuggingFace tp_plan with {len(layer_specs)} layer specifications")
+                gathered_output_patterns = [
+                    pattern for pattern, style in hf_tp_plan.items()
+                    if style.lower() in ("colwise_rep", "colwise_gather_output")
+                ]
+                print_dist(
+                    f"Using HuggingFace tp_plan with {len(layer_specs)} layer specifications; "
+                    f"gathered column output patterns={gathered_output_patterns}",
+                    ranks=[0],
+                )
                 tp_plan_config = AutoTPConfig(tp_size=tp_size, layer_specs=layer_specs)
                 autotp = AutoTP(
                     module=model,
@@ -752,6 +792,14 @@ class DeepSpeedEngine(Module):
                 autotp._replace_module(model)
                 setattr(model, "ds_autotp_parsed", True)
                 return
+            print_dist(
+                f"AutoTP: effective HuggingFace tp_plan could not be converted; falling back to heuristic AutoTP. "
+                f"styles={sorted(set(hf_tp_plan.values()))!r}",
+                ranks=[0],
+            )
+        else:
+            print_dist("AutoTP: no effective HuggingFace tp_plan was found; falling back to heuristic AutoTP.",
+                       ranks=[0])
 
         parser_dict = AutoTP.tp_parser(model)
         for client_module, injection_policy in parser_dict:

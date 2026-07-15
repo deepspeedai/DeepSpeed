@@ -129,3 +129,35 @@ class TestTPPlanExtraction:
             "layers.*.self_attn.q_proj": "colwise",
             "lm_head": "colwise_gather_output",
         }
+
+    def test_class_lm_head_plan_survives_runtime_base_plan_override(self):
+
+        class MockHFConfig:
+            base_model_tp_plan = {"layers.*.self_attn.q_proj": "colwise"}
+
+        class MockHFModel:
+            _tp_plan = {"lm_head": "colwise_gather_output"}
+
+            def __init__(self, config):
+                self.config = config
+                self._tp_plan = {
+                    "layers.*.self_attn.q_proj": "colwise",
+                    "model.layers.*.self_attn.q_proj": "colwise",
+                }
+
+        model = MockHFModel(MockHFConfig())
+        assert model._tp_plan != type(model)._tp_plan
+
+        tp_plan = _get_hf_tp_plan(model)
+
+        assert tp_plan == {
+            "layers.*.self_attn.q_proj": "colwise",
+            "lm_head": "colwise_gather_output",
+        }
+
+    def test_extract_class_only_tp_plan(self):
+
+        class MockHFModel:
+            _tp_plan = {"lm_head": "colwise_rep"}
+
+        assert _get_hf_tp_plan(MockHFModel()) == {"lm_head": "colwise_rep"}
