@@ -215,7 +215,8 @@ class AutoTP():
         self.linear_policies = None
         self.conv_linear_layer = False
         self.partition_config = partition_config
-        self._gathered_column_ties_validated = False
+        self._gathered_column_tie_fallbacks_configured = False
+        self._tied_gathered_column_module_names = set()
         TensorParallel_Layer.set_keep_module_on_host(keep_module_on_host)
 
     def in_module_list(module, module_list):
@@ -494,19 +495,31 @@ class AutoTP():
             print_dist(f"AutoTP: replacing '{name}' with LinearLayer(gather_output=True)", ranks=[0])
         return LinearLayer(module, self.mp_group, name=name, gather_output=spec.gather_output)
 
-    def _validate_gathered_column_ties(self):
-        """Reject gathered output layers that share their Parameter with an embedding."""
-        if self._gathered_column_ties_validated or self.partition_config is None:
+    def _configure_gathered_column_tie_fallbacks(self):
+        """Configure a replicated fallback for gathered output layers tied to embeddings."""
+        if self._gathered_column_tie_fallbacks_configured or self.partition_config is None:
             return
 
-        embeddings = [(name, module) for name, module in self.module.named_modules()
+        named_modules = list(self.module.named_modules())
+        embeddings = [(name, module) for name, module in named_modules
                       if isinstance(module, nn.Embedding) and hasattr(module, "weight")]
+        get_input_embeddings = getattr(self.module, "get_input_embeddings", None)
+        if callable(get_input_embeddings):
+            input_embedding = get_input_embeddings()
+            if input_embedding is not None and hasattr(input_embedding, "weight"):
+                input_embedding_name = next(
+                    (name for name, module in named_modules if module is input_embedding),
+                    None,
+                )
+                is_known_embedding = any(module is input_embedding for _, module in embeddings)
+                if input_embedding_name is not None and not is_known_embedding:
+                    embeddings.append((input_embedding_name, input_embedding))
         if not embeddings:
-            self._gathered_column_ties_validated = True
+            self._gathered_column_tie_fallbacks_configured = True
             return
 
         model_type = self._get_model_type()
-        for module_name, module in self.module.named_modules():
+        for module_name, module in named_modules:
             if not module_name or isinstance(module, nn.Embedding) or not hasattr(module, "weight"):
                 continue
 
@@ -521,13 +534,14 @@ class AutoTP():
             if spec is None or spec.partition_type != PartitionType.COLUMN or not spec.gather_output:
                 continue
 
-            raise NotImplementedError(
-                f"AutoTP cannot apply gathered column parallelism to '{module_name}.weight' because it is tied "
-                f"to embedding '{tied_embedding_name}.weight' (both reference the same Parameter). Tied output "
-                "weights require a coupled vocabulary-parallel embedding, which is not supported yet. Untie "
-                "the weights before enabling gathered column parallelism.")
+            self._tied_gathered_column_module_names.update((module_name, tied_embedding_name))
+            print_dist(
+                f"AutoTP: '{module_name}.weight' is tied to '{tied_embedding_name}.weight'; leaving both modules "
+                "replicated because coupled vocabulary-parallel embedding is not supported yet.",
+                ranks=[0],
+            )
 
-        self._gathered_column_ties_validated = True
+        self._gathered_column_tie_fallbacks_configured = True
 
     def _get_model_type(self) -> Optional[str]:
         """Extract model type from module config or class name."""
@@ -623,7 +637,7 @@ class AutoTP():
 
     def _replace_module(self, r_module, prev_name='', prev_class_name=''):
         if prev_name == '' and prev_class_name == '':
-            self._validate_gathered_column_ties()
+            self._configure_gathered_column_tie_fallbacks()
 
         for name, child in r_module.named_children():
             if getattr(child, "_is_autoep_layer", False):
@@ -650,7 +664,9 @@ class AutoTP():
             # instead of linear_policies. This keeps all pattern logic centralized here.
             if self.partition_config is not None:
                 full_name = class_name + '.' + name if class_name else name
-                if isinstance(child, nn.Embedding):
+                if full_name in self._tied_gathered_column_module_names:
+                    continue
+                elif isinstance(child, nn.Embedding):
                     # Check if embedding matches any pattern
                     param_name = full_name + ".weight"
                     model_type = self._get_model_type()

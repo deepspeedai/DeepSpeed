@@ -165,12 +165,11 @@ def test_gathered_lm_head_uses_column_parallel_layer_when_untied():
     assert model.lm_head.gather_output
 
 
-def test_gathered_lm_head_rejects_runtime_parameter_tie_before_replacement():
+def test_gathered_lm_head_falls_back_for_runtime_parameter_tie():
     model = OutputModel(tied=True)
     assert model.lm_head.weight is model.embed_tokens.weight
 
-    with pytest.raises(NotImplementedError, match="coupled vocabulary-parallel embedding"):
-        _build_gathered_lm_head_autotp(model)._replace_module(model)
+    _build_gathered_lm_head_autotp(model)._replace_module(model)
 
     assert isinstance(model.embed_tokens, nn.Embedding)
     assert isinstance(model.lm_head, nn.Linear)

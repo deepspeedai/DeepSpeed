@@ -93,8 +93,8 @@ class TestTPPlanRealHFModels(DistributedTest):
 
             assert not torch.isnan(outputs.loss)
 
-    def test_qwen2_tied_lm_head_is_rejected(self):
-        """Test that the gathered LM-head plan rejects an actual Qwen2 Parameter tie."""
+    def test_qwen2_tied_lm_head_falls_back_to_replicated(self):
+        """Test that an actual Qwen2 Parameter tie remains replicated."""
         skip_on_device()
 
         try:
@@ -124,10 +124,23 @@ class TestTPPlanRealHFModels(DistributedTest):
             },
         }
 
-        with pytest.raises(NotImplementedError, match="coupled vocabulary-parallel embedding"):
-            deepspeed.initialize(model=model, model_parameters=model.parameters(), config=ds_config)
+        engine, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=ds_config)
 
+        assert engine.autotp_size() == 2
+        assert isinstance(model.model.layers[0].self_attn.q_proj, LinearLayer)
+        assert isinstance(model.model.embed_tokens, torch.nn.Embedding)
+        assert isinstance(model.lm_head, torch.nn.Linear)
         assert model.lm_head.weight is model.model.embed_tokens.weight
+        assert model.lm_head.weight.shape == (1000, 128)
+
+        input_ids = torch.randint(0, 1000, (1, 16)).to(get_accelerator().current_device_name())
+        dist.broadcast(
+            input_ids,
+            src=groups.get_tensor_model_parallel_src_rank(),
+            group=groups.get_tensor_model_parallel_group(),
+        )
+        outputs = engine(input_ids)
+        assert outputs.logits.shape == (1, 16, 1000)
 
     def test_custom_model_with_custom_tp_plan(self):
         """Test custom model + custom tp_plan"""

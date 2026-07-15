@@ -125,10 +125,12 @@ shards so every tensor-parallel rank receives the complete output.
 
 Gathered column parallelism currently supports untied output layers. If an
 output layer such as `lm_head` shares the same runtime `Parameter` object with
-an embedding, DeepSpeed raises an error before replacing either layer. Preserving
-that tie requires a coupled vocabulary-parallel embedding, which is not yet
-implemented. This check uses actual `Parameter` identity rather than model
-configuration metadata such as `tie_word_embeddings`.
+an embedding, DeepSpeed leaves both modules replicated and applies tensor
+parallelism to the remaining matched layers. This preserves the tie without
+silently cloning the weight, but does not reduce the embedding or output-layer
+memory footprint. A coupled vocabulary-parallel embedding is required to shard
+the tied weight and is not yet implemented. This fallback uses actual `Parameter`
+identity rather than model configuration metadata such as `tie_word_embeddings`.
 
 Additional HuggingFace types such as `local_colwise` and `local_rowwise` are
 not yet handled and fall back to AutoTP preset-based partitioning.
