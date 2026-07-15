@@ -13,6 +13,7 @@ from unit.common import DistributedTest, preferred_dtype, allclose_on_all_ranks
 from unit.simple_model import SimpleModel, random_dataloader
 from deepspeed.accelerator import get_accelerator
 from deepspeed.utils import safe_get_full_grad
+from deepspeed.runtime.zero.partition_parameters import ZeroParamStatus
 
 
 class SimpleNonScalarModel(torch.nn.Module):
@@ -203,6 +204,25 @@ def compare_parameters(params_ddp, params_ds, step_info=""):
         allclose_on_all_ranks(params_ddp_fp32,
                               params_ds_fp32,
                               assert_message=f"Parameter {name} mismatch{step_suffix}")
+
+
+def get_retain_graph_state(model_engine):
+    """Return retained-backward state exposed by the ZeRO optimizer."""
+    return bool(getattr(model_engine.optimizer, "retain_graph_on_current_backward", False))
+
+
+def get_deferred_release_count(model_engine):
+    """Return the number of deferred backward releases queued on the optimizer."""
+    return len(getattr(model_engine.optimizer, "_deferred_backward_releases", ()))
+
+
+def get_zero3_releasable_param_statuses(model_engine):
+    """Collect ds_status for ZeRO-3 params that should be releasable after backward."""
+    statuses = []
+    for _, param in model_engine.named_parameters():
+        if hasattr(param, "ds_status") and not getattr(param, "ds_persist", False):
+            statuses.append(param.ds_status)
+    return statuses
 
 
 @pytest.mark.parametrize("zero_stage", [1, 2, 3])
@@ -658,6 +678,96 @@ class TestZeroUserBackwardSeparateLoss(DistributedTest):
         # loss2; both gradient sets must match their DDP counterparts.
         compare_gradients(grads1_ddp, grads1_ds, "loss1")
         compare_gradients(grads2_ddp, grads2_ds, "loss2")
+
+        model_engine.destroy()
+
+    def test_retain_graph_state_clears_after_followup_backward(self, zero_stage):
+        """Retained-backward state should be cleared after follow-up backward on same graph."""
+        hidden_dim = 4
+        batch_size = 2
+
+        device, _, dtype = initialize_distributed()
+        model_engine = create_deepspeed_engine(SimpleOutputModel, zero_stage=zero_stage, hidden_dim=hidden_dim)
+        loss_fn = torch.nn.CrossEntropyLoss()
+
+        torch.manual_seed(456)
+        x = torch.randn(batch_size, hidden_dim, device=device, dtype=dtype)
+        y1 = torch.randint(0, hidden_dim, (batch_size, ), device=device)
+        y2 = torch.randint(0, hidden_dim, (batch_size, ), device=device)
+
+        output_ds = model_engine(x)
+        loss1_ds = loss_fn(output_ds, y1)
+        loss2_ds = loss_fn(output_ds, y2)
+
+        model_engine.zero_grad()
+        model_engine.backward(loss1_ds, retain_graph=True)
+        # The retained flag must not leak after backward returns.
+        assert not get_retain_graph_state(model_engine)
+        if zero_stage == 3:
+            assert get_deferred_release_count(model_engine) > 0
+
+        model_engine.zero_grad()
+        model_engine.backward(loss2_ds)
+        assert not get_retain_graph_state(model_engine)
+        if zero_stage == 3:
+            assert get_deferred_release_count(model_engine) == 0
+            releasable_statuses = get_zero3_releasable_param_statuses(model_engine)
+            assert releasable_statuses, "Expected ZeRO-3 params to expose ds_status"
+            assert all(status != ZeroParamStatus.INFLIGHT for status in releasable_statuses)
+
+        model_engine.destroy()
+
+    def test_retained_backward_does_not_contaminate_next_step(self, zero_stage):
+        """A retained-backward sequence should not affect a fresh subsequent step."""
+        hidden_dim = 4
+        batch_size = 2
+
+        device, _, dtype = initialize_distributed()
+        model_engine = create_deepspeed_engine(SimpleOutputModel, zero_stage=zero_stage, hidden_dim=hidden_dim)
+        loss_fn = torch.nn.CrossEntropyLoss()
+
+        torch.manual_seed(789)
+        x1 = torch.randn(batch_size, hidden_dim, device=device, dtype=dtype)
+        y1 = torch.randint(0, hidden_dim, (batch_size, ), device=device)
+        y2 = torch.randint(0, hidden_dim, (batch_size, ), device=device)
+
+        # First sequence: retained + follow-up backward on the same forward graph.
+        output1 = model_engine(x1)
+        loss1 = loss_fn(output1, y1)
+        loss2 = loss_fn(output1, y2)
+
+        model_engine.zero_grad()
+        model_engine.backward(loss1, retain_graph=True)
+        if zero_stage == 3:
+            assert get_deferred_release_count(model_engine) > 0
+        model_engine.zero_grad()
+        model_engine.backward(loss2)
+        assert not get_retain_graph_state(model_engine)
+        if zero_stage == 3:
+            assert get_deferred_release_count(model_engine) == 0
+            releasable_statuses = get_zero3_releasable_param_statuses(model_engine)
+            assert releasable_statuses, "Expected ZeRO-3 params to expose ds_status"
+            assert all(status != ZeroParamStatus.INFLIGHT for status in releasable_statuses)
+
+        model_engine.step()
+        assert not get_retain_graph_state(model_engine)
+        if zero_stage == 3:
+            assert get_deferred_release_count(model_engine) == 0
+
+        # Fresh sequence must behave like a normal non-retained backward.
+        x2 = torch.randn(batch_size, hidden_dim, device=device, dtype=dtype)
+        y3 = torch.randint(0, hidden_dim, (batch_size, ), device=device)
+        loss3 = loss_fn(model_engine(x2), y3)
+
+        model_engine.zero_grad()
+        model_engine.backward(loss3)
+        assert not get_retain_graph_state(model_engine)
+        assert len(collect_gradients_safe(model_engine)) > 0
+        if zero_stage == 3:
+            assert get_deferred_release_count(model_engine) == 0
+            releasable_statuses = get_zero3_releasable_param_statuses(model_engine)
+            assert releasable_statuses, "Expected ZeRO-3 params to expose ds_status"
+            assert all(status != ZeroParamStatus.INFLIGHT for status in releasable_statuses)
 
         model_engine.destroy()
 

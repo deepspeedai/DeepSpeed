@@ -137,6 +137,7 @@ class DeepSpeedZeRoOffload(object):
         zero_module_granularity_threshold=0,
         log_trace_cache_warnings=False,
         retain_graph_checker=None,
+        retain_graph_owner=None,
     ):
 
         see_memory_usage("DeepSpeedZeRoOffload initialize [begin]", force=False)
@@ -155,6 +156,7 @@ class DeepSpeedZeRoOffload(object):
         self.zero_quantized_nontrainable_weights = zero_quantized_nontrainable_weights
         self.log_trace_cache_warnings = log_trace_cache_warnings
         self.retain_graph_checker = retain_graph_checker
+        self.retain_graph_owner = retain_graph_owner
 
         if offload_param_config is not None and offload_param_config.device != OffloadDeviceEnum.none:
             self.offload_device = offload_param_config.device
@@ -565,10 +567,13 @@ class DeepSpeedZeRoOffload(object):
             for param in params_to_fetch:
                 param.data = param.data.t() if len(param.ds_shape) != 1 else param.data
 
-        # Keep gathered params alive when the current backward retains the graph,
-        # so a second backward over the same forward can reuse valid saved tensors.
+        # Keep gathered params alive during the retained-backward window, then
+        # flush the delayed releases once a non-retained backward completes.
         retain_graph_backward = bool(self.retain_graph_checker()) if self.retain_graph_checker is not None else False
-        if not retain_graph_backward:
+        if retain_graph_backward and self.retain_graph_owner is not None:
+            self.retain_graph_owner.defer_backward_release(lambda sub_module=sub_module: self.get_param_coordinator().
+                                                           release_sub_module(sub_module, forward=False))
+        else:
             self.get_param_coordinator().release_sub_module(sub_module, forward=False)
 
         see_memory_usage(
