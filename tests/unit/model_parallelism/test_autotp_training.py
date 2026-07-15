@@ -379,7 +379,7 @@ def process_linear_layer(hidden_dim, input):
     return torch_linear, torch_out
 
 
-def run_tp_layer_fwd_bwd(tp_size, tp_overlap_comm, column_parallel, use_tp_model_init=False):
+def run_tp_layer_fwd_bwd(tp_size, tp_overlap_comm, column_parallel, use_tp_model_init=False, gather_output=False):
     skip_on_device()
     hidden_dim = 128
     batch_size_per_device = 1
@@ -406,6 +406,7 @@ def run_tp_layer_fwd_bwd(tp_size, tp_overlap_comm, column_parallel, use_tp_model
         "layer_specs": [{
             "patterns": [".*\\.weight$"],
             "partition_type": partition_type,
+            "gather_output": gather_output,
         }],
     }
     if preferred_dtype() is torch.float16:
@@ -436,12 +437,16 @@ def run_tp_layer_fwd_bwd(tp_size, tp_overlap_comm, column_parallel, use_tp_model
     # rely on the model's AutoTP-partitioned parameters.
     torch_linear, torch_out = process_linear_layer(hidden_dim, input)
     if column_parallel:
-        linear = LinearLayer(deepcopy(torch_linear), groups.get_tensor_model_parallel_group())
+        linear = LinearLayer(deepcopy(torch_linear),
+                             groups.get_tensor_model_parallel_group(),
+                             gather_output=gather_output)
         out = linear(input.to(get_accelerator().current_device()))
         loss = out.sum()
         loss.backward()
 
-        cur_device_out = torch.chunk(torch_out, tp_size, dim=-1)[groups.get_tensor_model_parallel_rank()]
+        expected_out = torch_out
+        if not gather_output:
+            expected_out = torch.chunk(torch_out, tp_size, dim=-1)[groups.get_tensor_model_parallel_rank()]
         torch_grad = torch.chunk(torch_linear.weight.grad, tp_size, dim=0)[groups.get_tensor_model_parallel_rank()]
         torch_bias_grad = torch.chunk(torch_linear.bias.grad, tp_size, dim=0)[groups.get_tensor_model_parallel_rank()]
 
@@ -453,7 +458,7 @@ def run_tp_layer_fwd_bwd(tp_size, tp_overlap_comm, column_parallel, use_tp_model
                                    torch_grad.to(get_accelerator().current_device()),
                                    atol=1e-3,
                                    rtol=1e-3)
-        torch.testing.assert_close(cur_device_out.to(get_accelerator().current_device()).contiguous(),
+        torch.testing.assert_close(expected_out.to(get_accelerator().current_device()).contiguous(),
                                    out.contiguous(),
                                    atol=1e-2,
                                    rtol=1e-2)
@@ -489,6 +494,9 @@ class TestTpLayerFwdBwd(DistributedTest):
 
     def testColumnParallel(self, tp_size: int, tp_overlap_comm: bool):
         run_tp_layer_fwd_bwd(tp_size, tp_overlap_comm, column_parallel=True)
+
+    def testGatheredColumnParallel(self, tp_size: int, tp_overlap_comm: bool):
+        run_tp_layer_fwd_bwd(tp_size, tp_overlap_comm, column_parallel=True, gather_output=True)
 
 
 # @pytest.mark.sequential

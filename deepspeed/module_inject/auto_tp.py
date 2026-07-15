@@ -214,6 +214,7 @@ class AutoTP():
         self.linear_policies = None
         self.conv_linear_layer = False
         self.partition_config = partition_config
+        self._gathered_column_ties_validated = False
         TensorParallel_Layer.set_keep_module_on_host(keep_module_on_host)
 
     def in_module_list(module, module_list):
@@ -462,12 +463,14 @@ class AutoTP():
     def _create_column_parallel_layer(self, module, spec: TPLayerSpec, name: str):
         """Create column-parallel layer (AllReduce in backward)."""
         if self.conv_linear_layer:
-            return conv_LinearLayer(module, self.mp_group, name=name)
+            return conv_LinearLayer(module, self.mp_group, name=name, gather_output=spec.gather_output)
         # Only use fused-QKV heuristics when no partition_config is provided.
         elif self.partition_config is None and require_tp_fused_qkvw(name, self.mp_size):
             # Check and handle fused qkv for TP
             return fused_LinearLayer(module, self.mp_group, fused_module=self.module)
         if spec.shape is not None:
+            if spec.gather_output:
+                raise NotImplementedError("AutoTP gather_output does not yet support shaped sub-parameter layers.")
             return SubParamLinearLayer(
                 module,
                 self.mp_group,
@@ -475,7 +478,42 @@ class AutoTP():
                 partition_dim=spec.get_partition_dim(),
                 name=name,
             )
-        return LinearLayer(module, self.mp_group, name=name)
+        return LinearLayer(module, self.mp_group, name=name, gather_output=spec.gather_output)
+
+    def _validate_gathered_column_ties(self):
+        """Reject gathered output layers that share their Parameter with an embedding."""
+        if self._gathered_column_ties_validated or self.partition_config is None:
+            return
+
+        embeddings = [(name, module) for name, module in self.module.named_modules()
+                      if isinstance(module, nn.Embedding) and hasattr(module, "weight")]
+        if not embeddings:
+            self._gathered_column_ties_validated = True
+            return
+
+        model_type = self._get_model_type()
+        for module_name, module in self.module.named_modules():
+            if not module_name or isinstance(module, nn.Embedding) or not hasattr(module, "weight"):
+                continue
+
+            tied_embedding_name = next(
+                (embedding_name for embedding_name, embedding in embeddings if module.weight is embedding.weight),
+                None,
+            )
+            if tied_embedding_name is None:
+                continue
+
+            spec = self.partition_config.find_matching_spec(module_name + ".weight", model_type)
+            if spec is None or spec.partition_type != PartitionType.COLUMN or not spec.gather_output:
+                continue
+
+            raise NotImplementedError(
+                f"AutoTP cannot apply gathered column parallelism to '{module_name}.weight' because it is tied "
+                f"to embedding '{tied_embedding_name}.weight' (both reference the same Parameter). Tied output "
+                "weights require a coupled vocabulary-parallel embedding, which is not supported yet. Untie "
+                "the weights before enabling gathered column parallelism.")
+
+        self._gathered_column_ties_validated = True
 
     def _get_model_type(self) -> Optional[str]:
         """Extract model type from module config or class name."""
@@ -570,6 +608,9 @@ class AutoTP():
                 self._replace_module(child, full_name, "")
 
     def _replace_module(self, r_module, prev_name='', prev_class_name=''):
+        if prev_name == '' and prev_class_name == '':
+            self._validate_gathered_column_ties()
+
         for name, child in r_module.named_children():
             if getattr(child, "_is_autoep_layer", False):
                 full_name = prev_name + '.' + name if prev_name else name

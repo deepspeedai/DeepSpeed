@@ -9,7 +9,8 @@ from .autotp_config import TPLayerSpec, PartitionType
 
 logger = logging.getLogger(__name__)
 
-SUPPORTED_STYLES = {"colwise", "rowwise"}
+SUPPORTED_STYLES = {"colwise", "colwise_rep", "colwise_gather_output", "rowwise"}
+# `colwise_rep` was renamed to `colwise_gather_output` in huggingface/transformers#42809.
 
 
 class TPPlanConverter:
@@ -33,10 +34,13 @@ class TPPlanConverter:
 
         for pattern, partition in hf_tp_plan.items():
             regex_pattern = TPPlanConverter._wildcard_to_regex(pattern)
+            partition_style = partition.lower()
+            gather_output = False
 
-            if partition.lower() == "colwise":
+            if partition_style in ("colwise", "colwise_rep", "colwise_gather_output"):
                 partition_type = PartitionType.COLUMN
-            elif partition.lower() == "rowwise":
+                gather_output = partition_style != "colwise"
+            elif partition_style == "rowwise":
                 partition_type = PartitionType.ROW
 
             # Only add .weight suffix if not already present
@@ -48,6 +52,7 @@ class TPPlanConverter:
             layer_specs.append(TPLayerSpec(
                 patterns=[regex_pattern],
                 partition_type=partition_type,
+                gather_output=gather_output,
             ))
 
         return layer_specs

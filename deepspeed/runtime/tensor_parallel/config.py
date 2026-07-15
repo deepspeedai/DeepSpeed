@@ -149,15 +149,28 @@ def get_tensor_parallel_config(ds_config):
 def _get_hf_tp_plan(model):
     """Extract tp_plan from HuggingFace model.
 
-    Prefer base_model_tp_plan (from model config) over _tp_plan (runtime attribute)
-    because _tp_plan often contains duplicate entries with a 'model.' prefix added
-    by HuggingFace, which causes spurious duplicate-match warnings during conversion.
+    Merge unique runtime entries into base_model_tp_plan. HuggingFace often adds
+    duplicate runtime entries with a 'model.' prefix, but model-level entries such
+    as lm_head may only exist in the runtime plan.
     """
     config = getattr(model, 'config', None)
-    if config and getattr(config, 'base_model_tp_plan', None):
-        return model.config.base_model_tp_plan
+    base_plan = getattr(config, 'base_model_tp_plan', None) if config else None
+    runtime_plan = getattr(model, '_tp_plan', None)
 
-    if getattr(model, '_tp_plan', None):
-        return model._tp_plan
+    if base_plan:
+        if not runtime_plan:
+            return base_plan
+
+        merged_plan = dict(base_plan)
+        base_patterns = set(base_plan)
+        for pattern, style in runtime_plan.items():
+            unprefixed_pattern = pattern[len('model.'):] if pattern.startswith('model.') else pattern
+            if pattern in merged_plan or unprefixed_pattern in base_patterns:
+                continue
+            merged_plan[pattern] = style
+        return merged_plan
+
+    if runtime_plan:
+        return runtime_plan
 
     return None

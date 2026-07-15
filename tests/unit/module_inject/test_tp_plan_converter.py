@@ -4,7 +4,7 @@
 # DeepSpeed Team
 
 from deepspeed.module_inject.tp_plan_converter import TPPlanConverter
-from deepspeed.module_inject.autotp_config import PartitionType
+from deepspeed.module_inject.autotp_config import AutoTPConfig, PartitionType
 
 
 class TestTPPlanConverter:
@@ -28,7 +28,31 @@ class TestTPPlanConverter:
         o_spec = [s for s in specs if "o_proj" in s.patterns[0]][0]
 
         assert q_spec.partition_type == PartitionType.COLUMN
+        assert not q_spec.gather_output
         assert o_spec.partition_type == PartitionType.ROW
+        assert not o_spec.gather_output
+
+    def test_gathered_colwise_conversion(self):
+        hf_plan = {
+            "lm_head": "colwise_gather_output",
+            "legacy_lm_head": "colwise_rep",
+        }
+        specs = TPPlanConverter.convert(hf_plan)
+
+        assert len(specs) == 2
+        assert all(spec.partition_type == PartitionType.COLUMN for spec in specs)
+        assert all(spec.gather_output for spec in specs)
+
+    def test_gather_output_from_config_dict(self):
+        config = AutoTPConfig.from_dict({
+            "layer_specs": [{
+                "patterns": [r".*\.lm_head\.weight$"],
+                "partition_type": "column",
+                "gather_output": True,
+            }]
+        })
+
+        assert config.layer_specs[0].gather_output
 
     def test_pattern_weight_suffix(self):
         hf_plan = {"layers.*.q_proj": "colwise"}
@@ -87,7 +111,7 @@ class TestTPPlanConverter:
 
     def test_unsupported_style_returns_none(self):
         """Unsupported styles cause convert() to return None for fallback."""
-        hf_plan = {"layers.*.q_proj": "colwise_rep", "layers.*.o_proj": "rowwise"}
+        hf_plan = {"layers.*.q_proj": "local_colwise", "layers.*.o_proj": "rowwise"}
         result = TPPlanConverter.convert(hf_plan)
         assert result is None
 

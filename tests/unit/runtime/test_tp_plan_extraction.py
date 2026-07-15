@@ -90,7 +90,7 @@ class TestTPPlanExtraction:
 
         assert tp_plan is None
 
-    def test_priority_config_over_model(self):
+    def test_unique_runtime_entries_are_merged_with_config(self):
 
         class MockHFConfig:
             base_model_tp_plan = {"config_plan": "colwise"}
@@ -107,4 +107,25 @@ class TestTPPlanExtraction:
 
         assert tp_plan is not None
         assert "config_plan" in tp_plan
-        assert "model_plan" not in tp_plan
+        assert "model_plan" in tp_plan
+
+    def test_prefixed_runtime_duplicates_are_ignored(self):
+
+        class MockHFConfig:
+            base_model_tp_plan = {"layers.*.self_attn.q_proj": "colwise"}
+
+        class MockHFModel:
+
+            def __init__(self, config):
+                self.config = config
+                self._tp_plan = {
+                    "model.layers.*.self_attn.q_proj": "colwise",
+                    "lm_head": "colwise_gather_output",
+                }
+
+        tp_plan = _get_hf_tp_plan(MockHFModel(MockHFConfig()))
+
+        assert tp_plan == {
+            "layers.*.self_attn.q_proj": "colwise",
+            "lm_head": "colwise_gather_output",
+        }

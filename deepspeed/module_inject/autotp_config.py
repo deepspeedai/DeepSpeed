@@ -49,6 +49,13 @@ class TPLayerSpec:
             partition_type=PartitionType.COLUMN,
         )
 
+        # Column-parallel layer with replicated output (e.g., an untied LM head)
+        TPLayerSpec(
+            patterns=[".*\\.lm_head$"],
+            partition_type=PartitionType.COLUMN,
+            gather_output=True,
+        )
+
         # Fused QKV - GLM style [Q, K, V] concatenated on dim 0
         TPLayerSpec(
             patterns=[".*\\.query_key_value\\.weight$"],
@@ -116,6 +123,9 @@ class TPLayerSpec:
 
     # Optional: model type constraint (only apply for specific models)
     model_types: Optional[List[str]] = None
+
+    # Gather column-parallel output shards so every TP rank receives the full output
+    gather_output: bool = False
 
     def __post_init__(self):
         if isinstance(self.partition_type, str):
@@ -285,6 +295,7 @@ class AutoTPConfig:
                 TPLayerSpec(
                     patterns=spec_dict.get("patterns", []),
                     partition_type=partition_type,
+                    gather_output=spec_dict.get("gather_output", False),
                     shape=shape,
                     partition_dim=spec_dict.get("partition_dim"),
                     model_types=spec_dict.get("model_types"),
