@@ -117,12 +117,18 @@ class IPGBucket:
     elements: int = 0
     index: int = 0
     has_moe_params: bool = False
+    # Streams that issued copies into buffer[index] for the current bucket fill.
+    # average_tensor must wait on all of them before reducing the bucket, since the
+    # copies can be produced on multiple streams (e.g. under torch.compile gradient
+    # hooks run on different autograd streams), not just the current one (#8061).
+    copy_streams: set = field(default_factory=set)
 
     def clear(self):
         self.params.clear()
         self.grads.clear()
         self.elements = 0
         self.has_moe_params = False
+        self.copy_streams.clear()
 
 
 class DeepSpeedZeroOptimizer(ZeROOptimizer):
@@ -1144,6 +1150,11 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
 
         if self.contiguous_gradients:
             if param.numel() > self.reduce_bucket_size:
+                # Scope note (#8061): extra-large params are reduced directly and
+                # never copied into the contiguous IPG bucket, so no producer stream
+                # is recorded for them. average_tensor falls back to waiting on the
+                # current stream for this path; the producer-stream tracking only
+                # covers the bucketed path below.
                 self.extra_large_param_to_reduce[comm_dtype] = param
             else:
                 # keeping the gradients contiguous to prevent memory fragmentation, and avoid flattening
@@ -1154,6 +1165,10 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                 grad_reduc.data = new_grad_tensor.data.view_as(grad_reduc) if (
                     not self.zenflow or grad_reduc.dim() == 1) else new_grad_tensor.data.view_as(
                         grad_reduc.transpose(0, 1))
+                # Record the stream this copy ran on so average_tensor can wait on
+                # every producer of the bucket, not just the current stream (#8061).
+                if self.overlap_comm and not get_accelerator().resolves_data_dependency():
+                    bucket.copy_streams.add(get_accelerator().current_stream())
 
         bucket.elements += param.numel()
 
@@ -1262,7 +1277,15 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         if self.overlap_comm:
             stream = self.reduction_stream
             if not get_accelerator().resolves_data_dependency():
-                stream.wait_stream(get_accelerator().current_stream())
+                # The contiguous IPG bucket may have been filled by copies issued on
+                # several streams (e.g. under torch.compile, gradient hooks run on
+                # different autograd streams). Waiting only on the current stream lets
+                # the reduction read the bucket before the other producers finish
+                # (#8061), so wait on every stream that produced a copy into it.
+                bucket = self.ipg_buckets[communication_data_type]
+                producer_streams = bucket.copy_streams or {get_accelerator().current_stream()}
+                for producer_stream in producer_streams:
+                    stream.wait_stream(producer_stream)
                 get_accelerator().current_stream().wait_stream(stream)
         else:
             stream = get_accelerator().current_stream()

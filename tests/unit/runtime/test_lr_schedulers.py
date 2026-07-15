@@ -546,6 +546,25 @@ def test_warmup_cosine_lr_initializes_all_param_groups():
     assert [group["lr"] for group in optimizer.param_groups] == pytest.approx(expected_lrs)
 
 
+def test_warmup_cosine_lr_total_num_steps_equals_warmup_num_steps():
+    # total_num_steps == warmup_num_steps must not raise ZeroDivisionError, and because the
+    # cosine decay window is empty, every step past warmup must stay at cos_min_ratio rather
+    # than oscillating back up. The sibling WarmupDecayLR guards the same denominator with
+    # max(1, ...); WarmupCosineLR must too, and additionally clamp the cosine progress.
+    param = torch.nn.Parameter(torch.zeros(1))
+    optimizer = torch.optim.Adam([{"params": [param], "lr": 0.01}])
+    cos_min_ratio = 0.1
+
+    scheduler = WarmupCosineLR(optimizer=optimizer,
+                               total_num_steps=10,
+                               warmup_num_steps=10,
+                               cos_min_ratio=cos_min_ratio)
+
+    for step in range(scheduler.warmup_num_steps, scheduler.warmup_num_steps + 5):
+        scheduler.step(step)
+        assert scheduler.get_lr_ratio() == pytest.approx(cos_min_ratio)
+
+
 @pytest.mark.parametrize("scheduler_cls", [WarmupLR, WarmupDecayLR, WarmupCosineLR])
 @pytest.mark.parametrize("bad_warmup_num_steps", [None, -5])
 def test_warmup_schedulers_reject_invalid_warmup_num_steps(scheduler_cls, bad_warmup_num_steps):
