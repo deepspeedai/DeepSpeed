@@ -737,11 +737,11 @@ class TestZeroUserBackwardSeparateLoss(DistributedTest):
         loss2 = loss_fn(output1, y2)
 
         model_engine.zero_grad()
-        model_engine.scale(loss1, retain_graph=True).backward(retain_graph=True)
+        model_engine.backward(loss1, retain_graph=True)
         if zero_stage == 3:
             assert get_deferred_release_count(model_engine) > 0
         model_engine.zero_grad()
-        model_engine.scale(loss2).backward()
+        model_engine.backward(loss2)
         assert not get_retain_graph_state(model_engine)
         if zero_stage == 3:
             assert get_deferred_release_count(model_engine) == 0
