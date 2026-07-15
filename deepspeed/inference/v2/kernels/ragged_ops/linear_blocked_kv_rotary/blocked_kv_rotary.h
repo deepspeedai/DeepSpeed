@@ -19,7 +19,7 @@ Arguments:
     q: [n_tokens, n_q_heads * head_size]
     k: [n_tokens, n_kv_heads * head_size]
     v: [n_tokens, n_kv_heads * head_size]
-    inv_freq: [max_seq_len, head_size // 2]
+    inv_freq: [rotary_dim // 2], always FP32 independently of q/k/v dtype
 */
 void kv_trained_rotary_embeddings(torch::Tensor& kv_cache,
                                   torch::Tensor& q,

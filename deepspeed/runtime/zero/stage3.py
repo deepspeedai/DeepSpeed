@@ -3128,7 +3128,8 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             torch.save(checkpoint, "saved.pth")
         """
         if self.elastic_checkpoint:
-            raise NotImplementedError("ZeRO-3 does not yet support elastic checkpointing, please disable for now.")
+            raise NotImplementedError(
+                "ZeRO-3 elastic checkpointing is deprecated and unsupported. Use Universal Checkpointing instead.")
 
         return self._rigid_state_dict()
 
@@ -3288,7 +3289,8 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         """
 
         if self.elastic_checkpoint:
-            raise NotImplementedError("ZeRO-3 does not yet support elastic checkpointing, please disable for now.")
+            raise NotImplementedError(
+                "ZeRO-3 elastic checkpointing is deprecated and unsupported. Use Universal Checkpointing instead.")
 
         if checkpoint_folder:
             self._load_universal_checkpoint(checkpoint_folder, load_optimizer_states, load_from_fp32_weights)

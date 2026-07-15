@@ -366,12 +366,12 @@ void shm_initialize(int size, int rank, char* addr_string, char* port_string)
     workspace_buf->states[0] = coll_alt2_allreduce_naive__copy_in_done;
     workspace_buf->states[1] = coll_begin;
 
-    // create the workspace pointer list
-    workspace = (struct allreduce_workspace**)malloc(size * sizeof(struct allreduce_workspace*));
-    symmetric_buffer[0] = (char**)malloc(size * sizeof(char**));
-    symmetric_buffer[1] = (char**)malloc(size * sizeof(char**));
-    distributed_buffer[0] = (char**)malloc(size * sizeof(char**));
-    distributed_buffer[1] = (char**)malloc(size * sizeof(char**));
+    // calloc used for defensive zero-init; the loop below writes every element before any read
+    workspace = (struct allreduce_workspace**)calloc(size, sizeof(struct allreduce_workspace*));
+    symmetric_buffer[0] = (char**)calloc(size, sizeof(char*));
+    symmetric_buffer[1] = (char**)calloc(size, sizeof(char*));
+    distributed_buffer[0] = (char**)calloc(size, sizeof(char*));
+    distributed_buffer[1] = (char**)calloc(size, sizeof(char*));
 
     // map shm of all ranks
     for (int i = 0; i < size; i++) {

@@ -39,8 +39,10 @@ def schedule_prefetch(gm: GraphModule, graph_id: int, graph_order: List[Tuple[in
                       create_inputs_fn, mem_budget: float, param_manager: DSGraphParamManager,
                       bwd: bool) -> GraphModule:
 
-    profile_graph = profiling_results[graph_id].bwd_graph if bwd else profiling_results[graph_id].fwd_graph
-    if is_profile_incomplete(profile_graph):
+    profile = profiling_results[graph_id]
+    profile_graph = profile.bwd_graph if bwd else profile.fwd_graph
+    mem_complete = profile.bwd_mem_complete if bwd else profile.fwd_mem_complete
+    if is_profile_incomplete(profile_graph) or not mem_complete:
         print_rank_0(f"schedule_prefetch graph_id={graph_id} incomplete profiling data; skipping prefetch")
         return gm
 
