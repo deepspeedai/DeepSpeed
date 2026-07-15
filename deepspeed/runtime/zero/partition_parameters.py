@@ -246,52 +246,12 @@ _orig_torch_eye = torch.eye
 _orig_torch_randn = torch.randn
 
 
-def _stream_construction_device(target_device, size_args, stream_chunk_size, dtype=None):
-    """Choose the device on which to construct a new tensor under ``zero.Init``.
-
-    When streaming very large parameters (``stream_chunk_size > 0``), floating-point
-    tensors whose element count exceeds the threshold are built on the host instead of
-    the accelerator, so a giant parameter created inside the ``zero.Init`` context
-    (e.g. ``with zero.Init(): model = Model()``) is never fully materialized on a
-    single device -- the streaming partition then stages only one chunk at a time onto
-    the accelerator. Only floating-point tensors are redirected, since parameters are
-    floating point while large integer tensors (attention masks, position ids, ...)
-    are typically non-partitioned buffers that must stay on the accelerator.
-    ``size_args`` is the shape (positional args or the ``size`` keyword); if it is not
-    a plain shape the accelerator device is used unchanged.
-    """
-    if not stream_chunk_size or target_device is None:
-        return target_device
-    device = target_device if isinstance(target_device, torch.device) else torch.device(target_device)
-    if device.type == "cpu":
-        return target_device
-    if dtype is not None and not (isinstance(dtype, torch.dtype) and dtype.is_floating_point):
-        return target_device
-    if len(size_args) == 1 and isinstance(size_args[0], (list, tuple, torch.Size)):
-        dims = size_args[0]
-    else:
-        dims = size_args
-    numel = 1
-    for dim in dims:
-        if not isinstance(dim, int):
-            return target_device
-        numel *= dim
-    return torch.device("cpu") if numel > stream_chunk_size else target_device
-
-
-def zero_wrapper_for_fp_tensor_constructor(fn: Callable,
-                                           target_fp_dtype: torch.dtype,
-                                           target_device: torch.device,
-                                           stream_chunk_size: int = 0,
-                                           shape_args: bool = False) -> Callable:
+def zero_wrapper_for_fp_tensor_constructor(fn: Callable, target_fp_dtype: torch.dtype,
+                                           target_device: torch.device) -> Callable:
 
     def wrapped_fn(*args, **kwargs) -> Tensor:
         if kwargs.get("device", None) is None and target_device is not None:
-            device = target_device
-            if shape_args:
-                size = kwargs["size"] if "size" in kwargs else args
-                device = _stream_construction_device(target_device, size, stream_chunk_size, kwargs.get("dtype"))
-            kwargs['device'] = device
+            kwargs['device'] = target_device
         tensor: Tensor = fn(*args, **kwargs)
         if target_fp_dtype is not None and tensor.is_floating_point():
             tensor.data = tensor.data.to(target_fp_dtype)
@@ -301,19 +261,15 @@ def zero_wrapper_for_fp_tensor_constructor(fn: Callable,
     return wrapped_fn
 
 
-def get_new_tensor_fn_for_dtype(target_fp_dtype: torch.dtype,
-                                target_device: torch.device,
-                                stream_chunk_size: int = 0) -> Callable:
+def get_new_tensor_fn_for_dtype(target_fp_dtype: torch.dtype, target_device: torch.device) -> Callable:
 
     def new_tensor(cls, *args, **kwargs) -> Tensor:
         if not args:
             args = (0, )
-        size = kwargs["size"] if "size" in kwargs else args
-        device = _stream_construction_device(target_device, size, stream_chunk_size, kwargs.get("dtype"))
-        if device is None:
+        if target_device is None:
             tensor = _orig_torch_empty(0).new_empty(*args, **kwargs)
         else:
-            tensor = _orig_torch_empty(0, device=device).new_empty(*args, **kwargs)
+            tensor = _orig_torch_empty(0, device=target_device).new_empty(*args, **kwargs)
 
         if tensor.is_floating_point() and target_fp_dtype is not None:
             tensor = tensor.to(target_fp_dtype)
@@ -691,33 +647,20 @@ class InsertPostInitMethodToModuleSubClasses(object):
         else:
             target_device = None
 
-        # Stream the construction of very large parameters through the host so the
-        # `with zero.Init(): model = Model()` pattern also avoids a full single-device
-        # materialization. Only applied to the shape-based constructors (empty/zeros/
-        # ones/randn/new), where the element count can be read from the size args.
-        stream_chunk_size = getattr(self, "partition_stream_chunk_size", 0)
-
         torch.Tensor.__new__ = get_new_tensor_fn_for_dtype(target_fp_dtype=target_fp_dtype,
-                                                           target_device=target_device,
-                                                           stream_chunk_size=stream_chunk_size)
+                                                           target_device=target_device)
         torch.tensor = zero_wrapper_for_fp_tensor_constructor(_orig_torch_tensor,
                                                               target_fp_dtype=target_fp_dtype,
                                                               target_device=target_device)
         torch.empty = zero_wrapper_for_fp_tensor_constructor(_orig_torch_empty,
                                                              target_fp_dtype=target_fp_dtype,
-                                                             target_device=target_device,
-                                                             stream_chunk_size=stream_chunk_size,
-                                                             shape_args=True)
+                                                             target_device=target_device)
         torch.zeros = zero_wrapper_for_fp_tensor_constructor(_orig_torch_zeros,
                                                              target_fp_dtype=target_fp_dtype,
-                                                             target_device=target_device,
-                                                             stream_chunk_size=stream_chunk_size,
-                                                             shape_args=True)
+                                                             target_device=target_device)
         torch.ones = zero_wrapper_for_fp_tensor_constructor(_orig_torch_ones,
                                                             target_fp_dtype=target_fp_dtype,
-                                                            target_device=target_device,
-                                                            stream_chunk_size=stream_chunk_size,
-                                                            shape_args=True)
+                                                            target_device=target_device)
         torch.full = zero_wrapper_for_fp_tensor_constructor(_orig_torch_full,
                                                             target_fp_dtype=target_fp_dtype,
                                                             target_device=target_device)
@@ -729,9 +672,7 @@ class InsertPostInitMethodToModuleSubClasses(object):
                                                            target_device=target_device)
         torch.randn = zero_wrapper_for_fp_tensor_constructor(_orig_torch_randn,
                                                              target_fp_dtype=target_fp_dtype,
-                                                             target_device=target_device,
-                                                             stream_chunk_size=stream_chunk_size,
-                                                             shape_args=True)
+                                                             target_device=target_device)
 
     def _remove_tensor_creation_wrappers(self):
         torch.Tensor.__new__ = torch.Tensor.__old_new__
@@ -1270,6 +1211,11 @@ class Init(InsertPostInitMethodToModuleSubClasses):
             chunk_offset += chunk_numel
 
         free_param(param)
+        # free_param leaves the empty placeholder on the streamed (host) source device.
+        # Move it to the accelerator so streamed params end in the same state as the
+        # standard path: later code (e.g. the sequential all-gather) uses param.device
+        # as the destination for the materialized parameter.
+        param.data = torch.empty(0, dtype=param.dtype, device=self.local_device)
 
     def _convert_to_zero_parameters(self, param_list):
         for param in param_list:
@@ -1314,16 +1260,6 @@ class Init(InsertPostInitMethodToModuleSubClasses):
                 self._zero_init_param(param)
                 print_rank_0(
                     f"Partitioning param {debug_param2name_id_shape(param)} module={debug_module2name(module)}")
-
-        # The construction override cannot distinguish a parameter from a buffer, so a
-        # large buffer may have been built on the host. Buffers are not partitioned;
-        # move any that landed on the host back to the accelerator.
-        if self.partition_stream_chunk_size > 0 and DeepSpeedTensorOverride.device in self.tensor_overrides:
-            for name in list(module._buffers):
-                buffer = module._buffers[name]
-                if buffer is not None and buffer.device.type == "cpu" and buffer.numel(
-                ) > self.partition_stream_chunk_size:
-                    module._buffers[name] = buffer.to(self.local_device)
 
         see_memory_usage(
             f"Param count {InsertPostInitMethodToModuleSubClasses.num_module_elements}. After converting and partitioning params in {module.__class__.__name__}",

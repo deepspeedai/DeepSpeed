@@ -8,7 +8,7 @@ import torch
 
 import deepspeed
 from deepspeed.runtime.zero import partition_parameters as pp
-from deepspeed.runtime.zero.partition_parameters import _partition_chunk_overlap, _stream_construction_device
+from deepspeed.runtime.zero.partition_parameters import _partition_chunk_overlap
 
 from unit.common import DistributedTest
 
@@ -39,70 +39,6 @@ def _stream_one_partition(full_flat, rank, num_partitions, chunk_numel):
     return out
 
 
-@pytest.mark.parametrize(
-    "target,size_args,chunk,expected",
-    [
-        ("cuda", (5000, 5000), 1_000_000, "cpu"),  # large -> host
-        ("cuda", (100, 100), 1_000_000, "cuda"),  # small -> accelerator
-        ("cuda", ((5000, 5000), ), 1_000_000, "cpu"),  # size passed as a tuple
-        ("cuda", (5000, 5000), 0, "cuda"),  # streaming disabled -> accelerator
-        ("cpu", (5000, 5000), 1_000_000, "cpu"),  # cpu target unchanged
-        ("cuda", ("not_a_shape", ), 1_000_000, "cuda"),  # non-shape args -> fall back
-    ])
-def test_stream_construction_device(target, size_args, chunk, expected):
-    device = _stream_construction_device(torch.device(target), size_args, chunk)
-    assert torch.device(device).type == expected
-
-
-def test_stream_construction_device_none_target():
-    assert _stream_construction_device(None, (5000, 5000), 1_000_000) is None
-
-
-@pytest.mark.parametrize(
-    "dtype,expected",
-    [
-        (torch.float32, "cpu"),
-        (torch.float16, "cpu"),
-        (torch.bfloat16, "cpu"),
-        (None, "cpu"),  # unspecified dtype defaults to floating point
-        (torch.long, "cuda"),  # integer buffers (masks, position ids) stay on the accelerator
-        (torch.bool, "cuda"),
-    ])
-def test_stream_construction_device_only_floating_point(dtype, expected):
-    device = _stream_construction_device(torch.device("cuda"), (5000, 5000), 1_000_000, dtype)
-    assert torch.device(device).type == expected
-
-
-@pytest.mark.parametrize(
-    "call_kwargs,expected",
-    [
-        ({
-            "size": (5000, 5000)
-        }, "cpu"),  # size passed as a keyword must still be inspected
-        ({
-            "size": (10, 10)
-        }, "cuda"),
-        ({
-            "size": (5000, 5000),
-            "dtype": torch.long
-        }, "cuda"),  # integer size= stays on accelerator
-    ])
-def test_wrapper_inspects_size_keyword(call_kwargs, expected):
-    captured = {}
-
-    def fake_constructor(*args, **kwargs):
-        captured["device"] = kwargs.get("device")
-        return torch.empty(0)
-
-    wrapper = pp.zero_wrapper_for_fp_tensor_constructor(fake_constructor,
-                                                        target_fp_dtype=None,
-                                                        target_device=torch.device("cuda"),
-                                                        stream_chunk_size=1_000_000,
-                                                        shape_args=True)
-    wrapper(**call_kwargs)
-    assert torch.device(captured["device"]).type == expected
-
-
 @pytest.mark.parametrize("numel,num_partitions,chunk_numel", [
     (64, 4, 8),
     (64, 4, 7),
@@ -130,19 +66,6 @@ def test_streamed_partitions_match_direct_slicing(numel, num_partitions, chunk_n
         assert torch.all(padding == -1.0)
 
 
-class _DeterministicLinear(torch.nn.Module):
-    """A linear layer with device-independent weights. Random init draws from a
-    device-specific RNG, so a CPU-constructed (streamed) weight and a GPU-constructed
-    (reference) weight would differ; fixed values make the two directly comparable."""
-
-    def __init__(self, n):
-        super().__init__()
-        self.weight = torch.nn.Parameter(torch.empty(n, n))
-        with torch.no_grad():
-            values = torch.arange(self.weight.numel()) % 97
-            self.weight.view(-1).copy_(values.to(self.weight.dtype))
-
-
 class TestStreamingPartitionMatchesStandard(DistributedTest):
     world_size = 2
 
@@ -156,8 +79,9 @@ class TestStreamingPartitionMatchesStandard(DistributedTest):
                     "stage3_partition_stream_chunk_size": chunk_size,
                 },
             }
+            torch.manual_seed(1234)
             with deepspeed.zero.Init(config_dict_or_path=config):
-                linear = _DeterministicLinear(64)
+                linear = torch.nn.Linear(64, 64, bias=False)
             return linear
 
         # Reference: the standard broadcast-then-partition path (streaming disabled).
@@ -181,6 +105,22 @@ class TestStreamingPartitionMatchesStandard(DistributedTest):
 
         assert streaming_calls["count"] >= 1, "streaming partition path was not exercised"
         assert torch.equal(streamed.weight.ds_tensor, reference_partition)
+
+        # After partitioning, the empty placeholder left in param.data must live on
+        # the accelerator exactly like the standard path: the sequential all-gather
+        # materializes the gathered parameter at param.device, so a host placeholder
+        # would silently gather the full weight onto the CPU.
+        assert streamed.weight.device == reference.weight.device
+
+        # Round-trip through the coordinator-style sequential all-gather (a
+        # single-param list takes the _all_gather_sequential path) and verify the
+        # materialized parameter lands on the same device as the standard path.
+        streamed.weight.all_gather_coalesced([streamed.weight]).wait()
+        try:
+            assert streamed.weight.device == reference.weight.device
+            assert streamed.weight.shape == streamed.weight.ds_shape
+        finally:
+            streamed.weight.partition()
 
     def test_streaming_via_module_path(self):
         # zero.Init(module=...) decides whether to stream on plain torch parameters,
@@ -207,29 +147,6 @@ class TestStreamingPartitionMatchesStandard(DistributedTest):
         streamed = build(512)
         assert torch.equal(streamed.weight.ds_tensor, reference.weight.ds_tensor)
         assert torch.equal(streamed.bias.ds_tensor, reference.bias.ds_tensor)
-
-    def test_streaming_keeps_buffers_on_accelerator(self):
-        # The construction override redirects large tensors to the host, but a buffer
-        # is not partitioned, so it must be restored to the accelerator (otherwise it
-        # would be stranded on the host and break the forward pass).
-        from deepspeed.accelerator import get_accelerator
-
-        class _WithBuffer(torch.nn.Module):
-
-            def __init__(self):
-                super().__init__()
-                self.weight = torch.nn.Parameter(torch.empty(64, 64))  # streamed
-                self.register_buffer("cache", torch.zeros(1024))  # above the 512 chunk
-
-        config = {
-            "train_batch_size": self.world_size,
-            "zero_optimization": {
-                "stage": 3,
-                "stage3_partition_stream_chunk_size": 512,
-            },
-        }
-        with deepspeed.zero.Init(config_dict_or_path=config):
-            module = _WithBuffer()
-
-        assert module.weight.ds_tensor is not None
-        assert get_accelerator().on_accelerator(module.cache)
+        # The host-built streamed param must end with its placeholder on the
+        # accelerator, in the same state as the standard path.
+        assert streamed.weight.device == reference.weight.device
