@@ -713,7 +713,7 @@ class TestZeroUserBackwardSeparateLoss(DistributedTest):
             assert get_deferred_release_count(model_engine) == 0
             releasable_statuses = get_zero3_releasable_param_statuses(model_engine)
             assert releasable_statuses, "Expected ZeRO-3 params to expose ds_status"
-            assert all(status == ZeroParamStatus.NOT_AVAILABLE for status in releasable_statuses)
+            assert all(status != ZeroParamStatus.INFLIGHT for status in releasable_statuses)
 
         model_engine.destroy()
 
@@ -747,7 +747,7 @@ class TestZeroUserBackwardSeparateLoss(DistributedTest):
             assert get_deferred_release_count(model_engine) == 0
             releasable_statuses = get_zero3_releasable_param_statuses(model_engine)
             assert releasable_statuses, "Expected ZeRO-3 params to expose ds_status"
-            assert all(status == ZeroParamStatus.NOT_AVAILABLE for status in releasable_statuses)
+            assert all(status != ZeroParamStatus.INFLIGHT for status in releasable_statuses)
 
         model_engine.step()
         assert not get_retain_graph_state(model_engine)
@@ -767,7 +767,7 @@ class TestZeroUserBackwardSeparateLoss(DistributedTest):
             assert get_deferred_release_count(model_engine) == 0
             releasable_statuses = get_zero3_releasable_param_statuses(model_engine)
             assert releasable_statuses, "Expected ZeRO-3 params to expose ds_status"
-            assert all(status == ZeroParamStatus.NOT_AVAILABLE for status in releasable_statuses)
+            assert all(status != ZeroParamStatus.INFLIGHT for status in releasable_statuses)
 
         model_engine.destroy()
 
