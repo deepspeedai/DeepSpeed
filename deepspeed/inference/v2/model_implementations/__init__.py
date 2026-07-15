@@ -20,3 +20,4 @@ from .qwen import *
 from .qwen_v2 import *
 from .qwen_v2_moe import *
 from .exaone4 import *
+from .exaone4_5 import *

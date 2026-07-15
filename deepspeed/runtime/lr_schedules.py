@@ -851,9 +851,14 @@ class WarmupCosineLR(object):
             return ratio
 
         real_last_step = self.last_batch_iteration - self.warmup_num_steps + 1
-        real_total_steps = self.total_num_steps - self.warmup_num_steps
+        real_total_steps = max(1, self.total_num_steps - self.warmup_num_steps)
+        # Clamp the cosine progress to [0, 1] so that once the schedule reaches (or steps
+        # past) its end, the ratio stays at cos_min_ratio instead of oscillating back up.
+        # This also covers total_num_steps <= warmup_num_steps, where there is no decay
+        # window and every post-warmup step must stay at the floor.
+        cosine_progress = min(1.0, real_last_step / real_total_steps)
         ratio_delta = 1. - self.cos_min_ratio
-        ratio = (1 + math.cos(math.pi * real_last_step / real_total_steps)) / 2
+        ratio = (1 + math.cos(math.pi * cosine_progress)) / 2
         ratio = max(0.0, self.cos_min_ratio + ratio_delta * ratio)
         return ratio
 
