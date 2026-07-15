@@ -1288,7 +1288,25 @@ class OutputBackwardHookManager:
         self.preprocess_per_tensor_fn = preprocess_per_tensor_fn
         self.preprocess_done = False
         self.last_preprocess_graph_task_id = None
+        self._reset_preprocess_callback_queued = False
         self.hook_handles = []
+
+    def _queue_preprocess_reset_callback(self):
+        """Reset preprocess state when the current backward graph completes."""
+        if self._reset_preprocess_callback_queued:
+            return
+
+        engine = getattr(torch.autograd.Variable, "_execution_engine", None)
+        if engine is None or not hasattr(engine, "queue_callback"):
+            return
+
+        def _reset_preprocess_state():
+            self.preprocess_done = False
+            self.last_preprocess_graph_task_id = None
+            self._reset_preprocess_callback_queued = False
+
+        engine.queue_callback(_reset_preprocess_state)
+        self._reset_preprocess_callback_queued = True
 
     def _should_run_preprocess_once(self):
         """Run preprocess once per backward graph task.
@@ -1307,6 +1325,7 @@ class OutputBackwardHookManager:
         if graph_task_id is not None:
             if graph_task_id != self.last_preprocess_graph_task_id:
                 self.last_preprocess_graph_task_id = graph_task_id
+                self.preprocess_done = True
                 return True
             return False
 
@@ -1327,6 +1346,7 @@ class OutputBackwardHookManager:
         def backward_hook(grad):
             # First, ensure global preprocessing happens once
             if self._should_run_preprocess_once():
+                self._queue_preprocess_reset_callback()
                 self.preprocess_once_fn()
 
             # Then apply per-tensor preprocessing if provided
@@ -1372,6 +1392,7 @@ class OutputBackwardHookManager:
         # Reset state for new forward pass
         self.preprocess_done = False
         self.last_preprocess_graph_task_id = None
+        self._reset_preprocess_callback_queued = False
         self.remove_hooks()
 
         # Register hooks on all tensors with grad_fn
