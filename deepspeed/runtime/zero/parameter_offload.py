@@ -422,7 +422,9 @@ class DeepSpeedZeRoOffload(object):
         self.forward_hooks.append(module.register_forward_hook(_post_forward_module_hook))
 
         # Pre backward hook
-        if not hasattr(module, "pre_bwd_fn"):
+        # Attribute-delegating wrappers may expose a child's hook state, but these closures and counters are
+        # module-local.
+        if "pre_bwd_fn" not in module.__dict__:
 
             @instrument_w_nvtx
             def _run_before_backward_function(sub_module):
@@ -445,7 +447,7 @@ class DeepSpeedZeRoOffload(object):
                 def setup_context(ctx, inputs, output):
                     ctx.module = module
                     ctx.pre_backward_function = _run_before_backward_function
-                    if not hasattr(ctx.module, "applied_pre_backward_ref_cnt"):
+                    if "applied_pre_backward_ref_cnt" not in ctx.module.__dict__:
                         ctx.module.applied_pre_backward_ref_cnt = 0
                     ctx.module.applied_pre_backward_ref_cnt += 1
 
@@ -459,7 +461,7 @@ class DeepSpeedZeRoOffload(object):
         self.backward_hooks.append(module.register_forward_hook(_pre_backward_module_hook))
 
         # post backward hook
-        if not hasattr(module, "post_bwd_fn"):
+        if "post_bwd_fn" not in module.__dict__:
 
             @instrument_w_nvtx
             def _run_after_backward_function(sub_module):
