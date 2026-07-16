@@ -493,16 +493,16 @@ class PartitionedParameterCoordinator:
         be released."""
         # print_rank_0(f"release_sub_module {'fwd' if forward else 'bwd'}: {submodule.ds_id=} {debug_module2name_id(submodule)}", force=False)
         params_to_release = (self.__params_to_release(submodule, self.__step_id) if self.is_complete_trace() else set(
-            iter_params(submodule, recurse=z3_leaf_module(submodule))))
+            p.ds_id for p in iter_params(submodule, recurse=z3_leaf_module(submodule))))
 
         if not forward:
             assert self.__active_backward_submodules, "active_backward_submodules is empty during backward pass"
             assert self.__active_backward_submodules[-1].ds_id == submodule.ds_id, f"{self.__active_backward_submodules[-1].ds_id=} != {submodule.ds_id=} during backward pass"
-            params_to_release.update(submodule.ds_recompute_parameters)
+            recompute_params = set([p.ds_id for p in submodule.ds_recompute_parameters])
+            params_to_release.update(recompute_params)
 
-        param_ids_to_release = set([p.ds_id for p in params_to_release])
         current_bwd_id = self.__active_backward_submodules[-1].ds_id if self.__active_backward_submodules else None
-        print_rank_0(f"release_sub_module {'fwd' if forward else 'bwd'}: {submodule.ds_id=} {current_bwd_id=} {param_ids_to_release=}", force=True)
+        print_rank_0(f"release_sub_module {'fwd' if forward else 'bwd'}: {submodule.ds_id=} {current_bwd_id=} {params_to_release=}", force=False)
 
         free_data = not z3_leaf_module(submodule) or not self.fast_sharding_for_leaf_module
         if not free_data:
@@ -518,10 +518,10 @@ class PartitionedParameterCoordinator:
 
         for param in module_params:
             param.ds_active_sub_modules.discard(submodule.ds_id)
-            if param.ds_id in param_ids_to_release and not param.is_external_param:
+            if param.ds_id in params_to_release and not param.is_external_param:
                 self.__release_param(param, free_data)
             if not free_data:
-                if param.ds_id in param_ids_to_release and not param.is_external_param:
+                if param.ds_id in params_to_release and not param.is_external_param:
                     # empty buffer ensures that all computations are complete
                     param.data = empty_buffer
 
@@ -613,7 +613,7 @@ class PartitionedParameterCoordinator:
             raise RuntimeError("expected trace to be complete")
 
         params_to_release = set(
-            p for p in iter_params(submodule_to_release, recurse=z3_leaf_module(submodule_to_release))
+            p.ds_id for p in iter_params(submodule_to_release, recurse=z3_leaf_module(submodule_to_release))
             if not p.ds_persist)
 
         # Problem: When prefetcher scans the param trace, it skips AVAILABLE params.
