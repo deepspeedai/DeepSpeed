@@ -24,6 +24,12 @@ last_optimize_step = 0
 MEM_MARGIN = 0.1
 
 
+def _all_reduce(tensor, op, process_group=None):
+    if process_group is None:
+        return dist.all_reduce(tensor, op)
+    return dist.all_reduce(tensor, op, group=process_group)
+
+
 def print_rank_0(message):
     log_dist(message, ranks=[0])
 
@@ -75,6 +81,7 @@ def _profile_result_incomplete(prof) -> bool:
 def selective_gather(gm: GraphModule, graph_id: int, graph_order: List[Tuple[int, bool]], profiling_results,
                      create_inputs_fn, mem_budget: float, param_manager: DSGraphParamManager,
                      bwd: bool) -> GraphModule:
+    """Persist high-value parameters only on the final backward graph and within measured headroom."""
     target_graph_id = graph_id
 
     if not bwd:
@@ -90,6 +97,7 @@ def selective_gather(gm: GraphModule, graph_id: int, graph_order: List[Tuple[int
     if last_backward_graph_id is None or graph_id != last_backward_graph_id:
         return gm
 
+    process_group = getattr(profiling_results[graph_id], "process_group", None)
     incomplete_profile_ids = [
         profile_graph_id for profile_graph_id, prof in profiling_results.items() if _profile_result_incomplete(prof)
     ]
@@ -167,13 +175,16 @@ def selective_gather(gm: GraphModule, graph_id: int, graph_order: List[Tuple[int
     current_available_mem = accelerator.available_memory()
     vals_to_bcast = torch.tensor([total_mem, current_available_mem],
                                  device=torch.device(get_accelerator().current_device()))
-    dist.all_reduce(vals_to_bcast, dist.ReduceOp.MIN)
+    _all_reduce(vals_to_bcast, dist.ReduceOp.MIN, process_group)
     total_mem = vals_to_bcast[0].item()
     current_available_mem = vals_to_bcast[1].item()
 
     budget = _compute_persistence_budget(all_graph_mem_records, total_mem, MEM_MARGIN)
     profiled_available_mem = budget["available_mem"]
-    available_mem = profiled_available_mem
+    current_available_headroom = max(0, int(current_available_mem) - int(total_mem * MEM_MARGIN))
+    # The profile models transient peaks, while current allocator state captures
+    # memory retained since profiling.  Persistence must satisfy both views.
+    available_mem = min(profiled_available_mem, current_available_headroom)
 
     ds_id_to_param = {}
     for g_id, g_pm in param_manager.items():
@@ -187,7 +198,8 @@ def selective_gather(gm: GraphModule, graph_id: int, graph_order: List[Tuple[int
         f"selective_gather target_graph_id={target_graph_id} profiled_mem_lists={budget['profiled_list_count']} "
         f"total_mem={total_mem} usable_mem={budget['usable_mem']} peak_resident_alloc={budget['peak_resident_alloc']} "
         f"transient_peak={budget['transient_peak']} current_available_mem={current_available_mem} "
-        f"profiled_transient_available_mem={profiled_available_mem} "
+        f"current_available_headroom={current_available_headroom} "
+        f"profiled_transient_available_mem={profiled_available_mem} effective_available_mem={available_mem} "
         f"persistent_count={len(persistent_ds_ids)} persistent_bytes={persistent_bytes} "
         f"candidate_count={len(ds_ids)} candidate_bytes={candidate_bytes}")
 
@@ -200,7 +212,7 @@ def selective_gather(gm: GraphModule, graph_id: int, graph_order: List[Tuple[int
         return gm
 
     if available_mem == 0:
-        print_rank_0("selective_gather no profiled headroom for new persistent params")
+        print_rank_0("selective_gather no effective headroom for new persistent params")
         return gm
 
     persistent_mem = 0

@@ -82,12 +82,21 @@ def patch_compiled_func():
 
 
 def unpatch_compiled_func():
+    """Restore torch.autograd.Function and discard inputs captured for this compile cycle."""
     global enabled_patched_func
     enabled_patched_func = False
 
     global original_grad_fn
-    torch.autograd.Function = original_grad_fn
+    if original_grad_fn is not None:
+        torch.autograd.Function = original_grad_fn
+        original_grad_fn = None
+    clear_backward_inputs()
 
 
 def get_backward_inputs():
     return backward_inputs
+
+
+def clear_backward_inputs():
+    """Drop captured real backward inputs before the next graph compilation."""
+    backward_inputs.clear()

@@ -25,6 +25,12 @@ MAX_BUFFERED_SIZE = 4e9
 run_prefetch_pass = False
 
 
+def _all_reduce(tensor, op, process_group=None):
+    if process_group is None:
+        return dist.all_reduce(tensor, op)
+    return dist.all_reduce(tensor, op, group=process_group)
+
+
 def print_rank_0(message):
     if dist.get_rank() == 0:
         print(message)
@@ -40,6 +46,7 @@ def schedule_prefetch(gm: GraphModule, graph_id: int, graph_order: List[Tuple[in
                       bwd: bool) -> GraphModule:
 
     profile = profiling_results[graph_id]
+    process_group = getattr(profile, "process_group", None)
     profile_graph = profile.bwd_graph if bwd else profile.fwd_graph
     mem_complete = profile.bwd_mem_complete if bwd else profile.fwd_mem_complete
     if is_profile_incomplete(profile_graph) or not mem_complete:
@@ -48,7 +55,7 @@ def schedule_prefetch(gm: GraphModule, graph_id: int, graph_order: List[Tuple[in
 
     max_mem = get_accelerator().total_memory() * (1 - MARGIN)
     vals_to_bcast = torch.tensor([max_mem], device=torch.device(get_accelerator().current_device()))
-    dist.all_reduce(vals_to_bcast, dist.ReduceOp.MIN)
+    _all_reduce(vals_to_bcast, dist.ReduceOp.MIN, process_group)
     max_mem = vals_to_bcast[0].item()
 
     mem = profiling_results[graph_id].bwd_mem if bwd else profiling_results[graph_id].fwd_mem
