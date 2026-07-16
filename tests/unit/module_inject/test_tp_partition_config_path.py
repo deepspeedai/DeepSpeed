@@ -12,7 +12,7 @@ import pytest
 import torch.nn as nn
 
 from deepspeed.module_inject.auto_tp import AutoTP, AutoTPConfig, PartitionType, TPLayerSpec
-from deepspeed.module_inject.layers import LinearLayer
+from deepspeed.module_inject.layers import LinearLayer, LmHeadLinearAllreduce
 
 
 class SubAttn(nn.Module):
@@ -135,7 +135,7 @@ def test_nested_depth_correct():
         assert f"layers.{layer_idx}.self_attn.o_proj" in matched_names
 
 
-def _build_gathered_lm_head_autotp(model):
+def _build_gathered_lm_head_autotp(model, mp_size=1):
     config = AutoTPConfig(layer_specs=[
         TPLayerSpec(
             patterns=[r".*lm_head\.weight$"],
@@ -152,7 +152,7 @@ def _build_gathered_lm_head_autotp(model):
         orig_layer_impl=None,
         partition_config=config,
     )
-    autotp.set_tensor_parallel_config(1, None)
+    autotp.set_tensor_parallel_config(mp_size, None)
     autotp.update_linear_policies()
     return autotp
 
@@ -174,6 +174,15 @@ def test_gathered_lm_head_falls_back_for_runtime_parameter_tie():
     assert isinstance(model.embed_tokens, nn.Embedding)
     assert isinstance(model.lm_head, nn.Linear)
     assert model.lm_head.weight is model.embed_tokens.weight
+
+
+def test_gathered_lm_head_falls_back_to_legacy_allreduce_when_output_dim_is_uneven():
+    model = OutputModel(tied=False)
+    model.lm_head = nn.Linear(32, 101, bias=False)
+
+    _build_gathered_lm_head_autotp(model, mp_size=2)._replace_module(model)
+
+    assert isinstance(model.lm_head, LmHeadLinearAllreduce)
 
 
 if __name__ == "__main__":

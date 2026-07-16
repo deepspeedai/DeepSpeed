@@ -475,6 +475,21 @@ class AutoTP():
 
     def _create_column_parallel_layer(self, module, spec: TPLayerSpec, name: str):
         """Create column-parallel layer (AllReduce in backward)."""
+        if spec.gather_output and self.mp_size is not None and self.mp_size > 1:
+            output_dim = module.weight.shape[0]
+            if output_dim % self.mp_size != 0:
+                if any(part in ("lm_head", "embed_out") for part in name.split('.')):
+                    print_dist(
+                        f"AutoTP: '{name}' uses gather_output with uneven output dim {output_dim} and tp_size="
+                        f"{self.mp_size}; falling back to legacy LmHeadLinearAllreduce for checkpoint-safe "
+                        "consolidation.",
+                        ranks=[0],
+                    )
+                    return LmHeadLinearAllreduce(module, self.mp_group)
+                raise NotImplementedError(
+                    f"AutoTP gather_output requires output dimension divisible by tp_size. Layer '{name}' has "
+                    f"output dim {output_dim} with tp_size={self.mp_size}.")
+
         if self.conv_linear_layer:
             return conv_LinearLayer(module, self.mp_group, name=name, gather_output=spec.gather_output)
         # Only use fused-QKV heuristics when no partition_config is provided.
