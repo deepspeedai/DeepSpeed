@@ -3,6 +3,7 @@
 
 # DeepSpeed Team
 
+from contextlib import nullcontext
 from typing import Set
 
 import torch
@@ -20,6 +21,37 @@ from deepspeed.utils.torch import required_torch_version
 from .util import get_input_nodes
 from .graph_param import DSGraphParamManager
 from .partitioner import get_wrapped_partitioner
+
+_DEEP_COMPILE_Z3_INDUCTOR_REDUCTION_CONFIG = {
+    "triton.mix_order_reduction": False,
+    "triton.persistent_reductions": False,
+}
+
+
+def deepcompile_z3_inductor_config_patch(enabled: bool):
+    """Disable reduction heuristics that create oversized kernels for DeepCompile ZeRO-3 graphs."""
+    if not enabled:
+        return nullcontext()
+
+    inductor = getattr(torch, "_inductor", None)
+    config = getattr(inductor, "config", None)
+    if config is None or not hasattr(config, "patch"):
+        return nullcontext()
+
+    triton_config = getattr(config, "triton", None)
+    if triton_config is None:
+        return nullcontext()
+
+    overrides = {
+        config_name: value
+        for config_name, value in _DEEP_COMPILE_Z3_INDUCTOR_REDUCTION_CONFIG.items()
+        if hasattr(triton_config,
+                   config_name.split(".", 1)[1])
+    }
+    if not overrides:
+        return nullcontext()
+
+    return config.patch(overrides)
 
 
 def _get_graphsafe_run_with_rng_state():
@@ -40,6 +72,7 @@ def _register_graphsafe_rng_state_no_reuse(register_fallback_no_reuse):
 
 
 def patch_compiler(original_compiler, dc_compiler, z3_partition: bool, graph_id, graph_param_manager, bwd: bool):
+    """Wrap an AOT compiler with DeepCompile rewrites and ZeRO-3 fake-shape repair."""
 
     def wrapped_compiler(gm, fake_inputs):
         mod_graph = dc_compiler(gm, fake_inputs)
@@ -74,7 +107,8 @@ def patch_compiler(original_compiler, dc_compiler, z3_partition: bool, graph_id,
         else:
             patched_inputs = fake_inputs
 
-        return original_compiler(gm, patched_inputs)
+        with deepcompile_z3_inductor_config_patch(z3_partition):
+            return original_compiler(gm, patched_inputs)
 
     return wrapped_compiler
 
@@ -138,36 +172,45 @@ def _patch_deepcompile_aot_kwargs(kwargs: dict, *, graph_id: int, z3_partition: 
 
 def patch_create_aot_dispatcher_function(graph_id: int, z3_partition: bool, make_fw_graph, make_bw_graph, real_inputs,
                                          param_indices, param_manager, frame_id: int, frames_partitioned: Set[int]):
+    """Temporarily install graph-specific AOT compilers and return an idempotent restore callback."""
 
     from torch._dynamo.backends.common import AotAutograd
     import functools
 
-    def patch_aotautograd():
-        # Unpatch if it was already patched
-        if hasattr(AotAutograd, "__original_init"):
-            AotAutograd.__init__ = AotAutograd.__original_init
+    # The constructor patch is process-global.  Recover first if a previous
+    # compile failed before reaching its restoration callback.
+    if hasattr(AotAutograd, "__original_init"):
+        AotAutograd.__init__ = AotAutograd.__original_init
+        delattr(AotAutograd, "__original_init")
 
-        original_init = AotAutograd.__init__
+    original_init = AotAutograd.__init__
 
-        @functools.wraps(original_init)
-        def patched_init(self, **kwargs):
-            _patch_deepcompile_aot_kwargs(kwargs,
-                                          graph_id=graph_id,
-                                          z3_partition=z3_partition,
-                                          make_fw_graph=make_fw_graph,
-                                          make_bw_graph=make_bw_graph,
-                                          real_inputs=real_inputs,
-                                          param_indices=param_indices,
-                                          param_manager=param_manager,
-                                          frame_id=frame_id,
-                                          frames_partitioned=frames_partitioned)
+    @functools.wraps(original_init)
+    def patched_init(self, **kwargs):
+        _patch_deepcompile_aot_kwargs(kwargs,
+                                      graph_id=graph_id,
+                                      z3_partition=z3_partition,
+                                      make_fw_graph=make_fw_graph,
+                                      make_bw_graph=make_bw_graph,
+                                      real_inputs=real_inputs,
+                                      param_indices=param_indices,
+                                      param_manager=param_manager,
+                                      frame_id=frame_id,
+                                      frames_partitioned=frames_partitioned)
 
-            original_init(self, **kwargs)
+        original_init(self, **kwargs)
 
-        AotAutograd.__original_init = original_init
-        AotAutograd.__init__ = patched_init
+    AotAutograd.__original_init = original_init
+    AotAutograd.__init__ = patched_init
 
-    patch_aotautograd()
+    def restore_aotautograd():
+        """Restore only this invocation's patch without clobbering a newer owner."""
+        if AotAutograd.__init__ is patched_init:
+            AotAutograd.__init__ = original_init
+        if getattr(AotAutograd, "__original_init", None) is original_init:
+            delattr(AotAutograd, "__original_init")
+
+    return restore_aotautograd
 
 
 def register_custom_ops():

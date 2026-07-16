@@ -3,7 +3,7 @@
 
 # DeepSpeed Team
 
-from typing import List, Tuple
+from typing import Any, List, Tuple
 from dataclasses import dataclass, field
 
 from torch.fx import Graph
@@ -23,3 +23,6 @@ class ProfilingResult:
     fwd_tensor_sizes: List[Tuple[str, int]] = field(default_factory=list)  # name, size
     bwd_tensor_sizes: List[Tuple[str, int]] = field(default_factory=list)
     param_indices: List[Tuple[int, int, Tuple[int, ...]]] = field(default_factory=list)  # index, ds_id, ds_shape
+    # Keep newly added fields at the end so positional construction of the
+    # long-standing profiling fields remains backward compatible.
+    process_group: Any = None

@@ -2365,6 +2365,10 @@ class GatheredParameters:
         if not self.enabled:
             return
         self.params[0].all_gather(param_list=self.params)
+        for param in self.params:
+            fallback_owner = getattr(param, "_deepcompile_z3_eager_fallback_owner", None)
+            if fallback_owner is not None:
+                fallback_owner.transfer_gathered_param_to_user(param)
         if self.src_rank is None and self.enable_sanity_checks:
             self._param_versions = [(p, p.data.data_ptr(), p._version) for p in self.params]
 
