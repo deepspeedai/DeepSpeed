@@ -312,9 +312,6 @@ class PartitionedParameterCoordinator:
         2. kick off fetch for next few parameters we will need later (prefetch)
         3. block on parameters in immediately required sub module
         """
-        if not forward:
-            self.__active_backward_submodules.append(current_submodule)
-
         # For leaf modules during backward pass, autograd may trigger hooks from multiple
         # threads concurrently (e.g., when a module returns multiple tensors). We need to
         # serialize access to prevent race conditions in parameter state management.
@@ -337,6 +334,10 @@ class PartitionedParameterCoordinator:
                 # Wait outside the lock to avoid deadlock
                 event_to_wait.wait()
                 return
+
+        # Record only on the fetch-owning thread (waiters returned above) to preserve LIFO ordering.
+        if not forward:
+            self.__active_backward_submodules.append(current_submodule)
 
         try:
             self._fetch_sub_module_impl(current_submodule, forward, is_leaf)
