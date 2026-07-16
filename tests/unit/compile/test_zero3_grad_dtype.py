@@ -204,14 +204,12 @@ def test_zero3_compile_failure_deactivation_restores_dynamo_config(monkeypatch):
     fake_engine._release_deepcompile_dynamo_config = (
         lambda: DeepSpeedEngine._release_deepcompile_dynamo_config(fake_engine))
     fake_engine._set_deepcompile_active = lambda active: DeepSpeedEngine._set_deepcompile_active(fake_engine, active)
+    fake_engine.is_deepcompile_active = lambda: fake_engine._deepcompile_active
 
     try:
-        try:
-            backend()
-        except RuntimeError as exc:
-            assert str(exc) == "compile failed"
-        else:
-            raise AssertionError("failing backend did not raise")
+        for _ in range(2):
+            with pytest.raises(RuntimeError, match="compile failed"):
+                backend()
 
         assert FakeDynamo.config.force_parameter_static_shapes is True
         assert FakeDynamo.config.force_nn_module_property_static_shapes is False
@@ -223,7 +221,6 @@ def test_zero3_compile_failure_deactivation_restores_dynamo_config(monkeypatch):
 
         fake_engine.optimizer = None
         fake_engine.checkpoint_engine = None
-        fake_engine.is_deepcompile_active = lambda: fake_engine._deepcompile_active
         DeepSpeedEngine.destroy(fake_engine)
         assert cleanup_states == [True]
     finally:

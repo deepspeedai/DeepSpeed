@@ -78,8 +78,11 @@ def _deactivate_deepcompile_on_backend_failure(engine, backend_fn):
         try:
             return backend_fn(*args, **kwargs)
         except Exception:
-            get_deepcompile_handle().cleanup()
-            engine._set_deepcompile_active(False)
+            if engine.is_deepcompile_active():
+                try:
+                    get_deepcompile_handle().cleanup()
+                finally:
+                    engine._set_deepcompile_active(False)
             raise
 
     return backend_with_failure_cleanup
