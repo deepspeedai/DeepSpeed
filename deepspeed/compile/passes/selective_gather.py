@@ -13,7 +13,7 @@ import deepspeed.comm as dist
 from deepspeed.accelerator import get_accelerator
 from deepspeed.utils import log_dist
 
-from ..util import get_deepcompile_handle
+from ..util import get_deepcompile_handle, all_reduce
 from ..graph_param import DSGraphParamManager
 from ..profilers.graph_profile import is_profile_incomplete
 
@@ -22,12 +22,6 @@ NAME = "selective_gather"
 max_alloc_mem = 0
 last_optimize_step = 0
 MEM_MARGIN = 0.1
-
-
-def _all_reduce(tensor, op, process_group=None):
-    if process_group is None:
-        return dist.all_reduce(tensor, op)
-    return dist.all_reduce(tensor, op, group=process_group)
 
 
 def print_rank_0(message):
@@ -175,7 +169,7 @@ def selective_gather(gm: GraphModule, graph_id: int, graph_order: List[Tuple[int
     current_available_mem = accelerator.available_memory()
     vals_to_bcast = torch.tensor([total_mem, current_available_mem],
                                  device=torch.device(get_accelerator().current_device()))
-    _all_reduce(vals_to_bcast, dist.ReduceOp.MIN, process_group)
+    all_reduce(vals_to_bcast, dist.ReduceOp.MIN, process_group)
     total_mem = vals_to_bcast[0].item()
     current_available_mem = vals_to_bcast[1].item()
 

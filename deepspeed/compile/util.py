@@ -90,6 +90,12 @@ def log_rank0(msg: str, enable: bool = False):
         print(msg)
 
 
+def all_reduce(tensor, op, process_group=None):
+    if process_group is None:
+        return dist.all_reduce(tensor, op)
+    return dist.all_reduce(tensor, op, group=process_group)
+
+
 @functools.lru_cache
 def get_no_copy_ops():
     # Need to compile custom ops

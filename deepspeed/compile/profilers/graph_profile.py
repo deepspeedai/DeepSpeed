@@ -20,7 +20,7 @@ except ImportError:
 
 import deepspeed.comm as dist
 from deepspeed.accelerator import get_accelerator
-from ..util import is_comm_op, is_release_node, get_deepcompile_handle
+from ..util import is_comm_op, is_release_node, get_deepcompile_handle, all_reduce
 
 
 def _all_real_if_tensor(args):
@@ -151,12 +151,6 @@ def _absolute_profile_memory(mem_usage_out_of_torch):
             int(get_accelerator().max_memory_allocated()) + int(mem_usage_out_of_torch))
 
 
-def _all_reduce(tensor, op, process_group=None):
-    if process_group is None:
-        return dist.all_reduce(tensor, op)
-    return dist.all_reduce(tensor, op, group=process_group)
-
-
 def _barrier(process_group=None):
     if process_group is None:
         return dist.barrier()
@@ -173,7 +167,7 @@ def _rank_max_profile_memory(start_mem, peak_mem, device, distributed, process_g
     """Return per-field worst-rank absolute memory without averaging rank asymmetry."""
     values = torch.tensor([int(start_mem), int(peak_mem)], device=device, dtype=torch.int64)
     if distributed:
-        _all_reduce(values, dist.ReduceOp.MAX, process_group)
+        all_reduce(values, dist.ReduceOp.MAX, process_group)
     return int(values[0].item()), int(values[1].item())
 
 
@@ -273,7 +267,7 @@ class ProfilingInterpreter(Interpreter):
 
         cache_hit_flag = torch.tensor([0 if cache_hit else 1], device=self.device, dtype=torch.int)
         if self.distributed:
-            _all_reduce(cache_hit_flag, dist.ReduceOp.SUM, self.process_group)
+            all_reduce(cache_hit_flag, dist.ReduceOp.SUM, self.process_group)
         cache_hit = cache_hit_flag.item() == 0
 
         if cache_hit:
@@ -341,7 +335,7 @@ class ProfilingInterpreter(Interpreter):
                 vals_to_bcast = torch.tensor([device_time, wall_time, alloc_mem, max_memory, tensor_size],
                                              device=self.device)
                 if self.distributed:
-                    _all_reduce(vals_to_bcast, dist.ReduceOp.AVG, self.process_group)
+                    all_reduce(vals_to_bcast, dist.ReduceOp.AVG, self.process_group)
                 n.meta["device_time"] = vals_to_bcast[0].item()
                 n.meta["wall_time"] = vals_to_bcast[1].item()
                 n.meta["alloc_mem"] = int(vals_to_bcast[2].item())
@@ -432,7 +426,7 @@ class MemoryProfilingInterpreter(Interpreter):
                                        device=self.device,
                                        dtype=torch.int64)
         if dist.is_initialized():
-            _all_reduce(absolute_record, dist.ReduceOp.MAX, self.process_group)
+            all_reduce(absolute_record, dist.ReduceOp.MAX, self.process_group)
         profile_mem_start, current_alloc, max_alloc = (int(value.item()) for value in absolute_record)
         n.meta["profile_mem_start"] = profile_mem_start
         n.meta["profile_mem_peak"] = max_alloc

@@ -13,6 +13,7 @@ import torch
 from torch.fx import Graph, Node, GraphModule
 
 from ..util import get_input_nodes, get_param_nodes, get_index_by_graph_id, get_deepcompile_handle, get_real_uses, is_cast_op
+from ..util import all_reduce
 from ..fx import (add_postprocess, _make_node_meta, get_output_node, move_primals_to_head, add_end_backward,
                   replace_reduce_outputs_with_none, should_release_reduce_buckets)
 from ..profilers.graph_profile import ProfilingInterpreter, is_profile_incomplete
@@ -25,12 +26,6 @@ from deepspeed.accelerator import get_accelerator
 NAME = "zero3_compile"
 SCHEDULER_DEBUG_ENV = "DEEPSPEED_COMPILE_SCHEDULER_BUDGET_DEBUG"
 SCHEDULER_DEBUG_ENV_LEGACY = "DEEPSPEED_DEEPCOMPILE_SCHEDULER_DEBUG"
-
-
-def _all_reduce(tensor, op, process_group=None):
-    if process_group is None:
-        return dist.all_reduce(tensor, op)
-    return dist.all_reduce(tensor, op, group=process_group)
 
 
 def _get_rank(process_group=None):
@@ -47,7 +42,7 @@ def _reduce_int(value: int, op, process_group=None):
     value_tensor = torch.tensor([int(value)],
                                 device=torch.device(get_accelerator().current_device()),
                                 dtype=torch.int64)
-    _all_reduce(value_tensor, op, process_group)
+    all_reduce(value_tensor, op, process_group)
     return int(value_tensor.item())
 
 
@@ -71,7 +66,7 @@ def _sync_profile_complete(profile_complete: bool, process_group=None):
     complete = torch.tensor([1 if profile_complete else 0],
                             device=torch.device(get_accelerator().current_device()),
                             dtype=torch.int)
-    _all_reduce(complete, dist.ReduceOp.MIN, process_group)
+    all_reduce(complete, dist.ReduceOp.MIN, process_group)
     return bool(complete.item())
 
 
@@ -146,8 +141,8 @@ def _validate_final_schedule_fingerprint(graph: Graph, graph_id: int, bwd: bool,
     device = torch.device(get_accelerator().current_device())
     min_fingerprint = torch.tensor([fingerprint], device=device, dtype=torch.int64)
     max_fingerprint = min_fingerprint.clone()
-    _all_reduce(min_fingerprint, dist.ReduceOp.MIN, process_group)
-    _all_reduce(max_fingerprint, dist.ReduceOp.MAX, process_group)
+    all_reduce(min_fingerprint, dist.ReduceOp.MIN, process_group)
+    all_reduce(max_fingerprint, dist.ReduceOp.MAX, process_group)
     if min_fingerprint.item() != max_fingerprint.item():
         raise RuntimeError(
             f"DeepCompile ZeRO-3 final schedule fingerprint mismatch for graph_id={graph_id} bwd={bwd}: "
