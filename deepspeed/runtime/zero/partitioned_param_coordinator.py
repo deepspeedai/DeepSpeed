@@ -270,7 +270,7 @@ class PartitionedParameterCoordinator:
                 self.__trace_mode = ZeRoTraceMode.COMPLETE
                 print_rank_0(
                     f"completed record trace of {len(self.__submodule_order)} sub modules: {[m.ds_id for m in self.__submodule_order]}",
-                    force=True)
+                    force=False)
             else:
                 # Enable trace recording for next forward/backward pass
                 self.__trace_mode = ZeRoTraceMode.RECORD
@@ -314,7 +314,6 @@ class PartitionedParameterCoordinator:
         """
         if not forward:
             self.__active_backward_submodules.append(current_submodule)
-        print_rank_0(f"fetch_sub_module {current_submodule.ds_id=} {forward=} {self.__active_backward_submodules[-1].ds_id if self.__active_backward_submodules else None}", force=True)
 
         # For leaf modules during backward pass, autograd may trigger hooks from multiple
         # threads concurrently (e.g., when a module returns multiple tensors). We need to
@@ -492,8 +491,7 @@ class PartitionedParameterCoordinator:
     def release_sub_module(self, submodule: Module, forward=False) -> None:
         """release the parameters of a sub module, assuming they meet conditions to
         be released."""
-        from deepspeed.utils.debug import debug_module2name_id
-        # print_rank_0(f"release_sub_module {'fwd' if forward else 'bwd'}: {submodule.ds_id=} {debug_module2name_id(submodule)}", force=True)
+        # print_rank_0(f"release_sub_module {'fwd' if forward else 'bwd'}: {submodule.ds_id=} {debug_module2name_id(submodule)}", force=False)
         params_to_release = (self.__params_to_release(submodule, self.__step_id) if self.is_complete_trace() else set(
             iter_params(submodule, recurse=z3_leaf_module(submodule))))
 
@@ -602,9 +600,9 @@ class PartitionedParameterCoordinator:
     @instrument_w_nvtx
     def __release_param(self, param: Parameter, free_data: bool = True) -> None:
         if param.ds_status == ZeroParamStatus.AVAILABLE and not param.ds_active_sub_modules:
-            if True or logger.isEnabledFor(logging.DEBUG):
+            if logger.isEnabledFor(logging.DEBUG):
                 debug_rank0(f"-release: {param.ds_summary()}")
-                print_rank_0(f"release: {debug_param2name_id_shape(param)}", force=True)
+                print_rank_0(f"release: {debug_param2name_id_shape(param)}", force=False)
             param.partition(free_data=free_data)
             self.__n_available_params -= param.ds_numel
 
