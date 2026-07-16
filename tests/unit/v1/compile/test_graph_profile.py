@@ -186,8 +186,36 @@ def test_memory_profiling_interpreter_disables_profiling_if_cleanup_fails(monkey
     monkeypatch.setattr(graph_profile.Interpreter, "run", lambda self, *args: None)
 
     interpreter = graph_profile.MemoryProfilingInterpreter(_make_empty_graph_module())
+    interpreter.env["retained"] = object()
 
     with pytest.raises(RuntimeError, match="cleanup failed"):
         interpreter.run()
 
     assert fake_handle.events == [("enable", True), ("clear", None), ("enable", False)]
+    assert interpreter.env == {}
+
+
+def test_profiling_interpreter_restores_state_if_gathered_param_cleanup_fails(monkeypatch):
+    fake_handle = FakeDeepCompileHandle()
+
+    def fail_clear():
+        fake_handle.events.append(("clear", None))
+        raise RuntimeError("cleanup failed")
+
+    fake_handle.clear_all_gathered_params = fail_clear
+
+    monkeypatch.setattr(graph_profile, "get_deepcompile_handle", lambda: fake_handle)
+    monkeypatch.setattr(graph_profile, "get_accelerator", lambda: FakeAccelerator())
+    monkeypatch.setattr(graph_profile, "_all_real_if_tensor", lambda args: True)
+    monkeypatch.setattr(graph_profile, "_get_mem_usage_out_of_torch", lambda: 0)
+    monkeypatch.setattr(graph_profile.dist, "is_initialized", lambda: False)
+    monkeypatch.setattr(graph_profile.Interpreter, "run", lambda self, *args: None)
+
+    interpreter = graph_profile.ProfilingInterpreter(_make_empty_graph_module(), iteration=1)
+    interpreter.env["retained"] = object()
+
+    with pytest.raises(RuntimeError, match="cleanup failed"):
+        interpreter.run()
+
+    assert fake_handle.events == [("enable", True), ("clear", None), ("enable", False)]
+    assert interpreter.env == {}

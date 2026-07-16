@@ -20,7 +20,7 @@ except ImportError:
 
 import deepspeed.comm as dist
 from deepspeed.accelerator import get_accelerator
-from ..util import is_comm_op, is_release_node, get_deepcompile_handle, all_reduce
+from ..util import is_comm_op, is_release_node, get_deepcompile_handle, all_reduce, get_rank, barrier
 
 
 def _all_real_if_tensor(args):
@@ -151,18 +151,6 @@ def _absolute_profile_memory(mem_usage_out_of_torch):
             int(get_accelerator().max_memory_allocated()) + int(mem_usage_out_of_torch))
 
 
-def _barrier(process_group=None):
-    if process_group is None:
-        return dist.barrier()
-    return dist.barrier(group=process_group)
-
-
-def _get_rank(process_group=None):
-    if process_group is None:
-        return dist.get_rank()
-    return dist.get_rank(group=process_group)
-
-
 def _rank_max_profile_memory(start_mem, peak_mem, device, distributed, process_group=None):
     """Return per-field worst-rank absolute memory without averaging rank asymmetry."""
     values = torch.tensor([int(start_mem), int(peak_mem)], device=device, dtype=torch.int64)
@@ -210,17 +198,16 @@ class ProfilingInterpreter(Interpreter):
         except Exception as e:
             profile_complete = False
             msg = e.msg if "msg" in dir(e) else str(e)
-            if not self.distributed or _get_rank(self.process_group) == 0:
+            if not self.distributed or get_rank(self.process_group) == 0:
                 print(f"DeepCompile profiling failed; using default profile metadata for incomplete nodes: {msg}")
         finally:
+            # Keep this try/finally so profiling state is restored if gathered-param cleanup fails.
             try:
                 self.nz3.clear_all_gathered_params()
             finally:
-                try:
-                    self.nz3.enable_profiling(False)
-                finally:
-                    _clear_interpreter_env(self)
-                    _backfill_missing_profile_metadata(self.graph, profile_complete=profile_complete)
+                self.nz3.enable_profiling(False)
+                _clear_interpreter_env(self)
+                _backfill_missing_profile_metadata(self.graph, profile_complete=profile_complete)
         return return_val
 
     def run_node(self, n: torch.fx.Node) -> Any:
@@ -298,7 +285,7 @@ class ProfilingInterpreter(Interpreter):
 
         if is_comm_op(n):
             assert self.distributed, f"Distributed environment is not initialized but comm operator {n.name} {n.target} is used."
-            _barrier(self.process_group)
+            barrier(self.process_group)
 
         start = time.time()
         out = _run_repeatedly_for_profile(run_target, iteration, start_events, end_events)
@@ -306,7 +293,7 @@ class ProfilingInterpreter(Interpreter):
         walltime_sum = time.time() - start
 
         if is_comm_op(n):
-            _barrier(self.process_group)
+            barrier(self.process_group)
 
         alloc_mem = get_accelerator().memory_allocated() - alloc_mem_start + self.mem_usage_out_of_torch
         max_memory = get_accelerator().max_memory_allocated() - max_mem_start + self.mem_usage_out_of_torch
@@ -347,7 +334,7 @@ class ProfilingInterpreter(Interpreter):
             if is_release_op:
                 n.meta["alloc_mem"] = -self.allgather_mem.get(args[2], 0)
 
-            if _get_rank(self.process_group) == 0 and self.debug_log:
+            if get_rank(self.process_group) == 0 and self.debug_log:
                 print(
                     f"{n.target} {n.meta['device_time']:.2f}ms {n.meta['wall_time']:.2f}ms alloc_mem={n.meta['alloc_mem'] / 1024 / 1024:.2f}MB max_mem={n.meta['max_mem'] / 1024 / 1024:.2f}MB tensor_size={n.meta['tensor_size']}"
                 )
@@ -397,13 +384,12 @@ class MemoryProfilingInterpreter(Interpreter):
             self.mem_record.clear()
             print(f"MemoryProfiling error {e}")
         finally:
+            # Keep this try/finally so profiling state is restored if gathered-param cleanup fails.
             try:
                 self.nz3.clear_all_gathered_params()
             finally:
-                try:
-                    self.nz3.enable_profiling(False)
-                finally:
-                    _clear_interpreter_env(self)
+                self.nz3.enable_profiling(False)
+                _clear_interpreter_env(self)
 
         return return_val
 
@@ -434,7 +420,7 @@ class MemoryProfilingInterpreter(Interpreter):
         self.mem_record.append((n.name, current_alloc, current_alloc - self.last_alloc, max_alloc))
 
         self.node_counter += 1
-        if self.debug_log and _get_rank(self.process_group) == 0:
+        if self.debug_log and get_rank(self.process_group) == 0:
             print(
                 f"Mem prof Node {self.node_counter}/{self.node_num} {n.name} memory {current_alloc / 1024 / 1024:.2f}MB delta {(current_alloc - self.last_alloc) / 1024 / 1024:.2f}MB"
             )

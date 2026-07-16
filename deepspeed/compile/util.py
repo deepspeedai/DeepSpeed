@@ -96,6 +96,18 @@ def all_reduce(tensor, op, process_group=None):
     return dist.all_reduce(tensor, op, group=process_group)
 
 
+def get_rank(process_group=None):
+    if process_group is None:
+        return dist.get_rank()
+    return dist.get_rank(group=process_group)
+
+
+def barrier(process_group=None):
+    if process_group is None:
+        return dist.barrier()
+    return dist.barrier(group=process_group)
+
+
 @functools.lru_cache
 def get_no_copy_ops():
     # Need to compile custom ops
