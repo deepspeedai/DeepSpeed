@@ -30,6 +30,7 @@ def debug_rank0(message: str) -> None:
     if dist.get_rank() == 0:
         logger.debug(message)
 
+
 @torch.no_grad()
 @instrument_w_nvtx
 @compiler.disable
@@ -498,12 +499,15 @@ class PartitionedParameterCoordinator:
 
         if not forward:
             assert self.__active_backward_submodules, "active_backward_submodules is empty during backward pass"
-            assert self.__active_backward_submodules[-1].ds_id == submodule.ds_id, f"{self.__active_backward_submodules[-1].ds_id=} != {submodule.ds_id=} during backward pass"
+            assert self.__active_backward_submodules[
+                -1].ds_id == submodule.ds_id, f"{self.__active_backward_submodules[-1].ds_id=} != {submodule.ds_id=} during backward pass"
             recompute_params = set([p.ds_id for p in submodule.ds_recompute_parameters])
             params_to_release.update(recompute_params)
 
         current_bwd_id = self.__active_backward_submodules[-1].ds_id if self.__active_backward_submodules else None
-        print_rank_0(f"release_sub_module {'fwd' if forward else 'bwd'}: {submodule.ds_id=} {current_bwd_id=} {params_to_release=}", force=False)
+        print_rank_0(
+            f"release_sub_module {'fwd' if forward else 'bwd'}: {submodule.ds_id=} {current_bwd_id=} {params_to_release=}",
+            force=False)
 
         free_data = not z3_leaf_module(submodule) or not self.fast_sharding_for_leaf_module
         if not free_data:

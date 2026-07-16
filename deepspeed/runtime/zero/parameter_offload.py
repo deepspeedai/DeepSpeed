@@ -502,7 +502,9 @@ class DeepSpeedZeRoOffload(object):
 
     @torch.no_grad()
     def pre_sub_module_forward_function(self, sub_module):
-        see_memory_usage(f"Before sub module forward function {sub_module.__class__.__name__} {sub_module.ds_id=} before fetch", force=False)
+        see_memory_usage(
+            f"Before sub module forward function {sub_module.__class__.__name__} {sub_module.ds_id=} before fetch",
+            force=False)
 
         global FWD_MODULE_STACK
         FWD_MODULE_STACK.append(sub_module)
@@ -518,7 +520,9 @@ class DeepSpeedZeRoOffload(object):
             for param in params_to_fetch:
                 param.data = param.data.t() if len(param.ds_shape) != 1 else param.data
 
-        see_memory_usage(f"Before sub module forward function {sub_module.__class__.__name__} {sub_module.ds_id=} after fetch", force=False)
+        see_memory_usage(
+            f"Before sub module forward function {sub_module.__class__.__name__} {sub_module.ds_id=} after fetch",
+            force=False)
 
     @torch.no_grad()
     def post_sub_module_forward_function(self, sub_module):
@@ -537,7 +541,6 @@ class DeepSpeedZeRoOffload(object):
         see_memory_usage(
             f"After sub module forward function {sub_module.__class__.__name__}  {sub_module.ds_id} after release",
             force=False)
-
 
     @torch.no_grad()
     def pre_sub_module_backward_function(self, sub_module):
@@ -559,7 +562,6 @@ class DeepSpeedZeRoOffload(object):
         see_memory_usage(
             f"Before sub module backward function {sub_module.__class__.__name__} {sub_module.ds_id=} after fetch",
             force=False)
-
 
     @torch.no_grad()
     def post_sub_module_backward_function(self, sub_module):
