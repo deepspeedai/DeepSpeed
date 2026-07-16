@@ -3,7 +3,7 @@
 
 # DeepSpeed Team
 
-name: DCO
+name: DCO / required
 
 on:
   pull_request:
@@ -14,12 +14,13 @@ on:
       - master
 
 permissions:
+  checks: read
   contents: read
   pull-requests: read
 
 jobs:
-  DCO:
-    name: DCO
+  dco_required:
+    name: DCO / required
     runs-on: ubuntu-latest
 
     steps:
@@ -35,6 +36,10 @@ jobs:
           import urllib.error
           import urllib.parse
           import urllib.request
+
+
+          # GitHub App ID for https://github.com/apps/dco.
+          PROBOT_DCO_APP_ID = 1861
 
 
           def load_event(path):
@@ -134,7 +139,7 @@ jobs:
               return payload["data"]
 
 
-          def rest_request(path, token):
+          def rest_request(path, token, fatal=True):
               url = f"https://api.github.com/repos/{os.environ['GITHUB_REPOSITORY']}{path}"
               items = []
               while url:
@@ -153,9 +158,20 @@ jobs:
                           link = response.headers.get("Link", "")
                   except urllib.error.HTTPError as exc:
                       detail = exc.read().decode("utf-8", errors="replace")
-                      fail(f"GitHub REST request failed for {path}: HTTP {exc.code} {detail}")
+                      message = (
+                          f"GitHub REST request failed for {path}: "
+                          f"HTTP {exc.code} {detail}"
+                      )
+                      if fatal:
+                          fail(message)
+                      print(f"::warning::{message}")
+                      return None
                   except urllib.error.URLError as exc:
-                      fail(f"GitHub REST request failed for {path}: {exc}")
+                      message = f"GitHub REST request failed for {path}: {exc}"
+                      if fatal:
+                          fail(message)
+                      print(f"::warning::{message}")
+                      return None
 
                   if isinstance(data, list):
                       items.extend(data)
@@ -181,6 +197,42 @@ jobs:
               return rest_request(f"/compare/{base}...{head}?per_page=100", token)
 
 
+          def fetch_commit(sha, token):
+              ref = urllib.parse.quote(sha, safe="")
+              return rest_request(f"/commits/{ref}", token, fatal=False)
+
+
+          def has_successful_probot_dco(head_sha, token):
+              if not head_sha:
+                  return False
+
+              ref = urllib.parse.quote(head_sha, safe="")
+              payload = rest_request(
+                  f"/commits/{ref}/check-runs?check_name=DCO&filter=latest",
+                  token,
+                  fatal=False,
+              )
+              if not payload:
+                  return False
+
+              for check_run in payload.get("check_runs", []):
+                  app = check_run.get("app") or {}
+                  is_probot_dco = app.get("slug") == "dco" or app.get("id") == PROBOT_DCO_APP_ID
+                  if (
+                      check_run.get("name") == "DCO"
+                      and is_probot_dco
+                      and check_run.get("status") == "completed"
+                      and check_run.get("conclusion") == "success"
+                  ):
+                      print(
+                          "Found successful Probot DCO check for PR head "
+                          f"{head_sha}; accepting Probot result."
+                      )
+                      return True
+
+              return False
+
+
           def fetch_pr_commits(owner, repo, number, token):
               query = """
               query($owner: String!, $repo: String!, $number: Int!, $cursor: String) {
@@ -190,6 +242,7 @@ jobs:
                     baseRepository {
                       nameWithOwner
                     }
+                    headRefOid
                     commits(first: 100, after: $cursor) {
                       pageInfo {
                         hasNextPage
@@ -199,6 +252,20 @@ jobs:
                         commit {
                           oid
                           message
+                          author {
+                            name
+                            email
+                            user {
+                              login
+                            }
+                          }
+                          committer {
+                            name
+                            email
+                            user {
+                              login
+                            }
+                          }
                           parents(first: 2) {
                             totalCount
                           }
@@ -213,6 +280,7 @@ jobs:
               commits = []
               base_ref = None
               base_repo = None
+              head_sha = None
 
               while True:
                   data = graphql_request(
@@ -226,6 +294,7 @@ jobs:
 
                   base_ref = pull_request["baseRefName"]
                   base_repo = pull_request["baseRepository"]["nameWithOwner"]
+                  head_sha = pull_request["headRefOid"]
                   connection = pull_request["commits"]
                   commits.extend(connection["nodes"])
 
@@ -239,6 +308,7 @@ jobs:
               return {
                   "base_ref": base_ref,
                   "base_repo": base_repo,
+                  "head_sha": head_sha,
                   "commits": commits,
               }
 
@@ -257,10 +327,78 @@ jobs:
               return message.splitlines()[0] if message.splitlines() else "(empty subject)"
 
 
-          def validate_records(records, seen, skip_sha=None):
+          def actor_from_graphql(git_actor):
+              git_actor = git_actor or {}
+              user = git_actor.get("user") or {}
+              return {
+                  "login": user.get("login") or "",
+                  "type": "",
+                  "name": git_actor.get("name") or "",
+                  "email": git_actor.get("email") or "",
+              }
+
+
+          def actor_from_rest(api_actor, git_actor):
+              api_actor = api_actor or {}
+              git_actor = git_actor or {}
+              return {
+                  "login": api_actor.get("login") or "",
+                  "type": api_actor.get("type") or "",
+                  "name": git_actor.get("name") or "",
+                  "email": git_actor.get("email") or "",
+              }
+
+
+          def is_trusted_bot_actor(actor):
+              actor = actor or {}
+              return str(actor.get("type", "")).lower() == "bot"
+
+
+          def has_bot_marker(actor):
+              actor = actor or {}
+              for key in ("login", "name", "email"):
+                  value = str(actor.get(key, "")).lower()
+                  if "[bot]" in value:
+                      return True
+              return False
+
+
+          def actor_label(actor):
+              actor = actor or {}
+              return (
+                  actor.get("login")
+                  or actor.get("name")
+                  or actor.get("email")
+                  or "unknown actor"
+              )
+
+
+          def is_verified_bot_authored(record, token):
+              author = record.get("author") or {}
+              if is_trusted_bot_actor(author):
+                  return True
+
+              if not token or not has_bot_marker(author):
+                  return False
+
+              commit = fetch_commit(record["sha"], token)
+              if not commit:
+                  return False
+
+              api_author = commit.get("author") or {}
+              if str(api_author.get("type", "")).lower() != "bot":
+                  return False
+
+              author["login"] = api_author.get("login") or author.get("login") or ""
+              author["type"] = api_author.get("type") or author.get("type") or ""
+              return True
+
+
+          def validate_records(records, seen, token=None, skip_sha=None):
               failures = []
               checked = []
               skipped = []
+              accepted = []
               for record in records:
                   oid = record["sha"]
                   if oid in seen:
@@ -277,12 +415,25 @@ jobs:
                       print(f"Skipping merge commit {oid}")
                       continue
 
+                  if is_verified_bot_authored(record, token):
+                      skipped.append(oid)
+                      print(
+                          "Skipping bot-authored commit "
+                          f"{oid} ({actor_label(record.get('author'))})"
+                      )
+                      continue
+
                   checked.append(oid)
                   message = record.get("message") or ""
                   if not has_signed_off_by(message):
                       failures.append({"sha": oid, "subject": commit_subject(message)})
 
-              return {"checked": checked, "skipped": skipped, "failures": failures}
+              return {
+                  "checked": checked,
+                  "skipped": skipped,
+                  "accepted": accepted,
+                  "failures": failures,
+              }
 
 
           def validate_pr(owner, repo, number, token, seen):
@@ -306,6 +457,8 @@ jobs:
                       {
                           "sha": commit["oid"],
                           "message": commit.get("message") or "",
+                          "author": actor_from_graphql(commit.get("author")),
+                          "committer": actor_from_graphql(commit.get("committer")),
                           "parent_count": commit["parents"]["totalCount"],
                       }
                   )
@@ -314,6 +467,7 @@ jobs:
                   return {
                       "checked": [],
                       "skipped": [],
+                      "accepted": [],
                       "failures": [
                           {
                               "sha": f"PR #{number}",
@@ -322,7 +476,21 @@ jobs:
                       ],
                   }
 
-              return validate_records(records, seen)
+              if has_successful_probot_dco(pull_request["head_sha"], token):
+                  accepted = []
+                  for record in records:
+                      oid = record["sha"]
+                      if oid not in seen:
+                          seen.add(oid)
+                          accepted.append(oid)
+                  return {
+                      "checked": [],
+                      "skipped": [],
+                      "accepted": accepted,
+                      "failures": [],
+                  }
+
+              return validate_records(records, seen, token=token)
 
 
           def verify_merge_group_range_coverage(event, token, seen):
@@ -338,32 +506,29 @@ jobs:
 
               print(f"Checking merge group range coverage {base_sha}...{head_sha}")
               commits = fetch_compare_commits(base_sha, head_sha, token)
-              checked = []
-              failures = []
-              skipped = []
+              records = []
               for commit in commits:
-                  oid = commit.get("sha", "")
-                  if oid in seen:
-                      continue
-                  if oid == head_sha:
-                      skipped.append(oid)
-                      print(f"Skipping merge group head commit {oid}")
-                      continue
-                  if len(commit.get("parents", [])) > 1:
-                      skipped.append(oid)
-                      print(f"Skipping merge commit {oid}")
-                      continue
-
-                  seen.add(oid)
-                  checked.append(oid)
-                  message = commit.get("commit", {}).get("message", "") or ""
-                  if not has_signed_off_by(message):
-                      failures.append({"sha": oid, "subject": commit_subject(message)})
+                  git_commit = commit.get("commit", {}) or {}
+                  records.append(
+                      {
+                          "sha": commit.get("sha", ""),
+                          "message": git_commit.get("message", "") or "",
+                          "author": actor_from_rest(
+                              commit.get("author"),
+                              git_commit.get("author"),
+                          ),
+                          "committer": actor_from_rest(
+                              commit.get("committer"),
+                              git_commit.get("committer"),
+                          ),
+                          "parent_count": len(commit.get("parents", [])),
+                      }
+                  )
 
               if not commits:
                   fail(f"merge_group compare range {base_sha}...{head_sha} returned no commits")
 
-              return {"checked": checked, "skipped": skipped, "failures": failures}
+              return validate_records(records, seen, token=token, skip_sha=head_sha)
 
 
           def main():
@@ -378,6 +543,7 @@ jobs:
               failures = []
               checked = set()
               skipped = set()
+              accepted = set()
               seen = set()
 
               for number in sorted(pull_numbers):
@@ -385,6 +551,7 @@ jobs:
                   failures.extend(result["failures"])
                   checked.update(result["checked"])
                   skipped.update(result["skipped"])
+                  accepted.update(result.get("accepted", []))
 
               if event_name == "merge_group":
                   result = verify_merge_group_range_coverage(
@@ -395,6 +562,7 @@ jobs:
                   failures.extend(result["failures"])
                   checked.update(result["checked"])
                   skipped.update(result["skipped"])
+                  accepted.update(result.get("accepted", []))
 
               if failures:
                   for failure in failures:
@@ -404,9 +572,11 @@ jobs:
                   )
 
               print(
-                  "DCO trailers found for "
-                  f"{len(checked)} commit(s) across {len(pull_numbers)} "
-                  f"pull request(s); skipped {len(skipped)} merge or synthetic commit(s)."
+                  "DCO validation passed for "
+                  f"{len(pull_numbers)} pull request(s): "
+                  f"checked {len(checked)} commit(s), "
+                  f"accepted {len(accepted)} commit(s) via Probot DCO, "
+                  f"skipped {len(skipped)} merge, bot, or synthetic commit(s)."
               )
 
 

@@ -548,9 +548,32 @@ class AutoTP():
             else:
                 self.linear_policies = {nn.Linear: self._replace, nn.Embedding: self._slice_embedding}
 
+    def _replace_autoep_shared_experts(self, autoep_layer, autoep_name):
+        for child_name in ("shared_experts", "shared_experts_gate"):
+            child = getattr(autoep_layer, child_name, None)
+            if child is None:
+                continue
+            full_name = f"{autoep_name}.{child_name}" if autoep_name else child_name
+            if self.partition_config is not None and hasattr(child, "weight") and getattr(
+                    child.weight, "dim", lambda: 0)() == 2:
+                new_child = self._replace_with_config(child, full_name)
+                if new_child is not None:
+                    setattr(autoep_layer, child_name, new_child)
+            elif child.__class__ in self.linear_policies:
+                setattr(autoep_layer, child_name, self.linear_policies[child.__class__](child, full_name,
+                                                                                        self.conv_linear_layer))
+            elif any(isinstance(child, lp) for lp in self.linear_policies):
+                key = next(lp for lp in self.linear_policies if isinstance(child, lp))
+                setattr(autoep_layer, child_name, self.linear_policies[key](child, full_name, self.conv_linear_layer))
+            else:
+                self.update_mp_params(child)
+                self._replace_module(child, full_name, "")
+
     def _replace_module(self, r_module, prev_name='', prev_class_name=''):
         for name, child in r_module.named_children():
             if getattr(child, "_is_autoep_layer", False):
+                full_name = prev_name + '.' + name if prev_name else name
+                self._replace_autoep_shared_experts(child, full_name)
                 continue
 
             if prev_class_name == "":
@@ -571,7 +594,7 @@ class AutoTP():
             # When using partition_config (custom patterns/presets), use pattern-based routing
             # instead of linear_policies. This keeps all pattern logic centralized here.
             if self.partition_config is not None:
-                full_name = prev_name + '.' + name if prev_name else name
+                full_name = class_name + '.' + name if class_name else name
                 if isinstance(child, nn.Embedding):
                     # Check if embedding matches any pattern
                     param_name = full_name + ".weight"
@@ -588,7 +611,7 @@ class AutoTP():
                         setattr(r_module, name, new_child)
                 else:
                     self.update_mp_params(child)
-                    self._replace_module(child, full_name, class_name)
+                    self._replace_module(child, name, class_name)
             # Traditional path: use linear_policies for type-based routing
             elif child.__class__ in self.linear_policies:
                 setattr(r_module, name, self.linear_policies[child.__class__](child, prev_name + '.' + name,

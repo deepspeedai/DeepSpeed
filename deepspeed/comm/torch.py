@@ -30,7 +30,7 @@ def disable_compiler_collective(func):
 
 def build_shm_op():
     builder = get_accelerator().create_op_builder("ShareMemCommBuilder")
-    if builder is None or not deepspeed.ops.__compatible_ops__[builder.NAME]:
+    if builder is None or not deepspeed.ops.__compatible_ops__.get(builder.NAME, False):
         return None
     shm_cpp_module = builder.load()
     print(f'DeepSpeed {builder.absolute_name()} built successfully')

@@ -93,6 +93,10 @@ SUB_PARAMS_SHAPE = 'sub_params_shape'
 #########################################
 AUTOEP_LAYERS_KEY = 'ds_autoep_layers'
 AUTOEP_LAYERS_KEY_LEGACY = 'autoep_layers'
+AUTOEP_ZERO3_EXPERT_STATE_FORMAT_KEY = 'checkpoint_format'
+AUTOEP_ZERO3_PARTITIONED_EXPERT_STATE_FORMAT = 'zero3_partitioned'
+AUTOEP_ZERO3_EXPERT_STATE_FORMAT_VERSION_KEY = 'checkpoint_format_version'
+AUTOEP_ZERO3_EXPERT_STATE_FORMAT_VERSION = 1
 
 #########################################
 # Universal Checkpoint EP keys
@@ -100,3 +104,22 @@ AUTOEP_LAYERS_KEY_LEGACY = 'autoep_layers'
 EP_IS_EXPERT_PARAM = 'is_expert_param'
 EP_NUM_EXPERTS = 'ep_num_experts'
 EXPERT_PARAMETER_PATTERNS = 'expert_parameter_patterns'
+
+#########################################
+# AutoEP + AutoTP folding metadata keys
+#########################################
+FOLDING_METADATA_KEY = 'folding'
+FOLDING_METADATA_VERSION = 1
+FOLDING_TP_SIZE = 'tp_size'
+FOLDING_TP_RANK = 'tp_rank'
+FOLDING_EP_SIZE = 'ep_size'
+FOLDING_EP_RANK = 'ep_rank'
+FOLDING_ETP_SIZE = 'etp_size'
+FOLDING_ETP_RANK = 'etp_rank'
+FOLDING_ZERO_PARTITION_GROUP = 'zero_partition_group'
+FOLDING_ZERO_PARTITION_RANK = 'zero_partition_rank'
+FOLDING_ZERO_PARTITION_COUNT = 'zero_partition_count'
+FOLDING_DISPATCH_STRATEGY = 'dispatch_strategy'
+FOLDING_SHARED_EXPERT_PLACEMENT = 'shared_expert_placement'
+FOLDING_FAMILY = 'family'
+FOLDING_PARAM_FAMILIES = 'param_families'

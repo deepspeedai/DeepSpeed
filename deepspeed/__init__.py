@@ -3,6 +3,16 @@
 
 # DeepSpeed Team
 
+import os
+
+# By default, PyTorch's CUDA availability check (cudaGetDeviceCount/cuInit)
+# creates a CUDA context, which poisons fork()-based multiprocessing once
+# DeepSpeed probes op compatibility at import time. Opt into PyTorch's
+# NVML-based availability check so importing DeepSpeed never creates a CUDA
+# context, before importing torch or anything that may query CUDA.
+# setdefault() preserves an explicit user setting. See issue #7918.
+os.environ.setdefault("PYTORCH_NVML_BASED_CUDA_CHECK", "1")
+
 import argparse
 import sys
 import types
