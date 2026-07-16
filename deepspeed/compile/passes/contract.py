@@ -20,9 +20,11 @@ class PassContract:
     passes that name each other in ``conflicts_with`` may not share a schedule. ``phase`` is
     informational for now and records whether a pass rewrites the forward graph, the backward
     graph, or both.
+
+    A contract does not carry the pass name: the registry key set by ``register_compile_pass`` is
+    the single source of truth for a pass's identity.
     """
 
-    name: str
     provides: FrozenSet[str] = frozenset()
     requires: FrozenSet[str] = frozenset()
     conflicts_with: FrozenSet[str] = frozenset()
@@ -36,33 +38,47 @@ class PassContractError(ValueError):
 _pass_contracts: Dict[str, PassContract] = {}
 
 
-def register_pass_contract(contract: PassContract) -> None:
-    _pass_contracts[contract.name] = contract
+def register_pass_contract(name: str, contract: Optional[PassContract]) -> None:
+    # ``contract=None`` clears any contract previously registered under ``name`` so a pass that is
+    # re-registered through the two-argument API does not keep a stale contract.
+    if contract is None:
+        _pass_contracts.pop(name, None)
+    else:
+        _pass_contracts[name] = contract
 
 
 def get_pass_contract(name: str) -> Optional[PassContract]:
     return _pass_contracts.get(name)
 
 
-def _resolve_pass_name(pass_ref, fn_to_name: Optional[Dict]) -> Optional[str]:
-    # Schedules may reference a pass either by its registered name or by its callable. We only
-    # know how to look up a contract by name, so translate callables back to their name here.
+def _resolve_pass_name(pass_ref, name_registry: Optional[Dict]) -> Optional[str]:
+    # Schedules usually reference passes by their registered name, but a user may also drop a raw
+    # callable into a schedule. Contracts are keyed by name, so resolve a callable back to its
+    # name by object identity (avoiding any reliance on the callable being hashable or comparable).
     if isinstance(pass_ref, str):
         return pass_ref
-    if fn_to_name is not None:
-        return fn_to_name.get(pass_ref)
+    if name_registry is None:
+        return None
+    matches = [name for name, fn in name_registry.items() if fn is pass_ref]
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        raise PassContractError(f"Pass callable is registered under multiple names {sorted(matches)}; reference it by "
+                                f"name in the schedule so the intended contract can be selected.")
     return None
 
 
-def validate_schedule(schedule: List[Tuple[int, List]], fn_to_name: Optional[Dict] = None) -> None:
+def validate_schedule(schedule: List[Tuple[int, List]], name_registry: Optional[Dict] = None) -> None:
     """Validate that a DeepCompile pass schedule satisfies the registered pass contracts.
 
-    ``schedule`` uses the ``[(step, passes), ...]`` format consumed by ``init_schedule``. Each
-    entry in ``passes`` may be a registered pass name or a pass callable; pass ``fn_to_name`` to
-    resolve callables (typically ``{fn: name for name, fn in opt_passes.items()}``). Passes that
-    have no registered contract are treated as unconstrained and skipped, so mixed schedules of
-    contracted and ad-hoc passes remain valid. Raises :class:`PassContractError` on the first
-    unmet requirement or conflict.
+    ``schedule`` uses the ``[(step, passes), ...]`` format consumed by ``init_schedule``. Validate
+    it before names are converted to callables so the pass identity the user selected is preserved.
+    Each entry in ``passes`` is normally a registered pass name; a raw callable is resolved back to
+    its name through ``name_registry`` (the ``{name: fn}`` registry) by object identity, and a
+    callable registered under more than one name must instead be referenced by name. Passes with no
+    registered contract are treated as unconstrained and skipped, so mixed schedules of contracted
+    and ad-hoc passes remain valid. Raises :class:`PassContractError` on the first unmet requirement
+    or conflict.
 
     Each step is validated independently: DeepCompile resets Dynamo and recompiles from the
     original graph at every launched step (see ``launch_compile_passes``), so capabilities a pass
@@ -74,7 +90,7 @@ def validate_schedule(schedule: List[Tuple[int, List]], fn_to_name: Optional[Dic
         applied: List[str] = []
 
         for pass_ref in passes:
-            name = _resolve_pass_name(pass_ref, fn_to_name)
+            name = _resolve_pass_name(pass_ref, name_registry)
             if name is None:
                 continue
 

@@ -22,15 +22,25 @@ def clean_registry():
 
 
 def _register_zero3_and_prefetch():
-    register_pass_contract(PassContract(name="zero3", provides=frozenset({"z3"})))
-    register_pass_contract(PassContract(name="prefetch", requires=frozenset({"z3"})))
+    register_pass_contract("zero3", PassContract(provides=frozenset({"z3"})))
+    register_pass_contract("prefetch", PassContract(requires=frozenset({"z3"})))
 
 
 def test_register_and_get(clean_registry):
-    contract = PassContract(name="zero3", provides=frozenset({"z3"}))
-    register_pass_contract(contract)
+    contract = PassContract(provides=frozenset({"z3"}))
+    register_pass_contract("zero3", contract)
     assert get_pass_contract("zero3") is contract
     assert get_pass_contract("missing") is None
+
+
+def test_none_contract_clears_previous(clean_registry):
+    # Re-registering a pass without a contract must drop the stale one, not keep it.
+    register_pass_contract("prefetch", PassContract(requires=frozenset({"z3"})))
+    assert get_pass_contract("prefetch") is not None
+    register_pass_contract("prefetch", None)
+    assert get_pass_contract("prefetch") is None
+    # With the contract cleared, the pass is unconstrained again.
+    validate_schedule([(0, ["prefetch"])])
 
 
 def test_valid_order_passes(clean_registry):
@@ -60,8 +70,8 @@ def test_requirement_does_not_carry_across_steps(clean_registry):
 
 
 def test_conflict_is_symmetric(clean_registry):
-    register_pass_contract(PassContract(name="a", conflicts_with=frozenset({"b"})))
-    register_pass_contract(PassContract(name="b"))
+    register_pass_contract("a", PassContract(conflicts_with=frozenset({"b"})))
+    register_pass_contract("b", PassContract())
     # "b" declares nothing, but "a" lists it as a conflict; either ordering must be rejected.
     with pytest.raises(PassContractError, match="conflicts"):
         validate_schedule([(0, ["a", "b"])])
@@ -75,7 +85,7 @@ def test_uncontracted_passes_are_skipped(clean_registry):
     validate_schedule([(0, ["zero3", "ad_hoc_pass", "prefetch"])])
 
 
-def test_callables_resolved_via_fn_to_name(clean_registry):
+def test_callables_resolved_by_identity(clean_registry):
     _register_zero3_and_prefetch()
 
     def zero3_fn():
@@ -84,7 +94,19 @@ def test_callables_resolved_via_fn_to_name(clean_registry):
     def prefetch_fn():
         pass
 
-    fn_to_name = {zero3_fn: "zero3", prefetch_fn: "prefetch"}
-    validate_schedule([(0, [zero3_fn]), (10, [prefetch_fn])], fn_to_name)
+    name_registry = {"zero3": zero3_fn, "prefetch": prefetch_fn}
+    validate_schedule([(0, [zero3_fn]), (10, [zero3_fn, prefetch_fn])], name_registry)
     with pytest.raises(PassContractError, match="requires"):
-        validate_schedule([(0, [prefetch_fn])], fn_to_name)
+        validate_schedule([(0, [prefetch_fn])], name_registry)
+
+
+def test_ambiguous_callable_requires_explicit_name(clean_registry):
+    register_pass_contract("zero3", PassContract(provides=frozenset({"z3"})))
+
+    def shared_fn():
+        pass
+
+    # The same callable registered under two names cannot be resolved to a single contract.
+    name_registry = {"zero3": shared_fn, "zero3_alias": shared_fn}
+    with pytest.raises(PassContractError, match="multiple names"):
+        validate_schedule([(0, [shared_fn])], name_registry)

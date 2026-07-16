@@ -27,7 +27,7 @@ import deepspeed.comm as dist
 
 NAME = "offload_adam_states"
 # Offloads optimizer state and does not depend on the graph-rewriting passes.
-CONTRACT = PassContract(name=NAME)
+CONTRACT = PassContract()
 
 
 def print_r0(msg):

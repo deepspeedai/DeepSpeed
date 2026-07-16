@@ -22,7 +22,7 @@ from deepspeed.accelerator import get_accelerator
 
 NAME = "zero3_compile"
 # Inserts the ZeRO-3 all-gather/release ops that prefetch and selective-gather later build on.
-CONTRACT = PassContract(name=NAME, provides=frozenset({CAP_Z3_GATHER_RELEASE}))
+CONTRACT = PassContract(provides=frozenset({CAP_Z3_GATHER_RELEASE}))
 
 
 def add_allgather(graph_id: int, graph: Graph, node: Node, ds_id: int, dtype: torch.dtype):

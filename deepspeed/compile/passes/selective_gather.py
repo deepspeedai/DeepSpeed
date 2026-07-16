@@ -20,7 +20,7 @@ from .contract import PassContract, CAP_Z3_GATHER_RELEASE
 
 NAME = "selective_gather"
 # Chooses which zero3_compile all-gathers to keep resident, so it depends on that pass.
-CONTRACT = PassContract(name=NAME, requires=frozenset({CAP_Z3_GATHER_RELEASE}))
+CONTRACT = PassContract(requires=frozenset({CAP_Z3_GATHER_RELEASE}))
 
 max_alloc_mem = 0
 last_optimize_step = 0

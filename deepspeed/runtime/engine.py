@@ -5457,8 +5457,8 @@ class DeepSpeedEngine(Module):
                     assert callable(p) or p in opt_passes, f"Unknown pass {p}"
                 return [p if callable(p) else opt_passes[p] for p in passes]
 
+            validate_schedule(schedule, opt_passes)
             schedule = [(step, passes_name_to_fn(passes)) for step, passes in schedule]
-            validate_schedule(schedule, {fn: name for name, fn in opt_passes.items()})
 
         assert backend in ['inductor', 'eager'], f"Backend {backend} is not supported for DeepCompile."
 
