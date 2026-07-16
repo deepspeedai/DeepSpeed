@@ -172,6 +172,7 @@ def test_zero3_compile_failure_deactivation_restores_dynamo_config(monkeypatch):
 
     monkeypatch.setattr(torch, "_dynamo", FakeDynamo)
     restore = _allow_dynamo_dynamic_parameter_shapes_for_z3({})
+    cleanup_states = []
     fake_engine = type(
         "FakeEngine", (), {
             "_deepcompile_active": True,
@@ -180,6 +181,9 @@ def test_zero3_compile_failure_deactivation_restores_dynamo_config(monkeypatch):
             "_create_module_forward_pre_hook": lambda self: object(),
             "_create_module_forward_post_hook": lambda self: object(),
         })()
+    fake_handle = type("FakeDeepCompileHandle", (),
+                       {"cleanup": lambda self: cleanup_states.append(fake_engine._deepcompile_active)})()
+    monkeypatch.setattr("deepspeed.compile.init_z3.get_deepcompile_handle", lambda: fake_handle)
     fake_engine._deepcompile_dynamo_config_restore = restore
     original_autograd_function = torch.autograd.Function
     backend_mod.frames_needing_bwd.clear()
@@ -215,6 +219,13 @@ def test_zero3_compile_failure_deactivation_restores_dynamo_config(monkeypatch):
         assert backend_mod.frames_needing_bwd == {18}
         assert len(backend_mod.get_backward_inputs()) == 1
         assert torch.autograd.Function is not original_autograd_function
+        assert cleanup_states == [True]
+
+        fake_engine.optimizer = None
+        fake_engine.checkpoint_engine = None
+        fake_engine.is_deepcompile_active = lambda: fake_engine._deepcompile_active
+        DeepSpeedEngine.destroy(fake_engine)
+        assert cleanup_states == [True]
     finally:
         backend_mod.frames_needing_bwd.clear()
         backend_mod.unpatch_compiled_func()
