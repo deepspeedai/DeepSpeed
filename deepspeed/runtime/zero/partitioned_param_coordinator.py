@@ -7,7 +7,7 @@ from dataclasses import dataclass
 import collections
 from collections import UserDict
 import threading
-from typing import Deque, Set
+from typing import Deque, Dict, Set
 
 from deepspeed import comm as dist
 from deepspeed.utils import z3_leaf_module
@@ -157,7 +157,8 @@ class PartitionedParameterCoordinator:
         # This is only needed during backward pass; forward pass is single-threaded.
         self.__ongoing_fetch_leaf_module_events = collections.defaultdict(threading.Event)
         self.__leaf_module_lock = threading.Lock()
-        self.__active_backward_submodules = collections.deque()
+        # In-progress backward submodules keyed by ds_id; a dict (not LIFO deque) lets release remove the specific module, since multi-tensor z3-leaf hooks fire out of reverse-forward order.
+        self.__active_backward_submodules: Dict[int, Module] = {}
 
     """Tracing and Tracking
     TODO. consider performing trace before initializing PartitionedParameterCoordinator
@@ -336,9 +337,9 @@ class PartitionedParameterCoordinator:
                 event_to_wait.wait()
                 return
 
-        # Record only on the fetch-owning thread (waiters returned above) to preserve LIFO ordering.
+        # Record only on the fetch-owning thread (waiters returned above); keyed by ds_id so repeated fetches collapse to one entry.
         if not forward:
-            self.__active_backward_submodules.append(current_submodule)
+            self.__active_backward_submodules[current_submodule.ds_id] = current_submodule
 
         try:
             self._fetch_sub_module_impl(current_submodule, forward, is_leaf)
@@ -390,7 +391,7 @@ class PartitionedParameterCoordinator:
         for param in params_to_fetch:
             param.ds_active_sub_modules.add(current_submodule.ds_id)
             if in_checkpoint_recompute and self.__active_backward_submodules:
-                update_recompute_parameters(self.__active_backward_submodules[-1], param)
+                update_recompute_parameters(next(reversed(self.__active_backward_submodules.values())), param)
 
             if logger.isEnabledFor(logging.DEBUG):
                 debug_rank0(f"-wait: {param.ds_summary()}")
@@ -499,12 +500,10 @@ class PartitionedParameterCoordinator:
 
         if not forward:
             assert self.__active_backward_submodules, "active_backward_submodules is empty during backward pass"
-            assert self.__active_backward_submodules[
-                -1].ds_id == submodule.ds_id, f"{self.__active_backward_submodules[-1].ds_id=} != {submodule.ds_id=} during backward pass"
             recompute_params = set([p.ds_id for p in submodule.ds_recompute_parameters])
             params_to_release.update(recompute_params)
 
-        current_bwd_id = self.__active_backward_submodules[-1].ds_id if self.__active_backward_submodules else None
+        current_bwd_id = next(reversed(self.__active_backward_submodules)) if self.__active_backward_submodules else None
         print_rank_0(
             f"release_sub_module {'fwd' if forward else 'bwd'}: {submodule.ds_id=} {current_bwd_id=} {params_to_release=}",
             force=False)
@@ -519,7 +518,8 @@ class PartitionedParameterCoordinator:
         if not forward:
             module_params.update(submodule.ds_recompute_parameters)
             submodule.ds_recompute_parameters.clear()
-            self.__active_backward_submodules.pop()
+            # Remove this specific submodule regardless of position (hooks may fire out of reverse-forward order).
+            self.__active_backward_submodules.pop(submodule.ds_id, None)
 
         for param in module_params:
             param.ds_active_sub_modules.discard(submodule.ds_id)
@@ -546,6 +546,22 @@ class PartitionedParameterCoordinator:
         for param in iter_params(module, recurse=True):
             if param.ds_status != ZeroParamStatus.NOT_AVAILABLE:
                 raise RuntimeError(f"{param.ds_summary()} expected to be released")
+
+    @instrument_w_nvtx
+    @torch.no_grad()
+    def release_backward_leftovers(self) -> None:
+        """Release leftover submodules whose post-backward hook never fired (e.g. a no-grad
+        block input): drain the backward stack and release as the missing hook would have,
+        skipping persistent params to match __params_to_release."""
+        while self.__active_backward_submodules:
+            _, submodule = self.__active_backward_submodules.popitem()
+            params = set(iter_params(submodule, recurse=z3_leaf_module(submodule)))
+            params.update(submodule.ds_recompute_parameters)
+            submodule.ds_recompute_parameters.clear()
+            for param in params:
+                param.ds_active_sub_modules.discard(submodule.ds_id)
+                if not param.ds_persist and not param.is_external_param:
+                    self.__release_param(param)
 
     @instrument_w_nvtx
     def __all_gather_params(self, params: Set[Parameter], forward: bool) -> None:

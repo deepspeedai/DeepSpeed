@@ -224,6 +224,11 @@ class DeepSpeedZeRoOffload(object):
             if param.ds_status != ZeroParamStatus.NOT_AVAILABLE:
                 raise RuntimeError(f"{param.ds_summary()} expected to be released")
 
+    def release_backward_leftovers(self):
+        """Release params of submodules whose post-backward hook never fired (e.g. modules
+        fed a no-grad input). Cheap no-op when the backward stack is already empty."""
+        self.get_param_coordinator().release_backward_leftovers()
+
     def get_param_coordinator(self):
         return self.param_coordinator
 
