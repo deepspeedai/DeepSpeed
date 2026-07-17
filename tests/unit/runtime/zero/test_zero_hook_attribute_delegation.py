@@ -1,4 +1,6 @@
+# Copyright (c) DeepSpeed Team.
 # SPDX-License-Identifier: Apache-2.0
+
 # DeepSpeed Team
 
 import torch
@@ -63,8 +65,17 @@ class TestHookAttributeDelegation(DistributedTest):
         model = DelegatingWrapperModel(hidden_dim)
         engine, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config)
 
+        wrapper = engine.module.output
+        wrapped = wrapper.wrapped
+        assert "pre_bwd_fn" in wrapper.__dict__
+        assert "post_bwd_fn" in wrapper.__dict__
+        assert wrapper.pre_bwd_fn is not wrapped.pre_bwd_fn
+        assert wrapper.post_bwd_fn is not wrapped.post_bwd_fn
+
         for _ in range(2):
             inputs = torch.randn(1, hidden_dim, device=engine.device, dtype=engine.module.input.weight.dtype)
             loss = engine(inputs)
             engine.backward(loss)
+            assert wrapper.__dict__["applied_pre_backward_ref_cnt"] == 0
+            assert wrapped.__dict__["applied_pre_backward_ref_cnt"] == 0
             engine.step()
