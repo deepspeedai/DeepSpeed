@@ -42,3 +42,13 @@ class TestInferenceConfig(DistributedTest):
 
         engine = deepspeed.init_inference(torch.nn.Module(), config=config_json)
         assert engine._config.replace_with_kernel_inject
+
+    def test_moe_backward_compat_bool(self):
+        # `moe` accepts a bool for backward compatibility (moe: Union[bool, DeepSpeedMoEConfig]);
+        # it should build a DeepSpeedMoEConfig rather than raising a validation error.
+        from deepspeed.inference.config import DeepSpeedInferenceConfig, DeepSpeedMoEConfig
+
+        for value in (True, False):
+            config = DeepSpeedInferenceConfig(moe=value)
+            assert isinstance(config.moe, DeepSpeedMoEConfig)
+            assert config.moe.enabled == value

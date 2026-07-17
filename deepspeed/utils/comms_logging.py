@@ -91,7 +91,7 @@ class CommsLogger:
         self.prof_all = True
 
     def stop_profiling_comms(self):
-        self.prof_all = True
+        self.prof_all = False
 
     # E.g. start_profiling_op('all_reduce')
     def start_profiling_op(self, op_name_list):

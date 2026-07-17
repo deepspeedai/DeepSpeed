@@ -43,6 +43,9 @@ from deepspeed.runtime.bf16_optimizer import BF16_Optimizer
 
 from deepspeed.linear.optimized_linear import LoRAOptimizedLinear
 from deepspeed.module_inject.layers import GatherReplacedLayerParams, configure_tensor_parallel_runtime, collect_autotp_universal_checkpoint_info
+from deepspeed.module_inject.auto_ep_folding import (clear_autoep_folding_gradient_corrected,
+                                                     is_autoep_folding_gradient_corrected,
+                                                     reduce_autoep_folding_gradient)
 from deepspeed.runtime.config import DEEPSPEED_OPTIMIZERS, \
     ADAGRAD_OPTIMIZER, ADAM_OPTIMIZER, ADAMW_OPTIMIZER, LAMB_OPTIMIZER, ONEBIT_ADAM_OPTIMIZER, ONEBIT_LAMB_OPTIMIZER, \
     TORCH_ADAM_PARAM, ADAM_W_MODE, ADAM_W_MODE_DEFAULT, ZERO_ONE_ADAM_OPTIMIZER, MUADAM_OPTIMIZER, MUADAMW_OPTIMIZER, \
@@ -76,6 +79,7 @@ from deepspeed.checkpoint.constants import (
     AUTOEP_ZERO3_EXPERT_STATE_FORMAT_KEY,
     AUTOEP_ZERO3_PARTITIONED_EXPERT_STATE_FORMAT,
     EXPERT_PARAMETER_PATTERNS,
+    FOLDING_METADATA_KEY,
     FROZEN_PARAM_FRAGMENTS,
     OPTIMIZER_STATE_DICT,
     UNIVERSAL_CHECKPOINT_INFO,
@@ -286,6 +290,8 @@ class DeepSpeedEngine(Module):
         self.scale_wrt_gas = None
         self.losses = None
         self.mesh_device = mesh_device
+        self._autoep_folding_spec = None
+        self._autoep_folding_group_handles = None
 
         # Flag to indicate that scale() was called before manual backward pass
         self._manual_backward_expected = False
@@ -531,6 +537,7 @@ class DeepSpeedEngine(Module):
 
         from deepspeed.module_inject.auto_ep import AutoEP
         from deepspeed.module_inject.auto_ep_config import validate_autoep_config, validate_autoep_post_detection
+        from deepspeed.module_inject.auto_ep_folding import build_folding_spec, validate_folding_global
 
         ep_size = autoep_config.autoep_size
         tp_size = self.autotp_size()
@@ -547,6 +554,29 @@ class DeepSpeedEngine(Module):
 
         world_size = dist.get_world_size()
         validate_autoep_config(autoep_config, world_size, pp_size, tp_size, sp_size)
+        folding_spec = build_folding_spec(
+            world_size=world_size,
+            pp_size=pp_size,
+            tp_size=max(tp_size, 1),
+            ep_size=ep_size,
+            etp_size=autoep_config.expert_tensor_parallel_size,
+            mp_mode="tp" if tp_size > 1 else "sp",
+        )
+        compile_config = getattr(self._config, "compile_config", None)
+        validate_folding_global(
+            folding_spec,
+            zero_stage=self.zero_optimization_stage(),
+            sp_size=sp_size,
+            deepcompile_enabled=bool(getattr(compile_config, "deepcompile", False)),
+            use_data_before_expert_parallel=self._config.use_data_before_expert_parallel_,
+            mpu=self.mpu,
+            autoep_enabled=autoep_config.enabled,
+            tp_preset=getattr(self._config.tensor_parallel_config, "preset_model", None),
+            ep_preset=autoep_config.preset_model,
+            zero_offload_optimizer=self.zero_offload_optimizer() is not None,
+            zero_offload_param=self.zero_offload_param() is not None,
+        )
+        self._autoep_folding_spec = folding_spec
 
         # Create EP/EDP process groups
         mp_size = max(tp_size, sp_size, 1)
@@ -557,6 +587,7 @@ class DeepSpeedEngine(Module):
             pp_size=pp_size,
             mp_mode=mp_mode,
             use_data_before_expert_parallel_=self._config.use_data_before_expert_parallel_,
+            folding_spec=folding_spec if tp_size > 1 else None,
         )
 
         # Derive EP rank
@@ -1639,9 +1670,37 @@ class DeepSpeedEngine(Module):
         if self.mpu is not None:
             groups.mpu = self.mpu
 
+        folding_group_handles = None
+        try:
+            from deepspeed.module_inject.auto_ep_folding import FoldingGroupHandles, local_folding_ranks
+        except ImportError:
+            FoldingGroupHandles = None
+            local_folding_ranks = None
+        if (FoldingGroupHandles is not None and self._autoep_folding_spec is not None
+                and self._autoep_folding_spec.tp_size > 1):
+            ep_group_name = f"ep_size_{self._autoep_folding_spec.ep_size}"
+            rank = dist.get_rank()
+            local_ranks = local_folding_ranks(rank, self._autoep_folding_spec)
+            folding_group_handles = FoldingGroupHandles(
+                spec=self._autoep_folding_spec,
+                tp_group=groups.get_tensor_model_parallel_group(),
+                dense_dp_group=groups._get_data_parallel_group(),
+                ep_group=groups._get_expert_parallel_group(ep_group_name),
+                edp_group=groups._get_expert_data_parallel_group(ep_group_name),
+                ep_group_name=ep_group_name,
+                tp_ranks=local_ranks["tp"],
+                dense_dp_ranks=local_ranks["dense_dp"],
+                ep_ranks=local_ranks["ep"],
+                edp_ranks=local_ranks["edp"],
+            )
+            self._autoep_folding_group_handles = folding_group_handles
+
         # Set deepspeed parallelism spec. for the model including expert parallelism
         for _, module in self.module.named_modules():
-            if hasattr(module, 'set_deepspeed_parallelism'):
+            if _AutoEPMoELayer is not None and isinstance(module, _AutoEPMoELayer):
+                module.set_deepspeed_parallelism(self._config.use_data_before_expert_parallel_,
+                                                 folding_group_handles=folding_group_handles)
+            elif hasattr(module, 'set_deepspeed_parallelism'):
                 module.set_deepspeed_parallelism(self._config.use_data_before_expert_parallel_)
 
         # Query the groups module to get information about various parallel groups
@@ -1883,10 +1942,17 @@ class DeepSpeedEngine(Module):
         else:
             self.optimizer = basic_optimizer
 
+        self._configure_autoep_folding_optimizer_gradient_reduction()
         log_dist("DeepSpeed Final Optimizer = {}".format(self.optimizer.__class__.__name__), ranks=[0])
 
         self.compression_scheduler = self._configure_compression_scheduler()
         self.quantizer = self._configure_quantization()
+
+    def _configure_autoep_folding_optimizer_gradient_reduction(self):
+        configure = getattr(self.optimizer, "configure_autoep_folding_tp_gradient_reduction", None)
+        if configure is None:
+            return
+        configure(getattr(self, "_autoep_folding_spec", None))
 
     def _configure_basic_optimizer(self, model_parameters):
         # Copy so the pop() calls below (torch_adam, adam_w_mode, fp32_optimizer_states) do not
@@ -2692,6 +2758,8 @@ class DeepSpeedEngine(Module):
 
         # Pass (PP) gas boundary flag to optimizer (required for zero)
         self.optimizer.is_gradient_accumulation_boundary = self.is_gradient_accumulation_boundary()
+        if self.is_gradient_accumulation_boundary():
+            self._reduce_autoep_folding_tp_replicated_gradients()
         # ZeRO stage >= 2 communicates during non gradient accumulation boundaries as well
         if self.zero_optimization_partition_gradients():
             self.optimizer.overlapping_partition_gradients_reduce_epilogue()
@@ -2706,6 +2774,25 @@ class DeepSpeedEngine(Module):
                 self.buffered_allreduce_fallback(grads=grads, elements_per_buffer=bucket_size)
         elif self.zenflow:
             self.optimizer.reduce_gradients(pipeline_parallel=self.pipeline_parallelism)
+
+    def _reduce_autoep_folding_tp_replicated_gradients(self):
+        folding_spec = getattr(self, "_autoep_folding_spec", None)
+        if folding_spec is None or folding_spec.tp_size <= 1 or not dist.is_initialized():
+            return
+        if (isinstance(self.optimizer, ZeROOptimizer) and getattr(self.optimizer, "partition_gradients", False)
+                and getattr(self.optimizer, "autoep_folding_tp_group", None) is not None):
+            return
+        tp_group = groups.get_tensor_model_parallel_group()
+        if tp_group is None:
+            return
+
+        for param_name, param in self.module.named_parameters():
+            if not param.requires_grad or param.grad is None:
+                continue
+            if is_autoep_folding_gradient_corrected(param):
+                clear_autoep_folding_gradient_corrected(param)
+                continue
+            reduce_autoep_folding_gradient(folding_spec, param, param.grad, tp_group=tp_group, param_name=param_name)
 
     def _backward_prologue(self):
         if is_functorch_transforming():
@@ -3614,6 +3701,112 @@ class DeepSpeedEngine(Module):
         return sd
 
     @staticmethod
+    def _make_autoep_folding_metadata(folding_spec,
+                                      *,
+                                      family,
+                                      ep_rank,
+                                      zero_partition_group,
+                                      zero_partition_rank,
+                                      zero_partition_count,
+                                      param_families=None):
+        from deepspeed.checkpoint.autoep_universal import make_folding_metadata
+
+        return make_folding_metadata(tp_size=folding_spec.tp_size,
+                                     tp_rank=groups.get_tensor_model_parallel_rank(),
+                                     ep_size=folding_spec.ep_size,
+                                     ep_rank=ep_rank,
+                                     zero_partition_group=zero_partition_group,
+                                     zero_partition_rank=zero_partition_rank,
+                                     zero_partition_count=zero_partition_count,
+                                     family=family,
+                                     param_families=param_families)
+
+    @staticmethod
+    def _autoep_non_expert_param_families(state_dict):
+        families = {}
+        for key in state_dict.keys():
+            if ".router." in key:
+                families[key] = "router_gate_replicated"
+            elif ".shared_experts" in key:
+                families[key] = "shared_expert"
+            else:
+                families[key] = "dense"
+        return families
+
+    @staticmethod
+    def _autoep_param_family(param_name):
+        if ".experts." in param_name:
+            return "routed_expert"
+        if ".router." in param_name:
+            return "router_gate_replicated"
+        if ".shared_experts" in param_name:
+            return "shared_expert"
+        return "dense"
+
+    def _autoep_zero_optimizer_param_families(self):
+        optimizer = self.optimizer
+        real_dp_groups = getattr(optimizer, "real_dp_process_group", [])
+        partition_counts = getattr(optimizer, "partition_count", [])
+        param_families = {}
+        for group_idx, param_shapes in enumerate(self._get_zero_param_shapes()):
+            process_group = real_dp_groups[group_idx] if group_idx < len(
+                real_dp_groups) else optimizer.dp_process_group
+            partition_count = (partition_counts[group_idx]
+                               if group_idx < len(partition_counts) else dist.get_world_size(group=process_group))
+            partition_rank = dist.get_rank(group=process_group)
+            for param_name in param_shapes.keys():
+                family = DeepSpeedEngine._autoep_param_family(param_name)
+                zero_partition_group = "edp" if family == "routed_expert" else "dense_dp"
+                param_families[param_name] = {
+                    "family": family,
+                    "zero_partition_group": zero_partition_group,
+                    "zero_partition_rank": partition_rank,
+                    "zero_partition_count": partition_count,
+                }
+        return param_families
+
+    @staticmethod
+    def _validate_autoep_folding_checkpoint_metadata(state,
+                                                     *,
+                                                     folding_spec,
+                                                     family,
+                                                     zero_partition_group,
+                                                     zero_partition_count,
+                                                     tp_rank=None,
+                                                     ep_rank=None,
+                                                     zero_partition_rank=None,
+                                                     param_families=None,
+                                                     require_when_folded=True):
+        has_metadata = isinstance(state, dict) and FOLDING_METADATA_KEY in state
+        folded_runtime = folding_spec is not None and folding_spec.tp_size > 1
+        if has_metadata and not folded_runtime:
+            raise RuntimeError("Folded AutoEP+AutoTP checkpoint requires a folded runtime with matching "
+                               "tensor_parallel.autotp_size and expert_parallel.autoep_size.")
+        if not folded_runtime:
+            return
+        if require_when_folded and not has_metadata:
+            raise RuntimeError("Missing AutoEP+AutoTP folding metadata in folded checkpoint.")
+        if not has_metadata:
+            return
+
+        from deepspeed.checkpoint.autoep_universal import validate_folding_metadata
+
+        validate_folding_metadata(state,
+                                  tp_size=folding_spec.tp_size,
+                                  ep_size=folding_spec.ep_size,
+                                  etp_size=folding_spec.etp_size,
+                                  etp_rank=0,
+                                  tp_rank=tp_rank,
+                                  ep_rank=ep_rank,
+                                  zero_partition_group=zero_partition_group,
+                                  zero_partition_rank=zero_partition_rank,
+                                  zero_partition_count=zero_partition_count,
+                                  param_families=param_families,
+                                  family=family,
+                                  shared_expert_placement="tp_sharded",
+                                  dispatch_strategy="route_full_partition_dispatch")
+
+    @staticmethod
     def load_moe_state_dict(checkpoint_path,
                             tag,
                             state_dict,
@@ -3622,7 +3815,8 @@ class DeepSpeedEngine(Module):
                             mpu=None,
                             num_experts=1,
                             checkpoint_engine=TorchCheckpointEngine(),
-                            autoep_layers=None):
+                            autoep_layers=None,
+                            folding_spec=None):
         try:
             from deepspeed.module_inject.auto_ep_layer import AutoEPMoELayer as _AutoEPMoELayer
         except ImportError:
@@ -3630,6 +3824,7 @@ class DeepSpeedEngine(Module):
 
         has_autoep_layers = _AutoEPMoELayer is not None and model is not None and any(
             isinstance(m, _AutoEPMoELayer) for _, m in model.named_modules())
+        folded_autoep_tp = folding_spec is not None and folding_spec.tp_size > 1
 
         if old_moe_load:
             if has_autoep_layers:
@@ -3709,6 +3904,7 @@ class DeepSpeedEngine(Module):
                     group_name = module.ep_group_name
                     num_local_experts = module.num_local_experts
                     expp_rank = groups._get_expert_parallel_rank(group_name)
+                    exp_dp_rank = groups._get_expert_data_parallel_rank(group_name)
                     module_prefix = f"{n_module}." if n_module else ""
 
                     # Collect per-expert tensors to stack
@@ -3722,6 +3918,14 @@ class DeepSpeedEngine(Module):
                             raise FileNotFoundError(f"Expert checkpoint file not found: {expert_ckpt_path}. "
                                                     f"Expected layer_{moe_layer_id} expert_{global_expert_id}.")
                         expert_sd = checkpoint_engine.load(expert_ckpt_path, map_location=torch.device('cpu'))
+                        DeepSpeedEngine._validate_autoep_folding_checkpoint_metadata(
+                            expert_sd,
+                            folding_spec=folding_spec,
+                            family="routed_expert",
+                            zero_partition_group="edp",
+                            zero_partition_count=folding_spec.edp_size if folded_autoep_tp else None,
+                            tp_rank=groups.get_tensor_model_parallel_rank() if folded_autoep_tp else None,
+                            ep_rank=expp_rank if folded_autoep_tp else None)
 
                         for wname in ('w1', 'w2', 'w3'):
                             fused_key = f"{module_prefix}experts.{wname}"
@@ -4047,6 +4251,17 @@ class DeepSpeedEngine(Module):
         if checkpoint is None:
             return None, None
 
+        folding_spec = getattr(self, "_autoep_folding_spec", None)
+        folded_autoep_tp = folding_spec is not None and folding_spec.tp_size > 1
+        ep_group_name = f"ep_size_{folding_spec.ep_size}" if folded_autoep_tp else None
+        DeepSpeedEngine._validate_autoep_folding_checkpoint_metadata(
+            checkpoint,
+            folding_spec=folding_spec,
+            family="dense",
+            zero_partition_group="dense_dp",
+            zero_partition_count=folding_spec.dp_size if folded_autoep_tp else None,
+            tp_rank=groups.get_tensor_model_parallel_rank() if folded_autoep_tp else None)
+
         fetch_z3_params = False
         z3_params_to_fetch = None
         autoep_partitioned_experts = False
@@ -4086,7 +4301,8 @@ class DeepSpeedEngine(Module):
                                                     mpu=self.mpu,
                                                     num_experts=self.num_experts,
                                                     checkpoint_engine=self.checkpoint_engine,
-                                                    autoep_layers=autoep_layers)
+                                                    autoep_layers=autoep_layers,
+                                                    folding_spec=folding_spec)
             if self.zero_optimization_partition_weights():
                 z3_params_to_fetch = []
                 try:
@@ -4118,8 +4334,17 @@ class DeepSpeedEngine(Module):
                 if self.has_moe_layers:
                     largest_group_name = groups._get_max_expert_size_name()
                     expp_rank = groups._get_expert_parallel_rank(largest_group_name)
+                    exp_dp_rank = groups._get_expert_data_parallel_rank(largest_group_name)
                     optim_load_path = self._get_optimizer_ckpt_name(load_dir, tag, expp_rank)
                     optim_checkpoint = self.checkpoint_engine.load(optim_load_path, map_location=torch.device('cpu'))
+                    DeepSpeedEngine._validate_autoep_folding_checkpoint_metadata(
+                        optim_checkpoint,
+                        folding_spec=folding_spec,
+                        family="routed_expert",
+                        zero_partition_group="edp",
+                        zero_partition_count=folding_spec.edp_size if folded_autoep_tp else None,
+                        tp_rank=groups.get_tensor_model_parallel_rank() if folded_autoep_tp else None,
+                        ep_rank=expp_rank if folded_autoep_tp else None)
                 else:
                     optim_checkpoint = checkpoint
 
@@ -4127,9 +4352,7 @@ class DeepSpeedEngine(Module):
                     self.optimizer.load_state_dict(optim_checkpoint['optimizer'],
                                                    load_optimizer_states=load_optimizer_states)
                 else:
-                    optim_checkpoint = checkpoint
-
-                self.optimizer.load_state_dict(optim_checkpoint['optimizer'])
+                    self.optimizer.load_state_dict(optim_checkpoint['optimizer'])
 
             if load_lr_scheduler_states and self.lr_scheduler is not None:
                 self.lr_scheduler.load_state_dict(checkpoint['lr_scheduler'])
@@ -4263,6 +4486,13 @@ class DeepSpeedEngine(Module):
 
     def _get_all_zero_checkpoint_state_dicts(self, zero_ckpt_names):
         zero_sd_list = []
+        folding_spec = getattr(self, "_autoep_folding_spec", None)
+        folded_autoep_tp = folding_spec is not None and folding_spec.tp_size > 1
+        zero_partition_count = None
+        zero_param_families = None
+        if folded_autoep_tp:
+            zero_partition_count = dist.get_world_size(group=self.optimizer.dp_process_group)
+            zero_param_families = self._autoep_zero_optimizer_param_families()
         for i, ckpt_name in enumerate(zero_ckpt_names):
             _state = None
             if ckpt_name is None:
@@ -4275,6 +4505,16 @@ class DeepSpeedEngine(Module):
                 )
             else:
                 _state = {OPTIMIZER_STATE_DICT: None}
+            if _state.get(OPTIMIZER_STATE_DICT) is not None or FOLDING_METADATA_KEY in _state:
+                DeepSpeedEngine._validate_autoep_folding_checkpoint_metadata(
+                    _state,
+                    folding_spec=folding_spec,
+                    family="zero_optimizer_state",
+                    zero_partition_group="per_family",
+                    zero_partition_count=zero_partition_count,
+                    tp_rank=groups.get_tensor_model_parallel_rank() if folded_autoep_tp else None,
+                    zero_partition_rank=i if folded_autoep_tp else None,
+                    param_families=zero_param_families)
             zero_sd_list.append(_state)
 
         zero_optimizer_sd = [sd[OPTIMIZER_STATE_DICT] for sd in zero_sd_list]
@@ -4490,6 +4730,31 @@ class DeepSpeedEngine(Module):
         except ImportError:
             _AutoEPMoELayer = None
 
+        folding_spec = getattr(self, "_autoep_folding_spec", None)
+        folded_autoep_tp = folding_spec is not None and folding_spec.tp_size > 1
+
+        def folding_metadata(*,
+                             family,
+                             ep_rank,
+                             zero_partition_group,
+                             zero_partition_rank,
+                             zero_partition_count,
+                             param_families=None):
+            if not folded_autoep_tp:
+                return None
+            return DeepSpeedEngine._make_autoep_folding_metadata(folding_spec,
+                                                                 family=family,
+                                                                 ep_rank=ep_rank,
+                                                                 zero_partition_group=zero_partition_group,
+                                                                 zero_partition_rank=zero_partition_rank,
+                                                                 zero_partition_count=zero_partition_count,
+                                                                 param_families=param_families)
+
+        def autoep_expert_writer() -> bool:
+            if folded_autoep_tp:
+                return groups._get_data_parallel_rank() < folding_spec.ep_size
+            return self.checkpoint_engine.is_data_parallel_writer(exp_dp_rank)
+
         # A hack to save the checkpointing directory. Pipeline parallelism overrides
         # module_state_dict() and uses this path to save the model. module_state_dict()
         # then instead just returns None.
@@ -4616,12 +4881,14 @@ class DeepSpeedEngine(Module):
                                        f"multiple groups: {sorted(autoep_group_names)}. "
                                        f"All AutoEPMoELayer instances must use the same ep_size.")
 
+                # Gate file writes behind writer guard. Folded AutoEP+AutoTP needs
+                # one expert shard per (TP rank, EP rank), not only mp_rank_00.
                 if self.zero_optimization_partition_weights():
                     moe_layer_id += 1
                     continue
 
                 with deepspeed.zero.GatheredParameters(expert_params):
-                    if self.checkpoint_engine.is_data_parallel_writer(exp_dp_rank):
+                    if autoep_expert_writer():
                         # Slice fused 3D tensors into per-expert state dicts.
                         for local_expert_id in range(num_local_experts):
                             global_expert_id = expp_rank * num_local_experts + local_expert_id
@@ -4631,6 +4898,14 @@ class DeepSpeedEngine(Module):
                                 param = getattr(module.experts, wname)
                                 expert_state_dict[f"{fused_key}.{global_expert_id}"] = (
                                     param[local_expert_id].clone().detach())
+                            if folded_autoep_tp:
+                                expert_state_dict[FOLDING_METADATA_KEY] = folding_metadata(
+                                    family="routed_expert",
+                                    ep_rank=expp_rank,
+                                    zero_partition_group="edp",
+                                    zero_partition_rank=exp_dp_rank,
+                                    zero_partition_count=folding_spec.edp_size,
+                                )
 
                             moe_save_path = self._get_expert_ckpt_name(save_dir, moe_layer_id, global_expert_id, tag,
                                                                        self.mpu)
@@ -4646,18 +4921,23 @@ class DeepSpeedEngine(Module):
         largest_group_name = groups._get_max_expert_size_name()
         expp_rank = groups._get_expert_parallel_rank(largest_group_name)
         exp_dp_rank = groups._get_expert_data_parallel_rank(largest_group_name)
-
-        # In the case of E + D parallelism, only the first expert data-parallel
-        # rank writes expert/EP optimizer files because the expert weights are
-        # replicated across expert-data-parallel ranks. ZeRO-3 model-state
-        # files are different: each ZeRO partition rank must write its own
-        # zero_pp_rank_*_model_states.pt file so load can discover a checkpoint
-        # on every rank.
         is_expert_dp_writer = self.checkpoint_engine.is_data_parallel_writer(exp_dp_rank)
-        if is_expert_dp_writer and not self.zero_optimization_partition_weights():
+        expert_checkpoint_writer = (groups._get_data_parallel_rank() < folding_spec.ep_size
+                                    if folded_autoep_tp else is_expert_dp_writer)
+
+        # Non-ZeRO AutoEP keeps per-expert optimizer files. ZeRO-3 AutoEP
+        # restores experts from ZeRO optimizer shards, so every ZeRO partition
+        # rank continues to write its model-state file below instead.
+        if expert_checkpoint_writer and not self.zero_optimization_partition_weights():
             optimizer_state = {
                 'optimizer': self.optimizer.state_dict() if self.optimizer and not self.zero_optimization() else None
             }
+            if folded_autoep_tp:
+                optimizer_state[FOLDING_METADATA_KEY] = folding_metadata(family="routed_expert",
+                                                                         ep_rank=expp_rank,
+                                                                         zero_partition_group="edp",
+                                                                         zero_partition_rank=exp_dp_rank,
+                                                                         zero_partition_count=folding_spec.edp_size)
             # TODO: why use BufferedWriter not the path
             file_path = self._get_optimizer_ckpt_name(save_dir, tag, expp_rank)
             saveable_state_dict = optimizer_state
@@ -4707,8 +4987,17 @@ class DeepSpeedEngine(Module):
             state['ds_autoep_layers'] = autoep_layer_info if autoep_layer_info else None
             if universal_checkpoint_info is not None:
                 state[UNIVERSAL_CHECKPOINT_INFO] = universal_checkpoint_info
+            if folded_autoep_tp:
+                ep_group_name = f"ep_size_{folding_spec.ep_size}"
+                state[FOLDING_METADATA_KEY] = folding_metadata(
+                    family="dense",
+                    ep_rank=groups._get_expert_parallel_rank(ep_group_name),
+                    zero_partition_group="dense_dp",
+                    zero_partition_rank=groups._get_data_parallel_rank(),
+                    zero_partition_count=folding_spec.dp_size,
+                    param_families=DeepSpeedEngine._autoep_non_expert_param_families(model_state_dict))
             # Check for reserved-key collisions with client_state
-            reserved_keys = {'ds_autoep_layers', 'autoep_layers', UNIVERSAL_CHECKPOINT_INFO}
+            reserved_keys = {'ds_autoep_layers', 'autoep_layers', UNIVERSAL_CHECKPOINT_INFO, FOLDING_METADATA_KEY}
             collisions = reserved_keys.intersection(client_state.keys())
             if collisions:
                 raise KeyError(f"client_state contains reserved checkpoint keys: {sorted(collisions)}. "
@@ -4911,6 +5200,18 @@ class DeepSpeedEngine(Module):
     def _save_zero_checkpoint(self, save_path, tag):
         zero_checkpoint_name = self._get_zero_ckpt_name(save_path, tag)
         zero_sd = dict(optimizer_state_dict=self.optimizer.state_dict(), ds_config=self.config, ds_version=version)
+        folding_spec = getattr(self, "_autoep_folding_spec", None)
+        if folding_spec is not None and folding_spec.tp_size > 1:
+            ep_group_name = f"ep_size_{folding_spec.ep_size}"
+            zero_sd[FOLDING_METADATA_KEY] = DeepSpeedEngine._make_autoep_folding_metadata(
+                folding_spec,
+                family="zero_optimizer_state",
+                ep_rank=groups._get_expert_parallel_rank(ep_group_name),
+                zero_partition_group="per_family",
+                zero_partition_rank=dist.get_rank(group=self.optimizer.dp_process_group),
+                zero_partition_count=dist.get_world_size(group=self.optimizer.dp_process_group),
+                param_families=self._autoep_zero_optimizer_param_families(),
+            )
         self.checkpoint_engine.save(zero_sd, zero_checkpoint_name)
 
         if self.global_rank == 0:
