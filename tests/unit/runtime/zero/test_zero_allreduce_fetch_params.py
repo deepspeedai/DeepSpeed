@@ -54,12 +54,19 @@ class TestAllReduceFetchParamsPadded(DistributedTest):
 
         expected = [torch.arange(1, numel + 1, dtype=torch.float32) for numel in numels]
 
+        # Init.__exit__ restores torch.empty by reading _orig_torch_empty, so on the way out
+        # it rebinds the public torch.empty to poisoned_empty. Restoring the module global
+        # alone would leave every later allocation in this worker process sentinel-filled,
+        # so put the public binding back too.
+        saved_torch_empty = torch.empty
+
         partition_parameters._orig_torch_empty = poisoned_empty
         try:
             with deepspeed.zero.Init(config_dict_or_path=config, mem_efficient_linear=False, enabled=True):
                 module = ParamHolder(numels)
         finally:
             partition_parameters._orig_torch_empty = real_empty
+            torch.empty = saved_torch_empty
 
         params = [getattr(module, f"p{i}") for i in range(len(numels))]
         params[0].all_gather_coalesced(params).wait()
