@@ -1185,6 +1185,16 @@ def reload_adam_states(optimizer, device, non_blocking: bool = False):
             move_back_key(state, "exp_avg_sq")
 
 
+def is_transformers_cache(obj):
+    """Skip checks for the `transformers` cache class when performing AutoTP tensor comparisons."""
+    try:
+        from transformers.cache_utils import Cache
+    except ImportError:
+        return False
+
+    return isinstance(obj, Cache)
+
+
 def compare_tensors_in_structures(inputs1: Union[List, Dict], inputs2: Union[List, Dict]) -> bool:
     """
     Compare two lists or dictionaries for equality, including any tensors they may contain.
@@ -1203,6 +1213,10 @@ def compare_tensors_in_structures(inputs1: Union[List, Dict], inputs2: Union[Lis
         if len(inputs1) != len(inputs2):
             return False
         for val1, val2 in zip(inputs1, inputs2):
+            if is_transformers_cache(val1) and is_transformers_cache(val2):
+                if type(val1) is not type(val2):
+                    return False
+                continue
             if isinstance(val1, torch.Tensor) and isinstance(val2, torch.Tensor):
                 val1 = val1.to(torch.device(get_accelerator().current_device_name()))
                 val2 = val2.to(torch.device(get_accelerator().current_device_name()))
@@ -1217,6 +1231,10 @@ def compare_tensors_in_structures(inputs1: Union[List, Dict], inputs2: Union[Lis
             return False
         for key in inputs1:
             val1, val2 = inputs1[key], inputs2[key]
+            if is_transformers_cache(val1) and is_transformers_cache(val2):
+                if type(val1) is not type(val2):
+                    return False
+                continue
             if isinstance(val1, torch.Tensor) and isinstance(val2, torch.Tensor):
                 val1 = val1.to(torch.device(get_accelerator().current_device_name()))
                 val2 = val2.to(torch.device(get_accelerator().current_device_name()))

@@ -3,16 +3,34 @@
 """Shared fixtures and assertions for compact AutoEP tests."""
 
 import copy
+import os
+import tempfile
+import traceback
+from queue import Empty
 
 import deepspeed
+import deepspeed.comm as dist
 import pytest
 import torch
 import torch.nn as nn
+import torch.multiprocessing as mp
 
-from deepspeed.accelerator import get_accelerator
+from deepspeed.accelerator import get_accelerator, set_accelerator
+from deepspeed.accelerator.cpu_accelerator import CPU_Accelerator
+from unit.common import DEEPSPEED_TEST_TIMEOUT, get_master_port
 
 UNSET = object()
 UNSUPPORTED_LOAD_BALANCE_VALUES = [0, 0.0, 1e-3, 0.02, False, True, "1e-3", [1e-3], {"coeff": 1e-3}]
+H100_TEST_ENV_VARS = ("DEEPSPEED_RUN_H100_TESTS", "DEVDS_RUN_H100_TESTS")
+
+
+def h100_tests_enabled():
+    return any(os.environ.get(name) for name in H100_TEST_ENV_VARS)
+
+
+def skip_unless_h100_tests_enabled(reason):
+    if not h100_tests_enabled():
+        pytest.skip(f"{reason}; set DEEPSPEED_RUN_H100_TESTS=1 or DEVDS_RUN_H100_TESTS=1")
 
 
 class MockHFConfig:
@@ -114,6 +132,44 @@ class MockMoETransformer(nn.Module):
         return self.lm_head(x)
 
 
+class MockMoEOnlyTransformer(nn.Module):
+
+    def __init__(self, num_layers=2, num_experts=4, hidden_size=64, intermediate_size=128, moe_every_n=1):
+        super().__init__()
+        self.config = MockHFConfig()
+        self.config.num_local_experts = num_experts
+        self.config.hidden_size = hidden_size
+        self.config.intermediate_size = intermediate_size
+        self.model = nn.Module()
+        self.model.layers = nn.ModuleList([
+            self._make_layer(layer_idx, num_experts, hidden_size, intermediate_size, moe_every_n)
+            for layer_idx in range(num_layers)
+        ])
+        self.lm_head = nn.Linear(hidden_size, 100, bias=False)
+
+    @staticmethod
+    def _make_layer(layer_idx, num_experts, hidden_size, intermediate_size, moe_every_n):
+        layer = nn.Module()
+        layer.dense = nn.Linear(hidden_size, hidden_size, bias=False)
+        if layer_idx % moe_every_n == 0:
+            layer.mlp = MockMoEBlock(num_experts, intermediate_size, hidden_size)
+        else:
+            layer.mlp = MockDenseBlock(hidden_size, intermediate_size)
+        layer.input_layernorm = nn.LayerNorm(hidden_size)
+        layer.post_attention_layernorm = nn.LayerNorm(hidden_size)
+        return layer
+
+    def forward(self, x):
+        for layer_module in self.model.layers:
+            residual = x
+            x = layer_module.input_layernorm(x)
+            x = residual + layer_module.dense(x)
+            residual = x
+            x = layer_module.post_attention_layernorm(x)
+            x = residual + layer_module.mlp(x)
+        return self.lm_head(x)
+
+
 def assert_load_balance_coeff_rejection_message(exc: BaseException, value: object) -> None:
     text = str(exc)
     for needle in ("load_balance_coeff", "expert_bias", "not supported", "null", "omit"):
@@ -152,7 +208,7 @@ def make_autoep_config(zero_stage=0, ep_size=1, load_balance_coeff=UNSET, mixed_
         },
     }
     if get_accelerator().device_name() == "cpu":
-        config["optimizer"]["torch_adam"] = True
+        config["optimizer"]["params"]["torch_adam"] = True
     if mixed_precision:
         config.update(mixed_precision_config())
     if load_balance_coeff is not UNSET:
@@ -291,3 +347,59 @@ def tiny_mixtral_config(transformers):
         tie_word_embeddings=False,
         use_cache=False,
     )
+
+
+def _cpu_gloo_worker_entry(rank, world_size, init_method, master_port, worker, shared_tmpdir, error_queue):
+    set_accelerator(CPU_Accelerator())
+    os.environ["MASTER_ADDR"] = "127.0.0.1"
+    os.environ["MASTER_PORT"] = master_port
+    os.environ["LOCAL_RANK"] = str(rank)
+    os.environ["RANK"] = str(rank)
+    os.environ["LOCAL_SIZE"] = str(world_size)
+    os.environ["WORLD_SIZE"] = str(world_size)
+    os.environ.pop("NCCL_DEBUG", None)
+
+    try:
+        deepspeed.init_distributed(dist_backend="gloo", init_method=init_method, rank=rank, world_size=world_size)
+        worker(rank, world_size, shared_tmpdir)
+    except BaseException:
+        error_queue.put(traceback.format_exc())
+        raise
+    finally:
+        if dist.is_initialized():
+            dist.destroy_process_group()
+
+
+def run_cpu_gloo_test(worker, tmpdir, *, world_size=4, timeout=DEEPSPEED_TEST_TIMEOUT):
+    """Run a small CPU/Gloo distributed test without requiring visible GPU devices."""
+    ctx = mp.get_context("spawn")
+    error_queue = ctx.Queue()
+    with tempfile.NamedTemporaryFile(delete=False, dir=str(tmpdir), suffix="_filestore") as fp:
+        init_method = f"file://{fp.name}"
+    master_port = get_master_port()
+    shared_tmpdir = str(tmpdir)
+    processes = [
+        ctx.Process(target=_cpu_gloo_worker_entry,
+                    args=(rank, world_size, init_method, master_port, worker, shared_tmpdir, error_queue))
+        for rank in range(world_size)
+    ]
+    for process in processes:
+        process.start()
+    for process in processes:
+        process.join(timeout)
+    for process in processes:
+        if process.is_alive():
+            process.terminate()
+            pytest.fail(f"CPU/Gloo worker {process.pid} timed out after {timeout}s", pytrace=False)
+    errors = []
+    while True:
+        try:
+            errors.append(error_queue.get_nowait())
+        except Empty:
+            break
+    failed = [process for process in processes if process.exitcode]
+    if errors:
+        pytest.fail("\n".join(errors), pytrace=False)
+    if failed:
+        pytest.fail("CPU/Gloo worker failures: " + ", ".join(str(process.exitcode) for process in failed),
+                    pytrace=False)

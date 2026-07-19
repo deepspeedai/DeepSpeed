@@ -35,6 +35,7 @@ from deepspeed.git_version_info import version
 from deepspeed.runtime.constants import PIPE_REPLICATED
 from deepspeed.accelerator import get_accelerator
 from deepspeed.runtime.zero.muon.original_muon import muon_update
+from deepspeed.module_inject.auto_ep_folding import apply_folding_correction_to_grad_buffer
 from deepspeed.runtime.zero.muon.muon_optimizer import MuonWithAuxAdam
 from deepspeed.checkpoint.constants import (DS_VERSION, GROUP_PADDINGS, PARTITION_COUNT, LOSS_SCALER,
                                             SINGLE_PARTITION_OF_FP32_GROUPS, BASE_OPTIMIZER_STATE,
@@ -116,12 +117,18 @@ class IPGBucket:
     elements: int = 0
     index: int = 0
     has_moe_params: bool = False
+    # Streams that issued copies into buffer[index] for the current bucket fill.
+    # average_tensor must wait on all of them before reducing the bucket, since the
+    # copies can be produced on multiple streams (e.g. under torch.compile gradient
+    # hooks run on different autograd streams), not just the current one (#8061).
+    copy_streams: set = field(default_factory=set)
 
     def clear(self):
         self.params.clear()
         self.grads.clear()
         self.elements = 0
         self.has_moe_params = False
+        self.copy_streams.clear()
 
 
 class DeepSpeedZeroOptimizer(ZeROOptimizer):
@@ -219,11 +226,9 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
 
         self.reduce_scatter = reduce_scatter
 
-        # Muon's Newton-Schulz orthogonalization needs the full all-reduced gradient on each
-        # rank; reduce_scatter delivers only this rank's partition slice and silently corrupts
-        # cross-partition parameters (#7807). ZeRO-3 already guards this (see stage3.py).
-        if isinstance(self.optimizer, MuonWithAuxAdam) and self.reduce_scatter:
-            raise ValueError("Muon and reduce scatter cannot be used together")
+        if isinstance(self.optimizer, MuonWithAuxAdam) and self.reduce_scatter and self.cpu_offload:
+            raise ValueError("Muon with reduce scatter does not support optimizer offload because offload retains "
+                             "only partition slices; disable reduce scatter or optimizer offload")
 
         self.overlap_comm = overlap_comm
 
@@ -256,6 +261,8 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         self.contiguous_gradients = contiguous_gradients or self.cpu_offload
 
         self.has_moe_layers = has_moe_layers
+        self.autoep_folding_tp_group = None
+        self.autoep_folding_spec = None
         if self.has_moe_layers:
             self._configure_moe_settings()
         self._global_grad_norm = 0.
@@ -1025,6 +1032,26 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
     def overlapping_partition_gradients_reduce_epilogue(self):
         self.independent_gradient_partition_epilogue()
 
+    def configure_autoep_folding_tp_gradient_reduction(self, folding_spec):
+        if folding_spec is None or folding_spec.tp_size <= 1:
+            self.autoep_folding_tp_group = None
+            self.autoep_folding_spec = None
+            return
+        self.autoep_folding_tp_group = groups.get_tensor_model_parallel_group()
+        self.autoep_folding_spec = folding_spec
+
+    def _maybe_reduce_autoep_folding_tp_gradient(self, param, grad):
+        if ((not self.partition_gradients and not self.overlap_comm) or self.autoep_folding_tp_group is None
+                or grad is None):
+            return
+        if not getattr(param, "ds_grad_is_ready", True):
+            return
+        apply_folding_correction_to_grad_buffer(self.autoep_folding_spec,
+                                                param,
+                                                grad,
+                                                tp_group=self.autoep_folding_tp_group,
+                                                use_correction_marker=not self.partition_gradients)
+
     def _fill_param_grad_accum_attribute(self, param):
         if param.grad is not None:
             if param.grad_accum is None:
@@ -1112,6 +1139,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         if not getattr(param, "ds_grad_is_ready", True):
             return
 
+        self._maybe_reduce_autoep_folding_tp_gradient(param, grad_reduc)
         param_id = self.get_param_id(param)
         assert self.params_already_reduced[param_id] == False, \
             f"The parameter {debug_param2name(param)} has already been reduced. \
@@ -1120,6 +1148,11 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
 
         if self.contiguous_gradients:
             if param.numel() > self.reduce_bucket_size:
+                # Scope note (#8061): extra-large params are reduced directly and
+                # never copied into the contiguous IPG bucket, so no producer stream
+                # is recorded for them. average_tensor falls back to waiting on the
+                # current stream for this path; the producer-stream tracking only
+                # covers the bucketed path below.
                 self.extra_large_param_to_reduce[comm_dtype] = param
             else:
                 # keeping the gradients contiguous to prevent memory fragmentation, and avoid flattening
@@ -1130,6 +1163,10 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                 grad_reduc.data = new_grad_tensor.data.view_as(grad_reduc) if (
                     not self.zenflow or grad_reduc.dim() == 1) else new_grad_tensor.data.view_as(
                         grad_reduc.transpose(0, 1))
+                # Record the stream this copy ran on so average_tensor can wait on
+                # every producer of the bucket, not just the current stream (#8061).
+                if self.overlap_comm and not get_accelerator().resolves_data_dependency():
+                    bucket.copy_streams.add(get_accelerator().current_stream())
 
         bucket.elements += param.numel()
 
@@ -1192,8 +1229,11 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                                            process_group=process_group)
         if self.overlap_comm and not get_accelerator().resolves_data_dependency():
             allreduced.record_stream(self.reduction_stream)
+        local_rank = dist.get_rank(group=process_group)
         for buf, synced, bucket_rank in zip(small_bucket, self.unflatten(allreduced, small_bucket), bucket_ranks):
-            if dist.get_rank(group=process_group) == bucket_rank:
+            copy_to_local_rank = local_rank in bucket_rank if isinstance(bucket_rank,
+                                                                         frozenset) else local_rank == bucket_rank
+            if copy_to_local_rank:
                 buf.copy_(synced)
                 if self.overlap_comm and not get_accelerator().resolves_data_dependency():
                     buf.record_stream(self.reduction_stream)
@@ -1238,7 +1278,15 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         if self.overlap_comm:
             stream = self.reduction_stream
             if not get_accelerator().resolves_data_dependency():
-                stream.wait_stream(get_accelerator().current_stream())
+                # The contiguous IPG bucket may have been filled by copies issued on
+                # several streams (e.g. under torch.compile, gradient hooks run on
+                # different autograd streams). Waiting only on the current stream lets
+                # the reduction read the bucket before the other producers finish
+                # (#8061), so wait on every stream that produced a copy into it.
+                bucket = self.ipg_buckets[communication_data_type]
+                producer_streams = bucket.copy_streams or {get_accelerator().current_stream()}
+                for producer_stream in producer_streams:
+                    stream.wait_stream(producer_stream)
                 get_accelerator().current_stream().wait_stream(stream)
         else:
             stream = get_accelerator().current_stream()
@@ -1255,7 +1303,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             rank_and_offsets = []
             real_dp_process_group = []
             curr_size = 0
-            prev_id, prev_process_group = -1, None
+            prev_id, prev_process_group, prev_copy_ranks = -1, None, None
 
             process_group = self.dp_process_group
             # count = 0
@@ -1272,6 +1320,8 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                 partition_ids = self.param_to_partition_ids[i][param_id]
                 assert all([p_id < dist.get_world_size(group=process_group) for p_id in partition_ids
                             ]), f"world size {dist.get_world_size(group=process_group)} and p_ids: {partition_ids}"
+                muon_copy_ranks = (frozenset(partition_ids) if isinstance(self.optimizer, MuonWithAuxAdam)
+                                   and getattr(param, "use_muon", False) and len(partition_ids) > 1 else None)
                 partition_size = self.partition_size[i]
                 # Get all partition ids + their offsets
                 partition_ids_w_offsets = []
@@ -1296,39 +1346,46 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                         # Set numel to next partition's offset
                         numel = partition_ids_w_offsets[idx + 1][1] - offset
 
-                    # Merge bucket ranges if they belong to the same rank
-                    if partition_id == prev_id and process_group == prev_process_group:
-                        prev_pid, prev_size, prev_numel = rank_and_offsets[-1]
-                        rank_and_offsets[-1] = (prev_pid, prev_size, prev_numel + numel)
+                    copy_ranks = muon_copy_ranks or frozenset((partition_id, ))
+
+                    # Merge bucket ranges if they share the same reduction and consumers.
+                    if (partition_id == prev_id and process_group == prev_process_group
+                            and copy_ranks == prev_copy_ranks):
+                        prev_pid, prev_size, prev_numel, _ = rank_and_offsets[-1]
+                        rank_and_offsets[-1] = (prev_pid, prev_size, prev_numel + numel, copy_ranks)
                     else:
-                        rank_and_offsets.append((partition_id, curr_size, numel))
+                        rank_and_offsets.append((partition_id, curr_size, numel, copy_ranks))
                         real_dp_process_group.append(process_group)
                     curr_size += numel
-                    prev_id, prev_process_group = partition_id, process_group
+                    prev_id, prev_process_group, prev_copy_ranks = partition_id, process_group, copy_ranks
 
             tensor.div_(dist.get_world_size(group=self.dp_process_group) / float(self.sequence_parallel_size))
 
             buckets = {}
-            for i, (dst, bucket_offset, numel) in enumerate(rank_and_offsets):
+            for i, (dst, bucket_offset, numel, copy_ranks) in enumerate(rank_and_offsets):
                 grad_slice = tensor.narrow(0, int(bucket_offset), int(numel))
-                bucket_key = real_dp_process_group[i] if self.use_multi_rank_bucket_allreduce else (
-                    dst, real_dp_process_group[i])
+                process_group = real_dp_process_group[i]
+                # Split Muon matrices require all-reduce even when multi-rank bucket all-reduce is disabled.
+                if self.use_multi_rank_bucket_allreduce or len(copy_ranks) > 1:
+                    bucket_key = ("allreduce", process_group)
+                else:
+                    bucket_key = ("reduce", dst, process_group)
                 if bucket_key not in buckets:
                     buckets[bucket_key] = []
-                if self.use_multi_rank_bucket_allreduce:
-                    buckets[bucket_key].append((dst, grad_slice))
+                if bucket_key[0] == "allreduce":
+                    buckets[bucket_key].append((copy_ranks, grad_slice))
                 else:
                     buckets[bucket_key].append(grad_slice)
 
             for bucket_key in buckets:
-                if self.use_multi_rank_bucket_allreduce:
+                if bucket_key[0] == "allreduce":
                     self.allreduce_and_scatter(buckets[bucket_key],
                                                communication_data_type,
                                                numel_per_bucket=self.reduce_bucket_size,
                                                divide=False,
-                                               process_group=bucket_key)
+                                               process_group=bucket_key[1])
                 else:
-                    dst, process_group = bucket_key
+                    _, dst, process_group = bucket_key
                     self.allreduce_no_retain(buckets[bucket_key],
                                              communication_data_type,
                                              numel_per_bucket=self.reduce_bucket_size,
