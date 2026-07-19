@@ -772,6 +772,8 @@ class DeepSpeedEngine(Module):
             logger.debug("DeepSpeedEngine.__del__ cleanup skipped: %s", exc, exc_info=True)
 
     def destroy(self):
+        self._release_deepcompile_compiled_backward_state()
+        self._release_deepcompile_dynamo_config()
         optimizer = getattr(self, "optimizer", None)
         if optimizer is not None and hasattr(optimizer, 'destroy'):
             optimizer.destroy()
@@ -5523,6 +5525,10 @@ class DeepSpeedEngine(Module):
 
     def _set_deepcompile_active(self, active: bool) -> None:
         """Toggle DeepCompile runtime state and manage forward hooks accordingly."""
+        if not active:
+            self._release_deepcompile_compiled_backward_state()
+            self._release_deepcompile_dynamo_config()
+
         if self._deepcompile_active == active:
             return
 
@@ -5540,6 +5546,18 @@ class DeepSpeedEngine(Module):
                 self.module_forward_post_hook = self._create_module_forward_post_hook()
 
         self._deepcompile_active = active
+
+    def _release_deepcompile_compiled_backward_state(self) -> None:
+        owned_frames = getattr(self, "_deepcompile_owned_frames", None)
+        if owned_frames:
+            from deepspeed.compile.backend import cleanup_compiled_backward_state
+            cleanup_compiled_backward_state(owned_frames=owned_frames)
+
+    def _release_deepcompile_dynamo_config(self) -> None:
+        restore_dynamo_config = getattr(self, "_deepcompile_dynamo_config_restore", None)
+        if restore_dynamo_config is not None:
+            restore_dynamo_config()
+            del self._deepcompile_dynamo_config_restore
 
     def get_compile_time(self):
         from deepspeed.compile.backend import opt_pass_times

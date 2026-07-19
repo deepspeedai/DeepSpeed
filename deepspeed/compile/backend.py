@@ -77,6 +77,22 @@ opt_passes = {}
 fwd_real_inputs = []
 
 
+def cleanup_compiled_backward_state(frame_id=None, owned_frames=None):
+    """Release engine-owned process-global compiled-backward state."""
+    if frame_id is None:
+        if owned_frames is None:
+            frames_needing_bwd.clear()
+        else:
+            frames_needing_bwd.difference_update(owned_frames)
+            owned_frames.clear()
+    else:
+        frames_needing_bwd.discard(frame_id)
+        if owned_frames is not None:
+            owned_frames.discard(frame_id)
+    if len(frames_needing_bwd) == 0:
+        unpatch_compiled_func()
+
+
 def register_compile_pass(name: str, opt_pass_fn, contract=None):
     from .passes.contract import register_pass_contract
     opt_passes[name] = opt_pass_fn
@@ -97,7 +113,8 @@ def init_schedule(schedule):
     remaining_schedule = deque(schedule)
 
 
-def launch_compile_passes(global_steps: int):
+def launch_compile_passes(global_steps: int, owned_frames=None):
+    """Advance the pass schedule and discard state owned by the previous compile cycle."""
     global next_pass_step, next_passes
 
     if len(remaining_schedule) > 0 and global_steps == remaining_schedule[0][0]:
@@ -109,6 +126,7 @@ def launch_compile_passes(global_steps: int):
         graph_order_with_frame_id.clear()
         profiling_results.clear()
         param_manager.clear()
+        cleanup_compiled_backward_state(owned_frames=owned_frames)
         frames_partitioned.clear()
 
 
@@ -201,6 +219,21 @@ def set_example_values_to_symints(real_inputs, param_indices=None):
     return tuple(real_inputs_ret)
 
 
+def _get_fw_real_inputs(local_real_inputs, input_storage: InputStorage, graph_id: int, debug_log: bool = False):
+    """Resolve graph-local real inputs from the one-shot queue or persistent storage."""
+    if local_real_inputs:
+        return local_real_inputs.popleft()
+
+    if input_storage.has_data():
+        if debug_log:
+            log_rank0(f"Retrieving real inputs from storage for graph_id={graph_id}", enable=True)
+        return input_storage.get()
+
+    raise RuntimeError(f"No real inputs available for graph_id {graph_id}. "
+                       f"Local queue size: {len(local_real_inputs)}, "
+                       f"storage has data: {input_storage.has_data()}")
+
+
 def run_opt_passes(opt_passes: List[Callable],
                    gm: GraphModule,
                    graph_id: int,
@@ -243,13 +276,17 @@ def run_opt_passes(opt_passes: List[Callable],
             get_accelerator().empty_cache()
 
 
-def make_backend(backend, compile_config, compile_kwargs={}):
+def make_backend(backend, compile_config, compile_kwargs={}, owned_frames=None):
 
     register_custom_ops()
 
     # Extract values from compile_config
     debug_log = compile_config.debug_log
     free_activation = compile_config.free_activation and not is_backend_inductor(backend)
+
+    if owned_frames is None:
+        owned_frames = set()
+    owner_token = object()
 
     def backend_fn(gm: GraphModule, real_inputs):
         graph_id = id(gm.graph)
@@ -263,6 +300,7 @@ def make_backend(backend, compile_config, compile_kwargs={}):
         # This check cannot be placed here because autograd creates the fw/bw compiler callables before graph
         # partitioning. It is thus postponed to the point where the fw compiler is called.
         frame_id = gm.meta["dynamo_compile_id"].frame_id
+        frame_key = (owner_token, frame_id)
         graph_order_with_frame_id.add_graph(graph_id, frame_id)
 
         z3_partition = any(hasattr(v, "ds_id") for v in real_inputs)
@@ -275,17 +313,15 @@ def make_backend(backend, compile_config, compile_kwargs={}):
             param_indices = [(i, input_val.param_id, input_val.shape) for i, input_val in enumerate(real_inputs)
                              if isinstance(input_val, torch.nn.Parameter)]
 
-        global fwd_real_inputs
-
         # Create an InputStorage instance for this specific graph
         # It will be captured by the make_fw_graph closure, eliminating the need for graph ID management
         input_storage = InputStorage(keep_int_input_tensors=compile_config.keep_int_input_tensors,
                                      keep_all_input_tensors=compile_config.keep_all_input_tensors)
 
-        # Store in both list (for backward compatibility) and storage (for persistence)
+        # Store in a closure-local queue and storage (for persistence).
         # The input_storage keeps tensor metadata to handle cases where
         # backend_fn is called once but make_fw_graph is called multiple times
-        fwd_real_inputs.append(real_inputs)
+        local_fwd_real_inputs = deque([real_inputs])
         input_storage.put(real_inputs)
 
         global profiling_results
@@ -304,20 +340,10 @@ def make_backend(backend, compile_config, compile_kwargs={}):
             if needs_backward:
                 if len(frames_needing_bwd) == 0:
                     patch_compiled_func()
-                frames_needing_bwd.add(frame_id)
+                frames_needing_bwd.add(frame_key)
+                owned_frames.add(frame_key)
 
-            # Try to get real_inputs from the list first, then from storage
-            if fwd_real_inputs:
-                real_inputs = fwd_real_inputs.pop(0)
-            elif input_storage.has_data():
-                # Note: input_storage is captured from the enclosing backend_fn scope
-                # Materialize tensors from storage when list is empty
-                log_rank0(f"Retrieving real inputs from storage for graph_id={graph_id}", enable=debug_log)
-                real_inputs = input_storage.get()
-            else:
-                raise RuntimeError(f"No real inputs available for graph_id {graph_id}. "
-                                   f"List size: {len(fwd_real_inputs)}, Storage has data: {input_storage.has_data()}")
-
+            real_inputs = _get_fw_real_inputs(local_fwd_real_inputs, input_storage, graph_id, debug_log=debug_log)
             real_inputs = set_example_values_to_symints(real_inputs)
 
             param_manager[graph_id] = DSGraphParamManager(gm.graph, real_inputs, param_indices)
@@ -385,9 +411,7 @@ def make_backend(backend, compile_config, compile_kwargs={}):
                 add_free_activations(graph_id, gm.graph,
                                      get_activation_node_names(gm.graph, param_nodes_bw, non_param_input_names))
 
-            frames_needing_bwd.remove(frame_id)
-            if len(frames_needing_bwd) == 0:
-                unpatch_compiled_func()
+            cleanup_compiled_backward_state(frame_key, owned_frames)
 
             log_rank0(
                 f"Bwd end {graph_index} graph_id={graph_id} alloc_mem={get_accelerator().memory_allocated()} graph={gm.graph}",
@@ -415,10 +439,15 @@ def make_backend(backend, compile_config, compile_kwargs={}):
                                             partition_fn=partition_fn)
             return torch._dynamo.optimize(**compile_kwargs)(aot_mod)
         elif backend == "inductor":
-            patch_create_aot_dispatcher_function(graph_id, z3_partition, make_fw_graph, make_bw_graph, real_inputs,
-                                                 param_indices, param_manager, frame_id, frames_partitioned)
-
-            return torch._inductor.compile(gm, real_inputs)
+            restore_aotautograd = patch_create_aot_dispatcher_function(graph_id, z3_partition, make_fw_graph,
+                                                                       make_bw_graph, real_inputs, param_indices,
+                                                                       param_manager, frame_id, frames_partitioned)
+            try:
+                return torch._inductor.compile(gm, real_inputs)
+            finally:
+                # AotAutograd.__init__ is process-global; never leak this
+                # graph-specific compiler wiring into a later compilation.
+                restore_aotautograd()
 
         raise ValueError(f"Unsupported backend {backend}")
 
