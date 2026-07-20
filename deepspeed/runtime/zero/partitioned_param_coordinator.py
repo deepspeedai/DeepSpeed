@@ -503,7 +503,8 @@ class PartitionedParameterCoordinator:
             recompute_params = set([p.ds_id for p in submodule.ds_recompute_parameters])
             params_to_release.update(recompute_params)
 
-        current_bwd_id = next(reversed(self.__active_backward_submodules)) if self.__active_backward_submodules else None
+        current_bwd_id = next(reversed(
+            self.__active_backward_submodules)) if self.__active_backward_submodules else None
         print_rank_0(
             f"release_sub_module {'fwd' if forward else 'bwd'}: {submodule.ds_id=} {current_bwd_id=} {params_to_release=}",
             force=False)
