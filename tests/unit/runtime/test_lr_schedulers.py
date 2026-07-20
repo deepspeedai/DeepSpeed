@@ -546,6 +546,28 @@ def test_warmup_cosine_lr_initializes_all_param_groups():
     assert [group["lr"] for group in optimizer.param_groups] == pytest.approx(expected_lrs)
 
 
+def test_warmup_cosine_lr_linear_warmup_type_uses_linear_ratio():
+    # Pin the linear warmup curve for WarmupCosineLR: with warmup_type="linear" the
+    # per-step warmup ratio must follow the linear schedule (step / warmup_num_steps),
+    # which is distinct from the default log curve. Without this, a later change to the
+    # warmup_type normalization could silently collapse "linear" into "log" while the
+    # existing tests (which only exercise the log curve) stay green.
+    param = torch.nn.Parameter(torch.zeros(1))
+    optimizer = torch.optim.Adam([{"params": [param], "lr": 0.01}])
+
+    scheduler = WarmupCosineLR(optimizer=optimizer,
+                               total_num_steps=100,
+                               warmup_num_steps=10,
+                               warmup_min_ratio=0.0,
+                               warmup_type=WARMUP_LINEAR_RATE)
+
+    for step in range(1, 10):
+        scheduler.step(step)
+        # linear ratio == step / warmup_num_steps; the log curve would give a different,
+        # larger value at every one of these steps (e.g. ~0.301 vs 0.1 at step 1).
+        assert scheduler.get_lr_ratio() == pytest.approx(step / 10)
+
+
 def test_warmup_cosine_lr_total_num_steps_equals_warmup_num_steps():
     # total_num_steps == warmup_num_steps must not raise ZeroDivisionError, and because the
     # cosine decay window is empty, every step past warmup must stay at cos_min_ratio rather
@@ -604,3 +626,26 @@ def test_warmup_cosine_lr_unknown_warmup_type_falls_back_to_log():
         scheduler.step(step)
         scheduler_ref.step(step)
         assert scheduler.get_lr_ratio() == pytest.approx(scheduler_ref.get_lr_ratio())
+
+
+def test_warmup_cosine_lr_linear_warmup_type_produces_linear_ratios():
+    # No other test exercises WarmupCosineLR with warmup_type=WARMUP_LINEAR_RATE,
+    # so a regression that silently routed 'linear' through the log curve would
+    # keep the suite green. Pin the per-step warmup ratios: with
+    # warmup_min_ratio=0.0 the linear curve is step / warmup_num_steps, which
+    # clearly diverges from the log curve (e.g. 0.1 vs ~0.301 at step 1).
+    param = torch.nn.Parameter(torch.zeros(1))
+    optimizer = torch.optim.Adam([param], lr=0.001)
+    warmup_num_steps = 10
+
+    scheduler = WarmupCosineLR(optimizer=optimizer,
+                               total_num_steps=100,
+                               warmup_num_steps=warmup_num_steps,
+                               warmup_min_ratio=0.0,
+                               warmup_type=WARMUP_LINEAR_RATE)
+
+    assert scheduler.warmup_type == WARMUP_LINEAR_RATE
+
+    for step in range(warmup_num_steps):
+        scheduler.step(step)
+        assert scheduler.get_lr_ratio() == pytest.approx(step / warmup_num_steps)
