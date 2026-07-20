@@ -252,6 +252,8 @@ class ZeROOptimizer(DeepSpeedOptimizer):
 
     def __init__(self):
         self._backward_hook_state = BackwardHookStateManager()
+        self.retain_graph_on_current_backward = False
+        self._deferred_backward_releases = []
 
     # Delegate backward hook state management to the manager.
     # These properties provide backward compatibility with code that accesses
@@ -419,10 +421,27 @@ class ZeROOptimizer(DeepSpeedOptimizer):
 
         scaled_loss = self.backward_prologue(loss)
         retain_graph = kwargs.pop('retain_graph', False)
+        self.retain_graph_on_current_backward = retain_graph
         self.enter_backward()
-        scaled_loss.backward(retain_graph=retain_graph)
-        self.backward_epilogue()
-        self.exit_backward()
+        try:
+            scaled_loss.backward(retain_graph=retain_graph)
+            self.backward_epilogue()
+        finally:
+            self.exit_backward()
+            if not retain_graph:
+                self.flush_deferred_backward_releases()
+            self.retain_graph_on_current_backward = False
+
+    def should_defer_backward_release(self) -> bool:
+        return self.retain_graph_on_current_backward
+
+    def defer_backward_release(self, release_fn) -> None:
+        self._deferred_backward_releases.append(release_fn)
+
+    def flush_deferred_backward_releases(self) -> None:
+        for release_fn in self._deferred_backward_releases:
+            release_fn()
+        self._deferred_backward_releases.clear()
 
     def register_grad_acc_post_hook(self, hook):
         """Register a callback to run when all gradient hooks have fired."""
