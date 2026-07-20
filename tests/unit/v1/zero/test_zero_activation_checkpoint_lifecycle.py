@@ -356,6 +356,8 @@ class TestZero3ActivationCheckpointLifecycle(DistributedTest):
 
     def test_no_grad_checkpoint_input_scaled_backward_releases(self):
         """engine.scale(loss).backward() must also drain no-grad checkpoint leftovers."""
+        if not get_accelerator().is_fp16_supported():
+            pytest.skip("fp16 is not supported on this accelerator")
         device, _, _ = initialize_distributed()
         engine = _initialize_zero3(_NoGradInputModel(hidden_dim=8), fp16=True)
         dtype = next(engine.module.parameters()).dtype
