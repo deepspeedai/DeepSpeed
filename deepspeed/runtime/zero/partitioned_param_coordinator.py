@@ -294,12 +294,12 @@ class PartitionedParameterCoordinator:
         if step_id is None:
             step_id = self.__step_id
         param_names = [debug_param2name_id_shape(p) for p in params]
-        print_rank_0(f'{tag} {sub_module.ds_id=} step = {step_id} p_names = {param_names}', force=True)
+        print_rank_0(f'{tag} {sub_module.ds_id=} step = {step_id} p_names = {param_names}', force=False)
 
     def _dump_param_ids(self, tag, mod_id, p_ids, step_id=None):
         if step_id is None:
             step_id = self.__step_id
-        print_rank_0(f'{tag} mod = {mod_id}, step = {step_id}, p_ids = {p_ids}', force=True)
+        print_rank_0(f'{tag} mod = {mod_id}, step = {step_id}, p_ids = {p_ids}', force=False)
 
     """Fetch and Release
     Fetching, prefetching, and releasing parameters
