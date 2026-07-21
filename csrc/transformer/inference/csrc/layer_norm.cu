@@ -220,7 +220,7 @@ Template arg:
     StoreResidual: controls whether the residual calculation is stored
         or not. When set to false, the input `res_output` is unused.
 */
-template <typename T, int unRoll, int threadsPerGroup, int maxThreads, bool preLnResidual>
+template <typename T, int unRoll, int threadsPerGroup, int maxThreads, bool preLnResidual, bool useSmem = true>
 __global__ void fused_residual_ln(T* output,
                                   T* res_output,
                                   const T* vals,
@@ -250,6 +250,27 @@ __global__ void fused_residual_ln(T* output,
     const T* bias_base = bias + thread_offset;
 
     T local_buffer[unRoll * T_per_load];
+
+    // Preload gamma and beta into shared memory to reduce HBM traffic.
+    // These tensors are identical across rows, so caching them once per block
+    // eliminates redundant global memory reads in the normalization phase.
+    extern __shared__ char smem_raw[];
+    T* smem_gamma = reinterpret_cast<T*>(smem_raw);
+    T* smem_beta = smem_gamma + elems_per_row;
+
+    if (useSmem) {
+        const int tid = tb.thread_index().y * blockDim.x + tb.thread_index().x;
+        const int block_threads = blockDim.x * blockDim.y;
+        for (int idx = tid * T_per_load; idx < elems_per_row;
+             idx += block_threads * T_per_load) {
+            T gamma_buf[T_per_load], beta_buf[T_per_load];
+            mem_access::load_global<ln::granularity>(gamma_buf, gamma + idx, true);
+            mem_access::load_global<ln::granularity>(beta_buf, beta + idx, true);
+            mem_access::store_shared<ln::granularity>(smem_gamma + idx, gamma_buf);
+            mem_access::store_shared<ln::granularity>(smem_beta + idx, beta_buf);
+        }
+        __syncthreads();
+    }
 
     // Unlike a vanilla layernorm, since we're fusing the two adds as well
     // an inner unRoll seems to be less valuable. If anything, a double unRoll
@@ -314,8 +335,13 @@ __global__ void fused_residual_ln(T* output,
 
         T gamma_local[T_per_load], beta_local[T_per_load];
 
-        mem_access::load_global<ln::granularity>(gamma_local, gamma + iter_idx, do_loads);
-        mem_access::load_global<ln::granularity>(beta_local, beta + iter_idx, do_loads);
+        if (useSmem) {
+            mem_access::load_shared<ln::granularity>(gamma_local, smem_gamma + iter_idx, do_loads);
+            mem_access::load_shared<ln::granularity>(beta_local, smem_beta + iter_idx, do_loads);
+        } else {
+            mem_access::load_global<ln::granularity>(gamma_local, gamma + iter_idx, do_loads);
+            mem_access::load_global<ln::granularity>(beta_local, beta + iter_idx, do_loads);
+        }
 
 #pragma unRoll
         for (int j = 0; j < T_per_load; j++) {
@@ -335,10 +361,22 @@ __global__ void fused_residual_ln(T* output,
 }
 
 // TODO(cmikeh2): There's a bunch of redundancy here that needs to be removed/simplified.
-#define LAUNCH_FUSED_RES_LN(unRollFactor, threadsPerGroup, maxThreads)     \
-    fused_residual_ln<T, unRollFactor, threadsPerGroup, maxThreads, false> \
-        <<<grid, block, 0, stream>>>(                                      \
-            output, nullptr, vals, residual, bias, gamma, beta, epsilon, elems_per_row);
+#define LAUNCH_FUSED_RES_LN(unRollFactor, threadsPerGroup, maxThreads)                          \
+    do {                                                                                         \
+        if (use_smem) {                                                                         \
+            /* Always opt-in: static smem (reduce_buffer) pushes total over 48KB default */     \
+            cudaFuncSetAttribute(                                                               \
+                fused_residual_ln<T, unRollFactor, threadsPerGroup, maxThreads, false, true>,    \
+                cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem_sz);                     \
+            fused_residual_ln<T, unRollFactor, threadsPerGroup, maxThreads, false, true>        \
+                <<<grid, block, smem_sz, stream>>>(                                             \
+                    output, nullptr, vals, residual, bias, gamma, beta, epsilon, elems_per_row); \
+        } else {                                                                                 \
+            fused_residual_ln<T, unRollFactor, threadsPerGroup, maxThreads, false, false>       \
+                <<<grid, block, 0, stream>>>(                                                   \
+                    output, nullptr, vals, residual, bias, gamma, beta, epsilon, elems_per_row); \
+        }                                                                                        \
+    } while (0)
 
 template <typename T>
 void launch_fused_residual_ln(T* output,
@@ -379,6 +417,15 @@ void launch_fused_residual_ln(T* output,
     const int elems_per_step = threadsPerGroup * h_per_step;
     const int external_unRoll = (elems_per_row + elems_per_step - 1) / elems_per_step;
 
+    // Use shared memory only when total unRoll >= 6 so that gamma/beta reads saved
+    // (unRoll - 1) justify the occupancy reduction from smem allocation.
+    // For fp16 (internal_unRoll=2): need ext_unRoll >= 3 (channels > 8192)
+    // For fp32 (internal_unRoll=4): need ext_unRoll >= 2 (channels > 4096)
+    const size_t smem_sz = 2 * (size_t)elems_per_row * sizeof(T);
+    const bool use_smem = !is_subblock_schedule &&
+                          (external_unRoll * internal_unRoll >= 6) &&
+                          (smem_sz <= (size_t)(99 * 1024));
+
     if (is_subblock_schedule) {
         // <=128
         if (threadsPerGroup == 1) {
@@ -408,10 +455,22 @@ void launch_fused_residual_ln(T* output,
     }
 }
 
-#define LAUNCH_FUSED_RES_LN_STORE_PRE_LN_RES(unRollFactor, threadsPerGroup, maxThreads) \
-    fused_residual_ln<T, unRollFactor, threadsPerGroup, maxThreads, true>               \
-        <<<grid, block, 0, stream>>>(                                                   \
-            norm_output, res_output, vals, residual, bias, gamma, beta, epsilon, elems_per_row);
+#define LAUNCH_FUSED_RES_LN_STORE_PRE_LN_RES(unRollFactor, threadsPerGroup, maxThreads)         \
+    do {                                                                                         \
+        if (use_smem) {                                                                         \
+            /* Always opt-in: static smem (reduce_buffer) pushes total over 48KB default */     \
+            cudaFuncSetAttribute(                                                               \
+                fused_residual_ln<T, unRollFactor, threadsPerGroup, maxThreads, true, true>,     \
+                cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem_sz);                     \
+            fused_residual_ln<T, unRollFactor, threadsPerGroup, maxThreads, true, true>         \
+                <<<grid, block, smem_sz, stream>>>(                                             \
+                    norm_output, res_output, vals, residual, bias, gamma, beta, epsilon, elems_per_row); \
+        } else {                                                                                 \
+            fused_residual_ln<T, unRollFactor, threadsPerGroup, maxThreads, true, false>        \
+                <<<grid, block, 0, stream>>>(                                                   \
+                    norm_output, res_output, vals, residual, bias, gamma, beta, epsilon, elems_per_row); \
+        }                                                                                        \
+    } while (0)
 
 template <typename T>
 void launch_fused_residual_ln_store_pre_ln_res(T* norm_output,
@@ -452,6 +511,15 @@ void launch_fused_residual_ln_store_pre_ln_res(T* norm_output,
 
     const int elems_per_step = threadsPerGroup * h_per_step;
     const int external_unRoll = (elems_per_row + elems_per_step - 1) / elems_per_step;
+
+    // Use shared memory only when total unRoll >= 6 so that gamma/beta reads saved
+    // (unRoll - 1) justify the occupancy reduction from smem allocation.
+    // For fp16 (internal_unRoll=2): need ext_unRoll >= 3 (channels > 8192)
+    // For fp32 (internal_unRoll=4): need ext_unRoll >= 2 (channels > 4096)
+    const size_t smem_sz = 2 * (size_t)elems_per_row * sizeof(T);
+    const bool use_smem = !is_subblock_schedule &&
+                          (external_unRoll * internal_unRoll >= 6) &&
+                          (smem_sz <= (size_t)(99 * 1024));
 
     if (is_subblock_schedule) {
         // <=128
