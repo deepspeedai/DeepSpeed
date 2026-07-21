@@ -71,20 +71,22 @@ class _RaiseOnceInBackward(torch.autograd.Function):
         return grad_output, None
 
 
-def _zero3_config(*, gradient_accumulation_steps=1, fp16=False):
+def _zero3_config(*, gradient_accumulation_steps=1, dtype=torch.float32):
     config = get_config_dict(3, gradient_accumulation_steps=gradient_accumulation_steps, force_fp32=True)
     # Zero reuse window + no prefetch so residency reflects the current consumer, not a future reuse.
     config["zero_optimization"]["stage3_prefetch_bucket_size"] = 0
     config["zero_optimization"]["stage3_max_reuse_distance"] = 0
-    if fp16:
+    if dtype == torch.float16:
         config["fp16"] = {"enabled": True, "initial_scale_power": 8}
+    elif dtype == torch.bfloat16:
+        config["bf16"] = {"enabled": True}
     return config
 
 
-def _initialize_zero3(model, *, gradient_accumulation_steps=1, fp16=False):
+def _initialize_zero3(model, *, gradient_accumulation_steps=1, dtype=torch.float32):
     trainable_parameters = [parameter for parameter in model.parameters() if parameter.requires_grad]
     engine, _, _, _ = deepspeed.initialize(config=_zero3_config(
-        gradient_accumulation_steps=gradient_accumulation_steps, fp16=fp16),
+        gradient_accumulation_steps=gradient_accumulation_steps, dtype=dtype),
                                            model=model,
                                            model_parameters=trainable_parameters)
     return engine
@@ -354,14 +356,17 @@ class TestZero3ActivationCheckpointLifecycle(DistributedTest):
 
         engine.destroy()
 
-    def test_no_grad_checkpoint_input_scaled_backward_releases(self):
+    @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16], ids=["fp16", "bf16"])
+    def test_no_grad_checkpoint_input_scaled_backward_releases(self, dtype):
         """engine.scale(loss).backward() must also drain no-grad checkpoint leftovers."""
-        if not get_accelerator().is_fp16_supported():
+        if dtype == torch.float16 and not get_accelerator().is_fp16_supported():
             pytest.skip("fp16 is not supported on this accelerator")
+        if dtype == torch.bfloat16 and not get_accelerator().is_bf16_supported():
+            pytest.skip("bf16 is not supported on this accelerator")
         device, _, _ = initialize_distributed()
-        engine = _initialize_zero3(_NoGradInputModel(hidden_dim=8), fp16=True)
-        dtype = next(engine.module.parameters()).dtype
-        value = torch.randn(2, 8, device=device, dtype=dtype, requires_grad=False)
+        engine = _initialize_zero3(_NoGradInputModel(hidden_dim=8), dtype=dtype)
+        param_dtype = next(engine.module.parameters()).dtype
+        value = torch.randn(2, 8, device=device, dtype=param_dtype, requires_grad=False)
 
         engine.scale(engine(value).sum()).backward()
         _synchronize()

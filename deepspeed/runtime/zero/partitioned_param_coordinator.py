@@ -35,8 +35,6 @@ def debug_rank0(message: str) -> None:
 @instrument_w_nvtx
 @compiler.disable
 def update_recompute_parameters(sub_module: Module, param: Parameter) -> None:
-    if param.ds_persist:
-        return
     sub_module.ds_recompute_parameters.add(param)
     param.ds_active_sub_modules.add(sub_module.ds_id)
     print_rank_0(f"update_recompute_parameters  {sub_module.ds_id=} to {param.ds_id=}", force=False)
@@ -157,7 +155,8 @@ class PartitionedParameterCoordinator:
         # This is only needed during backward pass; forward pass is single-threaded.
         self.__ongoing_fetch_leaf_module_events = collections.defaultdict(threading.Event)
         self.__leaf_module_lock = threading.Lock()
-        # In-progress backward submodules keyed by ds_id; a dict (not LIFO deque) lets release remove the specific module, since multi-tensor z3-leaf hooks fire out of reverse-forward order.
+        # In-progress backward submodules keyed by ds_id. A dict (not LIFO deque) lets release
+        # remove a specific module, since multi-tensor z3-leaf hooks fire out of reverse order.
         self.__active_backward_submodules: Dict[int, Module] = {}
 
     """Tracing and Tracking
@@ -337,7 +336,7 @@ class PartitionedParameterCoordinator:
                 event_to_wait.wait()
                 return
 
-        # Record only on the fetch-owning thread (waiters returned above); keyed by ds_id so repeated fetches collapse to one entry.
+        # Record on the fetch-owning thread only; keyed by ds_id so repeated fetches collapse.
         if not forward:
             self.__active_backward_submodules[current_submodule.ds_id] = current_submodule
 
