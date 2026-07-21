@@ -389,7 +389,8 @@ class PartitionedParameterCoordinator:
         in_checkpoint_recompute = forward and torch._C._current_graph_task_id() != -1
         for param in params_to_fetch:
             param.ds_active_sub_modules.add(current_submodule.ds_id)
-            if in_checkpoint_recompute and self.__active_backward_submodules:
+            # Only frozen params need recompute attribution; trainable ones release via their backward hook.
+            if in_checkpoint_recompute and self.__active_backward_submodules and not param.requires_grad:
                 update_recompute_parameters(next(reversed(self.__active_backward_submodules.values())), param)
 
             if logger.isEnabledFor(logging.DEBUG):
