@@ -251,3 +251,26 @@ class TestElasticConfigChanged(DistributedTest):
 
         with pytest.raises(deepspeed.elasticity.config.ElasticityError):
             model, _, _, _ = deepspeed.initialize(config=config_dict, model=model, model_parameters=model.parameters())
+
+
+def test_return_microbatch_requires_world_size_v01(ds_config):
+    """return_microbatch on elasticity v0.1 needs world_size; do not ZeroDivisionError."""
+    # Ensure WORLD_SIZE is not set from other tests
+    os.environ.pop("WORLD_SIZE", None)
+    with pytest.raises(deepspeed.elasticity.config.ElasticityConfigError):
+        deepspeed.elasticity.compute_elastic_config(
+            ds_config=ds_config,
+            target_deepspeed_version=ds_version,
+            return_microbatch=True,
+        )
+
+
+def test_return_microbatch_with_world_size_v01(ds_config):
+    final_batch_size, valid_gpus, mbsize = deepspeed.elasticity.compute_elastic_config(
+        ds_config=ds_config,
+        target_deepspeed_version=ds_version,
+        world_size=64,
+        return_microbatch=True,
+    )
+    assert mbsize == 17
+    assert final_batch_size % 64 == 0
