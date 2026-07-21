@@ -127,7 +127,7 @@ class LLAMALayerPolicy(TransformerPolicy):
         try:
             import transformers
             LLAMALayerPolicy._orig_layer_class = transformers.models.llama.modeling_llama.LlamaDecoderLayer  # type: ignore
-        except Exception:
+        except (ImportError, AttributeError):
             LLAMALayerPolicy._orig_layer_class = None
 
     def get_hidden_heads(self):

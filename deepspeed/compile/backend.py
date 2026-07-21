@@ -77,8 +77,12 @@ opt_passes = {}
 fwd_real_inputs = []
 
 
-def register_compile_pass(name: str, opt_pass_fn):
+def register_compile_pass(name: str, opt_pass_fn, contract=None):
+    from .passes.contract import register_pass_contract
     opt_passes[name] = opt_pass_fn
+    # Replace the callable and its contract together under the same name; contract=None clears any
+    # contract previously registered for the pass.
+    register_pass_contract(name, contract)
 
 
 def init_schedule(schedule):
