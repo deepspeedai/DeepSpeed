@@ -106,8 +106,10 @@ jobs:
 
       - name: Run unit tests
         run: |
-          pytest -n 4 --forked --verbose tests/unit/v1/ --torch_ver=${{ env.TORCH_VER }} --cuda_ver=${{ env.CUDA_VER }}
+          # GDS tests require GPUDirect Storage support unavailable on these runners
+          pytest -n 4 --forked --verbose tests/unit/v1/ --ignore=tests/unit/v1/nvme/test_gds.py --torch_ver=${{ env.TORCH_VER }} --cuda_ver=${{ env.CUDA_VER }}
 
       - name: Run sequential unit tests
         run: |
-          pytest --verbose -m 'sequential' tests/unit/v1/ --torch_ver=${{ env.TORCH_VER }} --cuda_ver=${{ env.CUDA_VER }}
+          # GDS tests require GPUDirect Storage support unavailable on these runners
+          pytest --verbose -m 'sequential' tests/unit/v1/ --ignore=tests/unit/v1/nvme/test_gds.py --torch_ver=${{ env.TORCH_VER }} --cuda_ver=${{ env.CUDA_VER }}
