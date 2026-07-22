@@ -29,6 +29,8 @@ def record_z3_eager_fallback_param(param):
 
 def is_dynamo_guard_evaluation():
     """Return whether the current parameter access originates from Dynamo guard evaluation."""
+    # This intentionally depends on private Dynamo stack layout. Real GuardBuilder source resolution was verified with
+    # official CPU builds 2.8.0+cpu, 2.9.1+cpu, 2.10.0+cpu, 2.11.0+cpu, 2.12.0+cpu, and 2.13.0+cpu.
     frame = sys._getframe()
     while frame is not None:
         if frame.f_globals.get("__name__") == "torch._dynamo.guards":

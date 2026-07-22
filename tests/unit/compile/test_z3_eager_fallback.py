@@ -3,6 +3,8 @@
 
 # DeepSpeed Team
 
+import inspect
+import weakref
 from types import FunctionType
 
 import pytest
@@ -41,6 +43,46 @@ def test_deepcompile_fallback_suppresses_guard_time_gather(monkeypatch):
     assert gather_calls == []
     assert param.ds_status == ZeroParamStatus.NOT_AVAILABLE
     assert fallback.stats()["last_guard_suppressed_param_ids"] == [7]
+
+
+def test_real_guard_builder_source_resolution_suppresses_gather(monkeypatch):
+    from torch._dynamo.guards import GuardBuilder
+    try:
+        from torch._dynamo.source import AttrSource, LocalSource
+    except ImportError:
+        from torch._guards import AttrSource, LocalSource
+
+    module, param = _zero_module_with_param()
+    fallback = DeepCompileZ3EagerFallback(engine=None)
+    gather_calls = []
+
+    def all_gather():
+        gather_calls.append(param.ds_id)
+        param.ds_status = ZeroParamStatus.AVAILABLE
+
+    param.all_gather = all_gather
+    monkeypatch.setattr(z3_eager_fallback, "_ACTIVE_FALLBACK", fallback)
+    monkeypatch.setattr(parameter_offload, "print_rank_0", lambda *args, **kwargs: None)
+    before = (param.ds_status, param.data.data_ptr(), param.numel())
+
+    builder = object.__new__(GuardBuilder)
+    builder.scope = {"L": {"module": module}, "G": {}}
+    builder.src_get_value_cache = weakref.WeakKeyDictionary()
+    builder.source_get_cache = {}
+    builder.save_guards = False
+    source = AttrSource(LocalSource("module"), "weight")
+    get_parameter = list(inspect.signature(GuardBuilder.get).parameters)[1]
+    resolved = builder.get(source.name() if get_parameter == "name" else source)
+
+    assert resolved is param
+    assert gather_calls == []
+    assert (param.ds_status, param.data.data_ptr(), param.numel()) == before
+    assert fallback.stats()["last_guard_suppressed_param_ids"] == [7]
+
+    assert module._parameters["weight"] is param
+    assert gather_calls == [7]
+    assert param.ds_status == ZeroParamStatus.AVAILABLE
+    assert fallback.stats()["tracked_param_ids"] == [7]
 
 
 def test_dynamo_guard_detection_is_false_outside_guard_stack():
@@ -232,3 +274,76 @@ def test_context_exception_restores_fallback_and_user_ownership_depth(monkeypatc
     assert z3_eager_fallback.get_active_z3_eager_fallback() is previous
     assert not hasattr(param, "_deepspeed_gathered_param_context_depth")
     assert param.ds_status == ZeroParamStatus.NOT_AVAILABLE
+
+
+def _zero_params_with_collective_stubs(*ds_ids):
+    params = []
+    gather_calls = []
+    partition_calls = []
+    for ds_id in ds_ids:
+        param = torch.nn.Parameter(torch.empty(0))
+        param.ds_id = ds_id
+        param.ds_status = ZeroParamStatus.NOT_AVAILABLE
+
+        def all_gather(param_list, *, _calls=gather_calls):
+            _calls.append([int(item.ds_id) for item in param_list])
+            for item in param_list:
+                item.ds_status = ZeroParamStatus.AVAILABLE
+
+        def partition(param_list=None, has_been_updated=False, *, _param=param, _calls=partition_calls):
+            selected = [_param] if param_list is None else param_list
+            _calls.append([int(item.ds_id) for item in selected])
+            for item in selected:
+                item.ds_status = ZeroParamStatus.NOT_AVAILABLE
+
+        param.all_gather = all_gather
+        param.partition = partition
+        params.append(param)
+    return params, gather_calls, partition_calls
+
+
+def test_gathered_parameters_rejects_partial_overlap_atomically():
+    (first, shared, new), gather_calls, partition_calls = _zero_params_with_collective_stubs(1, 2, 3)
+
+    with GatheredParameters([first, shared]):
+        assert gather_calls == [[1, 2]]
+        assert getattr(first, "_deepspeed_gathered_param_context_depth") == 1
+        assert getattr(shared, "_deepspeed_gathered_param_context_depth") == 1
+
+        with pytest.raises(RuntimeError, match=r"cannot overlap parameters.*\[2\]"):
+            with GatheredParameters([shared, new]):
+                pytest.fail("overlapping inner context must not enter")
+
+        assert gather_calls == [[1, 2]]
+        assert partition_calls == []
+        assert first.ds_status == ZeroParamStatus.AVAILABLE
+        assert shared.ds_status == ZeroParamStatus.AVAILABLE
+        assert new.ds_status == ZeroParamStatus.NOT_AVAILABLE
+        assert getattr(first, "_deepspeed_gathered_param_context_depth") == 1
+        assert getattr(shared, "_deepspeed_gathered_param_context_depth") == 1
+        assert not hasattr(new, "_deepspeed_gathered_param_context_depth")
+
+    assert gather_calls == [[1, 2]]
+    assert partition_calls == [[1, 2]]
+    assert all(param.ds_status == ZeroParamStatus.NOT_AVAILABLE for param in (first, shared, new))
+    assert all(not hasattr(param, "_deepspeed_gathered_param_context_depth") for param in (first, shared, new))
+
+
+def test_gathered_parameters_preserves_disjoint_nesting():
+    (first, second), gather_calls, partition_calls = _zero_params_with_collective_stubs(1, 2)
+
+    with GatheredParameters([first]):
+        with GatheredParameters([second]):
+            assert gather_calls == [[1], [2]]
+            assert getattr(first, "_deepspeed_gathered_param_context_depth") == 1
+            assert getattr(second, "_deepspeed_gathered_param_context_depth") == 1
+
+        assert first.ds_status == ZeroParamStatus.AVAILABLE
+        assert second.ds_status == ZeroParamStatus.NOT_AVAILABLE
+        assert getattr(first, "_deepspeed_gathered_param_context_depth") == 1
+        assert not hasattr(second, "_deepspeed_gathered_param_context_depth")
+
+    assert gather_calls == [[1], [2]]
+    assert partition_calls == [[2], [1]]
+    assert all(param.ds_status == ZeroParamStatus.NOT_AVAILABLE for param in (first, second))
+    assert all(not hasattr(param, "_deepspeed_gathered_param_context_depth") for param in (first, second))
