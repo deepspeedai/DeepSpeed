@@ -500,7 +500,8 @@ class PartitionedParameterCoordinator:
 
         if not forward:
             assert self.__active_backward_submodules, "active_backward_submodules is empty during backward pass"
-            recompute_params = set([p.ds_id for p in submodule.ds_recompute_parameters])
+            # Persistent params must stay resident even when attributed to a recompute owner.
+            recompute_params = set([p.ds_id for p in submodule.ds_recompute_parameters if not p.ds_persist])
             params_to_release.update(recompute_params)
 
         current_bwd_id = next(reversed(

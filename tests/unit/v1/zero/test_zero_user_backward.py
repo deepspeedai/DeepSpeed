@@ -233,6 +233,24 @@ def assert_all_partitioned(model_engine, zero_stage, step_info=""):
             f"Parameter {name} not partitioned after backward (status={param.ds_status}){step_suffix}"
 
 
+def assert_persistent_resident(model_engine, zero_stage, step_info=""):
+    """For ZeRO-3, assert every persistent param stays gathered (AVAILABLE) after backward.
+
+    Persistent frozen params are added to a recompute owner during checkpoint recompute; if the
+    release path force-releases that owner's recompute set without a ds_persist guard, they get
+    partitioned despite stage3_param_persistence_threshold. No-op for stages 1/2 or when nothing
+    is persistent. Only meaningful once the trace is complete (skip warmup step 0).
+    """
+    if zero_stage != 3:
+        return
+    step_suffix = f" at {step_info}" if step_info else ""
+    for name, param in model_engine.module.named_parameters():
+        if not param.ds_persist:
+            continue
+        assert param.ds_status == ZeroParamStatus.AVAILABLE, \
+            f"Persistent parameter {name} was partitioned after backward (status={param.ds_status}){step_suffix}"
+
+
 def run_frozen_checkpoint_comparison(model_cls,
                                      zero_stage,
                                      use_reentrant,
@@ -306,6 +324,9 @@ def run_frozen_checkpoint_comparison(model_cls,
 
         # Frozen params must be released (partitioned) after every backward, not left gathered.
         assert_all_partitioned(model_engine, zero_stage, step_info)
+        # Persistent params must stay resident; check once the trace is complete (after warmup).
+        if iteration >= 1:
+            assert_persistent_resident(model_engine, zero_stage, step_info)
 
         model_engine.step()
         optimizer_ddp.step()
@@ -1800,6 +1821,9 @@ class TestZeroFrozenParamNoGradInputAccumulation(DistributedTest):
 
                 # Frozen params must be partitioned between microbatches, not carried gathered.
                 assert_all_partitioned(model_engine, zero_stage, step_info)
+                # Persistent params must stay resident; check once the trace is complete (after warmup).
+                if iteration >= 1:
+                    assert_persistent_resident(model_engine, zero_stage, step_info)
 
                 model_engine.step()
                 seed += 1
