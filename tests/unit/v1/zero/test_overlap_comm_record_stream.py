@@ -97,6 +97,23 @@ def test_allreduce_and_copy_with_multiple_ranks_records_only_local_buffers(monke
     assert bucket[1].recorded_streams == []
 
 
+def test_allreduce_and_copy_with_multiple_ranks_records_consumer_buffers(monkeypatch):
+    optimizer, allreduced, synced = _build_overlap_optimizer(monkeypatch, resolves_data_dependency=False)
+    bucket = [_FakeTensor(), _FakeTensor()]
+
+    optimizer.allreduce_and_copy_with_multiple_ranks(
+        bucket,
+        torch.float16,
+        bucket_ranks=[frozenset((0, 1)), frozenset((1, ))],
+    )
+
+    assert allreduced.recorded_streams == [optimizer.reduction_stream]
+    assert bucket[0].copied_from is synced[0]
+    assert bucket[0].recorded_streams == [optimizer.reduction_stream]
+    assert bucket[1].copied_from is None
+    assert bucket[1].recorded_streams == []
+
+
 class _FakeWaitStream:
     """A stream stand-in that records which streams it was told to wait on."""
 

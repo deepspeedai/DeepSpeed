@@ -335,7 +335,7 @@ def main():
             logger.info(f"Killing subprocess {process.pid}")
             try:
                 terminate_process_tree(process.pid)
-            except Exception:
+            except (OSError, psutil.Error):
                 pass
         if last_return_code is not None:
             logger.error(f"{cmd} exits with return code = {last_return_code}")

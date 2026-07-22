@@ -377,6 +377,29 @@ def test_graphsafe_rng_state_outputs_are_registered_no_reuse():
     assert calls == [(graphsafe_run_with_rng_state, {"never_reuse_output": True})]
 
 
+def test_mark_output_never_reuse_mixed_pytree():
+
+    class FakeIRNode(inductor_mod.IRNode):
+
+        def get_name(self):
+            return "tensor_buffer"
+
+    class NonIRLeaf:
+
+        def get_name(self):
+            raise AssertionError("get_name must not be called for non-IR outputs")
+
+    graph = SimpleNamespace(never_reuse_buffers=set())
+    outputs = (FakeIRNode(), 1, None, NonIRLeaf())
+
+    with inductor_mod.V.set_graph_handler(graph):
+        wrapped = torch.utils._pytree.tree_map(lambda out: inductor_mod._mark_output_never_reuse(out, enabled=True),
+                                               outputs)
+
+    assert wrapped == outputs
+    assert graph.never_reuse_buffers == {"tensor_buffer"}
+
+
 def test_register_custom_ops_includes_graphsafe_rng_state_no_reuse(monkeypatch):
     graphsafe_run_with_rng_state = inductor_mod._get_graphsafe_run_with_rng_state()
     if graphsafe_run_with_rng_state is None:

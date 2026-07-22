@@ -13,6 +13,7 @@ import deepspeed
 import deepspeed.comm as dist
 from deepspeed.runtime.pipe.topology import PipeDataParallelTopology
 from deepspeed.runtime.pipe.module import PipelineModule
+from deepspeed.utils import RepeatingLoader
 from unit.alexnet_model import AlexNetPipe, train_cifar
 from unit.common import DistributedTest
 from unit.util import skip_on_arch, no_child_process_in_deepspeed_io
@@ -47,6 +48,44 @@ config_dict = {
 
 def rel_diff(A, B):
     return abs(A - B) / abs(A)
+
+
+class TestPipeGradientAccumulationScaling(DistributedTest):
+    world_size = 2
+
+    def test_gradients_are_scaled_once(self):
+        gas = 2
+        learning_rate = 0.1
+        config = {
+            "train_batch_size": gas,
+            "train_micro_batch_size_per_gpu": 1,
+            "gradient_accumulation_steps": gas,
+            "gradient_clipping": 0.0,
+            "optimizer": {
+                "type": "SGD",
+                "params": {
+                    "lr": learning_rate
+                }
+            },
+            "zero_allow_untested_optimizer": True,
+            "pipeline": {
+                "activation_checkpoint_interval": 0
+            },
+        }
+
+        layers = [nn.Linear(1, 1, bias=False), nn.Linear(1, 1, bias=False)]
+        for layer in layers:
+            layer.weight.data.fill_(1.0)
+
+        model = PipelineModule(layers=layers, num_stages=2, loss_fn=nn.MSELoss())
+        engine, _, _, _ = deepspeed.initialize(config=config, model=model, model_parameters=model.parameters())
+        engine.set_dataiterator(RepeatingLoader([(torch.ones(1, 1), torch.zeros(1, 1))]))
+
+        engine.train_batch()
+
+        expected_weight = torch.tensor([[1.0 - 2.0 * learning_rate]], device=engine.device)
+        actual_weight = next(engine.module.parameters())
+        assert torch.allclose(actual_weight, expected_weight)
 
 
 @pytest.mark.parametrize('topo_config', [
