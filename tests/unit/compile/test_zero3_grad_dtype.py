@@ -53,6 +53,26 @@ def test_zero3_allows_dynamo_dynamic_parameter_shapes(monkeypatch):
         restore()
 
 
+def test_zero3_preserves_explicit_dynamo_dynamic_setting(monkeypatch):
+
+    class FakeDynamoConfig:
+        force_parameter_static_shapes = True
+        force_nn_module_property_static_shapes = True
+
+    class FakeDynamo:
+        config = FakeDynamoConfig()
+
+    compile_kwargs = {"dynamic": False}
+    monkeypatch.setattr(torch, "_dynamo", FakeDynamo)
+
+    restore = _allow_dynamo_dynamic_parameter_shapes_for_z3(compile_kwargs)
+    assert restore
+    try:
+        assert compile_kwargs["dynamic"] is False
+    finally:
+        restore()
+
+
 @pytest.mark.parametrize("first_owner_to_restore", [0, 1])
 def test_zero3_dynamo_config_restores_after_last_overlapping_owner(monkeypatch, first_owner_to_restore):
 
@@ -169,3 +189,25 @@ def test_deactivation_releases_only_the_engine_owned_state(monkeypatch):
     finally:
         backend_mod.frames_needing_bwd.clear()
         backend_mod.unpatch_compiled_func()
+
+
+def test_repeated_engine_destroy_cleans_native_state_once_and_deactivates(monkeypatch):
+    engine = object.__new__(DeepSpeedEngine)
+    torch.nn.Module.__init__(engine)
+    engine._deepcompile_active = True
+    cleanup_calls = []
+    engine._release_deepcompile_compiled_backward_state = lambda: None
+    engine._release_deepcompile_dynamo_config = lambda: None
+    engine.is_deepcompile_active = lambda: engine._deepcompile_active
+    engine._set_deepcompile_active = lambda active: setattr(engine, "_deepcompile_active", active)
+
+    fake_handle = type("FakeDeepCompileHandle", (), {"cleanup": lambda self: cleanup_calls.append("cleanup")})()
+    monkeypatch.setattr("deepspeed.runtime.engine.get_deepcompile_handle", lambda: fake_handle)
+    monkeypatch.setattr("deepspeed.runtime.engine.debug_clear_module_and_param_names", lambda: None)
+
+    engine.destroy()
+    engine.destroy()
+    engine.__del__()
+
+    assert cleanup_calls == ["cleanup"]
+    assert engine._deepcompile_active is False

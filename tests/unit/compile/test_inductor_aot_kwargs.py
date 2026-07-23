@@ -3,6 +3,8 @@
 
 # DeepSpeed Team
 
+import torch
+
 import deepspeed.compile.inductor as inductor
 
 
@@ -139,3 +141,97 @@ def test_torchxla_openxla_shape_passes_through_unchanged(monkeypatch):
     assert result["compiler_calls"] == []
     assert result["partition_calls"] == []
     assert kwargs == original_kwargs
+
+
+def test_deepcompile_z3_inductor_config_patch_disables_available_reduction_heuristics():
+    config = torch._inductor.config
+    triton_config = config.triton
+    original_values = {
+        config_name: getattr(triton_config,
+                             config_name.split(".", 1)[1])
+        for config_name in inductor._DEEP_COMPILE_Z3_INDUCTOR_REDUCTION_CONFIG
+        if hasattr(triton_config,
+                   config_name.split(".", 1)[1])
+    }
+    assert original_values
+
+    with inductor.deepcompile_z3_inductor_config_patch(enabled=True):
+        for config_name in original_values:
+            assert getattr(triton_config, config_name.split(".", 1)[1]) is False
+
+    for config_name, original_value in original_values.items():
+        assert getattr(triton_config, config_name.split(".", 1)[1]) is original_value
+
+    with inductor.deepcompile_z3_inductor_config_patch(enabled=False):
+        for config_name, original_value in original_values.items():
+            assert getattr(triton_config, config_name.split(".", 1)[1]) is original_value
+
+
+def test_deepcompile_z3_inductor_config_patch_skips_unavailable_reduction_heuristics(monkeypatch):
+
+    class FakeTritonConfig:
+        persistent_reductions = True
+
+    class FakePatch:
+
+        def __init__(self, overrides):
+            self.overrides = overrides
+
+        def __enter__(self):
+            assert self.overrides == {"triton.persistent_reductions": False}
+            FakeTritonConfig.persistent_reductions = False
+
+        def __exit__(self, exc_type, exc, tb):
+            FakeTritonConfig.persistent_reductions = True
+
+    class FakeConfig:
+        triton = FakeTritonConfig()
+
+        @staticmethod
+        def patch(overrides):
+            return FakePatch(overrides)
+
+    class FakeInductor:
+        config = FakeConfig()
+
+    monkeypatch.setattr(torch, "_inductor", FakeInductor())
+
+    with inductor.deepcompile_z3_inductor_config_patch(enabled=True):
+        assert FakeTritonConfig.persistent_reductions is False
+
+    assert FakeTritonConfig.persistent_reductions is True
+
+
+def test_patch_compiler_applies_z3_inductor_config_during_original_compile(monkeypatch):
+    events = []
+
+    class ConfigContext:
+
+        def __init__(self, enabled):
+            self.enabled = enabled
+
+        def __enter__(self):
+            events.append(("enter", self.enabled))
+
+        def __exit__(self, exc_type, exc, tb):
+            events.append(("exit", self.enabled))
+
+    monkeypatch.setattr(inductor, "deepcompile_z3_inductor_config_patch", lambda enabled: ConfigContext(enabled))
+
+    class ParamManager:
+        param_names = []
+
+    def original_compiler(gm, inputs):
+        events.append(("compile", tuple(inputs)))
+        return "compiled"
+
+    gm = torch.fx.symbolic_trace(lambda: torch.ones(()))
+    wrapped = inductor.patch_compiler(original_compiler,
+                                      dc_compiler=lambda gm, inputs: gm.graph,
+                                      z3_partition=True,
+                                      graph_id=7,
+                                      graph_param_manager={7: ParamManager()},
+                                      bwd=False)
+
+    assert wrapped(gm, ()) == "compiled"
+    assert events == [("enter", True), ("compile", ()), ("exit", True)]

@@ -23,15 +23,16 @@ except ImportError:
 
 import deepspeed.comm as dist
 from deepspeed.accelerator import get_accelerator
+from deepspeed.utils.allocator_telemetry import record_empty_cache
 
 from .fx import add_free_activations
 from .graph_param import DSGraphParamManager
 from .profilers import ProfilingResult
-from .profilers.graph_profile import MemoryProfilingInterpreter
+from .profilers.graph_profile import MemoryProfilingInterpreter, is_profile_incomplete
 from .patch_compiled_func import patch_compiled_func, unpatch_compiled_func, get_backward_inputs
 from .util import get_input_nodes, get_activation_node_names, get_index_by_graph_id, get_deepcompile_handle, log_rank0, is_backend_inductor
 from .partitioner import get_wrapped_partitioner
-from .inductor import register_custom_ops, patch_create_aot_dispatcher_function
+from .inductor import register_custom_ops, patch_create_aot_dispatcher_function, deepcompile_z3_inductor_config_patch
 from .input_storage import InputStorage
 
 remaining_schedule = None
@@ -153,12 +154,15 @@ def set_time_and_tensor_size(graph_id, graph: Graph, mem, bwd, profiling_results
         profiling_results[graph_id].fwd_mem_complete = mem_complete
 
 
-def _sync_memory_profile_complete(profile_complete: bool) -> bool:
+def _sync_memory_profile_complete(profile_complete: bool, process_group=None) -> bool:
     if not dist.is_initialized():
         return profile_complete
 
     complete = torch.tensor([1 if profile_complete else 0], device=torch.device(get_accelerator().current_device()))
-    dist.all_reduce(complete, dist.ReduceOp.MIN)
+    if process_group is None:
+        dist.all_reduce(complete, dist.ReduceOp.MIN)
+    else:
+        dist.all_reduce(complete, dist.ReduceOp.MIN, group=process_group)
     return bool(complete.item())
 
 
@@ -169,16 +173,28 @@ def evaluate_symint_from_shape_env(sym_int_v):
     return sym_int_v.node.hint
 
 
-def set_example_values_to_symints(real_inputs, param_indices=None):
+_ZERO_PARAMETER_COMPILE_METADATA = ("ds_id", "ds_shape", "ds_persist", "ds_status", "ds_target_dtype")
+
+
+def set_example_values_to_symints(real_inputs, param_indices=None, real_zero_params=None):
     real_inputs_ret = []
 
     # Create a set of parameter indices for quick lookup
     param_idx_set = set()
     if param_indices is not None:
         param_idx_set = {i for i, _, _ in param_indices}
+    param_ds_ids = {i: ds_id for i, ds_id, _ in (param_indices or [])}
+    real_zero_params = real_zero_params or {}
 
     for i, v in enumerate(real_inputs):
         if isinstance(v, torch.Tensor):
+            real_zero_param = real_zero_params.get(param_ds_ids.get(i))
+            if i in param_idx_set and real_zero_param is not None:
+                # Stored and fake profiling inputs both discard instance-bound
+                # ZeRO methods, so recover the original before materialization.
+                real_inputs_ret.append(real_zero_param)
+                continue
+
             if is_fake(v):
                 shape = []
                 for fs in v.shape:
@@ -202,10 +218,12 @@ def set_example_values_to_symints(real_inputs, param_indices=None):
 
                     # Create Parameter if this input index corresponds to a parameter
                     if i in param_idx_set:
-                        dummy_v = torch.nn.Parameter(dummy_v)
-                        # Copy any additional attributes from the original if they exist
-                        if hasattr(v, 'ds_id'):
-                            dummy_v.ds_id = v.ds_id
+                        dummy_v = torch.nn.Parameter(dummy_v, requires_grad=v.requires_grad)
+                        # Profiling and graph-parameter consumers use these ZeRO
+                        # attributes after symbolic fake inputs are materialized.
+                        for attr in _ZERO_PARAMETER_COMPILE_METADATA:
+                            if hasattr(v, attr):
+                                setattr(dummy_v, attr, getattr(v, attr))
 
                     real_inputs_ret.append(dummy_v)
             else:
@@ -243,12 +261,14 @@ def run_opt_passes(opt_passes: List[Callable],
                    mem_budget: float,
                    param_manager,
                    bwd: bool,
-                   debug_log=False) -> None:
+                   debug_log=False,
+                   process_group=None) -> None:
+    """Apply scheduled graph passes and retain only complete post-pass memory profiles."""
 
     with unset_fake_temporarily():
         get_accelerator().synchronize()
         gc.collect()
-        get_accelerator().empty_cache()
+        record_empty_cache("backend.pre-opt-passes", get_accelerator().empty_cache)
 
     for i, opt_pass_fn in enumerate(opt_passes):
         log_rank0(f"Running opt pass {i} for graph {graph_id}. bwd={bwd}", enable=debug_log)
@@ -260,23 +280,33 @@ def run_opt_passes(opt_passes: List[Callable],
             gm.graph.lint()
             gm.recompile()
 
-            mem_prof = MemoryProfilingInterpreter(gm, debug_log=debug_log)
-            mem_prof.run(*create_inputs_fn())
-            profile_complete = _sync_memory_profile_complete(mem_prof.profile_complete)
-            if profile_complete:
-                mem = [(name, current_alloc, delta, peak) for name, current_alloc, delta, peak in mem_prof.mem_record]
-            else:
+            # Re-profiling an already incomplete graph would turn synthetic
+            # backfilled metadata into a seemingly valid memory profile.
+            operator_profile_complete = _sync_memory_profile_complete(not is_profile_incomplete(gm.graph),
+                                                                      process_group)
+            if not operator_profile_complete:
+                profile_complete = False
                 mem = []
+            else:
+                mem_prof = MemoryProfilingInterpreter(gm, debug_log=debug_log, process_group=process_group)
+                mem_prof.run(*create_inputs_fn())
+                profile_complete = _sync_memory_profile_complete(mem_prof.profile_complete, process_group)
+                if profile_complete:
+                    mem = [(name, current_alloc, delta, peak)
+                           for name, current_alloc, delta, peak in mem_prof.mem_record]
+                else:
+                    mem = []
+                del mem_prof
 
             set_time_and_tensor_size(graph_id, gm.graph, mem, bwd, profiling_results, profile_complete)
 
         with unset_fake_temporarily():
             get_accelerator().synchronize()
             gc.collect()
-            get_accelerator().empty_cache()
+            record_empty_cache("backend.post-profile", get_accelerator().empty_cache)
 
 
-def make_backend(backend, compile_config, compile_kwargs={}, owned_frames=None):
+def make_backend(backend, compile_config, compile_kwargs={}, process_group=None, owned_frames=None):
 
     register_custom_ops()
 
@@ -307,11 +337,17 @@ def make_backend(backend, compile_config, compile_kwargs={}, owned_frames=None):
         if z3_partition:
             param_indices = [(i, input_val.ds_id, input_val.ds_shape) for i, input_val in enumerate(real_inputs)
                              if isinstance(input_val, torch.nn.Parameter)]
+            real_zero_params = {
+                input_val.ds_id: input_val
+                for input_val in real_inputs if isinstance(input_val, torch.nn.Parameter)
+                and hasattr(input_val, "all_gather") and hasattr(input_val, "partition")
+            }
         else:
             assert all(hasattr(v, "param_id") for v in real_inputs
                        if isinstance(v, torch.nn.Parameter)), "All param inputs should have param_id"
             param_indices = [(i, input_val.param_id, input_val.shape) for i, input_val in enumerate(real_inputs)
                              if isinstance(input_val, torch.nn.Parameter)]
+            real_zero_params = {}
 
         # Create an InputStorage instance for this specific graph
         # It will be captured by the make_fw_graph closure, eliminating the need for graph ID management
@@ -326,7 +362,7 @@ def make_backend(backend, compile_config, compile_kwargs={}, owned_frames=None):
 
         global profiling_results
         if graph_id not in profiling_results:
-            profiling_results[graph_id] = ProfilingResult()
+            profiling_results[graph_id] = ProfilingResult(process_group=process_group)
             profiling_results[graph_id].param_indices = param_indices
 
         def make_fw_graph(gm, sample_inputs):
@@ -344,7 +380,7 @@ def make_backend(backend, compile_config, compile_kwargs={}, owned_frames=None):
                 owned_frames.add(frame_key)
 
             real_inputs = _get_fw_real_inputs(local_fwd_real_inputs, input_storage, graph_id, debug_log=debug_log)
-            real_inputs = set_example_values_to_symints(real_inputs)
+            real_inputs = set_example_values_to_symints(real_inputs, param_indices, real_zero_params=real_zero_params)
 
             param_manager[graph_id] = DSGraphParamManager(gm.graph, real_inputs, param_indices)
 
@@ -359,7 +395,8 @@ def make_backend(backend, compile_config, compile_kwargs={}, owned_frames=None):
                 mem_budget=.0,  # unused
                 param_manager=param_manager,
                 bwd=False,
-                debug_log=debug_log)
+                debug_log=debug_log,
+                process_group=process_group)
 
             opt_pass_times.append(("fwd", graph_index, graph_id, time.time() - time_start))
 
@@ -401,7 +438,8 @@ def make_backend(backend, compile_config, compile_kwargs={}, owned_frames=None):
                 mem_budget=.0,  # unused
                 param_manager=param_manager,
                 bwd=True,
-                debug_log=debug_log)
+                debug_log=debug_log,
+                process_group=process_group)
 
             # assert graph_id in param_manager, f"Graph {graph_id} not found in param_manager"
 
@@ -443,7 +481,8 @@ def make_backend(backend, compile_config, compile_kwargs={}, owned_frames=None):
                                                                        make_bw_graph, real_inputs, param_indices,
                                                                        param_manager, frame_id, frames_partitioned)
             try:
-                return torch._inductor.compile(gm, real_inputs)
+                with deepcompile_z3_inductor_config_patch(z3_partition):
+                    return torch._inductor.compile(gm, real_inputs)
             finally:
                 # AotAutograd.__init__ is process-global; never leak this
                 # graph-specific compiler wiring into a later compilation.

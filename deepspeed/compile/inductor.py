@@ -3,6 +3,7 @@
 
 # DeepSpeed Team
 
+from contextlib import nullcontext
 from typing import Set
 
 import torch
@@ -20,6 +21,37 @@ from deepspeed.utils.torch import required_torch_version
 from .util import get_input_nodes
 from .graph_param import DSGraphParamManager
 from .partitioner import get_wrapped_partitioner
+
+_DEEP_COMPILE_Z3_INDUCTOR_REDUCTION_CONFIG = {
+    "triton.mix_order_reduction": False,
+    "triton.persistent_reductions": False,
+}
+
+
+def deepcompile_z3_inductor_config_patch(enabled: bool):
+    """Disable reduction heuristics that create oversized kernels for DeepCompile ZeRO-3 graphs."""
+    if not enabled:
+        return nullcontext()
+
+    inductor = getattr(torch, "_inductor", None)
+    config = getattr(inductor, "config", None)
+    if config is None or not hasattr(config, "patch"):
+        return nullcontext()
+
+    triton_config = getattr(config, "triton", None)
+    if triton_config is None:
+        return nullcontext()
+
+    overrides = {
+        config_name: value
+        for config_name, value in _DEEP_COMPILE_Z3_INDUCTOR_REDUCTION_CONFIG.items()
+        if hasattr(triton_config,
+                   config_name.split(".", 1)[1])
+    }
+    if not overrides:
+        return nullcontext()
+
+    return config.patch(overrides)
 
 
 def _get_graphsafe_run_with_rng_state():
@@ -46,6 +78,7 @@ def _mark_output_never_reuse(out, *, enabled):
 
 
 def patch_compiler(original_compiler, dc_compiler, z3_partition: bool, graph_id, graph_param_manager, bwd: bool):
+    """Wrap an AOT compiler with DeepCompile rewrites and ZeRO-3 fake-shape repair."""
 
     def wrapped_compiler(gm, fake_inputs):
         mod_graph = dc_compiler(gm, fake_inputs)
@@ -80,7 +113,8 @@ def patch_compiler(original_compiler, dc_compiler, z3_partition: bool, graph_id,
         else:
             patched_inputs = fake_inputs
 
-        return original_compiler(gm, patched_inputs)
+        with deepcompile_z3_inductor_config_patch(z3_partition):
+            return original_compiler(gm, patched_inputs)
 
     return wrapped_compiler
 

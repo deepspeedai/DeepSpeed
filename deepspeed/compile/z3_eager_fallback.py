@@ -4,6 +4,7 @@
 # DeepSpeed Team
 
 from contextlib import contextmanager
+import sys
 
 import torch
 
@@ -15,6 +16,16 @@ _ACTIVE_FALLBACK = None
 
 def get_active_z3_eager_fallback():
     return _ACTIVE_FALLBACK
+
+
+def is_dynamo_guard_evaluation():
+    """Return whether the current parameter access originates from Dynamo guard evaluation."""
+    frame = sys._getframe()
+    while frame is not None:
+        if frame.f_globals.get("__name__") == "torch._dynamo.guards":
+            return True
+        frame = frame.f_back
+    return False
 
 
 def record_z3_eager_fallback_param(param):

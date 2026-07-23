@@ -136,6 +136,7 @@ from ..git_version_info import version
 
 from deepspeed.profiling.flops_profiler.profiler import FlopsProfiler
 from deepspeed.utils.logging import print_json_dist, print_configuration, set_log_level_from_string
+from deepspeed.utils.allocator_telemetry import record_empty_cache
 
 from deepspeed.accelerator import get_accelerator
 
@@ -778,7 +779,12 @@ class DeepSpeedEngine(Module):
         if optimizer is not None and hasattr(optimizer, 'destroy'):
             optimizer.destroy()
         if self.is_deepcompile_active():
-            get_deepcompile_handle().cleanup()
+            try:
+                get_deepcompile_handle().cleanup()
+            finally:
+                # Native cleanup is process-global and must run only once even
+                # when destroy() is followed by __del__().
+                self._set_deepcompile_active(False)
         debug_clear_module_and_param_names()
 
         checkpoint_engine = getattr(self, "checkpoint_engine", None)
@@ -5412,7 +5418,7 @@ class DeepSpeedEngine(Module):
         if hasattr(self.optimizer, 'empty_partition_cache'):
             self.optimizer.empty_partition_cache()
             gc.collect()
-            get_accelerator().empty_cache()
+            record_empty_cache("engine.empty-partition-cache", get_accelerator().empty_cache)
 
     def get_autosp_backend(self, compile_kwargs):
         if self.compile_autosp() and self.zero_optimization_stage() not in [

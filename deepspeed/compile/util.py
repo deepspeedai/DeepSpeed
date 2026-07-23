@@ -90,6 +90,24 @@ def log_rank0(msg: str, enable: bool = False):
         print(msg)
 
 
+def all_reduce(tensor, op, process_group=None):
+    if process_group is None:
+        return dist.all_reduce(tensor, op)
+    return dist.all_reduce(tensor, op, group=process_group)
+
+
+def get_rank(process_group=None):
+    if process_group is None:
+        return dist.get_rank()
+    return dist.get_rank(group=process_group)
+
+
+def barrier(process_group=None):
+    if process_group is None:
+        return dist.barrier()
+    return dist.barrier(group=process_group)
+
+
 @functools.lru_cache
 def get_no_copy_ops():
     # Need to compile custom ops
@@ -251,6 +269,7 @@ def materialize_fake(v, device=None):
 
 
 def get_last_uses(graph: Graph):
+    """Map values to last consumers while propagating lifetimes through no-copy ops."""
     position = {node: i for i, node in enumerate(graph.nodes)}
 
     node_to_last_use: Dict[Node, Node] = {}
@@ -262,7 +281,9 @@ def get_last_uses(graph: Graph):
         known_last_use = None
 
         if user.target in no_copy_ops and n in node_to_last_use:
-            last_user = node_to_last_use[user]
+            # A no-copy node can itself be user-less (for example, a graph
+            # output alias).  In that case its own position is the lifetime end.
+            last_user = node_to_last_use.get(user, user)
             last_use_position = position[last_user]
 
             known_last_use = node_to_last_use[n]
@@ -271,7 +292,7 @@ def get_last_uses(graph: Graph):
 
         if n not in node_to_last_use or update:
             if user.target in no_copy_ops:
-                user = node_to_last_use[user]
+                user = node_to_last_use.get(user, user)
 
             node_to_last_use[n] = user
             user_to_last_uses.setdefault(user, []).append(n)

@@ -14,6 +14,7 @@ import deepspeed.comm as dist
 from ..profilers.comm_profile import create_predictor
 from ..profilers.graph_profile import is_profile_incomplete
 from ..graph_param import DSGraphParamManager
+from ..util import all_reduce
 from .contract import PassContract, CAP_Z3_GATHER_RELEASE
 
 NAME = "prefetch"
@@ -43,6 +44,7 @@ def schedule_prefetch(gm: GraphModule, graph_id: int, graph_order: List[Tuple[in
                       bwd: bool) -> GraphModule:
 
     profile = profiling_results[graph_id]
+    process_group = getattr(profile, "process_group", None)
     profile_graph = profile.bwd_graph if bwd else profile.fwd_graph
     mem_complete = profile.bwd_mem_complete if bwd else profile.fwd_mem_complete
     if is_profile_incomplete(profile_graph) or not mem_complete:
@@ -51,7 +53,7 @@ def schedule_prefetch(gm: GraphModule, graph_id: int, graph_order: List[Tuple[in
 
     max_mem = get_accelerator().total_memory() * (1 - MARGIN)
     vals_to_bcast = torch.tensor([max_mem], device=torch.device(get_accelerator().current_device()))
-    dist.all_reduce(vals_to_bcast, dist.ReduceOp.MIN)
+    all_reduce(vals_to_bcast, dist.ReduceOp.MIN, process_group)
     max_mem = vals_to_bcast[0].item()
 
     mem = profiling_results[graph_id].bwd_mem if bwd else profiling_results[graph_id].fwd_mem

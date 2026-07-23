@@ -10,6 +10,7 @@ import torch
 
 from deepspeed import comm as dist
 from deepspeed.accelerator import get_accelerator
+from deepspeed.utils.allocator_telemetry import record_empty_cache
 from deepspeed.runtime.zero.partition_parameters import InsertPostInitMethodToModuleSubClasses
 from deepspeed.runtime.zero.parameter_offload import DeepSpeedZeRoOffload
 
@@ -91,7 +92,7 @@ def init_z3(engine, backend, compile_config, compile_kwargs, schedule=None):
 
     if use_opt and hasattr(optimizer, "ipg_buckets"):
         optimizer.ipg_buckets.clear()
-        get_accelerator().empty_cache()
+        record_empty_cache("init-z3.ipg-clear", get_accelerator().empty_cache)
 
     dc = get_deepcompile_handle()
     dc.init(engine.data_parallel_group, compile_config, engine.zero_reduce_bucket_size())
@@ -170,4 +171,5 @@ def init_z3(engine, backend, compile_config, compile_kwargs, schedule=None):
     return make_backend(backend,
                         compile_config,
                         compile_kwargs=compile_kwargs,
+                        process_group=engine.data_parallel_group,
                         owned_frames=engine._deepcompile_owned_frames)
