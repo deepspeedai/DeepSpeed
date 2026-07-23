@@ -822,6 +822,11 @@ class WarmupCosineLR(object):
         self.last_batch_iteration = last_batch_iteration
         self.cos_min_ratio = cos_min_ratio
 
+        # Currently only support linear and log function
+        if warmup_type not in {WARMUP_LOG_RATE, WARMUP_LINEAR_RATE}:
+            logger.warning(f"Using unknown warmup_type: {warmup_type}. The increasing function "
+                           f"is set to default (log)")
+            warmup_type = WARMUP_LOG_RATE
         self.warmup_type = warmup_type
         self.warmup_min_ratio = warmup_min_ratio
         self.warmup_num_steps = max(2, warmup_num_steps)
