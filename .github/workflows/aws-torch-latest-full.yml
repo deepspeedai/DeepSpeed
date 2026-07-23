@@ -32,7 +32,7 @@ on:
       transformers_version:
         description: Hugging Face Transformers PyPI package version to install
         required: false
-        default: '4.50.0'
+        default: '4.51.3'
         type: string
       transformers_source:
         description: Hugging Face Transformers source for manual runs
@@ -101,7 +101,7 @@ jobs:
     env:
       DEFAULT_TORCH_PRESET: '2.10.0-cu126'
       DEFAULT_TRANSFORMERS_SOURCE: 'git'
-      DEFAULT_TRANSFORMERS_VERSION: '4.50.0'
+      DEFAULT_TRANSFORMERS_VERSION: '4.51.3'
       DEFAULT_TRANSFORMERS_REF: 'main'
       CUTLASS_PATH: /opt/cutlass
       # Disable reuse_dist_env to prevent pool worker cleanup hangs in full test runs
@@ -220,8 +220,13 @@ jobs:
           echo "Resolved test expectations: torch=$torch_test_version cuda=$cuda_test_version"
           echo "Resolved PyTorch index: $pytorch_index_url"
           echo "Resolved Transformers source: $transformers_source"
-          echo "Resolved Transformers version: $transformers_version"
-          echo "Resolved Transformers ref: $transformers_ref"
+          if [ "$transformers_source" = 'git' ]; then
+            echo "Requested Transformers PyPI version: N/A"
+            echo "Requested Transformers git ref: $transformers_ref"
+          else
+            echo "Requested Transformers PyPI version: $transformers_version"
+            echo "Requested Transformers git ref: N/A"
+          fi
 
       - name: Install CUTLASS
         run: |
@@ -242,6 +247,7 @@ jobs:
           case "$TRANSFORMERS_SOURCE" in
             'pypi')
               pip install "transformers==$TRANSFORMERS_VERSION"
+              echo "TRANSFORMERS_RESOLVED_REF=N/A" >> "$GITHUB_ENV"
               ;;
             'git')
               git clone --filter=blob:none https://github.com/huggingface/transformers /tmp/transformers
@@ -275,9 +281,15 @@ jobs:
           echo "PyTorch index URL: $PYTORCH_INDEX_URL"
           echo "Expected test versions: torch=$TORCH_TEST_VERSION cuda=$CUDA_TEST_VERSION"
           echo "Transformers source: $TRANSFORMERS_SOURCE"
-          echo "Transformers version: $TRANSFORMERS_VERSION"
-          echo "Transformers ref: $TRANSFORMERS_REF"
-          echo "Transformers resolved ref: ${TRANSFORMERS_RESOLVED_REF:-}"
+          if [ "$TRANSFORMERS_SOURCE" = 'git' ]; then
+            echo "Requested Transformers PyPI version: N/A"
+            echo "Requested Transformers git ref: $TRANSFORMERS_REF"
+            echo "Resolved Transformers git SHA: $TRANSFORMERS_RESOLVED_REF"
+          else
+            echo "Requested Transformers PyPI version: $TRANSFORMERS_VERSION"
+            echo "Requested Transformers git ref: N/A"
+            echo "Resolved Transformers git SHA: N/A"
+          fi
           echo ""
           echo "=== GPU Information ==="
           nvidia-smi
@@ -341,7 +353,32 @@ jobs:
               exit 1
               ;;
           esac
-          python -c "import transformers; print('transformers:', transformers.__version__, transformers)"
+          installed_version="$(python -c 'import transformers; print(transformers.__version__)')"
+          if [ "$TRANSFORMERS_SOURCE" = 'git' ]; then
+            requested_version='N/A'
+            requested_ref="$TRANSFORMERS_REF"
+            resolved_ref="$TRANSFORMERS_RESOLVED_REF"
+          else
+            requested_version="$TRANSFORMERS_VERSION"
+            requested_ref='N/A'
+            resolved_ref='N/A'
+          fi
+          {
+            echo "Transformers source: $TRANSFORMERS_SOURCE"
+            echo "Requested Transformers PyPI version: $requested_version"
+            echo "Requested Transformers git ref: $requested_ref"
+            echo "Resolved Transformers git SHA: $resolved_ref"
+            echo "Imported Transformers version: $installed_version"
+          } | tee /dev/stderr
+          {
+            echo "### Transformers provenance"
+            echo ""
+            echo "- Source: \`$TRANSFORMERS_SOURCE\`"
+            echo "- Requested PyPI version: \`$requested_version\`"
+            echo "- Requested git ref: \`$requested_ref\`"
+            echo "- Resolved git SHA: \`$resolved_ref\`"
+            echo "- Imported version: \`$installed_version\`"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Python environment
         run: |

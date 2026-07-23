@@ -26,6 +26,18 @@ pytestmark = pytest.mark.skipif(not required_torch_version(min_version=2.9),
 _SP_SIZE = 2
 
 
+def _create_sdpa_graph(seq_len):
+    graph = Graph()
+    inputs = []
+    for name in ("query", "key", "value"):
+        node = graph.placeholder(name)
+        node.meta["example_value"] = torch.empty(1, 2, seq_len, 8)
+        inputs.append(node)
+    sdpa = graph.call_function(F.scaled_dot_product_attention, args=tuple(inputs))
+    graph.output(sdpa)
+    return GraphModule({}, graph)
+
+
 class TestAutoSPCompile(DistributedTest):
     world_size = 4
     non_daemonic_procs = True
@@ -84,7 +96,9 @@ class TestSDPANodesCompile:
     def test(self, seq_len):
         from deepspeed.compile.util import get_sdpa_nodes
 
-        gm, _ = create_gm_nodes(seq_len=seq_len)
+        # This DeepSpeed 0.19.3 patch was historically validated with Transformers 4.51.3, 5.13.0,
+        # and main@e9c987a3eceb1cd130f30cb5e1f1fac542e4fcfe (5.15.0.dev0); future revisions are not guaranteed.
+        gm = _create_sdpa_graph(seq_len)
         sdpa_nodes = get_sdpa_nodes(gm)
 
         assert len(sdpa_nodes) >= 1, f"Expected at least 1 SDPA node, got {len(sdpa_nodes)}"
