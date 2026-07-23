@@ -730,7 +730,10 @@ class TestAutoEPConfig:
         )
 
         temp_dir = tmp_path / "tmp"
-        extract_zero_shards_stage3([str(optim_file)], [OrderedDict([("dense.weight", (2, 3))])], 1, str(temp_dir), 0)
+        # optim_files_grid[tp][dp] and param_shapes_grid[tp] (= PARAM_SHAPES, a list of
+        # sub-group dicts), work item (tp_index, dp_index).
+        extract_zero_shards_stage3([[str(optim_file)]], [[OrderedDict([("dense.weight", (2, 3))])]], 1, str(temp_dir),
+                                   (0, 0))
 
         fp32_fragment = torch.load(temp_dir / "dense.weight" / "0" / "fp32.00", weights_only=False)
         exp_avg_fragment = torch.load(temp_dir / "dense.weight" / "0" / "exp_avg.00", weights_only=False)

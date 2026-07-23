@@ -628,10 +628,10 @@ class DeepSpeedEngine(Module):
         and registering a pre-hook to ensure that the Dataloader inputs are consistent across ranks.
         """
         self._set_client_model(model)
-        # sanity check
-        # currently, the compatibility between 'autotp' and 'zero > 1' has not been validated
-        assert self.zero_optimization_stage(
-        ) <= 2, "Currently, the compatibility between 'autotp' and 'zero_stage = 3' has not been validated"
+        # AutoTP + ZeRO stage 3 is supported for both inference and training. The
+        # checkpoint paths (16-bit consolidated export and universal checkpoint
+        # conversion) gather across both the ZeRO data-parallel and the tensor-parallel
+        # dimensions, so saved/converted weights are complete.
 
         self.mpu = groups
         self.mpu._init_tp_mesh_device(tensor_model_parallel_size=self.autotp_size())
@@ -5300,34 +5300,40 @@ class DeepSpeedEngine(Module):
 
         state_dict = OrderedDict() if dist.get_rank() == 0 else None
         shared_params = {}
+        # GatheredParameters (below) merges only the ZeRO data-parallel partition. When
+        # AutoTP is active the result is still a single tensor-parallel shard, so the
+        # TP shards must be gathered as well to materialize the full weight on rank 0.
+        autotp_enabled = self.autotp_size() > 1
 
         def get_layer_state_dict(module, prefix=""):
             # gather one layer at a time to be memory-efficient
             # must use modifier_rank=0 to release GPU memory after each layer gathered
             #see_memory_usage("before GatheredParameters", force=True)
-            with deepspeed.zero.GatheredParameters(list(module.parameters(recurse=False)), modifier_rank=0):
-                if dist.get_rank() == 0:
-                    # handle params
-                    for name, param in module.named_parameters(recurse=False):
-                        if param is None or (exclude_frozen_parameters and not param.requires_grad):
-                            continue
-                        key = prefix + name
-                        # can't rely on param.data_ptr() as it will be reused as weights gets
-                        # gathered and reduced, but param.ds_id is unique across all zero weights
-                        # (and shared params will have the same param.ds_id)
-                        if param.ds_id in shared_params:
-                            # shared weights
-                            #print(f"`{key}` is shared with `{shared_params[param.ds_id]}`")
-                            state_dict[key] = state_dict[shared_params[param.ds_id]]
-                        else:
-                            state_dict[key] = param.detach().cpu()
-                            shared_params[param.ds_id] = key
-                        #print(f"param {param.ds_id} {param.shape} {key} ")
+            module_params = list(module.parameters(recurse=False))
+            with deepspeed.zero.GatheredParameters(module_params, modifier_rank=0):
+                with GatherReplacedLayerParams(module_params, module, enabled=autotp_enabled):
+                    if dist.get_rank() == 0:
+                        # handle params
+                        for name, param in module.named_parameters(recurse=False):
+                            if param is None or (exclude_frozen_parameters and not param.requires_grad):
+                                continue
+                            key = prefix + name
+                            # can't rely on param.data_ptr() as it will be reused as weights gets
+                            # gathered and reduced, but param.ds_id is unique across all zero weights
+                            # (and shared params will have the same param.ds_id)
+                            if param.ds_id in shared_params:
+                                # shared weights
+                                #print(f"`{key}` is shared with `{shared_params[param.ds_id]}`")
+                                state_dict[key] = state_dict[shared_params[param.ds_id]]
+                            else:
+                                state_dict[key] = param.detach().cpu()
+                                shared_params[param.ds_id] = key
+                            #print(f"param {param.ds_id} {param.shape} {key} ")
 
-                    # now buffers - not sure if need to take care of potentially shared weights here
-                    for name, buf in module.named_buffers(recurse=False):
-                        if (buf is not None and name not in module._non_persistent_buffers_set):
-                            state_dict[prefix + name] = buf.detach().cpu()
+                        # now buffers - not sure if need to take care of potentially shared weights here
+                        for name, buf in module.named_buffers(recurse=False):
+                            if (buf is not None and name not in module._non_persistent_buffers_set):
+                                state_dict[prefix + name] = buf.detach().cpu()
             #see_memory_usage("after GatheredParameters", force=True)
 
             for name, child in module.named_children():

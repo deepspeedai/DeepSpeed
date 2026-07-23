@@ -3,16 +3,20 @@
 
 # DeepSpeed Team
 
+import os
 import types
 from types import SimpleNamespace
 
 import torch
 
-from deepspeed.checkpoint.constants import (CAT_DIM, FP32_WEIGHT_KEY, PARAM, PARAMETER_WITH_ROW_PARALLELISM_PATTERNS,
+from deepspeed.checkpoint.constants import (CAT_DIM, FP32_FLAT_GROUPS, FP32_WEIGHT_KEY, OPTIMIZER_STATE_DICT, PARAM,
+                                            PARAM_GROUPS, PARAM_SHAPES, PARAMETER_WITH_ROW_PARALLELISM_PATTERNS,
                                             PARAMETER_WITH_SUB_PARAMS, SUB_PARAM_SHAPE,
-                                            TP_REPLICATED_PARAMETER_PATTERNS, UNIVERSAL_CHECKPOINT_INFO)
+                                            TP_REPLICATED_PARAMETER_PATTERNS, UNIVERSAL_CHECKPOINT_INFO,
+                                            UNIVERSAL_CHECKPOINT_VERSION_KEY, UNIVERSAL_CHECKPOINT_VERSION_VALUE,
+                                            VOCABULARY_PARAMETER_PATTERNS, ZERO_STAGE)
 from deepspeed.checkpoint.universal_checkpoint import SubparamShape as CheckpointSubparamShape
-from deepspeed.checkpoint.ds_to_universal import merge_tp_slices
+from deepspeed.checkpoint.ds_to_universal import main as convert_to_universal, merge_tp_slices
 from deepspeed.checkpoint.universal_checkpoint import (_get_param_uc_restore_meta, _resolve_autotp_partition,
                                                        load_hp_checkpoint_state)
 from deepspeed.runtime.bf16_optimizer import BF16_Optimizer
@@ -227,10 +231,7 @@ def test_merge_tp_slices_emits_subparam_shape_metadata(tmp_path):
         }],
     }
 
-    ds_checkpoint = SimpleNamespace(
-        get_checkpoint_info=lambda key: uc_info if key == UNIVERSAL_CHECKPOINT_INFO else {})
-
-    unmatched = merge_tp_slices(ds_checkpoint, str(output_dir), str(slice_dir), 2, (param_name, torch.Size([3, 4])))
+    unmatched = merge_tp_slices(uc_info, str(output_dir), str(slice_dir), 2, (param_name, torch.Size([3, 4])))
 
     ckpt = torch.load(output_dir / param_name / "fp32.pt", weights_only=False)
     assert not unmatched
@@ -254,10 +255,7 @@ def test_merge_tp_slices_uses_row_parallel_cat_dim(tmp_path):
         PARAMETER_WITH_SUB_PARAMS: [],
     }
 
-    ds_checkpoint = SimpleNamespace(
-        get_checkpoint_info=lambda key: uc_info if key == UNIVERSAL_CHECKPOINT_INFO else {})
-
-    merge_tp_slices(ds_checkpoint, str(output_dir), str(slice_dir), 2, (param_name, torch.Size([4, 4])))
+    merge_tp_slices(uc_info, str(output_dir), str(slice_dir), 2, (param_name, torch.Size([4, 4])))
 
     ckpt = torch.load(output_dir / param_name / "fp32.pt", weights_only=False)
     assert ckpt[CAT_DIM] == 1
@@ -310,3 +308,89 @@ def test_get_param_uc_restore_meta_returns_top_level_restore_schema():
 
     assert restore_meta["partition_dim"] == 1
     assert restore_meta["conversion"]["partition_dim"] == 999
+
+
+def _write_stage3_checkpoint(ckpt_dir, tp_shards, dp_degree, uc_info):
+    # Build a synthetic AutoTP + ZeRO-3 checkpoint: one optim/model_states file per
+    # (tp_rank, dp_rank), where each file holds the ZeRO-DP partition of one TP shard.
+    os.makedirs(str(ckpt_dir), exist_ok=True)
+    param_shapes = [{'fc.weight': list(shard.shape) for shard in tp_shards[:1]}]
+    for tp_rank, shard in enumerate(tp_shards):
+        flat = shard.reshape(-1)
+        per_dp = len(flat) // dp_degree
+        for dp_rank in range(dp_degree):
+            partition = flat[dp_rank * per_dp:(dp_rank + 1) * per_dp].clone()
+            optim_outer = {
+                OPTIMIZER_STATE_DICT: {
+                    'state': [{
+                        'exp_avg': partition * 10,
+                        'exp_avg_sq': partition * 100,
+                    }],
+                    PARAM_GROUPS: [{}],
+                },
+                FP32_FLAT_GROUPS: [partition],
+                ZERO_STAGE: 3,
+            }
+            stem = str(ckpt_dir / f"zero_pp_rank_{dp_rank}_mp_rank_{tp_rank:02d}")
+            torch.save({PARAM_SHAPES: param_shapes, UNIVERSAL_CHECKPOINT_INFO: uc_info}, stem + "_model_states.pt")
+            torch.save({OPTIMIZER_STATE_DICT: optim_outer}, stem + "_optim_states.pt")
+
+
+def test_stage3_autotp_universal_conversion_reassembles_full_weight(tmp_path):
+    # Reproduces the documented bug: AutoTP + ZeRO-3 column-parallel weight must be
+    # reassembled across BOTH the TP and DP dimensions. The buggy stage3 path dropped
+    # TP shards (numel == one shard); the fix reuses the stage<=2 TP-aware merge.
+    full_weight = torch.arange(16, dtype=torch.float32).reshape(4, 4)
+    tp_shards = [full_weight[0:2].contiguous(), full_weight[2:4].contiguous()]  # column-parallel, tp=2
+    dp_degree = 2
+
+    uc_info = {
+        UNIVERSAL_CHECKPOINT_VERSION_KEY: UNIVERSAL_CHECKPOINT_VERSION_VALUE,
+        PARAMETER_WITH_ROW_PARALLELISM_PATTERNS: [],  # column-parallel -> default cat dim 0
+        TP_REPLICATED_PARAMETER_PATTERNS: [],
+        VOCABULARY_PARAMETER_PATTERNS: [],
+        PARAMETER_WITH_SUB_PARAMS: [],
+    }
+
+    ckpt_dir = tmp_path / "ckpt"
+    ckpt_dir.mkdir()
+    _write_stage3_checkpoint(ckpt_dir, tp_shards, dp_degree, uc_info)
+
+    out_dir = tmp_path / "universal"
+    args = SimpleNamespace(input_folder=str(ckpt_dir),
+                           output_folder=str(out_dir),
+                           num_extract_workers=1,
+                           num_merge_workers=1,
+                           keep_temp_folder=False,
+                           strict=True,
+                           inject_missing_state=False)
+    convert_to_universal(args)
+
+    for state_name, scale in [('fp32', 1), ('exp_avg', 10), ('exp_avg_sq', 100)]:
+        ckpt = torch.load(out_dir / "zero" / "fc.weight" / f"{state_name}.pt", weights_only=False)
+        assert ckpt[CAT_DIM] == 0
+        torch.testing.assert_close(ckpt[PARAM], (full_weight * scale).reshape(4, 4))
+
+
+def test_stage3_no_tp_universal_conversion_unchanged(tmp_path):
+    # Regression guard: plain ZeRO-3 (tp_degree == 1) must keep using the DP-only path,
+    # producing a plain {PARAM: tensor} entry with no TP merge metadata.
+    full_weight = torch.arange(8, dtype=torch.float32).reshape(2, 4)
+    dp_degree = 2
+    # No UNIVERSAL_CHECKPOINT_INFO and a single (tp=0) rank -> tp_degree detected as 1.
+    _write_stage3_checkpoint(ckpt_dir=tmp_path / "ckpt", tp_shards=[full_weight], dp_degree=dp_degree, uc_info={})
+
+    ckpt_dir = tmp_path / "ckpt"
+    out_dir = tmp_path / "universal"
+    args = SimpleNamespace(input_folder=str(ckpt_dir),
+                           output_folder=str(out_dir),
+                           num_extract_workers=1,
+                           num_merge_workers=1,
+                           keep_temp_folder=False,
+                           strict=True,
+                           inject_missing_state=False)
+    convert_to_universal(args)
+
+    fp32_ckpt = torch.load(out_dir / "zero" / "fc.weight" / "fp32.pt", weights_only=False)
+    # DP-only merge writes the flat raw tensor (no reshape / no {PARAM: ...} dict).
+    torch.testing.assert_close(fp32_ckpt, full_weight.reshape(-1))
