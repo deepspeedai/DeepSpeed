@@ -231,7 +231,8 @@ def test_merge_tp_slices_emits_subparam_shape_metadata(tmp_path):
         }],
     }
 
-    unmatched = merge_tp_slices(uc_info, str(output_dir), str(slice_dir), 2, (param_name, torch.Size([3, 4])))
+    unmatched = merge_tp_slices(uc_info, str(output_dir), str(slice_dir), 2,
+                                (param_name, [torch.Size([3, 4]), torch.Size([3, 4])]))
 
     ckpt = torch.load(output_dir / param_name / "fp32.pt", weights_only=False)
     assert not unmatched
@@ -255,7 +256,8 @@ def test_merge_tp_slices_uses_row_parallel_cat_dim(tmp_path):
         PARAMETER_WITH_SUB_PARAMS: [],
     }
 
-    merge_tp_slices(uc_info, str(output_dir), str(slice_dir), 2, (param_name, torch.Size([4, 4])))
+    merge_tp_slices(uc_info, str(output_dir), str(slice_dir), 2,
+                    (param_name, [torch.Size([4, 4]), torch.Size([4, 4])]))
 
     ckpt = torch.load(output_dir / param_name / "fp32.pt", weights_only=False)
     assert ckpt[CAT_DIM] == 1
@@ -313,9 +315,11 @@ def test_get_param_uc_restore_meta_returns_top_level_restore_schema():
 def _write_stage3_checkpoint(ckpt_dir, tp_shards, dp_degree, uc_info):
     # Build a synthetic AutoTP + ZeRO-3 checkpoint: one optim/model_states file per
     # (tp_rank, dp_rank), where each file holds the ZeRO-DP partition of one TP shard.
+    # Each tp rank's model_states stores its OWN shard shape, so uneven TP splits are
+    # represented faithfully.
     os.makedirs(str(ckpt_dir), exist_ok=True)
-    param_shapes = [{'fc.weight': list(shard.shape) for shard in tp_shards[:1]}]
     for tp_rank, shard in enumerate(tp_shards):
+        param_shapes = [{'fc.weight': list(shard.shape)}]
         flat = shard.reshape(-1)
         per_dp = len(flat) // dp_degree
         for dp_rank in range(dp_degree):
@@ -370,6 +374,42 @@ def test_stage3_autotp_universal_conversion_reassembles_full_weight(tmp_path):
         ckpt = torch.load(out_dir / "zero" / "fc.weight" / f"{state_name}.pt", weights_only=False)
         assert ckpt[CAT_DIM] == 0
         torch.testing.assert_close(ckpt[PARAM], (full_weight * scale).reshape(4, 4))
+
+
+def test_stage3_autotp_universal_conversion_uneven_tp(tmp_path):
+    # Uneven TP split: a column-parallel dim (5) not divisible by tp_degree (2) yields
+    # shards of different shapes (3x4 and 2x4). Each rank stores its own shard shape, and
+    # the merge must reshape each TP slice to its own shape before concatenating.
+    full_weight = torch.arange(20, dtype=torch.float32).reshape(5, 4)
+    tp_shards = [full_weight[0:3].contiguous(), full_weight[3:5].contiguous()]  # (3,4) + (2,4)
+    dp_degree = 2
+
+    uc_info = {
+        UNIVERSAL_CHECKPOINT_VERSION_KEY: UNIVERSAL_CHECKPOINT_VERSION_VALUE,
+        PARAMETER_WITH_ROW_PARALLELISM_PATTERNS: [],
+        TP_REPLICATED_PARAMETER_PATTERNS: [],
+        VOCABULARY_PARAMETER_PATTERNS: [],
+        PARAMETER_WITH_SUB_PARAMS: [],
+    }
+
+    ckpt_dir = tmp_path / "ckpt"
+    _write_stage3_checkpoint(ckpt_dir, tp_shards, dp_degree, uc_info)
+
+    out_dir = tmp_path / "universal"
+    args = SimpleNamespace(input_folder=str(ckpt_dir),
+                           output_folder=str(out_dir),
+                           num_extract_workers=1,
+                           num_merge_workers=1,
+                           keep_temp_folder=False,
+                           strict=True,
+                           inject_missing_state=False)
+    convert_to_universal(args)
+
+    for state_name, scale in [('fp32', 1), ('exp_avg', 10), ('exp_avg_sq', 100)]:
+        ckpt = torch.load(out_dir / "zero" / "fc.weight" / f"{state_name}.pt", weights_only=False)
+        assert ckpt[CAT_DIM] == 0
+        assert tuple(ckpt[PARAM].shape) == (5, 4)
+        torch.testing.assert_close(ckpt[PARAM], (full_weight * scale).reshape(5, 4))
 
 
 def test_stage3_no_tp_universal_conversion_unchanged(tmp_path):

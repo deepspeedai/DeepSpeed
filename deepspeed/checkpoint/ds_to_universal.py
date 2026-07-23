@@ -227,7 +227,11 @@ def dump_param_fragment(dir, tp_index, dp_index, state_name, state_flat_tensor, 
     _save_checkpoint(path, state_flat_tensor)
 
 
-def _merge_zero_shards(param_base_path, state, tp_degree, slice_shape=None):
+def _merge_zero_shards(param_base_path, state, tp_degree, slice_shapes=None):
+    # slice_shapes, when provided, is a per-tp list of shapes (one entry per tp_index) so
+    # that uneven TP shards -- e.g. a partition dim not divisible by tp_degree, or uneven
+    # GQA sub-params -- reshape to the correct per-rank shape instead of a single shape
+    # taken from one rank. None keeps each merged fragment flat.
     slices = []
     for tp_index in range(tp_degree):
         prefix_path = os.path.join(param_base_path, str(tp_index), f"{state}")
@@ -252,18 +256,18 @@ def _merge_zero_shards(param_base_path, state, tp_degree, slice_shape=None):
             assert all(v == shards[0] for v in shards), "All shards must have the same step value"
             slice = shards[0]
         else:
-            if slice_shape is None:
+            if slice_shapes is None:
                 slice = torch.cat(shards, dim=0)
             else:
-                slice = torch.cat(shards, dim=0).reshape(slice_shape)
+                slice = torch.cat(shards, dim=0).reshape(slice_shapes[tp_index])
 
         slices.append(slice)
     return slices
 
 
-def merge_tp_slices(uc_info, dir, slice_dir, tp_degree, name_and_shape):
+def merge_tp_slices(uc_info, dir, slice_dir, tp_degree, name_and_shapes):
 
-    name, shape = name_and_shape
+    name, per_tp_shapes = name_and_shapes
     slice_base_path = os.path.join(slice_dir, name)
     param_base_path = os.path.join(dir, name)
 
@@ -299,12 +303,12 @@ def merge_tp_slices(uc_info, dir, slice_dir, tp_degree, name_and_shape):
 
     matched_sub_params_shape = get_matched_sub_params_pattern(name)
 
-    step_merged = _merge_zero_shards(slice_base_path, "step", tp_degree, shape)
+    step_merged = _merge_zero_shards(slice_base_path, "step", tp_degree, per_tp_shapes)
     if step_merged:
         _save_checkpoint(os.path.join(param_base_path, "step.pt"), step_merged[0])
 
     for state in ("fp32", "exp_avg", "exp_avg_sq"):
-        slices = _merge_zero_shards(slice_base_path, state, tp_degree, shape)
+        slices = _merge_zero_shards(slice_base_path, state, tp_degree, per_tp_shapes)
         final_path = os.path.join(param_base_path, f"{state}.pt")
 
         #print(f"Expected shape: {shape}")
@@ -839,13 +843,13 @@ def main(args):
         checkpoint_paths = _create_checkpoint_paths(args.output_folder, iteration, ds_checkpoint.tp_degree,
                                                     ds_checkpoint.pp_degree)
 
-        slice_shapes = []
+        # Collect per-tp param shapes (each mp_rank file stores its own TP shard shapes).
+        # Keep one shape list per param so uneven TP shards merge to the correct per-rank shape.
+        slice_shapes_by_tp = []
         for mp_rank_file in ds_checkpoint.mp_rank_files:
             mp_sd = torch.load(mp_rank_file, map_location=torch.device('cpu'), weights_only=False)
-            slice_shapes += mp_sd[PARAM_SHAPES]
-
-        # fix back to normal flat dict, merge duplicates for tp>1
-        slice_shapes = dict((k, v) for d in slice_shapes for k, v in d.items())
+            slice_shapes_by_tp.append(dict((k, v) for d in mp_sd[PARAM_SHAPES] for k, v in d.items()))
+        slice_shapes = {name: [d[name] for d in slice_shapes_by_tp] for name in slice_shapes_by_tp[0]}
         temp_dir = os.path.join(args.output_folder, 'tmp')
 
         print('*** 1. Extracting ZeRO fragments')
@@ -946,13 +950,14 @@ def main(args):
         param_keys -= autoep_expert_param_names
         if tp_degree > 1:
             # Reassemble both the ZeRO data-parallel and tensor-parallel dimensions by
-            # reusing the stage<=2 TP-aware merge machinery. slice_shapes hold the
-            # per-TP-shard shapes (one per param), matching merge_tp_slices' contract.
-            slice_shapes = {
-                name: shape
-                for sub_group_shapes in param_shapes
-                for name, shape in sub_group_shapes.items() if name in param_keys
-            }
+            # reusing the stage<=2 TP-aware merge machinery. Use the per-TP-rank shapes from
+            # param_shapes_grid (not a single rank's shape) so uneven TP shards -- e.g. a
+            # partition dim not divisible by tp_degree, or uneven GQA sub-params -- merge
+            # under their correct per-rank shape instead of the first rank's shape.
+            param_shapes_by_tp = [
+                dict((k, v) for sub in grid_tp for k, v in sub.items()) for grid_tp in param_shapes_grid
+            ]
+            slice_shapes = {name: [param_shapes_by_tp[tp][name] for tp in range(tp_degree)] for name in param_keys}
             uc_info = _load_universal_checkpoint_info_stage3(model_files)
             _merge_tp_slice_files(args, uc_info, tp_degree, slice_shapes, temp_dir)
         else:
