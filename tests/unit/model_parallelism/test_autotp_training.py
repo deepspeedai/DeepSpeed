@@ -185,6 +185,58 @@ class TestTpParallelStates(DistributedTest):
         assert groups.get_data_parallel_world_size() == dp_size
 
 
+@pytest.mark.parametrize("tp_size", [2, 4])
+class TestAutoTpZeroStage3(DistributedTest):
+    """AutoTP + ZeRO stage 3 is supported only for ZeRO-Inference (no optimizer).
+
+    The training path (optimizer present) is blocked because TP-aware checkpoint
+    consolidation is not yet implemented; the inference path (no optimizer ->
+    DummyOptim -> DeepSpeedZeRoOffload) must initialize.
+    """
+
+    world_size = 4
+    reuse_dist_env = False
+
+    def _build_config(self, tp_size: int, with_optimizer: bool) -> dict:
+        config_dict = {
+            "train_micro_batch_size_per_gpu": 1,
+            "tensor_parallel": {
+                "autotp_size": tp_size,
+                "partition_config": {
+                    "use_default_specs": False,
+                    "layer_specs": [{
+                        "patterns": [r".*\.weight$"],
+                        "partition_type": "column",
+                    }],
+                }
+            },
+            "zero_optimization": {
+                "stage": 3
+            }
+        }
+        if with_optimizer:
+            config_dict["optimizer"] = {"type": "Adam", "params": {"lr": 1e-6}}
+        if preferred_dtype() is torch.float16:
+            config_dict["fp16"] = {"enabled": True}
+        elif preferred_dtype() is torch.bfloat16:
+            config_dict["bf16"] = {"enabled": True}
+        return config_dict
+
+    def test_autotp_zero3_training_blocked(self, tp_size: int):
+        skip_on_device()
+        model = SimpleModel(hidden_dim=64)
+        config_dict = self._build_config(tp_size, with_optimizer=True)
+        with pytest.raises(NotImplementedError, match="only for inference"):
+            deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config_dict)
+
+    def test_autotp_zero3_inference(self, tp_size: int):
+        skip_on_device()
+        model = SimpleModel(hidden_dim=64)
+        config_dict = self._build_config(tp_size, with_optimizer=False)
+        model, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config_dict)
+        assert groups.get_tensor_model_parallel_world_size() == tp_size
+
+
 class TestTpModelInitCompatibility(DistributedTest):
     world_size = 4
     reuse_dist_env = False
