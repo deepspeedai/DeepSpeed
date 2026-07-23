@@ -43,11 +43,11 @@ def is_dynamo_guard_evaluation():
 def deepcompile_z3_forward_context(engine):
     fallback = getattr(engine, "_deepcompile_z3_eager_fallback", None)
     if fallback is None or not engine.is_deepcompile_active() or not engine.zero_optimization_partition_weights():
-        yield
+        yield None
         return
 
     with fallback.forward_context():
-        yield
+        yield fallback
 
 
 class DeepCompileZ3EagerFallback:
@@ -63,6 +63,10 @@ class DeepCompileZ3EagerFallback:
         self._last_pre_forward_released_param_ids = []
         self._last_user_adopted_param_ids = []
         self._user_adopted_param_ids = set()
+        self._next_forward_graph_id = 0
+        self._outstanding_forward_graph_ids = set()
+        self._backward_started_forward_graph_ids = set()
+        self._last_completed_forward_graph_ids = []
         self.total_gathered_params = 0
 
     @contextmanager
@@ -124,9 +128,25 @@ class DeepCompileZ3EagerFallback:
         """Record a guard probe that intentionally observed the partitioned parameter."""
         self._last_guard_suppressed_param_ids.append(int(param.ds_id))
 
+    def record_forward_graph(self):
+        """Record a grad-bearing forward whose fallback gathers must survive until backward."""
+        graph_id = self._next_forward_graph_id
+        self._next_forward_graph_id += 1
+        self._outstanding_forward_graph_ids.add(graph_id)
+        return graph_id
+
+    def record_backward_start(self, graph_id):
+        """Record that backward reached an output from a tracked forward graph."""
+        if graph_id in self._outstanding_forward_graph_ids:
+            self._backward_started_forward_graph_ids.add(graph_id)
+
     @torch.no_grad()
     def release_available_params_for_next_forward(self):
         """Restore the partitioned parameter state expected by Dynamo guards."""
+        if self._outstanding_forward_graph_ids:
+            self._last_pre_forward_released_param_ids = []
+            return
+
         released = []
         if self.engine is not None:
             for param in self.engine.module.parameters():
@@ -141,7 +161,7 @@ class DeepCompileZ3EagerFallback:
         self._last_pre_forward_released_param_ids = released
 
     @torch.no_grad()
-    def release_gathered_params(self):
+    def _release_gathered_params(self):
         released = []
         for ds_id, param in list(self._tracked_params.items()):
             if (hasattr(param, "ds_status") and param.ds_status == ZeroParamStatus.AVAILABLE
@@ -151,6 +171,24 @@ class DeepCompileZ3EagerFallback:
             self._drop_tracked_param(ds_id, param)
         self._last_released_param_ids = released
 
+    def complete_backward(self):
+        """Release fallback gathers after every forward graph reached by this backward completes."""
+        completed = sorted(self._backward_started_forward_graph_ids)
+        if not completed:
+            return
+
+        self._backward_started_forward_graph_ids.clear()
+        self._outstanding_forward_graph_ids.difference_update(completed)
+        self._last_completed_forward_graph_ids = completed
+        if not self._outstanding_forward_graph_ids:
+            self._release_gathered_params()
+
+    def release_gathered_params(self):
+        """Explicitly release gathers when pending backward work is intentionally abandoned."""
+        self._outstanding_forward_graph_ids.clear()
+        self._backward_started_forward_graph_ids.clear()
+        self._release_gathered_params()
+
     def stats(self):
         return {
             "tracked_param_ids": sorted(self._tracked_params),
@@ -159,5 +197,8 @@ class DeepCompileZ3EagerFallback:
             "last_guard_suppressed_param_ids": list(self._last_guard_suppressed_param_ids),
             "last_pre_forward_released_param_ids": list(self._last_pre_forward_released_param_ids),
             "last_user_adopted_param_ids": list(self._last_user_adopted_param_ids),
+            "outstanding_forward_graph_ids": sorted(self._outstanding_forward_graph_ids),
+            "backward_started_forward_graph_ids": sorted(self._backward_started_forward_graph_ids),
+            "last_completed_forward_graph_ids": list(self._last_completed_forward_graph_ids),
             "total_gathered_params": self.total_gathered_params,
         }

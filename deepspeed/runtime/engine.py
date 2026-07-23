@@ -2695,15 +2695,24 @@ class DeepSpeedEngine(Module):
             # We can't have this in forward prologue as the compiler compiles hooks including the forward prologue.
             self.launch_compile_passes(self.global_steps)
 
-        with deepcompile_z3_forward_context(self), autocast_if_enabled(self):
+        with deepcompile_z3_forward_context(self) as z3_eager_fallback, autocast_if_enabled(self):
             loss = self.module(*inputs, **kwargs)
+
+        forward_graph_id = None
+
+        def backward_prologue():
+            self._backward_prologue()
+            if z3_eager_fallback is not None and forward_graph_id is not None:
+                z3_eager_fallback.record_backward_start(forward_graph_id)
 
         # Register output backward hooks
         # preprocess_once_fn is called for preprocessing
         # preprocess_per_tensor_fn scales a tensor for gradient accumulation
-        register_output_backward_hooks(loss,
-                                       preprocess_once_fn=self._backward_prologue,
-                                       preprocess_per_tensor_fn=self._backward_prologue_per_tensor)
+        hook_manager = register_output_backward_hooks(loss,
+                                                      preprocess_once_fn=backward_prologue,
+                                                      preprocess_per_tensor_fn=self._backward_prologue_per_tensor)
+        if z3_eager_fallback is not None and hook_manager.hook_handles:
+            forward_graph_id = z3_eager_fallback.record_forward_graph()
 
         if self.autotuning_profile_model_info():
             activation_mem = get_ma_status() - ma

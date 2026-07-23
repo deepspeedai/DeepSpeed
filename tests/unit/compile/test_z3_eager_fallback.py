@@ -15,6 +15,7 @@ from deepspeed.compile.z3_eager_fallback import DeepCompileZ3EagerFallback, deep
 from deepspeed.runtime.zero import parameter_offload
 from deepspeed.runtime.zero.parameter_offload import ZeROOrderedDict
 from deepspeed.runtime.zero.partition_parameters import GatheredParameters, ZeroParamStatus
+from deepspeed.runtime.utils import register_output_backward_hooks
 
 
 def _zero_module_with_param():
@@ -144,7 +145,7 @@ def test_deepcompile_fallback_releases_leftover_gathered_params_before_forward()
     assert fallback.stats()["last_pre_forward_released_param_ids"] == [11]
 
 
-def test_consecutive_deepcompile_forwards_release_unowned_available_params():
+def test_consecutive_deepcompile_inference_forwards_release_unowned_available_params():
     module, param = _zero_module_with_param()
     param.ds_persist = False
     partition_calls = []
@@ -174,6 +175,147 @@ def test_consecutive_deepcompile_forwards_release_unowned_available_params():
             assert param.ds_status == ZeroParamStatus.NOT_AVAILABLE
 
     assert partition_calls == [7, 7]
+
+
+def test_two_disjoint_fallback_forwards_remain_gathered_until_combined_backward(monkeypatch):
+    module = torch.nn.Module()
+    params = ZeROOrderedDict(parent_module=module)
+    partition_calls = []
+
+    for name, ds_id in (("first", 1), ("second", 2)):
+        param = torch.nn.Parameter(torch.empty(0))
+        param.ds_id = ds_id
+        param.ds_status = ZeroParamStatus.NOT_AVAILABLE
+        param.ds_persist = False
+        gathered_data = torch.full((2, 3), float(ds_id))
+
+        def all_gather(*, _param=param, _data=gathered_data):
+            _param.data = _data.clone()
+            _param.ds_status = ZeroParamStatus.AVAILABLE
+
+        def partition(*, _param=param):
+            partition_calls.append(int(_param.ds_id))
+            _param.data = torch.empty(0)
+            _param.ds_status = ZeroParamStatus.NOT_AVAILABLE
+
+        param.all_gather = all_gather
+        param.partition = partition
+        params[name] = param
+
+    module._parameters = params
+
+    class FakeEngine:
+
+        def __init__(self):
+            self.module = module
+            self._deepcompile_z3_eager_fallback = DeepCompileZ3EagerFallback(self)
+
+        def is_deepcompile_active(self):
+            return True
+
+        def zero_optimization_partition_weights(self):
+            return True
+
+        def forward(self, name, input_tensor):
+            with deepcompile_z3_forward_context(self) as fallback:
+                output = torch.nn.functional.linear(input_tensor, self.module._parameters[name]).sum()
+
+            graph_id = None
+
+            def record_backward_start():
+                fallback.record_backward_start(graph_id)
+
+            hook_manager = register_output_backward_hooks(output, preprocess_once_fn=record_backward_start)
+            if hook_manager.hook_handles:
+                graph_id = fallback.record_forward_graph()
+            return output
+
+    monkeypatch.setattr(z3_eager_fallback, "is_dynamo_guard_evaluation", lambda: False)
+    monkeypatch.setattr(parameter_offload, "print_rank_0", lambda *args, **kwargs: None)
+
+    engine = FakeEngine()
+    first_input = torch.ones((1, 3), requires_grad=True)
+    second_input = torch.ones((1, 3), requires_grad=True)
+    first_loss = engine.forward("first", first_input)
+    second_loss = engine.forward("second", second_input)
+
+    fallback = engine._deepcompile_z3_eager_fallback
+    assert fallback.stats()["outstanding_forward_graph_ids"] == [0, 1]
+    assert partition_calls == []
+    assert all(param.ds_status == ZeroParamStatus.AVAILABLE for param in module.parameters())
+
+    (first_loss + second_loss).backward()
+    fallback.complete_backward()
+
+    assert first_input.grad is not None
+    assert second_input.grad is not None
+    assert fallback.stats()["outstanding_forward_graph_ids"] == []
+    assert partition_calls == [1, 2]
+    assert all(param.ds_status == ZeroParamStatus.NOT_AVAILABLE for param in module.parameters())
+
+
+def test_explicit_release_cleans_up_abandoned_forward_graph():
+    module, param = _zero_module_with_param()
+    param.ds_status = ZeroParamStatus.AVAILABLE
+    param.ds_persist = False
+    partition_calls = []
+
+    def partition():
+        partition_calls.append(param.ds_id)
+        param.ds_status = ZeroParamStatus.NOT_AVAILABLE
+
+    param.partition = partition
+
+    class FakeEngine:
+        pass
+
+    engine = FakeEngine()
+    engine.module = module
+    fallback = DeepCompileZ3EagerFallback(engine)
+    fallback.record_gathered_param(param)
+    fallback.record_forward_graph()
+    fallback.release_gathered_params()
+
+    assert fallback.stats()["outstanding_forward_graph_ids"] == []
+    assert fallback.stats()["tracked_param_ids"] == []
+    assert partition_calls == [7]
+
+
+def test_completed_backward_keeps_gathers_for_another_outstanding_forward():
+    module, param = _zero_module_with_param()
+    param.ds_status = ZeroParamStatus.AVAILABLE
+    param.ds_persist = False
+    partition_calls = []
+
+    def partition():
+        partition_calls.append(param.ds_id)
+        param.ds_status = ZeroParamStatus.NOT_AVAILABLE
+
+    param.partition = partition
+
+    class FakeEngine:
+        pass
+
+    engine = FakeEngine()
+    engine.module = module
+    fallback = DeepCompileZ3EagerFallback(engine)
+    fallback.record_gathered_param(param)
+    first_graph = fallback.record_forward_graph()
+    second_graph = fallback.record_forward_graph()
+
+    fallback.record_backward_start(second_graph)
+    fallback.complete_backward()
+
+    assert fallback.stats()["outstanding_forward_graph_ids"] == [first_graph]
+    assert fallback.stats()["tracked_param_ids"] == [7]
+    assert partition_calls == []
+
+    fallback.record_backward_start(first_graph)
+    fallback.complete_backward()
+
+    assert fallback.stats()["outstanding_forward_graph_ids"] == []
+    assert fallback.stats()["tracked_param_ids"] == []
+    assert partition_calls == [7]
 
 
 def test_new_fallback_owner_drops_previous_owner():
