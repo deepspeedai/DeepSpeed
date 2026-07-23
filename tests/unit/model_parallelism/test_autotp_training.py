@@ -16,7 +16,8 @@ from unit.simple_model import SimpleModel, random_dataloader
 from deepspeed.utils import groups
 from contextlib import contextmanager
 from torch import nn
-from deepspeed.module_inject.layers import LinearAllreduce, LinearLayer, set_autotp_mode, is_autotp_training_mode
+from deepspeed.module_inject.layers import (LinearAllreduce, LinearLayer, LmHeadLinearAllreduce, set_autotp_mode,
+                                            is_autotp_training_mode)
 from unit.checkpoint.common import compare_lr_scheduler_states, compare_optimizer_states
 import os
 from deepspeed.runtime.utils import is_model_parallel_parameter
@@ -136,6 +137,16 @@ class SequentialLinearModel(torch.nn.Module):
             for i, l in enumerate(self.linears):
                 x = self.linears[i](x)
         return self.cross_entropy_loss(x, y)
+
+
+class UnevenVocabOutputModel(torch.nn.Module):
+
+    def __init__(self, hidden_dim, vocab_size):
+        super().__init__()
+        self.lm_head = torch.nn.Linear(hidden_dim, vocab_size)
+
+    def forward(self, x):
+        return self.lm_head(x)
 
 
 @contextmanager
@@ -618,6 +629,52 @@ def prepare_tp_model(hidden_dim, nlayers, linear_indices, allreduce_indices, gro
         model.linears[i] = layer
 
     return model, base_model
+
+
+class TestUnevenVocabLmHeadCheckpoint(DistributedTest):
+    world_size = 3
+    reuse_dist_env = False
+
+    def test_consolidated_checkpoint(self):
+        skip_on_device()
+        hidden_dim = 12
+        vocab_size = 10  # Even, but not divisible by the three TP ranks.
+
+        torch.manual_seed(42)
+        model = UnevenVocabOutputModel(hidden_dim, vocab_size)
+        reference_state = {name: param.detach().cpu().clone() for name, param in model.state_dict().items()}
+        config_dict = {
+            "train_micro_batch_size_per_gpu": 1,
+            "tensor_parallel": {
+                "autotp_size": 3,
+                "partition_config": {
+                    "use_default_specs":
+                    False,
+                    "layer_specs": [{
+                        "patterns": [r".*lm_head\.weight$"],
+                        "partition_type": "column",
+                        "gather_output": True,
+                    }],
+                },
+            },
+            "zero_optimization": {
+                "stage": 0,
+            },
+        }
+
+        engine, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config_dict)
+
+        assert isinstance(engine.module.lm_head, LmHeadLinearAllreduce)
+        assert engine.module.lm_head.weight.shape == (vocab_size, hidden_dim // self.world_size)
+
+        checkpoint = engine._consolidated_16bit_state_dict()
+
+        if dist.get_rank() == 0:
+            assert checkpoint.keys() == reference_state.keys()
+            for name, expected in reference_state.items():
+                torch.testing.assert_close(checkpoint[name], expected)
+        else:
+            assert checkpoint is None
 
 
 @pytest.mark.parametrize("zero_stage", [0, 1, 2])
