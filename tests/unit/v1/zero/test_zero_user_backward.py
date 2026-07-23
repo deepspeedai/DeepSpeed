@@ -13,6 +13,7 @@ from unit.common import DistributedTest, preferred_dtype, allclose_on_all_ranks
 from unit.simple_model import SimpleModel, random_dataloader
 from deepspeed.accelerator import get_accelerator
 from deepspeed.utils import safe_get_full_grad
+from deepspeed.runtime.zero.partition_parameters import ZeroParamStatus
 
 
 class SimpleNonScalarModel(torch.nn.Module):
@@ -44,8 +45,18 @@ class SimpleOutputModel(torch.nn.Module):
         return x
 
 
-def get_config_dict(zero_stage, gradient_accumulation_steps=1):
-    """Helper to create config dict with common settings"""
+# Frozen-model hidden dim. Used as a persistence threshold too: at this value the 1-D norm
+# params (numel == hidden) become persistent (the HF#47254 RMSNorm shape); at 0 all partition.
+_FROZEN_HIDDEN_DIM = 8
+
+
+def get_config_dict(zero_stage, gradient_accumulation_steps=1, force_fp32=False, param_persistence_threshold=0):
+    """Build a config dict.
+
+    force_fp32 keeps the engine in fp32: the frozen-param non-reentrant CheckpointError only
+    reproduces in fp32 (bf16 recompute takes a different path). param_persistence_threshold
+    (ZeRO-3) sets stage3_param_persistence_threshold; 0 partitions all, >= numel stays resident.
+    """
     config_dict = {
         "train_micro_batch_size_per_gpu": 2,
         "gradient_accumulation_steps": gradient_accumulation_steps,
@@ -62,13 +73,13 @@ def get_config_dict(zero_stage, gradient_accumulation_steps=1):
     }
 
     if zero_stage == 3:
-        # For ZeRO-3, force partitioning of all parameters
-        config_dict["zero_optimization"]["stage3_param_persistence_threshold"] = 0
+        config_dict["zero_optimization"]["stage3_param_persistence_threshold"] = param_persistence_threshold
 
-    if get_accelerator().is_bf16_supported():
-        config_dict["bf16"] = {"enabled": True}
-    elif get_accelerator().is_fp16_supported():
-        config_dict["fp16"] = {"enabled": True, "initial_scale_power": 8}
+    if not force_fp32:
+        if get_accelerator().is_bf16_supported():
+            config_dict["bf16"] = {"enabled": True}
+        elif get_accelerator().is_fp16_supported():
+            config_dict["fp16"] = {"enabled": True, "initial_scale_power": 8}
 
     return config_dict
 
@@ -203,6 +214,125 @@ def compare_parameters(params_ddp, params_ds, step_info=""):
         allclose_on_all_ranks(params_ddp_fp32,
                               params_ds_fp32,
                               assert_message=f"Parameter {name} mismatch{step_suffix}")
+
+
+def assert_all_partitioned(model_engine, zero_stage, step_info=""):
+    """For ZeRO-3, assert every non-persistent param is released after backward.
+
+    The recompute bug left frozen params gathered after backward, so the release check catches
+    regressions a crash-only test misses. Persistent params are skipped (meant to stay
+    resident). No-op for stages 1/2.
+    """
+    if zero_stage != 3:
+        return
+    step_suffix = f" at {step_info}" if step_info else ""
+    for name, param in model_engine.module.named_parameters():
+        if param.ds_persist:
+            continue
+        assert param.ds_status == ZeroParamStatus.NOT_AVAILABLE, \
+            f"Parameter {name} not partitioned after backward (status={param.ds_status}){step_suffix}"
+
+
+def assert_persistent_resident(model_engine, zero_stage, step_info=""):
+    """For ZeRO-3, assert every persistent param stays gathered (AVAILABLE) after backward.
+
+    Persistent frozen params are added to a recompute owner during checkpoint recompute; if the
+    release path force-releases that owner's recompute set without a ds_persist guard, they get
+    partitioned despite stage3_param_persistence_threshold. No-op for stages 1/2 or when nothing
+    is persistent. Only meaningful once the trace is complete (skip warmup step 0).
+    """
+    if zero_stage != 3:
+        return
+    step_suffix = f" at {step_info}" if step_info else ""
+    for name, param in model_engine.module.named_parameters():
+        if not param.ds_persist:
+            continue
+        assert param.ds_status == ZeroParamStatus.AVAILABLE, \
+            f"Persistent parameter {name} was partitioned after backward (status={param.ds_status}){step_suffix}"
+
+
+def run_frozen_checkpoint_comparison(model_cls,
+                                     zero_stage,
+                                     use_reentrant,
+                                     num_iterations=3,
+                                     input_requires_grad=True,
+                                     leaf_module_types=None,
+                                     dtype=torch.float32,
+                                     param_persistence_threshold=0,
+                                     **model_kwargs):
+    """Shared driver for the frozen-param + checkpoint regression tests.
+
+    Each iteration checks: (1) backward runs without CheckpointError, (2) grads match the DDP
+    reference, (3) ZeRO-3 releases every non-persistent param after backward.
+    param_persistence_threshold toggles the persistent vs non-persistent frozen path.
+    """
+    hidden_dim = _FROZEN_HIDDEN_DIM
+    batch_size = 2
+
+    device, rank, _ = initialize_distributed()
+    # fp32 reproduces the pre-fix CheckpointError; bf16 covers the common mixed-precision case.
+    if dtype == torch.bfloat16 and not get_accelerator().is_bf16_supported():
+        pytest.skip("bf16 is not supported on this accelerator")
+
+    # DDP reference: no parameter partitioning, so no checkpoint metadata issue.
+    torch.manual_seed(42)
+    model_ddp = model_cls(hidden_dim=hidden_dim, use_reentrant=use_reentrant, **model_kwargs)
+    model_ddp = model_ddp.to(device=device, dtype=dtype)
+    model_ddp = DDP(model_ddp, device_ids=[rank], output_device=rank)
+    optimizer_ddp = torch.optim.Adam([p for p in model_ddp.parameters() if p.requires_grad], lr=1e-3)
+
+    # DeepSpeed engine with ZeRO partitioning. Only trainable params go to the optimizer;
+    # the frozen params are still partitioned by ZeRO-3, which is what triggers the failure.
+    torch.manual_seed(42)
+    model_ds = model_cls(hidden_dim=hidden_dim, use_reentrant=use_reentrant, **model_kwargs)
+    if leaf_module_types is not None:
+        from deepspeed.utils import set_z3_leaf_modules
+        set_z3_leaf_modules(model_ds, leaf_module_types)
+    config = get_config_dict(zero_stage,
+                             force_fp32=(dtype == torch.float32),
+                             param_persistence_threshold=param_persistence_threshold)
+    trainable_params = [p for p in model_ds.parameters() if p.requires_grad]
+    model_engine, _, _, _ = deepspeed.initialize(config=config, model=model_ds, model_parameters=trainable_params)
+
+    # Loop several iterations: the release-lifetime regression only shows up once frozen
+    # params linger AVAILABLE across steps, so a single step would miss it.
+    for iteration in range(num_iterations):
+        step_info = f"use_reentrant={use_reentrant}, stage {zero_stage}, iter {iteration}"
+
+        torch.manual_seed(123 + iteration)
+        x_ddp = torch.randn(batch_size, hidden_dim, device=device, dtype=dtype, requires_grad=input_requires_grad)
+        output_ddp = model_ddp(x_ddp)
+        output_ddp.backward(torch.ones_like(output_ddp))
+        get_accelerator().synchronize()
+        dist.barrier()
+        ddp_grads = collect_ddp_gradients(model_ddp)
+
+        # Drive backward through the engine so the ZeRO coordinator hooks run; a raw
+        # output.backward() bypasses them and would not reproduce the bug.
+        torch.manual_seed(123 + iteration)
+        x_ds = torch.randn(batch_size, hidden_dim, device=device, dtype=dtype, requires_grad=input_requires_grad)
+        output_ds = model_engine(x_ds)
+        model_engine.backward(output_ds.sum())
+        get_accelerator().synchronize()
+        dist.barrier()
+        ds_grads = collect_gradients_safe(model_engine)
+
+        assert len(ds_grads) > 0, f"No gradients with frozen param, {step_info}"
+        # Compare only on step 0: later steps diverge along slightly different Adam trajectories.
+        if iteration == 0:
+            compare_gradients(ddp_grads, ds_grads, f"frozen-param checkpointing {step_info}")
+
+        # Frozen params must be released (partitioned) after every backward, not left gathered.
+        assert_all_partitioned(model_engine, zero_stage, step_info)
+        # Persistent params must stay resident; check once the trace is complete (after warmup).
+        if iteration >= 1:
+            assert_persistent_resident(model_engine, zero_stage, step_info)
+
+        model_engine.step()
+        optimizer_ddp.step()
+        optimizer_ddp.zero_grad()
+
+    model_engine.destroy()
 
 
 @pytest.mark.parametrize("zero_stage", [1, 2, 3])
@@ -1430,5 +1560,272 @@ class TestZeroUserBackwardWithCheckpointing(DistributedTest):
             # Run optimizer steps on both models
             optimizer_ddp.step()
             model_engine.step()
+
+        model_engine.destroy()
+
+
+class FrozenParamCheckpointedModel(torch.nn.Module):
+    """Checkpointed model with a frozen parameter inside the checkpointed block.
+
+    Mirrors the common PEFT / quantized setup where the base is frozen and only a small
+    adapter trains. Under ZeRO-3 the frozen parameter is partitioned, and with non-reentrant
+    checkpointing it used to be re-partitioned to shape [0] during the recompute, tripping
+    torch's checkpoint metadata validation. See #4332.
+    """
+
+    def __init__(self, hidden_dim, use_reentrant=False):
+        super().__init__()
+        self.use_reentrant = use_reentrant
+        self.norm = torch.nn.LayerNorm(hidden_dim)
+        self.linear1 = torch.nn.Linear(hidden_dim, hidden_dim)
+        self.linear2 = torch.nn.Linear(hidden_dim, hidden_dim)
+        # Freeze the norm: this is the parameter that tripped the recompute metadata check.
+        self.norm.weight.requires_grad_(False)
+        self.norm.bias.requires_grad_(False)
+
+    def _checkpointed_block(self, x):
+        x = self.norm(x)
+        x = self.linear1(x)
+        x = torch.nn.functional.relu(x)
+        return x
+
+    def forward(self, x):
+        if self.training:
+            from torch.utils.checkpoint import checkpoint
+            x = checkpoint(self._checkpointed_block, x, use_reentrant=self.use_reentrant)
+        else:
+            x = self._checkpointed_block(x)
+        x = self.linear2(x)
+        return x
+
+
+@pytest.mark.parametrize("param_persistence_threshold", [0, _FROZEN_HIDDEN_DIM], ids=["nopersist", "persist"])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16], ids=["fp32", "bf16"])
+@pytest.mark.parametrize("zero_stage", [1, 2, 3])
+@pytest.mark.parametrize("use_reentrant", [True, False])
+class TestZeroUserBackwardFrozenParamCheckpointing(DistributedTest):
+    """Regression test for ZeRO + gradient checkpointing with a frozen parameter.
+
+    A frozen (non-grad) parameter inside a checkpointed block used to be partitioned to
+    shape [0] during the non-reentrant recompute under ZeRO-3, tripping torch's checkpoint
+    metadata validation with a CheckpointError. This verifies training runs and matches a
+    PyTorch DDP reference (fp32 reproduces the error; bf16 covers mixed precision). See #4332.
+    """
+    world_size = 2
+
+    def test_checkpointed_frozen_param(self, zero_stage, use_reentrant, dtype, param_persistence_threshold):
+        run_frozen_checkpoint_comparison(FrozenParamCheckpointedModel,
+                                         zero_stage,
+                                         use_reentrant,
+                                         dtype=dtype,
+                                         param_persistence_threshold=param_persistence_threshold)
+
+
+class MultiBlockFrozenModel(torch.nn.Module):
+    """Several checkpointed blocks, each with its own frozen norm.
+
+    Mirrors the diffusers UNet / stacked-transformer shape from #4332 and the extended MRE in
+    #8130: the recompute re-fires the forward hooks of every block, so a release-lifetime bug
+    compounds across blocks and modules must be released in the right (LIFO) order.
+    """
+
+    def __init__(self, hidden_dim, num_blocks=2, use_reentrant=False):
+        super().__init__()
+        self.use_reentrant = use_reentrant
+        self.blocks = torch.nn.ModuleList()
+        for _ in range(num_blocks):
+            norm = torch.nn.LayerNorm(hidden_dim)
+            norm.weight.requires_grad_(False)
+            norm.bias.requires_grad_(False)
+            block = torch.nn.ModuleDict({"norm": norm, "linear": torch.nn.Linear(hidden_dim, hidden_dim)})
+            self.blocks.append(block)
+
+    def _block_forward(self, block, x):
+        x = block["norm"](x)
+        x = block["linear"](x)
+        return torch.nn.functional.relu(x)
+
+    def forward(self, x):
+        from torch.utils.checkpoint import checkpoint
+        for block in self.blocks:
+            if self.training:
+                x = checkpoint(self._block_forward, block, x, use_reentrant=self.use_reentrant)
+            else:
+                x = self._block_forward(block, x)
+        return x
+
+
+class LoRAStyleFrozenModel(torch.nn.Module):
+    """LoRA-shaped model: a frozen base Linear plus a small trainable low-rank adapter.
+
+    This is the PEFT/QLoRA configuration from transformers#47254 and trl#5217 reduced to its
+    essential shape: the frozen base weight is the parameter that recomputed to shape [0].
+    """
+
+    def __init__(self, hidden_dim, rank=2, use_reentrant=False):
+        super().__init__()
+        self.use_reentrant = use_reentrant
+        self.base = torch.nn.Linear(hidden_dim, hidden_dim, bias=False)
+        self.base.weight.requires_grad_(False)
+        self.lora_a = torch.nn.Linear(hidden_dim, rank, bias=False)
+        self.lora_b = torch.nn.Linear(rank, hidden_dim, bias=False)
+        self.head = torch.nn.Linear(hidden_dim, hidden_dim)
+
+    def _checkpointed_block(self, x):
+        return self.base(x) + self.lora_b(self.lora_a(x))
+
+    def forward(self, x):
+        if self.training:
+            from torch.utils.checkpoint import checkpoint
+            x = checkpoint(self._checkpointed_block, x, use_reentrant=self.use_reentrant)
+        else:
+            x = self._checkpointed_block(x)
+        return self.head(x)
+
+
+class MultiTensorLeafBlock(torch.nn.Module):
+    """Leaf block with a frozen norm that returns multiple tensors.
+
+    When marked as a ZeRO-3 leaf, autograd fires this module's pre-backward hooks from
+    multiple threads (one per returned tensor), exercising the concurrent fetch_sub_module
+    path that PR #8148's review flagged for duplicate backward-stack entries.
+    """
+
+    def __init__(self, hidden_dim):
+        super().__init__()
+        self.norm = torch.nn.LayerNorm(hidden_dim)
+        self.norm.weight.requires_grad_(False)
+        self.norm.bias.requires_grad_(False)
+        self.linear_a = torch.nn.Linear(hidden_dim, hidden_dim)
+        self.linear_b = torch.nn.Linear(hidden_dim, hidden_dim)
+
+    def forward(self, x):
+        h = self.norm(x)
+        return self.linear_a(h), self.linear_b(h)
+
+
+class MultiTensorLeafFrozenModel(torch.nn.Module):
+    """Model whose checkpointed region contains a multi-tensor-returning frozen leaf block."""
+
+    def __init__(self, hidden_dim, use_reentrant=False):
+        super().__init__()
+        self.use_reentrant = use_reentrant
+        self.block = MultiTensorLeafBlock(hidden_dim)
+        self.head = torch.nn.Linear(hidden_dim, hidden_dim)
+
+    def _checkpointed_block(self, x):
+        a, b = self.block(x)
+        return a + b
+
+    def forward(self, x):
+        if self.training:
+            from torch.utils.checkpoint import checkpoint
+            x = checkpoint(self._checkpointed_block, x, use_reentrant=self.use_reentrant)
+        else:
+            x = self._checkpointed_block(x)
+        return self.head(x)
+
+
+@pytest.mark.parametrize("param_persistence_threshold", [0, _FROZEN_HIDDEN_DIM], ids=["nopersist", "persist"])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16], ids=["fp32", "bf16"])
+@pytest.mark.parametrize("zero_stage", [1, 2, 3])
+@pytest.mark.parametrize("use_reentrant", [True, False])
+class TestZeroFrozenParamCheckpointingVariants(DistributedTest):
+    """Additional frozen-param + activation-checkpoint repros distilled from the issues
+    linked in PR #8130 (multi-block unet-style #4332, and PEFT/LoRA transformers#47254 /
+    trl#5217). fp32 reproduces the original error; bf16 covers the common mixed-precision case.
+    persist keeps the frozen norm weights resident (HF#47254 shape); nopersist partitions them."""
+    world_size = 2
+
+    def test_multi_block(self, zero_stage, use_reentrant, dtype, param_persistence_threshold):
+        run_frozen_checkpoint_comparison(MultiBlockFrozenModel,
+                                         zero_stage,
+                                         use_reentrant,
+                                         num_blocks=3,
+                                         dtype=dtype,
+                                         param_persistence_threshold=param_persistence_threshold)
+
+    def test_lora_style(self, zero_stage, use_reentrant, dtype, param_persistence_threshold):
+        run_frozen_checkpoint_comparison(LoRAStyleFrozenModel,
+                                         zero_stage,
+                                         use_reentrant,
+                                         dtype=dtype,
+                                         param_persistence_threshold=param_persistence_threshold)
+
+
+@pytest.mark.parametrize("param_persistence_threshold", [0, _FROZEN_HIDDEN_DIM], ids=["nopersist", "persist"])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16], ids=["fp32", "bf16"])
+@pytest.mark.parametrize("use_reentrant", [True, False])
+@pytest.mark.parametrize("zero_stage", [1, 2, 3])
+class TestZeroFrozenParamMultiTensorLeaf(DistributedTest):
+    """Leaf module returning multiple tensors -- the multi-threaded-autograd path called out in
+    the #8148 review. Its backward hooks fire out of reverse-forward order; keying the
+    coordinator's active-backward tracker by ds_id (instead of a strict LIFO deque) lets each
+    submodule release regardless of position, so all stages pass."""
+    world_size = 2
+
+    def test_multi_tensor_leaf(self, zero_stage, use_reentrant, dtype, param_persistence_threshold):
+        run_frozen_checkpoint_comparison(MultiTensorLeafFrozenModel,
+                                         zero_stage,
+                                         use_reentrant,
+                                         leaf_module_types=[MultiTensorLeafBlock],
+                                         dtype=dtype,
+                                         param_persistence_threshold=param_persistence_threshold)
+
+
+@pytest.mark.parametrize("param_persistence_threshold", [0, _FROZEN_HIDDEN_DIM], ids=["nopersist", "persist"])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16], ids=["fp32", "bf16"])
+@pytest.mark.parametrize("use_reentrant", [True, False])
+class TestZeroFrozenParamNoGradInputAccumulation(DistributedTest):
+    """Frozen-param checkpointing with a no-grad input across grad-accumulation microbatches.
+
+    tohtana's case in PR #8130: a no-grad input can leave the module post-backward hook unfired,
+    so frozen params linger AVAILABLE between microbatches. Verifies release after each backward.
+    """
+    world_size = 2
+
+    def test_no_grad_input_accumulation(self, use_reentrant, dtype, param_persistence_threshold):
+        zero_stage = 3
+        hidden_dim = _FROZEN_HIDDEN_DIM
+        batch_size = 2
+        gradient_accumulation_steps = 2
+        num_iterations = 2
+
+        device, rank, _ = initialize_distributed()
+        # fp32 reproduces the release-lifetime gap; bf16 covers the common mixed-precision case.
+        if dtype == torch.bfloat16 and not get_accelerator().is_bf16_supported():
+            pytest.skip("bf16 is not supported on this accelerator")
+
+        torch.manual_seed(42)
+        model_ds = FrozenParamCheckpointedModel(hidden_dim=hidden_dim, use_reentrant=use_reentrant)
+        model_ds = model_ds.to(dtype=dtype)
+        config = get_config_dict(zero_stage,
+                                 gradient_accumulation_steps=gradient_accumulation_steps,
+                                 force_fp32=(dtype == torch.float32),
+                                 param_persistence_threshold=param_persistence_threshold)
+        trainable_params = [p for p in model_ds.parameters() if p.requires_grad]
+        model_engine, _, _, _ = deepspeed.initialize(config=config, model=model_ds, model_parameters=trainable_params)
+
+        seed = 123
+        for iteration in range(num_iterations):
+            for micro in range(gradient_accumulation_steps):
+                step_info = f"use_reentrant={use_reentrant}, iter {iteration}, micro {micro}"
+
+                torch.manual_seed(seed)
+                # No-grad input: this is the configuration that broke the release lifetime.
+                x = torch.randn(batch_size, hidden_dim, device=device, dtype=dtype, requires_grad=False)
+                loss = model_engine(x).sum()
+                model_engine.backward(loss)
+                get_accelerator().synchronize()
+                dist.barrier()
+
+                # Frozen params must be partitioned between microbatches, not carried gathered.
+                assert_all_partitioned(model_engine, zero_stage, step_info)
+                # Persistent params must stay resident; check once the trace is complete (after warmup).
+                if iteration >= 1:
+                    assert_persistent_resident(model_engine, zero_stage, step_info)
+
+                model_engine.step()
+                seed += 1
 
         model_engine.destroy()
