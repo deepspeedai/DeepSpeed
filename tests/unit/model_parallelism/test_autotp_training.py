@@ -402,7 +402,8 @@ def run_tp_layer_fwd_bwd(tp_size, tp_overlap_comm, column_parallel, use_tp_model
     }
     partition_type = "column" if column_parallel else "row"
     config_dict["tensor_parallel"]["partition_config"] = {
-        "use_default_specs": False,
+        "use_default_specs":
+        False,
         "layer_specs": [{
             "patterns": [".*\\.weight$"],
             "partition_type": partition_type,

@@ -122,7 +122,7 @@ def test_autotp_reaches_autoep_shared_experts(monkeypatch):
     )
 
     result = autotp._replace_module(model)
- 
+
     assert result is model
     assert calls == [(model.moe, "moe")]
 

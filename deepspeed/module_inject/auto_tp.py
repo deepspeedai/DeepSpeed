@@ -435,8 +435,8 @@ class AutoTP():
                     "partition_type": spec.partition_type.value,
                     "gather_output": spec.gather_output,
                 }
-            print_dist(
-                f"AutoTP lm_head spec match: parameter={param_name!r}; matched_spec={spec_details!r}", ranks=[0])
+            print_dist(f"AutoTP lm_head spec match: parameter={param_name!r}; matched_spec={spec_details!r}",
+                       ranks=[0])
 
         if spec is None:
             # No matching spec found

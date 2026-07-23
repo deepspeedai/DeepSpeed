@@ -49,11 +49,12 @@ class TPPlanConverter:
             else:
                 regex_pattern += r"$"
 
-            layer_specs.append(TPLayerSpec(
-                patterns=[regex_pattern],
-                partition_type=partition_type,
-                gather_output=gather_output,
-            ))
+            layer_specs.append(
+                TPLayerSpec(
+                    patterns=[regex_pattern],
+                    partition_type=partition_type,
+                    gather_output=gather_output,
+                ))
 
         return layer_specs
 
