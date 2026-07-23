@@ -267,9 +267,8 @@ def _checkout_exact(
             "fetch",
             "--no-tags",
             "--no-recurse-submodules",
-            "--depth=1",
             head_url,
-            f"{head_sha}:refs/devds/head",
+            f"{head_sha}:refs/ci/head",
         )
         _run_local(fetch_head)
         fetch_base = _git_command(
@@ -278,18 +277,17 @@ def _checkout_exact(
             "fetch",
             "--no-tags",
             "--no-recurse-submodules",
-            "--depth=1",
             base_url,
-            f"{base_sha}:refs/devds/base",
+            f"{base_sha}:refs/ci/base",
         )
         _run_local(fetch_base)
         resolved_head = _run_local(
-            _git_command("-C", str(destination), "rev-parse", "--verify", "refs/devds/head^{commit}")).strip()
+            _git_command("-C", str(destination), "rev-parse", "--verify", "refs/ci/head^{commit}")).strip()
         resolved_base = _run_local(
-            _git_command("-C", str(destination), "rev-parse", "--verify", "refs/devds/base^{commit}")).strip()
+            _git_command("-C", str(destination), "rev-parse", "--verify", "refs/ci/base^{commit}")).strip()
         if resolved_head != head_sha or resolved_base != base_sha:
             raise ValueError("fetched commit did not match requested event SHA")
-        _run_local(_git_command("-C", str(destination), "checkout", "--detach", "refs/devds/head"))
+        _run_local(_git_command("-C", str(destination), "checkout", "--detach", "refs/ci/head"))
         checked_out = _run_local(_git_command("-C", str(destination), "rev-parse", "HEAD")).strip()
         if checked_out != head_sha:
             raise ValueError("checked-out HEAD did not match requested event SHA")
@@ -348,8 +346,8 @@ def resolve_controller_inputs(env: Mapping[str, str]) -> ControllerInputs:
     transformers_ref = env.get("MODAL_TRANSFORMERS_REF", "")
     if transformers_source == "git":
         transformers_ref = validate_transformers_ref(transformers_ref or "main")
-    elif transformers_ref:
-        raise ValueError("MODAL_TRANSFORMERS_REF is only valid when source is 'git'")
+    else:
+        transformers_ref = ""
 
     return ControllerInputs(
         repository=repository,
@@ -414,12 +412,12 @@ def build_remote_commands(inputs: ControllerInputs) -> tuple[RemoteCommand, ...]
                 "--no-recurse-submodules",
                 "--depth=1",
                 repository_url,
-                f"{inputs.sha}:refs/devds/candidate",
+                f"{inputs.sha}:refs/ci/candidate",
             ),
         ),
         RemoteCommand(
             "checkout candidate SHA",
-            _remote_git("-C", REMOTE_REPOSITORY, "checkout", "--detach", "refs/devds/candidate"),
+            _remote_git("-C", REMOTE_REPOSITORY, "checkout", "--detach", "refs/ci/candidate"),
         ),
         RemoteCommand(
             "verify candidate SHA",
@@ -531,15 +529,16 @@ def run_sandbox_command(sandbox: Any, modal_module: Any, command: RemoteCommand)
         workdir=command.workdir,
     )
     displayed = 0
-    captured: list[str] = []
+    last_line = ""
     truncated = False
     for raw_line in process.stdout:
         line = _single_line(raw_line.rstrip("\r\n"))
-        encoded_size = len(line.encode("utf-8", errors="replace")) + 1
+        last_line = line
+        rendered = f"[sandbox:{command.label}] {line}"
+        encoded_size = len(rendered.encode("utf-8", errors="replace")) + 1
         if displayed + encoded_size <= MAX_DISPLAY_BYTES_PER_COMMAND:
-            print(f"[sandbox:{command.label}] {line}")
+            print(rendered)
             displayed += encoded_size
-            captured.append(line)
         else:
             truncated = True
     if truncated:
@@ -548,11 +547,11 @@ def run_sandbox_command(sandbox: Any, modal_module: Any, command: RemoteCommand)
     if return_code:
         raise RuntimeError(f"{command.label} failed with exit code {return_code}")
     if command.expected_line is not None:
-        actual = captured[-1].strip() if captured else ""
+        actual = last_line.strip()
         if actual != command.expected_line:
             raise RuntimeError(
                 f"{command.label} returned {_single_line(actual)!r}, expected {command.expected_line!r}")
-    return "\n".join(captured)
+    return last_line
 
 
 def _cleanup_sandbox(sandbox: Any) -> None:

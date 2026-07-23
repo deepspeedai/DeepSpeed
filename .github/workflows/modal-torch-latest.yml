@@ -98,7 +98,7 @@ jobs:
             python3 ci/tests_fetcher.py \
               --workflow modal-torch-latest \
               --repo-root "$CANDIDATE_ROOT" \
-              --base refs/devds/base
+              --base refs/ci/base
           else
             python3 ci/tests_fetcher.py \
               --workflow modal-torch-latest \

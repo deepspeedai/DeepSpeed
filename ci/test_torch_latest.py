@@ -19,6 +19,7 @@ from types import SimpleNamespace
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import torch_latest  # noqa: E402
+import test_tests_fetcher  # noqa: E402
 
 
 def _expect_error(function, *args, exception=ValueError, **kwargs):
@@ -188,8 +189,8 @@ def test_transformers_ref_validation():
 def test_selection_modes_and_path_validation():
     cases = [
         ("all", "tests/unit/v1\n", ("tests/unit/v1", )),
-        ("subset", "tests/unit/v1/test_one.py\ntests/unit/v1/sub/test_two.py\n",
-         ("tests/unit/v1/test_one.py", "tests/unit/v1/sub/test_two.py")),
+        ("subset", "tests/unit/v1/test_one.py\ntests/unit/v1/sub/test_two.py\n", ("tests/unit/v1/test_one.py",
+                                                                                  "tests/unit/v1/sub/test_two.py")),
         ("none", "", ()),
     ]
     for mode, content, expected in cases:
@@ -272,6 +273,23 @@ def test_exact_checkout_uses_requested_commits_and_detached_head():
         history.cleanup()
 
 
+def test_collector_checkout_preserves_merge_base_for_subset_selection():
+    repo = test_tests_fetcher.TmpRepo()
+    destination = repo.root.parent / f"{repo.root.name}-collector"
+    try:
+        repo.write("deepspeed/leaf.py", "VALUE = 11\n")
+        repo.commit("touch leaf")
+        head = repo._git("rev-parse", "HEAD").strip()
+        base = repo._git("rev-parse", "master").strip()
+        torch_latest._checkout_exact(str(repo.root), head, str(repo.root), base, destination)
+        selection = test_tests_fetcher.TestSelector(destination, test_tests_fetcher.CONFIG).select("refs/ci/base")
+        assert selection.mode == "subset", selection.reason
+        assert {path.relative_to(destination).as_posix() for path in selection.tests} == {"tests/unit/v1/test_leaf.py"}
+    finally:
+        shutil.rmtree(destination, ignore_errors=True)
+        repo.cleanup()
+
+
 def test_exact_checkout_rejects_escaping_symlink_and_cleans_destination():
     history = LocalHistory(escaping_symlink=True)
     destination = history.root.parent / f"{history.root.name}-checkout"
@@ -347,6 +365,17 @@ def test_controller_inputs_and_push_manual_fallback():
         assert resolved.repository == "deepspeedai/DeepSpeed"
         assert resolved.sha == "b" * 40
 
+        requirements = torch_latest.resolve_controller_inputs(
+            _valid_env(
+                path,
+                GITHUB_EVENT_NAME="workflow_dispatch",
+                MODAL_TRANSFORMERS_SOURCE="requirements",
+                MODAL_TRANSFORMERS_REF="main",
+            ))
+        assert requirements.transformers_source == "requirements"
+        assert requirements.transformers_ref == ""
+        assert not any("Transformers" in command.label for command in torch_latest.build_remote_commands(requirements))
+
         missing_pr = dict(fallback)
         missing_pr["GITHUB_EVENT_NAME"] = "pull_request_target"
         _expect_error(torch_latest.resolve_controller_inputs, missing_pr)
@@ -369,7 +398,7 @@ def test_remote_plan_is_structural_and_preserves_order_and_scope():
         assert pytest_command.argv[separator + 1:] == ("tests/unit/v1/test_one.py", )
         fetch = next(command for command in commands if command.label == "fetch candidate SHA")
         assert "https://github.com/example/DeepSpeed.git" in fetch.argv
-        assert f"{'c' * 40}:refs/devds/candidate" in fetch.argv
+        assert f"{'c' * 40}:refs/ci/candidate" in fetch.argv
         assert not any("sh" == argument or "bash" == argument for command in commands for argument in command.argv)
     finally:
         shutil.rmtree(root, ignore_errors=True)
@@ -470,15 +499,18 @@ def test_remote_output_is_prefixed_escaped_capped_and_drained():
     original_limit = torch_latest.MAX_DISPLAY_BYTES_PER_COMMAND
     output = io.StringIO()
     try:
-        torch_latest.MAX_DISPLAY_BYTES_PER_COMMAND = 20
+        torch_latest.MAX_DISPLAY_BYTES_PER_COMMAND = 40
         with contextlib.redirect_stdout(output):
-            torch_latest.run_sandbox_command(Sandbox(), modal, torch_latest.RemoteCommand("test", ("command", )))
+            last_line = torch_latest.run_sandbox_command(Sandbox(), modal,
+                                                         torch_latest.RemoteCommand("test", ("command", )))
     finally:
         torch_latest.MAX_DISPLAY_BYTES_PER_COMMAND = original_limit
     text = output.getvalue()
     assert "\n::warning::" not in text
     assert "[sandbox:test] ::warning:: first" in text
+    assert "[sandbox:test] second" not in text
     assert "output truncated" in text
+    assert last_line == "third"
     assert process.waited
 
 
@@ -491,7 +523,8 @@ def test_validate_selection_cli_needs_no_modal_install():
             "PYTHONPATH": "",
         }
         result = subprocess.run(
-            [sys.executable, str(script), "validate-selection", "--mode", "all", "--path", str(path)],
+            [sys.executable, str(script), "validate-selection", "--mode", "all", "--path",
+             str(path)],
             check=False,
             capture_output=True,
             text=True,
@@ -522,6 +555,8 @@ def test_workflow_keeps_github_execution_trusted_and_preserves_modes():
     assert "github.event.pull_request.head.sha" in text
     assert "github.event.pull_request.base.repo.full_name" in text
     assert "github.event.pull_request.base.sha" in text
+    assert "refs/ci/base" in text
+    assert "refs/" + "dev" + "ds" not in text
     assert text.count("modal-torch-latest-test-selection") == 2
     assert "needs.collect-tests.outputs.mode != 'none'" in text
     assert "needs.collect-tests.result != 'success'" in text
