@@ -212,9 +212,9 @@ For Grouped Query Attention with different Q/K/V sizes:
 
 ## Limitations
 
-1. **ZeRO Stage 3 not supported**: AutoTP currently only works with ZeRO stages 0, 1, and 2.
+1. **TP size must divide model dimensions**: The tensor parallel size must evenly divide the attention head count and hidden dimensions for the runtime TP math to be correct. (Checkpoint conversion additionally handles uneven parameter shards -- e.g. a non-divisible partition dimension or uneven fused/GQA sub-parameters -- so save/convert no longer require every dimension to be divisible.)
 
-2. **TP size must divide model dimensions**: The tensor parallel size must evenly divide the attention head count and hidden dimensions.
+2. **Cross-topology universal restore**: Loading a universal checkpoint back into a topology with a *different* tensor-parallel degree goes through DeepSpeed's Megatron-style model-state loader, which is not AutoTP-aware; prefer same-topology restore when changing world size.
 
 
 ## See Also
