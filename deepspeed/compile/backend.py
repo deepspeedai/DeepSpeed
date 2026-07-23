@@ -28,7 +28,8 @@ from .fx import add_free_activations
 from .graph_param import DSGraphParamManager
 from .profilers import ProfilingResult
 from .profilers.graph_profile import MemoryProfilingInterpreter
-from .patch_compiled_func import patch_compiled_func, unpatch_compiled_func, get_backward_inputs
+from .patch_compiled_func import (clear_backward_inputs, patch_compiled_func, pop_backward_input,
+                                  register_backward_frame, unpatch_compiled_func)
 from .util import get_input_nodes, get_activation_node_names, get_index_by_graph_id, get_deepcompile_handle, log_rank0, is_backend_inductor
 from .partitioner import get_wrapped_partitioner
 from .inductor import register_custom_ops, patch_create_aot_dispatcher_function
@@ -81,14 +82,18 @@ def cleanup_compiled_backward_state(frame_id=None, owned_frames=None):
     """Release engine-owned process-global compiled-backward state."""
     if frame_id is None:
         if owned_frames is None:
+            released_frames = set(frames_needing_bwd)
             frames_needing_bwd.clear()
         else:
+            released_frames = set(owned_frames)
             frames_needing_bwd.difference_update(owned_frames)
             owned_frames.clear()
     else:
+        released_frames = {frame_id}
         frames_needing_bwd.discard(frame_id)
         if owned_frames is not None:
             owned_frames.discard(frame_id)
+    clear_backward_inputs(released_frames)
     if len(frames_needing_bwd) == 0:
         unpatch_compiled_func()
 
@@ -342,6 +347,7 @@ def make_backend(backend, compile_config, compile_kwargs={}, owned_frames=None):
                     patch_compiled_func()
                 frames_needing_bwd.add(frame_key)
                 owned_frames.add(frame_key)
+                register_backward_frame(frame_key)
 
             real_inputs = _get_fw_real_inputs(local_fwd_real_inputs, input_storage, graph_id, debug_log=debug_log)
             real_inputs = set_example_values_to_symints(real_inputs)
@@ -377,10 +383,10 @@ def make_backend(backend, compile_config, compile_kwargs={}, owned_frames=None):
                 f"Bwd start {graph_index} graph_id={graph_id} alloc_mem={get_accelerator().memory_allocated()} graph={gm.graph}",
                 enable=debug_log)
 
-            bwd_inputs_stack = get_backward_inputs()
+            bwd_real_inputs = pop_backward_input(frame_key)
 
             param_nodes_bw, _ = param_manager[graph_id].get_bwd_mapping(gm.graph)
-            if len(bwd_inputs_stack) == 0:
+            if bwd_real_inputs is None:
                 # dynamo calls bw compiler ahead of time when symints are saved for backward. See the details for aot_dispatch_autograd in jit_compile_runtime_wrappers.
                 # As we currently use actually bwd input values in bw compiler, we make dummy data for profiling.
                 # Replace fake tensors with real parameters before calling set_example_values_to_symints
@@ -388,9 +394,6 @@ def make_backend(backend, compile_config, compile_kwargs={}, owned_frames=None):
                 sample_inputs_with_real_params = param_manager[graph_id].replace_fake_tensors_with_real_params(
                     sample_inputs, gm.graph)
                 bwd_real_inputs = set_example_values_to_symints(sample_inputs_with_real_params)
-            else:
-                bwd_real_inputs = bwd_inputs_stack.pop()
-
             run_opt_passes(
                 opt_passes=next_passes,
                 gm=gm,

@@ -8,7 +8,9 @@ import torch
 
 from deepspeed.compile import backend as backend_mod
 from deepspeed.compile.init_z3 import _allow_dynamo_dynamic_parameter_shapes_for_z3, _resolve_expected_grad_dtype
+from deepspeed.compile.patch_compiled_func import (get_backward_inputs, pop_backward_input, register_backward_frame)
 from deepspeed.runtime.engine import DeepSpeedEngine
+from deepspeed.utils.torch import required_torch_version
 
 
 def test_missing_grad_dtype_attribute_falls_back_to_param_dtype():
@@ -110,20 +112,73 @@ def test_destroy_releases_only_owner_with_overlapping_frame_ids(first_owner_to_d
         engine._deepcompile_owned_frames = {(owner, frame_id)}
 
     backend_mod.frames_needing_bwd.clear()
-    backend_mod.frames_needing_bwd.update(((owners[0], frame_id), (owners[1], frame_id)))
+    frame_keys = [(owners[0], frame_id), (owners[1], frame_id)]
+    backend_mod.frames_needing_bwd.update(frame_keys)
     backend_mod.patch_compiled_func()
-    backend_mod.get_backward_inputs().append((torch.ones(1), ))
+    for frame_key in frame_keys:
+        get_backward_inputs()[frame_key] = [(torch.ones(1), )]
 
     try:
         engines[first_owner_to_destroy].destroy()
-        surviving_owner = owners[1 - first_owner_to_destroy]
-        assert backend_mod.frames_needing_bwd == {(surviving_owner, frame_id)}
-        assert len(backend_mod.get_backward_inputs()) == 1
+        surviving_frame = frame_keys[1 - first_owner_to_destroy]
+        assert backend_mod.frames_needing_bwd == {surviving_frame}
+        assert set(get_backward_inputs()) == {surviving_frame}
         assert torch.autograd.Function is not original_autograd_function
 
         engines[1 - first_owner_to_destroy].destroy()
         assert backend_mod.frames_needing_bwd == set()
-        assert backend_mod.get_backward_inputs() == []
+        assert get_backward_inputs() == {}
+        assert torch.autograd.Function is original_autograd_function
+    finally:
+        backend_mod.frames_needing_bwd.clear()
+        backend_mod.unpatch_compiled_func()
+
+
+def test_destroyed_owner_inputs_cannot_be_consumed_by_survivor():
+    original_autograd_function = torch.autograd.Function
+    engines = [object.__new__(DeepSpeedEngine), object.__new__(DeepSpeedEngine)]
+    owners = [object(), object()]
+    frame_keys = [(owners[0], 17), (owners[1], 17)]
+    for frame_key, engine in zip(frame_keys, engines):
+        torch.nn.Module.__init__(engine)
+        engine._deepcompile_active = False
+        engine._deepcompile_owned_frames = {frame_key}
+
+    backend_mod.frames_needing_bwd.clear()
+    backend_mod.frames_needing_bwd.update(frame_keys)
+    backend_mod.patch_compiled_func()
+    register_backward_frame(frame_keys[0])
+
+    class CompiledFunction(torch.autograd.Function):
+        compiled_bw = object()
+
+        @staticmethod
+        def _backward_impl(ctx, all_args):
+            return all_args
+
+        @staticmethod
+        def _backward_prologue(ctx, *grad_outputs):
+            return grad_outputs
+
+    owner_a_inputs = (torch.ones(1), )
+    if required_torch_version(min_version=2.7):
+        CompiledFunction._backward_impl(None, owner_a_inputs)
+    else:
+        CompiledFunction._backward_prologue(None, *owner_a_inputs)
+
+    try:
+        assert len(get_backward_inputs(frame_keys[0])) == 1
+        assert get_backward_inputs(frame_keys[1]) == []
+
+        engines[0].destroy()
+
+        assert backend_mod.frames_needing_bwd == {frame_keys[1]}
+        assert get_backward_inputs(frame_keys[0]) == []
+        assert pop_backward_input(frame_keys[1]) is None
+        assert torch.autograd.Function is not original_autograd_function
+
+        engines[1].destroy()
+        assert get_backward_inputs() == {}
         assert torch.autograd.Function is original_autograd_function
     finally:
         backend_mod.frames_needing_bwd.clear()
@@ -149,11 +204,14 @@ def test_deactivation_releases_only_the_engine_owned_state(monkeypatch):
     original_autograd_function = torch.autograd.Function
     owner = object()
     other_owner = object()
+    frame_key = (owner, 17)
+    other_frame_key = (other_owner, 18)
     backend_mod.frames_needing_bwd.clear()
-    backend_mod.frames_needing_bwd.update(((owner, 17), (other_owner, 18)))
-    engine._deepcompile_owned_frames = {(owner, 17)}
+    backend_mod.frames_needing_bwd.update((frame_key, other_frame_key))
+    engine._deepcompile_owned_frames = {frame_key}
     backend_mod.patch_compiled_func()
-    backend_mod.get_backward_inputs().append((torch.ones(1), ))
+    get_backward_inputs()[frame_key] = [(torch.ones(1), )]
+    get_backward_inputs()[other_frame_key] = [(torch.ones(1), )]
 
     try:
         engine._set_deepcompile_active(False)
@@ -162,8 +220,8 @@ def test_deactivation_releases_only_the_engine_owned_state(monkeypatch):
         assert FakeDynamo.config.force_nn_module_property_static_shapes is False
         assert not hasattr(engine, "_deepcompile_dynamo_config_restore")
         assert engine._deepcompile_owned_frames == set()
-        assert backend_mod.frames_needing_bwd == {(other_owner, 18)}
-        assert len(backend_mod.get_backward_inputs()) == 1
+        assert backend_mod.frames_needing_bwd == {other_frame_key}
+        assert set(get_backward_inputs()) == {other_frame_key}
         assert torch.autograd.Function is not original_autograd_function
         assert engine.is_deepcompile_active() is False
     finally:

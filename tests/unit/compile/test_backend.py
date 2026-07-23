@@ -51,7 +51,7 @@ def test_launch_compile_passes_clears_owned_compiled_backward_state(monkeypatch)
     owned_frames = {(owner, 17)}
     backend_mod.frames_needing_bwd.update(owned_frames)
     patch_compiled_func()
-    get_backward_inputs().append((torch.ones(1), ))
+    get_backward_inputs()[next(iter(owned_frames))] = [(torch.ones(1), )]
     monkeypatch.setattr(backend_mod, "log_rank0", lambda *args, **kwargs: None)
     monkeypatch.setattr(backend_mod, "get_deepcompile_handle", lambda: DummyDeepCompileHandle())
 
@@ -61,7 +61,7 @@ def test_launch_compile_passes_clears_owned_compiled_backward_state(monkeypatch)
 
         assert owned_frames == set()
         assert backend_mod.frames_needing_bwd == set()
-        assert get_backward_inputs() == []
+        assert get_backward_inputs() == {}
         assert torch.autograd.Function is original_autograd_function
     finally:
         backend_mod.frames_needing_bwd.clear()
@@ -72,9 +72,9 @@ def test_unpatch_compiled_func_clears_backward_inputs():
     clear_backward_inputs()
     patch_compiled_func()
     try:
-        get_backward_inputs().append((torch.ones(1), ))
+        get_backward_inputs()[(object(), 17)] = [(torch.ones(1), )]
         unpatch_compiled_func()
-        assert get_backward_inputs() == []
+        assert get_backward_inputs() == {}
     finally:
         unpatch_compiled_func()
 

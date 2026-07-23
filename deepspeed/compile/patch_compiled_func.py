@@ -3,10 +3,13 @@
 
 # DeepSpeed Team
 
+from collections import deque
+
 import torch
 from deepspeed.utils.torch import required_torch_version
 
-backward_inputs = []
+backward_inputs = {}
+backward_frame_keys = deque()
 
 enabled_patched_func = False
 original_grad_fn = None
@@ -19,12 +22,13 @@ if required_torch_version(min_version=2.7):
         def __new__(cls, name, bases, dct):
             if name == "CompiledFunction":
                 original_backward_impl = dct.get("_backward_impl")
+                frame_key = backward_frame_keys.popleft() if backward_frame_keys else None
 
                 def wrapped_backward_impl(ctx, all_args):
                     assert original_backward_impl is not None
 
-                    if enabled_patched_func:
-                        backward_inputs.append(all_args)
+                    if enabled_patched_func and frame_key is not None:
+                        backward_inputs.setdefault(frame_key, []).append(all_args)
                         wrapped_backward_impl.owner_class.compiled_bw = None
 
                     return original_backward_impl(ctx, all_args)
@@ -45,13 +49,14 @@ elif required_torch_version(min_version=2.6):
         def __new__(cls, name, bases, dct):
             if name == "CompiledFunction":
                 original_backward_prologue = dct.get("_backward_prologue")
+                frame_key = backward_frame_keys.popleft() if backward_frame_keys else None
 
                 def wrapped_backward_prologue(ctx, *grad_outputs):
                     assert original_backward_prologue is not None
 
                     all_args = original_backward_prologue(ctx, *grad_outputs)
-                    if enabled_patched_func:
-                        backward_inputs.append(all_args)
+                    if enabled_patched_func and frame_key is not None:
+                        backward_inputs.setdefault(frame_key, []).append(all_args)
                         wrapped_backward_prologue.owner_class.compiled_bw = None
 
                     return all_args
@@ -81,6 +86,11 @@ def patch_compiled_func():
     return backward_inputs
 
 
+def register_backward_frame(frame_key):
+    """Associate the next AOT compiled function with its DeepCompile frame."""
+    backward_frame_keys.append(frame_key)
+
+
 def unpatch_compiled_func():
     """Restore torch.autograd.Function and discard inputs captured for this compile cycle."""
     global enabled_patched_func
@@ -93,10 +103,35 @@ def unpatch_compiled_func():
     clear_backward_inputs()
 
 
-def get_backward_inputs():
-    return backward_inputs
+def get_backward_inputs(frame_key=None):
+    if frame_key is None:
+        return backward_inputs
+    return backward_inputs.get(frame_key, [])
 
 
-def clear_backward_inputs():
-    """Drop captured real backward inputs before the next graph compilation."""
-    backward_inputs.clear()
+def pop_backward_input(frame_key):
+    """Pop captured real inputs for one DeepCompile frame."""
+    frame_inputs = backward_inputs.get(frame_key)
+    if not frame_inputs:
+        return None
+
+    inputs = frame_inputs.pop()
+    if not frame_inputs:
+        backward_inputs.pop(frame_key)
+    return inputs
+
+
+def clear_backward_inputs(frame_keys=None):
+    """Drop captured inputs and pending capture registrations for selected frames."""
+    if frame_keys is None:
+        backward_inputs.clear()
+        backward_frame_keys.clear()
+        return
+
+    frame_keys = set(frame_keys)
+    for frame_key in frame_keys:
+        backward_inputs.pop(frame_key, None)
+
+    retained_frame_keys = [frame_key for frame_key in backward_frame_keys if frame_key not in frame_keys]
+    backward_frame_keys.clear()
+    backward_frame_keys.extend(retained_frame_keys)
