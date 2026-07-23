@@ -211,6 +211,8 @@ def pytest():
             "-n",
             "4",
             "--verbose",
+            # GDS tests require GPUDirect Storage support unavailable on these runners
+            "--ignore=tests/unit/v1/nvme/test_gds.py",
             *selected_tests,
             f"--torch_ver={MODAL_TORCH_TEST_VERSION}",
             f"--cuda_ver={MODAL_CUDA_TEST_VERSION}",
