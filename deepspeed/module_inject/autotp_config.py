@@ -51,7 +51,7 @@ class TPLayerSpec:
 
         # Column-parallel layer with replicated output (e.g., an untied LM head)
         TPLayerSpec(
-            patterns=[".*\\.lm_head$"],
+            patterns=[".*lm_head\\.weight$"],
             partition_type=PartitionType.COLUMN,
             gather_output=True,
         )
