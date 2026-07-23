@@ -15,11 +15,14 @@ from ..fx import (add_postprocess, _make_node_meta, get_output_node, move_primal
                   replace_reduce_outputs_with_none, should_release_reduce_buckets)
 from ..profilers.graph_profile import ProfilingInterpreter
 from ..list_schedule import fast_free_schedule
+from .contract import PassContract, CAP_Z3_GATHER_RELEASE
 
 import deepspeed.comm as dist
 from deepspeed.accelerator import get_accelerator
 
 NAME = "zero3_compile"
+# Inserts the ZeRO-3 all-gather/release ops that prefetch and selective-gather later build on.
+CONTRACT = PassContract(provides=frozenset({CAP_Z3_GATHER_RELEASE}))
 
 
 def add_allgather(graph_id: int, graph: Graph, node: Node, ds_id: int, dtype: torch.dtype):

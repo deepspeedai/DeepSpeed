@@ -706,7 +706,7 @@ class DeepSpeedConfig(object):
                     self.world_size = dist.get_world_size() / config["sequence_parallel_size"]
                 else:
                     self.world_size = dist.get_world_size()
-        except Exception:
+        except (RuntimeError, AssertionError, AttributeError):
             self.global_rank = 0
             self.world_size = 1
         logger.info(f"Config mesh_device {mesh_device} world_size = {self.world_size}")

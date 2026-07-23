@@ -181,15 +181,12 @@ class TestGramNewtonSchulz(DistributedTest):
 
 
 class TestMuonRejectsReduceScatter(DistributedTest):
-    """Muon needs the full all-reduced gradient matrix on each rank for its Newton-Schulz
-    orthogonalization. reduce_scatter only delivers each rank its own partition slice, which
-    silently corrupts cross-partition parameters in ZeRO-1/2 (#7807). Initialization must fail
-    loudly, consistent with the ZeRO-3 guard in stage3.py (added in #7919)."""
+    """Optimizer offload does not yet support Muon with reduce-scatter."""
 
     world_size = 1
 
     @pytest.mark.parametrize('zero_stage', [1, 2])
-    def test_muon_reduce_scatter_raises(self, zero_stage):
+    def test_muon_reduce_scatter_with_optimizer_offload_raises(self, zero_stage):
         config_dict = {
             "train_batch_size": 4,
             "optimizer": {
@@ -204,10 +201,14 @@ class TestMuonRejectsReduceScatter(DistributedTest):
             "zero_optimization": {
                 "stage": zero_stage,
                 "reduce_scatter": True,
+                "offload_optimizer": {
+                    "device": "cpu",
+                    "pin_memory": True,
+                },
             },
         }
         model = SimpleModel(hidden_dim=32, nlayers=2)
-        with pytest.raises(ValueError, match="Muon and reduce scatter cannot be used together"):
+        with pytest.raises(ValueError, match="Muon with reduce scatter does not support optimizer offload"):
             deepspeed.initialize(config=config_dict,
                                  model=model,
                                  model_parameters=model.parameters(),
@@ -217,19 +218,31 @@ class TestMuonRejectsReduceScatter(DistributedTest):
 class TestMuonZero12NumericalCorrectness(DistributedTest):
     """Numerical-correctness regression for #7807.
 
-    Under ZeRO-1/2, Muon's Newton-Schulz orthogonalization must run on the FULL DP-averaged
-    gradient on every rank. The existing Muon tests only assert that parameters changed, which
-    cannot detect a wrong-but-nonzero update. Here we run the supported reduce_scatter=False
-    path on >=2 ranks, sized so a 2D weight straddles the gradient-partition boundary (exactly
-    the case #7807 corrupted), and compare the applied Muon update against an independent
-    reference that applies the real muon_update to the full averaged gradient. A
-    partition-then-orthogonalize bug diverges by O(1) -- far above fp16/bf16 NS rounding."""
+    Under ZeRO-1/2, Muon's Newton-Schulz orthogonalization must run on the full DP-averaged
+    gradient on every rank that owns part of a parameter. The existing Muon tests only assert
+    that parameters changed, which cannot detect a wrong-but-nonzero update. Here a 2D weight
+    straddles a gradient-partition boundary and the applied update is compared with an
+    independent full-gradient reference using the real muon_update."""
 
     world_size = 2
 
-    @pytest.mark.parametrize('ns_method', ['gram', 'standard'])
-    @pytest.mark.parametrize('zero_stage', [1, 2])
-    def test_update_matches_full_gradient_reference(self, zero_stage, ns_method):
+    @pytest.mark.parametrize(
+        "zero_stage,ns_method,reduce_scatter,gas,overlap_comm,use_multi_rank_bucket_allreduce,"
+        "contiguous_gradients,reduce_bucket_size", [
+            pytest.param(1, "gram", False, 1, False, True, True, 500000000, id="z1-gram-allreduce"),
+            pytest.param(1, "standard", False, 1, False, True, True, 500000000, id="z1-standard-allreduce"),
+            pytest.param(2, "gram", False, 1, False, True, True, 500000000, id="z2-gram-allreduce"),
+            pytest.param(2, "standard", False, 1, False, True, True, 500000000, id="z2-standard-allreduce"),
+            pytest.param(1, "gram", True, 1, False, True, True, 500000000, id="z1-reduce-scatter"),
+            pytest.param(2, "gram", True, 1, False, True, True, 500000000, id="z2-reduce-scatter"),
+            pytest.param(2, "gram", True, 2, True, True, True, 500000000, id="z2-rs-gas2-overlap"),
+            pytest.param(2, "gram", True, 2, False, False, True, 500000000, id="z2-rs-gas2-no-multi-rank"),
+            pytest.param(2, "gram", True, 1, False, True, True, 32768, id="z2-rs-extra-large-param"),
+            pytest.param(2, "gram", True, 1, False, True, False, 500000000, id="z2-rs-noncontiguous"),
+        ])
+    def test_update_matches_full_gradient_reference(self, zero_stage, ns_method, reduce_scatter, gas, overlap_comm,
+                                                    use_multi_rank_bucket_allreduce, contiguous_gradients,
+                                                    reduce_bucket_size):
         import copy
         from deepspeed.utils import safe_get_full_fp32_param
         from deepspeed.runtime.zero.muon.original_muon import muon_update
@@ -246,7 +259,7 @@ class TestMuonZero12NumericalCorrectness(DistributedTest):
 
         config_dict = {
             "train_micro_batch_size_per_gpu": micro,
-            "gradient_accumulation_steps": 1,
+            "gradient_accumulation_steps": gas,
             # No clipping: keep the applied update exactly -lr * muon_update(grad) for the
             # reference comparison (Muon's orthogonalized update has a large global norm, so the
             # default gradient_clipping=1.0 would otherwise rescale it).
@@ -266,7 +279,11 @@ class TestMuonZero12NumericalCorrectness(DistributedTest):
             },
             "zero_optimization": {
                 "stage": zero_stage,
-                "reduce_scatter": False
+                "reduce_scatter": reduce_scatter,
+                "overlap_comm": overlap_comm,
+                "use_multi_rank_bucket_allreduce": use_multi_rank_bucket_allreduce,
+                "contiguous_gradients": contiguous_gradients,
+                "reduce_bucket_size": reduce_bucket_size,
             },
         }
         engine, _, _, _ = deepspeed.initialize(config=config_dict,
@@ -279,32 +296,32 @@ class TestMuonZero12NumericalCorrectness(DistributedTest):
         # real param ordering): a 2D Muon weight must straddle the rank-0/rank-1 boundary, else
         # #7807 (which only corrupts cross-partition weights) cannot be exercised at all.
         opt = engine.optimizer
-        muon_groups = [gi for gi, ps in enumerate(opt.bit16_groups) if ps and all(p.dim() >= 2 for p in ps)]
-        assert muon_groups, "could not locate the Muon (2D-weight) param group in the optimizer"
-        crosses = False
-        for gi in muon_groups:
-            boundary = opt.bit16_groups_flat[gi].numel() // world
-            offset = 0
-            for p in opt.bit16_groups[gi]:
-                if offset < boundary < offset + p.numel():
-                    crosses = True
-                offset += p.numel()
-        assert crosses, "no 2D Muon weight straddles the partition boundary; resize the model"
+        split_muon_params = []
+        for gi, params in enumerate(opt.bit16_groups):
+            for p in params:
+                param_id = opt.get_param_id(p)
+                partition_ids = opt.param_to_partition_ids[gi].get(param_id, [])
+                if getattr(p, "use_muon", False) and len(partition_ids) > 1:
+                    split_muon_params.append(p)
+        assert split_muon_params, "no Muon weight straddles a partition boundary; resize the model"
 
         # Deterministic global batch, identical on every rank; each rank consumes its own slice so
         # the DP-averaged gradient equals the full-batch gradient used by the reference.
         gen = torch.Generator().manual_seed(999)
-        gx = torch.randn(world * micro, hidden_dim, generator=gen)
-        gy = torch.randint(0, hidden_dim, (world * micro, ), generator=gen)
-        x = gx[rank * micro:(rank + 1) * micro].to(device).half()
-        y = gy[rank * micro:(rank + 1) * micro].to(device)
+        gx = torch.randn(gas * world * micro, hidden_dim, generator=gen)
+        gy = torch.randint(0, hidden_dim, (gas * world * micro, ), generator=gen)
 
         muon_named = [(n, p) for n, p in engine.module.named_parameters() if p.ndim >= 2]
         pre = {n: safe_get_full_fp32_param(p).clone() for n, p in muon_named}
 
-        loss = engine(x, y)
-        engine.backward(loss)
-        engine.step()
+        for micro_step in range(gas):
+            batch_index = micro_step * world + rank
+            start = batch_index * micro
+            x = gx[start:start + micro].to(device).half()
+            y = gy[start:start + micro].to(device)
+            loss = engine(x, y)
+            engine.backward(loss)
+            engine.step()
 
         post = {n: safe_get_full_fp32_param(p).clone() for n, p in muon_named}
 
@@ -337,7 +354,9 @@ class TestMuonZero12NumericalCorrectness(DistributedTest):
             # #7807 partition-then-orthogonalize bug diverges by O(1) (measured ~0.6-0.67 on the
             # cross-partition weight). 0.40 separates them robustly for both ns_method values.
             assert rel_err < 0.40, (
-                f"{n} (ZeRO-{zero_stage}, ns_method={ns_method}): Muon update rel error {rel_err:.3f} vs "
+                f"{n} (ZeRO-{zero_stage}, ns_method={ns_method}, reduce_scatter={reduce_scatter}, gas={gas}, "
+                f"overlap_comm={overlap_comm}, multi_rank={use_multi_rank_bucket_allreduce}): "
+                f"Muon update rel error {rel_err:.3f} vs "
                 f"full-gradient reference -- orthogonalization likely ran on a partition slice rather than "
                 f"the full averaged gradient (#7807)")
         assert changed, "optimizer step did not update any Muon weight (skipped step?)"

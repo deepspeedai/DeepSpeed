@@ -577,3 +577,53 @@ def test_warmup_schedulers_reject_invalid_warmup_num_steps(scheduler_cls, bad_wa
 
     with pytest.raises(ValueError):
         scheduler_cls(**kwargs)
+
+
+def test_warmup_cosine_lr_unknown_warmup_type_falls_back_to_log():
+    # WarmupLR warns and falls back to the log warmup curve for an unrecognized
+    # warmup_type; WarmupCosineLR must do the same instead of crashing with an
+    # UnboundLocalError in get_lr_ratio on the first step.
+    param = torch.nn.Parameter(torch.zeros(1))
+    optimizer = torch.optim.Adam([param], lr=0.001)
+
+    scheduler = WarmupCosineLR(optimizer=optimizer,
+                               total_num_steps=100,
+                               warmup_num_steps=10,
+                               warmup_type="not_a_warmup_type")
+
+    assert scheduler.warmup_type == WARMUP_LOG_RATE
+
+    param_ref = torch.nn.Parameter(torch.zeros(1))
+    optimizer_ref = torch.optim.Adam([param_ref], lr=0.001)
+    scheduler_ref = WarmupCosineLR(optimizer=optimizer_ref,
+                                   total_num_steps=100,
+                                   warmup_num_steps=10,
+                                   warmup_type=WARMUP_LOG_RATE)
+
+    for step in range(15):
+        scheduler.step(step)
+        scheduler_ref.step(step)
+        assert scheduler.get_lr_ratio() == pytest.approx(scheduler_ref.get_lr_ratio())
+
+
+def test_warmup_cosine_lr_linear_warmup_type_produces_linear_ratios():
+    # No other test exercises WarmupCosineLR with warmup_type=WARMUP_LINEAR_RATE,
+    # so a regression that silently routed 'linear' through the log curve would
+    # keep the suite green. Pin the per-step warmup ratios: with
+    # warmup_min_ratio=0.0 the linear curve is step / warmup_num_steps, which
+    # clearly diverges from the log curve (e.g. 0.1 vs ~0.301 at step 1).
+    param = torch.nn.Parameter(torch.zeros(1))
+    optimizer = torch.optim.Adam([param], lr=0.001)
+    warmup_num_steps = 10
+
+    scheduler = WarmupCosineLR(optimizer=optimizer,
+                               total_num_steps=100,
+                               warmup_num_steps=warmup_num_steps,
+                               warmup_min_ratio=0.0,
+                               warmup_type=WARMUP_LINEAR_RATE)
+
+    assert scheduler.warmup_type == WARMUP_LINEAR_RATE
+
+    for step in range(warmup_num_steps):
+        scheduler.step(step)
+        assert scheduler.get_lr_ratio() == pytest.approx(step / warmup_num_steps)
