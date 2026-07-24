@@ -29,6 +29,9 @@ on:
           - '2.9.1-cu126'
           - '2.10.0-cu126'
           - '2.11.0-cu126'
+      # Used only when a manual workflow_dispatch explicitly selects
+      # transformers_source=pypi. Scheduled nightlies and default manual runs
+      # install Transformers from Git and ignore this value.
       transformers_version:
         description: Hugging Face Transformers PyPI package version to install
         required: false
@@ -101,6 +104,7 @@ jobs:
     env:
       DEFAULT_TORCH_PRESET: '2.10.0-cu126'
       DEFAULT_TRANSFORMERS_SOURCE: 'git'
+      # Manual PyPI fallback only; scheduled and default manual runs use Git.
       DEFAULT_TRANSFORMERS_VERSION: '4.51.3'
       DEFAULT_TRANSFORMERS_REF: 'main'
       CUTLASS_PATH: /opt/cutlass
