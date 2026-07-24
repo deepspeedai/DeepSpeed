@@ -670,7 +670,7 @@ class WarmupLR(object):
         self.optimizer = get_torch_optimizer(optimizer)
 
         if warmup_max_lr is None:
-            warmup_max_lr = [group['lr'] for group in self.optimizer.param_groups][0]
+            warmup_max_lr = [group['lr'] for group in self.optimizer.param_groups]
 
         self.min_lrs = self._format_param(self.optimizer, warmup_min_lr, "min_lr")
         self.max_lrs = self._format_param(self.optimizer, warmup_max_lr, "max_lr")

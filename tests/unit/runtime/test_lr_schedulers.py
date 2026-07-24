@@ -546,6 +546,26 @@ def test_warmup_cosine_lr_initializes_all_param_groups():
     assert [group["lr"] for group in optimizer.param_groups] == pytest.approx(expected_lrs)
 
 
+def test_warmup_lr_inherits_per_group_lr_when_max_unspecified():
+    # With warmup_max_lr unspecified, WarmupLR inherits the optimizer's lr; on a
+    # multi-group optimizer it must inherit EACH group's own lr, not group 0's for
+    # all groups. Regression for the trailing [0] on the fallback, which reduced the
+    # per-group list to group 0's scalar and _format_param then broadcast it, so the
+    # other groups' configured LRs were silently discarded.
+    dense = torch.nn.Parameter(torch.zeros(1))
+    expert = torch.nn.Parameter(torch.zeros(1))
+    optimizer = torch.optim.Adam([{"params": [dense], "lr": 0.1}, {"params": [expert], "lr": 0.2}])
+
+    scheduler = WarmupLR(optimizer=optimizer, warmup_num_steps=10)
+
+    assert scheduler.max_lrs == [0.1, 0.2]
+
+    # Step to the end of warmup (gamma == 1.0): each group reaches its own base lr.
+    scheduler.step(10)
+    assert scheduler.get_lr() == pytest.approx([0.1, 0.2])
+    assert [group["lr"] for group in optimizer.param_groups] == pytest.approx([0.1, 0.2])
+
+
 def test_warmup_cosine_lr_total_num_steps_equals_warmup_num_steps():
     # total_num_steps == warmup_num_steps must not raise ZeroDivisionError, and because the
     # cosine decay window is empty, every step past warmup must stay at cos_min_ratio rather
