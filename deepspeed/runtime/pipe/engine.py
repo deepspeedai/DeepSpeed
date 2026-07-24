@@ -3,7 +3,6 @@
 
 # DeepSpeed Team
 
-from types import MethodType
 from collections import OrderedDict
 from functools import reduce
 from operator import mul
@@ -173,6 +172,12 @@ class PipelineEngine(DeepSpeedEngine):
         if self.is_pipe_parallel:
             p2p.init_process_groups(self.grid)
 
+        # Set up pipeline executor and transport backends.
+        # The executor handles instruction dispatch; the transport handles
+        # inter-stage tensor communication.
+        self._transport = self._create_transport()
+        self._executor = self._create_executor()
+
         # Pipeline buffers
         self.num_pipe_buffers = 0
         self.pipe_buffers = {
@@ -260,6 +265,76 @@ class PipelineEngine(DeepSpeedEngine):
     def set_has_attention_mask(self, value):
         assert isinstance(value, bool)
         self.has_attention_mask = value
+
+    def _create_transport(self):
+        """Create the transport backend for inter-stage communication.
+
+        Reads ``config.pipeline.transport`` to select the backend:
+        - ``"nccl"`` (default): :class:`NcclTransport` for GPU-GPU NCCL p2p.
+        - ``"ray"``: :class:`RayTransport` for Ray object-store transfer.
+
+        Returns:
+            :class:`PipelineTransport`
+        """
+        transport_type = self._config.pipeline.get('transport', 'nccl')
+
+        if transport_type == 'nccl':
+            from .nccl_transport import NcclTransport
+            transport = NcclTransport()
+        elif transport_type == 'ray':
+            from .ray import RayTransport, HAS_RAY
+            if not HAS_RAY:
+                raise ImportError("Ray transport requires Ray. Install with: pip install ray")
+            transport = RayTransport(backend=self._config.pipeline.get('ray_transport_backend', 'ray_object_store'))
+        elif transport_type == 'tcp':
+            from .tcp_transport import TcpTransport
+            transport = TcpTransport(
+                send_port=self._config.pipeline.get('tcp_send_port', 20000),
+                recv_port=self._config.pipeline.get('tcp_recv_port', 20001),
+                host=self._config.pipeline.get('tcp_host', '127.0.0.1'),
+                persistent=self._config.pipeline.get('tcp_persistent', False),
+                pool_size=self._config.pipeline.get('tcp_pool_size', 4),
+                idle_timeout=self._config.pipeline.get('tcp_pool_idle_timeout', 60.0),
+            )
+        elif transport_type == 'shm':
+            from .shm_transport import ShmTransport
+            transport = ShmTransport(name_prefix=self._config.pipeline.get('shm_name_prefix', 'deepspeed_pp'), )
+        else:
+            raise ValueError(f"Unsupported transport type: {transport_type}")
+
+        if self.is_pipe_parallel:
+            transport.initialize(self.grid)
+        return transport
+
+    def _create_executor(self):
+        """Create the executor backend for pipeline instruction dispatch.
+
+        Reads ``config.pipeline.executor`` to select the backend:
+        - ``"process_group"`` (default): :class:`ProcessGroupExecutor` for
+          in-process NCCL execution.
+        - ``"ray"``: :class:`RayActorExecutor` for per-stage Ray actor execution.
+
+        Returns:
+            :class:`PipelineExecutor`
+        """
+        executor_type = self._config.pipeline.get('executor', 'process_group')
+
+        if executor_type == 'process_group':
+            from .process_group_exec import ProcessGroupExecutor
+            return ProcessGroupExecutor(self, self._transport)
+        elif executor_type == 'ray':
+            from .ray import RayActorExecutor, HAS_RAY
+            if not HAS_RAY:
+                raise ImportError("Ray executor requires Ray. Install with: pip install ray")
+            transport_type = self._config.pipeline.get('transport', 'nccl')
+            if transport_type != 'ray':
+                raise ValueError(f"Ray executor requires Ray transport, not '{transport_type}'. "
+                                 "Set pipeline.transport='ray' in your DeepSpeed config.")
+            executor = RayActorExecutor(self, self._transport)
+            executor._initialize_actors()
+            return executor
+        else:
+            raise ValueError(f"Unsupported executor type: {executor_type}")
 
     def _build_data_iter(self, dataset):
         sampler = torch.utils.data.distributed.DistributedSampler(dataset,
@@ -1362,36 +1437,28 @@ class PipelineEngine(DeepSpeedEngine):
                                    strict=strict,
                                    checkpoint_engine=self.checkpoint_engine)
 
-    # A map of PipeInstruction types to methods. Each method will be executed with the
-    # kwargs provided to the PipeInstruction from the scheduler.
-    _INSTRUCTION_MAP = {
-        schedule.OptimizerStep: _exec_optimizer_step,
-        schedule.ReduceGrads: _exec_reduce_grads,
-        schedule.ReduceTiedGrads: _exec_reduce_tied_grads,
-        schedule.LoadMicroBatch: _exec_load_micro_batch,
-        schedule.ForwardPass: _exec_forward_pass,
-        schedule.BackwardPass: _exec_backward_pass,
-        schedule.SendActivation: _exec_send_activations,
-        schedule.RecvActivation: _exec_recv_activations,
-        schedule.SendGrad: _exec_send_grads,
-        schedule.RecvGrad: _exec_recv_grads,
-    }
-
     def _exec_schedule(self, pipe_schedule):
-        # Reserve and reset buffers.
-        self._reserve_pipe_buffers(pipe_schedule.num_pipe_buffers())
-        self.fwd_outputs = []
+        """Execute all instructions in the pipeline schedule.
+
+        Delegates buffer management and instruction dispatch to the executor.
+        Each :class:`~schedule.PipeInstruction` type is routed to the
+        corresponding method on :attr:`_executor` via its
+        :attr:`~PipelineExecutor.instruction_map`.
+        """
+        self._executor.start_batch(pipe_schedule)
 
         # For each step in the schedule
         for step_cmds in pipe_schedule:
             # For each instruction in the step
             for cmd in step_cmds:
-                if type(cmd) not in self._INSTRUCTION_MAP:
+                instr_type = type(cmd)
+                if instr_type not in self._executor.instruction_map:
                     raise RuntimeError(f'{self.__class__.__name__} does not understand instruction {repr(cmd)}')
 
-                # Equivalent to: self._exec_forward_pass(buffer_id=0)
-                self._exec_instr = MethodType(self._INSTRUCTION_MAP[type(cmd)], self)
-                self._exec_instr(**cmd.kwargs)
+                # Dispatch to the executor method
+                self._executor.instruction_map[instr_type](**cmd.kwargs)
+
+        self._executor.end_batch()
 
     def get_additional_losses(self):
         return self.agg_additional_losses
