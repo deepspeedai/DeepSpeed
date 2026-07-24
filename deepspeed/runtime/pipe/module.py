@@ -3,6 +3,7 @@
 
 # DeepSpeed Team
 
+import contextlib
 import os
 import glob
 
@@ -81,6 +82,24 @@ class TiedLayerSpec(LayerSpec):
         self.key = key
         self.forward_fn = forward_fn
         self.tied_weight_attr = [tied_weight_attr] if type(tied_weight_attr) == str else tied_weight_attr
+
+
+if hasattr(torch.overrides, "TorchFunctionMode"):
+
+    class _DisableInit(torch.overrides.TorchFunctionMode):
+
+        def __torch_function__(self, func, types, args=(), kwargs=None):
+            kwargs = kwargs or {}
+            if getattr(func, '__module__', None) == 'torch.nn.init':
+                if 'tensor' in kwargs:
+                    return kwargs['tensor']
+                else:
+                    return args[0]
+            else:
+                return func(*args, **kwargs)
+
+else:
+    _DisableInit = contextlib.suppress
 
 
 class PipelineModule(nn.Module):
@@ -290,7 +309,8 @@ class PipelineModule(nn.Module):
                 A list of frozen parameter names
         """
         if isinstance(layer, LayerSpec):
-            l = layer.build()
+            with _DisableInit():
+                l = layer.build()
             return [n for n, p in l.named_parameters() if not p.requires_grad]
         elif isinstance(layer, nn.Module):
             return [n for n, p in layer.named_parameters() if not p.requires_grad]
@@ -308,7 +328,8 @@ class PipelineModule(nn.Module):
         param_counts = [0] * len(self._layer_specs)
         for idx, layer in enumerate(self._layer_specs):
             if isinstance(layer, LayerSpec):
-                l = layer.build()
+                with _DisableInit():
+                    l = layer.build()
                 params = filter(lambda p: p.requires_grad, l.parameters())
                 param_counts[idx] = sum(p.numel() for p in params)
             elif isinstance(layer, nn.Module):
