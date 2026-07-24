@@ -17,6 +17,7 @@ from deepspeed.utils import groups, z3_leaf_parameter
 from torch._utils import _flatten_dense_tensors, _unflatten_dense_tensors
 from deepspeed.runtime.base_optimizer import ZeROOptimizer
 from deepspeed.utils import logger
+from deepspeed.utils.allocator_telemetry import record_allocator_retry_sample, record_empty_cache
 from deepspeed.utils.torch import register_grad_hook, required_torch_version
 from deepspeed.runtime.fp16.loss_scaler import CreateLossScaler
 from deepspeed.runtime.torch_autocast import get_autocast_dtype, get_all_comm_dtypes, is_autocast_initialized, sort_dtypes
@@ -2592,6 +2593,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         alloc_retries = memory_stats.get("num_alloc_retries")
         if alloc_retries is None:
             alloc_retries = 0
+        record_allocator_retry_sample(self.n_caching_allocator_flushes, alloc_retries)
         if alloc_retries > self.n_caching_allocator_flushes:
             if dist.get_rank() == 0:
                 logger.warning(
@@ -3591,7 +3593,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             self.offloaded_states.add(OffloadStateTypeEnum.optim_states)
 
         gc.collect()
-        get_accelerator().empty_cache()
+        record_empty_cache("stage3.offload-states", get_accelerator().empty_cache)
 
     def reload_states(self, non_blocking: bool = False):
 
