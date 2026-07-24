@@ -20,6 +20,7 @@ or under pytest::
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import sys
@@ -28,7 +29,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # import the sibling module
 
-from tests_fetcher import TestSelector, WorkflowConfig  # noqa: E402
+import tests_fetcher  # noqa: E402
+from tests_fetcher import Selection, TestSelector, WorkflowConfig  # noqa: E402
 
 CONFIG = WorkflowConfig(
     name="test",
@@ -71,7 +73,7 @@ class TmpRepo:
     """A throwaway git repo seeded with BASELINE, committed on ``master``."""
 
     def __init__(self) -> None:
-        self.root = Path(tempfile.mkdtemp(prefix="ds-fetcher-test-"))
+        self.root = Path(tempfile.mkdtemp(prefix="ds-fetcher-test-")).resolve()
         for rel, content in BASELINE.items():
             self.write(rel, content)
         self._git("init", "-q", "-b", "master")
@@ -254,6 +256,107 @@ def test_missing_base_runs_all() -> None:
         assert sel.mode == "all", sel.reason
     finally:
         repo.cleanup()
+
+
+def test_external_repo_root_keeps_output_in_trusted_checkout() -> None:
+    repo = TmpRepo()
+    trusted_root = Path(tempfile.mkdtemp(prefix="ds-fetcher-trusted-"))
+    original_root = tests_fetcher.REPO_ROOT
+    original_argv = sys.argv
+    try:
+        repo.write("deepspeed/leaf.py", "VALUE = 11\n")
+        repo.commit("touch leaf")
+        candidate_output = repo.root / "ci" / ".test_selection" / "test_list.txt"
+        repo.write("ci/.test_selection/test_list.txt", "candidate-controlled\n")
+
+        tests_fetcher.REPO_ROOT = trusted_root
+        sys.argv = [
+            "tests_fetcher.py",
+            "--workflow",
+            "modal-torch-latest",
+            "--repo-root",
+            str(repo.root),
+            "--base",
+            "master",
+        ]
+        tests_fetcher.main()
+
+        trusted_output = trusted_root / "ci" / ".test_selection" / "test_list.txt"
+        assert trusted_output.read_text(encoding="utf-8") == "tests/unit/v1/test_leaf.py\n"
+        assert candidate_output.read_text(encoding="utf-8") == "candidate-controlled\n"
+    finally:
+        tests_fetcher.REPO_ROOT = original_root
+        sys.argv = original_argv
+        repo.cleanup()
+        shutil.rmtree(trusted_root, ignore_errors=True)
+
+
+def test_github_output_contains_only_validated_mode_and_count() -> None:
+    root = Path(tempfile.mkdtemp(prefix="ds-fetcher-output-"))
+    output = root / "github-output"
+    original = os.environ.get("GITHUB_OUTPUT")
+    try:
+        os.environ["GITHUB_OUTPUT"] = str(output)
+        tests_fetcher._emit_github_output("subset", 1)
+        assert output.read_text(encoding="utf-8") == "mode=subset\ncount=1\n"
+        try:
+            tests_fetcher._emit_github_output("subset\npwned=1", 1)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("invalid output mode was accepted")
+    finally:
+        if original is None:
+            os.environ.pop("GITHUB_OUTPUT", None)
+        else:
+            os.environ["GITHUB_OUTPUT"] = original
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_summary_escapes_candidate_controls_and_markup() -> None:
+    root = Path(tempfile.mkdtemp(prefix="ds-fetcher-summary-"))
+    summary = root / "summary"
+    original = os.environ.get("GITHUB_STEP_SUMMARY")
+    try:
+        os.environ["GITHUB_STEP_SUMMARY"] = str(summary)
+        selection = Selection("all", [], "changed <tag>\n::warning:: `text`")
+        tests_fetcher._write_step_summary(CONFIG, selection, ["tests/unit/v1"])
+        text = summary.read_text(encoding="utf-8")
+        assert "changed &lt;tag&gt;\\x0a::warning:: `text`" in text
+        assert "\n::warning::" not in text
+    finally:
+        if original is None:
+            os.environ.pop("GITHUB_STEP_SUMMARY", None)
+        else:
+            os.environ["GITHUB_STEP_SUMMARY"] = original
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_output_path_cannot_escape_or_replace_trusted_checkout() -> None:
+    root = Path(tempfile.mkdtemp(prefix="ds-fetcher-path-"))
+    outside = Path(tempfile.mkdtemp(prefix="ds-fetcher-outside-"))
+    try:
+        expected = root / "ci" / ".test_selection" / "test_list.txt"
+        assert tests_fetcher._resolve_output_path(root, "ci/.test_selection/test_list.txt") == expected
+        for value in ("../escape", str(outside / "absolute")):
+            try:
+                tests_fetcher._resolve_output_path(root, value)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError(f"unsafe output path was accepted: {value}")
+
+        expected.parent.mkdir(parents=True)
+        expected.symlink_to(outside / "test_list.txt")
+        try:
+            tests_fetcher._resolve_output_path(root, "ci/.test_selection/test_list.txt")
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("symlink output path was accepted")
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+        shutil.rmtree(outside, ignore_errors=True)
 
 
 def _all_test_functions():

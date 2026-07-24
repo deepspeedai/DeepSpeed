@@ -54,6 +54,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import html
 import os
 import subprocess
 import sys
@@ -618,14 +619,33 @@ class TestSelector:
 # --------------------------------------------------------------------------- #
 # CLI / CI glue.
 # --------------------------------------------------------------------------- #
-def _emit_github_output(mode: str, num_tests: int, reason: str) -> None:
+def _single_line(text: object) -> str:
+    """Render untrusted repository text without controls or extra log lines."""
+    return "".join(char if char.isprintable() else f"\\x{ord(char):02x}" for char in str(text))
+
+
+def _emit_github_output(mode: str, count: int) -> None:
+    if mode not in {"all", "subset", "none"}:
+        raise ValueError(f"invalid selection mode: {mode!r}")
+    if not isinstance(count, int) or count < 0:
+        raise ValueError(f"invalid selection count: {count!r}")
     gh_out = os.environ.get("GITHUB_OUTPUT")
     if not gh_out:
         return
     with open(gh_out, "a", encoding="utf-8") as fh:
         fh.write(f"mode={mode}\n")
-        fh.write(f"num_tests={num_tests}\n")
-        fh.write(f"reason={reason}\n")
+        fh.write(f"count={count}\n")
+
+
+def _resolve_output_path(trusted_root: Path, value: str) -> Path:
+    output_arg = Path(value)
+    if output_arg.is_absolute():
+        raise ValueError("--output-file must be relative to the trusted script checkout")
+    output_path = trusted_root / output_arg
+    resolved_output_path = output_path.resolve()
+    if not resolved_output_path.is_relative_to(trusted_root.resolve()) or output_path.is_symlink():
+        raise ValueError("--output-file must not escape or replace the trusted script checkout")
+    return output_path
 
 
 def _write_step_summary(config: WorkflowConfig, sel: Selection, targets: list[str]) -> None:
@@ -633,18 +653,15 @@ def _write_step_summary(config: WorkflowConfig, sel: Selection, targets: list[st
     path = os.environ.get("GITHUB_STEP_SUMMARY")
     if not path:
         return
-    # chr(96) is a backtick; kept out of f-string literals so flake8's W604
-    # (Python-2 backtick) check -- which doesn't mute f-string contents -- won't fire.
-    bt = chr(96)
 
     def code(text: object) -> str:
-        return f"{bt}{text}{bt}"
+        return f"<code>{html.escape(_single_line(text), quote=True)}</code>"
 
     lines = [
         f"### Test selection: {code(config.name)}",
         "",
         f"- **decision:** {code(sel.mode)}",
-        f"- **reason:** {sel.reason}",
+        f"- **reason:** {code(sel.reason)}",
         f"- **pytest targets:** {len(targets)}",
         "",
     ]
@@ -679,6 +696,11 @@ def main() -> None:
         "Default: origin/master.",
     )
     parser.add_argument(
+        "--repo-root",
+        default=str(REPO_ROOT),
+        help="Repository tree to analyze. Output remains anchored in the trusted script checkout.",
+    )
+    parser.add_argument(
         "--output-file",
         default="ci/.test_selection/test_list.txt",
         help="Where to write the test targets to run (one per line). "
@@ -697,7 +719,8 @@ def main() -> None:
     args = parser.parse_args()
 
     config = WORKFLOWS[args.workflow]
-    selector = TestSelector(REPO_ROOT, config)
+    repo_root = Path(args.repo_root).resolve()
+    selector = TestSelector(repo_root, config)
 
     if args.explain:
         try:
@@ -718,18 +741,21 @@ def main() -> None:
     if sel.mode == "all":
         targets = list(config.test_scopes)
     else:
-        targets = [p.relative_to(REPO_ROOT).as_posix() for p in sel.tests]
+        targets = [p.relative_to(repo_root).as_posix() for p in sel.tests]
 
-    out_path = (REPO_ROOT / args.output_file).resolve()
+    try:
+        out_path = _resolve_output_path(REPO_ROOT, args.output_file)
+    except ValueError as exc:
+        parser.error(str(exc))
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text("\n".join(targets) + ("\n" if targets else ""), encoding="utf-8")
 
-    print(f"\n### MODE: {sel.mode} ({sel.reason}) ###")
+    print(f"\n### MODE: {sel.mode} ({_single_line(sel.reason)}) ###")
     print(f"### {len(targets)} pytest target(s) -> {out_path.relative_to(REPO_ROOT)} ###")
     for t in targets:
-        print(f"  {t}")
+        print(f"  {_single_line(t)}")
 
-    _emit_github_output(sel.mode, len(sel.tests), sel.reason)
+    _emit_github_output(sel.mode, len(targets))
     _write_step_summary(config, sel, targets)
 
 
