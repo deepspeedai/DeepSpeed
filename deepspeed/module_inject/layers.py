@@ -23,7 +23,7 @@ from typing import Union
 __all__ = [
     "TensorParallel_Layer", "LinearAllreduce", "LinearLayer", "LmHeadLinearAllreduce", "Yuan_LinearAllreduce",
     "Yuan_LinearLayer", "GateUpPack_LinearLayer", "Conv_LinearALlreduce", "fused_LinearLayer", "conv_LinearLayer",
-    "SubParamLinearLayer", "SubParamLinearAllreduce"
+    "SubParamLinearLayer", "SubParamLinearAllreduce", "DepthwiseConv1dLayer", "Qwen35LinearAttentionLayer"
 ]
 
 DEEPSPEED_AUTOTP_MODE = AUTOTP_MODE.INFERENCE
@@ -1431,6 +1431,316 @@ class SubParamLinearAllreduce(TensorParallel_Layer):
                                     target_partition_shape=self.bias.shape,
                                     is_bias=True,
                                     replicated=True)
+
+
+class DepthwiseConv1dLayer(TensorParallel_Layer):
+    """Tensor-parallel depthwise Conv1d used by Qwen 3.5 linear attention."""
+
+    def __init__(self, module, mp_group, **kwargs):
+        super(DepthwiseConv1dLayer, self).__init__(mp_group, **kwargs)
+        if module.groups != module.in_channels or module.groups != module.out_channels or module.weight.shape[1] != 1:
+            raise ValueError(f"AutoTP layer '{self.name}' only supports depthwise Conv1d with one weight channel.")
+
+        self.weight = module.weight
+        self.bias = module.bias
+        self.stride = module.stride
+        self.padding = module.padding
+        self.dilation = module.dilation
+        self.padding_mode = module.padding_mode
+        self._reversed_padding_repeated_twice = getattr(module, "_reversed_padding_repeated_twice", None)
+        self.kernel_size = module.kernel_size
+
+        self._orig_weight_shape = tuple(module.weight.shape)
+        self._orig_bias_shape = tuple(module.bias.shape) if module.bias is not None else None
+        self._logical_weight_shape = tuple(module.weight.shape)
+        self.sub_param_sizes = kwargs.get('sub_param_sizes', None)
+
+        if self._should_materialize_tp_partition():
+            self._tp_partition([self.weight, self.bias])
+
+        self.in_channels = self.weight.shape[0]
+        self.out_channels = self.weight.shape[0]
+        self.groups = self.weight.shape[0]
+
+        self.support_training = True
+        self.config_tp_params(self.weight)
+        if self.bias is not None:
+            self.config_tp_params(self.bias)
+        self._mark_uc_metadata()
+
+    def forward(self, input):
+        if self.padding_mode != 'zeros':
+            return F.conv1d(F.pad(input, self._reversed_padding_repeated_twice, mode=self.padding_mode), self.weight,
+                            self.bias, self.stride, (0, ), self.dilation, self.groups)
+        return F.conv1d(input, self.weight, self.bias, self.stride, self.padding, self.dilation, self.groups)
+
+    @torch.no_grad()
+    def gather_params(self, params_list):
+        for idx, param in enumerate(params_list):
+            if param is None:
+                continue
+            params_list[idx].data_partition = param.data
+            logical_shape = self._logical_weight_shape if idx == 0 else self._orig_bias_shape
+            full_view = _gather_logical_tensor(param,
+                                               logical_shape,
+                                               0,
+                                               self.mp_group,
+                                               self.tp_world_size,
+                                               name=self.name,
+                                               subparam_sizes=self.sub_param_sizes)
+            params_list[idx].data = full_view.reshape(self._orig_weight_shape if idx == 0 else self._orig_bias_shape)
+
+    @torch.no_grad()
+    def _tp_partition(self, params_list):
+        for idx, param in enumerate(params_list):
+            if param is None:
+                continue
+            logical_shape = self._logical_weight_shape if idx == 0 else self._orig_bias_shape
+            view = param.reshape(logical_shape)
+            partitioned = _partition_logical_tensor(view,
+                                                    0,
+                                                    self.tp_world_size,
+                                                    self.tp_index,
+                                                    name=self.name,
+                                                    subparam_sizes=self.sub_param_sizes)
+            target = partitioned.reshape(-1) if idx == 1 else partitioned
+            params_list[idx].data = self.move(target).detach()
+
+    def _mark_uc_metadata(self):
+        self._set_param_uc_meta(self.weight,
+                                partition_type='column',
+                                partition_dim=0,
+                                logical_shape=self._logical_weight_shape,
+                                output_shape=(self._orig_weight_shape[0], ),
+                                original_shape=self._orig_weight_shape,
+                                target_partition_shape=self.weight.shape)
+        if self.bias is not None:
+            self._set_param_uc_meta(self.bias,
+                                    partition_type='column',
+                                    partition_dim=0,
+                                    logical_shape=self._orig_bias_shape,
+                                    output_shape=self._orig_bias_shape,
+                                    original_shape=self._orig_bias_shape,
+                                    target_partition_shape=self.bias.shape,
+                                    is_bias=True)
+
+
+class Qwen35LinearAttentionLayer(nn.Module):
+    """Local-head tensor-parallel wrapper for Qwen 3.5 gated linear attention."""
+
+    def __init__(self, module, mp_group, **kwargs):
+        super().__init__()
+        self.mp_group = mp_group
+        self.tp_world_size = dist.get_world_size(mp_group) if mp_group is not None else 1
+        self.tp_index = dist.get_rank(mp_group) if mp_group is not None else 0
+        self.name = kwargs.get('name', 'linear_attn')
+
+        self.hidden_size = module.hidden_size
+        self.head_k_dim = module.head_k_dim
+        self.head_v_dim = module.head_v_dim
+        self.conv_kernel_size = module.conv_kernel_size
+        self.layer_idx = module.layer_idx
+        self.activation = module.activation
+        self.act = module.act
+        self.layer_norm_epsilon = module.layer_norm_epsilon
+        self.causal_conv1d_fn = module.causal_conv1d_fn
+        self.causal_conv1d_update = module.causal_conv1d_update
+        self.chunk_gated_delta_rule = module.chunk_gated_delta_rule
+        self.recurrent_gated_delta_rule = module.recurrent_gated_delta_rule
+
+        self._orig_num_k_heads = int(module.num_k_heads)
+        self._orig_num_v_heads = int(module.num_v_heads)
+        self._orig_key_dim = int(module.key_dim)
+        self._orig_value_dim = int(module.value_dim)
+        self._orig_conv_dim = int(module.conv_dim)
+
+        self.key_dim = get_shard_size(self._orig_key_dim, self.tp_world_size, f"{self.name}.in_proj_qkv")
+        self.value_dim = get_shard_size(self._orig_value_dim, self.tp_world_size, f"{self.name}.in_proj_z")
+        if self.key_dim % self.head_k_dim != 0:
+            raise ValueError(
+                f"AutoTP layer '{self.name}' resolved local key_dim={self.key_dim} not divisible by head_k_dim={self.head_k_dim}."
+            )
+        if self.value_dim % self.head_v_dim != 0:
+            raise ValueError(
+                f"AutoTP layer '{self.name}' resolved local value_dim={self.value_dim} not divisible by head_v_dim={self.head_v_dim}."
+            )
+        self.num_k_heads = self.key_dim // self.head_k_dim
+        self.num_v_heads = self.value_dim // self.head_v_dim
+        self.conv_dim = self.key_dim * 2 + self.value_dim
+
+        self.in_proj_qkv = SubParamLinearLayer(module.in_proj_qkv,
+                                               mp_group,
+                                               shape=((self._orig_key_dim, self._orig_key_dim, self._orig_value_dim),
+                                                      -1),
+                                               partition_dim=0,
+                                               name=f"{self.name}.in_proj_qkv")
+        self.conv1d = DepthwiseConv1dLayer(module.conv1d,
+                                           mp_group,
+                                           name=f"{self.name}.conv1d",
+                                           sub_param_sizes=(self._orig_key_dim, self._orig_key_dim,
+                                                            self._orig_value_dim))
+        self.in_proj_z = LinearLayer(module.in_proj_z, mp_group, name=f"{self.name}.in_proj_z")
+        self.in_proj_a = LinearLayer(module.in_proj_a, mp_group, name=f"{self.name}.in_proj_a")
+        self.in_proj_b = LinearLayer(module.in_proj_b, mp_group, name=f"{self.name}.in_proj_b")
+        self.norm = module.norm
+        self.out_proj = LinearAllreduce(module.out_proj, mp_group, name=f"{self.name}.out_proj")
+
+        self.dt_bias = module.dt_bias
+        self.A_log = module.A_log
+        self._sharded_param_shapes = {
+            "dt_bias": tuple(module.dt_bias.shape),
+            "A_log": tuple(module.A_log.shape),
+        }
+        self._configure_sharded_vector_param(self.dt_bias, "dt_bias")
+        self._configure_sharded_vector_param(self.A_log, "A_log")
+        if self._should_materialize_tp_partition():
+            self._partition_sharded_vector_params([self.dt_bias, self.A_log])
+        self._set_sharded_vector_param_meta(self.dt_bias, "dt_bias")
+        self._set_sharded_vector_param_meta(self.A_log, "A_log")
+
+    def _should_materialize_tp_partition(self):
+        return self.mp_group is not None
+
+    def _move_tensor(self, tensor):
+        if tensor.is_meta:
+            return tensor
+        device = 'cpu' if TensorParallel_Layer.keep_module_on_host else get_accelerator().current_device_name()
+        return tensor.to(device, copy=not TensorParallel_Layer.keep_module_on_host)
+
+    def _configure_sharded_vector_param(self, param, param_name):
+        param_name_full = f"{self.name}.{param_name}"
+        if is_autotp_training_mode():
+            param.requires_grad = True
+        else:
+            param.requires_grad = False
+        param.gather_params = self._gather_sharded_vector_params
+        param._tp_partition = self._partition_sharded_vector_params
+        setattr(param, DS_TENSOR_MODEL_PARALLEL, True)
+        setattr(param, DS_IS_REPLACED_MODULE, True)
+        setattr(param, "_ds_autotp_shard_name", param_name_full)
+
+    def _set_sharded_vector_param_meta(self, param, param_name):
+        setattr(
+            param, DS_AUTOTP_UC_META,
+            _build_param_uc_restore_meta(partition_type='column',
+                                         partition_dim=0,
+                                         logical_shape=self._sharded_param_shapes[param_name],
+                                         output_shape=self._sharded_param_shapes[param_name],
+                                         target_partition_shape=tuple(param.shape),
+                                         original_shape=self._sharded_param_shapes[param_name],
+                                         is_bias=False,
+                                         replicated=False))
+
+    @torch.no_grad()
+    def _gather_sharded_vector_params(self, params_list):
+        for param in params_list:
+            if param is None:
+                continue
+            param.data_partition = param.data
+            full_view = _gather_logical_tensor(param,
+                                               self._sharded_param_shapes[param._ds_autotp_shard_name.rsplit('.',
+                                                                                                             1)[-1]],
+                                               0,
+                                               self.mp_group,
+                                               self.tp_world_size,
+                                               name=param._ds_autotp_shard_name)
+            param.data = full_view.reshape(self._sharded_param_shapes[param._ds_autotp_shard_name.rsplit('.', 1)[-1]])
+
+    @torch.no_grad()
+    def _partition_sharded_vector_params(self, params_list):
+        for param in params_list:
+            if param is None:
+                continue
+            shape_key = param._ds_autotp_shard_name.rsplit('.', 1)[-1]
+            logical_shape = self._sharded_param_shapes[shape_key]
+            partitioned = _partition_logical_tensor(param.reshape(logical_shape),
+                                                    0,
+                                                    self.tp_world_size,
+                                                    self.tp_index,
+                                                    name=param._ds_autotp_shard_name)
+            param.data = self._move_tensor(partitioned.reshape(-1)).detach()
+
+    def forward(self, hidden_states, cache_params=None, attention_mask=None):
+        hidden_states = hidden_states if attention_mask is None or attention_mask.shape[
+            1] <= 1 or attention_mask.shape[0] <= 1 else (hidden_states *
+                                                          attention_mask[:, :, None]).to(hidden_states.dtype)
+
+        batch_size, seq_len, _ = hidden_states.shape
+        use_precomputed_states = cache_params is not None and cache_params.has_previous_state(
+            self.layer_idx) and seq_len == 1
+
+        if use_precomputed_states:
+            conv_state = cache_params.layers[self.layer_idx].conv_states
+            recurrent_state = cache_params.layers[self.layer_idx].recurrent_states
+
+        mixed_qkv = self.in_proj_qkv(hidden_states).transpose(1, 2)
+
+        z = self.in_proj_z(hidden_states)
+        z = z.reshape(batch_size, seq_len, -1, self.head_v_dim)
+
+        b = self.in_proj_b(hidden_states)
+        a = self.in_proj_a(hidden_states)
+
+        if use_precomputed_states:
+            mixed_qkv = self.causal_conv1d_update(mixed_qkv, conv_state, self.conv1d.weight.squeeze(1),
+                                                  self.conv1d.bias, self.activation)
+        else:
+            if cache_params is not None:
+                conv_state = F.pad(mixed_qkv, (self.conv_kernel_size - mixed_qkv.shape[-1], 0))
+                conv_state = cache_params.update_conv_state(conv_state, self.layer_idx)
+            if self.causal_conv1d_fn is not None:
+                mixed_qkv = self.causal_conv1d_fn(x=mixed_qkv,
+                                                  weight=self.conv1d.weight.squeeze(1),
+                                                  bias=self.conv1d.bias,
+                                                  activation=self.activation,
+                                                  seq_idx=None)
+            else:
+                mixed_qkv = F.silu(self.conv1d(mixed_qkv)[:, :, :seq_len])
+
+        mixed_qkv = mixed_qkv.transpose(1, 2)
+        query, key, value = torch.split(mixed_qkv, [self.key_dim, self.key_dim, self.value_dim], dim=-1)
+
+        query = query.reshape(batch_size, seq_len, -1, self.head_k_dim)
+        key = key.reshape(batch_size, seq_len, -1, self.head_k_dim)
+        value = value.reshape(batch_size, seq_len, -1, self.head_v_dim)
+
+        beta = b.sigmoid()
+        g = -self.A_log.float().exp() * F.softplus(a.float() + self.dt_bias)
+        if self.num_v_heads // self.num_k_heads > 1:
+            repeat_factor = self.num_v_heads // self.num_k_heads
+            query = query.repeat_interleave(repeat_factor, dim=2)
+            key = key.repeat_interleave(repeat_factor, dim=2)
+
+        if not use_precomputed_states:
+            core_attn_out, last_recurrent_state = self.chunk_gated_delta_rule(query,
+                                                                              key,
+                                                                              value,
+                                                                              g=g,
+                                                                              beta=beta,
+                                                                              initial_state=None,
+                                                                              output_final_state=cache_params
+                                                                              is not None,
+                                                                              use_qk_l2norm_in_kernel=True)
+        else:
+            core_attn_out, last_recurrent_state = self.recurrent_gated_delta_rule(query,
+                                                                                  key,
+                                                                                  value,
+                                                                                  g=g,
+                                                                                  beta=beta,
+                                                                                  initial_state=recurrent_state,
+                                                                                  output_final_state=cache_params
+                                                                                  is not None,
+                                                                                  use_qk_l2norm_in_kernel=True)
+
+        if cache_params is not None:
+            cache_params.update_recurrent_state(last_recurrent_state, self.layer_idx)
+
+        core_attn_out = core_attn_out.reshape(-1, self.head_v_dim)
+        z = z.reshape(-1, self.head_v_dim)
+        core_attn_out = self.norm(core_attn_out, z)
+        core_attn_out = core_attn_out.reshape(batch_size, seq_len, -1)
+
+        return self.out_proj(core_attn_out)
 
 
 class RMSNormalize(nn.Module):
