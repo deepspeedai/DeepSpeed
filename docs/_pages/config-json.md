@@ -763,7 +763,7 @@ Configuring the asynchronous I/O module for offloading parameter and optimizer s
 | Submit requests to storage device in an overlapped fashion without waiting for completion of earlier requests. | `true`  |
 
 ### Tensor Parallel (AutoTP)
-Configure AutoTP tensor parallelism for training via the DeepSpeed config and hybrid TP + ZeRO. AutoTP supports ZeRO stages 0, 1, and 2 (stage 3 is not supported). `deepspeed.tp_model_init()` remains supported for backward compatibility but is not required when `tensor_parallel` is set in the config.
+Configure AutoTP tensor parallelism for training via the DeepSpeed config and hybrid TP + ZeRO. AutoTP supports ZeRO stages 0, 1, and 2. ZeRO stage 3 is supported only for inference (no optimizer); training with stage 3 is not yet supported. `deepspeed.tp_model_init()` remains supported for backward compatibility but is not required when `tensor_parallel` is set in the config.
 
 When a HuggingFace model provides a built-in `tp_plan` (via `model.config.base_model_tp_plan`), DeepSpeed automatically detects and uses it. In this case, neither `preset_model` nor `partition_config` is required -- just set `autotp_size`. If `partition_config` is also provided, it takes precedence over the model's `tp_plan`.
 ```json

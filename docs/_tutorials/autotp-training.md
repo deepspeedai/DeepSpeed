@@ -212,7 +212,7 @@ For Grouped Query Attention with different Q/K/V sizes:
 
 ## Limitations
 
-1. **ZeRO Stage 3 not supported**: AutoTP currently only works with ZeRO stages 0, 1, and 2.
+1. **ZeRO Stage 3 training not supported**: AutoTP with ZeRO stage 3 is supported only for inference (no optimizer). Training with an optimizer is blocked until TP-aware checkpoint consolidation is implemented.
 
 2. **TP size must divide model dimensions**: The tensor parallel size must evenly divide the attention head count and hidden dimensions.
 

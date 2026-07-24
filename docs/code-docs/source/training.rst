@@ -392,7 +392,7 @@ See :ref:`autotp-training-init-details` for more details.
     )
 
 .. note::
-   AutoTP training supports ZeRO stages 0, 1, and 2. ZeRO Stage 3 is not supported.
+   AutoTP training supports ZeRO stages 0, 1, and 2. ZeRO stage 3 is supported only for inference (no optimizer).
 
 .. _autotp-training-init-details:
 
