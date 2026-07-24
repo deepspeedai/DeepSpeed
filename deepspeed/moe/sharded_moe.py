@@ -224,6 +224,10 @@ def top1gating(logits: Tensor,
             new_capacity = torch.ceil(new_capacity / tp).mul(tp).to(new_capacity.dtype)
         # Make sure the capacity value does not exceed the number of tokens.
         capacity = min(new_capacity, torch.tensor(mask1.size(0)).to(new_capacity.device))
+    else:
+        # Same guard for the drop branch: capacity feeds torch.topk(..., dim=0) over the token
+        # dimension in _top_idx below, which requires capacity <= num_tokens.
+        capacity = min(capacity, torch.tensor(mask1.size(0)).to(capacity.device))
 
     # Compute l_aux
     me = torch.mean(gates, dim=0)
@@ -403,6 +407,11 @@ def topkgating(
     if drop_tokens:
         # Calculate configured capacity and remove locations outside capacity from mask
         capacity = _capacity(gates, torch.tensor(capacity_factor * k), torch.tensor(min_capacity))
+        # Make sure the capacity value does not exceed the number of tokens. The drop_policy=='probs'
+        # branch below selects tokens with torch.topk(..., k=capacity, dim=0) over the token
+        # dimension, which requires capacity <= num_tokens; #5353 added this same clamp to
+        # top1gating's no-drop branch but not to the drop branches.
+        capacity = min(capacity, torch.tensor(gates.size(0)).to(capacity.device))
         # update mask and locations by capacity
 
         if drop_policy == 'probs':
