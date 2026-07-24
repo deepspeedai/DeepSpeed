@@ -12,6 +12,7 @@ import pytest
 import torch.nn as nn
 
 from deepspeed.module_inject.auto_tp import AutoTP, AutoTPConfig, PartitionType, TPLayerSpec
+from deepspeed.module_inject.layers import LinearLayer, LmHeadLinearAllreduce
 
 
 class SubAttn(nn.Module):
@@ -39,6 +40,17 @@ class DummyModel(nn.Module):
         self.embed = nn.Embedding(100, 32)
         self.layers = nn.ModuleList([DecoderLayer() for _ in range(num_layers)])
         self.head = nn.Linear(32, 100, bias=False)
+
+
+class OutputModel(nn.Module):
+
+    def __init__(self, tied):
+        super().__init__()
+        self.config = type("Config", (), {"tie_word_embeddings": not tied})()
+        self.embed_tokens = nn.Embedding(100, 32)
+        self.lm_head = nn.Linear(32, 100, bias=False)
+        if tied:
+            self.lm_head.weight = self.embed_tokens.weight
 
 
 def _build_config():
@@ -121,6 +133,56 @@ def test_nested_depth_correct():
     for layer_idx in range(3):
         assert f"layers.{layer_idx}.self_attn.q_proj" in matched_names
         assert f"layers.{layer_idx}.self_attn.o_proj" in matched_names
+
+
+def _build_gathered_lm_head_autotp(model, mp_size=1):
+    config = AutoTPConfig(layer_specs=[
+        TPLayerSpec(
+            patterns=[r".*lm_head\.weight$"],
+            partition_type=PartitionType.COLUMN,
+            gather_output=True,
+        ),
+    ])
+    autotp = AutoTP(
+        module=model,
+        all_reduce_linears=[],
+        prefix="",
+        state_dict=None,
+        linear_layer_setting=None,
+        orig_layer_impl=None,
+        partition_config=config,
+    )
+    autotp.set_tensor_parallel_config(mp_size, None)
+    autotp.update_linear_policies()
+    return autotp
+
+
+def test_gathered_lm_head_uses_column_parallel_layer_when_untied():
+    model = OutputModel(tied=False)
+    _build_gathered_lm_head_autotp(model)._replace_module(model)
+
+    assert isinstance(model.lm_head, LinearLayer)
+    assert model.lm_head.gather_output
+
+
+def test_gathered_lm_head_falls_back_for_runtime_parameter_tie():
+    model = OutputModel(tied=True)
+    assert model.lm_head.weight is model.embed_tokens.weight
+
+    _build_gathered_lm_head_autotp(model)._replace_module(model)
+
+    assert isinstance(model.embed_tokens, nn.Embedding)
+    assert isinstance(model.lm_head, nn.Linear)
+    assert model.lm_head.weight is model.embed_tokens.weight
+
+
+def test_gathered_lm_head_falls_back_to_legacy_allreduce_when_output_dim_is_uneven():
+    model = OutputModel(tied=False)
+    model.lm_head = nn.Linear(32, 101, bias=False)
+
+    _build_gathered_lm_head_autotp(model, mp_size=2)._replace_module(model)
+
+    assert isinstance(model.lm_head, LmHeadLinearAllreduce)
 
 
 if __name__ == "__main__":

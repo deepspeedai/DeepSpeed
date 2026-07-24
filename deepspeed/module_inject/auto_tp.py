@@ -16,6 +16,7 @@ from deepspeed.accelerator import get_accelerator
 from .fusedqkv_utils import require_tp_fused_qkvw
 from deepspeed.module_inject.tp_shard import get_shard_size, get_shard_size_list
 from deepspeed.utils import groups
+from deepspeed.utils.logging import print_dist
 from deepspeed.module_inject.layers import is_autotp_training_mode
 from .autotp_config import TPLayerSpec, AutoTPConfig, PartitionType
 
@@ -214,6 +215,8 @@ class AutoTP():
         self.linear_policies = None
         self.conv_linear_layer = False
         self.partition_config = partition_config
+        self._gathered_column_tie_fallbacks_configured = False
+        self._tied_gathered_column_module_names = set()
         TensorParallel_Layer.set_keep_module_on_host(keep_module_on_host)
 
     def in_module_list(module, module_list):
@@ -424,6 +427,17 @@ class AutoTP():
         model_type = self._get_model_type()
         spec = self.partition_config.find_matching_spec(param_name, model_type)
 
+        if any(part in ("lm_head", "embed_out") for part in name.split('.')):
+            spec_details = None
+            if spec is not None:
+                spec_details = {
+                    "patterns": spec.patterns,
+                    "partition_type": spec.partition_type.value,
+                    "gather_output": spec.gather_output,
+                }
+            print_dist(f"AutoTP lm_head spec match: parameter={param_name!r}; matched_spec={spec_details!r}",
+                       ranks=[0])
+
         if spec is None:
             # No matching spec found
             if self.partition_config.strict_mode:
@@ -461,13 +475,30 @@ class AutoTP():
 
     def _create_column_parallel_layer(self, module, spec: TPLayerSpec, name: str):
         """Create column-parallel layer (AllReduce in backward)."""
+        if spec.gather_output and self.mp_size is not None and self.mp_size > 1:
+            output_dim = module.weight.shape[0]
+            if output_dim % self.mp_size != 0:
+                if any(part in ("lm_head", "embed_out") for part in name.split('.')):
+                    print_dist(
+                        f"AutoTP: '{name}' uses gather_output with uneven output dim {output_dim} and tp_size="
+                        f"{self.mp_size}; falling back to legacy LmHeadLinearAllreduce for checkpoint-safe "
+                        "consolidation.",
+                        ranks=[0],
+                    )
+                    return LmHeadLinearAllreduce(module, self.mp_group)
+                raise NotImplementedError(
+                    f"AutoTP gather_output requires output dimension divisible by tp_size. Layer '{name}' has "
+                    f"output dim {output_dim} with tp_size={self.mp_size}.")
+
         if self.conv_linear_layer:
-            return conv_LinearLayer(module, self.mp_group, name=name)
+            return conv_LinearLayer(module, self.mp_group, name=name, gather_output=spec.gather_output)
         # Only use fused-QKV heuristics when no partition_config is provided.
         elif self.partition_config is None and require_tp_fused_qkvw(name, self.mp_size):
             # Check and handle fused qkv for TP
             return fused_LinearLayer(module, self.mp_group, fused_module=self.module)
         if spec.shape is not None:
+            if spec.gather_output:
+                raise NotImplementedError("AutoTP gather_output does not yet support shaped sub-parameter layers.")
             return SubParamLinearLayer(
                 module,
                 self.mp_group,
@@ -475,7 +506,57 @@ class AutoTP():
                 partition_dim=spec.get_partition_dim(),
                 name=name,
             )
-        return LinearLayer(module, self.mp_group, name=name)
+        if spec.gather_output:
+            print_dist(f"AutoTP: replacing '{name}' with LinearLayer(gather_output=True)", ranks=[0])
+        return LinearLayer(module, self.mp_group, name=name, gather_output=spec.gather_output)
+
+    def _configure_gathered_column_tie_fallbacks(self):
+        """Configure a replicated fallback for gathered output layers tied to embeddings."""
+        if self._gathered_column_tie_fallbacks_configured or self.partition_config is None:
+            return
+
+        named_modules = list(self.module.named_modules())
+        embeddings = [(name, module) for name, module in named_modules
+                      if isinstance(module, nn.Embedding) and hasattr(module, "weight")]
+        get_input_embeddings = getattr(self.module, "get_input_embeddings", None)
+        if callable(get_input_embeddings):
+            input_embedding = get_input_embeddings()
+            if input_embedding is not None and hasattr(input_embedding, "weight"):
+                input_embedding_name = next(
+                    (name for name, module in named_modules if module is input_embedding),
+                    None,
+                )
+                is_known_embedding = any(module is input_embedding for _, module in embeddings)
+                if input_embedding_name is not None and not is_known_embedding:
+                    embeddings.append((input_embedding_name, input_embedding))
+        if not embeddings:
+            self._gathered_column_tie_fallbacks_configured = True
+            return
+
+        model_type = self._get_model_type()
+        for module_name, module in named_modules:
+            if not module_name or isinstance(module, nn.Embedding) or not hasattr(module, "weight"):
+                continue
+
+            tied_embedding_name = next(
+                (embedding_name for embedding_name, embedding in embeddings if module.weight is embedding.weight),
+                None,
+            )
+            if tied_embedding_name is None:
+                continue
+
+            spec = self.partition_config.find_matching_spec(module_name + ".weight", model_type)
+            if spec is None or spec.partition_type != PartitionType.COLUMN or not spec.gather_output:
+                continue
+
+            self._tied_gathered_column_module_names.update((module_name, tied_embedding_name))
+            print_dist(
+                f"AutoTP: '{module_name}.weight' is tied to '{tied_embedding_name}.weight'; leaving both modules "
+                "replicated because coupled vocabulary-parallel embedding is not supported yet.",
+                ranks=[0],
+            )
+
+        self._gathered_column_tie_fallbacks_configured = True
 
     def _get_model_type(self) -> Optional[str]:
         """Extract model type from module config or class name."""
@@ -570,6 +651,9 @@ class AutoTP():
                 self._replace_module(child, full_name, "")
 
     def _replace_module(self, r_module, prev_name='', prev_class_name=''):
+        if prev_name == '' and prev_class_name == '':
+            self._configure_gathered_column_tie_fallbacks()
+
         for name, child in r_module.named_children():
             if getattr(child, "_is_autoep_layer", False):
                 full_name = prev_name + '.' + name if prev_name else name
@@ -595,7 +679,9 @@ class AutoTP():
             # instead of linear_policies. This keeps all pattern logic centralized here.
             if self.partition_config is not None:
                 full_name = class_name + '.' + name if class_name else name
-                if isinstance(child, nn.Embedding):
+                if full_name in self._tied_gathered_column_module_names:
+                    continue
+                elif isinstance(child, nn.Embedding):
                     # Check if embedding matches any pattern
                     param_name = full_name + ".weight"
                     model_type = self._get_model_type()

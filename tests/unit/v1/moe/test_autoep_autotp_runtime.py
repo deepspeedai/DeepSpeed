@@ -103,12 +103,27 @@ def test_autotp_reaches_autoep_shared_experts(monkeypatch):
 
     model = nn.Module()
     model.moe = AutoEPLike()
-    autotp = AutoTP.__new__(AutoTP)
+
+    autotp = AutoTP(
+        module=model,
+        all_reduce_linears=[],
+        prefix="",
+        state_dict=None,
+        linear_layer_setting=None,
+        orig_layer_impl=None,
+        partition_config=None,
+    )
+
     calls = []
-    monkeypatch.setattr(autotp, "_replace_autoep_shared_experts", lambda child, name: calls.append((child, name)))
+    monkeypatch.setattr(
+        autotp,
+        "_replace_autoep_shared_experts",
+        lambda child, name: calls.append((child, name)),
+    )
 
-    AutoTP._replace_module(autotp, model)
+    result = autotp._replace_module(model)
 
+    assert result is model
     assert calls == [(model.moe, "moe")]
 
 
