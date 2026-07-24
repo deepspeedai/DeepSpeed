@@ -1364,7 +1364,7 @@ class Init(InsertPostInitMethodToModuleSubClasses):
                     start = start_param + param.ds_tensor.ds_numel * rank_in_group
                     flat_tensor.narrow(0, start, param.ds_tensor.ds_numel).copy_(param.ds_tensor)
 
-                    start_param += param.ds_numel
+                    start_param += param.ds_numel_aligned
 
                 handle = dist.all_reduce(flat_tensor, group=ds_process_group, async_op=True)
 
