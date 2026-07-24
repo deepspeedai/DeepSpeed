@@ -392,7 +392,10 @@ See :ref:`autotp-training-init-details` for more details.
     )
 
 .. note::
-   AutoTP training supports ZeRO stages 0, 1, and 2. ZeRO Stage 3 is not supported.
+   AutoTP training supports ZeRO stages 0, 1, 2, and 3. With ZeRO Stage 3, checkpoint
+   save/load and universal checkpoint conversion gather weights across both the ZeRO
+   data-parallel and the tensor-parallel dimensions, so saved/converted checkpoints are
+   complete.
 
 .. _autotp-training-init-details:
 
