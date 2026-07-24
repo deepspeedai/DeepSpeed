@@ -2849,6 +2849,7 @@ class DeepSpeedEngine(Module):
             if not bf16_optimizer:
                 self.optimizer.backward_epilogue()
             self.optimizer.exit_backward()
+            self.optimizer.retain_graph_on_current_backward = False
 
         if self.is_deepcompile_active():
             deepcompile_backward_epilogue()
@@ -3010,7 +3011,7 @@ class DeepSpeedEngine(Module):
                     optimizer.reduce_ready_partitions_and_remove_grads(param)
         optimizer.independent_gradient_partition_epilogue()
 
-    def scale(self, loss):
+    def scale(self, loss, retain_graph=False):
         r"""Apply loss scaler for manual backward pass.
 
         Use this method when calling loss.backward() directly instead of engine.backward().
@@ -3028,6 +3029,8 @@ class DeepSpeedEngine(Module):
 
         Arguments:
             loss: Scalar loss tensor to be scaled
+            retain_graph: bool, default: false
+                forward on user defined choice of retain_graph
 
         Returns:
             Scaled loss tensor ready for .backward() call
@@ -3053,6 +3056,8 @@ class DeepSpeedEngine(Module):
         # Apply loss scaler based on optimizer type
         scaled_loss = loss
         if isinstance(self.optimizer, ZeROOptimizer):
+            scaled_loss = self.optimizer.scale_if_loss(loss)
+            self.optimizer.retain_graph_on_current_backward = retain_graph
             scaled_loss = self.optimizer.scale_if_loss(scaled_loss)
         elif self.torch_autocast_z0_gradscaler:
             scaled_loss = self.torch_autocast_z0_gradscaler.scale(scaled_loss)
@@ -3093,6 +3098,7 @@ class DeepSpeedEngine(Module):
         # TODO: handle these scaling with direct calls to loss.backward()
         if isinstance(self.optimizer, ZeROOptimizer):
             loss = self.optimizer.scale_if_loss(loss)
+            self.optimizer.retain_graph_on_current_backward = retain_graph
         elif self.torch_autocast_z0_gradscaler:
             loss = self.torch_autocast_z0_gradscaler.scale(loss)
 
@@ -3110,6 +3116,8 @@ class DeepSpeedEngine(Module):
             self._backward_epilogue()
 
         self._running_engine_backward = False
+        if isinstance(self.optimizer, ZeROOptimizer):
+            self.optimizer.retain_graph_on_current_backward = False
 
         return gas_scaled_loss
 
