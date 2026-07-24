@@ -628,10 +628,6 @@ class DeepSpeedEngine(Module):
         and registering a pre-hook to ensure that the Dataloader inputs are consistent across ranks.
         """
         self._set_client_model(model)
-        # AutoTP + ZeRO-3 is supported only for ZeRO-Inference (no optimizer).
-        # With an optimizer the TP-aware checkpoint consolidation path is not yet
-        # implemented, so save_16bit_model()/save_checkpoint would silently drop
-        # TP shards. Block the training path until that is fixed (tracked separately).
         if self.zero_optimization_stage() > 2 and (self.client_optimizer or self.optimizer_name()):
             raise NotImplementedError("AutoTP together with ZeRO stage 3 is currently supported only for inference "
                                       "(no optimizer). Running it with an optimizer is disabled because TP-aware "
