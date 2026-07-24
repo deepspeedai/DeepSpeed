@@ -4799,6 +4799,7 @@ class DeepSpeedEngine(Module):
                     local_expert_id = None
                     if not m:
                         logger.warning(f'No expert found in key {key}.')
+                        continue
                     else:
                         local_expert_id = m.group(1)
 
