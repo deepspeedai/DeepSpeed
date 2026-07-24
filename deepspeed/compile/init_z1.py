@@ -4,6 +4,7 @@
 # DeepSpeed Team
 
 import copy
+from functools import partial
 
 import torch
 
@@ -185,5 +186,9 @@ def init_z1(engine, backend, compile_config, compile_kwargs, schedule=None, use_
 
     init_schedule(schedule)
 
-    engine.launch_compile_passes = launch_compile_passes
-    return make_backend(backend, compile_config, compile_kwargs=compile_kwargs)
+    engine._deepcompile_owned_frames = set()
+    engine.launch_compile_passes = partial(launch_compile_passes, owned_frames=engine._deepcompile_owned_frames)
+    return make_backend(backend,
+                        compile_config,
+                        compile_kwargs=compile_kwargs,
+                        owned_frames=engine._deepcompile_owned_frames)
