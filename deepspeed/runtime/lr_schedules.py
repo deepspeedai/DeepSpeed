@@ -331,6 +331,9 @@ class LRRangeTest(object):
         else:
             self.min_lr = [lr_range_test_min_lr] * len(self.optimizer.param_groups)
 
+        if not isinstance(lr_range_test_step_size, int) or lr_range_test_step_size <= 0:
+            raise ValueError(f"lr_range_test_step_size must be a positive integer, got {lr_range_test_step_size}")
+
         self.step_size = lr_range_test_step_size
         self.step_rate = lr_range_test_step_rate
         self.last_batch_iteration = last_batch_iteration
@@ -483,6 +486,9 @@ class OneCycle(object):
             cycle_second_step_size) if cycle_second_step_size is not None else cycle_first_step_size
 
         self.total_size = cycle_first_step_size + cycle_second_step_size
+        if self.total_size <= 0:
+            raise ValueError("cycle_first_step_size + cycle_second_step_size must be positive, got "
+                             f"{cycle_first_step_size} + {cycle_second_step_size} = {self.total_size}")
         self.step_ratio = cycle_first_step_size / self.total_size
         self.first_stair_count = cycle_first_stair_count
         self.second_stair_count = cycle_first_stair_count if cycle_second_stair_count is None else cycle_second_stair_count
