@@ -40,6 +40,7 @@ from deepspeed.runtime.torch_autocast import sort_dtypes, get_comm_dtype, has_co
 partitioned_param_data_shape = [0]
 zero_init_context = 0
 top_level_context = None
+_GATHERED_PARAM_CONTEXT_DEPTH_ATTR = "_deepspeed_gathered_param_context_depth"
 
 
 class DeepSpeedTensorOverride(Enum):
@@ -2364,13 +2365,37 @@ class GatheredParameters:
     def __enter__(self):
         if not self.enabled:
             return
+        overlapping_param_ids = [
+            int(param.ds_id) for param in self.params if getattr(param, _GATHERED_PARAM_CONTEXT_DEPTH_ATTR, 0) > 0
+        ]
+        if overlapping_param_ids:
+            raise RuntimeError("Nested GatheredParameters contexts cannot overlap parameters; "
+                               f"parameter ds_ids already gathered by an outer context: {overlapping_param_ids}")
         self.params[0].all_gather(param_list=self.params)
+        for param in self.params:
+            depth = getattr(param, _GATHERED_PARAM_CONTEXT_DEPTH_ATTR, 0)
+            setattr(param, _GATHERED_PARAM_CONTEXT_DEPTH_ATTR, depth + 1)
+            fallback_owner = getattr(param, "_deepcompile_z3_eager_fallback_owner", None)
+            if fallback_owner is not None:
+                fallback_owner.transfer_gathered_param_to_user(param)
         if self.src_rank is None and self.enable_sanity_checks:
             self._param_versions = [(p, p.data.data_ptr(), p._version) for p in self.params]
 
     def __exit__(self, *exc):
         if not self.enabled:
             return
+        try:
+            return self._exit(*exc)
+        finally:
+            for param in self.params:
+                depth = getattr(param, _GATHERED_PARAM_CONTEXT_DEPTH_ATTR, 0)
+                if depth <= 1:
+                    if hasattr(param, _GATHERED_PARAM_CONTEXT_DEPTH_ATTR):
+                        delattr(param, _GATHERED_PARAM_CONTEXT_DEPTH_ATTR)
+                else:
+                    setattr(param, _GATHERED_PARAM_CONTEXT_DEPTH_ATTR, depth - 1)
+
+    def _exit(self, *exc):
         if self.src_rank is None:
             if self._param_versions:
                 modified_params = [

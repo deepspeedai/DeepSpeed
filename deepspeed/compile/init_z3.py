@@ -46,7 +46,7 @@ def init_z3(engine, backend, compile_config, compile_kwargs, schedule=None):
     dc.init(engine.data_parallel_group, compile_config, engine.zero_reduce_bucket_size())
 
     engine._deepcompile_z3_eager_fallback = DeepCompileZ3EagerFallback(engine)
-    add_post_backward_hook(engine._deepcompile_z3_eager_fallback.release_gathered_params)
+    add_post_backward_hook(engine._deepcompile_z3_eager_fallback.complete_backward)
 
     if use_opt:
         optimizer.parameter_offload._remove_module_hooks()

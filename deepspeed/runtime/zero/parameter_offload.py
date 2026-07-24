@@ -63,8 +63,13 @@ class ZeROOrderedDict(OrderedDict):
 
         if hasattr(param, "ds_status") and param.ds_status == ZeroParamStatus.NOT_AVAILABLE:
             if self._parent_module._parameters._in_forward and not torch.compiler.is_compiling():
-                from deepspeed.compile.z3_eager_fallback import get_active_z3_eager_fallback
+                from deepspeed.compile.z3_eager_fallback import get_active_z3_eager_fallback, is_dynamo_guard_evaluation
                 fallback = get_active_z3_eager_fallback()
+                if fallback is not None and is_dynamo_guard_evaluation():
+                    # A guard only inspects parameter identity/metadata. Gathering here
+                    # would retain a full parameter before the compiled forward begins.
+                    fallback.record_guard_suppressed_param(param)
+                    return param
                 if fallback is None:
                     register_external_parameter(FWD_MODULE_STACK[-1], param)
                     param.all_gather()
