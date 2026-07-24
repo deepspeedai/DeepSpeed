@@ -723,6 +723,23 @@ def _load_universal_checkpoint_info_stage3(model_files):
     return model_state.get(UNIVERSAL_CHECKPOINT_INFO) or {}
 
 
+def _group_per_tp_shapes(slice_shapes_by_tp, pp_degree, tp_degree):
+    # mp_rank_files are tp-major (tp0_pp0, tp0_pp1, ..., tp1_pp0, ...).
+    # Group slice_shapes_by_tp entries by TP rank, union PP stages within each
+    # TP rank so that PP-local parameters are not lost, then build one per-TP
+    # shape list per param name.
+    per_tp = []
+    for tp in range(tp_degree):
+        tp_dict = {}
+        for pp in range(pp_degree):
+            tp_dict.update(slice_shapes_by_tp[tp * pp_degree + pp])
+        per_tp.append(tp_dict)
+    all_names = set()
+    for d in per_tp:
+        all_names.update(d.keys())
+    return {name: [d.get(name) for d in per_tp] for name in all_names}
+
+
 def _save_optimizer_state(args, ds_checkpoint):
     sharded_states = [BASE_OPTIMIZER_STATE, PARAM_SLICE_MAPPINGS, SINGLE_PARTITION_OF_FP32_GROUPS]
     sd = ds_checkpoint.get_zero_checkpoint_state(pp_index=0, tp_index=0, dp_index=0)
@@ -843,13 +860,15 @@ def main(args):
         checkpoint_paths = _create_checkpoint_paths(args.output_folder, iteration, ds_checkpoint.tp_degree,
                                                     ds_checkpoint.pp_degree)
 
-        # Collect per-tp param shapes (each mp_rank file stores its own TP shard shapes).
-        # Keep one shape list per param so uneven TP shards merge to the correct per-rank shape.
+        # Collect per-tp param shapes.  mp_rank_files are tp-major (tp0_pp0, tp0_pp1, ...,
+        # tp1_pp0, ...).  Group by TP rank, union PP stages within each TP rank so that
+        # PP-local parameters are not lost, then build one per-tp shape list per param
+        # for the TP-aware merge to reshape each TP slice correctly.
         slice_shapes_by_tp = []
         for mp_rank_file in ds_checkpoint.mp_rank_files:
             mp_sd = torch.load(mp_rank_file, map_location=torch.device('cpu'), weights_only=False)
             slice_shapes_by_tp.append(dict((k, v) for d in mp_sd[PARAM_SHAPES] for k, v in d.items()))
-        slice_shapes = {name: [d[name] for d in slice_shapes_by_tp] for name in slice_shapes_by_tp[0]}
+        slice_shapes = _group_per_tp_shapes(slice_shapes_by_tp, ds_checkpoint.pp_degree, ds_checkpoint.tp_degree)
         temp_dir = os.path.join(args.output_folder, 'tmp')
 
         print('*** 1. Extracting ZeRO fragments')

@@ -16,7 +16,7 @@ from deepspeed.checkpoint.constants import (CAT_DIM, FP32_FLAT_GROUPS, FP32_WEIG
                                             UNIVERSAL_CHECKPOINT_VERSION_KEY, UNIVERSAL_CHECKPOINT_VERSION_VALUE,
                                             VOCABULARY_PARAMETER_PATTERNS, ZERO_STAGE)
 from deepspeed.checkpoint.universal_checkpoint import SubparamShape as CheckpointSubparamShape
-from deepspeed.checkpoint.ds_to_universal import main as convert_to_universal, merge_tp_slices
+from deepspeed.checkpoint.ds_to_universal import _group_per_tp_shapes, main as convert_to_universal, merge_tp_slices
 from deepspeed.checkpoint.universal_checkpoint import (_get_param_uc_restore_meta, _resolve_autotp_partition,
                                                        load_hp_checkpoint_state)
 from deepspeed.runtime.bf16_optimizer import BF16_Optimizer
@@ -434,3 +434,33 @@ def test_stage3_no_tp_universal_conversion_unchanged(tmp_path):
     fp32_ckpt = torch.load(out_dir / "zero" / "fc.weight" / "fp32.pt", weights_only=False)
     # DP-only merge writes the flat raw tensor (no reshape / no {PARAM: ...} dict).
     torch.testing.assert_close(fp32_ckpt, full_weight.reshape(-1))
+
+
+def test_group_per_tp_shapes_handles_pp_local_params():
+    # mp_rank_files are tp-major in the stage<=2 path: tp0_pp0, tp0_pp1, ..., tp1_pp0, ...
+    # PP-local params (only in some PP stages) must survive the per-TP PP-union.
+    slice_shapes_by_tp = [
+        {
+            'fc.weight': (3, 4),
+            'layer0.weight': (2, 4)
+        },  # tp0_pp0
+        {
+            'fc.weight': (3, 4),
+            'layer1.weight': (2, 4)
+        },  # tp0_pp1
+        {
+            'fc.weight': (2, 4),
+            'layer0.weight': (2, 4)
+        },  # tp1_pp0 (uneven fc.shape)
+        {
+            'fc.weight': (2, 4),
+            'layer1.weight': (2, 4)
+        },  # tp1_pp1
+    ]
+    result = _group_per_tp_shapes(slice_shapes_by_tp, pp_degree=2, tp_degree=2)
+
+    assert 'layer0.weight' in result, 'PP-local param lost'
+    assert 'layer1.weight' in result, 'PP-local param lost'
+    assert result['fc.weight'] == [(3, 4), (2, 4)]
+    assert result['layer0.weight'] == [(2, 4), (2, 4)]
+    assert result['layer1.weight'] == [(2, 4), (2, 4)]
