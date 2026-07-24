@@ -880,6 +880,38 @@ def _no_gather_coalesced(params: Iterable[Parameter]) -> AllGatherCoalescedHandl
     return NoGatherCoalescedHandle(params)
 
 
+def _contradicting_single_rank_pg_error(dp_world_size, data_parallel_group, env=None):
+    """Detect the silent single-rank fallback described in #8084.
+
+    When a multi-process launcher (``deepspeed``, ``torchrun``, accelerate, ...) sets ``WORLD_SIZE > 1`` but the
+    process group resolved by ``zero.Init`` is single-rank (typically because a size-1 group was initialized before
+    ``zero.Init`` ran, e.g. by ``from_pretrained`` or another library), ``zero.Init`` would create every parameter
+    whole on every rank instead of partitioning it, so each rank allocates the full (unsharded) model and typically
+    OOMs. The failure is otherwise silent and looks exactly like a "model too big" OOM. ZeRO-3 cannot work correctly
+    with a process group that contradicts the launcher world, so return an actionable error message in that case,
+    else ``None``.
+
+    Only the default (world-group) path is checked: an explicitly supplied ``data_parallel_group`` of size 1 is
+    treated as intentional.
+    """
+    if dp_world_size != 1 or data_parallel_group is not None:
+        return None
+    env = os.environ if env is None else env
+    try:
+        launcher_world_size = int(env.get("WORLD_SIZE", "0") or "0")
+    except (TypeError, ValueError):
+        return None
+    if launcher_world_size <= 1:
+        return None
+    return (
+        "zero.Init resolved a process group of world_size=1, but the launcher environment reports "
+        f"WORLD_SIZE={launcher_world_size}. A single-rank process group was likely initialized before zero.Init ran "
+        "(for example, `from_pretrained` executed before `deepspeed.init_distributed()`). Parameters would NOT be "
+        "partitioned: every rank would allocate the full model and likely OOM. Call `deepspeed.init_distributed()` "
+        "before constructing the model under zero.Init, or pass an explicit `data_parallel_group` if a single-rank "
+        "group is intentional.")
+
+
 # Replaces all parameters in module with Scattered Parameters
 class Init(InsertPostInitMethodToModuleSubClasses):
     param_id = 0
@@ -1034,6 +1066,10 @@ class Init(InsertPostInitMethodToModuleSubClasses):
 
         self.rank = dist.get_rank(group=self.ds_process_group)
         self.dp_world_size = dist.get_world_size(group=self.ds_process_group)
+
+        _pg_contradiction = _contradicting_single_rank_pg_error(self.dp_world_size, data_parallel_group)
+        if _pg_contradiction is not None:
+            raise RuntimeError(_pg_contradiction)
 
         self.zero_param_process_group = zero_param_parallel_group
         if _ds_config is not None and _ds_config.zero_config.zero_hpz_partition_size > 1 and self.zero_param_process_group is None:
