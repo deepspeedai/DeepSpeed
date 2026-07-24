@@ -196,7 +196,7 @@ class DeepSpeedHybridEngine(DeepSpeedEngine):
                             if len(self.all_lora_params) > 0:
                                 self._fuse_lora_layer(layer_id)
 
-                            if self.mpu is not None:
+                            if self.mpu is None:
                                 self._inference_containers[layer_id].apply_tensor_parallelism(self.mp_replace,
                                                                                               reversed_dim=True)
 
@@ -220,6 +220,17 @@ class DeepSpeedHybridEngine(DeepSpeedEngine):
                     inputs = (output, *inputs[1:])
                 else:
                     kwargs['input_ids'] = output
+
+                # all gather attention mask
+                attn_mask_shape = kwargs['attention_mask'].shape
+                output_attn_mask = torch.zeros(
+                    (attn_mask_shape[0] * self._config.hybrid_engine.inference_tp_size,) + attn_mask_shape[1:],
+                    dtype=kwargs['attention_mask'].dtype,
+                    device=kwargs['attention_mask'].device)
+                attn_mask_cont = kwargs['attention_mask'].contiguous()
+                dist.all_gather_into_tensor(output_attn_mask, attn_mask_cont, group=self.mp_group)
+
+                kwargs['attention_mask'] = output_attn_mask
 
                 self.retake_inference_cache()
 
