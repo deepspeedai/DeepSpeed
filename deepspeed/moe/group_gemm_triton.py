@@ -48,7 +48,7 @@ try:
 except ImportError:
     _TRITON_AVAILABLE = False
 
-__all__ = ["group_gemm", "grouped_mm_triton", "is_available"]
+__all__ = ["group_gemm_triton", "is_available"]
 
 _SUPPORTED_DTYPES = (torch.float16, torch.bfloat16, torch.float32)
 
@@ -74,7 +74,7 @@ if _TRITON_AVAILABLE:
 
     @triton.autotune(configs=_ab_configs(), key=["KC", "NO", "NUM_GROUPS"])
     @triton.jit
-    def _group_gemm_ab_kernel(
+    def _group_gemm_kernel(
         a_ptr,  # [M, KC]
         b_ptr,  # [NUM_GROUPS, KC, NO]
         out_ptr,  # [M, NO]
@@ -91,7 +91,6 @@ if _TRITON_AVAILABLE:
         stride_om,
         stride_on,
         NUM_GROUPS: tl.constexpr,
-        IN_PRECISION: tl.constexpr,
         BLOCK_M: tl.constexpr,
         BLOCK_N: tl.constexpr,
         BLOCK_K: tl.constexpr,
@@ -146,7 +145,7 @@ if _TRITON_AVAILABLE:
                 mask=mask_k[:, None] & mask_n[None, :],
                 other=0.0,
             )
-            acc += tl.dot(a_tile, b_tile, input_precision=IN_PRECISION)
+            acc += tl.dot(a_tile, b_tile)
 
         out = acc.to(out_ptr.dtype.element_ty)
         tl.store(
@@ -184,7 +183,6 @@ if _TRITON_AVAILABLE:
         stride_ok,
         stride_on,
         NUM_GROUPS: tl.constexpr,
-        IN_PRECISION: tl.constexpr,
         BLOCK_M: tl.constexpr,
         BLOCK_K: tl.constexpr,
         BLOCK_N: tl.constexpr,
@@ -218,7 +216,7 @@ if _TRITON_AVAILABLE:
                 mask=mask_m[:, None] & mask_n[None, :],
                 other=0.0,
             )  # [BLOCK_M, BLOCK_N]
-            acc += tl.dot(tl.trans(a_tile), g_tile, input_precision=IN_PRECISION)  # [BLOCK_K, BLOCK_N]
+            acc += tl.dot(tl.trans(a_tile), g_tile)  # [BLOCK_K, BLOCK_N]
 
         out = acc.to(out_ptr.dtype.element_ty)
         out_base = out_ptr + pid_e * stride_oe
@@ -255,12 +253,7 @@ def _group_meta(offs: torch.Tensor):
     return m_start, m_size
 
 
-def _input_precision(dtype: torch.dtype) -> str:
-    """Full-precision fp32 matmul, TF32 for the reduced-precision dtypes."""
-    return "ieee" if dtype == torch.float32 else "tf32"
-
-
-def _grouped_ab(mat_a: torch.Tensor, mat_b: torch.Tensor, offs: torch.Tensor) -> torch.Tensor:
+def _group_gemm(mat_a: torch.Tensor, mat_b: torch.Tensor, offs: torch.Tensor) -> torch.Tensor:
     """Forward-style grouped GEMM: a[M,KC] x b[E,KC,NO] -> out[M,NO], grouped over M."""
     M, KC = mat_a.shape
     E, _, NO = mat_b.shape
@@ -277,7 +270,7 @@ def _grouped_ab(mat_a: torch.Tensor, mat_b: torch.Tensor, offs: torch.Tensor) ->
         max_m_tiles = (M + block_m - 1) // block_m + E
         return (max_m_tiles, triton.cdiv(NO, meta["BLOCK_N"]))
 
-    _group_gemm_ab_kernel[grid](
+    _group_gemm_kernel[grid](
         mat_a,
         mat_b,
         out,
@@ -294,7 +287,6 @@ def _grouped_ab(mat_a: torch.Tensor, mat_b: torch.Tensor, offs: torch.Tensor) ->
         out.stride(0),
         out.stride(1),
         NUM_GROUPS=E,
-        IN_PRECISION=_input_precision(mat_a.dtype),
     )
     return out
 
@@ -333,7 +325,6 @@ def _grouped_dw(mat_a: torch.Tensor, grad_out: torch.Tensor, offs: torch.Tensor,
         out.stride(1),
         out.stride(2),
         NUM_GROUPS=E,
-        IN_PRECISION=_input_precision(mat_a.dtype),
     )
     return out
 
@@ -351,7 +342,7 @@ class _GroupGemmFn(torch.autograd.Function):
         #   ``.transpose(-2, -1)`` would trigger.
         b_kernel = mat_b.transpose(-2, -1) if trans_b else mat_b
         _validate(mat_a, b_kernel, offs)
-        out = _grouped_ab(mat_a.contiguous(), b_kernel, offs)
+        out = _group_gemm(mat_a.contiguous(), b_kernel, offs)
         ctx.save_for_backward(mat_a, mat_b, offs)
         ctx.trans_b = trans_b
         return out
@@ -368,7 +359,7 @@ class _GroupGemmFn(torch.autograd.Function):
             # out[m,n] = sum_k a[m,k] * b[g,n,k]  with b = mat_b [E, N, K].
             if ctx.needs_input_grad[0]:
                 # grad_a[m,k] = sum_n grad_out[m,n] * b[g,n,k] -> ab with b=mat_b (contract N).
-                grad_a = _grouped_ab(grad_out, mat_b, offs)
+                grad_a = _group_gemm(grad_out, mat_b, offs)
             if ctx.needs_input_grad[1]:
                 # grad_b[g,n,k] = sum_{m in g} grad_out[m,n] * a[m,k]
                 #   -> dw(grad_out[M,N], a[M,K]) = [E, N, K], i.e. mat_b's own layout (no copy).
@@ -376,15 +367,15 @@ class _GroupGemmFn(torch.autograd.Function):
         else:
             if ctx.needs_input_grad[0]:
                 # grad_a[m] = grad_out[m] @ b[group(m)]^T -> a[M,N] x bT[E,N,K] grouped over M.
-                grad_a = _grouped_ab(grad_out, mat_b.transpose(-2, -1), offs)
+                grad_a = _group_gemm(grad_out, mat_b.transpose(-2, -1), offs)
             if ctx.needs_input_grad[1]:
                 # grad_b[e] = a_e^T @ grad_out_e.
                 grad_b = _grouped_dw(mat_a.contiguous(), grad_out, offs, E)
         return grad_a, grad_b, None, None
 
 
-def group_gemm(mat_a: torch.Tensor, mat_b: torch.Tensor, offs: torch.Tensor,
-               trans_b: bool = False) -> torch.Tensor:
+def group_gemm_triton(mat_a: torch.Tensor, mat_b: torch.Tensor, offs: torch.Tensor,
+                      trans_b: bool = False) -> torch.Tensor:
     """Autograd-aware Triton grouped GEMM (2D x 3D), drop-in for ``torch._grouped_mm``.
 
     Args:
@@ -403,8 +394,3 @@ def group_gemm(mat_a: torch.Tensor, mat_b: torch.Tensor, offs: torch.Tensor,
         ``[M, N]`` tensor, same dtype as inputs.
     """
     return _GroupGemmFn.apply(mat_a, mat_b, offs, trans_b)
-
-
-def grouped_mm_triton(mat_a: torch.Tensor, mat_b: torch.Tensor, *, offs: torch.Tensor) -> torch.Tensor:
-    """Keyword-``offs`` alias matching the ``torch._grouped_mm(a, b, offs=...)`` call style."""
-    return group_gemm(mat_a, mat_b, offs)

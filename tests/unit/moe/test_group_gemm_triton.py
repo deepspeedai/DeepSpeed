@@ -14,7 +14,7 @@ import pytest
 import torch
 
 from deepspeed.accelerator import get_accelerator
-from deepspeed.moe.group_gemm_triton import group_gemm, is_available
+from deepspeed.moe.group_gemm_triton import group_gemm_triton, is_available
 
 if not is_available():
     pytest.skip("Triton is not available", allow_module_level=True)
@@ -25,7 +25,9 @@ if not (get_accelerator().is_available() and get_accelerator().device_name() == 
 
 def _tol(dtype):
     if dtype == torch.float32:
-        return dict(atol=1e-3, rtol=1e-3)
+        # fp32 uses Triton's default tl.dot precision (TF32 on Ampere), compared
+        # against the full-precision torch reference, so use a TF32-level tol.
+        return dict(atol=2e-2, rtol=2e-2)
     if dtype == torch.float16:
         return dict(atol=2e-2, rtol=2e-2)
     return dict(atol=3e-2, rtol=3e-2)  # bfloat16
@@ -71,7 +73,7 @@ def test_forward_matches_reference(counts, K, N, dtype):
     b = w.transpose(-2, -1)  # [E, K, N] non-contiguous view, as in ep_experts.py
     offs = _make_offs(counts, dev)
 
-    out = group_gemm(a, b, offs)
+    out = group_gemm_triton(a, b, offs)
     ref = _ref_grouped_mm(a.float(), b.float(), offs)
 
     assert out.shape == (M, N)
@@ -92,7 +94,7 @@ def test_backward_matches_reference(counts, K, N, dtype):
 
     a_tri = a.clone().requires_grad_(True)
     w_tri = w.clone().requires_grad_(True)
-    out = group_gemm(a_tri, w_tri.transpose(-2, -1), offs)
+    out = group_gemm_triton(a_tri, w_tri.transpose(-2, -1), offs)
     grad_out = torch.randn_like(out)
     out.backward(grad_out)
 
@@ -127,14 +129,14 @@ def test_trans_b_matches_reference(counts, K, N, dtype):
     # trans_b=True path: pass w directly (no .transpose).
     a_t = a.clone().requires_grad_(True)
     w_t = w.clone().requires_grad_(True)
-    out_t = group_gemm(a_t, w_t, offs, trans_b=True)
+    out_t = group_gemm_triton(a_t, w_t, offs, trans_b=True)
     grad_out = torch.randn_like(out_t)
     out_t.backward(grad_out)
 
     # Reference: explicit-transpose path (trans_b=False with w^T).
     a_r = a.clone().requires_grad_(True)
     w_r = w.clone().requires_grad_(True)
-    out_r = group_gemm(a_r, w_r.transpose(-2, -1), offs)
+    out_r = group_gemm_triton(a_r, w_r.transpose(-2, -1), offs)
     out_r.backward(grad_out)
 
     assert w_t.grad.shape == w.shape  # gradient already in native [E, N, K] layout
@@ -156,7 +158,7 @@ def test_forward_matches_torch_grouped_mm_bf16(counts, K, N):
     w = torch.randn(E, N, K, device=dev, dtype=torch.bfloat16)
     offs = _make_offs(counts, dev)
 
-    tri = group_gemm(a, w.transpose(-2, -1), offs)
+    tri = group_gemm_triton(a, w.transpose(-2, -1), offs)
     try:
         native = torch._grouped_mm(a, w.transpose(-2, -1), offs=offs)
     except RuntimeError as e:
@@ -166,7 +168,7 @@ def test_forward_matches_torch_grouped_mm_bf16(counts, K, N):
 
 
 def test_gradcheck_fp32():
-    """Double-precision-style gradcheck (fp32 with IEEE accumulation)."""
+    """fp32 grad parity vs the pure-torch reference (Triton default tl.dot precision)."""
     dev = get_accelerator().current_device_name()
     torch.manual_seed(3)
     counts = [3, 0, 5]
@@ -177,7 +179,7 @@ def test_gradcheck_fp32():
     offs = _make_offs(counts, dev)
 
     # Analytic grads vs finite-difference reference on the pure-torch path.
-    out = group_gemm(a, w.transpose(-2, -1), offs)
+    out = group_gemm_triton(a, w.transpose(-2, -1), offs)
     grad_out = torch.randn_like(out)
     out.backward(grad_out)
 
@@ -185,8 +187,8 @@ def test_gradcheck_fp32():
     w_ref = w.detach().clone().requires_grad_(True)
     _ref_grouped_mm(a_ref, w_ref.transpose(-2, -1), offs).backward(grad_out)
 
-    torch.testing.assert_close(a.grad, a_ref.grad, atol=1e-3, rtol=1e-3)
-    torch.testing.assert_close(w.grad, w_ref.grad, atol=1e-3, rtol=1e-3)
+    torch.testing.assert_close(a.grad, a_ref.grad, **_tol(torch.float32))
+    torch.testing.assert_close(w.grad, w_ref.grad, **_tol(torch.float32))
 
 
 def test_empty_total_is_safe():
@@ -197,7 +199,7 @@ def test_empty_total_is_safe():
     w = torch.randn(E, N, K, device=dev, dtype=torch.bfloat16, requires_grad=True)
     offs = torch.zeros(E, device=dev, dtype=torch.int32)
 
-    out = group_gemm(a, w.transpose(-2, -1), offs)
+    out = group_gemm_triton(a, w.transpose(-2, -1), offs)
     assert out.shape == (0, N)
     out.sum().backward()
     assert torch.count_nonzero(w.grad) == 0
@@ -211,13 +213,13 @@ def test_empty_total_is_safe():
 
 
 def _swiglu_experts_group_gemm(w1, w2, w3, x, counts_tensor):
-    """Same SwiGLU expert MLP as _run_experts_grouped_mm, but via Triton group_gemm."""
+    """Same SwiGLU expert MLP as _run_experts_grouped_mm, but via Triton group_gemm_triton."""
     import torch.nn.functional as F
 
     offsets = torch.cumsum(counts_tensor, dim=0, dtype=torch.int32)
-    h = F.silu(group_gemm(x, w1.transpose(-2, -1), offsets))
-    h = h * group_gemm(x, w3.transpose(-2, -1), offsets)
-    return group_gemm(h, w2.transpose(-2, -1), offsets).type_as(x)
+    h = F.silu(group_gemm_triton(x, w1.transpose(-2, -1), offsets))
+    h = h * group_gemm_triton(x, w3.transpose(-2, -1), offsets)
+    return group_gemm_triton(h, w2.transpose(-2, -1), offsets).type_as(x)
 
 
 def test_e2e_swiglu_experts_matches_native_grouped_mm():
@@ -276,8 +278,10 @@ def test_grouped_experts_triton_path_parity():
     counts = torch.tensor([20, 0, 30, 14], device=dev, dtype=torch.int32)
     M = int(counts.sum())
 
-    triton_experts = GroupedExperts(dim, hidden, E, use_grouped_mm=True,
-                                    use_triton_grouped_mm=True).to(dev).to(torch.bfloat16)
+    # use_grouped_mm=True auto-selects the Triton path on sm < 9.0 (e.g. A6000).
+    triton_experts = GroupedExperts(dim, hidden, E, use_grouped_mm=True).to(dev).to(torch.bfloat16)
+    if not triton_experts.use_triton_grouped_mm:
+        pytest.skip("Triton grouped-GEMM path not selected on this device (sm >= 9.0)")
     loop_experts = GroupedExperts(dim, hidden, E, use_grouped_mm=False).to(dev).to(torch.bfloat16)
     # GroupedExperts allocates weights with torch.empty; set controlled values.
     with torch.no_grad():
@@ -304,15 +308,21 @@ def test_grouped_experts_triton_path_parity():
     torch.testing.assert_close(triton_experts.w3.grad.float(), loop_experts.w3.grad.float(), **tol)
 
 
-def test_grouped_experts_auto_selects_triton_on_ampere():
-    """On sm < 9.0 the module auto-selects the Triton grouped-GEMM path."""
+def test_grouped_experts_auto_selects_triton_on_ampere(monkeypatch):
+    """On sm < 9.0 the module auto-selects Triton; DS_DISABLE_TRITON_GROUPED_MM opts out."""
     from deepspeed.moe.ep_experts import GroupedExperts
 
     dev = get_accelerator().current_device_name()
     major, _ = torch.cuda.get_device_capability()
+
+    monkeypatch.delenv("DS_DISABLE_TRITON_GROUPED_MM", raising=False)
     experts = GroupedExperts(32, 64, 2, use_grouped_mm=True).to(dev)
     if major < 9:
         assert experts.use_triton_grouped_mm is True
-    # Explicit opt-out is always honored.
-    experts_off = GroupedExperts(32, 64, 2, use_grouped_mm=True, use_triton_grouped_mm=False).to(dev)
+    else:
+        assert experts.use_triton_grouped_mm is False  # sm90+ uses native torch._grouped_mm
+
+    # Env override disables the Triton path regardless of device.
+    monkeypatch.setenv("DS_DISABLE_TRITON_GROUPED_MM", "1")
+    experts_off = GroupedExperts(32, 64, 2, use_grouped_mm=True).to(dev)
     assert experts_off.use_triton_grouped_mm is False
