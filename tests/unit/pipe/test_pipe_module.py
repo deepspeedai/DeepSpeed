@@ -58,6 +58,16 @@ def batch_input():
     return torch.randn(1, HIDDEN_DIM)
 
 
+@pytest.fixture
+def mixed_param_model():
+    # ReLU carries no parameters and Linear does, so _is_checkpointable differs between blocks
+    # and a misaligned result list is visible, not just a wrongly sized one.
+    return torch.nn.Sequential(
+        *[nn.ReLU() for _ in range(LAYERS // 2)],
+        *[nn.Linear(HIDDEN_DIM, HIDDEN_DIM) for _ in range(LAYERS // 2)],
+    )
+
+
 class TestPipeModuleSequential(DistributedTest):
     world_size = 2
     # needs to be set for torch.compile: running torch.compile with daemonic process causes an error
@@ -109,3 +119,25 @@ class TestPipeModuleSequential(DistributedTest):
         pipe_output = pipe_output.to('cpu')
 
         assert torch.allclose(base_output, pipe_output, atol=1e-4)
+
+
+class TestPipeModuleCheckpointInterval(DistributedTest):
+    world_size = 1
+
+    def test_set_checkpoint_interval(self, mixed_param_model):
+        model = PipelineModule(layers=copy.deepcopy(mixed_param_model), num_stages=1, activation_checkpoint_interval=4)
+        model._precompute_checkpointable_values()
+        assert model.is_checkpointable_results == [False, True]
+
+        model.set_checkpoint_interval(1)
+
+        # the setter has to update the interval forward() reads, not a separate attribute
+        assert model.activation_checkpoint_interval == 1
+
+        # and the cached results have to be rebuilt for the new interval rather than appended to,
+        # otherwise forward() zips the layer blocks against results computed for the old interval
+        reference = PipelineModule(layers=copy.deepcopy(mixed_param_model),
+                                   num_stages=1,
+                                   activation_checkpoint_interval=1)
+        reference._precompute_checkpointable_values()
+        assert model.is_checkpointable_results == reference.is_checkpointable_results
