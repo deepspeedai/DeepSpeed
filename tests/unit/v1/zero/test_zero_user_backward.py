@@ -1850,7 +1850,7 @@ def build_managed_gas_config(zero_stage, gradient_accumulation_steps, managed_gr
     }
 
 
-@pytest.mark.parametrize("zero_stage", [0, 1])
+@pytest.mark.parametrize("zero_stage", [0, 1, 2])
 class TestUnmanagedGradientAccumulation(DistributedTest):
     """managed_gradient_accumulation=False: the caller's step() is the accumulation boundary."""
     world_size = 2
@@ -2041,20 +2041,27 @@ class TestUnmanagedGradientAccumulation(DistributedTest):
         engine.destroy()
 
 
-@pytest.mark.parametrize("zero_stage", [2, 3])
 class TestUnmanagedGradientAccumulationValidation(DistributedTest):
-    """Unmanaged mode is only supported for ZeRO stage 0/1."""
+    """Unmanaged mode rejects ZeRO stage 3 and ZeRO offload (until follow-up PRs)."""
     world_size = 1
 
-    def test_unmanaged_rejects_partitioned_stages(self, zero_stage):
+    def test_unmanaged_rejects_stage3(self):
         hidden_dim = 4
         initialize_distributed()
         torch.manual_seed(42)
         model = SimpleModel(hidden_dim=hidden_dim, nlayers=2)
-        config = build_managed_gas_config(zero_stage,
-                                          gradient_accumulation_steps=1,
-                                          managed_gradient_accumulation=False)
-        with pytest.raises(AssertionError, match="only supported for ZeRO stage 0 and 1"):
+        config = build_managed_gas_config(3, gradient_accumulation_steps=1, managed_gradient_accumulation=False)
+        with pytest.raises(AssertionError, match="only supported for ZeRO stage 0, 1, and 2"):
+            deepspeed.initialize(config=config, model=model, model_parameters=model.parameters())
+
+    def test_unmanaged_rejects_zero_offload(self):
+        hidden_dim = 4
+        initialize_distributed()
+        torch.manual_seed(42)
+        model = SimpleModel(hidden_dim=hidden_dim, nlayers=2)
+        config = build_managed_gas_config(2, gradient_accumulation_steps=1, managed_gradient_accumulation=False)
+        config["zero_optimization"]["offload_optimizer"] = {"device": "cpu"}
+        with pytest.raises(AssertionError, match="not supported with ZeRO offload"):
             deepspeed.initialize(config=config, model=model, model_parameters=model.parameters())
 
 
