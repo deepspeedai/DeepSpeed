@@ -21,7 +21,8 @@ inline void has_capability_or_fail(const sycl::device& dev,
                 break;
             default:
 #define __SYCL_ASPECT(ASPECT, ID) \
-    case sycl::aspect::ASPECT: return #ASPECT;
+    case sycl::aspect::ASPECT:    \
+        return #ASPECT;
 #define __SYCL_ASPECT_DEPRECATED(ASPECT, ID, MESSAGE) __SYCL_ASPECT(ASPECT, ID)
 #define __SYCL_ASPECT_DEPRECATED_ALIAS(ASPECT, ID, MESSAGE)
                 auto getAspectNameStr = [](sycl::aspect AspectNum) -> std::string {
