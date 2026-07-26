@@ -141,3 +141,35 @@ class TestPipeModuleCheckpointInterval(DistributedTest):
                                    activation_checkpoint_interval=1)
         reference._precompute_checkpointable_values()
         assert model.is_checkpointable_results == reference.is_checkpointable_results
+
+    def test_setter_keeps_reentrant_input_grads(self, mixed_param_model, simple_config):
+        # The engine decides whether to mark the first stage's inputs as requiring grad, which
+        # reentrant checkpointing needs, or its first checkpointed segment is cut off from
+        # autograd. Start from a config that disables checkpointing, so the only thing that
+        # turns it on is the setter this PR fixes.
+        config = copy.deepcopy(simple_config)
+        config["pipeline"]["activation_checkpoint_interval"] = 0
+
+        model = PipelineModule(layers=copy.deepcopy(mixed_param_model), num_stages=1)
+        engine, _, _, _ = deepspeed.initialize(config=config,
+                                               model=model,
+                                               model_parameters=[p for p in model.parameters()])
+        assert not engine._reentrant_activation_checkpointing()
+
+        engine.module.set_checkpoint_interval(2)
+
+        # forward() now checkpoints, so the inputs have to require grad to match
+        assert engine._reentrant_activation_checkpointing()
+
+    def test_non_reentrant_checkpointing_does_not_need_input_grads(self, mixed_param_model, simple_config):
+        # use_reentrant=False swaps in non_reentrant_checkpoint, which does not need the inputs
+        # to require grad, so the decision has to track the function and not just the interval.
+        config = copy.deepcopy(simple_config)
+        config["pipeline"]["use_reentrant"] = False
+
+        model = PipelineModule(layers=copy.deepcopy(mixed_param_model), num_stages=1)
+        engine, _, _, _ = deepspeed.initialize(config=config,
+                                               model=model,
+                                               model_parameters=[p for p in model.parameters()])
+        assert engine.module.activation_checkpoint_interval > 0
+        assert not engine._reentrant_activation_checkpointing()
