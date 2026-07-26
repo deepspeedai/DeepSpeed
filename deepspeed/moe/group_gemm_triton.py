@@ -200,7 +200,11 @@ if _TRITON_AVAILABLE:
         BLOCK_K: tl.constexpr,
         BLOCK_N: tl.constexpr,
     ):
-        """out[e, k, n] = sum_{m in group e} a[m, k] * g[m, n] (weight grad)."""
+        """For each group e, compute out[e] = a_e.T @ g_e by reducing over its M rows.
+
+        a_e.T @ g_e: [K, M_e] @ [M_e, NO] -> [K, NO], so
+        out[e, k, n] = sum_{m in group e} a[m, k] * g[m, n].
+        """
         pid_e = tl.program_id(0)
         pid_k = tl.program_id(1)
         pid_n = tl.program_id(2)
@@ -313,7 +317,12 @@ def _group_gemm(mat_a: torch.Tensor, mat_b: torch.Tensor, offs: torch.Tensor) ->
 
 
 def _grouped_dw(mat_a: torch.Tensor, grad_out: torch.Tensor, offs: torch.Tensor, E: int) -> torch.Tensor:
-    """Weight-grad grouped GEMM: out[e,K,NO] = sum_{m in group e} a[m,K] x g[m,NO]."""
+    """For each group e, compute mat_a_e.T @ grad_out_e.
+
+    ``[K, M_e] @ [M_e, NO] -> [K, NO]``; stacking all groups produces
+    ``out[E, K, NO]``. The reduction dimension is the number of rows ``M_e``
+    assigned to each group by ``offs``.
+    """
     M, K = mat_a.shape
     NO = grad_out.shape[1]
     if M == 0:
@@ -361,6 +370,10 @@ class _GroupGemmFn(torch.autograd.Function):
         #   avoiding the contiguous-materialization copy that an external
         #   ``.transpose(-2, -1)`` would trigger.
         b_kernel = mat_b.transpose(-2, -1) if trans_b else mat_b
+
+        # Per group, the forward equation is
+        # out_e = A_e @ B_e.T: [M_e, K] @ [K, N] -> [M_e, N],
+        # where B is stored in its native [E, N, K] layout.
         out = _group_gemm(mat_a.contiguous(), b_kernel, offs)
         ctx.save_for_backward(mat_a, mat_b, offs)
         ctx.trans_b = trans_b
@@ -375,20 +388,26 @@ class _GroupGemmFn(torch.autograd.Function):
 
         grad_a = grad_b = None
         if trans_b:
-            # out[m,n] = sum_k a[m,k] * b[g,n,k]  with b = mat_b [E, N, K].
+            # Per group, the forward equation is
+            #   out_e = A_e @ B_e.T: [M_e, K] @ [K, N] -> [M_e, N],
+            # where B is stored in its native [E, N, K] layout.
             if ctx.needs_input_grad[0]:
-                # grad_a[m,k] = sum_n grad_out[m,n] * b[g,n,k] -> ab with b=mat_b (contract N).
+                # dA_e = dOut_e @ B_e: [M_e, N] @ [N, K] -> [M_e, K].
                 grad_a = _group_gemm(grad_out, mat_b, offs)
             if ctx.needs_input_grad[1]:
-                # grad_b[g,n,k] = sum_{m in g} grad_out[m,n] * a[m,k]
-                #   -> dw(grad_out[M,N], a[M,K]) = [E, N, K], i.e. mat_b's own layout (no copy).
+                # dB_e = dOut_e.T @ A_e: [N, M_e] @ [M_e, K] -> [N, K].
+                # _grouped_dw(lhs, rhs) computes lhs_e.T @ rhs_e, so passing
+                # (grad_out, mat_a) directly produces [E, N, K], B's layout.
                 grad_b = _grouped_dw(grad_out, mat_a.contiguous(), offs, E)
         else:
+            # Per group, the forward equation is
+            #   out_e = A_e @ B_e: [M_e, K] @ [K, N] -> [M_e, N],
+            # where B is stored in [E, K, N] layout.
             if ctx.needs_input_grad[0]:
-                # grad_a[m] = grad_out[m] @ b[group(m)]^T -> a[M,N] x bT[E,N,K] grouped over M.
+                # dA_e = dOut_e @ B_e.T: [M_e, N] @ [N, K] -> [M_e, K].
                 grad_a = _group_gemm(grad_out, mat_b.transpose(-2, -1), offs)
             if ctx.needs_input_grad[1]:
-                # grad_b[e] = a_e^T @ grad_out_e.
+                # dB_e = A_e.T @ dOut_e: [K, M_e] @ [M_e, N] -> [K, N].
                 grad_b = _grouped_dw(mat_a.contiguous(), grad_out, offs, E)
         return grad_a, grad_b, None, None
 
