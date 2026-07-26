@@ -14,8 +14,11 @@ import deepspeed.comm as dist
 from ..profilers.comm_profile import create_predictor
 from ..profilers.graph_profile import is_profile_incomplete
 from ..graph_param import DSGraphParamManager
+from .contract import PassContract, CAP_Z3_GATHER_RELEASE
 
 NAME = "prefetch"
+# Reorders the all-gathers that zero3_compile emits, so it must run after that pass.
+CONTRACT = PassContract(requires=frozenset({CAP_Z3_GATHER_RELEASE}))
 
 FUSE_FACTOR = 0.8
 MARGIN = 0.1

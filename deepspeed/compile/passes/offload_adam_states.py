@@ -21,10 +21,13 @@ except ImportError:
 from ..profilers import ProfilingResult
 from ..graph_param import DSGraphParamManager
 from ..fx import move_primals_to_head
+from .contract import PassContract
 
 import deepspeed.comm as dist
 
 NAME = "offload_adam_states"
+# Offloads optimizer state and does not depend on the graph-rewriting passes.
+CONTRACT = PassContract()
 
 
 def print_r0(msg):

@@ -144,6 +144,7 @@ from deepspeed.runtime.config import DtypeEnum
 from deepspeed.compile.util import (is_deepcompile_supported, get_deepcompile_handle, deepcompile_backward_prologue,
                                     deepcompile_backward_epilogue)
 from deepspeed.compile.backend import register_compile_pass, opt_passes
+from deepspeed.compile.passes.contract import validate_schedule
 from deepspeed.compile.passes import zero3_compile, prefetch, selective_gather, offload_adam_states
 from deepspeed.compile.init_z1 import init_z1
 from deepspeed.compile.init_z3 import init_z3
@@ -458,10 +459,12 @@ class DeepSpeedEngine(Module):
         self._is_compiled = False
         if is_deepcompile_supported():
             # Predefined compile passes
-            self.register_compile_pass(zero3_compile.NAME, zero3_compile.add_z3_gather_release)
-            self.register_compile_pass(prefetch.NAME, prefetch.schedule_prefetch)
-            self.register_compile_pass(selective_gather.NAME, selective_gather.selective_gather)
-            self.register_compile_pass(offload_adam_states.NAME, offload_adam_states.move_opt_states)
+            self.register_compile_pass(zero3_compile.NAME, zero3_compile.add_z3_gather_release, zero3_compile.CONTRACT)
+            self.register_compile_pass(prefetch.NAME, prefetch.schedule_prefetch, prefetch.CONTRACT)
+            self.register_compile_pass(selective_gather.NAME, selective_gather.selective_gather,
+                                       selective_gather.CONTRACT)
+            self.register_compile_pass(offload_adam_states.NAME, offload_adam_states.move_opt_states,
+                                       offload_adam_states.CONTRACT)
 
         # We now support PyTorch style backward, but it relies on the counter in ZeRO optimizers.
         # However, we need some internal APIs to count the number of only used parameters.
@@ -625,10 +628,11 @@ class DeepSpeedEngine(Module):
         and registering a pre-hook to ensure that the Dataloader inputs are consistent across ranks.
         """
         self._set_client_model(model)
-        # sanity check
-        # currently, the compatibility between 'autotp' and 'zero > 1' has not been validated
-        assert self.zero_optimization_stage(
-        ) <= 2, "Currently, the compatibility between 'autotp' and 'zero_stage = 3' has not been validated"
+        if self.zero_optimization_stage() > 2 and (self.client_optimizer or self.optimizer_name()):
+            raise NotImplementedError("AutoTP together with ZeRO stage 3 is currently supported only for inference "
+                                      "(no optimizer). Running it with an optimizer is disabled because TP-aware "
+                                      "checkpoint consolidation is not yet implemented and would silently produce "
+                                      "incomplete checkpoints.")
 
         self.mpu = groups
         self.mpu._init_tp_mesh_device(tensor_model_parallel_size=self.autotp_size())
@@ -5015,7 +5019,7 @@ class DeepSpeedEngine(Module):
             checkpoint_name = name_function(save_dir, tag)
             path = os.path.dirname(checkpoint_name)
             self.checkpoint_engine.makedirs(path, exist_ok=True)
-        except Exception:
+        except OSError:
             logger.error(f"Failed saving model checkpoint to {save_dir} with tag {tag}")
             return False
 
@@ -5454,6 +5458,7 @@ class DeepSpeedEngine(Module):
                     assert callable(p) or p in opt_passes, f"Unknown pass {p}"
                 return [p if callable(p) else opt_passes[p] for p in passes]
 
+            validate_schedule(schedule, opt_passes)
             schedule = [(step, passes_name_to_fn(passes)) for step, passes in schedule]
 
         assert backend in ['inductor', 'eager'], f"Backend {backend} is not supported for DeepCompile."
@@ -5502,7 +5507,7 @@ class DeepSpeedEngine(Module):
         # create new dict to avoid modifying original dict
         try:
             self.module.compile(**{**compile_kwargs, 'backend': backend})
-        except Exception:
+        except BaseException:
             if is_deepspeed_compile_backend:
                 # Restore default hooks if compilation fails before completing.
                 self._set_deepcompile_active(False)
@@ -5541,8 +5546,8 @@ class DeepSpeedEngine(Module):
         from deepspeed.compile.backend import opt_pass_times
         return opt_pass_times
 
-    def register_compile_pass(self, pass_name: str, pass_fn: Callable) -> None:
-        register_compile_pass(pass_name, pass_fn)
+    def register_compile_pass(self, pass_name: str, pass_fn: Callable, contract=None) -> None:
+        register_compile_pass(pass_name, pass_fn, contract)
 
     def is_deepcompile_enabled(self) -> bool:
         return self._config.compile_config.deepcompile

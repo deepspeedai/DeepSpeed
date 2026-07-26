@@ -16,6 +16,8 @@ One of the challenges of applying Muon optimizer to DeepSpeed is that previous o
 
 Muon optimizer works on 2D weight matrices (attention and MLP weights).  It applies Newton-Schulz orthogonalization to the momentum matrix, which requires the weight to be 2D.  Non-2D parameters (embeddings, layer norms, biases, lm_head) fall back to AdamW.  We apply a parse in model engine initializer to tag the model parameter with `use_muon`, if and only if the model parameter is 2D and belongs to hidden layers.   When Muon optimizer is used, any parameter tagged `use_muon` will use Muon optimizer to update weight.
 
+ZeRO Stage 1 and 2 support Muon with `reduce_scatter` when optimizer offload is disabled.  If a Muon matrix crosses a ZeRO partition boundary, DeepSpeed makes its full reduced gradient available on every rank that owns part of the matrix before applying the nonlinear Muon update.  Muon with `reduce_scatter` and optimizer offload is not currently supported.
+
 Note that Muon is a hybrid optimizer: it uses Muon updates only for 2D hidden weights and falls back to Adam for all other parameters (embeddings, layer norms, biases, lm_head).  The DeepSpeed config supports separate learning rates via `muon_lr` (for Muon parameters) and `adam_lr` (for Adam parameters).
 
 ## Running DeepSpeed finetune with Muon optimizer
