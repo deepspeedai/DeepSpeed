@@ -60,19 +60,25 @@ def is_available() -> bool:
 
 if _TRITON_AVAILABLE:
 
-    def _ab_configs():
+    def _gmm_configs():
+        # Forward / grad_a kernel: output [M, N] tiled by BLOCK_M x BLOCK_N,
+        # reduction over K in BLOCK_K steps.
+        #   BLOCK_M (M/token tile): 32 / 64 / 128
+        #   BLOCK_N (N output tile): 128 / 256
+        #   BLOCK_K (K reduction):   32 / 64
         return [
             triton.Config({"BLOCK_M": bm, "BLOCK_N": bn, "BLOCK_K": bk}, num_warps=nw, num_stages=ns)
             for bm, bn, bk, nw, ns in (
-                (64, 64, 32, 4, 3),
-                (128, 64, 32, 4, 4),
-                (64, 128, 32, 4, 4),
-                (128, 128, 32, 8, 3),
-                (32, 32, 32, 4, 3),
+                (32, 128, 32, 8, 4),
+                (64, 128, 32, 8, 4),
+                (64, 128, 64, 8, 4),
+                (128, 128, 32, 8, 4),
+                (64, 256, 32, 8, 3),
+                (128, 256, 32, 8, 3),
             )
         ]
 
-    @triton.autotune(configs=_ab_configs(), key=["KC", "NO", "NUM_GROUPS"])
+    @triton.autotune(configs=_gmm_configs(), key=["KC", "NO", "NUM_GROUPS"])
     @triton.jit
     def _group_gemm_kernel(
         a_ptr,  # [M, KC]
@@ -155,13 +161,20 @@ if _TRITON_AVAILABLE:
         )
 
     def _dw_configs():
+        # Weight-grad kernel: output [E, K, N] tiled by BLOCK_K x BLOCK_N,
+        # reduction over M (tokens in the group) in BLOCK_M steps.
+        #   BLOCK_K (K output tile): 32 / 64 / 128
+        #   BLOCK_N (N output tile): 128 / 256
+        #   BLOCK_M (M reduction):   32 / 64
         return [
             triton.Config({"BLOCK_K": bk, "BLOCK_N": bn, "BLOCK_M": bm}, num_warps=nw, num_stages=ns)
             for bk, bn, bm, nw, ns in (
-                (64, 64, 32, 4, 3),
-                (64, 128, 32, 4, 4),
-                (128, 64, 32, 4, 4),
-                (32, 32, 32, 4, 3),
+                (32, 128, 32, 8, 4),
+                (64, 128, 32, 8, 4),
+                (64, 128, 64, 8, 4),
+                (128, 128, 32, 8, 4),
+                (64, 256, 32, 8, 3),
+                (128, 256, 32, 8, 3),
             )
         ]
 
@@ -227,21 +240,29 @@ if _TRITON_AVAILABLE:
         )
 
 
-def _validate(mat_a: torch.Tensor, mat_b: torch.Tensor, offs: torch.Tensor) -> None:
+def _validate(mat_a: torch.Tensor, mat_b: torch.Tensor, offs: torch.Tensor, trans_b: bool) -> None:
     if not _TRITON_AVAILABLE:
         raise RuntimeError("group_gemm_triton requires Triton, which is not available.")
     if mat_a.dim() != 2 or mat_b.dim() != 3:
         raise NotImplementedError(
             f"Only 2D x 3D grouped GEMM is supported, got mat_a.dim()={mat_a.dim()}, "
             f"mat_b.dim()={mat_b.dim()}.")
+    if not mat_b.is_contiguous():
+        raise ValueError(
+            "group_gemm_triton requires a contiguous mat_b. To compute a @ b^T, "
+            "pass the weight in its native [E, N, K] layout with trans_b=True "
+            "instead of a non-contiguous .transpose(-2, -1) view.")
     if mat_a.dtype != mat_b.dtype:
         raise ValueError(f"mat_a and mat_b must share dtype, got {mat_a.dtype} vs {mat_b.dtype}.")
     if mat_a.dtype not in _SUPPORTED_DTYPES:
         raise ValueError(f"Unsupported dtype {mat_a.dtype}; supported: {_SUPPORTED_DTYPES}.")
     if offs.dim() != 1 or offs.shape[0] != mat_b.shape[0]:
         raise ValueError(f"offs must be 1D of length E={mat_b.shape[0]}, got shape {tuple(offs.shape)}.")
-    if mat_a.shape[1] != mat_b.shape[1]:
-        raise ValueError(f"Contraction dim mismatch: mat_a K={mat_a.shape[1]} vs mat_b K={mat_b.shape[1]}.")
+    # Contraction dim K in mat_b: shape[2] when trans_b (native [E, N, K]),
+    # else shape[1] (kernel layout [E, K, N]).
+    mat_b_k = mat_b.shape[2] if trans_b else mat_b.shape[1]
+    if mat_a.shape[1] != mat_b_k:
+        raise ValueError(f"Contraction dim mismatch: mat_a K={mat_a.shape[1]} vs mat_b K={mat_b_k}.")
 
 
 def _group_meta(offs: torch.Tensor):
@@ -299,9 +320,6 @@ def _grouped_dw(mat_a: torch.Tensor, grad_out: torch.Tensor, offs: torch.Tensor,
         # No tokens routed anywhere -> every weight gradient is zero.
         return torch.zeros((E, K, NO), dtype=mat_a.dtype, device=mat_a.device)
 
-    # torch.empty (not zeros) is safe: the kernel grid covers every (E, K, NO)
-    # output tile and each program stores its result -- empty groups store 0 --
-    # so all elements are written. This avoids a large (E*K*NO) memset per call.
     out = torch.empty((E, K, NO), dtype=mat_a.dtype, device=mat_a.device)
 
     m_start, m_size = _group_meta(offs)
@@ -333,6 +351,8 @@ class _GroupGemmFn(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, mat_a, mat_b, offs, trans_b):
+        # Inputs are already validated in the public group_gemm_triton() wrapper.
+        #
         # trans_b=False: mat_b is [E, K, N], out = a @ b  (per group).
         # trans_b=True : mat_b is [E, N, K] (e.g. an expert weight in its native
         #   layout), out = a @ b^T. The transpose is applied here as a strided
@@ -341,7 +361,6 @@ class _GroupGemmFn(torch.autograd.Function):
         #   avoiding the contiguous-materialization copy that an external
         #   ``.transpose(-2, -1)`` would trigger.
         b_kernel = mat_b.transpose(-2, -1) if trans_b else mat_b
-        _validate(mat_a, b_kernel, offs)
         out = _group_gemm(mat_a.contiguous(), b_kernel, offs)
         ctx.save_for_backward(mat_a, mat_b, offs)
         ctx.trans_b = trans_b
@@ -380,9 +399,11 @@ def group_gemm_triton(mat_a: torch.Tensor, mat_b: torch.Tensor, offs: torch.Tens
 
     Args:
         mat_a: ``[M, K]`` float16/bfloat16/float32.
-        mat_b: same dtype (arbitrary strides allowed). Shape depends on ``trans_b``:
+        mat_b: contiguous tensor, same dtype as ``mat_a``. Shape depends on ``trans_b``:
             ``[E, K, N]`` when ``trans_b=False`` (``out = a @ b``), or
             ``[E, N, K]`` when ``trans_b=True`` (``out = a @ b^T``).
+            A non-contiguous (e.g. ``.transpose(-2, -1)``) ``mat_b`` is rejected --
+            use ``trans_b=True`` with the native layout instead.
         offs:  ``[E]`` cumulative row offsets into ``mat_a`` (``offs[-1] == M``).
         trans_b: if True, ``mat_b`` is stored in ``[E, N, K]`` (its native/contiguous
             layout, e.g. an expert weight) and is logically transposed inside the
@@ -393,4 +414,8 @@ def group_gemm_triton(mat_a: torch.Tensor, mat_b: torch.Tensor, offs: torch.Tens
     Returns:
         ``[M, N]`` tensor, same dtype as inputs.
     """
+    # All sanity checks live here (not in the autograd Function) so misuse is
+    # caught up front on the user-provided tensors. trans_b is passed through so
+    # the contraction dim is checked without materializing a transpose view.
+    _validate(mat_a, mat_b, offs, trans_b)
     return _GroupGemmFn.apply(mat_a, mat_b, offs, trans_b)

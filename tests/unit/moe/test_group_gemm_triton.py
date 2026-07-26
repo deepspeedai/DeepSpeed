@@ -69,8 +69,7 @@ def test_forward_matches_reference(counts, K, N, dtype):
     E = len(counts)
     M = sum(counts)
     a = torch.randn(M, K, device=dev, dtype=dtype)
-    w = torch.randn(E, N, K, device=dev, dtype=dtype)  # stored like expert weight [E, hidden, dim]
-    b = w.transpose(-2, -1)  # [E, K, N] non-contiguous view, as in ep_experts.py
+    b = torch.randn(E, K, N, device=dev, dtype=dtype)  # contiguous [E, K, N], trans_b=False
     offs = _make_offs(counts, dev)
 
     out = group_gemm_triton(a, b, offs)
@@ -89,24 +88,24 @@ def test_backward_matches_reference(counts, K, N, dtype):
     E = len(counts)
     M = sum(counts)
     a = torch.randn(M, K, device=dev, dtype=dtype)
-    w = torch.randn(E, N, K, device=dev, dtype=dtype)
+    b = torch.randn(E, K, N, device=dev, dtype=dtype)  # contiguous [E, K, N], trans_b=False
     offs = _make_offs(counts, dev)
 
     a_tri = a.clone().requires_grad_(True)
-    w_tri = w.clone().requires_grad_(True)
-    out = group_gemm_triton(a_tri, w_tri.transpose(-2, -1), offs)
+    b_tri = b.clone().requires_grad_(True)
+    out = group_gemm_triton(a_tri, b_tri, offs)
     grad_out = torch.randn_like(out)
     out.backward(grad_out)
 
     a_ref = a.float().clone().requires_grad_(True)
-    w_ref = w.float().clone().requires_grad_(True)
-    ref = _ref_grouped_mm(a_ref, w_ref.transpose(-2, -1), offs)
+    b_ref = b.float().clone().requires_grad_(True)
+    ref = _ref_grouped_mm(a_ref, b_ref, offs)
     ref.backward(grad_out.float())
 
     assert a_tri.grad.shape == a.shape and a_tri.grad.dtype == dtype
-    assert w_tri.grad.shape == w.shape and w_tri.grad.dtype == dtype
+    assert b_tri.grad.shape == b.shape and b_tri.grad.dtype == dtype
     torch.testing.assert_close(a_tri.grad.float(), a_ref.grad, **_tol(dtype))
-    torch.testing.assert_close(w_tri.grad.float(), w_ref.grad, **_tol(dtype))
+    torch.testing.assert_close(b_tri.grad.float(), b_ref.grad, **_tol(dtype))
 
 
 @pytest.mark.parametrize("counts,K,N", _SHAPES)
@@ -133,10 +132,10 @@ def test_trans_b_matches_reference(counts, K, N, dtype):
     grad_out = torch.randn_like(out_t)
     out_t.backward(grad_out)
 
-    # Reference: explicit-transpose path (trans_b=False with w^T).
+    # Reference: pure-torch a @ w^T per group (w in native [E, N, K] layout).
     a_r = a.clone().requires_grad_(True)
     w_r = w.clone().requires_grad_(True)
-    out_r = group_gemm_triton(a_r, w_r.transpose(-2, -1), offs)
+    out_r = _ref_grouped_mm(a_r, w_r.transpose(-2, -1), offs)
     out_r.backward(grad_out)
 
     assert w_t.grad.shape == w.shape  # gradient already in native [E, N, K] layout
@@ -158,7 +157,7 @@ def test_forward_matches_torch_grouped_mm_bf16(counts, K, N):
     w = torch.randn(E, N, K, device=dev, dtype=torch.bfloat16)
     offs = _make_offs(counts, dev)
 
-    tri = group_gemm_triton(a, w.transpose(-2, -1), offs)
+    tri = group_gemm_triton(a, w, offs, trans_b=True)
     try:
         native = torch._grouped_mm(a, w.transpose(-2, -1), offs=offs)
     except RuntimeError as e:
@@ -179,7 +178,7 @@ def test_gradcheck_fp32():
     offs = _make_offs(counts, dev)
 
     # Analytic grads vs finite-difference reference on the pure-torch path.
-    out = group_gemm_triton(a, w.transpose(-2, -1), offs)
+    out = group_gemm_triton(a, w, offs, trans_b=True)
     grad_out = torch.randn_like(out)
     out.backward(grad_out)
 
@@ -191,6 +190,18 @@ def test_gradcheck_fp32():
     torch.testing.assert_close(w.grad, w_ref.grad, **_tol(torch.float32))
 
 
+def test_noncontiguous_mat_b_is_rejected():
+    """A non-contiguous (transposed-view) mat_b must be rejected in favor of trans_b."""
+    dev = get_accelerator().current_device_name()
+    a = torch.randn(16, 8, device=dev, dtype=torch.bfloat16)
+    w = torch.randn(2, 6, 8, device=dev, dtype=torch.bfloat16)  # [E, N, K]
+    offs = _make_offs([8, 8], dev)
+    b_view = w.transpose(-2, -1)  # non-contiguous [E, K, N] view
+    assert not b_view.is_contiguous()
+    with pytest.raises(ValueError, match="contiguous"):
+        group_gemm_triton(a, b_view, offs)
+
+
 def test_empty_total_is_safe():
     """All-empty groups produce a well-formed zero-row output and zero weight grad."""
     dev = get_accelerator().current_device_name()
@@ -199,7 +210,7 @@ def test_empty_total_is_safe():
     w = torch.randn(E, N, K, device=dev, dtype=torch.bfloat16, requires_grad=True)
     offs = torch.zeros(E, device=dev, dtype=torch.int32)
 
-    out = group_gemm_triton(a, w.transpose(-2, -1), offs)
+    out = group_gemm_triton(a, w, offs, trans_b=True)
     assert out.shape == (0, N)
     out.sum().backward()
     assert torch.count_nonzero(w.grad) == 0
@@ -217,9 +228,9 @@ def _swiglu_experts_group_gemm(w1, w2, w3, x, counts_tensor):
     import torch.nn.functional as F
 
     offsets = torch.cumsum(counts_tensor, dim=0, dtype=torch.int32)
-    h = F.silu(group_gemm_triton(x, w1.transpose(-2, -1), offsets))
-    h = h * group_gemm_triton(x, w3.transpose(-2, -1), offsets)
-    return group_gemm_triton(h, w2.transpose(-2, -1), offsets).type_as(x)
+    h = F.silu(group_gemm_triton(x, w1, offsets, trans_b=True))
+    h = h * group_gemm_triton(x, w3, offsets, trans_b=True)
+    return group_gemm_triton(h, w2, offsets, trans_b=True).type_as(x)
 
 
 def test_e2e_swiglu_experts_matches_native_grouped_mm():
