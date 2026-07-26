@@ -641,11 +641,12 @@ def test_lr_range_test_rejects_nonpositive_step_size(bad_step_size):
         LRRangeTest(optimizer, lr_range_test_step_size=bad_step_size)
 
 
-@pytest.mark.parametrize("first, second", [(0, 0), (0, None), (-1, None)])
-def test_one_cycle_rejects_nonpositive_total_step_size(first, second):
-    # OneCycle divides cycle_first_step_size by total_size (cycle_first_step_size +
-    # cycle_second_step_size) in _initialize_cycle; a total of 0 raises ZeroDivisionError
-    # at construction. Reject the degenerate cycle with a clear ValueError instead.
+@pytest.mark.parametrize("first, second", [(0, 0), (0, None), (-1, None), (0, 100), (100, -1)])
+def test_one_cycle_rejects_nonpositive_step_sizes(first, second):
+    # _initialize_cycle divides cycle_first_step_size by total_size, and _get_scale_factor
+    # then divides by the resulting step_ratio. A total of 0 raises ZeroDivisionError at
+    # construction; a zero first half keeps total_size positive but sets step_ratio to 0,
+    # so the first get_lr() raises instead. Reject both shapes with a clear ValueError.
     param = torch.nn.Parameter(torch.zeros(1))
     optimizer = torch.optim.SGD([param], lr=0.1)
 
@@ -655,3 +656,23 @@ def test_one_cycle_rejects_nonpositive_total_step_size(first, second):
                  cycle_max_lr=0.1,
                  cycle_first_step_size=first,
                  cycle_second_step_size=second)
+
+
+def test_one_cycle_allows_zero_second_step_size():
+    # The mirror case is not degenerate: a zero second half gives step_ratio 1.0, and x
+    # stays below 1.0 in _get_scale_factor, so no division by zero is reachable. Pin it so
+    # the guard above does not grow into rejecting a working configuration.
+    param = torch.nn.Parameter(torch.zeros(1))
+    optimizer = torch.optim.SGD([param], lr=0.1)
+
+    scheduler = OneCycle(optimizer,
+                         cycle_min_lr=0.001,
+                         cycle_max_lr=0.1,
+                         cycle_first_step_size=100,
+                         cycle_second_step_size=0)
+
+    assert scheduler.step_ratio == 1.0
+    assert scheduler.get_lr() == [pytest.approx(0.001)]
+    for _ in range(3):
+        scheduler.step()
+    assert scheduler.get_lr()[0] > 0.001

@@ -485,10 +485,14 @@ class OneCycle(object):
         cycle_second_step_size = float(
             cycle_second_step_size) if cycle_second_step_size is not None else cycle_first_step_size
 
+        # Both halves are validated separately: a zero-length first half leaves total_size
+        # positive but makes step_ratio 0, and _get_scale_factor divides by step_ratio.
+        if cycle_first_step_size <= 0:
+            raise ValueError(f"cycle_first_step_size must be positive, got {cycle_first_step_size}")
+        if cycle_second_step_size < 0:
+            raise ValueError(f"cycle_second_step_size must be non-negative, got {cycle_second_step_size}")
+
         self.total_size = cycle_first_step_size + cycle_second_step_size
-        if self.total_size <= 0:
-            raise ValueError("cycle_first_step_size + cycle_second_step_size must be positive, got "
-                             f"{cycle_first_step_size} + {cycle_second_step_size} = {self.total_size}")
         self.step_ratio = cycle_first_step_size / self.total_size
         self.first_stair_count = cycle_first_stair_count
         self.second_stair_count = cycle_first_stair_count if cycle_second_stair_count is None else cycle_second_stair_count
