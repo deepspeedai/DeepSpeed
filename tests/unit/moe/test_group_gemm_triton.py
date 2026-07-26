@@ -15,6 +15,7 @@ import torch
 
 from deepspeed.accelerator import get_accelerator
 from deepspeed.moe.group_gemm_triton import group_gemm_triton, is_available
+from deepspeed.moe.group_gemm_triton import _group_meta, _GROUP_META_BLOCK
 
 if not is_available():
     pytest.skip("Triton is not available", allow_module_level=True)
@@ -46,6 +47,59 @@ def _ref_grouped_mm(a, b, offs):
 
 def _make_offs(counts, device):
     return torch.cumsum(torch.tensor(counts, device=device, dtype=torch.int64), 0).to(torch.int32)
+
+
+def _ref_group_meta(offs):
+    """Reference for _group_meta: m_start = exclusive-prefix, m_size = per-group count."""
+    offs_i = offs.to(torch.int32)
+    zero = torch.zeros(1, dtype=torch.int32, device=offs_i.device)
+    m_start = torch.cat([zero, offs_i[:-1]])
+    m_size = offs_i - m_start
+    return m_start, m_size
+
+
+# ---------------------------------------------------------------------------
+# _group_meta Triton kernel (per-group m-start / m-size from cumulative offs)
+# ---------------------------------------------------------------------------
+
+_GROUP_META_CASES = [
+    [16, 24, 40],  # simple
+    [0, 16, 24],  # leading empty group
+    [16, 40, 40],  # trailing empty group
+    [0, 0, 24],  # consecutive empty groups
+    [32],  # single group (E == 1)
+    [8, 8, 8, 8],  # even
+    [5, 0, 0, 7, 0],  # multiple empties
+]
+
+
+@pytest.mark.parametrize("cumulative", _GROUP_META_CASES)
+def test_group_meta_matches_reference(cumulative):
+    dev = get_accelerator().current_device_name()
+    offs = torch.tensor(cumulative, device=dev, dtype=torch.int32)
+    m_start, m_size = _group_meta(offs)
+    ref_start, ref_size = _ref_group_meta(offs)
+
+    assert m_start.dtype == torch.int32 and m_size.dtype == torch.int32
+    assert m_start.shape == offs.shape and m_size.shape == offs.shape
+    torch.testing.assert_close(m_start, ref_start, atol=0, rtol=0)
+    torch.testing.assert_close(m_size, ref_size, atol=0, rtol=0)
+    # m_start[0] must be 0 and m_size must sum to the total (offs[-1]).
+    assert int(m_start[0]) == 0
+    assert int(m_size.sum()) == int(offs[-1])
+
+
+def test_group_meta_large_E_spans_multiple_blocks():
+    """E larger than the fixed BLOCK exercises the multi-block grid path."""
+    dev = get_accelerator().current_device_name()
+    E = _GROUP_META_BLOCK * 3 + 7  # forces grid > 1, with a partial last block
+    torch.manual_seed(0)
+    counts = torch.randint(0, 5, (E, ), device=dev, dtype=torch.int32)
+    offs = torch.cumsum(counts, 0).to(torch.int32)
+    m_start, m_size = _group_meta(offs)
+    ref_start, ref_size = _ref_group_meta(offs)
+    torch.testing.assert_close(m_start, ref_start, atol=0, rtol=0)
+    torch.testing.assert_close(m_size, ref_size, atol=0, rtol=0)
 
 
 # (M-per-group counts, K, N)

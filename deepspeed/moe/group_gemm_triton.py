@@ -243,6 +243,42 @@ if _TRITON_AVAILABLE:
             mask=mask_k[:, None] & mask_n[None, :],
         )
 
+    @triton.jit
+    def _group_meta_kernel(
+        offs_ptr,  # [E] int32, cumulative row boundaries (offs[-1] == M)
+        m_start_ptr,  # [E] int32 out: exclusive prefix start row of each group
+        m_size_ptr,  # [E] int32 out: rows per group
+        E,
+        BLOCK: tl.constexpr,
+    ):
+        """m_start[g] = offs[g-1] (0 for g==0); m_size[g] = offs[g] - m_start[g]."""
+        pid = tl.program_id(0)
+        idx = pid * BLOCK + tl.arange(0, BLOCK)
+        mask = idx < E
+        cur = tl.load(offs_ptr + idx, mask=mask, other=0)
+        # Previous cumulative boundary; group 0 starts at 0 (masked load -> other=0).
+        prev = tl.load(offs_ptr + idx - 1, mask=mask & (idx > 0), other=0)
+        tl.store(m_start_ptr + idx, prev, mask=mask)
+        tl.store(m_size_ptr + idx, cur - prev, mask=mask)
+
+
+_GROUP_META_BLOCK = 256
+
+
+def _group_meta(offs: torch.Tensor):
+    """Compute per-group m-start (exclusive prefix) and m-size on device (no D2H sync).
+
+    A single Triton kernel reads ``offs`` and writes both outputs, replacing the
+    ``zeros`` + ``cat`` + subtract sequence (which launched several small kernels).
+    """
+    offs_i = offs.to(torch.int32).contiguous()
+    E = offs_i.shape[0]
+    m_start = torch.empty_like(offs_i)
+    m_size = torch.empty_like(offs_i)
+    grid = (triton.cdiv(E, _GROUP_META_BLOCK), )
+    _group_meta_kernel[grid](offs_i, m_start, m_size, E, BLOCK=_GROUP_META_BLOCK)
+    return m_start, m_size
+
 
 def _validate(mat_a: torch.Tensor, mat_b: torch.Tensor, offs: torch.Tensor, trans_b: bool) -> None:
     if not _TRITON_AVAILABLE:
@@ -267,15 +303,6 @@ def _validate(mat_a: torch.Tensor, mat_b: torch.Tensor, offs: torch.Tensor, tran
     mat_b_k = mat_b.shape[2] if trans_b else mat_b.shape[1]
     if mat_a.shape[1] != mat_b_k:
         raise ValueError(f"Contraction dim mismatch: mat_a K={mat_a.shape[1]} vs mat_b K={mat_b_k}.")
-
-
-def _group_meta(offs: torch.Tensor):
-    """Compute per-group m-start (exclusive prefix) and m-size on device (no D2H sync)."""
-    offs_i = offs.to(torch.int32)
-    zero = torch.zeros(1, dtype=torch.int32, device=offs_i.device)
-    m_start = torch.cat([zero, offs_i[:-1]]).contiguous()
-    m_size = (offs_i - m_start).contiguous()
-    return m_start, m_size
 
 
 def _group_gemm(mat_a: torch.Tensor, mat_b: torch.Tensor, offs: torch.Tensor) -> torch.Tensor:
