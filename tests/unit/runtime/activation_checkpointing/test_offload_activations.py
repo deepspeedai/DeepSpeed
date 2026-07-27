@@ -137,3 +137,28 @@ def test_streams_offload_restore_matches_baseline():
         if step == 1:
             # Second step with the same manager reuses pooled CPU buffers.
             assert manager._cpu_buffer_pool_size > 0
+
+
+@pytest.mark.skipif(not get_accelerator().is_available() or get_accelerator().is_synchronized_device(),
+                    reason="requires a stream-capable accelerator")
+def test_marked_view_with_storage_offset():
+
+    def fn(x):
+        return x.sin().square()
+
+    device = get_accelerator().device_name()
+    base = torch.randn(6, 8, device=device)
+    x_base = base[2:].detach().clone().requires_grad_(True)
+    fn(checkpoint(fn, x_base, use_reentrant=False)).sum().backward()
+
+    x = base[2:].detach().requires_grad_(True)
+    assert x.storage_offset() > 0
+    offload = CheckpointHiddenStatesOffload(use_streams=False, min_offload_size=0)
+    with offload:
+        offload.mark(x)
+        loss = fn(checkpoint(fn, x, use_reentrant=False)).sum()
+        loss.backward()
+
+    assert offload.stats.offloaded_tensors == 1
+    assert offload.stats.restored_tensors == 1
+    assert torch.allclose(x.grad, x_base.grad)
