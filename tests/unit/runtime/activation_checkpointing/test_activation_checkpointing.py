@@ -181,6 +181,33 @@ def _bool_to_float(btensor, dtype=torch.float32):
     return torch.where(btensor, ones, zeros)
 
 
+class TestActivationCheckpointKeywordArguments(DistributedTest):
+    world_size = 1
+
+    def test_tensor_and_non_tensor_keyword_arguments(self):
+        device = get_accelerator().device_name()
+        if device == "cpu":
+            pytest.skip("CPU accelerator does not support this test yet")
+
+        def function(value, *, scale, offset):
+            return value * scale + offset
+
+        value = torch.randn(HIDDEN_DIM, device=device, requires_grad=True)
+        scale = torch.randn(HIDDEN_DIM, device=device, requires_grad=True)
+        reference_value = value.detach().clone().requires_grad_()
+        reference_scale = scale.detach().clone().requires_grad_()
+
+        reference = function(reference_value, scale=reference_scale, offset=1.5)
+        reference.sum().backward()
+
+        output = ckpt(function, value, scale=scale, offset=1.5)
+        output.sum().backward()
+
+        torch.testing.assert_close(output, reference)
+        torch.testing.assert_close(value.grad, reference_value.grad)
+        torch.testing.assert_close(scale.grad, reference_scale.grad)
+
+
 #
 # Tests
 #
