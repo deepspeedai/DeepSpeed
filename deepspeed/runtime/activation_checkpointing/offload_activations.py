@@ -106,19 +106,22 @@ class CheckpointHiddenStatesOffload(saved_tensors_hooks):
         self.stats = CheckpointActivationOffloadStats()
         self._allowed: dict[int, int] = {}
         self._next_id = 0
-        self._tracker: dict[int, tuple[torch.Tensor, torch.device, int, torch.Size, tuple[int, ...],
-                                       _BufferKey, ], ] = {}
+        self._tracker: dict[int, tuple[torch.Tensor, torch.device, torch.Size, tuple[int, ...], _BufferKey]] = {}
         self._fwd_stash: dict[int, tuple[torch.Tensor, torch.Event]] = {}
         self._cpu_buffer_pool: dict[_BufferKey, list[torch.Tensor]] = {}
         self._cpu_buffer_pool_size = 0
         self._pending_cpu_buffers: list[tuple[_BufferKey, torch.Tensor, torch.Event]] = []
 
         # cpu-like accelerators have no streams; _pack_tensor never offloads there
-        self.s0 = get_accelerator().current_stream()
         stream_cls = get_accelerator().Stream
         self.s1 = stream_cls() if (use_streams and stream_cls is not None) else None
 
         super().__init__(self._pack_tensor, self._unpack_tensor)
+
+    @property
+    def compute_stream(self):
+        # resolved per use: the compute stream may differ from the construction-time one
+        return get_accelerator().current_stream()
 
     def _stream_context(self, stream):
         if stream is None:
@@ -153,7 +156,7 @@ class CheckpointHiddenStatesOffload(saved_tensors_hooks):
             if tensor_id > new_tensor_id - self.max_fwd_stash_size:
                 continue
             _, event = self._fwd_stash.pop(tensor_id)
-            self.s0.wait_event(event)
+            self.compute_stream.wait_event(event)
 
     def _buffer_key(self, tensor: torch.Tensor) -> _BufferKey:
         return (
@@ -214,10 +217,10 @@ class CheckpointHiddenStatesOffload(saved_tensors_hooks):
         tensor_id = self._next_tensor_id()
         if self.use_streams:
             self._reap_forward_stash(tensor_id)
-            self.s1.wait_stream(self.s0)
+            self.s1.wait_stream(self.compute_stream)
             stream = self.s1
         else:
-            stream = self.s0
+            stream = self.compute_stream
 
         with self._stream_context(stream):
             cpu_tensor, buffer_key = self._empty_cpu_like(tensor)
@@ -226,7 +229,6 @@ class CheckpointHiddenStatesOffload(saved_tensors_hooks):
         self._tracker[tensor_id] = (
             cpu_tensor,
             tensor.device,
-            tensor.storage_offset(),
             tensor.size(),
             tensor.stride(),
             buffer_key,
@@ -241,28 +243,25 @@ class CheckpointHiddenStatesOffload(saved_tensors_hooks):
     def _restore_tensor(self, tensor_id: int) -> torch.Tensor:
         if tensor_id in self._fwd_stash:
             tensor, event = self._fwd_stash.pop(tensor_id)
-            self.s0.wait_event(event)
+            self.compute_stream.wait_event(event)
             cpu_tensor, *_unused, buffer_key = self._tracker.pop(tensor_id)
             self._pool_cpu_buffer(buffer_key, cpu_tensor)
             self.stats.restored_tensors += 1
             self.stats.restored_bytes += self._num_bytes(tensor)
             return tensor
 
-        cpu_tensor, device, storage_offset, shape, stride, buffer_key = (self._tracker.pop(tensor_id))
-        stream = self.s1 if self.use_streams else self.s0
+        cpu_tensor, device, shape, stride, buffer_key = self._tracker.pop(tensor_id)
+        stream = self.s1 if self.use_streams else self.compute_stream
         with self._stream_context(stream):
-            gpu_tensor = cpu_tensor.to(device, non_blocking=self.use_streams)
-            if (gpu_tensor.storage_offset() != storage_offset or gpu_tensor.stride() != stride):
-                gpu_tensor = torch.as_strided(
-                    gpu_tensor,
-                    size=shape,
-                    stride=stride,
-                    storage_offset=storage_offset,
-                )
+            # restore into fresh offset-0 storage; reapplying the source storage_offset
+            # would index past the pool buffer's storage for sliced views
+            gpu_tensor = torch.empty_strided(shape, stride, dtype=cpu_tensor.dtype, device=device)
+            gpu_tensor.copy_(cpu_tensor, non_blocking=self.use_streams)
         if self.use_streams:
+            compute = self.compute_stream
             event = self.s1.record_event()
-            self.s0.wait_event(event)
-            gpu_tensor.record_stream(self.s0)
+            compute.wait_event(event)
+            gpu_tensor.record_stream(compute)
             self._pending_cpu_buffers.append((buffer_key, cpu_tensor, event))
         else:
             self._pool_cpu_buffer(buffer_key, cpu_tensor)
@@ -286,8 +285,9 @@ class CheckpointHiddenStatesOffload(saved_tensors_hooks):
 
     def _sync_and_clear(self) -> None:
         if self.use_streams:
-            if self.s0 is not None:
-                self.s0.synchronize()
+            compute = self.compute_stream
+            if compute is not None:
+                compute.synchronize()
             if self.s1 is not None:
                 self.s1.synchronize()
             self._reap_cpu_buffer_pool(force=True)
