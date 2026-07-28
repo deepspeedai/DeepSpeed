@@ -22,7 +22,7 @@ import re
 import shutil
 import stat
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 from typing import Any, Mapping, Sequence
 
@@ -74,11 +74,17 @@ MAX_DISPLAY_BYTES_PER_COMMAND = 16 * 1024 * 1024
 REMOTE_ROOT = "/workspace"
 REMOTE_REPOSITORY = f"{REMOTE_ROOT}/deepspeed"
 REMOTE_TRANSFORMERS = f"{REMOTE_ROOT}/transformers"
+GDS_TEST_TARGET = "tests/unit/v1/nvme/test_gds.py"
 
 _REPOSITORY_COMPONENT = r"[A-Za-z0-9][A-Za-z0-9._-]{0,99}"
 _REPOSITORY_RE = re.compile(rf"{_REPOSITORY_COMPONENT}/{_REPOSITORY_COMPONENT}\Z")
 _SHA_RE = re.compile(r"[0-9a-fA-F]{40}\Z")
 _TEST_FILE_RE = re.compile(r"tests/unit/v1/(?:[^/\x00-\x1f\x7f]+/)*test_[^/\x00-\x1f\x7f]+\.py\Z")
+
+
+def exclude_unsupported_gds_targets(targets: Sequence[str]) -> tuple[str, ...]:
+    """Remove explicit GDS targets from runners without GPUDirect Storage."""
+    return tuple(target for target in targets if target.split("::", 1)[0].rstrip("/") != GDS_TEST_TARGET)
 
 
 @dataclass(frozen=True)
@@ -507,6 +513,8 @@ def build_remote_commands(inputs: ControllerInputs) -> tuple[RemoteCommand, ...]
                 "-n",
                 "4",
                 "--verbose",
+                # GDS tests require GPUDirect Storage support unavailable on these runners.
+                "--ignore=tests/unit/v1/nvme/test_gds.py",
                 f"--torch_ver={preset['torch_test_version']}",
                 f"--cuda_ver={preset['cuda_test_version']}",
                 "--",
@@ -579,6 +587,12 @@ def run_controller(env: Mapping[str, str], modal_module: Any | None = None) -> i
     if inputs.selection_mode == "none":
         print("No impacted tests; Modal Sandbox was not created.")
         return 0
+    supported_targets = exclude_unsupported_gds_targets(inputs.targets)
+    if not supported_targets:
+        print("Skipping the selected GDS tests because this runner has no GPUDirect Storage support")
+        return 0
+    if supported_targets != inputs.targets:
+        inputs = replace(inputs, targets=supported_targets)
 
     if modal_module is None:
         modal_module = importlib.import_module("modal")

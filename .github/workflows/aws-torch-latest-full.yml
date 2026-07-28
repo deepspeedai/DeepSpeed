@@ -359,7 +359,7 @@ jobs:
           rm -rf /mnt/aio/pytest
           pytest --instafail --timeout 600 --forked -n 8 --basetemp=/mnt/aio/pytest unit/ \
             --ignore=unit/runtime/zero/test_nvme_checkpointing.py \
-            --ignore=unit/ops/aio/test_gds.py \
+            --ignore=unit/v1/nvme/test_gds.py \
             --ignore=unit/launcher/test_user_args.py \
             --ignore=unit/runtime/zenflow \
             --ignore=unit/ops/adam/test_zf_torch_adam.py \
@@ -372,7 +372,7 @@ jobs:
           rm -rf /mnt/aio/pytest
           pytest --instafail --timeout 600 -m 'sequential' --basetemp=/mnt/aio/pytest unit/ \
             --ignore=unit/runtime/zero/test_nvme_checkpointing.py \
-            --ignore=unit/ops/aio/test_gds.py \
+            --ignore=unit/v1/nvme/test_gds.py \
             --ignore=unit/launcher/test_user_args.py \
             --ignore=unit/runtime/zenflow \
             --ignore=unit/ops/adam/test_zf_torch_adam.py \
