@@ -89,6 +89,22 @@ class TestZeroLinearAutocast(DistributedTest):
 
     world_size = 1
 
+    def test_unbatched_backward_matches_reference(self):
+        device = get_accelerator().device_name()
+        weight = torch.randn(4, 8, device=device, requires_grad=True)
+        inp = torch.randn(8, device=device, requires_grad=True)
+        bias = torch.randn(4, device=device, requires_grad=True)
+        reference_weight = weight.detach().clone().requires_grad_()
+        reference_input = inp.detach().clone().requires_grad_()
+        reference_bias = bias.detach().clone().requires_grad_()
+
+        zero3_linear_wrap(inp, weight, bias).sum().backward()
+        (reference_input.matmul(reference_weight.t()) + reference_bias).sum().backward()
+
+        torch.testing.assert_close(weight.grad, reference_weight.grad)
+        torch.testing.assert_close(inp.grad, reference_input.grad)
+        torch.testing.assert_close(bias.grad, reference_bias.grad)
+
     def _run_forward_backward(self, device, use_autocast, dtype=None):
         """Run zero3_linear_wrap forward+backward, optionally inside autocast."""
         weight = torch.randn(4, 4, device=device, dtype=torch.float32, requires_grad=True)

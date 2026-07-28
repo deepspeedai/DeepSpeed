@@ -129,3 +129,54 @@ class TestZero3LinearInitContextPersistence(DistributedTest):
 
         assert F.linear is zero3_linear_wrap
         assert InsertPostInitMethodToModuleSubClasses.linear_bk is original_linear
+
+    def test_direct_init_reinstalls_wrapper_without_replacing_backup(self):
+        assert not hasattr(InsertPostInitMethodToModuleSubClasses, "linear_bk")
+        original_linear = F.linear
+        config = _zero3_config(memory_efficient_linear=True)
+
+        first_model = torch.nn.Linear(4, 3)
+        deepspeed.zero.Init(module=first_model, config_dict_or_path=config)
+        assert F.linear is zero3_linear_wrap
+        assert InsertPostInitMethodToModuleSubClasses.linear_bk is original_linear
+
+        F.linear = original_linear
+        second_model = torch.nn.Linear(4, 3)
+        deepspeed.zero.Init(module=second_model, config_dict_or_path=config)
+
+        assert F.linear is zero3_linear_wrap
+        assert InsertPostInitMethodToModuleSubClasses.linear_bk is original_linear
+
+    def test_direct_init_preserves_quantized_linear_wrapper(self):
+        assert not hasattr(InsertPostInitMethodToModuleSubClasses, "linear_bk")
+        original_linear = F.linear
+        quantized_config = _zero3_config(memory_efficient_linear=True)
+        quantized_config["weight_quantization"] = {
+            "quantized_initialization": {
+                "num_bits": 8,
+                "group_size": 2,
+                "group_dim": 1,
+                "symmetric": False,
+            },
+        }
+
+        with deepspeed.zero.Init(config_dict_or_path=quantized_config, dtype=torch.float32):
+            quantized_model = torch.nn.Linear(4, 4)
+
+        quantized_linear = F.linear
+        assert quantized_linear is not zero3_linear_wrap
+        assert quantized_linear.__wrapped__ is zero3_linear_wrap
+        assert quantized_model.weight.weight_quantized
+
+        ordinary_model = torch.nn.Linear(4, 4)
+        deepspeed.zero.Init(module=ordinary_model,
+                            config_dict_or_path=_zero3_config(memory_efficient_linear=True),
+                            dtype=torch.float32)
+
+        assert F.linear is quantized_linear
+        assert InsertPostInitMethodToModuleSubClasses.linear_bk is original_linear
+        with deepspeed.zero.GatheredParameters(quantized_model.parameters()):
+            inputs = torch.ones(2, 4, device=quantized_model.weight.device, dtype=quantized_model.weight.dtype)
+            output = F.linear(inputs, quantized_model.weight, quantized_model.bias)
+        assert output.shape == (2, 4)
+        assert torch.isfinite(output).all()

@@ -401,6 +401,7 @@ class InsertPostInitMethodToModuleSubClasses(object):
             force=False)
         if not hasattr(InsertPostInitMethodToModuleSubClasses, "linear_bk"):
             InsertPostInitMethodToModuleSubClasses.linear_bk = torch.nn.functional.linear
+        if torch.nn.functional.linear is InsertPostInitMethodToModuleSubClasses.linear_bk:
             torch.nn.functional.linear = zero3_linear_wrap
 
     def patch_init_and_builtins(self):
