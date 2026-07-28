@@ -9,6 +9,7 @@ from unit.simple_model import create_config_from_dict
 from deepspeed.launcher import runner as dsrun
 from deepspeed.autotuning.autotuner import Autotuner
 from deepspeed.autotuning.scheduler import ResourceManager
+from deepspeed.autotuning.utils import get_val_by_key, set_val_by_key
 
 RUN_OPTION = 'run'
 TUNE_OPTION = 'tune'
@@ -76,3 +77,21 @@ def test_autotuner_resources(tmpdir, active_resources):
 
     expected_num_gpus = min([len(v) for v in active_resources.values()])
     assert expected_num_gpus == tuner.exp_num_gpus
+
+
+def test_get_val_by_key_searches_all_nested_subdicts():
+    # get_val_by_key must mirror its sibling set_val_by_key: both walk every
+    # nested subdict, not just the first one. Here 'device' lives in the SECOND
+    # top-level subdict, so the old first-subdict-only search returned None.
+    exp = {"optimizer": {"type": "Adam"}, "zero_optimization": {"offload_optimizer": {"device": "cpu"}}}
+    assert get_val_by_key(exp, "device") == "cpu"
+
+    # A genuinely absent key still returns None (no false positives).
+    assert get_val_by_key(exp, "missing_key") is None
+
+    # A key in the first subdict is unaffected.
+    assert get_val_by_key(exp, "type") == "Adam"
+
+    # The getter agrees with the setter, which already reaches this field.
+    set_val_by_key(exp, "device", "nvme")
+    assert get_val_by_key(exp, "device") == "nvme"

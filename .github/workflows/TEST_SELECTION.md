@@ -24,8 +24,9 @@ one config — see [Adding a workflow](#adding-a-new-workflow).
 - On a PR, `ci/tests_fetcher.py` diffs your branch against the base branch, traces
   the import graph from your changed files to the impacted tests, and writes the
   list to `ci/.test_selection/test_list.txt`.
-- The workflow runs pytest on just that list. `push` to `master` and manual runs
-  always run everything.
+- The trusted controller validates that list, then fetches, installs, and tests
+  the exact candidate SHA inside a no-secret Modal Sandbox. `push` to `master`
+  and manual runs always run everything.
 - It is **fail-safe**: anything it can't reason about safely → run the *full* suite.
   It never silently runs *fewer* tests than reality.
 - Preview locally:
@@ -53,10 +54,10 @@ The design is a small, self-contained take on HuggingFace `transformers`'
 
 | File | Role |
 | --- | --- |
-| `.github/workflows/modal-torch-latest.yml` | The workflow: a `collect-tests` job (runs the fetcher) gating a `deploy` job (runs pytest on modal). |
+| `.github/workflows/modal-torch-latest.yml` | The workflow: a no-secret `collect-tests` job gating a trusted `deploy` controller job. |
 | `ci/tests_fetcher.py` | The selector. AST-parses the repo, builds an import graph, decides `all` / `subset` / `none`, writes the test-list file, emits a job summary. |
 | `ci/test_tests_fetcher.py` | Self-tests for the selector (pure stdlib; run in `collect-tests`). |
-| `ci/torch_latest.py` | The modal runner. Reads the test-list file and feeds it to pytest. |
+| `ci/torch_latest.py` | Pure-stdlib metadata/selection validation plus the trusted Modal Sandbox controller. |
 | `ci/.test_selection/test_list.txt` | The hand-off artifact (one pytest target per line). Git-ignored. |
 
 ### Job flow
@@ -65,24 +66,26 @@ The design is a small, self-contained take on HuggingFace `transformers`'
                 pull_request_target / push / workflow_dispatch
                                   │
                     ┌─────────────┴─────────────┐
-                    │        collect-tests       │   (no secrets; AST-only)
-                    │  checkout PR head          │
-                    │  restore ci/ from base     │
+                    │        collect-tests       │   (no secrets)
+                    │  checkout exact base SHA   │
+                    │  public-fetch exact PR SHA │
                     │  self-test the fetcher     │
-                    │  run tests_fetcher.py      │
+                    │  parse candidate as data   │
                     │   → mode (all|subset|none) │
-                    │   → upload test_list.txt   │
+                    │   → validate/upload list   │
                     └─────────────┬──────────────┘
                                   │ needs:
                                   ▼
                     ┌────────────────────────────┐
-                    │           deploy            │   (has modal/HF secrets)
-                    │  if mode != none (or manual │
-                    │     / collector failed)     │
-                    │  checkout PR head           │
-                    │  restore ci/ from base      │
-                    │  download test_list.txt     │
-                    │  modal run ci.torch_latest  │
+                    │           deploy            │   (Modal token: controller only)
+                    │  if mode != none            │
+                    │  checkout exact base SHA    │
+                    │  validate mode/list + SHA   │
+                    │  create one L40S:2 Sandbox  │
+                    │    no secrets or mounts     │
+                    │    fetch exact PR SHA       │
+                    │    install + run pytest     │
+                    │  terminate/observe Sandbox  │
                     └────────────────────────────┘
 ```
 
@@ -239,34 +242,50 @@ tests.
 ## Security model
 
 The workflow triggers on **`pull_request_target`**, so it runs in the base repo's
-context and the `deploy` job has the modal/HF **secrets** in scope. To keep PRs
-from abusing that:
+context and the `deploy` controller authenticates to Modal. The trust boundary is:
 
-- `collect-tests` holds **no secrets** and only **AST-parses** (never executes)
-  the PR tree.
-- **Both jobs restore `ci/` from the base branch** before using it:
-  - `collect-tests` runs the **base** selector + self-tests. This job decides
-    whether the Required `deploy` runs, so it must not trust the PR's own
-    `ci/tests_fetcher.py` — otherwise a PR could rewrite it to emit `mode=none`
-    and skip CI while still going green. The diff is computed from git history, so
-    a PR's `ci/` changes still appear in the diff and (via the base selector's
-    `ci/**` run-all glob) force a full run.
-  - `deploy` runs the **base** orchestration (which drives `modal run` with the
-    secrets), so a PR can't repoint it at the secrets to exfiltrate them.
-  In both jobs the PR's `deepspeed/` + `tests/` are what gets parsed/tested.
+- Both jobs check out only the exact trusted base SHA (or the exact
+  push/manual SHA), with persisted credentials, LFS, and submodules disabled.
+  They never use the fork head with `actions/checkout`.
+- `collect-tests` holds **no repository secrets**. Trusted base code fetches the
+  public head and base repositories at their exact event SHAs, disables
+  credentials, hooks, submodules, and LFS smudging, and rejects checkout
+  symlinks that escape the candidate root. It treats the candidate tree only as
+  git/AST data; it never imports, installs, builds, or executes candidate code.
+- The selector logic and its self-tests always come from the trusted checkout.
+  A PR's `ci/` changes still appear in the diff, so the base selector's `ci/**`
+  run-all rule widens them to the full suite.
+- The handoff is a fixed `all` / `subset` / `none` mode plus one bounded,
+  validated regular file. Test paths must stay under `tests/unit/v1`, cannot be
+  options or traversal paths, and are passed after pytest's `--` separator.
+- `deploy` runs only the trusted controller. Candidate metadata is restricted
+  to a public `owner/repository` and full 40-hex SHA; event values enter Python
+  through environment variables, not workflow shell interpolation.
+- The Modal service token remains in the controller process. The Sandbox gets
+  no Modal, GitHub, Hugging Face, OIDC, or other secret; no local checkout,
+  mount, volume, network filesystem, port, proxy, or workload identity is
+  attached. The controller constructs a positive allowlist of non-sensitive
+  git/pip environment flags instead of forwarding its environment.
+- Candidate acquisition, dependency installation, DeepSpeed installation, and
+  pytest all happen inside one isolated `l40s:2` Sandbox with a 3600-second
+  server-side lifetime. Every subprocess uses structural arguments, and every
+  nonzero clone/install/test status fails the check.
+- The Sandbox retains outbound network access because it must reach public
+  GitHub, package indexes, PyTorch wheels, and optionally Transformers. Those
+  services do not have stable CIDRs suitable for the SDK's CIDR allowlist, so
+  the containment control is the absence of secrets, identities, and mounts.
 - The `pull_request_target` trigger types are `review_requested`,
   `ready_for_review`, and `synchronize`. Because `synchronize` re-runs on every
   push to an open PR (not just on a maintainer action), the maintainer review is a
-  mitigation, **not** an absolute barrier — the base-`ci/` restore above is the
-  primary protection for the secrets.
+  mitigation, **not** the trust boundary. Exact trusted base code plus Sandbox
+  isolation is the primary protection.
 
 > **Consequence:** changes to `ci/*` (including `tests_fetcher.py` itself) take
-> effect under `pull_request_target` only after they're **merged**. Validate
-> `ci/*` changes via a `pull_request`-triggered run or the `modal` CLI locally.
->
-> **Bootstrap:** when the base branch has no selector yet (the PR that introduces
-> it), the restored base `ci/` won't contain `tests_fetcher.py`; `collect-tests`
-> detects this and falls back to running the full suite.
+> effect under `pull_request_target` only after they're **merged**. A PR that
+> changes this launcher cannot prove its new PR-triggered end-to-end path by
+> running itself. Before merge, use pure-stdlib/unit/static validation and, only
+> when separately authorized credentials are available, a direct Modal smoke.
+> Do not describe mock coverage as live Modal evidence.
 
 
 ## Failure modes & guarantees
@@ -276,14 +295,25 @@ The selector is built to **fail safe — to `all`, never to `none`**:
 - Missing/unresolvable base, no merge-base, a parse error on a file, or **any
   unexpected exception** in the selector → it falls back to the full suite (the
   top-level handler in `main()` logs the traceback and sets `mode=all`).
-- If `collect-tests` fails entirely, `deploy` still runs (and the workflow has an
-  explicit "fail if selection failed" guard) so a broken collector can't let a PR
-  pass without testing.
+- Checkout, selector self-test, list validation, write, or upload failures make
+  `collect-tests` fail. `deploy` then enters its explicit failure guard, so a
+  broken collector cannot pass the Required check.
 - The only way to run *fewer* tests is a clean, well-understood narrow decision;
   every uncertain case widens to everything.
+- Missing or invalid repository/SHA metadata, an inconsistent mode/list pair,
+  and any failed Sandbox clone, install, version probe, or pytest command fail
+  the controller. There is no moving-branch fallback.
+- Once created, the task-owned Sandbox is terminated and its terminal state is
+  observed on success and failure. Cleanup failure is itself a failure and is
+  reported without hiding the primary command error. Forced controller loss is
+  bounded by the Sandbox's one-hour server lifetime.
+- `none` creates no Sandbox. `subset` and `all` create exactly one Sandbox; the
+  GPU shape and lifetime are constants rather than PR or manual inputs.
 
 Every run writes a summary to the GitHub job summary (mode, reason, and the
-selected files) so the decision is auditable from the Actions UI.
+selected files) so the decision is auditable from the Actions UI. Candidate
+text is control-escaped before logs/summaries and is never written to
+`GITHUB_OUTPUT`.
 
 
 ## FAQ / troubleshooting
@@ -302,5 +332,11 @@ fanned out. Check the job summary's `reason`. If a hub over-fans, consider
 `OPAQUE_MODULES`.
 
 **It ran the full suite and the summary says "shallow clone?" / "no merge-base".**
-The runner didn't have enough history to compute the diff. `collect-tests` uses
-`fetch-depth: 0`; if you changed that, restore full history for the base.
+The exact event commits did not provide a usable merge-base. The collector
+fetches the exact head and base SHAs into fixed refs; verify both event commits
+are still publicly reachable. Do not replace this with a moving branch fallback.
+
+**Why didn't this PR exercise its new `pull_request_target` controller?**
+GitHub intentionally runs that event's workflow from the trusted base. The new
+controller becomes the trusted code only after merge; before then, rely on the
+focused static/unit evidence described in the security model.
