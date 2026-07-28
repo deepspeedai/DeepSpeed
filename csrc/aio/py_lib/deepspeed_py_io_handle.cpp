@@ -9,6 +9,7 @@ Functionality for swapping optimizer tensors to/from (NVMe) storage devices.
 
 #include "deepspeed_py_io_handle.h"
 #include <cstdlib>
+#include "deepspeed_aio_op_desc.h"
 
 #define O_DIRECT_ALIGNMENT 512
 
@@ -136,6 +137,7 @@ int deepspeed_io_handle_t::write(const torch::Tensor& buffer,
 
     const auto fd = open_file(filename, false);
     if (fd == -1) { return -1; }
+    warn_consumer_ssd_writes();
 
     auto write_buffer = (char*)buffer.data_ptr();
     const auto num_write_bytes = static_cast<int64_t>(buffer.nbytes());
