@@ -2737,6 +2737,10 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         if self.swap_optimizer:
             self.optimizer_swapper.post_backward()
 
+        # Release params of submodules whose post-backward hook never fired this microbatch
+        # (e.g. a checkpointed block fed a no-grad input). No-op when the backward stack is empty.
+        self.parameter_offload.release_backward_leftovers()
+
     def get_fp32_grad_partitions(self) -> Dict[int, Dict[int, Tensor]]:
         """get fp32 gradient partition dictionary
         accessed as grad_dict[parameter_group_index][parameter_index]

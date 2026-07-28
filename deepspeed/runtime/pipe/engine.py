@@ -534,6 +534,12 @@ class PipelineEngine(DeepSpeedEngine):
         """True if this process is in the last stage in the pipeline."""
         return self.stage_id == self.num_stages - 1
 
+    def _backward_prologue_per_tensor(self, grad):
+        # The last stage applies GAS scaling before sending gradients upstream.
+        if self.is_last_stage():
+            return super()._backward_prologue_per_tensor(grad)
+        return grad
+
     def get_pipeline_parallel_rank(self):
         return self.stage_id
 

@@ -300,6 +300,35 @@ class TestMoESingleton(DistributedTest):
 
 class TestTopkGate(DistributedTest):
 
+    @staticmethod
+    def _assert_tutel_routes_match(combine_weights, tutel_output):
+        _, capacity, num_experts, indices_, locations_, gates_, _ = tutel_output
+        reconstructed = torch.zeros_like(combine_weights)
+        for indices_s, locations_s, gates_s in zip(indices_, locations_, gates_):
+            route_mask = indices_s.ge(0)
+            safe_indices = indices_s.clamp_min(0)
+            expert_mask = torch.nn.functional.one_hot(safe_indices, num_classes=num_experts)
+            expert_mask *= route_mask.unsqueeze(1)
+            location_mask = torch.nn.functional.one_hot(locations_s, num_classes=int(capacity))
+            reconstructed += torch.einsum("s,se,sc->sec", gates_s, expert_mask, location_mask)
+        torch.testing.assert_close(reconstructed, combine_weights)
+
+    def test_tutel_top2_routing(self):
+        logits = torch.tensor([[0.1, 0.9, 0.2], [0.8, 0.1, 0.3], [0.4, 0.6, 0.5], [0.7, 0.2, 0.1]])
+        native_output = top2gating(logits, 0.5, 0, top2_2nd_expert_sampling=False)
+        tutel_output = top2gating(logits, 0.5, 0, top2_2nd_expert_sampling=False, use_tutel=True)
+
+        assert len(tutel_output[3]) == 2
+        self._assert_tutel_routes_match(native_output[1], tutel_output)
+
+    def test_tutel_topk_routing(self):
+        logits = torch.tensor([[0.1, 0.9, 0.2, 0.3], [0.8, 0.1, 0.3, 0.2], [0.4, 0.6, 0.5, 0.7], [0.7, 0.2, 0.1, 0.8]])
+        native_output = topkgating(logits, 3, 0.5, 0)
+        tutel_output = topkgating(logits, 3, 0.5, 0, use_tutel=True)
+
+        assert len(tutel_output[3]) == 3
+        self._assert_tutel_routes_match(native_output[1], tutel_output)
+
     def test(self):
 
         def check_equal(logits, cap, sparse_truth, res):
