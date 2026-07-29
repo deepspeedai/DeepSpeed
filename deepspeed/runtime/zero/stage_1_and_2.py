@@ -1511,7 +1511,11 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         start = source_offset
         accumulated_grad = accumulated_grad.view(-1).narrow(0, start, num_elements)
 
-        self.norm_for_param_grads[param_id] = accumulated_grad.data.double().norm(2)
+        # FIXME (musa): use data.double() in musa
+        if hasattr(torch, "musa"):
+            self.norm_for_param_grads[param_id] = accumulated_grad.data.norm(2)
+        else:
+            self.norm_for_param_grads[param_id] = accumulated_grad.data.double().norm(2)
 
     def async_inplace_copy_grad_to_fp32_buffer_from_gpu(self, param):
         param_id = self.get_param_id(param)

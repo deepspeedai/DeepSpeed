@@ -20,6 +20,8 @@
 | 新增 | `deepspeed/ops/op_builder/musa/` | 运行时镜像 |
 | 修改 | `accelerator/real_accelerator.py` | 注册 / 校验 / 自动探测 / 工厂 |
 | 修改 | `deepspeed/accelerator/real_accelerator.py` | 与上者对称修改 |
+| 修改 | `deepspeed/runtime/zero/stage_1_and_2.py` | MUSA 上 grad norm 跳过 `double()` |
+| 修改 | `deepspeed/runtime/zero/stage3.py` | 同上（ZeRO-3） |
 
 ---
 
@@ -352,7 +354,37 @@ class MUSAFusedAdam:
 
 ---
 
-## 7. 未修改但需知情的边界
+## 7. ZeRO：MUSA 上避免 fp64 grad norm
+
+**涉及文件**：
+
+- `deepspeed/runtime/zero/stage_1_and_2.py`
+- `deepspeed/runtime/zero/stage3.py`
+
+### 修改前
+
+梯度范数路径直接 `.double().norm(2)`（或等价的 `to(...).double().norm(2)`）。
+
+### 修改后
+
+若存在 `torch.musa`，改为直接 `.norm(2)`，否则仍走原来的 `double()` 路径。例如：
+
+```python
+if hasattr(torch, "musa"):
+    self.norm_for_param_grads[param_id] = accumulated_grad.data.norm(2)
+else:
+    self.norm_for_param_grads[param_id] = accumulated_grad.data.double().norm(2)
+```
+
+ZeRO-3 的 `_constant_buffered_norm2` / `get_grad_norm_direct` 同理。
+
+### 修改原因
+
+MUSA 上对 grad 做 `double()` 再算 norm 会出问题；在检测到 `torch.musa` 时跳过 fp64 转换，其余后端行为不变。
+
+---
+
+## 8. 未修改但需知情的边界
 
 | 项 | 说明 |
 |----|------|

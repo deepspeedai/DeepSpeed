@@ -1761,9 +1761,17 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         norm = None
         for part in input.view(-1).split(buffer_size):
             if norm is None:
-                norm = part.data.double().norm(2)**2.0
+                # FIXME (musa): use data.double() in musa
+                if hasattr(torch, "musa"):
+                    norm = part.data.norm(2)**2.0
+                else:
+                    norm = part.data.double().norm(2)**2.0
             else:
-                norm += part.data.double().norm(2)**2.0
+                # FIXME (musa): use data.double() in musa
+                if hasattr(torch, "musa"):
+                    norm += part.data.norm(2)**2.0
+                else:
+                    norm += part.data.double().norm(2)**2.0
         return norm**0.5
 
     def set_norm_for_param_grad_in_gpu(self, param):
@@ -2223,7 +2231,11 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             grad_norms = []
             for g, p in zip(gradients, params):
                 if is_model_parallel_parameter(p) or (self.model_parallel_rank == 0):
-                    grad_norms.append(g.to(get_accelerator().device_name(), non_blocking=True).double().norm(2))
+                    # FIXME (musa): use data.double() in musa
+                    if hasattr(torch, "musa"):
+                        grad_norms.append(g.to(get_accelerator().device_name(), non_blocking=True).norm(2))
+                    else:
+                        grad_norms.append(g.to(get_accelerator().device_name(), non_blocking=True).double().norm(2))
 
             # Sum across all model parallel GPUs.
             if len(grad_norms) == 0:

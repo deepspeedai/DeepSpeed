@@ -8,3 +8,4 @@ Minimal port based on the MLU accelerator pattern in upstream DeepSpeed 0.19.3, 
 - `accelerator/musa_accelerator.py` (+ `deepspeed/accelerator/` mirror)
 - `op_builder/musa/` (+ `deepspeed/ops/op_builder/musa/` mirror)
 - Registration / override check / auto-detect / factory in both `real_accelerator.py` copies
+- ZeRO-1/2/3: skip `tensor.double()` before grad `norm(2)` when `torch.musa` is present
