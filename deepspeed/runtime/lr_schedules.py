@@ -331,6 +331,9 @@ class LRRangeTest(object):
         else:
             self.min_lr = [lr_range_test_min_lr] * len(self.optimizer.param_groups)
 
+        if not isinstance(lr_range_test_step_size, int) or lr_range_test_step_size <= 0:
+            raise ValueError(f"lr_range_test_step_size must be a positive integer, got {lr_range_test_step_size}")
+
         self.step_size = lr_range_test_step_size
         self.step_rate = lr_range_test_step_rate
         self.last_batch_iteration = last_batch_iteration
@@ -481,6 +484,13 @@ class OneCycle(object):
         cycle_first_step_size = float(cycle_first_step_size)
         cycle_second_step_size = float(
             cycle_second_step_size) if cycle_second_step_size is not None else cycle_first_step_size
+
+        # Both halves are validated separately: a zero-length first half leaves total_size
+        # positive but makes step_ratio 0, and _get_scale_factor divides by step_ratio.
+        if cycle_first_step_size <= 0:
+            raise ValueError(f"cycle_first_step_size must be positive, got {cycle_first_step_size}")
+        if cycle_second_step_size < 0:
+            raise ValueError(f"cycle_second_step_size must be non-negative, got {cycle_second_step_size}")
 
         self.total_size = cycle_first_step_size + cycle_second_step_size
         self.step_ratio = cycle_first_step_size / self.total_size
@@ -688,7 +698,7 @@ class WarmupLR(object):
         self.optimizer = get_torch_optimizer(optimizer)
 
         if warmup_max_lr is None:
-            warmup_max_lr = [group['lr'] for group in self.optimizer.param_groups][0]
+            warmup_max_lr = [group['lr'] for group in self.optimizer.param_groups]
 
         self.min_lrs = self._format_param(self.optimizer, warmup_min_lr, "min_lr")
         self.max_lrs = self._format_param(self.optimizer, warmup_max_lr, "max_lr")
