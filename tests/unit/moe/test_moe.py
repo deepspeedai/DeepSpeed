@@ -14,7 +14,8 @@ import deepspeed.comm as dist
 import deepspeed.moe.sharded_moe as sharded_moe
 from deepspeed import get_accelerator
 from deepspeed.moe.layer import MoE
-from deepspeed.moe.sharded_moe import top1gating, top2gating, topkgating
+from deepspeed.moe.sharded_moe import (top1gating, top2gating, topkgating, _route_slots, _sparse_encode,
+                                       _sparse_decode)
 from deepspeed.moe.utils import split_params_into_different_moe_groups_for_optimizer, is_moe_param
 from deepspeed.utils.torch import required_torch_version
 
@@ -208,7 +209,7 @@ class TestTopk(DistributedTest):
                             noisy_gate_policy=None,
                             drop_tokens=False,
                             use_rts=True,
-                            use_tutel=False)
+                            sparse_routes=False)
 
 
 class TestMoESingleton(DistributedTest):
@@ -301,8 +302,8 @@ class TestMoESingleton(DistributedTest):
 class TestTopkGate(DistributedTest):
 
     @staticmethod
-    def _assert_tutel_routes_match(combine_weights, tutel_output):
-        _, capacity, num_experts, indices_, locations_, gates_, _ = tutel_output
+    def _assert_sparse_routes_match(combine_weights, sparse_output):
+        _, capacity, num_experts, indices_, locations_, gates_, _ = sparse_output
         reconstructed = torch.zeros_like(combine_weights)
         for indices_s, locations_s, gates_s in zip(indices_, locations_, gates_):
             route_mask = indices_s.ge(0)
@@ -313,21 +314,50 @@ class TestTopkGate(DistributedTest):
             reconstructed += torch.einsum("s,se,sc->sec", gates_s, expert_mask, location_mask)
         torch.testing.assert_close(reconstructed, combine_weights)
 
-    def test_tutel_top2_routing(self):
+    @pytest.mark.parametrize("k", [1, 2, 3])
+    def test_sparse_dispatch_matches_dense(self, k):
+        torch.manual_seed(k)
+        num_tokens, num_experts, d_model = 16, 4, 8
+        logits = torch.randn(num_tokens, num_experts)
+        hidden = torch.randn(num_tokens, d_model)
+
+        if k == 1:
+            dense = top1gating(logits, 1.0, 0, use_rts=False)
+            sparse = top1gating(logits, 1.0, 0, use_rts=False, sparse_routes=True)
+        elif k == 2:
+            dense = top2gating(logits, 1.0, 0, top2_2nd_expert_sampling=False)
+            sparse = top2gating(logits, 1.0, 0, top2_2nd_expert_sampling=False, sparse_routes=True)
+        else:
+            dense = topkgating(logits, k, 1.0, 0)
+            sparse = topkgating(logits, k, 1.0, 0, sparse_routes=True)
+
+        combine_weights, dispatch_mask = dense[1], dense[2]
+        capacity, indices_, locations_, gates_ = int(sparse[1]), sparse[3], sparse[4], sparse[5]
+        slots = _route_slots(indices_, locations_, num_experts, capacity)
+
+        expected = torch.einsum("sec,sm->ecm", dispatch_mask.float(), hidden)
+        torch.testing.assert_close(_sparse_encode(hidden, slots, num_experts, capacity), expected)
+
+        expert_output = torch.randn_like(expected)
+        expected = torch.einsum("sec,ecm->sm", combine_weights, expert_output)
+        actual = _sparse_decode(expert_output.view(num_experts * capacity, d_model), slots, gates_, num_tokens)
+        torch.testing.assert_close(actual, expected)
+
+    def test_sparse_top2_routing(self):
         logits = torch.tensor([[0.1, 0.9, 0.2], [0.8, 0.1, 0.3], [0.4, 0.6, 0.5], [0.7, 0.2, 0.1]])
         native_output = top2gating(logits, 0.5, 0, top2_2nd_expert_sampling=False)
-        tutel_output = top2gating(logits, 0.5, 0, top2_2nd_expert_sampling=False, use_tutel=True)
+        sparse_output = top2gating(logits, 0.5, 0, top2_2nd_expert_sampling=False, sparse_routes=True)
 
-        assert len(tutel_output[3]) == 2
-        self._assert_tutel_routes_match(native_output[1], tutel_output)
+        assert len(sparse_output[3]) == 2
+        self._assert_sparse_routes_match(native_output[1], sparse_output)
 
-    def test_tutel_topk_routing(self):
+    def test_sparse_topk_routing(self):
         logits = torch.tensor([[0.1, 0.9, 0.2, 0.3], [0.8, 0.1, 0.3, 0.2], [0.4, 0.6, 0.5, 0.7], [0.7, 0.2, 0.1, 0.8]])
         native_output = topkgating(logits, 3, 0.5, 0)
-        tutel_output = topkgating(logits, 3, 0.5, 0, use_tutel=True)
+        sparse_output = topkgating(logits, 3, 0.5, 0, sparse_routes=True)
 
-        assert len(tutel_output[3]) == 3
-        self._assert_tutel_routes_match(native_output[1], tutel_output)
+        assert len(sparse_output[3]) == 3
+        self._assert_sparse_routes_match(native_output[1], sparse_output)
 
     def test(self):
 
