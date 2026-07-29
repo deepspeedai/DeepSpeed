@@ -20,7 +20,7 @@ try:
 except ImportError as e:
     dsa2 = None
 
-SUPPORTED_ACCELERATOR_LIST = ['cuda', 'cpu', 'xpu', 'npu', 'mps', 'hpu', 'mlu', 'sdaa', 'supa']
+SUPPORTED_ACCELERATOR_LIST = ['cuda', 'cpu', 'xpu', 'npu', 'mps', 'hpu', 'mlu', 'sdaa', 'supa', 'musa']
 
 ds_accelerator = None
 
@@ -98,6 +98,11 @@ def get_accelerator():
                 import torch_mlu  # noqa: F401
             except ImportError as e:
                 raise ValueError("MLU_Accelerator requires torch_mlu, which is not installed on this system.")
+        elif accelerator_name == "musa":
+            try:
+                import torch_musa  # noqa: F401
+            except ImportError as e:
+                raise ValueError("MUSA_Accelerator requires torch_musa, which is not installed on this system.")
         elif accelerator_name == "supa":
             try:
                 import torch_supa  # noqa: F401 # type: ignore
@@ -169,6 +174,16 @@ def get_accelerator():
                 pass
         if accelerator_name is None:
             try:
+                import torch_musa  # noqa: F401,F811
+                import torch
+
+                # Detect MUSA before CUDA: torch_musa may expose CUDA-compatible APIs.
+                if hasattr(torch, 'musa') and torch.musa.is_available():
+                    accelerator_name = "musa"
+            except ImportError as e:
+                pass
+        if accelerator_name is None:
+            try:
                 # Detect Biren SUPA GPU. torch_supa spoofs torch.cuda so this  #ignore-cuda
                 # check must come before the CUDA detection below.
                 import torch_supa  # noqa: F401,F811 # type: ignore
@@ -236,6 +251,10 @@ def get_accelerator():
         from .mlu_accelerator import MLU_Accelerator
 
         ds_accelerator = MLU_Accelerator()
+    elif accelerator_name == 'musa':
+        from .musa_accelerator import MUSA_Accelerator
+
+        ds_accelerator = MUSA_Accelerator()
     elif accelerator_name == 'supa':
         from .supa_accelerator import SUPA_Accelerator
 
