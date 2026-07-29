@@ -228,6 +228,48 @@ class ColumnParallel(torch.autograd.Function):
         return None, grad_output
 
 
+class GatherFromTensorParallelRegion(torch.autograd.Function):
+    """Gather last-dimension shards while keeping the output replicated."""
+
+    @staticmethod
+    def forward(ctx: Any, group: dist.ProcessGroup, input: torch.Tensor) -> torch.Tensor:
+        ctx.group = group
+        if group is None:
+            ctx.partition_sizes = (input.shape[-1], )
+            ctx.tp_index = 0
+            return input
+
+        tp_world_size = dist.get_world_size(group=group)
+        ctx.tp_index = dist.get_rank(group=group)
+        if tp_world_size == 1:
+            ctx.partition_sizes = (input.shape[-1], )
+            return input
+
+        local_size = torch.tensor([input.shape[-1]], dtype=torch.long, device=input.device)
+        gathered_sizes = [torch.empty_like(local_size) for _ in range(tp_world_size)]
+        dist.all_gather(gathered_sizes, local_size, group=group)
+        ctx.partition_sizes = tuple(int(size.item()) for size in gathered_sizes)
+
+        max_partition_size = max(ctx.partition_sizes)
+        if input.shape[-1] == max_partition_size:
+            input_padded = input.contiguous()
+        else:
+            padded_shape = (*input.shape[:-1], max_partition_size)
+            input_padded = input.new_zeros(padded_shape)
+            input_padded[..., :input.shape[-1]].copy_(input)
+
+        gathered = [torch.empty_like(input_padded) for _ in range(tp_world_size)]
+        dist.all_gather(gathered, input_padded, group=group)
+        return torch.cat([shard[..., :size] for shard, size in zip(gathered, ctx.partition_sizes)], dim=-1)
+
+    @staticmethod
+    def backward(ctx: Any, grad_output: torch.Tensor) -> Tuple[None, torch.Tensor]:
+        shard_offset = sum(ctx.partition_sizes[:ctx.tp_index])
+        shard_size = ctx.partition_sizes[ctx.tp_index]
+        grad_input = grad_output.narrow(-1, shard_offset, shard_size).contiguous()
+        return None, grad_input
+
+
 class TensorParallel_Layer(nn.Module, ABC):
     """
     A base class for model layers with  tensor parallelism support.
@@ -677,10 +719,11 @@ class LinearAllreduce(TensorParallel_Layer):
 #remove kwargs from partition.
 class LinearLayer(TensorParallel_Layer):
 
-    def __init__(self, module, mp_group=None, skip_partition=False, **kwargs):
+    def __init__(self, module, mp_group=None, skip_partition=False, gather_output=False, **kwargs):
         super(LinearLayer, self).__init__(mp_group, **kwargs)
         self.weight = module.weight
         self.bias = module.bias
+        self.gather_output = gather_output
         if not skip_partition and self._should_materialize_tp_partition():
             self._tp_partition([self.weight, self.bias])
         self.support_training = True
@@ -698,6 +741,9 @@ class LinearLayer(TensorParallel_Layer):
                 output = add_bias(output, self.bias)
         else:
             output = AsyncColumnParallel.apply(self.mp_group, input, self.weight, self.bias)
+
+        if self.gather_output:
+            output = GatherFromTensorParallelRegion.apply(self.mp_group, output)
 
         return output
 
@@ -765,7 +811,7 @@ class LinearLayer(TensorParallel_Layer):
 
     # for bwc
     @classmethod
-    def from_weights(cls, weight_shape=None, dtype=torch.half, weight=None, bias=None):
+    def from_weights(cls, weight_shape=None, dtype=torch.half, weight=None, bias=None, gather_output=False):
         if weight is not None:
             in_features = weight.shape[1]
             out_features = weight.shape[0]
@@ -777,7 +823,7 @@ class LinearLayer(TensorParallel_Layer):
             in_features = weight_shape[1]
             out_features = weight_shape[0]
             linear = nn.Linear(in_features, out_features, bias=(bias is not None))
-        return cls(linear, skip_partition=True)
+        return cls(linear, skip_partition=True, gather_output=gather_output)
 
 
 class FusedModuleWrapper:

@@ -118,10 +118,22 @@ For models that define a `tp_plan`, you only need a minimal config:
 ```
 
 DeepSpeed will read the model's `tp_plan` at initialization and convert it to
-internal partition rules. Currently `colwise` and `rowwise` partition types
-are supported. Additional types defined by HuggingFace (such as
-`colwise_rep`, `local_colwise`, `local_rowwise`, etc.) are not yet handled
-and will raise an error if encountered.
+internal partition rules. The supported types are `colwise`, `rowwise`,
+and `colwise_gather_output`(`colwise_rep`). The gathered column styles shard
+the linear weight along its output dimension and AllGather the local output
+shards so every tensor-parallel rank receives the complete output.
+
+Gathered column parallelism currently supports untied output layers. If an
+output layer such as `lm_head` shares the same runtime `Parameter` object with
+an embedding, DeepSpeed leaves both modules replicated and applies tensor
+parallelism to the remaining matched layers. This preserves the tie without
+silently cloning the weight, but does not reduce the embedding or output-layer
+memory footprint. A coupled vocabulary-parallel embedding is required to shard
+the tied weight and is not yet implemented. This fallback uses actual `Parameter`
+identity rather than model configuration metadata such as `tie_word_embeddings`.
+
+Additional HuggingFace types such as `local_colwise` and `local_rowwise` are
+not yet handled and fall back to AutoTP preset-based partitioning.
 
 If you need to override the model's built-in `tp_plan`, provide a
 `partition_config` in the DeepSpeed config -- it takes precedence.
