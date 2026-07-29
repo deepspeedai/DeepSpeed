@@ -89,7 +89,7 @@ class TPTrainingConfig(DeepSpeedConfigModel):
     preset_model: Optional[str] = None
     """
     Use a built-in preset for common model architectures.
-    Available presets: "llama", "bloom", "chatglm", "mixtral", "deepseek_v2", "qwen2", "phi3"
+    Available presets: "llama", "bloom", "chatglm", "mixtral", "deepseek_v2", "qwen2", "qwen3_5", "phi3"
     """
 
     #The following parameters are required by autoTP parser.
