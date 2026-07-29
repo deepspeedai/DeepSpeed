@@ -880,7 +880,7 @@ def _no_gather_coalesced(params: Iterable[Parameter]) -> AllGatherCoalescedHandl
     return NoGatherCoalescedHandle(params)
 
 
-def _contradicting_single_rank_pg_error(dp_world_size, data_parallel_group, env=None):
+def _contradicting_single_rank_pg_error(dp_world_size, explicit_process_group, env=None):
     """Detect the silent single-rank fallback described in #8084.
 
     When a multi-process launcher (``deepspeed``, ``torchrun``, accelerate, ...) sets ``WORLD_SIZE > 1`` but the
@@ -891,10 +891,11 @@ def _contradicting_single_rank_pg_error(dp_world_size, data_parallel_group, env=
     with a process group that contradicts the launcher world, so return an actionable error message in that case,
     else ``None``.
 
-    Only the default (world-group) path is checked: an explicitly supplied ``data_parallel_group`` of size 1 is
-    treated as intentional.
+    Only the default (world-group) path is checked: ``explicit_process_group`` is the process group the caller
+    explicitly supplied to ``zero.Init``, if any (``data_parallel_group``, or the deprecated
+    ``sequence_data_parallel_group``); an explicitly supplied group of size 1 is treated as intentional.
     """
-    if dp_world_size != 1 or data_parallel_group is not None:
+    if dp_world_size != 1 or explicit_process_group is not None:
         return None
     env = os.environ if env is None else env
     try:
@@ -1067,7 +1068,10 @@ class Init(InsertPostInitMethodToModuleSubClasses):
         self.rank = dist.get_rank(group=self.ds_process_group)
         self.dp_world_size = dist.get_world_size(group=self.ds_process_group)
 
-        _pg_contradiction = _contradicting_single_rank_pg_error(self.dp_world_size, data_parallel_group)
+        # The deprecated sequence_data_parallel_group also counts as an explicitly supplied group (it is assigned
+        # to ds_process_group above), so a size-1 group passed through it must not trip the contradiction guard.
+        _explicit_process_group = data_parallel_group if data_parallel_group is not None else sequence_data_parallel_group
+        _pg_contradiction = _contradicting_single_rank_pg_error(self.dp_world_size, _explicit_process_group)
         if _pg_contradiction is not None:
             raise RuntimeError(_pg_contradiction)
 
