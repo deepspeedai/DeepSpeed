@@ -9,6 +9,8 @@ import pytest
 from unit.common import DistributedTest
 from deepspeed.utils.torch import required_torch_version
 from deepspeed.moe.layer import MoE
+from deepspeed import get_accelerator
+import deepspeed.moe.sharded_moe as sharded_moe
 
 
 class MPU():
@@ -90,3 +92,36 @@ class TestMOETensorParallel(DistributedTest):
             assert deepspeed.utils.groups._get_expert_model_parallel_world_size() == tp_size
         else:
             assert deepspeed.utils.groups._get_expert_model_parallel_world_size() == 1
+
+
+@pytest.mark.parametrize("enable_expert_tp", [True, False])
+class TestMOETensorParallelTutel(DistributedTest):
+    world_size = 2
+
+    def test(self, enable_expert_tp):
+        if not sharded_moe.TUTEL_INSTALLED:
+            pytest.skip("Tutel is not installed")
+
+        hidden_dim = 16
+        # Tutel dispatches into a flat [e * c, m] buffer, so it only agrees with the
+        # dense path if that buffer is sharded along the capacity dim under tensor parallelism.
+        deepspeed.utils.groups.mpu = MPU(self.world_size)
+        inputs = torch.randn(4, 8, hidden_dim, device=get_accelerator().current_device_name())
+
+        outputs = []
+        for use_tutel in (False, True):
+            torch.manual_seed(0)
+            expert = torch.nn.Sequential(torch.nn.Linear(hidden_dim, 4 * hidden_dim), torch.nn.ReLU(),
+                                         torch.nn.Linear(4 * hidden_dim, hidden_dim))
+            model = MoE(hidden_size=hidden_dim,
+                        expert=expert,
+                        num_experts=2,
+                        ep_size=1,
+                        use_residual=False,
+                        enable_expert_tensor_parallelism=enable_expert_tp,
+                        use_tutel=use_tutel).to(inputs.device)
+            assert model.deepspeed_moe.use_tutel == use_tutel
+            with torch.no_grad():
+                outputs.append(model(inputs)[0])
+
+        assert torch.allclose(outputs[0], outputs[1])

@@ -645,7 +645,9 @@ class MOELayer(Base):
             if not hasattr(self, '_tutel_dispatcher'):
                 self._tutel_dispatcher = tutel_moe.fast_dispatcher(E, C, M, dispatch_dtype=reshaped_input.dtype)
             self._tutel_dispatcher.update(indices_, locations_, gates_, capacity=C)
-            dispatched_input = self._tutel_dispatcher.encode(reshaped_input)
+            # encode() returns a flat [e * c, m]; reshape to [e, c, m] so the tensor-parallel
+            # drop_tokens/gather_tokens below split the capacity dim rather than the model dim.
+            dispatched_input = self._tutel_dispatcher.encode(reshaped_input).view(E, C, M)
         else:
             self.l_aux, combine_weights, dispatch_mask, self.exp_counts = self.gate(reshaped_input, input[1])
             dispatched_input = einsum("sec,sm->ecm", dispatch_mask.type_as(input[0]), reshaped_input)
