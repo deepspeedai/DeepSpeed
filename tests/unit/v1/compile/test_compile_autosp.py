@@ -91,7 +91,6 @@ class TestAutoSPCompile(DistributedTest):
 
 class TestSDPANodesCompile:
 
-    @pytest.mark.sequential
     @pytest.mark.parametrize('seq_len', [64, 128, 256])
     def test(self, seq_len):
         from deepspeed.compile.util import get_sdpa_nodes
