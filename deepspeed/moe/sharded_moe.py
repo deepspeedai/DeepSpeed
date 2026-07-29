@@ -19,7 +19,7 @@ from deepspeed.utils.timer import SynchronizedWallClockTimer
 from deepspeed.utils import logger
 from deepspeed.utils.bwc import bwc_tensor_model_parallel_world_size
 from deepspeed.utils.torch import jit_script_compat
-from typing import Callable, Dict, TYPE_CHECKING, Any, Optional, Tuple, Union
+from typing import Callable, Dict, List, TYPE_CHECKING, Any, Optional, Tuple, Union
 
 import torch
 from torch import Tensor
@@ -179,6 +179,18 @@ def _top_idx(source, k):
 @jit_script_compat
 def _one_hot_to_float(x, num_classes):
     return F.one_hot(x, num_classes=num_classes).float()
+
+
+def _split_routes(routes: Tensor, dtype: Optional[torch.dtype] = None) -> List[Tensor]:
+    """Split a [s, k] per-route tensor into the k contiguous [s] tensors Tutel expects.
+
+    Transposing once and casting the whole [k, s] block keeps the cost independent of
+    k, whereas letting Tutel cast each route separately scales the launch count with k.
+    """
+    routes = routes.t().contiguous()
+    if dtype is not None:
+        routes = routes.to(dtype)
+    return list(routes.unbind(0))
 
 
 def top1gating(logits: Tensor,
@@ -361,8 +373,9 @@ def top2gating(logits: Tensor,
     gates2_s /= denom_s
 
     if use_tutel:
-        indices1_s = torch.where(mask1.sum(dim=1).bool(), indices1_s, torch.full_like(indices1_s, -1))
-        indices2_s = torch.where(mask2.sum(dim=1).bool(), indices2_s, torch.full_like(indices2_s, -1))
+        # Routes evicted by the capacity limit are flagged with a negative expert index.
+        indices1_s = torch.where(mask1.any(dim=1), indices1_s, torch.full_like(indices1_s, -1))
+        indices2_s = torch.where(mask2.any(dim=1), indices2_s, torch.full_like(indices2_s, -1))
         return l_aux, capacity, num_experts, [indices1_s, indices2_s], [locations1_s,
                                                                         locations2_s], [gates1_s, gates2_s], exp_counts
 
@@ -449,17 +462,16 @@ def topkgating(
         raise ValueError(f"Locations is not set: {locations}")
 
     if use_tutel:
-        indices_ = []
-        locations_ = []
-        gates_ = []
-        for route in range(k):
-            indices_s = top_idx[:, route]
-            route_mask = F.one_hot(indices_s, num_classes=num_experts).bool() & mask
-            indices_s = torch.where(route_mask.any(dim=1), indices_s, torch.full_like(indices_s, -1))
-            indices_.append(indices_s)
-            locations_.append(torch.sum(locations * route_mask, dim=1))
-            gates_.append(torch.sum(gates_masked * route_mask, dim=1))
-        return l_aux, capacity, num_experts, indices_, locations_, gates_, exp_counts
+        # Tutel wants one (index, location, gate) triple per route. The top-k columns
+        # already name the selected experts, so gather the per-route values directly
+        # instead of rebuilding a dense [s, e] mask for every route. Routes evicted by
+        # the capacity limit are flagged with a negative expert index, which Tutel skips.
+        route_kept = mask.gather(1, top_idx)
+        route_indices = torch.where(route_kept, top_idx, torch.full_like(top_idx, -1))
+        route_locations = locations.gather(1, top_idx) * route_kept
+        route_gates = gates_masked.gather(1, top_idx)
+        return (l_aux, capacity, num_experts, _split_routes(route_indices, torch.int32),
+                _split_routes(route_locations, torch.int32), _split_routes(route_gates), exp_counts)
 
     # dispatch_mask
     locations_sc = _one_hot_to_float((locations * mask), capacity)
@@ -626,6 +638,9 @@ class MOELayer(Base):
         if self.use_tutel:
             self.l_aux, C, E, indices_, locations_, gates_, self.exp_counts = self.gate(reshaped_input, input[1], True)
             S, M = reshaped_input.size(0), reshaped_input.size(1)
+            # Resolve the capacity tensor once; every later use of C would otherwise
+            # force its own device-to-host sync.
+            C = int(C)
 
             if not hasattr(self, '_tutel_dispatcher'):
                 self._tutel_dispatcher = tutel_moe.fast_dispatcher(E, C, M, dispatch_dtype=reshaped_input.dtype)

@@ -306,10 +306,10 @@ class TestTopkGate(DistributedTest):
         reconstructed = torch.zeros_like(combine_weights)
         for indices_s, locations_s, gates_s in zip(indices_, locations_, gates_):
             route_mask = indices_s.ge(0)
-            safe_indices = indices_s.clamp_min(0)
+            safe_indices = indices_s.clamp_min(0).long()
             expert_mask = torch.nn.functional.one_hot(safe_indices, num_classes=num_experts)
             expert_mask *= route_mask.unsqueeze(1)
-            location_mask = torch.nn.functional.one_hot(locations_s, num_classes=int(capacity))
+            location_mask = torch.nn.functional.one_hot(locations_s.long(), num_classes=int(capacity))
             reconstructed += torch.einsum("s,se,sc->sec", gates_s, expert_mask, location_mask)
         torch.testing.assert_close(reconstructed, combine_weights)
 
