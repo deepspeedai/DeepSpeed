@@ -59,7 +59,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
              "filename"_a,
              "validate"_a,
              "async"_a,
-             "file_offset"_a = 0)
+             "file_offset"_a = 0,
+             py::call_guard<py::gil_scoped_release>())
 
         .def("pwrite",
              &deepspeed_aio_handle_t::pwrite,
@@ -69,21 +70,24 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
              "filename"_a,
              "validate"_a,
              "async"_a,
-             "file_offset"_a = 0)
+             "file_offset"_a = 0,
+             py::call_guard<py::gil_scoped_release>())
 
         .def("sync_pread",
              &deepspeed_aio_handle_t::sync_pread,
              "Synchronous parallel file read. Returns count of completed read ops",
              "buffer"_a,
              "filename"_a,
-             "file_offset"_a = 0)
+             "file_offset"_a = 0,
+             py::call_guard<py::gil_scoped_release>())
 
         .def("sync_pwrite",
              &deepspeed_aio_handle_t::sync_pwrite,
              "Synchronous parallel file write. Returns count of completed write ops",
              "buffer"_a,
              "filename"_a,
-             "file_offset"_a = 0)
+             "file_offset"_a = 0,
+             py::call_guard<py::gil_scoped_release>())
 
         .def("async_pread",
              &deepspeed_aio_handle_t::async_pread,
