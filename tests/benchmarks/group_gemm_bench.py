@@ -50,13 +50,13 @@ _BACKENDS = {
 def _time_ms(fn, iters=50, warmup=10):
     for _ in range(warmup):
         fn()
-    start, end = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
-    torch.cuda.synchronize()
+    start, end = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)  #ignore-cuda
+    torch.cuda.synchronize()  #ignore-cuda
     start.record()
     for _ in range(iters):
         fn()
     end.record()
-    torch.cuda.synchronize()
+    torch.cuda.synchronize()  #ignore-cuda
     return start.elapsed_time(end) / iters
 
 
@@ -81,7 +81,7 @@ def benchmark(num_experts, dim=2048, hidden=768, avg_tokens=32, dtype=torch.bflo
 
 
 if __name__ == "__main__":
-    assert is_available() and torch.cuda.is_available(), "Triton + CUDA required"
+    assert is_available() and torch.cuda.is_available(), "Triton + CUDA required"  #ignore-cuda
     parser = argparse.ArgumentParser()
     parser.add_argument("--experts", type=int, nargs="+", default=[16, 32], help="experts per rank to benchmark")
     parser.add_argument("--dim", type=int, default=2048)

@@ -916,7 +916,12 @@ smoke coverage used for this AutoEP surface produced the following version gates
 
 | Description                                                                                    | Default |
 | ---------------------------------------------------------------------------------------------- | ------- |
-| Use `torch._grouped_mm` for fused grouped GEMM. Raises `RuntimeError` at `GroupedExperts` construction time when `torch._grouped_mm` is unavailable; set `use_grouped_mm=false` to use the sequential for-loop. | `true`  |
+| Enable fused grouped GEMM for MoE expert computation. When enabled, the backend is selected automatically by device: on compute capability >= 9.0 (Hopper and newer) it uses `torch._grouped_mm`, which has a fused grouped-GEMM kernel; on compute capability < 9.0 (e.g. Ampere/Ada, where `torch._grouped_mm` falls back to a slow per-group loop) it uses a Triton grouped-GEMM kernel instead, when Triton is available. Set `use_grouped_mm=false` to use the sequential per-expert for-loop. `GroupedExperts` construction raises `RuntimeError` only if `use_grouped_mm=true` but neither `torch._grouped_mm` nor the Triton backend is available. | `true`  |
+
+The Triton backend selection can be overridden with the `DS_DISABLE_TRITON_GROUPED_MM=1` environment
+variable, which forces the `torch._grouped_mm` path even on compute capability < 9.0 (falling back to
+the sequential for-loop if that operator is also unavailable). The Triton backend requires the
+`triton` package; when it is not installed, DeepSpeed uses `torch._grouped_mm` where available.
 
 ***moe_layer_pattern***: [string]
 

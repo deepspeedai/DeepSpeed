@@ -67,8 +67,11 @@ if _TRITON_AVAILABLE:
         #   BLOCK_N (N output tile): 128 / 256
         #   BLOCK_K (K reduction):   32 / 64
         return [
-            triton.Config({"BLOCK_M": bm, "BLOCK_N": bn, "BLOCK_K": bk}, num_warps=nw, num_stages=ns)
-            for bm, bn, bk, nw, ns in (
+            triton.Config({
+                "BLOCK_M": bm,
+                "BLOCK_N": bn,
+                "BLOCK_K": bk
+            }, num_warps=nw, num_stages=ns) for bm, bn, bk, nw, ns in (
                 (32, 128, 32, 8, 4),
                 (64, 128, 32, 8, 4),
                 (64, 128, 64, 8, 4),
@@ -167,8 +170,11 @@ if _TRITON_AVAILABLE:
         #   BLOCK_N (N output tile): 128 / 256
         #   BLOCK_M (M reduction):   32 / 64
         return [
-            triton.Config({"BLOCK_K": bk, "BLOCK_N": bn, "BLOCK_M": bm}, num_warps=nw, num_stages=ns)
-            for bk, bn, bm, nw, ns in (
+            triton.Config({
+                "BLOCK_K": bk,
+                "BLOCK_N": bn,
+                "BLOCK_M": bm
+            }, num_warps=nw, num_stages=ns) for bk, bn, bm, nw, ns in (
                 (32, 128, 32, 8, 4),
                 (64, 128, 32, 8, 4),
                 (64, 128, 64, 8, 4),
@@ -284,14 +290,12 @@ def _validate(mat_a: torch.Tensor, mat_b: torch.Tensor, offs: torch.Tensor, tran
     if not _TRITON_AVAILABLE:
         raise RuntimeError("group_gemm_triton requires Triton, which is not available.")
     if mat_a.dim() != 2 or mat_b.dim() != 3:
-        raise NotImplementedError(
-            f"Only 2D x 3D grouped GEMM is supported, got mat_a.dim()={mat_a.dim()}, "
-            f"mat_b.dim()={mat_b.dim()}.")
+        raise NotImplementedError(f"Only 2D x 3D grouped GEMM is supported, got mat_a.dim()={mat_a.dim()}, "
+                                  f"mat_b.dim()={mat_b.dim()}.")
     if not mat_b.is_contiguous():
-        raise ValueError(
-            "group_gemm_triton requires a contiguous mat_b. To compute a @ b^T, "
-            "pass the weight in its native [E, N, K] layout with trans_b=True "
-            "instead of a non-contiguous .transpose(-2, -1) view.")
+        raise ValueError("group_gemm_triton requires a contiguous mat_b. To compute a @ b^T, "
+                         "pass the weight in its native [E, N, K] layout with trans_b=True "
+                         "instead of a non-contiguous .transpose(-2, -1) view.")
     if mat_a.dtype != mat_b.dtype:
         raise ValueError(f"mat_a and mat_b must share dtype, got {mat_a.dtype} vs {mat_b.dtype}.")
     if mat_a.dtype not in _SUPPORTED_DTYPES:
@@ -439,7 +443,9 @@ class _GroupGemmFn(torch.autograd.Function):
         return grad_a, grad_b, None, None
 
 
-def group_gemm_triton(mat_a: torch.Tensor, mat_b: torch.Tensor, offs: torch.Tensor,
+def group_gemm_triton(mat_a: torch.Tensor,
+                      mat_b: torch.Tensor,
+                      offs: torch.Tensor,
                       trans_b: bool = False) -> torch.Tensor:
     """Autograd-aware Triton grouped GEMM (2D x 3D), drop-in for ``torch._grouped_mm``.
 

@@ -112,7 +112,10 @@ _SHAPES = [
     ([1, 1, 1], 16, 16),  # single-row groups
 ]
 
-_DTYPES = [torch.bfloat16, torch.float16, torch.float32]
+# bfloat16 requires compute capability >= 8.0 (Ampere+); include it only there.
+_DTYPES = [torch.float16, torch.float32]
+if torch.cuda.get_device_capability()[0] >= 8:  #ignore-cuda
+    _DTYPES = [torch.bfloat16] + _DTYPES
 
 
 @pytest.mark.parametrize("counts,K,N", _SHAPES)
@@ -378,7 +381,7 @@ def test_grouped_experts_auto_selects_triton_on_ampere(monkeypatch):
     from deepspeed.moe.ep_experts import GroupedExperts
 
     dev = get_accelerator().current_device_name()
-    major, _ = torch.cuda.get_device_capability()
+    major, _ = torch.cuda.get_device_capability()  #ignore-cuda
 
     monkeypatch.delenv("DS_DISABLE_TRITON_GROUPED_MM", raising=False)
     experts = GroupedExperts(32, 64, 2, use_grouped_mm=True).to(dev)

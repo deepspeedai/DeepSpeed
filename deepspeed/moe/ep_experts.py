@@ -184,7 +184,7 @@ def _prefer_triton_grouped_mm() -> bool:
     if os.getenv("DS_DISABLE_TRITON_GROUPED_MM", "0") == "1":
         return False
 
-    if not torch.cuda.is_available() or torch.version.hip is not None: # Not verified on AMD GPU
+    if not torch.cuda.is_available() or torch.version.hip is not None:  # Not verified on AMD GPU  #ignore-cuda
         return False
 
     from deepspeed.moe.group_gemm_triton import is_available
@@ -193,9 +193,9 @@ def _prefer_triton_grouped_mm() -> bool:
 
     if not hasattr(torch, "_grouped_mm"):
         return True
-    
+
     try:
-        major, _ = torch.cuda.get_device_capability()
+        major, _ = torch.cuda.get_device_capability()  #ignore-cuda
     except Exception:
         return False
 
@@ -254,13 +254,12 @@ class GroupedExperts(nn.Module):
         else:
             self.use_triton_grouped_mm = _prefer_triton_grouped_mm()
 
-        from deepspeed.moe.group_gemm_triton import is_available
         if use_grouped_mm and not hasattr(torch, "_grouped_mm") and not self.use_triton_grouped_mm:
             raise RuntimeError("GroupedExperts was constructed with use_grouped_mm=True but "
-                                "torch._grouped_mm is not available in this PyTorch build. "
-                                "Upgrade PyTorch to a build that provides torch._grouped_mm, install "
-                                "Triton to enable the Triton grouped-GEMM path, or set "
-                                "use_grouped_mm=False to use the sequential expert loop.")
+                               "torch._grouped_mm is not available in this PyTorch build. "
+                               "Upgrade PyTorch to a build that provides torch._grouped_mm, install "
+                               "Triton to enable the Triton grouped-GEMM path, or set "
+                               "use_grouped_mm=False to use the sequential expert loop.")
 
         if use_grouped_mm and self.use_triton_grouped_mm:
             warning_once("Triton grouped-GEMM path is selected for grouped_gemm. "
