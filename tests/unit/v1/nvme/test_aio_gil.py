@@ -94,7 +94,8 @@ def test_blocking_aio_releases_gil(tmp_path, operation_name):
         assert target_path.read_bytes() == payload
 
 
-def test_concurrent_blocking_reads_on_shared_handle(tmp_path):
+@pytest.mark.parametrize("use_pinned_memory", [True, False])
+def test_concurrent_blocking_reads_on_shared_handle(tmp_path, use_pinned_memory):
     _require_aio_cuda()
 
     payloads = [os.urandom(BLOCK_SIZE), os.urandom(BLOCK_SIZE)]
@@ -104,7 +105,10 @@ def test_concurrent_blocking_reads_on_shared_handle(tmp_path):
         source_path = tmp_path / f"source-{index}.bin"
         source_path.write_bytes(payload)
         source_paths.append(source_path)
-        buffers.append(torch.zeros(BLOCK_SIZE, dtype=torch.uint8, device="cpu").pin_memory())
+        if use_pinned_memory:
+            buffers.append(torch.zeros(BLOCK_SIZE, dtype=torch.uint8, device="cpu").pin_memory())
+        else:
+            buffers.append(torch.zeros(BLOCK_SIZE, dtype=torch.uint8, device=get_accelerator().device_name()))
 
     handle = AsyncIOBuilder().load().aio_handle(BLOCK_SIZE, QUEUE_DEPTH, True, True, INTRA_OP_PARALLELISM)
     start = threading.Barrier(3, timeout=CONCURRENT_READ_TIMEOUT)

@@ -267,9 +267,8 @@ int deepspeed_io_handle_t::_pread(const torch::Tensor& buffer,
                                   const bool async,
                                   const int64_t file_offset)
 {
-    auto scheduled_op = _create_io_op_desc(true, buffer, fd, filename, validate, file_offset);
-
     std::lock_guard<std::mutex> lock(_pending_ops_mutex);
+    auto scheduled_op = _create_io_op_desc(true, buffer, fd, filename, validate, file_offset);
     _schedule_aio_work_locked(scheduled_op);
 
     if (async) { return 0; }
@@ -302,9 +301,8 @@ int deepspeed_io_handle_t::_pwrite(const torch::Tensor& buffer,
                                    const bool async,
                                    const int64_t file_offset)
 {
-    auto scheduled_op = _create_io_op_desc(false, buffer, fd, filename, validate, file_offset);
-
     std::lock_guard<std::mutex> lock(_pending_ops_mutex);
+    auto scheduled_op = _create_io_op_desc(false, buffer, fd, filename, validate, file_offset);
     _schedule_aio_work_locked(scheduled_op);
 
     if (async) { return 0; }
