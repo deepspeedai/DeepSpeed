@@ -1,4 +1,4 @@
-# Copyright (c) Microsoft Corporation.
+# Copyright (c) DeepSpeed Team.
 # SPDX-License-Identifier: Apache-2.0
 
 # DeepSpeed Team
@@ -21,27 +21,26 @@ def test_errors_when_launcher_multiprocess_but_group_is_single_rank():
     assert "init_distributed" in msg
 
 
-def test_no_error_for_genuine_single_process():
-    assert _contradicting_single_rank_pg_error(dp_world_size=1, explicit_process_group=None,
-                                               env={"WORLD_SIZE": "1"}) is None
-    assert _contradicting_single_rank_pg_error(dp_world_size=1, explicit_process_group=None, env={}) is None
+@pytest.mark.parametrize("env", [{"WORLD_SIZE": "1"}, {}])
+def test_no_error_for_genuine_single_process(env):
+    assert _contradicting_single_rank_pg_error(dp_world_size=1, explicit_process_group=None, env=env) is None
 
 
 def test_no_error_when_group_actually_shards():
-    assert _contradicting_single_rank_pg_error(dp_world_size=8, explicit_process_group=None,
-                                               env={"WORLD_SIZE": "8"}) is None
+    env = {"WORLD_SIZE": "8"}
+    assert _contradicting_single_rank_pg_error(dp_world_size=8, explicit_process_group=None, env=env) is None
 
 
-def test_no_error_when_explicit_dp_group_supplied():
+def test_no_error_when_explicit_group_supplied():
     # An explicitly provided size-1 group is treated as intentional. This covers both `data_parallel_group` and the
     # deprecated `sequence_data_parallel_group`: zero.Init resolves whichever was supplied into the same explicit
     # group argument before calling the helper.
-    sentinel_group = object()
-    assert _contradicting_single_rank_pg_error(dp_world_size=1, explicit_process_group=sentinel_group,
-                                               env={"WORLD_SIZE": "8"}) is None
+    group = object()
+    assert _contradicting_single_rank_pg_error(dp_world_size=1, explicit_process_group=group, env={"WORLD_SIZE":
+                                                                                                   "8"}) is None
 
 
 @pytest.mark.parametrize("bad", ["", "not-an-int", None])
 def test_malformed_world_size_does_not_raise(bad):
-    assert _contradicting_single_rank_pg_error(dp_world_size=1, explicit_process_group=None,
-                                               env={"WORLD_SIZE": bad}) is None
+    env = {"WORLD_SIZE": bad}
+    assert _contradicting_single_rank_pg_error(dp_world_size=1, explicit_process_group=None, env=env) is None
