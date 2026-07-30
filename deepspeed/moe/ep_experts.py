@@ -24,6 +24,7 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from deepspeed.accelerator import get_accelerator
 from deepspeed.utils.logging import warning_once
 
 # ---------------------------------------------------------------------------
@@ -170,38 +171,6 @@ def _run_experts_triton_grouped_mm(
     return out
 
 
-def _prefer_triton_grouped_mm() -> bool:
-    """Decide whether to use the Triton grouped-GEMM path (vs ``torch._grouped_mm``).
-
-    Rule: when grouped GEMM is requested, prefer the native ``torch._grouped_mm``
-    on sm90+ (where it has a fused kernel), and use the Triton path otherwise
-    (sm8x, where native would fall back to a slow per-group loop) as long as
-    Triton is available.
-
-    Set ``DS_DISABLE_TRITON_GROUPED_MM=1`` to disable the Triton path.
-    """
-    import os
-    if os.getenv("DS_DISABLE_TRITON_GROUPED_MM", "0") == "1":
-        return False
-
-    if not torch.cuda.is_available() or torch.version.hip is not None:  # Not verified on AMD GPU  #ignore-cuda
-        return False
-
-    from deepspeed.moe.group_gemm_triton import is_available
-    if not is_available():
-        return False
-
-    if not hasattr(torch, "_grouped_mm"):
-        return True
-
-    try:
-        major, _ = torch.cuda.get_device_capability()  #ignore-cuda
-    except Exception:
-        return False
-
-    return major < 9
-
-
 # ---------------------------------------------------------------------------
 # GroupedExperts module
 # ---------------------------------------------------------------------------
@@ -248,11 +217,11 @@ class GroupedExperts(nn.Module):
         self.use_triton_grouped_mm = False
         self.use_grouped_mm = use_grouped_mm
 
-        # Resolve the Triton path.
-        if not use_grouped_mm:
-            self.use_triton_grouped_mm = False
-        else:
-            self.use_triton_grouped_mm = _prefer_triton_grouped_mm()
+        # Resolve the Triton path. The device-specific decision is delegated to
+        # the accelerator backend (e.g. the CUDA backend prefers Triton on
+        # sm < 9.0, where torch._grouped_mm falls back to a slow per-group loop).
+        if use_grouped_mm:
+            self.use_triton_grouped_mm = get_accelerator().prefer_triton_grouped_mm()
 
         if use_grouped_mm and not hasattr(torch, "_grouped_mm") and not self.use_triton_grouped_mm:
             raise RuntimeError("GroupedExperts was constructed with use_grouped_mm=True but "

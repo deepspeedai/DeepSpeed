@@ -270,6 +270,25 @@ class CUDA_Accelerator(DeepSpeedAccelerator):
         else:
             return False
 
+    def prefer_triton_grouped_mm(self):
+        # torch._grouped_mm only has a fused grouped-GEMM kernel on Hopper (sm90)
+        # and newer; on sm8x it falls back to a slow per-group loop, so a Triton
+        # grouped-GEMM kernel is preferred there when Triton is available.
+        # Set DS_DISABLE_TRITON_GROUPED_MM=1 to force the native path.
+        import os
+        if os.getenv("DS_DISABLE_TRITON_GROUPED_MM", "0") == "1":
+            return False
+        if not self.is_available() or torch.version.hip is not None:  # not verified on AMD GPU
+            return False
+        try:
+            import triton  # noqa: F401
+        except ImportError:
+            return False
+        if not hasattr(torch, "_grouped_mm"):
+            return True
+        major, _ = torch.cuda.get_device_capability()
+        return major < 9
+
     # Graph operations
     def create_graph(self):
         return torch.cuda.CUDAGraph()

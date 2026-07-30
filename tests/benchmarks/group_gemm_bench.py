@@ -1,3 +1,7 @@
+# Copyright (c) DeepSpeed Team.
+# SPDX-License-Identifier: Apache-2.0
+
+# DeepSpeed Team
 """Simple benchmark comparing grouped-GEMM backends for MoE experts.
 
 Compares three implementations of the per-group GEMM ``out_e = A_e @ B_e^T``
