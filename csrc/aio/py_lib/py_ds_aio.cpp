@@ -136,12 +136,14 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
              &deepspeed_aio_handle_t::new_cpu_locked_tensor,
              "Allocate pinned CPU tensor.",
              "num_elem"_a,
-             "example_tenosr"_a)
+             "example_tenosr"_a,
+             py::call_guard<py::gil_scoped_release>())
 
         .def("free_cpu_locked_tensor",
              &deepspeed_aio_handle_t::free_cpu_locked_tensor,
              "Free pinned CPU tensor.",
-             "tensor"_a)
+             "tensor"_a,
+             py::call_guard<py::gil_scoped_release>())
 
         .def("wait",
              &deepspeed_aio_handle_t::wait,

@@ -22,7 +22,7 @@ struct deepspeed_io_handle_t {
 
     std::vector<std::shared_ptr<struct deepspeed_aio_thread_t>> _thread_contexts;
     std::vector<std::thread> _threads;
-    std::mutex _pending_ops_mutex;
+    std::mutex _handle_mutex;
     int _num_pending_ops;
     std::unique_ptr<struct deepspeed_pin_tensor_t> _pinned_tensor_mgr;
 

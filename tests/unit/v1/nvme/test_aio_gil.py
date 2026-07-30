@@ -19,6 +19,7 @@ QUEUE_DEPTH = 2
 INTRA_OP_PARALLELISM = 2
 MAX_BLOCKING_CALLS = 32
 CONCURRENT_READ_TIMEOUT = 30
+CONCURRENT_MANAGER_OPS = 32
 
 
 def _require_aio_cuda():
@@ -133,3 +134,47 @@ def test_concurrent_blocking_reads_on_shared_handle(tmp_path, use_pinned_memory)
     assert all(not reader.is_alive() for reader in readers)
     assert statuses == [1, 1]
     assert [bytes(buffer.tolist()) for buffer in buffers] == payloads
+
+
+def test_concurrent_unpinned_read_and_locked_tensor_management(tmp_path):
+    _require_aio_cuda()
+
+    payload = os.urandom(BLOCK_SIZE)
+    source_path = tmp_path / "source.bin"
+    source_path.write_bytes(payload)
+    buffer = torch.zeros(BLOCK_SIZE, dtype=torch.uint8, device=get_accelerator().device_name())
+    example_tensor = torch.empty(1, dtype=torch.uint8, device="cpu")
+    handle = AsyncIOBuilder().load().aio_handle(BLOCK_SIZE, QUEUE_DEPTH, True, True, INTRA_OP_PARALLELISM)
+    start = threading.Barrier(3, timeout=CONCURRENT_READ_TIMEOUT)
+    errors = []
+
+    def run_reads():
+        try:
+            start.wait()
+            for _ in range(CONCURRENT_MANAGER_OPS):
+                assert handle.sync_pread(buffer, str(source_path), 0) == 1
+        except Exception as error:
+            errors.append(error)
+
+    def manage_locked_tensors():
+        try:
+            start.wait()
+            for _ in range(CONCURRENT_MANAGER_OPS):
+                locked_tensor = handle.new_cpu_locked_tensor(BLOCK_SIZE, example_tensor)
+                assert handle.free_cpu_locked_tensor(locked_tensor)
+        except Exception as error:
+            errors.append(error)
+
+    workers = [
+        threading.Thread(target=run_reads, daemon=True),
+        threading.Thread(target=manage_locked_tensors, daemon=True),
+    ]
+    for worker in workers:
+        worker.start()
+    start.wait()
+    for worker in workers:
+        worker.join(timeout=CONCURRENT_READ_TIMEOUT)
+
+    assert not errors
+    assert all(not worker.is_alive() for worker in workers)
+    assert bytes(buffer.tolist()) == payload

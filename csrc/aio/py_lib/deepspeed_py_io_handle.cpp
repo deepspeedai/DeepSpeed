@@ -191,7 +191,7 @@ std::shared_ptr<struct io_op_desc_t> deepspeed_io_handle_t::_wait_for_aio_work()
 
 void deepspeed_io_handle_t::_stop_threads()
 {
-    std::lock_guard<std::mutex> lock(_pending_ops_mutex);
+    std::lock_guard<std::mutex> lock(_handle_mutex);
     assert(0 == _num_pending_ops);
     for (auto& ctxt : _thread_contexts) {
         {
@@ -204,7 +204,7 @@ void deepspeed_io_handle_t::_stop_threads()
 
 int deepspeed_io_handle_t::wait()
 {
-    std::lock_guard<std::mutex> lock(_pending_ops_mutex);
+    std::lock_guard<std::mutex> lock(_handle_mutex);
     return _wait_locked();
 }
 
@@ -267,7 +267,7 @@ int deepspeed_io_handle_t::_pread(const torch::Tensor& buffer,
                                   const bool async,
                                   const int64_t file_offset)
 {
-    std::lock_guard<std::mutex> lock(_pending_ops_mutex);
+    std::lock_guard<std::mutex> lock(_handle_mutex);
     auto scheduled_op = _create_io_op_desc(true, buffer, fd, filename, validate, file_offset);
     _schedule_aio_work_locked(scheduled_op);
 
@@ -301,7 +301,7 @@ int deepspeed_io_handle_t::_pwrite(const torch::Tensor& buffer,
                                    const bool async,
                                    const int64_t file_offset)
 {
-    std::lock_guard<std::mutex> lock(_pending_ops_mutex);
+    std::lock_guard<std::mutex> lock(_handle_mutex);
     auto scheduled_op = _create_io_op_desc(false, buffer, fd, filename, validate, file_offset);
     _schedule_aio_work_locked(scheduled_op);
 
@@ -367,10 +367,12 @@ int deepspeed_io_handle_t::async_pwrite(const torch::Tensor& buffer,
 at::Tensor deepspeed_io_handle_t::new_cpu_locked_tensor(const int64_t num_elem,
                                                         const torch::Tensor& example_tensor)
 {
+    std::lock_guard<std::mutex> lock(_handle_mutex);
     return _pinned_tensor_mgr->alloc(num_elem, example_tensor.scalar_type());
 }
 
 bool deepspeed_io_handle_t::free_cpu_locked_tensor(torch::Tensor& locked_tensor)
 {
+    std::lock_guard<std::mutex> lock(_handle_mutex);
     return _pinned_tensor_mgr->free(locked_tensor);
 }
