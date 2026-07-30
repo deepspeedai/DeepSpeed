@@ -18,6 +18,7 @@ BLOCK_SIZE = 4096
 QUEUE_DEPTH = 2
 INTRA_OP_PARALLELISM = 2
 MAX_BLOCKING_CALLS = 32
+CONCURRENT_READ_TIMEOUT = 30
 
 
 def _require_aio_cuda():
@@ -91,3 +92,40 @@ def test_blocking_aio_releases_gil(tmp_path, operation_name):
         assert bytes(buffer.tolist()) == payload
     else:
         assert target_path.read_bytes() == payload
+
+
+def test_concurrent_blocking_reads_on_shared_handle(tmp_path):
+    _require_aio_cuda()
+
+    payloads = [os.urandom(BLOCK_SIZE), os.urandom(BLOCK_SIZE)]
+    source_paths = []
+    buffers = []
+    for index, payload in enumerate(payloads):
+        source_path = tmp_path / f"source-{index}.bin"
+        source_path.write_bytes(payload)
+        source_paths.append(source_path)
+        buffers.append(torch.zeros(BLOCK_SIZE, dtype=torch.uint8, device="cpu").pin_memory())
+
+    handle = AsyncIOBuilder().load().aio_handle(BLOCK_SIZE, QUEUE_DEPTH, True, True, INTRA_OP_PARALLELISM)
+    start = threading.Barrier(3, timeout=CONCURRENT_READ_TIMEOUT)
+    statuses = [None, None]
+    errors = []
+
+    def run_read(index):
+        try:
+            start.wait()
+            statuses[index] = handle.sync_pread(buffers[index], str(source_paths[index]), 0)
+        except Exception as error:
+            errors.append(error)
+
+    readers = [threading.Thread(target=run_read, args=(index, ), daemon=True) for index in range(2)]
+    for reader in readers:
+        reader.start()
+    start.wait()
+    for reader in readers:
+        reader.join(timeout=CONCURRENT_READ_TIMEOUT)
+
+    assert not errors
+    assert all(not reader.is_alive() for reader in readers)
+    assert statuses == [1, 1]
+    assert [bytes(buffer.tolist()) for buffer in buffers] == payloads

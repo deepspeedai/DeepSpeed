@@ -163,7 +163,8 @@ int deepspeed_io_handle_t::write(const torch::Tensor& buffer,
     return 0;
 }
 
-void deepspeed_io_handle_t::_schedule_aio_work(std::shared_ptr<struct io_op_desc_t> scheduled_op)
+void deepspeed_io_handle_t::_schedule_aio_work_locked(
+    std::shared_ptr<struct io_op_desc_t> scheduled_op)
 {
     for (auto& ctxt : _thread_contexts) {
         {
@@ -190,6 +191,7 @@ std::shared_ptr<struct io_op_desc_t> deepspeed_io_handle_t::_wait_for_aio_work()
 
 void deepspeed_io_handle_t::_stop_threads()
 {
+    std::lock_guard<std::mutex> lock(_pending_ops_mutex);
     assert(0 == _num_pending_ops);
     for (auto& ctxt : _thread_contexts) {
         {
@@ -201,6 +203,12 @@ void deepspeed_io_handle_t::_stop_threads()
 }
 
 int deepspeed_io_handle_t::wait()
+{
+    std::lock_guard<std::mutex> lock(_pending_ops_mutex);
+    return _wait_locked();
+}
+
+int deepspeed_io_handle_t::_wait_locked()
 {
     assert(_num_pending_ops > 0);
     auto num_completed_ops = 0;
@@ -261,11 +269,12 @@ int deepspeed_io_handle_t::_pread(const torch::Tensor& buffer,
 {
     auto scheduled_op = _create_io_op_desc(true, buffer, fd, filename, validate, file_offset);
 
-    _schedule_aio_work(scheduled_op);
+    std::lock_guard<std::mutex> lock(_pending_ops_mutex);
+    _schedule_aio_work_locked(scheduled_op);
 
     if (async) { return 0; }
 
-    return wait();
+    return _wait_locked();
 }
 
 int deepspeed_io_handle_t::pread(const torch::Tensor& buffer,
@@ -295,11 +304,12 @@ int deepspeed_io_handle_t::_pwrite(const torch::Tensor& buffer,
 {
     auto scheduled_op = _create_io_op_desc(false, buffer, fd, filename, validate, file_offset);
 
-    _schedule_aio_work(scheduled_op);
+    std::lock_guard<std::mutex> lock(_pending_ops_mutex);
+    _schedule_aio_work_locked(scheduled_op);
 
     if (async) { return 0; }
 
-    return wait();
+    return _wait_locked();
 }
 
 int deepspeed_io_handle_t::pwrite(const torch::Tensor& buffer,
