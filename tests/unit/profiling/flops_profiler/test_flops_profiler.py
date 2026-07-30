@@ -123,6 +123,7 @@ class TestFlopsProfiler(DistributedTest):
         assert params == 61706
 
 
+@pytest.mark.sequential
 def test_print_model_profile_with_none_dp_world_size(capsys):
     # Regression test for https://github.com/deepspeedai/DeepSpeed/issues/7483
     # Under sequence parallelism (Ulysses) the engine reports dp_world_size as None, which used to

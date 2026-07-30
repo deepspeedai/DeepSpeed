@@ -7,6 +7,9 @@ import torch
 import deepspeed.comm as dist
 import deepspeed
 from deepspeed.accelerator import get_accelerator
+from deepspeed.checkpoint.constants import (ORIGINAL_VOCAB_SIZE, PARAMETER_WITH_ROW_PARALLELISM_PATTERNS,
+                                            TP_REPLICATED_PARAMETER_PATTERNS, UNIVERSAL_CHECKPOINT_INFO,
+                                            VOCABULARY_PARAMETER_PATTERNS)
 from deepspeed.utils import groups
 from deepspeed.runtime.utils import is_model_parallel_parameter
 from unit.common import DistributedTest, preferred_dtype
@@ -180,6 +183,34 @@ class TestTPPlanEndToEnd(DistributedTest):
             torch_o = torch_o.bfloat16()
 
         self._compare_tp_gradients(model, torch_q, torch_o, input_tensor, engine)
+
+    def test_tp_plan_attaches_universal_checkpoint_info(self):
+        model = self.SimpleHFModel()
+        model.lm_head = torch.nn.Linear(model.hidden_size, 64)
+        model.config.base_model_tp_plan["lm_head"] = "colwise_gather_output"
+        ds_config = {
+            "train_micro_batch_size_per_gpu": 1,
+            "tensor_parallel": {
+                "autotp_size": 2
+            },
+            "zero_optimization": {
+                "stage": 0
+            },
+        }
+
+        engine, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=ds_config)
+
+        assert engine.autotp_size() == 2
+        assert model.lm_head.gather_output
+        uc_info = getattr(model, UNIVERSAL_CHECKPOINT_INFO)
+        row_parallel_patterns = uc_info[PARAMETER_WITH_ROW_PARALLELISM_PATTERNS]
+        replicated_patterns = uc_info[TP_REPLICATED_PARAMETER_PATTERNS]
+        assert r"^layers\.0\.o_proj\.weight$" in row_parallel_patterns
+        assert r"^layers\.0\.q_proj\.weight$" not in row_parallel_patterns
+        assert r"^layers\.0\.o_proj\.bias$" in replicated_patterns
+        assert r"^layers\.0\.q_proj\.bias$" not in replicated_patterns
+        assert r"^lm_head\.weight$" in uc_info[VOCABULARY_PARAMETER_PATTERNS]
+        assert uc_info[ORIGINAL_VOCAB_SIZE] == 64
 
     def test_tp_plan_with_zero1(self):
         skip_on_device()

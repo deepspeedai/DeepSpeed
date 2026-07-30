@@ -135,7 +135,9 @@ def get_val_by_key(d: dict, k):
         return d[k]
     for v in d.values():
         if isinstance(v, dict):
-            return get_val_by_key(v, k)
+            r = get_val_by_key(v, k)
+            if r is not None:
+                return r
     return None
 
 

@@ -9,6 +9,8 @@
 #include <queue>
 #include "deepspeed_py_aio.h"
 
+void warn_consumer_ssd_writes() noexcept;
+
 struct io_op_desc_t {
     const bool _read_op;
     torch::Tensor _buffer;

@@ -331,6 +331,9 @@ class LRRangeTest(object):
         else:
             self.min_lr = [lr_range_test_min_lr] * len(self.optimizer.param_groups)
 
+        if not isinstance(lr_range_test_step_size, int) or lr_range_test_step_size <= 0:
+            raise ValueError(f"lr_range_test_step_size must be a positive integer, got {lr_range_test_step_size}")
+
         self.step_size = lr_range_test_step_size
         self.step_rate = lr_range_test_step_rate
         self.last_batch_iteration = last_batch_iteration
@@ -482,8 +485,17 @@ class OneCycle(object):
         cycle_second_step_size = float(
             cycle_second_step_size) if cycle_second_step_size is not None else cycle_first_step_size
 
+        # Both halves are validated separately: a zero-length first half leaves total_size
+        # positive but makes step_ratio 0, and _get_scale_factor divides by step_ratio.
+        if cycle_first_step_size <= 0:
+            raise ValueError(f"cycle_first_step_size must be positive, got {cycle_first_step_size}")
+        if cycle_second_step_size < 0:
+            raise ValueError(f"cycle_second_step_size must be non-negative, got {cycle_second_step_size}")
+
         self.total_size = cycle_first_step_size + cycle_second_step_size
         self.step_ratio = cycle_first_step_size / self.total_size
+        self.first_step_size = cycle_first_step_size
+        self.second_step_size = cycle_second_step_size
         self.first_stair_count = cycle_first_stair_count
         self.second_stair_count = cycle_first_stair_count if cycle_second_stair_count is None else cycle_second_stair_count
         self.decay_step_size = decay_step_size
@@ -535,8 +547,24 @@ class OneCycle(object):
         x = 1. + batch_iteration / self.total_size - cycle
         if x <= self.step_ratio:
             scale_factor = x / self.step_ratio
+            stair_count = self.first_stair_count
         else:
             scale_factor = (x - 1) / (self.step_ratio - 1)
+            stair_count = self.second_stair_count
+
+        # A stair count holds lr/mom flat across each of that many steps of the half cycle
+        # instead of moving them every batch, the same floor() the LR range test staircase
+        # uses. A count of 0 keeps the continuous schedule. Quantise from the integer batch
+        # offset rather than from scale_factor: the float scale at a half-cycle boundary can
+        # land just under an exact stair (1e-16 below 1.0 for an asymmetric cycle), and
+        # flooring that would drop the schedule a whole stair, including off the peak.
+        if stair_count > 0:
+            cycle_iteration = batch_iteration % self.total_size
+            if cycle_iteration <= self.first_step_size:
+                stair_position = cycle_iteration * stair_count / self.first_step_size
+            else:
+                stair_position = (self.total_size - cycle_iteration) * stair_count / self.second_step_size
+            scale_factor = math.floor(stair_position) / stair_count
 
         return scale_factor
 
@@ -670,7 +698,7 @@ class WarmupLR(object):
         self.optimizer = get_torch_optimizer(optimizer)
 
         if warmup_max_lr is None:
-            warmup_max_lr = [group['lr'] for group in self.optimizer.param_groups][0]
+            warmup_max_lr = [group['lr'] for group in self.optimizer.param_groups]
 
         self.min_lrs = self._format_param(self.optimizer, warmup_min_lr, "min_lr")
         self.max_lrs = self._format_param(self.optimizer, warmup_max_lr, "max_lr")
@@ -822,6 +850,11 @@ class WarmupCosineLR(object):
         self.last_batch_iteration = last_batch_iteration
         self.cos_min_ratio = cos_min_ratio
 
+        # Currently only support linear and log function
+        if warmup_type not in {WARMUP_LOG_RATE, WARMUP_LINEAR_RATE}:
+            logger.warning(f"Using unknown warmup_type: {warmup_type}. The increasing function "
+                           f"is set to default (log)")
+            warmup_type = WARMUP_LOG_RATE
         self.warmup_type = warmup_type
         self.warmup_min_ratio = warmup_min_ratio
         self.warmup_num_steps = max(2, warmup_num_steps)
