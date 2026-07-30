@@ -354,20 +354,14 @@ class TestTopkGate(DistributedTest):
         check_equal(logits3, 4, sec_sparse, dispatch_res)
 
 
-# #5353 clamped capacity to the number of tokens only in top1gating's no-drop branch. The drop
-# branches feed capacity to torch.topk(..., dim=0) over the token dimension, which requires
-# capacity <= num_tokens, so when capacity_factor * k > num_experts the capacity computed as
-# ceil(num_tokens / num_experts * capacity_factor * k) exceeds num_tokens and torch.topk raises
-# "selected index k out of range". These single-process gating checks fail on the unpatched
-# branches and pass once the same clamp is applied there.
+# The drop branches select at most num_tokens rows with torch.topk(..., dim=0), while the
+# configured capacity still sizes the dispatch width.
 def test_topkgating_probs_capacity_exceeds_num_tokens():
     # s=8, e=2, k=2, capacity_factor=2 -> capacity = ceil(8/2 * (2*2)) = 16 > 8.
     num_tokens, num_experts, k = 8, 2, 2
     logits = torch.randn(num_tokens, num_experts)
     _, _, dispatch_mask, _ = topkgating(logits, k, capacity_factor=2.0, min_capacity=0, drop_policy='probs')
-    # Capacity is clamped to num_tokens, and no routed token is spuriously dropped
-    # (every token keeps all k experts because capacity now covers all tokens).
-    assert dispatch_mask.shape[-1] == num_tokens
+    assert dispatch_mask.shape[-1] == 16
     assert int(dispatch_mask.sum()) == num_tokens * k
 
 
@@ -377,9 +371,23 @@ def test_top1gating_drop_capacity_exceeds_num_tokens():
     num_tokens, num_experts = 8, 2
     logits = torch.randn(num_tokens, num_experts)
     _, _, dispatch_mask, _ = top1gating(logits, capacity_factor=4.0, min_capacity=0, drop_tokens=True, use_rts=False)
-    assert dispatch_mask.shape[-1] == num_tokens
-    # top1 routes each token to exactly one expert; with capacity == num_tokens none are dropped.
+    assert dispatch_mask.shape[-1] == 16
     assert int(dispatch_mask.sum()) == num_tokens
+
+
+def test_topkgating_position_preserves_min_capacity():
+    # drop_policy='position' never selects over the token dimension, so min_capacity padding stays.
+    num_tokens, num_experts = 4, 2
+    logits = torch.randn(num_tokens, num_experts)
+    _, _, dispatch_mask, _ = topkgating(logits, 1, capacity_factor=1.0, min_capacity=8, drop_policy='position')
+    assert dispatch_mask.shape[-1] == 8
+
+
+def test_top1gating_preserves_tensor_parallel_capacity():
+    # s=3, e=4, capacity_factor=8 -> capacity = 6, which drop_tokens() needs divisible by tp=2.
+    logits = torch.randn(3, 4)
+    _, _, dispatch_mask, _ = top1gating(logits, capacity_factor=8.0, min_capacity=0, drop_tokens=True, use_rts=False)
+    assert dispatch_mask.shape[-1] == 6
 
 
 class TestExpertWeightGradWithZero(DistributedTest):
