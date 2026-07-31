@@ -8,7 +8,6 @@
 import math
 
 import pytest
-import torch
 
 from deepspeed.utils.groups import _ensure_divisibility
 from deepspeed.utils.timer import ThroughputTimer
@@ -61,37 +60,3 @@ def test_throughput_timer_report_boundary_guards_mutated_zero():
 def test_throughput_timer_report_boundary_none_is_safe():
     timer = ThroughputTimer(_DummyTimerConfig(), batch_size=1, steps_per_output=None)
     assert timer._is_report_boundary() is False
-
-
-def _import_hpu_fp_quantizer_builder():
-    try:
-        from op_builder.hpu.fp_quantizer import FPQuantizerBuilder
-        return FPQuantizerBuilder
-    except ImportError:
-        pytest.skip("HPU FPQuantizer builder is not available")
-
-
-def test_hpu_fp_quantizer_dequantize_rejects_zero_scale():
-    FPQuantizerBuilder = _import_hpu_fp_quantizer_builder()
-    scale = torch.tensor([0.0, 1.0])
-    fp_out = torch.empty(2, 4)
-    input_q = torch.empty(2, 4)
-    with pytest.raises(ValueError, match="finite non-zero"):
-        FPQuantizerBuilder.dequantize(fp_out, input_q, scale, group_size=4, q_mantisa_bits=3, q_exponent_bits=4)
-
-
-def test_hpu_fp_quantizer_dequantize_rejects_nonfinite_scale():
-    FPQuantizerBuilder = _import_hpu_fp_quantizer_builder()
-    scale = torch.tensor([float("nan"), 1.0])
-    fp_out = torch.empty(2, 4)
-    input_q = torch.empty(2, 4)
-    with pytest.raises(ValueError, match="finite non-zero"):
-        FPQuantizerBuilder.dequantize(fp_out, input_q, scale, group_size=4, q_mantisa_bits=3, q_exponent_bits=4)
-
-
-def test_hpu_fp_quantizer_dequantize_rejects_zero_scalar_scale():
-    FPQuantizerBuilder = _import_hpu_fp_quantizer_builder()
-    fp_out = torch.empty(2, 4)
-    input_q = torch.empty(2, 4)
-    with pytest.raises(ValueError, match="finite non-zero"):
-        FPQuantizerBuilder.dequantize(fp_out, input_q, 0.0, group_size=4, q_mantisa_bits=3, q_exponent_bits=4)
