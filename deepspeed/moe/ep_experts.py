@@ -148,9 +148,7 @@ def _run_experts_triton_grouped_mm(
 
     Numerically and API-compatible with :func:`_run_experts_grouped_mm`, but
     uses ``deepspeed.moe.group_gemm_triton.group_gemm_triton`` instead of
-    ``torch._grouped_mm``. On sm80/sm86 the native op has no fused grouped-GEMM
-    kernel and falls back to a per-group Python loop (plus a device->host sync);
-    the Triton path issues a single fused kernel per grouped GEMM with no sync.
+    ``torch._grouped_mm``.
 
     Args mirror :func:`_run_experts_grouped_mm`.
     """
@@ -196,6 +194,9 @@ class GroupedExperts(nn.Module):
         hidden_dim (int): Hidden dimension of the SwiGLU FFN.
         num_experts (int): Number of experts.
         use_grouped_mm (bool): Whether to attempt using grouped GEMM.
+        disable_triton_grouped_mm (bool): Set ``True`` to force the native
+            ``torch._grouped_mm`` path even on devices where the Triton
+            grouped-GEMM kernel would otherwise be preferred (e.g. sm8x).
     """
 
     def __init__(
@@ -204,6 +205,7 @@ class GroupedExperts(nn.Module):
         hidden_dim: int,
         num_experts: int,
         use_grouped_mm: bool = True,
+        disable_triton_grouped_mm: bool = False,
     ):
         super().__init__()
         self.num_experts = num_experts
@@ -220,7 +222,8 @@ class GroupedExperts(nn.Module):
         # Resolve the Triton path. The device-specific decision is delegated to
         # the accelerator backend (e.g. the CUDA backend prefers Triton on
         # sm < 9.0, where torch._grouped_mm falls back to a slow per-group loop).
-        if use_grouped_mm:
+        # Set disable_triton_grouped_mm=True to force the native path.
+        if use_grouped_mm and not disable_triton_grouped_mm:
             self.use_triton_grouped_mm = get_accelerator().prefer_triton_grouped_mm()
 
         if use_grouped_mm and not hasattr(torch, "_grouped_mm") and not self.use_triton_grouped_mm:
@@ -234,7 +237,7 @@ class GroupedExperts(nn.Module):
             warning_once("Triton grouped-GEMM path is selected for grouped_gemm. "
                          "The Triton path is preferred on compute capability smaller than sm90, "
                          "and will be used instead of torch._grouped_mm. Set use_grouped_mm=False or "
-                         "DS_DISABLE_TRITON_GROUPED_MM=1 to avoid this warning.")
+                         "disable_triton_grouped_mm=True to avoid this warning.")
 
     def forward(
         self,

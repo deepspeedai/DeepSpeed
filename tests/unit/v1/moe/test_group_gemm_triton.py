@@ -376,21 +376,19 @@ def test_grouped_experts_triton_path_parity():
     torch.testing.assert_close(triton_experts.w3.grad.float(), loop_experts.w3.grad.float(), **tol)
 
 
-def test_grouped_experts_auto_selects_triton_on_ampere(monkeypatch):
-    """On sm < 9.0 the module auto-selects Triton; DS_DISABLE_TRITON_GROUPED_MM opts out."""
+def test_grouped_experts_auto_selects_triton_on_ampere():
+    """On sm < 9.0 the module auto-selects Triton; disable_triton_grouped_mm opts out."""
     from deepspeed.moe.ep_experts import GroupedExperts
 
     dev = get_accelerator().current_device_name()
     major, _ = torch.cuda.get_device_capability()  #ignore-cuda
 
-    monkeypatch.delenv("DS_DISABLE_TRITON_GROUPED_MM", raising=False)
     experts = GroupedExperts(32, 64, 2, use_grouped_mm=True).to(dev)
     if major < 9:
         assert experts.use_triton_grouped_mm is True
     else:
         assert experts.use_triton_grouped_mm is False  # sm90+ uses native torch._grouped_mm
 
-    # Env override disables the Triton path regardless of device.
-    monkeypatch.setenv("DS_DISABLE_TRITON_GROUPED_MM", "1")
-    experts_off = GroupedExperts(32, 64, 2, use_grouped_mm=True).to(dev)
+    # Config override disables the Triton path regardless of device.
+    experts_off = GroupedExperts(32, 64, 2, use_grouped_mm=True, disable_triton_grouped_mm=True).to(dev)
     assert experts_off.use_triton_grouped_mm is False
