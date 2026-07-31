@@ -24,6 +24,7 @@ from torch.nn.parameter import Parameter
 from torch.nn import init
 from torch.nn.modules.module import Module
 from deepspeed.runtime.utils import noop_decorator
+from deepspeed.runtime.zero.utils import is_zero_param
 from deepspeed import comm as dist
 from deepspeed.accelerator import get_accelerator
 
@@ -114,7 +115,7 @@ class LinearFunctionForZeroStage3(torch.autograd.Function):
             input, weight, bias = ctx.saved_tensors
 
             grad_input = grad_weight = grad_bias = None
-            weight_was_partitioned = (hasattr(weight, "ds_status")
+            weight_was_partitioned = (is_zero_param(weight)
                                       and getattr(weight.ds_status, "name", None) == "NOT_AVAILABLE")
             if weight_was_partitioned:
                 weight.all_gather()
