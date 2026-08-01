@@ -104,8 +104,11 @@ This is useful when ``backward`` and ``step`` must be decoupled and the number o
 client- or RPC-driven RL backends where a single optimizer step arrives as ``N`` ``backward()``
 calls followed by one ``step()``, with ``N`` unknown at configuration time.
 
-Unmanaged mode currently supports **ZeRO stage 0/1 and DDP**: ``backward()`` accumulates gradients
-locally, and ``step()`` performs the gradient all-reduce followed by the optimizer update.
+Unmanaged mode currently supports **ZeRO stage 0/1/2 and DDP**. For ZeRO stage 0/1 (and DDP),
+``backward()`` accumulates gradients locally and ``step()`` performs the gradient all-reduce followed
+by the optimizer update. For ZeRO stage 2, gradients are reduced/partitioned on every ``backward()``
+(as in managed mode) and ``step()`` finalizes the accumulated partition gradients before the optimizer
+update; ZeRO ``overlap_comm`` is supported in this stage-2 path.
 
 .. note::
    By default ``backward()`` scales the loss and gradients by the configured
@@ -117,11 +120,12 @@ locally, and ``step()`` performs the gradient all-reduce followed by the optimiz
    applies and no manual averaging is needed.)
 
 .. note::
-   Unmanaged mode is being added incrementally. Only ZeRO stage 0/1 (and DDP) is supported today;
-   ZeRO stage 2/3 and ZeRO optimizer offload are planned but **not yet available** -- enabling them
+   Unmanaged mode is being added incrementally. ZeRO stage 0/1/2 (and DDP) is supported today;
+   ZeRO stage 3 and ZeRO optimizer offload are planned but **not yet available** -- enabling them
    with ``managed_gradient_accumulation=false`` raises an ``AssertionError`` at initialization.
-   Unmanaged mode is likewise incompatible with pipeline parallelism, DeepCompile, Apex AMP, and
-   ZeRO ``overlap_comm``, which are also rejected at initialization.
+   Unmanaged mode is likewise incompatible with pipeline parallelism, DeepCompile, and Apex AMP,
+   which are also rejected at initialization. ZeRO ``overlap_comm`` is supported only with ZeRO
+   stage 2 (rejected for stage 0/1, where reduction is deferred to ``step()``).
 
 .. autofunction:: deepspeed.DeepSpeedEngine.set_gradient_accumulation_boundary
 

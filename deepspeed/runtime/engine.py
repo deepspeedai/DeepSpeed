@@ -1653,8 +1653,8 @@ class DeepSpeedEngine(Module):
                 "managed_gradient_accumulation=False is only supported for ZeRO stage 0, 1, and 2"
             assert self.zero_offload_optimizer() is None and self.zero_offload_param() is None, \
                 "managed_gradient_accumulation=False is not supported with ZeRO offload"
-            assert not self.zero_overlap_comm(), \
-                "managed_gradient_accumulation=False is not supported with ZeRO overlap_comm"
+            assert self.zero_optimization_partition_gradients() or not self.zero_overlap_comm(), \
+                "managed_gradient_accumulation=False supports ZeRO overlap_comm only with ZeRO stage 2"
             assert not self.pipeline_parallelism, \
                 "managed_gradient_accumulation=False is not supported with pipeline parallelism"
             assert not self.is_deepcompile_enabled(), \
