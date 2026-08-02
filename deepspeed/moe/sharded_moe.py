@@ -297,7 +297,10 @@ def top1gating(logits: Tensor,
     assert logits.shape[
         0] >= min_capacity, "No. of tokens (batch-size) should be greater than min_capacity. Either set min_capacity to 0 or increase your batch size."
 
-    top_idx = _top_idx(mask1_rand, capacity)
+    # torch.topk(..., dim=0) cannot select more rows than the token dimension holds, so bound the
+    # selection without shrinking the dispatch capacity the buffers are sized from.
+    selection_capacity = min(capacity, torch.tensor(mask1.size(0)).to(capacity.device))
+    top_idx = _top_idx(mask1_rand, selection_capacity)
 
     new_mask1 = mask1 * torch.zeros_like(mask1).scatter_(0, top_idx, 1)
     mask1 = new_mask1
@@ -464,7 +467,10 @@ def topkgating(
 
         if drop_policy == 'probs':
             topk_masked_gates = torch.zeros_like(gates).scatter(1, top_idx, top_gate)
-            _, capacity_indices = torch.topk(topk_masked_gates, k=capacity, dim=0, sorted=False)
+            # k cannot exceed the token dimension being selected over, but capacity itself still
+            # sizes the dispatch buffer below.
+            selection_capacity = min(capacity, torch.tensor(gates.size(0)).to(capacity.device))
+            _, capacity_indices = torch.topk(topk_masked_gates, k=selection_capacity, dim=0, sorted=False)
             capacity_mask = torch.zeros_like(gates, dtype=torch.bool).scatter_(0, capacity_indices, True)
             mask &= capacity_mask
             locations = torch.cumsum(mask, dim=0) - 1

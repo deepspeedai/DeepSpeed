@@ -7,6 +7,7 @@
 Functionality for swapping optimizer tensors to/from (NVMe) storage devices.
 */
 #include <torch/extension.h>
+#include "deepspeed_aio_op_desc.h"
 #include "deepspeed_py_aio_handle.h"
 #include "deepspeed_py_copy.h"
 using namespace pybind11::literals;
@@ -59,31 +60,51 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
              "filename"_a,
              "validate"_a,
              "async"_a,
-             "file_offset"_a = 0)
+             "file_offset"_a = 0,
+             py::call_guard<py::gil_scoped_release>())
 
-        .def("pwrite",
-             &deepspeed_aio_handle_t::pwrite,
-             "Parallel file write with option of asynchronous completion. If synchronous, returns "
-             "count of completed write ops",
-             "buffer"_a,
-             "filename"_a,
-             "validate"_a,
-             "async"_a,
-             "file_offset"_a = 0)
+        .def(
+            "pwrite",
+            [](deepspeed_aio_handle_t& handle,
+               const torch::Tensor& buffer,
+               const char* filename,
+               const bool validate,
+               const bool async,
+               const int64_t file_offset) {
+                warn_consumer_ssd_writes();
+                py::gil_scoped_release release;
+                return handle.pwrite(buffer, filename, validate, async, file_offset);
+            },
+            "Parallel file write with option of asynchronous completion. If synchronous, returns "
+            "count of completed write ops",
+            "buffer"_a,
+            "filename"_a,
+            "validate"_a,
+            "async"_a,
+            "file_offset"_a = 0)
 
         .def("sync_pread",
              &deepspeed_aio_handle_t::sync_pread,
              "Synchronous parallel file read. Returns count of completed read ops",
              "buffer"_a,
              "filename"_a,
-             "file_offset"_a = 0)
+             "file_offset"_a = 0,
+             py::call_guard<py::gil_scoped_release>())
 
-        .def("sync_pwrite",
-             &deepspeed_aio_handle_t::sync_pwrite,
-             "Synchronous parallel file write. Returns count of completed write ops",
-             "buffer"_a,
-             "filename"_a,
-             "file_offset"_a = 0)
+        .def(
+            "sync_pwrite",
+            [](deepspeed_aio_handle_t& handle,
+               const torch::Tensor& buffer,
+               const char* filename,
+               const int64_t file_offset) {
+                warn_consumer_ssd_writes();
+                py::gil_scoped_release release;
+                return handle.sync_pwrite(buffer, filename, file_offset);
+            },
+            "Synchronous parallel file write. Returns count of completed write ops",
+            "buffer"_a,
+            "filename"_a,
+            "file_offset"_a = 0)
 
         .def("async_pread",
              &deepspeed_aio_handle_t::async_pread,
@@ -115,12 +136,14 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
              &deepspeed_aio_handle_t::new_cpu_locked_tensor,
              "Allocate pinned CPU tensor.",
              "num_elem"_a,
-             "example_tenosr"_a)
+             "example_tenosr"_a,
+             py::call_guard<py::gil_scoped_release>())
 
         .def("free_cpu_locked_tensor",
              &deepspeed_aio_handle_t::free_cpu_locked_tensor,
              "Free pinned CPU tensor.",
-             "tensor"_a)
+             "tensor"_a,
+             py::call_guard<py::gil_scoped_release>())
 
         .def("wait",
              &deepspeed_aio_handle_t::wait,

@@ -9,6 +9,7 @@ Functionality for swapping optimizer tensors to/from (NVMe) storage devices.
 
 #include <condition_variable>
 #include <memory>
+#include <mutex>
 #include "deepspeed_aio_thread.h"
 #include "deepspeed_pin_tensor.h"
 
@@ -21,6 +22,7 @@ struct deepspeed_io_handle_t {
 
     std::vector<std::shared_ptr<struct deepspeed_aio_thread_t>> _thread_contexts;
     std::vector<std::thread> _threads;
+    std::mutex _handle_mutex;
     int _num_pending_ops;
     std::unique_ptr<struct deepspeed_pin_tensor_t> _pinned_tensor_mgr;
 
@@ -80,9 +82,11 @@ struct deepspeed_io_handle_t {
 
     void _stop_threads();
 
-    void _schedule_aio_work(std::shared_ptr<struct io_op_desc_t> scheduled_op);
+    void _schedule_aio_work_locked(std::shared_ptr<struct io_op_desc_t> scheduled_op);
 
     std::shared_ptr<struct io_op_desc_t> _wait_for_aio_work();
+
+    int _wait_locked();
 
     bool _is_valid_parallel_aio_op(const bool read_op, const int64_t num_bytes);
 
