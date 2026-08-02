@@ -2999,8 +2999,11 @@ class DeepSpeedEngine(Module):
               with-blocks; the flush overwrites averaged_gradients each exit.
 
         Unsupported (NotImplementedError): ZeRO stage 0, BF16/FP16_Optimizer
-        wrappers, PipelineModule.
+        wrappers, PipelineModule. Also requires managed_gradient_accumulation=True.
         """
+        assert self.managed_gradient_accumulation(), \
+            "coalesce_grad_reduction is not supported with managed_gradient_accumulation=False; " \
+            "the caller already owns the accumulation boundary via step()"
         stage = self.zero_optimization_stage()
         if stage not in (ZeroStageEnum.optimizer_states, ZeroStageEnum.gradients, ZeroStageEnum.weights):
             raise NotImplementedError(f"coalesce_grad_reduction requires ZeRO stage 1/2/3, got stage {int(stage)}")

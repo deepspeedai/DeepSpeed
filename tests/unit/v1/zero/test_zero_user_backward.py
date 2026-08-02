@@ -2155,6 +2155,26 @@ class TestUnmanagedGradientAccumulationOverlapCommStage2(DistributedTest):
         unmanaged_engine.destroy()
 
 
+@pytest.mark.parametrize("zero_stage", [1, 2])
+class TestUnmanagedGradientAccumulationCoalesceValidation(DistributedTest):
+    """coalesce_grad_reduction() conflicts with unmanaged mode: both own the accumulation boundary."""
+    world_size = 1
+
+    def test_unmanaged_rejects_coalesce_grad_reduction(self, zero_stage):
+        hidden_dim = 4
+        initialize_distributed()
+        torch.manual_seed(42)
+        model = SimpleModel(hidden_dim=hidden_dim, nlayers=2)
+        config = build_managed_gas_config(zero_stage,
+                                          gradient_accumulation_steps=1,
+                                          managed_gradient_accumulation=False)
+        engine, _, _, _ = deepspeed.initialize(config=config, model=model, model_parameters=model.parameters())
+        with pytest.raises(AssertionError, match="coalesce_grad_reduction"):
+            with engine.coalesce_grad_reduction():
+                pass
+        engine.destroy()
+
+
 class TestUnmanagedGradientAccumulationPipelineValidation(DistributedTest):
     """Unmanaged mode is incompatible with pipeline parallelism."""
     world_size = 2
