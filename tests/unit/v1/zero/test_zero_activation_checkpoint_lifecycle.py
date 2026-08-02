@@ -11,6 +11,7 @@ from torch.utils.checkpoint import checkpoint, set_checkpoint_early_stop
 import deepspeed
 import deepspeed.comm as dist
 from deepspeed.accelerator import get_accelerator
+from deepspeed.runtime.zero.linear import zero3_linear_wrap
 from deepspeed.runtime.zero.partition_parameters import ZeroParamStatus
 
 from unit.common import DistributedTest
@@ -71,11 +72,12 @@ class _RaiseOnceInBackward(torch.autograd.Function):
         return grad_output, None
 
 
-def _zero3_config(*, gradient_accumulation_steps=1, dtype=torch.float32):
+def _zero3_config(*, gradient_accumulation_steps=1, dtype=torch.float32, module_granularity_threshold=0):
     config = get_config_dict(3, gradient_accumulation_steps=gradient_accumulation_steps, force_fp32=True)
     # Zero reuse window + no prefetch so residency reflects the current consumer, not a future reuse.
     config["zero_optimization"]["stage3_prefetch_bucket_size"] = 0
     config["zero_optimization"]["stage3_max_reuse_distance"] = 0
+    config["zero_optimization"]["stage3_module_granularity_threshold"] = module_granularity_threshold
     if dtype == torch.float16:
         config["fp16"] = {"enabled": True, "initial_scale_power": 8}
     elif dtype == torch.bfloat16:
@@ -83,10 +85,12 @@ def _zero3_config(*, gradient_accumulation_steps=1, dtype=torch.float32):
     return config
 
 
-def _initialize_zero3(model, *, gradient_accumulation_steps=1, dtype=torch.float32):
+def _initialize_zero3(model, *, gradient_accumulation_steps=1, dtype=torch.float32, module_granularity_threshold=0):
     trainable_parameters = [parameter for parameter in model.parameters() if parameter.requires_grad]
     engine, _, _, _ = deepspeed.initialize(config=_zero3_config(
-        gradient_accumulation_steps=gradient_accumulation_steps, dtype=dtype),
+        gradient_accumulation_steps=gradient_accumulation_steps,
+        dtype=dtype,
+        module_granularity_threshold=module_granularity_threshold),
                                            model=model,
                                            model_parameters=trainable_parameters)
     return engine
@@ -310,10 +314,14 @@ class TestZero3ActivationCheckpointLifecycle(DistributedTest):
 
     world_size = 1
 
-    def test_reused_checkpointed_module_invocations_release_independently(self):
+    @pytest.mark.parametrize("fast_sharding", [False, True])
+    def test_reused_checkpointed_module_invocations_release_independently(self, fast_sharding):
         """Nested calls to one module must retire independent hook invocations despite sharing a ds_id."""
         device, _, _ = initialize_distributed()
-        engine = _initialize_zero3(_RecursiveCheckpointModel(hidden_dim=8))
+        engine = _initialize_zero3(_RecursiveCheckpointModel(hidden_dim=8),
+                                   module_granularity_threshold=1_000_000 if fast_sharding else 0)
+        assert F.linear is zero3_linear_wrap
+        assert bool(getattr(engine.module, "_z3_leaf", False)) is fast_sharding
         value = torch.randn(2, 8, device=device, dtype=torch.float32, requires_grad=True)
 
         engine.backward(engine(value).sum())

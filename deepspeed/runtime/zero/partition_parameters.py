@@ -395,6 +395,15 @@ class InsertPostInitMethodToModuleSubClasses(object):
             self.dtype = dtype or torch.float16 if get_accelerator().is_fp16_supported(
             ) else torch.bfloat16 if get_accelerator().is_bf16_supported else torch.float32
 
+    def _enable_mem_efficient_linear(self):
+        print_rank_0(
+            "nn.functional.linear has been overridden with a more memory efficient version. This will persist unless manually reset.",
+            force=False)
+        if not hasattr(InsertPostInitMethodToModuleSubClasses, "linear_bk"):
+            InsertPostInitMethodToModuleSubClasses.linear_bk = torch.nn.functional.linear
+        if torch.nn.functional.linear is InsertPostInitMethodToModuleSubClasses.linear_bk:
+            torch.nn.functional.linear = zero3_linear_wrap
+
     def patch_init_and_builtins(self):
 
         def apply_with_gather(orig_module_apply_fn: Callable) -> Callable:
@@ -578,12 +587,7 @@ class InsertPostInitMethodToModuleSubClasses(object):
             self._add_tensor_creation_wrappers()
 
         if self.mem_efficient_linear:
-            print_rank_0(
-                "nn.functional.linear has been overridden with a more memory efficient version. This will persist unless manually reset.",
-                force=False)
-            if not hasattr(InsertPostInitMethodToModuleSubClasses, "linear_bk"):
-                InsertPostInitMethodToModuleSubClasses.linear_bk = torch.nn.functional.linear
-                torch.nn.functional.linear = zero3_linear_wrap
+            self._enable_mem_efficient_linear()
 
             if self.quantized_initialization:
                 print_rank_0("nn.functional.linear has been overridden with quantized linear version.", force=False)
@@ -1050,6 +1054,9 @@ class Init(InsertPostInitMethodToModuleSubClasses):
         if not dist.is_initialized():
             init_distributed()
             assert dist.is_initialized(), "Parameters cannot be scattered without initializing deepspeed.comm"
+
+        if module is not None and self.enabled and self.mem_efficient_linear:
+            self._enable_mem_efficient_linear()
 
         if data_parallel_group is None:
             self.ds_process_group = dist.get_world_group()
