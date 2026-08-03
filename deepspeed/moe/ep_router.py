@@ -184,8 +184,6 @@ class TokenChoiceTopKRouter(nn.Module):
 
         top_scores = top_scores * self.route_scale
 
-        num_tokens_per_expert = count_tokens_per_expert(selected_experts_indices,
-                                                        self.num_experts,
-                                                        out_dtype=torch.int32)
+        num_tokens_per_expert = count_tokens_per_expert(selected_experts_indices, self.num_experts)
 
         return top_scores, selected_experts_indices, num_tokens_per_expert

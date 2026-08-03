@@ -150,11 +150,7 @@ def compute_split_plan(
     local_counts_by_source.
     """
     if num_tokens_per_expert is None:
-        num_tokens_per_expert = count_tokens_per_expert(
-            selected_experts,
-            num_experts,
-            out_dtype=torch.int32,
-        )
+        num_tokens_per_expert = count_tokens_per_expert(selected_experts, num_experts)
 
     if ep_size == 1:
         # No dispatch needed - all tokens stay local
@@ -177,7 +173,7 @@ def compute_split_plan_from_expert_indices(
     ep_group: dist.ProcessGroup | None,
 ) -> SplitPlan:
     """Compute EP AllToAllV splits for an already partitioned assignment list."""
-    counts = count_tokens_per_expert(expert_indices, num_experts, out_dtype=torch.int32)
+    counts = count_tokens_per_expert(expert_indices, num_experts)
     if ep_size == 1:
         return SplitPlan([int(expert_indices.numel())], [int(expert_indices.numel())], counts,
                          counts.view(1, num_local_experts))
