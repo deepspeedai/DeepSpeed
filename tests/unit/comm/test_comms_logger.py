@@ -18,6 +18,7 @@ def test_stop_profiling_comms_disables_prof_all():
     comms_logger.stop_profiling_comms()
     assert comms_logger.prof_all is False
 
+
 def test_get_operation_summary_does_not_reorder_the_stored_records():
     # comms_dict stores parallel lists per message size: [count, latencies, algbws,
     # busbws], where index i is the i-th recorded op. trim_mean used to sort in
