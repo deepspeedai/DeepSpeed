@@ -182,9 +182,6 @@ class MLU_Accelerator(DeepSpeedAccelerator):
     def is_triton_supported(self):
         return True
 
-    def prefer_triton_grouped_mm(self):
-        return False
-
     # Graph operations
     def create_graph(self):
         torch.mlu.MLUGraph()

@@ -154,7 +154,7 @@ if _TRITON_AVAILABLE:
                 mask=mask_k[:, None] & mask_n[None, :],
                 other=0.0,
             )
-            acc += tl.dot(a_tile, b_tile)
+            acc += tl.dot(a_tile, b_tile)  # For FP32 inputs, it use TF32 tensor core for better performance on sm8x
 
         out = acc.to(out_ptr.dtype.element_ty)
         tl.store(
@@ -239,7 +239,9 @@ if _TRITON_AVAILABLE:
                 mask=mask_m[:, None] & mask_n[None, :],
                 other=0.0,
             )  # [BLOCK_M, BLOCK_N]
-            acc += tl.dot(tl.trans(a_tile), g_tile)  # [BLOCK_K, BLOCK_N]
+            acc += tl.dot(
+                tl.trans(a_tile),
+                g_tile)  # [BLOCK_K, BLOCK_N]; For FP32 inputs, it use TF32 tensor core for better performance on sm8x
 
         out = acc.to(out_ptr.dtype.element_ty)
         out_base = out_ptr + pid_e * stride_oe

@@ -191,9 +191,6 @@ class HPU_Accelerator(DeepSpeedAccelerator):
     def is_triton_supported(self):
         return False
 
-    def prefer_triton_grouped_mm(self):
-        return False
-
     # Graph operations
     def create_graph(self):
         return self.hpu.HPUGraph()

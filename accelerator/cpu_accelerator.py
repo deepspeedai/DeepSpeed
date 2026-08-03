@@ -221,9 +221,6 @@ class CPU_Accelerator(DeepSpeedAccelerator):
     def is_triton_supported(self):
         return False
 
-    def prefer_triton_grouped_mm(self):
-        return False
-
     # Data types
     def is_bf16_supported(self):
         return True

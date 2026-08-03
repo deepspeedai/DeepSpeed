@@ -281,6 +281,8 @@ class CUDA_Accelerator(DeepSpeedAccelerator):
         if not hasattr(torch, "_grouped_mm"):
             return True
         major, _ = torch.cuda.get_device_capability()
+        if major < 7:
+            return False
         return major < 9
 
     # Graph operations
