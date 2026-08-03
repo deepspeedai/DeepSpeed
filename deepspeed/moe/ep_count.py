@@ -6,8 +6,6 @@
 
 import torch
 
-from deepspeed.accelerator import get_accelerator
-
 
 def count_tokens_per_expert(
     selected_experts_indices: torch.Tensor,
