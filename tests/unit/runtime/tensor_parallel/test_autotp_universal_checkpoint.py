@@ -158,3 +158,22 @@ def test_conversion_helper_reads_builder_nested_view():
                                                                              replicated=False)
 
     assert _get_param_uc_conversion_meta(param) == param.ds_autotp_universal_checkpoint_meta["conversion"]
+
+
+def test_collect_marks_autotp_unchanged_params_as_replicated():
+    # AutoTP replaces the Linear (its params get conversion meta) but leaves the plain
+    # LayerNorm untouched, so the LayerNorm params have no conversion meta. They must be
+    # classified as TP-replicated; otherwise the converter's default dim-0 concat would
+    # expand them from [H] to [H * tp_degree].
+    model = torch.nn.Module()
+    model.fc = LinearLayer(torch.nn.Linear(16, 8, bias=True), mp_group=None, name="fc")
+    model.ln = torch.nn.LayerNorm(16)
+
+    uc_info = collect_autotp_universal_checkpoint_info(model)
+
+    replicated = uc_info[TP_REPLICATED_PARAMETER_PATTERNS]
+    assert r"^ln\.weight$" in replicated
+    assert r"^ln\.bias$" in replicated
+    # The AutoTP-replaced column-parallel weight/bias are sharded, not replicated.
+    assert not any("fc.weight" in p for p in replicated)
+    assert not any("fc.bias" in p for p in replicated)

@@ -224,9 +224,9 @@ For Grouped Query Attention with different Q/K/V sizes:
 
 ## Limitations
 
-1. **ZeRO Stage 3 training not supported**: AutoTP with ZeRO stage 3 is supported only for inference (no optimizer). Training with an optimizer is blocked until TP-aware checkpoint consolidation is implemented.
+1. **TP size must divide model dimensions**: The tensor parallel size must evenly divide the attention head count and hidden dimensions for the runtime TP math to be correct. (Checkpoint conversion handles an uneven partition dimension -- e.g. a non-divisible vocab or hidden size -- via per-TP-rank shapes, so a single parameter's partition dimension no longer must be divisible. Uneven sharding within a fused/GQA sub-parameter weight is not yet supported.)
 
-2. **TP size must divide model dimensions**: The tensor parallel size must evenly divide the attention head count and hidden dimensions.
+2. **Cross-topology universal restore**: Loading a universal checkpoint back into a topology with a *different* tensor-parallel degree goes through DeepSpeed's Megatron-style model-state loader, which is not AutoTP-aware; prefer same-topology restore when changing world size.
 
 
 ## See Also

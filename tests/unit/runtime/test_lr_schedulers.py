@@ -566,6 +566,74 @@ def test_warmup_lr_inherits_per_group_lr_when_max_unspecified():
     assert [group["lr"] for group in optimizer.param_groups] == pytest.approx([0.1, 0.2])
 
 
+@pytest.mark.parametrize("lr_shape", [(), (1, )])
+def test_warmup_lr_preserves_tensor_lr(lr_shape):
+    param = torch.nn.Parameter(torch.zeros(1))
+    initial_lr = torch.full(lr_shape, 0.1, dtype=torch.float64)
+    optimizer = torch.optim.SGD([param], lr=initial_lr)
+
+    scheduler = WarmupLR(optimizer=optimizer, warmup_num_steps=10)
+
+    assert optimizer.param_groups[0]["lr"] is initial_lr
+    assert initial_lr.shape == lr_shape
+    assert initial_lr.dtype == torch.float64
+    assert initial_lr.item() == 0.0
+
+    scheduler.step(1)
+
+    assert optimizer.param_groups[0]["lr"] is initial_lr
+    assert initial_lr.shape == lr_shape
+    assert initial_lr.dtype == torch.float64
+    assert initial_lr.item() == pytest.approx(0.1 * math.log(2) / math.log(10))
+
+
+@pytest.mark.parametrize("lr_shape", [(), (1, )])
+def test_warmup_cosine_lr_preserves_tensor_lr(lr_shape):
+    param = torch.nn.Parameter(torch.zeros(1))
+    initial_lr = torch.full(lr_shape, 0.1, dtype=torch.float64)
+    optimizer = torch.optim.SGD([param], lr=initial_lr)
+
+    scheduler = WarmupCosineLR(optimizer=optimizer, total_num_steps=100, warmup_num_steps=10)
+
+    assert optimizer.param_groups[0]["lr"] is initial_lr
+    assert initial_lr.shape == lr_shape
+    assert initial_lr.dtype == torch.float64
+    assert initial_lr.item() == 0.0
+
+    scheduler.step(1)
+
+    assert optimizer.param_groups[0]["lr"] is initial_lr
+    assert initial_lr.shape == lr_shape
+    assert initial_lr.dtype == torch.float64
+    assert initial_lr.item() == pytest.approx(0.1 * math.log(2) / math.log(10))
+
+
+@pytest.mark.parametrize("lr_shape", [(), (1, )])
+def test_one_cycle_preserves_tensor_lr(lr_shape):
+    param = torch.nn.Parameter(torch.zeros(1))
+    initial_lr = torch.full(lr_shape, 0.1, dtype=torch.float64)
+    optimizer = torch.optim.SGD([param], lr=initial_lr)
+
+    scheduler = OneCycle(optimizer=optimizer,
+                         cycle_min_lr=0.01,
+                         cycle_max_lr=0.1,
+                         cycle_first_step_size=10,
+                         cycle_second_step_size=10,
+                         cycle_momentum=False)
+
+    assert optimizer.param_groups[0]["lr"] is initial_lr
+    assert initial_lr.shape == lr_shape
+    assert initial_lr.dtype == torch.float64
+    assert initial_lr.item() == pytest.approx(0.01)
+
+    scheduler.step(1)
+
+    assert optimizer.param_groups[0]["lr"] is initial_lr
+    assert initial_lr.shape == lr_shape
+    assert initial_lr.dtype == torch.float64
+    assert initial_lr.item() == pytest.approx(0.01 + (0.1 - 0.01) * 2 / 10)
+
+
 def test_warmup_cosine_lr_total_num_steps_equals_warmup_num_steps():
     # total_num_steps == warmup_num_steps must not raise ZeroDivisionError, and because the
     # cosine decay window is empty, every step past warmup must stay at cos_min_ratio rather

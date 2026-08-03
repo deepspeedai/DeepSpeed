@@ -461,6 +461,7 @@ class AutoEPMoELayer(nn.Module):
             hidden_dim=spec.ffn_hidden_size,
             num_experts=self.num_local_experts,
             use_grouped_mm=config.use_grouped_mm,
+            disable_triton_grouped_mm=config.disable_triton_grouped_mm,
         )
         _copy_parameter_data(self.experts.w1, w1)
         _copy_parameter_data(self.experts.w2, w2)
