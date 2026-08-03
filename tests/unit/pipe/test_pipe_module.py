@@ -13,6 +13,7 @@ import pytest
 
 import deepspeed
 from deepspeed.pipe import PipelineModule
+from deepspeed.runtime.activation_checkpointing import checkpointing as ds_checkpointing
 from deepspeed.utils import RepeatingLoader
 from deepspeed.accelerator import get_accelerator
 
@@ -172,4 +173,26 @@ class TestPipeModuleCheckpointInterval(DistributedTest):
                                                model=model,
                                                model_parameters=[p for p in model.parameters()])
         assert engine.module.activation_checkpoint_interval > 0
+        assert not engine._reentrant_activation_checkpointing()
+
+    def test_setter_honors_non_reentrant_when_the_config_disables_checkpointing(self, mixed_param_model,
+                                                                                simple_config):
+        # use_reentrant only reached the module inside the positive-interval branch, so a config
+        # that disables checkpointing left activation_checkpoint_func at the reentrant default.
+        # set_checkpoint_interval() then enabled checkpointing with the wrong function, silently
+        # ignoring use_reentrant=False, and _is_checkpointable() reads the same function.
+        config = copy.deepcopy(simple_config)
+        config["pipeline"]["activation_checkpoint_interval"] = 0
+        config["pipeline"]["use_reentrant"] = False
+
+        model = PipelineModule(layers=copy.deepcopy(mixed_param_model), num_stages=1)
+        engine, _, _, _ = deepspeed.initialize(config=config,
+                                               model=model,
+                                               model_parameters=[p for p in model.parameters()])
+        assert engine.module.activation_checkpoint_interval == 0
+        assert engine.module.activation_checkpoint_func is ds_checkpointing.non_reentrant_checkpoint
+
+        engine.module.set_checkpoint_interval(1)
+
+        assert engine.module.activation_checkpoint_func is ds_checkpointing.non_reentrant_checkpoint
         assert not engine._reentrant_activation_checkpointing()

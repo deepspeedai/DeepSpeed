@@ -208,16 +208,20 @@ class PipelineEngine(DeepSpeedEngine):
         self.agg_train_loss = None
         self.agg_additional_losses = None
 
+        # use_reentrant picks the module's checkpoint function, and that choice also feeds
+        # _is_checkpointable(), so resolve it whatever the configured interval is: the module's
+        # set_checkpoint_interval() can enable checkpointing later, and it would otherwise run
+        # with the reentrant default even though the config asked for non-reentrant.
+        # set use_reentrant default to True.
+        if self._config.pipeline.get('use_reentrant') is None:
+            self._config.pipeline['use_reentrant'] = True
+        if self._config.pipeline['use_reentrant'] is False:
+            # set activation_checkpoint_func to non_reentrant_checkpoint func.
+            self.module.activation_checkpoint_func = ds_checkpointing.non_reentrant_checkpoint
+            if self.grid.get_global_rank() == 0:
+                logger.info('CONFIG: activation_checkpoint_func=non_reentrant_checkpoint')
         if self._config.pipeline['activation_checkpoint_interval'] > 0:
             self.module.activation_checkpoint_interval = self._config.pipeline['activation_checkpoint_interval']
-            # set use_reentrant default to True.
-            if self._config.pipeline.get('use_reentrant') is None:
-                self._config.pipeline['use_reentrant'] = True
-            if self._config.pipeline['use_reentrant'] is False:
-                # set activation_checkpoint_func to non_reentrant_checkpoint func.
-                self.module.activation_checkpoint_func = ds_checkpointing.non_reentrant_checkpoint
-                if self.grid.get_global_rank() == 0:
-                    logger.info('CONFIG: activation_checkpoint_func=non_reentrant_checkpoint')
         if self.module.activation_checkpoint_interval > 0:
             self.module._precompute_checkpointable_values()
 
