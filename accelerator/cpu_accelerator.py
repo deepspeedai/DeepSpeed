@@ -278,11 +278,9 @@ class CPU_Accelerator(DeepSpeedAccelerator):
     def LongTensor(self):
         return torch.LongTensor
 
-    def pin_memory(self, tensor, align_bytes=1):
+    def _torch_pin_memory(self, tensor):
+        # torch cannot pin CPU tensors to a device; keep the historical no-op.
         return tensor
-
-    def is_pinned(self, tensor):
-        return tensor.is_pinned()
 
     def op_builder_dir(self):
         try:
