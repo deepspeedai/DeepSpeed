@@ -112,17 +112,20 @@ def _run_experts_grouped_mm(
     """
     offsets = torch.cumsum(num_tokens_per_expert, dim=0, dtype=torch.int32)
 
+    from deepspeed.ops.triton_ops.swiglu_triton import swiglu
+
     cast_dtype = x.dtype
-    h = F.silu(torch._grouped_mm(
+    gate = torch._grouped_mm(
         x.to(cast_dtype),
         w1.to(cast_dtype).transpose(-2, -1),
         offs=offsets,
-    ))
-    h = h * torch._grouped_mm(
+    )
+    up = torch._grouped_mm(
         x.to(cast_dtype),
         w3.to(cast_dtype).transpose(-2, -1),
         offs=offsets,
     )
+    h = swiglu(gate, up)
     out = torch._grouped_mm(
         h,
         w2.to(cast_dtype).transpose(-2, -1),
@@ -147,12 +150,13 @@ def _run_experts_triton_grouped_mm(
     """Compute SwiGLU expert MLP via the Triton grouped GEMM drop-in.
 
     Numerically and API-compatible with :func:`_run_experts_grouped_mm`, but
-    uses ``deepspeed.moe.group_gemm_triton.group_gemm_triton`` instead of
+    uses ``deepspeed.ops.triton_ops.group_gemm_triton.group_gemm_triton`` instead of
     ``torch._grouped_mm``.
 
     Args mirror :func:`_run_experts_grouped_mm`.
     """
-    from deepspeed.moe.group_gemm_triton import group_gemm_triton
+    from deepspeed.ops.triton_ops.group_gemm_triton import group_gemm_triton
+    from deepspeed.ops.triton_ops.swiglu_triton import swiglu
 
     offsets = torch.cumsum(num_tokens_per_expert, dim=0, dtype=torch.int32)
 
@@ -162,8 +166,9 @@ def _run_experts_triton_grouped_mm(
     # avoiding a contiguous-materialization copy of the transposed grad.
 
     dtype = x.dtype
-    h = F.silu(group_gemm_triton(x, w1.to(dtype), offsets, trans_b=True))
-    h = h * group_gemm_triton(x, w3.to(dtype), offsets, trans_b=True)
+    gate = group_gemm_triton(x, w1.to(dtype), offsets, trans_b=True)
+    up = group_gemm_triton(x, w3.to(dtype), offsets, trans_b=True)
+    h = swiglu(gate, up)
     out = group_gemm_triton(h, w2.to(dtype), offsets, trans_b=True).type_as(x)
 
     return out
@@ -179,7 +184,7 @@ class GroupedExperts(nn.Module):
 
     Supports three execution paths:
       - **triton_grouped_mm**: Uses a Triton grouped-GEMM kernel
-        (``deepspeed.moe.group_gemm_triton``). Auto-selected on sm80/sm86 where
+        (``deepspeed.ops.triton_ops.group_gemm_triton``). Auto-selected on sm80/sm86 where
         ``torch._grouped_mm`` would otherwise fall back to a slow per-group loop.
       - **grouped_mm**: Uses ``torch._grouped_mm`` for fused grouped GEMM
         (requires a sufficiently recent PyTorch build).

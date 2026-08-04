@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # DeepSpeed Team
-"""Unit tests for the Triton grouped-GEMM drop-in (``deepspeed.moe.group_gemm_triton``).
+"""Unit tests for the Triton grouped-GEMM drop-in (``deepspeed.ops.triton_ops.group_gemm_triton``).
 
 Correctness is checked against:
   * a pure-PyTorch per-group reference (all dtypes), and
@@ -14,8 +14,8 @@ import pytest
 import torch
 
 from deepspeed.accelerator import get_accelerator
-from deepspeed.moe.group_gemm_triton import group_gemm_triton, is_available
-from deepspeed.moe.group_gemm_triton import _group_meta, _GROUP_META_BLOCK
+from deepspeed.ops.triton_ops.group_gemm_triton import group_gemm_triton, is_available
+from deepspeed.ops.triton_ops.group_gemm_triton import _group_meta, _GROUP_META_BLOCK
 
 if not is_available():
     pytest.skip("Triton is not available", allow_module_level=True)

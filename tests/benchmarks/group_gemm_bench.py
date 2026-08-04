@@ -23,7 +23,7 @@ import argparse
 
 import torch
 
-from deepspeed.moe.group_gemm_triton import group_gemm_triton, is_available
+from deepspeed.ops.triton_ops.group_gemm_triton import group_gemm_triton, is_available
 
 
 def _unbalanced_offs(num_experts, avg_tokens, device):
