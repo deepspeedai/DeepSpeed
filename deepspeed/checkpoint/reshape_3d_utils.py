@@ -73,15 +73,13 @@ class model_3d_desc(object):
         return len(err_msg) == 0, err_msg
 
 
-def get_model_3d_descriptor(dir):
-    file_list = get_files(dir)
-    zero_file_list = get_zero_files(dir)
-    model_file_list = get_files_with_prefix(file_list, MODEL_FILE_PREFIX)
+def get_model_3d_descriptor_from_metadata(file_list, zero_file_list, model_state_metadata):
+    """Derive checkpoint topology without loading checkpoint contents."""
+    model_file_list = [model_file for model_file, _ in model_state_metadata]
     parallel_dims = []
     missing_parallel_dims = []
-    for model_file in model_file_list:
-        model_state = torch.load(model_file, map_location='cpu', weights_only=False)
-        dimensions = model_state.get(CHECKPOINT_PARALLEL_DIMS)
+    for model_file, metadata in model_state_metadata:
+        dimensions = metadata.get(CHECKPOINT_PARALLEL_DIMS)
         if dimensions is None:
             missing_parallel_dims.append(model_file)
             continue
@@ -124,6 +122,20 @@ def get_model_3d_descriptor(dir):
         pp_degree = 1
 
     return model_3d_desc(pp_degree, tp_degree, dp_degree)
+
+
+def get_model_3d_descriptor(dir):
+    file_list = get_files(dir)
+    zero_file_list = get_zero_files(dir)
+    model_file_list = get_files_with_prefix(file_list, MODEL_FILE_PREFIX)
+    model_state_metadata = []
+    for model_file in model_file_list:
+        model_state = torch.load(model_file, map_location='cpu', weights_only=False)
+        model_state_metadata.append((model_file, {
+            CHECKPOINT_PARALLEL_DIMS: model_state.get(CHECKPOINT_PARALLEL_DIMS)
+        }))
+        del model_state
+    return get_model_3d_descriptor_from_metadata(file_list, zero_file_list, model_state_metadata)
 
 
 def flatten_dp_dimension(meg_2d_map, src_2d_size, dp_degree):

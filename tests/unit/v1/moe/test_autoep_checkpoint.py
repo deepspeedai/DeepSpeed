@@ -13,6 +13,7 @@ import torch
 import torch.nn as nn
 
 from deepspeed import comm as dist
+from deepspeed.checkpoint.autoep_universal import _zero12_fragment_path, consolidate_autoep_zero12_expert_states
 from deepspeed.checkpoint.ds_to_universal import main as convert_to_universal
 from deepspeed.runtime.config import DeepSpeedConfig
 from unit.common import DistributedFixture, DistributedTest
@@ -26,6 +27,7 @@ from unit.v1.moe.autoep_test_utils import (
     make_autoep_integration_config,
     run_training_steps,
     seed_everything,
+    skip_unless_h100_tests_enabled,
 )
 
 TOPOLOGY_TAG = "autoep-zero3-topology"
@@ -303,6 +305,28 @@ def _run_training_steps_with_engine_input_dtype(engine, num_steps=2, seq_len=8, 
     return losses
 
 
+@pytest.mark.parametrize("data_first,dp_order", [(False, [0, 2, 1, 3]), (True, [0, 1, 2, 3])], ids=["E+D", "D+E"])
+def test_zero12_expert_state_consolidation_exact(tmpdir, data_first, dp_order):
+    temp_dir = os.path.join(str(tmpdir), "tmp")
+    output_dir = os.path.join(str(tmpdir), "universal")
+    param_name = "model.layers.0.mlp.experts.w1"
+    os.makedirs(os.path.join(temp_dir, param_name, "0"))
+    for state_index, state_key in enumerate(UNIVERSAL_STATE_KEYS):
+        for dp_rank in range(4):
+            torch.save(torch.tensor([10 * state_index + dp_rank], dtype=torch.float32),
+                       _zero12_fragment_path(temp_dir, param_name, state_key, dp_rank))
+    for dp_rank in range(4):
+        torch.save(torch.tensor(7), _zero12_fragment_path(temp_dir, param_name, "step", dp_rank))
+
+    metadata = {param_name: {"num_experts": 4, "num_local_experts": 2, "ep_size": 2}}
+    consolidate_autoep_zero12_expert_states(temp_dir, output_dir, metadata, {param_name: (2, 1)}, 4, 1, data_first)
+    for state_index, state_key in enumerate(UNIVERSAL_STATE_KEYS):
+        expected = torch.tensor([10 * state_index + rank for rank in dp_order], dtype=torch.float32).view(4, 1)
+        torch.testing.assert_close(_load_universal_expert_state(output_dir, param_name, state_key), expected)
+    step = torch.load(os.path.join(output_dir, "zero", param_name, "step.pt"), weights_only=False)
+    assert int(step) == 7
+
+
 def _assert_topology_load_matches_universal(tmpdir,
                                             *,
                                             target_ep_size,
@@ -411,6 +435,30 @@ class TestAutoEPCheckpointSaveLoad(DistributedTest):
                                                 autoep_layers=[{
                                                     "moe_layer_id": 0
                                                 }])
+
+
+class TestAutoEPZero12UniversalCheckpoint(DistributedTest):
+    world_size = 4
+
+    @pytest.mark.parametrize("zero_stage", [1, 2])
+    def test_round_trip_weights_and_training_step(self, tmpdir, zero_stage):
+        skip_unless_h100_tests_enabled("AutoEP ZeRO-1/2 Universal Checkpoint coverage requires H100")
+        seed_everything(8100 + zero_stage)
+        config = make_autoep_config(zero_stage=zero_stage, ep_size=2, mixed_precision=True)
+        engine, _, _, _ = deepspeed.initialize(model=MockMoETransformer(), config=config)
+        _run_training_steps_with_engine_input_dtype(engine, num_steps=2)
+        save_dir, tag = str(tmpdir), f"autoep-zero{zero_stage}"
+        engine.save_checkpoint(save_dir, tag=tag)
+        universal_dir = _convert_checkpoint_to_universal(save_dir, tag)
+        engine.destroy()
+
+        load_config = make_autoep_config(zero_stage=zero_stage, ep_size=2, mixed_precision=True)
+        load_config["checkpoint"] = {"load_universal": True}
+        restored, _, _, _ = deepspeed.initialize(model=MockMoETransformer(), config=load_config)
+        restored.load_checkpoint(save_dir, tag=f"{tag}_universal")
+        _assert_module_params_match_universal(restored, universal_dir)
+        assert torch.isfinite(torch.tensor(_run_training_steps_with_engine_input_dtype(restored, num_steps=1)[0]))
+        restored.destroy()
 
 
 class TestAutoEPZero3UniversalCheckpoint(DistributedTest):

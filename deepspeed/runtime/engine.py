@@ -235,6 +235,17 @@ def _eigenvalue_summary_events(block_eigenvalue, global_samples):
             for i, ev_value in enumerate(block_eigenvalue.values())]
 
 
+def _checkpoint_parallel_metadata(mpu):
+    from deepspeed.utils.bwc import bwc_pipeline_parallel_world_size, bwc_tensor_model_parallel_world_size
+
+    return {
+        CHECKPOINT_PARALLEL_DIMS: {
+            CHECKPOINT_PP_DEGREE: bwc_pipeline_parallel_world_size(mpu),
+            CHECKPOINT_TP_DEGREE: bwc_tensor_model_parallel_world_size(mpu),
+        }
+    }
+
+
 class DeepSpeedEngine(Module):
     r"""DeepSpeed engine for training."""
 
@@ -4815,12 +4826,6 @@ class DeepSpeedEngine(Module):
         return full_state_dict
 
     def _common_checkpoint_state(self, module_state_dict, zero_optimizer_state, save_frozen_param):
-        from deepspeed.utils.bwc import bwc_pipeline_parallel_world_size, bwc_tensor_model_parallel_world_size
-
-        parallel_dimensions = {
-            CHECKPOINT_PP_DEGREE: bwc_pipeline_parallel_world_size(self.mpu),
-            CHECKPOINT_TP_DEGREE: bwc_tensor_model_parallel_world_size(self.mpu),
-        }
         return dict(module=module_state_dict,
                     buffer_names=self._get_buffer_names(),
                     optimizer=self.optimizer.state_dict() if self.optimizer and not zero_optimizer_state else None,
@@ -4840,7 +4845,7 @@ class DeepSpeedEngine(Module):
                     global_samples=self.global_samples,
                     dp_world_size=self.seq_dp_world_size,
                     mp_world_size=self.mp_world_size,
-                    **{CHECKPOINT_PARALLEL_DIMS: parallel_dimensions},
+                    **_checkpoint_parallel_metadata(self.mpu),
                     ds_config=self.config,
                     ds_version=version)
 

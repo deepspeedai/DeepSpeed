@@ -822,12 +822,10 @@ def _get_zero_stage(optim_files):
 
 
 def _inject_missing_state(ds_checkpoint):
-    if UNIVERSAL_CHECKPOINT_INFO not in ds_checkpoint.global_state:
-        sd = torch.load(ds_checkpoint.mp_rank_files[0], map_location=torch.device('cpu'), weights_only=False)
-        if UNIVERSAL_CHECKPOINT_INFO not in sd:
-            ds_checkpoint.global_state[UNIVERSAL_CHECKPOINT_INFO] = {}
-            ds_checkpoint.global_state[UNIVERSAL_CHECKPOINT_INFO][
-                UNIVERSAL_CHECKPOINT_VERSION_KEY] = UNIVERSAL_CHECKPOINT_VERSION_VALUE
+    if ds_checkpoint.get_checkpoint_info(UNIVERSAL_CHECKPOINT_INFO) is None:
+        ds_checkpoint.global_state[UNIVERSAL_CHECKPOINT_INFO] = {
+            UNIVERSAL_CHECKPOINT_VERSION_KEY: UNIVERSAL_CHECKPOINT_VERSION_VALUE
+        }
 
 
 def _check_for_required_state(ds_checkpoint):
@@ -843,17 +841,19 @@ def _classify_autoep_expert_file_consolidation(autoep_metadata, expert_files):
     return 'none'
 
 
-def _aggregate_autoep_zero12_metadata(model_files):
+def _aggregate_autoep_zero12_metadata(model_state_metadata):
     slice_shapes_by_tp = []
     metadata_by_prefix = {}
     metadata_source_by_prefix = {}
     use_data_before_expert_parallel_by_file = {}
 
-    for model_file in model_files:
-        model_state = torch.load(model_file, map_location=torch.device('cpu'), weights_only=False)
-        slice_shapes_by_tp.append(dict((k, v) for group in model_state[PARAM_SHAPES] for k, v in group.items()))
+    for model_file, metadata in model_state_metadata:
+        param_shapes = metadata[PARAM_SHAPES]
+        if not isinstance(param_shapes, dict):
+            raise RuntimeError(f"DeepSpeed checkpoint {PARAM_SHAPES} must contain dictionaries in {model_file}.")
+        slice_shapes_by_tp.append(param_shapes)
 
-        autoep_metadata = _get_autoep_metadata(model_state)
+        autoep_metadata = metadata[AUTOEP_LAYERS_KEY]
         if autoep_metadata is not None:
             if not isinstance(autoep_metadata, list):
                 raise RuntimeError(f"AutoEP metadata must be a list in {model_file}.")
@@ -871,7 +871,7 @@ def _aggregate_autoep_zero12_metadata(model_files):
                     metadata_by_prefix[prefix] = layer_info
                     metadata_source_by_prefix[prefix] = model_file
 
-        source_ds_config = model_state.get('ds_config', {})
+        source_ds_config = metadata['ds_config']
         if not isinstance(source_ds_config, dict):
             raise RuntimeError(f"DeepSpeed checkpoint ds_config must be a dictionary in {model_file}.")
         use_data_before_expert_parallel = source_ds_config.get('use_data_before_expert_parallelism', False)
@@ -879,7 +879,6 @@ def _aggregate_autoep_zero12_metadata(model_files):
             raise RuntimeError("DeepSpeed checkpoint use_data_before_expert_parallelism must be a boolean "
                                f"in {model_file}.")
         use_data_before_expert_parallel_by_file[model_file] = use_data_before_expert_parallel
-        del model_state
 
     use_data_before_expert_parallel_values = set(use_data_before_expert_parallel_by_file.values())
     if len(use_data_before_expert_parallel_values) != 1:
@@ -915,7 +914,7 @@ def main(args):
                                                     ds_checkpoint.pp_degree)
 
         slice_shapes_by_tp, autoep_metadata, use_data_before_expert_parallel = _aggregate_autoep_zero12_metadata(
-            ds_checkpoint.mp_rank_files)
+            ds_checkpoint.model_state_metadata)
         # Each mp_rank file stores one TP rank's PARAM_SHAPES for one PP stage.
         # mp_rank_files are ordered pp-major (pp0_tp0, pp0_tp1, ..., pp1_tp0, ...),
         # matching meg_2d_parallel_map.simple_init() (i -> pp=i // tp_degree,
