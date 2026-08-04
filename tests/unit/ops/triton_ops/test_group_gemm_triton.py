@@ -14,10 +14,11 @@ import pytest
 import torch
 
 from deepspeed.accelerator import get_accelerator
-from deepspeed.ops.triton_ops.group_gemm_triton import group_gemm_triton, is_available
+from deepspeed.ops.triton_ops import is_triton_available
+from deepspeed.ops.triton_ops.group_gemm_triton import group_gemm_triton
 from deepspeed.ops.triton_ops.group_gemm_triton import _group_meta, _GROUP_META_BLOCK
 
-if not is_available():
+if not is_triton_available():
     pytest.skip("Triton is not available", allow_module_level=True)
 
 if not (get_accelerator().is_available() and get_accelerator().device_name() == "cuda"):

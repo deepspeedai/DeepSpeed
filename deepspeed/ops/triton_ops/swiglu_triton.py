@@ -8,11 +8,10 @@ The SwiGLU gate combines two projections of the same input::
 
     h = silu(gate) * up
 
-where ``silu(x) = x * sigmoid(x)``. Done eagerly this launches two elementwise
-kernels (a ``silu`` and a ``mul``) and materializes an extra intermediate. This
-module fuses both into a single Triton kernel for the forward pass and a single
-kernel for the backward pass, which halves the elementwise kernel launches and
-the intermediate-tensor traffic on the expert MLP hot path.
+where ``silu(x) = x * sigmoid(x)``. This module fuses both into a single Triton 
+kernel for the forward pass and a single kernel for the backward pass, which 
+halves the elementwise kernel launches and the intermediate-tensor traffic
+on the expert MLP hot path.
 
 ``gate`` and ``up`` are the raw outputs of the gate/up grouped GEMMs and must
 share the same shape and dtype. All math is accumulated in float32 for numerical
@@ -28,22 +27,7 @@ import torch
 import torch.nn.functional as F
 
 from deepspeed.accelerator import get_accelerator
-
-try:
-    import triton
-    import triton.language as tl
-
-    _TRITON_AVAILABLE = True
-except ImportError:
-    _TRITON_AVAILABLE = False
-
-__all__ = ["swiglu", "is_available"]
-
-
-def is_available() -> bool:
-    """Return True if the fused Triton SwiGLU path can be used."""
-    return _TRITON_AVAILABLE
-
+from deepspeed.ops.triton_ops._triton import _TRITON_AVAILABLE, triton, tl
 
 if _TRITON_AVAILABLE:
 

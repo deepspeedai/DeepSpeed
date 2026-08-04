@@ -14,9 +14,10 @@ import torch
 import torch.nn.functional as F
 
 from deepspeed.accelerator import get_accelerator
-from deepspeed.ops.triton_ops.swiglu_triton import swiglu, is_available
+from deepspeed.ops.triton_ops import is_triton_available
+from deepspeed.ops.triton_ops.swiglu_triton import swiglu
 
-if not is_available():
+if not is_triton_available():
     pytest.skip("Triton is not available", allow_module_level=True)
 
 if not (get_accelerator().is_available() and get_accelerator().device_name() == "cuda"):
