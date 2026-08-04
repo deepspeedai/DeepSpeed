@@ -78,8 +78,8 @@ class MLU_Accelerator(DeepSpeedAccelerator):
     def manual_seed_all(self, seed):
         return torch.mlu.manual_seed_all(seed)
 
-    def initial_seed(self, seed):
-        return torch.mlu.initial_seed(seed)
+    def initial_seed(self):
+        return torch.mlu.initial_seed()
 
     def default_generator(self, device_index):
         return torch.mlu.default_generators[device_index]
@@ -184,7 +184,7 @@ class MLU_Accelerator(DeepSpeedAccelerator):
 
     # Graph operations
     def create_graph(self):
-        torch.mlu.MLUGraph()
+        return torch.mlu.MLUGraph()
 
     def capture_to_graph(self, graph, pool=None, stream=None):
         return torch.mlu.graph(graph, pool, stream)
@@ -223,7 +223,7 @@ class MLU_Accelerator(DeepSpeedAccelerator):
     def LongTensor(self):
         return functools.partial(torch.tensor, dtype=torch.long, device='mlu')
 
-    def pin_memory(self, tensor):
+    def pin_memory(self, tensor, align_bytes=1):
         return tensor.pin_memory()
 
     def is_pinned(self, tensor):

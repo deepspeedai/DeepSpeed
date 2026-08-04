@@ -25,7 +25,6 @@ from deepspeed.utils import logger
 from deepspeed.moe.ep_router import TokenChoiceTopKRouter
 from deepspeed.moe.ep_count import count_tokens_per_expert
 from deepspeed.moe.ep_experts import GroupedExperts
-from deepspeed.moe.ep_kernels import TokenReorderer
 from deepspeed.moe.ep_repack import _gather_source_zero_params, repack_expert_requires_grad_flags, repack_expert_weights
 
 # ---------------------------------------------------------------------------
@@ -134,22 +133,24 @@ def _split_plan_from_expert_counts(
 
 
 def compute_split_plan(
-    selected_experts: torch.Tensor,  # [T, K]
-    num_experts: int,
-    ep_size: int,
-    num_local_experts: int,
-    ep_group: dist.ProcessGroup | None,
+        selected_experts: torch.Tensor,  # [T, K]
+        num_experts: int,
+        ep_size: int,
+        num_local_experts: int,
+        ep_group: dist.ProcessGroup | None,
+        num_tokens_per_expert: torch.Tensor | None = None,  # [E_global], int32
 ) -> SplitPlan:
     """Compute AllToAllV split sizes for token dispatch/combine.
+
+    ``num_tokens_per_expert`` may be supplied by the caller to reuse the
+    histogram already computed by the router; when omitted it is derived from
+    ``selected_experts``.
 
     Returns SplitPlan with input_splits, output_splits, local_counts, and
     local_counts_by_source.
     """
-    num_tokens_per_expert = count_tokens_per_expert(
-        selected_experts,
-        num_experts,
-        out_dtype=torch.int32,
-    )
+    if num_tokens_per_expert is None:
+        num_tokens_per_expert = count_tokens_per_expert(selected_experts, num_experts)
 
     if ep_size == 1:
         # No dispatch needed - all tokens stay local
@@ -172,7 +173,7 @@ def compute_split_plan_from_expert_indices(
     ep_group: dist.ProcessGroup | None,
 ) -> SplitPlan:
     """Compute EP AllToAllV splits for an already partitioned assignment list."""
-    counts = count_tokens_per_expert(expert_indices, num_experts, out_dtype=torch.int32)
+    counts = count_tokens_per_expert(expert_indices, num_experts)
     if ep_size == 1:
         return SplitPlan([int(expert_indices.numel())], [int(expert_indices.numel())], counts,
                          counts.view(1, num_local_experts))
@@ -470,7 +471,6 @@ class AutoEPMoELayer(nn.Module):
         self.experts.w2.requires_grad_(w2_requires_grad)
         self.experts.w3.requires_grad_(w3_requires_grad)
 
-        self.reorderer = TokenReorderer(num_experts=self.num_experts, top_k=self.top_k)
         self.shared_experts = getattr(source_module, spec.shared_experts_name,
                                       None) if spec.has_shared_experts else None
         self.shared_experts_gate = getattr(source_module, spec.shared_experts_gate_name,
@@ -595,8 +595,9 @@ class AutoEPMoELayer(nn.Module):
         with torch.no_grad():
             self.tokens_per_expert.add_(ro.num_tokens_per_expert)
 
-        # Reorder tokens by expert
-        top_scores_sorted, token_indices_sorted, _ = self.reorderer(ro.top_scores, ro.selected_experts)
+        # Reorder tokens into expert-contiguous order.
+        token_indices_sorted = torch.argsort(ro.selected_experts.view(-1), stable=True)
+        top_scores_sorted = ro.top_scores.view(-1)[token_indices_sorted]
         expert_indices_sorted = ro.selected_experts.reshape(-1).index_select(0, token_indices_sorted)
 
         folded_tp = self.folding_group_handles is not None and self.folding_group_handles.spec.tp_size > 1
@@ -651,11 +652,7 @@ class AutoEPMoELayer(nn.Module):
 
         if self.ep_size == 1:
             # No AllToAll needed - local computation only
-            local_counts = count_tokens_per_expert(
-                ro.selected_experts,
-                self.num_local_experts,
-                out_dtype=torch.int32,
-            )
+            local_counts = ro.num_tokens_per_expert
 
             routed_input_permuted, perm_indices, aligned_counts, n_tokens = permute_by_local_expert(
                 routed_input, local_counts)
@@ -678,6 +675,7 @@ class AutoEPMoELayer(nn.Module):
                     ep_size=self.ep_size,
                     num_local_experts=self.num_local_experts,
                     ep_group=self.ep_group,
+                    num_tokens_per_expert=ro.num_tokens_per_expert,
                 )
 
             routed_input = _AllToAllV.apply(self.ep_group, routed_input, plan.input_splits, plan.output_splits)
