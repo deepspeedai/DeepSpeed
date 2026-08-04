@@ -107,6 +107,13 @@ Gradient Accumulation should be of the format:
 GRADIENT_ACCUMULATION_STEPS = "gradient_accumulation_steps"
 GRADIENT_ACCUMULATION_STEPS_DEFAULT = None
 
+#########################################
+# Managed Gradient Accumulation
+#########################################
+# True (default): DeepSpeed tracks micro-steps and steps on the boundary. False: the client owns the boundary and each step() applies an optimizer update.
+MANAGED_GRADIENT_ACCUMULATION = "managed_gradient_accumulation"
+MANAGED_GRADIENT_ACCUMULATION_DEFAULT = True
+
 # DeepSpeed CSR gradient sparsity
 SPARSE_GRADIENTS = "sparse_gradients"
 SPARSE_GRADIENTS_DEFAULT = False

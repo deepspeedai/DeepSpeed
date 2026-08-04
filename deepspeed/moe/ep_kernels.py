@@ -10,7 +10,7 @@
 """
 Token reordering and permutation utilities for expert parallelism.
 
-Ported from TorchTitan's TokenReorderer, Triton kernels, and alignment
+Ported from TorchTitan's Triton kernels and alignment
 utilities with adaptations for DeepSpeed:
   - Triton import guarded with try/except; pure-PyTorch fallback provided
   - Alignment config exposed as TOKEN_GROUP_ALIGN_SIZE_M
@@ -23,9 +23,6 @@ import logging
 from typing import Callable
 
 import torch
-import torch.nn as nn
-
-from deepspeed.moe.ep_count import count_tokens_per_expert
 
 logger = logging.getLogger(__name__)
 
@@ -329,53 +326,3 @@ def indices_padding_wrapper(func: Callable) -> Callable:
         return out
 
     return wrapper
-
-
-# ===================================================================
-# TokenReorderer
-# ===================================================================
-
-
-class TokenReorderer(nn.Module):
-    """Reorder token indices to match expert order for efficient parallel
-    processing.
-
-    Args:
-        num_experts (int): Number of experts in the MoE layer.
-        top_k (int): Number of experts each token is routed to.
-    """
-
-    def __init__(self, num_experts: int, top_k: int):
-        super().__init__()
-        self.num_experts = num_experts
-        self.top_k = top_k
-
-    def forward(
-        self,
-        top_scores: torch.Tensor,
-        selected_experts_indices: torch.Tensor,
-    ) -> tuple:
-        """
-        Args:
-            top_scores: Routing scores, shape ``(T, top_k)``.
-            selected_experts_indices: Expert indices, shape ``(T, top_k)``.
-
-        Returns:
-            Tuple of:
-                - top_scores_experts_sorted ``(T * top_k,)``: scores in
-                  expert-sorted order.
-                - token_indices_experts_sorted ``(T * top_k,)``: flattened
-                  token-slot indices sorted by expert.
-                - num_tokens_per_expert ``(num_experts,)``: histogram.
-        """
-        num_tokens_per_expert = count_tokens_per_expert(selected_experts_indices, self.num_experts)
-
-        token_indices_experts_sorted = torch.argsort(selected_experts_indices.view(-1), stable=True)
-
-        top_scores_experts_sorted = top_scores.view(-1)[token_indices_experts_sorted]
-
-        return (
-            top_scores_experts_sorted,
-            token_indices_experts_sorted,
-            num_tokens_per_expert,
-        )

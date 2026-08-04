@@ -43,7 +43,6 @@ from deepspeed.module_inject.auto_ep_presets.registry import (
 )
 from deepspeed.moe.layer import MoE
 from deepspeed.moe.ep_experts import GroupedExperts
-from deepspeed.moe.ep_kernels import TokenReorderer
 from deepspeed.moe.ep_repack import repack_expert_weights
 from deepspeed.moe.ep_router import TokenChoiceTopKRouter
 from deepspeed.runtime.engine import DeepSpeedEngine
@@ -734,7 +733,10 @@ class TestAutoEPConfig:
         )
 
         temp_dir = tmp_path / "tmp"
-        extract_zero_shards_stage3([str(optim_file)], [OrderedDict([("dense.weight", (2, 3))])], 1, str(temp_dir), 0)
+        # optim_files_grid[tp][dp] and param_shapes_grid[tp] (= PARAM_SHAPES, a list of
+        # sub-group dicts), work item (tp_index, dp_index).
+        extract_zero_shards_stage3([[str(optim_file)]], [[OrderedDict([("dense.weight", (2, 3))])]], 1, str(temp_dir),
+                                   (0, 0))
 
         fp32_fragment = torch.load(temp_dir / "dense.weight" / "0" / "fp32.00", weights_only=False)
         exp_avg_fragment = torch.load(temp_dir / "dense.weight" / "0" / "exp_avg.00", weights_only=False)
@@ -847,7 +849,7 @@ class TestRoutingAndLayerSemantics:
         assert torch.equal(scaled_counts, base_counts)
         assert base_counts.shape == (8, )
 
-    def test_grouped_experts_and_token_reorderer(self):
+    def test_grouped_experts(self):
         experts = GroupedExperts(dim=64, hidden_dim=128, num_experts=4, use_grouped_mm=False)
         nn.init.normal_(experts.w1, std=0.02)
         nn.init.normal_(experts.w2, std=0.02)
@@ -855,13 +857,6 @@ class TestRoutingAndLayerSemantics:
         out = experts(torch.randn(8, 64), torch.tensor([2, 2, 2, 2]))
         assert out.shape == (8, 64)
         assert not torch.isnan(out).any()
-
-        top_scores = torch.randn(20, 2)
-        selected_experts = torch.randint(0, 4, (20, 2))
-        scores_sorted, indices_sorted, counts = TokenReorderer(num_experts=4, top_k=2)(top_scores, selected_experts)
-        assert scores_sorted.shape == (40, )
-        assert set(indices_sorted.tolist()) == set(range(40))
-        assert torch.equal(counts, torch.bincount(selected_experts.reshape(-1), minlength=4).to(counts.dtype))
 
     def test_score_application_and_combine(self):
         x = torch.randn(4, 8)

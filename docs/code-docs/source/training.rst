@@ -57,7 +57,73 @@ Optimizer Step
 
 Gradient Accumulation
 ---------------------
+DeepSpeed accumulates gradients over ``gradient_accumulation_steps`` micro-batches
+before averaging them and applying an optimizer step. The ``managed_gradient_accumulation``
+config flag (default ``true``) controls who decides when that accumulation boundary occurs.
+
 .. autofunction:: deepspeed.DeepSpeedEngine.is_gradient_accumulation_boundary
+
+Managed Gradient Accumulation (default)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+With ``"managed_gradient_accumulation": true`` (the default), DeepSpeed tracks an
+internal micro-step counter and treats every ``gradient_accumulation_steps``-th
+micro-batch as the accumulation boundary
+(``(micro_steps + 1) % gradient_accumulation_steps == 0``). Only on that boundary does
+``step()`` reduce gradients and apply the optimizer update, so you can call
+``forward``/``backward``/``step`` symmetrically on every micro-batch:
+
+.. code-block:: python
+
+    for step, batch in enumerate(data_loader):
+        loss = model_engine(batch)
+        model_engine.backward(loss)
+        model_engine.step()   # optimizer runs only on the accumulation boundary
+
+Unmanaged Gradient Accumulation
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+With ``"managed_gradient_accumulation": false``, micro-step tracking is disabled and the
+caller owns the accumulation boundary. ``backward()`` only accumulates gradients, and each
+``step()`` finalizes the accumulated gradients and applies exactly one optimizer update. You
+are responsible for calling ``step()`` when accumulation is complete:
+
+.. code-block:: python
+
+    # ds_config = {..., "managed_gradient_accumulation": False}
+    for step_batches in batched_micro_batches:            # caller decides the boundary
+        num_micro_batches = len(step_batches)             # may differ from gradient_accumulation_steps
+        for micro_batch in step_batches:
+            loss = model_engine(micro_batch)
+            # scale_wrt_gas=False disables DeepSpeed's 1/gradient_accumulation_steps scaling,
+            # so average over the actual micro-batch count yourself.
+            averaged_loss = loss / num_micro_batches
+            model_engine.backward(averaged_loss, scale_wrt_gas=False)   # accumulate only
+        model_engine.step()                               # reduce + optimizer update
+
+This is useful when ``backward`` and ``step`` must be decoupled and the number of
+``backward()`` calls per optimizer step is decided by the caller at run time -- for example
+client- or RPC-driven RL backends where a single optimizer step arrives as ``N`` ``backward()``
+calls followed by one ``step()``, with ``N`` unknown at configuration time.
+
+Unmanaged mode currently supports **ZeRO stage 0/1 and DDP**: ``backward()`` accumulates gradients
+locally, and ``step()`` performs the gradient all-reduce followed by the optimizer update.
+
+.. note::
+   By default ``backward()`` scales the loss and gradients by the configured
+   ``gradient_accumulation_steps``. In unmanaged mode the number of ``backward()`` calls per step is
+   owned by the caller and may differ from that value (and may vary per step), so the default scaling
+   would be incorrect. Pass ``scale_wrt_gas=False`` to disable DeepSpeed's scaling and average the
+   loss yourself over the actual micro-batch count, as shown above. (If you intentionally call
+   ``backward()`` exactly ``gradient_accumulation_steps`` times per step, the default scaling still
+   applies and no manual averaging is needed.)
+
+.. note::
+   Unmanaged mode is being added incrementally. Only ZeRO stage 0/1 (and DDP) is supported today;
+   ZeRO stage 2/3 and ZeRO optimizer offload are planned but **not yet available** -- enabling them
+   with ``managed_gradient_accumulation=false`` raises an ``AssertionError`` at initialization.
+   Unmanaged mode is likewise incompatible with pipeline parallelism, DeepCompile, Apex AMP, and
+   ZeRO ``overlap_comm``, which are also rejected at initialization.
+
+.. autofunction:: deepspeed.DeepSpeedEngine.set_gradient_accumulation_boundary
 
 Coalesced Gradient Reduction
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -392,7 +458,10 @@ See :ref:`autotp-training-init-details` for more details.
     )
 
 .. note::
-   AutoTP training supports ZeRO stages 0, 1, and 2. ZeRO stage 3 is supported only for inference (no optimizer).
+   AutoTP training supports ZeRO stages 0, 1, 2, and 3. With ZeRO Stage 3, checkpoint
+   save/load and universal checkpoint conversion gather weights across both the ZeRO
+   data-parallel and the tensor-parallel dimensions, so saved/converted checkpoints are
+   complete.
 
 .. _autotp-training-init-details:
 

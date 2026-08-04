@@ -198,6 +198,10 @@ def get_gradient_accumulation_steps(param_dict):
     return get_scalar_param(param_dict, GRADIENT_ACCUMULATION_STEPS, GRADIENT_ACCUMULATION_STEPS_DEFAULT)
 
 
+def get_managed_gradient_accumulation(param_dict):
+    return get_scalar_param(param_dict, MANAGED_GRADIENT_ACCUMULATION, MANAGED_GRADIENT_ACCUMULATION_DEFAULT)
+
+
 def get_sparse_gradients_enabled(param_dict):
     return get_scalar_param(param_dict, SPARSE_GRADIENTS, SPARSE_GRADIENTS_DEFAULT)
 
@@ -781,6 +785,7 @@ class DeepSpeedConfig(object):
         self.train_batch_size = get_train_batch_size(param_dict)
         self.train_micro_batch_size_per_gpu = get_train_micro_batch_size_per_gpu(param_dict)
         self.gradient_accumulation_steps = get_gradient_accumulation_steps(param_dict)
+        self.managed_gradient_accumulation = get_managed_gradient_accumulation(param_dict)
         self.steps_per_print = get_steps_per_print(param_dict)
         self.dump_state = get_dump_state(param_dict)
 

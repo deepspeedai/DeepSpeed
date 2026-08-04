@@ -1829,3 +1829,278 @@ class TestZeroFrozenParamNoGradInputAccumulation(DistributedTest):
                 seed += 1
 
         model_engine.destroy()
+
+
+def build_managed_gas_config(zero_stage, gradient_accumulation_steps, managed_gradient_accumulation):
+    """fp32 config toggling managed_gradient_accumulation; micro-batch 1 so total_samples == micro-batch count."""
+    return {
+        "train_micro_batch_size_per_gpu": 1,
+        "gradient_accumulation_steps": gradient_accumulation_steps,
+        "steps_per_print": 1,
+        "managed_gradient_accumulation": managed_gradient_accumulation,
+        "zero_optimization": {
+            "stage": zero_stage,
+        },
+        "optimizer": {
+            "type": "Adam",
+            "params": {
+                "lr": 1e-3
+            }
+        },
+    }
+
+
+@pytest.mark.parametrize("zero_stage", [0, 1])
+class TestUnmanagedGradientAccumulation(DistributedTest):
+    """managed_gradient_accumulation=False: the caller's step() is the accumulation boundary."""
+    world_size = 2
+
+    def test_step_always_applies_update(self, zero_stage):
+        """Every step() applies an optimizer update regardless of gradient_accumulation_steps."""
+        hidden_dim = 4
+        gradient_accumulation_steps = 4
+
+        device, _, _ = initialize_distributed()
+        torch.manual_seed(42)
+        model = SimpleModel(hidden_dim=hidden_dim, nlayers=2)
+        config = build_managed_gas_config(zero_stage, gradient_accumulation_steps, managed_gradient_accumulation=False)
+        engine, _, _, _ = deepspeed.initialize(config=config, model=model, model_parameters=model.parameters())
+
+        data_loader = random_dataloader(model=engine,
+                                        total_samples=8,
+                                        hidden_dim=hidden_dim,
+                                        device=device,
+                                        dtype=torch.float32)
+
+        prev_global_steps = engine.global_steps
+        for batch in data_loader:
+            loss = engine(batch[0], batch[1])
+            engine.backward(loss)
+            engine.step()
+            assert engine.was_step_applied(), "Every step() must apply an update in unmanaged mode"
+            assert engine.global_steps == prev_global_steps + 1
+            prev_global_steps = engine.global_steps
+
+        engine.destroy()
+
+    def test_managed_baseline_applies_only_on_boundary(self, zero_stage):
+        """Default managed mode only applies an update on the accumulation boundary."""
+        hidden_dim = 4
+        gradient_accumulation_steps = 4
+
+        device, _, _ = initialize_distributed()
+        torch.manual_seed(42)
+        model = SimpleModel(hidden_dim=hidden_dim, nlayers=2)
+        config = build_managed_gas_config(zero_stage, gradient_accumulation_steps, managed_gradient_accumulation=True)
+        engine, _, _, _ = deepspeed.initialize(config=config, model=model, model_parameters=model.parameters())
+
+        data_loader = random_dataloader(model=engine,
+                                        total_samples=2 * gradient_accumulation_steps,
+                                        hidden_dim=hidden_dim,
+                                        device=device,
+                                        dtype=torch.float32)
+
+        applied = []
+        for batch in data_loader:
+            loss = engine(batch[0], batch[1])
+            engine.backward(loss)
+            engine.step()
+            applied.append(engine.was_step_applied())
+
+        # Only every GAS-th micro-step (the boundary) applies an update.
+        assert applied == [False, False, False, True, False, False, False, True]
+
+        engine.destroy()
+
+    def test_unmanaged_matches_managed(self, zero_stage):
+        """N backwards + one step() in unmanaged mode equals managed mode with GAS=N."""
+        hidden_dim = 4
+        gradient_accumulation_steps = 4
+        num_cycles = 3
+
+        device, _, _ = initialize_distributed()
+
+        torch.manual_seed(42)
+        model_managed = SimpleModel(hidden_dim=hidden_dim, nlayers=2)
+        managed_engine, _, _, _ = deepspeed.initialize(config=build_managed_gas_config(
+            zero_stage, gradient_accumulation_steps, managed_gradient_accumulation=True),
+                                                       model=model_managed,
+                                                       model_parameters=model_managed.parameters())
+
+        torch.manual_seed(42)
+        model_unmanaged = SimpleModel(hidden_dim=hidden_dim, nlayers=2)
+        unmanaged_engine, _, _, _ = deepspeed.initialize(config=build_managed_gas_config(
+            zero_stage, gradient_accumulation_steps, managed_gradient_accumulation=False),
+                                                         model=model_unmanaged,
+                                                         model_parameters=model_unmanaged.parameters())
+
+        total_samples = num_cycles * gradient_accumulation_steps
+        # Materialize the batches so both engines consume identical data.
+        batches = list(
+            random_dataloader(model=managed_engine,
+                              total_samples=total_samples,
+                              hidden_dim=hidden_dim,
+                              device=device,
+                              dtype=torch.float32))
+
+        # Managed: symmetric forward/backward/step on every micro-batch.
+        for batch in batches:
+            loss = managed_engine(batch[0], batch[1])
+            managed_engine.backward(loss)
+            managed_engine.step()
+
+        # Unmanaged: accumulate N backwards, then a single step() per cycle.
+        for cycle in range(num_cycles):
+            for micro in range(gradient_accumulation_steps):
+                batch = batches[cycle * gradient_accumulation_steps + micro]
+                loss = unmanaged_engine(batch[0], batch[1])
+                unmanaged_engine.backward(loss)
+            unmanaged_engine.step()
+
+        managed_params = collect_deepspeed_parameters(managed_engine, zero_stage)
+        unmanaged_params = collect_deepspeed_parameters(unmanaged_engine, zero_stage)
+        compare_parameters(managed_params, unmanaged_params, "unmanaged vs managed gradient accumulation")
+
+        managed_engine.destroy()
+        unmanaged_engine.destroy()
+
+    def test_unmanaged_varying_backward_count(self, zero_stage):
+        """Varying backward() count per step matches a managed manual-boundary reference and tracks global_samples."""
+        hidden_dim = 4
+        gradient_accumulation_steps = 4  # config value; unmanaged boundary is caller-owned
+        backward_counts = [2, 5, 3]  # micro-batches per step: differs per step and from GAS
+
+        device, _, _ = initialize_distributed()
+
+        torch.manual_seed(42)
+        model_unmanaged = SimpleModel(hidden_dim=hidden_dim, nlayers=2)
+        unmanaged_engine, _, _, _ = deepspeed.initialize(config=build_managed_gas_config(
+            zero_stage, gradient_accumulation_steps, managed_gradient_accumulation=False),
+                                                         model=model_unmanaged,
+                                                         model_parameters=model_unmanaged.parameters())
+
+        torch.manual_seed(42)
+        model_managed = SimpleModel(hidden_dim=hidden_dim, nlayers=2)
+        managed_engine, _, _, _ = deepspeed.initialize(config=build_managed_gas_config(
+            zero_stage, gradient_accumulation_steps, managed_gradient_accumulation=True),
+                                                       model=model_managed,
+                                                       model_parameters=model_managed.parameters())
+
+        total_samples = sum(backward_counts)
+        batches = list(
+            random_dataloader(model=unmanaged_engine,
+                              total_samples=total_samples,
+                              hidden_dim=hidden_dim,
+                              device=device,
+                              dtype=torch.float32))
+
+        # Unmanaged: N backwards accumulate locally, one step() reduces + updates; global_samples advances by N micro-batches.
+        samples_per_micro_batch = unmanaged_engine.train_batch_size() // unmanaged_engine.gradient_accumulation_steps()
+        expected_samples = unmanaged_engine.global_samples
+        idx = 0
+        for n in backward_counts:
+            for _ in range(n):
+                loss = unmanaged_engine(batches[idx][0], batches[idx][1])
+                unmanaged_engine.backward(loss / n, scale_wrt_gas=False)
+                idx += 1
+            unmanaged_engine.step()
+            assert unmanaged_engine.was_step_applied(), "Every step() must apply an update in unmanaged mode"
+            expected_samples += samples_per_micro_batch * n
+            assert unmanaged_engine.global_samples == expected_samples, \
+                f"global_samples {unmanaged_engine.global_samples} != expected {expected_samples} at n={n}"
+
+        # Managed reference: reproduce the same variable boundary via set_gradient_accumulation_boundary.
+        idx = 0
+        for n in backward_counts:
+            for micro in range(n):
+                managed_engine.set_gradient_accumulation_boundary(micro == n - 1)
+                loss = managed_engine(batches[idx][0], batches[idx][1])
+                managed_engine.backward(loss / n, scale_wrt_gas=False)
+                idx += 1
+            managed_engine.step()
+
+        unmanaged_params = collect_deepspeed_parameters(unmanaged_engine, zero_stage)
+        managed_params = collect_deepspeed_parameters(managed_engine, zero_stage)
+        compare_parameters(managed_params, unmanaged_params, "unmanaged varying-N vs managed manual boundary")
+
+        unmanaged_engine.destroy()
+        managed_engine.destroy()
+
+    def test_set_gradient_accumulation_boundary_rejected(self, zero_stage):
+        """set_gradient_accumulation_boundary() is unsupported in unmanaged mode (caller owns the boundary)."""
+        hidden_dim = 4
+        initialize_distributed()
+        torch.manual_seed(42)
+        model = SimpleModel(hidden_dim=hidden_dim, nlayers=2)
+        config = build_managed_gas_config(zero_stage,
+                                          gradient_accumulation_steps=4,
+                                          managed_gradient_accumulation=False)
+        engine, _, _, _ = deepspeed.initialize(config=config, model=model, model_parameters=model.parameters())
+        with pytest.raises(AssertionError, match="set_gradient_accumulation_boundary"):
+            engine.set_gradient_accumulation_boundary(True)
+        engine.destroy()
+
+
+@pytest.mark.parametrize("zero_stage", [2, 3])
+class TestUnmanagedGradientAccumulationValidation(DistributedTest):
+    """Unmanaged mode is only supported for ZeRO stage 0/1."""
+    world_size = 1
+
+    def test_unmanaged_rejects_partitioned_stages(self, zero_stage):
+        hidden_dim = 4
+        initialize_distributed()
+        torch.manual_seed(42)
+        model = SimpleModel(hidden_dim=hidden_dim, nlayers=2)
+        config = build_managed_gas_config(zero_stage,
+                                          gradient_accumulation_steps=1,
+                                          managed_gradient_accumulation=False)
+        with pytest.raises(AssertionError, match="only supported for ZeRO stage 0 and 1"):
+            deepspeed.initialize(config=config, model=model, model_parameters=model.parameters())
+
+
+class TestUnmanagedGradientAccumulationOffloadValidation(DistributedTest):
+    """Unmanaged mode does not support ZeRO optimizer offload (stage 1: before the stage-2/3 guard)."""
+    world_size = 1
+
+    def test_unmanaged_rejects_offload(self):
+        hidden_dim = 4
+        initialize_distributed()
+        torch.manual_seed(42)
+        model = SimpleModel(hidden_dim=hidden_dim, nlayers=2)
+        config = build_managed_gas_config(1, gradient_accumulation_steps=1, managed_gradient_accumulation=False)
+        config["zero_optimization"]["offload_optimizer"] = {"device": "cpu"}
+        with pytest.raises(AssertionError, match="not supported with ZeRO offload"):
+            deepspeed.initialize(config=config, model=model, model_parameters=model.parameters())
+
+
+@pytest.mark.parametrize("zero_stage", [0, 1])
+class TestUnmanagedGradientAccumulationOverlapCommValidation(DistributedTest):
+    """Unmanaged mode does not support ZeRO overlap_comm (step-time reduce skips the param walk)."""
+    world_size = 1
+
+    def test_unmanaged_rejects_overlap_comm(self, zero_stage):
+        hidden_dim = 4
+        initialize_distributed()
+        torch.manual_seed(42)
+        model = SimpleModel(hidden_dim=hidden_dim, nlayers=2)
+        config = build_managed_gas_config(zero_stage,
+                                          gradient_accumulation_steps=1,
+                                          managed_gradient_accumulation=False)
+        config["zero_optimization"]["overlap_comm"] = True
+        with pytest.raises(AssertionError, match="not supported with ZeRO overlap_comm"):
+            deepspeed.initialize(config=config, model=model, model_parameters=model.parameters())
+
+
+class TestUnmanagedGradientAccumulationPipelineValidation(DistributedTest):
+    """Unmanaged mode is incompatible with pipeline parallelism."""
+    world_size = 2
+
+    def test_unmanaged_rejects_pipeline(self):
+        from deepspeed.runtime.pipe.module import PipelineModule
+
+        initialize_distributed()
+        layers = [torch.nn.Linear(4, 4, bias=False), torch.nn.Linear(4, 4, bias=False)]
+        model = PipelineModule(layers=layers, num_stages=2, loss_fn=torch.nn.MSELoss())
+        config = build_managed_gas_config(0, gradient_accumulation_steps=1, managed_gradient_accumulation=False)
+        with pytest.raises(AssertionError, match="not supported with pipeline parallelism"):
+            deepspeed.initialize(config=config, model=model, model_parameters=model.parameters())

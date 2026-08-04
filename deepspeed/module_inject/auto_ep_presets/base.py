@@ -105,6 +105,7 @@ class AutoEPConfig:
     expert_pattern: str | None = None
     router_pattern: str | None = None
     use_grouped_mm: bool = True
+    disable_triton_grouped_mm: bool = False
     route_norm: bool | None = None
     route_scale: float = 1.0
     score_apply: Literal["auto", "pre", "post"] = "auto"
