@@ -173,9 +173,6 @@ class DeepEPExchange:
         # The handle the last dispatch produced. Combine and both backward
         # passes replay against it, so it has to outlive the dispatch call.
         self.last_handle = None
-        # The routing weights that arrived with the last dispatch, kept so the
-        # layer can decide whether to apply them before or after the experts.
-        self.last_recv_weights = None
 
     def dispatch(self, tokens: torch.Tensor, topk_idx: torch.Tensor, topk_weights: torch.Tensor):
         """Send tokens to their experts, returning rows, weights and handle.
@@ -203,7 +200,6 @@ class DeepEPExchange:
         # The returned event only holds anything when the call was made with
         # async_with_compute_stream; a synchronous result is already usable.
         self.last_handle = handle
-        self.last_recv_weights = recv_weights
         return recv_x, recv_weights, handle
 
     def dispatch_with_handle(self, tokens: torch.Tensor, handle):
