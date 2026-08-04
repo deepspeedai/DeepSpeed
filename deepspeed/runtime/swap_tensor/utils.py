@@ -183,6 +183,8 @@ class SwapBufferManager(object):
         self.num_elems = num_elems
         self.count = count
         self.dtype = dtype
+        # Keep the handle to release the page-locked buffers on teardown (see __del__).
+        self.aio_handle = aio_handle
         # Zero-init: new_cpu_locked_tensor is backed by posix_memalign (uninitialized),
         # but optimizer state (e.g. Adam momentum/variance) starts from these buffers and
         # must be zeroed, matching the prior torch.zeros() allocation.
@@ -193,7 +195,7 @@ class SwapBufferManager(object):
         self.gigabytes = (self.all_buffers[0].element_size() * num_elems * count) / (1024**3)
 
         if dist.get_rank() == 0:
-            exclude_list = ['all_buffers']
+            exclude_list = ['all_buffers', 'aio_handle']
             print_object(obj=self, name='SwapBufferManager', exclude_list=exclude_list)
 
     def allocate(self, num_elems, count, dtype):
@@ -225,6 +227,21 @@ class SwapBufferManager(object):
         for b_id in buffer_ids:
             self.free_buffer_index.append(self.used_buffer_index[b_id])
             del (self.used_buffer_index[b_id])
+
+    def __del__(self):
+        # The pinned-tensor manager is process-wide, so these page-locked buffers are
+        # not reclaimed when this manager is dropped; release them explicitly so that
+        # repeatedly building NVMe swappers does not accumulate locked memory.
+        all_buffers = getattr(self, 'all_buffers', None)
+        if not all_buffers:
+            return
+        for buf in all_buffers:
+            try:
+                self.aio_handle.free_cpu_locked_tensor(buf)
+            except Exception:
+                # Best-effort cleanup; the handle may already be gone at shutdown.
+                pass
+        self.all_buffers = []
 
 
 def get_sized_buffer(buffer, num_elems):

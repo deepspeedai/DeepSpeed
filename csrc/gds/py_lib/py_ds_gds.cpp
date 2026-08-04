@@ -116,7 +116,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
 
         .def("is_pinned",
              &deepspeed_gds_handle_t::is_pinned,
-             "Whether the buffer is page-locked by the DeepNVMe pinned-tensor manager.",
+             "Whether the buffer is directly usable for DeepNVMe I/O (torch-pinned or "
+             "page-locked by the DeepNVMe pinned-tensor manager).",
              "buffer"_a)
 
         .def("new_pinned_device_tensor",

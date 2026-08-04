@@ -379,5 +379,9 @@ bool deepspeed_io_handle_t::free_cpu_locked_tensor(torch::Tensor& locked_tensor)
 
 bool deepspeed_io_handle_t::is_pinned(const torch::Tensor& buffer)
 {
-    return _pinned_tensor_mgr->is_managed(buffer);
+    // Mirror cpu_op_desc_t's direct-I/O eligibility check: a buffer needs no bounce
+    // copy if it is torch-pinned or page-locked by the DeepNVMe manager. Reporting
+    // only is_managed() would misclassify torch-pinned buffers (e.g. ZeRO-3's fp16
+    // flat CPU memory) as unpinned and force the extra swap-buffer path.
+    return buffer.is_pinned() || _pinned_tensor_mgr->is_managed(buffer);
 }
