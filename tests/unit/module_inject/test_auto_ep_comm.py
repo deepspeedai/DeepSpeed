@@ -1,7 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # DeepSpeed Team
 
+import ast
+import inspect
 import os
+import textwrap
 import sys
 import unittest
 
@@ -9,7 +12,8 @@ import torch
 from unittest import mock
 
 from deepspeed.module_inject.auto_ep_comm import (AVAILABLE_BACKENDS, DEEPEP_BACKEND, NCCL_BACKEND, _conform_rows,
-                                                  _import_deep_ep, configured_backend, configured_num_sms)
+                                                  _DeepEPCombine, _DeepEPDispatch, _import_deep_ep, configured_backend,
+                                                  configured_num_sms)
 
 
 class TestAutoEPCommBackendSelection(unittest.TestCase):
@@ -112,6 +116,48 @@ class TestGradientConformance(unittest.TestCase):
         grad = torch.randn((7, 4))
 
         self.assertIs(_conform_rows(grad, (7, 4)), grad)
+
+
+class TestAutogradSignatures(unittest.TestCase):
+    """Both directions must return a gradient for every differentiable input.
+
+    A missing router-weight gradient does not fail loudly: training runs, the
+    loss falls, and the gate simply never learns. These check the arity that
+    carries it rather than leaving it to a live run to reveal.
+    """
+
+    @staticmethod
+    def gradient_count(function) -> int:
+        """How many values the backward returns, parsed rather than counted.
+
+        Counting commas in the source would also count the ones inside calls
+        like ``_conform_rows(grad, shape)``.
+        """
+        tree = ast.parse(textwrap.dedent(inspect.getsource(function)))
+        returns = [node for node in ast.walk(tree) if isinstance(node, ast.Return)]
+        assert returns, "backward has no return statement"
+        value = returns[-1].value
+        return len(value.elts) if isinstance(value, ast.Tuple) else 1
+
+    def test_dispatch_backward_returns_a_gradient_per_input(self):
+        # ctx is not an input autograd returns a gradient for.
+        inputs = len(inspect.signature(_DeepEPDispatch.forward).parameters) - 1
+
+        self.assertEqual(inputs, 4)
+        self.assertEqual(self.gradient_count(_DeepEPDispatch.backward), inputs)
+
+    def test_combine_backward_returns_a_gradient_per_input(self):
+        inputs = len(inspect.signature(_DeepEPCombine.forward).parameters) - 1
+
+        self.assertEqual(inputs, 4)
+        self.assertEqual(self.gradient_count(_DeepEPCombine.backward), inputs)
+
+    def test_dispatch_forward_returns_weights_so_they_stay_differentiable(self):
+        # The received weights have to leave the custom function as an output;
+        # reading them off the exchange afterwards puts them outside the graph.
+        source = inspect.getsource(_DeepEPDispatch.forward)
+
+        self.assertIn("return received, recv_weights", source)
 
 
 if __name__ == "__main__":

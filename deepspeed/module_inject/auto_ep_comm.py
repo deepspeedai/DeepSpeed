@@ -168,6 +168,8 @@ class DeepEPExchange:
         self.num_sms = num_sms
         self.num_qps = self.buffer.get_theoretical_num_qps(self.num_sms)
         self.num_experts = num_experts
+        # Recorded so the layer can tell when a later batch outgrows it.
+        self.num_max_tokens_per_rank = num_max_tokens_per_rank
         # The handle the last dispatch produced. Combine and both backward
         # passes replay against it, so it has to outlive the dispatch call.
         self.last_handle = None
@@ -204,14 +206,31 @@ class DeepEPExchange:
         self.last_recv_weights = recv_weights
         return recv_x, recv_weights, handle
 
-    def dispatch_with_handle(self, tokens: torch.Tensor, handle) -> torch.Tensor:
-        recv_x, _, _, _, _ = self.buffer.dispatch(
+    def dispatch_with_handle(self, tokens: torch.Tensor, handle):
+        """Replay a dispatch against a cached handle, keeping both outputs.
+
+        Used as the backward of a combine, where the weights matter as much as
+        the rows: their gradient is what reaches the router gate.
+        """
+        recv_x, _, recv_weights, _, _ = self.buffer.dispatch(
             tokens,
             handle=handle,
             num_sms=self.num_sms,
             num_qps=self.num_qps,
         )
-        return recv_x
+        return recv_x, recv_weights
+
+    def combine_with_weight_grad(self, rows: torch.Tensor, handle, weight_grads=None):
+        """Combine that also returns the reduced weight gradient.
+
+        Used as the backward of a dispatch. The weight gradient travels the
+        same path as the row gradient, so it is reduced by the same call.
+        """
+        combined, combined_weights, _ = self.buffer.combine(rows,
+                                                            handle=handle,
+                                                            topk_weights=weight_grads,
+                                                            num_sms=self.num_sms)
+        return combined, combined_weights
 
     def combine(self, rows: torch.Tensor, handle, topk_weights=None) -> torch.Tensor:
         """Reduce expert outputs back to their tokens.
@@ -255,13 +274,24 @@ class _DeepEPDispatch(torch.autograd.Function):
         ctx.exchange = exchange
         ctx.handle = handle
         ctx.tokens_shape = tokens.shape
-        ctx.recv_weights = recv_weights
-        return received
+        ctx.weights_shape = None if topk_weights is None else topk_weights.shape
+        # Dispatch moves the weights alongside the tokens, so the received
+        # copies are what downstream code differentiates; returning them makes
+        # autograd carry their gradient back to the router gate. Without this
+        # the gate silently receives nothing and stops learning.
+        return received, recv_weights
 
     @staticmethod
-    def backward(ctx, grad_received):
-        grad_tokens = ctx.exchange.combine(grad_received.contiguous(), ctx.handle)
-        return None, _conform_rows(grad_tokens, ctx.tokens_shape), None, None
+    def backward(ctx, grad_received, grad_recv_weights):
+        grad_tokens, grad_weights = ctx.exchange.combine_with_weight_grad(
+            grad_received.contiguous(),
+            ctx.handle,
+            None if grad_recv_weights is None else grad_recv_weights.contiguous(),
+        )
+        conformed_weights = None
+        if grad_weights is not None and ctx.weights_shape is not None:
+            conformed_weights = grad_weights[:ctx.weights_shape[0]].reshape(ctx.weights_shape)
+        return None, _conform_rows(grad_tokens, ctx.tokens_shape), None, conformed_weights
 
 
 class _DeepEPCombine(torch.autograd.Function):
@@ -275,18 +305,23 @@ class _DeepEPCombine(torch.autograd.Function):
         # while the backward dispatch hands back a whole buffer. Autograd
         # requires the gradient to match the input it is the gradient of.
         ctx.rows_shape = rows.shape
+        ctx.weights_shape = None if topk_weights is None else topk_weights.shape
         return exchange.combine(rows, handle, topk_weights)
 
     @staticmethod
     def backward(ctx, grad_combined):
-        grad_rows = ctx.exchange.dispatch_with_handle(grad_combined.contiguous(), ctx.handle)
-        return None, _conform_rows(grad_rows, ctx.rows_shape), None, None
+        grad_rows, grad_weights = ctx.exchange.dispatch_with_handle(grad_combined.contiguous(), ctx.handle)
+        conformed_weights = None
+        if grad_weights is not None and ctx.weights_shape is not None:
+            conformed_weights = grad_weights[:ctx.weights_shape[0]]
+        return None, _conform_rows(grad_rows, ctx.rows_shape), None, conformed_weights
 
 
 def deepep_dispatch(exchange: DeepEPExchange, tokens: torch.Tensor, topk_idx: torch.Tensor,
                     topk_weights: torch.Tensor):
-    received = _DeepEPDispatch.apply(exchange, tokens, topk_idx, topk_weights)
-    return received, exchange
+    """Dispatch tokens and their routing weights, keeping both differentiable."""
+    received, recv_weights = _DeepEPDispatch.apply(exchange, tokens, topk_idx, topk_weights)
+    return received, recv_weights, exchange
 
 
 def deepep_combine(exchange: DeepEPExchange, rows: torch.Tensor, handle, topk_weights=None) -> torch.Tensor:

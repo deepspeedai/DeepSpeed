@@ -561,6 +561,14 @@ class AutoEPMoELayer(nn.Module):
 
         if folding_group_handles is not None:
             self.folding_group_handles = folding_group_handles
+            if self.comm_backend == DEEPEP_BACKEND and folding_group_handles.spec.tp_size > 1:
+                # Folded TP partitions assignments across lanes and restores
+                # them by assignment metadata, which a transport whose combine
+                # returns token-major rows cannot satisfy. Saying so beats
+                # silently running something other than what was asked for.
+                logger.warning("AutoEP: the DeepEP backend does not support folded tensor parallelism; "
+                               "using the default all-to-all for this layer")
+                self.comm_backend = NCCL_BACKEND
             self.ep_group_name = folding_group_handles.ep_group_name
             self.ep_group = folding_group_handles.ep_group
             self.tp_group = folding_group_handles.tp_group
@@ -593,10 +601,13 @@ class AutoEPMoELayer(nn.Module):
         expansion and the reduction around the collectives, not just the
         collectives, and returns [T, H] ready for the shared tail of forward.
         """
-        if self._deepep_exchange is None:
-            # Built on first use rather than at construction, because the
-            # buffer is sized from the token count and that is not known until
-            # a batch arrives.
+        # Built on first use because the buffer is sized from the token count,
+        # which is not known until a batch arrives, and rebuilt if a later
+        # batch is larger: variable sequence lengths or a small warm-up batch
+        # would otherwise exceed a capacity fixed by the first call.
+        if self._deepep_exchange is None or tokens.shape[0] > self._deepep_exchange.num_max_tokens_per_rank:
+            if self._deepep_exchange is not None:
+                self._deepep_exchange.destroy()
             self._deepep_exchange = DeepEPExchange(
                 ep_group=self.ep_group,
                 num_experts=self.num_experts,
@@ -605,7 +616,8 @@ class AutoEPMoELayer(nn.Module):
                 num_max_tokens_per_rank=tokens.shape[0],
             )
 
-        received, exchange = deepep_dispatch(self._deepep_exchange, tokens, ro.selected_experts, ro.top_scores)
+        received, recv_weights, exchange = deepep_dispatch(self._deepep_exchange, tokens, ro.selected_experts,
+                                                           ro.top_scores)
         handle = exchange.last_handle
 
         # Two quantities have to line up for the grouped GEMM, and they come
@@ -626,7 +638,6 @@ class AutoEPMoELayer(nn.Module):
         # the reduction and is handed to combine instead. In expand mode each
         # row is one token-expert slot, so a weight per row broadcasts across
         # the hidden dimension.
-        recv_weights = exchange.last_recv_weights
         if self.score_apply == "pre" and recv_weights is not None:
             scale = recv_weights[:received.shape[0]].reshape(-1, 1)
             received = (received.to(torch.float32) * scale).to(received.dtype)
@@ -666,6 +677,9 @@ class AutoEPMoELayer(nn.Module):
         expert_indices_sorted = ro.selected_experts.reshape(-1).index_select(0, token_indices_sorted)
 
         folded_tp = self.folding_group_handles is not None and self.folding_group_handles.spec.tp_size > 1
+        # Set only where DeepEP's combine actually produced the output, since
+        # that decides whether the reduction below has already happened.
+        deepep_combined = False
         restore_ctx = None
         if folded_tp:
             from deepspeed.moe.ep_tp_dispatch import (
@@ -745,6 +759,7 @@ class AutoEPMoELayer(nn.Module):
 
             if self.comm_backend == DEEPEP_BACKEND:
                 expert_output = self._deepep_route(x, ro)
+                deepep_combined = True
             else:
                 routed_input = _AllToAllV.apply(self.ep_group, routed_input, plan.input_splits, plan.output_splits)
 
@@ -761,8 +776,11 @@ class AutoEPMoELayer(nn.Module):
                                       tp_group=self.tp_group,
                                       validate_coverage=self.validate_folding_routing).reshape(bsz, seqlen, hdim)
             self._last_folding_dispatch_counters = dispatch_counters(restore_ctx)
-        elif self.comm_backend == DEEPEP_BACKEND:
-            # Already reduced over top-k and back in token order.
+        elif deepep_combined:
+            # DeepEP's combine already reduced over top-k and restored token
+            # order. This is keyed on the route having run rather than on the
+            # backend being selected: with ep_size == 1 the local path runs
+            # instead and still has one row per assignment to reduce.
             output = expert_output.reshape(bsz, seqlen, hdim)
         else:
             output = combine_from_routed(

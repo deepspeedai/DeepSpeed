@@ -84,6 +84,37 @@ Weights-only/module-only Universal Checkpoint loads use the converted
 4. Expert parameters are marked for expert-data-parallel gradient reduction;
    router and shared-expert parameters use standard data-parallel reduction.
 
+**Communication backend (optional):**
+
+The expert AllToAll can be carried by `DeepEP <https://github.com/deepseek-ai/DeepEP>`__
+instead of NCCL. This is opt-in and off by default; jobs that set nothing keep
+the NCCL path unchanged.
+
+.. code-block:: bash
+
+    export DEEPSPEED_AUTOEP_COMM_BACKEND=deepep   # default: nccl
+    export DEEPSPEED_AUTOEP_COMM_SMS=12           # communication SM budget
+
+On 16 H100s across two nodes, replaying routing captured from real training,
+DeepEP reduced payload AllToAll time from roughly 100 ms to 48 ms per step, and
+whole training steps from 454 ms to 371 ms. The advantage grows with routing
+imbalance: at the most skewed step measured, the NCCL path degraded to 116 ms
+while DeepEP stayed flat.
+
+``DEEPSPEED_AUTOEP_COMM_SMS`` matters because communication competes with the
+expert GEMM for SMs. The default of 12 was chosen by measuring whole steps: a
+smaller budget slows the collective itself, and a larger one slows everything
+else. Requirements and limits:
+
+- The ``deep_ep`` package must be installed. It is imported only when this
+  backend is selected, so installations without it are unaffected.
+- DeepEP v2 requires NCCL 2.30.4 or newer, built with GIN support. Below that
+  version the transport is unavailable regardless of the network.
+- DeepEP v1 (the legacy ``Buffer`` API, using NVSHMEM and IBGDA) is not
+  supported.
+- The backend is disabled, with a warning, on layers using folded tensor
+  parallelism (``tp_size > 1``); those layers fall back to NCCL.
+
 **Constraints:**
 
 - ``autoep_size`` must divide ``num_experts`` for all detected MoE layers.
