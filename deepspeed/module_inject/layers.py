@@ -228,6 +228,48 @@ class ColumnParallel(torch.autograd.Function):
         return None, grad_output
 
 
+class GatherFromTensorParallelRegion(torch.autograd.Function):
+    """Gather last-dimension shards while keeping the output replicated."""
+
+    @staticmethod
+    def forward(ctx: Any, group: dist.ProcessGroup, input: torch.Tensor) -> torch.Tensor:
+        ctx.group = group
+        if group is None:
+            ctx.partition_sizes = (input.shape[-1], )
+            ctx.tp_index = 0
+            return input
+
+        tp_world_size = dist.get_world_size(group=group)
+        ctx.tp_index = dist.get_rank(group=group)
+        if tp_world_size == 1:
+            ctx.partition_sizes = (input.shape[-1], )
+            return input
+
+        local_size = torch.tensor([input.shape[-1]], dtype=torch.long, device=input.device)
+        gathered_sizes = [torch.empty_like(local_size) for _ in range(tp_world_size)]
+        dist.all_gather(gathered_sizes, local_size, group=group)
+        ctx.partition_sizes = tuple(int(size.item()) for size in gathered_sizes)
+
+        max_partition_size = max(ctx.partition_sizes)
+        if input.shape[-1] == max_partition_size:
+            input_padded = input.contiguous()
+        else:
+            padded_shape = (*input.shape[:-1], max_partition_size)
+            input_padded = input.new_zeros(padded_shape)
+            input_padded[..., :input.shape[-1]].copy_(input)
+
+        gathered = [torch.empty_like(input_padded) for _ in range(tp_world_size)]
+        dist.all_gather(gathered, input_padded, group=group)
+        return torch.cat([shard[..., :size] for shard, size in zip(gathered, ctx.partition_sizes)], dim=-1)
+
+    @staticmethod
+    def backward(ctx: Any, grad_output: torch.Tensor) -> Tuple[None, torch.Tensor]:
+        shard_offset = sum(ctx.partition_sizes[:ctx.tp_index])
+        shard_size = ctx.partition_sizes[ctx.tp_index]
+        grad_input = grad_output.narrow(-1, shard_offset, shard_size).contiguous()
+        return None, grad_input
+
+
 class TensorParallel_Layer(nn.Module, ABC):
     """
     A base class for model layers with  tensor parallelism support.
@@ -476,12 +518,17 @@ def collect_autotp_universal_checkpoint_info(model: nn.Module) -> Dict[str, Any]
             marker()
 
         for param_name, param in module.named_parameters(recurse=False):
-            conversion_meta = _get_param_uc_conversion_meta(param)
-            if not conversion_meta:
-                continue
-
             full_name = f"{module_name}.{param_name}" if module_name else param_name
             pattern = rf"^{re.escape(full_name)}$"
+
+            conversion_meta = _get_param_uc_conversion_meta(param)
+            if not conversion_meta:
+                # AutoTP left this parameter untouched, so it is identical across TP
+                # ranks. Classify it as TP-replicated; otherwise it falls through to
+                # the converter's default dim-0 concat and is wrongly expanded (e.g.
+                # LayerNorm/RMSNorm weights [H] -> [H * tp_degree]).
+                replicated_patterns.append(pattern)
+                continue
 
             if conversion_meta.get('replicated'):
                 replicated_patterns.append(pattern)
@@ -608,7 +655,6 @@ class LinearAllreduce(TensorParallel_Layer):
             if param is None or idx > 0:
                 # don't gather bias
                 return
-            params_list[idx].data_partition = param.data
             param = param.transpose(0, 1).contiguous()
 
             output_param = torch.empty(self.tp_world_size * param.shape[0],
@@ -677,10 +723,11 @@ class LinearAllreduce(TensorParallel_Layer):
 #remove kwargs from partition.
 class LinearLayer(TensorParallel_Layer):
 
-    def __init__(self, module, mp_group=None, skip_partition=False, **kwargs):
+    def __init__(self, module, mp_group=None, skip_partition=False, gather_output=False, **kwargs):
         super(LinearLayer, self).__init__(mp_group, **kwargs)
         self.weight = module.weight
         self.bias = module.bias
+        self.gather_output = gather_output
         if not skip_partition and self._should_materialize_tp_partition():
             self._tp_partition([self.weight, self.bias])
         self.support_training = True
@@ -699,6 +746,9 @@ class LinearLayer(TensorParallel_Layer):
         else:
             output = AsyncColumnParallel.apply(self.mp_group, input, self.weight, self.bias)
 
+        if self.gather_output:
+            output = GatherFromTensorParallelRegion.apply(self.mp_group, output)
+
         return output
 
     @torch.no_grad()
@@ -706,7 +756,6 @@ class LinearLayer(TensorParallel_Layer):
         #  Does not support uneven shard.
         for idx, param in enumerate(params_list):
 
-            params_list[idx].data_partition = param.data
             output_param = torch.empty((self.tp_world_size * param.shape[0], *param.shape[1:]),
                                        dtype=param.dtype,
                                        device=param.device)
@@ -765,7 +814,7 @@ class LinearLayer(TensorParallel_Layer):
 
     # for bwc
     @classmethod
-    def from_weights(cls, weight_shape=None, dtype=torch.half, weight=None, bias=None):
+    def from_weights(cls, weight_shape=None, dtype=torch.half, weight=None, bias=None, gather_output=False):
         if weight is not None:
             in_features = weight.shape[1]
             out_features = weight.shape[0]
@@ -777,7 +826,7 @@ class LinearLayer(TensorParallel_Layer):
             in_features = weight_shape[1]
             out_features = weight_shape[0]
             linear = nn.Linear(in_features, out_features, bias=(bias is not None))
-        return cls(linear, skip_partition=True)
+        return cls(linear, skip_partition=True, gather_output=gather_output)
 
 
 class FusedModuleWrapper:
@@ -1263,7 +1312,6 @@ class SubParamLinearLayer(TensorParallel_Layer):
         for idx, param in enumerate(params_list):
             if param is None:
                 continue
-            params_list[idx].data_partition = param.data
             if idx == 0:
                 full_view = _gather_logical_tensor(param,
                                                    self._logical_shape,
@@ -1382,7 +1430,6 @@ class SubParamLinearAllreduce(TensorParallel_Layer):
             if param is None or idx > 0:
                 # don't gather bias for row parallel
                 return
-            params_list[idx].data_partition = param.data
             full_view = _gather_logical_tensor(param,
                                                self._logical_shape,
                                                self.partition_dim,

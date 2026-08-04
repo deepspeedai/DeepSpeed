@@ -13,7 +13,7 @@ import argparse
 from torch.optim import Optimizer
 import math
 from deepspeed.utils import logger
-from torch import tensor, is_tensor
+from torch import is_tensor
 
 LR_SCHEDULE = 'lr_schedule'
 LR_RANGE_TEST = 'LRRangeTest'
@@ -250,10 +250,11 @@ def get_lr_from_config(config):
 
 def update_lr(param_groups, lrs):
     for param_group, lr in zip(param_groups, lrs):
-        # new LR should match the type of current LR for scalar and Tensor LR support
         if is_tensor(param_group['lr']):
-            lr = tensor([lr], device=param_group['lr'].device)
-        param_group['lr'] = lr
+            lr = lr.squeeze() if is_tensor(lr) else lr
+            param_group['lr'].fill_(lr)
+        else:
+            param_group['lr'] = lr
     return [group['lr'] for group in param_groups]
 
 
@@ -330,6 +331,9 @@ class LRRangeTest(object):
             self.min_lr = list(lr_range_test_min_lr)
         else:
             self.min_lr = [lr_range_test_min_lr] * len(self.optimizer.param_groups)
+
+        if not isinstance(lr_range_test_step_size, int) or lr_range_test_step_size <= 0:
+            raise ValueError(f"lr_range_test_step_size must be a positive integer, got {lr_range_test_step_size}")
 
         self.step_size = lr_range_test_step_size
         self.step_rate = lr_range_test_step_rate
@@ -482,8 +486,17 @@ class OneCycle(object):
         cycle_second_step_size = float(
             cycle_second_step_size) if cycle_second_step_size is not None else cycle_first_step_size
 
+        # Both halves are validated separately: a zero-length first half leaves total_size
+        # positive but makes step_ratio 0, and _get_scale_factor divides by step_ratio.
+        if cycle_first_step_size <= 0:
+            raise ValueError(f"cycle_first_step_size must be positive, got {cycle_first_step_size}")
+        if cycle_second_step_size < 0:
+            raise ValueError(f"cycle_second_step_size must be non-negative, got {cycle_second_step_size}")
+
         self.total_size = cycle_first_step_size + cycle_second_step_size
         self.step_ratio = cycle_first_step_size / self.total_size
+        self.first_step_size = cycle_first_step_size
+        self.second_step_size = cycle_second_step_size
         self.first_stair_count = cycle_first_stair_count
         self.second_stair_count = cycle_first_stair_count if cycle_second_stair_count is None else cycle_second_stair_count
         self.decay_step_size = decay_step_size
@@ -499,8 +512,7 @@ class OneCycle(object):
     def _initialize_lr(self, optimizer, cycle_min_lr, cycle_max_lr, decay_lr_rate, last_batch_iteration):
         self.min_lrs = [cycle_min_lr] * len(optimizer.param_groups)
         if last_batch_iteration == -1:
-            for lr, group in zip(self.min_lrs, optimizer.param_groups):
-                group['lr'] = lr
+            update_lr(optimizer.param_groups, self.min_lrs)
 
         self.max_lrs = [cycle_max_lr] * len(optimizer.param_groups)
         self.decay_lr_rate = decay_lr_rate
@@ -535,8 +547,24 @@ class OneCycle(object):
         x = 1. + batch_iteration / self.total_size - cycle
         if x <= self.step_ratio:
             scale_factor = x / self.step_ratio
+            stair_count = self.first_stair_count
         else:
             scale_factor = (x - 1) / (self.step_ratio - 1)
+            stair_count = self.second_stair_count
+
+        # A stair count holds lr/mom flat across each of that many steps of the half cycle
+        # instead of moving them every batch, the same floor() the LR range test staircase
+        # uses. A count of 0 keeps the continuous schedule. Quantise from the integer batch
+        # offset rather than from scale_factor: the float scale at a half-cycle boundary can
+        # land just under an exact stair (1e-16 below 1.0 for an asymmetric cycle), and
+        # flooring that would drop the schedule a whole stair, including off the peak.
+        if stair_count > 0:
+            cycle_iteration = batch_iteration % self.total_size
+            if cycle_iteration <= self.first_step_size:
+                stair_position = cycle_iteration * stair_count / self.first_step_size
+            else:
+                stair_position = (self.total_size - cycle_iteration) * stair_count / self.second_step_size
+            scale_factor = math.floor(stair_position) / stair_count
 
         return scale_factor
 
@@ -670,7 +698,7 @@ class WarmupLR(object):
         self.optimizer = get_torch_optimizer(optimizer)
 
         if warmup_max_lr is None:
-            warmup_max_lr = [group['lr'] for group in self.optimizer.param_groups][0]
+            warmup_max_lr = [group['lr'] for group in self.optimizer.param_groups]
 
         self.min_lrs = self._format_param(self.optimizer, warmup_min_lr, "min_lr")
         self.max_lrs = self._format_param(self.optimizer, warmup_max_lr, "max_lr")
@@ -835,7 +863,9 @@ class WarmupCosineLR(object):
         if self.total_num_steps < self.warmup_num_steps:
             logger.warning('total_num_steps {} is less than warmup_num_steps {}'.format(
                 total_num_steps, warmup_num_steps))
-        self.org_lrs = [group['lr'] for group in self.optimizer.param_groups]
+        self.org_lrs = [
+            group['lr'].clone() if is_tensor(group['lr']) else group['lr'] for group in self.optimizer.param_groups
+        ]
 
         # Initialize lrs in optimizer groups
         if last_batch_iteration == -1:

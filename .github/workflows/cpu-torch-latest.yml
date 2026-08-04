@@ -13,10 +13,13 @@ on:
           - '2.8.0-cpu'
           - '2.9.1-cpu'
           - '2.10.0-cpu'
+      # Used only when a manual workflow_dispatch explicitly selects
+      # transformers_source=pypi. Scheduled nightlies and default manual runs
+      # install Transformers from Git and ignore this value.
       transformers_version:
         description: Hugging Face Transformers PyPI package version to install
         required: false
-        default: '4.50.0'
+        default: '4.51.3'
         type: string
       transformers_source:
         description: Hugging Face Transformers source for manual runs
@@ -80,7 +83,8 @@ jobs:
     env:
       DEFAULT_TORCH_PRESET: '2.10.0-cpu'
       DEFAULT_TRANSFORMERS_SOURCE: 'git'
-      DEFAULT_TRANSFORMERS_VERSION: '4.50.0'
+      # Manual PyPI fallback only; scheduled and default manual runs use Git.
+      DEFAULT_TRANSFORMERS_VERSION: '4.51.3'
       DEFAULT_TRANSFORMERS_REF: 'main'
 
     steps:
@@ -175,8 +179,13 @@ jobs:
           echo "Resolved install tuple: torch==$torch_install_version torchvision==$torchvision_install_version"
           echo "Resolved test expectation: torch=$torch_test_version"
           echo "Resolved Transformers source: $transformers_source"
-          echo "Resolved Transformers version: $transformers_version"
-          echo "Resolved Transformers ref: $transformers_ref"
+          if [ "$transformers_source" = 'git' ]; then
+            echo "Requested Transformers PyPI version: N/A"
+            echo "Requested Transformers git ref: $transformers_ref"
+          else
+            echo "Requested Transformers PyPI version: $transformers_version"
+            echo "Requested Transformers git ref: N/A"
+          fi
 
       - name: Install PyTorch
         run: |
@@ -192,6 +201,7 @@ jobs:
           case "$TRANSFORMERS_SOURCE" in
             'pypi')
               pip install "transformers==$TRANSFORMERS_VERSION"
+              echo "TRANSFORMERS_RESOLVED_REF=N/A" >> "$GITHUB_ENV"
               ;;
             'git')
               git clone --filter=blob:none https://github.com/huggingface/transformers /tmp/transformers
@@ -229,7 +239,32 @@ jobs:
               exit 1
               ;;
           esac
-          python -c "import transformers; print('transformers:', transformers.__version__, transformers)"
+          installed_version="$(python -c 'import transformers; print(transformers.__version__)')"
+          if [ "$TRANSFORMERS_SOURCE" = 'git' ]; then
+            requested_version='N/A'
+            requested_ref="$TRANSFORMERS_REF"
+            resolved_ref="$TRANSFORMERS_RESOLVED_REF"
+          else
+            requested_version="$TRANSFORMERS_VERSION"
+            requested_ref='N/A'
+            resolved_ref='N/A'
+          fi
+          {
+            echo "Transformers source: $TRANSFORMERS_SOURCE"
+            echo "Requested Transformers PyPI version: $requested_version"
+            echo "Requested Transformers git ref: $requested_ref"
+            echo "Resolved Transformers git SHA: $resolved_ref"
+            echo "Imported Transformers version: $installed_version"
+          } | tee /dev/stderr
+          {
+            echo "### Transformers provenance"
+            echo ""
+            echo "- Source: \`$TRANSFORMERS_SOURCE\`"
+            echo "- Requested PyPI version: \`$requested_version\`"
+            echo "- Requested git ref: \`$requested_ref\`"
+            echo "- Resolved git SHA: \`$resolved_ref\`"
+            echo "- Imported version: \`$installed_version\`"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Python environment
         run: |

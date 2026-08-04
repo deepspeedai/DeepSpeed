@@ -24,6 +24,7 @@ from torch.nn.parameter import Parameter
 from torch.nn import init
 from torch.nn.modules.module import Module
 from deepspeed.runtime.utils import noop_decorator
+from deepspeed.runtime.zero.utils import is_zero_param
 from deepspeed import comm as dist
 from deepspeed.accelerator import get_accelerator
 
@@ -114,22 +115,34 @@ class LinearFunctionForZeroStage3(torch.autograd.Function):
             input, weight, bias = ctx.saved_tensors
 
             grad_input = grad_weight = grad_bias = None
+            weight_was_partitioned = (is_zero_param(weight)
+                                      and getattr(weight.ds_status, "name", None) == "NOT_AVAILABLE")
+            if weight_was_partitioned:
+                weight.all_gather()
 
-            dim = grad_output.dim()
-            if ctx.needs_input_grad[0]:
-                grad_input = grad_output.matmul(weight)
-            if ctx.needs_input_grad[1]:
-                if dim > 2:
-                    grad_weight = grad_output.reshape(-1, grad_output.shape[-1]).t().matmul(
-                        input.reshape(-1, input.shape[-1]))
-                else:
-                    grad_weight = grad_output.t().matmul(input)
-            if bias is not None and ctx.needs_input_grad[2]:
-                if dim > 2:
-                    grad_bias = grad_output.sum([i for i in range(dim - 1)])
-                else:
-                    grad_bias = grad_output.sum(0)
-            return grad_input, grad_weight, grad_bias
+            try:
+                dim = grad_output.dim()
+                if ctx.needs_input_grad[0]:
+                    grad_input = grad_output.matmul(weight)
+                if ctx.needs_input_grad[1]:
+                    if dim > 2:
+                        grad_weight = grad_output.reshape(-1, grad_output.shape[-1]).t().matmul(
+                            input.reshape(-1, input.shape[-1]))
+                    elif dim == 1:
+                        grad_weight = grad_output.unsqueeze(-1) * input.unsqueeze(0)
+                    else:
+                        grad_weight = grad_output.t().matmul(input)
+                if bias is not None and ctx.needs_input_grad[2]:
+                    if dim > 2:
+                        grad_bias = grad_output.sum([i for i in range(dim - 1)])
+                    elif dim == 1:
+                        grad_bias = grad_output
+                    else:
+                        grad_bias = grad_output.sum(0)
+                return grad_input, grad_weight, grad_bias
+            finally:
+                if weight_was_partitioned:
+                    weight.partition()
 
 
 def zero3_linear_wrap(input, weight, bias=None):
