@@ -22,6 +22,8 @@ import deepspeed.comm as dist
 from deepspeed.module_inject.auto_ep_config import AutoEPConfig, MoELayerSpec, resolve_autoep_config_defaults
 from deepspeed.module_inject.auto_ep_folding import mark_autoep_folding_router_parameter
 from deepspeed.utils import logger
+from deepspeed.module_inject.auto_ep_comm import (DEEPEP_BACKEND, NCCL_BACKEND, DeepEPExchange, configured_backend,
+                                                  deepep_combine, deepep_dispatch)
 from deepspeed.moe.ep_router import TokenChoiceTopKRouter
 from deepspeed.moe.ep_count import count_tokens_per_expert
 from deepspeed.moe.ep_experts import GroupedExperts
@@ -519,6 +521,15 @@ class AutoEPMoELayer(nn.Module):
 
         # Router-logit cache
         self._cached_router_logits = None
+        # Resolved once per layer: a DeepEP exchange sizes its buffer at
+        # construction, so it is built on first use and kept. A bad value must
+        # not break the default path, which nobody opted into.
+        try:
+            self.comm_backend = configured_backend()
+        except ValueError as error:
+            logger.warning(f"AutoEP: falling back to the default all-to-all: {error}")
+            self.comm_backend = NCCL_BACKEND
+        self._deepep_exchange = None
         self._register_logit_hook()
 
     def _register_logit_hook(self):
@@ -570,6 +581,60 @@ class AutoEPMoELayer(nn.Module):
                 use_data_before_expert_parallel_=use_data_before_expert_parallel_,
             )
         self.ep_group = groups._get_expert_parallel_group(self.ep_group_name)
+
+    def _deepep_route(self, tokens: torch.Tensor, ro: "RouterOutput") -> torch.Tensor:
+        """Dispatch, run the experts, and combine through DeepEP.
+
+        ``tokens`` is [T, H] before top-k expansion. DeepEP replicates each
+        token to the ranks that need it rather than being handed one row per
+        selected expert, groups arrivals by expert for the grouped GEMM, and
+        reduces the weighted sum on the way back. It therefore replaces the
+        expansion and the reduction around the collectives, not just the
+        collectives, and returns [T, H] ready for the shared tail of forward.
+        """
+        if self._deepep_exchange is None:
+            # Built on first use rather than at construction, because the
+            # buffer is sized from the token count and that is not known until
+            # a batch arrives.
+            self._deepep_exchange = DeepEPExchange(
+                ep_group=self.ep_group,
+                num_experts=self.num_experts,
+                top_k=self.top_k,
+                hidden_size=self.hidden_size,
+                num_max_tokens_per_rank=tokens.shape[0],
+            )
+
+        received, exchange = deepep_dispatch(self._deepep_exchange, tokens, ro.selected_experts, ro.top_scores)
+        handle = exchange.last_handle
+
+        # Two quantities have to line up for the grouped GEMM, and they come
+        # from different places: the rows are the valid prefix of a buffer
+        # sized for the worst case, and the per-expert counts arrive as a
+        # prefix sum. Differencing the same prefix sum that bounds the rows
+        # keeps the two consistent.
+        prefix = handle.psum_num_recv_tokens_per_expert
+        counts = torch.diff(prefix, prepend=prefix.new_zeros(1)).to(torch.int32)
+        received = received[:int(prefix[-1].item())]
+        if counts.numel() != self.num_local_experts:
+            raise RuntimeError(f"DeepEP returned {counts.numel()} expert counts, but this rank owns "
+                               f"{self.num_local_experts} experts")
+
+        # The router weights must be applied exactly once. In "pre" mode the
+        # NCCL path scales tokens before the experts see them, so the arrived
+        # rows are scaled the same way; in "post" mode the scaling is part of
+        # the reduction and is handed to combine instead. In expand mode each
+        # row is one token-expert slot, so a weight per row broadcasts across
+        # the hidden dimension.
+        recv_weights = exchange.last_recv_weights
+        if self.score_apply == "pre" and recv_weights is not None:
+            scale = recv_weights[:received.shape[0]].reshape(-1, 1)
+            received = (received.to(torch.float32) * scale).to(received.dtype)
+            combine_weights = None
+        else:
+            combine_weights = recv_weights
+
+        expert_output = self.experts(received, counts)
+        return deepep_combine(exchange, expert_output, handle, combine_weights)
 
     def forward(
         self,
@@ -679,14 +744,17 @@ class AutoEPMoELayer(nn.Module):
                     ep_group=self.ep_group,
                 )
 
-            routed_input = _AllToAllV.apply(self.ep_group, routed_input, plan.input_splits, plan.output_splits)
+            if self.comm_backend == DEEPEP_BACKEND:
+                expert_output = self._deepep_route(x, ro)
+            else:
+                routed_input = _AllToAllV.apply(self.ep_group, routed_input, plan.input_splits, plan.output_splits)
 
-            routed_input, perm_indices, aligned_counts, n_tokens = permute_by_local_expert(
-                routed_input, plan.local_counts_by_source)
-            expert_output = self.experts(routed_input, aligned_counts)
-            expert_output = unpermute_by_local_expert(expert_output, perm_indices, n_tokens)
+                routed_input, perm_indices, aligned_counts, n_tokens = permute_by_local_expert(
+                    routed_input, plan.local_counts_by_source)
+                expert_output = self.experts(routed_input, aligned_counts)
+                expert_output = unpermute_by_local_expert(expert_output, perm_indices, n_tokens)
 
-            expert_output = _AllToAllV.apply(self.ep_group, expert_output, plan.output_splits, plan.input_splits)
+                expert_output = _AllToAllV.apply(self.ep_group, expert_output, plan.output_splits, plan.input_splits)
 
         if folded_tp:
             output = restore_combined(expert_output,
@@ -694,6 +762,9 @@ class AutoEPMoELayer(nn.Module):
                                       tp_group=self.tp_group,
                                       validate_coverage=self.validate_folding_routing).reshape(bsz, seqlen, hdim)
             self._last_folding_dispatch_counters = dispatch_counters(restore_ctx)
+        elif self.comm_backend == DEEPEP_BACKEND:
+            # Already reduced over top-k and back in token order.
+            output = expert_output.reshape(bsz, seqlen, hdim)
         else:
             output = combine_from_routed(
                 expert_output,
