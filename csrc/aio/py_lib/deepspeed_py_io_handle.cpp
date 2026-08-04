@@ -46,7 +46,7 @@ deepspeed_io_handle_t::deepspeed_io_handle_t(const int block_size,
       _intra_op_parallelism(intra_op_parallelism),
       _aio_config(block_size, queue_depth, single_submit, overlap_events, false),
       _num_pending_ops(0),
-      _pinned_tensor_mgr(new deepspeed_pin_tensor_t())
+      _pinned_tensor_mgr(deepspeed_pin_tensor_t::shared())
 {
     for (auto i = 0; i < intra_op_parallelism; ++i) {
         _thread_contexts.push_back(std::make_shared<deepspeed_aio_thread_t>(i, _aio_config));
@@ -375,4 +375,9 @@ bool deepspeed_io_handle_t::free_cpu_locked_tensor(torch::Tensor& locked_tensor)
 {
     std::lock_guard<std::mutex> lock(_handle_mutex);
     return _pinned_tensor_mgr->free(locked_tensor);
+}
+
+bool deepspeed_io_handle_t::is_pinned(const torch::Tensor& buffer)
+{
+    return _pinned_tensor_mgr->is_managed(buffer);
 }

@@ -114,6 +114,11 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
              "Free pinned CPU tensor.",
              "tensor"_a)
 
+        .def("is_pinned",
+             &deepspeed_gds_handle_t::is_pinned,
+             "Whether the buffer is page-locked by the DeepNVMe pinned-tensor manager.",
+             "buffer"_a)
+
         .def("new_pinned_device_tensor",
              &deepspeed_gds_handle_t::new_pinned_device_tensor,
              "Allocate pinned device tensor.",

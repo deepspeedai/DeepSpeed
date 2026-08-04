@@ -8,7 +8,6 @@ Functionality of swapping tensors to/from (NVMe) storage devices.
 
 import torch
 from deepspeed.utils.logging import logger
-from deepspeed.accelerator import get_accelerator
 
 from deepspeed import comm as dist
 
@@ -96,8 +95,8 @@ class SwapBuffer(object):
 
 class SwapBufferPool(object):
 
-    def __init__(self, buffers):
-        assert all([get_accelerator().is_pinned(buf) for buf in buffers])
+    def __init__(self, buffers, aio_handle):
+        assert all([aio_handle.is_pinned(buf) for buf in buffers])
         self.buffers = [SwapBuffer(buf) for buf in buffers]
         self.current_index = 0
 
@@ -180,14 +179,15 @@ class SwapBufferPool(object):
 
 class SwapBufferManager(object):
 
-    def __init__(self, num_elems, count, dtype):
+    def __init__(self, num_elems, count, dtype, aio_handle):
         self.num_elems = num_elems
         self.count = count
         self.dtype = dtype
-        self.all_buffers = [
-            get_accelerator().pin_memory(torch.zeros(num_elems, device='cpu', dtype=dtype), align_bytes=0)
-            for _ in range(count)
-        ]
+        # Zero-init: new_cpu_locked_tensor is backed by posix_memalign (uninitialized),
+        # but optimizer state (e.g. Adam momentum/variance) starts from these buffers and
+        # must be zeroed, matching the prior torch.zeros() allocation.
+        dtype_example = torch.zeros(1, device='cpu', dtype=dtype)
+        self.all_buffers = [aio_handle.new_cpu_locked_tensor(num_elems, dtype_example).zero_() for _ in range(count)]
         self.free_buffer_index = [i for i in range(count)]
         self.used_buffer_index = {}
         self.gigabytes = (self.all_buffers[0].element_size() * num_elems * count) / (1024**3)

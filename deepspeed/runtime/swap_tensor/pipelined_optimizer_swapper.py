@@ -52,9 +52,6 @@ ASYNC_SWAP_OUT_STATE_TIMER = 'async_swap_out_state'
 class PipelinedOptimizerSwapper(OptimizerSwapper):
 
     def __init__(self, swap_config, aio_config, base_folder, optimizer, largest_numel, device, dtype, timers):
-        super(PipelinedOptimizerSwapper, self).__init__(swap_config, aio_config, base_folder, optimizer, largest_numel,
-                                                        device, dtype, timers)
-
         aio_op = AsyncIOBuilder().load()
         self.write_aio_handle = aio_op.aio_handle(block_size=aio_config[AIO_BLOCK_SIZE],
                                                   queue_depth=aio_config[AIO_QUEUE_DEPTH],
@@ -67,6 +64,9 @@ class PipelinedOptimizerSwapper(OptimizerSwapper):
                                                  single_submit=aio_config[AIO_SINGLE_SUBMIT],
                                                  overlap_events=aio_config[AIO_OVERLAP_EVENTS],
                                                  intra_op_parallelism=aio_config[AIO_INTRA_OP_PARALLELISM])
+
+        super(PipelinedOptimizerSwapper, self).__init__(swap_config, aio_config, base_folder, optimizer, largest_numel,
+                                                        device, dtype, timers, self.write_aio_handle)
 
         # Overlap gradient swap out
         self.gradient_swapper = AsyncTensorSwapper(aio_handle=self.write_aio_handle,
