@@ -238,7 +238,7 @@ def materialize_fake(v, device=None):
                                        device=t.device if device is None else device,
                                        layout=t.layout,
                                        requires_grad=t.requires_grad,
-                                       pin_memory=t.is_pinned())
+                                       pin_memory=get_accelerator().is_pinned(t))
                 else:
                     return torch.zeros(t.shape,
                                        dtype=t.dtype,
