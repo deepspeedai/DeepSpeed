@@ -17,6 +17,7 @@ from deepspeed.runtime.lr_schedules import CYCLE_MIN_MOM, CYCLE_MAX_MOM, DECAY_M
 from deepspeed.runtime.lr_schedules import WARMUP_DECAY_LR, TOTAL_NUM_STEPS
 from deepspeed.runtime.lr_schedules import WARMUP_COSINE_LR, WARMUP_MIN_RATIO, COS_MIN_RATIO, WarmupCosineLR
 from deepspeed.runtime.lr_schedules import WarmupLR, WarmupDecayLR, LRRangeTest, OneCycle
+from deepspeed.runtime import lr_schedules as lrs
 
 
 def _verify_continuous_decrease(values):
@@ -566,72 +567,67 @@ def test_warmup_lr_inherits_per_group_lr_when_max_unspecified():
     assert [group["lr"] for group in optimizer.param_groups] == pytest.approx([0.1, 0.2])
 
 
+# Every scheduler exposed via VALID_LR_SCHEDULES must preserve a caller-supplied
+# tensor LR through construction and the first step: update_lr() fills the
+# optimizer's existing LR tensor in place rather than replacing it with a Python
+# scalar, so the caller-held reference keeps its identity, shape and dtype.
+# Add a row when a new scheduler is registered; the coverage test below fails
+# collection if any scheduler is missing.
+TENSOR_LR_CONTRACTS = [
+    pytest.param(LRRangeTest, {}, 1e-3, 1e-3 * (1 + 2 / 2000), id="LRRangeTest"),
+    pytest.param(OneCycle,
+                 dict(cycle_min_lr=0.01,
+                      cycle_max_lr=0.1,
+                      cycle_first_step_size=10,
+                      cycle_second_step_size=10,
+                      cycle_momentum=False),
+                 0.01,
+                 0.01 + (0.1 - 0.01) * 2 / 10,
+                 id="OneCycle"),
+    pytest.param(WarmupLR, dict(warmup_num_steps=10), 0.0, 0.1 * math.log(2) / math.log(10), id="WarmupLR"),
+    pytest.param(WarmupDecayLR,
+                 dict(total_num_steps=100, warmup_num_steps=10, warmup_max_lr=0.1),
+                 0.0,
+                 0.1 * math.log(2) / math.log(10),
+                 id="WarmupDecayLR"),
+    pytest.param(WarmupCosineLR,
+                 dict(total_num_steps=100, warmup_num_steps=10),
+                 0.0,
+                 0.1 * math.log(2) / math.log(10),
+                 id="WarmupCosineLR"),
+]
+
+
 @pytest.mark.parametrize("lr_shape", [(), (1, )])
-def test_warmup_lr_preserves_tensor_lr(lr_shape):
+@pytest.mark.parametrize("scheduler_cls, scheduler_kwargs, init_lr, step_lr", TENSOR_LR_CONTRACTS)
+def test_lr_scheduler_preserves_tensor_lr(scheduler_cls, scheduler_kwargs, init_lr, step_lr, lr_shape):
     param = torch.nn.Parameter(torch.zeros(1))
     initial_lr = torch.full(lr_shape, 0.1, dtype=torch.float64)
     optimizer = torch.optim.SGD([param], lr=initial_lr)
 
-    scheduler = WarmupLR(optimizer=optimizer, warmup_num_steps=10)
+    scheduler = scheduler_cls(optimizer=optimizer, **scheduler_kwargs)
 
-    assert optimizer.param_groups[0]["lr"] is initial_lr
-    assert initial_lr.shape == lr_shape
-    assert initial_lr.dtype == torch.float64
-    assert initial_lr.item() == 0.0
-
-    scheduler.step(1)
-
-    assert optimizer.param_groups[0]["lr"] is initial_lr
-    assert initial_lr.shape == lr_shape
-    assert initial_lr.dtype == torch.float64
-    assert initial_lr.item() == pytest.approx(0.1 * math.log(2) / math.log(10))
-
-
-@pytest.mark.parametrize("lr_shape", [(), (1, )])
-def test_warmup_cosine_lr_preserves_tensor_lr(lr_shape):
-    param = torch.nn.Parameter(torch.zeros(1))
-    initial_lr = torch.full(lr_shape, 0.1, dtype=torch.float64)
-    optimizer = torch.optim.SGD([param], lr=initial_lr)
-
-    scheduler = WarmupCosineLR(optimizer=optimizer, total_num_steps=100, warmup_num_steps=10)
-
-    assert optimizer.param_groups[0]["lr"] is initial_lr
-    assert initial_lr.shape == lr_shape
-    assert initial_lr.dtype == torch.float64
-    assert initial_lr.item() == 0.0
+    g = optimizer.param_groups[0]["lr"]
+    assert g is initial_lr
+    assert g.shape == lr_shape
+    assert g.dtype == torch.float64
+    assert g.item() == pytest.approx(init_lr)
 
     scheduler.step(1)
 
-    assert optimizer.param_groups[0]["lr"] is initial_lr
-    assert initial_lr.shape == lr_shape
-    assert initial_lr.dtype == torch.float64
-    assert initial_lr.item() == pytest.approx(0.1 * math.log(2) / math.log(10))
+    g = optimizer.param_groups[0]["lr"]
+    assert g is initial_lr
+    assert g.shape == lr_shape
+    assert g.dtype == torch.float64
+    assert g.item() == pytest.approx(step_lr)
 
 
-@pytest.mark.parametrize("lr_shape", [(), (1, )])
-def test_one_cycle_preserves_tensor_lr(lr_shape):
-    param = torch.nn.Parameter(torch.zeros(1))
-    initial_lr = torch.full(lr_shape, 0.1, dtype=torch.float64)
-    optimizer = torch.optim.SGD([param], lr=initial_lr)
-
-    scheduler = OneCycle(optimizer=optimizer,
-                         cycle_min_lr=0.01,
-                         cycle_max_lr=0.1,
-                         cycle_first_step_size=10,
-                         cycle_second_step_size=10,
-                         cycle_momentum=False)
-
-    assert optimizer.param_groups[0]["lr"] is initial_lr
-    assert initial_lr.shape == lr_shape
-    assert initial_lr.dtype == torch.float64
-    assert initial_lr.item() == pytest.approx(0.01)
-
-    scheduler.step(1)
-
-    assert optimizer.param_groups[0]["lr"] is initial_lr
-    assert initial_lr.shape == lr_shape
-    assert initial_lr.dtype == torch.float64
-    assert initial_lr.item() == pytest.approx(0.01 + (0.1 - 0.01) * 2 / 10)
+def test_all_schedulers_covered_by_tensor_lr_contract():
+    covered = {arg.values[0] for arg in TENSOR_LR_CONTRACTS}
+    registered = {getattr(lrs, name) for name in lrs.VALID_LR_SCHEDULES}
+    assert covered == registered, (
+        f"missing tensor-LR contract for: {sorted(c.__name__ for c in registered - covered)}; "
+        f"stale contract entries: {sorted(c.__name__ for c in covered - registered)}")
 
 
 def test_warmup_cosine_lr_total_num_steps_equals_warmup_num_steps():

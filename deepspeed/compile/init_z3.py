@@ -86,6 +86,17 @@ def _resolve_expected_grad_dtype(param):
 
 def init_z3(engine, backend, compile_config, compile_kwargs, schedule=None):
 
+    # Validate before touching the engine: everything below removes hooks and unpatches modules,
+    # so raising later would leave a half-converted engine behind.
+    # zero_use_cpu_optimizer(), not zero_offload_optimizer(): the latter returns the config
+    # object, which is present but inert for `offload_optimizer: {}` or `device: none`.
+    if compile_config.offload_opt_states and engine.zero_use_cpu_optimizer():
+        raise ValueError("compile.offload_opt_states cannot be combined with ZeRO's "
+                         "zero_optimization.offload_optimizer set to cpu or nvme: both manage the "
+                         "same optimizer state. ZeRO keeps it off the accelerator for the whole step "
+                         "and runs the optimizer there, while this pass keeps it resident when memory "
+                         "allows and moves it around the compiled graph. Enable one of them.")
+
     optimizer = engine.optimizer
     use_opt = not isinstance(optimizer, DeepSpeedZeRoOffload)
 
@@ -97,7 +108,7 @@ def init_z3(engine, backend, compile_config, compile_kwargs, schedule=None):
     dc.init(engine.data_parallel_group, compile_config, engine.zero_reduce_bucket_size())
 
     engine._deepcompile_z3_eager_fallback = DeepCompileZ3EagerFallback(engine)
-    add_post_backward_hook(engine._deepcompile_z3_eager_fallback.release_gathered_params)
+    add_post_backward_hook(engine._deepcompile_z3_eager_fallback.complete_backward)
 
     if use_opt:
         optimizer.parameter_offload._remove_module_hooks()
@@ -125,9 +136,21 @@ def init_z3(engine, backend, compile_config, compile_kwargs, schedule=None):
                              _resolve_expected_grad_dtype(p))
 
     if schedule is None:
+        if compile_config.offload_parameters and compile_config.offload_opt_states:
+            raise ValueError("offload_parameters and offload_opt_states cannot be enabled together; "
+                             "choose one offloading target per run. Note that offload_parameters may have "
+                             "been enabled implicitly: the engine turns it on when the ZeRO config "
+                             "offloads both optimizer and parameters to CPU.")
         schedule = []
         if (compile_config.offload_parameters):
             schedule.append((0, [zero3_compile.add_z3_gather_release, offload_parameters.offload_parameter_fwd]))
+        elif compile_config.offload_opt_states:
+            from .passes.offload_adam_states import move_opt_states, offload_adam_states_for_init
+            schedule.append((0, [zero3_compile.add_z3_gather_release]))
+            # States exist from step 0's optimizer step, so offloading engages at step 1.
+            # for_init empties them before profiling, so the plan is made against the floor and a
+            # job that only fits with offloading never runs a step with everything resident.
+            schedule.append((1, [offload_adam_states_for_init, zero3_compile.add_z3_gather_release, move_opt_states]))
         else:
             schedule.append((0, [zero3_compile.add_z3_gather_release]))
             schedule.append(
@@ -148,9 +171,10 @@ def init_z3(engine, backend, compile_config, compile_kwargs, schedule=None):
         add_pre_backward_hook(set_grad_buffer)
 
         # offloading opt states need additional setup
-        from .passes.offload_adam_states import move_opt_states, move_opt_states_sync, init_offload_opt_states
+        from .passes.offload_adam_states import (move_opt_states, move_opt_states_sync, offload_adam_states_for_init,
+                                                 init_offload_opt_states)
         for _, passes in schedule:
-            if move_opt_states in passes or move_opt_states_sync in passes:
+            if move_opt_states in passes or move_opt_states_sync in passes or offload_adam_states_for_init in passes:
                 init_offload_opt_states(optimizer, dc)
 
     engine._deepcompile_owned_frames = set()
