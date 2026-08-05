@@ -108,10 +108,11 @@ that set nothing keep the existing path unchanged.
 - ``comm_qp_margin``: RDMA queue pairs reserved beyond one per SM. Default 4.
 
 On 16 H100s across two nodes, replaying routing captured from real training,
-DeepEP reduced payload AllToAll time from roughly 100 ms to 48 ms per step, and
-whole training steps from 454 ms to 371 ms. The advantage grows with routing
-imbalance: at the most skewed step measured, the collective path degraded to
-116 ms while DeepEP stayed flat.
+DeepEP reduced payload AllToAll time from roughly 100 ms to 48 ms per step. A
+full SFT step on Qwen3.5-MoE went from 360.6 ms to 310.6 ms, a 1.16x speedup
+that removes 13.9% of the step. The advantage grows with routing imbalance: at
+the most skewed step measured, the collective path degraded to 116 ms while
+DeepEP stayed flat.
 
 ``comm_num_sm`` matters because communication competes with the expert GEMM for
 SMs. The default of 12 was chosen by measuring whole steps: a smaller budget

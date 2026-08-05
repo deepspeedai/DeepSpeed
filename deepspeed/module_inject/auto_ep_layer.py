@@ -528,6 +528,10 @@ class AutoEPMoELayer(nn.Module):
         self.comm_num_sm = config.comm_num_sm
         self.comm_qp_margin = config.comm_qp_margin
         self._deepep_exchange = None
+        # The agreed capacity and the shape it was agreed for, so the
+        # agreement is not repeated on every layer of every step.
+        self._deepep_capacity = 0
+        self._deepep_tokens_per_rank = -1
         # Buffers outgrown by a larger batch. They stay alive rather than being
         # released, because a backward still pending from an earlier forward
         # replays against the buffer that forward used. Capacity is rounded up
@@ -611,21 +615,23 @@ class AutoEPMoELayer(nn.Module):
         # batch is larger: variable sequence lengths or a small warm-up batch
         # would otherwise exceed a capacity fixed by the first call.
         #
-        # Capacity is agreed across the group before it is used. Ranks hold
-        # different local token counts, and DeepEP requires the same
-        # num_max_tokens_per_rank everywhere; sizing from the local count also
-        # has some ranks entering construction while others do not, and
-        # construction is collective, so those that entered wait for peers that
-        # never arrive. Reducing first fixes both, and makes the rebuild
-        # decision unanimous without a second collective.
-        capacity = torch.tensor([tokens.shape[0]], dtype=torch.int64, device=tokens.device)
-        dist.all_reduce(capacity, op=dist.ReduceOp.MAX, group=self.ep_group)
-        # Rounded up so a sequence length that creeps upward does not rebuild
-        # on almost every step.
-        granularity = 512
-        num_max_tokens_per_rank = -(-int(capacity.item()) // granularity) * granularity
+        # DeepEP requires the same num_max_tokens_per_rank on every rank, and
+        # construction is collective, so the size is agreed rather than taken
+        # from the local count. The agreement is cached against the shape that
+        # produced it: ranks in an expert-parallel group are handed the same
+        # micro-batch shape, so they leave and re-enter the agreement together,
+        # and a collective on every layer of every step would otherwise put a
+        # device-to-host synchronisation in the middle of the forward pass.
+        if tokens.shape[0] != self._deepep_tokens_per_rank:
+            capacity = torch.tensor([tokens.shape[0]], dtype=torch.int64, device=tokens.device)
+            dist.all_reduce(capacity, op=dist.ReduceOp.MAX, group=self.ep_group)
+            # Rounded up so a sequence length that creeps upward does not
+            # rebuild on almost every step.
+            granularity = 512
+            self._deepep_capacity = -(-int(capacity.item()) // granularity) * granularity
+            self._deepep_tokens_per_rank = tokens.shape[0]
 
-        if self._deepep_exchange is None or num_max_tokens_per_rank > self._deepep_exchange.num_max_tokens_per_rank:
+        if self._deepep_exchange is None or self._deepep_capacity > self._deepep_exchange.num_max_tokens_per_rank:
             if self._deepep_exchange is not None:
                 # Kept rather than destroyed. A backward from an earlier
                 # forward replays against the buffer that forward dispatched
@@ -638,7 +644,7 @@ class AutoEPMoELayer(nn.Module):
                 num_experts=self.num_experts,
                 top_k=self.top_k,
                 hidden_size=self.hidden_size,
-                num_max_tokens_per_rank=num_max_tokens_per_rank,
+                num_max_tokens_per_rank=self._deepep_capacity,
                 num_sms=self.comm_num_sm,
                 qp_margin=self.comm_qp_margin,
             )

@@ -200,6 +200,8 @@ class TestRoutingWeightsAreApplied(unittest.TestCase):
 
         layer = mock.Mock(
             _deepep_exchange=exchange,
+            _deepep_capacity=1024,
+            _deepep_tokens_per_rank=4,
             _retired_exchanges=[],
             num_local_experts=self.LOCAL_EXPERTS,
             score_apply=score_apply,
@@ -263,9 +265,28 @@ class TestRoutingWeightsAreApplied(unittest.TestCase):
 class TestBufferLifecycle(unittest.TestCase):
     """A grown buffer must not invalidate a backward that is still pending."""
 
+    def test_capacity_agreement_is_skipped_when_the_shape_is_unchanged(self):
+        # The agreement is collective and ends in a device-to-host read, so
+        # repeating it per layer per step puts a synchronisation in the middle
+        # of the forward pass.
+        source = inspect.getsource(auto_ep_layer.AutoEPMoELayer._deepep_route)
+        tree = ast.parse(textwrap.dedent(source))
+        guards = [
+            node for node in ast.walk(tree)
+            if isinstance(node, ast.If) and "_deepep_tokens_per_rank" in ast.dump(node.test)
+        ]
+
+        self.assertTrue(guards, "the all_reduce must be guarded by an unchanged-shape check")
+        self.assertIn("all_reduce", ast.dump(guards[0]))
+
     def test_outgrown_buffer_is_retired_rather_than_destroyed(self):
         old = mock.Mock(num_max_tokens_per_rank=512)
-        layer = mock.Mock(_deepep_exchange=old, _retired_exchanges=[], comm_num_sm=12, comm_qp_margin=4)
+        layer = mock.Mock(_deepep_exchange=old,
+                          _deepep_capacity=512,
+                          _deepep_tokens_per_rank=-1,
+                          _retired_exchanges=[],
+                          comm_num_sm=12,
+                          comm_qp_margin=4)
 
         with mock.patch.object(auto_ep_layer, "DeepEPExchange") as built, \
                 mock.patch.object(auto_ep_layer, "deepep_dispatch", side_effect=RuntimeError("stop here")), \

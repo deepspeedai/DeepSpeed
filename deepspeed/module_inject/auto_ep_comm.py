@@ -182,6 +182,12 @@ class DeepEPExchange:
         # on its own. Registering it means a process that never calls the
         # layer's teardown can still release every buffer in one call.
         _LIVE_EXCHANGES.append(self)
+        # Buffer construction is collective and allocates fabric resources, so
+        # it is where an unsuitable cluster fails, often by killing the process
+        # without raising. Recording each one lets a post-mortem tell a buffer
+        # that was never built from one that was built and then used.
+        logger.info(f"AutoEP DeepEP buffer {len(_LIVE_EXCHANGES)} built: "
+                    f"capacity={num_max_tokens_per_rank} sms={num_sms} qps={_qps_for_sms(num_sms, qp_margin)}")
 
     def dispatch(self, tokens: torch.Tensor, topk_idx: torch.Tensor, topk_weights: torch.Tensor):
         """Send tokens to their experts, returning rows, weights and handle.
