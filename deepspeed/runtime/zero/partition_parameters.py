@@ -755,9 +755,11 @@ class AllGatherCoalescedHandle:
 
         if self.quantization:
             instrument_w_nvtx(self.quantization.quant_handle.wait)()
-            flat_tensor = self.quantization.backend.dequantize(self.quantization.quantized_param,
-                                                               self.quantization.scale_buffer,
-                                                               dtype=self.params[0].dtype).to(self.params[0].device)
+            # No dtype here on purpose. A quantized coalesced bucket is not grouped by dtype the
+            # way the non-quantized path is, so params[0].dtype is not necessarily the dtype of
+            # the rest of the bucket. Each slice is cast to its own parameter's dtype below.
+            flat_tensor = self.quantization.backend.dequantize(
+                self.quantization.quantized_param, self.quantization.scale_buffer).to(self.params[0].device)
 
             self.partitions: List[Parameter] = []
             for i in range(self.world_size):
