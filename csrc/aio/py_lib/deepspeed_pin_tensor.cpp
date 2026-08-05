@@ -67,11 +67,14 @@ bool deepspeed_pin_tensor_t::is_managed(const torch::Tensor& buffer)
     if (!buffer.is_cpu()) { return false; }
     std::lock_guard<std::mutex> guard(_mutex);
     // Range check (not exact base match) so slices/views of a locked buffer are
-    // still recognized as pinned, matching torch's is_pinned() semantics.
+    // still recognized as pinned, matching torch's is_pinned() semantics. Require
+    // the buffer's full byte extent to fall within a single locked region; a buffer
+    // that starts inside a region but ends past it would have an unpinned tail.
     const char* ptr = (char*)buffer.data_ptr();
+    const char* end = ptr + buffer.nbytes();
     for (const auto& iter : _locked_tensors) {
         const char* base = (char*)iter.first;
-        if (base <= ptr && ptr < base + iter.second) { return true; }
+        if (base <= ptr && end <= base + iter.second) { return true; }
     }
     return false;
 };
