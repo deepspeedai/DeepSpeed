@@ -55,6 +55,20 @@ def test_unpin_frees_range(native_pins):
     assert not native_pins.is_pinned(view)
 
 
+def test_pin_freed_on_gc(native_pins):
+    import gc
+
+    tensor = torch.arange(32, dtype=torch.float32)
+    pinned = native_pins.pin(tensor)
+    begin = pinned.data_ptr()
+    assert begin in native_pins._ranges
+    # Dropping the returned tensor must release the mlocked allocation, matching
+    # torch.pin_memory lifetime semantics (no explicit unpin() required).
+    del pinned
+    gc.collect()
+    assert begin not in native_pins._ranges
+
+
 def test_is_pinned_handles_storageless_tensors(native_pins):
     from torch._subclasses.fake_tensor import FakeTensorMode
 
