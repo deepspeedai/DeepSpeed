@@ -117,6 +117,79 @@ class TestGradientConformance(unittest.TestCase):
 
         self.assertIs(_conform_rows(grad, (7, 4)), grad)
 
+    def test_conforms_a_one_dimensional_weight_buffer(self):
+        # Routing weights arrive one per row rather than one per hidden unit,
+        # so conforming has to work without a trailing dimension.
+        grad = torch.ones(9)
+
+        self.assertEqual(tuple(_conform_rows(grad, (4, )).shape), (4, ))
+        self.assertEqual(tuple(_conform_rows(grad, (12, )).shape), (12, ))
+
+
+class TestRoutedRowAgreement(unittest.TestCase):
+    """Rows and their weights must describe the same arrivals.
+
+    DeepEP hands back whole worst-case buffers, and the layer trims the rows to
+    the arrivals the prefix sum reports. Leaving the weights at full length
+    makes combine reduce a row count and a weight count that disagree, which is
+    silent in "pre" mode and fatal in "post" mode.
+    """
+
+    BUFFER_ROWS = 32
+    ARRIVED_ROWS = 12
+    HIDDEN = 8
+    LOCAL_EXPERTS = 4
+
+    def route(self, score_apply):
+        """Drive _deepep_route with a stub exchange, returning combine's inputs."""
+        from deepspeed.module_inject import auto_ep_layer
+
+        prefix = torch.tensor([3, 6, 9, self.ARRIVED_ROWS], dtype=torch.int64)
+        handle = mock.Mock(psum_num_recv_tokens_per_expert=prefix)
+        exchange = mock.Mock(last_handle=handle, num_max_tokens_per_rank=self.BUFFER_ROWS)
+
+        buffer_rows = torch.ones((self.BUFFER_ROWS, self.HIDDEN))
+        buffer_weights = torch.ones(self.BUFFER_ROWS)
+        seen = {}
+
+        def fake_dispatch(_exchange, *_args):
+            return buffer_rows, buffer_weights, exchange
+
+        def fake_combine(_exchange, rows, _handle, topk_weights=None):
+            seen["rows"] = rows
+            seen["weights"] = topk_weights
+            return rows
+
+        layer = mock.Mock(
+            _deepep_exchange=exchange,
+            num_local_experts=self.LOCAL_EXPERTS,
+            score_apply=score_apply,
+            experts=lambda rows, counts: rows,
+        )
+
+        with mock.patch.object(auto_ep_layer, "deepep_dispatch", fake_dispatch), \
+                mock.patch.object(auto_ep_layer, "deepep_combine", fake_combine), \
+                mock.patch.object(auto_ep_layer.dist, "all_reduce", lambda *a, **k: None):
+            router_output = auto_ep_layer.RouterOutput(
+                top_scores=torch.ones((4, 2)),
+                selected_experts=torch.zeros((4, 2), dtype=torch.long),
+                num_tokens_per_expert=torch.zeros(self.LOCAL_EXPERTS, dtype=torch.long),
+            )
+            auto_ep_layer.AutoEPMoELayer._deepep_route(layer, torch.ones((4, self.HIDDEN)), router_output)
+        return seen
+
+    def test_post_mode_hands_combine_one_weight_per_row(self):
+        seen = self.route("post")
+
+        self.assertEqual(seen["rows"].shape[0], self.ARRIVED_ROWS)
+        self.assertEqual(seen["weights"].shape[0], self.ARRIVED_ROWS)
+
+    def test_pre_mode_scales_only_the_rows_that_arrived(self):
+        seen = self.route("pre")
+
+        self.assertEqual(seen["rows"].shape[0], self.ARRIVED_ROWS)
+        self.assertIsNone(seen["weights"], "pre mode applies the weights before the experts, not during combine")
+
 
 class TestAutogradSignatures(unittest.TestCase):
     """Both directions must return a gradient for every differentiable input.

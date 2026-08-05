@@ -255,7 +255,7 @@ def _conform_rows(tensor: torch.Tensor, shape) -> torch.Tensor:
         return tensor
     if tensor.shape[0] > rows:
         return tensor[:rows]
-    extended = tensor.new_zeros((rows, tensor.shape[1]))
+    extended = tensor.new_zeros((rows, ) + tuple(tensor.shape[1:]))
     extended[:tensor.shape[0]] = tensor
     return extended
 
@@ -286,7 +286,7 @@ class _DeepEPDispatch(torch.autograd.Function):
         )
         conformed_weights = None
         if grad_weights is not None and ctx.weights_shape is not None:
-            conformed_weights = grad_weights[:ctx.weights_shape[0]].reshape(ctx.weights_shape)
+            conformed_weights = _conform_rows(grad_weights, ctx.weights_shape).reshape(ctx.weights_shape)
         return None, _conform_rows(grad_tokens, ctx.tokens_shape), None, conformed_weights
 
 
@@ -309,7 +309,7 @@ class _DeepEPCombine(torch.autograd.Function):
         grad_rows, grad_weights = ctx.exchange.dispatch_with_handle(grad_combined.contiguous(), ctx.handle)
         conformed_weights = None
         if grad_weights is not None and ctx.weights_shape is not None:
-            conformed_weights = grad_weights[:ctx.weights_shape[0]]
+            conformed_weights = _conform_rows(grad_weights, ctx.weights_shape)
         return None, _conform_rows(grad_rows, ctx.rows_shape), None, conformed_weights
 
 

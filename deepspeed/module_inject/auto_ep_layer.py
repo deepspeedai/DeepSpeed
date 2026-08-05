@@ -605,7 +605,19 @@ class AutoEPMoELayer(nn.Module):
         # which is not known until a batch arrives, and rebuilt if a later
         # batch is larger: variable sequence lengths or a small warm-up batch
         # would otherwise exceed a capacity fixed by the first call.
-        if self._deepep_exchange is None or tokens.shape[0] > self._deepep_exchange.num_max_tokens_per_rank:
+        #
+        # Capacity is agreed across the group before it is used. Ranks hold
+        # different local token counts, so sizing from the local count has some
+        # ranks constructing a buffer while others do not; construction is
+        # collective, and the ranks that entered it then wait for peers that
+        # never arrive until the connection drops. Reducing first also makes
+        # the rebuild decision unanimous for free, since every rank compares
+        # the same global count against the same current capacity.
+        capacity = torch.tensor([tokens.shape[0]], dtype=torch.int64, device=tokens.device)
+        dist.all_reduce(capacity, op=dist.ReduceOp.MAX, group=self.ep_group)
+        num_max_tokens_per_rank = int(capacity.item())
+
+        if self._deepep_exchange is None or num_max_tokens_per_rank > self._deepep_exchange.num_max_tokens_per_rank:
             if self._deepep_exchange is not None:
                 self._deepep_exchange.destroy()
             self._deepep_exchange = DeepEPExchange(
@@ -613,7 +625,7 @@ class AutoEPMoELayer(nn.Module):
                 num_experts=self.num_experts,
                 top_k=self.top_k,
                 hidden_size=self.hidden_size,
-                num_max_tokens_per_rank=tokens.shape[0],
+                num_max_tokens_per_rank=num_max_tokens_per_rank,
             )
 
         received, recv_weights, exchange = deepep_dispatch(self._deepep_exchange, tokens, ro.selected_experts,
@@ -632,6 +644,12 @@ class AutoEPMoELayer(nn.Module):
             raise RuntimeError(f"DeepEP returned {counts.numel()} expert counts, but this rank owns "
                                f"{self.num_local_experts} experts")
 
+        # The weights arrive in a buffer sized for the worst case, like the
+        # rows did, so they are trimmed to the same prefix. Combine reduces
+        # rows and weights together and rejects a pair whose lengths disagree.
+        if recv_weights is not None:
+            recv_weights = recv_weights[:received.shape[0]]
+
         # The router weights must be applied exactly once. In "pre" mode the
         # NCCL path scales tokens before the experts see them, so the arrived
         # rows are scaled the same way; in "post" mode the scaling is part of
@@ -639,7 +657,7 @@ class AutoEPMoELayer(nn.Module):
         # row is one token-expert slot, so a weight per row broadcasts across
         # the hidden dimension.
         if self.score_apply == "pre" and recv_weights is not None:
-            scale = recv_weights[:received.shape[0]].reshape(-1, 1)
+            scale = recv_weights.reshape(-1, 1)
             received = (received.to(torch.float32) * scale).to(received.dtype)
             combine_weights = None
         else:
