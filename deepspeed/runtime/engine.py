@@ -824,6 +824,11 @@ class DeepSpeedEngine(Module):
             logger.debug("DeepSpeedEngine.__del__ cleanup skipped: %s", exc, exc_info=True)
 
     def destroy(self):
+        # DeepEP buffers ask the library not to reclaim them, so they outlive
+        # the engine unless something releases them here.
+        from deepspeed.module_inject.auto_ep_comm import destroy_all_exchanges
+        destroy_all_exchanges()
+
         self._release_deepcompile_compiled_backward_state()
         self._release_deepcompile_dynamo_config()
         optimizer = getattr(self, "optimizer", None)

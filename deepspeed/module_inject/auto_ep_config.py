@@ -58,6 +58,9 @@ def parse_autoep_config(param_dict: dict) -> AutoEPConfig:
     config.route_scale = param_dict.get("route_scale", 1.0)
     config.score_apply = param_dict.get("score_apply", "auto")
     config.combine_impl = param_dict.get("combine_impl", "auto")
+    config.comm_backend = param_dict.get("comm_backend", "comm")
+    config.comm_num_sm = param_dict.get("comm_num_sm", 12)
+    config.comm_qp_margin = param_dict.get("comm_qp_margin", 4)
     config.num_expert_groups = param_dict.get("num_expert_groups", None)
     config.num_limited_groups = param_dict.get("num_limited_groups", None)
     config.score_func = param_dict.get("score_func", "auto")
@@ -156,6 +159,20 @@ def validate_autoep_config(
     if config.combine_impl not in valid_combine_impl:
         raise ValueError(f"combine_impl must be one of {valid_combine_impl}, "
                          f"got '{config.combine_impl}'")
+
+    # Validate comm_backend
+    valid_comm_backend = ("comm", "deepep")
+    if config.comm_backend not in valid_comm_backend:
+        raise ValueError(f"comm_backend must be one of {valid_comm_backend}, "
+                         f"got '{config.comm_backend}'")
+
+    # A zero budget would hand the whole GPU to the collective, and a negative
+    # one is meaningless; both are worth rejecting where the value is written
+    # rather than inside a buffer constructor.
+    if not isinstance(config.comm_num_sm, int) or config.comm_num_sm < 1:
+        raise ValueError(f"comm_num_sm must be a positive integer, got {config.comm_num_sm!r}")
+    if not isinstance(config.comm_qp_margin, int) or config.comm_qp_margin < 0:
+        raise ValueError(f"comm_qp_margin must be a non-negative integer, got {config.comm_qp_margin!r}")
 
     # Validate score_func
     valid_score_func = ("auto", "softmax", "sigmoid")

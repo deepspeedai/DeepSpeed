@@ -110,6 +110,9 @@ class AutoEPConfig:
     route_scale: float = 1.0
     score_apply: Literal["auto", "pre", "post"] = "auto"
     combine_impl: Literal["auto", "weighted_sum", "legacy_bmm"] = "auto"
+    comm_backend: Literal["comm", "deepep"] = "comm"
+    comm_num_sm: int = 12
+    comm_qp_margin: int = 4
     num_expert_groups: int | None = None
     num_limited_groups: int | None = None
     score_func: Literal["auto", "softmax", "sigmoid"] = "auto"

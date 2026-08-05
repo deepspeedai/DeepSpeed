@@ -3,7 +3,6 @@
 
 import ast
 import inspect
-import os
 import textwrap
 import sys
 import unittest
@@ -11,45 +10,78 @@ import unittest
 import torch
 from unittest import mock
 
-from deepspeed.module_inject.auto_ep_comm import (AVAILABLE_BACKENDS, DEEPEP_BACKEND, NCCL_BACKEND, _conform_rows,
-                                                  _DeepEPCombine, _DeepEPDispatch, _import_deep_ep, configured_backend,
-                                                  configured_num_sms)
+from deepspeed.module_inject.auto_ep_comm import (COMM_BACKEND, DEEPEP_BACKEND, SUPPORTED_DTYPES, _conform_rows,
+                                                  _DeepEPCombine, _DeepEPDispatch, _import_deep_ep, _qps_for_sms,
+                                                  assert_dtype_supported)
+from deepspeed.module_inject.auto_ep_config import parse_autoep_config, validate_autoep_config
 
 
 class TestAutoEPCommBackendSelection(unittest.TestCase):
+    """Backend choice lives in the config, alongside the rest of AutoEP."""
 
-    def test_defaults_to_nccl(self):
-        # An unset variable must leave existing jobs on the shipped path.
-        with mock.patch.dict(os.environ, {}, clear=True):
-            self.assertEqual(configured_backend(), NCCL_BACKEND)
-            self.assertEqual(configured_num_sms(), 0)
+    @staticmethod
+    def validate(config):
+        validate_autoep_config(config, world_size=1, pp_size=1, tp_size=1, sp_size=1)
+
+    def test_defaults_to_the_collective_path(self):
+        # A config that asks for nothing must leave existing jobs unchanged.
+        config = parse_autoep_config({"enabled": True})
+
+        self.assertEqual(config.comm_backend, COMM_BACKEND)
+        self.assertEqual(config.comm_num_sm, 12)
+        self.assertEqual(config.comm_qp_margin, 4)
 
     def test_selects_deepep(self):
-        with mock.patch.dict(os.environ, {"DEEPSPEED_AUTOEP_COMM_BACKEND": "DeepEP"}):
-            self.assertEqual(configured_backend(), DEEPEP_BACKEND)
+        config = parse_autoep_config({"enabled": True, "comm_backend": "deepep"})
+
+        self.assertEqual(config.comm_backend, DEEPEP_BACKEND)
+
+    def test_sm_budget_and_qp_margin_are_configurable(self):
+        config = parse_autoep_config({"enabled": True, "comm_num_sm": 24, "comm_qp_margin": 8})
+
+        self.assertEqual(config.comm_num_sm, 24)
+        self.assertEqual(config.comm_qp_margin, 8)
 
     def test_rejects_unknown_backend(self):
         # Failing loudly beats silently running the wrong transport.
-        with mock.patch.dict(os.environ, {"DEEPSPEED_AUTOEP_COMM_BACKEND": "moonep"}):
-            with self.assertRaises(ValueError) as caught:
-                configured_backend()
-            self.assertIn(str(AVAILABLE_BACKENDS), str(caught.exception))
+        config = parse_autoep_config({"enabled": True, "comm_backend": "moonep"})
 
-    def test_sm_budget_is_configurable(self):
-        with mock.patch.dict(os.environ, {"DEEPSPEED_AUTOEP_COMM_SMS": "24"}):
-            self.assertEqual(configured_num_sms(), 24)
+        with self.assertRaises(ValueError) as caught:
+            self.validate(config)
+        self.assertIn("moonep", str(caught.exception))
 
-    def test_blank_value_is_treated_as_unset(self):
-        # An empty variable is what an unset shell variable expands to.
-        with mock.patch.dict(os.environ, {"DEEPSPEED_AUTOEP_COMM_BACKEND": "  "}):
-            self.assertEqual(configured_backend(), NCCL_BACKEND)
-        with mock.patch.dict(os.environ, {"DEEPSPEED_AUTOEP_COMM_SMS": ""}):
-            self.assertEqual(configured_num_sms(), 0)
+    def test_rejects_a_zero_sm_budget(self):
+        # Zero would hand the whole GPU to the collective.
+        config = parse_autoep_config({"enabled": True, "comm_num_sm": 0})
 
-    def test_non_numeric_sm_budget_is_rejected(self):
-        with mock.patch.dict(os.environ, {"DEEPSPEED_AUTOEP_COMM_SMS": "many"}):
-            with self.assertRaises(ValueError):
-                configured_num_sms()
+        with self.assertRaises(ValueError):
+            self.validate(config)
+
+    def test_rejects_a_negative_qp_margin(self):
+        config = parse_autoep_config({"enabled": True, "comm_qp_margin": -1})
+
+        with self.assertRaises(ValueError):
+            self.validate(config)
+
+    def test_queue_pairs_leave_room_for_the_control_path(self):
+        # DeepEP's own default exhausts the QPs that ZeRO and the
+        # data-parallel groups have already claimed in a training step.
+        self.assertEqual(_qps_for_sms(12, 4), 16)
+
+
+class TestDtypeGuard(unittest.TestCase):
+    """DeepEP's dispatch kernel handles bfloat16, not fp16."""
+
+    def test_rejects_fp16(self):
+        with self.assertRaises(TypeError) as caught:
+            assert_dtype_supported(torch.float16)
+        self.assertIn("bfloat16", str(caught.exception))
+
+    def test_accepts_bfloat16(self):
+        self.assertIsNone(assert_dtype_supported(torch.bfloat16))
+
+    def test_fp16_is_not_quietly_in_the_supported_set(self):
+        self.assertNotIn(torch.float16, SUPPORTED_DTYPES)
 
 
 class TestDeepEPPreflight(unittest.TestCase):
@@ -61,7 +93,7 @@ class TestDeepEPPreflight(unittest.TestCase):
                 _import_deep_ep()
         message = str(caught.exception)
         self.assertIn("2.30.4", message)
-        self.assertIn("DEEPSPEED_AUTOEP_COMM_BACKEND", message)
+        self.assertIn("comm_backend", message)
 
     def test_old_torch_nccl_warns_but_does_not_block(self):
         # torch reports the NCCL it bundles, which DeepEP need not be using;
@@ -126,45 +158,54 @@ class TestGradientConformance(unittest.TestCase):
         self.assertEqual(tuple(_conform_rows(grad, (12, )).shape), (12, ))
 
 
-class TestRoutedRowAgreement(unittest.TestCase):
-    """Rows and their weights must describe the same arrivals.
+class TestRoutingWeightsAreApplied(unittest.TestCase):
+    """The layer must apply the routing weights itself.
 
-    DeepEP hands back whole worst-case buffers, and the layer trims the rows to
-    the arrivals the prefix sum reports. Leaving the weights at full length
-    makes combine reduce a row count and a weight count that disagree, which is
-    silent in "pre" mode and fatal in "post" mode.
+    DeepEP's combine does not multiply rows by the topk_weights it is given.
+    It transports and reduces them separately and returns them as a second
+    output, so handing the weights to combine drops them from the result: the
+    expert outputs come back summed but unweighted, which trains quietly and
+    wrongly.
     """
 
     BUFFER_ROWS = 32
-    ARRIVED_ROWS = 12
     HIDDEN = 8
     LOCAL_EXPERTS = 4
+    WEIGHT = 0.25
 
     def route(self, score_apply):
-        """Drive _deepep_route with a stub exchange, returning combine's inputs."""
+        """Drive _deepep_route with a stub exchange, recording what each stage saw."""
         from deepspeed.module_inject import auto_ep_layer
 
-        prefix = torch.tensor([3, 6, 9, self.ARRIVED_ROWS], dtype=torch.int64)
+        prefix = torch.tensor([3, 6, 9, 12], dtype=torch.int64)
         handle = mock.Mock(psum_num_recv_tokens_per_expert=prefix)
-        exchange = mock.Mock(last_handle=handle, num_max_tokens_per_rank=self.BUFFER_ROWS)
+        exchange = mock.Mock(last_handle=handle, num_max_tokens_per_rank=1024)
 
         buffer_rows = torch.ones((self.BUFFER_ROWS, self.HIDDEN))
-        buffer_weights = torch.ones(self.BUFFER_ROWS)
+        buffer_weights = torch.full((self.BUFFER_ROWS, ), self.WEIGHT)
         seen = {}
 
         def fake_dispatch(_exchange, *_args):
             return buffer_rows, buffer_weights, exchange
 
-        def fake_combine(_exchange, rows, _handle, topk_weights=None):
-            seen["rows"] = rows
-            seen["weights"] = topk_weights
+        def fake_combine(_exchange, rows, _handle, **kwargs):
+            seen["combine_rows"] = rows
+            seen["combine_kwargs"] = kwargs
+            return rows
+
+        def fake_experts(rows, counts):
+            seen["expert_input"] = rows
+            seen["counts"] = counts
             return rows
 
         layer = mock.Mock(
             _deepep_exchange=exchange,
+            _retired_exchanges=[],
             num_local_experts=self.LOCAL_EXPERTS,
             score_apply=score_apply,
-            experts=lambda rows, counts: rows,
+            comm_num_sm=12,
+            comm_qp_margin=4,
+            experts=fake_experts,
         )
 
         with mock.patch.object(auto_ep_layer, "deepep_dispatch", fake_dispatch), \
@@ -175,20 +216,67 @@ class TestRoutedRowAgreement(unittest.TestCase):
                 selected_experts=torch.zeros((4, 2), dtype=torch.long),
                 num_tokens_per_expert=torch.zeros(self.LOCAL_EXPERTS, dtype=torch.long),
             )
-            auto_ep_layer.AutoEPMoELayer._deepep_route(layer, torch.ones((4, self.HIDDEN)), router_output)
+            tokens = torch.ones((4, self.HIDDEN), dtype=torch.bfloat16)
+            seen["result"] = auto_ep_layer.AutoEPMoELayer._deepep_route(layer, tokens, router_output)
         return seen
 
-    def test_post_mode_hands_combine_one_weight_per_row(self):
+    def test_combine_is_never_given_the_weights(self):
+        for score_apply in ("pre", "post"):
+            with self.subTest(score_apply=score_apply):
+                seen = self.route(score_apply)
+
+                self.assertNotIn("topk_weights", seen["combine_kwargs"])
+
+    def test_post_mode_weights_the_expert_output(self):
         seen = self.route("post")
 
-        self.assertEqual(seen["rows"].shape[0], self.ARRIVED_ROWS)
-        self.assertEqual(seen["weights"].shape[0], self.ARRIVED_ROWS)
+        # The experts saw unscaled rows, and the scaling landed after them.
+        self.assertTrue(torch.allclose(seen["expert_input"].float(), torch.ones(1)))
+        self.assertTrue(torch.allclose(seen["combine_rows"].float(), torch.full((1, ), self.WEIGHT)))
 
-    def test_pre_mode_scales_only_the_rows_that_arrived(self):
+    def test_pre_mode_weights_the_expert_input(self):
         seen = self.route("pre")
 
-        self.assertEqual(seen["rows"].shape[0], self.ARRIVED_ROWS)
-        self.assertIsNone(seen["weights"], "pre mode applies the weights before the experts, not during combine")
+        # Scaling landed before the experts, and is not applied a second time.
+        self.assertTrue(torch.allclose(seen["expert_input"].float(), torch.full((1, ), self.WEIGHT)))
+        self.assertTrue(torch.allclose(seen["combine_rows"].float(), torch.full((1, ), self.WEIGHT)))
+
+    def test_rows_are_not_trimmed_before_the_grouped_gemm(self):
+        # Trimming needs prefix[-1] on the host, which drains the pipeline in
+        # front of every layer's GEMM. The expert paths bound their own work by
+        # the counts, so the untrimmed buffer is safe to pass straight through.
+        seen = self.route("post")
+
+        self.assertEqual(seen["expert_input"].shape[0], self.BUFFER_ROWS)
+        self.assertTrue(torch.equal(seen["counts"], torch.tensor([3, 3, 3, 3], dtype=torch.int32)))
+
+
+class TestBufferLifecycle(unittest.TestCase):
+    """A grown buffer must not invalidate a backward that is still pending."""
+
+    def test_outgrown_buffer_is_retired_rather_than_destroyed(self):
+        from deepspeed.module_inject import auto_ep_layer
+
+        old = mock.Mock(num_max_tokens_per_rank=512)
+        layer = mock.Mock(_deepep_exchange=old, _retired_exchanges=[], comm_num_sm=12, comm_qp_margin=4)
+
+        with mock.patch.object(auto_ep_layer, "DeepEPExchange") as built, \
+                mock.patch.object(auto_ep_layer, "deepep_dispatch", side_effect=RuntimeError("stop here")), \
+                mock.patch.object(auto_ep_layer.dist, "all_reduce", lambda *a, **k: None):
+            router_output = auto_ep_layer.RouterOutput(
+                top_scores=torch.ones((600, 1)),
+                selected_experts=torch.zeros((600, 1), dtype=torch.long),
+                num_tokens_per_expert=torch.zeros(4, dtype=torch.long),
+            )
+            with self.assertRaises(RuntimeError):
+                auto_ep_layer.AutoEPMoELayer._deepep_route(layer, torch.ones((600, 8), dtype=torch.bfloat16),
+                                                           router_output)
+
+        old.destroy.assert_not_called()
+        self.assertIn(old, layer._retired_exchanges)
+        # Capacity is rounded up so a slowly growing sequence length does not
+        # rebuild on nearly every step.
+        self.assertEqual(built.call_args.kwargs["num_max_tokens_per_rank"], 1024)
 
 
 class TestAutogradSignatures(unittest.TestCase):
@@ -220,9 +308,11 @@ class TestAutogradSignatures(unittest.TestCase):
         self.assertEqual(self.gradient_count(_DeepEPDispatch.backward), inputs)
 
     def test_combine_backward_returns_a_gradient_per_input(self):
+        # Combine takes no weights: DeepEP would not apply them, so the layer
+        # folds them into the rows before calling it.
         inputs = len(inspect.signature(_DeepEPCombine.forward).parameters) - 1
 
-        self.assertEqual(inputs, 4)
+        self.assertEqual(inputs, 3)
         self.assertEqual(self.gradient_count(_DeepEPCombine.backward), inputs)
 
     def test_dispatch_forward_returns_weights_so_they_stay_differentiable(self):

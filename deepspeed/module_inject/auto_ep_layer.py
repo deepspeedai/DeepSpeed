@@ -22,7 +22,7 @@ import deepspeed.comm as dist
 from deepspeed.module_inject.auto_ep_config import AutoEPConfig, MoELayerSpec, resolve_autoep_config_defaults
 from deepspeed.module_inject.auto_ep_folding import mark_autoep_folding_router_parameter
 from deepspeed.utils import logger
-from deepspeed.module_inject.auto_ep_comm import (DEEPEP_BACKEND, NCCL_BACKEND, DeepEPExchange, configured_backend,
+from deepspeed.module_inject.auto_ep_comm import (DEEPEP_BACKEND, DeepEPExchange, assert_dtype_supported,
                                                   deepep_combine, deepep_dispatch)
 from deepspeed.moe.ep_router import TokenChoiceTopKRouter
 from deepspeed.moe.ep_count import count_tokens_per_expert
@@ -523,14 +523,16 @@ class AutoEPMoELayer(nn.Module):
         # Router-logit cache
         self._cached_router_logits = None
         # Resolved once per layer: a DeepEP exchange sizes its buffer at
-        # construction, so it is built on first use and kept. A bad value must
-        # not break the default path, which nobody opted into.
-        try:
-            self.comm_backend = configured_backend()
-        except ValueError as error:
-            logger.warning(f"AutoEP: falling back to the default all-to-all: {error}")
-            self.comm_backend = NCCL_BACKEND
+        # construction, so it is built on first use and kept.
+        self.comm_backend = config.comm_backend
+        self.comm_num_sm = config.comm_num_sm
+        self.comm_qp_margin = config.comm_qp_margin
         self._deepep_exchange = None
+        # Buffers outgrown by a larger batch. They stay alive rather than being
+        # released, because a backward still pending from an earlier forward
+        # replays against the buffer that forward used. Capacity is rounded up
+        # so this list stays short.
+        self._retired_exchanges = []
         self._register_logit_hook()
 
     def _register_logit_hook(self):
@@ -564,11 +566,13 @@ class AutoEPMoELayer(nn.Module):
             if self.comm_backend == DEEPEP_BACKEND and folding_group_handles.spec.tp_size > 1:
                 # Folded TP partitions assignments across lanes and restores
                 # them by assignment metadata, which a transport whose combine
-                # returns token-major rows cannot satisfy. Saying so beats
-                # silently running something other than what was asked for.
-                logger.warning("AutoEP: the DeepEP backend does not support folded tensor parallelism; "
-                               "using the default all-to-all for this layer")
-                self.comm_backend = NCCL_BACKEND
+                # returns token-major rows cannot satisfy. Refusing beats
+                # falling back, which leaves the job reporting a backend it is
+                # not running and the speedup unexplained.
+                raise ValueError(
+                    f'comm_backend="{DEEPEP_BACKEND}" does not support folded tensor parallelism '
+                    f"(expert_tensor_parallel_size={folding_group_handles.spec.tp_size}). Set "
+                    'expert_tensor_parallel_size to 1, or comm_backend to "comm".')
             self.ep_group_name = folding_group_handles.ep_group_name
             self.ep_group = folding_group_handles.ep_group
             self.tp_group = folding_group_handles.tp_group
@@ -597,74 +601,84 @@ class AutoEPMoELayer(nn.Module):
         ``tokens`` is [T, H] before top-k expansion. DeepEP replicates each
         token to the ranks that need it rather than being handed one row per
         selected expert, groups arrivals by expert for the grouped GEMM, and
-        reduces the weighted sum on the way back. It therefore replaces the
-        expansion and the reduction around the collectives, not just the
-        collectives, and returns [T, H] ready for the shared tail of forward.
+        sums them back. It therefore replaces the expansion and the reduction
+        around the collectives, not just the collectives, and returns [T, H]
+        ready for the shared tail of forward.
         """
+        assert_dtype_supported(tokens.dtype)
+
         # Built on first use because the buffer is sized from the token count,
         # which is not known until a batch arrives, and rebuilt if a later
         # batch is larger: variable sequence lengths or a small warm-up batch
         # would otherwise exceed a capacity fixed by the first call.
         #
         # Capacity is agreed across the group before it is used. Ranks hold
-        # different local token counts, so sizing from the local count has some
-        # ranks constructing a buffer while others do not; construction is
-        # collective, and the ranks that entered it then wait for peers that
-        # never arrive until the connection drops. Reducing first also makes
-        # the rebuild decision unanimous for free, since every rank compares
-        # the same global count against the same current capacity.
+        # different local token counts, and DeepEP requires the same
+        # num_max_tokens_per_rank everywhere; sizing from the local count also
+        # has some ranks entering construction while others do not, and
+        # construction is collective, so those that entered wait for peers that
+        # never arrive. Reducing first fixes both, and makes the rebuild
+        # decision unanimous without a second collective.
         capacity = torch.tensor([tokens.shape[0]], dtype=torch.int64, device=tokens.device)
         dist.all_reduce(capacity, op=dist.ReduceOp.MAX, group=self.ep_group)
-        num_max_tokens_per_rank = int(capacity.item())
+        # Rounded up so a sequence length that creeps upward does not rebuild
+        # on almost every step.
+        granularity = 512
+        num_max_tokens_per_rank = -(-int(capacity.item()) // granularity) * granularity
 
         if self._deepep_exchange is None or num_max_tokens_per_rank > self._deepep_exchange.num_max_tokens_per_rank:
             if self._deepep_exchange is not None:
-                self._deepep_exchange.destroy()
+                # Kept rather than destroyed. A backward from an earlier
+                # forward replays against the buffer that forward dispatched
+                # on, so releasing it here breaks
+                #     out1 = model(b1); out2 = model(b2); (out1 + out2).backward()
+                # where b2 outgrew b1's buffer.
+                self._retired_exchanges.append(self._deepep_exchange)
             self._deepep_exchange = DeepEPExchange(
                 ep_group=self.ep_group,
                 num_experts=self.num_experts,
                 top_k=self.top_k,
                 hidden_size=self.hidden_size,
                 num_max_tokens_per_rank=num_max_tokens_per_rank,
+                num_sms=self.comm_num_sm,
+                qp_margin=self.comm_qp_margin,
             )
 
         received, recv_weights, exchange = deepep_dispatch(self._deepep_exchange, tokens, ro.selected_experts,
                                                            ro.top_scores)
         handle = exchange.last_handle
 
-        # Two quantities have to line up for the grouped GEMM, and they come
-        # from different places: the rows are the valid prefix of a buffer
-        # sized for the worst case, and the per-expert counts arrive as a
-        # prefix sum. Differencing the same prefix sum that bounds the rows
-        # keeps the two consistent.
+        # The routing weight is applied here in both score modes and is never
+        # handed to combine: DeepEP's combine does not multiply rows by the
+        # weights it carries, it transports and reduces them separately, so
+        # passing them there would drop them from the result entirely.
+        #
+        # Which side of the experts it goes on has to match the collective
+        # path, because the expert MLP is not linear and the two placements do
+        # not commute through SwiGLU.
+        weights = None if recv_weights is None else recv_weights.reshape(-1, 1)
+        if weights is not None and self.score_apply == "pre":
+            received = (received.float() * weights[:received.shape[0]]).to(received.dtype)
+            weights = None
+
+        # The grouped GEMM needs per-expert row counts, which arrive as a
+        # prefix sum over the experts this rank owns. Differencing it recovers
+        # the counts. The rows themselves are not trimmed to the prefix: all
+        # three expert paths bound their work by these counts and ignore what
+        # lies beyond, so trimming would only add a device-to-host
+        # synchronisation in front of every layer's GEMM.
         prefix = handle.psum_num_recv_tokens_per_expert
         counts = torch.diff(prefix, prepend=prefix.new_zeros(1)).to(torch.int32)
-        received = received[:int(prefix[-1].item())]
         if counts.numel() != self.num_local_experts:
             raise RuntimeError(f"DeepEP returned {counts.numel()} expert counts, but this rank owns "
                                f"{self.num_local_experts} experts")
 
-        # The weights arrive in a buffer sized for the worst case, like the
-        # rows did, so they are trimmed to the same prefix. Combine reduces
-        # rows and weights together and rejects a pair whose lengths disagree.
-        if recv_weights is not None:
-            recv_weights = recv_weights[:received.shape[0]]
-
-        # The router weights must be applied exactly once. In "pre" mode the
-        # NCCL path scales tokens before the experts see them, so the arrived
-        # rows are scaled the same way; in "post" mode the scaling is part of
-        # the reduction and is handed to combine instead. In expand mode each
-        # row is one token-expert slot, so a weight per row broadcasts across
-        # the hidden dimension.
-        if self.score_apply == "pre" and recv_weights is not None:
-            scale = recv_weights.reshape(-1, 1)
-            received = (received.to(torch.float32) * scale).to(received.dtype)
-            combine_weights = None
-        else:
-            combine_weights = recv_weights
-
         expert_output = self.experts(received, counts)
-        return deepep_combine(exchange, expert_output, handle, combine_weights)
+
+        if weights is not None:
+            expert_output = (expert_output.float() * weights[:expert_output.shape[0]]).to(expert_output.dtype)
+
+        return deepep_combine(exchange, expert_output, handle)
 
     def forward(
         self,

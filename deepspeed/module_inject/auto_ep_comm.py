@@ -4,15 +4,16 @@
 
 The dispatch and combine collectives are the largest single cost in an AutoEP
 step, and a measured replay of real routing on 16 H100s across two nodes put
-NCCL at 195.8 ms of payload all-to-all per step against DeepEP's 86.3 ms. This
-module is what lets that be switched without the MoE layer knowing which
-transport it is using.
+the collective path at 195.8 ms of payload all-to-all per step against DeepEP's
+86.3 ms. This module is what lets that be switched without the MoE layer
+knowing which transport it is using.
 
-Selection is by environment variable and defaults to the NCCL path, so a job
-that sets nothing behaves exactly as before:
+Selection lives in the ``expert_parallel`` section of the DeepSpeed config and
+defaults to the collective path, so a job that sets nothing behaves exactly as
+before::
 
-    DEEPSPEED_AUTOEP_COMM_BACKEND=nccl     (default)
-    DEEPSPEED_AUTOEP_COMM_BACKEND=deepep
+    "expert_parallel": {"comm_backend": "comm"}      # default
+    "expert_parallel": {"comm_backend": "deepep"}
 
 A backend is asked for once per layer and reused, because DeepEP's buffers are
 sized at construction and are expensive to rebuild.
@@ -20,22 +21,21 @@ sized at construction and are expensive to rebuild.
 
 from __future__ import annotations
 
-import os
-
 import torch
 
 from deepspeed.utils import logger
 
-_BACKEND_ENV = "DEEPSPEED_AUTOEP_COMM_BACKEND"
-_NUM_SMS_ENV = "DEEPSPEED_AUTOEP_COMM_SMS"
-NCCL_BACKEND = "nccl"
+# Names the transport, not the library behind it: the default path goes through
+# deepspeed.comm, which is NCCL on CUDA but not on every accelerator.
+COMM_BACKEND = "comm"
 # Names the library, not its version: v2 is the only path implemented, and
 # nothing about the name would have to change if that ever grew.
 DEEPEP_BACKEND = "deepep"
-AVAILABLE_BACKENDS = (NCCL_BACKEND, DEEPEP_BACKEND)
+AVAILABLE_BACKENDS = (COMM_BACKEND, DEEPEP_BACKEND)
 # GIN, and so DeepEP, does not exist in any form below this NCCL version.
 NCCL_GIN_MIN_VERSION = (2, 30, 4)
-# Chosen by sweeping whole training steps rather than the collective alone.
+# The config's comm_num_sm default. Chosen by sweeping whole training steps
+# rather than the collective alone.
 # On 16 H100s across two nodes the step took 340, 311, 353, 360 and 391 ms at 8,
 # 12, 16, 24 and 32 SMs. Twelve is the point where the collective is already as
 # fast as it gets while the expert GEMM still has the SMs it needs: at 8 the
@@ -44,45 +44,44 @@ NCCL_GIN_MIN_VERSION = (2, 30, 4)
 DEFAULT_COMM_SMS = 12
 
 
-def _qps_for_sms(num_sms: int) -> int:
+def _qps_for_sms(num_sms: int, qp_margin: int) -> int:
     """Queue pairs to reserve for a given SM count.
 
-    One per SM plus a small margin for the control path. This is deliberately
-    smaller than DeepEP's automatic choice, which assumes it is the only thing
-    on the fabric.
+    One per SM plus a margin for the control path. This is deliberately smaller
+    than DeepEP's automatic choice, which assumes it is the only thing on the
+    fabric: in a training step ZeRO and the data-parallel groups have already
+    taken their share, and asking for DeepEP's default exhausts them.
     """
-    return num_sms + 4
+    return num_sms + qp_margin
 
 
-def configured_backend() -> str:
-    """The transport this process should use for expert all-to-all.
+# Every buffer built in this process, in construction order. DeepEP buffers are
+# constructed with explicitly_destroy, so nothing reclaims them on its own, and
+# destroying them is collective: every rank has to do it in the same order.
+_LIVE_EXCHANGES: list["DeepEPExchange"] = []
 
-    An unset variable selects NCCL, so a job that opts into nothing keeps the
-    behaviour it had before this existed.
+# DeepEP's dispatch kernel handles bfloat16 and fp8, not fp16. A half-precision
+# run would otherwise reach an assertion inside the kernel.
+SUPPORTED_DTYPES = (torch.bfloat16, torch.float32)
+
+
+def assert_dtype_supported(dtype: torch.dtype) -> None:
+    """Reject dtypes DeepEP's kernels cannot dispatch."""
+    if dtype not in SUPPORTED_DTYPES:
+        raise TypeError(f'comm_backend="{DEEPEP_BACKEND}" does not support {dtype}: DeepEP\'s dispatch kernel '
+                        'handles bfloat16, not fp16. Train in bfloat16, or set comm_backend="comm" to use the '
+                        "default all-to-all, which has no such restriction.")
+
+
+def destroy_all_exchanges() -> None:
+    """Release every DeepEP buffer this process built.
+
+    Collective, and ordered by construction, so every rank tears the same
+    buffers down in the same order. Worth calling at the end of training: the
+    buffers ask DeepEP not to reclaim them, so nothing else will.
     """
-    raw = os.environ.get(_BACKEND_ENV)
-    if raw is None or not raw.strip():
-        return NCCL_BACKEND
-    name = raw.strip().lower()
-    if name not in AVAILABLE_BACKENDS:
-        raise ValueError(f"{_BACKEND_ENV}={raw!r} is not one of {AVAILABLE_BACKENDS}")
-    return name
-
-
-def configured_num_sms() -> int:
-    """SM budget for communication; 0 lets the backend decide.
-
-    Worth setting because the collective competes with the expert GEMM for
-    SMs: measurements showed the GEMM running 1.21-1.25x slower whenever a
-    collective was in flight.
-    """
-    raw = os.environ.get(_NUM_SMS_ENV)
-    if raw is None or not raw.strip():
-        return 0
-    try:
-        return int(raw)
-    except ValueError as error:
-        raise ValueError(f"{_NUM_SMS_ENV}={raw!r} is not an integer") from error
+    for exchange in list(_LIVE_EXCHANGES):
+        exchange.destroy()
 
 
 def _import_deep_ep():
@@ -98,10 +97,10 @@ def _import_deep_ep():
         import deep_ep
     except ImportError as error:
         raise ImportError(
-            f"{_BACKEND_ENV}={DEEPEP_BACKEND} requires the deep_ep package, which is not installed. It also "
+            f'comm_backend="{DEEPEP_BACKEND}" requires the deep_ep package, which is not installed. It also '
             "requires NCCL 2.30.4 or newer built with GIN support: the transport is unavailable below that "
-            "version regardless of the network. Unset "
-            f"{_BACKEND_ENV} to use the default NCCL all-to-all, which has no such requirement.") from error
+            'version regardless of the network. Set comm_backend="comm" to use the default all-to-all, which '
+            "has no such requirement.") from error
 
     nccl_version = _nccl_version()
     if nccl_version is not None and nccl_version < NCCL_GIN_MIN_VERSION:
@@ -115,7 +114,7 @@ def _import_deep_ep():
         logger.warning(
             f"torch reports NCCL {installed}, older than the {minimum} that GIN requires. DeepEP links its own "
             "NCCL, so this is only a problem if it also resolves to the older one; a failure inside buffer "
-            f"construction is the symptom. Unset {_BACKEND_ENV} to fall back to the default all-to-all.")
+            'construction is the symptom. Set comm_backend="comm" to fall back to the default all-to-all.')
     return deep_ep
 
 
@@ -142,7 +141,14 @@ class DeepEPExchange:
     survive from forward to backward.
     """
 
-    def __init__(self, ep_group, num_experts: int, top_k: int, hidden_size: int, num_max_tokens_per_rank: int):
+    def __init__(self,
+                 ep_group,
+                 num_experts: int,
+                 top_k: int,
+                 hidden_size: int,
+                 num_max_tokens_per_rank: int,
+                 num_sms: int = DEFAULT_COMM_SMS,
+                 qp_margin: int = 4):
         deep_ep = _import_deep_ep()
 
         self.deep_ep = deep_ep
@@ -151,14 +157,13 @@ class DeepEPExchange:
         # nothing else but fails in a training step where ZeRO and the
         # data-parallel groups have already taken their share. Asking for only
         # what the chosen SM count needs keeps the request proportionate.
-        num_sms = configured_num_sms() or DEFAULT_COMM_SMS
         self.buffer = deep_ep.ElasticBuffer(
             ep_group,
             num_max_tokens_per_rank=num_max_tokens_per_rank,
             hidden=hidden_size,
             num_topk=top_k,
             use_fp8_dispatch=False,
-            num_allocated_qps=_qps_for_sms(num_sms),
+            num_allocated_qps=_qps_for_sms(num_sms, qp_margin),
             # Required once the EP group spans nodes: it splits the ranks into
             # an NVLink domain and an RDMA domain rather than assuming a single
             # flat NVLink domain.
@@ -166,13 +171,17 @@ class DeepEPExchange:
             explicitly_destroy=True,
         )
         self.num_sms = num_sms
-        self.num_qps = self.buffer.get_theoretical_num_qps(self.num_sms)
         self.num_experts = num_experts
         # Recorded so the layer can tell when a later batch outgrows it.
         self.num_max_tokens_per_rank = num_max_tokens_per_rank
         # The handle the last dispatch produced. Combine and both backward
         # passes replay against it, so it has to outlive the dispatch call.
         self.last_handle = None
+        self.destroyed = False
+        # Constructed with explicitly_destroy, so nothing reclaims this buffer
+        # on its own. Registering it means a process that never calls the
+        # layer's teardown can still release every buffer in one call.
+        _LIVE_EXCHANGES.append(self)
 
     def dispatch(self, tokens: torch.Tensor, topk_idx: torch.Tensor, topk_weights: torch.Tensor):
         """Send tokens to their experts, returning rows, weights and handle.
@@ -195,32 +204,32 @@ class DeepEPExchange:
             # offsets have to describe the rows that are actually there.
             expert_alignment=1,
             num_sms=self.num_sms,
-            num_qps=self.num_qps,
         )
         # The returned event only holds anything when the call was made with
         # async_with_compute_stream; a synchronous result is already usable.
         self.last_handle = handle
         return recv_x, recv_weights, handle
 
-    def dispatch_with_handle(self, tokens: torch.Tensor, handle):
-        """Replay a dispatch against a cached handle, keeping both outputs.
+    def dispatch_with_handle(self, tokens: torch.Tensor, handle) -> torch.Tensor:
+        """Replay a dispatch against a cached handle.
 
-        Used as the backward of a combine, where the weights matter as much as
-        the rows: their gradient is what reaches the router gate.
+        Used as the backward of a combine, which scatters the combined
+        gradient back to the rows that contributed to it.
         """
-        recv_x, _, recv_weights, _, _ = self.buffer.dispatch(
+        recv_x, _, _, _, _ = self.buffer.dispatch(
             tokens,
             handle=handle,
             num_sms=self.num_sms,
-            num_qps=self.num_qps,
         )
-        return recv_x, recv_weights
+        return recv_x
 
     def combine_with_weight_grad(self, rows: torch.Tensor, handle, weight_grads=None):
-        """Combine that also returns the reduced weight gradient.
+        """Combine that also reduces the routing-weight gradient.
 
-        Used as the backward of a dispatch. The weight gradient travels the
-        same path as the row gradient, so it is reduced by the same call.
+        Used as the backward of a dispatch. Dispatch replicates a token's
+        routing weight to every rank that expert-owns it, so the adjoint is a
+        sum over those copies, which is exactly what combine does to the
+        weights it carries.
         """
         combined, combined_weights, _ = self.buffer.combine(rows,
                                                             handle=handle,
@@ -228,18 +237,26 @@ class DeepEPExchange:
                                                             num_sms=self.num_sms)
         return combined, combined_weights
 
-    def combine(self, rows: torch.Tensor, handle, topk_weights=None) -> torch.Tensor:
-        """Reduce expert outputs back to their tokens.
+    def combine(self, rows: torch.Tensor, handle) -> torch.Tensor:
+        """Reduce expert outputs back to the tokens they came from.
 
-        Passing ``topk_weights`` makes DeepEP weight each expert's output as it
-        reduces, which is the same weighted sum the NCCL path performs
-        separately after its combine.
+        Deliberately does not pass ``topk_weights``. DeepEP's combine does not
+        multiply the rows by those weights; it transports and reduces them
+        alongside, returning them separately. Handing the routing weights here
+        would therefore drop them from the result, so the layer applies them to
+        the rows itself.
         """
-        combined, _, _ = self.buffer.combine(rows, handle=handle, topk_weights=topk_weights, num_sms=self.num_sms)
+        combined, _, _ = self.buffer.combine(rows, handle=handle, num_sms=self.num_sms)
         return combined
 
     def destroy(self) -> None:
+        """Release the buffer. Collective, so every rank must call it."""
+        if self.destroyed:
+            return
+        self.destroyed = True
         self.buffer.destroy()
+        if self in _LIVE_EXCHANGES:
+            _LIVE_EXCHANGES.remove(self)
 
 
 def _conform_rows(tensor: torch.Tensor, shape) -> torch.Tensor:
@@ -294,23 +311,18 @@ class _DeepEPCombine(torch.autograd.Function):
     """Combine whose backward is the matching dispatch, on the same handle."""
 
     @staticmethod
-    def forward(ctx, exchange: DeepEPExchange, rows: torch.Tensor, handle, topk_weights):
+    def forward(ctx, exchange: DeepEPExchange, rows: torch.Tensor, handle):
         ctx.exchange = exchange
         ctx.handle = handle
-        # The forward input was trimmed to the rows that actually arrived,
-        # while the backward dispatch hands back a whole buffer. Autograd
+        # The backward dispatch hands back a whole buffer, while autograd
         # requires the gradient to match the input it is the gradient of.
         ctx.rows_shape = rows.shape
-        ctx.weights_shape = None if topk_weights is None else topk_weights.shape
-        return exchange.combine(rows, handle, topk_weights)
+        return exchange.combine(rows, handle)
 
     @staticmethod
     def backward(ctx, grad_combined):
-        grad_rows, grad_weights = ctx.exchange.dispatch_with_handle(grad_combined.contiguous(), ctx.handle)
-        conformed_weights = None
-        if grad_weights is not None and ctx.weights_shape is not None:
-            conformed_weights = _conform_rows(grad_weights, ctx.weights_shape)
-        return None, _conform_rows(grad_rows, ctx.rows_shape), None, conformed_weights
+        grad_rows = ctx.exchange.dispatch_with_handle(grad_combined.contiguous(), ctx.handle)
+        return None, _conform_rows(grad_rows, ctx.rows_shape), None
 
 
 def deepep_dispatch(exchange: DeepEPExchange, tokens: torch.Tensor, topk_idx: torch.Tensor,
@@ -320,5 +332,5 @@ def deepep_dispatch(exchange: DeepEPExchange, tokens: torch.Tensor, topk_idx: to
     return received, recv_weights, exchange
 
 
-def deepep_combine(exchange: DeepEPExchange, rows: torch.Tensor, handle, topk_weights=None) -> torch.Tensor:
-    return _DeepEPCombine.apply(exchange, rows, handle, topk_weights)
+def deepep_combine(exchange: DeepEPExchange, rows: torch.Tensor, handle) -> torch.Tensor:
+    return _DeepEPCombine.apply(exchange, rows, handle)

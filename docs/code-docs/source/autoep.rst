@@ -87,24 +87,40 @@ Weights-only/module-only Universal Checkpoint loads use the converted
 **Communication backend (optional):**
 
 The expert AllToAll can be carried by `DeepEP <https://github.com/deepseek-ai/DeepEP>`__
-instead of NCCL. This is opt-in and off by default; jobs that set nothing keep
-the NCCL path unchanged.
+instead of the default collectives. This is opt-in and off by default; jobs
+that set nothing keep the existing path unchanged.
 
-.. code-block:: bash
+.. code-block:: json
 
-    export DEEPSPEED_AUTOEP_COMM_BACKEND=deepep   # default: nccl
-    export DEEPSPEED_AUTOEP_COMM_SMS=12           # communication SM budget
+    {
+      "expert_parallel": {
+        "enabled": true,
+        "autoep_size": 8,
+        "comm_backend": "deepep",
+        "comm_num_sm": 12,
+        "comm_qp_margin": 4
+      }
+    }
+
+- ``comm_backend``: ``"comm"`` (default) uses ``deepspeed.comm`` collectives;
+  ``"deepep"`` uses DeepEP's dispatch and combine kernels.
+- ``comm_num_sm``: SMs given to communication. Default 12.
+- ``comm_qp_margin``: RDMA queue pairs reserved beyond one per SM. Default 4.
 
 On 16 H100s across two nodes, replaying routing captured from real training,
 DeepEP reduced payload AllToAll time from roughly 100 ms to 48 ms per step, and
 whole training steps from 454 ms to 371 ms. The advantage grows with routing
-imbalance: at the most skewed step measured, the NCCL path degraded to 116 ms
-while DeepEP stayed flat.
+imbalance: at the most skewed step measured, the collective path degraded to
+116 ms while DeepEP stayed flat.
 
-``DEEPSPEED_AUTOEP_COMM_SMS`` matters because communication competes with the
-expert GEMM for SMs. The default of 12 was chosen by measuring whole steps: a
-smaller budget slows the collective itself, and a larger one slows everything
-else. Requirements and limits:
+``comm_num_sm`` matters because communication competes with the expert GEMM for
+SMs. The default of 12 was chosen by measuring whole steps: a smaller budget
+slows the collective itself, and a larger one slows everything else.
+``comm_qp_margin`` exists because DeepEP's automatic queue-pair count assumes
+it is alone on the fabric, which exhausts the queue pairs ZeRO and the
+data-parallel groups have already claimed in a training step.
+
+Requirements and limits:
 
 - The ``deep_ep`` package must be installed. It is imported only when this
   backend is selected, so installations without it are unaffected.
@@ -112,8 +128,10 @@ else. Requirements and limits:
   version the transport is unavailable regardless of the network.
 - DeepEP v1 (the legacy ``Buffer`` API, using NVSHMEM and IBGDA) is not
   supported.
-- The backend is disabled, with a warning, on layers using folded tensor
-  parallelism (``tp_size > 1``); those layers fall back to NCCL.
+- bfloat16 only. DeepEP's dispatch kernel does not handle fp16, and selecting
+  this backend for an fp16 run is rejected rather than silently downgraded.
+- Not compatible with folded tensor parallelism
+  (``expert_tensor_parallel_size > 1``), which is rejected at setup.
 
 **Constraints:**
 
