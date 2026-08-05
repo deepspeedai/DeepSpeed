@@ -4,6 +4,7 @@
 # DeepSpeed Team
 
 import os
+import weakref
 
 # ``torch._subclasses.fake_tensor`` is a private API that may be absent on some
 # torch versions; guard the import so this module stays importable (including
@@ -22,6 +23,9 @@ class NativePinnedMemory(object):
     def __init__(self):
         # base address -> end address; keyed by base so unpin is an O(1) delete.
         self._ranges = {}
+        # base address -> weakref.finalize handle for the returned tensor, so an
+        # explicit unpin() can cancel the GC-triggered free.
+        self._finalizers = {}
         # Fail early: native pinning is useless without the async-io handle, so
         # surface the build/load failure here instead of silently degrading.
         try:
@@ -33,14 +37,22 @@ class NativePinnedMemory(object):
 
     def pin(self, tensor, make_copy=True, match_shape=True):
         numel = tensor.numel()
-        locked = self._handle.new_cpu_locked_tensor(numel, tensor)[:numel]
+        # ``base`` owns the mlocked allocation; retain it so the finalizer can free
+        # it after the returned (possibly reshaped) view is garbage-collected.
+        base = self._handle.new_cpu_locked_tensor(numel, tensor)
+        locked = base[:numel]
         if make_copy:
             locked.copy_(tensor.reshape(-1))
         if match_shape:
             locked = locked.view(tensor.shape)
-        begin = locked.data_ptr()
+        begin = base.data_ptr()
         self._ranges[begin] = begin + numel * tensor.element_size()
         locked.ds_pinned = True
+        # Match torch.pin_memory lifetime semantics: free the page-locked
+        # allocation when the returned tensor is dropped, so call sites that never
+        # call unpin() do not accumulate mlocked host memory.
+        self._finalizers[begin] = weakref.finalize(locked, self._release, self._handle, base, self._ranges,
+                                                   self._finalizers, begin)
         return locked
 
     def is_pinned(self, tensor):
@@ -53,11 +65,28 @@ class NativePinnedMemory(object):
 
     def unpin(self, tensor):
         # After freeing, using ``tensor`` is a use-after-free and must be avoided.
+        begin = tensor.data_ptr()
+        finalizer = self._finalizers.pop(begin, None)
+        if finalizer is not None:
+            # Explicit unpin owns the free; cancel the GC finalizer to avoid a
+            # redundant free_cpu_locked_tensor call.
+            finalizer.detach()
         freed = self._handle.free_cpu_locked_tensor(tensor)
-        self._ranges.pop(tensor.data_ptr(), None)
+        self._ranges.pop(begin, None)
         if hasattr(tensor, "ds_pinned"):
             tensor.ds_pinned = False
         return freed
+
+    @staticmethod
+    def _release(handle, base_tensor, ranges, finalizers, begin):
+        ranges.pop(begin, None)
+        finalizers.pop(begin, None)
+        try:
+            handle.free_cpu_locked_tensor(base_tensor)
+        except Exception:
+            # Best-effort cleanup; the handle or torch may already be torn down
+            # during interpreter shutdown.
+            pass
 
     @staticmethod
     def _has_real_storage(tensor):
