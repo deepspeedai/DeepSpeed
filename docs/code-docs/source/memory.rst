@@ -284,7 +284,7 @@ This needs to be completed.
 .. _host-memory-pinning:
 
 Host Memory Pinning
-===================
+-----------------------
 
 DeepSpeed page-locks (pins) host memory so DMA engines can move data efficiently
 between CPU RAM and accelerators or NVMe. All pinning goes through the accelerator
@@ -302,8 +302,8 @@ APIs:
 callers can either allocate a shaped copy of ``tensor`` or obtain a flat locked
 buffer for later filling.
 
-Backend selection
------------------
+Backend Selection
+=================
 
 The pinning implementation is selected with the ``DS_PIN_MEMORY_BACKEND``
 environment variable:
@@ -321,8 +321,8 @@ Example:
     export DS_PIN_MEMORY_BACKEND=native
     deepspeed train.py ...
 
-Requirements for ``native``
----------------------------
+Requirements for native
+=======================
 
 * The DeepSpeed **async-io** (AIO) op must build and load successfully. If AIO
   cannot be constructed, selecting ``native`` fails early rather than silently
@@ -331,8 +331,8 @@ Requirements for ``native``
   ``ulimit -l`` / ``memlock`` limits). Large ZeRO CPU-offload footprints can
   otherwise hit the memlock ceiling.
 
-Lifetime and unpinning (``native``)
-------------------------------------
+Lifetime and unpinning (native)
+================================
 
 Native-pinned allocations are tracked by a process-wide manager. Lifetime
 matches ``torch.pin_memory`` as closely as possible:
