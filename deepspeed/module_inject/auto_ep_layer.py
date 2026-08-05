@@ -569,10 +569,9 @@ class AutoEPMoELayer(nn.Module):
                 # returns token-major rows cannot satisfy. Refusing beats
                 # falling back, which leaves the job reporting a backend it is
                 # not running and the speedup unexplained.
-                raise ValueError(
-                    f'comm_backend="{DEEPEP_BACKEND}" does not support folded tensor parallelism '
-                    f"(expert_tensor_parallel_size={folding_group_handles.spec.tp_size}). Set "
-                    'expert_tensor_parallel_size to 1, or comm_backend to "comm".')
+                raise ValueError(f'comm_backend="{DEEPEP_BACKEND}" does not support folded tensor parallelism '
+                                 f"(expert_tensor_parallel_size={folding_group_handles.spec.tp_size}). Set "
+                                 'expert_tensor_parallel_size to 1, or comm_backend to "comm".')
             self.ep_group_name = folding_group_handles.ep_group_name
             self.ep_group = folding_group_handles.ep_group
             self.tp_group = folding_group_handles.tp_group
@@ -648,6 +647,15 @@ class AutoEPMoELayer(nn.Module):
                                                            ro.top_scores)
         handle = exchange.last_handle
 
+        # Dispatch returns buffers sized for the worst case, and combine reads
+        # exactly the rows the handle says arrived, so everything downstream is
+        # cut to that length before it is used. The count is taken from the
+        # handle, where it is already a Python int, rather than off the end of
+        # the prefix sum on the device: reading it there would put a
+        # device-to-host synchronisation in front of every layer's expert GEMM.
+        arrived = handle.num_expanded_tokens
+        received = received[:arrived]
+
         # The routing weight is applied here in both score modes and is never
         # handed to combine: DeepEP's combine does not multiply rows by the
         # weights it carries, it transports and reduces them separately, so
@@ -656,17 +664,14 @@ class AutoEPMoELayer(nn.Module):
         # Which side of the experts it goes on has to match the collective
         # path, because the expert MLP is not linear and the two placements do
         # not commute through SwiGLU.
-        weights = None if recv_weights is None else recv_weights.reshape(-1, 1)
+        weights = None if recv_weights is None else recv_weights[:arrived].reshape(-1, 1)
         if weights is not None and self.score_apply == "pre":
-            received = (received.float() * weights[:received.shape[0]]).to(received.dtype)
+            received = (received.float() * weights).to(received.dtype)
             weights = None
 
         # The grouped GEMM needs per-expert row counts, which arrive as a
         # prefix sum over the experts this rank owns. Differencing it recovers
-        # the counts. The rows themselves are not trimmed to the prefix: all
-        # three expert paths bound their work by these counts and ignore what
-        # lies beyond, so trimming would only add a device-to-host
-        # synchronisation in front of every layer's GEMM.
+        # the counts.
         prefix = handle.psum_num_recv_tokens_per_expert
         counts = torch.diff(prefix, prepend=prefix.new_zeros(1)).to(torch.int32)
         if counts.numel() != self.num_local_experts:
@@ -676,7 +681,7 @@ class AutoEPMoELayer(nn.Module):
         expert_output = self.experts(received, counts)
 
         if weights is not None:
-            expert_output = (expert_output.float() * weights[:expert_output.shape[0]]).to(expert_output.dtype)
+            expert_output = (expert_output.float() * weights).to(expert_output.dtype)
 
         return deepep_combine(exchange, expert_output, handle)
 

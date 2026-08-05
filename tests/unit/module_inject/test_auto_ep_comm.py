@@ -13,6 +13,7 @@ from unittest import mock
 from deepspeed.module_inject.auto_ep_comm import (COMM_BACKEND, DEEPEP_BACKEND, SUPPORTED_DTYPES, _conform_rows,
                                                   _DeepEPCombine, _DeepEPDispatch, _import_deep_ep, _qps_for_sms,
                                                   assert_dtype_supported)
+from deepspeed.module_inject import auto_ep_layer
 from deepspeed.module_inject.auto_ep_config import parse_autoep_config, validate_autoep_config
 
 
@@ -169,16 +170,15 @@ class TestRoutingWeightsAreApplied(unittest.TestCase):
     """
 
     BUFFER_ROWS = 32
+    ARRIVED_ROWS = 12
     HIDDEN = 8
     LOCAL_EXPERTS = 4
     WEIGHT = 0.25
 
     def route(self, score_apply):
         """Drive _deepep_route with a stub exchange, recording what each stage saw."""
-        from deepspeed.module_inject import auto_ep_layer
-
-        prefix = torch.tensor([3, 6, 9, 12], dtype=torch.int64)
-        handle = mock.Mock(psum_num_recv_tokens_per_expert=prefix)
+        prefix = torch.tensor([3, 6, 9, self.ARRIVED_ROWS], dtype=torch.int64)
+        handle = mock.Mock(psum_num_recv_tokens_per_expert=prefix, num_expanded_tokens=self.ARRIVED_ROWS)
         exchange = mock.Mock(last_handle=handle, num_max_tokens_per_rank=1024)
 
         buffer_rows = torch.ones((self.BUFFER_ROWS, self.HIDDEN))
@@ -241,22 +241,29 @@ class TestRoutingWeightsAreApplied(unittest.TestCase):
         self.assertTrue(torch.allclose(seen["expert_input"].float(), torch.full((1, ), self.WEIGHT)))
         self.assertTrue(torch.allclose(seen["combine_rows"].float(), torch.full((1, ), self.WEIGHT)))
 
-    def test_rows_are_not_trimmed_before_the_grouped_gemm(self):
-        # Trimming needs prefix[-1] on the host, which drains the pipeline in
-        # front of every layer's GEMM. The expert paths bound their own work by
-        # the counts, so the untrimmed buffer is safe to pass straight through.
+    def test_combine_receives_exactly_the_rows_that_arrived(self):
+        # Dispatch returns a worst-case buffer while combine reads the rows the
+        # handle recorded. Handing it the whole buffer reads past what the
+        # handle describes, which does not raise: it faults.
         seen = self.route("post")
 
-        self.assertEqual(seen["expert_input"].shape[0], self.BUFFER_ROWS)
+        self.assertEqual(seen["expert_input"].shape[0], self.ARRIVED_ROWS)
+        self.assertEqual(seen["combine_rows"].shape[0], self.ARRIVED_ROWS)
         self.assertTrue(torch.equal(seen["counts"], torch.tensor([3, 3, 3, 3], dtype=torch.int32)))
+
+    def test_row_count_comes_from_the_handle_not_the_device(self):
+        # Reading it off the prefix sum needs a device-to-host synchronisation
+        # in front of every layer's GEMM; the handle already holds it as an int.
+        source = inspect.getsource(auto_ep_layer.AutoEPMoELayer._deepep_route)
+
+        self.assertIn("arrived = handle.num_expanded_tokens", source)
+        self.assertNotIn("psum_num_recv_tokens_per_expert[-1]", source)
 
 
 class TestBufferLifecycle(unittest.TestCase):
     """A grown buffer must not invalidate a backward that is still pending."""
 
     def test_outgrown_buffer_is_retired_rather_than_destroyed(self):
-        from deepspeed.module_inject import auto_ep_layer
-
         old = mock.Mock(num_max_tokens_per_rank=512)
         layer = mock.Mock(_deepep_exchange=old, _retired_exchanges=[], comm_num_sm=12, comm_qp_margin=4)
 
