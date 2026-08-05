@@ -265,24 +265,13 @@ Note about gradients: While gradients are stored in fp16 (2 bytes), during the w
 
 **Pinned Memory**
 
-Pinned general RAM is included in normal general RAM allocations (i.e. this is not extra memory allocations but simply shows how much of the general RAM is pinned)
+Pinned general RAM is included in normal general RAM allocations (i.e. this is not extra memory allocations but simply shows how much of the general RAM is pinned). Enable pinning on ZeRO CPU/NVMe offload with ``"pin_memory": true`` under ``offload_optimizer`` / ``offload_param``. See :ref:`host-memory-pinning` for how host memory is page-locked (``torch`` vs ``native`` backends).
 
-* ZeRO-2: can't be controlled
+* ZeRO-2 / ZeRO-3 with ``offload_optimizer.pin_memory=true``: fp32 master weights / gradients (and related offload scratch buffers) may be pinned on the host.
 
-* ZeRO-3
+* ZeRO-3 with ``offload_param.pin_memory=true``: partitioned fp16/bf16 parameter buffers on CPU may also be pinned.
 
-To enable add: ``"cpu_offload_use_pin_memory" : true``
-
-Now there are 2 sub-cases:
-
-1. ``"cpu_offload_params": true``:
-
-   - 6 * params (2b for fp16 params + 4b for fp32 gradients)
-   - if ``gradient_accumulation_steps > 1`` an additional 2b for fp16 gradients are pinned
-
-2. ``"cpu_offload_params": false``:
-
-   - 4b for fp32 gradients
+Exact pinned volume depends on which states are offloaded and on gradient-accumulation settings.
 
 
 **Activation Memory**
@@ -290,3 +279,71 @@ Now there are 2 sub-cases:
 XXX: For Transformers is probably around (2* seq * attn_heads + 16 * hidden_size) * sequence * batch/gpu
 
 This needs to be completed.
+
+
+.. _host-memory-pinning:
+
+Host Memory Pinning
+===================
+
+DeepSpeed page-locks (pins) host memory so DMA engines can move data efficiently
+between CPU RAM and accelerators or NVMe. All pinning goes through the accelerator
+APIs:
+
+.. code-block:: python
+
+    from deepspeed.accelerator import get_accelerator
+
+    pinned = get_accelerator().pin_memory(tensor)          # default: copy + match shape
+    assert get_accelerator().is_pinned(pinned)
+    get_accelerator().unpin_memory(pinned)                # no-op for the torch backend
+
+``pin_memory`` accepts ``make_copy`` and ``match_shape`` (both default ``True``) so
+callers can either allocate a shaped copy of ``tensor`` or obtain a flat locked
+buffer for later filling.
+
+Backend selection
+-----------------
+
+The pinning implementation is selected with the ``DS_PIN_MEMORY_BACKEND``
+environment variable:
+
+* ``torch`` (default): uses ``torch.Tensor.pin_memory()``. ``unpin_memory()`` is
+  a no-op; memory is released when the tensor is garbage-collected.
+* ``native``: uses DeepNVMe's page-locked allocator (``posix_memalign`` +
+  ``mlock``) via the async-io op. Native pins are recognized across AIO/GDS I/O
+  handles, so DeepNVMe can skip bounce buffers for these buffers.
+
+Example:
+
+.. code-block:: bash
+
+    export DS_PIN_MEMORY_BACKEND=native
+    deepspeed train.py ...
+
+Requirements for ``native``
+---------------------------
+
+* The DeepSpeed **async-io** (AIO) op must build and load successfully. If AIO
+  cannot be constructed, selecting ``native`` fails early rather than silently
+  falling back to ``torch``.
+* The process must be allowed to lock the requested host memory (see
+  ``ulimit -l`` / ``memlock`` limits). Large ZeRO CPU-offload footprints can
+  otherwise hit the memlock ceiling.
+
+Lifetime and unpinning (``native``)
+------------------------------------
+
+Native-pinned allocations are tracked by a process-wide manager. Lifetime
+matches ``torch.pin_memory`` as closely as possible:
+
+* Dropping the returned tensor frees the locked pages via a ``weakref``
+  finalizer (no explicit unpin required for short-lived buffers).
+* Prefer ``get_accelerator().unpin_memory(tensor)`` when you know a buffer is
+  finished, so mlocked memory is released immediately instead of waiting on
+  garbage collection. ZeRO / ZenFlow optimizers do this for their owned
+  CPU-offload buffers in ``destroy()``.
+* After ``unpin_memory``, the tensor storage must not be used (use-after-free).
+
+``is_pinned`` reports ``True`` for both torch-pinned tensors and native-managed
+buffers, including slices/views whose storage falls inside a managed range.
