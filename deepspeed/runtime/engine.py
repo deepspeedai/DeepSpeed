@@ -1648,12 +1648,12 @@ class DeepSpeedEngine(Module):
                 f'Client Optimizer (type = {type(self.client_optimizer)} is not instantiated but Client LR Scheduler is instantiated'
 
         if not self.managed_gradient_accumulation():
-            assert not self.zero_optimization_partition_gradients(), \
-                "managed_gradient_accumulation=False is only supported for ZeRO stage 0 and 1"
-            assert self.zero_offload_optimizer() is None and self.zero_offload_param() is None, \
-                "managed_gradient_accumulation=False is not supported with ZeRO offload"
-            assert not self.zero_overlap_comm(), \
-                "managed_gradient_accumulation=False is not supported with ZeRO overlap_comm"
+            assert not self.zero_optimization_partition_weights(), \
+                "managed_gradient_accumulation=False is only supported for ZeRO stage 0, 1, and 2"
+            assert self.zero_offload_optimizer() is None, \
+                "managed_gradient_accumulation=False is not supported with ZeRO optimizer state offload"
+            assert self.zero_optimization_partition_gradients() or not self.zero_overlap_comm(), \
+                "managed_gradient_accumulation=False supports ZeRO overlap_comm only with ZeRO stage 2"
             assert not self.pipeline_parallelism, \
                 "managed_gradient_accumulation=False is not supported with pipeline parallelism"
             assert not self.is_deepcompile_enabled(), \
@@ -3007,8 +3007,11 @@ class DeepSpeedEngine(Module):
               with-blocks; the flush overwrites averaged_gradients each exit.
 
         Unsupported (NotImplementedError): ZeRO stage 0, BF16/FP16_Optimizer
-        wrappers, PipelineModule.
+        wrappers, PipelineModule. Also requires managed_gradient_accumulation=True.
         """
+        assert self.managed_gradient_accumulation(), \
+            "coalesce_grad_reduction is not supported with managed_gradient_accumulation=False; " \
+            "the caller already owns the accumulation boundary via step()"
         stage = self.zero_optimization_stage()
         if stage not in (ZeroStageEnum.optimizer_states, ZeroStageEnum.gradients, ZeroStageEnum.weights):
             raise NotImplementedError(f"coalesce_grad_reduction requires ZeRO stage 1/2/3, got stage {int(stage)}")
@@ -3373,9 +3376,11 @@ class DeepSpeedEngine(Module):
         # Unmanaged mode: step() is the accumulation boundary.
         self._running_engine_step = True
 
-        # Unmanaged mode: backward() only accumulates locally, so reduce grads here.
+        # Unmanaged boundary: stage 2 already reduced/partitioned per backward so only finalize; stage 0/1/DDP reduce here.
         if not self.managed_gradient_accumulation():
-            if self.enable_backward_allreduce and not self.inside_no_sync_ctxt:
+            if self.zero_optimization_partition_gradients():
+                self.optimizer.finalize_gradient_accumulation_boundary()
+            elif self.enable_backward_allreduce and not self.inside_no_sync_ctxt:
                 self.allreduce_gradients()
 
         if self.zenflow:

@@ -145,6 +145,12 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
              "tensor"_a,
              py::call_guard<py::gil_scoped_release>())
 
+        .def("is_pinned",
+             &deepspeed_aio_handle_t::is_pinned,
+             "Whether the buffer is directly usable for DeepNVMe I/O (torch-pinned or "
+             "page-locked by the DeepNVMe pinned-tensor manager).",
+             "buffer"_a)
+
         .def("wait",
              &deepspeed_aio_handle_t::wait,
              "Wait for (ongoing) asynchronous operations to complete",

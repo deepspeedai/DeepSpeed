@@ -1850,7 +1850,7 @@ def build_managed_gas_config(zero_stage, gradient_accumulation_steps, managed_gr
     }
 
 
-@pytest.mark.parametrize("zero_stage", [0, 1])
+@pytest.mark.parametrize("zero_stage", [0, 1, 2])
 class TestUnmanagedGradientAccumulation(DistributedTest):
     """managed_gradient_accumulation=False: the caller's step() is the accumulation boundary."""
     world_size = 2
@@ -2041,20 +2041,27 @@ class TestUnmanagedGradientAccumulation(DistributedTest):
         engine.destroy()
 
 
-@pytest.mark.parametrize("zero_stage", [2, 3])
 class TestUnmanagedGradientAccumulationValidation(DistributedTest):
-    """Unmanaged mode is only supported for ZeRO stage 0/1."""
+    """Unmanaged mode rejects ZeRO stage 3 and ZeRO offload (until follow-up PRs)."""
     world_size = 1
 
-    def test_unmanaged_rejects_partitioned_stages(self, zero_stage):
+    def test_unmanaged_rejects_stage3(self):
         hidden_dim = 4
         initialize_distributed()
         torch.manual_seed(42)
         model = SimpleModel(hidden_dim=hidden_dim, nlayers=2)
-        config = build_managed_gas_config(zero_stage,
-                                          gradient_accumulation_steps=1,
-                                          managed_gradient_accumulation=False)
-        with pytest.raises(AssertionError, match="only supported for ZeRO stage 0 and 1"):
+        config = build_managed_gas_config(3, gradient_accumulation_steps=1, managed_gradient_accumulation=False)
+        with pytest.raises(AssertionError, match="only supported for ZeRO stage 0, 1, and 2"):
+            deepspeed.initialize(config=config, model=model, model_parameters=model.parameters())
+
+    def test_unmanaged_rejects_zero_offload(self):
+        hidden_dim = 4
+        initialize_distributed()
+        torch.manual_seed(42)
+        model = SimpleModel(hidden_dim=hidden_dim, nlayers=2)
+        config = build_managed_gas_config(2, gradient_accumulation_steps=1, managed_gradient_accumulation=False)
+        config["zero_optimization"]["offload_optimizer"] = {"device": "cpu"}
+        with pytest.raises(AssertionError, match="not supported with ZeRO optimizer state offload"):
             deepspeed.initialize(config=config, model=model, model_parameters=model.parameters())
 
 
@@ -2069,13 +2076,13 @@ class TestUnmanagedGradientAccumulationOffloadValidation(DistributedTest):
         model = SimpleModel(hidden_dim=hidden_dim, nlayers=2)
         config = build_managed_gas_config(1, gradient_accumulation_steps=1, managed_gradient_accumulation=False)
         config["zero_optimization"]["offload_optimizer"] = {"device": "cpu"}
-        with pytest.raises(AssertionError, match="not supported with ZeRO offload"):
+        with pytest.raises(AssertionError, match="not supported with ZeRO optimizer state offload"):
             deepspeed.initialize(config=config, model=model, model_parameters=model.parameters())
 
 
 @pytest.mark.parametrize("zero_stage", [0, 1])
 class TestUnmanagedGradientAccumulationOverlapCommValidation(DistributedTest):
-    """Unmanaged mode does not support ZeRO overlap_comm (step-time reduce skips the param walk)."""
+    """Unmanaged mode rejects ZeRO overlap_comm for stage 0/1 (reduction is deferred to step())."""
     world_size = 1
 
     def test_unmanaged_rejects_overlap_comm(self, zero_stage):
@@ -2087,8 +2094,85 @@ class TestUnmanagedGradientAccumulationOverlapCommValidation(DistributedTest):
                                           gradient_accumulation_steps=1,
                                           managed_gradient_accumulation=False)
         config["zero_optimization"]["overlap_comm"] = True
-        with pytest.raises(AssertionError, match="not supported with ZeRO overlap_comm"):
+        with pytest.raises(AssertionError, match="overlap_comm only with ZeRO stage 2"):
             deepspeed.initialize(config=config, model=model, model_parameters=model.parameters())
+
+
+class TestUnmanagedGradientAccumulationOverlapCommStage2(DistributedTest):
+    """overlap_comm is supported in unmanaged mode for ZeRO stage 2 (reduction stays per-backward)."""
+    world_size = 2
+
+    def test_unmanaged_matches_managed_overlap_comm(self):
+        hidden_dim = 4
+        gradient_accumulation_steps = 4
+        num_cycles = 3
+
+        device, _, _ = initialize_distributed()
+
+        def overlap_config(managed):
+            config = build_managed_gas_config(2, gradient_accumulation_steps, managed_gradient_accumulation=managed)
+            config["zero_optimization"]["overlap_comm"] = True
+            config["zero_optimization"]["contiguous_gradients"] = True
+            return config
+
+        torch.manual_seed(42)
+        model_managed = SimpleModel(hidden_dim=hidden_dim, nlayers=2)
+        managed_engine, _, _, _ = deepspeed.initialize(config=overlap_config(True),
+                                                       model=model_managed,
+                                                       model_parameters=model_managed.parameters())
+
+        torch.manual_seed(42)
+        model_unmanaged = SimpleModel(hidden_dim=hidden_dim, nlayers=2)
+        unmanaged_engine, _, _, _ = deepspeed.initialize(config=overlap_config(False),
+                                                         model=model_unmanaged,
+                                                         model_parameters=model_unmanaged.parameters())
+
+        total_samples = num_cycles * gradient_accumulation_steps
+        batches = list(
+            random_dataloader(model=managed_engine,
+                              total_samples=total_samples,
+                              hidden_dim=hidden_dim,
+                              device=device,
+                              dtype=torch.float32))
+
+        for batch in batches:
+            loss = managed_engine(batch[0], batch[1])
+            managed_engine.backward(loss)
+            managed_engine.step()
+
+        for cycle in range(num_cycles):
+            for micro in range(gradient_accumulation_steps):
+                batch = batches[cycle * gradient_accumulation_steps + micro]
+                loss = unmanaged_engine(batch[0], batch[1])
+                unmanaged_engine.backward(loss)
+            unmanaged_engine.step()
+
+        managed_params = collect_deepspeed_parameters(managed_engine, 2)
+        unmanaged_params = collect_deepspeed_parameters(unmanaged_engine, 2)
+        compare_parameters(managed_params, unmanaged_params, "unmanaged vs managed with overlap_comm (stage 2)")
+
+        managed_engine.destroy()
+        unmanaged_engine.destroy()
+
+
+@pytest.mark.parametrize("zero_stage", [1, 2])
+class TestUnmanagedGradientAccumulationCoalesceValidation(DistributedTest):
+    """coalesce_grad_reduction() conflicts with unmanaged mode: both own the accumulation boundary."""
+    world_size = 1
+
+    def test_unmanaged_rejects_coalesce_grad_reduction(self, zero_stage):
+        hidden_dim = 4
+        initialize_distributed()
+        torch.manual_seed(42)
+        model = SimpleModel(hidden_dim=hidden_dim, nlayers=2)
+        config = build_managed_gas_config(zero_stage,
+                                          gradient_accumulation_steps=1,
+                                          managed_gradient_accumulation=False)
+        engine, _, _, _ = deepspeed.initialize(config=config, model=model, model_parameters=model.parameters())
+        with pytest.raises(AssertionError, match="coalesce_grad_reduction"):
+            with engine.coalesce_grad_reduction():
+                pass
+        engine.destroy()
 
 
 class TestUnmanagedGradientAccumulationPipelineValidation(DistributedTest):
