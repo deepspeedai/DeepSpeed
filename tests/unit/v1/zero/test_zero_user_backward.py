@@ -2061,7 +2061,7 @@ class TestUnmanagedGradientAccumulationValidation(DistributedTest):
         model = SimpleModel(hidden_dim=hidden_dim, nlayers=2)
         config = build_managed_gas_config(2, gradient_accumulation_steps=1, managed_gradient_accumulation=False)
         config["zero_optimization"]["offload_optimizer"] = {"device": "cpu"}
-        with pytest.raises(AssertionError, match="not supported with ZeRO offload"):
+        with pytest.raises(AssertionError, match="not supported with ZeRO optimizer state offload"):
             deepspeed.initialize(config=config, model=model, model_parameters=model.parameters())
 
 
@@ -2076,7 +2076,7 @@ class TestUnmanagedGradientAccumulationOffloadValidation(DistributedTest):
         model = SimpleModel(hidden_dim=hidden_dim, nlayers=2)
         config = build_managed_gas_config(1, gradient_accumulation_steps=1, managed_gradient_accumulation=False)
         config["zero_optimization"]["offload_optimizer"] = {"device": "cpu"}
-        with pytest.raises(AssertionError, match="not supported with ZeRO offload"):
+        with pytest.raises(AssertionError, match="not supported with ZeRO optimizer state offload"):
             deepspeed.initialize(config=config, model=model, model_parameters=model.parameters())
 
 

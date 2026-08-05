@@ -949,7 +949,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
 
     def finalize_gradient_accumulation_boundary(self):
         # Unmanaged mode: grads were reduced/accumulated into all_grad_tensors each backward; finalize averaged_gradients for step().
-        assert not self.cpu_offload, "unmanaged gradient accumulation does not support ZeRO offload"
+        assert not self.cpu_offload, "unmanaged gradient accumulation does not support ZeRO optimizer state offload"
         self.is_gradient_accumulation_boundary = True
         for i, _ in enumerate(self.bit16_groups):
             self.averaged_gradients[i] = self.get_flat_partition(self.params_in_partition[i],
