@@ -109,14 +109,15 @@ that set nothing keep the existing path unchanged.
 
 On 16 H100s across two nodes, replaying routing captured from real training,
 DeepEP reduced payload AllToAll time from roughly 100 ms to 48 ms per step. A
-full SFT step on Qwen3.5-MoE went from 360.6 ms to 310.6 ms, a 1.16x speedup
-that removes 13.9% of the step. The advantage grows with routing imbalance: at
-the most skewed step measured, the collective path degraded to 116 ms while
-DeepEP stayed flat.
+full SFT step on Qwen3.5-MoE went from 325.1 ms to 256.9 ms, a 1.27x speedup
+that removes 21% of the step. Both backends were measured in the same job, on
+the same pods and alternating, since the same measurement varied by a quarter
+between jobs. The advantage grows with routing imbalance: at the most skewed
+step measured, the collective path degraded to 116 ms while DeepEP stayed flat.
 
 ``comm_num_sm`` matters because communication competes with the expert GEMM for
-SMs. The default of 12 was chosen by measuring whole steps: a smaller budget
-slows the collective itself, and a larger one slows everything else.
+SMs. The default of 12 was chosen by measuring whole steps: 8 SMs gave 272.4 ms
+against 256.9 ms at 12, and larger budgets were slower again.
 ``comm_qp_margin`` exists because DeepEP's automatic queue-pair count assumes
 it is alone on the fabric, which exhausts the queue pairs ZeRO and the
 data-parallel groups have already claimed in a training step.

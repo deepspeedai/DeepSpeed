@@ -34,13 +34,17 @@ DEEPEP_BACKEND = "deepep"
 AVAILABLE_BACKENDS = (COMM_BACKEND, DEEPEP_BACKEND)
 # GIN, and so DeepEP, does not exist in any form below this NCCL version.
 NCCL_GIN_MIN_VERSION = (2, 30, 4)
-# The config's comm_num_sm default. Chosen by sweeping whole training steps
-# rather than the collective alone.
-# On 16 H100s across two nodes the step took 340, 311, 353, 360 and 391 ms at 8,
-# 12, 16, 24 and 32 SMs. Twelve is the point where the collective is already as
-# fast as it gets while the expert GEMM still has the SMs it needs: at 8 the
-# collective itself degrades, and above 12 the step grows because communication
-# takes SMs the rest of the step was using.
+# The config's comm_num_sm default. Chosen by timing whole training steps
+# rather than the collective alone, because the budget trades one against the
+# other: the collective and the expert GEMM draw from the same SMs.
+#
+# On 16 H100s across two nodes, taking the fastest of three runs per budget and
+# rotating the budgets through every position within one job, a step took
+# 272.4 ms at 8 SMs and 256.9 ms at 12. Larger budgets were slower again, the
+# collective having taken SMs the rest of the step was using. Interference on a
+# shared cluster is one-sided, so the fastest run is the least contaminated
+# estimate; a mean of two runs put 8 ahead until a single disturbed run was
+# identified as the cause.
 DEFAULT_COMM_SMS = 12
 
 
