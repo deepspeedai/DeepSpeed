@@ -448,4 +448,6 @@ class OnebitLamb(torch.optim.Optimizer):
         del self.server_errors[:]
 
     def get_lamb_coeffs(self):
-        return self.lamb_coeffs
+        # step() clears lamb_coeffs in place before recomputing them, so hand back
+        # a copy or the next step() empties the list the caller is holding.
+        return list(self.lamb_coeffs)
