@@ -26,7 +26,6 @@ class BlockedRotaryEmbeddings(DSKernelBase):
         """
         Args:
             head_size: The size of the attention head.
-            q_ratio: Ratio of q heads to kv heads (for GQA)
             dtype: Data type for the input/output. Supported values are torch.float16 and torch.bfloat16.
         """
 
