@@ -29,6 +29,13 @@ toc_label: "Contents"
 | Number of training steps to accumulate gradients before averaging and applying them. This feature is sometimes useful to improve scalability since it results in less frequent communication of gradients between steps. Another impact of this feature is the ability to train with larger batch sizes per GPU. Can be omitted if both <i>**train_batch_size**</i> and <i>**train_micro_batch_size_per_gpu**</i> are provided. | `1`     |
 
 
+<i>**managed_gradient_accumulation**</i>: [boolean]
+
+| Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              | Default |
+| -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
+| Controls how gradient accumulation boundaries are managed. When `true`, DeepSpeed tracks micro-steps and applies the optimizer step only at the accumulation boundary, so `forward`/`backward`/`step` can be called symmetrically on every micro-batch. When `false`, micro-step tracking is disabled and the client is responsible for calling `step()` at the accumulation boundary; each `step()` finalizes the locally-accumulated gradients and applies an optimizer update. The `false` setting currently supports ZeRO stage 0/1/2/3 (and DDP); ZeRO offload (optimizer state and parameter) is planned but not yet available (rejected at initialization). It is also incompatible with pipeline parallelism, DeepCompile, and Apex AMP. ZeRO `overlap_comm` is supported only with ZeRO stage 2 (rejected for stage 0/1, where reduction is deferred to `step()`). | `true`  |
+
+
 
 ### Optimizer Parameters
 
@@ -763,7 +770,7 @@ Configuring the asynchronous I/O module for offloading parameter and optimizer s
 | Submit requests to storage device in an overlapped fashion without waiting for completion of earlier requests. | `true`  |
 
 ### Tensor Parallel (AutoTP)
-Configure AutoTP tensor parallelism for training via the DeepSpeed config and hybrid TP + ZeRO. AutoTP supports ZeRO stages 0, 1, and 2. ZeRO stage 3 is supported only for inference (no optimizer); training with stage 3 is not yet supported. `deepspeed.tp_model_init()` remains supported for backward compatibility but is not required when `tensor_parallel` is set in the config.
+Configure AutoTP tensor parallelism for training via the DeepSpeed config and hybrid TP + ZeRO. AutoTP supports ZeRO stages 0, 1, 2, and 3, including checkpoint save/load and universal checkpoint conversion. `deepspeed.tp_model_init()` remains supported for backward compatibility but is not required when `tensor_parallel` is set in the config.
 
 When a HuggingFace model provides a built-in `tp_plan` (via `model.config.base_model_tp_plan`), DeepSpeed automatically detects and uses it. In this case, neither `preset_model` nor `partition_config` is required -- just set `autotp_size`. If `partition_config` is also provided, it takes precedence over the model's `tp_plan`.
 ```json
@@ -916,7 +923,13 @@ smoke coverage used for this AutoEP surface produced the following version gates
 
 | Description                                                                                    | Default |
 | ---------------------------------------------------------------------------------------------- | ------- |
-| Use `torch._grouped_mm` for fused grouped GEMM. Raises `RuntimeError` at `GroupedExperts` construction time when `torch._grouped_mm` is unavailable; set `use_grouped_mm=false` to use the sequential for-loop. | `true`  |
+| Enable fused grouped GEMM for MoE expert computation. When enabled, the backend is selected automatically by device: on compute capability >= 9.0 (Hopper and newer) it uses `torch._grouped_mm`, which has a fused grouped-GEMM kernel; on compute capability < 9.0 (e.g. Ampere/Ada, where `torch._grouped_mm` falls back to a slow per-group loop) it uses a Triton grouped-GEMM kernel instead, when Triton is available. Set `use_grouped_mm=false` to use the sequential per-expert for-loop. `GroupedExperts` construction raises `RuntimeError` only if `use_grouped_mm=true` but neither `torch._grouped_mm` nor the Triton backend is available. | `true`  |
+
+***disable_triton_grouped_mm***: [boolean]
+
+| Description                                                                                    | Default |
+| ---------------------------------------------------------------------------------------------- | ------- |
+| Controls the Triton grouped-GEMM backend selection when `use_grouped_mm=true`. When `false` (default), DeepSpeed uses the Triton grouped-GEMM kernel on devices where it is preferred (compute capability < 9.0, e.g. Ampere/Ada, where `torch._grouped_mm` falls back to a slow per-group loop) and Triton is available. Set `disable_triton_grouped_mm=true` to force the `torch._grouped_mm` path even on compute capability < 9.0 (falling back to the sequential for-loop if that operator is also unavailable). The Triton backend requires the `triton` package; when it is not installed, DeepSpeed uses `torch._grouped_mm` where available. | `false`  |
 
 ***moe_layer_pattern***: [string]
 

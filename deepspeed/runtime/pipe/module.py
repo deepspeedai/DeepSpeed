@@ -223,6 +223,9 @@ class PipelineModule(nn.Module):
         if self.activation_checkpoint_interval > 0 and self.is_checkpointable_results_interval != self.activation_checkpoint_interval:
             num_layers = len(self.forward_funcs)
             self.interval_was_zero = False
+            # results are cached per interval, so any left over from a previous interval no longer
+            # line up with the layer blocks forward() builds and must not be carried over
+            self.is_checkpointable_results = []
             for start_idx in range(0, num_layers, self.activation_checkpoint_interval):
                 end_idx = min(start_idx + self.activation_checkpoint_interval, num_layers)
                 funcs = self.forward_funcs[start_idx:end_idx]
@@ -551,7 +554,10 @@ class PipelineModule(nn.Module):
 
     def set_checkpoint_interval(self, interval):
         assert interval >= 0
-        self.checkpoint_interval = interval
+        self.activation_checkpoint_interval = interval
+        # forward() zips the layer blocks against the cached results, so they have to be rebuilt
+        # for the new interval before the next forward pass
+        self._precompute_checkpointable_values()
 
     def topology(self):
         """ ProcessTopology object to query process mappings. """

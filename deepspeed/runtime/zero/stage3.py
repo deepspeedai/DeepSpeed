@@ -1349,6 +1349,12 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         # The increment is deferred to clear_backward_seen_flag() which runs in forward().
         self._epilogue_ran_this_backward = True
 
+    def finalize_gradient_accumulation_boundary(self):
+        # Unmanaged mode: grad partitions already accumulate across backwards via __param_id_to_grad_partition; nothing to finalize for non-offload.
+        assert not self.offload_optimizer and not self.offload_param, \
+            "unmanaged gradient accumulation does not support ZeRO offload"
+        self.is_gradient_accumulation_boundary = True
+
     def overlapping_partition_gradients_reduce_epilogue(self):
         self.independent_gradient_partition_epilogue()
 
@@ -3441,15 +3447,28 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         rank = dist.get_rank(group=partition_group)
 
         # Load tensors from files and reshape them to flat vectors
-        loaded_checkpoint_state = torch.load(os.path.join(folder, f"{key}.pt"), weights_only=False)
-        if isinstance(loaded_checkpoint_state, dict):
-            if loaded_checkpoint_state.get(EP_IS_EXPERT_PARAM, False):
+        ckpt_dict = torch.load(os.path.join(folder, f"{key}.pt"), weights_only=False)
+        loaded_checkpoint_state = ckpt_dict
+        if isinstance(ckpt_dict, dict):
+            if ckpt_dict.get(EP_IS_EXPERT_PARAM, False):
                 if param is None:
                     raise ValueError(f"AutoEP universal expert checkpoint state in {folder} requires a target param")
-                loaded_checkpoint_state = self._slice_autoep_universal_expert_param(loaded_checkpoint_state, param)
+                loaded_checkpoint_state = self._slice_autoep_universal_expert_param(ckpt_dict, param)
             else:
-                loaded_checkpoint_state = loaded_checkpoint_state[PARAM]
+                loaded_checkpoint_state = ckpt_dict[PARAM]
         loaded_checkpoint_state = loaded_checkpoint_state.view(-1)
+
+        # AutoTP + ZeRO-3: the universal tensor is the FULL weight, but each tensor-parallel
+        # rank only owns its TP shard, and ZeRO then partitions that shard across the DP group.
+        # Resolve the TP shard first so the DP partition below operates on the per-rank shard.
+        if param is not None and isinstance(ckpt_dict, dict):
+            from deepspeed.checkpoint.universal_checkpoint import _get_param_uc_restore_meta, _resolve_autotp_partition
+            if _get_param_uc_restore_meta(param):
+                tp_group = groups.get_tensor_model_parallel_group()
+                tp_shard = _resolve_autotp_partition(param, ckpt_dict, loaded_checkpoint_state,
+                                                     dist.get_rank(tp_group), dist.get_world_size(tp_group))
+                if tp_shard is not None:
+                    loaded_checkpoint_state = tp_shard
 
         # Partition the loaded data according to the local rank
         world_size = dist.get_world_size(group=partition_group)

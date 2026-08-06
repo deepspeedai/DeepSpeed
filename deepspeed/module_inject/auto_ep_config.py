@@ -53,6 +53,7 @@ def parse_autoep_config(param_dict: dict) -> AutoEPConfig:
     config.expert_pattern = param_dict.get("expert_pattern", None)
     config.router_pattern = param_dict.get("router_pattern", None)
     config.use_grouped_mm = param_dict.get("use_grouped_mm", True)
+    config.disable_triton_grouped_mm = param_dict.get("disable_triton_grouped_mm", False)
     config.route_norm = param_dict.get("route_norm", None)
     config.route_scale = param_dict.get("route_scale", 1.0)
     config.score_apply = param_dict.get("score_apply", "auto")

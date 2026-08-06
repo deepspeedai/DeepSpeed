@@ -203,6 +203,14 @@ class DeepSpeedAccelerator(ABC):
     def is_triton_supported(self):
         ...
 
+    # Whether the fused MoE expert path should prefer a Triton grouped-GEMM
+    # kernel over ``torch._grouped_mm`` on this accelerator. Backends override
+    # this to return True when the Triton path is faster than the native op
+    # (e.g. CUDA sm8x, where ``torch._grouped_mm`` falls back to a slow
+    # per-group loop). Defaults to False so backends opt in explicitly.
+    def prefer_triton_grouped_mm(self):
+        return False
+
     # Graph operations
     @abc.abstractmethod
     def create_graph(self):

@@ -208,16 +208,20 @@ class PipelineEngine(DeepSpeedEngine):
         self.agg_train_loss = None
         self.agg_additional_losses = None
 
+        # use_reentrant picks the module's checkpoint function, and that choice also feeds
+        # _is_checkpointable(), so resolve it whatever the configured interval is: the module's
+        # set_checkpoint_interval() can enable checkpointing later, and it would otherwise run
+        # with the reentrant default even though the config asked for non-reentrant.
+        # set use_reentrant default to True.
+        if self._config.pipeline.get('use_reentrant') is None:
+            self._config.pipeline['use_reentrant'] = True
+        if self._config.pipeline['use_reentrant'] is False:
+            # set activation_checkpoint_func to non_reentrant_checkpoint func.
+            self.module.activation_checkpoint_func = ds_checkpointing.non_reentrant_checkpoint
+            if self.grid.get_global_rank() == 0:
+                logger.info('CONFIG: activation_checkpoint_func=non_reentrant_checkpoint')
         if self._config.pipeline['activation_checkpoint_interval'] > 0:
             self.module.activation_checkpoint_interval = self._config.pipeline['activation_checkpoint_interval']
-            # set use_reentrant default to True.
-            if self._config.pipeline.get('use_reentrant') is None:
-                self._config.pipeline['use_reentrant'] = True
-            if self._config.pipeline['use_reentrant'] is False:
-                # set activation_checkpoint_func to non_reentrant_checkpoint func.
-                self.module.activation_checkpoint_func = ds_checkpointing.non_reentrant_checkpoint
-                if self.grid.get_global_rank() == 0:
-                    logger.info('CONFIG: activation_checkpoint_func=non_reentrant_checkpoint')
         if self.module.activation_checkpoint_interval > 0:
             self.module._precompute_checkpointable_values()
 
@@ -891,6 +895,20 @@ class PipelineEngine(DeepSpeedEngine):
             self.timers(BACKWARD_MICRO_TIMER).stop()
             self.timers(BACKWARD_GLOBAL_TIMER).stop()
 
+    def _reentrant_activation_checkpointing(self):
+        """True when the module checkpoints activations with the reentrant function.
+
+        Reentrant checkpointing needs the first stage's inputs to require grad, or the
+        first checkpointed segment is detached from autograd. Key that off the module,
+        not off ``self._config.pipeline``: the config only seeds the module at __init__,
+        so a module built with its own ``activation_checkpoint_interval``, or one changed
+        later via ``set_checkpoint_interval()``, would leave the config stale. The forward
+        pass already branches on the module attribute, so this keeps the two in agreement.
+        """
+        if self.module.activation_checkpoint_interval <= 0:
+            return False
+        return self.module.activation_checkpoint_func is not ds_checkpointing.non_reentrant_checkpoint
+
     def _exec_load_micro_batch(self, buffer_id):
         if self.wall_clock_breakdown():
             self.timers(BATCH_INPUT_TIMER).start()
@@ -901,8 +919,7 @@ class PipelineEngine(DeepSpeedEngine):
             loaded = None
             if torch.is_tensor(batch[0]):
                 loaded = batch[0].clone().to(self.device).detach()
-                if self._config.pipeline['activation_checkpoint_interval'] > 0 and self._config.pipeline[
-                        'use_reentrant']:
+                if self._reentrant_activation_checkpointing():
                     loaded.requires_grad = loaded.is_floating_point()
             else:
                 assert isinstance(batch[0], (tuple, list))
@@ -911,8 +928,7 @@ class PipelineEngine(DeepSpeedEngine):
                 for x in batch[0]:
                     assert torch.is_tensor(x)
                     mine = x.clone().detach().to(self.device)
-                    if self._config.pipeline['activation_checkpoint_interval'] > 0 and self._config.pipeline[
-                            'use_reentrant']:
+                    if self._reentrant_activation_checkpointing():
                         mine.requires_grad = mine.is_floating_point()
                     loaded.append(mine)
                 loaded = tuple(loaded)

@@ -19,9 +19,13 @@ This module is self-contained: no imports from deepspeed.module_inject
 or deepspeed.runtime.
 """
 
+from __future__ import annotations
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from deepspeed.accelerator import get_accelerator
+from deepspeed.utils.logging import warning_once
 
 # ---------------------------------------------------------------------------
 # Expert computation: sequential for-loop (reference path)
@@ -129,6 +133,43 @@ def _run_experts_grouped_mm(
 
 
 # ---------------------------------------------------------------------------
+# Expert computation: Triton grouped GEMM (sm80 / sm86 fast path)
+# ---------------------------------------------------------------------------
+
+
+def _run_experts_triton_grouped_mm(
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    w3: torch.Tensor,
+    x: torch.Tensor,
+    num_tokens_per_expert: torch.Tensor,
+) -> torch.Tensor:
+    """Compute SwiGLU expert MLP via the Triton grouped GEMM drop-in.
+
+    Numerically and API-compatible with :func:`_run_experts_grouped_mm`, but
+    uses ``deepspeed.moe.group_gemm_triton.group_gemm_triton`` instead of
+    ``torch._grouped_mm``.
+
+    Args mirror :func:`_run_experts_grouped_mm`.
+    """
+    from deepspeed.moe.group_gemm_triton import group_gemm_triton
+
+    offsets = torch.cumsum(num_tokens_per_expert, dim=0, dtype=torch.int32)
+
+    # trans_b=True: pass expert weights in their native [E, hidden, dim] layout
+    # (no .transpose on the autograd tape). The kernel applies the transpose via
+    # strides, and backward writes the weight gradient directly in that layout,
+    # avoiding a contiguous-materialization copy of the transposed grad.
+
+    dtype = x.dtype
+    h = F.silu(group_gemm_triton(x, w1.to(dtype), offsets, trans_b=True))
+    h = h * group_gemm_triton(x, w3.to(dtype), offsets, trans_b=True)
+    out = group_gemm_triton(h, w2.to(dtype), offsets, trans_b=True).type_as(x)
+
+    return out
+
+
+# ---------------------------------------------------------------------------
 # GroupedExperts module
 # ---------------------------------------------------------------------------
 
@@ -136,20 +177,26 @@ def _run_experts_grouped_mm(
 class GroupedExperts(nn.Module):
     """Grouped expert computation for MoE layers.
 
-    Supports two execution paths:
+    Supports three execution paths:
+      - **triton_grouped_mm**: Uses a Triton grouped-GEMM kernel
+        (``deepspeed.moe.group_gemm_triton``). Auto-selected on sm80/sm86 where
+        ``torch._grouped_mm`` would otherwise fall back to a slow per-group loop.
       - **grouped_mm**: Uses ``torch._grouped_mm`` for fused grouped GEMM
         (requires a sufficiently recent PyTorch build).
       - **for-loop**: Sequential per-expert matmuls; always available.
 
-    If ``use_grouped_mm=True`` but ``torch._grouped_mm`` is not available, the
-    constructor raises ``RuntimeError``. Set ``use_grouped_mm=False`` to select
-    the sequential for-loop path without checking ``torch._grouped_mm``.
+    If ``use_grouped_mm=True`` but neither the Triton path nor
+    ``torch._grouped_mm`` is available, the constructor raises ``RuntimeError``.
+    Set ``use_grouped_mm=False`` to select the sequential for-loop path.
 
     Args:
         dim (int): Input / output dimension.
         hidden_dim (int): Hidden dimension of the SwiGLU FFN.
         num_experts (int): Number of experts.
         use_grouped_mm (bool): Whether to attempt using grouped GEMM.
+        disable_triton_grouped_mm (bool): Set ``True`` to force the native
+            ``torch._grouped_mm`` path even on devices where the Triton
+            grouped-GEMM kernel would otherwise be preferred (e.g. sm8x).
     """
 
     def __init__(
@@ -158,6 +205,7 @@ class GroupedExperts(nn.Module):
         hidden_dim: int,
         num_experts: int,
         use_grouped_mm: bool = True,
+        disable_triton_grouped_mm: bool = False,
     ):
         super().__init__()
         self.num_experts = num_experts
@@ -168,13 +216,28 @@ class GroupedExperts(nn.Module):
         self.w1.is_expert_group = True
         self.w2.is_expert_group = True
         self.w3.is_expert_group = True
+        self.use_triton_grouped_mm = False
+        self.use_grouped_mm = use_grouped_mm
 
-        if use_grouped_mm and not hasattr(torch, "_grouped_mm"):
+        # Resolve the Triton path. The device-specific decision is delegated to
+        # the accelerator backend (e.g. the CUDA backend prefers Triton on
+        # sm < 9.0, where torch._grouped_mm falls back to a slow per-group loop).
+        # Set disable_triton_grouped_mm=True to force the native path.
+        if use_grouped_mm and not disable_triton_grouped_mm:
+            self.use_triton_grouped_mm = get_accelerator().prefer_triton_grouped_mm()
+
+        if use_grouped_mm and not hasattr(torch, "_grouped_mm") and not self.use_triton_grouped_mm:
             raise RuntimeError("GroupedExperts was constructed with use_grouped_mm=True but "
                                "torch._grouped_mm is not available in this PyTorch build. "
-                               "Upgrade PyTorch to a build that provides torch._grouped_mm, or "
-                               "set use_grouped_mm=False to use the sequential expert loop.")
-        self.use_grouped_mm = use_grouped_mm
+                               "Upgrade PyTorch to a build that provides torch._grouped_mm, install "
+                               "Triton to enable the Triton grouped-GEMM path, or set "
+                               "use_grouped_mm=False to use the sequential expert loop.")
+
+        if use_grouped_mm and self.use_triton_grouped_mm:
+            warning_once("Triton grouped-GEMM path is selected for grouped_gemm. "
+                         "The Triton path is preferred on compute capability smaller than sm90, "
+                         "and will be used instead of torch._grouped_mm. Set use_grouped_mm=False or "
+                         "disable_triton_grouped_mm=True to avoid this warning.")
 
     def forward(
         self,
@@ -189,7 +252,10 @@ class GroupedExperts(nn.Module):
         Returns:
             Output tensor of shape ``(T, dim)``.
         """
-        if self.use_grouped_mm:
+
+        if self.use_triton_grouped_mm:
+            return _run_experts_triton_grouped_mm(self.w1, self.w2, self.w3, x, num_tokens_per_expert)
+        elif self.use_grouped_mm:
             return _run_experts_grouped_mm(self.w1, self.w2, self.w3, x, num_tokens_per_expert)
         else:
             return _run_experts_for_loop(self.w1, self.w2, self.w3, x, num_tokens_per_expert)
