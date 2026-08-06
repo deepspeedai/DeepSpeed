@@ -38,13 +38,14 @@ NCCL_GIN_MIN_VERSION = (2, 30, 4)
 # rather than the collective alone, because the budget trades one against the
 # other: the collective and the expert GEMM draw from the same SMs.
 #
-# On 16 H100s across two nodes, taking the fastest of three runs per budget and
-# rotating the budgets through every position within one job, a step took
-# 272.4 ms at 8 SMs and 256.9 ms at 12. Larger budgets were slower again, the
-# collective having taken SMs the rest of the step was using. Interference on a
-# shared cluster is one-sided, so the fastest run is the least contaminated
-# estimate; a mean of two runs put 8 ahead until a single disturbed run was
-# identified as the cause.
+# On 16 H100s across two nodes, timing three runs per budget and rotating the
+# budgets through every position within one job, the median step was 297.9 ms
+# at 8 SMs and 265.4 ms at 12. Larger budgets were slower again, the collective
+# having taken SMs the rest of the step was using.
+#
+# Run-to-run spread was around 20%, which is wider than the gap between
+# neighbouring budgets, so single runs cannot separate them: a mean of two runs
+# put 8 ahead until one disturbed run turned out to be the whole difference.
 DEFAULT_COMM_SMS = 12
 
 
