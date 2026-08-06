@@ -1648,10 +1648,12 @@ class DeepSpeedEngine(Module):
                 f'Client Optimizer (type = {type(self.client_optimizer)} is not instantiated but Client LR Scheduler is instantiated'
 
         if not self.managed_gradient_accumulation():
-            assert not self.zero_optimization_partition_weights(), \
-                "managed_gradient_accumulation=False is only supported for ZeRO stage 0, 1, and 2"
-            assert self.zero_offload_optimizer() is None, \
+            offload_optimizer = self.zero_offload_optimizer()
+            offload_param = self.zero_offload_param()
+            assert offload_optimizer is None or offload_optimizer.device == OffloadDeviceEnum.none, \
                 "managed_gradient_accumulation=False is not supported with ZeRO optimizer state offload"
+            assert offload_param is None or offload_param.device == OffloadDeviceEnum.none, \
+                "managed_gradient_accumulation=False is not supported with ZeRO parameter offload"
             assert self.zero_optimization_partition_gradients() or not self.zero_overlap_comm(), \
                 "managed_gradient_accumulation=False supports ZeRO overlap_comm only with ZeRO stage 2"
             assert not self.pipeline_parallelism, \
@@ -3376,7 +3378,7 @@ class DeepSpeedEngine(Module):
         # Unmanaged mode: step() is the accumulation boundary.
         self._running_engine_step = True
 
-        # Unmanaged boundary: stage 2 already reduced/partitioned per backward so only finalize; stage 0/1/DDP reduce here.
+        # Unmanaged boundary: stage 2/3 already reduced/partitioned per backward so only finalize; stage 0/1/DDP reduce here.
         if not self.managed_gradient_accumulation():
             if self.zero_optimization_partition_gradients():
                 self.optimizer.finalize_gradient_accumulation_boundary()
