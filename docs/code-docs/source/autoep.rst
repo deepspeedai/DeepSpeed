@@ -106,6 +106,12 @@ that set nothing keep the existing path unchanged.
   ``"deepep"`` uses DeepEP's dispatch and combine kernels.
 - ``comm_num_sm``: SMs given to communication. Default 12.
 - ``comm_qp_margin``: RDMA queue pairs reserved beyond one per SM. Default 4.
+- ``comm_max_tokens_per_rank``: largest per-rank token count the job will
+  produce, which is ``micro_batch_size * seq_len`` when sequences are padded to
+  a fixed length. Default 0, which sizes the buffer from the first batch. Set
+  it when later batches can be larger than the first: the buffer is sized once
+  and a batch that outgrows it is an error, because resizing is collective and
+  cannot be decided from one rank's token count without risking a hang.
 
 On 16 H100s across two nodes, replaying routing captured from real training,
 DeepEP reduced payload AllToAll time from roughly 100 ms to 48 ms per step. A

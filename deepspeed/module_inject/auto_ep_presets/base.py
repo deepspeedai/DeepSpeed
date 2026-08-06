@@ -113,6 +113,7 @@ class AutoEPConfig:
     comm_backend: Literal["comm", "deepep"] = "comm"
     comm_num_sm: int = 12
     comm_qp_margin: int = 4
+    comm_max_tokens_per_rank: int = 0
     num_expert_groups: int | None = None
     num_limited_groups: int | None = None
     score_func: Literal["auto", "softmax", "sigmoid"] = "auto"

@@ -530,13 +530,7 @@ class AutoEPMoELayer(nn.Module):
         self._deepep_exchange = None
         # The agreed capacity and the shape it was agreed for, so the
         # agreement is not repeated on every layer of every step.
-        self._deepep_capacity = 0
-        self._deepep_tokens_per_rank = -1
-        # Buffers outgrown by a larger batch. They stay alive rather than being
-        # released, because a backward still pending from an earlier forward
-        # replays against the buffer that forward used. Capacity is rounded up
-        # so this list stays short.
-        self._retired_exchanges = []
+        self.comm_max_tokens_per_rank = config.comm_max_tokens_per_rank
         self._register_logit_hook()
 
     def _register_logit_hook(self):
@@ -610,44 +604,45 @@ class AutoEPMoELayer(nn.Module):
         """
         assert_dtype_supported(tokens.dtype)
 
-        # Built on first use because the buffer is sized from the token count,
-        # which is not known until a batch arrives, and rebuilt if a later
-        # batch is larger: variable sequence lengths or a small warm-up batch
-        # would otherwise exceed a capacity fixed by the first call.
+        # Sized once, on the first forward, and then fixed.
         #
         # DeepEP requires the same num_max_tokens_per_rank on every rank, and
-        # construction is collective, so the size is agreed rather than taken
-        # from the local count. The agreement is cached against the shape that
-        # produced it: ranks in an expert-parallel group are handed the same
-        # micro-batch shape, so they leave and re-enter the agreement together,
-        # and a collective on every layer of every step would otherwise put a
-        # device-to-host synchronisation in the middle of the forward pass.
-        if tokens.shape[0] != self._deepep_tokens_per_rank:
+        # construction is collective, so the size cannot come from the local
+        # token count. It is agreed with one all-reduce, which is safe here
+        # because every rank reaches its first forward together.
+        #
+        # It deliberately does not re-agree later. A rank cannot tell whether
+        # its peers also need more room without asking them, and asking only
+        # when the local count grew makes the collective conditional on local
+        # data: if the counts ever diverge, some ranks enter the all-reduce and
+        # the rest do not, and the job hangs. Growing on demand would also cost
+        # a device-to-host read in the middle of every layer of every step,
+        # measured at roughly a fifth of the step. So a batch that outgrows the
+        # buffer is a configuration error with a named remedy, not a stall.
+        if self._deepep_exchange is None:
             capacity = torch.tensor([tokens.shape[0]], dtype=torch.int64, device=tokens.device)
             dist.all_reduce(capacity, op=dist.ReduceOp.MAX, group=self.ep_group)
-            # Rounded up so a sequence length that creeps upward does not
-            # rebuild on almost every step.
+            # Rounded up so a sequence length that varies a little still fits.
             granularity = 512
-            self._deepep_capacity = -(-int(capacity.item()) // granularity) * granularity
-            self._deepep_tokens_per_rank = tokens.shape[0]
-
-        if self._deepep_exchange is None or self._deepep_capacity > self._deepep_exchange.num_max_tokens_per_rank:
-            if self._deepep_exchange is not None:
-                # Kept rather than destroyed. A backward from an earlier
-                # forward replays against the buffer that forward dispatched
-                # on, so releasing it here breaks
-                #     out1 = model(b1); out2 = model(b2); (out1 + out2).backward()
-                # where b2 outgrew b1's buffer.
-                self._retired_exchanges.append(self._deepep_exchange)
+            sized_for = self.comm_max_tokens_per_rank or -(-int(capacity.item()) // granularity) * granularity
             self._deepep_exchange = DeepEPExchange(
                 ep_group=self.ep_group,
                 num_experts=self.num_experts,
                 top_k=self.top_k,
                 hidden_size=self.hidden_size,
-                num_max_tokens_per_rank=self._deepep_capacity,
+                num_max_tokens_per_rank=sized_for,
                 num_sms=self.comm_num_sm,
                 qp_margin=self.comm_qp_margin,
             )
+
+        if tokens.shape[0] > self._deepep_exchange.num_max_tokens_per_rank:
+            raise RuntimeError(
+                f"this rank routed {tokens.shape[0]} tokens, more than the "
+                f"{self._deepep_exchange.num_max_tokens_per_rank} the DeepEP buffer was built for. The buffer is "
+                "sized once, from the first batch, because resizing is collective and cannot be decided from one "
+                "rank's token count. Set comm_max_tokens_per_rank in the expert_parallel config to the largest "
+                "per-rank token count this job will produce, which is micro_batch_size * seq_len when sequences "
+                'are padded to a fixed length, or set comm_backend="comm".')
 
         received, recv_weights, exchange = deepep_dispatch(self._deepep_exchange, tokens, ro.selected_experts,
                                                            ro.top_scores)

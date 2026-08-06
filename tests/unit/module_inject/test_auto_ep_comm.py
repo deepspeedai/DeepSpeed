@@ -200,9 +200,6 @@ class TestRoutingWeightsAreApplied(unittest.TestCase):
 
         layer = mock.Mock(
             _deepep_exchange=exchange,
-            _deepep_capacity=1024,
-            _deepep_tokens_per_rank=4,
-            _retired_exchanges=[],
             num_local_experts=self.LOCAL_EXPERTS,
             score_apply=score_apply,
             comm_num_sm=12,
@@ -263,48 +260,67 @@ class TestRoutingWeightsAreApplied(unittest.TestCase):
 
 
 class TestBufferLifecycle(unittest.TestCase):
-    """A grown buffer must not invalidate a backward that is still pending."""
+    """The buffer is sized once, and never resized behind the group's back."""
 
-    def test_capacity_agreement_is_skipped_when_the_shape_is_unchanged(self):
-        # The agreement is collective and ends in a device-to-host read, so
-        # repeating it per layer per step puts a synchronisation in the middle
-        # of the forward pass.
+    def test_the_agreement_is_not_conditional_on_local_data(self):
+        # A collective entered by only some ranks hangs the job. The size is
+        # agreed on the first forward, which every rank reaches together, and
+        # never re-agreed from a local token count afterwards.
         source = inspect.getsource(auto_ep_layer.AutoEPMoELayer._deepep_route)
         tree = ast.parse(textwrap.dedent(source))
-        guards = [
+
+        reduces = [
             node for node in ast.walk(tree)
-            if isinstance(node, ast.If) and "_deepep_tokens_per_rank" in ast.dump(node.test)
+            if isinstance(node, ast.Call) and getattr(node.func, "attr", "") == "all_reduce"
         ]
+        self.assertEqual(len(reduces), 1, "exactly one agreement, on the first forward")
 
-        self.assertTrue(guards, "the all_reduce must be guarded by an unchanged-shape check")
-        self.assertIn("all_reduce", ast.dump(guards[0]))
+        guards = [
+            node for node in ast.walk(tree) if isinstance(node, ast.If) and any(
+                isinstance(inner, ast.Call) and getattr(inner.func, "attr", "") == "all_reduce"
+                for inner in ast.walk(node))
+        ]
+        self.assertTrue(guards, "the agreement must sit under the first-forward guard")
+        # The guard must test whether the buffer exists, not how many tokens
+        # this rank happens to hold.
+        self.assertIn("_deepep_exchange", ast.dump(guards[0].test))
+        self.assertNotIn("tokens", ast.dump(guards[0].test))
 
-    def test_outgrown_buffer_is_retired_rather_than_destroyed(self):
-        old = mock.Mock(num_max_tokens_per_rank=512)
-        layer = mock.Mock(_deepep_exchange=old,
-                          _deepep_capacity=512,
-                          _deepep_tokens_per_rank=-1,
-                          _retired_exchanges=[],
-                          comm_num_sm=12,
-                          comm_qp_margin=4)
+    def test_outgrowing_the_buffer_names_the_remedy(self):
+        exchange = mock.Mock(num_max_tokens_per_rank=512)
+        layer = mock.Mock(_deepep_exchange=exchange)
 
-        with mock.patch.object(auto_ep_layer, "DeepEPExchange") as built, \
-                mock.patch.object(auto_ep_layer, "deepep_dispatch", side_effect=RuntimeError("stop here")), \
-                mock.patch.object(auto_ep_layer.dist, "all_reduce", lambda *a, **k: None):
+        with mock.patch.object(auto_ep_layer.dist, "all_reduce", lambda *a, **k: None):
             router_output = auto_ep_layer.RouterOutput(
                 top_scores=torch.ones((600, 1)),
                 selected_experts=torch.zeros((600, 1), dtype=torch.long),
                 num_tokens_per_expert=torch.zeros(4, dtype=torch.long),
             )
-            with self.assertRaises(RuntimeError):
+            with self.assertRaises(RuntimeError) as caught:
                 auto_ep_layer.AutoEPMoELayer._deepep_route(layer, torch.ones((600, 8), dtype=torch.bfloat16),
                                                            router_output)
 
-        old.destroy.assert_not_called()
-        self.assertIn(old, layer._retired_exchanges)
-        # Capacity is rounded up so a slowly growing sequence length does not
-        # rebuild on nearly every step.
-        self.assertEqual(built.call_args.kwargs["num_max_tokens_per_rank"], 1024)
+        message = str(caught.exception)
+        self.assertIn("comm_max_tokens_per_rank", message)
+        self.assertIn("600", message)
+
+    def test_a_configured_capacity_overrides_the_first_batch(self):
+        layer = mock.Mock(_deepep_exchange=None, comm_max_tokens_per_rank=4096, comm_num_sm=12, comm_qp_margin=4)
+
+        built = mock.Mock(return_value=mock.Mock(num_max_tokens_per_rank=4096))
+        with mock.patch.object(auto_ep_layer, "DeepEPExchange", built), \
+                mock.patch.object(auto_ep_layer, "deepep_dispatch", side_effect=RuntimeError("stop here")), \
+                mock.patch.object(auto_ep_layer.dist, "all_reduce", lambda *a, **k: None):
+            router_output = auto_ep_layer.RouterOutput(
+                top_scores=torch.ones((8, 1)),
+                selected_experts=torch.zeros((8, 1), dtype=torch.long),
+                num_tokens_per_expert=torch.zeros(4, dtype=torch.long),
+            )
+            with self.assertRaises(RuntimeError):
+                auto_ep_layer.AutoEPMoELayer._deepep_route(layer, torch.ones((8, 8), dtype=torch.bfloat16),
+                                                           router_output)
+
+        self.assertEqual(built.call_args.kwargs["num_max_tokens_per_rank"], 4096)
 
 
 class TestAutogradSignatures(unittest.TestCase):
