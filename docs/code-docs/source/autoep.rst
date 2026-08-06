@@ -115,11 +115,13 @@ that set nothing keep the existing path unchanged.
 
 On 16 H100s across two nodes, replaying routing captured from real training,
 DeepEP reduced payload AllToAll time from roughly 100 ms to 48 ms per step. A
-full SFT step on Qwen3.5-MoE went from a median 329.4 ms to 265.4 ms, a 1.24x
-speedup that removes 19% of the step. Both backends were measured in the same
-job, on the same pods and alternating, since the same measurement varied by a
-quarter between jobs; run-to-run spread within a job was still around 20%, so
-these are medians of three runs rather than single observations. The advantage grows with routing imbalance: at the most skewed
+full SFT step on Qwen3.5-MoE went from roughly 325 ms to 266 ms, a 1.2x speedup
+that removes about 18% of the step, reproduced across two independent jobs
+(1.21x and 1.24x). Both backends are measured in the same job, on the same pods
+and alternating, since the same measurement varied by a quarter between jobs;
+the figures are medians rather than single observations, and DeepEP's own
+median moved by 0.3% between the two jobs while the collective baseline moved
+by 2.5%. The advantage grows with routing imbalance: at the most skewed
 step measured, the collective path degraded to 116 ms while DeepEP stayed flat.
 
 ``comm_num_sm`` matters because communication competes with the expert GEMM for
