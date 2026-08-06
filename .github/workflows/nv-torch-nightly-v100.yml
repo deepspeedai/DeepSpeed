@@ -6,7 +6,6 @@ concurrency:
 
 permissions:
   contents: read
-  issues: write
 
 jobs:
   unit-tests:
@@ -48,12 +47,3 @@ jobs:
           cd tests
           pytest $PYTEST_OPTS --forked -n 8 unit/
           pytest $PYTEST_OPTS --forked -m 'sequential' unit/
-
-      - name: Open GitHub issue if nightly CI fails
-        if: ${{ failure() && (github.event_name == 'schedule') }}
-        uses: JasonEtco/create-an-issue@v2
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          filename: .github/ISSUE_TEMPLATE/ci_failure_report.md
-          update_existing: true

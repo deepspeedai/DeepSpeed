@@ -32,7 +32,6 @@ concurrency:
 
 permissions:
   contents: read
-  issues: write
 
 jobs:
   unit-tests:
