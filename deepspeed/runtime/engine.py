@@ -1790,6 +1790,9 @@ class DeepSpeedEngine(Module):
         self.seq_data_parallel_group = groups._get_sequence_data_parallel_group()
         self.seq_dp_world_size = groups._get_sequence_data_parallel_world_size()
         self.mp_world_size = groups._get_model_parallel_world_size()
+        self.checkpoint_mp_rank = 0
+        if self.mp_world_size > 1:
+            self.checkpoint_mp_rank = self.mpu.get_model_parallel_rank()
         self.expert_parallel_group = groups._get_expert_parallel_group_dict()
         self.expert_data_parallel_group = groups._get_expert_data_parallel_group_dict()
         self.sequence_parallel_size = groups._get_sequence_parallel_world_size()
@@ -3944,7 +3947,11 @@ class DeepSpeedEngine(Module):
                             num_experts=1,
                             checkpoint_engine=TorchCheckpointEngine(),
                             autoep_layers=None,
-                            folding_spec=None):
+                            folding_spec=None,
+                            checkpoint_mp_rank=None):
+        if checkpoint_mp_rank is None:
+            checkpoint_mp_rank = 0 if mpu is None else mpu.get_model_parallel_rank()
+
         try:
             from deepspeed.module_inject.auto_ep_layer import AutoEPMoELayer as _AutoEPMoELayer
         except ImportError:
@@ -3970,7 +3977,7 @@ class DeepSpeedEngine(Module):
                         -1,  # -1 means ignore layer_id
                         global_expert_id,
                         tag,
-                        mpu),
+                        checkpoint_mp_rank=checkpoint_mp_rank),
                     map_location=torch.device('cpu'))
 
                 # Updating global -> local expert ids
@@ -4016,7 +4023,11 @@ class DeepSpeedEngine(Module):
                     for local_expert_id in range(num_local_experts):
                         global_expert_id = expp_rank * num_local_experts + local_expert_id
                         expert_state_dict = checkpoint_engine.load(DeepSpeedEngine._get_expert_ckpt_name(
-                            checkpoint_path, moe_layer_id, global_expert_id, tag, mpu),
+                            checkpoint_path,
+                            moe_layer_id,
+                            global_expert_id,
+                            tag,
+                            checkpoint_mp_rank=checkpoint_mp_rank),
                                                                    map_location=torch.device('cpu'))
                         # print(expert_state_dict.keys())
                         # Updating global -> local expert ids
@@ -4040,8 +4051,11 @@ class DeepSpeedEngine(Module):
 
                     for local_expert_id in range(num_local_experts):
                         global_expert_id = expp_rank * num_local_experts + local_expert_id
-                        expert_ckpt_path = DeepSpeedEngine._get_expert_ckpt_name(checkpoint_path, moe_layer_id,
-                                                                                 global_expert_id, tag, mpu)
+                        expert_ckpt_path = DeepSpeedEngine._get_expert_ckpt_name(checkpoint_path,
+                                                                                 moe_layer_id,
+                                                                                 global_expert_id,
+                                                                                 tag,
+                                                                                 checkpoint_mp_rank=checkpoint_mp_rank)
                         if not os.path.exists(expert_ckpt_path):
                             raise FileNotFoundError(f"Expert checkpoint file not found: {expert_ckpt_path}. "
                                                     f"Expected layer_{moe_layer_id} expert_{global_expert_id}.")
@@ -4138,17 +4152,15 @@ class DeepSpeedEngine(Module):
         return zero_ckpt_name
 
     def _get_zero_ckpt_name(self, checkpoints_path, tag):
-        mp_rank = 0 if self.mpu is None else self.mpu.get_model_parallel_rank()
         pp_rank = dist.get_rank(group=self.optimizer.dp_process_group)
         bf16_mode = self.bfloat16_enabled()
-        return self._get_rank_zero_ckpt_name(checkpoints_path, tag, mp_rank, pp_rank, bf16_mode)
+        return self._get_rank_zero_ckpt_name(checkpoints_path, tag, self.checkpoint_mp_rank, pp_rank, bf16_mode)
 
     def _get_ckpt_name(self, checkpoints_path, tag, mp_placeholder=None, pp_placeholder=None):
         if mp_placeholder is not None:
             mp_rank_str = mp_placeholder
         else:
-            mp_rank = 0 if self.mpu is None else self.mpu.get_model_parallel_rank()
-            mp_rank_str = f"{mp_rank:02d}"
+            mp_rank_str = f"{self.checkpoint_mp_rank:02d}"
 
         if self.zero_optimization_partition_weights():
             if pp_placeholder is not None:
@@ -4171,22 +4183,24 @@ class DeepSpeedEngine(Module):
         return ckpt_name
 
     def _get_optimizer_ckpt_name(self, checkpoints_path, tag, expp_rank):
-        mp_rank = 0 if self.mpu is None else self.mpu.get_model_parallel_rank()
         ckpt_name = os.path.join(checkpoints_path, str(tag),
-                                 f'expp_rank_{expp_rank}_mp_rank_{mp_rank:02d}_optim_states.pt')
+                                 f'expp_rank_{expp_rank}_mp_rank_{self.checkpoint_mp_rank:02d}_optim_states.pt')
         return ckpt_name
 
     @staticmethod
-    def _get_expert_ckpt_name(checkpoints_path, layer_id, expert_id, tag, mpu=None):
-        mp_rank = 0 if mpu is None else mpu.get_model_parallel_rank()
+    def _get_expert_ckpt_name(checkpoints_path, layer_id, expert_id, tag, mpu=None, checkpoint_mp_rank=None):
+        if checkpoint_mp_rank is None:
+            checkpoint_mp_rank = 0 if mpu is None else mpu.get_model_parallel_rank()
+
         if layer_id <= -1:
             # Used to support old checkpoint loading
             ckpt_name = os.path.join(checkpoints_path, '' if tag is None else str(tag),
-                                     f'expert_{expert_id}_mp_rank_{mp_rank:02d}_model_states.pt')
+                                     f'expert_{expert_id}_mp_rank_{checkpoint_mp_rank:02d}_model_states.pt')
         else:
             # Used to support new checkpoint loading
-            ckpt_name = os.path.join(checkpoints_path, '' if tag is None else str(tag),
-                                     f'layer_{layer_id}_expert_{expert_id}_mp_rank_{mp_rank:02d}_model_states.pt')
+            ckpt_name = os.path.join(
+                checkpoints_path, '' if tag is None else str(tag), f'layer_{layer_id}_expert_{expert_id}_mp_rank_'
+                f'{checkpoint_mp_rank:02d}_model_states.pt')
         return ckpt_name
 
     def _get_all_ckpt_names(self, checkpoints_path, tag):
@@ -4373,8 +4387,9 @@ class DeepSpeedEngine(Module):
 
         is_pipe_parallel = isinstance(self.module, PipelineModule)
 
-        mp_rank = 0 if self.mpu is None else self.mpu.get_model_parallel_rank()
-        load_path, checkpoint, _ = sd_loader.load(self.mp_world_size, mp_rank, is_pipe_parallel=is_pipe_parallel)
+        load_path, checkpoint, _ = sd_loader.load(self.mp_world_size,
+                                                  self.checkpoint_mp_rank,
+                                                  is_pipe_parallel=is_pipe_parallel)
 
         if checkpoint is None:
             return None, None
@@ -4426,7 +4441,7 @@ class DeepSpeedEngine(Module):
                                                     state_dict=checkpoint['module'],
                                                     old_moe_load=old_moe_load,
                                                     model=self.module,
-                                                    mpu=self.mpu,
+                                                    checkpoint_mp_rank=self.checkpoint_mp_rank,
                                                     num_experts=self.num_experts,
                                                     checkpoint_engine=self.checkpoint_engine,
                                                     autoep_layers=autoep_layers,
@@ -4595,10 +4610,9 @@ class DeepSpeedEngine(Module):
         return zero_ckpt_names
 
     def _get_all_zero_checkpoint_names(self, load_dir, tag, bf16_mode):
-        mp_rank = 0 if self.mpu is None else self.mpu.get_model_parallel_rank()
         zero_ckpt_names = self._get_mp_rank_zero_checkpoint_names(load_dir=load_dir,
                                                                   tag=tag,
-                                                                  mp_rank=mp_rank,
+                                                                  mp_rank=self.checkpoint_mp_rank,
                                                                   dp_world_size=self.loaded_checkpoint_dp_world_size,
                                                                   bf16_mode=bf16_mode)
         for i, ckpt_name in enumerate(zero_ckpt_names):
@@ -4938,7 +4952,11 @@ class DeepSpeedEngine(Module):
                 # let save the moe parameters
                 for global_expert_id, expert_state_dict in experts_state_dict.items():
                     # save the moe parameters
-                    moe_save_path = self._get_expert_ckpt_name(save_dir, moe_layer_id, global_expert_id, tag, self.mpu)
+                    moe_save_path = self._get_expert_ckpt_name(save_dir,
+                                                               moe_layer_id,
+                                                               global_expert_id,
+                                                               tag,
+                                                               checkpoint_mp_rank=self.checkpoint_mp_rank)
                     if self.random_ltd_enabled():
                         expert_state_dict = remove_random_ltd_state_dict(expert_state_dict)
                     saveable_state_dict = expert_state_dict
@@ -5035,8 +5053,11 @@ class DeepSpeedEngine(Module):
                                     zero_partition_count=folding_spec.edp_size,
                                 )
 
-                            moe_save_path = self._get_expert_ckpt_name(save_dir, moe_layer_id, global_expert_id, tag,
-                                                                       self.mpu)
+                            moe_save_path = self._get_expert_ckpt_name(save_dir,
+                                                                       moe_layer_id,
+                                                                       global_expert_id,
+                                                                       tag,
+                                                                       checkpoint_mp_rank=self.checkpoint_mp_rank)
                             saveable = expert_state_dict
                             if self.checkpoint_engine.preserves_storage_sharing():
                                 saveable = clone_tensors_for_torch_save(expert_state_dict)
