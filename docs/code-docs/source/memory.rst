@@ -265,22 +265,20 @@ Note about gradients: While gradients are stored in fp16 (2 bytes), during the w
 
 **Pinned Memory**
 
-Pinned general RAM is included in normal general RAM allocations (i.e. this is not extra memory allocations but simply shows how much of the general RAM is pinned)
+Pinned general RAM is included in normal general RAM allocations (i.e. this is not extra memory allocations but simply shows how much of the general RAM is pinned). Pinning is controlled by the ``pin_memory`` field of ``offload_optimizer`` / ``offload_param`` (both default to ``true``); set to ``false`` on hosts with tight memlock limits (``ulimit -l``).
 
-* ZeRO-2: can't be controlled
+* ZeRO-1/2: controlled by ``offload_optimizer.pin_memory``
 
 * ZeRO-3
 
-To enable add: ``"cpu_offload_use_pin_memory" : true``
+With pinning enabled there are 2 sub-cases:
 
-Now there are 2 sub-cases:
-
-1. ``"cpu_offload_params": true``:
+1. ``offload_param`` enabled (``device: cpu``):
 
    - 6 * params (2b for fp16 params + 4b for fp32 gradients)
    - if ``gradient_accumulation_steps > 1`` an additional 2b for fp16 gradients are pinned
 
-2. ``"cpu_offload_params": false``:
+2. ``offload_param`` not enabled:
 
    - 4b for fp32 gradients
 

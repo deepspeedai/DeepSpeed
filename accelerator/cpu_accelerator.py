@@ -279,6 +279,9 @@ class CPU_Accelerator(DeepSpeedAccelerator):
         return torch.LongTensor
 
     def pin_memory(self, tensor, align_bytes=1):
+        # Overrides pin_memory directly (not _pin_memory) to bypass the ABC's
+        # pinned-memory accounting: this is a no-op, nothing is page-locked, so
+        # counting would mislead OOM diagnostics. Do not rename to _pin_memory.
         return tensor
 
     def is_pinned(self, tensor):

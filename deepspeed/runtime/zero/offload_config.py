@@ -42,10 +42,13 @@ class DeepSpeedZeroOffloadParamConfig(DeepSpeedConfigModel):
     NVMe is enabled.
     """
 
-    pin_memory: bool = False
+    pin_memory: bool = True
     """
-    Offload to page-locked CPU memory. This could boost throughput at the cost
-    of extra memory overhead.
+    Offload to page-locked (pinned) CPU memory. Required for asynchronous,
+    full-bandwidth GPU<->CPU transfers and for overlap of grad/param offload
+    with compute. Defaults to True. Disable only on hosts with tight memlock
+    limits (ulimit -l) or very limited resident RAM, since pinned memory
+    cannot be paged out.
     """
 
 
@@ -69,10 +72,13 @@ class DeepSpeedZeroOffloadOptimizerConfig(DeepSpeedConfigModel):
     gradient, momentum, and variance).
     """
 
-    pin_memory: bool = False
+    pin_memory: bool = True
     """
-    Offload to page-locked CPU memory. This could boost throughput at the cost
-    of extra memory overhead.
+    Offload to page-locked (pinned) CPU memory. Required for asynchronous,
+    full-bandwidth GPU<->CPU transfers and for overlap of grad/param offload
+    with compute. Defaults to True. Disable only on hosts with tight memlock
+    limits (ulimit -l) or very limited resident RAM, since pinned memory
+    cannot be paged out.
     """
 
     pipeline_read: bool = False

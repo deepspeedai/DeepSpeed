@@ -945,9 +945,25 @@ def non_reentrant_checkpoint(function, *args):
 
 
 @compiler.disable  # WA from Pytorch repo for compile + zero 3 accuracy issue
-def checkpoint(function, *args):
+def checkpoint(function, *args, **kwargs):
     """Checkpoint a model or part of the model.
-    This has been directly copied from torch.utils.checkpoint. """
+    This has been directly copied from torch.utils.checkpoint.
+
+    Tensor arguments passed by keyword participate in autograd in the same way as positional tensor arguments.
+    """
+
+    if kwargs:
+        run_function = function
+        kwarg_keys = tuple(kwargs.keys())
+        positional_arg_count = len(args)
+
+        def function_with_kwargs(*all_args):
+            positional_args = all_args[:positional_arg_count]
+            keyword_args = dict(zip(kwarg_keys, all_args[positional_arg_count:]))
+            return run_function(*positional_args, **keyword_args)
+
+        function = function_with_kwargs
+        args = args + tuple(kwargs.values())
 
     all_outputs = []
     CheckpointFunction.apply(function, all_outputs, *args)

@@ -33,7 +33,7 @@ toc_label: "Contents"
 
 | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              | Default |
 | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
-| Controls how gradient accumulation boundaries are managed. When `true`, DeepSpeed tracks micro-steps and applies the optimizer step only at the accumulation boundary, so `forward`/`backward`/`step` can be called symmetrically on every micro-batch. When `false`, micro-step tracking is disabled and the client is responsible for calling `step()` at the accumulation boundary; each `step()` finalizes the locally-accumulated gradients and applies an optimizer update. The `false` setting currently supports ZeRO stage 0/1 (and DDP); ZeRO stage 2/3 and ZeRO optimizer offload are planned but not yet available (rejected at initialization). It is also incompatible with pipeline parallelism, DeepCompile, Apex AMP, and ZeRO `overlap_comm`. | `true`  |
+| Controls how gradient accumulation boundaries are managed. When `true`, DeepSpeed tracks micro-steps and applies the optimizer step only at the accumulation boundary, so `forward`/`backward`/`step` can be called symmetrically on every micro-batch. When `false`, micro-step tracking is disabled and the client is responsible for calling `step()` at the accumulation boundary; each `step()` finalizes the locally-accumulated gradients and applies an optimizer update. The `false` setting currently supports ZeRO stage 0/1/2/3 (and DDP); ZeRO offload (optimizer state and parameter) is planned but not yet available (rejected at initialization). It is also incompatible with pipeline parallelism, DeepCompile, and Apex AMP. ZeRO `overlap_comm` is supported only with ZeRO stage 2 (rejected for stage 0/1, where reduction is deferred to `step()`). | `true`  |
 
 
 
@@ -657,7 +657,7 @@ Note that if the value of "device" is not specified or not supported, an asserti
 
 | Description                                                                                          | Default |
 | ---------------------------------------------------------------------------------------------------- | ------- |
-| Offload to page-locked CPU memory. This could boost throughput at the cost of extra memory overhead. | `false` |
+| Offload to page-locked (pinned) CPU memory. Pinning enables asynchronous, full-bandwidth CPU<->GPU DMA so parameter fetches during forward/backward overlap with compute. Pinned memory is non-swappable and counts against the host memlock limit (`ulimit -l`); on hosts with tight memlock limits this may fail at init or cause out-of-memory errors elsewhere — set to `false` in that case. | `true` |
 
 ***buffer_count***: [integer]
 
@@ -707,7 +707,10 @@ Note that if the value of "device" is not specified or not supported, an asserti
 
 | Description                                                                                          | Default |
 | ---------------------------------------------------------------------------------------------------- | ------- |
-| Offload to page-locked CPU memory. This could boost throughput at the cost of extra memory overhead. | `false` |
+| Offload to page-locked (pinned) CPU memory. Pinning is required for the asynchronous GPU->CPU gradient offload to run as a full-bandwidth DMA that overlaps with backward compute (needs `overlap_comm: true`). Pinned memory is non-swappable and counts against the host memlock limit (`ulimit -l`); on hosts with tight memlock limits this may fail at init or cause out-of-memory errors elsewhere — set to `false` in that case. | `true` |
+
+**Note:** `pin_memory` now defaults to `true` for both `offload_param` and `offload_optimizer` (previously `false`). If you see out-of-memory errors after upgrading — especially on hosts with a low memlock limit (`ulimit -l`) — explicitly set `"pin_memory": false`.
+{: .notice--warning}
 
 ***ratio***: [float]
 
@@ -923,7 +926,13 @@ smoke coverage used for this AutoEP surface produced the following version gates
 
 | Description                                                                                    | Default |
 | ---------------------------------------------------------------------------------------------- | ------- |
-| Use `torch._grouped_mm` for fused grouped GEMM. Raises `RuntimeError` at `GroupedExperts` construction time when `torch._grouped_mm` is unavailable; set `use_grouped_mm=false` to use the sequential for-loop. | `true`  |
+| Enable fused grouped GEMM for MoE expert computation. When enabled, the backend is selected automatically by device: on compute capability >= 9.0 (Hopper and newer) it uses `torch._grouped_mm`, which has a fused grouped-GEMM kernel; on compute capability < 9.0 (e.g. Ampere/Ada, where `torch._grouped_mm` falls back to a slow per-group loop) it uses a Triton grouped-GEMM kernel instead, when Triton is available. Set `use_grouped_mm=false` to use the sequential per-expert for-loop. `GroupedExperts` construction raises `RuntimeError` only if `use_grouped_mm=true` but neither `torch._grouped_mm` nor the Triton backend is available. | `true`  |
+
+***disable_triton_grouped_mm***: [boolean]
+
+| Description                                                                                    | Default |
+| ---------------------------------------------------------------------------------------------- | ------- |
+| Controls the Triton grouped-GEMM backend selection when `use_grouped_mm=true`. When `false` (default), DeepSpeed uses the Triton grouped-GEMM kernel on devices where it is preferred (compute capability < 9.0, e.g. Ampere/Ada, where `torch._grouped_mm` falls back to a slow per-group loop) and Triton is available. Set `disable_triton_grouped_mm=true` to force the `torch._grouped_mm` path even on compute capability < 9.0 (falling back to the sequential for-loop if that operator is also unavailable). The Triton backend requires the `triton` package; when it is not installed, DeepSpeed uses `torch._grouped_mm` where available. | `false`  |
 
 ***moe_layer_pattern***: [string]
 

@@ -512,8 +512,7 @@ class OneCycle(object):
     def _initialize_lr(self, optimizer, cycle_min_lr, cycle_max_lr, decay_lr_rate, last_batch_iteration):
         self.min_lrs = [cycle_min_lr] * len(optimizer.param_groups)
         if last_batch_iteration == -1:
-            for lr, group in zip(self.min_lrs, optimizer.param_groups):
-                group['lr'] = lr
+            update_lr(optimizer.param_groups, self.min_lrs)
 
         self.max_lrs = [cycle_max_lr] * len(optimizer.param_groups)
         self.decay_lr_rate = decay_lr_rate

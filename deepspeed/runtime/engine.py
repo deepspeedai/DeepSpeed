@@ -1662,12 +1662,14 @@ class DeepSpeedEngine(Module):
                 f'Client Optimizer (type = {type(self.client_optimizer)} is not instantiated but Client LR Scheduler is instantiated'
 
         if not self.managed_gradient_accumulation():
-            assert not self.zero_optimization_partition_gradients(), \
-                "managed_gradient_accumulation=False is only supported for ZeRO stage 0 and 1"
-            assert self.zero_offload_optimizer() is None and self.zero_offload_param() is None, \
-                "managed_gradient_accumulation=False is not supported with ZeRO offload"
-            assert not self.zero_overlap_comm(), \
-                "managed_gradient_accumulation=False is not supported with ZeRO overlap_comm"
+            offload_optimizer = self.zero_offload_optimizer()
+            offload_param = self.zero_offload_param()
+            assert offload_optimizer is None or offload_optimizer.device == OffloadDeviceEnum.none, \
+                "managed_gradient_accumulation=False is not supported with ZeRO optimizer state offload"
+            assert offload_param is None or offload_param.device == OffloadDeviceEnum.none, \
+                "managed_gradient_accumulation=False is not supported with ZeRO parameter offload"
+            assert self.zero_optimization_partition_gradients() or not self.zero_overlap_comm(), \
+                "managed_gradient_accumulation=False supports ZeRO overlap_comm only with ZeRO stage 2"
             assert not self.pipeline_parallelism, \
                 "managed_gradient_accumulation=False is not supported with pipeline parallelism"
             assert not self.is_deepcompile_enabled(), \
@@ -2780,15 +2782,24 @@ class DeepSpeedEngine(Module):
             # We can't have this in forward prologue as the compiler compiles hooks including the forward prologue.
             self.launch_compile_passes(self.global_steps)
 
-        with deepcompile_z3_forward_context(self), autocast_if_enabled(self):
+        with deepcompile_z3_forward_context(self) as z3_eager_fallback, autocast_if_enabled(self):
             loss = self.module(*inputs, **kwargs)
+
+        forward_graph_id = None
+
+        def backward_prologue():
+            self._backward_prologue()
+            if z3_eager_fallback is not None and forward_graph_id is not None:
+                z3_eager_fallback.record_backward_start(forward_graph_id)
 
         # Register output backward hooks
         # preprocess_once_fn is called for preprocessing
         # preprocess_per_tensor_fn scales a tensor for gradient accumulation
-        register_output_backward_hooks(loss,
-                                       preprocess_once_fn=self._backward_prologue,
-                                       preprocess_per_tensor_fn=self._backward_prologue_per_tensor)
+        hook_manager = register_output_backward_hooks(loss,
+                                                      preprocess_once_fn=backward_prologue,
+                                                      preprocess_per_tensor_fn=self._backward_prologue_per_tensor)
+        if z3_eager_fallback is not None and hook_manager.hook_handles:
+            forward_graph_id = z3_eager_fallback.record_forward_graph()
 
         if self.autotuning_profile_model_info():
             activation_mem = get_ma_status() - ma
@@ -3012,8 +3023,11 @@ class DeepSpeedEngine(Module):
               with-blocks; the flush overwrites averaged_gradients each exit.
 
         Unsupported (NotImplementedError): ZeRO stage 0, BF16/FP16_Optimizer
-        wrappers, PipelineModule.
+        wrappers, PipelineModule. Also requires managed_gradient_accumulation=True.
         """
+        assert self.managed_gradient_accumulation(), \
+            "coalesce_grad_reduction is not supported with managed_gradient_accumulation=False; " \
+            "the caller already owns the accumulation boundary via step()"
         stage = self.zero_optimization_stage()
         if stage not in (ZeroStageEnum.optimizer_states, ZeroStageEnum.gradients, ZeroStageEnum.weights):
             raise NotImplementedError(f"coalesce_grad_reduction requires ZeRO stage 1/2/3, got stage {int(stage)}")
@@ -3378,9 +3392,11 @@ class DeepSpeedEngine(Module):
         # Unmanaged mode: step() is the accumulation boundary.
         self._running_engine_step = True
 
-        # Unmanaged mode: backward() only accumulates locally, so reduce grads here.
+        # Unmanaged boundary: stage 2/3 already reduced/partitioned per backward so only finalize; stage 0/1/DDP reduce here.
         if not self.managed_gradient_accumulation():
-            if self.enable_backward_allreduce and not self.inside_no_sync_ctxt:
+            if self.zero_optimization_partition_gradients():
+                self.optimizer.finalize_gradient_accumulation_boundary()
+            elif self.enable_backward_allreduce and not self.inside_no_sync_ctxt:
                 self.allreduce_gradients()
 
         if self.zenflow:

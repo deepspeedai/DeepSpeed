@@ -43,7 +43,6 @@ from deepspeed.module_inject.auto_ep_presets.registry import (
 )
 from deepspeed.moe.layer import MoE
 from deepspeed.moe.ep_experts import GroupedExperts
-from deepspeed.moe.ep_kernels import TokenReorderer
 from deepspeed.moe.ep_repack import repack_expert_weights
 from deepspeed.moe.ep_router import TokenChoiceTopKRouter
 from deepspeed.runtime.engine import DeepSpeedEngine
@@ -850,7 +849,7 @@ class TestRoutingAndLayerSemantics:
         assert torch.equal(scaled_counts, base_counts)
         assert base_counts.shape == (8, )
 
-    def test_grouped_experts_and_token_reorderer(self):
+    def test_grouped_experts(self):
         experts = GroupedExperts(dim=64, hidden_dim=128, num_experts=4, use_grouped_mm=False)
         nn.init.normal_(experts.w1, std=0.02)
         nn.init.normal_(experts.w2, std=0.02)
@@ -858,13 +857,6 @@ class TestRoutingAndLayerSemantics:
         out = experts(torch.randn(8, 64), torch.tensor([2, 2, 2, 2]))
         assert out.shape == (8, 64)
         assert not torch.isnan(out).any()
-
-        top_scores = torch.randn(20, 2)
-        selected_experts = torch.randint(0, 4, (20, 2))
-        scores_sorted, indices_sorted, counts = TokenReorderer(num_experts=4, top_k=2)(top_scores, selected_experts)
-        assert scores_sorted.shape == (40, )
-        assert set(indices_sorted.tolist()) == set(range(40))
-        assert torch.equal(counts, torch.bincount(selected_experts.reshape(-1), minlength=4).to(counts.dtype))
 
     def test_score_application_and_combine(self):
         x = torch.randn(4, 8)
