@@ -562,11 +562,9 @@ class AutoEPMoELayer(nn.Module):
         if folding_group_handles is not None:
             self.folding_group_handles = folding_group_handles
             if self.comm_backend == DEEPEP_BACKEND and folding_group_handles.spec.tp_size > 1:
-                # Folded TP partitions assignments across lanes and restores
-                # them by assignment metadata, which a transport whose combine
-                # returns token-major rows cannot satisfy. Refusing beats
-                # falling back, which leaves the job reporting a backend it is
-                # not running and the speedup unexplained.
+                # DeepEP's combine returns token-major rows, which folded TP's
+                # assignment-metadata restore can't consume. Refuse rather than
+                # silently fall back to a backend the job didn't ask for.
                 raise ValueError(f'comm_backend="{DEEPEP_BACKEND}" does not support folded tensor parallelism '
                                  f"(expert_tensor_parallel_size={folding_group_handles.spec.tp_size}). Set "
                                  'expert_tensor_parallel_size to 1, or comm_backend to "comm".')
@@ -604,21 +602,13 @@ class AutoEPMoELayer(nn.Module):
         """
         assert_dtype_supported(tokens.dtype)
 
-        # Sized once, on the first forward, and then fixed.
-        #
-        # DeepEP requires the same num_max_tokens_per_rank on every rank, and
-        # construction is collective, so the size cannot come from the local
-        # token count. It is agreed with one all-reduce, which is safe here
-        # because every rank reaches its first forward together.
-        #
-        # It deliberately does not re-agree later. A rank cannot tell whether
-        # its peers also need more room without asking them, and asking only
-        # when the local count grew makes the collective conditional on local
-        # data: if the counts ever diverge, some ranks enter the all-reduce and
-        # the rest do not, and the job hangs. Growing on demand would also cost
-        # a device-to-host read in the middle of every layer of every step,
-        # measured at roughly a fifth of the step. So a batch that outgrows the
-        # buffer is a configuration error with a named remedy, not a stall.
+        # Sized once, on the first forward, then fixed. Construction is
+        # collective and needs the same num_max_tokens_per_rank everywhere, so
+        # capacity is agreed with one all-reduce here, where every rank arrives
+        # together. It's deliberately never re-agreed later: a resize decided
+        # from local token counts risks ranks disagreeing on whether to enter
+        # the collective at all, which hangs rather than fails. A batch that
+        # outgrows the buffer instead raises with a named remedy below.
         if self._deepep_exchange is None:
             capacity = torch.tensor([tokens.shape[0]], dtype=torch.int64, device=tokens.device)
             dist.all_reduce(capacity, op=dist.ReduceOp.MAX, group=self.ep_group)
@@ -648,23 +638,16 @@ class AutoEPMoELayer(nn.Module):
                                                            ro.top_scores)
         handle = exchange.last_handle
 
-        # Dispatch returns buffers sized for the worst case, and combine reads
-        # exactly the rows the handle says arrived, so everything downstream is
-        # cut to that length before it is used. The count is taken from the
-        # handle, where it is already a Python int, rather than off the end of
-        # the prefix sum on the device: reading it there would put a
-        # device-to-host synchronisation in front of every layer's expert GEMM.
+        # combine reads exactly the rows the handle says arrived, taken from
+        # the handle as a Python int rather than off the device prefix sum to
+        # avoid a device-to-host sync in front of every layer's expert GEMM.
         arrived = handle.num_expanded_tokens
         received = received[:arrived]
 
-        # The routing weight is applied here in both score modes and is never
-        # handed to combine: DeepEP's combine does not multiply rows by the
-        # weights it carries, it transports and reduces them separately, so
-        # passing them there would drop them from the result entirely.
-        #
-        # Which side of the experts it goes on has to match the collective
-        # path, because the expert MLP is not linear and the two placements do
-        # not commute through SwiGLU.
+        # Applied here, not handed to combine: DeepEP's combine transports and
+        # reduces topk_weights but doesn't multiply rows by them. Which side of
+        # the experts it lands on must match the collective path, since SwiGLU
+        # doesn't commute with the weight.
         weights = None if recv_weights is None else recv_weights[:arrived].reshape(-1, 1)
         if weights is not None and self.score_apply == "pre":
             received = (received.float() * weights).to(received.dtype)

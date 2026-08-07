@@ -34,18 +34,10 @@ DEEPEP_BACKEND = "deepep"
 AVAILABLE_BACKENDS = (COMM_BACKEND, DEEPEP_BACKEND)
 # GIN, and so DeepEP, does not exist in any form below this NCCL version.
 NCCL_GIN_MIN_VERSION = (2, 30, 4)
-# The config's comm_num_sm default. Chosen by timing whole training steps
-# rather than the collective alone, because the budget trades one against the
-# other: the collective and the expert GEMM draw from the same SMs.
-#
-# On 16 H100s across two nodes, timing three runs per budget and rotating the
-# budgets through every position within one job, the median step was 297.9 ms
-# at 8 SMs and 265.4 ms at 12. Larger budgets were slower again, the collective
-# having taken SMs the rest of the step was using.
-#
-# Run-to-run spread was around 20%, which is wider than the gap between
-# neighbouring budgets, so single runs cannot separate them: a mean of two runs
-# put 8 ahead until one disturbed run turned out to be the whole difference.
+# The config's comm_num_sm default. The collective and the expert GEMM share
+# SMs, so this trades one against the other; timing whole steps on 16 H100s
+# across two nodes put the median at 265.4 ms for 12 SMs against 297.9 ms for
+# 8, with larger budgets slower again.
 DEFAULT_COMM_SMS = 12
 
 
@@ -111,11 +103,8 @@ def _import_deep_ep():
     if nccl_version is not None and nccl_version < NCCL_GIN_MIN_VERSION:
         installed = ".".join(str(part) for part in nccl_version)
         minimum = ".".join(str(part) for part in NCCL_GIN_MIN_VERSION)
-        # Deliberately a warning. This reports the NCCL that torch bundles and
-        # loads through its own RPATH, which DeepEP need not be using: DeepEP
-        # links the NCCL it was built against, and that pairing has been
-        # observed working while torch reported an older one. Refusing to start
-        # on this signal would block a configuration already known to run.
+        # A warning, not an error: DeepEP links its own NCCL, which can satisfy
+        # GIN even when torch reports an older one.
         logger.warning(
             f"torch reports NCCL {installed}, older than the {minimum} that GIN requires. DeepEP links its own "
             "NCCL, so this is only a problem if it also resolves to the older one; a failure inside buffer "
@@ -157,11 +146,8 @@ class DeepEPExchange:
         deep_ep = _import_deep_ep()
 
         self.deep_ep = deep_ep
-        # Queue pairs are the scarce resource here. Left automatic, DeepEP
-        # claims 65 to 129 of them, which is fine in a process that does
-        # nothing else but fails in a training step where ZeRO and the
-        # data-parallel groups have already taken their share. Asking for only
-        # what the chosen SM count needs keeps the request proportionate.
+        # Left automatic, DeepEP claims 65 to 129 queue pairs; see
+        # _qps_for_sms for why that's too many here.
         self.buffer = deep_ep.ElasticBuffer(
             ep_group,
             num_max_tokens_per_rank=num_max_tokens_per_rank,
@@ -188,9 +174,7 @@ class DeepEPExchange:
         # layer's teardown can still release every buffer in one call.
         _LIVE_EXCHANGES.append(self)
         # Buffer construction is collective and allocates fabric resources, so
-        # it is where an unsuitable cluster fails, often by killing the process
-        # without raising. Recording each one lets a post-mortem tell a buffer
-        # that was never built from one that was built and then used.
+        # it's often where an unsuitable cluster kills the process silently.
         logger.info(f"AutoEP DeepEP buffer {len(_LIVE_EXCHANGES)} built: "
                     f"capacity={num_max_tokens_per_rank} sms={num_sms} qps={_qps_for_sms(num_sms, qp_margin)}")
 
