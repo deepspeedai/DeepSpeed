@@ -61,7 +61,7 @@ jobs:
 
     steps:
       - name: Checkout trusted workflow code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: ${{ github.event.pull_request.base.sha || github.sha }}
           fetch-depth: 1
@@ -139,7 +139,7 @@ jobs:
         run: exit 1
 
       - name: Checkout trusted controller code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: ${{ github.event.pull_request.base.sha || github.sha }}
           fetch-depth: 1
@@ -148,7 +148,7 @@ jobs:
           submodules: false
 
       - name: Install Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: "3.10"
           cache: 'pip'
