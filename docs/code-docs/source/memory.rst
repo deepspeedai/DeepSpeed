@@ -339,8 +339,8 @@ environment variable (default ``torch``).
      - ``make_copy`` / ``match_shape`` are accepted by the API but only affect the native path
      - Honors ``make_copy`` and ``match_shape`` (both default ``True``)
    * - Pin recognition (``is_pinned``)
-     - Torch pinned status (plus any accelerator-specific check)
-     - ``.ds_pinned`` and process-wide pointer ranges (slices/views included); also visible to AIO/GDS I/O handles
+     - Torch pinned status (``tensor.is_pinned()``); visible to AIO/GDS I/O handles
+     - ``.ds_pinned`` and process-wide pointer ranges (slices/views included); also visible to AIO/GDS via the shared pin manager
    * - DeepNVMe I/O
      - Torch-pinned host buffers skip bounce buffers (``tensor.is_pinned()``)
      - Native-managed buffers also skip bounce buffers (shared pin manager / ``is_managed``), including slices/views in a locked range
