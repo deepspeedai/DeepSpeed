@@ -19,8 +19,9 @@ from unit.simple_model import SimpleModel
 from unit.common import allclose_on_all_ranks
 
 
-def compare_loss(self, config, dtype, iteration=5, hidden_dim_override=None, rtol=None, atol=None):
+def compare_loss(self, config, dtype, iteration=5, hidden_dim_override=None, rtol=None, atol=None, model_cls=None):
     hidden_dim = hidden_dim_override if hidden_dim_override is not None else 10
+    model_cls = SimpleModel if model_cls is None else model_cls
 
     # the default tolerances are too small for the ZeRO-0 eager vs ZeRO-3 compiled comparison
     RTOL = 5e-1 if rtol is None else rtol
@@ -40,7 +41,7 @@ def compare_loss(self, config, dtype, iteration=5, hidden_dim_override=None, rto
     get_accelerator().manual_seed_all(seed)
 
     device = torch.device(get_accelerator().current_device_name())
-    model = SimpleModel(hidden_dim)
+    model = model_cls(hidden_dim)
 
     i = get_accelerator().current_device()
     baseline_model = deepcopy(model)
@@ -53,7 +54,7 @@ def compare_loss(self, config, dtype, iteration=5, hidden_dim_override=None, rto
 
     if config["zero_optimization"]["stage"] == 3:
         with deepspeed.zero.Init(config_dict_or_path=config):
-            target_model = SimpleModel(hidden_dim)
+            target_model = model_cls(hidden_dim)
         with GatheredParameters(target_model.parameters(), modifier_rank=0):
             for p1, p2 in zip(target_model.parameters(), model.parameters()):
                 p1.data.copy_(p2.data)
