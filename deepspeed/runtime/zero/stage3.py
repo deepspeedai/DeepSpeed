@@ -1349,6 +1349,12 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         # The increment is deferred to clear_backward_seen_flag() which runs in forward().
         self._epilogue_ran_this_backward = True
 
+    def finalize_gradient_accumulation_boundary(self):
+        # Unmanaged mode: grad partitions already accumulate across backwards via __param_id_to_grad_partition; nothing to finalize for non-offload.
+        assert not self.offload_optimizer and not self.offload_param, \
+            "unmanaged gradient accumulation does not support ZeRO offload"
+        self.is_gradient_accumulation_boundary = True
+
     def overlapping_partition_gradients_reduce_epilogue(self):
         self.independent_gradient_partition_epilogue()
 

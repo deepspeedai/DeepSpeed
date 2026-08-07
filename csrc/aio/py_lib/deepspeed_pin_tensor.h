@@ -12,14 +12,21 @@ Functionality for managing CPU tensors occupying page-locked memory.
 */
 
 #include <map>
+#include <memory>
+#include <mutex>
 #include "deepspeed_py_aio.h"
 
 struct deepspeed_pin_tensor_t {
     std::map<void*, int64_t> _locked_tensors;
+    std::mutex _mutex;
 
     deepspeed_pin_tensor_t() = default;
 
     ~deepspeed_pin_tensor_t();
+
+    // Process-wide shared manager so that pinned-buffer recognition is consistent
+    // across every io handle (each handle references this single instance).
+    static std::shared_ptr<deepspeed_pin_tensor_t> shared();
 
     torch::Tensor alloc(const int64_t num_elem, const at::ScalarType& elem_type);
     torch::Tensor alloc(const int64_t num_elem, const torch::TensorOptions& options);
