@@ -947,6 +947,20 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
 
         see_memory_usage("End ipg_epilogue")
 
+    def finalize_gradient_accumulation_boundary(self):
+        # Unmanaged mode: grads were reduced/accumulated into all_grad_tensors each backward; finalize averaged_gradients for step().
+        assert not self.cpu_offload, "unmanaged gradient accumulation does not support ZeRO optimizer state offload"
+        self.is_gradient_accumulation_boundary = True
+        for i, _ in enumerate(self.bit16_groups):
+            self.averaged_gradients[i] = self.get_flat_partition(self.params_in_partition[i],
+                                                                 self.first_offset[i],
+                                                                 self.partition_size[i],
+                                                                 dtype=self.gradient_accumulation_dtype,
+                                                                 device=get_accelerator().current_device_name(),
+                                                                 param_group_idx=i,
+                                                                 return_tensor_list=True)
+            self.all_grad_tensors[i] = None
+
     def clear_backward_seen_flag(self):
         """Clear the backward seen flag and do deferred cleanup.
 
