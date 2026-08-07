@@ -228,7 +228,7 @@ class XPU_Accelerator(DeepSpeedAccelerator):
     def LongTensor(self):
         return functools.partial(torch.tensor, dtype=torch.long, device=self._name)
 
-    def _torch_pin_memory(self, tensor):
+    def _pin_memory(self, tensor):
         return tensor.pin_memory(device=self.current_device_name())
 
     def _torch_is_pinned(self, tensor):

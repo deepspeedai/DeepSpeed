@@ -231,7 +231,7 @@ class HPU_Accelerator(DeepSpeedAccelerator):
     def LongTensor(self):
         return functools.partial(torch.tensor, dtype=torch.long, device='hpu')
 
-    def _torch_pin_memory(self, tensor):
+    def _pin_memory(self, tensor):
         return tensor.pin_memory(self.device())
 
     def on_accelerator(self, tensor):

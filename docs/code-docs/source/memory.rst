@@ -265,13 +265,24 @@ Note about gradients: While gradients are stored in fp16 (2 bytes), during the w
 
 **Pinned Memory**
 
-Pinned general RAM is included in normal general RAM allocations (i.e. this is not extra memory allocations but simply shows how much of the general RAM is pinned). Enable pinning on ZeRO CPU/NVMe offload with ``"pin_memory": true`` under ``offload_optimizer`` / ``offload_param``. See :ref:`host-memory-pinning` for how host memory is page-locked (``torch`` vs ``native`` backends).
+Pinned general RAM is included in normal general RAM allocations (i.e. this is not extra memory allocations but simply shows how much of the general RAM is pinned). Pinning is controlled by the ``pin_memory`` field of ``offload_optimizer`` / ``offload_param`` (both default to ``true``); set to ``false`` on hosts with tight memlock limits (``ulimit -l``). See :ref:`host-memory-pinning` for how host memory is page-locked (``torch`` vs ``native`` backends).
 
-* ZeRO-2 / ZeRO-3 with ``offload_optimizer.pin_memory=true``: fp32 master weights / gradients (and related offload scratch buffers) may be pinned on the host.
+* ZeRO-1/2: controlled by ``offload_optimizer.pin_memory`` (fp32 master weights / gradients and related offload scratch buffers may be pinned on the host)
 
 * ZeRO-3 with ``offload_param.pin_memory=true``: partitioned fp16/bf16 parameter buffers on CPU may also be pinned.
 
-Exact pinned volume depends on which states are offloaded and on gradient-accumulation settings.
+With pinning enabled on ZeRO-3 there are 2 sub-cases:
+
+1. ``offload_param`` enabled (``device: cpu``):
+
+   - 6 * params (2b for fp16 params + 4b for fp32 gradients)
+   - if ``gradient_accumulation_steps > 1`` an additional 2b for fp16 gradients are pinned
+
+2. ``offload_param`` not enabled:
+
+   - 4b for fp32 gradients
+
+Exact pinned volume also depends on gradient-accumulation and other offload scratch buffers.
 
 
 **Activation Memory**

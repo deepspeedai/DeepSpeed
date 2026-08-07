@@ -260,12 +260,14 @@ class DeepSpeedAccelerator(ABC):
     def LongTensor(self):
         ...
 
-    # Memory pinning. The public methods below dispatch between the native
-    # backend (``deepspeed.utils.pin_memory``, selected via ``DS_PIN_MEMORY_BACKEND``)
-    # and the device-specific torch primitives ``_torch_pin_memory``/``_torch_is_pinned``,
-    # which subclasses override as needed. The native utility is backend-only and
-    # never calls back here.
-    def _torch_pin_memory(self, tensor):
+    # Memory pinning. Public ``pin_memory`` dispatches between the native backend
+    # (``deepspeed.utils.pin_memory``, via ``DS_PIN_MEMORY_BACKEND``) and the
+    # device-specific torch hook ``_pin_memory``. Both paths update pinned-memory
+    # accounting when pages are actually locked. Subclasses override ``_pin_memory``
+    # / ``_torch_is_pinned`` as needed; the native utility never calls back here.
+    def _pin_memory(self, tensor):
+        """Device-specific torch pinning hook. Override this rather than
+        ``pin_memory`` so pinned-memory accounting in ``pin_memory`` is preserved."""
         return tensor.pin_memory()
 
     def _torch_is_pinned(self, tensor):
@@ -273,10 +275,14 @@ class DeepSpeedAccelerator(ABC):
 
     def pin_memory(self, tensor, make_copy=True, match_shape=True):
         from deepspeed.utils.pin_memory import get_active_native_pinned_memory
+        from deepspeed.utils.pin_memory_tracker import track_pinned_memory
         pins = get_active_native_pinned_memory()
         if pins is not None:
-            return pins.pin(tensor, make_copy=make_copy, match_shape=match_shape)
-        return self._torch_pin_memory(tensor)
+            pinned = pins.pin(tensor, make_copy=make_copy, match_shape=match_shape)
+            track_pinned_memory(pinned.nbytes)
+            return pinned
+        track_pinned_memory(tensor.nbytes)
+        return self._pin_memory(tensor)
 
     def is_pinned(self, tensor):
         from deepspeed.utils.pin_memory import get_active_native_pinned_memory
