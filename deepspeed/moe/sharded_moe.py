@@ -629,7 +629,7 @@ class MOELayer(Base):
     Args:
         gate (torch.nn.Module):
             gate network
-        expert (torch.nn.Module):
+        experts (torch.nn.Module):
             expert network
     """
 

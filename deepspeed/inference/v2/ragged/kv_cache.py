@@ -67,11 +67,8 @@ class BlockedKVCache:
         blocked KV-caches.
 
         Parameters:
-            config (KVCacheConfig): The configuration of the KV-cache.
-            slack (int): The amount of slack space to reserve in GPU memory for the cache.
-            enable_offload (bool): Whether to enable offloading of the cache to the host.
-            blocks (int): The number of blocks to pre-allocate for the cache. If this is set,
-                slack will be ignored.
+            configs (Tuple[KVCacheConfig, ...]): The configurations of the KV-cache.
+            offload (bool): Whether to enable offloading of the cache to the host.
         """
         self._configs = configs
         self._memory_config = memory_config

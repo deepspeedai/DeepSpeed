@@ -150,7 +150,7 @@ def apply_to_tensors_only(function, value, warning_msg_fn=None):
     Apply `function` to every Tensor in `value`.
 
     Args:
-        functional: The function class to apply.
+        function: The function class to apply.
         value (Any): Target object to apply `function` to.
 
     Returns:
