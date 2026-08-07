@@ -681,6 +681,24 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         for hook in self._grad_acc_hooks:
             hook.remove()
         self.print_rank_0("Removed grad acc hooks")
+        self._unpin_offload_buffers()
+
+    def _unpin_offload_buffers(self):
+        # Release the page-locked host buffers we pinned for CPU offload. unpin_memory is a
+        # no-op for the torch backend and only frees under DS_PIN_MEMORY_BACKEND=native,
+        # where the mlocked allocation would otherwise persist until garbage collection.
+        if not (self.cpu_offload and self.cpu_offload_pin_memory):
+            return
+        accelerator = get_accelerator()
+        for fp32_partition in self.single_partition_of_fp32_groups:
+            accelerator.unpin_memory(fp32_partition)
+            if fp32_partition.grad is not None:
+                accelerator.unpin_memory(fp32_partition.grad)
+        for buffer in self.param_buffer_of_bit16_for_cpu_offload_groups:
+            accelerator.unpin_memory(buffer)
+        temp_grad_buffer = getattr(self, 'temp_grad_buffer_for_cpu_offload', None)
+        if temp_grad_buffer is not None:
+            accelerator.unpin_memory(temp_grad_buffer)
 
     def _enable_universal_checkpoint(self):
         self._universal_checkpoint_info = None

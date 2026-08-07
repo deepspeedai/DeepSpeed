@@ -278,14 +278,15 @@ class CPU_Accelerator(DeepSpeedAccelerator):
     def LongTensor(self):
         return torch.LongTensor
 
-    def pin_memory(self, tensor, align_bytes=1):
-        # Overrides pin_memory directly (not _pin_memory) to bypass the ABC's
-        # pinned-memory accounting: this is a no-op, nothing is page-locked, so
-        # counting would mislead OOM diagnostics. Do not rename to _pin_memory.
+    def pin_memory(self, tensor, make_copy=True, match_shape=True):
+        # Torch cannot pin CPU tensors to a device (historical no-op). Override
+        # ``pin_memory`` (not ``_pin_memory``) so the ABC's pinned-memory
+        # accounting is skipped when nothing is page-locked. When the native
+        # backend is active, pages are actually mlocked — defer to the ABC.
+        from deepspeed.utils.pin_memory import get_active_native_pinned_memory
+        if get_active_native_pinned_memory() is not None:
+            return DeepSpeedAccelerator.pin_memory(self, tensor, make_copy=make_copy, match_shape=match_shape)
         return tensor
-
-    def is_pinned(self, tensor):
-        return tensor.is_pinned()
 
     def op_builder_dir(self):
         try:
