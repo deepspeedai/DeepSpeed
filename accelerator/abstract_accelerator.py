@@ -260,9 +260,16 @@ class DeepSpeedAccelerator(ABC):
     def LongTensor(self):
         ...
 
-    @abc.abstractmethod
     def pin_memory(self, tensor, align_bytes=1):
-        ...
+        from deepspeed.utils.pin_memory_tracker import track_pinned_memory
+        track_pinned_memory(tensor.nbytes)
+        return self._pin_memory(tensor, align_bytes)
+
+    def _pin_memory(self, tensor, align_bytes=1):
+        """Device-specific pinning hook. Accelerators that need custom pinning
+        behavior should override this method rather than ``pin_memory`` so that
+        the pinned-memory accounting in ``pin_memory`` is preserved."""
+        return tensor.pin_memory()
 
     @abc.abstractmethod
     def is_pinned(self, tensor):

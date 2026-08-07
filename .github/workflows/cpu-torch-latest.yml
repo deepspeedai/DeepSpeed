@@ -58,10 +58,10 @@ jobs:
         if: github.event_name != 'pull_request'
         run: echo "should_run=true" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         if: github.event_name == 'pull_request'
 
-      - uses: dorny/paths-filter@v3
+      - uses: dorny/paths-filter@v4
         id: filter
         if: github.event_name == 'pull_request'
         with:
@@ -92,7 +92,7 @@ jobs:
         if: needs.check-paths.result != 'success'
         run: exit 1
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - id: setup-venv
         uses: ./.github/workflows/setup-venv
