@@ -28,10 +28,10 @@ jobs:
         if: github.event_name != 'pull_request'
         run: echo "should_run=true" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         if: github.event_name == 'pull_request'
 
-      - uses: dorny/paths-filter@v3
+      - uses: dorny/paths-filter@v4
         id: filter
         if: github.event_name == 'pull_request'
         with:
@@ -64,7 +64,7 @@ jobs:
           if: needs.check-paths.outputs.should_run != 'true'
           run: echo "Only ignored paths changed; install smoke intentionally skipped."
 
-        - uses: actions/checkout@v4
+        - uses: actions/checkout@v7
           if: needs.check-paths.outputs.should_run == 'true'
 
         - name: Install build dependencies
