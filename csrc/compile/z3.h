@@ -10,6 +10,12 @@
 namespace dc {
 
 void register_graph_z3(long graph_id, const std::vector<long>& ds_ids);
+void set_z3_gather_buffer_pool_fixed_budget_for_test(int64_t fixed_budget_bytes);
+void update_z3_gather_buffer_pool_allocator_pressure_for_test(int64_t retries,
+                                                              int64_t free_bytes,
+                                                              int64_t total_bytes);
+std::vector<int64_t> get_z3_gather_buffer_pool_state_for_test();
+void reset_z3_gather_buffer_pool();
 void register_graph_ops_z3(long graph_id,
                            const std::vector<std::string>& op_names,
                            const std::vector<long>& n_args);

@@ -105,6 +105,15 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
     m.def("register_graph_z3",
           &dc::register_graph_z3,
           "Register graph with a list of ds parameter ids");
+    m.def("set_z3_gather_buffer_pool_fixed_budget_for_test",
+          &dc::set_z3_gather_buffer_pool_fixed_budget_for_test,
+          "Set a fixed ZeRO-3 gather-buffer-pool budget for tests");
+    m.def("update_z3_gather_buffer_pool_allocator_pressure_for_test",
+          &dc::update_z3_gather_buffer_pool_allocator_pressure_for_test,
+          "Simulate allocator pressure for ZeRO-3 gather-buffer-pool tests");
+    m.def("get_z3_gather_buffer_pool_state_for_test",
+          &dc::get_z3_gather_buffer_pool_state_for_test,
+          "Inspect ZeRO-3 gather-buffer-pool accounting for tests");
     m.def("start_forward", &dc::start_forward, "Start forward pass");
     m.def("end_forward", &dc::end_forward, "End forward pass");
     m.def("start_backward", &dc::start_backward, "Start backward pass");

@@ -153,6 +153,24 @@ This project is the result of a close collaboration between Microsoft and the Un
 
 # Appendix
 
+## Diagnostics
+
+DeepCompile's low-level scheduler and gather-buffer diagnostics are opt-in environment variables rather than
+`compile` configuration fields. Prefix the normal launch command with either variable, for example:
+
+```bash
+DEEPSPEED_COMPILE_SCHEDULER_BUDGET_DEBUG=1 deepspeed <training-script>
+DEEPSPEED_ALLOCATOR_TELEMETRY=1 deepspeed <training-script>
+```
+
+Both flags are disabled when unset or set, case-insensitively, to an empty value, `0`, `false`, or `no`; any other
+value enables the diagnostic. `DEEPSPEED_COMPILE_SCHEDULER_BUDGET_DEBUG` prints rank-zero scheduler budget and
+cross-rank schedule-fingerprint lines beginning with `DeepCompile ZeRO-3 scheduler`, `DeepCompile ZeRO-3
+collective_schedule_projection`, or `DeepCompile ZeRO-3 final_schedule_fingerprint`.
+`DEEPSPEED_ALLOCATOR_TELEMETRY` prints native, line-oriented gather-buffer pool events from each process beginning
+with `DEEPSPEED_Z3_GATHER_BUFFER_POOL`. These debugging streams are not JSON or a stable machine-readable API and
+may add synchronization or logging overhead.
+
 ## Examples and Benchmarks
 
 Our DeepSpeedExamples repository provides [example code](https://github.com/deepspeedai/DeepSpeedExamples/tree/master/benchmarks/deepcompile) to enable DeepCompile.
