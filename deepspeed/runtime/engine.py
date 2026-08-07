@@ -150,6 +150,7 @@ from deepspeed.compile.init_z1 import init_z1
 from deepspeed.compile.init_z3 import init_z3
 from deepspeed.compile.z3_eager_fallback import deepcompile_z3_forward_context
 from deepspeed.compile.init_sp import init_autosp
+from deepspeed.compile.init_tp import init_autotp
 
 MEMORY_OPT_ALLREDUCE_SIZE = 500000000
 
@@ -1214,6 +1215,19 @@ class DeepSpeedEngine(Module):
     def compile_autosp(self):
         """Determines if AutoSP is set in deepcompile's passes attributes."""
         return "autosp" in (getattr(self._config.compile_config, "passes", None) or [])
+
+    def compile_autotp(self):
+        """Determines if AutoTP is set in deepcompile's passes attributes."""
+        return "autotp" in (getattr(self._config.compile_config, "passes", None) or [])
+
+    def uses_parallelization_pass_only(self):
+        """Determines if the compiled graph comes from a parallelization pass rather than ZeRO.
+
+        AutoSP and AutoTP rewrite the graph and then rely on regular autograd, so a run using only
+        those passes must keep the standard gradient reduction instead of the one the z1/z3 passes
+        install.
+        """
+        return self.compile_autosp() or self.compile_autotp()
 
     def mics_shard_size(self):
         return self._config.mics_shard_size
@@ -2838,7 +2852,7 @@ class DeepSpeedEngine(Module):
     def allreduce_gradients(self, bucket_size=MEMORY_OPT_ALLREDUCE_SIZE):
         # Skip gradient reduction when DeepCompile is enabled
         # DeepCompile handles its own gradient reduction through compiled graph operations
-        if self.is_deepcompile_active() and not self.compile_autosp():
+        if self.is_deepcompile_active() and not self.uses_parallelization_pass_only():
             return
 
         # Pass (PP) gas boundary flag to optimizer (required for zero)
@@ -2897,7 +2911,9 @@ class DeepSpeedEngine(Module):
         assert not self.eigenvalue_enabled(), "Eigenvalue is not supported with non-scalar backward"
         assert not self.amp_enabled(), "Apex AMP is not supported with non-scalar backward"
 
-        if self.is_deepcompile_active():
+        # The AutoTP pass installs no backward hooks and keeps no DeepCompile state, so the
+        # prologue would only force the DeepCompile native extension to load for nothing.
+        if self.is_deepcompile_active() and not self.compile_autotp():
             deepcompile_backward_prologue(self.is_gradient_accumulation_boundary())
 
         if isinstance(self.optimizer, ZeROOptimizer):
@@ -2932,7 +2948,7 @@ class DeepSpeedEngine(Module):
                 self.optimizer.backward_epilogue()
             self.optimizer.exit_backward()
 
-        if self.is_deepcompile_active():
+        if self.is_deepcompile_active() and not self.compile_autotp():
             deepcompile_backward_epilogue()
 
         see_memory_usage("Engine after backward", force=self.memory_breakdown())
@@ -5555,6 +5571,26 @@ class DeepSpeedEngine(Module):
         compile_kwargs['fullgraph'] = True
         return init_autosp(self._config)
 
+    def get_autotp_backend(self, compile_kwargs):
+        if self.autotp_size() <= 1:
+            logger.info("AutoTP compile pass requires tensor_parallel.autotp_size > 1. "
+                        "Falling back to the torch compiler.")
+            return None
+
+        # The one-shot dataloader consistency check broadcasts Python objects, which cannot be
+        # captured in a full graph, so it has to go before the module is compiled.
+        if self.first_dataloader_check is not None:
+            self.first_dataloader_check.remove()
+            self.first_dataloader_check = None
+            logger.warning("Skipping the TP dataloader consistency check because the AutoTP compile pass "
+                           "requires a full graph. Ensure the dataloader yields identical inputs on every "
+                           "rank of the TP group.")
+
+        # A graph break would leave part of the model without the collectives the pass inserts,
+        # which is silently wrong rather than slow, so the whole module must be captured.
+        compile_kwargs['fullgraph'] = True
+        return init_autotp(self.module)
+
     def get_deepcompile_backend(self, backend, compile_kwargs, schedule):
         if self.zero_optimization_stage() != ZeroStageEnum.optimizer_states \
                 and self.zero_optimization_stage() != ZeroStageEnum.weights \
@@ -5593,8 +5629,14 @@ class DeepSpeedEngine(Module):
 
         assert backend in ['inductor', 'eager'], f"Backend {backend} is not supported for DeepCompile."
 
+        if self.compile_autotp() and (self.compile_autosp() or self.compile_zero_optimization_stage()):
+            raise NotImplementedError("The AutoTP compile pass cannot yet be combined with AutoSP or the ZeRO "
+                                      "passes. Run 'autotp' on its own until the passes are made composable.")
+
         if self.compile_autosp():
             resolved_backend = self.get_autosp_backend(compile_kwargs)
+        elif self.compile_autotp():
+            resolved_backend = self.get_autotp_backend(compile_kwargs)
         else:
             resolved_backend = self.get_deepcompile_backend(backend, compile_kwargs, schedule)
 

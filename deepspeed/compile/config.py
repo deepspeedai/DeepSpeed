@@ -6,7 +6,7 @@
 from typing import List, Optional, Literal
 from deepspeed.runtime.config_utils import DeepSpeedConfigModel
 
-PassName = Literal["z1", "z3", "autosp"]
+PassName = Literal["z1", "z3", "autosp", "autotp"]
 
 
 class CompileConfig(DeepSpeedConfigModel):

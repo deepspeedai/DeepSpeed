@@ -305,6 +305,10 @@ class TensorParallel_Layer(nn.Module, ABC):
         """
         super().__init__()
         self.support_training: bool = False
+        # DeepCompile's AutoTP pass emits the tensor-parallel collectives as graph nodes so the
+        # scheduler and profiler can see them. The module-level collectives are suppressed in that
+        # mode, but mp_group is still needed for parameter gathering and checkpointing.
+        self.defer_collectives_to_compiler: bool = False
         self.mp_group = mp_group
         if mp_group is not None:
             self.tp_world_size: int = dist.get_world_size(self.mp_group)
@@ -643,7 +647,8 @@ class LinearAllreduce(TensorParallel_Layer):
 
     def forward(self, input):
         output = torch.matmul(input, self.weight.transpose(-1, -2))
-        output = RowParallel.apply(self.mp_group, output, not self.is_training_mode())
+        if not self.defer_collectives_to_compiler:
+            output = RowParallel.apply(self.mp_group, output, not self.is_training_mode())
         if self.bias is not None:
             output = add_bias(output, self.bias)
         return output
@@ -738,7 +743,7 @@ class LinearLayer(TensorParallel_Layer):
 
     def forward(self, input):
         if not self.__class__.tp_overlap_comm:
-            if getattr(self, 'mp_group', None) is not None:
+            if getattr(self, 'mp_group', None) is not None and not self.defer_collectives_to_compiler:
                 input = ColumnParallel.apply(self.mp_group, input)
             output = torch.matmul(input, self.weight.transpose(-1, -2))
             if self.bias is not None:
