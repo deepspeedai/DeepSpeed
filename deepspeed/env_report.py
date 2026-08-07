@@ -9,6 +9,7 @@ import deepspeed
 import subprocess
 import argparse
 from .ops.op_builder.all_ops import ALL_OPS
+from .ops.op_builder.builder import probe_is_compatible
 from .git_version_info import installed_ops, torch_info, accelerator_name
 from deepspeed.accelerator import get_accelerator
 
@@ -51,7 +52,7 @@ def op_report(verbose=True):
     no = f"{YELLOW}[NO]{END}"
     for op_name, builder in ALL_OPS.items():
         dots = "." * (max_dots - len(op_name))
-        is_compatible = OKAY if builder.is_compatible(verbose) else no
+        is_compatible = OKAY if probe_is_compatible(builder, verbose) else no
         is_installed = installed if installed_ops.get(op_name,
                                                       False) and accelerator_name == get_accelerator()._name else no
         dots2 = '.' * ((len(h[1]) + (max_dots2 - len(h[1]))) - (len(is_installed) - color_len))
