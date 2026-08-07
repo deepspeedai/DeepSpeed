@@ -342,8 +342,8 @@ environment variable (default ``torch``).
      - Torch pinned status (plus any accelerator-specific check)
      - ``.ds_pinned`` and process-wide pointer ranges (slices/views included); also visible to AIO/GDS I/O handles
    * - DeepNVMe I/O
-     - May require bounce buffers unless the buffer was locked via the I/O handle
-     - Recognized across handles, so DeepNVMe can skip bounce buffers for these pins
+     - Torch-pinned host buffers skip bounce buffers (``tensor.is_pinned()``)
+     - Native-managed buffers also skip bounce buffers (shared pin manager / ``is_managed``), including slices/views in a locked range
    * - ``unpin_memory``
      - No-op (returns ``None``)
      - Frees the mlocked allocation immediately (returns ``True`` on success)
