@@ -131,5 +131,7 @@ lnav:
         url: /tutorials/zero/
       - title: 'ZeRO++'
         url: /tutorials/zeropp/
+  - title: 'Governance'
+    url: /governance/
   - title: 'Contributing'
     url: /contributing/
