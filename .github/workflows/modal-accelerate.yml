@@ -51,12 +51,12 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           lfs: true
 
       - name: Filter changed files
-        uses: dorny/paths-filter@v2
+        uses: dorny/paths-filter@v4
         id: filter
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
@@ -84,12 +84,12 @@ jobs:
     if: needs.collect-tests.outputs.deepspeed == 'true'
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           lfs: true
 
       - name: Install Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: "3.10"
           cache: 'pip' # caching pip dependencies
