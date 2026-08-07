@@ -42,15 +42,14 @@ def test_zero_hpz_partition_size_config():
 
 
 def test_zero_hpz_small_param_secondary_shard_without_overlap(monkeypatch):
+
     class _FakeAccelerator:
 
         def resolves_data_dependency(self):
             return True
 
-    monkeypatch.setattr("deepspeed.runtime.zero.partition_parameters.get_accelerator",
-                        lambda: _FakeAccelerator())
-    monkeypatch.setattr("deepspeed.runtime.zero.partition_parameters.print_rank_0",
-                        lambda *args, **kwargs: None)
+    monkeypatch.setattr("deepspeed.runtime.zero.partition_parameters.get_accelerator", lambda: _FakeAccelerator())
+    monkeypatch.setattr("deepspeed.runtime.zero.partition_parameters.print_rank_0", lambda *args, **kwargs: None)
 
     param = nn.Parameter(torch.tensor([3.0], dtype=torch.float16))
     param.ds_status = ZeroParamStatus.AVAILABLE
@@ -70,25 +69,24 @@ def test_zero_hpz_small_param_secondary_shard_without_overlap(monkeypatch):
     Init._partition_param_sec(dummy_init, param)
 
     assert param.ds_secondary_tensor is not None
-    assert tuple(param.ds_secondary_tensor.shape) == (2,)
+    assert tuple(param.ds_secondary_tensor.shape) == (2, )
     assert param.ds_secondary_tensor.requires_grad is False
     assert torch.equal(param.ds_secondary_tensor, torch.zeros(2, dtype=torch.float16))
 
 
 def test_zero_hpz_secondary_shard_padding_is_zeroed(monkeypatch):
+
     class _FakeAccelerator:
 
         def resolves_data_dependency(self):
             return True
 
-    monkeypatch.setattr("deepspeed.runtime.zero.partition_parameters.get_accelerator",
-                        lambda: _FakeAccelerator())
-    monkeypatch.setattr("deepspeed.runtime.zero.partition_parameters.print_rank_0",
-                        lambda *args, **kwargs: None)
+    monkeypatch.setattr("deepspeed.runtime.zero.partition_parameters.get_accelerator", lambda: _FakeAccelerator())
+    monkeypatch.setattr("deepspeed.runtime.zero.partition_parameters.print_rank_0", lambda *args, **kwargs: None)
 
     param = nn.Parameter(torch.tensor([1.0, 2.0, 3.0], dtype=torch.float16))
     param.ds_status = ZeroParamStatus.AVAILABLE
-    param.ds_secondary_tensor = torch.full((2,), -7.0, dtype=torch.float16)
+    param.ds_secondary_tensor = torch.full((2, ), -7.0, dtype=torch.float16)
     param.ds_secondary_tensor.ds_numel = 2
     param.ds_secondary_tensor.status = ZeroParamStatus.AVAILABLE
     param.ds_numel = param.numel()
