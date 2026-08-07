@@ -317,13 +317,45 @@ Backend Selection
 =================
 
 The pinning implementation is selected with the ``DS_PIN_MEMORY_BACKEND``
-environment variable:
+environment variable (default ``torch``).
 
-* ``torch`` (default): uses ``torch.Tensor.pin_memory()``. ``unpin_memory()`` is
-  a no-op; memory is released when the tensor is garbage-collected.
-* ``native``: uses DeepNVMe's page-locked allocator (``posix_memalign`` +
-  ``mlock``) via the async-io op. Native pins are recognized across AIO/GDS I/O
-  handles, so DeepNVMe can skip bounce buffers for these buffers.
+.. list-table:: Differences between ``torch`` and ``native`` pin backends
+   :header-rows: 1
+   :widths: 22 39 39
+
+   * - Aspect
+     - ``torch`` (default)
+     - ``native``
+   * - Allocator
+     - ``torch.Tensor.pin_memory()`` (device-specific accelerator hook)
+     - DeepNVMe page-locked allocator (``posix_memalign`` + ``mlock``) via async-io
+   * - Selection
+     - ``DS_PIN_MEMORY_BACKEND`` unset or ``torch``
+     - ``DS_PIN_MEMORY_BACKEND=native``
+   * - Build dependency
+     - None beyond the active accelerator / PyTorch
+     - DeepSpeed **async-io** (AIO) op must build and load; fails early if unavailable (no silent fallback)
+   * - ``pin_memory`` extras
+     - ``make_copy`` / ``match_shape`` are accepted by the API but only affect the native path
+     - Honors ``make_copy`` and ``match_shape`` (both default ``True``)
+   * - Pin recognition (``is_pinned``)
+     - Torch pinned status (plus any accelerator-specific check)
+     - ``.ds_pinned`` and process-wide pointer ranges (slices/views included); also visible to AIO/GDS I/O handles
+   * - DeepNVMe I/O
+     - May require bounce buffers unless the buffer was locked via the I/O handle
+     - Recognized across handles, so DeepNVMe can skip bounce buffers for these pins
+   * - ``unpin_memory``
+     - No-op (returns ``None``)
+     - Frees the mlocked allocation immediately (returns ``True`` on success)
+   * - Lifetime / free
+     - Freed when the tensor is garbage-collected (PyTorch)
+     - ``weakref`` finalizer frees on GC; prefer explicit ``unpin_memory`` for long-lived buffers (e.g. ZeRO ``destroy()``)
+   * - Host accounting
+     - Counted by ``track_pinned_memory`` when pages are actually locked
+     - Same accounting on the returned locked buffer
+   * - CPU accelerator
+     - Historical no-op (torch cannot pin CPU tensors); accounting skipped
+     - Real ``mlock`` pins; accounting applies
 
 Example:
 
