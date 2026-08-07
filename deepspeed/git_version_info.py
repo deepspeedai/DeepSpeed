@@ -23,9 +23,10 @@ except ModuleNotFoundError:
 
 # compatible_ops list is recreated for each launch
 from .ops.op_builder.all_ops import ALL_OPS
+from .ops.op_builder.builder import probe_is_compatible
 
 compatible_ops = dict.fromkeys(ALL_OPS.keys(), False)
 for op_name, builder in ALL_OPS.items():
-    op_compatible = builder.is_compatible()
+    op_compatible = probe_is_compatible(builder)
     compatible_ops[op_name] = op_compatible
     compatible_ops["deepspeed_not_implemented"] = False

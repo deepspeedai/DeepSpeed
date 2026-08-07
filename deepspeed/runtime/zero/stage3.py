@@ -18,6 +18,7 @@ from torch._utils import _flatten_dense_tensors, _unflatten_dense_tensors
 from deepspeed.runtime.base_optimizer import ZeROOptimizer
 from deepspeed.utils import logger
 from deepspeed.utils.torch import register_grad_hook, required_torch_version
+from deepspeed.utils.pin_memory_tracker import pinned_memory_summary
 from deepspeed.runtime.fp16.loss_scaler import CreateLossScaler
 from deepspeed.runtime.torch_autocast import get_autocast_dtype, get_all_comm_dtypes, is_autocast_initialized, sort_dtypes
 from deepspeed.runtime.comm.coalesced_collectives import reduce_scatter_coalesced, all_to_all_quant_reduce, all_to_all_loco_quant_reduce
@@ -718,6 +719,8 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             self.__param_id_to_grad_partition[param.ds_id] = self.grad_partitions_flat_buffer.narrow(
                 0, offset, param.partition_numel())
             offset += param.partition_numel()
+
+        pinned_memory_summary("ZeRO-3 optimizer init")
 
     def _link_all_hp_params(self):
         for p in self.module.parameters():
@@ -1778,14 +1781,6 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         #Using a more memory efficient version
         self.norm_for_param_grads[param_id] = self._constant_buffered_norm2(param.grad)
 
-    def async_inplace_copy_grad_to_fp32_buffer_from_gpu(self, param, fp32_grad_tensor):
-        with get_accelerator().stream(self.copy_grad_stream):
-            param_id = self.get_param_id(param)
-            src_tensor = param.grad.view(-1).to(dtype=self.master_weights_and_grads_dtype)
-            #print(f"src_tensor {src_tensor.size()} and fp32 grad {fp32_grad_tensor.size()}")
-            fp32_grad_tensor.copy_(src_tensor, non_blocking=True)
-            param.grad = None
-
     def complete_grad_norm_calculation_for_cpu_offload(self, params):
         self._assert_same_partition_group(params)
         process_group = self._get_param_partition_group(params[0])
@@ -1864,7 +1859,8 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                     else:
                         fp32_grad_tensor = self.fp32_partitioned_groups_flat[i].grad.narrow(
                             0, dest_offset, grad_buffer.numel())
-                        fp32_grad_tensor.copy_(grad_buffer.to(dtype=self.master_weights_and_grads_dtype))
+                        fp32_grad_tensor.copy_(grad_buffer.to(dtype=self.master_weights_and_grads_dtype),
+                                               non_blocking=True)
 
             # free the gradient
             if not get_accelerator().is_synchronized_device():

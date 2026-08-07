@@ -50,13 +50,34 @@ def installed_cuda_version(name=""):
     if cuda_home is None:
         raise MissingCUDAException("CUDA_HOME does not exist, unable to compile CUDA op(s)")
     # Ensure there is not a cuda version mismatch between torch and nvcc compiler
-    output = subprocess.check_output([cuda_home + "/bin/nvcc", "-V"], universal_newlines=True)
+    nvcc = cuda_home + "/bin/nvcc"
+    try:
+        output = subprocess.check_output([nvcc, "-V"], universal_newlines=True)
+    except (OSError, subprocess.SubprocessError) as err:
+        # CUDA_HOME can point at a runtime only install, which has no nvcc to compile with. Report that
+        # the same way as a missing CUDA_HOME so the callers that already fall back can handle it.
+        raise MissingCUDAException(f"Unable to run {nvcc}, unable to compile CUDA op(s): {err}") from err
     output_split = output.split()
     release_idx = output_split.index("release")
     release = output_split[release_idx + 1].replace(',', '').split(".")
     # Ignore patch versions, only look at major + minor
     cuda_major, cuda_minor = release[:2]
     return int(cuda_major), int(cuda_minor)
+
+
+def probe_is_compatible(builder, verbose=False):
+    """Report whether an op can be built, treating a probe that itself fails as "not compatible".
+
+    Compatibility is probed for every op when deepspeed is imported, whether or not the caller will ever
+    build that op. A CUDA op builder on a machine that has a GPU but no CUDA toolkit raises
+    MissingCUDAException from its probe, which would otherwise make importing deepspeed fail outright
+    over an op that was never asked for. See #7452.
+    """
+    try:
+        return builder.is_compatible(verbose)
+    except Exception as err:
+        print(f"{WARNING} {builder.name} compatibility check failed ({err}), treating the op as not compatible")
+        return False
 
 
 def get_default_compute_capabilities():

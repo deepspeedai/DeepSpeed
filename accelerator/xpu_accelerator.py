@@ -229,7 +229,7 @@ class XPU_Accelerator(DeepSpeedAccelerator):
     def LongTensor(self):
         return functools.partial(torch.tensor, dtype=torch.long, device=self._name)
 
-    def pin_memory(self, tensor, align_bytes=1):
+    def _pin_memory(self, tensor, align_bytes=1):
         if align_bytes == 1:
             return tensor.pin_memory(device=self.current_device_name())
         elif align_bytes == 0:

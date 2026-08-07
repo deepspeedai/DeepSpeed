@@ -20,6 +20,9 @@ CUDAOpBuilder = builder_module.CUDAOpBuilder
 
 BUILDER_MODULE = builder_module
 CUDA_API = BUILDER_MODULE.torch.cuda  #ignore-cuda
+MissingCUDAException = builder_module.MissingCUDAException
+installed_cuda_version = builder_module.installed_cuda_version
+probe_is_compatible = builder_module.probe_is_compatible
 
 
 class _StubCUDAOpBuilder(CUDAOpBuilder):
@@ -298,3 +301,40 @@ def test_forked_child_can_use_cuda_after_importing_deepspeed():
         pytest.skip("no CUDA device available")
     assert result.returncode == 0, ("forked child could not use CUDA after 'import deepspeed' "
                                     "(a CUDA context was created during import, issue #7918):\n" + result.stderr)
+
+
+def test_installed_cuda_version_reports_a_runtime_only_cuda_home_as_missing(tmp_path):
+    # CUDA_HOME often points at a runtime only install (a pip torch wheel, a conda cudatoolkit) that has
+    # no nvcc under bin/. That has to surface as MissingCUDAException, because that is what the callers
+    # falling back to a CPU only build already catch. See #7452.
+    with patch("torch.utils.cpp_extension.CUDA_HOME", str(tmp_path)):
+        with pytest.raises(MissingCUDAException, match="unable to compile CUDA op"):
+            installed_cuda_version()
+
+
+class _RaisingBuilder:
+    name = "raising_stub"
+
+    def is_compatible(self, verbose=False):
+        raise MissingCUDAException("CUDA_HOME does not exist, unable to compile CUDA op(s)")
+
+
+class _AnsweringBuilder:
+
+    def __init__(self, answer):
+        self.name = "answering_stub"
+        self.answer = answer
+
+    def is_compatible(self, verbose=False):
+        return self.answer
+
+
+def test_probe_is_compatible_does_not_propagate_a_failed_probe():
+    # Every op is probed at "import deepspeed" time whether or not it will ever be built, so one op
+    # builder that cannot answer must not take the whole import down.
+    assert probe_is_compatible(_RaisingBuilder()) is False
+
+
+@pytest.mark.parametrize("answer", [True, False])
+def test_probe_is_compatible_passes_through_a_successful_probe(answer):
+    assert probe_is_compatible(_AnsweringBuilder(answer)) is answer

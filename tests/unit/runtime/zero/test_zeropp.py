@@ -12,6 +12,7 @@ from unit.simple_model import random_dataloader
 import deepspeed
 
 from deepspeed.runtime.zero.config import DeepSpeedZeroConfig
+from deepspeed.runtime.zero.partition_parameters import Init, ZeroParamStatus
 
 import torch.nn as nn
 import torch
@@ -38,6 +39,71 @@ class NNModel(nn.Module):
 def test_zero_hpz_partition_size_config():
     config = DeepSpeedZeroConfig(**{"zero_hpz_partition_size": 4})
     assert config.zero_hpz_partition_size == 4
+
+
+def test_zero_hpz_small_param_secondary_shard_without_overlap(monkeypatch):
+
+    class _FakeAccelerator:
+
+        def resolves_data_dependency(self):
+            return True
+
+    monkeypatch.setattr("deepspeed.runtime.zero.partition_parameters.get_accelerator", lambda: _FakeAccelerator())
+    monkeypatch.setattr("deepspeed.runtime.zero.partition_parameters.print_rank_0", lambda *args, **kwargs: None)
+
+    param = nn.Parameter(torch.tensor([3.0], dtype=torch.float16))
+    param.ds_status = ZeroParamStatus.AVAILABLE
+    param.ds_secondary_tensor = None
+    param.ds_numel = param.numel()
+    param.ds_id = 0
+
+    dummy_init = type("DummyInit", (), {})()
+    dummy_init.remote_device = "cpu"
+    dummy_init.pin_memory = False
+    dummy_init.quantized_nontrainable_weights = False
+    dummy_init.dp_world_size = 4
+    dummy_init.num_ranks_in_param_group = 2
+    dummy_init.rank_in_group = 1
+    dummy_init._aligned_size = lambda _param: 4
+
+    Init._partition_param_sec(dummy_init, param)
+
+    assert param.ds_secondary_tensor is not None
+    assert tuple(param.ds_secondary_tensor.shape) == (2, )
+    assert param.ds_secondary_tensor.requires_grad is False
+    assert torch.equal(param.ds_secondary_tensor, torch.zeros(2, dtype=torch.float16))
+
+
+def test_zero_hpz_secondary_shard_padding_is_zeroed(monkeypatch):
+
+    class _FakeAccelerator:
+
+        def resolves_data_dependency(self):
+            return True
+
+    monkeypatch.setattr("deepspeed.runtime.zero.partition_parameters.get_accelerator", lambda: _FakeAccelerator())
+    monkeypatch.setattr("deepspeed.runtime.zero.partition_parameters.print_rank_0", lambda *args, **kwargs: None)
+
+    param = nn.Parameter(torch.tensor([1.0, 2.0, 3.0], dtype=torch.float16))
+    param.ds_status = ZeroParamStatus.AVAILABLE
+    param.ds_secondary_tensor = torch.full((2, ), -7.0, dtype=torch.float16)
+    param.ds_secondary_tensor.ds_numel = 2
+    param.ds_secondary_tensor.status = ZeroParamStatus.AVAILABLE
+    param.ds_numel = param.numel()
+    param.ds_id = 0
+
+    dummy_init = type("DummyInit", (), {})()
+    dummy_init.remote_device = "cpu"
+    dummy_init.pin_memory = False
+    dummy_init.quantized_nontrainable_weights = False
+    dummy_init.dp_world_size = 4
+    dummy_init.num_ranks_in_param_group = 2
+    dummy_init.rank_in_group = 1
+    dummy_init._aligned_size = lambda _param: 4
+
+    Init._partition_param_sec(dummy_init, param, has_been_updated=True)
+
+    assert torch.equal(param.ds_secondary_tensor, torch.tensor([3.0, 0.0], dtype=torch.float16))
 
 
 def _assert_no_secondary_tensor_group(model: Module) -> None:

@@ -1893,11 +1893,13 @@ class Init(InsertPostInitMethodToModuleSubClasses):
             # ds_numel is unpadded, so the last chunk of the secondary tensor might not be secondary_partition_size
             sec_numel = max(0, min(param.ds_numel - secondary_start, secondary_partition_size))
 
-            # copy from full tensor to secondary tensor
+            # Zero any uncovered padding so coalesced quantization never sees stale values.
             with torch.no_grad():
                 # make sure param.ds_secondary_tensor requires_grad always be false
-                param.ds_secondary_tensor.narrow(0, 0,
-                                                 sec_numel).copy_(one_dim_param.narrow(0, secondary_start, sec_numel))
+                param.ds_secondary_tensor.zero_()
+                if sec_numel > 0:
+                    param.ds_secondary_tensor.narrow(0, 0, sec_numel).copy_(
+                        one_dim_param.narrow(0, secondary_start, sec_numel))
 
             # TODO: This is a temporary fix to avoid the issue that 2nd tensor all-gather happens before 2nd tensor partition is done
             if not get_accelerator().resolves_data_dependency():

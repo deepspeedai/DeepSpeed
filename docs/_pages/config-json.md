@@ -657,7 +657,7 @@ Note that if the value of "device" is not specified or not supported, an asserti
 
 | Description                                                                                          | Default |
 | ---------------------------------------------------------------------------------------------------- | ------- |
-| Offload to page-locked CPU memory. This could boost throughput at the cost of extra memory overhead. | `false` |
+| Offload to page-locked (pinned) CPU memory. Pinning enables asynchronous, full-bandwidth CPU<->GPU DMA so parameter fetches during forward/backward overlap with compute. Pinned memory is non-swappable and counts against the host memlock limit (`ulimit -l`); on hosts with tight memlock limits this may fail at init or cause out-of-memory errors elsewhere — set to `false` in that case. | `true` |
 
 ***buffer_count***: [integer]
 
@@ -707,7 +707,10 @@ Note that if the value of "device" is not specified or not supported, an asserti
 
 | Description                                                                                          | Default |
 | ---------------------------------------------------------------------------------------------------- | ------- |
-| Offload to page-locked CPU memory. This could boost throughput at the cost of extra memory overhead. | `false` |
+| Offload to page-locked (pinned) CPU memory. Pinning is required for the asynchronous GPU->CPU gradient offload to run as a full-bandwidth DMA that overlaps with backward compute (needs `overlap_comm: true`). Pinned memory is non-swappable and counts against the host memlock limit (`ulimit -l`); on hosts with tight memlock limits this may fail at init or cause out-of-memory errors elsewhere — set to `false` in that case. | `true` |
+
+**Note:** `pin_memory` now defaults to `true` for both `offload_param` and `offload_optimizer` (previously `false`). If you see out-of-memory errors after upgrading — especially on hosts with a low memlock limit (`ulimit -l`) — explicitly set `"pin_memory": false`.
+{: .notice--warning}
 
 ***ratio***: [float]
 
