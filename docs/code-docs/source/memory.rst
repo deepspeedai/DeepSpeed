@@ -319,6 +319,10 @@ Backend Selection
 The pinning implementation is selected with the ``DS_PIN_MEMORY_BACKEND``
 environment variable (default ``torch``).
 
+Both backends page-lock host memory for DMA, are visible to AIO/GDS I/O
+handles (so DeepNVMe can skip bounce buffers), and are counted by
+``track_pinned_memory`` when pages are actually locked. Differences:
+
 .. list-table:: Differences between ``torch`` and ``native`` pin backends
    :header-rows: 1
    :widths: 22 39 39
@@ -336,23 +340,17 @@ environment variable (default ``torch``).
      - None beyond the active accelerator / PyTorch
      - DeepSpeed **async-io** (AIO) op must build and load; fails early if unavailable (no silent fallback)
    * - ``pin_memory`` extras
-     - ``make_copy`` / ``match_shape`` are accepted by the API but only affect the native path
+     - ``make_copy`` / ``match_shape`` are ignored on this path
      - Honors ``make_copy`` and ``match_shape`` (both default ``True``)
    * - Pin recognition (``is_pinned``)
-     - Torch pinned status (``tensor.is_pinned()``); visible to AIO/GDS I/O handles
-     - ``.ds_pinned`` and process-wide pointer ranges (slices/views included); also visible to AIO/GDS via the shared pin manager
-   * - DeepNVMe I/O
-     - Torch-pinned host buffers skip bounce buffers (``tensor.is_pinned()``)
-     - Native-managed buffers also skip bounce buffers (shared pin manager / ``is_managed``), including slices/views in a locked range
+     - Torch pinned status (``tensor.is_pinned()``)
+     - ``.ds_pinned`` and process-wide pointer ranges (slices/views included)
    * - ``unpin_memory``
      - No-op (returns ``None``)
      - Frees the mlocked allocation immediately (returns ``True`` on success)
    * - Lifetime / free
      - Freed when the tensor is garbage-collected (PyTorch)
      - ``weakref`` finalizer frees on GC; prefer explicit ``unpin_memory`` for long-lived buffers (e.g. ZeRO ``destroy()``)
-   * - Host accounting
-     - Counted by ``track_pinned_memory`` when pages are actually locked
-     - Same accounting on the returned locked buffer
    * - CPU accelerator
      - Historical no-op (torch cannot pin CPU tensors); accounting skipped
      - Real ``mlock`` pins; accounting applies
