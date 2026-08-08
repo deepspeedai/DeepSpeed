@@ -226,17 +226,23 @@ Example of <i>**scheduler**</i>
 | ----------------------------------------------------------------------------------------------------------------------------- | ------- |
 | During gradient averaging perform communication with selected data type. By default it will be determined by selected regime  |  None   |
 
+<i>**gradient_allreduce_op**</i>: [string]
+
+| Description                                                                                                                                                                                            | Default  |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | -------- |
+| Select `"mean"` to average gradients across data-parallel workers or `"sum"` to keep the unscaled sum. `"sum"` supports ZeRO stages 0, 1, and 2 without ZenFlow; ZeRO stage 3 and ZenFlow reject this setting. | `"mean"` |
+
 <i>**prescale_gradients**</i>: [boolean]
 
 | Description                            | Default |
 | -------------------------------------- | ------- |
-| Scale gradients before doing allreduce | `false` |
+| Scale gradients before doing mean allreduce | `false` |
 
 <i>**gradient_predivide_factor**</i>: [float]
 
 | Description                                                                                                                                       | Default |
 | ------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
-| Before gradient averaging predivide gradients by a specified factor, can sometimes help with fp16 stability when scaling to large numbers of GPUs | `1.0`   |
+| Before mean gradient allreduce, predivide gradients by a specified factor; this can sometimes help with fp16 stability when scaling to large numbers of GPUs | `1.0`   |
 
 <i>**sparse_gradients**</i>: [boolean]
 

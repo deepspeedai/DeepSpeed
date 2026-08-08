@@ -28,6 +28,58 @@ from deepspeed.runtime.zero.utils import ZeRORuntimeException
 from deepspeed.accelerator import get_accelerator
 
 
+@pytest.mark.parametrize("zero_stage", [0, 1, 2])
+@pytest.mark.parametrize("gradient_allreduce_op,expected_scale", [("mean", 1.0), ("sum", 2.0)])
+@pytest.mark.parametrize(
+    "reduce_scatter,contiguous_gradients,prescale_gradients,gradient_predivide_factor",
+    [
+        (True, True, False, 1.0),
+        (False, True, False, 2.0),
+        (False, False, True, 1.0),
+    ],
+)
+class TestGradientAllreduceOp(DistributedTest):
+    world_size = 2
+
+    def test(self, zero_stage, gradient_allreduce_op, expected_scale, reduce_scatter, contiguous_gradients,
+             prescale_gradients, gradient_predivide_factor):
+
+        class LinearLoss(Module):
+
+            def __init__(self):
+                super().__init__()
+                self.weight = Parameter(torch.zeros(2))
+
+            def forward(self, inputs):
+                return (self.weight * inputs).sum()
+
+        model = LinearLoss()
+        optimizer = torch.optim.SGD(model.parameters(), lr=1.0)
+        config_dict = {
+            "train_micro_batch_size_per_gpu": 1,
+            "gradient_clipping": 0.0,
+            "zero_allow_untested_optimizer": True,
+            "gradient_allreduce_op": gradient_allreduce_op,
+            "prescale_gradients": prescale_gradients,
+            "gradient_predivide_factor": gradient_predivide_factor,
+            "zero_optimization": {
+                "stage": zero_stage,
+                "reduce_scatter": reduce_scatter,
+                "contiguous_gradients": contiguous_gradients,
+            },
+        }
+        engine, _, _, _ = deepspeed.initialize(model=model, optimizer=optimizer, config=config_dict)
+
+        inputs = torch.tensor([1.0, 2.0], device=engine.device)
+        engine.backward(engine(inputs))
+        engine.step()
+
+        actual = engine.module.weight.detach().clone()
+        expected = -inputs * expected_scale
+        torch.testing.assert_close(actual, expected)
+        engine.destroy()
+
+
 def run_unbalanced_gradients(model, data_loader):
 
     def drop_some_gradients(model, iter):
