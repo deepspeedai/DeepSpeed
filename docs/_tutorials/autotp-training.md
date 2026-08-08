@@ -121,7 +121,10 @@ DeepSpeed will read the model's `tp_plan` at initialization and convert it to
 internal partition rules. The supported types are `colwise`, `rowwise`,
 and `colwise_gather_output`(`colwise_rep`). The gathered column styles shard
 the linear weight along its output dimension and AllGather the local output
-shards so every tensor-parallel rank receives the complete output.
+shards so every tensor-parallel rank receives the complete output. For untied
+output layers, the output dimension does not need to be divisible by
+`autotp_size`; DeepSpeed uses uneven local shards and gathers back to the
+original logical output size.
 
 Gathered column parallelism currently supports untied output layers. If an
 output layer such as `lm_head` shares the same runtime `Parameter` object with
@@ -224,7 +227,7 @@ For Grouped Query Attention with different Q/K/V sizes:
 
 ## Limitations
 
-1. **TP size must divide model dimensions**: The tensor parallel size must evenly divide the attention head count and hidden dimensions for the runtime TP math to be correct. (Checkpoint conversion handles an uneven partition dimension -- e.g. a non-divisible vocab or hidden size -- via per-TP-rank shapes, so a single parameter's partition dimension no longer must be divisible. Uneven sharding within a fused/GQA sub-parameter weight is not yet supported.)
+1. **Ranks beyond the key/value head count stay idle**: Attention heads are distributed whole, and the distribution may be uneven -- 6 key/value heads over 4 ranks becomes 2/2/1/1, and a fused QKV weight is cut on the same head boundaries rather than inside a head. With more ranks than key/value heads, for example an 8-head model at `autotp_size=16`, the surplus ranks receive no attention weights at all. The result is still correct, because those ranks contribute zeros to the row-parallel all-reduce, but they do no attention work; AutoTP logs a warning instead of replicating heads to fill them. Hidden and vocabulary dimensions do not need to be divisible by the tensor parallel size: uneven shards are carried through save, conversion and restore via per-TP-rank shapes and widths.
 
 2. **Cross-topology universal restore**: Loading a universal checkpoint back into a topology with a *different* tensor-parallel degree goes through DeepSpeed's Megatron-style model-state loader, which is not AutoTP-aware; prefer same-topology restore when changing world size.
 

@@ -9,6 +9,7 @@ import deepspeed.comm as dist
 import deepspeed
 from deepspeed.accelerator import get_accelerator
 from deepspeed.module_inject.layers import LinearLayer
+from deepspeed.module_inject.tp_shard import get_shard_size_list
 from deepspeed.runtime.tensor_parallel.config import _get_hf_tp_plan
 from deepspeed.utils import groups
 from unit.common import DistributedTest
@@ -92,6 +93,57 @@ class TestTPPlanRealHFModels(DistributedTest):
             engine.step()
 
             assert not torch.isnan(outputs.loss)
+
+    def test_qwen2_tp_plan_with_uneven_vocab(self):
+        """Test an untied Qwen2 LM head with an uneven gathered vocabulary size."""
+        skip_on_device()
+
+        try:
+            from transformers import AutoModelForCausalLM, Qwen2Config
+        except ImportError:
+            pytest.skip("transformers not installed")
+
+        config = Qwen2Config(
+            vocab_size=1001,
+            hidden_size=128,
+            intermediate_size=256,
+            num_hidden_layers=1,
+            num_attention_heads=4,
+            num_key_value_heads=4,
+            tie_word_embeddings=False,
+        )
+
+        model = AutoModelForCausalLM.from_config(config)
+        assert model.lm_head.weight is not model.model.embed_tokens.weight
+
+        ds_config = {
+            "train_micro_batch_size_per_gpu": 1,
+            "tensor_parallel": {
+                "autotp_size": 2
+            },
+            "zero_optimization": {
+                "stage": 0
+            },
+        }
+
+        engine, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=ds_config)
+
+        tp_rank = groups.get_tensor_model_parallel_rank()
+        output_partition_sizes = get_shard_size_list(config.vocab_size, 2, "lm_head")
+        assert engine.autotp_size() == 2
+        assert isinstance(model.lm_head, LinearLayer)
+        assert model.lm_head.gather_output
+        assert model.lm_head.weight.shape == (output_partition_sizes[tp_rank], config.hidden_size)
+        assert model.model.embed_tokens.weight.shape == (config.vocab_size, config.hidden_size)
+
+        input_ids = torch.randint(0, config.vocab_size, (1, 16)).to(get_accelerator().current_device_name())
+        dist.broadcast(
+            input_ids,
+            src=groups.get_tensor_model_parallel_src_rank(),
+            group=groups.get_tensor_model_parallel_group(),
+        )
+        outputs = engine(input_ids)
+        assert outputs.logits.shape == (1, 16, config.vocab_size)
 
     def test_qwen2_tied_lm_head_falls_back_to_replicated(self):
         """Test that an actual Qwen2 Parameter tie remains replicated."""
