@@ -265,7 +265,7 @@ Note about gradients: While gradients are stored in fp16 (2 bytes), during the w
 
 **Pinned Memory**
 
-Pinned general RAM is included in normal general RAM allocations (i.e. this is not extra memory allocations but simply shows how much of the general RAM is pinned). Pinning is controlled by the ``pin_memory`` field of ``offload_optimizer`` / ``offload_param`` (both default to ``true``); set to ``false`` on hosts with tight memlock limits (``ulimit -l``). See :ref:`host-memory-pinning` for how host memory is page-locked (``torch`` vs ``native`` backends).
+Pinned general RAM is included in normal general RAM allocations (i.e. this is not extra memory allocations but simply shows how much of the general RAM is pinned). Pinning is controlled by the ``pin_memory`` field of ``offload_optimizer`` / ``offload_param`` (both default to ``true``); set to ``false`` on hosts with tight memlock limits (``ulimit -l``). See :ref:`host-memory-pinning` for how host memory is page-locked (``torch`` vs ``native`` backends, and the DeepSpeed ``pin_memory`` op).
 
 * ZeRO-1/2: controlled by ``offload_optimizer.pin_memory`` (fp32 master weights / gradients and related offload scratch buffers may be pinned on the host)
 
@@ -332,13 +332,14 @@ handles (so DeepNVMe can skip bounce buffers), and are counted by
      - ``native``
    * - Allocator
      - ``torch.Tensor.pin_memory()`` (device-specific accelerator hook)
-     - DeepNVMe page-locked allocator (``posix_memalign`` + ``mlock``) via async-io
+     - DeepNVMe page-locked allocator (``posix_memalign`` + ``mlock``) via the
+       DeepSpeed ``pin_memory`` op
    * - Selection
      - ``DS_PIN_MEMORY_BACKEND`` unset or ``torch``
      - ``DS_PIN_MEMORY_BACKEND=native``
    * - Build dependency
      - None beyond the active accelerator / PyTorch
-     - DeepSpeed **async-io** (AIO) op must build and load; fails early if unavailable (no silent fallback)
+     - DeepSpeed **pin_memory** op must build and load; fails early if unavailable (no silent fallback)
    * - ``pin_memory`` extras
      - ``make_copy`` / ``match_shape`` are ignored on this path
      - Honors ``make_copy`` and ``match_shape`` (both default ``True``)
@@ -362,12 +363,36 @@ Example:
     export DS_PIN_MEMORY_BACKEND=native
     deepspeed train.py ...
 
+DeepSpeed ``pin_memory`` op
+==========================
+
+The standalone ``pin_memory`` operator allocates page-locked host tensors without
+requiring ``libaio`` or ``async_io`` worker threads. The native backend above
+loads this op under the hood; callers can also use it directly:
+
+.. code-block:: python
+
+    import torch
+    from deepspeed.ops.op_builder import PinMemoryBuilder
+
+    pin = PinMemoryBuilder().load().pin_handle()
+    t = pin.new_cpu_locked_tensor(1024**3, torch.empty(0, dtype=torch.uint8))
+    assert pin.is_pinned(t)
+    pin.free_cpu_locked_tensor(t)
+
+``pin_handle`` exposes ``new_cpu_locked_tensor``, ``free_cpu_locked_tensor``, and
+``is_pinned``. The same methods remain available on ``aio_handle`` / ``gds_handle``
+as thin wrappers. Buffers from either path share one process-wide pin manager, so
+DeepNVMe bounce-buffer skipping stays consistent.
+
 Requirements for native
 =======================
 
-* The DeepSpeed **async-io** (AIO) op must build and load successfully. If AIO
-  cannot be constructed, selecting ``native`` fails early rather than silently
-  falling back to ``torch``.
+* The DeepSpeed **pin_memory** op must build and load successfully. If it cannot
+  be constructed, selecting ``native`` fails early rather than silently falling
+  back to ``torch``. When ``async_io`` / ``gds`` are precompiled, ``setup.py``
+  also precompiles ``pin_memory`` so deployments without a runtime compiler still
+  get the shared manager.
 * The process must be allowed to lock the requested host memory (see
   ``ulimit -l`` / ``memlock`` limits). Large ZeRO CPU-offload footprints can
   otherwise hit the memlock ceiling.
