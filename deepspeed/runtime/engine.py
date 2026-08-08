@@ -2836,7 +2836,8 @@ class DeepSpeedEngine(Module):
             return
 
         # Pass (PP) gas boundary flag to optimizer (required for zero)
-        self.optimizer.is_gradient_accumulation_boundary = self.is_gradient_accumulation_boundary()
+        if hasattr(self.optimizer, "set_gradient_accumulation_boundary"):
+            self.optimizer.set_gradient_accumulation_boundary(self.is_gradient_accumulation_boundary())
         if self.is_gradient_accumulation_boundary():
             self._reduce_autoep_folding_tp_replicated_gradients()
         # ZeRO stage >= 2 communicates during non gradient accumulation boundaries as well
@@ -2903,7 +2904,7 @@ class DeepSpeedEngine(Module):
             self.optimizer.zenflow_state ^= 1
 
         if self.zero_optimization():
-            self.optimizer.is_gradient_accumulation_boundary = self.is_gradient_accumulation_boundary()
+            self.optimizer.set_gradient_accumulation_boundary(self.is_gradient_accumulation_boundary())
 
         self._start_timers(self.engine_timers.backward_inner_timers)
 
@@ -3038,7 +3039,7 @@ class DeepSpeedEngine(Module):
             optimizer._coalesce_grad_reduction = False
             self.inside_no_sync_ctxt = False
             self._is_gradient_accumulation_boundary = True
-            optimizer.is_gradient_accumulation_boundary = True
+            optimizer.set_gradient_accumulation_boundary(True)
             try:
                 # Drive a single reduction pass over locally accumulated grads.
                 # Iterate explicitly (rather than calling reduce_gradients) so
@@ -3250,7 +3251,8 @@ class DeepSpeedEngine(Module):
             "set_gradient_accumulation_boundary() is not supported with managed_gradient_accumulation=False; " \
             "the caller owns the boundary by calling step()"
         self._is_gradient_accumulation_boundary = is_boundary
-        self.optimizer.is_gradient_accumulation_boundary = is_boundary
+        if hasattr(self.optimizer, "set_gradient_accumulation_boundary"):
+            self.optimizer.set_gradient_accumulation_boundary(is_boundary)
 
     def zero_grad(self):
         """

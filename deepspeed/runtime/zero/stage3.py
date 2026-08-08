@@ -441,8 +441,6 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         if self.swap_optimizer:
             self._configure_tensor_swapping(offload_optimizer_config, aio_config)
 
-        self.is_gradient_accumulation_boundary: bool = True
-
         # Toggled by DeepSpeedEngine.coalesce_grad_reduction().
         self._coalesce_grad_reduction = False
 
@@ -1356,7 +1354,8 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
     def finalize_gradient_accumulation_boundary(self):
         # Unmanaged mode: partitions already accumulate in __param_id_to_grad_partition; offload still needs deferred boundary copy.
-        self.is_gradient_accumulation_boundary = True
+        # Mirror engine boundary for any managed-style readers during step(); finalize itself does not branch on it.
+        self.set_gradient_accumulation_boundary(True)
         if self.offload_optimizer:
             self._finalize_offload_gradient_accumulation()
 
@@ -1890,7 +1889,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
             # offload the gradient partition if applicable
             if self.offload_optimizer:
-                if self.is_gradient_accumulation_boundary:
+                if self.is_gradient_accumulation_boundary():
                     self._offload_grad_partition_at_boundary(param, grad_buffer, offload_fp32_gradients,
                                                              offload_fp32_offsets)
 

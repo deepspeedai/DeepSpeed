@@ -252,8 +252,6 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         self.real_dp_process_group = [dp_process_group for i in range(len(self.optimizer.param_groups))]
         self.partition_count = [dp_size for i in range(len(self.optimizer.param_groups))]
 
-        self.is_gradient_accumulation_boundary = True
-
         # Toggled by DeepSpeedEngine.coalesce_grad_reduction().
         self._coalesce_grad_reduction = False
 
@@ -923,7 +921,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                                                         dtype=self.gradient_accumulation_dtype)
                     for accumulated_grad, new_avg_grad in zip(self.all_grad_tensors[i], avg_new):
                         accumulated_grad.add_(new_avg_grad)
-                if self.is_gradient_accumulation_boundary:
+                if self.is_gradient_accumulation_boundary():
                     self.averaged_gradients[i] = self.get_flat_partition(
                         self.params_in_partition[i],
                         self.first_offset[i],
@@ -951,7 +949,8 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
 
     def finalize_gradient_accumulation_boundary(self):
         # Unmanaged mode: grads accumulated each backward; finalize for step() (averaged_gradients or offload fp32 copy).
-        self.is_gradient_accumulation_boundary = True
+        # Mirror engine boundary for any managed-style readers during step(); finalize itself does not branch on it.
+        self.set_gradient_accumulation_boundary(True)
         if self.cpu_offload:
             self._finalize_cpu_offload_gradient_accumulation()
             return
@@ -1627,12 +1626,12 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             # CPU buffer) or more will follow (save to CPU buffer). Skipping only
             # the lone backward of a step preserves the existing fast path for
             # ga_steps=1 + single backward.
-            if self.micro_step_id > 0 or not self.is_gradient_accumulation_boundary:
+            if self.micro_step_id > 0 or not self.is_gradient_accumulation_boundary():
                 self.async_accumulate_grad_in_cpu_via_gpu(param)
                 # Record active param so unmanaged finalize skips params unused this window.
                 self._offload_accumulated_param_ids.add(self.get_param_id(param))
 
-            if self.is_gradient_accumulation_boundary:
+            if self.is_gradient_accumulation_boundary():
                 self.set_norm_for_param_grad_in_gpu(param)
 
                 self.update_offload_overflow_tracker_for_param_grad(param)
@@ -1739,7 +1738,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             self.reduce_ready_partitions_and_remove_grads(param, i)
 
     def reduce_ready_partitions_and_remove_grads(self, param, i):
-        if self.partition_gradients or self.is_gradient_accumulation_boundary or self.zenflow:
+        if self.partition_gradients or self.is_gradient_accumulation_boundary() or self.zenflow:
             self.reduce_independent_p_g_buckets_and_remove_grads(param, i)
 
     def zero_reduced_gradients(self, partition_id, i):
