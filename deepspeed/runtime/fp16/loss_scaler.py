@@ -26,6 +26,11 @@ from dataclasses import dataclass
 from typing import Optional
 from enum import Enum
 from deepspeed.runtime.config_utils import DeepSpeedConfigObject
+from deepspeed.runtime.loss_scale_validation import (
+    validate_loss_scale_value,
+    validate_positive_finite,
+    validate_positive_int,
+)
 from deepspeed import comm as dist
 from deepspeed.utils import logger
 
@@ -67,6 +72,20 @@ LOSS_SCALE_PROFILE_DEFAULTS = {
 }
 
 
+def _validated_dynamic_loss_args(dynamic_loss_args):
+    return {
+        INITIAL_LOSS_SCALE: validate_positive_finite(dynamic_loss_args[INITIAL_LOSS_SCALE],
+                                                     name=f"dynamic_loss_args['{INITIAL_LOSS_SCALE}']"),
+        SCALE_WINDOW: validate_positive_int(dynamic_loss_args[SCALE_WINDOW],
+                                            name=f"dynamic_loss_args['{SCALE_WINDOW}']"),
+        DELAYED_SHIFT: validate_positive_int(dynamic_loss_args[DELAYED_SHIFT],
+                                             name=f"dynamic_loss_args['{DELAYED_SHIFT}']"),
+        CONSECUTIVE_HYSTERESIS: dynamic_loss_args[CONSECUTIVE_HYSTERESIS],
+        MIN_LOSS_SCALE: validate_positive_finite(dynamic_loss_args[MIN_LOSS_SCALE],
+                                                 name=f"dynamic_loss_args['{MIN_LOSS_SCALE}']"),
+    }
+
+
 @dataclass
 class LossScaleConfig:
     use_grad_scaling: bool
@@ -100,7 +119,7 @@ class LossScaleConfig:
         if not use_grad_scaling:
             return
 
-        self.cur_scale = static_loss_scale
+        self.cur_scale = validate_loss_scale_value(static_loss_scale, name="fp16.loss_scale")
         if not dynamic_loss_scale:
             return
 
@@ -111,14 +130,15 @@ class LossScaleConfig:
         self.last_overflow_iter = -1
         self.scale_factor = defaults.scale_factor
         if dynamic_loss_args is None:
-            self.cur_scale = initial_dynamic_scale
+            self.cur_scale = validate_positive_finite(initial_dynamic_scale, name="dynamic_loss_args['init_scale']")
             self.scale_window = defaults.default_scale_window
             self.min_loss_scale = defaults.default_min_loss_scale
             return
 
-        self.cur_scale = dynamic_loss_args[INITIAL_LOSS_SCALE]
-        self.scale_window = dynamic_loss_args[SCALE_WINDOW]
-        self.min_loss_scale = dynamic_loss_args[MIN_LOSS_SCALE]
+        validated_dynamic_loss_args = _validated_dynamic_loss_args(dynamic_loss_args)
+        self.cur_scale = validated_dynamic_loss_args[INITIAL_LOSS_SCALE]
+        self.scale_window = validated_dynamic_loss_args[SCALE_WINDOW]
+        self.min_loss_scale = validated_dynamic_loss_args[MIN_LOSS_SCALE]
 
 
 # item() is a recent addition, so this helps with backward compatibility.
@@ -305,9 +325,10 @@ class DynamicLossScaler(LossScalerBase):
 def CreateLossScaler(dtype, static_loss_scale, dynamic_scaling, dynamic_loss_args):
     if dtype == torch.half and dynamic_scaling:
         assert dynamic_loss_args is not None, "Dynamic loss scaling parameters must be defined."
-        return DynamicLossScaler(dtype=dtype, **dynamic_loss_args)
+        return DynamicLossScaler(dtype=dtype, **_validated_dynamic_loss_args(dynamic_loss_args))
 
     loss_scale_value = static_loss_scale if dtype == torch.half else 1.0
+    loss_scale_value = validate_loss_scale_value(loss_scale_value, name="fp16.loss_scale")
     return LossScaler(scale=loss_scale_value)
 
 
