@@ -8,8 +8,6 @@ from packaging import version as pkg_version
 
 def check_tb_availability():
     try:
-        # torch.utils.tensorboard will fail if `tensorboard` is not available,
-        # see their docs for more details: https://pytorch.org/docs/1.8.0/tensorboard.html
         import tensorboard  # noqa: F401 # type: ignore
     except ImportError:
         print('If you want to use tensorboard logging, please `pip install tensorboard`')
@@ -34,4 +32,14 @@ def check_comet_availability():
             raise ImportError("`comet_ml` must have at least version 3.41.0")
     except ImportError:
         print('If you want to use comet logging, please `pip install "comet_ml>=3.41.0"`')
+        raise
+
+
+def check_trackio_availability():
+    try:
+        import trackio  # noqa: F401 # type: ignore
+    except ImportError:
+        print(
+            'If you want to use Trackio logging, please `pip install trackio` and follow the instructions at https://github.com/huggingface/trackio'
+        )
         raise
