@@ -9,6 +9,9 @@ jobs:
   deploy:
     runs-on: ubuntu-24.04
     environment: release-env
+    permissions:
+      contents: read
+      id-token: write
 
     steps:
     - uses: actions/checkout@v7
@@ -30,9 +33,6 @@ jobs:
         DS_BUILD_STRING=" " python -m build --sdist
     - name: Publish to PyPI
       uses: pypa/gh-action-pypi-publish@release/v1
-      with:
-        password: ${{ secrets.PYPI_API_TOKEN }}
-        repository-url: https://upload.pypi.org/legacy/
     - name: Bump version
       run: |
         python release/bump_patch_version.py --current_version ${{ env.RELEASE_VERSION }}
