@@ -411,7 +411,7 @@ class ZenFlowZeroOptimizer(DeepSpeedZeroOptimizer):
 
                 self.param_id_sum_buffer_offset[param_id] = []
 
-        if not self.is_gradient_accumulation_boundary:
+        if not self.is_gradient_accumulation_boundary():
             self.selective_optimizer.group_step(group_to_paramlist)
         else:
             self.selective_optimizer.temp_copy_param(group_to_paramlist)

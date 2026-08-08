@@ -151,7 +151,7 @@ class SuperOffloadOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
                 grad_buffer.copy_(cuda_grad_buffer, non_blocking=True)
                 grad_buffer = cuda_grad_buffer
 
-            if self.is_gradient_accumulation_boundary:
+            if self.is_gradient_accumulation_boundary():
                 self.norm_for_param_grads[self.get_param_id(param)] = self._constant_buffered_norm2(grad_buffer)
 
                 fp32_grad_tensor = self.fp32_partitioned_groups_flat[i].grad.narrow(
@@ -162,7 +162,7 @@ class SuperOffloadOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
             if self.sub_group_grad_partition_counts[i] == self.sub_group_to_param_num[i]:
                 completed_sub_groups.append(i)
 
-        if self.is_gradient_accumulation_boundary and completed_sub_groups:
+        if self.is_gradient_accumulation_boundary() and completed_sub_groups:
             get_accelerator().current_stream().synchronize()
             for i in completed_sub_groups:
                 if self.subgroup_to_device[i] == 'cpu' and not self.clip_grad:
