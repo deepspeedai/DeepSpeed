@@ -56,6 +56,11 @@ class FPQuantizer:
     def dequantize(cls, fp_out, input_q, scale, group_size, q_mantisa_bits, q_exponent_bits):
         orig_shape = fp_out.shape
         orig_dtype = fp_out.dtype
+        scale_tensor = scale if torch.is_tensor(scale) else torch.as_tensor(scale)
+        if not torch.all(torch.isfinite(scale_tensor)):
+            raise ValueError("dequantize scale must contain finite values")
+        if torch.any(scale_tensor == 0):
+            raise ValueError("dequantize scale must be non-zero")
         dequant_out = torch.ops.hpu.cast_from_fp8(input_q, (1.0 / scale), orig_dtype).view(orig_shape)
         fp_out.copy_(dequant_out)
         return fp_out
