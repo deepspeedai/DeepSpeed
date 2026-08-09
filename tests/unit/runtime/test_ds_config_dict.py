@@ -180,6 +180,21 @@ def test_sum_gradient_allreduce_rejects_zenflow():
         })
 
 
+@pytest.mark.parametrize("zero_stage", [1, 2])
+def test_sum_gradient_allreduce_rejects_deepcompile(zero_stage):
+    with pytest.raises(ValueError, match="not supported with DeepCompile"):
+        DeepSpeedConfig({
+            "train_batch_size": 1,
+            "gradient_allreduce_op": "sum",
+            "zero_optimization": {
+                "stage": zero_stage,
+            },
+            "compile": {
+                "deepcompile": True,
+            },
+        })
+
+
 @pytest.mark.parametrize("gather_weights_key",
                          ["stage3_gather_16bit_weights_on_model_save", "stage3_gather_fp16_weights_on_model_save"])
 def test_gather_16bit_params_on_model_save(gather_weights_key):

@@ -1030,6 +1030,8 @@ class DeepSpeedConfig(object):
             raise ValueError(f"{GRADIENT_ALLREDUCE_OP}='sum' is not supported with ZeRO stage 3")
         if self.gradient_allreduce_op == GRADIENT_ALLREDUCE_OP_SUM and self.zero_config.zenflow is not None:
             raise ValueError(f"{GRADIENT_ALLREDUCE_OP}='sum' is not supported with ZenFlow")
+        if self.gradient_allreduce_op == GRADIENT_ALLREDUCE_OP_SUM and self.compile_config.deepcompile:
+            raise ValueError(f"{GRADIENT_ALLREDUCE_OP}='sum' is not supported with DeepCompile")
 
         if self.float16_config.fp16_master_weights_and_grads:
             assert self.zero_enabled and self.zero_optimization_stage in (
