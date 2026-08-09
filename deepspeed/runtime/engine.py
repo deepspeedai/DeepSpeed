@@ -78,6 +78,9 @@ from deepspeed.checkpoint.constants import (
     AUTOEP_ZERO3_EXPERT_STATE_FORMAT_VERSION_KEY,
     AUTOEP_ZERO3_EXPERT_STATE_FORMAT_KEY,
     AUTOEP_ZERO3_PARTITIONED_EXPERT_STATE_FORMAT,
+    CHECKPOINT_PARALLEL_DIMS,
+    CHECKPOINT_PP_DEGREE,
+    CHECKPOINT_TP_DEGREE,
     EXPERT_PARAMETER_PATTERNS,
     FOLDING_METADATA_KEY,
     FROZEN_PARAM_FRAGMENTS,
@@ -230,6 +233,17 @@ class EngineTimers(object):
 def _eigenvalue_summary_events(block_eigenvalue, global_samples):
     return [(f"Train/Eigenvalues/ModelBlockParam_{i}", ev_value[0], global_samples)
             for i, ev_value in enumerate(block_eigenvalue.values())]
+
+
+def _checkpoint_parallel_metadata(mpu):
+    from deepspeed.utils.bwc import bwc_pipeline_parallel_world_size, bwc_tensor_model_parallel_world_size
+
+    return {
+        CHECKPOINT_PARALLEL_DIMS: {
+            CHECKPOINT_PP_DEGREE: bwc_pipeline_parallel_world_size(mpu),
+            CHECKPOINT_TP_DEGREE: bwc_tensor_model_parallel_world_size(mpu),
+        }
+    }
 
 
 class DeepSpeedEngine(Module):
@@ -4843,6 +4857,7 @@ class DeepSpeedEngine(Module):
                     global_samples=self.global_samples,
                     dp_world_size=self.seq_dp_world_size,
                     mp_world_size=self.mp_world_size,
+                    **_checkpoint_parallel_metadata(self.mpu),
                     ds_config=self.config,
                     ds_version=version)
 
@@ -5049,27 +5064,27 @@ class DeepSpeedEngine(Module):
         expert_checkpoint_writer = (groups._get_data_parallel_rank() < folding_spec.ep_size
                                     if folded_autoep_tp else is_expert_dp_writer)
 
-        # Non-ZeRO AutoEP keeps per-expert optimizer files. ZeRO-3 AutoEP
-        # restores experts from ZeRO optimizer shards, so every ZeRO partition
-        # rank continues to write its model-state file below instead.
-        if expert_checkpoint_writer and not self.zero_optimization_partition_weights():
-            optimizer_state = {
-                'optimizer': self.optimizer.state_dict() if self.optimizer and not self.zero_optimization() else None
-            }
-            if folded_autoep_tp:
-                optimizer_state[FOLDING_METADATA_KEY] = folding_metadata(family="routed_expert",
-                                                                         ep_rank=expp_rank,
-                                                                         zero_partition_group="edp",
-                                                                         zero_partition_rank=exp_dp_rank,
-                                                                         zero_partition_count=folding_spec.edp_size)
-            # TODO: why use BufferedWriter not the path
-            file_path = self._get_optimizer_ckpt_name(save_dir, tag, expp_rank)
-            saveable_state_dict = optimizer_state
-            if self.checkpoint_engine.preserves_storage_sharing():
-                saveable_state_dict = clone_tensors_for_torch_save(optimizer_state)
-            self.checkpoint_engine.save(saveable_state_dict, file_path)
-        elif not self.zero_optimization_partition_weights():
-            return
+        # Non-ZeRO AutoEP keeps per-expert optimizer files. ZeRO-1/2 and ZeRO-3
+        # restore optimizer state from ZeRO shards, so do not emit an empty
+        # per-expert optimizer payload for those stages.
+        if not self.zero_optimization_partition_weights():
+            if not expert_checkpoint_writer:
+                return
+            if not self.zero_optimization():
+                optimizer_state = {'optimizer': self.optimizer.state_dict() if self.optimizer else None}
+                if folded_autoep_tp:
+                    optimizer_state[FOLDING_METADATA_KEY] = folding_metadata(
+                        family="routed_expert",
+                        ep_rank=expp_rank,
+                        zero_partition_group="edp",
+                        zero_partition_rank=exp_dp_rank,
+                        zero_partition_count=folding_spec.edp_size)
+                # TODO: why use BufferedWriter not the path
+                file_path = self._get_optimizer_ckpt_name(save_dir, tag, expp_rank)
+                saveable_state_dict = optimizer_state
+                if self.checkpoint_engine.preserves_storage_sharing():
+                    saveable_state_dict = clone_tensors_for_torch_save(optimizer_state)
+                self.checkpoint_engine.save(saveable_state_dict, file_path)
 
         # Load flow uses below saved file for model parameters, RNG and more
         if self.zero_optimization_partition_weights() or groups._get_data_parallel_rank() == 0:
@@ -5121,11 +5136,14 @@ class DeepSpeedEngine(Module):
                     zero_partition_count=folding_spec.dp_size,
                     param_families=DeepSpeedEngine._autoep_non_expert_param_families(model_state_dict))
             # Check for reserved-key collisions with client_state
-            reserved_keys = {'ds_autoep_layers', 'autoep_layers', UNIVERSAL_CHECKPOINT_INFO, FOLDING_METADATA_KEY}
+            reserved_keys = {
+                'ds_autoep_layers', 'autoep_layers', UNIVERSAL_CHECKPOINT_INFO, FOLDING_METADATA_KEY,
+                CHECKPOINT_PARALLEL_DIMS
+            }
             collisions = reserved_keys.intersection(client_state.keys())
             if collisions:
                 raise KeyError(f"client_state contains reserved checkpoint keys: {sorted(collisions)}. "
-                               f"These keys are used internally by DeepSpeed for AutoEP metadata.")
+                               f"These keys are used internally by DeepSpeed checkpoint metadata.")
             state.update(client_state)
             logger.info(f'Saving model checkpoint: {save_path}')
             saveable_state_dict = state
@@ -5174,6 +5192,9 @@ class DeepSpeedEngine(Module):
         autotp_uc_info = getattr(self.module, UNIVERSAL_CHECKPOINT_INFO, None)
         if autotp_uc_info is not None:
             state[UNIVERSAL_CHECKPOINT_INFO] = autotp_uc_info
+        if CHECKPOINT_PARALLEL_DIMS in client_state:
+            raise KeyError(f"client_state contains reserved checkpoint key: {CHECKPOINT_PARALLEL_DIMS}. "
+                           "This key is used internally by DeepSpeed checkpoint metadata.")
         state.update(client_state)
         log_dist(message=f'Saving model checkpoint: {save_path}', ranks=[0])
 
