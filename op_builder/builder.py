@@ -864,7 +864,8 @@ class CUDAOpBuilder(OpBuilder):
         if sys.platform == "win32":
             return ['-O2']
         else:
-            return ['-O3', '-std=c++17', '-g', '-Wno-reorder']
+            cpp_standard = '-std=c++20' if (TORCH_MAJOR, TORCH_MINOR) >= (2, 12) else '-std=c++17'
+            return ['-O3', cpp_standard, '-g', '-Wno-reorder']
 
     def nvcc_args(self):
         if self.build_for_cpu:
