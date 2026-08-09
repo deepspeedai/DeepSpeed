@@ -146,7 +146,7 @@ True
 1073741824
 ```
 
-You can also allocate page-locked host tensors directly through the standalone `pin_memory` operator, which pins CPU memory (`posix_memalign` + `mlock`) without requiring `libaio` or the `async_io` worker threads. This is useful on CPU-only hosts or when you want a pinned buffer without an `aio_handle`. Buffers allocated this way are recognized by `aio_handle`/`gds_handle` (they share one process-wide pin manager), so DeepNVMe can still skip bounce buffers for them.
+You can also allocate page-locked host tensors directly through the standalone `pin_memory` operator, which pins CPU memory (`posix_memalign` + `mlock`). This is useful on CPU-only hosts or when you want a pinned buffer without starting an I/O handle. Buffers allocated this way are recognized by DeepNVMe I/O handles (they share one process-wide pin manager), so DeepNVMe can still skip bounce buffers for them.
 
 ```bash
 >>> import torch
@@ -159,7 +159,7 @@ True
 True
 ```
 
-The `pin_handle` exposes `new_cpu_locked_tensor(num_elem, example_tensor)`, `free_cpu_locked_tensor(tensor)`, and `is_pinned(tensor)`. The same methods remain available on `aio_handle` and `gds_handle` as thin wrappers, so existing code continues to work unchanged.
+The `pin_handle` exposes `new_cpu_locked_tensor(num_elem, example_tensor)`, `free_cpu_locked_tensor(tensor)`, and `is_pinned(tensor)`. The same methods remain available on DeepNVMe I/O handles as thin wrappers, so existing code continues to work unchanged.
 
 On the other hand,`gds_handle` provides `new_pinned_device_tensor()` and `pin_device_tensor()` functions for pinning CUDA tensors. The following example illustrates writing a pinned CUDA tensor to a local NVMe file.
 

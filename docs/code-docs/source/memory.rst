@@ -366,9 +366,9 @@ Example:
 DeepSpeed ``pin_memory`` op
 ==========================
 
-The standalone ``pin_memory`` operator allocates page-locked host tensors without
-requiring ``libaio`` or ``async_io`` worker threads. The native backend above
-loads this op under the hood; callers can also use it directly:
+The standalone ``pin_memory`` operator allocates page-locked host tensors
+(``posix_memalign`` + ``mlock``). The native backend above loads this op under
+the hood; callers can also use it directly:
 
 .. code-block:: python
 
@@ -381,8 +381,8 @@ loads this op under the hood; callers can also use it directly:
     pin.free_cpu_locked_tensor(t)
 
 ``pin_handle`` exposes ``new_cpu_locked_tensor``, ``free_cpu_locked_tensor``, and
-``is_pinned``. The same methods remain available on ``aio_handle`` / ``gds_handle``
-as thin wrappers. Buffers from either path share one process-wide pin manager, so
+``is_pinned``. The same methods remain available on DeepNVMe I/O handles as thin
+wrappers. Buffers from either path share one process-wide pin manager, so
 DeepNVMe bounce-buffer skipping stays consistent.
 
 Requirements for native
@@ -390,9 +390,7 @@ Requirements for native
 
 * The DeepSpeed **pin_memory** op must build and load successfully. If it cannot
   be constructed, selecting ``native`` fails early rather than silently falling
-  back to ``torch``. When ``async_io`` / ``gds`` are precompiled, ``setup.py``
-  also precompiles ``pin_memory`` so deployments without a runtime compiler still
-  get the shared manager.
+  back to ``torch``.
 * The process must be allowed to lock the requested host memory (see
   ``ulimit -l`` / ``memlock`` limits). Large ZeRO CPU-offload footprints can
   otherwise hit the memlock ceiling.
