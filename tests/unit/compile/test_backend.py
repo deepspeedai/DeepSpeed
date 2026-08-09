@@ -13,6 +13,7 @@ from deepspeed.compile.inductor import patch_create_aot_dispatcher_function
 from deepspeed.compile.input_storage import InputStorage
 from deepspeed.compile.patch_compiled_func import (clear_backward_inputs, get_backward_inputs, patch_compiled_func,
                                                    unpatch_compiled_func)
+from deepspeed.utils.torch import required_torch_version
 
 
 def test_forward_real_inputs_are_graph_local():
@@ -75,6 +76,39 @@ def test_unpatch_compiled_func_clears_backward_inputs():
         get_backward_inputs()[(object(), 17)] = [(torch.ones(1), )]
         unpatch_compiled_func()
         assert get_backward_inputs() == {}
+    finally:
+        unpatch_compiled_func()
+
+
+def test_patch_compiled_func_unwraps_staticmethod_descriptor():
+
+    class NonCallableStaticMethod(staticmethod):
+        # Staticmethod descriptors became callable in Python 3.10, so emulate Python 3.9 on newer interpreters.
+        def __call__(self, *args, **kwargs):
+            raise TypeError("staticmethod object is not callable")
+
+    clear_backward_inputs()
+    patch_compiled_func()
+    try:
+
+        class CompiledFunction(torch.autograd.Function):
+
+            @NonCallableStaticMethod
+            def _backward_impl(ctx, all_args):
+                return all_args
+
+            @NonCallableStaticMethod
+            def _backward_prologue(ctx, *grad_outputs):
+                return grad_outputs
+
+        inputs = (torch.ones(1), )
+        if required_torch_version(min_version=2.7):
+            result = CompiledFunction._backward_impl(None, inputs)
+        else:
+            result = CompiledFunction._backward_prologue(None, *inputs)
+
+        assert len(result) == 1
+        assert result[0] is inputs[0]
     finally:
         unpatch_compiled_func()
 
