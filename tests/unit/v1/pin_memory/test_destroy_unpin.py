@@ -1,4 +1,3 @@
-# Copyright (c) Microsoft Corporation.
 # SPDX-License-Identifier: Apache-2.0
 
 # DeepSpeed Team
@@ -25,7 +24,7 @@ def _require_native():
     try:
         native = get_active_native_pinned_memory()
     except Exception:
-        pytest.skip("async_io op could not be built; native pinning unavailable")
+        pytest.skip("pin_memory op could not be built; native pinning unavailable")
     if native is None:
         pytest.skip("native backend not selected")
     return native

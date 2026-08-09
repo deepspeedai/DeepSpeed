@@ -1,4 +1,3 @@
-# Copyright (c) Microsoft Corporation.
 # SPDX-License-Identifier: Apache-2.0
 
 # DeepSpeed Team
@@ -26,14 +25,14 @@ class NativePinnedMemory(object):
         # base address -> weakref.finalize handle for the returned tensor, so an
         # explicit unpin() can cancel the GC-triggered free.
         self._finalizers = {}
-        # Fail early: native pinning is useless without the async-io handle, so
+        # Fail early: native pinning is useless without the pin_memory handle, so
         # surface the build/load failure here instead of silently degrading.
         try:
-            from deepspeed.ops.op_builder import AsyncIOBuilder
-            self._handle = AsyncIOBuilder().load().aio_handle(128 * 1024, 8, False, False, 1)
+            from deepspeed.ops.op_builder import PinMemoryBuilder
+            self._handle = PinMemoryBuilder().load().pin_handle()
         except Exception as e:
             raise RuntimeError(
-                "DS_PIN_MEMORY_BACKEND=native requires the async-io (AIO) op, which failed to build/load.") from e
+                "DS_PIN_MEMORY_BACKEND=native requires the pin_memory op, which failed to build/load.") from e
 
     def pin(self, tensor, make_copy=True, match_shape=True):
         numel = tensor.numel()
@@ -116,7 +115,7 @@ def get_native_pinned_memory():
 def get_active_native_pinned_memory():
     # Returns the shared manager when ``DS_PIN_MEMORY_BACKEND=native``; otherwise
     # None so the accelerator uses its (torch) pinning path. When native is
-    # selected but the async-io ops cannot be built, constructing the manager
+    # selected but the pin_memory op cannot be built, constructing the manager
     # raises rather than silently falling back.
     if os.environ.get("DS_PIN_MEMORY_BACKEND", "torch").strip().lower() != "native":
         return None

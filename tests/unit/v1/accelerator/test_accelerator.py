@@ -1,4 +1,3 @@
-# Copyright (c) Microsoft Corporation.
 # SPDX-License-Identifier: Apache-2.0
 
 # DeepSpeed Team
@@ -71,7 +70,7 @@ def test_abstract_methods_defined(module_name, accel_class_name):
 
 def _require_native(monkeypatch):
     # Backend selection is env-driven and evaluated per call, so set native for
-    # the whole test and skip if the async-io ops cannot be built (constructing
+    # the whole test and skip if the pin_memory op cannot be built (constructing
     # the native manager raises in that case).
     from deepspeed.utils.pin_memory import get_active_native_pinned_memory
     monkeypatch.setenv("DS_PIN_MEMORY_BACKEND", "native")
@@ -79,7 +78,7 @@ def _require_native(monkeypatch):
         if get_active_native_pinned_memory() is None:
             pytest.skip("native backend not selected")
     except Exception:
-        pytest.skip("async_io op could not be built; native pinning unavailable")
+        pytest.skip("pin_memory op could not be built; native pinning unavailable")
 
 
 def test_pin_memory_torch_backend(monkeypatch):
@@ -128,24 +127,24 @@ def test_pin_memory_native_backend(monkeypatch):
     assert not accel.is_pinned(view)
 
 
-def test_pin_memory_native_raises_when_aio_unavailable(monkeypatch):
+def test_pin_memory_native_raises_when_pin_memory_unavailable(monkeypatch):
     import deepspeed.ops.op_builder as op_builder
     import deepspeed.utils.pin_memory as pin_memory_util
 
     class _FailingBuilder:
 
         def load(self):
-            raise RuntimeError("simulated async_io build failure")
+            raise RuntimeError("simulated pin_memory build failure")
 
     # Reset the shared manager so it is rebuilt with the failing builder below;
     # monkeypatch restores the original instance after the test.
     monkeypatch.setenv("DS_PIN_MEMORY_BACKEND", "native")
     monkeypatch.setattr(pin_memory_util, "_shared_native_pins", None)
-    monkeypatch.setattr(op_builder, "AsyncIOBuilder", _FailingBuilder)
+    monkeypatch.setattr(op_builder, "PinMemoryBuilder", _FailingBuilder)
 
-    # Native is selected but the async-io handle cannot be built, so we fail early
+    # Native is selected but the pin_memory op cannot be built, so we fail early
     # (no silent torch fallback).
-    with pytest.raises(RuntimeError):
+    with pytest.raises(RuntimeError, match="pin_memory"):
         pin_memory_util.get_active_native_pinned_memory()
 
 

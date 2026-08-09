@@ -1,4 +1,3 @@
-# Copyright (c) Microsoft Corporation.
 # SPDX-License-Identifier: Apache-2.0
 
 # DeepSpeed Team
@@ -14,7 +13,7 @@ def native_pins():
     try:
         return NativePinnedMemory()
     except Exception:
-        pytest.skip("async_io op could not be built; native pinning unavailable")
+        pytest.skip("pin_memory op could not be built; native pinning unavailable")
 
 
 def test_pin_copies_and_matches_shape(native_pins):
