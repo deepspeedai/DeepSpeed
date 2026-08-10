@@ -36,22 +36,30 @@ class NativePinnedMemory(object):
 
     def pin(self, tensor, make_copy=True, match_shape=True):
         numel = tensor.numel()
-        # ``base`` owns the mlocked allocation; retain it so the finalizer can free
-        # it after the returned (possibly reshaped) view is garbage-collected.
+        # ``base`` is the allocation root and the view root for everything derived
+        # from it. Every slice/view of the returned tensor keeps ``base`` alive via
+        # ``._base``, so the allocation is freed only after the returned tensor and
+        # all of its aliases are gone (a live view can never outlive the free).
         base = self._handle.new_cpu_locked_tensor(numel, tensor)
+        begin = base.data_ptr()
         locked = base[:numel]
         if make_copy:
             locked.copy_(tensor.reshape(-1))
         if match_shape:
             locked = locked.view(tensor.shape)
-        begin = base.data_ptr()
         self._ranges[begin] = begin + numel * tensor.element_size()
         locked.ds_pinned = True
-        # Match torch.pin_memory lifetime semantics: free the page-locked
-        # allocation when the returned tensor is dropped, so call sites that never
-        # call unpin() do not accumulate mlocked host memory.
-        self._finalizers[begin] = weakref.finalize(locked, self._release, self._handle, base, self._ranges,
-                                                   self._finalizers, begin)
+        # Remember the owning allocation address so an explicit unpin() frees the
+        # original region even if the tensor's ``.data`` is later redirected (e.g.
+        # ZeRO offload/reload rebinds ``.data`` to a different buffer).
+        locked.ds_pin_base = begin
+        # Match torch.pin_memory lifetime semantics: free the page-locked allocation
+        # once its root is garbage-collected, so call sites that never call unpin()
+        # do not accumulate mlocked host memory. The finalizer is tied to ``base``
+        # (not the returned view) and frees by address; ``base`` must not be passed
+        # as a finalize argument or it would be kept alive forever.
+        self._finalizers[begin] = weakref.finalize(base, self._release, self._handle, begin, self._ranges,
+                                                   self._finalizers)
         return locked
 
     def is_pinned(self, tensor):
@@ -64,24 +72,28 @@ class NativePinnedMemory(object):
 
     def unpin(self, tensor):
         # After freeing, using ``tensor`` is a use-after-free and must be avoided.
-        begin = tensor.data_ptr()
+        # Prefer the address recorded at pin time so a redirected ``.data`` still
+        # releases the correct region; fall back to the current pointer otherwise.
+        begin = getattr(tensor, "ds_pin_base", None)
+        if begin is None:
+            begin = tensor.data_ptr()
         finalizer = self._finalizers.pop(begin, None)
         if finalizer is not None:
             # Explicit unpin owns the free; cancel the GC finalizer to avoid a
-            # redundant free_cpu_locked_tensor call.
+            # redundant free.
             finalizer.detach()
-        freed = self._handle.free_cpu_locked_tensor(tensor)
+        freed = self._handle.free_cpu_locked_tensor_by_ptr(begin)
         self._ranges.pop(begin, None)
         if hasattr(tensor, "ds_pinned"):
             tensor.ds_pinned = False
         return freed
 
     @staticmethod
-    def _release(handle, base_tensor, ranges, finalizers, begin):
+    def _release(handle, begin, ranges, finalizers):
         ranges.pop(begin, None)
         finalizers.pop(begin, None)
         try:
-            handle.free_cpu_locked_tensor(base_tensor)
+            handle.free_cpu_locked_tensor_by_ptr(begin)
         except Exception:
             # Best-effort cleanup; the handle or torch may already be torn down
             # during interpreter shutdown.
