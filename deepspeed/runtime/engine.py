@@ -492,6 +492,7 @@ class DeepSpeedEngine(Module):
         self._support_torch_style_backward = False
         # Flag to control whether gradients should be scaled by gradient accumulation steps
         self._scale_wrt_gas = True
+        self._is_engine_backward_loss_scaled = False
         if isinstance(self.optimizer, ZeROOptimizer) and check_internal_apis_for_count_used_parameters():
             self._support_torch_style_backward = True
             # These hooks are used for non-scalar backward support, such as `out.backward(out_grad)`,
@@ -2952,7 +2953,7 @@ class DeepSpeedEngine(Module):
         if is_functorch_transforming():
             return grad
         # Only scale gradients if scale_wrt_gas is True, consistent with backward() parameter
-        if grad is not None and self._scale_wrt_gas:
+        if grad is not None and self._scale_wrt_gas and not self._is_engine_backward_loss_scaled:
             return grad / self.gradient_accumulation_steps()
         return grad
 
@@ -3178,42 +3179,45 @@ class DeepSpeedEngine(Module):
         self._running_engine_backward = True
         # Store scale_wrt_gas so the hook can respect it
         self._scale_wrt_gas = scale_wrt_gas
+        previous_engine_backward_loss_scaled = self._is_engine_backward_loss_scaled
+        self._is_engine_backward_loss_scaled = scale_wrt_gas
+        try:
+            # Unmanaged mode: count this backward so step() can advance global_samples by the actual micro-batch count.
+            if not self.managed_gradient_accumulation():
+                self._unmanaged_backward_count += 1
 
-        # Unmanaged mode: count this backward so step() can advance global_samples by the actual micro-batch count.
-        if not self.managed_gradient_accumulation():
-            self._unmanaged_backward_count += 1
+            # Set flag to prevent hooks from firing (we'll manually call prologue/epilogue)
+            backward_kwargs = {"retain_graph": retain_graph}
+            if self.eigenvalue_enabled():
+                backward_kwargs["create_graph"] = True
+                backward_kwargs["retain_graph"] = True
 
-        # Set flag to prevent hooks from firing (we'll manually call prologue/epilogue)
-        backward_kwargs = {"retain_graph": retain_graph}
-        if self.eigenvalue_enabled():
-            backward_kwargs["create_graph"] = True
-            backward_kwargs["retain_graph"] = True
+            loss = loss / self.gradient_accumulation_steps() if scale_wrt_gas else loss
+            gas_scaled_loss = loss
 
-        # Used only for return value
-        gas_scaled_loss = loss / self.gradient_accumulation_steps() if scale_wrt_gas else loss
+            # TODO: handle these scaling with direct calls to loss.backward()
+            if isinstance(self.optimizer, ZeROOptimizer):
+                loss = self.optimizer.scale_if_loss(loss)
+            elif self.torch_autocast_z0_gradscaler:
+                loss = self.torch_autocast_z0_gradscaler.scale(loss)
 
-        # TODO: handle these scaling with direct calls to loss.backward()
-        if isinstance(self.optimizer, ZeROOptimizer):
-            loss = self.optimizer.scale_if_loss(loss)
-        elif self.torch_autocast_z0_gradscaler:
-            loss = self.torch_autocast_z0_gradscaler.scale(loss)
+            with compiled_autograd(self._is_compiled_autograd_enabled, self._compile_kwargs):
+                if self.zero_optimization() or not self.amp_enabled():
+                    loss.backward(**backward_kwargs)
+                elif self.amp_enabled():
+                    # AMP requires delaying unscale when inside gradient accumulation boundaries
+                    # https://nvidia.github.io/apex/advanced.html#gradient-accumulation-across-iterations
+                    delay_unscale = not self.is_gradient_accumulation_boundary()
+                    with amp.scale_loss(loss, self.optimizer, delay_unscale=delay_unscale) as scaled_loss:
+                        scaled_loss.backward(**backward_kwargs)
 
-        with compiled_autograd(self._is_compiled_autograd_enabled, self._compile_kwargs):
-            if self.zero_optimization() or not self.amp_enabled():
-                loss.backward(**backward_kwargs)
-            elif self.amp_enabled():
-                # AMP requires delaying unscale when inside gradient accumulation boundaries
-                # https://nvidia.github.io/apex/advanced.html#gradient-accumulation-across-iterations
-                delay_unscale = not self.is_gradient_accumulation_boundary()
-                with amp.scale_loss(loss, self.optimizer, delay_unscale=delay_unscale) as scaled_loss:
-                    scaled_loss.backward(**backward_kwargs)
+                # backward_epilogue is not called in a hook when self._support_torch_style_backward is False
+                self._backward_epilogue()
 
-            # backward_epilogue is not called in a hook when self._support_torch_style_backward is False
-            self._backward_epilogue()
-
-        self._running_engine_backward = False
-
-        return gas_scaled_loss
+            return gas_scaled_loss
+        finally:
+            self._is_engine_backward_loss_scaled = previous_engine_backward_loss_scaled
+            self._running_engine_backward = False
 
     def is_gradient_accumulation_boundary(self):
         """
