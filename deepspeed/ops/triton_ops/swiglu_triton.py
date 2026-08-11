@@ -8,8 +8,8 @@ The SwiGLU gate combines two projections of the same input::
 
     h = silu(gate) * up
 
-where ``silu(x) = x * sigmoid(x)``. This module fuses both into a single Triton 
-kernel for the forward pass and a single kernel for the backward pass, which 
+where ``silu(x) = x * sigmoid(x)``. This module fuses both into a single Triton
+kernel for the forward pass and a single kernel for the backward pass, which
 halves the elementwise kernel launches and the intermediate-tensor traffic
 on the expert MLP hot path.
 
@@ -26,7 +26,6 @@ from __future__ import annotations
 import torch
 import torch.nn.functional as F
 
-from deepspeed.accelerator import get_accelerator
 from deepspeed.ops.triton_ops._triton import _TRITON_AVAILABLE, triton, tl
 
 if _TRITON_AVAILABLE:
@@ -126,13 +125,8 @@ def swiglu(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
 
     Falls back to the eager PyTorch expression when Triton is unavailable.
     """
-    if gate.shape != up.shape:
-        raise ValueError(f"swiglu expects gate and up to have the same shape, got {tuple(gate.shape)} "
-                         f"and {tuple(up.shape)}")
-    if gate.dtype != up.dtype:
-        raise ValueError(f"swiglu expects gate and up to have the same dtype, got {gate.dtype} and {up.dtype}")
 
-    if not _TRITON_AVAILABLE or not get_accelerator().on_accelerator(gate):
+    if not _TRITON_AVAILABLE:
         return _swiglu_eager(gate, up)
 
     return _SwiGLUFn.apply(gate, up)
