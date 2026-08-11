@@ -408,7 +408,7 @@ class MiCS_Optimizer(DeepSpeedZeroOptimizer_Stage3):
         """
         """
         # TODO: improve the condition check
-        if not self.is_gradient_accumulation_boundary or \
+        if not self.is_gradient_accumulation_boundary() or \
             len(partitioned_grads_buffers) == 0:
             return
 

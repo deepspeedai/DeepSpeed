@@ -1,37 +1,11 @@
-// Copyright (c) Microsoft Corporation.
 // SPDX-License-Identifier: Apache-2.0
 
 // DeepSpeed Team
 
 /*
-Functionality for managing CPU tensors occupying page-locked memory.
-TODO: Implement a full-featured manager that
-1. Avoid page-locked memory leaks
-2. Minimize page-locked memory usage by reducing internal fragmentation
-Functionality for managing CPU tensors occupying page-locked memory.
+Compatibility include: pin-tensor manager lives under csrc/pin_memory/.
 */
 
-#include <map>
-#include <memory>
-#include <mutex>
-#include "deepspeed_py_aio.h"
+#pragma once
 
-struct deepspeed_pin_tensor_t {
-    std::map<void*, int64_t> _locked_tensors;
-    std::mutex _mutex;
-
-    deepspeed_pin_tensor_t() = default;
-
-    ~deepspeed_pin_tensor_t();
-
-    // Process-wide shared manager so that pinned-buffer recognition is consistent
-    // across every io handle (each handle references this single instance).
-    static std::shared_ptr<deepspeed_pin_tensor_t> shared();
-
-    torch::Tensor alloc(const int64_t num_elem, const at::ScalarType& elem_type);
-    torch::Tensor alloc(const int64_t num_elem, const torch::TensorOptions& options);
-
-    bool free(torch::Tensor& locked_tensor);
-
-    bool is_managed(const torch::Tensor& buffer);
-};
+#include "../../pin_memory/deepspeed_pin_tensor.h"

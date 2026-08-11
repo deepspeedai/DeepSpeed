@@ -8,6 +8,7 @@ import torch
 import torch.nn.functional as F
 import deepspeed.comm as dist
 from deepspeed import initialize
+import deepspeed.runtime.sequence_parallel.parallel_state_sp as sp_mpu
 from transformers import AutoModel
 from unit.common import DistributedTest
 from deepspeed.sequence.layer import _SeqAllToAll
@@ -17,6 +18,71 @@ from unit.simple_model import *
 from deepspeed.utils import groups
 from deepspeed.module_inject.tp_shard import get_shard_size_list
 #Use mesh device to create data and sequence parallel group
+
+
+class TestUlyssesCheckpointLoad(DistributedTest):
+    world_size = 2
+
+    def test_load_non_sequence_parallel_checkpoint(self, tmpdir):
+        config = {
+            "train_batch_size": self.world_size,
+            "optimizer": {
+                "type": "Adam",
+                "params": {
+                    "lr": 1e-3
+                }
+            },
+            "zero_optimization": {
+                "stage": 1
+            }
+        }
+        hidden_dim = 4
+        source_model = SimpleModel(hidden_dim)
+        with torch.no_grad():
+            for parameter in source_model.parameters():
+                parameter.fill_(1.5)
+        expected = {name: tensor.detach().cpu().clone() for name, tensor in source_model.state_dict().items()}
+        source_engine, _, _, _ = initialize(model=source_model,
+                                            model_parameters=source_model.parameters(),
+                                            config=config)
+
+        checkpoint_dir = str(tmpdir)
+        tag = "no_sp"
+        source_engine.save_checkpoint(checkpoint_dir, tag=tag)
+        dist.barrier()
+
+        sp_mpu.initialize_sequence_parallel(self.world_size)
+        target_model = SimpleModel(hidden_dim)
+        target_engine, _, _, _ = initialize(model=target_model,
+                                            model_parameters=target_model.parameters(),
+                                            config=config,
+                                            mpu=sp_mpu)
+        assert target_engine.mp_world_size == 1
+        assert target_engine.checkpoint_mp_rank == 0
+        assert sp_mpu.get_model_parallel_rank() == dist.get_rank()
+
+        target_engine.load_checkpoint(checkpoint_dir,
+                                      tag=tag,
+                                      load_module_only=True,
+                                      load_optimizer_states=False,
+                                      load_lr_scheduler_states=False)
+
+        for name, tensor in target_engine.module.state_dict().items():
+            assert torch.equal(tensor.detach().cpu(), expected[name])
+
+        sp_tag = "with_sp"
+        target_engine.save_checkpoint(checkpoint_dir, tag=sp_tag)
+        dist.barrier()
+
+        resumed_model = SimpleModel(hidden_dim)
+        resumed_engine, _, _, _ = initialize(model=resumed_model,
+                                             model_parameters=resumed_model.parameters(),
+                                             config=config,
+                                             mpu=sp_mpu)
+        resumed_engine.load_checkpoint(checkpoint_dir, tag=sp_tag)
+
+        for name, tensor in resumed_engine.module.state_dict().items():
+            assert torch.equal(tensor.detach().cpu(), expected[name])
 
 
 class TestUlyssesUtils(DistributedTest):

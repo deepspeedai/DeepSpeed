@@ -1,4 +1,3 @@
-// Copyright (c) Microsoft Corporation.
 // SPDX-License-Identifier: Apache-2.0
 
 // DeepSpeed Team
@@ -8,6 +7,11 @@ Functionality for managing CPU tensors occupying page-locked memory.
 */
 
 #include "deepspeed_pin_tensor.h"
+#include "page_alloc.h"
+
+#include <cassert>
+
+#include <sys/mman.h>
 
 using namespace std;
 
@@ -24,6 +28,15 @@ std::shared_ptr<deepspeed_pin_tensor_t> deepspeed_pin_tensor_t::shared()
 {
     static auto mgr = std::make_shared<deepspeed_pin_tensor_t>();
     return mgr;
+}
+
+extern "C" void* deepspeed_pin_tensor_mgr_holder()
+{
+    // Heap-allocate the shared_ptr so its control block outlives any transient
+    // copies made by other extensions that resolve this symbol via dlsym.
+    static auto* holder =
+        new std::shared_ptr<deepspeed_pin_tensor_t>(deepspeed_pin_tensor_t::shared());
+    return static_cast<void*>(holder);
 }
 
 torch::Tensor deepspeed_pin_tensor_t::alloc(const int64_t num_elem,

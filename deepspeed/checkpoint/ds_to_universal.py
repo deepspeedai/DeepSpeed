@@ -45,6 +45,7 @@ from deepspeed.checkpoint import (
     PARAMETER_WITH_SUB_PARAMS,
     AUTOEP_LAYERS_KEY,
     AUTOEP_LAYERS_KEY_LEGACY,
+    AUTOEP_EXPERT_KEY_PREFIX,
     EP_IS_EXPERT_PARAM,
     EP_NUM_EXPERTS,
     EXPERT_PARAMETER_PATTERNS,
@@ -423,10 +424,14 @@ def _extract_zero_shard_files_stage3(args,
     _do_parallel_work(do_work, work_items, args.num_extract_workers)
 
 
-def _merge_tp_slice_files(args, uc_info, tp_degree, slice_shapes, temp_dir):
+def _merge_tp_slice_files(args, uc_info, tp_degree, slice_shapes, temp_dir, exclude_param_names=None):
+    exclude_param_names = exclude_param_names or set()
     zero_output_folder = os.path.join(args.output_folder, "zero")
     do_work = partial(merge_tp_slices, uc_info, zero_output_folder, temp_dir, tp_degree)
-    unmatched_patterns_lists = _do_parallel_work(do_work, list(slice_shapes.items()), args.num_merge_workers)
+    merge_shapes = [(name, shape) for name, shape in slice_shapes.items() if name not in exclude_param_names]
+    unmatched_patterns_lists = _do_parallel_work(do_work, merge_shapes, args.num_merge_workers)
+    if not unmatched_patterns_lists:
+        return
 
     # verify that all patterns were used
     # if a pattern was not used by any of the workers, then it was not used at all -> assert/alert
@@ -817,12 +822,10 @@ def _get_zero_stage(optim_files):
 
 
 def _inject_missing_state(ds_checkpoint):
-    if UNIVERSAL_CHECKPOINT_INFO not in ds_checkpoint.global_state:
-        sd = torch.load(ds_checkpoint.mp_rank_files[0], map_location=torch.device('cpu'), weights_only=False)
-        if UNIVERSAL_CHECKPOINT_INFO not in sd:
-            ds_checkpoint.global_state[UNIVERSAL_CHECKPOINT_INFO] = {}
-            ds_checkpoint.global_state[UNIVERSAL_CHECKPOINT_INFO][
-                UNIVERSAL_CHECKPOINT_VERSION_KEY] = UNIVERSAL_CHECKPOINT_VERSION_VALUE
+    if ds_checkpoint.get_checkpoint_info(UNIVERSAL_CHECKPOINT_INFO) is None:
+        ds_checkpoint.global_state[UNIVERSAL_CHECKPOINT_INFO] = {
+            UNIVERSAL_CHECKPOINT_VERSION_KEY: UNIVERSAL_CHECKPOINT_VERSION_VALUE
+        }
 
 
 def _check_for_required_state(ds_checkpoint):
@@ -836,6 +839,55 @@ def _classify_autoep_expert_file_consolidation(autoep_metadata, expert_files):
     if expert_files:
         return 'native_moe'
     return 'none'
+
+
+def _aggregate_autoep_zero12_metadata(model_state_metadata):
+    slice_shapes_by_tp = []
+    metadata_by_prefix = {}
+    metadata_source_by_prefix = {}
+    use_data_before_expert_parallel_by_file = {}
+
+    for model_file, metadata in model_state_metadata:
+        param_shapes = metadata[PARAM_SHAPES]
+        if not isinstance(param_shapes, dict):
+            raise RuntimeError(f"DeepSpeed checkpoint {PARAM_SHAPES} must contain dictionaries in {model_file}.")
+        slice_shapes_by_tp.append(param_shapes)
+
+        autoep_metadata = metadata[AUTOEP_LAYERS_KEY]
+        if autoep_metadata is not None:
+            if not isinstance(autoep_metadata, list):
+                raise RuntimeError(f"AutoEP metadata must be a list in {model_file}.")
+            for layer_info in autoep_metadata:
+                if not isinstance(layer_info, dict):
+                    raise RuntimeError(f"AutoEP layer metadata must contain dictionaries in {model_file}.")
+                prefix = layer_info.get(AUTOEP_EXPERT_KEY_PREFIX)
+                if not isinstance(prefix, str) or not prefix:
+                    raise RuntimeError(f"AutoEP expert_key_prefix must be a non-empty string in {model_file}.")
+                existing = metadata_by_prefix.get(prefix)
+                if existing is not None and existing != layer_info:
+                    raise RuntimeError(f"Conflicting AutoEP metadata for expert_key_prefix {prefix!r} in "
+                                       f"{metadata_source_by_prefix[prefix]} and {model_file}.")
+                if existing is None:
+                    metadata_by_prefix[prefix] = layer_info
+                    metadata_source_by_prefix[prefix] = model_file
+
+        source_ds_config = metadata['ds_config']
+        if not isinstance(source_ds_config, dict):
+            raise RuntimeError(f"DeepSpeed checkpoint ds_config must be a dictionary in {model_file}.")
+        use_data_before_expert_parallel = source_ds_config.get('use_data_before_expert_parallelism', False)
+        if not isinstance(use_data_before_expert_parallel, bool):
+            raise RuntimeError("DeepSpeed checkpoint use_data_before_expert_parallelism must be a boolean "
+                               f"in {model_file}.")
+        use_data_before_expert_parallel_by_file[model_file] = use_data_before_expert_parallel
+
+    use_data_before_expert_parallel_values = set(use_data_before_expert_parallel_by_file.values())
+    if len(use_data_before_expert_parallel_values) != 1:
+        raise RuntimeError("DeepSpeed checkpoint use_data_before_expert_parallelism disagrees across model-state "
+                           f"files: {use_data_before_expert_parallel_by_file}")
+
+    autoep_metadata = list(metadata_by_prefix.values()) or None
+    use_data_before_expert_parallel = next(iter(use_data_before_expert_parallel_values))
+    return slice_shapes_by_tp, autoep_metadata, use_data_before_expert_parallel
 
 
 def main(args):
@@ -861,6 +913,8 @@ def main(args):
         checkpoint_paths = _create_checkpoint_paths(args.output_folder, iteration, ds_checkpoint.tp_degree,
                                                     ds_checkpoint.pp_degree)
 
+        slice_shapes_by_tp, autoep_metadata, use_data_before_expert_parallel = _aggregate_autoep_zero12_metadata(
+            ds_checkpoint.model_state_metadata)
         # Each mp_rank file stores one TP rank's PARAM_SHAPES for one PP stage.
         # mp_rank_files are ordered pp-major (pp0_tp0, pp0_tp1, ..., pp1_tp0, ...),
         # matching meg_2d_parallel_map.simple_init() (i -> pp=i // tp_degree,
@@ -869,40 +923,36 @@ def main(args):
         # and returns one per-TP shape list per parameter name. The per-TP shapes
         # let _merge_zero_shards reshape each TP rank's slice to its own shape,
         # which matters for uneven TP splits.
-        slice_shapes_by_tp = []
-        for mp_rank_file in ds_checkpoint.mp_rank_files:
-            mp_sd = torch.load(mp_rank_file, map_location=torch.device('cpu'), weights_only=False)
-            slice_shapes_by_tp.append(dict((k, v) for d in mp_sd[PARAM_SHAPES] for k, v in d.items()))
         slice_shapes = _group_per_tp_shapes(slice_shapes_by_tp, ds_checkpoint.pp_degree, ds_checkpoint.tp_degree)
         temp_dir = os.path.join(args.output_folder, 'tmp')
+
+        from deepspeed.checkpoint.autoep_universal import (
+            consolidate_autoep_zero12_expert_states,
+            get_autoep_zero12_expert_param_info,
+        )
+
+        expert_files = glob.glob(os.path.join(args.input_folder, 'layer_*_expert_*_model_states.pt'))
+        autoep_expert_file_type = _classify_autoep_expert_file_consolidation(autoep_metadata, expert_files)
+        autoep_expert_param_info = (get_autoep_zero12_expert_param_info(autoep_metadata)
+                                    if autoep_expert_file_type == 'autoep' else {})
 
         print('*** 1. Extracting ZeRO fragments')
         _extract_zero_shard_files(args, ds_checkpoint, temp_dir)
 
         print('*** 2. Merging slices .....')
-        _merge_tp_slice_files(args, ds_checkpoint.get_checkpoint_info(UNIVERSAL_CHECKPOINT_INFO),
-                              ds_checkpoint.tp_degree, slice_shapes, temp_dir)
-
-        print('*** 2.5. Consolidating AutoEP expert files')
-        from deepspeed.checkpoint.autoep_universal import (
-            consolidate_autoep_expert_files,
-            consolidate_autoep_optimizer_states,
-        )
-
-        # Load AutoEP metadata from main checkpoint
-        main_sd = torch.load(ds_checkpoint.mp_rank_files[0], map_location=torch.device('cpu'), weights_only=False)
-        autoep_metadata = main_sd.get(AUTOEP_LAYERS_KEY)
-        if autoep_metadata is None:
-            autoep_metadata = main_sd.get(AUTOEP_LAYERS_KEY_LEGACY)
-
-        # Check for expert files in checkpoint directory
-        expert_files = glob.glob(os.path.join(args.input_folder, 'layer_*_expert_*_model_states.pt'))
-        autoep_expert_file_type = _classify_autoep_expert_file_consolidation(autoep_metadata, expert_files)
+        _merge_tp_slice_files(args,
+                              ds_checkpoint.get_checkpoint_info(UNIVERSAL_CHECKPOINT_INFO),
+                              ds_checkpoint.tp_degree,
+                              slice_shapes,
+                              temp_dir,
+                              exclude_param_names=set(autoep_expert_param_info))
 
         if autoep_expert_file_type == 'autoep':
-            consolidate_autoep_expert_files(args.input_folder, args.output_folder, autoep_metadata)
-            ep_size = autoep_metadata[0]['ep_size'] if autoep_metadata else 1
-            consolidate_autoep_optimizer_states(args.input_folder, args.output_folder, autoep_metadata, ep_size)
+            print('*** 2.5. Consolidating AutoEP ZeRO-1/2 expert states')
+            autoep_slice_shapes = {name: per_tp_shapes[0] for name, per_tp_shapes in slice_shapes.items()}
+            consolidate_autoep_zero12_expert_states(temp_dir, args.output_folder, autoep_expert_param_info,
+                                                    autoep_slice_shapes, ds_checkpoint.dp_degree,
+                                                    ds_checkpoint.tp_degree, use_data_before_expert_parallel)
             print(f'    Consolidated {len(autoep_metadata)} AutoEP layer(s)')
         elif autoep_expert_file_type == 'native_moe':
             print(f'    Found {len(expert_files)} expert checkpoint file(s) but no AutoEP metadata; '
@@ -917,7 +967,7 @@ def main(args):
             shutil.rmtree(temp_dir, ignore_errors=True)
 
         # Copy mp* files into output folder, injecting AutoEP metadata into UNIVERSAL_CHECKPOINT_INFO
-        for f in glob.glob(os.path.join(args.input_folder, 'mp*')):
+        for f in ds_checkpoint.mp_rank_files:
             if autoep_metadata is not None:
                 # Load -> update with AutoEP metadata -> save
                 mp_sd = torch.load(f, map_location=torch.device('cpu'), weights_only=False)

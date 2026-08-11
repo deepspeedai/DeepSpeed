@@ -28,10 +28,10 @@ jobs:
         if: github.event_name != 'pull_request'
         run: echo "should_run=true" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         if: github.event_name == 'pull_request'
 
-      - uses: dorny/paths-filter@v3
+      - uses: dorny/paths-filter@v4
         id: filter
         if: github.event_name == 'pull_request'
         with:
@@ -62,7 +62,7 @@ jobs:
             apt-get update && apt-get install -y git python3 python3-pip libaio-dev ninja-build
             ln -sf /usr/bin/python3 /usr/bin/python
 
-        - uses: actions/checkout@v4
+        - uses: actions/checkout@v7
 
         - name: Install PyTorch
           run: |

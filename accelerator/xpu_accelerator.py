@@ -229,12 +229,13 @@ class XPU_Accelerator(DeepSpeedAccelerator):
     def LongTensor(self):
         return functools.partial(torch.tensor, dtype=torch.long, device=self._name)
 
-    def pin_memory(self, tensor, align_bytes=1):
+    def _pin_memory(self, tensor, align_bytes=1):
         if align_bytes == 1:
             return tensor.pin_memory(device=self.current_device_name())
         elif align_bytes == 0:
-            from deepspeed.ops.op_builder.xpu import AsyncIOBuilder
-            self.aio_handle = AsyncIOBuilder().load().aio_handle(128 * 1024, 8, False, False, False)
+            # Page-locked host buffer without starting AIO worker threads.
+            from deepspeed.ops.op_builder import PinMemoryBuilder
+            self.aio_handle = PinMemoryBuilder().load().pin_handle()
             aligned_t = self.aio_handle.new_cpu_locked_tensor(tensor.numel(), tensor)
             aligned_t = aligned_t[:tensor.numel()].copy_(tensor)
             self.aligned_tensors.append([aligned_t.data_ptr(), aligned_t[-1].data_ptr()])
