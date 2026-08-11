@@ -125,6 +125,11 @@ def swiglu(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
 
     Falls back to the eager PyTorch expression when Triton is unavailable.
     """
+    if gate.shape != up.shape:
+        raise ValueError(f"swiglu expects gate and up to have the same shape, got {tuple(gate.shape)} "
+                         f"and {tuple(up.shape)}")
+    if gate.dtype != up.dtype:
+        raise ValueError(f"swiglu expects gate and up to have the same dtype, got {gate.dtype} and {up.dtype}")
 
     if not _TRITON_AVAILABLE:
         return _swiglu_eager(gate, up)
