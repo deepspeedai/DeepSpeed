@@ -191,3 +191,27 @@ def test_memory_profiling_interpreter_disables_profiling_if_cleanup_fails(monkey
         interpreter.run()
 
     assert fake_handle.events == [("enable", True), ("clear", None), ("enable", False)]
+
+
+class FakePinnedTensor(torch.Tensor):
+    """A CPU tensor that reports itself as pinned without needing an accelerator."""
+
+    @staticmethod
+    def __new__(cls, data):
+        return torch.Tensor._make_subclass(cls, data)
+
+    def is_pinned(self, device=None):
+        return True
+
+    def to(self, *args, **kwargs):
+        raise AssertionError("a pinned host tensor must be left where it is")
+
+
+def test_to_leaves_pinned_host_tensors_alone():
+    # Pinned host tensors inside a graph are offloaded values. Copying one to the device would undo
+    # the offload the compile pass just made and hide the memory it gave back from the profile.
+    pinned = FakePinnedTensor(torch.zeros(4))
+    assert graph_profile._to(pinned, torch.device("cpu")) is pinned
+
+    plain = torch.zeros(4)
+    assert graph_profile._to(plain, torch.device("cpu")) is not pinned

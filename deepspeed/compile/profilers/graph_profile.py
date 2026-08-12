@@ -29,6 +29,11 @@ def _all_real_if_tensor(args):
 
 def _to(v, device):
     if torch.is_tensor(v):
+        # A pinned host tensor inside a graph is an offloaded value: the op reading it expects it on
+        # the host, and copying it to the device would both undo the offload and hide from the
+        # profile the memory the offload just gave back.
+        if v.device.type == "cpu" and v.is_pinned():
+            return v
         with unset_fake_temporarily():
             return v.to(device)
     return v

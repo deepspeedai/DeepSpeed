@@ -148,7 +148,8 @@ from deepspeed.compile.util import (is_deepcompile_supported, get_deepcompile_ha
                                     deepcompile_backward_epilogue)
 from deepspeed.compile.backend import register_compile_pass, opt_passes
 from deepspeed.compile.passes.contract import validate_schedule
-from deepspeed.compile.passes import zero3_compile, prefetch, selective_gather, offload_adam_states
+from deepspeed.compile.passes import (zero3_compile, prefetch, selective_gather, offload_adam_states,
+                                      offload_activation)
 from deepspeed.compile.init_z1 import init_z1
 from deepspeed.compile.init_z3 import init_z3
 from deepspeed.compile.z3_eager_fallback import deepcompile_z3_forward_context
@@ -480,6 +481,8 @@ class DeepSpeedEngine(Module):
                                        selective_gather.CONTRACT)
             self.register_compile_pass(offload_adam_states.NAME, offload_adam_states.move_opt_states,
                                        offload_adam_states.CONTRACT)
+            self.register_compile_pass(offload_activation.NAME, offload_activation.offload_activation,
+                                       offload_activation.CONTRACT)
 
         # We now support PyTorch style backward, but it relies on the counter in ZeRO optimizers.
         # However, we need some internal APIs to count the number of only used parameters.
