@@ -1013,14 +1013,17 @@ def _reload_functionals():
     F.interpolate = old_functions[F.interpolate.__str__]
     F.softmax = old_functions[F.softmax.__str__]
     F.embedding = old_functions[F.embedding.__str__]
+    if required_torch_version(min_version=2.0):
+        F.scaled_dot_product_attention = old_functions[F.scaled_dot_product_attention.__str__]
 
 
 def _reload_tensor_methods():
     torch.matmul = old_functions[torch.matmul.__str__]
     torch.Tensor.matmul = old_functions[torch.Tensor.matmul.__str__]
+    torch.Tensor.__matmul__ = old_functions[torch.Tensor.__matmul__.__str__]
     torch.mm = old_functions[torch.mm.__str__]
     torch.Tensor.mm = old_functions[torch.Tensor.mm.__str__]
-    torch.bmm = old_functions[torch.matmul.__str__]
+    torch.bmm = old_functions[torch.bmm.__str__]
     torch.Tensor.bmm = old_functions[torch.Tensor.bmm.__str__]
     torch.addmm = old_functions[torch.addmm.__str__]
     torch.Tensor.addmm = old_functions[torch.Tensor.addmm.__str__]
