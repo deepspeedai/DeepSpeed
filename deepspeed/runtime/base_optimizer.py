@@ -5,7 +5,9 @@
 
 import os
 import torch
+from functools import wraps
 from typing import Any
+from weakref import ref
 
 from deepspeed.utils import logger
 from deepspeed.utils.tensor_fragment import map_to_flat_opt_states
@@ -16,6 +18,21 @@ from deepspeed.runtime.utils import maybe_loss_for_backward
 
 class DeepSpeedOptimizer(object):
     pass
+
+
+class _IPGBucketParameterList(list):
+    """Record when a non-empty IPG bucket is drained during an active backward."""
+
+    def __init__(self, values, optimizer):
+        super().__init__(values)
+        self._optimizer_ref = ref(optimizer)
+
+    def clear(self):
+        optimizer = self._optimizer_ref()
+        if (self and optimizer is not None and optimizer._backward_active_depth > 0
+                and not optimizer._clearing_aborted_backward):
+            optimizer._backward_reduction_observed = True
+        super().clear()
 
 
 def _get_universal_checkpoint_ep_info() -> tuple[int, int]:
@@ -146,13 +163,21 @@ class BackwardHookStateManager:
             self.backward_active_depth -= 1
 
     def reset_for_new_step(self):
-        """Reset state at the start of each forward/backward step."""
+        """Reset state at the start of each forward/backward step.
+
+        Returns whether the previous backward was still active. This can happen
+        when autograd exits through an exception before the backward epilogue.
+        """
+        incomplete_backward = self.backward_active_depth > 0
+        self.remaining_grad_acc_hooks = 0
+        self.backward_active_depth = 0
         self.backward_seen_this_step = False
         self.hooks_fired_this_backward = 0
         self.max_expected_hooks_seen = 0
         self.epilogue_ran_this_backward = False
         self.post_backward_callback_queued = False
         self.post_backward_callback_graph_task_id = None
+        return incomplete_backward
 
     def should_refresh_expected_hook_count(self):
         """Return True when count_used_parameters_in_backward() should be re-evaluated.
@@ -250,8 +275,46 @@ class BackwardHookStateManager:
 class ZeROOptimizer(DeepSpeedOptimizer):
     """Base class for ZeRO optimizer implementations (stages 1, 2, and 3)."""
 
+    def __init_subclass__(cls, **kwargs):
+        """Require every ZeRO step implementation to reject an incomplete backward."""
+        super().__init_subclass__(**kwargs)
+        step = cls.__dict__.get("step")
+        if step is None or getattr(step, "_deepspeed_aborted_backward_guard", False):
+            return
+
+        @wraps(step)
+        def guarded_step(self, *args, **kwargs):
+            self._ensure_backward_complete_before_step()
+            result = step(self, *args, **kwargs)
+            self._backward_completed_since_step = False
+            return result
+
+        guarded_step._deepspeed_aborted_backward_guard = True
+        cls.step = guarded_step
+
+    def __setattr__(self, name, value):
+        """Preserve the aborted-backward guard across runtime step replacement."""
+        if (name == "step" and callable(value) and "_backward_hook_state" in self.__dict__
+                and not getattr(value, "_deepspeed_aborted_backward_guard", False)):
+            step = value
+
+            @wraps(step)
+            def guarded_step(*args, **kwargs):
+                self._ensure_backward_complete_before_step()
+                result = step(*args, **kwargs)
+                self._backward_completed_since_step = False
+                return result
+
+            guarded_step._deepspeed_aborted_backward_guard = True
+            value = guarded_step
+        object.__setattr__(self, name, value)
+
     def __init__(self):
         self._backward_hook_state = BackwardHookStateManager()
+        self._aborted_backward_requires_restart = False
+        self._backward_completed_since_step = False
+        self._backward_reduction_observed = False
+        self._clearing_aborted_backward = False
         # Mirrored copy of the engine GAS boundary for managed reduce/offload paths.
         # Engine owns the source of truth (micro-step / step() / set_*); ZeRO reads this
         # during backward. Prefer get/set methods over touching the private field.
@@ -460,10 +523,116 @@ class ZeROOptimizer(DeepSpeedOptimizer):
     def exit_backward(self):
         """Exit backward context. Call at the end of backward pass."""
         self._backward_hook_state.exit_backward()
+        if self._backward_active_depth == 0:
+            self._backward_completed_since_step = True
+
+    @staticmethod
+    def _aborted_backward_error():
+        return RuntimeError("An aborted backward already contributed gradients; discard this engine and restart the "
+                            "accumulation window")
+
+    def _ensure_backward_complete_before_step(self):
+        if self._aborted_backward_requires_restart or self._backward_active_depth > 0:
+            self._aborted_backward_requires_restart = True
+            raise self._aborted_backward_error()
+
+    def _track_ipg_bucket_reductions(self, buckets):
+        for bucket in buckets.values():
+            if not isinstance(bucket.params, _IPGBucketParameterList):
+                bucket.params = _IPGBucketParameterList(bucket.params, self)
+
+    def _clear_unreduced_parameter_gradients(self):
+        groups = getattr(self, "bit16_groups", None)
+        if groups is None:
+            groups = getattr(self, "fp16_groups", None)
+        if groups is None:
+            groups = getattr(self, "bf16_groups", ())
+        for group in groups:
+            for param in group:
+                param.grad = None
+                if hasattr(param, "grad_accum"):
+                    param.grad_accum = None
 
     def clear_backward_seen_flag(self):
-        """Clear the backward seen flag and reset hook counters at the start of each step."""
-        self._backward_hook_state.reset_for_new_step()
+        """Reset hook state and discard partial reduction state from an aborted backward."""
+        buckets = getattr(self, "ipg_buckets", {})
+        self._track_ipg_bucket_reductions(buckets)
+        if self._aborted_backward_requires_restart:
+            raise self._aborted_backward_error()
+
+        hooks_fired = self._backward_hook_state.hooks_fired_this_backward
+        params_already_reduced = getattr(self, "params_already_reduced", None)
+        if isinstance(params_already_reduced, dict):
+            any_param_reduced = any(params_already_reduced.values())
+        elif params_already_reduced is not None:
+            any_param_reduced = any(params_already_reduced)
+        else:
+            any_param_reduced = False
+        bf16_grad_contributed = any(any(group) for group in getattr(self, "fp32_groups_has_gradients", ()))
+        zero1_grad_contributed = (hasattr(self, "partition_gradients") and not self.partition_gradients
+                                  and self._backward_completed_since_step)
+        coalesced_grad_contributed = (getattr(self, "_coalesce_grad_reduction", False)
+                                      and self._backward_completed_since_step)
+        stage12_buckets_were_ready = getattr(self, "ready_for_gradients", False)
+
+        incomplete_backward = self._backward_hook_state.reset_for_new_step()
+        if not incomplete_backward:
+            self._backward_reduction_observed = False
+            return
+
+        # Bucket parameter lists are instrumented before every backward. Clearing
+        # a non-empty list while backward is active means a reduction crossed into
+        # persistent accumulation state. ZeRO-1's separate grad_accum path is also
+        # irreversible once any hook has contributed to the shared accumulator.
+        partial_reduction = (self._backward_reduction_observed or any_param_reduced or zero1_grad_contributed
+                             or coalesced_grad_contributed
+                             or (getattr(self, "use_grad_accum_attribute", False) and hooks_fired > 0)
+                             or bf16_grad_contributed)
+
+        # Autograd exceptions bypass the backward epilogue, so a partially filled
+        # IPG bucket and its reduced flags must not flow into the next root forward.
+        self._clearing_aborted_backward = True
+        try:
+            for bucket in buckets.values():
+                if hasattr(bucket, "clear_params"):
+                    bucket.clear_params()
+                else:
+                    bucket.clear()
+        finally:
+            self._clearing_aborted_backward = False
+
+        self._clear_unreduced_parameter_gradients()
+
+        extra_large_params = getattr(self, "extra_large_param_to_reduce", None)
+        if extra_large_params is not None:
+            extra_large_params.clear()
+
+        if isinstance(params_already_reduced, dict):
+            for param_id in params_already_reduced:
+                params_already_reduced[param_id] = False
+        elif params_already_reduced is not None:
+            for param_id in range(len(params_already_reduced)):
+                params_already_reduced[param_id] = False
+
+        if hasattr(self, "reset_partition_gradient_structures"):
+            self.reset_partition_gradient_structures()
+        if hasattr(self, "ready_for_gradients"):
+            self.ready_for_gradients = False
+        if hasattr(self, "grads_in_partition_offset"):
+            self.grads_in_partition_offset = 0
+
+        if partial_reduction:
+            self._aborted_backward_requires_restart = True
+            raise self._aborted_backward_error()
+
+        # Stage 1/2 advances micro_step_id when its first gradient hook sets up
+        # the IPG buckets. A safe abort before any bucket drain must undo that
+        # advance so CPU-offload retry does not import the previous step's
+        # accumulated_grads_in_cpu as a current-window contribution.
+        if stage12_buckets_were_ready and hasattr(self, "micro_step_id"):
+            self.micro_step_id -= 1
+
+        self._backward_reduction_observed = False
 
     def should_refresh_expected_hook_count(self):
         """Return True when count_used_parameters_in_backward() should be re-evaluated."""

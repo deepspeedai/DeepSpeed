@@ -3465,6 +3465,9 @@ class DeepSpeedEngine(Module):
         assert not self.inside_no_sync_ctxt, \
         "It is illegal to call Engine.step() inside no_sync context manager"
 
+        if isinstance(self.optimizer, ZeROOptimizer):
+            self.optimizer._ensure_backward_complete_before_step()
+
         see_memory_usage("Engine before step", force=self.memory_breakdown())
 
         # Check early because self.global_steps is incremented at some point here.

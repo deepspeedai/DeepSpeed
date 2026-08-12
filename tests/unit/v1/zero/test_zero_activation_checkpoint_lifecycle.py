@@ -119,6 +119,32 @@ def _assert_checkpoint_state_clean(engine, *, require_partitioned=True):
                 f"status={parameter.ds_status}")
 
 
+def _assert_backward_state_clean(engine):
+    """Assert that the next root forward discarded an incomplete backward."""
+    optimizer = engine.optimizer
+    assert optimizer._backward_active_depth == 0
+    assert optimizer._remaining_grad_acc_hooks == 0
+    for bucket in optimizer.ipg_buckets.values():
+        assert not bucket.params
+        assert bucket.elements == 0
+    reduced_flags = optimizer.params_already_reduced
+    if isinstance(reduced_flags, dict):
+        reduced_flags = reduced_flags.values()
+    assert not any(reduced_flags)
+    assert not getattr(optimizer, "extra_large_param_to_reduce", {})
+    groups = getattr(optimizer, "bit16_groups", getattr(optimizer, "fp16_groups", ()))
+    for group in groups:
+        for parameter in group:
+            assert parameter.grad is None
+            assert getattr(parameter, "grad_accum", None) is None
+
+
+def _snapshot_trainable_parameters(engine):
+    parameters = [parameter for parameter in engine.module.parameters() if parameter.requires_grad]
+    with deepspeed.zero.GatheredParameters(parameters):
+        return [parameter.detach().float().cpu().clone() for parameter in parameters]
+
+
 class _RecursiveFrozenBlock(torch.nn.Module):
     """Recursively invoke one module instance so its ZeRO ds_id overlaps with itself."""
 
@@ -442,6 +468,7 @@ class TestZero3ActivationCheckpointLifecycle(DistributedTest):
         def _observe_after_deepspeed_reset(module, unused_inputs):
             if observe_reset["enabled"]:
                 _assert_checkpoint_state_clean(engine)
+                _assert_backward_state_clean(engine)
                 observe_reset["enabled"] = False
 
         handle = engine.module.register_forward_pre_hook(_observe_after_deepspeed_reset)
@@ -453,6 +480,328 @@ class TestZero3ActivationCheckpointLifecycle(DistributedTest):
         assert not observe_reset["enabled"], "the post-reset observer did not execute"
         _assert_checkpoint_state_clean(engine)
         engine.destroy()
+
+    @pytest.mark.parametrize("zero_stage", [2, 3], ids=["zero2", "zero3"])
+    def test_partial_reduction_before_aborted_backward_requires_restart(self, zero_stage):
+        """A retry must fail closed once an aborted backward has reduced a partial bucket."""
+        device, _, _ = initialize_distributed()
+        model = _IncompleteBackwardModel(hidden_dim=8)
+        model.backward_control["raise"] = False
+        config = get_config_dict(zero_stage, gradient_accumulation_steps=2, force_fp32=True)
+        config["zero_optimization"]["reduce_bucket_size"] = 8
+        if zero_stage == 3:
+            config["zero_optimization"]["stage3_prefetch_bucket_size"] = 0
+            config["zero_optimization"]["stage3_max_reuse_distance"] = 0
+        trainable_parameters = [parameter for parameter in model.parameters() if parameter.requires_grad]
+        engine, _, _, _ = deepspeed.initialize(config=config, model=model, model_parameters=trainable_parameters)
+
+        first = torch.randn(2, 8, device=device, dtype=torch.float32, requires_grad=True)
+        engine.backward(engine(first).sum())
+        engine.step()
+
+        model.backward_control["raise"] = True
+        failing = torch.randn(2, 8, device=device, dtype=torch.float32, requires_grad=True)
+        with pytest.raises(RuntimeError, match="injected incomplete checkpoint backward"):
+            engine.backward(engine(failing).sum())
+
+        retry = torch.randn(2, 8, device=device, dtype=torch.float32, requires_grad=True)
+        with pytest.raises(RuntimeError, match="restart the accumulation window"):
+            engine(retry)
+        with pytest.raises(RuntimeError, match="restart the accumulation window"):
+            engine(retry)
+
+        engine.destroy()
+
+    def test_zero3_leaf_partial_reduction_before_abort_requires_restart(self):
+        """A multi-parameter ZeRO-3 leaf hook must record every bucket drain."""
+        from deepspeed.utils import set_z3_leaf_modules
+
+        device, _, _ = initialize_distributed()
+        model = _IncompleteBackwardModel(hidden_dim=8)
+        model.backward_control["raise"] = False
+        set_z3_leaf_modules(model, [torch.nn.Linear])
+        config = get_config_dict(3, gradient_accumulation_steps=2, force_fp32=True)
+        config["zero_optimization"]["reduce_bucket_size"] = 8
+        config["zero_optimization"]["stage3_prefetch_bucket_size"] = 0
+        config["zero_optimization"]["stage3_max_reuse_distance"] = 0
+        trainable_parameters = [parameter for parameter in model.parameters() if parameter.requires_grad]
+        engine, _, _, _ = deepspeed.initialize(config=config, model=model, model_parameters=trainable_parameters)
+
+        first = torch.randn(2, 8, device=device, dtype=torch.float32, requires_grad=True)
+        engine.backward(engine(first).sum())
+        engine.step()
+
+        model.backward_control["raise"] = True
+        failing = torch.randn(2, 8, device=device, dtype=torch.float32, requires_grad=True)
+        with pytest.raises(RuntimeError, match="injected incomplete checkpoint backward"):
+            engine.backward(engine(failing).sum())
+
+        retry = torch.randn(2, 8, device=device, dtype=torch.float32, requires_grad=True)
+        with pytest.raises(RuntimeError, match="restart the accumulation window"):
+            engine(retry)
+        engine.destroy()
+
+    @pytest.mark.parametrize("zero_stage", [2, 3], ids=["zero2", "zero3"])
+    def test_step_after_aborted_backward_requires_restart(self, zero_stage):
+        """An optimizer step cannot bypass aborted-backward cleanup at the next forward."""
+        device, _, _ = initialize_distributed()
+        model = _IncompleteBackwardModel(hidden_dim=8)
+        config = get_config_dict(zero_stage, gradient_accumulation_steps=1, force_fp32=True)
+        trainable_parameters = [parameter for parameter in model.parameters() if parameter.requires_grad]
+        engine, _, _, _ = deepspeed.initialize(config=config, model=model, model_parameters=trainable_parameters)
+
+        failing = torch.randn(2, 8, device=device, dtype=torch.float32, requires_grad=True)
+        with pytest.raises(RuntimeError, match="injected incomplete checkpoint backward"):
+            engine.backward(engine(failing).sum())
+        with pytest.raises(RuntimeError, match="restart the accumulation window"):
+            engine.step()
+
+        retry = torch.randn(2, 8, device=device, dtype=torch.float32, requires_grad=True)
+        with pytest.raises(RuntimeError, match="restart the accumulation window"):
+            engine(retry)
+        engine.destroy()
+
+    @pytest.mark.parametrize("zero_stage", [2, 3], ids=["zero2", "zero3"])
+    def test_non_boundary_step_after_aborted_backward_requires_restart(self, zero_stage):
+        """A non-boundary GAS step must reject an incomplete backward without advancing."""
+        device, _, _ = initialize_distributed()
+        model = _IncompleteBackwardModel(hidden_dim=8)
+        config = get_config_dict(zero_stage, gradient_accumulation_steps=2, force_fp32=True)
+        config["zero_optimization"]["reduce_bucket_size"] = 1_000_000
+        if zero_stage == 3:
+            config["zero_optimization"]["stage3_prefetch_bucket_size"] = 0
+            config["zero_optimization"]["stage3_max_reuse_distance"] = 0
+        trainable_parameters = [parameter for parameter in model.parameters() if parameter.requires_grad]
+        engine, _, _, _ = deepspeed.initialize(config=config, model=model, model_parameters=trainable_parameters)
+
+        failing = torch.randn(2, 8, device=device, dtype=torch.float32, requires_grad=True)
+        with pytest.raises(RuntimeError, match="injected incomplete checkpoint backward"):
+            engine.backward(engine(failing).sum())
+
+        initial_micro_steps = engine.micro_steps
+        with pytest.raises(RuntimeError, match="restart the accumulation window"):
+            engine.step()
+        assert engine.micro_steps == initial_micro_steps
+
+        retry = torch.randn(2, 8, device=device, dtype=torch.float32, requires_grad=True)
+        with pytest.raises(RuntimeError, match="restart the accumulation window"):
+            engine(retry)
+        engine.destroy()
+
+    def test_runtime_step_replacement_keeps_aborted_backward_guard(self):
+        """Instance-level ZeRO step replacement must retain the incomplete-backward guard."""
+        device, _, _ = initialize_distributed()
+        model = _IncompleteBackwardModel(hidden_dim=8)
+        config = get_config_dict(3, gradient_accumulation_steps=1, force_fp32=True)
+        config["zero_optimization"]["stage3_prefetch_bucket_size"] = 0
+        config["zero_optimization"]["stage3_max_reuse_distance"] = 0
+        trainable_parameters = [parameter for parameter in model.parameters() if parameter.requires_grad]
+        engine, _, _, _ = deepspeed.initialize(config=config, model=model, model_parameters=trainable_parameters)
+        replacement_calls = []
+        engine.optimizer.step = lambda closure=None: replacement_calls.append(closure)
+
+        failing = torch.randn(2, 8, device=device, dtype=torch.float32, requires_grad=True)
+        with pytest.raises(RuntimeError, match="injected incomplete checkpoint backward"):
+            engine.backward(engine(failing).sum())
+        with pytest.raises(RuntimeError, match="restart the accumulation window"):
+            engine.step()
+
+        assert not replacement_calls
+        engine.destroy()
+
+    def test_zero2_oversized_unreduced_gradient_is_cleared_for_retry(self):
+        """Discard an oversized ZeRO-2 bucket side-table entry after a safe abort."""
+        device, _, _ = initialize_distributed()
+        torch.manual_seed(1234)
+        model = _IncompleteBackwardModel(hidden_dim=8)
+        model.head.bias.requires_grad_(False)
+        config = get_config_dict(2, gradient_accumulation_steps=1, force_fp32=True)
+        config["zero_optimization"]["reduce_bucket_size"] = 1
+        trainable_parameters = [parameter for parameter in model.parameters() if parameter.requires_grad]
+        engine, _, _, _ = deepspeed.initialize(config=config, model=model, model_parameters=trainable_parameters)
+
+        failing = torch.randn(2, 8, device=device, dtype=torch.float32, requires_grad=True)
+        with pytest.raises(RuntimeError, match="injected incomplete checkpoint backward"):
+            engine.backward(engine(failing).sum())
+        assert engine.optimizer.extra_large_param_to_reduce
+
+        retry = torch.randn(2, 8, device=device, dtype=torch.float32, requires_grad=True)
+        engine.backward(engine(retry).sum())
+        engine.step()
+
+        _assert_backward_state_clean(engine)
+        engine.destroy()
+
+    def test_bf16_immediate_update_aborted_backward_requires_restart(self):
+        """BF16 hooks that reached the persistent FP32 buffer make retry unsafe."""
+        if not get_accelerator().is_bf16_supported():
+            pytest.skip("bfloat16 is not supported on this accelerator")
+
+        device, _, _ = initialize_distributed()
+        model = _IncompleteBackwardModel(hidden_dim=8)
+        config = get_config_dict(1, gradient_accumulation_steps=1)
+        config["bf16"] = {"enabled": True, "immediate_grad_update": True}
+        config["data_types"] = {"grad_accum_dtype": "fp32"}
+        trainable_parameters = [parameter for parameter in model.parameters() if parameter.requires_grad]
+        engine, _, _, _ = deepspeed.initialize(config=config, model=model, model_parameters=trainable_parameters)
+
+        failing = torch.randn(2, 8, device=device, dtype=torch.bfloat16, requires_grad=True)
+        with pytest.raises(RuntimeError, match="injected incomplete checkpoint backward"):
+            engine.backward(engine(failing).sum())
+        assert any(any(group) for group in engine.optimizer.fp32_groups_has_gradients)
+
+        retry = torch.randn(2, 8, device=device, dtype=torch.bfloat16, requires_grad=True)
+        with pytest.raises(RuntimeError, match="restart the accumulation window"):
+            engine(retry)
+        engine.destroy()
+
+    def test_zero1_prior_accumulation_aborted_backward_requires_restart(self):
+        """Keep a valid earlier ZeRO-1 microbatch from being silently discarded."""
+        device, _, _ = initialize_distributed()
+        engines = []
+
+        for _ in range(2):
+            torch.manual_seed(1234)
+            model = _IncompleteBackwardModel(hidden_dim=8)
+            model.backward_control["raise"] = False
+            config = get_config_dict(1, gradient_accumulation_steps=2, force_fp32=True)
+            trainable_parameters = [parameter for parameter in model.parameters() if parameter.requires_grad]
+            engine, _, _, _ = deepspeed.initialize(config=config, model=model, model_parameters=trainable_parameters)
+            engines.append(engine)
+
+        control, aborted = engines
+        first = torch.randn(2, 8, device=device, dtype=torch.float32)
+        second = torch.randn(2, 8, device=device, dtype=torch.float32)
+        for engine in engines:
+            engine.backward(engine(first.clone().requires_grad_(True)).sum())
+            engine.step()
+
+        control.backward(control(second.clone().requires_grad_(True)).sum())
+        control.step()
+
+        aborted.module.backward_control["raise"] = True
+        with pytest.raises(RuntimeError, match="injected incomplete checkpoint backward"):
+            aborted.backward(aborted(second.clone().requires_grad_(True)).sum())
+        with pytest.raises(RuntimeError, match="restart the accumulation window"):
+            aborted(second.clone().requires_grad_(True))
+
+        control.destroy()
+        aborted.destroy()
+
+    @pytest.mark.parametrize("zero_stage", [2, 3], ids=["zero2", "zero3"])
+    def test_coalesced_prior_backward_abort_requires_restart(self, zero_stage):
+        """Keep an earlier coalesced backward from being silently discarded."""
+        device, _, _ = initialize_distributed()
+        model = _IncompleteBackwardModel(hidden_dim=8)
+        model.backward_control["raise"] = False
+        config = get_config_dict(zero_stage, gradient_accumulation_steps=1, force_fp32=True)
+        if zero_stage == 3:
+            config["zero_optimization"]["stage3_prefetch_bucket_size"] = 0
+            config["zero_optimization"]["stage3_max_reuse_distance"] = 0
+        trainable_parameters = [parameter for parameter in model.parameters() if parameter.requires_grad]
+        engine, _, _, _ = deepspeed.initialize(config=config, model=model, model_parameters=trainable_parameters)
+
+        first = torch.randn(2, 8, device=device, dtype=torch.float32, requires_grad=True)
+        failing = torch.randn(2, 8, device=device, dtype=torch.float32, requires_grad=True)
+        retry = torch.randn(2, 8, device=device, dtype=torch.float32, requires_grad=True)
+        with engine.coalesce_grad_reduction():
+            engine.backward(engine(first).sum())
+            model.backward_control["raise"] = True
+            with pytest.raises(RuntimeError, match="injected incomplete checkpoint backward"):
+                engine.backward(engine(failing).sum())
+            with pytest.raises(RuntimeError, match="restart the accumulation window"):
+                engine(retry)
+
+        engine.destroy()
+
+    @pytest.mark.parametrize("zero_stage", [2, 3], ids=["zero2", "zero3"])
+    def test_pre_reduction_abort_retry_matches_clean_control(self, zero_stage):
+        """Discard unreduced failed gradients without losing earlier GAS contributions."""
+        device, _, _ = initialize_distributed()
+        first = torch.randn(2, 8, device=device, dtype=torch.float32)
+        second = torch.randn(2, 8, device=device, dtype=torch.float32)
+        engines = []
+
+        for _ in range(2):
+            torch.manual_seed(1234)
+            model = _IncompleteBackwardModel(hidden_dim=8)
+            model.backward_control["raise"] = False
+            config = get_config_dict(zero_stage, gradient_accumulation_steps=2, force_fp32=True)
+            config["zero_optimization"]["reduce_bucket_size"] = 1_000_000
+            if zero_stage == 3:
+                config["zero_optimization"]["stage3_prefetch_bucket_size"] = 0
+                config["zero_optimization"]["stage3_max_reuse_distance"] = 0
+            trainable_parameters = [parameter for parameter in model.parameters() if parameter.requires_grad]
+            engine, _, _, _ = deepspeed.initialize(config=config, model=model, model_parameters=trainable_parameters)
+            engines.append(engine)
+
+        control, recovered = engines
+        for engine in engines:
+            engine.backward(engine(first.clone().requires_grad_(True)).sum())
+            engine.step()
+
+        control.backward(control(second.clone().requires_grad_(True)).sum())
+        control.step()
+
+        recovered.module.backward_control["raise"] = True
+        with pytest.raises(RuntimeError, match="injected incomplete checkpoint backward"):
+            recovered.backward(recovered(second.clone().requires_grad_(True)).sum())
+        recovered.backward(recovered(second.clone().requires_grad_(True)).sum())
+        recovered.step()
+
+        for control_parameter, recovered_parameter in zip(_snapshot_trainable_parameters(control),
+                                                          _snapshot_trainable_parameters(recovered)):
+            torch.testing.assert_close(recovered_parameter, control_parameter, rtol=0, atol=0)
+
+        control.destroy()
+        recovered.destroy()
+
+    def test_zero2_cpu_offload_pre_reduction_abort_retry_matches_clean_control(self):
+        """A safe retry must not import CPU gradients from the previous optimizer step."""
+        device, _, dtype = initialize_distributed()
+        first_window = [torch.randn(2, 8, device=device, dtype=dtype) for _ in range(2)]
+        second_window = [torch.randn(2, 8, device=device, dtype=dtype) for _ in range(2)]
+        engines = []
+
+        for _ in range(2):
+            torch.manual_seed(1234)
+            model = _IncompleteBackwardModel(hidden_dim=8)
+            model.backward_control["raise"] = False
+            config = get_config_dict(2, gradient_accumulation_steps=2)
+            config["zero_optimization"]["reduce_bucket_size"] = 1_000_000
+            config["zero_optimization"]["offload_optimizer"] = {"device": "cpu"}
+            config["zero_force_ds_cpu_optimizer"] = False
+            trainable_parameters = [parameter for parameter in model.parameters() if parameter.requires_grad]
+            engine, _, _, _ = deepspeed.initialize(config=config, model=model, model_parameters=trainable_parameters)
+            engines.append(engine)
+
+        control, recovered = engines
+        for microbatch in first_window:
+            for engine in engines:
+                engine.backward(engine(microbatch.clone().requires_grad_(True)).sum())
+                engine.step()
+        for engine in engines:
+            assert engine.optimizer.accumulated_grads_in_cpu
+
+        control.backward(control(second_window[0].clone().requires_grad_(True)).sum())
+        control.step()
+
+        recovered.module.backward_control["raise"] = True
+        with pytest.raises(RuntimeError, match="injected incomplete checkpoint backward"):
+            recovered.backward(recovered(second_window[0].clone().requires_grad_(True)).sum())
+        recovered.backward(recovered(second_window[0].clone().requires_grad_(True)).sum())
+        recovered.step()
+
+        for engine in engines:
+            engine.backward(engine(second_window[1].clone().requires_grad_(True)).sum())
+            engine.step()
+
+        for control_parameter, recovered_parameter in zip(_snapshot_trainable_parameters(control),
+                                                          _snapshot_trainable_parameters(recovered)):
+            torch.testing.assert_close(recovered_parameter, control_parameter, rtol=0, atol=0)
+
+        control.destroy()
+        recovered.destroy()
 
     @_RECOMPUTE_RELEASE_TIMING
     def test_frozen_parameter_without_backward_consumer_releases_at_last_use(self):
