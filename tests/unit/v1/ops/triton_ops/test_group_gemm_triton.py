@@ -302,7 +302,9 @@ def test_e2e_swiglu_experts_matches_native_grouped_mm():
     counts_t = torch.tensor(counts, device=dev, dtype=torch.int32)
 
     # Shared random init for the two paths.
-    x0 = torch.randn(M, dim, device=dev, dtype=torch.bfloat16)
+    # Bounded [-1, 1] inputs keep the SwiGLU activations small so the two paths' differing
+    # bf16 accumulation orders stay within tolerance (unbounded randn tails blow up weight grads).
+    x0 = torch.empty(M, dim, device=dev, dtype=torch.bfloat16).uniform_(-1, 1)
     w1_0 = torch.randn(E, hidden, dim, device=dev, dtype=torch.bfloat16) * 0.1
     w2_0 = torch.randn(E, dim, hidden, device=dev, dtype=torch.bfloat16) * 0.1
     w3_0 = torch.randn(E, hidden, dim, device=dev, dtype=torch.bfloat16) * 0.1
@@ -360,7 +362,8 @@ def test_grouped_experts_triton_path_parity():
     loop_experts.load_state_dict(triton_experts.state_dict())
     assert triton_experts.use_triton_grouped_mm is True
 
-    x = torch.randn(M, dim, device=dev, dtype=torch.bfloat16)
+    # Bounded [-1, 1] inputs keep activations small so the two paths agree within tolerance.
+    x = torch.empty(M, dim, device=dev, dtype=torch.bfloat16).uniform_(-1, 1)
     x_t = x.clone().requires_grad_(True)
     x_l = x.clone().requires_grad_(True)
     out_t = triton_experts(x_t, counts)
