@@ -3,6 +3,8 @@
 
 # DeepSpeed Team
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 from packaging.version import Version
@@ -465,9 +467,10 @@ def test_defer_collectives_is_all_or_nothing():
     assert not model.row.defer_collectives_to_compiler
 
 
-def test_broken_transformers_moe_raises(monkeypatch):
-    """On an affected transformers release the pass must reject MoE models up front, with a
-    pointer to the fix, while leaving dense models untouched."""
+@pytest.mark.parametrize("experts_implementation, should_raise", [("batched_mm", True), ("eager", False),
+                                                                  ("grouped_mm", False)])
+def test_broken_transformers_moe_raises(monkeypatch, experts_implementation, should_raise):
+    """Affected releases must reject only MoE models selecting the broken batched_mm path."""
     transformers = pytest.importorskip("transformers")
     from deepspeed.compile.init_tp import _check_broken_transformers_moe
 
@@ -479,7 +482,11 @@ def test_broken_transformers_moe_raises(monkeypatch):
     # The markers transformers' experts-implementation decorator leaves on a wrapped module.
     moe_model.experts._apply_gate = lambda x: x
     moe_model.experts.is_concatenated = True
-    with pytest.raises(RuntimeError, match="45634"):
+    moe_model.experts.config = SimpleNamespace(_experts_implementation=experts_implementation)
+    if should_raise:
+        with pytest.raises(RuntimeError, match="45634"):
+            _check_broken_transformers_moe(moe_model)
+    else:
         _check_broken_transformers_moe(moe_model)
 
     _check_broken_transformers_moe(torch.nn.Module())

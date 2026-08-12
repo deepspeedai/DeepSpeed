@@ -35,6 +35,7 @@ def _check_broken_transformers_moe(model):
     experts_modules = [
         name for name, module in model.named_modules()
         if hasattr(module, "_apply_gate") and hasattr(module, "is_concatenated")
+        and getattr(getattr(module, "config", None), "_experts_implementation", None) == "batched_mm"
     ]
     if experts_modules:
         raise RuntimeError(
