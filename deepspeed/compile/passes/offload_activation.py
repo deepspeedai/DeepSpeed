@@ -272,8 +272,14 @@ def _select_activations(graph: Graph, graph_id: int, profile, param_manager) -> 
         return []
 
     if not profile.fwd_mem:
-        print_rank_0(f"offload_activation graph_id={graph_id} incomplete profiling data; skipping")
-        return []
+        # No profile means no peak to plan against, and the usual reason it is missing is that
+        # profiling itself ran out of memory -- which is evidence of exactly the pressure this pass
+        # relieves. Doing nothing here guarantees the failure it was enabled to prevent, so move
+        # everything eligible instead. The cost is the worst case measured for the forced arm; the
+        # alternative is a run that does not start.
+        print_rank_0(f"offload_activation graph_id={graph_id} no memory profile (profiling likely ran "
+                     f"out of memory); moving all {len(candidates)} eligible activations")
+        return candidates
 
     budget = _memory_budget()
     peak = max(peak for _, _, _, peak in profile.fwd_mem)

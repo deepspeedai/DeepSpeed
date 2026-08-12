@@ -177,6 +177,21 @@ def test_pass_does_not_ask_for_a_reprofiling_replay(forced_budget):
     assert "offload_tensor" in gm.code, "the rewritten graph was not recompiled into the module"
 
 
+def test_fwd_moves_everything_when_the_profile_is_missing(forced_budget):
+    # Profiling is the first thing to run out of memory under pressure, and it used to take the pass
+    # down with it: no profile, no plan, no offloading -- in exactly the runs that needed it. With no
+    # peak to plan against, move everything eligible rather than sit out.
+    _ensure_dc_ops()
+    graph = _make_fwd_graph()
+    gm = _make_gm(graph)
+    profile = _make_profile(graph)
+    profile.fwd_mem = []
+
+    _run_pass(gm, profile, bwd=False)
+
+    assert [n for n in _node_names(graph) if n.startswith("offload_")] == ["offload_act_0", "offload_act_1"]
+
+
 def test_fwd_skips_parameters(forced_budget):
     _ensure_dc_ops()
     graph = _make_fwd_graph()

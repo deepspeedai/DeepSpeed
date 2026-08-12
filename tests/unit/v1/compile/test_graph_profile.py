@@ -215,3 +215,112 @@ def test_to_leaves_pinned_host_tensors_alone():
 
     plain = torch.zeros(4)
     assert graph_profile._to(plain, torch.device("cpu")) is not pinned
+
+
+class RecordingAllReduce:
+    """Stands in for the collective, recording shapes so a test can see who took part.
+
+    Set peer_failed to make the vote come back as "someone else failed", which is what a healthy
+    rank sees when another rank hit an error.
+    """
+
+    def __init__(self, peer_failed=False):
+        self.shapes = []
+        self.peer_failed = peer_failed
+
+    def __call__(self, tensor, op=None):
+        self.shapes.append(tuple(tensor.shape))
+        if self.peer_failed and tensor.numel() == 1:
+            tensor.fill_(1)
+
+
+def _install_fake_distributed(monkeypatch, all_reduce):
+    monkeypatch.setattr(graph_profile.dist, "is_initialized", lambda: True)
+    monkeypatch.setattr(graph_profile.dist, "all_reduce", all_reduce)
+    monkeypatch.setattr(graph_profile.dist, "get_rank", lambda: 0)
+    monkeypatch.setattr(graph_profile.dist, "barrier", lambda: None)
+
+
+def test_abort_helper_passes_when_every_rank_is_healthy(monkeypatch):
+    all_reduce = RecordingAllReduce()
+    _install_fake_distributed(monkeypatch, all_reduce)
+
+    # One vote per call, and no exception when nobody reported a failure.
+    graph_profile._abort_if_any_rank_failed(None, torch.device("cpu"))
+    assert all_reduce.shapes == [(1, )]
+
+
+def test_abort_helper_raises_locally_without_distributed():
+    # Single-process runs have nobody to agree with, so the error is raised as it stands.
+    with pytest.raises(graph_profile.ProfileAborted, match="local failure"):
+        graph_profile._abort_if_any_rank_failed(RuntimeError("local failure"), torch.device("cpu"), distributed=False)
+
+
+def test_healthy_rank_aborts_when_another_rank_failed(monkeypatch):
+    # The point of the vote: this rank is fine, but it must stop rather than run on into
+    # collectives the failed rank will never reach.
+    _install_fake_distributed(monkeypatch, RecordingAllReduce(peer_failed=True))
+
+    with pytest.raises(graph_profile.ProfileAborted, match="another rank"):
+        graph_profile._abort_if_any_rank_failed(None, torch.device("cpu"))
+
+
+def test_memory_profiler_finishes_the_node_collectives_before_reporting_a_failure(monkeypatch):
+    # A node that raises used to unwind straight out of the loop, skipping this node's memory
+    # reduce and every collective after it, leaving the other ranks waiting until the watchdog
+    # killed the job half an hour later.
+    all_reduce = RecordingAllReduce()
+    _install_fake_distributed(monkeypatch, all_reduce)
+    monkeypatch.setattr(graph_profile, "get_deepcompile_handle", lambda: FakeDeepCompileHandle())
+    monkeypatch.setattr(graph_profile, "get_accelerator", lambda: FakeAccelerator())
+    monkeypatch.setattr(graph_profile, "_all_real_if_tensor", lambda args: True)
+    monkeypatch.setattr(graph_profile, "_get_mem_usage_out_of_torch", lambda: 0)
+
+    def out_of_memory(x):
+        raise RuntimeError("CUDA out of memory. Tried to allocate 6.96 GiB")
+
+    graph = Graph()
+    x = graph.placeholder("x")
+    y = graph.call_function(out_of_memory, (x, ))
+    graph.output(y)
+    gm = GraphModule(torch.nn.Module(), graph)
+
+    interpreter = graph_profile.MemoryProfilingInterpreter(gm)
+
+    # run() swallows it the way it always has, so the caller still gets "profile incomplete".
+    assert interpreter.run(torch.ones(1)) is None
+    assert not interpreter.profile_complete
+    assert interpreter.mem_record == []
+
+    # The failing node took part in its memory reduce (2 values) and then in the vote (1 value):
+    # the same pair of collectives every healthy rank issues for that node.
+    assert all_reduce.shapes[-2:] == [(2, ), (1, )]
+
+
+def test_time_profiler_finishes_the_node_collectives_before_reporting_a_failure(monkeypatch):
+    all_reduce = RecordingAllReduce()
+    _install_fake_distributed(monkeypatch, all_reduce)
+    monkeypatch.setattr(graph_profile, "get_deepcompile_handle", lambda: FakeDeepCompileHandle())
+    monkeypatch.setattr(graph_profile, "get_accelerator", lambda: FakeAccelerator())
+    monkeypatch.setattr(graph_profile, "_all_real_if_tensor", lambda args: True)
+    monkeypatch.setattr(graph_profile, "_get_mem_usage_out_of_torch", lambda: 0)
+    monkeypatch.setattr(graph_profile, "is_comm_op", lambda node: False)
+    monkeypatch.setattr(graph_profile, "is_release_node", lambda node: False)
+
+    def out_of_memory(x):
+        raise RuntimeError("CUDA out of memory. Tried to allocate 1.06 GiB")
+
+    graph = Graph()
+    x = graph.placeholder("x")
+    y = graph.call_function(out_of_memory, (x, ))
+    graph.output(y)
+    gm = GraphModule(torch.nn.Module(), graph)
+
+    interpreter = graph_profile.ProfilingInterpreter(gm, iteration=1, warmup=0)
+
+    assert interpreter.run(torch.ones(1)) is None
+
+    # Cache vote (1), the timing reduce this rank has nothing to contribute to (5), then the
+    # failure vote (1). Skipping the middle one is what stranded the other ranks.
+    assert all_reduce.shapes[-3:] == [(1, ), (5, ), (1, )]
+    assert graph_profile.is_profile_incomplete(gm.graph)
