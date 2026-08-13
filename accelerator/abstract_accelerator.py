@@ -203,6 +203,14 @@ class DeepSpeedAccelerator(ABC):
     def is_triton_supported(self):
         ...
 
+    # Whether the fused MoE expert path should prefer a Triton grouped-GEMM
+    # kernel over ``torch._grouped_mm`` on this accelerator. Backends override
+    # this to return True when the Triton path is faster than the native op
+    # (e.g. CUDA sm8x, where ``torch._grouped_mm`` falls back to a slow
+    # per-group loop). Defaults to False so backends opt in explicitly.
+    def prefer_triton_grouped_mm(self):
+        return False
+
     # Graph operations
     @abc.abstractmethod
     def create_graph(self):
@@ -252,9 +260,16 @@ class DeepSpeedAccelerator(ABC):
     def LongTensor(self):
         ...
 
-    @abc.abstractmethod
     def pin_memory(self, tensor, align_bytes=1):
-        ...
+        from deepspeed.utils.pin_memory_tracker import track_pinned_memory
+        track_pinned_memory(tensor.nbytes)
+        return self._pin_memory(tensor, align_bytes)
+
+    def _pin_memory(self, tensor, align_bytes=1):
+        """Device-specific pinning hook. Accelerators that need custom pinning
+        behavior should override this method rather than ``pin_memory`` so that
+        the pinned-memory accounting in ``pin_memory`` is preserved."""
+        return tensor.pin_memory()
 
     @abc.abstractmethod
     def is_pinned(self, tensor):

@@ -17,6 +17,7 @@ from deepspeed.runtime.lr_schedules import CYCLE_MIN_MOM, CYCLE_MAX_MOM, DECAY_M
 from deepspeed.runtime.lr_schedules import WARMUP_DECAY_LR, TOTAL_NUM_STEPS
 from deepspeed.runtime.lr_schedules import WARMUP_COSINE_LR, WARMUP_MIN_RATIO, COS_MIN_RATIO, WarmupCosineLR
 from deepspeed.runtime.lr_schedules import WarmupLR, WarmupDecayLR, LRRangeTest, OneCycle
+from deepspeed.runtime import lr_schedules as lrs
 
 
 def _verify_continuous_decrease(values):
@@ -566,6 +567,69 @@ def test_warmup_lr_inherits_per_group_lr_when_max_unspecified():
     assert [group["lr"] for group in optimizer.param_groups] == pytest.approx([0.1, 0.2])
 
 
+# Every scheduler exposed via VALID_LR_SCHEDULES must preserve a caller-supplied
+# tensor LR through construction and the first step: update_lr() fills the
+# optimizer's existing LR tensor in place rather than replacing it with a Python
+# scalar, so the caller-held reference keeps its identity, shape and dtype.
+# Add a row when a new scheduler is registered; the coverage test below fails
+# collection if any scheduler is missing.
+TENSOR_LR_CONTRACTS = [
+    pytest.param(LRRangeTest, {}, 1e-3, 1e-3 * (1 + 2 / 2000), id="LRRangeTest"),
+    pytest.param(OneCycle,
+                 dict(cycle_min_lr=0.01,
+                      cycle_max_lr=0.1,
+                      cycle_first_step_size=10,
+                      cycle_second_step_size=10,
+                      cycle_momentum=False),
+                 0.01,
+                 0.01 + (0.1 - 0.01) * 2 / 10,
+                 id="OneCycle"),
+    pytest.param(WarmupLR, dict(warmup_num_steps=10), 0.0, 0.1 * math.log(2) / math.log(10), id="WarmupLR"),
+    pytest.param(WarmupDecayLR,
+                 dict(total_num_steps=100, warmup_num_steps=10, warmup_max_lr=0.1),
+                 0.0,
+                 0.1 * math.log(2) / math.log(10),
+                 id="WarmupDecayLR"),
+    pytest.param(WarmupCosineLR,
+                 dict(total_num_steps=100, warmup_num_steps=10),
+                 0.0,
+                 0.1 * math.log(2) / math.log(10),
+                 id="WarmupCosineLR"),
+]
+
+
+@pytest.mark.parametrize("lr_shape", [(), (1, )])
+@pytest.mark.parametrize("scheduler_cls, scheduler_kwargs, init_lr, step_lr", TENSOR_LR_CONTRACTS)
+def test_lr_scheduler_preserves_tensor_lr(scheduler_cls, scheduler_kwargs, init_lr, step_lr, lr_shape):
+    param = torch.nn.Parameter(torch.zeros(1))
+    initial_lr = torch.full(lr_shape, 0.1, dtype=torch.float64)
+    optimizer = torch.optim.SGD([param], lr=initial_lr)
+
+    scheduler = scheduler_cls(optimizer=optimizer, **scheduler_kwargs)
+
+    g = optimizer.param_groups[0]["lr"]
+    assert g is initial_lr
+    assert g.shape == lr_shape
+    assert g.dtype == torch.float64
+    assert g.item() == pytest.approx(init_lr)
+
+    scheduler.step(1)
+
+    g = optimizer.param_groups[0]["lr"]
+    assert g is initial_lr
+    assert g.shape == lr_shape
+    assert g.dtype == torch.float64
+    assert g.item() == pytest.approx(step_lr)
+
+
+def test_all_schedulers_covered_by_tensor_lr_contract():
+    covered = {arg.values[0] for arg in TENSOR_LR_CONTRACTS}
+    registered = {getattr(lrs, name) for name in lrs.VALID_LR_SCHEDULES}
+    assert covered == registered, (
+        f"missing tensor-LR contract for: {sorted(c.__name__ for c in registered - covered)}; "
+        f"stale contract entries: {sorted(c.__name__ for c in covered - registered)}")
+
+
 def test_warmup_cosine_lr_total_num_steps_equals_warmup_num_steps():
     # total_num_steps == warmup_num_steps must not raise ZeroDivisionError, and because the
     # cosine decay window is empty, every step past warmup must stay at cos_min_ratio rather
@@ -750,3 +814,63 @@ def test_one_cycle_allows_zero_second_step_size():
     for _ in range(3):
         scheduler.step()
     assert scheduler.get_lr()[0] > 0.001
+
+
+def _two_group_adam():
+    dense = torch.nn.Parameter(torch.zeros(1))
+    expert = torch.nn.Parameter(torch.zeros(1))
+    return torch.optim.Adam([{"params": [dense], "lr": 0.1}, {"params": [expert], "lr": 0.2}], betas=(0.9, 0.99))
+
+
+def test_one_cycle_accepts_per_group_lr_and_momentum_lists():
+    # cycle_min_lr, cycle_max_lr, cycle_min_mom and cycle_max_mom are all documented as
+    # "float or list ... for each parameter group", but OneCycle only broadcast a scalar,
+    # so a list was written whole into every param group. That left the optimizer holding
+    # a list as its lr and as betas[0], and the first step raised TypeError on a list
+    # subtraction. Reuse _format_param, which is how the sibling schedulers in this file
+    # already honour the same documented contract.
+    optimizer = _two_group_adam()
+
+    scheduler = OneCycle(optimizer=optimizer,
+                         cycle_min_lr=[0.001, 0.002],
+                         cycle_max_lr=[0.01, 0.02],
+                         cycle_min_mom=[0.8, 0.85],
+                         cycle_max_mom=[0.9, 0.95],
+                         cycle_first_step_size=5,
+                         cycle_second_step_size=5)
+
+    assert scheduler.min_lrs == pytest.approx([0.001, 0.002])
+    assert scheduler.max_lrs == pytest.approx([0.01, 0.02])
+    assert [group["lr"] for group in optimizer.param_groups] == pytest.approx([0.001, 0.002])
+    assert [group["betas"][0] for group in optimizer.param_groups] == pytest.approx([0.8, 0.85])
+
+    # At the peak of the cycle each group reaches its own cycle_max_lr, and momentum is at
+    # its own cycle_min_mom, rather than every group tracking group 0's values.
+    scheduler.step(4)
+    assert scheduler.get_lr() == pytest.approx([0.01, 0.02])
+    assert [group["lr"] for group in optimizer.param_groups] == pytest.approx([0.01, 0.02])
+    assert [group["betas"][0] for group in optimizer.param_groups] == pytest.approx([0.8, 0.85])
+
+    # Back at the bottom of the cycle, momentum returns to each group's cycle_max_mom.
+    scheduler.step(9)
+    assert scheduler.get_lr() == pytest.approx([0.001, 0.002])
+    assert [group["betas"][0] for group in optimizer.param_groups] == pytest.approx([0.9, 0.95])
+
+
+@pytest.mark.parametrize("kwargs", [{
+    "cycle_min_lr": [0.001, 0.002, 0.003]
+}, {
+    "cycle_max_lr": [0.01, 0.02, 0.03]
+}, {
+    "cycle_min_mom": [0.8, 0.85, 0.9]
+}, {
+    "cycle_max_mom": [0.9, 0.95, 0.99]
+}])
+def test_one_cycle_rejects_wrong_length_per_group_lists(kwargs):
+    # A list whose length does not match the number of param groups was silently accepted
+    # and then zipped short, dropping groups. LRRangeTest and WarmupLR both reject it.
+    optimizer = _two_group_adam()
+    defaults = {"cycle_min_lr": 0.001, "cycle_max_lr": 0.01, "cycle_first_step_size": 5}
+
+    with pytest.raises(ValueError):
+        OneCycle(optimizer=optimizer, **{**defaults, **kwargs})

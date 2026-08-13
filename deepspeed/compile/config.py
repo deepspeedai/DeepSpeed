@@ -25,7 +25,11 @@ class CompileConfig(DeepSpeedConfigModel):
     """ Turn on/off the activation offloading """
 
     offload_opt_states: bool = False
-    """ Turn on/off the optimizer states offloading """
+    """ Offload optimizer states (fp32 master parameters and Adam moments) to pinned host memory
+    during forward/backward and reload them for the optimizer step, keeping resident whatever the
+    memory budget allows. Runs in place of the prefetch/selective-gather passes and is mutually
+    exclusive with offload_parameters. Designed for gradient_accumulation_steps=1: the compiled
+    graph runs once per micro-batch, so accumulation repeats the whole offload/reload cycle. """
 
     double_buffer: bool = True
     """ Turn on/off the double buffering """

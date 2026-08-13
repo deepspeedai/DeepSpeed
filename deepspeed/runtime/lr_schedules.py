@@ -13,7 +13,7 @@ import argparse
 from torch.optim import Optimizer
 import math
 from deepspeed.utils import logger
-from torch import tensor, is_tensor
+from torch import is_tensor
 
 LR_SCHEDULE = 'lr_schedule'
 LR_RANGE_TEST = 'LRRangeTest'
@@ -250,10 +250,11 @@ def get_lr_from_config(config):
 
 def update_lr(param_groups, lrs):
     for param_group, lr in zip(param_groups, lrs):
-        # new LR should match the type of current LR for scalar and Tensor LR support
         if is_tensor(param_group['lr']):
-            lr = tensor([lr], device=param_group['lr'].device)
-        param_group['lr'] = lr
+            lr = lr.squeeze() if is_tensor(lr) else lr
+            param_group['lr'].fill_(lr)
+        else:
+            param_group['lr'] = lr
     return [group['lr'] for group in param_groups]
 
 
@@ -272,6 +273,16 @@ def get_torch_optimizer(optimizer):
         return optimizer.optimizer
 
     raise TypeError('{} is not a subclass of torch.optim.Optimizer'.format(type(optimizer).__name__))
+
+
+def _format_param(optimizer, param_value, param_name):
+    """Broadcast a scalar to every param group, or validate a per-group list/tuple."""
+    if isinstance(param_value, list) or isinstance(param_value, tuple):
+        if len(param_value) != len(optimizer.param_groups):
+            raise ValueError("expected {} value for {}, got {}".format(len(optimizer.param_groups), param_name,
+                                                                       len(param_value)))
+        return list(param_value)
+    return [param_value] * len(optimizer.param_groups)
 
 
 class LRRangeTest(object):
@@ -509,12 +520,14 @@ class OneCycle(object):
 
     # Configure lr schedule
     def _initialize_lr(self, optimizer, cycle_min_lr, cycle_max_lr, decay_lr_rate, last_batch_iteration):
-        self.min_lrs = [cycle_min_lr] * len(optimizer.param_groups)
-        if last_batch_iteration == -1:
-            for lr, group in zip(self.min_lrs, optimizer.param_groups):
-                group['lr'] = lr
+        self.min_lrs = _format_param(optimizer, cycle_min_lr, 'cycle_min_lr')
+        self.max_lrs = _format_param(optimizer, cycle_max_lr, 'cycle_max_lr')
 
-        self.max_lrs = [cycle_max_lr] * len(optimizer.param_groups)
+        # Validate both bounds before touching the optimizer, so a bad cycle_max_lr does
+        # not leave the param groups half updated.
+        if last_batch_iteration == -1:
+            update_lr(optimizer.param_groups, self.min_lrs)
+
         self.decay_lr_rate = decay_lr_rate
 
         if math.isclose(self.decay_lr_rate, 0):
@@ -531,8 +544,8 @@ class OneCycle(object):
             return
 
         self.decay_mom_rate = decay_mom_rate
-        self.min_moms = [(cycle_min_mom, 0.99)] * len(optimizer.param_groups)
-        self.max_moms = [(cycle_max_mom, 0.99)] * len(optimizer.param_groups)
+        self.min_moms = [(mom, 0.99) for mom in _format_param(optimizer, cycle_min_mom, 'cycle_min_mom')]
+        self.max_moms = [(mom, 0.99) for mom in _format_param(optimizer, cycle_max_mom, 'cycle_max_mom')]
 
         if last_batch_iteration == -1:
             for momentum, group in zip(self.min_moms, optimizer.param_groups):
@@ -700,8 +713,8 @@ class WarmupLR(object):
         if warmup_max_lr is None:
             warmup_max_lr = [group['lr'] for group in self.optimizer.param_groups]
 
-        self.min_lrs = self._format_param(self.optimizer, warmup_min_lr, "min_lr")
-        self.max_lrs = self._format_param(self.optimizer, warmup_max_lr, "max_lr")
+        self.min_lrs = _format_param(self.optimizer, warmup_min_lr, "min_lr")
+        self.max_lrs = _format_param(self.optimizer, warmup_max_lr, "max_lr")
         self.delta_lrs = [big - small for big, small in zip(self.max_lrs, self.min_lrs)]
         self.warmup_num_steps = max(2, warmup_num_steps)
         # Currently only support linear and log function
@@ -748,14 +761,6 @@ class WarmupLR(object):
             elif self.warmup_type == WARMUP_LINEAR_RATE:
                 return self.last_batch_iteration / self.warmup_num_steps
         return 1.0
-
-    def _format_param(self, optimizer, param_value, param_name):
-        if isinstance(param_value, list) or isinstance(param_value, tuple):
-            if len(param_value) != len(optimizer.param_groups):
-                raise ValueError("expected {} value for {}, got {}".format(len(optimizer.param_groups), param_name,
-                                                                           FileNotFoundError(param_value)))
-            return list(param_value)
-        return [param_value] * len(optimizer.param_groups)
 
 
 class WarmupDecayLR(WarmupLR):
@@ -863,7 +868,9 @@ class WarmupCosineLR(object):
         if self.total_num_steps < self.warmup_num_steps:
             logger.warning('total_num_steps {} is less than warmup_num_steps {}'.format(
                 total_num_steps, warmup_num_steps))
-        self.org_lrs = [group['lr'] for group in self.optimizer.param_groups]
+        self.org_lrs = [
+            group['lr'].clone() if is_tensor(group['lr']) else group['lr'] for group in self.optimizer.param_groups
+        ]
 
         # Initialize lrs in optimizer groups
         if last_batch_iteration == -1:
@@ -919,11 +926,3 @@ class WarmupCosineLR(object):
 
     def load_state_dict(self, sd):
         self.last_batch_iteration = sd['last_batch_iteration']
-
-    def _format_param(self, optimizer, param_value, param_name):
-        if isinstance(param_value, list) or isinstance(param_value, tuple):
-            if len(param_value) != len(optimizer.param_groups):
-                raise ValueError("expected {} value for {}, got {}".format(len(optimizer.param_groups), param_name,
-                                                                           FileNotFoundError(param_value)))
-            return list(param_value)
-        return [param_value] * len(optimizer.param_groups)

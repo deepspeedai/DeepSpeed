@@ -148,7 +148,7 @@ class TokenChoiceTopKRouter(nn.Module):
             Tuple of:
                 - top_scores ``(T, top_k)``: routing weights for selected experts.
                 - selected_experts ``(T, top_k)``: expert indices per token.
-                - num_tokens_per_expert ``(num_experts,)``: histogram of token counts.
+                - num_tokens_per_expert ``(num_experts,)``: int32 histogram of token counts.
         """
         # Gate projection -> (T, num_experts)
         scores = self.gate(x)

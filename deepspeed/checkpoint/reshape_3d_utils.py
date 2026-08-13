@@ -3,9 +3,12 @@
 
 # DeepSpeed Team
 
+import torch
+
 from .reshape_utils import (get_files, get_files_with_prefix, partition_data, get_zero_files)
 
-from .constants import (MODEL_FILE_PREFIX, LAYER_FILE_PREFIX)
+from .constants import (CHECKPOINT_PARALLEL_DIMS, CHECKPOINT_PP_DEGREE, CHECKPOINT_TP_DEGREE, MODEL_FILE_PREFIX,
+                        LAYER_FILE_PREFIX)
 
 from .reshape_meg_2d import (reshape_meg_2d_parallel, meg_2d_parallel_map)
 
@@ -70,20 +73,69 @@ class model_3d_desc(object):
         return len(err_msg) == 0, err_msg
 
 
-def get_model_3d_descriptor(dir):
-    file_list = get_files(dir)
-    zero_file_list = get_zero_files(dir)
+def get_model_3d_descriptor_from_metadata(file_list, zero_file_list, model_state_metadata):
+    """Derive checkpoint topology without loading checkpoint contents."""
+    model_file_list = [model_file for model_file, _ in model_state_metadata]
+    parallel_dims = []
+    missing_parallel_dims = []
+    for model_file, metadata in model_state_metadata:
+        dimensions = metadata.get(CHECKPOINT_PARALLEL_DIMS)
+        if dimensions is None:
+            missing_parallel_dims.append(model_file)
+            continue
+        if not isinstance(dimensions, dict):
+            raise RuntimeError(f"Checkpoint {CHECKPOINT_PARALLEL_DIMS} must be a dictionary in {model_file}.")
+        values = []
+        for dimension_key in (CHECKPOINT_PP_DEGREE, CHECKPOINT_TP_DEGREE):
+            value = dimensions.get(dimension_key)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise RuntimeError(f"Checkpoint {dimension_key} must be a positive integer in {model_file}, "
+                                   f"got {value!r}.")
+            values.append(value)
+        parallel_dims.append(tuple(values))
+
+    if parallel_dims:
+        if missing_parallel_dims:
+            raise RuntimeError(f"Checkpoint {CHECKPOINT_PARALLEL_DIMS} is missing from model-state files: "
+                               f"{missing_parallel_dims}")
+        if len(set(parallel_dims)) != 1:
+            raise RuntimeError(f"Checkpoint {CHECKPOINT_PARALLEL_DIMS} disagrees across model-state files: "
+                               f"{parallel_dims}")
+        pp_degree, tp_degree = parallel_dims[0]
+        if len(model_file_list) != pp_degree * tp_degree:
+            raise RuntimeError(f"Checkpoint model-state file count {len(model_file_list)} does not match "
+                               f"{CHECKPOINT_PP_DEGREE}={pp_degree} * {CHECKPOINT_TP_DEGREE}={tp_degree}.")
+        if len(zero_file_list) % (pp_degree * tp_degree) != 0:
+            raise RuntimeError(f"Checkpoint ZeRO file count {len(zero_file_list)} is not divisible by "
+                               f"{CHECKPOINT_PP_DEGREE}={pp_degree} * {CHECKPOINT_TP_DEGREE}={tp_degree}.")
+        dp_degree = max(1, len(zero_file_list) // (pp_degree * tp_degree))
+        return model_3d_desc(pp_degree, tp_degree, dp_degree)
+
     num_pp0_files = len(get_files_with_prefix(file_list, f'{LAYER_FILE_PREFIX}01'))
     if num_pp0_files > 0:
         tp_degree = num_pp0_files
-        pp_degree = len(get_files_with_prefix(file_list, MODEL_FILE_PREFIX)) // tp_degree
+        pp_degree = len(model_file_list) // tp_degree
         dp_degree = max(1, len(zero_file_list) // (pp_degree * tp_degree))
     else:
-        tp_degree = len(get_files_with_prefix(file_list, MODEL_FILE_PREFIX))
+        tp_degree = len(model_file_list)
         dp_degree = max(1, len(zero_file_list) // tp_degree)
         pp_degree = 1
 
     return model_3d_desc(pp_degree, tp_degree, dp_degree)
+
+
+def get_model_3d_descriptor(dir):
+    file_list = get_files(dir)
+    zero_file_list = get_zero_files(dir)
+    model_file_list = get_files_with_prefix(file_list, MODEL_FILE_PREFIX)
+    model_state_metadata = []
+    for model_file in model_file_list:
+        model_state = torch.load(model_file, map_location='cpu', weights_only=False)
+        model_state_metadata.append((model_file, {
+            CHECKPOINT_PARALLEL_DIMS: model_state.get(CHECKPOINT_PARALLEL_DIMS)
+        }))
+        del model_state
+    return get_model_3d_descriptor_from_metadata(file_list, zero_file_list, model_state_metadata)
 
 
 def flatten_dp_dimension(meg_2d_map, src_2d_size, dp_degree):

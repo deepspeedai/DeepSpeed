@@ -16,14 +16,14 @@ GROUP_STATE_KEY = 'state'
 
 class ZeROCheckpoint(object):
 
-    def __init__(self, dir):
+    def __init__(self, dir, source_3d=None):
         basic_folder_validation(dir)
         self.dir = dir
         self.file_list = get_zero_files(dir)
         self.num_files = len(self.file_list)
         assert self.num_files > 0, f'No ZeRO files found in {dir}'
 
-        self.src_3d = get_model_3d_descriptor(dir)
+        self.src_3d = get_model_3d_descriptor(dir) if source_3d is None else source_3d
         self.target_3d = model_3d_desc(pp_degree=self.src_3d.pp_degree,
                                        tp_degree=self.src_3d.tp_degree,
                                        dp_degree=self.src_3d.dp_degree)

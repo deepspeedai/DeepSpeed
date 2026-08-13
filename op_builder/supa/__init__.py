@@ -8,6 +8,7 @@ from .fused_lion import FusedLionBuilder
 from .inference import InferenceBuilder
 from .quantizer import QuantizerBuilder
 from .async_io import AsyncIOBuilder
+from .pin_memory import PinMemoryBuilder
 from .no_impl import NotImplementedBuilder
 from .cpu_adam import CPUAdamBuilder
 from .cpu_lion import CPULionBuilder
