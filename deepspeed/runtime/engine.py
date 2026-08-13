@@ -481,6 +481,8 @@ class DeepSpeedEngine(Module):
                                        selective_gather.CONTRACT)
             self.register_compile_pass(offload_adam_states.NAME, offload_adam_states.move_opt_states,
                                        offload_adam_states.CONTRACT)
+            self.register_compile_pass(offload_activation.FLOOR_NAME, offload_activation.offload_activation_floor,
+                                       offload_activation.CONTRACT)
             self.register_compile_pass(offload_activation.NAME, offload_activation.offload_activation,
                                        offload_activation.CONTRACT)
 

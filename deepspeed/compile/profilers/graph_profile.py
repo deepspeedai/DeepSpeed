@@ -159,8 +159,13 @@ def _get_mem_usage_out_of_torch():
         handle = pynvml.nvmlDeviceGetHandleByIndex(current_dev_id)
         info = pynvml.nvmlDeviceGetMemoryInfo(handle)
 
-        torch_alloc = get_accelerator().memory_allocated()
-        adjust = info.used - torch_alloc
+        # Reserved, not allocated. This number is meant to be the memory *other* things hold, and
+        # it is added to every node's reading. Subtracting only what torch has handed out counts
+        # the allocator's own cache as somebody else's usage: with expandable_segments the cache is
+        # most of the card while live tensors are a fraction of it, which inflated a measured
+        # 125GiB peak to a reported 239GiB and left the planner reading it as hopeless.
+        torch_held = get_accelerator().memory_reserved()
+        adjust = max(0, info.used - torch_held)
     except Exception:
         # pynvml not available
         pass

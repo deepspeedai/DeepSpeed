@@ -162,7 +162,16 @@ def init_z3(engine, backend, compile_config, compile_kwargs, schedule=None):
             # Engages at step 0, not at WARMUP: a job that only fits with its activations moved out
             # would run out of memory during the first steps, before the pass ever ran. The memory
             # profile it plans against comes from the ZeRO-3 pass ahead of it in this same step.
-            schedule.append((0, [zero3_compile.add_z3_gather_release, offload_activation.offload_activation]))
+            # Two passes, in this order. The first moves every eligible activation out and is
+            # profiled, so the numbers the second reads describe the graph at its lowest memory
+            # rather than at the memory this pass exists to reduce -- profiling the latter is what
+            # runs out of memory at the sequence lengths that need offloading at all. The second
+            # then keeps on the device whatever the budget has room for. Same shape the
+            # optimizer-state pass uses, where for_init empties the states before profiling.
+            schedule.append((0, [
+                zero3_compile.add_z3_gather_release, offload_activation.offload_activation_floor,
+                offload_activation.offload_activation
+            ]))
         else:
             schedule.append((0, [zero3_compile.add_z3_gather_release]))
             schedule.append(

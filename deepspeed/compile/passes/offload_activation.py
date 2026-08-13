@@ -26,16 +26,37 @@ from ..util import get_no_copy_ops
 from .contract import PassContract
 
 NAME = "offload_activation"
+FLOOR_NAME = "offload_activation_floor"
 # Moves tensors that the forward graph saves for the backward pass. It neither reads nor rewrites
 # what the other passes produce, so it has no capability requirements.
 CONTRACT = PassContract()
 
-# Share of device memory left to the allocator and to whatever lives outside the compiled graph.
+# Fallback share of device memory left to the allocator, used only when the real overhead cannot be
+# read. The measured value is normally far smaller: with expandable_segments the allocator wastes
+# little, and every point of margin here is memory the planner may not give back to the device.
 MARGIN = 0.1
 
+# The measured margin is clamped into this range. The floor is the calibrated value, not a token
+# non-zero one, because the measurement and the risk are different quantities. reserved-minus-
+# allocated is read while this pass runs, before the memory-heavy phase, so it is near zero and the
+# floor decides every time -- it read exactly 0.0100 in all twelve cells of the 2026-08-13 sweep.
+# What the margin actually has to cover is peak-time fragmentation plus the error in the floor
+# profile, and both are far larger: at seq4096 the run died with 4.5GB of nominal slack and at
+# seq3584 with 3.5GB, putting the usable ceiling near 145GB rather than the card's 150.1GB, while
+# the floor profile itself was off by up to 3.3GB. A 1% floor covers neither; 10% covers both.
+#
+# The ceiling stays above the floor so the measurement still does something in the safe direction:
+# an allocator genuinely holding more than a tenth of the card can raise the reserve, but nothing
+# can lower it below the calibrated value. Collapsing both ends to 0.1 would leave a function that
+# reads two counters, divides them, and returns a constant -- the appearance of measurement with
+# none of it, which is the failure this comment exists to prevent.
+MIN_MEASURED_MARGIN = 0.1
+MAX_MEASURED_MARGIN = 0.25
+
 # Below this size a tensor costs more in copy launches and event bookkeeping than the memory it
-# returns. Same threshold the free_activation path uses.
-MIN_OFFLOAD_SIZE = 10 * 1024 * 1024
+# returns. The floor is ignored once the fallback below fires: at seq4096 the tensors above 10MB
+# were not enough to fit the run, while moving every one of them was.
+MIN_OFFLOAD_SIZE = 5 * 1024 * 1024
 
 # Used only if the bandwidth measurement below fails.
 DEFAULT_H2D_BYTES_PER_SEC = 10e9
@@ -105,6 +126,26 @@ def _new_value_id() -> int:
     return _next_value_id
 
 
+def _measured_margin(accelerator) -> float:
+    """The share of the device the allocator is holding without using.
+
+    This is what the margin is standing in for. Reading it beats guessing: a flat tenth of an H200
+    reserves 14GiB, which at the sequence lengths that need this pass is most of the room the
+    planner has to give activations back with.
+    """
+    margin_override = os.environ.get("DS_DC_OFFLOAD_ACT_MARGIN")
+    if margin_override is not None:
+        return float(margin_override)
+
+    total = accelerator.total_memory()
+    if not total:
+        return MARGIN
+
+    overhead = max(0, accelerator.memory_reserved() - accelerator.memory_allocated())
+    margin = overhead / total
+    return min(max(margin, MIN_MEASURED_MARGIN), MAX_MEASURED_MARGIN)
+
+
 def _memory_budget() -> float:
     budget_override = os.environ.get("DS_DC_OFFLOAD_ACT_BUDGET_GB")
     if budget_override is not None:
@@ -112,10 +153,30 @@ def _memory_budget() -> float:
         return float(budget_override) * 1e9
 
     accelerator = get_accelerator()
-    budget = accelerator.total_memory() * (1 - MARGIN)
+    margin = _measured_margin(accelerator)
+    budget = accelerator.total_memory() * (1 - margin)
     # Ranks run the same graph, so they must reach the same plan. The smallest device decides.
     vals_to_bcast = torch.tensor([budget], device=torch.device(accelerator.current_device()))
     dist.all_reduce(vals_to_bcast, dist.ReduceOp.MIN)
+    return vals_to_bcast[0].item()
+
+
+def _agree_on_floor_peak(floor_peak: int) -> float:
+    """Make every rank plan against the same floor.
+
+    The profile behind this number is measured locally, and it varies across ranks: the
+    out-of-torch term reads NVML for one device, and no two devices carry the same non-torch
+    memory. The plan below spends the gap between this and the budget, so ranks that disagree
+    here hand back different sets of activations: the rank that measured the highest floor keeps
+    the most resident, which is the rank least able to afford it, and it runs out of memory on a
+    plan that fit everywhere else. The busiest rank decides, the same way the smallest device
+    decides the budget.
+    """
+    if not dist.is_initialized():
+        return float(floor_peak)
+
+    vals_to_bcast = torch.tensor([float(floor_peak)], device=torch.device(get_accelerator().current_device()))
+    dist.all_reduce(vals_to_bcast, dist.ReduceOp.MAX)
     return vals_to_bcast[0].item()
 
 
@@ -216,8 +277,8 @@ def _insertion_point_after_last_use(nodes: List[Node], node: Node) -> Node:
     return nodes[insert_index]
 
 
-def _select_activations(graph: Graph, graph_id: int, profile, param_manager) -> List[Tuple[Node, int]]:
-    """Choose which saved activations to move, largest first, until the profiled peak fits."""
+def _eligible_activations(graph: Graph, graph_id: int, num_fwd_outputs, param_manager) -> List[Tuple[Node, int]]:
+    """Every saved activation this pass is allowed to move, largest first."""
     output_node = get_output_node(graph)
     outputs = output_node.args[0]
     if not isinstance(outputs, (list, tuple)):
@@ -227,15 +288,19 @@ def _select_activations(graph: Graph, graph_id: int, profile, param_manager) -> 
     # The partitioner puts the values the caller receives first and the values saved for the
     # backward pass after them. Only the saved ones live until the backward pass, and returning a
     # host tensor to the caller would change what the model outputs.
-    num_fwd_outputs = profile.num_fwd_outputs
     if num_fwd_outputs is None:
         print_rank_0(f"offload_activation graph_id={graph_id} has no partition information; skipping")
         return []
 
     returned_to_caller = set(node for node in outputs[:num_fwd_outputs] if isinstance(node, Node))
     param_names = set(param_manager[graph_id].param_names) if graph_id in param_manager else set()
-    min_size = _min_offload_size()
     no_copy_ops = get_no_copy_ops()
+
+    # No profile means no peak to plan against, and the usual reason it is missing is that profiling
+    # itself ran out of memory -- which is evidence of exactly the pressure this pass relieves. Take
+    # everything in that case, size floor included: measured at seq4096, moving only the tensors
+    # above the floor still ran out of memory, while moving all of them completed the run.
+    min_size = _min_offload_size()
 
     saved_nodes = [node for node in outputs[num_fwd_outputs:] if isinstance(node, Node)]
 
@@ -268,44 +333,26 @@ def _select_activations(graph: Graph, graph_id: int, profile, param_manager) -> 
             continue
         candidates.append((node, size))
 
-    if not candidates:
-        return []
-
-    if not profile.fwd_mem:
-        # No profile means no peak to plan against, and the usual reason it is missing is that
-        # profiling itself ran out of memory -- which is evidence of exactly the pressure this pass
-        # relieves. Doing nothing here guarantees the failure it was enabled to prevent, so move
-        # everything eligible instead. The cost is the worst case measured for the forced arm; the
-        # alternative is a run that does not start.
-        print_rank_0(f"offload_activation graph_id={graph_id} no memory profile (profiling likely ran "
-                     f"out of memory); moving all {len(candidates)} eligible activations")
-        return candidates
-
-    budget = _memory_budget()
-    peak = max(peak for _, _, _, peak in profile.fwd_mem)
-
-    # Largest first: the fewest copies for the memory returned.
+    # Largest first, so bringing tensors back later returns the most memory per copy avoided.
     candidates.sort(key=lambda candidate: candidate[1], reverse=True)
-
-    selected = []
-    offloaded_bytes = 0
-    for node, size in candidates:
-        if peak - offloaded_bytes <= budget:
-            break
-        selected.append((node, size))
-        offloaded_bytes += size
-
-    print_rank_0(f"offload_activation graph_id={graph_id} peak={peak} budget={budget} "
-                 f"candidates={len(candidates)} selected={len(selected)} selected_bytes={offloaded_bytes}")
-    return selected
+    return candidates
 
 
-def _offload_activation_fwd(gm: GraphModule, graph_id: int, profiling_results, param_manager) -> Optional[GraphModule]:
+def _offload_everything_fwd(gm: GraphModule, graph_id: int, profiling_results, param_manager):
+    """Move every eligible activation out, so the profile taken next measures the floor.
+
+    Profiling replays the graph, so profiling the graph as written measures the memory the pass was
+    called in to reduce -- and at the sequence lengths that need this pass, that replay is the first
+    thing to run out of memory, leaving no numbers to plan with. Moving everything first means the
+    replay runs against the low-water mark instead, which fits, and the planner that follows has
+    measurements rather than guesses. The optimizer-state pass reaches the same profile by emptying
+    its states before profiling; this is the same idea for values the graph itself produces.
+    """
     graph = gm.graph
     # A later compile phase plans again from the original graph, so drop any earlier plan first.
     _offload_plans[graph_id] = OrderedDict()
 
-    selected = _select_activations(graph, graph_id, profiling_results[graph_id], param_manager)
+    selected = _eligible_activations(graph, graph_id, profiling_results[graph_id].num_fwd_outputs, param_manager)
     if not selected:
         return None
 
@@ -339,12 +386,76 @@ def _offload_activation_fwd(gm: GraphModule, graph_id: int, profiling_results, p
         _stats["offload_nodes"] += 1
 
     graph.lint()
+    print_rank_0(f"offload_activation graph_id={graph_id} floor: moved all {len(selected)} eligible "
+                 f"activations ({sum(size for _, size in selected) / 1e9:.1f}GB) before profiling")
+    # Returned, not None: the caller profiles what it gets back, and that profile is the floor the
+    # planner needs.
+    return gm
+
+
+def _bring_back(graph: Graph, name: str) -> None:
+    """Undo one activation's move: the graph keeps it resident again."""
+    by_name = {node.name: node for node in graph.nodes}
+    original = by_name.get(name)
+    offload_node = by_name.get(f"offload_{name}")
+    wait_node = by_name.get(f"wait_offload_{name}")
+    if original is None or offload_node is None or wait_node is None:
+        return
+
+    # Whoever reads the host buffer goes back to reading the tensor itself, and the two copy nodes
+    # are erased users-first, since the wait reads the copy.
+    for user in list(wait_node.users):
+        user.replace_input_with(wait_node, original)
+    graph.erase_node(wait_node)
+    graph.erase_node(offload_node)
+
+
+def _plan_against_floor_fwd(gm: GraphModule, graph_id: int, profiling_results) -> Optional[GraphModule]:
+    """Bring activations back while the floor profile says they fit.
+
+    The pass before this one moved everything, so the profile now describes the graph at its lowest
+    memory. Whatever headroom is left between that floor and the budget can be spent keeping
+    activations resident, cheapest-to-move first, which is the amount this pass should move rather
+    than the everything it starts from.
+    """
+    plan = _offload_plans.get(graph_id)
+    if not plan:
+        return None
+
+    profile = profiling_results[graph_id]
+    if not profile.fwd_mem:
+        # Even the floor could not be profiled. Keeping everything on the host is the only safe
+        # reading of that, and it is what the run needs to have any chance of starting.
+        print_rank_0(f"offload_activation graph_id={graph_id} floor could not be profiled either; "
+                     f"keeping all {len(plan)} activations on the host")
+        return None
+
+    floor_peak = _agree_on_floor_peak(max(peak for _, _, _, peak in profile.fwd_mem))
+    budget = _memory_budget()
+    headroom = budget - floor_peak
+    print_rank_0(f"offload_activation graph_id={graph_id} margin={_measured_margin(get_accelerator()):.4f} "
+                 f"floor_peak={floor_peak} budget={budget} headroom={headroom}")
+
+    # Largest first: each one returned buys back the most memory per copy avoided.
+    by_size = sorted(plan.items(), key=lambda item: item[1][1], reverse=True)
+    kept_resident = 0
+    for name, (_, size) in by_size:
+        if size > headroom:
+            continue
+        _bring_back(gm.graph, name)
+        del plan[name]
+        headroom -= size
+        kept_resident += size
+        _stats["offload_nodes"] -= 1
+
+    moved_bytes = sum(size for _, size in plan.values())
+    print_rank_0(f"offload_activation graph_id={graph_id} floor_peak={floor_peak} budget={budget} "
+                 f"kept_resident={kept_resident} selected={len(plan)} selected_bytes={moved_bytes}")
+
+    gm.graph.lint()
     gm.recompile()
-    # Returning None skips the caller's re-profiling replay. Nothing later in this schedule reads
-    # that profile, and replaying a graph that is already at the memory wall is precisely what this
-    # pass exists to avoid: the replay ran out of memory on one rank, whose profiler then stopped
-    # taking part in the per-node collectives while the other ranks kept waiting, and the job died
-    # half an hour later on a collective timeout.
+    # None: the caller skips its replay. The graph only shrank in memory terms from the profile
+    # just taken, and replaying it again at this pressure is what used to hang the job.
     return None
 
 
@@ -359,6 +470,16 @@ def _reload_activation_bwd(gm: GraphModule, graph_id: int, profiling_results) ->
     peak_mem = {name: peak for name, _, _, peak in profile.bwd_mem}
     budget = _memory_budget()
     bandwidth = _h2d_bandwidth()
+
+    # Without a backward profile every node reads as using no memory, so the headroom check below
+    # cannot refuse anything and every copy back is hoisted as early as it will go -- the backward
+    # pass then holds everything the forward pass just moved out, and the run dies with the same plan
+    # that survives when the copies come back one at a time. A missing profile means profiling ran
+    # out of memory, so bring each tensor back at the point it is needed and nowhere sooner.
+    reload_just_in_time = not profile.bwd_mem
+    if reload_just_in_time:
+        print_rank_0(f"offload_activation graph_id={graph_id} no backward profile; bringing each "
+                     f"tensor back just before its first use")
 
     nodes = list(graph.nodes)
     node_index = {node: index for index, node in enumerate(nodes)}
@@ -385,7 +506,8 @@ def _reload_activation_bwd(gm: GraphModule, graph_id: int, profiling_results) ->
         copy_time_ms = size / bandwidth * 1000
         insert_before = first_user
         elapsed_ms = 0.0
-        for index in range(first_user_index - 1, -1, -1):
+        search_start = -1 if reload_just_in_time else first_user_index - 1
+        for index in range(search_start, -1, -1):
             candidate = nodes[index]
             if candidate.op == "placeholder":
                 break
@@ -425,18 +547,28 @@ def _reload_activation_bwd(gm: GraphModule, graph_id: int, profiling_results) ->
     return None
 
 
+def offload_activation_floor(gm: GraphModule, graph_id: int, graph_order: List[Tuple[int, bool]], profiling_results,
+                             create_inputs_fn, mem_budget: float, param_manager: DSGraphParamManager,
+                             bwd: bool) -> Optional[GraphModule]:
+    """First half: move every eligible activation out so the next profile measures the floor."""
+    register_activation_offload_ops()
+
+    if bwd:
+        return None
+    return _offload_everything_fwd(gm, graph_id, profiling_results, param_manager)
+
+
 def offload_activation(gm: GraphModule, graph_id: int, graph_order: List[Tuple[int, bool]], profiling_results,
                        create_inputs_fn, mem_budget: float, param_manager: DSGraphParamManager,
                        bwd: bool) -> Optional[GraphModule]:
-    """Move activations saved for the backward pass to pinned host memory and bring them back.
+    """Second half: keep what fits on the device, and bring the rest back before the backward reads it.
 
-    The forward half copies a chosen tensor out right after its last use and hands the host buffer
-    to the backward pass instead of the device tensor, which is what frees the memory. The backward
-    half starts the copy back far enough ahead of the tensor's first use for the transfer to hide
-    behind the compute in between.
+    Schedule this after offload_activation_floor. That pass moves everything and is profiled; this
+    one reads the resulting floor and returns to the device whatever the budget has room for. The
+    backward graph is rewritten here too, by which point the forward plan is final.
     """
     register_activation_offload_ops()
 
     if bwd:
         return _reload_activation_bwd(gm, graph_id, profiling_results)
-    return _offload_activation_fwd(gm, graph_id, profiling_results, param_manager)
+    return _plan_against_floor_fwd(gm, graph_id, profiling_results)

@@ -85,18 +85,35 @@ def _make_fwd_graph(saved_numels=(LARGE_NUMEL, LARGE_NUMEL)):
     return graph
 
 
-def _make_profile(graph, peak=10**9, num_fwd_outputs=1):
+def _make_profile(graph, peak=10**9, num_fwd_outputs=1, fwd_mem_complete=True):
     mem = [(node.name, peak, 0, peak) for node in graph.nodes]
-    return SimpleNamespace(num_fwd_outputs=num_fwd_outputs, fwd_mem=mem, bwd_mem=[], bwd_time=[])
+    return SimpleNamespace(num_fwd_outputs=num_fwd_outputs,
+                           fwd_mem=mem,
+                           fwd_mem_complete=fwd_mem_complete,
+                           bwd_mem=[],
+                           bwd_time=[])
+
+
+def _call(pass_fn, gm, profile, bwd, param_manager=None, graph_id=0):
+    return pass_fn(gm,
+                   graph_id, [(graph_id, True)], {graph_id: profile},
+                   lambda: (),
+                   0.0,
+                   param_manager if param_manager is not None else {},
+                   bwd=bwd)
 
 
 def _run_pass(gm, profile, bwd, param_manager=None, graph_id=0):
-    return offload_pass.offload_activation(gm,
-                                           graph_id, [(graph_id, True)], {graph_id: profile},
-                                           lambda: (),
-                                           0.0,
-                                           param_manager if param_manager is not None else {},
-                                           bwd=bwd)
+    """Drive both halves the way the schedule does: move everything, then keep what fits.
+
+    The floor pass is profiled by the caller in production; here the profile handed to the planner
+    stands in for that measurement.
+    """
+    if bwd:
+        return _call(offload_pass.offload_activation, gm, profile, True, param_manager, graph_id)
+
+    _call(offload_pass.offload_activation_floor, gm, profile, False, param_manager, graph_id)
+    return _call(offload_pass.offload_activation, gm, profile, False, param_manager, graph_id)
 
 
 def _node_names(graph):
@@ -116,6 +133,92 @@ def forced_budget(monkeypatch):
 @pytest.fixture
 def ample_budget(monkeypatch):
     monkeypatch.setenv("DS_DC_OFFLOAD_ACT_BUDGET_GB", "100")
+
+
+def test_margin_is_measured_not_guessed(monkeypatch):
+    # The margin stands for memory the allocator holds without using. A flat tenth of an H200 is
+    # 14GiB, which at the sequence lengths that need this pass is most of the room the planner has
+    # to give activations back with, so it is read from the allocator instead.
+    _ensure_dc_ops()
+    total = 100 * 1024**3
+    accelerator = SimpleNamespace(total_memory=lambda: total,
+                                  memory_reserved=lambda: 42 * 1024**3,
+                                  memory_allocated=lambda: 40 * 1024**3)
+
+    # A reading below the calibrated floor does not lower the margin. This is the whole safety
+    # property: the quantity measured here is allocator slack at pass time, which is near zero
+    # because the memory-heavy phase has not run, while the margin has to cover peak-time
+    # fragmentation and error in the floor profile. Reading 2% and reserving 2% is what put a
+    # seq4096 plan at 99% of the card.
+    assert offload_pass._measured_margin(accelerator) == offload_pass.MIN_MEASURED_MARGIN
+
+    # An unreadable or suspiciously perfect allocator lands on the same floor.
+    idle = SimpleNamespace(total_memory=lambda: total, memory_reserved=lambda: 0, memory_allocated=lambda: 0)
+    assert offload_pass._measured_margin(idle) == offload_pass.MIN_MEASURED_MARGIN
+
+    # An allocator genuinely holding more than the floor raises the margin -- the measurement is
+    # allowed to act, but only in the direction that reserves more.
+    fat = SimpleNamespace(total_memory=lambda: total,
+                          memory_reserved=lambda: 55 * 1024**3,
+                          memory_allocated=lambda: 40 * 1024**3)
+    assert offload_pass._measured_margin(fat) == pytest.approx(0.15)
+    assert offload_pass._measured_margin(fat) > offload_pass.MIN_MEASURED_MARGIN
+
+    # And a badly fragmented one cannot reserve the whole card away from the planner.
+    fragmented = SimpleNamespace(total_memory=lambda: total,
+                                 memory_reserved=lambda: 90 * 1024**3,
+                                 memory_allocated=lambda: 0)
+    assert offload_pass._measured_margin(fragmented) == offload_pass.MAX_MEASURED_MARGIN
+
+    # The clamp must not collapse to a point, or _measured_margin becomes a constant function
+    # wearing the appearance of a measurement.
+    assert offload_pass.MAX_MEASURED_MARGIN > offload_pass.MIN_MEASURED_MARGIN
+
+
+def test_floor_peak_agrees_across_ranks(monkeypatch):
+    # Every rank profiles its own device, and the out-of-torch term behind that profile reads NVML
+    # for that one device, so no two ranks measure the same floor. The planner spends the gap
+    # between the floor and the budget, so a rank that read a higher floor hands back more
+    # activations -- on the device that could least afford them. The busiest rank decides, the same
+    # way the smallest device decides the budget.
+    _ensure_dc_ops()
+    reduce_ops = []
+
+    class _FakeDist:
+        ReduceOp = SimpleNamespace(MAX="max")
+
+        @staticmethod
+        def is_initialized():
+            return True
+
+        @staticmethod
+        def all_reduce(tensor, op):
+            reduce_ops.append(op)
+            # Stand in for the rank that measured the highest floor.
+            tensor.fill_(900.0)
+
+    monkeypatch.setattr(offload_pass, "dist", _FakeDist)
+    monkeypatch.setattr(offload_pass, "get_accelerator", lambda: SimpleNamespace(current_device=lambda: "cpu"))
+
+    assert offload_pass._agree_on_floor_peak(100) == pytest.approx(900.0)
+    assert reduce_ops == ["max"], "the floor must be reduced with MAX, not averaged or left local"
+
+
+def test_floor_peak_without_distributed_is_local(monkeypatch):
+    _ensure_dc_ops()
+    monkeypatch.setattr(offload_pass, "dist", SimpleNamespace(is_initialized=lambda: False))
+
+    assert offload_pass._agree_on_floor_peak(1234) == pytest.approx(1234.0)
+
+
+def test_margin_override_wins(monkeypatch):
+    _ensure_dc_ops()
+    monkeypatch.setenv("DS_DC_OFFLOAD_ACT_MARGIN", "0.05")
+    accelerator = SimpleNamespace(total_memory=lambda: 100 * 1024**3,
+                                  memory_reserved=lambda: 90 * 1024**3,
+                                  memory_allocated=lambda: 0)
+
+    assert offload_pass._measured_margin(accelerator) == pytest.approx(0.05)
 
 
 def test_register_ops_adds_meta_kernels():
@@ -178,9 +281,8 @@ def test_pass_does_not_ask_for_a_reprofiling_replay(forced_budget):
 
 
 def test_fwd_moves_everything_when_the_profile_is_missing(forced_budget):
-    # Profiling is the first thing to run out of memory under pressure, and it used to take the pass
-    # down with it: no profile, no plan, no offloading -- in exactly the runs that needed it. With no
-    # peak to plan against, move everything eligible rather than sit out.
+    # Even the floor could not be profiled, which means memory ran out with every activation already
+    # on the host. Nothing can be brought back on that evidence, so they all stay moved.
     _ensure_dc_ops()
     graph = _make_fwd_graph()
     gm = _make_gm(graph)
@@ -317,14 +419,17 @@ def test_fwd_no_op_when_memory_fits(ample_budget):
     assert offload_pass.get_offload_activation_stats()["offload_nodes"] == 0
 
 
-def test_fwd_offloads_only_what_the_budget_requires(monkeypatch):
+def test_fwd_keeps_resident_only_what_the_budget_has_room_for(monkeypatch):
+    # The profile the planner reads is the floor: taken with everything already moved out. Headroom
+    # between that floor and the budget is what can come back. 40MB of room fits one 32MB
+    # activation, so exactly one returns to the device and the other stays on the host.
     _ensure_dc_ops()
-    # A peak 20MB above the budget is covered by moving one 32MB activation.
     monkeypatch.setenv("DS_DC_OFFLOAD_ACT_BUDGET_GB", "1")
     graph = _make_fwd_graph()
     gm = _make_gm(graph)
+    floor_peak = int(1e9) - 40 * 1024 * 1024
 
-    _run_pass(gm, _make_profile(graph, peak=int(1e9) + 20 * 1024 * 1024), bwd=False)
+    _run_pass(gm, _make_profile(graph, peak=floor_peak), bwd=False)
 
     assert len([n for n in _node_names(graph) if n.startswith("offload_")]) == 1
 
@@ -435,6 +540,26 @@ def test_bwd_keeps_the_copy_late_when_memory_is_tight(monkeypatch):
     _run_pass(gm, _make_bwd_profile(graph, peak=40 * 1024 * 1024, node_time_ms=1.0), bwd=True)
 
     names = _node_names(graph)
+    assert names.index("use_act_1") - names.index("reload_act_1") == 2
+
+
+def test_bwd_reloads_just_in_time_when_the_profile_is_missing(forced_budget, monkeypatch):
+    # Without a backward profile every node reads as using no memory, so the headroom check cannot
+    # refuse anything and every copy back is hoisted as early as it will go. The backward pass then
+    # holds everything the forward pass moved out. Measured: the same plan that completes with the
+    # copies coming back one at a time dies when they are all hoisted.
+    _ensure_dc_ops()
+    monkeypatch.setattr(offload_pass, "_h2d_bandwidth", lambda: 10e9)
+    graph = _make_bwd_graph()
+    gm = _make_gm(graph)
+    _plan_for(["act_1"])
+    profile = _make_bwd_profile(graph)
+    profile.bwd_mem = []
+
+    _run_pass(gm, profile, bwd=True)
+
+    names = _node_names(graph)
+    # Immediately before its reader, not hoisted above the compute in between.
     assert names.index("use_act_1") - names.index("reload_act_1") == 2
 
 
