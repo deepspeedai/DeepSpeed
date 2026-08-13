@@ -280,7 +280,6 @@ class DeepSpeedAccelerator(ABC):
             return pins.pin(tensor, make_copy=make_copy, match_shape=match_shape)
         return self._torch_pin_memory(tensor)
 
-
     def is_pinned(self, tensor):
         from deepspeed.utils.pin_memory import get_active_native_pinned_memory
         pins = get_active_native_pinned_memory()

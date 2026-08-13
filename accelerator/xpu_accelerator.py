@@ -231,7 +231,6 @@ class XPU_Accelerator(DeepSpeedAccelerator):
     def _torch_pin_memory(self, tensor):
         return tensor.pin_memory(device=self.current_device_name())
 
-
     def _torch_is_pinned(self, tensor):
         return tensor.is_pinned(device=self.current_device_name())
 
