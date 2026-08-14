@@ -85,13 +85,9 @@ def _make_fwd_graph(saved_numels=(LARGE_NUMEL, LARGE_NUMEL)):
     return graph
 
 
-def _make_profile(graph, peak=10**9, num_fwd_outputs=1, fwd_mem_complete=True):
+def _make_profile(graph, peak=10**9, num_fwd_outputs=1):
     mem = [(node.name, peak, 0, peak) for node in graph.nodes]
-    return SimpleNamespace(num_fwd_outputs=num_fwd_outputs,
-                           fwd_mem=mem,
-                           fwd_mem_complete=fwd_mem_complete,
-                           bwd_mem=[],
-                           bwd_time=[])
+    return SimpleNamespace(num_fwd_outputs=num_fwd_outputs, fwd_mem=mem, bwd_mem=[], bwd_time=[])
 
 
 def _call(pass_fn, gm, profile, bwd, param_manager=None, graph_id=0):
@@ -103,6 +99,23 @@ def _call(pass_fn, gm, profile, bwd, param_manager=None, graph_id=0):
                    bwd=bwd)
 
 
+def _pin_observed_floor(monkeypatch, observed=0):
+    """Hold the observed-memory clamp still.
+
+    The planner takes the larger of its profiled floor and what the allocator has already handed
+    out. That second term is live state, so without pinning it a test asserting an exact plan size
+    passes or fails depending on what else has run in the process.
+    """
+    monkeypatch.setattr(offload_pass, "_get_mem_usage_out_of_torch", lambda: 0)
+    real = offload_pass.get_accelerator()
+    monkeypatch.setattr(
+        offload_pass, "get_accelerator", lambda: SimpleNamespace(max_memory_allocated=lambda: observed,
+                                                                 current_device=real.current_device,
+                                                                 total_memory=real.total_memory,
+                                                                 memory_reserved=lambda: 0,
+                                                                 memory_allocated=lambda: 0))
+
+
 def _run_pass(gm, profile, bwd, param_manager=None, graph_id=0):
     """Drive both halves the way the schedule does: move everything, then keep what fits.
 
@@ -110,7 +123,9 @@ def _run_pass(gm, profile, bwd, param_manager=None, graph_id=0):
     stands in for that measurement.
     """
     if bwd:
-        return _call(offload_pass.offload_activation, gm, profile, True, param_manager, graph_id)
+        # The floor half owns the backward now: it inserts a copy back for everything it moved out,
+        # so the steps before the planner runs at WARMUP execute a complete configuration.
+        return _call(offload_pass.offload_activation_floor, gm, profile, True, param_manager, graph_id)
 
     _call(offload_pass.offload_activation_floor, gm, profile, False, param_manager, graph_id)
     return _call(offload_pass.offload_activation, gm, profile, False, param_manager, graph_id)
@@ -173,6 +188,109 @@ def test_margin_is_measured_not_guessed(monkeypatch):
     # The clamp must not collapse to a point, or _measured_margin becomes a constant function
     # wearing the appearance of a measurement.
     assert offload_pass.MAX_MEASURED_MARGIN > offload_pass.MIN_MEASURED_MARGIN
+
+
+def test_floor_half_is_runnable_on_its_own(monkeypatch):
+    """Everything the floor moves out in the forward is copied back in the backward.
+
+    The planner runs at WARMUP, so the steps before it execute what the floor produced and nothing
+    else. If the floor offloaded without reloading, those steps would hand a host buffer to a CUDA
+    matmul -- which is the failure the split schedule would otherwise have introduced.
+    """
+    _ensure_dc_ops()
+    monkeypatch.setenv("DS_DC_OFFLOAD_ACT_MIN_SIZE_MB", "0")
+    fwd_graph = _make_fwd_graph()
+    fwd_gm = _make_gm(fwd_graph)
+    _call(offload_pass.offload_activation_floor, fwd_gm, _make_profile(fwd_graph), False, None, 0)
+
+    offloaded = [n for n in fwd_gm.graph.nodes if n.name.startswith("wait_offload_")]
+    assert offloaded, "the floor half moved nothing out"
+
+    bwd_graph = _make_bwd_graph()
+    bwd_gm = _make_gm(bwd_graph)
+    _call(offload_pass.offload_activation_floor, bwd_gm, _make_bwd_profile(bwd_graph), True, None, 0)
+
+    reloaded = {n.name[len("wait_reload_"):] for n in bwd_gm.graph.nodes if n.name.startswith("wait_reload_")}
+    moved = {n.name[len("wait_offload_"):] for n in offloaded}
+    assert moved <= reloaded, f"offloaded without a copy back: {sorted(moved - reloaded)}"
+
+
+def test_planner_drops_the_reload_for_what_it_keeps_resident(monkeypatch):
+    """Bringing an activation back in the forward must remove its copy back in the backward.
+
+    The backward placeholder now carries the tensor itself rather than a host buffer, so a reload
+    left behind would copy from a buffer nothing wrote.
+    """
+    _ensure_dc_ops()
+    monkeypatch.setenv("DS_DC_OFFLOAD_ACT_MIN_SIZE_MB", "0")
+    monkeypatch.setenv("DS_DC_OFFLOAD_ACT_BUDGET_GB", "1000")
+
+    fwd_graph = _make_fwd_graph()
+    fwd_gm = _make_gm(fwd_graph)
+    _call(offload_pass.offload_activation_floor, fwd_gm, _make_profile(fwd_graph), False, None, 0)
+
+    bwd_graph = _make_bwd_graph()
+    bwd_gm = _make_gm(bwd_graph)
+    _call(offload_pass.offload_activation_floor, bwd_gm, _make_bwd_profile(bwd_graph), True, None, 0)
+    before = sum(1 for n in bwd_gm.graph.nodes if n.name.startswith("wait_reload_"))
+    assert before > 0
+
+    # A budget with room to spare: the planner brings everything back, so every reload must go.
+    _call(offload_pass.offload_activation, fwd_gm, _make_profile(fwd_graph, peak=10**6), False, None, 0)
+    _call(offload_pass.offload_activation, bwd_gm, _make_bwd_profile(bwd_graph), True, None, 0)
+
+    after = sum(1 for n in bwd_gm.graph.nodes if n.name.startswith("wait_reload_"))
+    assert after == 0, f"{after} reloads left for activations that were kept resident"
+
+
+def test_floor_never_reads_below_what_was_already_observed(monkeypatch):
+    """The profile covers the compiled forward graph; work outside it is invisible to the floor.
+
+    DeepSpeed's tiled loss drives a nested autograd.backward from inside its own forward, so that
+    memory never appears in the profile. Measured on Qwen3-14B, turning tiling on at seq3072 moved
+    the floor from 3.1GB above the run's real peak to 1.9GB below it, and at seq4096 the 3.1GB
+    shortfall exceeded the 2.3GB of real headroom, so every plan the planner made there died. The
+    profiling replays have already run the whole step, so the allocator's high-water mark is a
+    lower bound the profile can miss.
+    """
+    _ensure_dc_ops()
+    monkeypatch.setenv("DS_DC_OFFLOAD_ACT_MIN_SIZE_MB", "0")
+    monkeypatch.setenv("DS_DC_OFFLOAD_ACT_BUDGET_GB", "1000")
+    monkeypatch.setattr(offload_pass, "_get_mem_usage_out_of_torch", lambda: 0)
+
+    # The observed high-water mark reaches the budget, so a floor clamped to it leaves no headroom.
+    # The profiled floor is tiny, so without the clamp the planner would think it had the whole
+    # budget to spend -- which is the seq4096 failure in miniature.
+    observed = 1000 * 10**9
+    monkeypatch.setattr(
+        offload_pass, "get_accelerator", lambda: SimpleNamespace(max_memory_allocated=lambda: observed,
+                                                                 current_device=lambda: "cpu",
+                                                                 total_memory=lambda: 1000 * 10**9,
+                                                                 memory_reserved=lambda: 0,
+                                                                 memory_allocated=lambda: 0))
+    graph = _make_fwd_graph()
+    gm = _make_gm(graph)
+    assert _run_pass(gm, _make_profile(graph, peak=10**6), bwd=False) is None
+    starved = offload_pass.get_offload_activation_stats()["offload_nodes"]
+
+    # Same graph and budget, but nothing observed: the profile is all there is, so the planner is
+    # free to bring activations back.
+    offload_pass.reset_offload_activation_stats()
+    offload_pass._offload_plans.clear()
+    monkeypatch.setattr(
+        offload_pass, "get_accelerator", lambda: SimpleNamespace(max_memory_allocated=lambda: 0,
+                                                                 current_device=lambda: "cpu",
+                                                                 total_memory=lambda: 1000 * 10**9,
+                                                                 memory_reserved=lambda: 0,
+                                                                 memory_allocated=lambda: 0))
+    graph2 = _make_fwd_graph()
+    gm2 = _make_gm(graph2)
+    assert _run_pass(gm2, _make_profile(graph2, peak=10**6), bwd=False) is None
+    generous = offload_pass.get_offload_activation_stats()["offload_nodes"]
+
+    assert starved > generous, (
+        "a floor below the observed high-water mark must not license bringing activations back: "
+        f"observed-clamped left {starved} offloaded, unclamped left {generous}")
 
 
 def test_floor_peak_agrees_across_ranks(monkeypatch):
@@ -420,6 +538,7 @@ def test_fwd_no_op_when_memory_fits(ample_budget):
 
 
 def test_fwd_keeps_resident_only_what_the_budget_has_room_for(monkeypatch):
+    _pin_observed_floor(monkeypatch)
     # The profile the planner reads is the floor: taken with everything already moved out. Headroom
     # between that floor and the budget is what can come back. 40MB of room fits one 32MB
     # activation, so exactly one returns to the device and the other stays on the host.
@@ -649,6 +768,11 @@ class TestOffloadActivation(DistributedTest):
 
         stats = offload_pass.get_offload_activation_stats()
         assert stats["offload_nodes"] > 0, "no activation was offloaded"
+        # offload_nodes counts what was ever built, so it stays positive even if a later rebuild
+        # dropped every offload -- exactly what a broken WARMUP schedule did once, leaving this test
+        # green while the pass had stopped offloading anything. planned_offloads is the end state.
+        assert stats["planned_offloads"] > 0, \
+            "the last plan left nothing offloaded; the pass built offload nodes and then lost them"
         # Activations that never come back would be a silent failure of the backward half.
         assert stats["reload_nodes"] > 0, "offloaded activations were never reloaded"
 

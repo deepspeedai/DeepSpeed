@@ -159,16 +159,31 @@ def init_z3(engine, backend, compile_config, compile_kwargs, schedule=None):
             schedule.append((1, [offload_adam_states_for_init, zero3_compile.add_z3_gather_release, move_opt_states]))
         elif compile_config.offload_activation:
             offload_activation.register_activation_offload_ops()
-            # Engages at step 0, not at WARMUP: a job that only fits with its activations moved out
-            # would run out of memory during the first steps, before the pass ever ran. The memory
-            # profile it plans against comes from the ZeRO-3 pass ahead of it in this same step.
-            # Two passes, in this order. The first moves every eligible activation out and is
-            # profiled, so the numbers the second reads describe the graph at its lowest memory
-            # rather than at the memory this pass exists to reduce -- profiling the latter is what
-            # runs out of memory at the sequence lengths that need offloading at all. The second
-            # then keeps on the device whatever the budget has room for. Same shape the
-            # optimizer-state pass uses, where for_init empties the states before profiling.
-            schedule.append((0, [
+            # The two halves run at different steps, and the split matters.
+            #
+            # The floor pass has to engage at step 0: a job that only fits with its activations
+            # moved out would run out of memory during the first steps, before it ever ran. It
+            # moves every eligible activation out in the forward and copies each back in the
+            # backward, so what it produces runs correctly on its own.
+            #
+            # The planner runs at WARMUP because it only gives memory back, so deferring it is
+            # safe -- the steps before it execute the fully-offloaded configuration, which is the
+            # one that survives everywhere. Planning at step 0 was the bug: the floor it read came
+            # from profiling the compiled forward graph, and work outside that graph is invisible
+            # to it. DeepSpeed's tiled loss drives a nested autograd.backward from inside its own
+            # forward, so none of that memory is counted. Measured on Qwen3-14B, the floor
+            # overshoots the real peak with an untiled loss (seq2048 +4.4GB, seq3072 +3.1GB,
+            # seq3584 +1.7GB) and undershoots as soon as tiling is on -- seq3072 goes from +3.1GB
+            # to -1.9GB with nothing else changed, and at seq4096 it undershot by 3.1GB against
+            # 2.3GB of real headroom, so every plan it made there died. By WARMUP the profile is
+            # taken with the run's real memory in place.
+            # Both entries rebuild from the captured graph, so the floor pass has to appear in each
+            # of them. Listing only the planner at WARMUP rebuilds a forward with no offloads at
+            # all, the planner finds nothing to trim, and every activation goes resident -- measured
+            # as a 14.2GB jump in step peak the moment WARMUP was reached. This is the same reason
+            # the default schedule repeats add_z3_gather_release below.
+            schedule.append((0, [zero3_compile.add_z3_gather_release, offload_activation.offload_activation_floor]))
+            schedule.append((WARMUP, [
                 zero3_compile.add_z3_gather_release, offload_activation.offload_activation_floor,
                 offload_activation.offload_activation
             ]))

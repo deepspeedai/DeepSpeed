@@ -5,7 +5,7 @@
 
 import os
 import time
-from collections import OrderedDict
+from collections import OrderedDict, defaultdict
 from typing import Dict, List, Optional, Tuple
 
 import torch
@@ -22,6 +22,7 @@ except ImportError:
 
 from ..fx import get_output_node
 from ..graph_param import DSGraphParamManager
+from ..profilers.graph_profile import _get_mem_usage_out_of_torch
 from ..util import get_no_copy_ops
 from .contract import PassContract
 
@@ -79,7 +80,10 @@ _h2d_bytes_per_sec = None
 
 # Nodes inserted so far. A run whose forward graph carries offload nodes but whose backward graph
 # carries no reload nodes has silently lost its activations, so tests assert on both.
-_stats = {"offload_nodes": 0, "reload_nodes": 0}
+# offload_nodes/reload_nodes count what was ever built. planned_offloads is what the last plan
+# actually left on the host, so a rebuild that quietly dropped every offload shows up as 0
+# instead of hiding behind a stale build counter.
+_stats = {"offload_nodes": 0, "reload_nodes": 0, "planned_offloads": 0}
 
 
 def get_offload_activation_stats():
@@ -155,6 +159,9 @@ def _memory_budget() -> float:
     accelerator = get_accelerator()
     margin = _measured_margin(accelerator)
     budget = accelerator.total_memory() * (1 - margin)
+    if not dist.is_initialized():
+        return budget
+
     # Ranks run the same graph, so they must reach the same plan. The smallest device decides.
     vals_to_bcast = torch.tensor([budget], device=torch.device(accelerator.current_device()))
     dist.all_reduce(vals_to_bcast, dist.ReduceOp.MIN)
@@ -277,6 +284,20 @@ def _insertion_point_after_last_use(nodes: List[Node], node: Node) -> Node:
     return nodes[insert_index]
 
 
+_skipped = defaultdict(int)
+
+
+def _skip_bytes(node) -> int:
+    """Bytes a rejected candidate would have carried, for the skip breakdown."""
+    val = node.meta.get("val", None) if hasattr(node, "meta") else None
+    if val is None or not hasattr(val, "numel") or not hasattr(val, "element_size"):
+        return 0
+    try:
+        return int(val.numel()) * int(val.element_size())
+    except Exception:
+        return 0
+
+
 def _eligible_activations(graph: Graph, graph_id: int, num_fwd_outputs, param_manager) -> List[Tuple[Node, int]]:
     """Every saved activation this pass is allowed to move, largest first."""
     output_node = get_output_node(graph)
@@ -301,6 +322,7 @@ def _eligible_activations(graph: Graph, graph_id: int, num_fwd_outputs, param_ma
     # everything in that case, size floor included: measured at seq4096, moving only the tensors
     # above the floor still ran out of memory, while moving all of them completed the run.
     min_size = _min_offload_size()
+    _skipped.clear()
 
     saved_nodes = [node for node in outputs[num_fwd_outputs:] if isinstance(node, Node)]
 
@@ -313,29 +335,80 @@ def _eligible_activations(graph: Graph, graph_id: int, num_fwd_outputs, param_ma
         # A value saved twice reaches the backward graph as two placeholders under two names, and
         # only the one named after this node would be reloaded. Leave it alone.
         if saved_nodes.count(node) > 1:
+            _skipped["duplicate"] += _skip_bytes(node)
             continue
         # A parameter is already managed by ZeRO, and a value the caller also receives has to stay
         # on the device.
         if node in returned_to_caller or node.name in param_names:
+            _skipped["param_or_output"] += _skip_bytes(node)
             continue
         # A value that only aliases another tensor shares its storage, so copying it out frees
         # nothing while the tensor it aliases is still live.
         if node.target in no_copy_ops:
+            _skipped["alias"] += _skip_bytes(node)
             continue
         # Only floating-point values are activations. The rest are bookkeeping the backward pass
         # needs -- indices, masks, and the random-number state that attention saves. That state is
         # the reason this test cannot be a device check: it lives on the host, but an op's traced
         # metadata takes its device from the op's inputs, so it claims to be on the accelerator.
         if not _is_floating_point(node):
+            _skipped["not_float"] += _skip_bytes(node)
             continue
         size = _static_tensor_size(node)
         if size is None or size < min_size:
+            _skipped["too_small" if size is not None else "no_static_size"] += _skip_bytes(node)
             continue
         candidates.append((node, size))
+
+    if _skipped:
+        breakdown = " ".join(f"{k}={v}" for k, v in sorted(_skipped.items()))
+        print_rank_0(f"offload_activation graph_id={graph_id} skipped bytes by rule: {breakdown}")
 
     # Largest first, so bringing tensors back later returns the most memory per copy avoided.
     candidates.sort(key=lambda candidate: candidate[1], reverse=True)
     return candidates
+
+
+def _report_partitioner_split(graph: Graph, graph_id: int, num_fwd_outputs: int) -> None:
+    """Say how much of the forward AOTAutograd chose to keep, and how much it already recomputes.
+
+    This pass can only move what the partitioner decided to save; anything it dropped is recomputed
+    in the backward and was never this pass's to offload. Without this line the two are impossible
+    to tell apart in the numbers -- a small offload plan looks like a timid planner when it may
+    simply be that the partitioner already threw most of the forward away.
+    """
+    output_node = get_output_node(graph)
+    outputs = output_node.args[0]
+    saved = outputs[num_fwd_outputs:] if isinstance(outputs, (list, tuple)) else []
+
+    def _bytes(node) -> int:
+        if not hasattr(node, "meta"):
+            return 0
+        val = node.meta.get("val", None)
+        if val is None or not hasattr(val, "numel") or not hasattr(val, "element_size"):
+            return 0
+        try:
+            return int(val.numel()) * int(val.element_size())
+        except Exception:
+            return 0
+
+    produced_bytes = 0
+    produced_count = 0
+    for node in graph.nodes:
+        if node.op != "call_function":
+            continue
+        size = _bytes(node)
+        if size:
+            produced_bytes += size
+            produced_count += 1
+
+    saved_bytes = sum(_bytes(n) for n in saved if hasattr(n, "meta"))
+    dropped_bytes = max(0, produced_bytes - saved_bytes)
+    share = (100.0 * saved_bytes / produced_bytes) if produced_bytes else 0.0
+    print_rank_0(f"offload_activation graph_id={graph_id} partitioner split: forward produces "
+                 f"{produced_count} tensors / {produced_bytes} bytes; saved for backward "
+                 f"{len(saved)} / {saved_bytes} bytes ({share:.1f}%); not saved (recomputed or dead) "
+                 f"{dropped_bytes} bytes")
 
 
 def _offload_everything_fwd(gm: GraphModule, graph_id: int, profiling_results, param_manager):
@@ -351,6 +424,8 @@ def _offload_everything_fwd(gm: GraphModule, graph_id: int, profiling_results, p
     graph = gm.graph
     # A later compile phase plans again from the original graph, so drop any earlier plan first.
     _offload_plans[graph_id] = OrderedDict()
+
+    _report_partitioner_split(graph, graph_id, profiling_results[graph_id].num_fwd_outputs)
 
     selected = _eligible_activations(graph, graph_id, profiling_results[graph_id].num_fwd_outputs, param_manager)
     if not selected:
@@ -410,6 +485,48 @@ def _bring_back(graph: Graph, name: str) -> None:
     graph.erase_node(offload_node)
 
 
+def _remove_reload(graph: Graph, name: str) -> None:
+    """Undo one activation's copy back: the backward reads the tensor directly again.
+
+    Mirrors _bring_back on the forward side. Once the planner keeps an activation resident, the
+    value reaching the backward graph is the tensor itself rather than a host buffer, so its reload
+    is not merely wasted -- it would copy from a host buffer nothing wrote.
+    """
+    by_name = {node.name: node for node in graph.nodes}
+    placeholder = by_name.get(name)
+    reload_node = by_name.get(f"reload_{name}")
+    wait_node = by_name.get(f"wait_reload_{name}")
+    if placeholder is None or reload_node is None or wait_node is None:
+        return
+
+    for user in list(wait_node.users):
+        user.replace_input_with(wait_node, placeholder)
+    graph.erase_node(wait_node)
+    graph.erase_node(reload_node)
+
+
+def _drop_reloads_for_resident_bwd(gm: GraphModule, graph_id: int) -> None:
+    """Remove the copies back for whatever the forward half decided to keep on the device."""
+    plan = _offload_plans.get(graph_id) or {}
+    graph = gm.graph
+    removed = 0
+    for node in list(graph.nodes):
+        if not node.name.startswith("wait_reload_"):
+            continue
+        name = node.name[len("wait_reload_"):]
+        if name in plan:
+            continue
+        _remove_reload(graph, name)
+        removed += 1
+        _stats["reload_nodes"] -= 1
+
+    if removed:
+        print_rank_0(f"offload_activation graph_id={graph_id} dropped {removed} reloads for "
+                     f"activations the planner kept resident")
+        graph.lint()
+        gm.recompile()
+
+
 def _plan_against_floor_fwd(gm: GraphModule, graph_id: int, profiling_results) -> Optional[GraphModule]:
     """Bring activations back while the floor profile says they fit.
 
@@ -430,10 +547,46 @@ def _plan_against_floor_fwd(gm: GraphModule, graph_id: int, profiling_results) -
                      f"keeping all {len(plan)} activations on the host")
         return None
 
-    floor_peak = _agree_on_floor_peak(max(peak for _, _, _, peak in profile.fwd_mem))
+    # The profile covers the compiled forward graph, and work that runs outside it is invisible to
+    # the floor. DeepSpeed's tiled loss is the case that bites: it drives a nested autograd.backward
+    # from inside its own forward, so none of that memory appears in this profile. Measured on
+    # Qwen3-14B, the floor overshoots the run's real peak whenever the loss is untiled -- seq2048
+    # +4.4GB, seq3072 +3.1GB, seq3584 +1.7GB, all conservative -- and undershoots as soon as tiling
+    # is on: seq3072 goes from +3.1GB to -1.9GB with nothing changed but the loss, and seq4096
+    # undershoots by 3.1GB against 2.3GB of real headroom, which is why every plan there died.
+    #
+    # The profiling replays ran the whole step for real, tiled loss included, so the allocator's
+    # high-water mark has already seen what the per-node profile missed. Taking the larger of the
+    # two lets the floor rise to meet reality and never fall below it: the planner can only become
+    # more conservative, never less.
+    # Prefer what the run actually reached over what the profile predicts. By the time this pass
+    # runs, several steps have already executed the fully-offloaded configuration, so their peak IS
+    # the floor -- measured, for this exact graph, with the tiled loss and everything else included.
+    # The profile is an estimate of the same quantity and a poor one in both directions: taken at
+    # step 0 it missed the tiled loss's nested backward and read 3.1GB low at seq4096, and taken
+    # here it reads the graph replay plus whatever else is live at that instant, which put it 6.5GB
+    # high at seq3200 and 13GB high at seq3072 -- enough to leave the planner nothing to spend.
+    profiled_floor = _agree_on_floor_peak(max(peak for _, _, _, peak in profile.fwd_mem))
+    observed_floor = _agree_on_floor_peak(get_accelerator().max_memory_allocated() + _get_mem_usage_out_of_torch())
+    if observed_floor > 0:
+        floor_peak = observed_floor
+        source = "observed"
+    else:
+        floor_peak = profiled_floor
+        source = "profiled"
+    print_rank_0(f"offload_activation graph_id={graph_id} floor from {source}: "
+                 f"observed={observed_floor} profiled={profiled_floor}")
     budget = _memory_budget()
     headroom = budget - floor_peak
-    print_rank_0(f"offload_activation graph_id={graph_id} margin={_measured_margin(get_accelerator()):.4f} "
+    # Report where the budget came from. DS_DC_OFFLOAD_ACT_BUDGET_GB bypasses the margin entirely,
+    # so printing a margin next to an overridden budget invites a reader to believe the margin
+    # produced it -- the split-sweep logs of 2026-08-13 all read margin=0.0100 while their budgets
+    # came from the hook.
+    if os.environ.get("DS_DC_OFFLOAD_ACT_BUDGET_GB") is not None:
+        margin_note = "budget=overridden(margin unused)"
+    else:
+        margin_note = f"margin={_measured_margin(get_accelerator()):.4f}"
+    print_rank_0(f"offload_activation graph_id={graph_id} {margin_note} "
                  f"floor_peak={floor_peak} budget={budget} headroom={headroom}")
 
     # Largest first: each one returned buys back the most memory per copy avoided.
@@ -449,6 +602,7 @@ def _plan_against_floor_fwd(gm: GraphModule, graph_id: int, profiling_results) -
         _stats["offload_nodes"] -= 1
 
     moved_bytes = sum(size for _, size in plan.values())
+    _stats["planned_offloads"] = len(plan)
     print_rank_0(f"offload_activation graph_id={graph_id} floor_peak={floor_peak} budget={budget} "
                  f"kept_resident={kept_resident} selected={len(plan)} selected_bytes={moved_bytes}")
 
@@ -550,11 +704,17 @@ def _reload_activation_bwd(gm: GraphModule, graph_id: int, profiling_results) ->
 def offload_activation_floor(gm: GraphModule, graph_id: int, graph_order: List[Tuple[int, bool]], profiling_results,
                              create_inputs_fn, mem_budget: float, param_manager: DSGraphParamManager,
                              bwd: bool) -> Optional[GraphModule]:
-    """First half: move every eligible activation out so the next profile measures the floor."""
+    """First half: move every eligible activation out so the next profile measures the floor.
+
+    This half has to stand alone. The planner that trims it runs at WARMUP, so the steps before that
+    execute exactly what this pass produced -- a forward that moves activations to the host and a
+    backward that copies them back. Leaving the backward untouched here would offload without ever
+    reloading, and the backward would read a host buffer on a CUDA matmul.
+    """
     register_activation_offload_ops()
 
     if bwd:
-        return None
+        return _reload_activation_bwd(gm, graph_id, profiling_results)
     return _offload_everything_fwd(gm, graph_id, profiling_results, param_manager)
 
 
@@ -570,5 +730,6 @@ def offload_activation(gm: GraphModule, graph_id: int, graph_order: List[Tuple[i
     register_activation_offload_ops()
 
     if bwd:
-        return _reload_activation_bwd(gm, graph_id, profiling_results)
+        _drop_reloads_for_resident_bwd(gm, graph_id)
+        return None
     return _plan_against_floor_fwd(gm, graph_id, profiling_results)
