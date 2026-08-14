@@ -417,7 +417,7 @@ public:
 
     void registerGatheredParam(long ds_id, at::Tensor ds_tensor)
     {
-        gathered_params_.emplace(ds_id, ds_tensor);
+        gathered_params_.insert_or_assign(ds_id, std::move(ds_tensor));
     }
 
     void unregisterGatheredParam(long ds_id)
@@ -498,6 +498,8 @@ public:
         // This synchronization ensures all of reduce calls are done before optimizer's step.
         at::cuda::stream_synchronize(rs_stream_);
     }
+
+    virtual void prepareForReset() {}
 
     virtual at::Tensor reduceGrad(at::Tensor grad_tensor, long ds_id)
     {

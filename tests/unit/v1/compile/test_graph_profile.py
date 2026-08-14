@@ -36,6 +36,12 @@ class FakeAccelerator:
     def max_memory_allocated(self):
         return 0
 
+    def memory_reserved(self):
+        return 0
+
+    def max_memory_reserved(self):
+        return 0
+
     def reset_peak_memory_stats(self):
         return None
 
@@ -55,12 +61,19 @@ class FakeDeepCompileHandle:
 
     def __init__(self):
         self.events = []
+        self.reclaimable_bytes = 0
 
     def enable_profiling(self, enabled):
         self.events.append(("enable", enabled))
 
     def clear_all_gathered_params(self):
         self.events.append(("clear", None))
+
+    def get_z3_gather_buffer_pool_reclaimable_bytes(self):
+        return self.reclaimable_bytes
+
+    def get_z3_gather_buffer_pool_transition_reclaimable_bytes(self):
+        return self.reclaimable_bytes
 
 
 class FakeEvent:
@@ -126,7 +139,7 @@ def test_profiling_interpreter_wall_time_excludes_warmup(monkeypatch):
     monkeypatch.setattr(graph_profile, "is_comm_op", lambda node: False)
     monkeypatch.setattr(graph_profile, "is_release_node", lambda node: False)
     monkeypatch.setattr(graph_profile.dist, "is_initialized", lambda: False)
-    monkeypatch.setattr(graph_profile.dist, "get_rank", lambda: 0)
+    monkeypatch.setattr(graph_profile.dist, "get_rank", lambda group=None: 0)
 
     timestamps = iter(range(20))
     monkeypatch.setattr(graph_profile.time, "time", lambda: next(timestamps))
@@ -191,3 +204,67 @@ def test_memory_profiling_interpreter_disables_profiling_if_cleanup_fails(monkey
         interpreter.run()
 
     assert fake_handle.events == [("enable", True), ("clear", None), ("enable", False)]
+
+
+def test_memory_profiling_interpreter_records_allocator_reserved_peaks(monkeypatch):
+    fake_handle = FakeDeepCompileHandle()
+    fake_handle.reclaimable_bytes = 32
+
+    class ReservedAccelerator(FakeAccelerator):
+
+        def memory_allocated(self):
+            return 10
+
+        def max_memory_allocated(self):
+            return 20
+
+        def memory_reserved(self):
+            return 100
+
+        def max_memory_reserved(self):
+            return 120
+
+    monkeypatch.setattr(graph_profile, "get_deepcompile_handle", lambda: fake_handle)
+    monkeypatch.setattr(graph_profile, "get_accelerator", lambda: ReservedAccelerator())
+    monkeypatch.setattr(graph_profile, "_all_real_if_tensor", lambda args: True)
+    monkeypatch.setattr(graph_profile, "_get_mem_usage_out_of_torch", lambda: 7)
+    monkeypatch.setattr(graph_profile.dist, "is_initialized", lambda: False)
+
+    gm = _make_empty_graph_module()
+    interpreter = graph_profile.MemoryProfilingInterpreter(gm)
+
+    assert interpreter.run() is None
+    output = next(node for node in gm.graph.nodes if node.op == "output")
+    assert output.meta["profile_mem_start"] == 17
+    assert output.meta["profile_mem_peak"] == 27
+    assert output.meta["profile_reserved_start"] == 107
+    assert output.meta["profile_reserved_current"] == 107
+    assert output.meta["profile_reserved_peak"] == 127
+    assert output.meta["profile_gather_pool_charged"] == 32
+    assert fake_handle.events == [("enable", True), ("clear", None), ("enable", False)]
+
+
+def test_profiling_interpreter_restores_state_if_gathered_param_cleanup_fails(monkeypatch):
+    fake_handle = FakeDeepCompileHandle()
+
+    def fail_clear():
+        fake_handle.events.append(("clear", None))
+        raise RuntimeError("cleanup failed")
+
+    fake_handle.clear_all_gathered_params = fail_clear
+
+    monkeypatch.setattr(graph_profile, "get_deepcompile_handle", lambda: fake_handle)
+    monkeypatch.setattr(graph_profile, "get_accelerator", lambda: FakeAccelerator())
+    monkeypatch.setattr(graph_profile, "_all_real_if_tensor", lambda args: True)
+    monkeypatch.setattr(graph_profile, "_get_mem_usage_out_of_torch", lambda: 0)
+    monkeypatch.setattr(graph_profile.dist, "is_initialized", lambda: False)
+    monkeypatch.setattr(graph_profile.Interpreter, "run", lambda self, *args: None)
+
+    interpreter = graph_profile.ProfilingInterpreter(_make_empty_graph_module(), iteration=1)
+    interpreter.env["retained"] = object()
+
+    with pytest.raises(RuntimeError, match="cleanup failed"):
+        interpreter.run()
+
+    assert fake_handle.events == [("enable", True), ("clear", None), ("enable", False)]
+    assert interpreter.env == {}

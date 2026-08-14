@@ -13,7 +13,7 @@ TORCH_LIBRARY(dc, m)
     m.def("allgather_param(Tensor a, int graph_id, int id, ScalarType? dtype = None) -> Tensor");
     m.def(
         "prefetch_params_fused(int graph_id, Tensor[] params, int[] ids,"
-        "                      ScalarType[]? dtypes = None) -> ()");
+        "                      ScalarType[]? dtypes = None, int arena_plan_id = -1) -> ()");
     m.def("wait_allgather(Tensor(a) a, int graph_id, int id) -> Tensor(a)");
     m.def("release_param(Tensor(a) a, int graph_id, int id, int n_users) -> Tensor(a)");
     m.def("reduce_grad(Tensor a, int graph_id, int id) -> Tensor");
@@ -105,6 +105,30 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
     m.def("register_graph_z3",
           &dc::register_graph_z3,
           "Register graph with a list of ds parameter ids");
+    m.def("set_z3_gather_buffer_pool_fixed_budget_for_test",
+          &dc::set_z3_gather_buffer_pool_fixed_budget_for_test,
+          "Set a fixed ZeRO-3 gather-buffer-pool budget for tests");
+    m.def("update_z3_gather_buffer_pool_allocator_pressure_for_test",
+          &dc::update_z3_gather_buffer_pool_allocator_pressure_for_test,
+          "Simulate allocator pressure for ZeRO-3 gather-buffer-pool tests");
+    m.def("get_z3_gather_buffer_pool_state_for_test",
+          &dc::get_z3_gather_buffer_pool_state_for_test,
+          "Inspect ZeRO-3 gather-buffer-pool accounting for tests");
+    m.def("get_z3_gather_buffer_pool_reclaimable_bytes",
+          &dc::get_z3_gather_buffer_pool_reclaimable_bytes,
+          "Read immediately reclaimable idle bytes in the ZeRO-3 gather-buffer pool");
+    m.def("get_z3_gather_buffer_pool_transition_reclaimable_bytes",
+          &dc::get_z3_gather_buffer_pool_transition_reclaimable_bytes,
+          "Read pool-owned bytes retired before a ZeRO-3 prefetch arena takes ownership");
+    m.def("configure_z3_prefetch_arena",
+          &dc::configure_z3_prefetch_arena,
+          "Configure a fixed ZeRO-3 prefetch arena plan");
+    m.def("disable_z3_prefetch_arena",
+          &dc::disable_z3_prefetch_arena,
+          "Disable every phase of a ZeRO-3 prefetch arena session");
+    m.def("get_z3_prefetch_arena_state_for_test",
+          &dc::get_z3_prefetch_arena_state_for_test,
+          "Inspect ZeRO-3 prefetch arena accounting for tests");
     m.def("start_forward", &dc::start_forward, "Start forward pass");
     m.def("end_forward", &dc::end_forward, "End forward pass");
     m.def("start_backward", &dc::start_backward, "Start backward pass");
