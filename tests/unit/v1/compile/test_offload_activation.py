@@ -246,12 +246,8 @@ def test_planner_drops_the_reload_for_what_it_keeps_resident(monkeypatch):
 def test_floor_never_reads_below_what_was_already_observed(monkeypatch):
     """The profile covers the compiled forward graph; work outside it is invisible to the floor.
 
-    DeepSpeed's tiled loss drives a nested autograd.backward from inside its own forward, so that
-    memory never appears in the profile. Measured on Qwen3-14B, turning tiling on at seq3072 moved
-    the floor from 3.1GB above the run's real peak to 1.9GB below it, and at seq4096 the 3.1GB
-    shortfall exceeded the 2.3GB of real headroom, so every plan the planner made there died. The
-    profiling replays have already run the whole step, so the allocator's high-water mark is a
-    lower bound the profile can miss.
+    A tiled loss drives a nested backward the profile never sees, so the floor can read below the
+    run's real peak. What the allocator has already handed out cannot.
     """
     _ensure_dc_ops()
     monkeypatch.setenv("DS_DC_OFFLOAD_ACT_MIN_SIZE_MB", "0")

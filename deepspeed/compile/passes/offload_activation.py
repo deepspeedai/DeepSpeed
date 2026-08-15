@@ -37,20 +37,10 @@ CONTRACT = PassContract()
 # little, and every point of margin here is memory the planner may not give back to the device.
 MARGIN = 0.1
 
-# The measured margin is clamped into this range. The floor is the calibrated value, not a token
-# non-zero one, because the measurement and the risk are different quantities. reserved-minus-
-# allocated is read while this pass runs, before the memory-heavy phase, so it is near zero and the
-# floor decides every time -- it read exactly 0.0100 in all twelve cells of the 2026-08-13 sweep.
-# What the margin actually has to cover is peak-time fragmentation plus the error in the floor
-# profile, and both are far larger: at seq4096 the run died with 4.5GB of nominal slack and at
-# seq3584 with 3.5GB, putting the usable ceiling near 145GB rather than the card's 150.1GB, while
-# the floor profile itself was off by up to 3.3GB. A 1% floor covers neither; 10% covers both.
-#
-# The ceiling stays above the floor so the measurement still does something in the safe direction:
-# an allocator genuinely holding more than a tenth of the card can raise the reserve, but nothing
-# can lower it below the calibrated value. Collapsing both ends to 0.1 would leave a function that
-# reads two counters, divides them, and returns a constant -- the appearance of measurement with
-# none of it, which is the failure this comment exists to prevent.
+# reserved-minus-allocated is read before the memory-heavy phase, so it is near zero and the
+# floor decides in practice. The floor is the calibrated value: what a margin has to cover is
+# peak-time fragmentation plus floor-profile error, both far larger than the reading. The
+# ceiling stays above the floor so an unusually fat allocator can still raise the reserve.
 MIN_MEASURED_MARGIN = 0.1
 MAX_MEASURED_MARGIN = 0.25
 
@@ -131,12 +121,7 @@ def _new_value_id() -> int:
 
 
 def _measured_margin(accelerator) -> float:
-    """The share of the device the allocator is holding without using.
-
-    This is what the margin is standing in for. Reading it beats guessing: a flat tenth of an H200
-    reserves 14GiB, which at the sequence lengths that need this pass is most of the room the
-    planner has to give activations back with.
-    """
+    """The share of the device the allocator holds without using, clamped to a calibrated range."""
     margin_override = os.environ.get("DS_DC_OFFLOAD_ACT_MARGIN")
     if margin_override is not None:
         return float(margin_override)
@@ -171,13 +156,9 @@ def _memory_budget() -> float:
 def _agree_on_floor_peak(floor_peak: int) -> float:
     """Make every rank plan against the same floor.
 
-    The profile behind this number is measured locally, and it varies across ranks: the
-    out-of-torch term reads NVML for one device, and no two devices carry the same non-torch
-    memory. The plan below spends the gap between this and the budget, so ranks that disagree
-    here hand back different sets of activations: the rank that measured the highest floor keeps
-    the most resident, which is the rank least able to afford it, and it runs out of memory on a
-    plan that fit everywhere else. The busiest rank decides, the same way the smallest device
-    decides the budget.
+    This number is measured locally and varies across ranks. Ranks that disagree hand back
+    different sets, and the rank reading the highest floor keeps the most while being least able
+    to afford it. The busiest rank decides, mirroring the budget's MIN.
     """
     if not dist.is_initialized():
         return float(floor_peak)
@@ -370,12 +351,10 @@ def _eligible_activations(graph: Graph, graph_id: int, num_fwd_outputs, param_ma
 
 
 def _report_partitioner_split(graph: Graph, graph_id: int, num_fwd_outputs: int) -> None:
-    """Say how much of the forward AOTAutograd chose to keep, and how much it already recomputes.
+    """Say how much of the forward AOTAutograd kept, and how much it already recomputes.
 
-    This pass can only move what the partitioner decided to save; anything it dropped is recomputed
-    in the backward and was never this pass's to offload. Without this line the two are impossible
-    to tell apart in the numbers -- a small offload plan looks like a timid planner when it may
-    simply be that the partitioner already threw most of the forward away.
+    Only the saved set is this pass's to move. Without this, a small plan looks like a timid
+    planner when the partitioner may simply have discarded most of the forward already.
     """
     output_node = get_output_node(graph)
     outputs = output_node.args[0]
@@ -414,12 +393,9 @@ def _report_partitioner_split(graph: Graph, graph_id: int, num_fwd_outputs: int)
 def _offload_everything_fwd(gm: GraphModule, graph_id: int, profiling_results, param_manager):
     """Move every eligible activation out, so the profile taken next measures the floor.
 
-    Profiling replays the graph, so profiling the graph as written measures the memory the pass was
-    called in to reduce -- and at the sequence lengths that need this pass, that replay is the first
-    thing to run out of memory, leaving no numbers to plan with. Moving everything first means the
-    replay runs against the low-water mark instead, which fits, and the planner that follows has
-    measurements rather than guesses. The optimizer-state pass reaches the same profile by emptying
-    its states before profiling; this is the same idea for values the graph itself produces.
+    Profiling the graph as written measures the memory this pass exists to reduce, and that replay
+    is the first thing to run out of memory where the pass is needed. `move_opt_states` reaches its
+    floor the same way, by emptying states before profiling.
     """
     graph = gm.graph
     # A later compile phase plans again from the original graph, so drop any earlier plan first.
@@ -443,13 +419,10 @@ def _offload_everything_fwd(gm: GraphModule, graph_id: int, profiling_results, p
                                              name=f"offload_{node.name}")
         _copy_tensor_meta(node, offload_node)
 
-        # The wait sits immediately after the copy, which makes the copy synchronous and costs the
-        # overlap. It is the only correct placement under inductor: inductor's liveness knows
-        # nothing about streams, so the only way to stop it writing into a buffer whose copy is
-        # still in flight is to mark that buffer as never reused -- and that keeps the buffer alive
-        # for the whole forward pass, which is the memory this pass exists to release. Waiting here
-        # ends the copy before anything else runs, so the buffer is genuinely dead afterwards and
-        # inductor frees and recycles it as usual.
+        # Waiting here makes the copy synchronous and costs the overlap, but it is the only
+        # correct placement: inductor's liveness is stream-unaware, so the alternative is marking
+        # the buffer never-reused, which keeps it alive for the whole forward -- the very memory
+        # this pass releases.
         with graph.inserting_after(offload_node):
             wait_node = graph.create_node('call_function',
                                           torch.ops.dc.wait_offload.default, (offload_node, graph_id, value_id), {},
@@ -488,9 +461,8 @@ def _bring_back(graph: Graph, name: str) -> None:
 def _remove_reload(graph: Graph, name: str) -> None:
     """Undo one activation's copy back: the backward reads the tensor directly again.
 
-    Mirrors _bring_back on the forward side. Once the planner keeps an activation resident, the
-    value reaching the backward graph is the tensor itself rather than a host buffer, so its reload
-    is not merely wasted -- it would copy from a host buffer nothing wrote.
+    Mirrors _bring_back. Once an activation stays resident the backward placeholder carries the
+    tensor, so a leftover reload would copy from a host buffer nothing wrote.
     """
     by_name = {node.name: node for node in graph.nodes}
     placeholder = by_name.get(name)
@@ -528,12 +500,10 @@ def _drop_reloads_for_resident_bwd(gm: GraphModule, graph_id: int) -> None:
 
 
 def _plan_against_floor_fwd(gm: GraphModule, graph_id: int, profiling_results) -> Optional[GraphModule]:
-    """Bring activations back while the floor profile says they fit.
+    """Bring activations back while the floor says they fit.
 
-    The pass before this one moved everything, so the profile now describes the graph at its lowest
-    memory. Whatever headroom is left between that floor and the budget can be spent keeping
-    activations resident, cheapest-to-move first, which is the amount this pass should move rather
-    than the everything it starts from.
+    The floor pass moved everything, so headroom between that floor and the budget is what can be
+    kept resident. Largest first: most bytes not copied per unit of headroom spent.
     """
     plan = _offload_plans.get(graph_id)
     if not plan:
@@ -547,25 +517,11 @@ def _plan_against_floor_fwd(gm: GraphModule, graph_id: int, profiling_results) -
                      f"keeping all {len(plan)} activations on the host")
         return None
 
-    # The profile covers the compiled forward graph, and work that runs outside it is invisible to
-    # the floor. DeepSpeed's tiled loss is the case that bites: it drives a nested autograd.backward
-    # from inside its own forward, so none of that memory appears in this profile. Measured on
-    # Qwen3-14B, the floor overshoots the run's real peak whenever the loss is untiled -- seq2048
-    # +4.4GB, seq3072 +3.1GB, seq3584 +1.7GB, all conservative -- and undershoots as soon as tiling
-    # is on: seq3072 goes from +3.1GB to -1.9GB with nothing changed but the loss, and seq4096
-    # undershoots by 3.1GB against 2.3GB of real headroom, which is why every plan there died.
-    #
-    # The profiling replays ran the whole step for real, tiled loss included, so the allocator's
-    # high-water mark has already seen what the per-node profile missed. Taking the larger of the
-    # two lets the floor rise to meet reality and never fall below it: the planner can only become
-    # more conservative, never less.
-    # Prefer what the run actually reached over what the profile predicts. By the time this pass
-    # runs, several steps have already executed the fully-offloaded configuration, so their peak IS
-    # the floor -- measured, for this exact graph, with the tiled loss and everything else included.
-    # The profile is an estimate of the same quantity and a poor one in both directions: taken at
-    # step 0 it missed the tiled loss's nested backward and read 3.1GB low at seq4096, and taken
-    # here it reads the graph replay plus whatever else is live at that instant, which put it 6.5GB
-    # high at seq3200 and 13GB high at seq3072 -- enough to leave the planner nothing to spend.
+    # Prefer what the run actually reached over what the profile predicts. Several steps have
+    # already executed the fully-offloaded configuration by now, so their peak IS the floor,
+    # measured for this graph with the tiled loss included. The profile estimates the same
+    # quantity badly in both directions -- it cannot see work outside the compiled graph, and
+    # taken here it also counts whatever else is live. See activation-offload-learnings.md.
     profiled_floor = _agree_on_floor_peak(max(peak for _, _, _, peak in profile.fwd_mem))
     observed_floor = _agree_on_floor_peak(get_accelerator().max_memory_allocated() + _get_mem_usage_out_of_torch())
     if observed_floor > 0:
