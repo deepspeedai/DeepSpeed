@@ -2211,6 +2211,24 @@ and the pass reuses the same tensor-parallel group.
 
 
 
+### DeepCompile activation offload
+
+These fields live under `compile` and apply when DeepCompile activation offload is scheduled.
+The offload pass is **not** in the default DeepCompile schedule; enable it only via a custom
+`schedule=` when calling DeepCompile init. Setting `offload_activation` alone has no effect.
+
+<i>**offload_activation**</i>: [boolean]
+
+| Description | Default |
+| ----------- | ------- |
+| Config field for DeepCompile activation offload. Requires a custom schedule that includes the offload pass; not enabled by the default `init_z3` / `init_z1` schedules. | `false` |
+
+<i>**offload_activation_pin_memory**</i>: [boolean]
+
+| Description | Default |
+| ----------- | ------- |
+| When activation offload runs, pin host buffers via ATen `pinned_memory` (Torch host pin). Does **not** use `DS_PIN_MEMORY_BACKEND`. Defaults to `true`; set `false` under tight memlock limits (`ulimit -l`). | `true` |
+
 ### Data Type options
 
 ```json

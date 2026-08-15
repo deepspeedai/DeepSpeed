@@ -106,6 +106,7 @@ extern bool sync_before_reduce;     // for debugging
 extern bool sync_after_reduce;      // for debugging
 extern bool sync_before_allgather;  // for debugging
 extern bool sync_after_allgather;   // for debugging
+extern bool offload_activation_pin_memory;
 
 std::vector<int64_t> sizes_to_int_vector(at::IntArrayRef sizes);
 void enable_profiling(bool enable);
