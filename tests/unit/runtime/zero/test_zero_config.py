@@ -3,7 +3,16 @@
 
 # DeepSpeed Team
 
+import pytest
+
 from deepspeed.runtime.zero.config import DeepSpeedZeroConfig, DeepSpeedZeroOffloadParamConfig, DeepSpeedZeroOffloadOptimizerConfig
+
+
+def test_zero_config_reduce_bucket_size():
+    assert DeepSpeedZeroConfig(reduce_bucket_size=1).reduce_bucket_size == 1
+
+    with pytest.raises(ValueError):
+        DeepSpeedZeroConfig(reduce_bucket_size=0)
 
 
 def test_zero_config_deprecatedfields():
