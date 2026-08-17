@@ -28,6 +28,7 @@ def _define_dc_ops():
         torch.ops.dc.wait_allgather.default
         torch.ops.dc.release_param.default
         torch.ops.dc.reduce_grad.default
+        torch.ops.dc.offload_tensor.default
         return
     except AttributeError:
         pass
@@ -40,6 +41,10 @@ def _define_dc_ops():
             "reduce_grad(Tensor a, int graph_id, int id) -> Tensor",
             "free_tensors(Tensor[] tensors) -> ()",
             "end_backward(Tensor[] tensors, int graph_id, bool release_reduce_buckets = True) -> ()",
+            "offload_tensor(Tensor a, int id, int id) -> Tensor",
+            "reload_tensor(Tensor a, int id, int id) -> Tensor",
+            "wait_offload(Tensor a, int id, int id) -> Tensor",
+            "wait_reload(Tensor a, int id, int id) -> Tensor",
     ):
         try:
             lib.define(schema)
