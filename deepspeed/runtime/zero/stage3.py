@@ -531,6 +531,37 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             hook.remove()
         print_rank_0("Removed grad acc hooks", force=False)
         self.ipg_buckets.clear()
+        self._unpin_offload_buffers()
+
+    def _unpin_offload_buffers(self):
+        # Release the page-locked host buffers we pinned for parameter/optimizer offload.
+        # unpin_memory is a no-op for the torch backend and only frees under
+        # DS_PIN_MEMORY_BACKEND=native, where these would otherwise persist until GC.
+        accelerator = get_accelerator()
+        for buffer in getattr(self, 'param_groups_fp16_flat_cpu_memory', []):
+            accelerator.unpin_memory(buffer)
+        for attr in ('grad_partitions_flat_buffer', 'lp_param_contiguous_pin_buffer',
+                     'lp_grad_partitions_flat_pin_buffers'):
+            buffer = getattr(self, attr, None)
+            if buffer is not None:
+                accelerator.unpin_memory(buffer)
+        for buffer in getattr(self, 'hp_params_pin_buffers', []):
+            accelerator.unpin_memory(buffer)
+        if self.offload_optimizer_pin_memory:
+            for fp32_partition in self.fp32_partitioned_groups_flat:
+                if fp32_partition.grad is not None:
+                    accelerator.unpin_memory(fp32_partition.grad)
+        if self.zenflow:
+            # ZenFlow keeps per-parameter selective-optimizer state and per-subgroup
+            # overlap-grad buffers pinned on the host.
+            for param in self.module.parameters():
+                for attr in ('exp_avg_cpu_data', 'exp_avg_sq_cpu_data'):
+                    buffer = getattr(param, attr, None)
+                    if buffer is not None:
+                        accelerator.unpin_memory(buffer)
+            for fp32_partition in getattr(self, 'fp32_partitioned_groups_flat', []):
+                for buffer in getattr(fp32_partition, 'overlap_grad', None) or []:
+                    accelerator.unpin_memory(buffer)
 
     def create_zenflow_hooks(self):
         from functools import partial

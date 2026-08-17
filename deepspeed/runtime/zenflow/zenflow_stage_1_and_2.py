@@ -85,6 +85,23 @@ class ZenFlowZeroOptimizer(DeepSpeedZeroOptimizer):
         else:
             return ZenFlowZeroOptimizerSequential
 
+    def _unpin_offload_buffers(self):
+        super()._unpin_offload_buffers()
+        if not (self.cpu_offload and self.cpu_offload_pin_memory):
+            return
+        # ZenFlow additionally pins per-parameter selective-optimizer state and, for the
+        # parallel variant, per-partition overlap-grad buffers on the host.
+        accelerator = get_accelerator()
+        for group in self.bit16_groups:
+            for param in group:
+                for attr in ('exp_avg_cpu_data', 'exp_avg_sq_cpu_data'):
+                    buffer = getattr(param, attr, None)
+                    if buffer is not None:
+                        accelerator.unpin_memory(buffer)
+        for fp32_partition in self.single_partition_of_fp32_groups:
+            for buffer in getattr(fp32_partition, 'overlap_grad', None) or []:
+                accelerator.unpin_memory(buffer)
+
     def _configure_zenflow(self, zenflow_config):
         """
         Configure ZenFlow optimizer

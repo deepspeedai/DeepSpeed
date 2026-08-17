@@ -59,7 +59,7 @@ from deepspeed.runtime.zero.muon.muon_optimizer import MuonWithAuxAdam
 from deepspeed.runtime.constants import \
     ROUTE_TRAIN, ROUTE_PREDICT, ROUTE_EVAL, \
     PLD_THETA, PLD_GAMMA, BFLOAT16, FP16, AMP, GRADIENT_ACCUMULATION_STEPS, \
-    DATA_PARALLEL_GROUP, GLOBAL_RANK, DDP_BFLOAT16
+    DATA_PARALLEL_GROUP, GLOBAL_RANK, DDP_BFLOAT16, GRADIENT_ALLREDUCE_OP_MEAN
 from deepspeed.runtime.zero.config import ZeroStageEnum
 from deepspeed.compression import compression_scheduler
 from deepspeed.compression.constants import \
@@ -279,7 +279,7 @@ class DeepSpeedEngine(Module):
         # Unmanaged mode: backward() calls since the last step(), used to advance global_samples.
         self._unmanaged_backward_count = 0
         self.skipped_steps = 0
-        self.gradient_average = True
+        self.gradient_average = config_class.gradient_allreduce_op == GRADIENT_ALLREDUCE_OP_MEAN
         self.warn_unscaled_loss = True
         self.config = config
         self._config = config_class
@@ -2387,6 +2387,7 @@ class DeepSpeedEngine(Module):
                 mpu=self.mpu,
                 postscale_gradients=self.postscale_gradients(),
                 gradient_predivide_factor=self.gradient_predivide_factor(),
+                gradient_average=self.gradient_average,
                 gradient_accumulation_steps=self.gradient_accumulation_steps(),
                 ignore_unused_parameters=self.zero_ignore_unused_parameters(),
                 partition_grads=zero_stage == ZeroStageEnum.gradients,
@@ -3634,14 +3635,15 @@ class DeepSpeedEngine(Module):
 
         if dp_world_size is None:
             dp_world_size = dist.get_world_size(group=dp_group)
-        if self.postscale_gradients():
+        if not self.gradient_average:
+            dist.all_reduce(tensor_to_allreduce, group=dp_group)
+        elif self.postscale_gradients():
             if self.gradient_predivide_factor() != 1.0:
                 tensor_to_allreduce.mul_(1.0 / self.gradient_predivide_factor())
 
             dist.all_reduce(tensor_to_allreduce, group=dp_group)
-            if self.gradient_average:
-                if self.gradient_predivide_factor() != dp_world_size:
-                    tensor_to_allreduce.mul_(self.gradient_predivide_factor() / dp_world_size)
+            if self.gradient_predivide_factor() != dp_world_size:
+                tensor_to_allreduce.mul_(self.gradient_predivide_factor() / dp_world_size)
         else:
             tensor_to_allreduce.mul_(1. / dp_world_size)
             dist.all_reduce(tensor_to_allreduce, group=dp_group)
@@ -3794,11 +3796,11 @@ class DeepSpeedEngine(Module):
 
         if dp_world_size is None:
             dp_world_size = dist.get_world_size(group=dp_group)
-        if self.postscale_gradients():
-            if self.gradient_average:
+        if self.gradient_average:
+            if self.postscale_gradients():
                 values.mul_(self.gradient_predivide_factor() / (dp_world_size))
-        else:
-            values.mul_(1. / (dp_world_size))
+            else:
+                values.mul_(1. / (dp_world_size))
 
         indices_device_list = self.sparse_all_gather(indices, dp_group)
         values_device_list = self.sparse_all_gather(values, dp_group)
