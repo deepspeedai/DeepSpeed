@@ -10,6 +10,7 @@ tags: getting-started training accelerator
 - [Intel XPU](#intel-xpu)
 - [Huawei Ascend NPU](#huawei-ascend-npu)
 - [Intel Gaudi](#intel-gaudi)
+- [Google TPU](#google-tpu)
 
 # Introduction
 DeepSpeed supports different accelerators from different companies.   Setup steps to run DeepSpeed on certain accelerators might be different.  This guide allows user to lookup setup instructions for the accelerator family and hardware they are using.
@@ -276,3 +277,25 @@ PyTorch models can be run on Intel® Gaudi® AI accelerator using DeepSpeed. Ref
 * [DeepSpeed User Guide for Training](https://docs.habana.ai/en/latest/PyTorch/DeepSpeed/DeepSpeed_User_Guide/DeepSpeed_User_Guide.html#deepspeed-user-guide)
 * [Optimizing Large Language Models](https://docs.habana.ai/en/latest/PyTorch/DeepSpeed/Optimizing_LLM.html#llms-opt)
 * [Inference Using DeepSpeed](https://docs.habana.ai/en/latest/PyTorch/DeepSpeed/Inference_Using_DeepSpeed.html#deepspeed-inference-user-guide)
+
+# Google TPU
+DeepSpeed supports Google Cloud TPU through the [PyTorch/XLA](https://github.com/pytorch/xla) (`torch_xla`) runtime.
+
+> **Note:** TPU support is experimental and under active development. The current release wires the DeepSpeed accelerator abstraction to TPU (device, RNG, and op-builder plumbing) so `get_accelerator()` resolves to TPU; advanced features such as ZeRO are not yet supported on TPU.
+
+## Installation steps for Google TPU
+1. Provision a Cloud TPU VM and install the matching `torch` and `torch_xla` wheels by following the [PyTorch/XLA installation guide](https://github.com/pytorch/xla#installation).
+2. Install DeepSpeed:
+```
+pip install deepspeed
+```
+
+## How to use DeepSpeed on Google TPU
+When `torch_xla` is installed, DeepSpeed auto-detects the TPU accelerator. You can also select it explicitly with an environment variable:
+```
+export DS_ACCELERATOR=tpu
+```
+To confirm the accelerator DeepSpeed selected:
+```
+python -c "from deepspeed.accelerator import get_accelerator; print(get_accelerator().device_name())"
+```

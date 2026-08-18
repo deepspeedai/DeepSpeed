@@ -20,7 +20,7 @@ try:
 except ImportError as e:
     dsa2 = None
 
-SUPPORTED_ACCELERATOR_LIST = ['cuda', 'cpu', 'xpu', 'npu', 'mps', 'hpu', 'mlu', 'sdaa', 'supa']
+SUPPORTED_ACCELERATOR_LIST = ['cuda', 'cpu', 'xpu', 'npu', 'mps', 'hpu', 'mlu', 'sdaa', 'supa', 'tpu']
 
 ds_accelerator = None
 
@@ -103,6 +103,11 @@ def get_accelerator():
                 import torch_supa  # noqa: F401 # type: ignore
             except ImportError as e:
                 raise ValueError("SUPA_Accelerator requires torch_supa, which is not installed on this system.")
+        elif accelerator_name == "tpu":
+            try:
+                import torch_xla  # noqa: F401 # type: ignore
+            except ImportError as e:
+                raise ValueError("TPU_Accelerator requires torch_xla, which is not installed on this system.")
         elif accelerator_name not in SUPPORTED_ACCELERATOR_LIST:
             raise ValueError(f'DS_ACCELERATOR must be one of {SUPPORTED_ACCELERATOR_LIST}. '
                              f'Value "{accelerator_name}" is not supported')
@@ -180,6 +185,15 @@ def get_accelerator():
                 pass
         if accelerator_name is None:
             try:
+                # Detect Google TPU. torch_xla is only importable on a machine
+                # with an XLA/TPU runtime, so treat a successful import as TPU.
+                import torch_xla  # noqa: F401,F811 # type: ignore
+
+                accelerator_name = "tpu"
+            except ImportError as e:
+                pass
+        if accelerator_name is None:
+            try:
                 import torch
 
                 # Determine if we are on a GPU or x86 CPU with torch.
@@ -240,6 +254,10 @@ def get_accelerator():
         from .supa_accelerator import SUPA_Accelerator
 
         ds_accelerator = SUPA_Accelerator()
+    elif accelerator_name == 'tpu':
+        from .tpu_accelerator import TPU_Accelerator
+
+        ds_accelerator = TPU_Accelerator()
     _validate_accelerator(ds_accelerator)
     if accel_logger is not None:
         accel_logger.info(f"Setting ds_accelerator to {ds_accelerator._name} ({ds_set_method})")
