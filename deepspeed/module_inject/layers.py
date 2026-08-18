@@ -381,6 +381,18 @@ class TensorParallel_Layer(nn.Module, ABC):
             setattr(weight, DS_TENSOR_MODEL_PARALLEL, True)
             setattr(weight, DS_IS_REPLACED_MODULE, True)
 
+    @staticmethod
+    def _shape_before_zero3_partition(param):
+        """Shape of ``param`` as it was before ZeRO-3 partitioned it.
+
+        ZeRO-3 replaces a partitioned parameter's local data with an empty 1-D
+        tensor, so ``param.shape`` no longer describes the layer and indexing it
+        raises. ZeRO-3 records the pre-partition shape as ``ds_shape``, which is
+        what the universal-checkpoint metadata needs.
+        """
+        ds_shape = getattr(param, 'ds_shape', None)
+        return tuple(param.shape) if ds_shape is None else tuple(ds_shape)
+
     def _set_param_uc_meta(self,
                            param,
                            *,
@@ -704,7 +716,8 @@ class LinearAllreduce(TensorParallel_Layer):
             params_list[idx].data = _partition
 
     def _mark_uc_metadata(self):
-        original_weight_shape = (self.weight.shape[0], self.weight.shape[1] * self.tp_world_size)
+        weight_shape = self._shape_before_zero3_partition(self.weight)
+        original_weight_shape = (weight_shape[0], weight_shape[1] * self.tp_world_size)
         self._set_param_uc_meta(self.weight,
                                 partition_type='row',
                                 partition_dim=1,
@@ -712,12 +725,13 @@ class LinearAllreduce(TensorParallel_Layer):
                                 output_shape=(original_weight_shape[0], ),
                                 original_shape=original_weight_shape)
         if self.bias is not None:
+            bias_shape = self._shape_before_zero3_partition(self.bias)
             self._set_param_uc_meta(self.bias,
                                     partition_type='row',
                                     partition_dim=None,
-                                    logical_shape=tuple(self.bias.shape),
-                                    output_shape=tuple(self.bias.shape),
-                                    original_shape=tuple(self.bias.shape),
+                                    logical_shape=bias_shape,
+                                    output_shape=bias_shape,
+                                    original_shape=bias_shape,
                                     is_bias=True,
                                     replicated=True)
 
@@ -803,8 +817,9 @@ class LinearLayer(TensorParallel_Layer):
             params_list[idx].data = _partition
 
     def _mark_uc_metadata(self):
-        original_out_dim = self.weight.shape[0] * self.tp_world_size
-        original_weight_shape = (original_out_dim, self.weight.shape[1])
+        weight_shape = self._shape_before_zero3_partition(self.weight)
+        original_out_dim = weight_shape[0] * self.tp_world_size
+        original_weight_shape = (original_out_dim, weight_shape[1])
         self._set_param_uc_meta(self.weight,
                                 partition_type='column',
                                 partition_dim=0,
@@ -812,7 +827,7 @@ class LinearLayer(TensorParallel_Layer):
                                 output_shape=(original_out_dim, ),
                                 original_shape=original_weight_shape)
         if self.bias is not None:
-            original_bias_shape = (self.bias.shape[0] * self.tp_world_size, )
+            original_bias_shape = (self._shape_before_zero3_partition(self.bias)[0] * self.tp_world_size, )
             self._set_param_uc_meta(self.bias,
                                     partition_type='column',
                                     partition_dim=0,
