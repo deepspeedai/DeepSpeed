@@ -65,6 +65,45 @@ def test_collect_autotp_universal_checkpoint_info_subparams_preserves_shape_meta
     assert uc_info[PARAMETER_WITH_SUB_PARAMS][0]["shape"] == [(2, 10), 12]
 
 
+def _simulate_zero3_partition(module):
+    """Make ``module``'s parameters look the way ZeRO-3 leaves them.
+
+    ZeRO-3 empties each partitioned parameter's local data and records the
+    pre-partition shape on the parameter as ``ds_shape``.
+    """
+    for param in (module.weight, module.bias):
+        if param is None:
+            continue
+        param.ds_shape = param.shape
+        param.data = torch.empty(0, dtype=param.dtype)
+
+
+def test_column_parallel_uc_metadata_uses_zero3_shape():
+    module = torch.nn.Linear(16, 8, bias=True)
+    _simulate_zero3_partition(module)
+
+    layer = LinearLayer(module, mp_group=None, name="dense")
+
+    weight_meta = getattr(layer.weight, DS_AUTOTP_UC_META)
+    bias_meta = getattr(layer.bias, DS_AUTOTP_UC_META)
+
+    assert tuple(weight_meta["original_shape"]) == (8, 16)
+    assert tuple(bias_meta["original_shape"]) == (8, )
+
+
+def test_row_parallel_uc_metadata_uses_zero3_shape():
+    module = torch.nn.Linear(16, 8, bias=True)
+    _simulate_zero3_partition(module)
+
+    layer = LinearAllreduce(module, mp_group=None, name="proj")
+
+    weight_meta = getattr(layer.weight, DS_AUTOTP_UC_META)
+    bias_meta = getattr(layer.bias, DS_AUTOTP_UC_META)
+
+    assert tuple(weight_meta["original_shape"]) == (8, 16)
+    assert tuple(bias_meta["original_shape"]) == (8, )
+
+
 def test_subparam_layer_marks_standardized_param_metadata():
     layer = SubParamLinearLayer(torch.nn.Linear(12, 12, bias=True),
                                 mp_group=None,

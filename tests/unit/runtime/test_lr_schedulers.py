@@ -814,3 +814,63 @@ def test_one_cycle_allows_zero_second_step_size():
     for _ in range(3):
         scheduler.step()
     assert scheduler.get_lr()[0] > 0.001
+
+
+def _two_group_adam():
+    dense = torch.nn.Parameter(torch.zeros(1))
+    expert = torch.nn.Parameter(torch.zeros(1))
+    return torch.optim.Adam([{"params": [dense], "lr": 0.1}, {"params": [expert], "lr": 0.2}], betas=(0.9, 0.99))
+
+
+def test_one_cycle_accepts_per_group_lr_and_momentum_lists():
+    # cycle_min_lr, cycle_max_lr, cycle_min_mom and cycle_max_mom are all documented as
+    # "float or list ... for each parameter group", but OneCycle only broadcast a scalar,
+    # so a list was written whole into every param group. That left the optimizer holding
+    # a list as its lr and as betas[0], and the first step raised TypeError on a list
+    # subtraction. Reuse _format_param, which is how the sibling schedulers in this file
+    # already honour the same documented contract.
+    optimizer = _two_group_adam()
+
+    scheduler = OneCycle(optimizer=optimizer,
+                         cycle_min_lr=[0.001, 0.002],
+                         cycle_max_lr=[0.01, 0.02],
+                         cycle_min_mom=[0.8, 0.85],
+                         cycle_max_mom=[0.9, 0.95],
+                         cycle_first_step_size=5,
+                         cycle_second_step_size=5)
+
+    assert scheduler.min_lrs == pytest.approx([0.001, 0.002])
+    assert scheduler.max_lrs == pytest.approx([0.01, 0.02])
+    assert [group["lr"] for group in optimizer.param_groups] == pytest.approx([0.001, 0.002])
+    assert [group["betas"][0] for group in optimizer.param_groups] == pytest.approx([0.8, 0.85])
+
+    # At the peak of the cycle each group reaches its own cycle_max_lr, and momentum is at
+    # its own cycle_min_mom, rather than every group tracking group 0's values.
+    scheduler.step(4)
+    assert scheduler.get_lr() == pytest.approx([0.01, 0.02])
+    assert [group["lr"] for group in optimizer.param_groups] == pytest.approx([0.01, 0.02])
+    assert [group["betas"][0] for group in optimizer.param_groups] == pytest.approx([0.8, 0.85])
+
+    # Back at the bottom of the cycle, momentum returns to each group's cycle_max_mom.
+    scheduler.step(9)
+    assert scheduler.get_lr() == pytest.approx([0.001, 0.002])
+    assert [group["betas"][0] for group in optimizer.param_groups] == pytest.approx([0.9, 0.95])
+
+
+@pytest.mark.parametrize("kwargs", [{
+    "cycle_min_lr": [0.001, 0.002, 0.003]
+}, {
+    "cycle_max_lr": [0.01, 0.02, 0.03]
+}, {
+    "cycle_min_mom": [0.8, 0.85, 0.9]
+}, {
+    "cycle_max_mom": [0.9, 0.95, 0.99]
+}])
+def test_one_cycle_rejects_wrong_length_per_group_lists(kwargs):
+    # A list whose length does not match the number of param groups was silently accepted
+    # and then zipped short, dropping groups. LRRangeTest and WarmupLR both reject it.
+    optimizer = _two_group_adam()
+    defaults = {"cycle_min_lr": 0.001, "cycle_max_lr": 0.01, "cycle_first_step_size": 5}
+
+    with pytest.raises(ValueError):
+        OneCycle(optimizer=optimizer, **{**defaults, **kwargs})

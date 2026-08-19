@@ -15,6 +15,7 @@ from deepspeed.runtime.zero.partition_parameters import *
 from deepspeed.runtime.zero.partitioned_param_coordinator import PartitionedParameterCoordinator, InflightParamRegistry, iter_params
 from deepspeed.accelerator import get_accelerator
 from deepspeed import utils
+from deepspeed.utils.pin_memory_tracker import pinned_memory_summary
 
 FWD_MODULE_STACK = list()
 
@@ -225,6 +226,7 @@ class DeepSpeedZeRoOffload(object):
             force=False)
 
         see_memory_usage("DeepSpeedZeRoOffload initialize [end]", force=False)
+        pinned_memory_summary("ZeRO-3 parameter offload init")
 
     @instrument_w_nvtx
     def partition_all_parameters(self):

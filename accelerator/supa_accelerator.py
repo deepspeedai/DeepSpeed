@@ -214,12 +214,6 @@ class SUPA_Accelerator(DeepSpeedAccelerator):
     def LongTensor(self):
         return torch.supa.LongTensor
 
-    def pin_memory(self, tensor, align_bytes=1):
-        return tensor.pin_memory()
-
-    def is_pinned(self, tensor):
-        return tensor.is_pinned()
-
     def on_accelerator(self, tensor):
         device_str = str(tensor.device)
         return device_str.startswith('supa:')

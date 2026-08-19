@@ -169,6 +169,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                  communication_data_type=torch.float16,
                  postscale_gradients=True,
                  gradient_predivide_factor=1.0,
+                 gradient_average=True,
                  gradient_accumulation_steps=1,
                  ignore_unused_parameters=True,
                  partition_grads=True,
@@ -252,8 +253,6 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         self.real_dp_process_group = [dp_process_group for i in range(len(self.optimizer.param_groups))]
         self.partition_count = [dp_size for i in range(len(self.optimizer.param_groups))]
 
-        self.is_gradient_accumulation_boundary = True
-
         # Toggled by DeepSpeedEngine.coalesce_grad_reduction().
         self._coalesce_grad_reduction = False
 
@@ -281,6 +280,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         self.communication_data_type = communication_data_type
         self.gradient_predivide_factor = gradient_predivide_factor
         self.postscale_gradients = postscale_gradients
+        self.gradient_average = gradient_average
         self.gradient_accumulation_steps = gradient_accumulation_steps
         self.micro_step_id = INITIAL_MICRO_STEP_ID
         self.ignore_unused_parameters = ignore_unused_parameters
@@ -306,8 +306,9 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         if self.reduce_scatter and self.partition_gradients:
             valid_reduce_scatter_dtypes = (torch.float16, torch.bfloat16, torch.float32)
             assert self.communication_data_type in valid_reduce_scatter_dtypes, f"{self.zero_stage_string} supports {valid_reduce_scatter_dtypes} communication_data_type with reduce scatter enabled. Got: '{self.communication_data_type}'"
-            assert self.gradient_predivide_factor == 1.0, f"gradient_predivide_factor != 1.0 is not yet supported with {self.zero_stage_string} with reduce scatter enabled"
-            assert self.postscale_gradients, f"pre-scale gradients is not yet supported with {self.zero_stage_string} with reduce scatter enabled"
+            if self.gradient_average:
+                assert self.gradient_predivide_factor == 1.0, f"gradient_predivide_factor != 1.0 is not yet supported with {self.zero_stage_string} with reduce scatter enabled"
+                assert self.postscale_gradients, f"pre-scale gradients is not yet supported with {self.zero_stage_string} with reduce scatter enabled"
 
         # param flattened by groups
         self.bit16_groups = []
@@ -579,6 +580,8 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             self.norm_for_param_grads = {}
             self.local_overflow = False
             self.grad_position = {}
+            # Param ids reduced since the last step(); used to finalize only active params in unmanaged mode.
+            self._offload_accumulated_param_ids = set()
             self.temp_grad_buffer_for_cpu_offload = torch.zeros(largest_param_numel,
                                                                 device=self.device,
                                                                 dtype=self.dtype)
@@ -681,6 +684,24 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         for hook in self._grad_acc_hooks:
             hook.remove()
         self.print_rank_0("Removed grad acc hooks")
+        self._unpin_offload_buffers()
+
+    def _unpin_offload_buffers(self):
+        # Release the page-locked host buffers we pinned for CPU offload. unpin_memory is a
+        # no-op for the torch backend and only frees under DS_PIN_MEMORY_BACKEND=native,
+        # where the mlocked allocation would otherwise persist until garbage collection.
+        if not (self.cpu_offload and self.cpu_offload_pin_memory):
+            return
+        accelerator = get_accelerator()
+        for fp32_partition in self.single_partition_of_fp32_groups:
+            accelerator.unpin_memory(fp32_partition)
+            if fp32_partition.grad is not None:
+                accelerator.unpin_memory(fp32_partition.grad)
+        for buffer in self.param_buffer_of_bit16_for_cpu_offload_groups:
+            accelerator.unpin_memory(buffer)
+        temp_grad_buffer = getattr(self, 'temp_grad_buffer_for_cpu_offload', None)
+        if temp_grad_buffer is not None:
+            accelerator.unpin_memory(temp_grad_buffer)
 
     def _enable_universal_checkpoint(self):
         self._universal_checkpoint_info = None
@@ -921,7 +942,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                                                         dtype=self.gradient_accumulation_dtype)
                     for accumulated_grad, new_avg_grad in zip(self.all_grad_tensors[i], avg_new):
                         accumulated_grad.add_(new_avg_grad)
-                if self.is_gradient_accumulation_boundary:
+                if self.is_gradient_accumulation_boundary():
                     self.averaged_gradients[i] = self.get_flat_partition(
                         self.params_in_partition[i],
                         self.first_offset[i],
@@ -948,9 +969,12 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         see_memory_usage("End ipg_epilogue")
 
     def finalize_gradient_accumulation_boundary(self):
-        # Unmanaged mode: grads were reduced/accumulated into all_grad_tensors each backward; finalize averaged_gradients for step().
-        assert not self.cpu_offload, "unmanaged gradient accumulation does not support ZeRO optimizer state offload"
-        self.is_gradient_accumulation_boundary = True
+        # Unmanaged mode: grads accumulated each backward; finalize for step() (averaged_gradients or offload fp32 copy).
+        # Mirror engine boundary for any managed-style readers during step(); finalize itself does not branch on it.
+        self.set_gradient_accumulation_boundary(True)
+        if self.cpu_offload:
+            self._finalize_cpu_offload_gradient_accumulation()
+            return
         for i, _ in enumerate(self.bit16_groups):
             self.averaged_gradients[i] = self.get_flat_partition(self.params_in_partition[i],
                                                                  self.first_offset[i],
@@ -960,6 +984,36 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                                                                  param_group_idx=i,
                                                                  return_tensor_list=True)
             self.all_grad_tensors[i] = None
+
+    def _finalize_cpu_offload_gradient_accumulation(self):
+        # Deferred boundary work for params reduced this window (matches managed offload; skips inactive params).
+        for group in self.params_in_partition:
+            for param in group:
+                if not param.requires_grad:
+                    continue
+                if self.get_param_id(param) not in self._offload_accumulated_param_ids:
+                    continue
+                self._restore_cpu_offload_grad_to_gpu(param)
+                self.set_norm_for_param_grad_in_gpu(param)
+                self.update_offload_overflow_tracker_for_param_grad(param)
+                self.async_inplace_copy_grad_to_fp32_buffer_from_gpu(param)
+
+    def _restore_cpu_offload_grad_to_gpu(self, param):
+        # Last non-boundary epilogue cleared param.grad; reload accumulated CPU grads for boundary helpers.
+        param_id = self.get_param_id(param)
+        [_, source_offset, dest_offset, num_elements] = self.grad_position[param_id]
+        dest_buffer = self.temp_grad_buffer_for_gpu_offload.view(-1).narrow(0, 0, param.numel())
+        if not self.low_precision_master_weights_and_grads:
+            dest_buffer.copy_(self.accumulated_grads_in_cpu[param_id].view(-1), non_blocking=True)
+        else:
+            dest_buffer.narrow(0, source_offset, num_elements).copy_(self.accumulated_grads_in_cpu[param_id].view(-1),
+                                                                     non_blocking=True)
+        # Clone so the shared temp buffer can be reused for the next parameter.
+        restored = dest_buffer.view_as(param).clone()
+        if self.use_grad_accum_attribute:
+            param.grad_accum = restored
+        else:
+            param.grad = restored
 
     def clear_backward_seen_flag(self):
         """Clear the backward seen flag and do deferred cleanup.
@@ -1210,7 +1264,9 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         if communication_data_type != tensor.dtype:
             tensor_to_allreduce = tensor.to(communication_data_type)
 
-        if self.postscale_gradients:
+        if not self.gradient_average:
+            dist.all_reduce(tensor_to_allreduce, group=self.dp_process_group)
+        elif self.postscale_gradients:
             if self.gradient_predivide_factor != 1.0:
                 tensor_to_allreduce.mul_(1. / self.gradient_predivide_factor)
 
@@ -1373,7 +1429,8 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                     curr_size += numel
                     prev_id, prev_process_group, prev_copy_ranks = partition_id, process_group, copy_ranks
 
-            tensor.div_(dist.get_world_size(group=self.dp_process_group) / float(self.sequence_parallel_size))
+            if self.gradient_average:
+                tensor.div_(dist.get_world_size(group=self.dp_process_group) / float(self.sequence_parallel_size))
 
             buckets = {}
             for i, (dst, bucket_offset, numel, copy_ranks) in enumerate(rank_and_offsets):
@@ -1593,10 +1650,12 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             # CPU buffer) or more will follow (save to CPU buffer). Skipping only
             # the lone backward of a step preserves the existing fast path for
             # ga_steps=1 + single backward.
-            if self.micro_step_id > 0 or not self.is_gradient_accumulation_boundary:
+            if self.micro_step_id > 0 or not self.is_gradient_accumulation_boundary():
                 self.async_accumulate_grad_in_cpu_via_gpu(param)
+                # Record active param so unmanaged finalize skips params unused this window.
+                self._offload_accumulated_param_ids.add(self.get_param_id(param))
 
-            if self.is_gradient_accumulation_boundary:
+            if self.is_gradient_accumulation_boundary():
                 self.set_norm_for_param_grad_in_gpu(param)
 
                 self.update_offload_overflow_tracker_for_param_grad(param)
@@ -1703,7 +1762,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             self.reduce_ready_partitions_and_remove_grads(param, i)
 
     def reduce_ready_partitions_and_remove_grads(self, param, i):
-        if self.partition_gradients or self.is_gradient_accumulation_boundary or self.zenflow:
+        if self.partition_gradients or self.is_gradient_accumulation_boundary() or self.zenflow:
             self.reduce_independent_p_g_buckets_and_remove_grads(param, i)
 
     def zero_reduced_gradients(self, partition_id, i):
@@ -1788,7 +1847,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         if communication_data_type != tensor.dtype:
             tensor_to_allreduce = tensor.to(communication_data_type)
 
-        if divide:
+        if divide and self.gradient_average:
             tensor_to_allreduce.div_(dist.get_world_size(group=process_group) / float(self.sequence_parallel_size))
 
         if rank is None:
@@ -2219,6 +2278,8 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         Not supporting closure.
         """
         self.micro_step_id = INITIAL_MICRO_STEP_ID
+        if self.cpu_offload:
+            self._offload_accumulated_param_ids = set()
 
         see_memory_usage("In step before checking overflow")
 

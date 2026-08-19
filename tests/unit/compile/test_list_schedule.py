@@ -133,6 +133,27 @@ def _scheduled_names(graph):
     return [node.name for node in schedule_mod.fast_free_schedule(graph, 0, 0, debug_log=True).nodes]
 
 
+@pytest.mark.parametrize("case", ["only_consumer", "later_real_use"])
+def test_get_last_uses_unconsumed_no_copy_wait(case):
+    graph = Graph()
+    param = _placeholder(graph, f"{case}_param")
+    allgather = _allgather(graph, param, 1, case)
+    wait = _wait(graph, allgather, 1, case)
+
+    later_use = _neg(graph, allgather, f"{case}_later_use") if case == "later_real_use" else None
+    graph.output((later_use, ) if later_use is not None else ())
+    graph.lint()
+
+    node_to_last_use, user_to_last_uses = compile_util.get_last_uses(graph)
+    node_to_uses = compile_util.get_real_uses(graph)
+
+    expected_last_use = later_use if later_use is not None else wait
+    assert node_to_last_use[allgather] is expected_last_use
+    assert user_to_last_uses[expected_last_use] == [allgather]
+    assert user_to_last_uses.get(wait, []) == ([] if later_use is not None else [allgather])
+    assert node_to_uses[allgather] == ([] if later_use is None else [later_use])
+
+
 def test_fast_free_schedule_keeps_zero_free_acc_filter():
     graph = Graph()
 

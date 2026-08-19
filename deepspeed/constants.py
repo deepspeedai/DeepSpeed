@@ -16,7 +16,7 @@ TORCH_DISTRIBUTED_DEFAULT_PORT = 29500
 # (only if NCCL_BLOCKING_WAIT or NCCL_ASYNC_ERROR_HANDLING is set to 1).
 # To make an attempt at backwards compatibility with THD, we use an
 # extraordinarily high default timeout, given that THD did not have timeouts.
-default_pg_timeout = timedelta(minutes=int(os.getenv("DEEPSPEED_TIMEOUT", default=30)))
+default_pg_timeout = timedelta(minutes=int(os.getenv("DEEPSPEED_TIMEOUT", default=10)))
 INFERENCE_GENERIC_MODE = 'generic'
 INFERENCE_SPECIALIZED_MODE = 'specialized'
 

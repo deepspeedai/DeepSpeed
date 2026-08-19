@@ -3,6 +3,7 @@
 
 # DeepSpeed Team
 
+from copy import deepcopy
 import math
 from collections import namedtuple
 from typing import Dict, List, NamedTuple, Set, Tuple
@@ -16,7 +17,7 @@ from torch.nn.modules.loss import L1Loss
 from torch.nn.parameter import Parameter
 from torch.nn.utils import skip_init
 
-from unit.common import DistributedTest, preferred_dtype
+from unit.common import DistributedTest, preferred_dtype, allclose_on_all_ranks
 from unit.simple_model import SimpleModel, random_dataloader
 
 import deepspeed
@@ -26,6 +27,200 @@ from deepspeed.runtime.zero.partition_parameters import ZeroParamStatus
 from deepspeed.utils.zero_to_fp32 import load_state_dict_from_zero_checkpoint
 from deepspeed.runtime.zero.utils import ZeRORuntimeException
 from deepspeed.accelerator import get_accelerator
+from deepspeed.utils import safe_get_full_fp32_param, safe_get_full_grad
+
+
+@pytest.mark.parametrize("zero_stage", [0, 1, 2])
+@pytest.mark.parametrize("gradient_allreduce_op,expected_scale", [("mean", 1.0), ("sum", 2.0)])
+@pytest.mark.parametrize(
+    "reduce_scatter,contiguous_gradients,prescale_gradients,gradient_predivide_factor",
+    [
+        (True, True, False, 1.0),
+        (False, True, False, 2.0),
+        (False, False, True, 1.0),
+    ],
+)
+class TestGradientAllreduceOp(DistributedTest):
+    world_size = 2
+
+    def test(self, zero_stage, gradient_allreduce_op, expected_scale, reduce_scatter, contiguous_gradients,
+             prescale_gradients, gradient_predivide_factor):
+
+        class LinearLoss(Module):
+
+            def __init__(self):
+                super().__init__()
+                self.weight = Parameter(torch.zeros(2))
+
+            def forward(self, inputs):
+                return (self.weight * inputs).sum()
+
+        model = LinearLoss()
+        optimizer = torch.optim.SGD(model.parameters(), lr=1.0)
+        config_dict = {
+            "train_micro_batch_size_per_gpu": 1,
+            "gradient_clipping": 0.0,
+            "zero_allow_untested_optimizer": True,
+            "gradient_allreduce_op": gradient_allreduce_op,
+            "prescale_gradients": prescale_gradients,
+            "gradient_predivide_factor": gradient_predivide_factor,
+            "zero_optimization": {
+                "stage": zero_stage,
+                "reduce_scatter": reduce_scatter,
+                "contiguous_gradients": contiguous_gradients,
+            },
+        }
+        engine, _, _, _ = deepspeed.initialize(model=model, optimizer=optimizer, config=config_dict)
+
+        inputs = torch.tensor([1.0, 2.0], device=engine.device)
+        engine.backward(engine(inputs))
+        engine.step()
+
+        actual = engine.module.weight.detach().clone()
+        expected = -inputs * expected_scale
+        torch.testing.assert_close(actual, expected)
+        engine.destroy()
+
+
+@pytest.mark.parametrize(
+    "optimizer_name,zero_stage",
+    [
+        pytest.param("AdamW", 0, id="adamw-zero0"),
+        pytest.param("AdamW", 1, id="adamw-zero1"),
+        pytest.param("AdamW", 2, id="adamw-zero2"),
+        pytest.param("Muon", 1, id="muon-zero1"),
+        pytest.param("Muon", 2, id="muon-zero2"),
+    ],
+)
+class TestGradientAllreduceOpTraining(DistributedTest):
+    world_size = 2
+
+    def test(self, optimizer_name, zero_stage):
+        world_size = dist.get_world_size()
+        rank = dist.get_rank()
+        hidden_dim = 32
+        micro_batch_size = 4
+        steps = 5
+        use_muon = optimizer_name == "Muon"
+        if use_muon and torch.half not in get_accelerator().supported_dtypes():
+            pytest.skip(f"fp16 not supported, valid dtype: {get_accelerator().supported_dtypes()}")
+
+        dtype = torch.float16 if use_muon else torch.float32
+        rtol, atol = ((1e-3, 1e-4) if use_muon else (1e-5, 1e-6))
+
+        optimizer_params = {
+            "lr": 0.01 if use_muon else 1e-3,
+            "weight_decay": 0.0,
+        }
+        if use_muon:
+            optimizer_params.update({
+                "momentum": 0.95,
+                "ns_method": "gram",
+            })
+        else:
+            optimizer_params["torch_adam"] = True
+
+        def config(gradient_allreduce_op):
+            config_dict = {
+                "train_micro_batch_size_per_gpu": micro_batch_size,
+                "gradient_clipping": 0.0,
+                "steps_per_print": 1000,
+                "gradient_allreduce_op": gradient_allreduce_op,
+                "optimizer": {
+                    "type": optimizer_name,
+                    "params": optimizer_params,
+                },
+                "zero_optimization": {
+                    "stage": zero_stage,
+                    "contiguous_gradients": True,
+                },
+            }
+            if zero_stage > 0:
+                config_dict["zero_optimization"]["reduce_scatter"] = True
+            if use_muon:
+                config_dict["fp16"] = {
+                    "enabled": True,
+                    "loss_scale": 1.0,
+                }
+            return config_dict
+
+        def get_batch(step, device):
+            generator = torch.Generator().manual_seed(999 + step)
+            global_x = torch.randn(world_size * micro_batch_size, hidden_dim, generator=generator)
+            global_y = torch.randint(0, hidden_dim, (world_size * micro_batch_size, ), generator=generator)
+            start = rank * micro_batch_size
+            x = global_x[start:start + micro_batch_size].to(device, dtype=dtype)
+            y = global_y[start:start + micro_batch_size].to(device)
+            return x, y
+
+        def clone_full_param(param):
+            full_param = safe_get_full_fp32_param(param)
+            if full_param is None:
+                full_param = param.detach().float()
+            return full_param.clone()
+
+        torch.manual_seed(1234)
+        base_model = SimpleModel(hidden_dim=hidden_dim, nlayers=2)
+        mean_model = deepcopy(base_model)
+        mean_engine, _, _, _ = deepspeed.initialize(config=config("mean"),
+                                                    model=mean_model,
+                                                    model_parameters=mean_model.parameters())
+        mean_losses = []
+        mean_gradients = []
+        mean_parameters = []
+        for step in range(steps):
+            x, y = get_batch(step, mean_engine.device)
+            mean_loss = mean_engine(x, y)
+            mean_engine.backward(mean_loss)
+            mean_losses.append(mean_loss.detach().clone())
+            mean_gradients.append({
+                name: safe_get_full_grad(param).detach().clone()
+                for name, param in mean_engine.module.named_parameters()
+            })
+            mean_engine.step()
+            mean_parameters.append({
+                name: clone_full_param(param)
+                for name, param in mean_engine.module.named_parameters()
+            })
+        mean_engine.destroy()
+
+        sum_model = deepcopy(base_model)
+        sum_engine, _, _, _ = deepspeed.initialize(config=config("sum"),
+                                                   model=sum_model,
+                                                   model_parameters=sum_model.parameters())
+
+        for step in range(steps):
+            x, y = get_batch(step, sum_engine.device)
+            sum_loss = sum_engine(x, y)
+            allclose_on_all_ranks(sum_loss,
+                                  mean_losses[step],
+                                  assert_message=f"{optimizer_name} ZeRO-{zero_stage} loss differs at step {step}",
+                                  rtol=rtol,
+                                  atol=atol)
+            # SUM scales gradients by world_size. Normalize only the backward loss so
+            # adaptive and nonlinear optimizers receive the same gradients as MEAN.
+            sum_engine.backward(sum_loss / world_size)
+
+            for sum_name, sum_param in sum_engine.module.named_parameters():
+                normalized_sum_grad = safe_get_full_grad(sum_param)
+                allclose_on_all_ranks(
+                    normalized_sum_grad,
+                    mean_gradients[step][sum_name],
+                    assert_message=f"{optimizer_name} ZeRO-{zero_stage} gradient {sum_name} differs at step {step}",
+                    rtol=rtol,
+                    atol=atol)
+
+            sum_engine.step()
+
+            for sum_name, sum_param in sum_engine.module.named_parameters():
+                allclose_on_all_ranks(
+                    clone_full_param(sum_param),
+                    mean_parameters[step][sum_name],
+                    assert_message=f"{optimizer_name} ZeRO-{zero_stage} parameter {sum_name} differs at step {step}",
+                    rtol=rtol,
+                    atol=atol)
+
+        sum_engine.destroy()
 
 
 def run_unbalanced_gradients(model, data_loader):

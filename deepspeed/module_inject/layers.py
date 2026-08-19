@@ -305,6 +305,7 @@ class TensorParallel_Layer(nn.Module, ABC):
         """
         super().__init__()
         self.support_training: bool = False
+        self.defer_collectives_to_compiler: bool = False
         self.mp_group = mp_group
         if mp_group is not None:
             self.tp_world_size: int = dist.get_world_size(self.mp_group)
@@ -379,6 +380,18 @@ class TensorParallel_Layer(nn.Module, ABC):
             weight._tp_partition = self._tp_partition
             setattr(weight, DS_TENSOR_MODEL_PARALLEL, True)
             setattr(weight, DS_IS_REPLACED_MODULE, True)
+
+    @staticmethod
+    def _shape_before_zero3_partition(param):
+        """Shape of ``param`` as it was before ZeRO-3 partitioned it.
+
+        ZeRO-3 replaces a partitioned parameter's local data with an empty 1-D
+        tensor, so ``param.shape`` no longer describes the layer and indexing it
+        raises. ZeRO-3 records the pre-partition shape as ``ds_shape``, which is
+        what the universal-checkpoint metadata needs.
+        """
+        ds_shape = getattr(param, 'ds_shape', None)
+        return tuple(param.shape) if ds_shape is None else tuple(ds_shape)
 
     def _set_param_uc_meta(self,
                            param,
@@ -643,7 +656,8 @@ class LinearAllreduce(TensorParallel_Layer):
 
     def forward(self, input):
         output = torch.matmul(input, self.weight.transpose(-1, -2))
-        output = RowParallel.apply(self.mp_group, output, not self.is_training_mode())
+        if not self.defer_collectives_to_compiler:
+            output = RowParallel.apply(self.mp_group, output, not self.is_training_mode())
         if self.bias is not None:
             output = add_bias(output, self.bias)
         return output
@@ -702,7 +716,8 @@ class LinearAllreduce(TensorParallel_Layer):
             params_list[idx].data = _partition
 
     def _mark_uc_metadata(self):
-        original_weight_shape = (self.weight.shape[0], self.weight.shape[1] * self.tp_world_size)
+        weight_shape = self._shape_before_zero3_partition(self.weight)
+        original_weight_shape = (weight_shape[0], weight_shape[1] * self.tp_world_size)
         self._set_param_uc_meta(self.weight,
                                 partition_type='row',
                                 partition_dim=1,
@@ -710,12 +725,13 @@ class LinearAllreduce(TensorParallel_Layer):
                                 output_shape=(original_weight_shape[0], ),
                                 original_shape=original_weight_shape)
         if self.bias is not None:
+            bias_shape = self._shape_before_zero3_partition(self.bias)
             self._set_param_uc_meta(self.bias,
                                     partition_type='row',
                                     partition_dim=None,
-                                    logical_shape=tuple(self.bias.shape),
-                                    output_shape=tuple(self.bias.shape),
-                                    original_shape=tuple(self.bias.shape),
+                                    logical_shape=bias_shape,
+                                    output_shape=bias_shape,
+                                    original_shape=bias_shape,
                                     is_bias=True,
                                     replicated=True)
 
@@ -738,7 +754,7 @@ class LinearLayer(TensorParallel_Layer):
 
     def forward(self, input):
         if not self.__class__.tp_overlap_comm:
-            if getattr(self, 'mp_group', None) is not None:
+            if getattr(self, 'mp_group', None) is not None and not self.defer_collectives_to_compiler:
                 input = ColumnParallel.apply(self.mp_group, input)
             output = torch.matmul(input, self.weight.transpose(-1, -2))
             if self.bias is not None:
@@ -747,7 +763,14 @@ class LinearLayer(TensorParallel_Layer):
             output = AsyncColumnParallel.apply(self.mp_group, input, self.weight, self.bias)
 
         if self.gather_output:
-            output = GatherFromTensorParallelRegion.apply(self.mp_group, output)
+            if self.defer_collectives_to_compiler:
+                # The gather changes the activation's width, so downstream ops (e.g. a depthwise
+                # conv sized for the full width) only trace correctly if it happens inline. The
+                # custom op is graph-capturable, unlike GatherFromTensorParallelRegion, which
+                # reads gathered shard sizes back into Python.
+                output = torch.ops.autotp.gather_from_tp_region(output)
+            else:
+                output = GatherFromTensorParallelRegion.apply(self.mp_group, output)
 
         return output
 
@@ -794,8 +817,9 @@ class LinearLayer(TensorParallel_Layer):
             params_list[idx].data = _partition
 
     def _mark_uc_metadata(self):
-        original_out_dim = self.weight.shape[0] * self.tp_world_size
-        original_weight_shape = (original_out_dim, self.weight.shape[1])
+        weight_shape = self._shape_before_zero3_partition(self.weight)
+        original_out_dim = weight_shape[0] * self.tp_world_size
+        original_weight_shape = (original_out_dim, weight_shape[1])
         self._set_param_uc_meta(self.weight,
                                 partition_type='column',
                                 partition_dim=0,
@@ -803,7 +827,7 @@ class LinearLayer(TensorParallel_Layer):
                                 output_shape=(original_out_dim, ),
                                 original_shape=original_weight_shape)
         if self.bias is not None:
-            original_bias_shape = (self.bias.shape[0] * self.tp_world_size, )
+            original_bias_shape = (self._shape_before_zero3_partition(self.bias)[0] * self.tp_world_size, )
             self._set_param_uc_meta(self.bias,
                                     partition_type='column',
                                     partition_dim=0,
@@ -1299,7 +1323,7 @@ class SubParamLinearLayer(TensorParallel_Layer):
         self._mark_uc_metadata()
 
     def forward(self, input):
-        if getattr(self, 'mp_group', None) is not None:
+        if getattr(self, 'mp_group', None) is not None and not self.defer_collectives_to_compiler:
             input = ColumnParallel.apply(self.mp_group, input)
         output = torch.matmul(input, self.weight.transpose(-1, -2))
         if self.bias is not None:
@@ -1418,7 +1442,8 @@ class SubParamLinearAllreduce(TensorParallel_Layer):
 
     def forward(self, input):
         output = torch.matmul(input, self.weight.transpose(-1, -2))
-        output = RowParallel.apply(self.mp_group, output, not self.is_training_mode())
+        if not self.defer_collectives_to_compiler:
+            output = RowParallel.apply(self.mp_group, output, not self.is_training_mode())
         if self.bias is not None:
             output = add_bias(output, self.bias)
         return output

@@ -8,8 +8,9 @@ import re
 from typing import Dict
 import torch
 
-from .reshape_3d_utils import model_3d_desc
-from .reshape_utils import (basic_folder_validation, merge_state, partition_data, get_files, get_files_with_prefix)
+from .reshape_3d_utils import model_3d_desc, get_model_3d_descriptor_from_metadata
+from .reshape_utils import (basic_folder_validation, merge_state, partition_data, get_files, get_files_with_prefix,
+                            get_zero_files)
 
 from .constants import (MODEL_FILE_PREFIX, LAYER_FILE_PREFIX)
 
@@ -23,6 +24,8 @@ ARGS_KEY = 'args'
 CHECKPOINT_INFO_KEY = 'checkpoint_info'
 ITERATION_KEY = 'iteration'
 LAYER_FILE_PREFIX_PATTERN = r'layer_(\d+)-model_.*'
+USE_DATA_BEFORE_EXPERT_PARALLELISM = 'use_data_before_expert_parallelism'
+AUTOEP_METADATA_FIELDS = ('moe_layer_id', 'module_path') + AUTOEP_ZERO12_REQUIRED_FIELDS
 
 SEQUENTIAL_LAYERS = [
     'input_layernorm.weight', 'input_layernorm.bias', 'self_attention.dense.bias', 'post_attention_layernorm.weight',
@@ -30,6 +33,11 @@ SEQUENTIAL_LAYERS = [
 ]
 
 LAYER_CONCAT_DIM = {'self_attention.dense.weight': 1, 'mlp.dense_4h_to_h.weight': 1}
+
+
+def _get_pipeline_layer_files(file_list):
+    return sorted(
+        [file_path for file_path in file_list if re.fullmatch(LAYER_FILE_PREFIX_PATTERN, os.path.basename(file_path))])
 
 
 class DeepSpeedCheckpoint(object):
@@ -43,15 +51,17 @@ class DeepSpeedCheckpoint(object):
         self.final_layer_norm_idx = final_layer_norm_idx
         self.dir = dir
 
-        pipeline_parallel = len(get_files_with_prefix(get_files(dir), LAYER_FILE_PREFIX)) > 0
+        self.file_list = get_files(dir)
+        self.layer_files = _get_pipeline_layer_files(self.file_list)
+        pipeline_parallel = len(self.layer_files) > 0
 
         self._validate_folder(dir, pipeline_parallel)
 
-        self.zero_checkpoint = ZeROCheckpoint(dir)
-
-        self.file_list = get_files(dir)
-        self.layer_files = get_files_with_prefix(self.file_list, LAYER_FILE_PREFIX)
         self.mp_rank_files = get_files_with_prefix(self.file_list, MODEL_FILE_PREFIX)
+        self.model_state_metadata, self.global_state = self._discover_model_state_metadata()
+        source_3d = get_model_3d_descriptor_from_metadata(self.file_list, get_zero_files(dir),
+                                                          self.model_state_metadata)
+        self.zero_checkpoint = ZeROCheckpoint(dir, source_3d=source_3d)
 
         self.layer_keys = self._get_layer_keys()
         self.layer_count = len(self.layer_keys)
@@ -75,14 +85,67 @@ class DeepSpeedCheckpoint(object):
         if self.is_change_pp_degree() or self.is_change_tp_degree() or self.is_change_dp_degree():
             self.zero_checkpoint.reshape(model_3d_desc(self.pp_degree, self.tp_degree, self.dp_degree))
 
-        self.global_state = {}
-
         self._sanity_check()
         self.pp_to_transformer_map = self._build_pp_transformer_map()
         self.transformer_file_map = self._build_transformer_file_map()
         self.tp_to_embedding_map = self._build_tp_other_layer_map(EMBEDDING_LAYER_INDEX)
         self.tp_to_final_norm_map = self._build_tp_other_layer_map(self.final_layer_norm_idx)
-        self._build_global_state()
+
+    @staticmethod
+    def _lightweight_autoep_metadata(model_state):
+        autoep_metadata = model_state.get(AUTOEP_LAYERS_KEY)
+        if autoep_metadata is None:
+            autoep_metadata = model_state.get(AUTOEP_LAYERS_KEY_LEGACY)
+        if autoep_metadata is None or not isinstance(autoep_metadata, list):
+            return autoep_metadata if autoep_metadata is None else type(autoep_metadata).__name__
+        return [{
+            key: entry[key]
+            for key in AUTOEP_METADATA_FIELDS if key in entry
+        } if isinstance(entry, dict) else type(entry).__name__ for entry in autoep_metadata]
+
+    @staticmethod
+    def _lightweight_ds_config(model_state):
+        ds_config = model_state.get('ds_config', {})
+        if not isinstance(ds_config, dict):
+            return type(ds_config).__name__
+        ordering = ds_config.get(USE_DATA_BEFORE_EXPERT_PARALLELISM, False)
+        if not isinstance(ordering, bool):
+            ordering = type(ordering).__name__
+        return {USE_DATA_BEFORE_EXPERT_PARALLELISM: ordering}
+
+    @staticmethod
+    def _lightweight_param_shapes(model_state):
+        param_shapes = model_state.get(PARAM_SHAPES)
+        if not isinstance(param_shapes, (list, tuple)) or not all(isinstance(group, dict) for group in param_shapes):
+            return None if param_shapes is None else type(param_shapes).__name__
+        return {name: shape for group in param_shapes for name, shape in group.items()}
+
+    @staticmethod
+    def _lightweight_parallel_dimensions(model_state):
+        dimensions = model_state.get(CHECKPOINT_PARALLEL_DIMS)
+        if dimensions is None or not isinstance(dimensions, dict):
+            return dimensions if dimensions is None else type(dimensions).__name__
+        return {key: dimensions.get(key) for key in (CHECKPOINT_PP_DEGREE, CHECKPOINT_TP_DEGREE)}
+
+    def _discover_model_state_metadata(self):
+        """Load model-state files once and retain only descriptor/conversion metadata."""
+        metadata_by_file = []
+        global_state = {}
+        known_global_keys = (ARGS_KEY, CHECKPOINT_INFO_KEY, UNIVERSAL_CHECKPOINT_INFO)
+        for file_index, model_file in enumerate(self.mp_rank_files):
+            model_state = torch.load(model_file, map_location=torch.device('cpu'), weights_only=False)
+            metadata_by_file.append((model_file, {
+                CHECKPOINT_PARALLEL_DIMS: self._lightweight_parallel_dimensions(model_state),
+                PARAM_SHAPES: self._lightweight_param_shapes(model_state),
+                AUTOEP_LAYERS_KEY: self._lightweight_autoep_metadata(model_state),
+                'ds_config': self._lightweight_ds_config(model_state),
+            }))
+            if file_index == 0:
+                global_state[ITERATION_KEY] = model_state.get(ITERATION_KEY, 0)
+                for key in known_global_keys:
+                    global_state[key] = model_state.get(key)
+            del model_state
+        return metadata_by_file, global_state
 
     def is_change_tp_degree(self):
         return self.tp_degree != self.zero_checkpoint.get_src_tp_degree()
@@ -114,11 +177,6 @@ class DeepSpeedCheckpoint(object):
 
     def show_transformer_file_map(self):
         self._dump_mapping(self.transformer_file_map, 'rank_to_transformer_files')
-
-    def _build_global_state(self):
-        sd = torch.load(self.mp_rank_files[0], map_location=torch.device('cpu'), weights_only=False)
-        self.global_state[ITERATION_KEY] = sd.get(ITERATION_KEY, 0)
-        self.global_state[ARGS_KEY] = sd.get(ARGS_KEY, None)
 
     def get_zero_checkpoint_state(self, pp_index, tp_index, dp_index, strip_tensor_paddings: bool = True) -> dict:
         return self.zero_checkpoint.get_state_for_rank(pp_index=pp_index,
