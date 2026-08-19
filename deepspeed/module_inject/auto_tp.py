@@ -596,8 +596,54 @@ class AutoTP():
         setattr(child, "replaced", True)
         return new_embedding
 
+    def register_replicated_grad_hooks(self, model):
+        """Sum the gradients of replicated parameters marked grad_allreduce across the TP group.
+
+        A parameter left replicated but applied to sharded activations (Qwen3's q_norm/k_norm
+        normalize the local attention heads) receives a different partial gradient on every
+        tensor-parallel rank. Without this reduction the ranks silently drift apart after the
+        first optimizer step. The hook runs when the gradient is computed, before accumulation,
+        so it holds under gradient accumulation and under the DeepCompile pass, whose compiled
+        backward still accumulates leaf gradients through the autograd engine.
+        """
+        if self.partition_config is None or self.mp_group is None or self.mp_size <= 1:
+            return
+
+        def make_grad_allreduce_hook(group):
+
+            def hook(grad):
+                grad = grad.contiguous()
+                dist.all_reduce(grad, group=group)
+                return grad
+
+            return hook
+
+        model_type = self._get_model_type()
+        registered = []
+        for param_name, param in model.named_parameters():
+            spec = self.partition_config.find_matching_spec(param_name, model_type)
+            if spec is None or not spec.grad_allreduce:
+                continue
+            if getattr(param, "_ds_grad_allreduce_registered", False):
+                continue
+            param.register_hook(make_grad_allreduce_hook(self.mp_group))
+            param._ds_grad_allreduce_registered = True
+            registered.append(param_name)
+        if registered:
+            print_dist(
+                f"AutoTP: registered tensor-parallel grad all-reduce for {len(registered)} replicated "
+                f"parameters, e.g. {registered[0]!r}",
+                ranks=[0])
+
     def update_mp_params(self, child):
         if getattr(child, "replaced", False) == True:
+            return
+        # Fused-expert containers (Mixtral/Llama4/Qwen-MoE style) hold their weights as 3D
+        # parameters that AutoTP does not shard, so their dimension attributes must stay whole.
+        # Halving e.g. Llama4TextExperts.hidden_size while its weights keep the full size breaks
+        # the experts' batched matmul.
+        if any(param.dim() >= 3 for param in child.parameters(recurse=False)):
+            setattr(child, "replaced", True)
             return
         param_list = [
             "n_heads", "inner_dim", "num_heads", "num_kv", "num_attention_heads", "num_attn_heads", "all_head_size",

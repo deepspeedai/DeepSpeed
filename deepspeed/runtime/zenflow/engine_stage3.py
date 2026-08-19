@@ -325,7 +325,7 @@ def _process_selected_fp32_groups_grad(optimizer_z3, params_to_update, grad_part
 
             curr_buffer_idx += 1
 
-    if not optimizer_z3.is_gradient_accumulation_boundary:
+    if not optimizer_z3.is_gradient_accumulation_boundary():
         optimizer_z3.selective_optimizer.group_step(params_to_update)
     else:
         optimizer_z3.selective_optimizer.temp_copy_param(params_to_update)
@@ -494,7 +494,7 @@ def partition_grads(optimizer_z3, params_to_release: List[Parameter], grad_parti
             i, dest_offset, _ = optimizer_z3.grad_position[optimizer_z3.get_param_id(param)]
             now_state = optimizer_z3.get_overlap_step_state()
 
-            if optimizer_z3.is_gradient_accumulation_boundary:
+            if optimizer_z3.is_gradient_accumulation_boundary():
                 optimizer_z3.norm_for_param_grads[optimizer_z3.get_param_id(
                     param)] = optimizer_z3._constant_buffered_norm2(grad_buffer)
 

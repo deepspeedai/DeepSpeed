@@ -201,6 +201,21 @@ for op_name, builder in ALL_OPS.items():
         install_ops[op_name] = op_enabled(op_name)
         ext_modules.append(builder.builder())
 
+# async_io/gds load the pin_memory op's shared manager at runtime. If they are
+# precompiled but pin_memory is not, deployments without a compiler would hit a
+# runtime JIT build, so precompile pin_memory alongside them.
+pin_memory_dependents = [name for name in ("async_io", "gds") if install_ops.get(name)]
+if pin_memory_dependents and not install_ops.get("pin_memory"):
+    pin_memory_builder = ALL_OPS.get("pin_memory")
+    if pin_memory_builder is not None and pin_memory_builder.is_compatible():
+        assert torch_available, "Unable to pre-compile pin_memory, please first install torch"
+        install_ops["pin_memory"] = 1
+        ext_modules.append(pin_memory_builder.builder())
+    else:
+        raise RuntimeError(
+            f"Cannot pre-compile {', '.join(pin_memory_dependents)} without pin_memory, which is required at "
+            "runtime but is not compatible on this platform.")
+
 print(f'Install Ops={install_ops}')
 
 # Write out version/git info.

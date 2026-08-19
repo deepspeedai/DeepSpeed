@@ -48,3 +48,36 @@ def test_buffer_is_shared_across_handles():
 def test_unmanaged_buffer_is_not_pinned():
     handle = _new_handle()
     assert not handle.is_pinned(torch.empty(NUM_ELEMS, dtype=torch.float))
+
+
+def test_pin_handle_buffer_recognized_by_aio_handle():
+    # Buffers allocated via the standalone pin_memory op must share the same
+    # process-wide manager as async_io, so aio_handle.is_pinned sees them.
+    from deepspeed.ops.op_builder import PinMemoryBuilder
+    if not deepspeed.ops.__compatible_ops__.get(PinMemoryBuilder.NAME, True):
+        pytest.skip('Skip tests since pin_memory is not compatible')
+
+    pin_handle = PinMemoryBuilder().load().pin_handle()
+    aio_handle = _new_handle()
+    buffer = pin_handle.new_cpu_locked_tensor(NUM_ELEMS, torch.empty(0, dtype=torch.float))
+    try:
+        assert pin_handle.is_pinned(buffer)
+        assert aio_handle.is_pinned(buffer)
+        assert aio_handle.is_pinned(buffer.narrow(0, BLOCK_SIZE, BLOCK_SIZE))
+    finally:
+        pin_handle.free_cpu_locked_tensor(buffer)
+
+
+def test_aio_handle_buffer_recognized_by_pin_handle():
+    from deepspeed.ops.op_builder import PinMemoryBuilder
+    if not deepspeed.ops.__compatible_ops__.get(PinMemoryBuilder.NAME, True):
+        pytest.skip('Skip tests since pin_memory is not compatible')
+
+    pin_handle = PinMemoryBuilder().load().pin_handle()
+    aio_handle = _new_handle()
+    buffer = aio_handle.new_cpu_locked_tensor(NUM_ELEMS, torch.empty(0, dtype=torch.float))
+    try:
+        assert aio_handle.is_pinned(buffer)
+        assert pin_handle.is_pinned(buffer)
+    finally:
+        aio_handle.free_cpu_locked_tensor(buffer)

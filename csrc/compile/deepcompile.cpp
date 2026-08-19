@@ -26,6 +26,7 @@ bool sync_before_reduce;     // for debugging
 bool sync_after_reduce;      // for debugging
 bool sync_before_allgather;  // for debugging
 bool sync_after_allgather;   // for debugging
+bool offload_activation_pin_memory = true;
 
 std::vector<int64_t> sizes_to_int_vector(at::IntArrayRef sizes)
 {
@@ -161,6 +162,7 @@ void init(c10::intrusive_ptr<c10d::ProcessGroup> pg,
     sync_after_reduce = get_config<bool>(config, "sync_after_reduce");
     sync_before_allgather = get_config<bool>(config, "sync_before_allgather");
     sync_after_allgather = get_config<bool>(config, "sync_after_allgather");
+    offload_activation_pin_memory = get_config<bool>(config, "offload_activation_pin_memory");
 }
 
 void start_forward()
