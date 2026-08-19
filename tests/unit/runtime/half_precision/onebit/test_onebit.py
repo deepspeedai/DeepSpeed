@@ -14,6 +14,7 @@ import numpy as np
 from deepspeed.runtime.pipe.topology import PipeDataParallelTopology
 from deepspeed.ops.op_builder import OpBuilder
 from deepspeed.runtime.pipe.module import PipelineModule
+from deepspeed.runtime.fp16.onebit.lamb import OnebitLamb
 from unit.common import DistributedTest
 from unit.simple_model import SimpleModel, random_dataloader
 from unit.alexnet_model import AlexNetPipe, train_cifar
@@ -775,6 +776,19 @@ class TestZeroOneAdamFP16Pipeline(DistributedTest):
         test_net = AlexNetPipe()
         test_model = PipelineModule(layers=test_net.to_layers(), topology=topo, loss_fn=nn.CrossEntropyLoss())
         test_losses = train_cifar(test_model, config=config_dict, num_steps=steps, fp16=config_dict['fp16']['enabled'])
+
+
+def test_onebit_lamb_get_lamb_coeffs_returns_a_copy():
+    # Needs no accelerator or distributed backend: the accessor is pure Python and
+    # OnebitLamb.__init__ asserts on an initialized backend, so build the instance
+    # directly and give it only the attribute the accessor reads.
+    optimizer = OnebitLamb.__new__(OnebitLamb)
+    optimizer.lamb_coeffs = [torch.tensor(0.5), torch.tensor(1.5)]
+
+    coeffs = optimizer.get_lamb_coeffs()
+    del optimizer.lamb_coeffs[:]  # what step() does before recomputing them
+
+    assert len(coeffs) == 2, "step() emptied the list returned to the caller"
 
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float16], ids=["fp32", "fp16"])

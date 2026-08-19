@@ -260,20 +260,39 @@ class DeepSpeedAccelerator(ABC):
     def LongTensor(self):
         ...
 
-    def pin_memory(self, tensor, align_bytes=1):
-        from deepspeed.utils.pin_memory_tracker import track_pinned_memory
-        track_pinned_memory(tensor.nbytes)
-        return self._pin_memory(tensor, align_bytes)
-
-    def _pin_memory(self, tensor, align_bytes=1):
-        """Device-specific pinning hook. Accelerators that need custom pinning
-        behavior should override this method rather than ``pin_memory`` so that
-        the pinned-memory accounting in ``pin_memory`` is preserved."""
+    # Memory pinning. The public methods below dispatch between the native
+    # backend (``deepspeed.utils.pin_memory``, selected via ``DS_PIN_MEMORY_BACKEND``)
+    # and the device-specific torch primitives ``_torch_pin_memory``/``_torch_is_pinned``,
+    # which subclasses override as needed. The native utility is backend-only and
+    # never calls back here.
+    def _torch_pin_memory(self, tensor):
         return tensor.pin_memory()
 
-    @abc.abstractmethod
+    def _torch_is_pinned(self, tensor):
+        return tensor.is_pinned()
+
+    def pin_memory(self, tensor, make_copy=True, match_shape=True):
+        from deepspeed.utils.pin_memory_tracker import track_pinned_memory
+        track_pinned_memory(tensor.nbytes)
+        from deepspeed.utils.pin_memory import get_active_native_pinned_memory
+        pins = get_active_native_pinned_memory()
+        if pins is not None:
+            return pins.pin(tensor, make_copy=make_copy, match_shape=match_shape)
+        return self._torch_pin_memory(tensor)
+
     def is_pinned(self, tensor):
-        ...
+        from deepspeed.utils.pin_memory import get_active_native_pinned_memory
+        pins = get_active_native_pinned_memory()
+        if pins is not None and pins.is_pinned(tensor):
+            return True
+        return self._torch_is_pinned(tensor)
+
+    def unpin_memory(self, tensor):
+        from deepspeed.utils.pin_memory import get_active_native_pinned_memory
+        pins = get_active_native_pinned_memory()
+        if pins is not None:
+            return pins.unpin(tensor)
+        return None
 
     @abc.abstractmethod
     def on_accelerator(self, tensor):

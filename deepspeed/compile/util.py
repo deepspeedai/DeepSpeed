@@ -238,7 +238,7 @@ def materialize_fake(v, device=None):
                                        device=t.device if device is None else device,
                                        layout=t.layout,
                                        requires_grad=t.requires_grad,
-                                       pin_memory=t.is_pinned())
+                                       pin_memory=get_accelerator().is_pinned(t))
                 else:
                     return torch.zeros(t.shape,
                                        dtype=t.dtype,
@@ -262,7 +262,7 @@ def get_last_uses(graph: Graph):
         known_last_use = None
 
         if user.target in no_copy_ops and n in node_to_last_use:
-            last_user = node_to_last_use[user]
+            last_user = node_to_last_use.get(user, user)
             last_use_position = position[last_user]
 
             known_last_use = node_to_last_use[n]
@@ -271,7 +271,7 @@ def get_last_uses(graph: Graph):
 
         if n not in node_to_last_use or update:
             if user.target in no_copy_ops:
-                user = node_to_last_use[user]
+                user = node_to_last_use.get(user, user)
 
             node_to_last_use[n] = user
             user_to_last_uses.setdefault(user, []).append(n)

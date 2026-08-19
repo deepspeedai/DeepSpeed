@@ -3,6 +3,8 @@
 
 # DeepSpeed Team
 
+import pytest
+
 from deepspeed.module_inject.tp_plan_converter import TPPlanConverter
 from deepspeed.module_inject.autotp_config import AutoTPConfig, PartitionType
 
@@ -69,10 +71,9 @@ class TestTPPlanConverter:
         assert specs[0].patterns[0].endswith(r"\.weight$")
 
     def test_empty_plan(self):
-        hf_plan = {}
-        specs = TPPlanConverter.convert(hf_plan)
-
-        assert len(specs) == 0
+        """An empty plan has nothing to convert, so the caller should fall back rather than
+        silently partition nothing."""
+        assert TPPlanConverter.convert({}) is None
 
     def test_multiple_patterns(self):
         hf_plan = {
@@ -109,11 +110,21 @@ class TestTPPlanConverter:
 
         assert re.match(down_pattern.patterns[0], "model.layers.5.mlp.down_proj.weight")
 
-    def test_unsupported_style_returns_none(self):
-        """Unsupported styles cause convert() to return None for fallback."""
+    def test_unsupported_style_rejects_whole_plan(self):
+        """Any unknown style must reject the plan outright, not skip the entry.
+
+        The converter has no notion of which entries pair with which, so applying the supported
+        subset can shard one half of a column/row pair — here o_proj would be row-sharded while
+        the q_proj feeding it stays whole — and break the model. Failing loudly also keeps the
+        model off the heuristic path, which breaks models like Llama4 by wrapping its MoE router.
+        """
         hf_plan = {"layers.*.q_proj": "local_colwise", "layers.*.o_proj": "rowwise"}
-        result = TPPlanConverter.convert(hf_plan)
-        assert result is None
+        with pytest.raises(ValueError, match="local_colwise"):
+            TPPlanConverter.convert(hf_plan)
+
+        hf_plan = {"layers.*.q_proj": "local_colwise", "layers.*.experts": "moe_tp_experts"}
+        with pytest.raises(ValueError, match="unsupported partition style"):
+            TPPlanConverter.convert(hf_plan)
 
     def test_alternate_prefixes(self):
         """Test tp_plan with non-layers prefix"""

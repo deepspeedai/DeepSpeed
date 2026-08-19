@@ -169,6 +169,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                  communication_data_type=torch.float16,
                  postscale_gradients=True,
                  gradient_predivide_factor=1.0,
+                 gradient_average=True,
                  gradient_accumulation_steps=1,
                  ignore_unused_parameters=True,
                  partition_grads=True,
@@ -279,6 +280,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         self.communication_data_type = communication_data_type
         self.gradient_predivide_factor = gradient_predivide_factor
         self.postscale_gradients = postscale_gradients
+        self.gradient_average = gradient_average
         self.gradient_accumulation_steps = gradient_accumulation_steps
         self.micro_step_id = INITIAL_MICRO_STEP_ID
         self.ignore_unused_parameters = ignore_unused_parameters
@@ -304,8 +306,9 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         if self.reduce_scatter and self.partition_gradients:
             valid_reduce_scatter_dtypes = (torch.float16, torch.bfloat16, torch.float32)
             assert self.communication_data_type in valid_reduce_scatter_dtypes, f"{self.zero_stage_string} supports {valid_reduce_scatter_dtypes} communication_data_type with reduce scatter enabled. Got: '{self.communication_data_type}'"
-            assert self.gradient_predivide_factor == 1.0, f"gradient_predivide_factor != 1.0 is not yet supported with {self.zero_stage_string} with reduce scatter enabled"
-            assert self.postscale_gradients, f"pre-scale gradients is not yet supported with {self.zero_stage_string} with reduce scatter enabled"
+            if self.gradient_average:
+                assert self.gradient_predivide_factor == 1.0, f"gradient_predivide_factor != 1.0 is not yet supported with {self.zero_stage_string} with reduce scatter enabled"
+                assert self.postscale_gradients, f"pre-scale gradients is not yet supported with {self.zero_stage_string} with reduce scatter enabled"
 
         # param flattened by groups
         self.bit16_groups = []
@@ -681,6 +684,24 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         for hook in self._grad_acc_hooks:
             hook.remove()
         self.print_rank_0("Removed grad acc hooks")
+        self._unpin_offload_buffers()
+
+    def _unpin_offload_buffers(self):
+        # Release the page-locked host buffers we pinned for CPU offload. unpin_memory is a
+        # no-op for the torch backend and only frees under DS_PIN_MEMORY_BACKEND=native,
+        # where the mlocked allocation would otherwise persist until garbage collection.
+        if not (self.cpu_offload and self.cpu_offload_pin_memory):
+            return
+        accelerator = get_accelerator()
+        for fp32_partition in self.single_partition_of_fp32_groups:
+            accelerator.unpin_memory(fp32_partition)
+            if fp32_partition.grad is not None:
+                accelerator.unpin_memory(fp32_partition.grad)
+        for buffer in self.param_buffer_of_bit16_for_cpu_offload_groups:
+            accelerator.unpin_memory(buffer)
+        temp_grad_buffer = getattr(self, 'temp_grad_buffer_for_cpu_offload', None)
+        if temp_grad_buffer is not None:
+            accelerator.unpin_memory(temp_grad_buffer)
 
     def _enable_universal_checkpoint(self):
         self._universal_checkpoint_info = None
@@ -1243,7 +1264,9 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         if communication_data_type != tensor.dtype:
             tensor_to_allreduce = tensor.to(communication_data_type)
 
-        if self.postscale_gradients:
+        if not self.gradient_average:
+            dist.all_reduce(tensor_to_allreduce, group=self.dp_process_group)
+        elif self.postscale_gradients:
             if self.gradient_predivide_factor != 1.0:
                 tensor_to_allreduce.mul_(1. / self.gradient_predivide_factor)
 
@@ -1406,7 +1429,8 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                     curr_size += numel
                     prev_id, prev_process_group, prev_copy_ranks = partition_id, process_group, copy_ranks
 
-            tensor.div_(dist.get_world_size(group=self.dp_process_group) / float(self.sequence_parallel_size))
+            if self.gradient_average:
+                tensor.div_(dist.get_world_size(group=self.dp_process_group) / float(self.sequence_parallel_size))
 
             buckets = {}
             for i, (dst, bucket_offset, numel, copy_ranks) in enumerate(rank_and_offsets):
@@ -1823,7 +1847,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         if communication_data_type != tensor.dtype:
             tensor_to_allreduce = tensor.to(communication_data_type)
 
-        if divide:
+        if divide and self.gradient_average:
             tensor_to_allreduce.div_(dist.get_world_size(group=process_group) / float(self.sequence_parallel_size))
 
         if rank is None:
@@ -2032,9 +2056,8 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         the gradients are modified in place.
 
         Arguments:
-            parameters (Iterable[Tensor] or Tensor): an iterable of Tensors or a
+            params (Iterable[Tensor] or Tensor): an iterable of Tensors or a
                 single Tensor that will have gradients normalized
-            max_norm (float or int): max norm of the gradients
             norm_type (float or int): type of the used p-norm. Can be ``'inf'`` for
                 infinity norm.
 

@@ -138,7 +138,10 @@ if _TRITON_AVAILABLE:
         mask_m = offs_m < (m_start + m_size)
         mask_n = offs_n < NO
 
-        b_base = b_ptr + selected * stride_be
+        # int64: ``selected * stride_be`` reaches E*K*N elements, which overflows
+        # int32 for large experts (e.g. 64 x 4096 x 14336) and wraps to a
+        # negative offset, giving an out-of-bounds pointer.
+        b_base = b_ptr + selected.to(tl.int64) * stride_be
 
         acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
         for k0 in range(0, KC, BLOCK_K):

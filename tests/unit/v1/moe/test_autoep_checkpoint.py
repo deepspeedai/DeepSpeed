@@ -436,6 +436,27 @@ class TestAutoEPCheckpointSaveLoad(DistributedTest):
                                                     "moe_layer_id": 0
                                                 }])
 
+    def test_legacy_mpu_checkpoint_rank_argument(self):
+        from deepspeed.runtime.engine import DeepSpeedEngine
+
+        class LegacyMPU:
+
+            def get_model_parallel_rank(self):
+                return 3
+
+        mpu = LegacyMPU()
+        expert_path = DeepSpeedEngine._get_expert_ckpt_name("/fake", 1, 2, "tag", mpu)
+        assert expert_path.endswith("layer_1_expert_2_mp_rank_03_model_states.pt")
+        override_path = DeepSpeedEngine._get_expert_ckpt_name("/fake", 1, 2, "tag", mpu, checkpoint_mp_rank=0)
+        assert override_path.endswith("layer_1_expert_2_mp_rank_00_model_states.pt")
+
+        DeepSpeedEngine.load_moe_state_dict(checkpoint_path="/fake",
+                                            tag="tag",
+                                            state_dict={},
+                                            old_moe_load=False,
+                                            model=nn.Linear(1, 1),
+                                            mpu=mpu)
+
 
 class TestAutoEPZero12UniversalCheckpoint(DistributedTest):
     world_size = 4

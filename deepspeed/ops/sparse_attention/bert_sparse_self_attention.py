@@ -53,7 +53,7 @@ class BertSparseSelfAttention(nn.Module):
 
         Arguments:
             hidden_states: required: hidden_states tensor of the bert model
-            attn_mask: required: a mask tensor of size (SequenceLength X SequenceLength); currently only 2D is supported
+            attention_mask: required: a mask tensor of size (SequenceLength X SequenceLength); currently only 2D is supported
 
         Return:
              context_layer: a dense tensor containing attention context

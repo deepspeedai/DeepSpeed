@@ -326,9 +326,6 @@ class CUDA_Accelerator(DeepSpeedAccelerator):
     def LongTensor(self):
         return functools.partial(torch.tensor, dtype=torch.long, device='cuda')
 
-    def is_pinned(self, tensor):
-        return tensor.is_pinned()
-
     def on_accelerator(self, tensor):
         device_str = str(tensor.device)
         if device_str.startswith('cuda:'):

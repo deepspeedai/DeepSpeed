@@ -63,12 +63,17 @@ torch::Tensor deepspeed_pin_tensor_t::alloc(const int64_t num_elem, const at::Sc
 
 bool deepspeed_pin_tensor_t::free(torch::Tensor& locked_tensor)
 {
+    return free(locked_tensor.data_ptr());
+}
+
+bool deepspeed_pin_tensor_t::free(void* addr)
+{
     std::lock_guard<std::mutex> guard(_mutex);
-    auto addr = locked_tensor.data_ptr();
-    if (_locked_tensors.find(addr) != _locked_tensors.end()) {
-        munlock(addr, _locked_tensors[addr]);
+    auto iter = _locked_tensors.find(addr);
+    if (iter != _locked_tensors.end()) {
+        munlock(addr, iter->second);
         std::free(addr);
-        _locked_tensors.erase(addr);
+        _locked_tensors.erase(iter);
         return true;
     }
 
