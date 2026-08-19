@@ -59,6 +59,12 @@ def test_invalid_zenflow_type_raises():
         DeepSpeedZeroConfig(zenflow=123)
 
 
+@pytest.mark.parametrize("topk_ratio", [0.0, 1.0])
+def test_topk_ratio_excludes_endpoints(topk_ratio):
+    with pytest.raises(ValidationError):
+        ZenFlowConfig(topk_ratio=topk_ratio)
+
+
 def test_offload_and_zenflow_combined():
     """
     offload_optimizer and zenflow can be used together under stage 2
