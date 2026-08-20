@@ -61,7 +61,7 @@ class FlopsProfiler(object):
     To profile a trained model in inference, use the `get_model_profile` API.
 
     Args:
-        object (torch.nn.Module): The PyTorch model to profile.
+        model (torch.nn.Module): The PyTorch model to profile.
     """
 
     def __init__(self, model, ds_engine=None, recompute_fwd_factor=0.0):

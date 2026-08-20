@@ -135,8 +135,6 @@ class ZeroOneAdam(torch.optim.Optimizer):
             output params (list of tensors, optional): A reduced precision copy
                 of the updated weights written out in addition to the regular
                 updated weights. Have to be of same type as gradients. (default: None)
-            scale (float, optional): factor to divide gradient tensor values
-                by before applying to weights. (default: 1)
         """
         loss = None
         if closure is not None:

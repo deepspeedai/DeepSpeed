@@ -12,7 +12,7 @@ import pytest
 import torch.nn as nn
 
 from deepspeed.module_inject.auto_tp import AutoTP, AutoTPConfig, PartitionType, TPLayerSpec
-from deepspeed.module_inject.layers import LinearLayer, LmHeadLinearAllreduce
+from deepspeed.module_inject.layers import LinearLayer
 
 
 class SubAttn(nn.Module):
@@ -176,13 +176,14 @@ def test_gathered_lm_head_falls_back_for_runtime_parameter_tie():
     assert model.lm_head.weight is model.embed_tokens.weight
 
 
-def test_gathered_lm_head_falls_back_to_legacy_allreduce_when_output_dim_is_uneven():
+def test_gathered_lm_head_uses_column_parallel_layer_when_output_dim_is_uneven():
     model = OutputModel(tied=False)
     model.lm_head = nn.Linear(32, 101, bias=False)
 
     _build_gathered_lm_head_autotp(model, mp_size=2)._replace_module(model)
 
-    assert isinstance(model.lm_head, LmHeadLinearAllreduce)
+    assert isinstance(model.lm_head, LinearLayer)
+    assert model.lm_head.gather_output
 
 
 if __name__ == "__main__":
