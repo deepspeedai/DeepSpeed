@@ -12,7 +12,7 @@ from unit.simple_model import random_dataloader
 import deepspeed
 
 from deepspeed.runtime.zero.config import DeepSpeedZeroConfig
-from deepspeed.runtime.zero.partition_parameters import Init, ZeroParamStatus
+from deepspeed.runtime.zero.partition_parameters import CUDAQuantizer, Init, ZeroParamStatus
 
 import torch.nn as nn
 import torch
@@ -39,6 +39,41 @@ class NNModel(nn.Module):
 def test_zero_hpz_partition_size_config():
     config = DeepSpeedZeroConfig(**{"zero_hpz_partition_size": 4})
     assert config.zero_hpz_partition_size == 4
+
+
+class Fp16OnlyQuantizerModule:
+    """Stand-in for the compiled QuantizerBuilder op.
+
+    It mirrors the two properties of the real kernel that matter here: quantize() reads its input
+    through a __half*, and dequantize() always allocates an fp16 output tensor.
+    """
+
+    Symmetric = 0
+
+    def quantize(self, param, groups, num_bits, quant_type):
+        assert param.dtype == torch.half, f"the quantize kernel reads fp16, got {param.dtype}"
+        return param.to(torch.int8), torch.ones(groups, dtype=torch.float32, device=param.device)
+
+    def dequantize(self, quantized_param, scale, num_groups, num_bits, quant_type):
+        return quantized_param.to(torch.half)
+
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.half])
+def test_cuda_quantizer_round_trips_parameter_dtype(monkeypatch, dtype):
+    """zero_quantized_weights must hand a parameter back in its own dtype.
+
+    The quantizer op is fp16-only, so under a bf16 config the weights used to come back as fp16 and
+    break the forward pass with a dtype mismatch. See #7775.
+    """
+    monkeypatch.setattr(CUDAQuantizer, "quantizer_cuda_module", Fp16OnlyQuantizerModule())
+    quantizer = CUDAQuantizer()
+
+    param = torch.randn(4096, dtype=dtype)
+    quantized_param, scale = quantizer.quantize(param)
+    assert quantized_param.dtype == torch.int8
+
+    dequantized = quantizer.dequantize(quantized_param, scale, dtype=param.dtype)
+    assert dequantized.dtype == dtype
 
 
 def test_zero_hpz_small_param_secondary_shard_without_overlap(monkeypatch):

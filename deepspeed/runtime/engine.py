@@ -8,6 +8,7 @@ import re
 import stat
 import torch
 import hashlib
+import logging
 from collections import defaultdict, OrderedDict, deque
 from shutil import copyfile
 import gc
@@ -138,7 +139,7 @@ from ..moe.utils import is_moe_param, configure_moe_param_groups
 from ..git_version_info import version
 
 from deepspeed.profiling.flops_profiler.profiler import FlopsProfiler
-from deepspeed.utils.logging import print_dist, print_json_dist, print_configuration, set_log_level_from_string
+from deepspeed.utils.logging import print_json_dist, print_configuration, set_log_level_from_string
 
 from deepspeed.accelerator import get_accelerator
 
@@ -725,41 +726,54 @@ class DeepSpeedEngine(Module):
             partition_config = tp_config.get_partition_config_object()
 
         model_config = getattr(model, "config", None)
-        base_tp_plan = getattr(model_config, "base_model_tp_plan", None) if model_config is not None else None
-        class_tp_plan = getattr(type(model), "_tp_plan", None)
-        runtime_tp_plan = getattr(model, "__dict__", {}).get("_tp_plan")
+        # The direct Hugging Face tp_plan path bypasses replace_transformer_layer, which
+        # normally initializes the shard-size globals that AutoTP layers consult. Without
+        # them attention projections are split by grain size and can be cut mid-head, so
+        # the model's later reshape onto head_dim fails.
+        from deepspeed.module_inject.tp_shard import set_num_kv_heads, set_n_embd, set_num_attention_heads
+        from deepspeed.module_inject.tp_shard import set_tp_grain_size
+
+        # 1. Try to get num_key_heads from model_config.num_key_value_heads
+        if hasattr(model_config, "text_config"):
+            num_kv_heads = AutoTP.get_model_num_kv_heads(model_config.text_config)
+        else:
+            num_kv_heads = AutoTP.get_model_num_kv_heads(model_config)
+
+        # 2. Ranks beyond the KV head count get no attention shard. This still computes the
+        # correct result because the row-parallel all-reduce sums their empty contribution,
+        # but attention work concentrates on the first num_kv_heads ranks.
+        if num_kv_heads is not None and tp_size > num_kv_heads:
+            log_dist(
+                f"AutoTP: autotp_size ({tp_size}) exceeds the model's key-value head count "
+                f"({num_kv_heads}); ranks beyond the head count hold no attention shard and "
+                "attention throughput will not scale past that point.",
+                ranks=[0],
+                level=logging.WARNING)
+
+        # 3. When we have num_kv_heads defined, uneven division is possible, otherwise enforce even division
+        set_num_kv_heads(num_kv_heads)
+
+        # 3.1 Get n_embd
+        n_embd = None
+        multi_query_n_embd_names = ['n_embd', 'hidden_size']
+        for name in multi_query_n_embd_names:
+            if hasattr(model_config, name):
+                n_embd = getattr(model_config, name)
+            if n_embd != None:
+                break
+
+        # 3.2 set n_embd
+        set_n_embd(n_embd)
+
+        # 3.3 set attention_heads
+        if hasattr(model_config, 'num_attention_heads'):
+            set_num_attention_heads(getattr(model_config, 'num_attention_heads'))
+
+        # 3.4 set tp_grain_size
+        set_tp_grain_size(tp_config.tensor_parallel.tp_grain_size)
+
         from deepspeed.runtime.tensor_parallel.config import _get_hf_tp_plan
         hf_tp_plan = _get_hf_tp_plan(model)
-
-        def lm_head_entries(tp_plan):
-            if not isinstance(tp_plan, dict):
-                return {}
-            return {
-                pattern: style
-                for pattern, style in tp_plan.items()
-                if any(part in ("lm_head", "embed_out") for part in pattern.split('.'))
-            }
-
-        lm_head_modules = [
-            name for name, _ in model.named_modules()
-            if name and any(part in ("lm_head", "embed_out") for part in name.split('.'))
-        ]
-        selected_route = "custom partition_config" if partition_config is not None else "HuggingFace tp_plan or AutoTP"
-        model_class = f"{type(model).__module__}.{type(model).__qualname__}"
-        print_dist(
-            f"AutoTP tp_plan diagnostics: model_class={model_class}; route={selected_route}; "
-            f"base_model_tp_plan={base_tp_plan!r}; type(model)._tp_plan={class_tp_plan!r}; "
-            f"instance_tp_plan={runtime_tp_plan!r}; "
-            f"effective_tp_plan={hf_tp_plan!r}",
-            ranks=[0],
-        )
-        print_dist(
-            f"AutoTP lm_head diagnostics: modules={lm_head_modules!r}; "
-            f"base_entries={lm_head_entries(base_tp_plan)!r}; class_entries={lm_head_entries(class_tp_plan)!r}; "
-            f"runtime_entries={lm_head_entries(runtime_tp_plan)!r}; "
-            f"effective_entries={lm_head_entries(hf_tp_plan)!r}",
-            ranks=[0],
-        )
 
         if partition_config is not None:
             autotp = AutoTP(module=model,
@@ -793,7 +807,7 @@ class DeepSpeedEngine(Module):
                     pattern for pattern, style in hf_tp_plan.items()
                     if style.lower() in ("colwise_rep", "colwise_gather_output")
                 ]
-                print_dist(
+                log_dist(
                     f"Using HuggingFace tp_plan with {len(layer_specs)} layer specifications; "
                     f"gathered column output patterns={gathered_output_patterns}",
                     ranks=[0],
@@ -816,14 +830,14 @@ class DeepSpeedEngine(Module):
                 setattr(model, UNIVERSAL_CHECKPOINT_INFO, collect_autotp_universal_checkpoint_info(model))
                 setattr(model, "ds_autotp_parsed", True)
                 return
-            print_dist(
+            log_dist(
                 f"AutoTP: effective HuggingFace tp_plan could not be converted; falling back to heuristic AutoTP. "
                 f"styles={sorted(set(hf_tp_plan.values()))!r}",
                 ranks=[0],
             )
         else:
-            print_dist("AutoTP: no effective HuggingFace tp_plan was found; falling back to heuristic AutoTP.",
-                       ranks=[0])
+            log_dist("AutoTP: no effective HuggingFace tp_plan was found; falling back to heuristic AutoTP.",
+                     ranks=[0])
 
         parser_dict = AutoTP.tp_parser(model)
         for client_module, injection_policy in parser_dict:

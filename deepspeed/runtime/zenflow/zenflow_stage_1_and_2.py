@@ -272,9 +272,6 @@ class ZenFlowZeroOptimizer(DeepSpeedZeroOptimizer):
         """
         Process gradients for selected columns in FP32 groups
 
-        Args:
-            param: The parameter to process
-            param_id: ID of the parameter
         """
 
         curr_size = 0
