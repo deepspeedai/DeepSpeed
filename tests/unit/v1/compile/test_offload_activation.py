@@ -148,6 +148,10 @@ def forced_budget(monkeypatch):
 @pytest.fixture
 def ample_budget(monkeypatch):
     monkeypatch.setenv("DS_DC_OFFLOAD_ACT_BUDGET_GB", "100")
+    # A budget alone does not leave the planner any room: it takes the larger of its profiled floor
+    # and what the device has already handed out, so on a shared accelerator the observed term can
+    # exceed the budget and force everything out. Pin it so "ample" means ample.
+    _pin_observed_floor(monkeypatch)
 
 
 def test_margin_is_measured_not_guessed(monkeypatch):
@@ -707,7 +711,8 @@ class TestOffloadActivation(DistributedTest):
     non_daemonic_procs = True
 
     @pytest.mark.parametrize('dtype', [torch.bfloat16])
-    def test_offload_activation_correctness(self, dtype):
+    @pytest.mark.parametrize('gradient_accumulation_steps', [1, 2])
+    def test_offload_activation_correctness(self, dtype, gradient_accumulation_steps):
         from deepspeed.compile.util import is_deepcompile_supported
 
         skip_on_arch(min_arch=8)
@@ -722,6 +727,7 @@ class TestOffloadActivation(DistributedTest):
 
         config = {
             "train_micro_batch_size_per_gpu": 1,
+            "gradient_accumulation_steps": gradient_accumulation_steps,
             "steps_per_print": 1,
             "optimizer": {
                 "type": "Adam",
@@ -748,7 +754,8 @@ class TestOffloadActivation(DistributedTest):
         # A wider model gives inductor buffers worth reusing. Reuse of a buffer whose copy out is
         # still in flight corrupts the activation silently, so the arithmetic check below is only
         # as good as the reuse pressure the model creates.
-        losses_no_offload = compare_loss(self, config_no_offload, dtype, iteration=8, hidden_dim_override=512)
+        iteration = 8 * gradient_accumulation_steps
+        losses_no_offload = compare_loss(self, config_no_offload, dtype, iteration=iteration, hidden_dim_override=512)
 
         # This model's activations are far below the real size threshold and its memory nowhere
         # near any real budget, so force both.
@@ -756,8 +763,8 @@ class TestOffloadActivation(DistributedTest):
         os.environ["DS_DC_OFFLOAD_ACT_MIN_SIZE_MB"] = "0"
         try:
             offload_pass.reset_offload_activation_stats()
-            # The pass engages at the WARMUP phase, so 8 iterations give several offloaded steps.
-            losses_offload = compare_loss(self, config, dtype, iteration=8, hidden_dim_override=512)
+            # The pass engages at the WARMUP phase, so 8 optimizer steps give several offloaded ones.
+            losses_offload = compare_loss(self, config, dtype, iteration=iteration, hidden_dim_override=512)
         finally:
             del os.environ["DS_DC_OFFLOAD_ACT_BUDGET_GB"]
             del os.environ["DS_DC_OFFLOAD_ACT_MIN_SIZE_MB"]

@@ -413,6 +413,31 @@ def test_mark_output_never_reuse_mixed_pytree():
     assert graph.never_reuse_buffers == {"tensor_buffer"}
 
 
+def test_register_custom_ops_defines_every_op_it_registers(monkeypatch):
+    """register_custom_ops must not raise when only _define_dc_ops has run.
+
+    It registers each dc op in sequence, so an op the helper does not define raises AttributeError
+    partway through and everything after it -- including the graphsafe rng lowering -- is silently
+    never registered. That only shows up where the C++ extension is absent, which is CI.
+    """
+    _define_dc_ops()
+    registered_ops = []
+
+    monkeypatch.setattr(inductor_mod, "add_needs_realized_inputs", lambda _op: None)
+    monkeypatch.setattr(inductor_mod, "register_lowering",
+                        lambda op_overload, **_kwargs: lambda handler: registered_ops.append(op_overload) or handler)
+    monkeypatch.setattr(inductor_mod, "fallbacks", set())
+    monkeypatch.setattr(inductor_mod.Scheduler, "is_dc_patched", True, raising=False)
+
+    inductor_mod.register_custom_ops()
+
+    # Every dc op named in register_custom_ops should have reached register_lowering.
+    names = {getattr(op, "__name__", str(op)) for op in registered_ops}
+    for expected in ("offload_tensor", "wait_offload", "reload_tensor", "wait_reload"):
+        assert any(expected in str(op) for op in registered_ops), \
+            f"{expected} was never registered; _define_dc_ops is missing its schema. Registered: {sorted(names)}"
+
+
 def test_register_custom_ops_includes_graphsafe_rng_state_no_reuse(monkeypatch):
     graphsafe_run_with_rng_state = inductor_mod._get_graphsafe_run_with_rng_state()
     if graphsafe_run_with_rng_state is None:
