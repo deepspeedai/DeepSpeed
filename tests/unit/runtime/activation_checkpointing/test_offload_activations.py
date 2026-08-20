@@ -359,11 +359,11 @@ def test_strided_view_offload_matches_baseline():
 
     device = get_accelerator().device_name()
     base = torch.randn(6, 8, device=device)
-    x_base = base[:, ::2].detach().clone().requires_grad_(True)
-    assert not x_base.is_contiguous()
-    fn(checkpoint(fn, x_base, use_reentrant=False)).sum().backward()
-
     x = base[:, ::2].detach().requires_grad_(True)
+    assert not x.is_contiguous()
+    x_base = torch.empty_strided(x.size(), x.stride(), dtype=x.dtype,
+                                 device=device).copy_(x).detach().requires_grad_(True)
+    fn(checkpoint(fn, x_base, use_reentrant=False)).sum().backward()
     offload = CheckpointHiddenStatesOffload(use_streams=False, min_offload_bytes=0, keep_last_count=0)
     with offload:
         offload.mark(x)
