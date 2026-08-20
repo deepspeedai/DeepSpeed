@@ -172,6 +172,7 @@ class CheckpointHiddenStatesOffload(saved_tensors_hooks):
         self._tracker: dict[int, tuple[torch.Tensor, torch.device, torch.Size, tuple[int, ...], _BufferKey]] = {}
         self._fwd_stash: dict[int, tuple[torch.Tensor, torch.Event]] = {}
         self._keep_last: dict[int, torch.Tensor] = {}
+        self._restored: dict[int, torch.Tensor] = {}
         self._cpu_buffer_pool: dict[_BufferKey, list[torch.Tensor]] = {}
         self._cpu_buffer_pool_count = 0
         self._pending_cpu_buffers: list[tuple[_BufferKey, torch.Tensor, torch.Event]] = []
@@ -212,16 +213,22 @@ class CheckpointHiddenStatesOffload(saved_tensors_hooks):
     def _num_bytes(tensor: torch.Tensor) -> int:
         return tensor.element_size() * tensor.nelement()
 
+    @staticmethod
+    def _storage_bytes(tensor: torch.Tensor) -> int:
+        # Host allocation size (includes strided gaps); logical numel can be smaller.
+        return tensor.untyped_storage().nbytes()
+
     def _next_tensor_id(self) -> int:
         self._next_id += 1
         return self._next_id
 
     def _reap_forward_stash(self, new_tensor_id: int) -> None:
+        # Drop GPU refs whose D2H has had enough overlap. record_stream on pack
+        # keeps the source allocation alive until s1 finishes; do not stall compute.
         for tensor_id in list(self._fwd_stash):
             if tensor_id > new_tensor_id - self.max_fwd_stash_count:
                 continue
-            _, event = self._fwd_stash.pop(tensor_id)
-            self.compute_stream.wait_event(event)
+            self._fwd_stash.pop(tensor_id)
 
     def _buffer_key(self, tensor: torch.Tensor) -> _BufferKey:
         return (
@@ -271,7 +278,6 @@ class CheckpointHiddenStatesOffload(saved_tensors_hooks):
         ), key
 
     def _start_offload(self, tensor_id: int, tensor: torch.Tensor, reap_id: int | None = None) -> None:
-        num_bytes = self._num_bytes(tensor)
         if self.use_streams:
             self._reap_forward_stash(tensor_id if reap_id is None else reap_id)
             self.s1.wait_stream(self.compute_stream)
@@ -291,10 +297,11 @@ class CheckpointHiddenStatesOffload(saved_tensors_hooks):
             buffer_key,
         )
         if self.use_streams:
+            tensor.record_stream(self.s1)
             self._fwd_stash[tensor_id] = (tensor, self.s1.record_event())
 
         self.stats.offloaded_tensors += 1
-        self.stats.offloaded_bytes += num_bytes
+        self.stats.offloaded_bytes += self._storage_bytes(cpu_tensor)
 
     def _flush_keep_last(self, newest_id: int) -> None:
         while len(self._keep_last) > self.keep_last_count:
@@ -322,9 +329,14 @@ class CheckpointHiddenStatesOffload(saved_tensors_hooks):
         return _OffloadedTensorRef(tensor_id)
 
     def _restore_tensor(self, tensor_id: int) -> torch.Tensor:
+        cached = self._restored.get(tensor_id)
+        if cached is not None:
+            return cached
+
         kept = self._keep_last.pop(tensor_id, None)
         if kept is not None:
             self.stats.kept_last_tensors += 1
+            self._restored[tensor_id] = kept
             return kept
 
         if tensor_id in self._fwd_stash:
@@ -334,13 +346,13 @@ class CheckpointHiddenStatesOffload(saved_tensors_hooks):
             self._pool_cpu_buffer(buffer_key, cpu_tensor)
             self.stats.restored_tensors += 1
             self.stats.restored_bytes += self._num_bytes(tensor)
+            self._restored[tensor_id] = tensor
             return tensor
 
         tracked = self._tracker.pop(tensor_id, None)
         if tracked is None:
             raise RuntimeError(f"offloaded activation {tensor_id} is no longer tracked. backward() must run "
-                               "inside the same CheckpointHiddenStatesOffload context as forward(), and each "
-                               "graph can only be backwarded once (retain_graph=True is not supported).")
+                               "inside the same CheckpointHiddenStatesOffload context as forward().")
         cpu_tensor, device, shape, stride, buffer_key = tracked
         stream = self.s1 if self.use_streams else self.compute_stream
         with self._stream_context(stream):
@@ -359,6 +371,7 @@ class CheckpointHiddenStatesOffload(saved_tensors_hooks):
 
         self.stats.restored_tensors += 1
         self.stats.restored_bytes += self._num_bytes(gpu_tensor)
+        self._restored[tensor_id] = gpu_tensor
         return gpu_tensor
 
     def _unpack_tensor(self, maybe_ref):
@@ -366,29 +379,34 @@ class CheckpointHiddenStatesOffload(saved_tensors_hooks):
             return self._restore_tensor(maybe_ref.tensor_id)
         return maybe_ref
 
+    def _sync_copy_streams(self) -> None:
+        if not self.use_streams:
+            return
+        if self.s1 is not None:
+            self.s1.synchronize()
+        self._reap_cpu_buffer_pool(force=True)
+
     def reset(self) -> None:
+        # Wait for in-flight copies before dropping CPU/GPU refs (public API).
+        self._sync_copy_streams()
         self.stats = CheckpointActivationOffloadStats()
         self._allowed.clear()
         self._tracker.clear()
         self._fwd_stash.clear()
         self._keep_last.clear()
+        self._restored.clear()
         self._pending_cpu_buffers.clear()
         self._next_id = 0
 
     def _sync_and_clear(self) -> None:
-        if self.use_streams:
-            compute = self.compute_stream
-            if compute is not None:
-                compute.synchronize()
-            if self.s1 is not None:
-                self.s1.synchronize()
-            self._reap_cpu_buffer_pool(force=True)
+        self._sync_copy_streams()
         for tracked in self._tracker.values():
             self._pool_cpu_buffer(tracked[-1], tracked[0])
         self._allowed.clear()
         self._tracker.clear()
         self._fwd_stash.clear()
         self._keep_last.clear()
+        self._restored.clear()
         self._pending_cpu_buffers.clear()
 
     def _pop_manager_stack(self) -> None:

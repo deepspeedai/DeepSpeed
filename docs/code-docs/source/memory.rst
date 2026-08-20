@@ -338,9 +338,12 @@ Backend Selection
 The pinning implementation is selected with the ``DS_PIN_MEMORY_BACKEND``
 environment variable (default ``torch``).
 
-Both backends page-lock host memory for DMA, are visible to AIO/GDS I/O
-handles (so DeepNVMe can skip bounce buffers), and are counted by
-``track_pinned_memory`` when pages are actually locked. Differences:
+The ``torch`` backend page-locks host memory for **accelerator DMA**
+(``cudaHostRegister`` / device-specific pin). The ``native`` backend
+page-locks via ``posix_memalign`` + ``mlock`` for AIO/GDS (DeepNVMe can
+skip bounce buffers) and does **not** register the allocation with CUDA/XPU,
+so async GPU copies to native-pinned tensors can still block. Both are
+counted by ``track_pinned_memory`` when pages are actually locked. Differences:
 
 .. list-table:: Differences between ``torch`` and ``native`` pin backends
    :header-rows: 1

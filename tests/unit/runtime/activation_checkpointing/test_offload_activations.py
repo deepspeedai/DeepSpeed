@@ -346,6 +346,8 @@ def test_contiguous_offload_buffer_pin_flag(use_pin_memory):
         cpu_bufs = [tracked[0] for tracked in offload._tracker.values()]
         assert cpu_bufs
         for buf in cpu_bufs:
+            # ATen pin_memory (cudaHostRegister), not native ds_pinned.
+            assert buf.is_pinned() is use_pin_memory
             assert get_accelerator().is_pinned(buf) is use_pin_memory
         loss.backward()
     assert offload.stats.offloaded_tensors == 1
@@ -368,7 +370,68 @@ def test_strided_view_offload_matches_baseline():
     with offload:
         offload.mark(x)
         loss = fn(checkpoint(fn, x, use_reentrant=False)).sum()
+        cpu_bufs = [tracked[0] for tracked in offload._tracker.values()]
+        assert cpu_bufs
+        assert tuple(cpu_bufs[0].stride()) == tuple(x.stride())
         loss.backward()
 
     assert offload.stats.offloaded_tensors == 1
     assert torch.allclose(x.grad, x_base.grad)
+
+
+def test_empty_cpu_like_does_not_call_accelerator_pin(monkeypatch):
+    accel = get_accelerator()
+    calls = []
+    orig = accel.pin_memory
+
+    def wrapped(*args, **kwargs):
+        calls.append(1)
+        return orig(*args, **kwargs)
+
+    monkeypatch.setattr(accel, "pin_memory", wrapped)
+    offload = CheckpointHiddenStatesOffload(use_streams=False, min_offload_bytes=0, keep_last_count=0)
+    src = torch.randn(4, 8)
+    buf, _ = offload._empty_cpu_like(src)
+    assert calls == []
+    assert tuple(buf.stride()) == tuple(src.stride())
+    assert tuple(buf.size()) == tuple(src.size())
+
+
+@pytest.mark.skipif(not _ACCEL, reason="requires a stream-capable accelerator")
+def test_overlapping_view_is_skipped():
+
+    def fn(x):
+        return x.sin().square()
+
+    device = get_accelerator().device_name()
+    base = torch.randn(4, 8, device=device)
+    x = base.expand(2, 4, 8).detach().requires_grad_(True)
+    assert 0 in x.stride()
+    offload = CheckpointHiddenStatesOffload(use_streams=False, min_offload_bytes=0, keep_last_count=0)
+    with offload:
+        offload.mark(x)
+        loss = fn(checkpoint(fn, x, use_reentrant=False)).sum()
+        loss.backward()
+    assert offload.stats.offloaded_tensors == 0
+    assert offload.stats.skipped_marked_tensors >= 1
+    assert x.grad is not None
+
+
+@pytest.mark.skipif(not _ACCEL, reason="requires a stream-capable accelerator")
+def test_retain_graph_second_backward():
+
+    def fn(x):
+        return x.sin().square()
+
+    device = get_accelerator().device_name()
+    x = torch.randn(4, 8, device=device, requires_grad=True)
+    offload = CheckpointHiddenStatesOffload(use_streams=False, min_offload_bytes=0, keep_last_count=0)
+    with offload:
+        offload.mark(x)
+        loss = fn(checkpoint(fn, x, use_reentrant=False)).sum()
+        loss.backward(retain_graph=True)
+        assert offload.stats.restored_tensors == 1
+        x.grad = None
+        loss.backward()
+    assert offload.stats.restored_tensors == 1
+    assert x.grad is not None
