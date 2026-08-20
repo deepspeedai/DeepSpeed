@@ -4,19 +4,14 @@
 """
 Offload activation checkpoint inputs to CPU on a pinned side-stream buffer pool.
 
-Two consumers share one copy engine (``_ActivationOffloadEngine``):
+Two consumers share one ``_ActivationOffloadEngine``:
 
-* ``CheckpointHiddenStatesOffload`` is a ``saved_tensors_hooks`` context manager
-  for HF non-reentrant checkpointing (``use_reentrant=False``). It marks only the
-  checkpoint inputs on ``GradientCheckpointingLayer`` and offloads those; all other
-  saved tensors pass through. Independent of ``deepspeed.checkpointing.configure()``.
-* DeepSpeed native ``cpu_checkpointing`` calls the engine directly (see
-  ``deepspeed/runtime/activation_checkpointing/checkpointing.py``) to offload
-  checkpoint inputs asynchronously instead of blocking ``.to('cpu')`` / ``.to(cuda)``.
+* ``CheckpointHiddenStatesOffload``: a ``saved_tensors_hooks`` context manager for
+  HF non-reentrant checkpointing that offloads only marked inputs.
+* DeepSpeed native ``cpu_checkpointing`` (checkpointing.py), which drives the
+  engine directly instead of blocking ``.to('cpu')`` / ``.to(cuda)``.
 
-transformers is imported lazily so importing this module works without it.
-
-Adapted from axolotl checkpoint_activation_offload.py
+transformers is imported lazily. Adapted from axolotl checkpoint_activation_offload.py
 https://github.com/axolotl-ai-cloud/axolotl/pull/3776
 """
 
@@ -63,9 +58,8 @@ _PATCH_USERS = 0
 class _ActivationOffloadEngine:
     """Async CPU offload of activation tensors on a pinned side stream.
 
-    Holds the buffer pool, side stream, forward stash, keep-last set, and
-    device<->host copy logic. Knows nothing about ``saved_tensors_hooks`` or the
-    HF marker; callers drive it with ``offload_input`` / ``restore_input``.
+    Owns the buffer pool, stream, stash, keep-last, and copy logic. Callers drive
+    it with ``offload_input`` / ``restore_input``.
     """
 
     def __init__(
@@ -225,8 +219,7 @@ class _ActivationOffloadEngine:
         """Register a tensor for offload; returns its id, or None if skipped.
 
         The newest ``keep_last_count`` tensors stay on GPU; older ones start an
-        async D2H. The caller owns the returned id and must call
-        ``restore_input`` before the source storage is needed again.
+        async D2H. The caller must ``restore_input`` before reusing the storage.
         """
         if self._should_skip(tensor):
             self.stats.skipped_marked_tensors += 1
@@ -241,8 +234,8 @@ class _ActivationOffloadEngine:
         return self._restore_tensor(tensor_id, cache=False)
 
     def _restore_tensor(self, tensor_id: int, cache: bool = True) -> torch.Tensor:
-        # cache=True lets one id be unpacked repeatedly (HF retain_graph); the
-        # cache is cleared per step on context exit. cache=False fully consumes.
+        # cache=True allows repeated unpack of one id (HF retain_graph), cleared on
+        # context exit; cache=False fully consumes.
         if cache:
             cached = self._restored.get(tensor_id)
             if cached is not None:

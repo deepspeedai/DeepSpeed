@@ -62,15 +62,13 @@ CONTIGUOUS_CHECKPOINTING = False
 SYNCHRONIZE = False
 PROFILE_TIME = False
 
-# Async CPU offload engine for cpu_checkpointing (non-partition path). Shared
-# across all checkpointed layers so keep-last and the forward stash span the
-# whole forward. Built lazily on first use so its side stream binds to the
-# already-selected device.
+# Shared async CPU offload engine for cpu_checkpointing (non-partition path), so
+# keep-last/stash span the whole forward. Built lazily so its stream binds to the
+# selected device.
 _cpu_offload_engine = None
 
-# torch.autograd.Function.forward always runs with grad disabled, so grad mode
-# must be captured in the checkpoint() wrapper (where it still reflects the
-# caller) and read inside CheckpointFunction.forward.
+# Function.forward always runs with grad disabled, so grad mode is captured in the
+# checkpoint() wrapper and read in CheckpointFunction.forward.
 _checkpoint_grad_enabled = True
 
 # Default name for the model parallel rng tracker.
@@ -498,10 +496,10 @@ def get_cpu_activations_for_backward(args, inputs):
 
 
 def _get_cpu_offload_engine():
-    """Return the shared async CPU-offload engine, or None to use blocking copies.
+    """Shared async CPU-offload engine, or None to use blocking copies.
 
-    Only the non-partition ``cpu_checkpointing`` path uses it. Synchronized (CPU-like)
-    accelerators have no side stream, so they fall back to blocking copies.
+    Only the non-partition ``cpu_checkpointing`` path uses it; synchronized
+    accelerators have no side stream and fall back to blocking copies.
     """
     global _cpu_offload_engine
     if not CPU_CHECKPOINT or PARTITION_ACTIVATIONS:
@@ -521,9 +519,9 @@ def _reset_cpu_offload_engine():
 def get_offloaded_activations_for_backward(args, engine):
     """Offload checkpoint inputs asynchronously and empty their GPU storage.
 
-    ``engine.offload_input`` holds a detached alias (keep-last or forward stash)
-    that keeps the source storage alive until the D2H drains, so emptying ``arg``
-    afterwards is safe. Aliased args share one id; skipped args stay on GPU.
+    The engine holds a detached alias that keeps the source storage alive until
+    the D2H drains, so emptying ``arg`` afterwards is safe. Aliased args share one
+    id; skipped args stay on GPU.
     """
     new_args = []
     tokens = {}
@@ -541,8 +539,8 @@ def get_offloaded_activations_for_backward(args, engine):
             to_empty.append(arg)
         new_args.append(arg)
 
-    # Empty only after every offload has registered its alias, so a repeated arg
-    # cannot see an already-emptied storage while it is still being offloaded.
+    # Empty only after all offloads register, so a repeated arg is never emptied
+    # mid-offload.
     for arg in to_empty:
         arg.data = torch.empty([], device=arg.device).data
 
@@ -552,9 +550,8 @@ def get_offloaded_activations_for_backward(args, engine):
 def restore_offloaded_activations(tensors, engine):
     """Restore async-offloaded inputs in place onto their saved tensors.
 
-    Mutating ``t.data`` (rather than replacing the object) preserves autograd
-    identity and ``requires_grad`` for ``detach_variable``. Idempotent: a second
-    backward (retain_graph) finds the id cleared and the tensor already on GPU.
+    Mutating ``t.data`` (not replacing the object) preserves autograd identity and
+    ``requires_grad`` for ``detach_variable``.
     """
     for t in tensors:
         if not torch.is_tensor(t):
@@ -607,9 +604,7 @@ class CheckpointFunction(torch.autograd.Function):
         cuda_device = get_accelerator().current_device_name()
         transport_stream = get_accelerator().Stream(device=cuda_device)
 
-        # Async CPU offload only when a backward will run; eval/no_grad forwards
-        # would allocate ids that never get consumed. grad mode is captured in the
-        # checkpoint() wrapper because it is always disabled inside forward().
+        # Offload only when a backward will run; eval/no_grad ids never get consumed.
         offload_engine = _get_cpu_offload_engine() if (CPU_CHECKPOINT and _checkpoint_grad_enabled) else None
         ctx.ds_offload_engine = offload_engine
 
@@ -843,8 +838,7 @@ def non_reentrant_checkpoint(function, *args):
     cuda_device = get_accelerator().current_device_name()
     transport_stream = get_accelerator().Stream(device=cuda_device)
 
-    # Async CPU offload only when a backward will run; eval/no_grad forwards
-    # would allocate ids that never get consumed.
+    # Offload only when a backward will run; eval/no_grad ids never get consumed.
     offload_engine = _get_cpu_offload_engine() if (CPU_CHECKPOINT and torch.is_grad_enabled()) else None
 
     inputs = None
@@ -947,7 +941,7 @@ def non_reentrant_checkpoint(function, *args):
             cuda_device = get_accelerator().current_device_name()
             transport_stream = get_accelerator().Stream(device=cuda_device)
 
-            # Rebuild tensors emptied by the blocking CPU path before recompute.
+            # Rebuild tensors emptied by the blocking CPU path.
             for t in deepspeed_saved_tensors:
                 if t is not None and hasattr(t, 'saved_data') and t.saved_data is not None:
                     t.data = t.saved_data.to(t.device)
@@ -1021,8 +1015,8 @@ def non_reentrant_checkpoint(function, *args):
     with torch.autograd.graph.saved_tensors_hooks(checkpoint_pack, checkpoint_unpack):
         outputs = function(*inputs_cuda)
 
-    # Save inputs for backward after forward has consumed them, so emptying the
-    # GPU storage cannot corrupt the forward pass (inputs_cuda may alias args).
+    # Save after forward has consumed inputs, so emptying GPU storage cannot
+    # corrupt the forward (inputs_cuda may alias args).
     if PARTITION_ACTIVATIONS:
         new_args = get_partitioned_activations_for_backward(args, inputs, CONTIGUOUS_CHECKPOINTING)
         assert len(new_args) % 2 == 0, f'save_for_backward called with odd number of args, {len(new_args)}'
@@ -1129,8 +1123,8 @@ def reset():
         data_offsets = []
         size_offsets = []
 
-    # Eval runs many forwards without a backward; drain the async offload engine
-    # so keep-last/tracker refs and in-flight copies do not accumulate.
+    # Eval runs forwards without backward; drain the engine so refs and in-flight
+    # copies do not accumulate.
     _reset_cpu_offload_engine()
 
 
