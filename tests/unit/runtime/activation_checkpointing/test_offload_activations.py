@@ -325,3 +325,50 @@ def test_marked_view_with_storage_offset():
     assert offload.stats.offloaded_tensors == 1
     assert offload.stats.restored_tensors == 1
     assert torch.allclose(x.grad, x_base.grad)
+
+
+@pytest.mark.skipif(not _ACCEL, reason="requires a stream-capable accelerator")
+@pytest.mark.parametrize("use_pin_memory", [True, False])
+def test_contiguous_offload_buffer_pin_flag(use_pin_memory):
+
+    def fn(x):
+        return x.sin().square()
+
+    device = get_accelerator().device_name()
+    x = torch.randn(4, 8, device=device, requires_grad=True)
+    offload = CheckpointHiddenStatesOffload(use_streams=False,
+                                            min_offload_bytes=0,
+                                            keep_last_count=0,
+                                            use_pin_memory=use_pin_memory)
+    with offload:
+        offload.mark(x)
+        loss = fn(checkpoint(fn, x, use_reentrant=False)).sum()
+        cpu_bufs = [tracked[0] for tracked in offload._tracker.values()]
+        assert cpu_bufs
+        for buf in cpu_bufs:
+            assert get_accelerator().is_pinned(buf) is use_pin_memory
+        loss.backward()
+    assert offload.stats.offloaded_tensors == 1
+
+
+@pytest.mark.skipif(not _ACCEL, reason="requires a stream-capable accelerator")
+def test_strided_view_offload_matches_baseline():
+
+    def fn(x):
+        return x.sin().square()
+
+    device = get_accelerator().device_name()
+    base = torch.randn(6, 8, device=device)
+    x_base = base[:, ::2].detach().clone().requires_grad_(True)
+    assert not x_base.is_contiguous()
+    fn(checkpoint(fn, x_base, use_reentrant=False)).sum().backward()
+
+    x = base[:, ::2].detach().requires_grad_(True)
+    offload = CheckpointHiddenStatesOffload(use_streams=False, min_offload_bytes=0, keep_last_count=0)
+    with offload:
+        offload.mark(x)
+        loss = fn(checkpoint(fn, x, use_reentrant=False)).sum()
+        loss.backward()
+
+    assert offload.stats.offloaded_tensors == 1
+    assert torch.allclose(x.grad, x_base.grad)

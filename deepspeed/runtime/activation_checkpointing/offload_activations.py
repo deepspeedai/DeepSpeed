@@ -250,6 +250,20 @@ class CheckpointHiddenStatesOffload(saved_tensors_hooks):
             else:
                 self._pending_cpu_buffers.append((key, tensor, event))
 
+    def _alloc_cpu_like(self, tensor: torch.Tensor) -> torch.Tensor:
+        size = tuple(tensor.size())
+        stride = tuple(tensor.stride())
+        alloc_kw = dict(dtype=tensor.dtype, layout=tensor.layout, device="cpu")
+        if not self.use_pin_memory:
+            return torch.empty_strided(size, stride, pin_memory=False, **alloc_kw)
+        # Native pin is a dense locked allocation plus view(shape); it cannot
+        # represent an arbitrary stride. Contiguous checkpoint inputs (the
+        # common case) go through the accelerator so DS_PIN_MEMORY_BACKEND
+        # applies. Strided views keep ATen empty_strided pin (pin on/off only).
+        if tensor.is_contiguous():
+            return get_accelerator().pin_memory(torch.empty(size, **alloc_kw), make_copy=False)
+        return torch.empty_strided(size, stride, pin_memory=True, **alloc_kw)
+
     def _empty_cpu_like(self, tensor: torch.Tensor) -> tuple[torch.Tensor, _BufferKey]:
         self._reap_cpu_buffer_pool()
         key = self._buffer_key(tensor)
@@ -257,15 +271,7 @@ class CheckpointHiddenStatesOffload(saved_tensors_hooks):
         if pool:
             self._cpu_buffer_pool_count -= 1
             return pool.pop(), key
-        # empty_strided(pin_memory=True) preserves strides; get_accelerator().pin_memory() copies and may not
-        return torch.empty_strided(
-            tuple(tensor.size()),
-            tuple(tensor.stride()),
-            dtype=tensor.dtype,
-            layout=tensor.layout,
-            device="cpu",
-            pin_memory=self.use_pin_memory,
-        ), key
+        return self._alloc_cpu_like(tensor), key
 
     def _start_offload(self, tensor_id: int, tensor: torch.Tensor, reap_id: int | None = None) -> None:
         num_bytes = self._num_bytes(tensor)
