@@ -314,8 +314,8 @@ class CheckpointHiddenStatesOffload(saved_tensors_hooks):
                 or num_bytes < self.min_offload_bytes or isinstance(tensor, torch.nn.Parameter)
                 or (hasattr(torch.nn, "Buffer") and isinstance(tensor, torch.nn.Buffer))
                 or (tensor.numel() > 1 and 0 in tensor.stride())):
-            # Restore rebuilds the source strides and copy_ cannot write into the
-            # overlapping storage that a stride-0 view would produce.
+            # Restore rebuilds a stride-0 view, and copy_ cannot write into its
+            # overlapping (aliased) storage.
             self.stats.skipped_marked_tensors += 1
             return tensor
 
