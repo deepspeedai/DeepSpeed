@@ -344,7 +344,11 @@ public:
             offload_comp_done_events_[id] =
                 std::make_shared<at::cuda::CUDAEvent>(cudaEventDisableTiming);
 
-            const auto options = at::TensorOptions().pinned_memory(true).device(torch::kCPU);
+            // Pin by default so async D2H/H2D can use full PCIe bandwidth; controlled by
+            // compile.offload_activation_pin_memory.
+            const auto options = at::TensorOptions()
+                                     .pinned_memory(offload_activation_pin_memory)
+                                     .device(torch::kCPU);
             offload_buffers_[id] = at::empty_like(tensor, options);
         }
 

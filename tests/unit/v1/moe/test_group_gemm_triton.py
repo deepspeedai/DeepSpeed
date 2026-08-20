@@ -392,3 +392,36 @@ def test_grouped_experts_auto_selects_triton_on_ampere():
     # Config override disables the Triton path regardless of device.
     experts_off = GroupedExperts(32, 64, 2, use_grouped_mm=True, disable_triton_grouped_mm=True).to(dev)
     assert experts_off.use_triton_grouped_mm is False
+
+
+def test_expert_offset_exceeds_int32():
+    """Expert base offsets past 2**31 elements must be computed in int64.
+
+    ``b_base = b_ptr + selected * stride_be`` walks ``E * K * N`` elements. With
+    a large enough expert weight that product overflows int32 and wraps to a
+    negative offset, so the kernel reads out of bounds and faults. Sizes here put
+    the last expert at ~2.2e9 elements, just past the int32 limit.
+    """
+    K = N = 8192
+    num_experts = 34
+    rows_per_expert = 8
+    dtype = torch.bfloat16
+
+    stride_be = K * N
+    assert (num_experts - 1) * stride_be > 2**31 - 1, "sizes no longer exercise the overflow"
+
+    needed = num_experts * stride_be * torch.finfo(dtype).bits // 8
+    if get_accelerator().available_memory() < 2 * needed:
+        pytest.skip(f"needs ~{2 * needed / 2**30:.1f} GiB of free device memory")
+
+    dev = get_accelerator().current_device_name()
+    m = num_experts * rows_per_expert
+    a = torch.randn(m, K, dtype=dtype, device=dev)
+    b = torch.randn(num_experts, K, N, dtype=dtype, device=dev)
+    offs = _make_offs([rows_per_expert] * num_experts, dev)
+
+    out = group_gemm_triton(a, b, offs)
+
+    # Check the last expert specifically -- it carries the largest offset.
+    last = a[-rows_per_expert:] @ b[-1]
+    torch.testing.assert_close(out[-rows_per_expert:].float(), last.float(), **_tol(dtype))

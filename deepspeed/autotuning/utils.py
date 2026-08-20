@@ -231,7 +231,7 @@ def prune_config(config, ignored_keys=[]):
     """ Prunes the input configurations
 
     Args:
-        configs (dict): A configuration dictionary.
+        config (dict): A configuration dictionary.
         ignored_keys (list, optional): the keys of the sections to delete. Defaults to [].
 
     Returns:

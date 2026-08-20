@@ -2056,9 +2056,8 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         the gradients are modified in place.
 
         Arguments:
-            parameters (Iterable[Tensor] or Tensor): an iterable of Tensors or a
+            params (Iterable[Tensor] or Tensor): an iterable of Tensors or a
                 single Tensor that will have gradients normalized
-            max_norm (float or int): max norm of the gradients
             norm_type (float or int): type of the used p-norm. Can be ``'inf'`` for
                 infinity norm.
 

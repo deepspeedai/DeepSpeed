@@ -24,6 +24,11 @@ class CompileConfig(DeepSpeedConfigModel):
     offload_activation: bool = False
     """ Turn on/off the activation offloading """
 
+    offload_activation_pin_memory: bool = True
+    """ Pin host buffers used for DeepCompile activation offload. Required for
+    full-bandwidth async GPU<->CPU copies. Disable only under tight memlock
+    limits (ulimit -l). Defaults to True to match ZeRO offload pin_memory. """
+
     offload_opt_states: bool = False
     """ Offload optimizer states (fp32 master parameters and Adam moments) to pinned host memory
     during forward/backward and reload them for the optimizer step, keeping resident whatever the

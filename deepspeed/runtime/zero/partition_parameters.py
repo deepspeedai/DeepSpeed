@@ -64,8 +64,11 @@ class NoGatherHandle:
             raise RuntimeError(f"expected param {param.ds_summary()} to be available")
 
         if hasattr(param.ds_tensor, "ds_quant_scale"):
-            param.data = Init.quantizer_module.dequantize(param.ds_tensor.data, param.ds_tensor.ds_quant_scale).to(
-                device=get_accelerator().current_device_name(), non_blocking=True).view(param.ds_shape)
+            param.data = Init.quantizer_module.dequantize(param.ds_tensor.data,
+                                                          param.ds_tensor.ds_quant_scale,
+                                                          dtype=param.dtype).to(
+                                                              device=get_accelerator().current_device_name(),
+                                                              non_blocking=True).view(param.ds_shape)
         else:
             param.data = param.ds_tensor.data.to(device=get_accelerator().current_device_name(),
                                                  non_blocking=True).view(param.ds_shape)
@@ -87,8 +90,11 @@ class NoGatherCoalescedHandle:
             if param.ds_status != ZeroParamStatus.INFLIGHT:
                 raise RuntimeError(f"expected param {param.ds_summary()} to not be available")
             if hasattr(param.ds_tensor, "ds_quant_scale"):
-                param.data = Init.quantizer_module.dequantize(param.ds_tensor.data, param.ds_tensor.ds_quant_scale).to(
-                    device=get_accelerator().current_device_name(), non_blocking=True).view(param.ds_shape)
+                param.data = Init.quantizer_module.dequantize(param.ds_tensor.data,
+                                                              param.ds_tensor.ds_quant_scale,
+                                                              dtype=param.dtype).to(
+                                                                  device=get_accelerator().current_device_name(),
+                                                                  non_blocking=True).view(param.ds_shape)
             else:
                 param.data = param.ds_tensor.data.to(device=get_accelerator().current_device_name(),
                                                      non_blocking=True).view(param.ds_shape)
@@ -708,8 +714,10 @@ class AllGatherHandle:
                 self.__original_dtype).to(self.__param.device)
         elif self.__quantization:
             instrument_w_nvtx(self.__quantization.quant_handle.wait)()
-            self.__param.data = self.__quantization.backend.dequantize(
-                self.__quantization.quantized_param, self.__quantization.scale_buffer).to(self.__param.device)
+            self.__param.data = self.__quantization.backend.dequantize(self.__quantization.quantized_param,
+                                                                       self.__quantization.scale_buffer,
+                                                                       dtype=self.__param.dtype).to(
+                                                                           self.__param.device)
         self.__param.ds_status = ZeroParamStatus.AVAILABLE
 
 
@@ -747,6 +755,9 @@ class AllGatherCoalescedHandle:
 
         if self.quantization:
             instrument_w_nvtx(self.quantization.quant_handle.wait)()
+            # No dtype here on purpose. A quantized coalesced bucket is not grouped by dtype the
+            # way the non-quantized path is, so params[0].dtype is not necessarily the dtype of
+            # the rest of the bucket. Each slice is cast to its own parameter's dtype below.
             flat_tensor = self.quantization.backend.dequantize(
                 self.quantization.quantized_param, self.quantization.scale_buffer).to(self.params[0].device)
 
@@ -865,12 +876,18 @@ class CUDAQuantizer:
                 assert param.numel(
                 ) > groups, f"Adaptive grouping algorithm cannot find a group size for input tensor of size {param.numel()}"
                 self.group_size_cache[param.numel()] = groups
-        return self.quantizer_cuda_module.quantize(param.to(get_accelerator().device_name()), groups, 8,
-                                                   self.quantizer_cuda_module.Symmetric)
+        # The CUDA kernel reads its input through a __half* and always writes fp16 back out, so a bf16
+        # parameter would be reinterpreted bit-for-bit and silently corrupted. Convert on the way in and
+        # let the caller ask for its own dtype back on the way out.
+        param = param.to(get_accelerator().device_name(), dtype=torch.half)
+        return self.quantizer_cuda_module.quantize(param, groups, 8, self.quantizer_cuda_module.Symmetric)
 
-    def dequantize(self, quantized_param, scale):
-        return self.quantizer_cuda_module.dequantize(quantized_param, scale, scale.numel(), 8,
-                                                     self.quantizer_cuda_module.Symmetric)
+    def dequantize(self, quantized_param, scale, dtype=None):
+        dequantized = self.quantizer_cuda_module.dequantize(quantized_param, scale, scale.numel(), 8,
+                                                            self.quantizer_cuda_module.Symmetric)
+        if dtype is not None and dequantized.dtype != dtype:
+            dequantized = dequantized.to(dtype)
+        return dequantized
 
 
 def _no_gather_coalesced(params: Iterable[Parameter]) -> AllGatherCoalescedHandle:
@@ -2071,7 +2088,9 @@ class Init(InsertPostInitMethodToModuleSubClasses):
         for i, param in enumerate(param_list):
             gathered_tensor = allgather_params[i]
             if quantize:
-                gathered_tensor = self.quantizer_module.dequantize(gathered_tensor, allgather_quantize_scale[i])
+                gathered_tensor = self.quantizer_module.dequantize(gathered_tensor,
+                                                                   allgather_quantize_scale[i],
+                                                                   dtype=param.dtype)
             param.data = gathered_tensor.narrow(0, 0, param.ds_numel).view(param.ds_shape).data
 
         # guarantee the communication to be completed
@@ -2130,7 +2149,7 @@ class Init(InsertPostInitMethodToModuleSubClasses):
                                     scale_partitions[partition_rank],
                                     group=self.get_partition_dp_group(param),
                                     async_op=False)
-                flat_tensor = self.quantizer_module.dequantize(flat_tensor, flat_scale_tensor)
+                flat_tensor = self.quantizer_module.dequantize(flat_tensor, flat_scale_tensor, dtype=param.dtype)
 
             param.data = flat_tensor.narrow(0, 0, param.ds_numel).view(param.ds_shape)
 

@@ -74,7 +74,7 @@ def attn_out_in_features(out_features: int,
     Helper to calculate the expected output projection dimension of a QKV projection matrix.
 
     Args:
-        in_features (int): The model dimension.
+        out_features (int): The model dimension.
         shard_rank (int): Which rank to return the corresponding size for.
         num_shards (int): The total number of shards the parameter is distributed across.
         head_size (int): The size of each attention head.
