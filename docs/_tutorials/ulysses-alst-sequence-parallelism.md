@@ -372,7 +372,7 @@ with ctx:
     loss.backward()
 ```
 
-Re-use one manager and wrap each training step (forward+backward) in it. Requires `transformers`: the marker identifying checkpoint inputs is installed on `GradientCheckpointingLayer`, and all other saved tensors pass through untouched. Tune with `use_pin_memory`, `use_streams`, `min_offload_size`, `max_fwd_stash_size` and `max_cpu_buffer_pool_size`.
+Re-use one manager and wrap each training step (forward+backward) in it; `backward()` must run inside the same context as forward. Requires `transformers`: the marker identifying checkpoint inputs is installed on `GradientCheckpointingLayer` only while a manager is active (so the same model can be reused for HybridEngine rollout), and all other saved tensors pass through untouched. Tune with `use_pin_memory`, `use_streams`, `min_offload_bytes` (threshold), `max_fwd_stash_count` (in-flight GPU copies), `max_cpu_buffer_pool_count` (pooled CPU buffers), and `keep_last_count` (default 1: leave the last checkpoint input on GPU so the first backward is not stalled by a D2H of an activation that is needed immediately). Peak extra GPU activations retained is `max_fwd_stash_count + keep_last_count`.
 
 ### PYTORCH_CUDA_ALLOC_CONF
 

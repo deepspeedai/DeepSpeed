@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import contextlib
 import importlib.util
+import threading
 from dataclasses import dataclass
 from typing import Tuple
 
@@ -36,6 +37,7 @@ class CheckpointActivationOffloadStats:
     offloaded_tensors: int = 0
     restored_tensors: int = 0
     skipped_marked_tensors: int = 0
+    kept_last_tensors: int = 0
     offloaded_bytes: int = 0
     restored_bytes: int = 0
 
@@ -46,18 +48,31 @@ class _OffloadedTensorRef:
 
 
 _BufferKey = Tuple[Tuple[int, ...], Tuple[int, ...], torch.dtype, torch.layout, bool]
-_MANAGER_STACK: list["CheckpointHiddenStatesOffload"] = []
+_TLS = threading.local()
+_PATCH_LOCK = threading.Lock()
 _ORIG_GRADIENT_CHECKPOINTING_LAYER_CALL = None
+_MARKER_WRAPPER = None
+_MARKER_INSTALLED_BY_CONTEXT = False
+_PATCH_USERS = 0
+
+
+def _manager_stack() -> list["CheckpointHiddenStatesOffload"]:
+    stack = getattr(_TLS, "stack", None)
+    if stack is None:
+        stack = []
+        _TLS.stack = stack
+    return stack
 
 
 def _current_manager() -> "CheckpointHiddenStatesOffload | None":
-    return _MANAGER_STACK[-1] if _MANAGER_STACK else None
+    stack = _manager_stack()
+    return stack[-1] if stack else None
 
 
 def patch_gradient_checkpointing_layer_marker() -> None:
-    global _ORIG_GRADIENT_CHECKPOINTING_LAYER_CALL
+    global _ORIG_GRADIENT_CHECKPOINTING_LAYER_CALL, _MARKER_WRAPPER
 
-    if _ORIG_GRADIENT_CHECKPOINTING_LAYER_CALL is not None:
+    if _MARKER_WRAPPER is not None:
         return
 
     try:
@@ -67,54 +82,104 @@ def patch_gradient_checkpointing_layer_marker() -> None:
                            "package (>= 4.52, which introduced GradientCheckpointingLayer). "
                            "Install it with `pip install transformers`.") from e
 
-    _ORIG_GRADIENT_CHECKPOINTING_LAYER_CALL = GradientCheckpointingLayer.__call__
+    # Class-owned __call__, or None if HF is using nn.Module.__call__ via MRO.
+    orig_owned = GradientCheckpointingLayer.__dict__.get("__call__")
+    orig_call = GradientCheckpointingLayer.__call__
+    _ORIG_GRADIENT_CHECKPOINTING_LAYER_CALL = orig_owned
 
     def _checkpoint_offload_call(self, *args, **kwargs):
         manager = _current_manager()
+        marked = None
         if (manager is not None and self.training and torch.is_grad_enabled()
                 and getattr(self, "gradient_checkpointing", False)):
-            hidden_states = args[0] if args else kwargs.get("hidden_states")
+            # HF decoder layers take hidden_states as the first positional argument.
+            # GradientCheckpointingLayer.__call__ checkpoints super().__call__(*args),
+            # so only args[0] is a saved checkpoint input. A keyword hidden_states is
+            # captured in partial(..., **kwargs) and is never packed.
+            hidden_states = args[0] if args else None
             if torch.is_tensor(hidden_states):
                 manager.mark(hidden_states)
-        return _ORIG_GRADIENT_CHECKPOINTING_LAYER_CALL(self, *args, **kwargs)
+                marked = hidden_states
+        try:
+            return orig_call(self, *args, **kwargs)
+        finally:
+            # id() is recycled; drop a mark the pack hook did not consume.
+            if marked is not None:
+                manager._consume_mark(marked)
 
     GradientCheckpointingLayer.__call__ = _checkpoint_offload_call
+    _MARKER_WRAPPER = _checkpoint_offload_call
+
+
+def _unpatch_gradient_checkpointing_layer_marker() -> None:
+    # Restore GradientCheckpointingLayer.__call__ when no offload manager is active
+    # so the same model can be reused for HybridEngineRollout without leftover patching.
+    global _ORIG_GRADIENT_CHECKPOINTING_LAYER_CALL, _MARKER_WRAPPER
+
+    wrapper = _MARKER_WRAPPER
+    orig_owned = _ORIG_GRADIENT_CHECKPOINTING_LAYER_CALL
+    _MARKER_WRAPPER = None
+    _ORIG_GRADIENT_CHECKPOINTING_LAYER_CALL = None
+    if wrapper is None:
+        return
+
+    from transformers import GradientCheckpointingLayer
+    if GradientCheckpointingLayer.__call__ is not wrapper:
+        return
+    if orig_owned is None:
+        delattr(GradientCheckpointingLayer, "__call__")
+    else:
+        GradientCheckpointingLayer.__call__ = orig_owned
 
 
 class CheckpointHiddenStatesOffload(saved_tensors_hooks):
     """Offload only marked checkpoint inputs.
 
-    The marker is installed on ``GradientCheckpointingLayer.__call__`` before
-    non-reentrant checkpointing saves positional layer inputs. All other saved
-    tensors pass through unchanged, including tensors from the final norm/head
-    and any non-checkpointed modules.
+    The marker is installed on ``GradientCheckpointingLayer.__call__`` while this
+    context is active and restored on exit. All other saved tensors pass through
+    unchanged, including tensors from the final norm/head and any
+    non-checkpointed modules.
     """
 
     def __init__(
         self,
         use_pin_memory: bool = True,
         use_streams: bool = True,
-        min_offload_size: int = 1024,
-        max_fwd_stash_size: int = 2,
-        max_cpu_buffer_pool_size: int = 64,
+        min_offload_bytes: int = 1024,
+        max_fwd_stash_count: int = 2,
+        max_cpu_buffer_pool_count: int = 64,
+        keep_last_count: int = 1,
     ) -> None:
+        if keep_last_count < 0:
+            raise ValueError(f"keep_last_count must be >= 0, got {keep_last_count}")
+        if max_fwd_stash_count < 0:
+            raise ValueError(f"max_fwd_stash_count must be >= 0, got {max_fwd_stash_count}")
+        if max_cpu_buffer_pool_count < 0:
+            raise ValueError(f"max_cpu_buffer_pool_count must be >= 0, got {max_cpu_buffer_pool_count}")
+        if min_offload_bytes < 0:
+            raise ValueError(f"min_offload_bytes must be >= 0, got {min_offload_bytes}")
+
         self.use_pin_memory = use_pin_memory
-        self.use_streams = use_streams
-        self.min_tensor_size_bytes = min_offload_size
-        self.max_fwd_stash_size = max_fwd_stash_size
-        self.max_cpu_buffer_pool_size = max_cpu_buffer_pool_size
+        self.min_offload_bytes = min_offload_bytes
+        self.max_fwd_stash_count = max_fwd_stash_count
+        self.max_cpu_buffer_pool_count = max_cpu_buffer_pool_count
+        # Last packed checkpoint inputs stay on GPU: the first backward uses them
+        # immediately, and a D2H of that activation can stall if head bwd is fast.
+        self.keep_last_count = keep_last_count
         self.stats = CheckpointActivationOffloadStats()
         self._allowed: dict[int, int] = {}
         self._next_id = 0
         self._tracker: dict[int, tuple[torch.Tensor, torch.device, torch.Size, tuple[int, ...], _BufferKey]] = {}
         self._fwd_stash: dict[int, tuple[torch.Tensor, torch.Event]] = {}
+        self._keep_last: dict[int, torch.Tensor] = {}
         self._cpu_buffer_pool: dict[_BufferKey, list[torch.Tensor]] = {}
-        self._cpu_buffer_pool_size = 0
+        self._cpu_buffer_pool_count = 0
         self._pending_cpu_buffers: list[tuple[_BufferKey, torch.Tensor, torch.Event]] = []
 
         # cpu-like accelerators have no streams; _pack_tensor never offloads there
         stream_cls = get_accelerator().Stream
         self.s1 = stream_cls() if (use_streams and stream_cls is not None) else None
+        self.use_streams = bool(use_streams and self.s1 is not None)
 
         super().__init__(self._pack_tensor, self._unpack_tensor)
 
@@ -153,7 +218,7 @@ class CheckpointHiddenStatesOffload(saved_tensors_hooks):
 
     def _reap_forward_stash(self, new_tensor_id: int) -> None:
         for tensor_id in list(self._fwd_stash):
-            if tensor_id > new_tensor_id - self.max_fwd_stash_size:
+            if tensor_id > new_tensor_id - self.max_fwd_stash_count:
                 continue
             _, event = self._fwd_stash.pop(tensor_id)
             self.compute_stream.wait_event(event)
@@ -168,10 +233,10 @@ class CheckpointHiddenStatesOffload(saved_tensors_hooks):
         )
 
     def _pool_cpu_buffer(self, key: _BufferKey, tensor: torch.Tensor) -> None:
-        if self._cpu_buffer_pool_size >= self.max_cpu_buffer_pool_size:
+        if self._cpu_buffer_pool_count >= self.max_cpu_buffer_pool_count:
             return
         self._cpu_buffer_pool.setdefault(key, []).append(tensor)
-        self._cpu_buffer_pool_size += 1
+        self._cpu_buffer_pool_count += 1
 
     def _reap_cpu_buffer_pool(self, force: bool = False) -> None:
         pending = self._pending_cpu_buffers
@@ -190,7 +255,7 @@ class CheckpointHiddenStatesOffload(saved_tensors_hooks):
         key = self._buffer_key(tensor)
         pool = self._cpu_buffer_pool.get(key)
         if pool:
-            self._cpu_buffer_pool_size -= 1
+            self._cpu_buffer_pool_count -= 1
             return pool.pop(), key
         # empty_strided(pin_memory=True) preserves strides; get_accelerator().pin_memory() copies and may not
         return torch.empty_strided(
@@ -202,21 +267,10 @@ class CheckpointHiddenStatesOffload(saved_tensors_hooks):
             pin_memory=self.use_pin_memory,
         ), key
 
-    def _pack_tensor(self, tensor: torch.Tensor):
-        self.stats.saved_tensors_seen += 1
-        if not self._consume_mark(tensor):
-            return tensor
-
+    def _start_offload(self, tensor_id: int, tensor: torch.Tensor, reap_id: int | None = None) -> None:
         num_bytes = self._num_bytes(tensor)
-        if (get_accelerator().is_synchronized_device() or not get_accelerator().on_accelerator(tensor)
-                or num_bytes < self.min_tensor_size_bytes or isinstance(tensor, torch.nn.Parameter)
-                or (hasattr(torch.nn, "Buffer") and isinstance(tensor, torch.nn.Buffer))):
-            self.stats.skipped_marked_tensors += 1
-            return tensor
-
-        tensor_id = self._next_tensor_id()
         if self.use_streams:
-            self._reap_forward_stash(tensor_id)
+            self._reap_forward_stash(tensor_id if reap_id is None else reap_id)
             self.s1.wait_stream(self.compute_stream)
             stream = self.s1
         else:
@@ -238,9 +292,36 @@ class CheckpointHiddenStatesOffload(saved_tensors_hooks):
 
         self.stats.offloaded_tensors += 1
         self.stats.offloaded_bytes += num_bytes
+
+    def _flush_keep_last(self, newest_id: int) -> None:
+        while len(self._keep_last) > self.keep_last_count:
+            oldest_id, oldest = next(iter(self._keep_last.items()))
+            del self._keep_last[oldest_id]
+            self._start_offload(oldest_id, oldest, reap_id=newest_id)
+
+    def _pack_tensor(self, tensor: torch.Tensor):
+        self.stats.saved_tensors_seen += 1
+        if not self._consume_mark(tensor):
+            return tensor
+
+        num_bytes = self._num_bytes(tensor)
+        if (get_accelerator().is_synchronized_device() or not get_accelerator().on_accelerator(tensor)
+                or num_bytes < self.min_offload_bytes or isinstance(tensor, torch.nn.Parameter)
+                or (hasattr(torch.nn, "Buffer") and isinstance(tensor, torch.nn.Buffer))):
+            self.stats.skipped_marked_tensors += 1
+            return tensor
+
+        tensor_id = self._next_tensor_id()
+        self._keep_last[tensor_id] = tensor
+        self._flush_keep_last(tensor_id)
         return _OffloadedTensorRef(tensor_id)
 
     def _restore_tensor(self, tensor_id: int) -> torch.Tensor:
+        kept = self._keep_last.pop(tensor_id, None)
+        if kept is not None:
+            self.stats.kept_last_tensors += 1
+            return kept
+
         if tensor_id in self._fwd_stash:
             tensor, event = self._fwd_stash.pop(tensor_id)
             self.compute_stream.wait_event(event)
@@ -250,7 +331,12 @@ class CheckpointHiddenStatesOffload(saved_tensors_hooks):
             self.stats.restored_bytes += self._num_bytes(tensor)
             return tensor
 
-        cpu_tensor, device, shape, stride, buffer_key = self._tracker.pop(tensor_id)
+        tracked = self._tracker.pop(tensor_id, None)
+        if tracked is None:
+            raise RuntimeError(f"offloaded activation {tensor_id} is no longer tracked. backward() must run "
+                               "inside the same CheckpointHiddenStatesOffload context as forward(), and each "
+                               "graph can only be backwarded once (retain_graph=True is not supported).")
+        cpu_tensor, device, shape, stride, buffer_key = tracked
         stream = self.s1 if self.use_streams else self.compute_stream
         with self._stream_context(stream):
             # restore into fresh offset-0 storage; reapplying the source storage_offset
@@ -280,6 +366,7 @@ class CheckpointHiddenStatesOffload(saved_tensors_hooks):
         self._allowed.clear()
         self._tracker.clear()
         self._fwd_stash.clear()
+        self._keep_last.clear()
         self._pending_cpu_buffers.clear()
         self._next_id = 0
 
@@ -296,38 +383,72 @@ class CheckpointHiddenStatesOffload(saved_tensors_hooks):
         self._allowed.clear()
         self._tracker.clear()
         self._fwd_stash.clear()
+        self._keep_last.clear()
         self._pending_cpu_buffers.clear()
 
+    def _pop_manager_stack(self) -> None:
+        global _MARKER_INSTALLED_BY_CONTEXT, _PATCH_USERS
+        stack = _manager_stack()
+        if stack and stack[-1] is self:
+            stack.pop()
+        elif self in stack:
+            stack.remove(self)
+        with _PATCH_LOCK:
+            if _PATCH_USERS > 0:
+                _PATCH_USERS -= 1
+            if _PATCH_USERS == 0 and _MARKER_INSTALLED_BY_CONTEXT:
+                _unpatch_gradient_checkpointing_layer_marker()
+                _MARKER_INSTALLED_BY_CONTEXT = False
+
     def __enter__(self):
-        # auto-install the marker if transformers is present; mark() still works without it
-        if _ORIG_GRADIENT_CHECKPOINTING_LAYER_CALL is None and importlib.util.find_spec("transformers") is not None:
-            patch_gradient_checkpointing_layer_marker()
+        global _MARKER_INSTALLED_BY_CONTEXT, _PATCH_USERS
+        if self in _manager_stack():
+            raise RuntimeError("CheckpointHiddenStatesOffload is not re-entrant; use a separate "
+                               "instance for a nested context")
+
+        with _PATCH_LOCK:
+            if (_MARKER_WRAPPER is None and importlib.util.find_spec("transformers") is not None):
+                patch_gradient_checkpointing_layer_marker()
+                _MARKER_INSTALLED_BY_CONTEXT = True
+            if _MARKER_WRAPPER is not None:
+                _PATCH_USERS += 1
+
         self.reset()
-        _MANAGER_STACK.append(self)
-        return super().__enter__()
+        _manager_stack().append(self)
+        try:
+            return super().__enter__()
+        except Exception:
+            self._pop_manager_stack()
+            raise
 
     def __exit__(self, *args, **kwargs):
+        sync_err = None
         try:
             self._sync_and_clear()
+        except Exception as err:
+            sync_err = err
+        try:
+            self._pop_manager_stack()
         finally:
-            if _MANAGER_STACK and _MANAGER_STACK[-1] is self:
-                _MANAGER_STACK.pop()
-            elif self in _MANAGER_STACK:
-                _MANAGER_STACK.remove(self)
-        return super().__exit__(*args, **kwargs)
+            result = super().__exit__(*args, **kwargs)
+        if sync_err is not None:
+            raise sync_err
+        return result
 
 
 def get_checkpoint_hidden_states_offloading_ctx_manager(
     use_pin_memory: bool = True,
     use_streams: bool = True,
-    min_offload_size: int = 1024,
-    max_fwd_stash_size: int = 2,
-    max_cpu_buffer_pool_size: int = 64,
+    min_offload_bytes: int = 1024,
+    max_fwd_stash_count: int = 2,
+    max_cpu_buffer_pool_count: int = 64,
+    keep_last_count: int = 1,
 ) -> CheckpointHiddenStatesOffload:
     return CheckpointHiddenStatesOffload(
         use_pin_memory=use_pin_memory,
         use_streams=use_streams,
-        min_offload_size=min_offload_size,
-        max_fwd_stash_size=max_fwd_stash_size,
-        max_cpu_buffer_pool_size=max_cpu_buffer_pool_size,
+        min_offload_bytes=min_offload_bytes,
+        max_fwd_stash_count=max_fwd_stash_count,
+        max_cpu_buffer_pool_count=max_cpu_buffer_pool_count,
+        keep_last_count=keep_last_count,
     )

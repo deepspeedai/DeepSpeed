@@ -3,6 +3,8 @@
 
 # DeepSpeed Team
 
+import inspect
+
 import pytest
 import torch
 from torch import nn
@@ -14,12 +16,14 @@ from deepspeed.runtime.activation_checkpointing.offload_activations import (
     get_checkpoint_hidden_states_offloading_ctx_manager,
 )
 
+_ACCEL = get_accelerator().is_available() and not get_accelerator().is_synchronized_device()
+
 
 def test_unmarked_saved_tensors_pass_through():
     hidden_states = torch.randn(4, 8, requires_grad=True)
     linear = nn.Linear(8, 8)
 
-    offload = CheckpointHiddenStatesOffload(use_streams=False, min_offload_size=0)
+    offload = CheckpointHiddenStatesOffload(use_streams=False, min_offload_bytes=0)
     with offload:
         loss = linear(hidden_states).square().sum()
         loss.backward()
@@ -39,7 +43,7 @@ def test_marked_cpu_tensor_is_skipped():
     fn(checkpoint(fn, x_base, use_reentrant=False)).sum().backward()
 
     x = x_base.detach().clone().requires_grad_(True)
-    offload = CheckpointHiddenStatesOffload(use_streams=False, min_offload_size=0)
+    offload = CheckpointHiddenStatesOffload(use_streams=False, min_offload_bytes=0)
     with offload:
         offload.mark(x)
         loss = fn(checkpoint(fn, x, use_reentrant=False)).sum()
@@ -50,6 +54,116 @@ def test_marked_cpu_tensor_is_skipped():
     assert offload.stats.skipped_marked_tensors >= 1
     assert offload.stats.offloaded_tensors == 0
     assert torch.allclose(x.grad, x_base.grad)
+
+
+def test_keep_last_count_rejects_negative():
+    with pytest.raises(ValueError, match="keep_last_count"):
+        CheckpointHiddenStatesOffload(keep_last_count=-1)
+
+
+def test_gradient_checkpointing_layer_signature_contract():
+    """Pin the HF signature _checkpoint_offload_call depends on.
+
+    GradientCheckpointingLayer itself does not define forward(); the contract
+    lives on concrete decoder layers and on subclasses used with the marker.
+    """
+    transformers = pytest.importorskip("transformers")
+    if not hasattr(transformers, "GradientCheckpointingLayer"):
+        pytest.skip("transformers version does not provide GradientCheckpointingLayer")
+    from transformers import GradientCheckpointingLayer
+
+    class TinyCheckpointLayer(GradientCheckpointingLayer):
+
+        def forward(self, hidden_states):
+            return hidden_states
+
+    for layer_cls in (TinyCheckpointLayer, ):
+        params = [p for p in inspect.signature(layer_cls.forward).parameters.values() if p.name != "self"]
+        assert params, f"{layer_cls.__name__}.forward has no params"
+        assert params[0].name == "hidden_states", (
+            f"_checkpoint_offload_call assumes args[0] is hidden_states, but "
+            f"{layer_cls.__name__}.forward now starts with '{params[0].name}'. "
+            "Update the marker patch in patch_gradient_checkpointing_layer_marker.")
+        assert params[0].kind is inspect.Parameter.POSITIONAL_OR_KEYWORD
+
+    try:
+        from transformers.models.llama.modeling_llama import LlamaDecoderLayer
+    except ImportError:
+        return
+    if not issubclass(LlamaDecoderLayer, GradientCheckpointingLayer):
+        pytest.skip("LlamaDecoderLayer is not a GradientCheckpointingLayer")
+    params = [p for p in inspect.signature(LlamaDecoderLayer.forward).parameters.values() if p.name != "self"]
+    assert params[0].name == "hidden_states"
+    assert params[0].kind is inspect.Parameter.POSITIONAL_OR_KEYWORD
+
+
+def test_marker_patch_restored_after_context_exit():
+    transformers = pytest.importorskip("transformers")
+    if not hasattr(transformers, "GradientCheckpointingLayer"):
+        pytest.skip("transformers version does not provide GradientCheckpointingLayer")
+    from functools import partial
+    from transformers import GradientCheckpointingLayer
+
+    class TinyCheckpointLayer(GradientCheckpointingLayer):
+
+        def forward(self, hidden_states):
+            return hidden_states.sin()
+
+    orig_call = GradientCheckpointingLayer.__call__
+    layer = TinyCheckpointLayer()
+    layer.gradient_checkpointing = True
+    layer._gradient_checkpointing_func = partial(checkpoint, use_reentrant=False)
+    layer.train()
+    hidden_states = torch.randn(4, 8, requires_grad=True)
+
+    offload = CheckpointHiddenStatesOffload(use_streams=False, min_offload_bytes=0, keep_last_count=0)
+    with offload:
+        assert GradientCheckpointingLayer.__call__ is not orig_call
+        layer(hidden_states)
+    assert GradientCheckpointingLayer.__call__ is orig_call
+    assert offload.stats.marked_tensors == 1
+
+    layer(hidden_states)
+    assert offload.stats.marked_tensors == 1
+
+
+def test_marker_patch_restored_on_exception():
+    transformers = pytest.importorskip("transformers")
+    if not hasattr(transformers, "GradientCheckpointingLayer"):
+        pytest.skip("transformers version does not provide GradientCheckpointingLayer")
+    from transformers import GradientCheckpointingLayer
+
+    orig_call = GradientCheckpointingLayer.__call__
+    offload = CheckpointHiddenStatesOffload(use_streams=False, min_offload_bytes=0)
+    with pytest.raises(ValueError, match="boom"):
+        with offload:
+            raise ValueError("boom")
+    assert GradientCheckpointingLayer.__call__ is orig_call
+
+
+def test_nested_managers_unpatch_on_outer_exit():
+    transformers = pytest.importorskip("transformers")
+    if not hasattr(transformers, "GradientCheckpointingLayer"):
+        pytest.skip("transformers version does not provide GradientCheckpointingLayer")
+    from transformers import GradientCheckpointingLayer
+
+    orig_call = GradientCheckpointingLayer.__call__
+    outer = CheckpointHiddenStatesOffload(use_streams=False, min_offload_bytes=0)
+    inner = CheckpointHiddenStatesOffload(use_streams=False, min_offload_bytes=0)
+    with outer:
+        patched = GradientCheckpointingLayer.__call__
+        assert patched is not orig_call
+        with inner:
+            assert GradientCheckpointingLayer.__call__ is patched
+        assert GradientCheckpointingLayer.__call__ is patched
+    assert GradientCheckpointingLayer.__call__ is orig_call
+
+
+def test_same_manager_is_not_reentrant():
+    offload = CheckpointHiddenStatesOffload(use_streams=False, min_offload_bytes=0)
+    with offload:
+        with pytest.raises(RuntimeError, match="not re-entrant"):
+            offload.__enter__()
 
 
 def test_marker_offloads_checkpoint_input():
@@ -66,7 +180,7 @@ def test_marker_offloads_checkpoint_input():
             hidden_states = hidden_states.sin()
             return hidden_states * hidden_states
 
-    on_accelerator = get_accelerator().is_available() and not get_accelerator().is_synchronized_device()
+    on_accelerator = _ACCEL
     device = get_accelerator().device_name() if on_accelerator else "cpu"
     layer = TinyCheckpointLayer()
     layer.gradient_checkpointing = True
@@ -75,7 +189,7 @@ def test_marker_offloads_checkpoint_input():
     layer.train()
     hidden_states = torch.randn(4, 8, device=device, requires_grad=True)
 
-    offload = CheckpointHiddenStatesOffload(use_streams=False, min_offload_size=0)
+    offload = CheckpointHiddenStatesOffload(use_streams=False, min_offload_bytes=0, keep_last_count=0)
     with offload:
         loss = layer(hidden_states).sum()
         loss.backward()
@@ -90,8 +204,7 @@ def test_marker_offloads_checkpoint_input():
         assert offload.stats.skipped_marked_tensors == 1
 
 
-@pytest.mark.skipif(not get_accelerator().is_available() or get_accelerator().is_synchronized_device(),
-                    reason="requires a stream-capable accelerator")
+@pytest.mark.skipif(not _ACCEL, reason="requires a stream-capable accelerator")
 def test_streams_offload_restore_matches_baseline():
     device = get_accelerator().device_name()
     torch.manual_seed(17)
@@ -119,8 +232,9 @@ def test_streams_offload_restore_matches_baseline():
     baseline_x_grad = x.grad.detach().clone()
 
     manager = get_checkpoint_hidden_states_offloading_ctx_manager(use_streams=True,
-                                                                  max_fwd_stash_size=2,
-                                                                  min_offload_size=0)
+                                                                  max_fwd_stash_count=2,
+                                                                  min_offload_bytes=0,
+                                                                  keep_last_count=0)
     for step in range(2):
         layers.zero_grad(set_to_none=True)
         x.grad = None
@@ -136,11 +250,60 @@ def test_streams_offload_restore_matches_baseline():
         assert manager.stats.offloaded_tensors > 0
         if step == 1:
             # Second step with the same manager reuses pooled CPU buffers.
-            assert manager._cpu_buffer_pool_size > 0
+            assert manager._cpu_buffer_pool_count > 0
 
 
-@pytest.mark.skipif(not get_accelerator().is_available() or get_accelerator().is_synchronized_device(),
-                    reason="requires a stream-capable accelerator")
+@pytest.mark.skipif(not _ACCEL, reason="requires a stream-capable accelerator")
+@pytest.mark.parametrize("use_streams", [False, True])
+@pytest.mark.parametrize("keep_last_count", [0, 1, 2])
+def test_keep_last_count_matches_baseline(use_streams, keep_last_count):
+    device = get_accelerator().device_name()
+    torch.manual_seed(3)
+    layers = nn.ModuleList([nn.Linear(16, 16) for _ in range(4)]).to(device)
+
+    def run(x, manager=None):
+        h = x
+        last_marked = None
+        for layer in layers:
+            if manager is not None:
+                manager.mark(h)
+                last_marked = h
+            h = checkpoint(layer, h, use_reentrant=False)
+        return h.square().sum(), last_marked
+
+    x = torch.randn(8, 16, device=device, requires_grad=True)
+    baseline_loss, _ = run(x)
+    baseline_loss.backward()
+    baseline_x_grad = x.grad.detach().clone()
+    baseline_grads = [p.grad.detach().clone() for p in layers.parameters()]
+
+    layers.zero_grad(set_to_none=True)
+    x.grad = None
+    offload = CheckpointHiddenStatesOffload(use_streams=use_streams,
+                                            min_offload_bytes=0,
+                                            keep_last_count=keep_last_count)
+    with offload:
+        loss, last_marked = run(x, manager=offload)
+        if keep_last_count:
+            expected_ids = list(range(offload._next_id - keep_last_count + 1, offload._next_id + 1))
+        else:
+            expected_ids = []
+        assert list(offload._keep_last) == expected_ids
+        if keep_last_count == 1:
+            assert next(iter(offload._keep_last.values())) is last_marked
+        loss.backward()
+
+    assert torch.allclose(loss, baseline_loss)
+    assert torch.allclose(x.grad, baseline_x_grad)
+    for g, bg in zip([p.grad for p in layers.parameters()], baseline_grads):
+        assert torch.allclose(g, bg)
+    assert offload.stats.marked_tensors == 4
+    assert offload.stats.offloaded_tensors == 4 - keep_last_count
+    assert offload.stats.restored_tensors == 4 - keep_last_count
+    assert offload.stats.kept_last_tensors == keep_last_count
+
+
+@pytest.mark.skipif(not _ACCEL, reason="requires a stream-capable accelerator")
 def test_marked_view_with_storage_offset():
 
     def fn(x):
@@ -153,7 +316,7 @@ def test_marked_view_with_storage_offset():
 
     x = base[2:].detach().requires_grad_(True)
     assert x.storage_offset() > 0
-    offload = CheckpointHiddenStatesOffload(use_streams=False, min_offload_size=0)
+    offload = CheckpointHiddenStatesOffload(use_streams=False, min_offload_bytes=0, keep_last_count=0)
     with offload:
         offload.mark(x)
         loss = fn(checkpoint(fn, x, use_reentrant=False)).sum()
