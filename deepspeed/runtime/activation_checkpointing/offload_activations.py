@@ -92,10 +92,8 @@ def patch_gradient_checkpointing_layer_marker() -> None:
         marked = None
         if (manager is not None and self.training and torch.is_grad_enabled()
                 and getattr(self, "gradient_checkpointing", False)):
-            # HF decoder layers take hidden_states as the first positional argument.
-            # GradientCheckpointingLayer.__call__ checkpoints super().__call__(*args),
-            # so only args[0] is a saved checkpoint input. A keyword hidden_states is
-            # captured in partial(..., **kwargs) and is never packed.
+            # Only args[0] (hidden_states) is checkpointed; a keyword hidden_states
+            # rides in partial(**kwargs) and is never packed.
             hidden_states = args[0] if args else None
             if torch.is_tensor(hidden_states):
                 manager.mark(hidden_states)
@@ -112,8 +110,8 @@ def patch_gradient_checkpointing_layer_marker() -> None:
 
 
 def _unpatch_gradient_checkpointing_layer_marker() -> None:
-    # Restore GradientCheckpointingLayer.__call__ when no offload manager is active
-    # so the same model can be reused for HybridEngineRollout without leftover patching.
+    # Restore __call__ once no manager is active so the model stays clean for
+    # HybridEngine reuse.
     global _ORIG_GRADIENT_CHECKPOINTING_LAYER_CALL, _MARKER_WRAPPER
 
     wrapper = _MARKER_WRAPPER
@@ -163,8 +161,8 @@ class CheckpointHiddenStatesOffload(saved_tensors_hooks):
         self.min_offload_bytes = min_offload_bytes
         self.max_fwd_stash_count = max_fwd_stash_count
         self.max_cpu_buffer_pool_count = max_cpu_buffer_pool_count
-        # Last packed checkpoint inputs stay on GPU: the first backward uses them
-        # immediately, and a D2H of that activation can stall if head bwd is fast.
+        # Keep the last inputs on GPU; the first backward needs them before a
+        # D2H would finish.
         self.keep_last_count = keep_last_count
         self.stats = CheckpointActivationOffloadStats()
         self._allowed: dict[int, int] = {}
@@ -186,7 +184,7 @@ class CheckpointHiddenStatesOffload(saved_tensors_hooks):
 
     @property
     def compute_stream(self):
-        # resolved per use: the compute stream may differ from the construction-time one
+        # resolve per use; the compute stream may change after construction
         return get_accelerator().current_stream()
 
     def _stream_context(self, stream):
@@ -218,8 +216,8 @@ class CheckpointHiddenStatesOffload(saved_tensors_hooks):
         return self._next_id
 
     def _reap_forward_stash(self, new_tensor_id: int) -> None:
-        # Drop GPU refs whose D2H has had enough overlap. record_stream on pack
-        # keeps the source allocation alive until s1 finishes; do not stall compute.
+        # Drop GPU refs past the stash window; record_stream (pack) holds the
+        # allocation until s1 drains, so compute never stalls.
         for tensor_id in list(self._fwd_stash):
             if tensor_id > new_tensor_id - self.max_fwd_stash_count:
                 continue
@@ -260,10 +258,9 @@ class CheckpointHiddenStatesOffload(saved_tensors_hooks):
         if pool:
             self._cpu_buffer_pool_count -= 1
             return pool.pop(), key
-        # Host buffers are dense: _restore_tensor rebuilds the source strides on the
-        # device and copy_ bridges the layout difference, so the buffer only has to
-        # match shape and dtype. That keeps pinning on the accelerator API, which
-        # honors DS_PIN_MEMORY_BACKEND and feeds the pinned-memory accounting.
+        # Dense host buffer: restore rebuilds strides device-side, so matching
+        # shape/dtype is enough and we pin via the accelerator API (honors
+        # DS_PIN_MEMORY_BACKEND and its accounting).
         host = torch.empty(tuple(tensor.size()), dtype=tensor.dtype, layout=tensor.layout, device="cpu")
         if self.use_pin_memory:
             host = get_accelerator().pin_memory(host, make_copy=False)
@@ -289,8 +286,8 @@ class CheckpointHiddenStatesOffload(saved_tensors_hooks):
             buffer_key,
         )
         if self.use_streams:
-            # record_stream keeps the source allocation alive until s1 drains the
-            # copy, so a zero stash can drop the GPU reference right away.
+            # record_stream holds the allocation until s1 drains, so a zero stash
+            # can drop the GPU ref now.
             tensor.record_stream(self.s1)
             if self.max_fwd_stash_count > 0:
                 self._fwd_stash[tensor_id] = (tensor, self.s1.record_event())
@@ -352,8 +349,7 @@ class CheckpointHiddenStatesOffload(saved_tensors_hooks):
         cpu_tensor, device, shape, stride, buffer_key = tracked
         stream = self.s1 if self.use_streams else self.compute_stream
         with self._stream_context(stream):
-            # restore into fresh offset-0 storage; reapplying the source storage_offset
-            # would index past the pool buffer's storage for sliced views
+            # fresh offset-0 storage; a source offset would index past the pool buffer
             gpu_tensor = torch.empty_strided(shape, stride, dtype=cpu_tensor.dtype, device=device)
             gpu_tensor.copy_(cpu_tensor, non_blocking=self.use_streams)
         if self.use_streams:
