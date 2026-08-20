@@ -297,8 +297,11 @@ class CheckpointHiddenStatesOffload(saved_tensors_hooks):
             buffer_key,
         )
         if self.use_streams:
+            # record_stream keeps the source allocation alive until s1 drains the
+            # copy, so a zero stash can drop the GPU reference right away.
             tensor.record_stream(self.s1)
-            self._fwd_stash[tensor_id] = (tensor, self.s1.record_event())
+            if self.max_fwd_stash_count > 0:
+                self._fwd_stash[tensor_id] = (tensor, self.s1.record_event())
 
         self.stats.offloaded_tensors += 1
         self.stats.offloaded_bytes += self._storage_bytes(cpu_tensor)

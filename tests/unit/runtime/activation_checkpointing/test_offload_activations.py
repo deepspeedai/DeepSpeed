@@ -435,3 +435,41 @@ def test_retain_graph_second_backward():
         loss.backward()
     assert offload.stats.restored_tensors == 1
     assert x.grad is not None
+
+
+@pytest.mark.skipif(not _ACCEL, reason="requires a stream-capable accelerator")
+def test_zero_fwd_stash_retains_no_gpu_activation():
+    device = get_accelerator().device_name()
+    torch.manual_seed(11)
+    layers = nn.ModuleList([nn.Linear(16, 16) for _ in range(4)]).to(device)
+
+    def run(x, manager=None):
+        h = x
+        for layer in layers:
+            if manager is not None:
+                manager.mark(h)
+            h = checkpoint(layer, h, use_reentrant=False)
+        return h.square().sum()
+
+    x = torch.randn(8, 16, device=device, requires_grad=True)
+    baseline_loss = run(x)
+    baseline_loss.backward()
+    baseline_x_grad = x.grad.detach().clone()
+    baseline_grads = [p.grad.detach().clone() for p in layers.parameters()]
+
+    layers.zero_grad(set_to_none=True)
+    x.grad = None
+    offload = CheckpointHiddenStatesOffload(use_streams=True,
+                                            min_offload_bytes=0,
+                                            max_fwd_stash_count=0,
+                                            keep_last_count=0)
+    with offload:
+        loss = run(x, manager=offload)
+        assert not offload._fwd_stash
+        loss.backward()
+
+    assert torch.allclose(x.grad, baseline_x_grad)
+    for g, bg in zip([p.grad for p in layers.parameters()], baseline_grads):
+        assert torch.allclose(g, bg)
+    assert offload.stats.offloaded_tensors == 4
+    assert offload.stats.restored_tensors == 4
