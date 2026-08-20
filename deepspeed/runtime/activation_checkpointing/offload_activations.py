@@ -47,7 +47,7 @@ class _OffloadedTensorRef:
     tensor_id: int
 
 
-_BufferKey = Tuple[Tuple[int, ...], Tuple[int, ...], torch.dtype, torch.layout, bool]
+_BufferKey = Tuple[Tuple[int, ...], torch.dtype, torch.layout, bool]
 _TLS = threading.local()
 _PATCH_LOCK = threading.Lock()
 _ORIG_GRADIENT_CHECKPOINTING_LAYER_CALL = None
@@ -213,11 +213,6 @@ class CheckpointHiddenStatesOffload(saved_tensors_hooks):
     def _num_bytes(tensor: torch.Tensor) -> int:
         return tensor.element_size() * tensor.nelement()
 
-    @staticmethod
-    def _storage_bytes(tensor: torch.Tensor) -> int:
-        # Host allocation size (includes strided gaps); logical numel can be smaller.
-        return tensor.untyped_storage().nbytes()
-
     def _next_tensor_id(self) -> int:
         self._next_id += 1
         return self._next_id
@@ -231,9 +226,10 @@ class CheckpointHiddenStatesOffload(saved_tensors_hooks):
             self._fwd_stash.pop(tensor_id)
 
     def _buffer_key(self, tensor: torch.Tensor) -> _BufferKey:
+        # Pooled host buffers are dense, so sources that differ only in stride can
+        # share one buffer.
         return (
             tuple(tensor.size()),
-            tuple(tensor.stride()),
             tensor.dtype,
             tensor.layout,
             self.use_pin_memory,
@@ -264,18 +260,14 @@ class CheckpointHiddenStatesOffload(saved_tensors_hooks):
         if pool:
             self._cpu_buffer_pool_count -= 1
             return pool.pop(), key
-        # ATen empty_strided(pin_memory=True) is CUDA/XPU-registered host memory
-        # and preserves strides. get_accelerator().pin_memory() native backend is
-        # posix_memalign+mlock without cudaHostRegister, so async D2H/H2D would
-        # silently become blocking. Keep pin on/off here, not Torch-vs-native.
-        return torch.empty_strided(
-            tuple(tensor.size()),
-            tuple(tensor.stride()),
-            dtype=tensor.dtype,
-            layout=tensor.layout,
-            device="cpu",
-            pin_memory=self.use_pin_memory,
-        ), key
+        # Host buffers are dense: _restore_tensor rebuilds the source strides on the
+        # device and copy_ bridges the layout difference, so the buffer only has to
+        # match shape and dtype. That keeps pinning on the accelerator API, which
+        # honors DS_PIN_MEMORY_BACKEND and feeds the pinned-memory accounting.
+        host = torch.empty(tuple(tensor.size()), dtype=tensor.dtype, layout=tensor.layout, device="cpu")
+        if self.use_pin_memory:
+            host = get_accelerator().pin_memory(host, make_copy=False)
+        return host, key
 
     def _start_offload(self, tensor_id: int, tensor: torch.Tensor, reap_id: int | None = None) -> None:
         if self.use_streams:
@@ -304,7 +296,7 @@ class CheckpointHiddenStatesOffload(saved_tensors_hooks):
                 self._fwd_stash[tensor_id] = (tensor, self.s1.record_event())
 
         self.stats.offloaded_tensors += 1
-        self.stats.offloaded_bytes += self._storage_bytes(cpu_tensor)
+        self.stats.offloaded_bytes += self._num_bytes(cpu_tensor)
 
     def _flush_keep_last(self, newest_id: int) -> None:
         while len(self._keep_last) > self.keep_last_count:
@@ -322,7 +314,8 @@ class CheckpointHiddenStatesOffload(saved_tensors_hooks):
                 or num_bytes < self.min_offload_bytes or isinstance(tensor, torch.nn.Parameter)
                 or (hasattr(torch.nn, "Buffer") and isinstance(tensor, torch.nn.Buffer))
                 or (tensor.numel() > 1 and 0 in tensor.stride())):
-            # Overlapping (stride-0) views cannot be copy_'d into empty_strided storage.
+            # Restore rebuilds the source strides and copy_ cannot write into the
+            # overlapping storage that a stride-0 view would produce.
             self.stats.skipped_marked_tensors += 1
             return tensor
 

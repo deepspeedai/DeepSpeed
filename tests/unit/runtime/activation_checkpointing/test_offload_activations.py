@@ -346,8 +346,7 @@ def test_contiguous_offload_buffer_pin_flag(use_pin_memory):
         cpu_bufs = [tracked[0] for tracked in offload._tracker.values()]
         assert cpu_bufs
         for buf in cpu_bufs:
-            # ATen pin_memory (cudaHostRegister), not native ds_pinned.
-            assert buf.is_pinned() is use_pin_memory
+            # Ask the accelerator, so the assertion holds for either pin backend.
             assert get_accelerator().is_pinned(buf) is use_pin_memory
         loss.backward()
     assert offload.stats.offloaded_tensors == 1
@@ -372,29 +371,41 @@ def test_strided_view_offload_matches_baseline():
         loss = fn(checkpoint(fn, x, use_reentrant=False)).sum()
         cpu_bufs = [tracked[0] for tracked in offload._tracker.values()]
         assert cpu_bufs
-        assert tuple(cpu_bufs[0].stride()) == tuple(x.stride())
+        assert cpu_bufs[0].is_contiguous()
         loss.backward()
 
     assert offload.stats.offloaded_tensors == 1
     assert torch.allclose(x.grad, x_base.grad)
 
 
-def test_empty_cpu_like_does_not_call_accelerator_pin(monkeypatch):
+@pytest.mark.parametrize("use_pin_memory", [True, False])
+def test_empty_cpu_like_pins_via_accelerator(monkeypatch, use_pin_memory):
     accel = get_accelerator()
     calls = []
     orig = accel.pin_memory
 
     def wrapped(*args, **kwargs):
-        calls.append(1)
+        calls.append(kwargs)
         return orig(*args, **kwargs)
 
     monkeypatch.setattr(accel, "pin_memory", wrapped)
-    offload = CheckpointHiddenStatesOffload(use_streams=False, min_offload_bytes=0, keep_last_count=0)
-    src = torch.randn(4, 8)
+    offload = CheckpointHiddenStatesOffload(use_streams=False,
+                                            min_offload_bytes=0,
+                                            keep_last_count=0,
+                                            use_pin_memory=use_pin_memory)
+    src = torch.randn(6, 8)[:, ::2]
+    assert not src.is_contiguous()
     buf, _ = offload._empty_cpu_like(src)
-    assert calls == []
-    assert tuple(buf.stride()) == tuple(src.stride())
+    assert len(calls) == (1 if use_pin_memory else 0)
     assert tuple(buf.size()) == tuple(src.size())
+    assert buf.is_contiguous()
+
+
+def test_buffer_key_shared_across_strides():
+    offload = CheckpointHiddenStatesOffload(use_streams=False, min_offload_bytes=0, keep_last_count=0)
+    dense = torch.randn(6, 4)
+    strided = torch.randn(6, 8)[:, ::2]
+    assert offload._buffer_key(dense) == offload._buffer_key(strided)
 
 
 @pytest.mark.skipif(not _ACCEL, reason="requires a stream-capable accelerator")

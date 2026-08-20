@@ -325,12 +325,14 @@ Whether to pin and how to pin are orthogonal:
   All default to pinning so async copies can use full DMA bandwidth; set
   false only under tight memlock limits (``ulimit -l``).
 * **How:** ``DS_PIN_MEMORY_BACKEND=torch|native`` (environment only; not a
-  ``ds_config`` field). ZeRO CPU-offload buffers that go through
-  ``get_accelerator().pin_memory()`` honor this env var. Eager activation
-  checkpoint offload and DeepCompile activation offload pin with ATen
-  ``pinned_memory`` / ``empty_strided(..., pin_memory=True)`` so accelerator
-  DMA stays async; they do **not** use ``DS_PIN_MEMORY_BACKEND`` (native pin
-  is ``mlock`` without ``cudaHostRegister``).
+  ``ds_config`` field). Every call site that pins through
+  ``get_accelerator().pin_memory()`` honors this env var, including ZeRO
+  CPU-offload buffers and eager activation checkpoint offload. Keep the default
+  ``torch`` backend for activation offload: ``native`` is ``mlock`` without
+  ``cudaHostRegister``, so its host buffers are not registered for accelerator
+  DMA and the offload's async copies can still block. DeepCompile activation
+  offload pins with ATen ``pinned_memory`` and does **not** use
+  ``DS_PIN_MEMORY_BACKEND``.
 
 Backend Selection
 =================
