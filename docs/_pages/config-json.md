@@ -226,17 +226,23 @@ Example of <i>**scheduler**</i>
 | ----------------------------------------------------------------------------------------------------------------------------- | ------- |
 | During gradient averaging perform communication with selected data type. By default it will be determined by selected regime  |  None   |
 
+<i>**gradient_allreduce_op**</i>: [string]
+
+| Description                                                                                                                                                                                            | Default  |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | -------- |
+| Select `"mean"` to average gradients across data-parallel workers or `"sum"` to keep the unscaled sum. `"sum"` supports ZeRO stages 0, 1, and 2 when neither ZenFlow nor DeepCompile is enabled; ZeRO stage 3, ZenFlow, and DeepCompile reject this setting. | `"mean"` |
+
 <i>**prescale_gradients**</i>: [boolean]
 
 | Description                            | Default |
 | -------------------------------------- | ------- |
-| Scale gradients before doing allreduce | `false` |
+| Scale gradients before doing mean allreduce | `false` |
 
 <i>**gradient_predivide_factor**</i>: [float]
 
 | Description                                                                                                                                       | Default |
 | ------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
-| Before gradient averaging predivide gradients by a specified factor, can sometimes help with fp16 stability when scaling to large numbers of GPUs | `1.0`   |
+| Before mean gradient allreduce, predivide gradients by a specified factor; this can sometimes help with fp16 stability when scaling to large numbers of GPUs | `1.0`   |
 
 <i>**sparse_gradients**</i>: [boolean]
 
@@ -869,6 +875,36 @@ When a HuggingFace model provides a built-in `tp_plan` (via `model.config.base_m
 | Description                                                                                                                                                                                                                                                                                                                                                     | Default |
 | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
 | Unused parameters in modules may be unexpected in static networks, but could be normal in dynamic networks. This controls whether or not training should terminate with an error message when unused parameters are detected. This is set to `True` by default, which means unused parameters are ignored and training continues. Now is just used in stage 2. | `True`  |
+
+### Hybrid Engine
+
+The Hybrid Engine (`DeepSpeedHybridEngine`) switches a model between training mode and DeepSpeed's inference kernels within a single training loop, which is what RLHF pipelines such as DeepSpeed-Chat use for the actor model.
+
+```json
+  "hybrid_engine": {
+    "enabled": true,
+    "max_out_tokens": 512,
+    "inference_tp_size": 1,
+    "release_inference_cache": false,
+    "pin_parameters": true,
+    "tp_gather_partition_size": 8,
+    "enable_cuda_graph": false
+  }
+```
+
+***enable_cuda_graph***: [boolean]
+
+| Description                                                                                                                                                                                                                                                                                                                                        | Default |
+| ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
+| Capture token generation into CUDA graphs. Generation issues on the order of a thousand kernel launches per token and is bound by CPU launch overhead rather than by the GPU, so replaying a captured graph removes most of the per-token cost. One graph is captured per decode position, and generated tokens are unchanged. | `false` |
+
+`enable_cuda_graph` requires a pinned generation length (`min_new_tokens` equal to `max_new_tokens`) and `max_out_tokens` large enough to cover the longest generation. It is ignored, with a warning, when any of the following apply, since captured graphs would not stay valid:
+
+* ZeRO stage 3, where parameters are gathered into fresh buffers for each generation
+* `release_inference_cache: true`, which frees the buffers the graphs write into
+* `inference_tp_size` greater than 1
+
+The first generation after enabling captures one graph per decode position and is therefore slower; subsequent generations replay them.
 
 ### Expert Parallel (AutoEP)
 Configure AutoEP expert parallelism for MoE models. AutoEP automatically detects MoE layers in HuggingFace models and replaces them with EP-enabled versions using TorchTitan's grouped GEMM kernels. Requires zero model code changes. Supports ZeRO stages 0, 1, 2, and constrained ZeRO Stage 3.
@@ -2179,11 +2215,49 @@ DeepSpeed provides compiler-based optimization passes through the `compile` conf
 }
 ```
 
+### AutoTP options
+
+The `autotp` pass emits AutoTP's tensor-parallel collectives into the compiled graph instead of
+running them from inside the injected `LinearLayer` / `LinearAllreduce` modules. The model is
+partitioned by the regular AutoTP path, so `tensor_parallel.autotp_size` must be greater than 1
+and the pass reuses the same tensor-parallel group.
+
+```json
+{
+    "zero_optimization": {"stage": 0},
+    "tensor_parallel": {"autotp_size": 4},
+    "compile": {
+        "deepcompile": true,
+        "passes": ["autotp"],
+    }
+}
+```
+
 <i>**passes**</i>: [array of strings]
 
-| Description                                                              | Default |
-| ------------------------------------------------------------------------ | ------- |
-| List of compiler passes to apply. Currently supported: `["autosp"]`.     | `[]`    |
+| Description                                                                       | Default |
+| ----------------------------------------------------------------------------------- | ------- |
+| List of compiler passes to apply. Currently supported: `["autosp", "autotp"]`.    | `[]`    |
+
+
+
+### DeepCompile activation offload
+
+These fields live under `compile` and apply when DeepCompile activation offload is scheduled.
+The offload pass is **not** in the default DeepCompile schedule; enable it only via a custom
+`schedule=` when calling DeepCompile init. Setting `offload_activation` alone has no effect.
+
+<i>**offload_activation**</i>: [boolean]
+
+| Description | Default |
+| ----------- | ------- |
+| Config field for DeepCompile activation offload. Requires a custom schedule that includes the offload pass; not enabled by the default `init_z3` / `init_z1` schedules. | `false` |
+
+<i>**offload_activation_pin_memory**</i>: [boolean]
+
+| Description | Default |
+| ----------- | ------- |
+| When activation offload runs, pin host buffers via ATen `pinned_memory` (Torch host pin). Does **not** use `DS_PIN_MEMORY_BACKEND`. Defaults to `true`; set `false` under tight memlock limits (`ulimit -l`). | `true` |
 
 ### Data Type options
 

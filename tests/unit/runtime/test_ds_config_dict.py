@@ -135,6 +135,66 @@ def test_temp_config_json(tmpdir):
     assert 'train_batch_size' in config_json
 
 
+@pytest.mark.parametrize("value,expected", [("mean", "mean"), ("SUM", "sum")])
+def test_gradient_allreduce_op(value, expected):
+    config = DeepSpeedConfig({
+        "train_batch_size": 1,
+        "gradient_allreduce_op": value,
+    })
+    assert config.gradient_allreduce_op == expected
+
+
+def test_gradient_allreduce_op_default():
+    config = DeepSpeedConfig({"train_batch_size": 1})
+    assert config.gradient_allreduce_op == "mean"
+
+
+def test_invalid_gradient_allreduce_op():
+    with pytest.raises(ValueError, match="Invalid gradient_allreduce_op"):
+        DeepSpeedConfig({
+            "train_batch_size": 1,
+            "gradient_allreduce_op": "max",
+        })
+
+
+def test_sum_gradient_allreduce_rejects_zero3():
+    with pytest.raises(ValueError, match="not supported with ZeRO stage 3"):
+        DeepSpeedConfig({
+            "train_batch_size": 1,
+            "gradient_allreduce_op": "sum",
+            "zero_optimization": {
+                "stage": 3,
+            },
+        })
+
+
+def test_sum_gradient_allreduce_rejects_zenflow():
+    with pytest.raises(ValueError, match="not supported with ZenFlow"):
+        DeepSpeedConfig({
+            "train_batch_size": 1,
+            "gradient_allreduce_op": "sum",
+            "zero_optimization": {
+                "stage": 2,
+                "zenflow": {},
+            },
+        })
+
+
+@pytest.mark.parametrize("zero_stage", [1, 2])
+def test_sum_gradient_allreduce_rejects_deepcompile(zero_stage):
+    with pytest.raises(ValueError, match="not supported with DeepCompile"):
+        DeepSpeedConfig({
+            "train_batch_size": 1,
+            "gradient_allreduce_op": "sum",
+            "zero_optimization": {
+                "stage": zero_stage,
+            },
+            "compile": {
+                "deepcompile": True,
+            },
+        })
+
+
 @pytest.mark.parametrize("gather_weights_key",
                          ["stage3_gather_16bit_weights_on_model_save", "stage3_gather_fp16_weights_on_model_save"])
 def test_gather_16bit_params_on_model_save(gather_weights_key):

@@ -94,7 +94,7 @@ class DSRaggedUnembed(DSUnembedBase):
             hidden_states (torch.Tensor): The hidden states from the model. This is the output of the
                 final layer of the model.
             vocab_embedding (torch.Tensor): The vocab embedding table.
-            raged_metadata (RaggedBatchWrapper): The ragged batch metadata.
+            ragged_metadata (RaggedBatchWrapper): The ragged batch metadata.
             gamma (Optional[torch.Tensor]): The gamma tensor for normalization.
             beta (Optional[torch.Tensor]): The beta tensor for normalization.
         """

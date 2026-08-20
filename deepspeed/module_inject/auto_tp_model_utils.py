@@ -3,13 +3,80 @@
 
 # DeepSpeed Team
 
+import functools
+
 from deepspeed import comm as dist
 import torch
 from typing import Optional
-from deepspeed.module_inject.tp_shard import get_shard_size, get_shard_size_list
+from deepspeed.module_inject.tp_shard import get_shard_size_list
 
 
-def build_bloom_alibi_tensor(attention_mask: torch.Tensor, num_heads: int, dtype: torch.dtype) -> torch.Tensor:
+class _HeadCountProxy:
+
+    def __init__(self, module, total_num_heads):
+        object.__setattr__(self, "_module", module)
+        object.__setattr__(self, "n_head", total_num_heads)
+
+    def __getattr__(self, name):
+        return getattr(self._module, name)
+
+    def __setattr__(self, name, value):
+        if name == "n_head":
+            object.__setattr__(self, name, value)
+        else:
+            setattr(self._module, name, value)
+
+
+def get_head_shard_sizes(num_heads, mp_group=None, num_kv_heads=None):
+    tp_world_size = dist.get_world_size(group=mp_group)
+    return get_shard_size_list(
+        num_heads,
+        tp_world_size,
+        num_kv_heads=num_kv_heads,
+    )
+
+
+def install_head_sharded_helper(module, name, wrapper, mp_group=None, num_heads=None, num_kv_heads=None):
+    """Give ``module`` a head-slicing wrapper around one of its own methods.
+
+    The wrapper is bound to this instance instead of installed on its class. A class-wide patch
+    outlives the injected model: instances created later never get the ``<name>_orig`` the
+    wrapper delegates to, and a subclass inheriting the patched method would record the wrapper
+    itself as the original and call it until the interpreter runs out of stack.
+    """
+    original_name = f"{name}_orig"
+    if original_name not in module.__dict__:
+        # Wrapping an already wrapped instance would make it delegate to itself.
+        setattr(module, original_name, getattr(module, name))
+    shard_sizes = get_head_shard_sizes(num_heads, mp_group, num_kv_heads) if num_heads is not None else None
+    setattr(
+        module, name,
+        functools.partial(wrapper, module, mp_group=mp_group, head_shard_sizes=shard_sizes, total_num_heads=num_heads))
+
+
+def _head_shard(num_heads, mp_group=None, head_shard_sizes=None, total_num_heads=None):
+    """This rank's head count and offset, following the same split AutoTP used for the weights.
+
+    The heads have to be cut the same way as the attention weights, which AutoTP partitions
+    across the tensor-parallel group. Falling back to the global rank would select a different
+    slice than the weights whenever the group is smaller than the world.
+    """
+    tp_world_size = dist.get_world_size(group=mp_group)
+    tp_index = dist.get_rank(group=mp_group)
+    full_num_heads = total_num_heads if total_num_heads is not None else num_heads
+    shard_sizes = head_shard_sizes or get_shard_size_list(full_num_heads, tp_world_size)
+    if len(shard_sizes) != tp_world_size or sum(shard_sizes) != full_num_heads:
+        raise ValueError(f"Head shard sizes {shard_sizes} do not partition {full_num_heads} heads across "
+                         f"{tp_world_size} tensor-parallel ranks.")
+    return shard_sizes[tp_index], sum(shard_sizes[0:tp_index])
+
+
+def build_bloom_alibi_tensor(attention_mask: torch.Tensor,
+                             num_heads: int,
+                             dtype: torch.dtype,
+                             mp_group=None,
+                             head_shard_sizes=None,
+                             total_num_heads=None) -> torch.Tensor:
     """
     Link to paper: https://arxiv.org/abs/2108.12409 Alibi tensor is not causal as the original paper mentions, it
     relies on a translation invariance of softmax for quick implementation: with l being a tensor, and a fixed value
@@ -27,6 +94,7 @@ def build_bloom_alibi_tensor(attention_mask: torch.Tensor, num_heads: int, dtype
             dtype of the output tensor
     """
     import math
+    num_heads = total_num_heads if total_num_heads is not None else num_heads
     batch_size, seq_length = attention_mask.shape
     closest_power_of_2 = 2**math.floor(math.log2(num_heads))
     base = torch.tensor(2**(-(2**-(math.log2(closest_power_of_2) - 3))),
@@ -52,8 +120,7 @@ def build_bloom_alibi_tensor(attention_mask: torch.Tensor, num_heads: int, dtype
     arange_tensor = ((attention_mask.cumsum(dim=-1) - 1) * attention_mask)[:, None, :]
     alibi = slopes[..., None] * arange_tensor
     if dist.is_initialized():
-        num_heads_per_rank = get_shard_size(num_heads, dist.get_world_size())
-        offset = sum(get_shard_size_list(num_heads, dist.get_world_size())[0:dist.get_rank()])
+        num_heads_per_rank, offset = _head_shard(num_heads, mp_group, head_shard_sizes, total_num_heads)
         alibi = alibi.view(batch_size, num_heads, 1, seq_length)
         alibi = alibi[:, offset:num_heads_per_rank + offset, :, :]
         return alibi.reshape(batch_size * num_heads_per_rank, 1, seq_length).to(dtype)
@@ -61,11 +128,17 @@ def build_bloom_alibi_tensor(attention_mask: torch.Tensor, num_heads: int, dtype
         return alibi.reshape(batch_size * num_heads, 1, seq_length).to(dtype)
 
 
-def get_alibi_mask(self, tensor, seq_length_with_past):
-    mask = self.get_alibi_mask_orig(tensor, seq_length_with_past)
-    if not self.training and dist.is_initialized():
-        num_heads_per_rank = get_shard_size(self.n_head, dist.get_world_size())
-        offset = sum(get_shard_size_list(self.n_head, dist.get_world_size())[0:dist.get_rank()])
+def get_alibi_mask(self, tensor, seq_length_with_past, mp_group=None, head_shard_sizes=None, total_num_heads=None):
+    original = self.get_alibi_mask_orig
+    if total_num_heads is not None and self.n_head != total_num_heads:
+        original_function = getattr(original, "__func__", None)
+        if original_function is None:
+            raise TypeError("Cannot invoke get_alibi_mask with the original total head count.")
+        mask = original_function(_HeadCountProxy(self, total_num_heads), tensor, seq_length_with_past)
+    else:
+        mask = original(tensor, seq_length_with_past)
+    if dist.is_initialized():
+        num_heads_per_rank, offset = _head_shard(self.n_head, mp_group, head_shard_sizes, total_num_heads)
         mask = mask[offset:num_heads_per_rank + offset, :seq_length_with_past, :seq_length_with_past]
 
     return mask
@@ -76,29 +149,38 @@ def build_mpt_atten_bias_tensor(self,
                                 dtype,
                                 attention_mask: Optional[torch.ByteTensor] = None,
                                 prefix_mask: Optional[torch.ByteTensor] = None,
-                                sequence_id: Optional[torch.LongTensor] = None):
+                                sequence_id: Optional[torch.LongTensor] = None,
+                                mp_group=None,
+                                head_shard_sizes=None,
+                                total_num_heads=None):
     (attn_bias, attention_mask) = self._attn_bias_orig(device,
                                                        dtype,
                                                        attention_mask=attention_mask,
                                                        prefix_mask=prefix_mask,
                                                        sequence_id=sequence_id)
     if dist.is_initialized():
-        num_heads_per_rank = get_shard_size(self.config.n_heads, dist.get_world_size())
-        offset = sum(get_shard_size_list(self.config.n_heads, dist.get_world_size())[0:dist.get_rank()])
+        num_heads_per_rank, offset = _head_shard(self.config.n_heads, mp_group, head_shard_sizes, total_num_heads)
         attn_bias = attn_bias[:, offset:num_heads_per_rank + offset, :, :]
     return attn_bias, attention_mask
 
 
-def build_mpt_alibi_tensor(self, num_heads, sequence_length, alibi_bias_max=8, device=None) -> torch.Tensor:
+def build_mpt_alibi_tensor(self,
+                           num_heads,
+                           sequence_length,
+                           alibi_bias_max=8,
+                           device=None,
+                           mp_group=None,
+                           head_shard_sizes=None,
+                           total_num_heads=None) -> torch.Tensor:
     r"""
     Link to paper: https://arxiv.org/abs/2108.12409 - Alibi tensor is not causal as the original paper mentions, it
     relies on a translation invariance of softmax for quick implementation. This implementation has been copied from
     the alibi implementation of MPT source code that led to slightly different results than the Bloom alibi:
     https://huggingface.co/mosaicml/mpt-7b/blob/main/attention.py#L292
     """
-    alibi = self.build_mpt_alibi_tensor_orig(num_heads, sequence_length, alibi_bias_max, device)
+    full_num_heads = total_num_heads if total_num_heads is not None else num_heads
+    alibi = self.build_mpt_alibi_tensor_orig(full_num_heads, sequence_length, alibi_bias_max, device)
     if dist.is_initialized():
-        num_heads_per_rank = int(num_heads / dist.get_world_size())
-        offset = dist.get_rank() * num_heads_per_rank
+        num_heads_per_rank, offset = _head_shard(num_heads, mp_group, head_shard_sizes, total_num_heads)
         alibi = alibi[offset:num_heads_per_rank + offset, :, :]
     return alibi

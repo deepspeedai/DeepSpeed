@@ -79,6 +79,7 @@ jobs:
         - name: Install PyTorch (CPU)
           if: needs.check-paths.outputs.should_run == 'true'
           run: |
+            python -m pip install --upgrade pip
             pip install torch --index-url https://download.pytorch.org/whl/cpu
         - name: Install deepspeed
           if: needs.check-paths.outputs.should_run == 'true'

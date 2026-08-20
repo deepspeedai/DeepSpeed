@@ -127,6 +127,12 @@ class TPLayerSpec:
     # Gather column-parallel output shards so every TP rank receives the full output
     gather_output: bool = False
 
+    # For SKIP specs only: the parameter stays replicated, but each tensor-parallel rank computes
+    # only its shard's contribution to the gradient, so the gradients must be summed across the
+    # tensor-parallel group. This is HuggingFace's 'replicated_with_grad_allreduce' style (e.g.
+    # Qwen3's q_norm/k_norm, which normalize sharded attention heads).
+    grad_allreduce: bool = False
+
     def __post_init__(self):
         if isinstance(self.partition_type, str):
             self.partition_type = PartitionType(self.partition_type.lower())
@@ -296,6 +302,7 @@ class AutoTPConfig:
                     patterns=spec_dict.get("patterns", []),
                     partition_type=partition_type,
                     gather_output=spec_dict.get("gather_output", False),
+                    grad_allreduce=spec_dict.get("grad_allreduce", False),
                     shape=shape,
                     partition_dim=spec_dict.get("partition_dim"),
                     model_types=spec_dict.get("model_types"),

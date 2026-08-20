@@ -1361,7 +1361,7 @@ class PipelineEngine(DeepSpeedEngine):
         If ``state_dict`` is not ``None`` or a ``str``, we revert to ``super()`` expecting a ``dict``.
 
         Args:
-            state_dict (str, None): unused
+            checkpoint (dict): the checkpoint whose module state is loaded
             strict (bool, optional): Strict state loading. Defaults to True.
         """
         assert custom_load_fn is None, "custom_load_fn not supported w. pipeline parallelism"

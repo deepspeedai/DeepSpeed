@@ -15,13 +15,20 @@ enabled_patched_func = False
 original_grad_fn = None
 base_meta = type(torch.autograd.Function)
 
+
+def _unwrap_staticmethod(method):
+    if isinstance(method, staticmethod):
+        return method.__func__
+    return method
+
+
 if required_torch_version(min_version=2.7):
 
     class FunctionMeta(base_meta):
 
         def __new__(cls, name, bases, dct):
             if name == "CompiledFunction":
-                original_backward_impl = dct.get("_backward_impl")
+                original_backward_impl = _unwrap_staticmethod(dct.get("_backward_impl"))
                 frame_key = backward_frame_keys.popleft() if backward_frame_keys else None
 
                 def wrapped_backward_impl(ctx, all_args):
@@ -48,7 +55,7 @@ elif required_torch_version(min_version=2.6):
 
         def __new__(cls, name, bases, dct):
             if name == "CompiledFunction":
-                original_backward_prologue = dct.get("_backward_prologue")
+                original_backward_prologue = _unwrap_staticmethod(dct.get("_backward_prologue"))
                 frame_key = backward_frame_keys.popleft() if backward_frame_keys else None
 
                 def wrapped_backward_prologue(ctx, *grad_outputs):

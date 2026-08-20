@@ -3,6 +3,7 @@
 // DeepSpeed Team
 
 #include <torch/extension.h>
+#include <cstdint>
 #include "deepspeed_pin_tensor.h"
 
 using namespace pybind11::literals;
@@ -20,6 +21,11 @@ struct deepspeed_pin_handle_t {
     bool free_cpu_locked_tensor(torch::Tensor& locked_tensor)
     {
         return _pinned_tensor_mgr->free(locked_tensor);
+    }
+
+    bool free_cpu_locked_tensor_by_ptr(const uintptr_t address)
+    {
+        return _pinned_tensor_mgr->free(reinterpret_cast<void*>(address));
     }
 
     bool is_pinned(const torch::Tensor& buffer)
@@ -41,6 +47,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
              &deepspeed_pin_handle_t::free_cpu_locked_tensor,
              "Free a page-locked CPU tensor",
              "locked_tensor"_a)
+        .def("free_cpu_locked_tensor_by_ptr",
+             &deepspeed_pin_handle_t::free_cpu_locked_tensor_by_ptr,
+             "Free a page-locked CPU tensor by its allocation base address",
+             "address"_a)
         .def("is_pinned",
              &deepspeed_pin_handle_t::is_pinned,
              "Return whether buffer is torch-pinned or managed by DeepSpeed pin_memory",

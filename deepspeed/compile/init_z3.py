@@ -127,7 +127,10 @@ def init_z3(engine, backend, compile_config, compile_kwargs, schedule=None):
 
     for p in engine.module.parameters():
         grad_buffer = torch.Tensor()
-        if use_opt:
+        # Frozen params (e.g. the base weights of a LoRA setup) are absent from the optimizer's
+        # grad partition map, which is built from the trainable groups only. They keep the empty
+        # buffer: no reduce op is scheduled for a param without a grad node, so it is never read.
+        if use_opt and p.requires_grad:
             grad_buffer = optimizer._DeepSpeedZeroOptimizer_Stage3__param_id_to_grad_partition[p.ds_id]
 
         # Disable persistent param

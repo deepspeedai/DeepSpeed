@@ -35,6 +35,10 @@ struct deepspeed_pin_tensor_t {
 
     bool free(torch::Tensor& locked_tensor);
 
+    // Free by allocation base address. Lets callers release the original locked
+    // region even when the tensor's storage pointer has since been redirected.
+    bool free(void* addr);
+
     bool is_managed(const torch::Tensor& buffer);
 };
 

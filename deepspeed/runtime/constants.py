@@ -324,6 +324,16 @@ Gradient predivide factor should be enabled as:
 GRADIENT_PREDIVIDE_FACTOR = "gradient_predivide_factor"
 GRADIENT_PREDIVIDE_FACTOR_DEFAULT = 1.0
 
+GRADIENT_ALLREDUCE_OP_FORMAT = '''
+Gradient allreduce operation should be set as:
+"gradient_allreduce_op": "mean"
+'''
+GRADIENT_ALLREDUCE_OP = "gradient_allreduce_op"
+GRADIENT_ALLREDUCE_OP_MEAN = "mean"
+GRADIENT_ALLREDUCE_OP_SUM = "sum"
+GRADIENT_ALLREDUCE_OP_DEFAULT = GRADIENT_ALLREDUCE_OP_MEAN
+GRADIENT_ALLREDUCE_OP_SUPPORTED = (GRADIENT_ALLREDUCE_OP_MEAN, GRADIENT_ALLREDUCE_OP_SUM)
+
 #########################################
 # Disable AllGather
 #########################################
