@@ -99,8 +99,6 @@ class DeepSpeedDiffusersAttentionFunction(Function):
 class DeepSpeedDiffusersAttention(nn.Module):
     """Initialize the DeepSpeed Transformer Layer.
         Arguments:
-            layer_id: The layer index starting from 0, e.g. if model has 24 transformer layers,
-                layer_id will be 0,1,2...23 when each layer object is instantiated
             config: An object of DeepSpeedInferenceConfig
     """
     layer_id = 0

@@ -49,6 +49,13 @@ class TPLayerSpec:
             partition_type=PartitionType.COLUMN,
         )
 
+        # Column-parallel layer with replicated output (e.g., an untied LM head)
+        TPLayerSpec(
+            patterns=[".*lm_head\\.weight$"],
+            partition_type=PartitionType.COLUMN,
+            gather_output=True,
+        )
+
         # Fused QKV - GLM style [Q, K, V] concatenated on dim 0
         TPLayerSpec(
             patterns=[".*\\.query_key_value\\.weight$"],
@@ -116,6 +123,15 @@ class TPLayerSpec:
 
     # Optional: model type constraint (only apply for specific models)
     model_types: Optional[List[str]] = None
+
+    # Gather column-parallel output shards so every TP rank receives the full output
+    gather_output: bool = False
+
+    # For SKIP specs only: the parameter stays replicated, but each tensor-parallel rank computes
+    # only its shard's contribution to the gradient, so the gradients must be summed across the
+    # tensor-parallel group. This is HuggingFace's 'replicated_with_grad_allreduce' style (e.g.
+    # Qwen3's q_norm/k_norm, which normalize sharded attention heads).
+    grad_allreduce: bool = False
 
     def __post_init__(self):
         if isinstance(self.partition_type, str):
@@ -285,6 +301,8 @@ class AutoTPConfig:
                 TPLayerSpec(
                     patterns=spec_dict.get("patterns", []),
                     partition_type=partition_type,
+                    gather_output=spec_dict.get("gather_output", False),
+                    grad_allreduce=spec_dict.get("grad_allreduce", False),
                     shape=shape,
                     partition_dim=spec_dict.get("partition_dim"),
                     model_types=spec_dict.get("model_types"),

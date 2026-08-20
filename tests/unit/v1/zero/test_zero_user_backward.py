@@ -13,6 +13,9 @@ from unit.common import DistributedTest, preferred_dtype, allclose_on_all_ranks
 from unit.simple_model import SimpleModel, random_dataloader
 from deepspeed.accelerator import get_accelerator
 from deepspeed.utils import safe_get_full_grad
+from deepspeed.runtime.zero.partition_parameters import ZeroParamStatus
+from deepspeed.ops.aio import AsyncIOBuilder
+from deepspeed.runtime.zero.offload_config import OffloadDeviceEnum
 
 
 class SimpleNonScalarModel(torch.nn.Module):
@@ -44,8 +47,18 @@ class SimpleOutputModel(torch.nn.Module):
         return x
 
 
-def get_config_dict(zero_stage, gradient_accumulation_steps=1):
-    """Helper to create config dict with common settings"""
+# Frozen-model hidden dim. Used as a persistence threshold too: at this value the 1-D norm
+# params (numel == hidden) become persistent (the HF#47254 RMSNorm shape); at 0 all partition.
+_FROZEN_HIDDEN_DIM = 8
+
+
+def get_config_dict(zero_stage, gradient_accumulation_steps=1, force_fp32=False, param_persistence_threshold=0):
+    """Build a config dict.
+
+    force_fp32 keeps the engine in fp32: the frozen-param non-reentrant CheckpointError only
+    reproduces in fp32 (bf16 recompute takes a different path). param_persistence_threshold
+    (ZeRO-3) sets stage3_param_persistence_threshold; 0 partitions all, >= numel stays resident.
+    """
     config_dict = {
         "train_micro_batch_size_per_gpu": 2,
         "gradient_accumulation_steps": gradient_accumulation_steps,
@@ -62,13 +75,13 @@ def get_config_dict(zero_stage, gradient_accumulation_steps=1):
     }
 
     if zero_stage == 3:
-        # For ZeRO-3, force partitioning of all parameters
-        config_dict["zero_optimization"]["stage3_param_persistence_threshold"] = 0
+        config_dict["zero_optimization"]["stage3_param_persistence_threshold"] = param_persistence_threshold
 
-    if get_accelerator().is_bf16_supported():
-        config_dict["bf16"] = {"enabled": True}
-    elif get_accelerator().is_fp16_supported():
-        config_dict["fp16"] = {"enabled": True, "initial_scale_power": 8}
+    if not force_fp32:
+        if get_accelerator().is_bf16_supported():
+            config_dict["bf16"] = {"enabled": True}
+        elif get_accelerator().is_fp16_supported():
+            config_dict["fp16"] = {"enabled": True, "initial_scale_power": 8}
 
     return config_dict
 
@@ -203,6 +216,125 @@ def compare_parameters(params_ddp, params_ds, step_info=""):
         allclose_on_all_ranks(params_ddp_fp32,
                               params_ds_fp32,
                               assert_message=f"Parameter {name} mismatch{step_suffix}")
+
+
+def assert_all_partitioned(model_engine, zero_stage, step_info=""):
+    """For ZeRO-3, assert every non-persistent param is released after backward.
+
+    The recompute bug left frozen params gathered after backward, so the release check catches
+    regressions a crash-only test misses. Persistent params are skipped (meant to stay
+    resident). No-op for stages 1/2.
+    """
+    if zero_stage != 3:
+        return
+    step_suffix = f" at {step_info}" if step_info else ""
+    for name, param in model_engine.module.named_parameters():
+        if param.ds_persist:
+            continue
+        assert param.ds_status == ZeroParamStatus.NOT_AVAILABLE, \
+            f"Parameter {name} not partitioned after backward (status={param.ds_status}){step_suffix}"
+
+
+def assert_persistent_resident(model_engine, zero_stage, step_info=""):
+    """For ZeRO-3, assert every persistent param stays gathered (AVAILABLE) after backward.
+
+    Persistent frozen params are added to a recompute owner during checkpoint recompute; if the
+    release path force-releases that owner's recompute set without a ds_persist guard, they get
+    partitioned despite stage3_param_persistence_threshold. No-op for stages 1/2 or when nothing
+    is persistent. Only meaningful once the trace is complete (skip warmup step 0).
+    """
+    if zero_stage != 3:
+        return
+    step_suffix = f" at {step_info}" if step_info else ""
+    for name, param in model_engine.module.named_parameters():
+        if not param.ds_persist:
+            continue
+        assert param.ds_status == ZeroParamStatus.AVAILABLE, \
+            f"Persistent parameter {name} was partitioned after backward (status={param.ds_status}){step_suffix}"
+
+
+def run_frozen_checkpoint_comparison(model_cls,
+                                     zero_stage,
+                                     use_reentrant,
+                                     num_iterations=3,
+                                     input_requires_grad=True,
+                                     leaf_module_types=None,
+                                     dtype=torch.float32,
+                                     param_persistence_threshold=0,
+                                     **model_kwargs):
+    """Shared driver for the frozen-param + checkpoint regression tests.
+
+    Each iteration checks: (1) backward runs without CheckpointError, (2) grads match the DDP
+    reference, (3) ZeRO-3 releases every non-persistent param after backward.
+    param_persistence_threshold toggles the persistent vs non-persistent frozen path.
+    """
+    hidden_dim = _FROZEN_HIDDEN_DIM
+    batch_size = 2
+
+    device, rank, _ = initialize_distributed()
+    # fp32 reproduces the pre-fix CheckpointError; bf16 covers the common mixed-precision case.
+    if dtype == torch.bfloat16 and not get_accelerator().is_bf16_supported():
+        pytest.skip("bf16 is not supported on this accelerator")
+
+    # DDP reference: no parameter partitioning, so no checkpoint metadata issue.
+    torch.manual_seed(42)
+    model_ddp = model_cls(hidden_dim=hidden_dim, use_reentrant=use_reentrant, **model_kwargs)
+    model_ddp = model_ddp.to(device=device, dtype=dtype)
+    model_ddp = DDP(model_ddp, device_ids=[rank], output_device=rank)
+    optimizer_ddp = torch.optim.Adam([p for p in model_ddp.parameters() if p.requires_grad], lr=1e-3)
+
+    # DeepSpeed engine with ZeRO partitioning. Only trainable params go to the optimizer;
+    # the frozen params are still partitioned by ZeRO-3, which is what triggers the failure.
+    torch.manual_seed(42)
+    model_ds = model_cls(hidden_dim=hidden_dim, use_reentrant=use_reentrant, **model_kwargs)
+    if leaf_module_types is not None:
+        from deepspeed.utils import set_z3_leaf_modules
+        set_z3_leaf_modules(model_ds, leaf_module_types)
+    config = get_config_dict(zero_stage,
+                             force_fp32=(dtype == torch.float32),
+                             param_persistence_threshold=param_persistence_threshold)
+    trainable_params = [p for p in model_ds.parameters() if p.requires_grad]
+    model_engine, _, _, _ = deepspeed.initialize(config=config, model=model_ds, model_parameters=trainable_params)
+
+    # Loop several iterations: the release-lifetime regression only shows up once frozen
+    # params linger AVAILABLE across steps, so a single step would miss it.
+    for iteration in range(num_iterations):
+        step_info = f"use_reentrant={use_reentrant}, stage {zero_stage}, iter {iteration}"
+
+        torch.manual_seed(123 + iteration)
+        x_ddp = torch.randn(batch_size, hidden_dim, device=device, dtype=dtype, requires_grad=input_requires_grad)
+        output_ddp = model_ddp(x_ddp)
+        output_ddp.backward(torch.ones_like(output_ddp))
+        get_accelerator().synchronize()
+        dist.barrier()
+        ddp_grads = collect_ddp_gradients(model_ddp)
+
+        # Drive backward through the engine so the ZeRO coordinator hooks run; a raw
+        # output.backward() bypasses them and would not reproduce the bug.
+        torch.manual_seed(123 + iteration)
+        x_ds = torch.randn(batch_size, hidden_dim, device=device, dtype=dtype, requires_grad=input_requires_grad)
+        output_ds = model_engine(x_ds)
+        model_engine.backward(output_ds.sum())
+        get_accelerator().synchronize()
+        dist.barrier()
+        ds_grads = collect_gradients_safe(model_engine)
+
+        assert len(ds_grads) > 0, f"No gradients with frozen param, {step_info}"
+        # Compare only on step 0: later steps diverge along slightly different Adam trajectories.
+        if iteration == 0:
+            compare_gradients(ddp_grads, ds_grads, f"frozen-param checkpointing {step_info}")
+
+        # Frozen params must be released (partitioned) after every backward, not left gathered.
+        assert_all_partitioned(model_engine, zero_stage, step_info)
+        # Persistent params must stay resident; check once the trace is complete (after warmup).
+        if iteration >= 1:
+            assert_persistent_resident(model_engine, zero_stage, step_info)
+
+        model_engine.step()
+        optimizer_ddp.step()
+        optimizer_ddp.zero_grad()
+
+    model_engine.destroy()
 
 
 @pytest.mark.parametrize("zero_stage", [1, 2, 3])
@@ -1432,3 +1564,834 @@ class TestZeroUserBackwardWithCheckpointing(DistributedTest):
             model_engine.step()
 
         model_engine.destroy()
+
+
+class FrozenParamCheckpointedModel(torch.nn.Module):
+    """Checkpointed model with a frozen parameter inside the checkpointed block.
+
+    Mirrors the common PEFT / quantized setup where the base is frozen and only a small
+    adapter trains. Under ZeRO-3 the frozen parameter is partitioned, and with non-reentrant
+    checkpointing it used to be re-partitioned to shape [0] during the recompute, tripping
+    torch's checkpoint metadata validation. See #4332.
+    """
+
+    def __init__(self, hidden_dim, use_reentrant=False):
+        super().__init__()
+        self.use_reentrant = use_reentrant
+        self.norm = torch.nn.LayerNorm(hidden_dim)
+        self.linear1 = torch.nn.Linear(hidden_dim, hidden_dim)
+        self.linear2 = torch.nn.Linear(hidden_dim, hidden_dim)
+        # Freeze the norm: this is the parameter that tripped the recompute metadata check.
+        self.norm.weight.requires_grad_(False)
+        self.norm.bias.requires_grad_(False)
+
+    def _checkpointed_block(self, x):
+        x = self.norm(x)
+        x = self.linear1(x)
+        x = torch.nn.functional.relu(x)
+        return x
+
+    def forward(self, x):
+        if self.training:
+            from torch.utils.checkpoint import checkpoint
+            x = checkpoint(self._checkpointed_block, x, use_reentrant=self.use_reentrant)
+        else:
+            x = self._checkpointed_block(x)
+        x = self.linear2(x)
+        return x
+
+
+@pytest.mark.parametrize("param_persistence_threshold", [0, _FROZEN_HIDDEN_DIM], ids=["nopersist", "persist"])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16], ids=["fp32", "bf16"])
+@pytest.mark.parametrize("zero_stage", [1, 2, 3])
+@pytest.mark.parametrize("use_reentrant", [True, False])
+class TestZeroUserBackwardFrozenParamCheckpointing(DistributedTest):
+    """Regression test for ZeRO + gradient checkpointing with a frozen parameter.
+
+    A frozen (non-grad) parameter inside a checkpointed block used to be partitioned to
+    shape [0] during the non-reentrant recompute under ZeRO-3, tripping torch's checkpoint
+    metadata validation with a CheckpointError. This verifies training runs and matches a
+    PyTorch DDP reference (fp32 reproduces the error; bf16 covers mixed precision). See #4332.
+    """
+    world_size = 2
+
+    def test_checkpointed_frozen_param(self, zero_stage, use_reentrant, dtype, param_persistence_threshold):
+        run_frozen_checkpoint_comparison(FrozenParamCheckpointedModel,
+                                         zero_stage,
+                                         use_reentrant,
+                                         dtype=dtype,
+                                         param_persistence_threshold=param_persistence_threshold)
+
+
+class MultiBlockFrozenModel(torch.nn.Module):
+    """Several checkpointed blocks, each with its own frozen norm.
+
+    Mirrors the diffusers UNet / stacked-transformer shape from #4332 and the extended MRE in
+    #8130: the recompute re-fires the forward hooks of every block, so a release-lifetime bug
+    compounds across blocks and modules must be released in the right (LIFO) order.
+    """
+
+    def __init__(self, hidden_dim, num_blocks=2, use_reentrant=False):
+        super().__init__()
+        self.use_reentrant = use_reentrant
+        self.blocks = torch.nn.ModuleList()
+        for _ in range(num_blocks):
+            norm = torch.nn.LayerNorm(hidden_dim)
+            norm.weight.requires_grad_(False)
+            norm.bias.requires_grad_(False)
+            block = torch.nn.ModuleDict({"norm": norm, "linear": torch.nn.Linear(hidden_dim, hidden_dim)})
+            self.blocks.append(block)
+
+    def _block_forward(self, block, x):
+        x = block["norm"](x)
+        x = block["linear"](x)
+        return torch.nn.functional.relu(x)
+
+    def forward(self, x):
+        from torch.utils.checkpoint import checkpoint
+        for block in self.blocks:
+            if self.training:
+                x = checkpoint(self._block_forward, block, x, use_reentrant=self.use_reentrant)
+            else:
+                x = self._block_forward(block, x)
+        return x
+
+
+class LoRAStyleFrozenModel(torch.nn.Module):
+    """LoRA-shaped model: a frozen base Linear plus a small trainable low-rank adapter.
+
+    This is the PEFT/QLoRA configuration from transformers#47254 and trl#5217 reduced to its
+    essential shape: the frozen base weight is the parameter that recomputed to shape [0].
+    """
+
+    def __init__(self, hidden_dim, rank=2, use_reentrant=False):
+        super().__init__()
+        self.use_reentrant = use_reentrant
+        self.base = torch.nn.Linear(hidden_dim, hidden_dim, bias=False)
+        self.base.weight.requires_grad_(False)
+        self.lora_a = torch.nn.Linear(hidden_dim, rank, bias=False)
+        self.lora_b = torch.nn.Linear(rank, hidden_dim, bias=False)
+        self.head = torch.nn.Linear(hidden_dim, hidden_dim)
+
+    def _checkpointed_block(self, x):
+        return self.base(x) + self.lora_b(self.lora_a(x))
+
+    def forward(self, x):
+        if self.training:
+            from torch.utils.checkpoint import checkpoint
+            x = checkpoint(self._checkpointed_block, x, use_reentrant=self.use_reentrant)
+        else:
+            x = self._checkpointed_block(x)
+        return self.head(x)
+
+
+class MultiTensorLeafBlock(torch.nn.Module):
+    """Leaf block with a frozen norm that returns multiple tensors.
+
+    When marked as a ZeRO-3 leaf, autograd fires this module's pre-backward hooks from
+    multiple threads (one per returned tensor), exercising the concurrent fetch_sub_module
+    path that PR #8148's review flagged for duplicate backward-stack entries.
+    """
+
+    def __init__(self, hidden_dim):
+        super().__init__()
+        self.norm = torch.nn.LayerNorm(hidden_dim)
+        self.norm.weight.requires_grad_(False)
+        self.norm.bias.requires_grad_(False)
+        self.linear_a = torch.nn.Linear(hidden_dim, hidden_dim)
+        self.linear_b = torch.nn.Linear(hidden_dim, hidden_dim)
+
+    def forward(self, x):
+        h = self.norm(x)
+        return self.linear_a(h), self.linear_b(h)
+
+
+class MultiTensorLeafFrozenModel(torch.nn.Module):
+    """Model whose checkpointed region contains a multi-tensor-returning frozen leaf block."""
+
+    def __init__(self, hidden_dim, use_reentrant=False):
+        super().__init__()
+        self.use_reentrant = use_reentrant
+        self.block = MultiTensorLeafBlock(hidden_dim)
+        self.head = torch.nn.Linear(hidden_dim, hidden_dim)
+
+    def _checkpointed_block(self, x):
+        a, b = self.block(x)
+        return a + b
+
+    def forward(self, x):
+        if self.training:
+            from torch.utils.checkpoint import checkpoint
+            x = checkpoint(self._checkpointed_block, x, use_reentrant=self.use_reentrant)
+        else:
+            x = self._checkpointed_block(x)
+        return self.head(x)
+
+
+@pytest.mark.parametrize("param_persistence_threshold", [0, _FROZEN_HIDDEN_DIM], ids=["nopersist", "persist"])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16], ids=["fp32", "bf16"])
+@pytest.mark.parametrize("zero_stage", [1, 2, 3])
+@pytest.mark.parametrize("use_reentrant", [True, False])
+class TestZeroFrozenParamCheckpointingVariants(DistributedTest):
+    """Additional frozen-param + activation-checkpoint repros distilled from the issues
+    linked in PR #8130 (multi-block unet-style #4332, and PEFT/LoRA transformers#47254 /
+    trl#5217). fp32 reproduces the original error; bf16 covers the common mixed-precision case.
+    persist keeps the frozen norm weights resident (HF#47254 shape); nopersist partitions them."""
+    world_size = 2
+
+    def test_multi_block(self, zero_stage, use_reentrant, dtype, param_persistence_threshold):
+        run_frozen_checkpoint_comparison(MultiBlockFrozenModel,
+                                         zero_stage,
+                                         use_reentrant,
+                                         num_blocks=3,
+                                         dtype=dtype,
+                                         param_persistence_threshold=param_persistence_threshold)
+
+    def test_lora_style(self, zero_stage, use_reentrant, dtype, param_persistence_threshold):
+        run_frozen_checkpoint_comparison(LoRAStyleFrozenModel,
+                                         zero_stage,
+                                         use_reentrant,
+                                         dtype=dtype,
+                                         param_persistence_threshold=param_persistence_threshold)
+
+
+@pytest.mark.parametrize("param_persistence_threshold", [0, _FROZEN_HIDDEN_DIM], ids=["nopersist", "persist"])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16], ids=["fp32", "bf16"])
+@pytest.mark.parametrize("use_reentrant", [True, False])
+@pytest.mark.parametrize("zero_stage", [1, 2, 3])
+class TestZeroFrozenParamMultiTensorLeaf(DistributedTest):
+    """Leaf module returning multiple tensors -- the multi-threaded-autograd path called out in
+    the #8148 review. Its backward hooks fire out of reverse-forward order; keying the
+    coordinator's active-backward tracker by ds_id (instead of a strict LIFO deque) lets each
+    submodule release regardless of position, so all stages pass."""
+    world_size = 2
+
+    def test_multi_tensor_leaf(self, zero_stage, use_reentrant, dtype, param_persistence_threshold):
+        run_frozen_checkpoint_comparison(MultiTensorLeafFrozenModel,
+                                         zero_stage,
+                                         use_reentrant,
+                                         leaf_module_types=[MultiTensorLeafBlock],
+                                         dtype=dtype,
+                                         param_persistence_threshold=param_persistence_threshold)
+
+
+@pytest.mark.parametrize("param_persistence_threshold", [0, _FROZEN_HIDDEN_DIM], ids=["nopersist", "persist"])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16], ids=["fp32", "bf16"])
+@pytest.mark.parametrize("use_reentrant", [True, False])
+class TestZeroFrozenParamNoGradInputAccumulation(DistributedTest):
+    """Frozen-param checkpointing with a no-grad input across grad-accumulation microbatches.
+
+    tohtana's case in PR #8130: a no-grad input can leave the module post-backward hook unfired,
+    so frozen params linger AVAILABLE between microbatches. Verifies release after each backward.
+    """
+    world_size = 2
+
+    def test_no_grad_input_accumulation(self, use_reentrant, dtype, param_persistence_threshold):
+        zero_stage = 3
+        hidden_dim = _FROZEN_HIDDEN_DIM
+        batch_size = 2
+        gradient_accumulation_steps = 2
+        num_iterations = 2
+
+        device, rank, _ = initialize_distributed()
+        # fp32 reproduces the release-lifetime gap; bf16 covers the common mixed-precision case.
+        if dtype == torch.bfloat16 and not get_accelerator().is_bf16_supported():
+            pytest.skip("bf16 is not supported on this accelerator")
+
+        torch.manual_seed(42)
+        model_ds = FrozenParamCheckpointedModel(hidden_dim=hidden_dim, use_reentrant=use_reentrant)
+        model_ds = model_ds.to(dtype=dtype)
+        config = get_config_dict(zero_stage,
+                                 gradient_accumulation_steps=gradient_accumulation_steps,
+                                 force_fp32=(dtype == torch.float32),
+                                 param_persistence_threshold=param_persistence_threshold)
+        trainable_params = [p for p in model_ds.parameters() if p.requires_grad]
+        model_engine, _, _, _ = deepspeed.initialize(config=config, model=model_ds, model_parameters=trainable_params)
+
+        seed = 123
+        for iteration in range(num_iterations):
+            for micro in range(gradient_accumulation_steps):
+                step_info = f"use_reentrant={use_reentrant}, iter {iteration}, micro {micro}"
+
+                torch.manual_seed(seed)
+                # No-grad input: this is the configuration that broke the release lifetime.
+                x = torch.randn(batch_size, hidden_dim, device=device, dtype=dtype, requires_grad=False)
+                loss = model_engine(x).sum()
+                model_engine.backward(loss)
+                get_accelerator().synchronize()
+                dist.barrier()
+
+                # Frozen params must be partitioned between microbatches, not carried gathered.
+                assert_all_partitioned(model_engine, zero_stage, step_info)
+                # Persistent params must stay resident; check once the trace is complete (after warmup).
+                if iteration >= 1:
+                    assert_persistent_resident(model_engine, zero_stage, step_info)
+
+                model_engine.step()
+                seed += 1
+
+        model_engine.destroy()
+
+
+def build_managed_gas_config(zero_stage, gradient_accumulation_steps, managed_gradient_accumulation):
+    """fp32 config toggling managed_gradient_accumulation; micro-batch 1 so total_samples == micro-batch count."""
+    return {
+        "train_micro_batch_size_per_gpu": 1,
+        "gradient_accumulation_steps": gradient_accumulation_steps,
+        "steps_per_print": 1,
+        "managed_gradient_accumulation": managed_gradient_accumulation,
+        "zero_optimization": {
+            "stage": zero_stage,
+        },
+        "optimizer": {
+            "type": "Adam",
+            "params": {
+                "lr": 1e-3
+            }
+        },
+    }
+
+
+@pytest.mark.parametrize("zero_stage", [0, 1, 2, 3])
+class TestUnmanagedGradientAccumulation(DistributedTest):
+    """managed_gradient_accumulation=False: the caller's step() is the accumulation boundary."""
+    world_size = 2
+
+    def test_step_always_applies_update(self, zero_stage):
+        """Every step() applies an optimizer update regardless of gradient_accumulation_steps."""
+        hidden_dim = 4
+        gradient_accumulation_steps = 4
+
+        device, _, _ = initialize_distributed()
+        torch.manual_seed(42)
+        model = SimpleModel(hidden_dim=hidden_dim, nlayers=2)
+        config = build_managed_gas_config(zero_stage, gradient_accumulation_steps, managed_gradient_accumulation=False)
+        engine, _, _, _ = deepspeed.initialize(config=config, model=model, model_parameters=model.parameters())
+
+        data_loader = random_dataloader(model=engine,
+                                        total_samples=8,
+                                        hidden_dim=hidden_dim,
+                                        device=device,
+                                        dtype=torch.float32)
+
+        prev_global_steps = engine.global_steps
+        for batch in data_loader:
+            loss = engine(batch[0], batch[1])
+            engine.backward(loss)
+            engine.step()
+            assert engine.was_step_applied(), "Every step() must apply an update in unmanaged mode"
+            assert engine.global_steps == prev_global_steps + 1
+            prev_global_steps = engine.global_steps
+
+        engine.destroy()
+
+    def test_managed_baseline_applies_only_on_boundary(self, zero_stage):
+        """Default managed mode only applies an update on the accumulation boundary."""
+        hidden_dim = 4
+        gradient_accumulation_steps = 4
+
+        device, _, _ = initialize_distributed()
+        torch.manual_seed(42)
+        model = SimpleModel(hidden_dim=hidden_dim, nlayers=2)
+        config = build_managed_gas_config(zero_stage, gradient_accumulation_steps, managed_gradient_accumulation=True)
+        engine, _, _, _ = deepspeed.initialize(config=config, model=model, model_parameters=model.parameters())
+
+        data_loader = random_dataloader(model=engine,
+                                        total_samples=2 * gradient_accumulation_steps,
+                                        hidden_dim=hidden_dim,
+                                        device=device,
+                                        dtype=torch.float32)
+
+        applied = []
+        for batch in data_loader:
+            loss = engine(batch[0], batch[1])
+            engine.backward(loss)
+            engine.step()
+            applied.append(engine.was_step_applied())
+
+        # Only every GAS-th micro-step (the boundary) applies an update.
+        assert applied == [False, False, False, True, False, False, False, True]
+
+        engine.destroy()
+
+    def test_unmanaged_matches_managed(self, zero_stage):
+        """N backwards + one step() in unmanaged mode equals managed mode with GAS=N."""
+        hidden_dim = 4
+        gradient_accumulation_steps = 4
+        num_cycles = 3
+
+        device, _, _ = initialize_distributed()
+
+        torch.manual_seed(42)
+        model_managed = SimpleModel(hidden_dim=hidden_dim, nlayers=2)
+        managed_engine, _, _, _ = deepspeed.initialize(config=build_managed_gas_config(
+            zero_stage, gradient_accumulation_steps, managed_gradient_accumulation=True),
+                                                       model=model_managed,
+                                                       model_parameters=model_managed.parameters())
+
+        torch.manual_seed(42)
+        model_unmanaged = SimpleModel(hidden_dim=hidden_dim, nlayers=2)
+        unmanaged_engine, _, _, _ = deepspeed.initialize(config=build_managed_gas_config(
+            zero_stage, gradient_accumulation_steps, managed_gradient_accumulation=False),
+                                                         model=model_unmanaged,
+                                                         model_parameters=model_unmanaged.parameters())
+
+        total_samples = num_cycles * gradient_accumulation_steps
+        # Materialize the batches so both engines consume identical data.
+        batches = list(
+            random_dataloader(model=managed_engine,
+                              total_samples=total_samples,
+                              hidden_dim=hidden_dim,
+                              device=device,
+                              dtype=torch.float32))
+
+        # Managed: symmetric forward/backward/step on every micro-batch.
+        for batch in batches:
+            loss = managed_engine(batch[0], batch[1])
+            managed_engine.backward(loss)
+            managed_engine.step()
+
+        # Unmanaged: accumulate N backwards, then a single step() per cycle.
+        for cycle in range(num_cycles):
+            for micro in range(gradient_accumulation_steps):
+                batch = batches[cycle * gradient_accumulation_steps + micro]
+                loss = unmanaged_engine(batch[0], batch[1])
+                unmanaged_engine.backward(loss)
+            unmanaged_engine.step()
+
+        managed_params = collect_deepspeed_parameters(managed_engine, zero_stage)
+        unmanaged_params = collect_deepspeed_parameters(unmanaged_engine, zero_stage)
+        compare_parameters(managed_params, unmanaged_params, "unmanaged vs managed gradient accumulation")
+
+        managed_engine.destroy()
+        unmanaged_engine.destroy()
+
+    def test_unmanaged_varying_backward_count(self, zero_stage):
+        """Varying backward() count per step matches a managed manual-boundary reference and tracks global_samples."""
+        hidden_dim = 4
+        gradient_accumulation_steps = 4  # config value; unmanaged boundary is caller-owned
+        backward_counts = [2, 5, 3]  # micro-batches per step: differs per step and from GAS
+
+        device, _, _ = initialize_distributed()
+
+        torch.manual_seed(42)
+        model_unmanaged = SimpleModel(hidden_dim=hidden_dim, nlayers=2)
+        unmanaged_engine, _, _, _ = deepspeed.initialize(config=build_managed_gas_config(
+            zero_stage, gradient_accumulation_steps, managed_gradient_accumulation=False),
+                                                         model=model_unmanaged,
+                                                         model_parameters=model_unmanaged.parameters())
+
+        torch.manual_seed(42)
+        model_managed = SimpleModel(hidden_dim=hidden_dim, nlayers=2)
+        managed_engine, _, _, _ = deepspeed.initialize(config=build_managed_gas_config(
+            zero_stage, gradient_accumulation_steps, managed_gradient_accumulation=True),
+                                                       model=model_managed,
+                                                       model_parameters=model_managed.parameters())
+
+        total_samples = sum(backward_counts)
+        batches = list(
+            random_dataloader(model=unmanaged_engine,
+                              total_samples=total_samples,
+                              hidden_dim=hidden_dim,
+                              device=device,
+                              dtype=torch.float32))
+
+        # Unmanaged: N backwards accumulate locally, one step() reduces + updates; global_samples advances by N micro-batches.
+        samples_per_micro_batch = unmanaged_engine.train_batch_size() // unmanaged_engine.gradient_accumulation_steps()
+        expected_samples = unmanaged_engine.global_samples
+        idx = 0
+        for n in backward_counts:
+            for _ in range(n):
+                loss = unmanaged_engine(batches[idx][0], batches[idx][1])
+                unmanaged_engine.backward(loss / n, scale_wrt_gas=False)
+                idx += 1
+            unmanaged_engine.step()
+            assert unmanaged_engine.was_step_applied(), "Every step() must apply an update in unmanaged mode"
+            expected_samples += samples_per_micro_batch * n
+            assert unmanaged_engine.global_samples == expected_samples, \
+                f"global_samples {unmanaged_engine.global_samples} != expected {expected_samples} at n={n}"
+
+        # Managed reference: reproduce the same variable boundary via set_gradient_accumulation_boundary.
+        idx = 0
+        for n in backward_counts:
+            for micro in range(n):
+                managed_engine.set_gradient_accumulation_boundary(micro == n - 1)
+                loss = managed_engine(batches[idx][0], batches[idx][1])
+                managed_engine.backward(loss / n, scale_wrt_gas=False)
+                idx += 1
+            managed_engine.step()
+
+        unmanaged_params = collect_deepspeed_parameters(unmanaged_engine, zero_stage)
+        managed_params = collect_deepspeed_parameters(managed_engine, zero_stage)
+        compare_parameters(managed_params, unmanaged_params, "unmanaged varying-N vs managed manual boundary")
+
+        unmanaged_engine.destroy()
+        managed_engine.destroy()
+
+    def test_set_gradient_accumulation_boundary_rejected(self, zero_stage):
+        """set_gradient_accumulation_boundary() is unsupported in unmanaged mode (caller owns the boundary)."""
+        hidden_dim = 4
+        initialize_distributed()
+        torch.manual_seed(42)
+        model = SimpleModel(hidden_dim=hidden_dim, nlayers=2)
+        config = build_managed_gas_config(zero_stage,
+                                          gradient_accumulation_steps=4,
+                                          managed_gradient_accumulation=False)
+        engine, _, _, _ = deepspeed.initialize(config=config, model=model, model_parameters=model.parameters())
+        with pytest.raises(AssertionError, match="set_gradient_accumulation_boundary"):
+            engine.set_gradient_accumulation_boundary(True)
+        engine.destroy()
+
+
+class TestUnmanagedGradientAccumulationValidation(DistributedTest):
+    """Unmanaged mode accepts disabled offload template blocks (device=none)."""
+    world_size = 1
+
+    def test_unmanaged_accepts_disabled_offload_blocks(self):
+        # A disabled offload block (device="none") is not offload, so init must succeed.
+        hidden_dim = 4
+        initialize_distributed()
+        torch.manual_seed(42)
+        model = SimpleModel(hidden_dim=hidden_dim, nlayers=2)
+        config = build_managed_gas_config(3, gradient_accumulation_steps=1, managed_gradient_accumulation=False)
+        config["zero_optimization"]["offload_param"] = {"device": "none"}
+        config["zero_optimization"]["offload_optimizer"] = {"device": "none"}
+        engine, _, _, _ = deepspeed.initialize(config=config, model=model, model_parameters=model.parameters())
+        assert not engine.managed_gradient_accumulation()
+        engine.destroy()
+
+
+def _build_unmanaged_offload_config(zero_stage,
+                                    gradient_accumulation_steps,
+                                    managed,
+                                    offload_param=False,
+                                    offload_device="cpu",
+                                    nvme_path=None):
+    config = build_managed_gas_config(zero_stage, gradient_accumulation_steps, managed_gradient_accumulation=managed)
+    offload_opt = {"device": offload_device}
+    if offload_device == OffloadDeviceEnum.nvme:
+        assert nvme_path is not None, "nvme_path is required for NVMe offload"
+        offload_opt["nvme_path"] = str(nvme_path)
+    config["zero_optimization"]["offload_optimizer"] = offload_opt
+    if offload_param:
+        offload_p = {"device": offload_device}
+        if offload_device == OffloadDeviceEnum.nvme:
+            offload_p["nvme_path"] = str(nvme_path)
+        config["zero_optimization"]["offload_param"] = offload_p
+    if offload_device == OffloadDeviceEnum.nvme:
+        # Small sub_group_size so each large param is its own swappable subgroup.
+        config["zero_optimization"]["sub_group_size"] = 100
+        config["aio"] = {"block_size": 1048576}
+    return config
+
+
+def _run_unmanaged_vs_managed_offload(zero_stage,
+                                      gradient_accumulation_steps,
+                                      num_cycles,
+                                      offload_param=False,
+                                      offload_device="cpu",
+                                      nvme_path=None,
+                                      hidden_dim=4,
+                                      label=""):
+    device, _, _ = initialize_distributed()
+
+    def make_config(managed):
+        return _build_unmanaged_offload_config(zero_stage,
+                                               gradient_accumulation_steps,
+                                               managed=managed,
+                                               offload_param=offload_param,
+                                               offload_device=offload_device,
+                                               nvme_path=nvme_path)
+
+    torch.manual_seed(42)
+    if zero_stage == 3 and offload_device == OffloadDeviceEnum.nvme:
+        with deepspeed.zero.Init(config_dict_or_path=make_config(True)):
+            model_managed = SimpleModel(hidden_dim=hidden_dim, nlayers=2)
+    else:
+        model_managed = SimpleModel(hidden_dim=hidden_dim, nlayers=2)
+    managed_engine, _, _, _ = deepspeed.initialize(config=make_config(True),
+                                                   model=model_managed,
+                                                   model_parameters=model_managed.parameters())
+
+    torch.manual_seed(42)
+    if zero_stage == 3 and offload_device == OffloadDeviceEnum.nvme:
+        with deepspeed.zero.Init(config_dict_or_path=make_config(False)):
+            model_unmanaged = SimpleModel(hidden_dim=hidden_dim, nlayers=2)
+    else:
+        model_unmanaged = SimpleModel(hidden_dim=hidden_dim, nlayers=2)
+    unmanaged_engine, _, _, _ = deepspeed.initialize(config=make_config(False),
+                                                     model=model_unmanaged,
+                                                     model_parameters=model_unmanaged.parameters())
+
+    total_samples = num_cycles * gradient_accumulation_steps
+    batches = list(
+        random_dataloader(model=managed_engine,
+                          total_samples=total_samples,
+                          hidden_dim=hidden_dim,
+                          device=device,
+                          dtype=torch.float32))
+
+    for batch in batches:
+        loss = managed_engine(batch[0], batch[1])
+        managed_engine.backward(loss)
+        managed_engine.step()
+
+    for cycle in range(num_cycles):
+        for micro in range(gradient_accumulation_steps):
+            batch = batches[cycle * gradient_accumulation_steps + micro]
+            loss = unmanaged_engine(batch[0], batch[1])
+            unmanaged_engine.backward(loss)
+        unmanaged_engine.step()
+
+    managed_params = collect_deepspeed_parameters(managed_engine, zero_stage)
+    unmanaged_params = collect_deepspeed_parameters(unmanaged_engine, zero_stage)
+    compare_parameters(managed_params, unmanaged_params, label)
+
+    managed_engine.destroy()
+    unmanaged_engine.destroy()
+
+
+@pytest.mark.parametrize("zero_stage", [1, 2, 3])
+class TestUnmanagedGradientAccumulationOffload(DistributedTest):
+    """Unmanaged mode with ZeRO optimizer offload matches managed offload."""
+    world_size = 2
+
+    def test_unmanaged_matches_managed_optimizer_offload(self, zero_stage):
+        _run_unmanaged_vs_managed_offload(zero_stage,
+                                          gradient_accumulation_steps=4,
+                                          num_cycles=3,
+                                          label=f"unmanaged vs managed optimizer offload (stage {zero_stage})")
+
+
+class TestUnmanagedGradientAccumulationParamOffload(DistributedTest):
+    """Unmanaged ZeRO-3 with parameter + optimizer offload matches managed mode."""
+    world_size = 2
+
+    def test_unmanaged_matches_managed_param_offload(self):
+        _run_unmanaged_vs_managed_offload(zero_stage=3,
+                                          gradient_accumulation_steps=4,
+                                          num_cycles=2,
+                                          offload_param=True,
+                                          label="unmanaged vs managed param+optimizer offload (stage 3)")
+
+
+@pytest.mark.sequential
+class TestUnmanagedGradientAccumulationNvmeOffload(DistributedTest):
+    """Unmanaged ZeRO-3 NVMe offload matches managed NVMe offload."""
+    world_size = 2
+
+    def _skip_if_nvme_unsupported(self):
+        if not deepspeed.ops.__compatible_ops__[AsyncIOBuilder.NAME]:
+            pytest.skip("Skip tests since async-io is not compatible")
+
+    def test_unmanaged_matches_managed_optimizer_nvme_offload(self, tmpdir):
+        self._skip_if_nvme_unsupported()
+        # Large enough that partitioned params exceed MIN_AIO_BYTES and exercise swap_out_gradients.
+        _run_unmanaged_vs_managed_offload(zero_stage=3,
+                                          gradient_accumulation_steps=2,
+                                          num_cycles=2,
+                                          offload_device=OffloadDeviceEnum.nvme,
+                                          nvme_path=tmpdir,
+                                          hidden_dim=1024,
+                                          label="unmanaged vs managed optimizer NVMe offload (stage 3)")
+
+    def test_unmanaged_matches_managed_param_nvme_offload(self, tmpdir):
+        self._skip_if_nvme_unsupported()
+        _run_unmanaged_vs_managed_offload(zero_stage=3,
+                                          gradient_accumulation_steps=2,
+                                          num_cycles=2,
+                                          offload_param=True,
+                                          offload_device=OffloadDeviceEnum.nvme,
+                                          nvme_path=tmpdir,
+                                          hidden_dim=1024,
+                                          label="unmanaged vs managed param+optimizer NVMe offload (stage 3)")
+
+
+class _TwoHeadModel(torch.nn.Module):
+    """Two independent heads; only one is exercised per window so the other receives no gradient."""
+
+    def __init__(self, hidden_dim):
+        super().__init__()
+        self.head_a = torch.nn.Linear(hidden_dim, hidden_dim, bias=False)
+        self.head_b = torch.nn.Linear(hidden_dim, hidden_dim, bias=False)
+        self.cross_entropy_loss = torch.nn.CrossEntropyLoss()
+        self.use_a = True
+
+    def forward(self, x, y):
+        out = self.head_a(x) if self.use_a else self.head_b(x)
+        return self.cross_entropy_loss(out, y)
+
+
+@pytest.mark.parametrize("zero_stage", [1, 2, 3])
+class TestUnmanagedGradientAccumulationOffloadInactiveParams(DistributedTest):
+    """Unmanaged optimizer offload must skip params that receive no gradient in a window (matches managed)."""
+    world_size = 2
+
+    def test_unmanaged_matches_managed_inactive_params(self, zero_stage):
+        hidden_dim = 4
+        gradient_accumulation_steps = 2
+        # One head is exclusively active per window, so the other head is inactive that whole window.
+        window_use_a = [True, False, True]
+
+        device, _, _ = initialize_distributed()
+
+        def offload_config(managed):
+            config = _build_unmanaged_offload_config(zero_stage, gradient_accumulation_steps, managed=managed)
+            config["zero_optimization"]["ignore_unused_parameters"] = True
+            return config
+
+        torch.manual_seed(123)
+        model_managed = _TwoHeadModel(hidden_dim)
+        managed_engine, _, _, _ = deepspeed.initialize(config=offload_config(True),
+                                                       model=model_managed,
+                                                       model_parameters=model_managed.parameters())
+
+        torch.manual_seed(123)
+        model_unmanaged = _TwoHeadModel(hidden_dim)
+        unmanaged_engine, _, _, _ = deepspeed.initialize(config=offload_config(False),
+                                                         model=model_unmanaged,
+                                                         model_parameters=model_unmanaged.parameters())
+
+        total_samples = len(window_use_a) * gradient_accumulation_steps
+        batches = list(
+            random_dataloader(model=managed_engine,
+                              total_samples=total_samples,
+                              hidden_dim=hidden_dim,
+                              device=device,
+                              dtype=torch.float32))
+
+        # Managed: symmetric forward/backward/step; optimizer applies on each GAS boundary.
+        for w, use_a in enumerate(window_use_a):
+            managed_engine.module.use_a = use_a
+            for micro in range(gradient_accumulation_steps):
+                batch = batches[w * gradient_accumulation_steps + micro]
+                loss = managed_engine(batch[0], batch[1])
+                managed_engine.backward(loss)
+                managed_engine.step()
+
+        # Unmanaged: N backwards then one step() per window.
+        for w, use_a in enumerate(window_use_a):
+            unmanaged_engine.module.use_a = use_a
+            for micro in range(gradient_accumulation_steps):
+                batch = batches[w * gradient_accumulation_steps + micro]
+                loss = unmanaged_engine(batch[0], batch[1])
+                unmanaged_engine.backward(loss)
+            unmanaged_engine.step()
+
+        managed_params = collect_deepspeed_parameters(managed_engine, zero_stage)
+        unmanaged_params = collect_deepspeed_parameters(unmanaged_engine, zero_stage)
+        compare_parameters(managed_params, unmanaged_params,
+                           f"unmanaged vs managed offload inactive params (stage {zero_stage})")
+
+        managed_engine.destroy()
+        unmanaged_engine.destroy()
+
+
+@pytest.mark.parametrize("zero_stage", [0, 1])
+class TestUnmanagedGradientAccumulationOverlapCommValidation(DistributedTest):
+    """Unmanaged mode rejects ZeRO overlap_comm for stage 0/1 (reduction is deferred to step())."""
+    world_size = 1
+
+    def test_unmanaged_rejects_overlap_comm(self, zero_stage):
+        hidden_dim = 4
+        initialize_distributed()
+        torch.manual_seed(42)
+        model = SimpleModel(hidden_dim=hidden_dim, nlayers=2)
+        config = build_managed_gas_config(zero_stage,
+                                          gradient_accumulation_steps=1,
+                                          managed_gradient_accumulation=False)
+        config["zero_optimization"]["overlap_comm"] = True
+        with pytest.raises(AssertionError, match="overlap_comm only with ZeRO stage 2"):
+            deepspeed.initialize(config=config, model=model, model_parameters=model.parameters())
+
+
+class TestUnmanagedGradientAccumulationOverlapCommStage2(DistributedTest):
+    """overlap_comm is supported in unmanaged mode for ZeRO stage 2 (reduction stays per-backward)."""
+    world_size = 2
+
+    def test_unmanaged_matches_managed_overlap_comm(self):
+        hidden_dim = 4
+        gradient_accumulation_steps = 4
+        num_cycles = 3
+
+        device, _, _ = initialize_distributed()
+
+        def overlap_config(managed):
+            config = build_managed_gas_config(2, gradient_accumulation_steps, managed_gradient_accumulation=managed)
+            config["zero_optimization"]["overlap_comm"] = True
+            config["zero_optimization"]["contiguous_gradients"] = True
+            return config
+
+        torch.manual_seed(42)
+        model_managed = SimpleModel(hidden_dim=hidden_dim, nlayers=2)
+        managed_engine, _, _, _ = deepspeed.initialize(config=overlap_config(True),
+                                                       model=model_managed,
+                                                       model_parameters=model_managed.parameters())
+
+        torch.manual_seed(42)
+        model_unmanaged = SimpleModel(hidden_dim=hidden_dim, nlayers=2)
+        unmanaged_engine, _, _, _ = deepspeed.initialize(config=overlap_config(False),
+                                                         model=model_unmanaged,
+                                                         model_parameters=model_unmanaged.parameters())
+
+        total_samples = num_cycles * gradient_accumulation_steps
+        batches = list(
+            random_dataloader(model=managed_engine,
+                              total_samples=total_samples,
+                              hidden_dim=hidden_dim,
+                              device=device,
+                              dtype=torch.float32))
+
+        for batch in batches:
+            loss = managed_engine(batch[0], batch[1])
+            managed_engine.backward(loss)
+            managed_engine.step()
+
+        for cycle in range(num_cycles):
+            for micro in range(gradient_accumulation_steps):
+                batch = batches[cycle * gradient_accumulation_steps + micro]
+                loss = unmanaged_engine(batch[0], batch[1])
+                unmanaged_engine.backward(loss)
+            unmanaged_engine.step()
+
+        managed_params = collect_deepspeed_parameters(managed_engine, 2)
+        unmanaged_params = collect_deepspeed_parameters(unmanaged_engine, 2)
+        compare_parameters(managed_params, unmanaged_params, "unmanaged vs managed with overlap_comm (stage 2)")
+
+        managed_engine.destroy()
+        unmanaged_engine.destroy()
+
+
+@pytest.mark.parametrize("zero_stage", [1, 2])
+class TestUnmanagedGradientAccumulationCoalesceValidation(DistributedTest):
+    """coalesce_grad_reduction() conflicts with unmanaged mode: both own the accumulation boundary."""
+    world_size = 1
+
+    def test_unmanaged_rejects_coalesce_grad_reduction(self, zero_stage):
+        hidden_dim = 4
+        initialize_distributed()
+        torch.manual_seed(42)
+        model = SimpleModel(hidden_dim=hidden_dim, nlayers=2)
+        config = build_managed_gas_config(zero_stage,
+                                          gradient_accumulation_steps=1,
+                                          managed_gradient_accumulation=False)
+        engine, _, _, _ = deepspeed.initialize(config=config, model=model, model_parameters=model.parameters())
+        with pytest.raises(AssertionError, match="coalesce_grad_reduction"):
+            with engine.coalesce_grad_reduction():
+                pass
+        engine.destroy()
+
+
+class TestUnmanagedGradientAccumulationPipelineValidation(DistributedTest):
+    """Unmanaged mode is incompatible with pipeline parallelism."""
+    world_size = 2
+
+    def test_unmanaged_rejects_pipeline(self):
+        from deepspeed.runtime.pipe.module import PipelineModule
+
+        initialize_distributed()
+        layers = [torch.nn.Linear(4, 4, bias=False), torch.nn.Linear(4, 4, bias=False)]
+        model = PipelineModule(layers=layers, num_stages=2, loss_fn=torch.nn.MSELoss())
+        config = build_managed_gas_config(0, gradient_accumulation_steps=1, managed_gradient_accumulation=False)
+        with pytest.raises(AssertionError, match="not supported with pipeline parallelism"):
+            deepspeed.initialize(config=config, model=model, model_parameters=model.parameters())

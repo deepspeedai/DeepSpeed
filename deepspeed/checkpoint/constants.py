@@ -43,6 +43,9 @@ MODEL_FILE_SUFFIX = '_model_states.pt'
 LAYER_FILE_PREFIX = 'layer_'
 BF16_ZERO_FILE_PREFIX = 'bf16_' + ZERO_FILE_PREFIX
 FP16_ZERO_FILE_PREFIX = 'fp16_' + ZERO_FILE_PREFIX
+CHECKPOINT_PARALLEL_DIMS = 'checkpoint_parallel_dimensions'
+CHECKPOINT_PP_DEGREE = 'pp_degree'
+CHECKPOINT_TP_DEGREE = 'tp_degree'
 
 #########################################
 # Checkpoint utility keys
@@ -55,9 +58,10 @@ DS_VERSION = 'ds_version'
 UNIVERSAL_CHECKPOINT_INFO = 'universal_checkpoint_info'
 UNIVERSAL_CHECKPOINT_VERSION_KEY = 'universal_checkpoint_version'
 # Reserve version 0.1  for the hardcoded logic used in BLOOM-176B training
-UNIVERSAL_CHECKPOINT_VERSION_VALUE = 0.3
+UNIVERSAL_CHECKPOINT_VERSION_VALUE = 0.4
 # Attribute name used to store AutoTP universal-checkpoint metadata on torch Parameters.
 DS_AUTOTP_UC_META = "ds_autotp_universal_checkpoint_meta"
+AUTOTP_UNSUPPORTED_PARAMETER_PATTERNS = "autotp_unsupported_parameter_patterns"
 
 # Vocabulary padding
 VOCAB_TENSOR = 'vocab_tensor'
@@ -86,6 +90,11 @@ PARAMETER_WITH_ROW_PARALLELISM_PATTERNS = 'parameter_with_row_parallelism_patter
 TP_REPLICATED_PARAMETER_PATTERNS = 'tp_replicated_parameter_patterns'
 PARAMETER_WITH_2_SUB_PARAMS_CAT_DIM_0 = 'parameter_with_2_sub_params_cat_dim_0'
 PARAMETER_WITH_SUB_PARAMS = 'parameter_with_sub_params'
+# Per-rank width of every sub-parameter, keyed by the same pattern used in
+# PARAMETER_WITH_SUB_PARAMS. Kept as a separate top-level key so that converters predating
+# uneven sub-parameter support simply do not see it, instead of failing to build a
+# SubparamShape from an unexpected field.
+SUB_PARAM_SHARD_WIDTHS = 'sub_param_shard_widths'  # UCP version 0.4
 SUB_PARAMS_SHAPE = 'sub_params_shape'
 
 #########################################
@@ -93,6 +102,16 @@ SUB_PARAMS_SHAPE = 'sub_params_shape'
 #########################################
 AUTOEP_LAYERS_KEY = 'ds_autoep_layers'
 AUTOEP_LAYERS_KEY_LEGACY = 'autoep_layers'
+AUTOEP_EXPERT_KEY_PREFIX = 'expert_key_prefix'
+AUTOEP_NUM_EXPERTS = 'num_experts'
+AUTOEP_NUM_LOCAL_EXPERTS = 'num_local_experts'
+AUTOEP_EP_SIZE = 'ep_size'
+AUTOEP_ZERO12_REQUIRED_FIELDS = (
+    AUTOEP_EXPERT_KEY_PREFIX,
+    AUTOEP_NUM_EXPERTS,
+    AUTOEP_NUM_LOCAL_EXPERTS,
+    AUTOEP_EP_SIZE,
+)
 AUTOEP_ZERO3_EXPERT_STATE_FORMAT_KEY = 'checkpoint_format'
 AUTOEP_ZERO3_PARTITIONED_EXPERT_STATE_FORMAT = 'zero3_partitioned'
 AUTOEP_ZERO3_EXPERT_STATE_FORMAT_VERSION_KEY = 'checkpoint_format_version'

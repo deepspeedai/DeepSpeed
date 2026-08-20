@@ -252,6 +252,23 @@ class ZeROOptimizer(DeepSpeedOptimizer):
 
     def __init__(self):
         self._backward_hook_state = BackwardHookStateManager()
+        # Mirrored copy of the engine GAS boundary for managed reduce/offload paths.
+        # Engine owns the source of truth (micro-step / step() / set_*); ZeRO reads this
+        # during backward. Prefer get/set methods over touching the private field.
+        self._is_gradient_accumulation_boundary = True
+
+    def is_gradient_accumulation_boundary(self) -> bool:
+        """Whether the current micro-batch is a gradient accumulation boundary.
+
+        Used by managed ZeRO reduce/partition/offload logic. Unmanaged mode still
+        mirrors True while ``engine.step()`` runs so late readers stay consistent;
+        deferred offload finalize does not branch on this flag.
+        """
+        return self._is_gradient_accumulation_boundary
+
+    def set_gradient_accumulation_boundary(self, is_boundary: bool) -> None:
+        """Mirror the engine's gradient accumulation boundary into this optimizer."""
+        self._is_gradient_accumulation_boundary = bool(is_boundary)
 
     # Delegate backward hook state management to the manager.
     # These properties provide backward compatibility with code that accesses

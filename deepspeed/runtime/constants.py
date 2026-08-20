@@ -107,6 +107,13 @@ Gradient Accumulation should be of the format:
 GRADIENT_ACCUMULATION_STEPS = "gradient_accumulation_steps"
 GRADIENT_ACCUMULATION_STEPS_DEFAULT = None
 
+#########################################
+# Managed Gradient Accumulation
+#########################################
+# True (default): DeepSpeed tracks micro-steps and steps on the boundary. False: the client owns the boundary and each step() applies an optimizer update.
+MANAGED_GRADIENT_ACCUMULATION = "managed_gradient_accumulation"
+MANAGED_GRADIENT_ACCUMULATION_DEFAULT = True
+
 # DeepSpeed CSR gradient sparsity
 SPARSE_GRADIENTS = "sparse_gradients"
 SPARSE_GRADIENTS_DEFAULT = False
@@ -316,6 +323,16 @@ Gradient predivide factor should be enabled as:
 '''
 GRADIENT_PREDIVIDE_FACTOR = "gradient_predivide_factor"
 GRADIENT_PREDIVIDE_FACTOR_DEFAULT = 1.0
+
+GRADIENT_ALLREDUCE_OP_FORMAT = '''
+Gradient allreduce operation should be set as:
+"gradient_allreduce_op": "mean"
+'''
+GRADIENT_ALLREDUCE_OP = "gradient_allreduce_op"
+GRADIENT_ALLREDUCE_OP_MEAN = "mean"
+GRADIENT_ALLREDUCE_OP_SUM = "sum"
+GRADIENT_ALLREDUCE_OP_DEFAULT = GRADIENT_ALLREDUCE_OP_MEAN
+GRADIENT_ALLREDUCE_OP_SUPPORTED = (GRADIENT_ALLREDUCE_OP_MEAN, GRADIENT_ALLREDUCE_OP_SUM)
 
 #########################################
 # Disable AllGather

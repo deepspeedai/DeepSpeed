@@ -7,6 +7,9 @@ import torch
 import deepspeed.comm as dist
 import deepspeed
 from deepspeed.accelerator import get_accelerator
+from deepspeed.checkpoint.constants import (ORIGINAL_VOCAB_SIZE, PARAMETER_WITH_ROW_PARALLELISM_PATTERNS,
+                                            TP_REPLICATED_PARAMETER_PATTERNS, UNIVERSAL_CHECKPOINT_INFO,
+                                            VOCABULARY_PARAMETER_PATTERNS)
 from deepspeed.utils import groups
 from deepspeed.runtime.utils import is_model_parallel_parameter
 from unit.common import DistributedTest, preferred_dtype
@@ -181,6 +184,34 @@ class TestTPPlanEndToEnd(DistributedTest):
 
         self._compare_tp_gradients(model, torch_q, torch_o, input_tensor, engine)
 
+    def test_tp_plan_attaches_universal_checkpoint_info(self):
+        model = self.SimpleHFModel()
+        model.lm_head = torch.nn.Linear(model.hidden_size, 64)
+        model.config.base_model_tp_plan["lm_head"] = "colwise_gather_output"
+        ds_config = {
+            "train_micro_batch_size_per_gpu": 1,
+            "tensor_parallel": {
+                "autotp_size": 2
+            },
+            "zero_optimization": {
+                "stage": 0
+            },
+        }
+
+        engine, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=ds_config)
+
+        assert engine.autotp_size() == 2
+        assert model.lm_head.gather_output
+        uc_info = getattr(model, UNIVERSAL_CHECKPOINT_INFO)
+        row_parallel_patterns = uc_info[PARAMETER_WITH_ROW_PARALLELISM_PATTERNS]
+        replicated_patterns = uc_info[TP_REPLICATED_PARAMETER_PATTERNS]
+        assert r"^layers\.0\.o_proj\.weight$" in row_parallel_patterns
+        assert r"^layers\.0\.q_proj\.weight$" not in row_parallel_patterns
+        assert r"^layers\.0\.o_proj\.bias$" in replicated_patterns
+        assert r"^layers\.0\.q_proj\.bias$" not in replicated_patterns
+        assert r"^lm_head\.weight$" in uc_info[VOCABULARY_PARAMETER_PATTERNS]
+        assert uc_info[ORIGINAL_VOCAB_SIZE] == 64
+
     def test_tp_plan_with_zero1(self):
         skip_on_device()
 
@@ -272,3 +303,82 @@ class TestTPPlanEndToEnd(DistributedTest):
         loss = output.mean()
         engine.backward(loss)
         engine.step()
+
+
+class TestReplicatedGradAllreduce(DistributedTest):
+    """Replicated parameters marked replicated_with_grad_allreduce must not drift across TP ranks.
+
+    Qwen3's q_norm/k_norm normalize the locally sharded attention heads, so each rank computes only
+    its shard's contribution to their gradient. Before the style was implemented the whole tp_plan
+    was discarded and the partial gradients were silently left unsummed: training ran, the loss
+    went down, and the ranks held different weights after the first optimizer step.
+    """
+
+    world_size = 2
+    non_daemonic_procs = True
+
+    def test_qwen3_norm_grads_match_across_ranks(self):
+        if get_accelerator().device_name() == "cpu":
+            import pytest
+            pytest.skip("CPU does not support this test yet")
+        import pytest
+        transformers = pytest.importorskip("transformers")
+        if not hasattr(transformers, "Qwen3ForCausalLM"):
+            pytest.skip("transformers build has no Qwen3")
+
+        config = transformers.Qwen3Config(vocab_size=256,
+                                          hidden_size=64,
+                                          intermediate_size=128,
+                                          num_hidden_layers=2,
+                                          num_attention_heads=8,
+                                          num_key_value_heads=8,
+                                          head_dim=8,
+                                          max_position_embeddings=64,
+                                          use_cache=False,
+                                          tie_word_embeddings=False)
+        config._attn_implementation = "sdpa"
+        torch.manual_seed(42)
+        model = transformers.Qwen3ForCausalLM(config)
+
+        ds_config = {
+            "train_micro_batch_size_per_gpu": 1,
+            "optimizer": {
+                "type": "Adam",
+                "params": {
+                    "lr": 1e-6
+                }
+            },
+            "tensor_parallel": {
+                "autotp_size": self.world_size
+            },
+            "zero_optimization": {
+                "stage": 0
+            },
+        }
+        engine, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=ds_config)
+
+        norm_params = [name for name, _ in engine.module.named_parameters() if "q_norm" in name or "k_norm" in name]
+        assert norm_params, "the model should expose q_norm/k_norm parameters"
+        registered = [
+            name for name, param in engine.module.named_parameters()
+            if getattr(param, "_ds_grad_allreduce_registered", False)
+        ]
+        assert set(norm_params) <= set(registered), \
+            f"grad all-reduce hooks missing for {sorted(set(norm_params) - set(registered))}"
+
+        device = torch.device(get_accelerator().current_device_name())
+        torch.manual_seed(1234)
+        input_ids = torch.randint(0, 256, (1, 16), device=device)
+        logits = engine(input_ids=input_ids, use_cache=False).logits
+        engine.backward(logits.float().pow(2).mean())
+
+        tp_group = groups.get_tensor_model_parallel_group()
+        tp_world = dist.get_world_size(group=tp_group)
+        for name, param in engine.module.named_parameters():
+            if name not in norm_params:
+                continue
+            gathered = [torch.empty_like(param.grad) for _ in range(tp_world)]
+            dist.all_gather(gathered, param.grad.contiguous(), group=tp_group)
+            for other in gathered[1:]:
+                assert torch.allclose(gathered[0], other, atol=1e-6), \
+                    f"gradient of {name} differs across tensor-parallel ranks"

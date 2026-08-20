@@ -181,6 +181,57 @@ def _one_hot_to_float(x, num_classes):
     return F.one_hot(x, num_classes=num_classes).float()
 
 
+def _stack_routes(routes: Tensor, dtype: Optional[torch.dtype] = None) -> Tensor:
+    """Turn a [s, k] per-route tensor into the contiguous [k, s] block the dispatch uses.
+
+    Transposing and casting the whole block once keeps the cost independent of k,
+    whereas casting each route separately scales the launch count with k.
+    """
+    routes = routes.t().contiguous()
+    if dtype is not None:
+        routes = routes.to(dtype)
+    return routes
+
+
+def _route_slots(indices: Tensor, locations: Tensor, num_experts: int, capacity: int) -> Tensor:
+    """Map every (token, route) pair onto its flat slot in the [e * c] expert buffer.
+
+    Routes evicted by the capacity limit are parked on one extra scratch slot so that
+    the scatter and gather below stay branch-free; callers drop that slot.
+    """
+    flat_slot = indices.long() * capacity + locations.long()
+    scratch = torch.full_like(flat_slot, num_experts * capacity)
+    return torch.where(indices >= 0, flat_slot, scratch)
+
+
+def _sparse_encode(reshaped_input: Tensor, slots: Tensor, num_experts: int, capacity: int) -> Tensor:
+    """Place every routed token in its expert slot, returning the [e, c, m] buffer.
+
+    Inverting the routing map first turns the copy into a single gather. Scattering
+    instead would need one input copy per route, and the dense one-hot einsum this
+    replaces costs O(s * e * c * m) to move only s * k * m elements.
+    """
+    num_tokens, d_model = reshaped_input.shape
+    # Name the source token of every slot; slots nothing routes to read a zero pad row.
+    source = torch.full((num_experts * capacity + 1, ), num_tokens, dtype=torch.long, device=slots.device)
+    tokens = torch.arange(num_tokens, device=slots.device).expand_as(slots)
+    source.scatter_(0, slots.reshape(-1), tokens.reshape(-1))
+    padded_input = torch.cat([reshaped_input, reshaped_input.new_zeros(1, d_model)])
+    return padded_input.index_select(0, source[:-1]).view(num_experts, capacity, d_model)
+
+
+def _sparse_decode(expert_output: Tensor, slots: Tensor, gates: Tensor, num_tokens: int) -> Tensor:
+    """Gather each token's expert results back and weight them by the gate values."""
+    d_model = expert_output.size(-1)
+    padded_output = torch.cat([expert_output, expert_output.new_zeros(1, d_model)])
+    routed = padded_output.index_select(0, slots.reshape(-1)).view(slots.size(0), num_tokens, d_model)
+    # gates is fp32, so the product and the sum over routes accumulate in fp32 as well.
+    # The dense einsum this replaces accumulated in fp32 inside the matmul, and summing
+    # the routes in the input dtype instead measurably loses precision in bf16/fp16.
+    combined = (routed * gates.unsqueeze(-1)).sum(0)
+    return combined.to(expert_output.dtype)
+
+
 def top1gating(logits: Tensor,
                capacity_factor: float,
                min_capacity: int,
@@ -189,6 +240,7 @@ def top1gating(logits: Tensor,
                drop_tokens: bool = True,
                use_rts: bool = True,
                ep_group: Union[torch.distributed.ProcessGroup, None] = None,
+               sparse_routes: bool = False,
                use_tutel: bool = False) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
     """Implements Top1Gating on logits."""
     if noisy_gate_policy == 'RSample':
@@ -245,14 +297,17 @@ def top1gating(logits: Tensor,
     assert logits.shape[
         0] >= min_capacity, "No. of tokens (batch-size) should be greater than min_capacity. Either set min_capacity to 0 or increase your batch size."
 
-    top_idx = _top_idx(mask1_rand, capacity)
+    # torch.topk(..., dim=0) cannot select more rows than the token dimension holds, so bound the
+    # selection without shrinking the dispatch capacity the buffers are sized from.
+    selection_capacity = min(capacity, torch.tensor(mask1.size(0)).to(capacity.device))
+    top_idx = _top_idx(mask1_rand, selection_capacity)
 
     new_mask1 = mask1 * torch.zeros_like(mask1).scatter_(0, top_idx, 1)
     mask1 = new_mask1
 
-    if use_tutel:
-        # Tutel doesn't support index values masked with zero
-        # so we need to replace masked indices with -1
+    if sparse_routes:
+        # The dispatch flags routes evicted by the capacity limit with a negative
+        # expert index, so replace the masked indices with -1.
         indices_mask = mask1.sum(dim=1) * num_experts - 1
         indices1_s = torch.min(indices1_s, indices_mask)
 
@@ -262,16 +317,11 @@ def top1gating(logits: Tensor,
     else:
         locations1 = torch.cumsum(mask1, dim=0) - 1
 
-    if use_tutel:
+    if sparse_routes:
         gates1_s = (gates * mask1).sum(dim=1)
         locations1_s = torch.sum(locations1 * mask1, dim=1)
-        return l_aux, capacity, num_experts, [
-            indices1_s,
-        ], [
-            locations1_s,
-        ], [
-            gates1_s,
-        ], exp_counts
+        return (l_aux, capacity, num_experts, indices1_s.to(torch.int32).unsqueeze(0),
+                locations1_s.to(torch.int32).unsqueeze(0), gates1_s.unsqueeze(0), exp_counts)
 
     # Store the capacity location for each token
     locations1_s = torch.sum(locations1 * mask1, dim=1)
@@ -293,7 +343,8 @@ def top2gating(logits: Tensor,
                min_capacity: int,
                drop_tokens: bool = True,
                ep_group: Union[torch.distributed.ProcessGroup, None] = None,
-               top2_2nd_expert_sampling: bool = True) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
+               top2_2nd_expert_sampling: bool = True,
+               sparse_routes: bool = False) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
     """Implements Top2Gating on logits."""
     # everything is in fp32 in this function
     gates = F.softmax(logits, dim=1)
@@ -359,6 +410,14 @@ def top2gating(logits: Tensor,
     gates1_s /= denom_s
     gates2_s /= denom_s
 
+    if sparse_routes:
+        # Routes evicted by the capacity limit are flagged with a negative expert index.
+        indices1_s = torch.where(mask1.any(dim=1), indices1_s, torch.full_like(indices1_s, -1))
+        indices2_s = torch.where(mask2.any(dim=1), indices2_s, torch.full_like(indices2_s, -1))
+        return (l_aux, capacity, num_experts, torch.stack([indices1_s, indices2_s]).to(torch.int32),
+                torch.stack([locations1_s, locations2_s]).to(torch.int32), torch.stack([gates1_s,
+                                                                                        gates2_s]), exp_counts)
+
     # Calculate combine_weights and dispatch_mask
     gates1 = einsum("s,se->se", gates1_s, mask1_float)
     gates2 = einsum("s,se->se", gates2_s, mask2_float)
@@ -380,6 +439,7 @@ def topkgating(
     drop_tokens: bool = True,
     ep_group: Union[torch.distributed.ProcessGroup, None] = None,
     drop_policy: str = "probs",
+    sparse_routes: bool = False,
 ) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
     """Implements TopKGating on logits."""
 
@@ -407,7 +467,10 @@ def topkgating(
 
         if drop_policy == 'probs':
             topk_masked_gates = torch.zeros_like(gates).scatter(1, top_idx, top_gate)
-            _, capacity_indices = torch.topk(topk_masked_gates, k=capacity, dim=0, sorted=False)
+            # k cannot exceed the token dimension being selected over, but capacity itself still
+            # sizes the dispatch buffer below.
+            selection_capacity = min(capacity, torch.tensor(gates.size(0)).to(capacity.device))
+            _, capacity_indices = torch.topk(topk_masked_gates, k=selection_capacity, dim=0, sorted=False)
             capacity_mask = torch.zeros_like(gates, dtype=torch.bool).scatter_(0, capacity_indices, True)
             mask &= capacity_mask
             locations = torch.cumsum(mask, dim=0) - 1
@@ -439,6 +502,19 @@ def topkgating(
 
     if locations is None:
         raise ValueError(f"Locations is not set: {locations}")
+
+    if sparse_routes:
+        # The dispatch wants one (index, location, gate) triple per route. The top-k
+        # columns already name the selected experts, so gather the per-route values
+        # directly instead of rebuilding a dense [s, e] mask for every route. Routes
+        # evicted by the capacity limit are flagged with a negative expert index.
+        route_kept = mask.gather(1, top_idx)
+        route_indices = torch.where(route_kept, top_idx, torch.full_like(top_idx, -1))
+        route_locations = locations.gather(1, top_idx) * route_kept
+        route_gates = gates_masked.gather(1, top_idx)
+        return (l_aux, capacity, num_experts, _stack_routes(route_indices, torch.int32),
+                _stack_routes(route_locations, torch.int32), _stack_routes(route_gates), exp_counts)
+
     # dispatch_mask
     locations_sc = _one_hot_to_float((locations * mask), capacity)
 
@@ -502,6 +578,7 @@ class TopKGate(Module):
     def forward(self,
                 input: torch.Tensor,
                 used_token: torch.Tensor = None,
+                sparse_routes: bool = False,
                 use_tutel: bool = False) -> Tuple[Tensor, Tensor, Tensor]:  # type: ignore
 
         if self.wall_clock_breakdown:
@@ -516,15 +593,20 @@ class TopKGate(Module):
         if self.k == 1:
             gate_output = top1gating(logits, self.capacity_factor if self.training else self.eval_capacity_factor,
                                      self.min_capacity, used_token, self.noisy_gate_policy if self.training else None,
-                                     self.drop_tokens, self.use_rts, self.ep_group, use_tutel)
+                                     self.drop_tokens, self.use_rts, self.ep_group, sparse_routes, use_tutel)
 
         elif self.k == 2:
             gate_output = top2gating(logits, self.capacity_factor if self.training else self.eval_capacity_factor,
-                                     self.min_capacity, self.drop_tokens, self.ep_group, self.top2_2nd_expert_sampling)
+                                     self.min_capacity, self.drop_tokens, self.ep_group, self.top2_2nd_expert_sampling,
+                                     sparse_routes)
         else:
-            gate_output = topkgating(logits, self.k,
+            gate_output = topkgating(logits,
+                                     self.k,
                                      self.capacity_factor if self.training else self.eval_capacity_factor,
-                                     self.min_capacity, self.drop_tokens, self.ep_group)
+                                     self.min_capacity,
+                                     self.drop_tokens,
+                                     self.ep_group,
+                                     sparse_routes=sparse_routes)
 
         if self.wall_clock_breakdown:
             self.timers(TOPK_GATE_TIMER).stop()
@@ -547,7 +629,7 @@ class MOELayer(Base):
     Args:
         gate (torch.nn.Module):
             gate network
-        expert (torch.nn.Module):
+        experts (torch.nn.Module):
             expert network
     """
 
@@ -571,15 +653,12 @@ class MOELayer(Base):
         self.timers = SynchronizedWallClockTimer()
         self.wall_clock_breakdown = False
 
-        self.use_tutel = use_tutel and TUTEL_INSTALLED and gate.k == 1
+        self.use_tutel = use_tutel and TUTEL_INSTALLED
 
         if self.use_tutel:
             logger.info('Using Tutel optimizations.')
         elif use_tutel and not TUTEL_INSTALLED:
             logger.warning("Tutel optimization requested but not installed. "
-                           "Proceeding without Tutel.")
-        elif use_tutel and TUTEL_INSTALLED and gate.k != 1:
-            logger.warning("To enable Tutel optimization, use top-1 instead of top-2 gate. "
                            "Proceeding without Tutel.")
 
     def _set_ep_group(self, ep_group):
@@ -599,17 +678,26 @@ class MOELayer(Base):
         # group_size = kwargs['group_size'] if 'group_size' in kwargs.keys() else 1
         reshaped_input = input[0].reshape(-1, d_model)
 
-        if self.use_tutel:
-            self.l_aux, C, E, indices_, locations_, gates_, self.exp_counts = self.gate(reshaped_input, input[1], True)
-            S, M = reshaped_input.size(0), reshaped_input.size(1)
+        self.l_aux, C, E, indices_, locations_, gates_, self.exp_counts = self.gate(
+            reshaped_input, input[1], True, self.use_tutel)
+        S, M = reshaped_input.size(0), reshaped_input.size(1)
+        # Resolve the capacity tensor once; every later use of C would otherwise force
+        # its own device-to-host sync.
+        C = int(C)
 
+        if self.use_tutel:
             if not hasattr(self, '_tutel_dispatcher'):
                 self._tutel_dispatcher = tutel_moe.fast_dispatcher(E, C, M, dispatch_dtype=reshaped_input.dtype)
-            self._tutel_dispatcher.update(indices_, locations_, gates_, capacity=C)
-            dispatched_input = self._tutel_dispatcher.encode(reshaped_input)
+            self._tutel_dispatcher.update(list(indices_.unbind(0)),
+                                          list(locations_.unbind(0)),
+                                          list(gates_.unbind(0)),
+                                          capacity=C)
+            # encode() returns a flat [e * c, m]; reshape to [e, c, m] so the tensor-parallel
+            # drop_tokens/gather_tokens below split the capacity dim rather than the model dim.
+            dispatched_input = self._tutel_dispatcher.encode(reshaped_input).view(E, C, M)
         else:
-            self.l_aux, combine_weights, dispatch_mask, self.exp_counts = self.gate(reshaped_input, input[1])
-            dispatched_input = einsum("sec,sm->ecm", dispatch_mask.type_as(input[0]), reshaped_input)
+            slots = _route_slots(indices_, locations_, E, C)
+            dispatched_input = _sparse_encode(reshaped_input, slots, E, C)
 
         if self.wall_clock_breakdown:
             self.timers(FIRST_ALLTOALL_TIMER).start()
@@ -675,7 +763,7 @@ class MOELayer(Base):
         if self.use_tutel:
             combined_output = self._tutel_dispatcher.decode(expert_output.view(E * C, M))
         else:
-            combined_output = einsum("sec,ecm->sm", combine_weights.type_as(input[0]), expert_output)
+            combined_output = _sparse_decode(expert_output.view(E * C, M), slots, gates_, S)
 
         a = combined_output.reshape(input[0].shape)
 

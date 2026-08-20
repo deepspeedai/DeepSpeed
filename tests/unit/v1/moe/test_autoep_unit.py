@@ -16,6 +16,7 @@ import torch.nn as nn
 import deepspeed.runtime.engine as ds_engine
 import deepspeed.runtime.zero.stage3 as zero_stage3
 import deepspeed.moe.ep_repack as ep_repack
+import deepspeed.module_inject.auto_ep_layer as auto_ep_layer
 from deepspeed.module_inject.auto_ep import AutoEP, _resolve_route_scale
 from deepspeed.module_inject.auto_ep_config import (
     AutoEPConfig,
@@ -28,8 +29,11 @@ from deepspeed.module_inject.auto_ep_config import (
 )
 from deepspeed.module_inject.auto_ep_layer import (
     AutoEPMoELayer,
+    SplitPlan,
     apply_scores_before_experts_if_enabled,
     combine_from_routed,
+    compute_split_plan,
+    compute_split_plan_from_expert_indices,
     resolve_score_apply_mode,
 )
 from deepspeed.module_inject.auto_ep_preset_adapters import get_preset_adapter
@@ -39,7 +43,6 @@ from deepspeed.module_inject.auto_ep_presets.registry import (
 )
 from deepspeed.moe.layer import MoE
 from deepspeed.moe.ep_experts import GroupedExperts
-from deepspeed.moe.ep_kernels import TokenReorderer
 from deepspeed.moe.ep_repack import repack_expert_weights
 from deepspeed.moe.ep_router import TokenChoiceTopKRouter
 from deepspeed.runtime.engine import DeepSpeedEngine
@@ -730,7 +733,10 @@ class TestAutoEPConfig:
         )
 
         temp_dir = tmp_path / "tmp"
-        extract_zero_shards_stage3([str(optim_file)], [OrderedDict([("dense.weight", (2, 3))])], 1, str(temp_dir), 0)
+        # optim_files_grid[tp][dp] and param_shapes_grid[tp] (= PARAM_SHAPES, a list of
+        # sub-group dicts), work item (tp_index, dp_index).
+        extract_zero_shards_stage3([[str(optim_file)]], [[OrderedDict([("dense.weight", (2, 3))])]], 1, str(temp_dir),
+                                   (0, 0))
 
         fp32_fragment = torch.load(temp_dir / "dense.weight" / "0" / "fp32.00", weights_only=False)
         exp_avg_fragment = torch.load(temp_dir / "dense.weight" / "0" / "exp_avg.00", weights_only=False)
@@ -843,7 +849,7 @@ class TestRoutingAndLayerSemantics:
         assert torch.equal(scaled_counts, base_counts)
         assert base_counts.shape == (8, )
 
-    def test_grouped_experts_and_token_reorderer(self):
+    def test_grouped_experts(self):
         experts = GroupedExperts(dim=64, hidden_dim=128, num_experts=4, use_grouped_mm=False)
         nn.init.normal_(experts.w1, std=0.02)
         nn.init.normal_(experts.w2, std=0.02)
@@ -851,13 +857,6 @@ class TestRoutingAndLayerSemantics:
         out = experts(torch.randn(8, 64), torch.tensor([2, 2, 2, 2]))
         assert out.shape == (8, 64)
         assert not torch.isnan(out).any()
-
-        top_scores = torch.randn(20, 2)
-        selected_experts = torch.randint(0, 4, (20, 2))
-        scores_sorted, indices_sorted, counts = TokenReorderer(num_experts=4, top_k=2)(top_scores, selected_experts)
-        assert scores_sorted.shape == (40, )
-        assert set(indices_sorted.tolist()) == set(range(40))
-        assert torch.equal(counts, torch.bincount(selected_experts.reshape(-1), minlength=4).to(counts.dtype))
 
     def test_score_application_and_combine(self):
         x = torch.randn(4, 8)
@@ -892,6 +891,167 @@ class TestRoutingAndLayerSemantics:
                            ep_size=1,
                            ep_rank=0,
                            config=AutoEPConfig(enabled=True, autoep_size=1, load_balance_coeff=0.02))
+
+
+SPLIT_PLAN_EP_SIZE = 3
+SPLIT_PLAN_LOCAL_EXPERTS = 2
+SPLIT_PLAN_NUM_EXPERTS = SPLIT_PLAN_EP_SIZE * SPLIT_PLAN_LOCAL_EXPERTS
+
+# Each row is one source rank's flat [E_global] histogram over global experts.
+SPLIT_PLAN_SCENARIOS = {
+    "balanced": [[2, 2, 2, 2, 2, 2], [2, 2, 2, 2, 2, 2], [2, 2, 2, 2, 2, 2]],
+    "severe_skew": [[11, 0, 0, 0, 0, 1], [0, 1, 0, 9, 0, 0], [0, 0, 4, 0, 0, 8]],
+    "zero_token_destination": [[3, 1, 0, 0, 4, 0], [2, 2, 0, 0, 0, 5], [1, 1, 0, 0, 2, 2]],
+    "empty_local_expert": [[0, 4, 3, 1, 0, 6], [0, 2, 1, 1, 0, 3], [0, 5, 2, 2, 0, 1]],
+    "silent_source": [[4, 1, 2, 3, 1, 1], [0, 0, 0, 0, 0, 0], [1, 1, 1, 1, 1, 1]],
+}
+
+
+def _split_plan_counts(scenario):
+    return [torch.tensor(row, dtype=torch.int32) for row in SPLIT_PLAN_SCENARIOS[scenario]]
+
+
+def _split_plan_received(all_counts, ep_rank):
+    """Rows of the matrix rank ``ep_rank`` receives from the counts all-to-all."""
+    return torch.stack([counts.view(SPLIT_PLAN_EP_SIZE, SPLIT_PLAN_LOCAL_EXPERTS)[ep_rank]
+                        for counts in all_counts]).to(torch.int32)
+
+
+def _selected_experts_from_counts(counts):
+    """Build a routing assignment list whose histogram is exactly ``counts``."""
+    return torch.repeat_interleave(torch.arange(counts.numel()), counts.to(torch.int64))
+
+
+def _legacy_split_plan(num_tokens_per_expert):
+    """The two-collective planner this change replaces, kept as a reference."""
+    count_matrix = num_tokens_per_expert.to(torch.int32).view(SPLIT_PLAN_EP_SIZE, SPLIT_PLAN_LOCAL_EXPERTS)
+    input_splits = count_matrix.sum(dim=1).cpu().tolist()
+
+    rank_counts = count_matrix.sum(dim=1).clone()
+    remote_rank_counts = torch.zeros_like(rank_counts)
+    auto_ep_layer.dist.all_to_all_single(remote_rank_counts, rank_counts, group=None)
+    output_splits = remote_rank_counts.cpu().tolist()
+
+    expert_counts = count_matrix.reshape(-1).contiguous()
+    received_flat = torch.zeros_like(expert_counts)
+    auto_ep_layer.dist.all_to_all_single(received_flat, expert_counts, group=None)
+    received_counts = received_flat.view(SPLIT_PLAN_EP_SIZE, SPLIT_PLAN_LOCAL_EXPERTS)
+
+    return SplitPlan(input_splits, output_splits, received_counts.sum(dim=0), received_counts)
+
+
+class TestSplitPlan:
+    """Split metadata is exchanged once and rank splits are derived from it."""
+
+    @staticmethod
+    def _patch_counts_exchange(monkeypatch, all_counts, ep_rank):
+        """Emulate the EP metadata all-to-alls seen by rank ``ep_rank``.
+
+        Both the legacy per-rank exchange and the per-(rank, local-expert)
+        exchange are served, each derived independently from ``all_counts``.
+        Payloads are built lazily so callers that never reach a collective
+        (ep_size == 1) do not need a full ``[ep_size, E_local]`` layout.
+        """
+        sent = []
+
+        def fake_all_to_all_single(output, input_, group=None):
+            sent.append(input_.clone())
+            received = _split_plan_received(all_counts, ep_rank)
+            if input_.numel() == len(all_counts):
+                payload = received.sum(dim=1)
+            else:
+                payload = received.reshape(-1)
+            output.copy_(payload.to(output.dtype))
+
+        monkeypatch.setattr(auto_ep_layer.dist, "all_to_all_single", fake_all_to_all_single)
+        return sent
+
+    @pytest.mark.parametrize("scenario", sorted(SPLIT_PLAN_SCENARIOS))
+    @pytest.mark.parametrize("ep_rank", range(SPLIT_PLAN_EP_SIZE))
+    def test_single_exchange_derives_rank_splits(self, monkeypatch, scenario, ep_rank):
+        all_counts = _split_plan_counts(scenario)
+        sent = self._patch_counts_exchange(monkeypatch, all_counts, ep_rank)
+
+        plan = compute_split_plan(
+            selected_experts=_selected_experts_from_counts(all_counts[ep_rank]),
+            num_experts=SPLIT_PLAN_NUM_EXPERTS,
+            ep_size=SPLIT_PLAN_EP_SIZE,
+            num_local_experts=SPLIT_PLAN_LOCAL_EXPERTS,
+            ep_group=None,
+        )
+
+        assert len(sent) == 1
+        assert sent[0].dtype == torch.int32
+        assert sent[0].is_contiguous()
+        assert torch.equal(sent[0], all_counts[ep_rank])
+
+        received = _split_plan_received(all_counts, ep_rank)
+        mine = all_counts[ep_rank].view(SPLIT_PLAN_EP_SIZE, SPLIT_PLAN_LOCAL_EXPERTS)
+        assert plan.input_splits == mine.sum(dim=1).tolist()
+        assert plan.output_splits == received.sum(dim=1).tolist()
+        assert torch.equal(plan.local_counts, received.sum(dim=0))
+        assert torch.equal(plan.local_counts_by_source, received)
+        assert sum(plan.output_splits) == int(received.sum())
+
+    @pytest.mark.parametrize("scenario", sorted(SPLIT_PLAN_SCENARIOS))
+    @pytest.mark.parametrize("ep_rank", range(SPLIT_PLAN_EP_SIZE))
+    def test_matches_legacy_two_collective_planner(self, monkeypatch, scenario, ep_rank):
+        all_counts = _split_plan_counts(scenario)
+        sent = self._patch_counts_exchange(monkeypatch, all_counts, ep_rank)
+
+        expected = _legacy_split_plan(all_counts[ep_rank])
+        assert len(sent) == 2
+        sent.clear()
+
+        plan = compute_split_plan(
+            selected_experts=_selected_experts_from_counts(all_counts[ep_rank]),
+            num_experts=SPLIT_PLAN_NUM_EXPERTS,
+            ep_size=SPLIT_PLAN_EP_SIZE,
+            num_local_experts=SPLIT_PLAN_LOCAL_EXPERTS,
+            ep_group=None,
+        )
+
+        assert len(sent) == 1
+        assert plan.input_splits == expected.input_splits
+        assert plan.output_splits == expected.output_splits
+        assert torch.equal(plan.local_counts, expected.local_counts)
+        assert torch.equal(plan.local_counts_by_source, expected.local_counts_by_source)
+
+    @pytest.mark.parametrize("scenario", sorted(SPLIT_PLAN_SCENARIOS))
+    def test_folded_entry_point_agrees(self, monkeypatch, scenario):
+        all_counts = _split_plan_counts(scenario)
+        selected_experts = _selected_experts_from_counts(all_counts[1])
+        kwargs = dict(num_experts=SPLIT_PLAN_NUM_EXPERTS,
+                      ep_size=SPLIT_PLAN_EP_SIZE,
+                      num_local_experts=SPLIT_PLAN_LOCAL_EXPERTS,
+                      ep_group=None)
+
+        self._patch_counts_exchange(monkeypatch, all_counts, ep_rank=1)
+        derived = compute_split_plan(selected_experts=selected_experts, **kwargs)
+        folded = compute_split_plan_from_expert_indices(expert_indices=selected_experts, **kwargs)
+
+        assert derived.input_splits == folded.input_splits
+        assert derived.output_splits == folded.output_splits
+        assert torch.equal(derived.local_counts, folded.local_counts)
+        assert torch.equal(derived.local_counts_by_source, folded.local_counts_by_source)
+
+    def test_ep_size_one_needs_no_exchange(self, monkeypatch):
+        counts = torch.tensor([3, 0, 5, 1], dtype=torch.int32)
+        sent = self._patch_counts_exchange(monkeypatch, [counts], ep_rank=0)
+
+        plan = compute_split_plan(
+            selected_experts=_selected_experts_from_counts(counts),
+            num_experts=4,
+            ep_size=1,
+            num_local_experts=4,
+            ep_group=None,
+        )
+
+        assert sent == []
+        assert plan.input_splits == [9]
+        assert plan.output_splits == [9]
+        assert torch.equal(plan.local_counts, counts)
+        assert torch.equal(plan.local_counts_by_source, counts.view(1, 4))
 
 
 class TestModelDetectionAndReplacement:

@@ -313,7 +313,7 @@ class DeepSpeedInferenceConfig(DeepSpeedConfigModel):
     @field_validator("moe")
     def moe_backward_compat(cls, field_value, values):
         if isinstance(field_value, bool):
-            return DeepSpeedMoEConfig(moe=field_value)
+            return DeepSpeedMoEConfig(enabled=field_value)
         return field_value
 
     @field_validator("use_triton")

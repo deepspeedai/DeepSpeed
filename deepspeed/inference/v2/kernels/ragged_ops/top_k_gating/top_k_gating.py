@@ -45,9 +45,9 @@ class RaggedTopKGating(DSKernelBase):
                 it is recommended to write to 0 during the MoE output remapping.
             scores (torch.Tensor): Preallocated output of shape [n_tokens, n_top_k] to place expert scaling
                 value.
-            expert_assignment (torch.Tensor): Preallocated output of shape [n_tokens, n_top_k] to place
+            assignments (torch.Tensor): Preallocated output of shape [n_tokens, n_top_k] to place
                 which expert a token has been assigned to.
-            expert_offset (torch.Tensor): Preallocated output of shape [n_tokens, n_top_k] to place which
+            offsets (torch.Tensor): Preallocated output of shape [n_tokens, n_top_k] to place which
                 offset within an experts group a token is.
             logits (torch.Tensor): Raw logits of gating function.
             batch (RaggedBatchWrapper): Batch information for ragged tensor.

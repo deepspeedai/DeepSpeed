@@ -4,6 +4,7 @@
 # DeepSpeed Team
 
 # Automatic Tensor Parallelism
+import logging
 import re
 
 from torch import nn
@@ -16,7 +17,10 @@ from deepspeed.accelerator import get_accelerator
 from .fusedqkv_utils import require_tp_fused_qkvw
 from deepspeed.module_inject.tp_shard import get_shard_size, get_shard_size_list
 from deepspeed.utils import groups
+from deepspeed.utils.logging import log_dist
 from deepspeed.module_inject.layers import is_autotp_training_mode
+from deepspeed.module_inject.layers import _build_param_uc_restore_meta
+from deepspeed.checkpoint.constants import DS_AUTOTP_UC_META
 from .autotp_config import TPLayerSpec, AutoTPConfig, PartitionType
 
 
@@ -68,7 +72,7 @@ class ReplaceWithTensorSlicing:
             if src_shape[outer_dim] == dst_shape[self.out_dim]:
                 try:
                     dst = dst.reshape(-1).data.copy_(src.data.reshape(-1)).reshape(src.shape)
-                except Exception:
+                except (RuntimeError, ValueError, TypeError):
                     print(dst.shape, src.shape)
                     exit()
                 dst = torch.nn.parameter.Parameter(dst, requires_grad=False)
@@ -214,6 +218,8 @@ class AutoTP():
         self.linear_policies = None
         self.conv_linear_layer = False
         self.partition_config = partition_config
+        self._gathered_column_tie_fallbacks_configured = False
+        self._tied_gathered_column_module_names = set()
         TensorParallel_Layer.set_keep_module_on_host(keep_module_on_host)
 
     def in_module_list(module, module_list):
@@ -462,12 +468,14 @@ class AutoTP():
     def _create_column_parallel_layer(self, module, spec: TPLayerSpec, name: str):
         """Create column-parallel layer (AllReduce in backward)."""
         if self.conv_linear_layer:
-            return conv_LinearLayer(module, self.mp_group, name=name)
+            return conv_LinearLayer(module, self.mp_group, name=name, gather_output=spec.gather_output)
         # Only use fused-QKV heuristics when no partition_config is provided.
         elif self.partition_config is None and require_tp_fused_qkvw(name, self.mp_size):
             # Check and handle fused qkv for TP
             return fused_LinearLayer(module, self.mp_group, fused_module=self.module)
         if spec.shape is not None:
+            if spec.gather_output:
+                raise NotImplementedError("AutoTP gather_output does not yet support shaped sub-parameter layers.")
             return SubParamLinearLayer(
                 module,
                 self.mp_group,
@@ -475,7 +483,56 @@ class AutoTP():
                 partition_dim=spec.get_partition_dim(),
                 name=name,
             )
-        return LinearLayer(module, self.mp_group, name=name)
+        return LinearLayer(module, self.mp_group, name=name, gather_output=spec.gather_output)
+
+    def _configure_gathered_column_tie_fallbacks(self):
+        """Configure a replicated fallback for gathered output layers tied to embeddings."""
+        if self._gathered_column_tie_fallbacks_configured or self.partition_config is None:
+            return
+
+        named_modules = list(self.module.named_modules())
+        embeddings = [(name, module) for name, module in named_modules
+                      if isinstance(module, nn.Embedding) and hasattr(module, "weight")]
+        get_input_embeddings = getattr(self.module, "get_input_embeddings", None)
+        if callable(get_input_embeddings):
+            input_embedding = get_input_embeddings()
+            if input_embedding is not None and hasattr(input_embedding, "weight"):
+                input_embedding_name = next(
+                    (name for name, module in named_modules if module is input_embedding),
+                    None,
+                )
+                is_known_embedding = any(module is input_embedding for _, module in embeddings)
+                if input_embedding_name is not None and not is_known_embedding:
+                    embeddings.append((input_embedding_name, input_embedding))
+        if not embeddings:
+            self._gathered_column_tie_fallbacks_configured = True
+            return
+
+        model_type = self._get_model_type()
+        for module_name, module in named_modules:
+            if not module_name or isinstance(module, nn.Embedding) or not hasattr(module, "weight"):
+                continue
+
+            tied_embedding_name = next(
+                (embedding_name for embedding_name, embedding in embeddings if module.weight is embedding.weight),
+                None,
+            )
+            if tied_embedding_name is None:
+                continue
+
+            spec = self.partition_config.find_matching_spec(module_name + ".weight", model_type)
+            if spec is None or spec.partition_type != PartitionType.COLUMN or not spec.gather_output:
+                continue
+
+            self._tied_gathered_column_module_names.update((module_name, tied_embedding_name))
+            log_dist(
+                f"AutoTP: '{module_name}.weight' is tied to '{tied_embedding_name}.weight'; leaving both modules "
+                "replicated because coupled vocabulary-parallel embedding is not supported yet.",
+                ranks=[0],
+                level=logging.WARNING,
+            )
+
+        self._gathered_column_tie_fallbacks_configured = True
 
     def _get_model_type(self) -> Optional[str]:
         """Extract model type from module config or class name."""
@@ -503,20 +560,78 @@ class AutoTP():
 
         mp_replace = ReplaceWithTensorSlicing(mp_group=self.mp_group)
 
+        original_shape = tuple(child.weight.shape)
+        partition_sizes = get_shard_size_list(original_shape[1], self.mp_size, name)
         if hasattr(child.weight, 'ds_tensor'):
-            data = child.weight.ds_tensor.data.split(get_shard_size_list(child.weight.shape[1], self.mp_size), dim=1)
+            data = child.weight.ds_tensor.data.split(partition_sizes, dim=1)
         else:
-            data = child.weight.data.split(get_shard_size_list(child.weight.shape[1], self.mp_size, name), dim=1)
+            data = child.weight.data.split(partition_sizes, dim=1)
         data = data[mp_replace.gpu_index].to(get_accelerator().current_device_name())
         data = torch.nn.parameter.Parameter(data, requires_grad=False)
 
-        new_embedding = nn.Embedding(child.weight.shape[0], get_shard_size(child.weight.shape[1], self.mp_size, name))
+        new_embedding = nn.Embedding(child.weight.shape[0], data.shape[1])
         new_embedding.weight.data.copy_(data)
+        setattr(
+            new_embedding.weight, DS_AUTOTP_UC_META,
+            _build_param_uc_restore_meta(partition_type='row',
+                                         partition_dim=1,
+                                         logical_shape=original_shape,
+                                         output_shape=original_shape,
+                                         partition_sizes=partition_sizes,
+                                         target_partition_shape=tuple(new_embedding.weight.shape),
+                                         original_shape=original_shape))
         setattr(child, "replaced", True)
         return new_embedding
 
-    def update_mp_params(self, child):
+    def register_replicated_grad_hooks(self, model):
+        """Sum the gradients of replicated parameters marked grad_allreduce across the TP group.
+
+        A parameter left replicated but applied to sharded activations (Qwen3's q_norm/k_norm
+        normalize the local attention heads) receives a different partial gradient on every
+        tensor-parallel rank. Without this reduction the ranks silently drift apart after the
+        first optimizer step. The hook runs when the gradient is computed, before accumulation,
+        so it holds under gradient accumulation and under the DeepCompile pass, whose compiled
+        backward still accumulates leaf gradients through the autograd engine.
+        """
+        if self.partition_config is None or self.mp_group is None or self.mp_size <= 1:
+            return
+
+        def make_grad_allreduce_hook(group):
+
+            def hook(grad):
+                grad = grad.contiguous()
+                dist.all_reduce(grad, group=group)
+                return grad
+
+            return hook
+
+        model_type = self._get_model_type()
+        registered = []
+        for param_name, param in model.named_parameters():
+            spec = self.partition_config.find_matching_spec(param_name, model_type)
+            if spec is None or not spec.grad_allreduce:
+                continue
+            if getattr(param, "_ds_grad_allreduce_registered", False):
+                continue
+            param.register_hook(make_grad_allreduce_hook(self.mp_group))
+            param._ds_grad_allreduce_registered = True
+            registered.append(param_name)
+        if registered:
+            print_dist(
+                f"AutoTP: registered tensor-parallel grad all-reduce for {len(registered)} replicated "
+                f"parameters, e.g. {registered[0]!r}",
+                ranks=[0])
+
+    def update_mp_params(self, child, name=None):
         if getattr(child, "replaced", False) == True:
+            return
+        tp_index = dist.get_rank(group=self.mp_group) if self.mp_group is not None else 0
+        # Fused-expert containers (Mixtral/Llama4/Qwen-MoE style) hold their weights as 3D
+        # parameters that AutoTP does not shard, so their dimension attributes must stay whole.
+        # Halving e.g. Llama4TextExperts.hidden_size while its weights keep the full size breaks
+        # the experts' batched matmul.
+        if any(param.dim() >= 3 for param in child.parameters(recurse=False)):
+            setattr(child, "replaced", True)
             return
         param_list = [
             "n_heads", "inner_dim", "num_heads", "num_kv", "num_attention_heads", "num_attn_heads", "all_head_size",
@@ -528,7 +643,9 @@ class AutoTP():
                 param_list.remove('embed_dim')
             if hasattr(child, param):
                 param_val = getattr(child, param)
-                setattr(child, param, get_shard_size(param_val, self.mp_size))
+                # get_shard_size selects its partitioning strategy from the module name, so the
+                # attributes must be sharded under the same name as the weights they describe.
+                setattr(child, param, get_shard_size(param_val, self.mp_size, name, rank=tp_index))
         setattr(child, "replaced", True)
 
     def update_linear_policies(self):
@@ -566,10 +683,13 @@ class AutoTP():
                 key = next(lp for lp in self.linear_policies if isinstance(child, lp))
                 setattr(autoep_layer, child_name, self.linear_policies[key](child, full_name, self.conv_linear_layer))
             else:
-                self.update_mp_params(child)
+                self.update_mp_params(child, full_name)
                 self._replace_module(child, full_name, "")
 
     def _replace_module(self, r_module, prev_name='', prev_class_name=''):
+        if prev_name == '' and prev_class_name == '':
+            self._configure_gathered_column_tie_fallbacks()
+
         for name, child in r_module.named_children():
             if getattr(child, "_is_autoep_layer", False):
                 full_name = prev_name + '.' + name if prev_name else name
@@ -595,7 +715,9 @@ class AutoTP():
             # instead of linear_policies. This keeps all pattern logic centralized here.
             if self.partition_config is not None:
                 full_name = class_name + '.' + name if class_name else name
-                if isinstance(child, nn.Embedding):
+                if full_name in self._tied_gathered_column_module_names:
+                    continue
+                elif isinstance(child, nn.Embedding):
                     # Check if embedding matches any pattern
                     param_name = full_name + ".weight"
                     model_type = self._get_model_type()
@@ -610,7 +732,7 @@ class AutoTP():
                     if new_child is not None:
                         setattr(r_module, name, new_child)
                 else:
-                    self.update_mp_params(child)
+                    self.update_mp_params(child, full_name)
                     self._replace_module(child, name, class_name)
             # Traditional path: use linear_policies for type-based routing
             elif child.__class__ in self.linear_policies:
@@ -628,11 +750,12 @@ class AutoTP():
                 setattr(r_module, name, self.linear_policies[key](child, prev_name + '.' + name,
                                                                   self.conv_linear_layer))
             else:
-                self.update_mp_params(child)
+                self.update_mp_params(child, name)
                 self._replace_module(child, name, class_name)
         return r_module
 
-    def get_model_num_kv_heads(self, config):
+    @staticmethod
+    def get_model_num_kv_heads(config):
         num_kv_heads = None
         # multi_query_group_num is for chatglm2 & chatglm3
         kv_head_names = [

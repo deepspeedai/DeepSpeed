@@ -26,14 +26,17 @@ def rotary_pos_embs(q: torch.Tensor,
                     seq_descs: List[DSSequenceDescriptor],
                     batch: RaggedBatchWrapper,
                     head_size: int,
-                    rotary_dim: int = -1) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+                    rotary_dim: int = -1,
+                    trained_emb: bool = False) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
 
     rotary_dim = rotary_dim if rotary_dim >= 0 else head_size
 
     def make_cos_sin_emb(seq_len: int) -> Tuple[torch.Tensor, torch.Tensor]:
         t = torch.arange(seq_len, dtype=torch.float32, device=get_accelerator().current_device())
-        inv_freq = (1.0 / (10000.0**(torch.arange(
-            0, rotary_dim, 2, dtype=torch.float32, device=get_accelerator().current_device()) / rotary_dim))).half()
+        inv_freq = 1.0 / (10000.0**(torch.arange(
+            0, rotary_dim, 2, dtype=torch.float32, device=get_accelerator().current_device()) / rotary_dim))
+        if not trained_emb:
+            inv_freq = inv_freq.half()
 
         freqs = torch.einsum("i,j->ij", t, inv_freq)
         emb = torch.cat((freqs, freqs), dim=-1)
@@ -81,6 +84,53 @@ def rotary_pos_embs(q: torch.Tensor,
     return q_out, k_out, freqs
 
 
+def rotate_half(x: torch.Tensor) -> torch.Tensor:
+    return torch.cat((-x[..., x.shape[-1] // 2:], x[..., :x.shape[-1] // 2]), dim=-1)
+
+
+@pytest.mark.inference_v2_ops
+@pytest.mark.parametrize("dtype, atol", [(torch.float16, 2e-3), (torch.bfloat16, 2e-2)])
+def test_trained_rotary_uses_fp32_phase_at_position_4095(dtype: torch.dtype, atol: float) -> None:
+    head_size = 128
+    n_heads_q = 40
+    n_heads_kv = 8
+    kv_block_size = 64
+    position = 4095
+    device = get_accelerator().current_device()
+    batch, state_manager, seq_descs = build_batch_and_manager([(1, position)],
+                                                              head_size,
+                                                              n_heads_kv,
+                                                              kv_block_size,
+                                                              cache_dtype=dtype)
+
+    torch.manual_seed(8121)
+    qkv = torch.randn((1, (n_heads_q + 2 * n_heads_kv) * head_size), device=device, dtype=dtype)
+    qkv_reference = qkv.clone()
+    q = qkv_reference[:, :n_heads_q * head_size].reshape(1, n_heads_q, head_size).float()
+    k = qkv_reference[:, n_heads_q * head_size:(n_heads_q + n_heads_kv) * head_size]
+    k = k.reshape(1, n_heads_kv, head_size).float()
+    v = qkv_reference[:, (n_heads_q + n_heads_kv) * head_size:]
+
+    inverse_freqs = 1.0 / (1000000.0**(torch.arange(0, head_size, 2, dtype=torch.float32, device=device) / head_size))
+    phase = inverse_freqs * float(position)
+    cos = torch.cat((phase, phase)).cos().reshape(1, 1, head_size)
+    sin = torch.cat((phase, phase)).sin().reshape(1, 1, head_size)
+    q_reference = (q * cos + rotate_half(q) * sin).to(dtype)
+    k_reference = (k * cos + rotate_half(k) * sin).to(dtype)
+
+    kv_cache = state_manager.get_cache(0)
+    kernel = BlockedTrainedRotaryEmbeddings(head_size, n_heads_q, n_heads_kv, dtype)
+    kernel(kv_cache, qkv, batch, inverse_freqs)
+
+    # The CUDA kernel and torch trigonometric implementations can differ by one
+    # output ULP. These bounds are tighter than the existing rotary-suite defaults.
+    torch.testing.assert_close(qkv[:, :n_heads_q * head_size].reshape_as(q_reference), q_reference, rtol=0, atol=atol)
+    block_id = seq_descs[0].kv_cache_ids(on_device=False)[0, position // kv_block_size]
+    k_actual = kv_cache[block_id, position % kv_block_size, 0]
+    torch.testing.assert_close(k_actual, k_reference[0], rtol=0, atol=atol)
+    validate_kv_cache(kv_cache, k_reference, v, seq_descs, batch, exact=False)
+
+
 @pytest.mark.inference_v2_ops
 @pytest.mark.parametrize("n_tokens, history_size", [(1, 0), (17, 0), (33, 15), (1, 63)])
 @pytest.mark.parametrize("trained_emb", [False, True])
@@ -109,8 +159,7 @@ def test_single_sequence_single_block(n_tokens: int, history_size: int, trained_
     k = qkv_ref[:, head_size * n_heads_q:head_size * (n_heads_q + n_heads_kv)]
     v = qkv_ref[:, head_size * (n_heads_q + n_heads_kv):]
 
-    q_ref, k, freqs = rotary_pos_embs(q, k, seq_descs, batch, head_size)
-    freqs = freqs.half()
+    q_ref, k, freqs = rotary_pos_embs(q, k, seq_descs, batch, head_size, trained_emb=trained_emb)
 
     kv_cache = state_manager.get_cache(0)
 
@@ -153,8 +202,7 @@ def test_single_sequence_multiple_blocks(n_tokens: int, history_size: int, train
     k = qkv_ref[:, head_size * n_heads_q:head_size * (n_heads_q + n_heads_kv)]
     v = qkv_ref[:, head_size * (n_heads_q + n_heads_kv):]
 
-    q_ref, k, freqs = rotary_pos_embs(q, k, seq_descs, batch, head_size)
-    freqs = freqs.half()
+    q_ref, k, freqs = rotary_pos_embs(q, k, seq_descs, batch, head_size, trained_emb=trained_emb)
 
     kv_cache = state_manager.get_cache(0)
 
@@ -199,8 +247,7 @@ def test_multi_sequences(trained_emb: bool, head_size: int) -> None:
     k = qkv_ref[:, head_size * n_heads_q:head_size * (n_heads_q + n_heads_kv)]
     v = qkv_ref[:, head_size * (n_heads_q + n_heads_kv):]
 
-    q_ref, k, freqs = rotary_pos_embs(q, k, seq_descs, batch, head_size)
-    freqs = freqs.half()
+    q_ref, k, freqs = rotary_pos_embs(q, k, seq_descs, batch, head_size, trained_emb=trained_emb)
 
     kv_cache = state_manager.get_cache(0)
 

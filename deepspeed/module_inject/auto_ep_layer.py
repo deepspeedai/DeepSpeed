@@ -25,7 +25,6 @@ from deepspeed.utils import logger
 from deepspeed.moe.ep_router import TokenChoiceTopKRouter
 from deepspeed.moe.ep_count import count_tokens_per_expert
 from deepspeed.moe.ep_experts import GroupedExperts
-from deepspeed.moe.ep_kernels import TokenReorderer
 from deepspeed.moe.ep_repack import _gather_source_zero_params, repack_expert_requires_grad_flags, repack_expert_weights
 
 # ---------------------------------------------------------------------------
@@ -93,27 +92,69 @@ def apply_scores_before_experts_if_enabled(
     return routed_input
 
 
-def compute_split_plan(
-    selected_experts: torch.Tensor,  # [T, K]
-    num_experts: int,
+def _split_plan_from_expert_counts(
+    num_tokens_per_expert: torch.Tensor,  # [E_global], int32
     ep_size: int,
     num_local_experts: int,
     ep_group: dist.ProcessGroup | None,
 ) -> SplitPlan:
+    """Build a SplitPlan from a global per-expert token histogram (ep_size > 1).
+
+    A single all-to-all exchanges the whole ``[ep_size, E_local]`` count matrix.
+    Row ``s`` of the received matrix holds the per-local-expert counts sent by
+    source rank ``s``, so summing it over experts recovers exactly the per-rank
+    totals that a separate rank-count exchange would have produced.
+    """
+    count_matrix = num_tokens_per_expert.view(ep_size, num_local_experts)
+
+    send_counts = count_matrix.reshape(-1).contiguous()  # [ep_size * E_local]
+    received_counts_flat = torch.empty_like(send_counts)
+    dist.all_to_all_single(
+        received_counts_flat,
+        send_counts,
+        group=ep_group,
+    )
+    received_counts = received_counts_flat.view(ep_size, num_local_experts)
+
+    # input_splits: tokens THIS rank sends to each destination rank.
+    # output_splits: tokens THIS rank receives from each source rank.
+    # Stacked so both split lists share a single device-to-host sync.
+    input_splits, output_splits = torch.stack((
+        count_matrix.sum(dim=1),
+        received_counts.sum(dim=1),
+    )).cpu().tolist()
+
+    return SplitPlan(
+        input_splits=input_splits,
+        output_splits=output_splits,
+        local_counts=received_counts.sum(dim=0),  # [E_local]
+        local_counts_by_source=received_counts,
+    )
+
+
+def compute_split_plan(
+        selected_experts: torch.Tensor,  # [T, K]
+        num_experts: int,
+        ep_size: int,
+        num_local_experts: int,
+        ep_group: dist.ProcessGroup | None,
+        num_tokens_per_expert: torch.Tensor | None = None,  # [E_global], int32
+) -> SplitPlan:
     """Compute AllToAllV split sizes for token dispatch/combine.
+
+    ``num_tokens_per_expert`` may be supplied by the caller to reuse the
+    histogram already computed by the router; when omitted it is derived from
+    ``selected_experts``.
 
     Returns SplitPlan with input_splits, output_splits, local_counts, and
     local_counts_by_source.
     """
-    T_K = selected_experts.numel()
+    if num_tokens_per_expert is None:
+        num_tokens_per_expert = count_tokens_per_expert(selected_experts, num_experts)
 
     if ep_size == 1:
         # No dispatch needed - all tokens stay local
-        num_tokens_per_expert = count_tokens_per_expert(
-            selected_experts,
-            num_experts,
-            out_dtype=torch.int32,
-        )
+        T_K = selected_experts.numel()
         return SplitPlan(
             input_splits=[T_K],
             output_splits=[T_K],
@@ -121,56 +162,7 @@ def compute_split_plan(
             local_counts_by_source=num_tokens_per_expert.view(1, num_local_experts),
         )
 
-    # Count tokens per expert globally
-    num_tokens_per_expert = count_tokens_per_expert(
-        selected_experts,
-        num_experts,
-        out_dtype=torch.int32,
-    )
-
-    # Reshape to [ep_size, num_local_experts] to get per-rank counts
-    count_matrix = num_tokens_per_expert.view(ep_size, num_local_experts)
-
-    # input_splits: how many tokens THIS rank sends to each destination rank
-    input_splits = count_matrix.sum(dim=1).cpu().tolist()
-
-    # Exchange counts with all ranks to get output_splits
-    # Each rank tells every other rank how many tokens it will send
-    local_counts_tensor = count_matrix.sum(dim=1).clone()  # [ep_size]
-    remote_counts_tensor = torch.zeros_like(local_counts_tensor)
-
-    dist.all_to_all_single(
-        remote_counts_tensor,
-        local_counts_tensor,
-        group=ep_group,
-    )
-    output_splits = remote_counts_tensor.cpu().tolist()
-
-    # local_counts: how many tokens this rank will process for each local expert
-    # After receiving tokens, we need per-expert counts for this rank
-    local_expert_counts = count_matrix[:, :].clone()  # [ep_size, E_local]
-
-    # Exchange the detailed per-expert counts
-    # Each rank needs to know, for its local experts, how many tokens come from each source
-    local_expert_counts_flat = local_expert_counts.view(-1).contiguous()  # [ep_size * E_local]
-    received_counts_flat = torch.zeros_like(local_expert_counts_flat)
-
-    dist.all_to_all_single(
-        received_counts_flat,
-        local_expert_counts_flat,
-        group=ep_group,
-    )
-
-    # Sum over source ranks to get total per local expert
-    received_counts = received_counts_flat.view(ep_size, num_local_experts)
-    local_counts = received_counts.sum(dim=0)  # [E_local]
-
-    return SplitPlan(
-        input_splits=input_splits,
-        output_splits=output_splits,
-        local_counts=local_counts,
-        local_counts_by_source=received_counts,
-    )
+    return _split_plan_from_expert_counts(num_tokens_per_expert, ep_size, num_local_experts, ep_group)
 
 
 def compute_split_plan_from_expert_indices(
@@ -181,25 +173,12 @@ def compute_split_plan_from_expert_indices(
     ep_group: dist.ProcessGroup | None,
 ) -> SplitPlan:
     """Compute EP AllToAllV splits for an already partitioned assignment list."""
+    counts = count_tokens_per_expert(expert_indices, num_experts)
     if ep_size == 1:
-        counts = count_tokens_per_expert(expert_indices, num_experts, out_dtype=torch.int32)
         return SplitPlan([int(expert_indices.numel())], [int(expert_indices.numel())], counts,
                          counts.view(1, num_local_experts))
 
-    counts = count_tokens_per_expert(expert_indices, num_experts, out_dtype=torch.int32)
-    count_matrix = counts.view(ep_size, num_local_experts)
-    input_splits = count_matrix.sum(dim=1).cpu().tolist()
-    local_counts_tensor = count_matrix.sum(dim=1).clone()
-    remote_counts_tensor = torch.zeros_like(local_counts_tensor)
-    dist.all_to_all_single(remote_counts_tensor, local_counts_tensor, group=ep_group)
-    output_splits = remote_counts_tensor.cpu().tolist()
-
-    local_expert_counts_flat = count_matrix.reshape(-1).contiguous()
-    received_counts_flat = torch.zeros_like(local_expert_counts_flat)
-    dist.all_to_all_single(received_counts_flat, local_expert_counts_flat, group=ep_group)
-    received_counts = received_counts_flat.view(ep_size, num_local_experts)
-    local_counts = received_counts.sum(dim=0)
-    return SplitPlan(input_splits, output_splits, local_counts, received_counts)
+    return _split_plan_from_expert_counts(counts, ep_size, num_local_experts, ep_group)
 
 
 class _AllToAllV(torch.autograd.Function):
@@ -483,6 +462,7 @@ class AutoEPMoELayer(nn.Module):
             hidden_dim=spec.ffn_hidden_size,
             num_experts=self.num_local_experts,
             use_grouped_mm=config.use_grouped_mm,
+            disable_triton_grouped_mm=config.disable_triton_grouped_mm,
         )
         _copy_parameter_data(self.experts.w1, w1)
         _copy_parameter_data(self.experts.w2, w2)
@@ -491,7 +471,6 @@ class AutoEPMoELayer(nn.Module):
         self.experts.w2.requires_grad_(w2_requires_grad)
         self.experts.w3.requires_grad_(w3_requires_grad)
 
-        self.reorderer = TokenReorderer(num_experts=self.num_experts, top_k=self.top_k)
         self.shared_experts = getattr(source_module, spec.shared_experts_name,
                                       None) if spec.has_shared_experts else None
         self.shared_experts_gate = getattr(source_module, spec.shared_experts_gate_name,
@@ -616,8 +595,9 @@ class AutoEPMoELayer(nn.Module):
         with torch.no_grad():
             self.tokens_per_expert.add_(ro.num_tokens_per_expert)
 
-        # Reorder tokens by expert
-        top_scores_sorted, token_indices_sorted, _ = self.reorderer(ro.top_scores, ro.selected_experts)
+        # Reorder tokens into expert-contiguous order.
+        token_indices_sorted = torch.argsort(ro.selected_experts.view(-1), stable=True)
+        top_scores_sorted = ro.top_scores.view(-1)[token_indices_sorted]
         expert_indices_sorted = ro.selected_experts.reshape(-1).index_select(0, token_indices_sorted)
 
         folded_tp = self.folding_group_handles is not None and self.folding_group_handles.spec.tp_size > 1
@@ -672,11 +652,7 @@ class AutoEPMoELayer(nn.Module):
 
         if self.ep_size == 1:
             # No AllToAll needed - local computation only
-            local_counts = count_tokens_per_expert(
-                ro.selected_experts,
-                self.num_local_experts,
-                out_dtype=torch.int32,
-            )
+            local_counts = ro.num_tokens_per_expert
 
             routed_input_permuted, perm_indices, aligned_counts, n_tokens = permute_by_local_expert(
                 routed_input, local_counts)
@@ -699,6 +675,7 @@ class AutoEPMoELayer(nn.Module):
                     ep_size=self.ep_size,
                     num_local_experts=self.num_local_experts,
                     ep_group=self.ep_group,
+                    num_tokens_per_expert=ro.num_tokens_per_expert,
                 )
 
             routed_input = _AllToAllV.apply(self.ep_group, routed_input, plan.input_splits, plan.output_splits)

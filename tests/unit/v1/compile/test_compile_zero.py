@@ -12,7 +12,7 @@ from deepspeed.accelerator import get_accelerator
 
 from unit.v1.compile.util import compare_loss
 from unit.common import DistributedTest
-from unit.simple_model import SimpleModel
+from unit.simple_model import SimpleModel, SimpleFrozenModel
 from unit.util import bf16_required_version_check, skip_on_arch
 import deepspeed
 from deepspeed.ops.aio import AsyncIOBuilder
@@ -265,3 +265,33 @@ class TestDeepCompile(DistributedTest):
         }
 
         compare_loss(self, config_dict, torch.float32)
+
+    @pytest.mark.parametrize('dtype', [torch.float32])
+    @pytest.mark.parametrize('zero_stage', [3])
+    def test_frozen_params(self, zero_stage, dtype):
+        """Test that models with frozen params (e.g. LoRA/PEFT) work correctly with DeepCompile"""
+        if not required_torch_version(min_version=2.6):
+            pytest.skip("DeepCompile requires PyTorch >= v2.6")
+
+        if get_accelerator().device_name() == "cpu":
+            pytest.skip("CPU does not support this test yet")
+
+        config_dict = {
+            "train_micro_batch_size_per_gpu": 1,
+            "steps_per_print": 1,
+            "optimizer": {
+                "type": "Adam",
+                "params": {
+                    "lr": 0.00015
+                }
+            },
+            "zero_optimization": {
+                "stage": zero_stage,
+            },
+            "compile": {
+                "deepcompile": True
+            }
+        }
+
+        # Need warmup steps so that the profiling passes also run with frozen params present
+        compare_loss(self, config_dict, dtype, iteration=10, model_cls=SimpleFrozenModel)

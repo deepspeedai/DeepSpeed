@@ -77,7 +77,7 @@ def _blocked_flash_testing_helper(head_size: int,
     if not trained_freqs:
         out = attn_module(qkv, kv_cache, batch)
     else:
-        inv_freqs = torch.randn((head_size // 2, ), device=get_accelerator().current_device(), dtype=torch.float16)
+        inv_freqs = torch.randn((head_size // 2, ), device=get_accelerator().current_device(), dtype=torch.float32)
         out = attn_module(qkv, kv_cache, batch, inv_freqs)
 
     if validate_accuracy and trained_freqs is None:

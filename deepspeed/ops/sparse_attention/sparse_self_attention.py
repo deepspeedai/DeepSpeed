@@ -105,8 +105,6 @@ class SparseSelfAttention(nn.Module):
             rpe: optional: a tensor same dimension as x that is used as relative position embedding
             key_padding_mask: optional: a mask tensor of size (BatchSize X SequenceLength)
             attn_mask: optional: a mask tensor of size (SequenceLength X SequenceLength); currently only 2D is supported
-            key_padding_mask_mode: optional: a boolean determining if key_padding_mask needs to be added or multiplied
-            attn_mask_mode: optional: a boolean determining if attn_mask needs to be added or multiplied
 
         Return:
              attn_output: a dense tensor containing attention context

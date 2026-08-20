@@ -12,7 +12,7 @@
                                         (C_TYPE*)q.data_ptr(),             \
                                         (C_TYPE*)k.data_ptr(),             \
                                         (C_TYPE*)v.data_ptr(),             \
-                                        (C_TYPE*)inv_freq_ptr,             \
+                                        (float*)inv_freq_ptr,              \
                                         rotary_dim,                        \
                                         theta_base,                        \
                                         batch_wrapper,                     \
@@ -37,7 +37,7 @@ Arguments:
     q: [n_tokens, n_q_heads * head_size]
     k: [n_tokens, n_kv_heads * head_size]
     v: [n_tokens, n_kv_heads * head_size]
-    inv_freq: [max_seq_len, head_size // 2]
+    inv_freq: [rotary_dim // 2], always FP32 independently of q/k/v dtype
 */
 void kv_trained_rotary_embeddings(torch::Tensor& kv_cache,
                                   torch::Tensor& q,
@@ -52,6 +52,10 @@ void kv_trained_rotary_embeddings(torch::Tensor& kv_cache,
     const int32_t n_tokens = q.size(0);
     TORCH_CHECK(n_tokens == k.size(0));
     TORCH_CHECK(n_tokens == v.size(0));
+    TORCH_CHECK(inv_freq.scalar_type() == torch::kFloat32,
+                "trained rotary inverse frequencies must be FP32");
+    TORCH_CHECK(inv_freq.dim() == 1, "trained rotary inverse frequencies must be one-dimensional");
+    TORCH_CHECK(inv_freq.is_contiguous(), "trained rotary inverse frequencies must be contiguous");
 
     const float theta_base = 0.f;
     const int32_t rotary_dim = inv_freq.size(0) * 2;

@@ -30,7 +30,7 @@ class GDSBuilder(AsyncIOBuilder):
     def include_paths(self):
         import torch
         CUDA_INCLUDE = [os.path.join(torch.utils.cpp_extension.CUDA_HOME, "include")]
-        return ['csrc/aio/py_lib', 'csrc/aio/common'] + CUDA_INCLUDE
+        return ['csrc/aio/py_lib', 'csrc/aio/common', 'csrc/pin_memory'] + CUDA_INCLUDE
 
     def extra_ldflags(self):
         return super().extra_ldflags() + ['-lcufile']

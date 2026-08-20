@@ -203,6 +203,14 @@ class DeepSpeedAccelerator(ABC):
     def is_triton_supported(self):
         ...
 
+    # Whether the fused MoE expert path should prefer a Triton grouped-GEMM
+    # kernel over ``torch._grouped_mm`` on this accelerator. Backends override
+    # this to return True when the Triton path is faster than the native op
+    # (e.g. CUDA sm8x, where ``torch._grouped_mm`` falls back to a slow
+    # per-group loop). Defaults to False so backends opt in explicitly.
+    def prefer_triton_grouped_mm(self):
+        return False
+
     # Graph operations
     @abc.abstractmethod
     def create_graph(self):
@@ -252,13 +260,39 @@ class DeepSpeedAccelerator(ABC):
     def LongTensor(self):
         ...
 
-    @abc.abstractmethod
-    def pin_memory(self, tensor, align_bytes=1):
-        ...
+    # Memory pinning. The public methods below dispatch between the native
+    # backend (``deepspeed.utils.pin_memory``, selected via ``DS_PIN_MEMORY_BACKEND``)
+    # and the device-specific torch primitives ``_torch_pin_memory``/``_torch_is_pinned``,
+    # which subclasses override as needed. The native utility is backend-only and
+    # never calls back here.
+    def _torch_pin_memory(self, tensor):
+        return tensor.pin_memory()
 
-    @abc.abstractmethod
+    def _torch_is_pinned(self, tensor):
+        return tensor.is_pinned()
+
+    def pin_memory(self, tensor, make_copy=True, match_shape=True):
+        from deepspeed.utils.pin_memory_tracker import track_pinned_memory
+        track_pinned_memory(tensor.nbytes)
+        from deepspeed.utils.pin_memory import get_active_native_pinned_memory
+        pins = get_active_native_pinned_memory()
+        if pins is not None:
+            return pins.pin(tensor, make_copy=make_copy, match_shape=match_shape)
+        return self._torch_pin_memory(tensor)
+
     def is_pinned(self, tensor):
-        ...
+        from deepspeed.utils.pin_memory import get_active_native_pinned_memory
+        pins = get_active_native_pinned_memory()
+        if pins is not None and pins.is_pinned(tensor):
+            return True
+        return self._torch_is_pinned(tensor)
+
+    def unpin_memory(self, tensor):
+        from deepspeed.utils.pin_memory import get_active_native_pinned_memory
+        pins = get_active_native_pinned_memory()
+        if pins is not None:
+            return pins.unpin(tensor)
+        return None
 
     @abc.abstractmethod
     def on_accelerator(self, tensor):

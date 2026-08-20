@@ -5,6 +5,8 @@
 
 import torch
 
+from deepspeed.accelerator import get_accelerator
+
 try:
     from torch._subclasses import FakeTensorMode
     from torch._subclasses.fake_tensor import unset_fake_temporarily
@@ -20,7 +22,7 @@ def wrap_if_ds_param(t):
                           dtype=t.dtype,
                           layout=t.layout,
                           device=t.device,
-                          pin_memory=t.is_pinned(),
+                          pin_memory=get_accelerator().is_pinned(t),
                           requires_grad=t.requires_grad)
         if isinstance(t, torch.nn.Parameter):
             t = torch.nn.Parameter(data, requires_grad=t.requires_grad)

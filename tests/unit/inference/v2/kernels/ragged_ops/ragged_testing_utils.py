@@ -93,7 +93,8 @@ def build_batch_and_manager(
     kv_block_size: int,
     vocab_range: Optional[int] = 100,
     padding: Optional[bool] = False,
-    kv_fill: Optional[List[torch.Tensor]] = None
+    kv_fill: Optional[List[torch.Tensor]] = None,
+    cache_dtype: torch.dtype = torch.float16,
 ) -> Tuple[RaggedBatchWrapper, DSStateManager, List[DSSequenceDescriptor]]:
     """
     Will construct and populate a batch and KVCache with the given sequence parameters.
@@ -126,7 +127,8 @@ def build_batch_and_manager(
 
     kv_config = KVCacheConfig(block_size=kv_block_size,
                               num_allocation_groups=1,
-                              cache_shape=(1, n_heads_kv, head_size))
+                              cache_shape=(1, n_heads_kv, head_size),
+                              cache_dtype=cache_dtype)
     memory_config = MemoryConfig(mode=AllocationMode.ALLOCATE, size=total_kv_blocks)
 
     config = DSStateManagerConfig(max_tracked_sequences=n_seqs,

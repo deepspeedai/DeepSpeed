@@ -212,7 +212,8 @@ class ResourceManager:
         """ Parses the metric file of the finished experiments to select the optimal DeepSpeed configuration.
 
         Args:
-            finished_experiments (dcit): a dictionary of experiment id and experiment description.
+            metric (str): the key to read from each experiment's metrics file when
+                comparing configurations.
 
         Returns:
             The path to the result folder of the experiment with the optimal configuration.

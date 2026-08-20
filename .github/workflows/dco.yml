@@ -40,6 +40,12 @@ jobs:
 
           # GitHub App ID for https://github.com/apps/dco.
           PROBOT_DCO_APP_ID = 1861
+          VALID_EMAIL_RE = re.compile(
+              r"^[-!#$%&'*+/0-9=?A-Z^_a-z`{|}~]"
+              r"(?:\.?[-!#$%&'*+/0-9=?A-Z^_a-z`{|}~])*"
+              r"@[a-zA-Z0-9](?:-*\.?[a-zA-Z0-9])*"
+              r"\.[a-zA-Z](?:-?[a-zA-Z0-9])+$"
+          )
 
 
           def load_event(path):
@@ -313,14 +319,41 @@ jobs:
               }
 
 
-          def has_signed_off_by(message):
-              return bool(
-                  re.search(
-                      r"^Signed-off-by:\s+\S.*$",
-                      message,
-                      flags=re.MULTILINE,
-                  )
-              )
+          def is_valid_email(email):
+              if not email:
+                  return False
+
+              parts = email.split("@")
+              if len(parts) != 2:
+                  return False
+
+              account, address = parts
+              if len(account) > 64 or len(address) > 255:
+                  return False
+              if any(len(part) > 63 for part in address.split(".")):
+                  return False
+
+              return bool(VALID_EMAIL_RE.fullmatch(email))
+
+
+          def has_valid_signed_off_by(message, author, committer):
+              actors = [actor or {} for actor in (author, committer)]
+              identities = {
+                  (str(actor["name"]).lower(), str(actor["email"]).lower())
+                  for actor in actors
+                  if actor.get("name") and actor.get("email")
+              }
+              for match in re.finditer(
+                  r"^Signed-off-by: (.*) <(.*)>\s*$",
+                  message,
+                  flags=re.IGNORECASE | re.MULTILINE,
+              ):
+                  signoff_name = match.group(1).lower()
+                  signoff_email = match.group(2).lower()
+                  valid_email = is_valid_email(signoff_email)
+                  if (signoff_name, signoff_email) in identities and valid_email:
+                      return True
+              return False
 
 
           def commit_subject(message):
@@ -425,7 +458,11 @@ jobs:
 
                   checked.append(oid)
                   message = record.get("message") or ""
-                  if not has_signed_off_by(message):
+                  if not has_valid_signed_off_by(
+                      message,
+                      record.get("author"),
+                      record.get("committer"),
+                  ):
                       failures.append({"sha": oid, "subject": commit_subject(message)})
 
               return {
@@ -568,7 +605,7 @@ jobs:
                   for failure in failures:
                       print(f"::error::{failure['sha']}: {failure['subject']}")
                   fail(
-                      f"{len(failures)} commit(s) are missing a Signed-off-by trailer."
+                      f"{len(failures)} commit(s) are missing a valid Signed-off-by trailer."
                   )
 
               print(

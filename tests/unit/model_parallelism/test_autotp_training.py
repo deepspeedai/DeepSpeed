@@ -17,6 +17,7 @@ from deepspeed.utils import groups
 from contextlib import contextmanager
 from torch import nn
 from deepspeed.module_inject.layers import LinearAllreduce, LinearLayer, set_autotp_mode, is_autotp_training_mode
+from deepspeed.module_inject.tp_shard import get_shard_size_list
 from unit.checkpoint.common import compare_lr_scheduler_states, compare_optimizer_states
 import os
 from deepspeed.runtime.utils import is_model_parallel_parameter
@@ -138,6 +139,16 @@ class SequentialLinearModel(torch.nn.Module):
         return self.cross_entropy_loss(x, y)
 
 
+class UnevenVocabOutputModel(torch.nn.Module):
+
+    def __init__(self, hidden_dim, vocab_size):
+        super().__init__()
+        self.lm_head = torch.nn.Linear(hidden_dim, vocab_size)
+
+    def forward(self, x):
+        return self.lm_head(x)
+
+
 @contextmanager
 def should_assert_with_msg(expected_message):
     try:
@@ -183,6 +194,44 @@ class TestTpParallelStates(DistributedTest):
         model, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config_dict)
         assert groups.get_tensor_model_parallel_world_size() == tp_size
         assert groups.get_data_parallel_world_size() == dp_size
+
+
+@pytest.mark.parametrize("tp_size", [2, 4])
+class TestAutoTpZeroStage3(DistributedTest):
+    """AutoTP + ZeRO stage 3 initialization must succeed."""
+
+    world_size = 4
+    reuse_dist_env = False
+
+    def _build_config(self, tp_size: int) -> dict:
+        config_dict = {
+            "train_micro_batch_size_per_gpu": 1,
+            "tensor_parallel": {
+                "autotp_size": tp_size,
+                "partition_config": {
+                    "use_default_specs": False,
+                    "layer_specs": [{
+                        "patterns": [r".*\.weight$"],
+                        "partition_type": "column",
+                    }],
+                }
+            },
+            "zero_optimization": {
+                "stage": 3
+            }
+        }
+        if preferred_dtype() is torch.float16:
+            config_dict["fp16"] = {"enabled": True}
+        elif preferred_dtype() is torch.bfloat16:
+            config_dict["bf16"] = {"enabled": True}
+        return config_dict
+
+    def test_autotp_zero3_inference(self, tp_size: int):
+        skip_on_device()
+        model = SimpleModel(hidden_dim=64)
+        config_dict = self._build_config(tp_size)
+        model, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config_dict)
+        assert groups.get_tensor_model_parallel_world_size() == tp_size
 
 
 class TestTpModelInitCompatibility(DistributedTest):
@@ -367,10 +416,12 @@ class TestTpDataloaderCorrectness(DistributedTest):
             model(batch[0], batch[1])
 
 
-def process_linear_layer(hidden_dim, input):
+def process_linear_layer(hidden_dim, input, output_dim=None):
     torch.manual_seed(42)
+    if output_dim is None:
+        output_dim = hidden_dim
     torch_linear = nn.Linear(hidden_dim,
-                             hidden_dim,
+                             output_dim,
                              dtype=preferred_dtype(),
                              device=get_accelerator().current_device())
     torch_out = torch_linear(input)
@@ -379,7 +430,12 @@ def process_linear_layer(hidden_dim, input):
     return torch_linear, torch_out
 
 
-def run_tp_layer_fwd_bwd(tp_size, tp_overlap_comm, column_parallel, use_tp_model_init=False):
+def run_tp_layer_fwd_bwd(tp_size,
+                         tp_overlap_comm,
+                         column_parallel,
+                         use_tp_model_init=False,
+                         gather_output=False,
+                         output_dim=None):
     skip_on_device()
     hidden_dim = 128
     batch_size_per_device = 1
@@ -402,10 +458,12 @@ def run_tp_layer_fwd_bwd(tp_size, tp_overlap_comm, column_parallel, use_tp_model
     }
     partition_type = "column" if column_parallel else "row"
     config_dict["tensor_parallel"]["partition_config"] = {
-        "use_default_specs": False,
+        "use_default_specs":
+        False,
         "layer_specs": [{
             "patterns": [".*\\.weight$"],
             "partition_type": partition_type,
+            "gather_output": gather_output,
         }],
     }
     if preferred_dtype() is torch.float16:
@@ -434,16 +492,23 @@ def run_tp_layer_fwd_bwd(tp_size, tp_overlap_comm, column_parallel, use_tp_model
 
     # Note: correctness checks below use standalone TP wrappers and do not
     # rely on the model's AutoTP-partitioned parameters.
-    torch_linear, torch_out = process_linear_layer(hidden_dim, input)
+    torch_linear, torch_out = process_linear_layer(hidden_dim, input, output_dim=output_dim)
     if column_parallel:
-        linear = LinearLayer(deepcopy(torch_linear), groups.get_tensor_model_parallel_group())
+        linear = LinearLayer(deepcopy(torch_linear),
+                             groups.get_tensor_model_parallel_group(),
+                             gather_output=gather_output)
         out = linear(input.to(get_accelerator().current_device()))
         loss = out.sum()
         loss.backward()
 
-        cur_device_out = torch.chunk(torch_out, tp_size, dim=-1)[groups.get_tensor_model_parallel_rank()]
-        torch_grad = torch.chunk(torch_linear.weight.grad, tp_size, dim=0)[groups.get_tensor_model_parallel_rank()]
-        torch_bias_grad = torch.chunk(torch_linear.bias.grad, tp_size, dim=0)[groups.get_tensor_model_parallel_rank()]
+        expected_out = torch_out
+        output_partition_sizes = get_shard_size_list(torch_out.shape[-1], tp_size, linear.name)
+        tp_rank = groups.get_tensor_model_parallel_rank()
+        if not gather_output:
+            shard_offset = sum(output_partition_sizes[:tp_rank])
+            expected_out = torch_out.narrow(-1, shard_offset, output_partition_sizes[tp_rank])
+        torch_grad = torch_linear.weight.grad.split(output_partition_sizes, dim=0)[tp_rank]
+        torch_bias_grad = torch_linear.bias.grad.split(output_partition_sizes, dim=0)[tp_rank]
 
         torch.testing.assert_close(linear.bias.grad,
                                    torch_bias_grad.to(get_accelerator().current_device()),
@@ -453,7 +518,7 @@ def run_tp_layer_fwd_bwd(tp_size, tp_overlap_comm, column_parallel, use_tp_model
                                    torch_grad.to(get_accelerator().current_device()),
                                    atol=1e-3,
                                    rtol=1e-3)
-        torch.testing.assert_close(cur_device_out.to(get_accelerator().current_device()).contiguous(),
+        torch.testing.assert_close(expected_out.to(get_accelerator().current_device()).contiguous(),
                                    out.contiguous(),
                                    atol=1e-2,
                                    rtol=1e-2)
@@ -489,6 +554,12 @@ class TestTpLayerFwdBwd(DistributedTest):
 
     def testColumnParallel(self, tp_size: int, tp_overlap_comm: bool):
         run_tp_layer_fwd_bwd(tp_size, tp_overlap_comm, column_parallel=True)
+
+    def testGatheredColumnParallel(self, tp_size: int, tp_overlap_comm: bool):
+        run_tp_layer_fwd_bwd(tp_size, tp_overlap_comm, column_parallel=True, gather_output=True)
+
+    def testUnevenGatheredColumnParallel(self, tp_size: int, tp_overlap_comm: bool):
+        run_tp_layer_fwd_bwd(tp_size, tp_overlap_comm, column_parallel=True, gather_output=True, output_dim=129)
 
 
 # @pytest.mark.sequential
@@ -578,6 +649,68 @@ class TestParamsGather(DistributedTest):
 
         assert expected_tp_params == tp_params2
 
+    def test_uneven_linear_gather_params(self):
+        skip_on_device()
+        tp_size = 4
+        hidden_dim = 128
+        output_dim = 129
+        config_dict = {
+            "train_micro_batch_size_per_gpu": 1,
+            "optimizer": {
+                "type": "Adam",
+                "params": {
+                    "lr": 1e-6
+                }
+            },
+            "tensor_parallel": {
+                "autotp_size": tp_size,
+                "partition_config": {
+                    "use_default_specs": False,
+                    "layer_specs": [{
+                        "patterns": [".*\\.weight$"],
+                        "partition_type": "skip",
+                    }],
+                }
+            },
+            "zero_optimization": {
+                "stage": 0,
+            }
+        }
+        if preferred_dtype() is torch.float16:
+            config_dict["fp16"] = {"enabled": True}
+        elif preferred_dtype() is torch.bfloat16:
+            config_dict["bf16"] = {"enabled": True}
+
+        torch.manual_seed(42)
+        model = SequentialLinearModel(hidden_dim=hidden_dim)
+        model, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config_dict)
+
+        torch_linear = nn.Linear(hidden_dim, output_dim, dtype=preferred_dtype(), device="cpu")
+        total_params = sum(p.numel() for p in torch_linear.parameters())
+        tp_layer = LinearLayer(deepcopy(torch_linear), groups.get_tensor_model_parallel_group())
+        tp_rank = groups.get_tensor_model_parallel_rank()
+        output_partition_sizes = get_shard_size_list(output_dim, tp_size, tp_layer.name)
+        expected_tp_params = output_partition_sizes[tp_rank] * (hidden_dim + 1)
+
+        assert expected_tp_params == sum(p.numel() for p in tp_layer.parameters())
+
+        for name, param in tp_layer.named_parameters(recurse=False):
+            if is_model_parallel_parameter(param):
+                param.gather_params([param])
+
+        torch_linear = torch_linear.to(get_accelerator().current_device())
+        is_same_weights = all(
+            torch.equal(param1, param2) for param1, param2 in zip(tp_layer.parameters(), torch_linear.parameters()))
+
+        assert is_same_weights
+        assert total_params == sum(p.numel() for p in tp_layer.parameters())
+
+        for name, param in tp_layer.named_parameters(recurse=False):
+            if is_model_parallel_parameter(param):
+                param._tp_partition([param])
+
+        assert expected_tp_params == sum(p.numel() for p in tp_layer.parameters())
+
 
 def dummy_init_engine(config):
     # This is a dummy initialization function for the DeepSpeed engine.
@@ -609,6 +742,55 @@ def prepare_tp_model(hidden_dim, nlayers, linear_indices, allreduce_indices, gro
         model.linears[i] = layer
 
     return model, base_model
+
+
+class TestUnevenVocabLmHeadCheckpoint(DistributedTest):
+    world_size = 3
+    reuse_dist_env = False
+
+    def test_consolidated_checkpoint(self):
+        skip_on_device()
+        hidden_dim = 12
+        vocab_size = 10  # Even, but not divisible by the three TP ranks.
+
+        torch.manual_seed(42)
+        model = UnevenVocabOutputModel(hidden_dim, vocab_size)
+        reference_state = {name: param.detach().cpu().clone() for name, param in model.state_dict().items()}
+        config_dict = {
+            "train_micro_batch_size_per_gpu": 1,
+            "tensor_parallel": {
+                "autotp_size": 3,
+                "partition_config": {
+                    "use_default_specs":
+                    False,
+                    "layer_specs": [{
+                        "patterns": [r".*lm_head\.weight$"],
+                        "partition_type": "column",
+                        "gather_output": True,
+                    }],
+                },
+            },
+            "zero_optimization": {
+                "stage": 0,
+            },
+        }
+
+        engine, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config_dict)
+
+        tp_rank = groups.get_tensor_model_parallel_rank()
+        output_partition_sizes = get_shard_size_list(vocab_size, self.world_size, "lm_head")
+        assert isinstance(engine.module.lm_head, LinearLayer)
+        assert engine.module.lm_head.gather_output
+        assert engine.module.lm_head.weight.shape == (output_partition_sizes[tp_rank], hidden_dim)
+
+        checkpoint = engine._consolidated_16bit_state_dict()
+
+        if dist.get_rank() == 0:
+            assert checkpoint.keys() == reference_state.keys()
+            for name, expected in reference_state.items():
+                torch.testing.assert_close(checkpoint[name], expected)
+        else:
+            assert checkpoint is None
 
 
 @pytest.mark.parametrize("zero_stage", [0, 1, 2])

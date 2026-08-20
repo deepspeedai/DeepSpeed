@@ -13,9 +13,15 @@ from torch import nn
 from unit.common import DistributedTest, preferred_dtype
 from deepspeed.accelerator import get_accelerator
 from deepspeed.utils import groups
-from deepspeed.module_inject.layers import (LinearAllreduce, LinearLayer, SubParamLinearLayer, fused_LinearLayer)
+from deepspeed.module_inject.layers import (GateUpPack_LinearLayer, LinearAllreduce, LinearLayer,
+                                            SubParamLinearAllreduce, SubParamLinearLayer, fused_LinearLayer)
+from deepspeed.module_inject.layers import collect_autotp_universal_checkpoint_info
+from deepspeed.checkpoint.constants import PARAMETER_WITH_ROW_PARALLELISM_PATTERNS, TP_REPLICATED_PARAMETER_PATTERNS
 from deepspeed.module_inject.autotp_config import AutoTPConfig
+from deepspeed.module_inject.tp_shard import get_shard_size, get_shard_size_list, set_num_kv_heads
 from deepspeed.module_inject.auto_tp import AutoTP
+from deepspeed.module_inject.auto_tp_model_utils import (build_bloom_alibi_tensor, build_mpt_alibi_tensor,
+                                                         get_alibi_mask, install_head_sharded_helper)
 
 
 def skip_on_device():
@@ -392,7 +398,7 @@ class TestAutoTPCustomPatterns(DistributedTest):
             config_dict["bf16"] = {"enabled": True}
 
         model = QKVLinearModel(hidden_dim=hidden_dim)
-        baseline = deepcopy(model).to(get_accelerator().current_device(), dtype=preferred_dtype())
+        baseline = deepcopy(model).to(get_accelerator().current_device_name(), dtype=preferred_dtype())
         engine, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config_dict)
         qkv_layer = engine.module.self_attn.qkv_proj
         # Custom pattern should force SubParamLinearLayer (shape-based path),
@@ -410,7 +416,7 @@ class TestAutoTPCustomPatterns(DistributedTest):
             torch.testing.assert_close(qkv_layer.bias, baseline.self_attn.qkv_proj.bias)
 
         torch.manual_seed(4321)
-        inputs = torch.randn(2, hidden_dim, dtype=preferred_dtype(), device=get_accelerator().current_device())
+        inputs = torch.randn(2, hidden_dim, dtype=preferred_dtype(), device=get_accelerator().current_device_name())
         full_output = baseline(inputs)
         tp_output = engine.module(inputs)
         assert_close_for_preferred_dtype(tp_output, full_output)
@@ -484,9 +490,245 @@ def test_invalid_custom_shape_rejected():
         AutoTPConfig.from_dict(bad_config)
 
 
+def test_update_mp_params_uses_group_local_rank(monkeypatch):
+    tp_group = object()
+    autotp = object.__new__(AutoTP)
+    autotp.mp_group = tp_group
+    autotp.mp_size = 2
+    child = nn.Module()
+    child.num_heads = 12
+
+    monkeypatch.setattr(dist, "get_rank", lambda group=None: 1 if group is tp_group else 0)
+    set_num_kv_heads(3)
+    try:
+        autotp.update_mp_params(child)
+    finally:
+        set_num_kv_heads(None)
+
+    # Three KV groups split as [2, 1], so the second TP rank owns four query heads.
+    assert child.num_heads == 4
+
+
+def test_update_mp_params_shards_attributes_like_their_weights(monkeypatch):
+    tp_group = object()
+    autotp = object.__new__(AutoTP)
+    autotp.mp_group = tp_group
+    autotp.mp_size = 2
+    child = nn.Module()
+    child.hidden_size = 12
+
+    monkeypatch.setattr(dist, "get_rank", lambda group=None: 1 if group is tp_group else 0)
+    set_num_kv_heads(3)
+    try:
+        autotp.update_mp_params(child, "model.layers.0.mlp")
+    finally:
+        set_num_kv_heads(None)
+
+    # MLP layers are excluded from the KV-head split, so the attribute has to follow the same
+    # near-even split that the MLP weights use rather than the [2, 1] KV-group split.
+    assert child.hidden_size == get_shard_size(12, 2, "model.layers.0.mlp", rank=1)
+
+
+def test_sliced_embedding_publishes_row_partition_metadata(monkeypatch):
+    tp_group = object()
+    autotp = object.__new__(AutoTP)
+    autotp.mp_group = tp_group
+    autotp.mp_size = 2
+    embedding = nn.Embedding(5, 4)
+
+    monkeypatch.setattr(dist, "get_rank", lambda group=None: 1 if group is tp_group else 0)
+    sliced = autotp._slice_embedding(embedding, "embed_tokens", False)
+    model = nn.Module()
+    model.embed_tokens = sliced
+
+    uc_info = collect_autotp_universal_checkpoint_info(model)
+
+    assert r"^embed_tokens\.weight$" in uc_info[PARAMETER_WITH_ROW_PARALLELISM_PATTERNS]
+    assert r"^embed_tokens\.weight$" not in uc_info[TP_REPLICATED_PARAMETER_PATTERNS]
+
+
+class TestAutoTPAlibiHelpers(DistributedTest):
+    world_size = 2
+    reuse_dist_env = False
+
+    def test_mpt_alibi_covers_every_head_of_an_uneven_split(self):
+        skip_on_device()
+        init_tp_engine(tp_size=2)
+
+        num_heads = 5
+        set_num_kv_heads(num_heads)
+        try:
+
+            class MptTransformer(nn.Module):
+
+                def build_mpt_alibi_tensor(self, heads, sequence_length, alibi_bias_max=8, device=None):
+                    return torch.arange(heads, dtype=torch.float32).view(heads, 1, 1).expand(heads, 1, sequence_length)
+
+            transformer = MptTransformer()
+            install_head_sharded_helper(transformer, 'build_mpt_alibi_tensor', build_mpt_alibi_tensor)
+
+            alibi = transformer.build_mpt_alibi_tensor(num_heads, 3)
+
+            # AutoTP splits 5 heads over 2 ranks as [3, 2]; an even split would give every rank
+            # 2 heads and drop the last one entirely.
+            expected_heads = get_shard_size_list(num_heads, dist.get_world_size())
+            offset = sum(expected_heads[:dist.get_rank()])
+            assert alibi.shape[0] == expected_heads[dist.get_rank()]
+            torch.testing.assert_close(alibi[:, 0, 0].cpu(),
+                                       torch.arange(offset, offset + alibi.shape[0], dtype=torch.float32))
+        finally:
+            set_num_kv_heads(None)
+
+    def test_head_sharded_helper_leaves_the_class_untouched(self):
+        skip_on_device()
+        init_tp_engine(tp_size=2)
+
+        num_heads = 5
+        set_num_kv_heads(num_heads)
+        try:
+
+            class MptTransformer(nn.Module):
+
+                def build_mpt_alibi_tensor(self, heads, sequence_length, alibi_bias_max=8, device=None):
+                    return torch.arange(heads, dtype=torch.float32).view(heads, 1, 1).expand(heads, 1, sequence_length)
+
+            class MptSubclass(MptTransformer):
+                pass
+
+            first = MptTransformer()
+            install_head_sharded_helper(first, 'build_mpt_alibi_tensor', build_mpt_alibi_tensor)
+            expected = first.build_mpt_alibi_tensor(num_heads, 3)
+
+            # Injecting a second model of the same architecture must not make either of them
+            # delegate to the other's wrapper.
+            second = MptTransformer()
+            install_head_sharded_helper(second, 'build_mpt_alibi_tensor', build_mpt_alibi_tensor)
+            torch.testing.assert_close(second.build_mpt_alibi_tensor(num_heads, 3), expected)
+            torch.testing.assert_close(first.build_mpt_alibi_tensor(num_heads, 3), expected)
+
+            # A model of the same class that was never injected keeps its own method, and a
+            # subclass of it inherits that method rather than an installed wrapper.
+            plain = MptTransformer()
+            assert plain.build_mpt_alibi_tensor(num_heads, 3).shape[0] == num_heads
+
+            derived = MptSubclass()
+            install_head_sharded_helper(derived, 'build_mpt_alibi_tensor', build_mpt_alibi_tensor)
+            torch.testing.assert_close(derived.build_mpt_alibi_tensor(num_heads, 3), expected)
+        finally:
+            set_num_kv_heads(None)
+
+    def test_head_sharded_helper_freezes_the_models_split(self):
+        skip_on_device()
+        init_tp_engine(tp_size=2)
+
+        class MptTransformer(nn.Module):
+
+            def build_mpt_alibi_tensor(self, heads, sequence_length, alibi_bias_max=8, device=None):
+                return torch.arange(heads, dtype=torch.float32).view(heads, 1, 1).expand(heads, 1, sequence_length)
+
+        num_heads = 6
+        set_num_kv_heads(3)
+        try:
+            transformer = MptTransformer()
+            install_head_sharded_helper(transformer,
+                                        'build_mpt_alibi_tensor',
+                                        build_mpt_alibi_tensor,
+                                        num_heads=num_heads,
+                                        num_kv_heads=3)
+
+            # Initializing another model can replace this process-wide setting. The first
+            # model's helper must keep the [4, 2] split frozen with its weights.
+            set_num_kv_heads(2)
+            expected_sizes = [4, 2]
+            # AutoTP replaces the model's public head count with this rank's local count.
+            local_num_heads = expected_sizes[dist.get_rank()]
+            alibi = transformer.build_mpt_alibi_tensor(local_num_heads, 3)
+
+            offset = sum(expected_sizes[:dist.get_rank()])
+            assert alibi.shape[0] == expected_sizes[dist.get_rank()]
+            torch.testing.assert_close(alibi[:, 0, 0].cpu(),
+                                       torch.arange(offset, offset + alibi.shape[0], dtype=torch.float32))
+        finally:
+            set_num_kv_heads(None)
+
+    def test_bloom_alibi_uses_original_total_after_injection(self):
+        skip_on_device()
+        init_tp_engine(tp_size=2)
+
+        shard_sizes = [4, 2]
+        local_num_heads = shard_sizes[dist.get_rank()]
+        alibi = build_bloom_alibi_tensor(torch.ones(1, 3),
+                                         local_num_heads,
+                                         torch.float32,
+                                         head_shard_sizes=shard_sizes,
+                                         total_num_heads=6)
+
+        assert alibi.shape == (local_num_heads, 1, 3)
+
+    def test_alibi_mask_uses_original_total_after_injection(self):
+        skip_on_device()
+        init_tp_engine(tp_size=2)
+
+        class AlibiModel(nn.Module):
+
+            def __init__(self):
+                super().__init__()
+                self.n_head = 5
+                self.calls = 0
+                self.cached_heads = None
+
+            def get_alibi_mask(self, tensor, sequence_length):
+                self.calls += 1
+                self.cached_heads = self.n_head
+                return torch.arange(self.n_head,
+                                    dtype=torch.float32).view(-1, 1, 1).expand(-1, sequence_length, sequence_length)
+
+        model = AlibiModel()
+        install_head_sharded_helper(model, 'get_alibi_mask', get_alibi_mask, num_heads=5, num_kv_heads=5)
+
+        shard_sizes = [3, 2]
+        model.n_head = shard_sizes[dist.get_rank()]
+        mask = model.get_alibi_mask(None, 3)
+        second_mask = model.get_alibi_mask(None, 3)
+
+        offset = sum(shard_sizes[:dist.get_rank()])
+        assert mask.shape == (shard_sizes[dist.get_rank()], 3, 3)
+        assert model.n_head == shard_sizes[dist.get_rank()]
+        assert model.calls == 2
+        assert model.cached_heads == 5
+        torch.testing.assert_close(second_mask, mask)
+        torch.testing.assert_close(mask[:, 0, 0],
+                                   torch.arange(offset, offset + shard_sizes[dist.get_rank()], dtype=torch.float32))
+
+
 class TestAutoTPFusedWeights(DistributedTest):
     world_size = 2
     reuse_dist_env = False
+
+    def test_gate_up_gather_restores_sub_param_order(self):
+        skip_on_device()
+        init_tp_engine(tp_size=2)
+
+        hidden_dim = 4
+        gate_up_dim = 6
+        set_num_kv_heads(3)
+        try:
+            torch.manual_seed(17)
+            linear = nn.Linear(hidden_dim,
+                               gate_up_dim * 2,
+                               bias=False,
+                               dtype=preferred_dtype(),
+                               device=get_accelerator().current_device_name())
+            full_weight = deepcopy(linear.weight.data)
+            layer = GateUpPack_LinearLayer(deepcopy(linear), groups.get_tensor_model_parallel_group())
+
+            # The gate and the up halves are each cut in two, so a rank-order concatenation of
+            # the shards would interleave them instead of restoring the original weight.
+            gathered = nn.Parameter(layer.weight.data.clone())
+            layer.gather_params([gathered, None])
+            torch.testing.assert_close(gathered.data, full_weight)
+        finally:
+            set_num_kv_heads(None)
 
     def test_gate_up_fused_weight_partition(self):
         skip_on_device()
@@ -498,7 +740,7 @@ class TestAutoTPFusedWeights(DistributedTest):
                            hidden_dim * 2,
                            bias=True,
                            dtype=preferred_dtype(),
-                           device=get_accelerator().current_device())
+                           device=get_accelerator().current_device_name())
         full_weight = deepcopy(linear.weight.data)
         full_bias = deepcopy(linear.bias.data)
 
@@ -514,6 +756,26 @@ class TestAutoTPFusedWeights(DistributedTest):
         torch.testing.assert_close(layer.weight.data, full_weight)
         torch.testing.assert_close(layer.bias.data, full_bias)
 
+    def test_gate_up_single_param_bias_gather_partition(self):
+        skip_on_device()
+        init_tp_engine(tp_size=2)
+
+        hidden_dim = 8
+        torch.manual_seed(43)
+        linear = nn.Linear(hidden_dim,
+                           hidden_dim * 2,
+                           bias=True,
+                           dtype=preferred_dtype(),
+                           device=get_accelerator().current_device_name())
+        full_bias = deepcopy(linear.bias.data)
+
+        layer = GateUpPack_LinearLayer(deepcopy(linear), groups.get_tensor_model_parallel_group())
+        bias_shard = layer.bias.data.clone()
+        layer.bias.gather_params([layer.bias])
+        torch.testing.assert_close(layer.bias.data, full_bias)
+        layer.bias._tp_partition([layer.bias])
+        torch.testing.assert_close(layer.bias.data, bias_shard)
+
     def test_gqa_uneven_qkv_fused_weight_partition(self):
         skip_on_device()
         init_tp_engine(tp_size=2)
@@ -525,7 +787,7 @@ class TestAutoTPFusedWeights(DistributedTest):
                            q_size + k_size + v_size,
                            bias=True,
                            dtype=preferred_dtype(),
-                           device=get_accelerator().current_device())
+                           device=get_accelerator().current_device_name())
         full_weight = deepcopy(linear.weight.data)
         full_bias = deepcopy(linear.bias.data)
 
@@ -541,6 +803,109 @@ class TestAutoTPFusedWeights(DistributedTest):
         torch.testing.assert_close(layer.weight.data, full_weight)
         torch.testing.assert_close(layer.bias.data, full_bias)
 
+    def test_subparam_linear_single_param_weight_and_bias_roundtrip(self):
+        skip_on_device()
+        init_tp_engine(tp_size=2)
+
+        hidden_dim = 8
+        q_size, k_size, v_size = 8, 4, 4
+        torch.manual_seed(124)
+        linear = nn.Linear(hidden_dim,
+                           q_size + k_size + v_size,
+                           bias=True,
+                           dtype=preferred_dtype(),
+                           device=get_accelerator().current_device_name())
+        full_weight = deepcopy(linear.weight.data)
+        full_bias = deepcopy(linear.bias.data)
+
+        layer = SubParamLinearLayer(deepcopy(linear),
+                                    groups.get_tensor_model_parallel_group(),
+                                    shape=((q_size, k_size, v_size), -1),
+                                    partition_dim=0,
+                                    name="self_attn.qkv_proj")
+
+        weight_shard = layer.weight.data.clone()
+        bias_shard = layer.bias.data.clone()
+
+        layer.weight.gather_params([layer.weight])
+        torch.testing.assert_close(layer.weight.data, full_weight)
+        layer.weight._tp_partition([layer.weight])
+        torch.testing.assert_close(layer.weight.data, weight_shard)
+
+        layer.bias.gather_params([layer.bias])
+        torch.testing.assert_close(layer.bias.data, full_bias)
+        layer.bias._tp_partition([layer.bias])
+        torch.testing.assert_close(layer.bias.data, bias_shard)
+
+    def test_subparam_allreduce_single_param_weight_and_bias_roundtrip(self):
+        # engine.py hands the layer one parameter at a time, so bias has to be recognized by
+        # identity rather than by its position in the list.
+        skip_on_device()
+        init_tp_engine(tp_size=2)
+
+        out_dim = 8
+        q_size, k_size, v_size = 8, 4, 4
+        torch.manual_seed(125)
+        linear = nn.Linear(q_size + k_size + v_size,
+                           out_dim,
+                           bias=True,
+                           dtype=preferred_dtype(),
+                           device=get_accelerator().current_device_name())
+        full_weight = deepcopy(linear.weight.data)
+        full_bias = deepcopy(linear.bias.data)
+
+        layer = SubParamLinearAllreduce(deepcopy(linear),
+                                        groups.get_tensor_model_parallel_group(),
+                                        shape=(-1, (q_size, k_size, v_size)),
+                                        partition_dim=1,
+                                        name="self_attn.o_proj")
+
+        weight_shard = layer.weight.data.clone()
+        # Row parallel replicates the bias, so partitioning must leave it at full size.
+        torch.testing.assert_close(layer.bias.data, full_bias)
+
+        layer.gather_params([layer.weight])
+        torch.testing.assert_close(layer.weight.data, full_weight)
+        layer._tp_partition([layer.weight])
+        torch.testing.assert_close(layer.weight.data, weight_shard)
+
+        layer.gather_params([layer.bias])
+        torch.testing.assert_close(layer.bias.data, full_bias)
+        layer._tp_partition([layer.bias])
+        torch.testing.assert_close(layer.bias.data, full_bias)
+
+    def test_gather_uses_the_layers_own_shard_widths(self):
+        # The gather has to undo the exact uneven cut this layer was partitioned with, so it
+        # reads the widths recorded on the layer rather than re-deriving a split.
+        skip_on_device()
+        init_tp_engine(tp_size=2)
+
+        hidden_dim = 8
+        head_size = 12
+        set_num_kv_heads(3)
+        try:
+            torch.manual_seed(7)
+            linear = nn.Linear(hidden_dim,
+                               head_size * 3,
+                               bias=True,
+                               dtype=preferred_dtype(),
+                               device=get_accelerator().current_device_name())
+            full_weight = deepcopy(linear.weight.data)
+            full_bias = deepcopy(linear.bias.data)
+
+            layer = SubParamLinearLayer(deepcopy(linear),
+                                        groups.get_tensor_model_parallel_group(),
+                                        shape=((head_size, head_size, head_size), -1),
+                                        partition_dim=0,
+                                        name="self_attn.qkv_proj")
+            assert layer._subparam_shard_widths == [[8, 4], [8, 4], [8, 4]]
+
+            layer.gather_params([layer.weight, layer.bias])
+            torch.testing.assert_close(layer.weight.data, full_weight)
+            torch.testing.assert_close(layer.bias.data, full_bias)
+        finally:
+            set_num_kv_heads(None)
+
     def test_gqa_uneven_qkv_fused_forward(self):
         skip_on_device()
         groups._init_tp_mesh_device(tensor_model_parallel_size=2)
@@ -552,7 +917,7 @@ class TestAutoTPFusedWeights(DistributedTest):
                            q_size + k_size + v_size,
                            bias=True,
                            dtype=preferred_dtype(),
-                           device=get_accelerator().current_device())
+                           device=get_accelerator().current_device_name())
         layer = SubParamLinearLayer(deepcopy(linear),
                                     groups.get_tensor_model_parallel_group(),
                                     shape=((q_size, k_size, v_size), -1),
@@ -560,7 +925,7 @@ class TestAutoTPFusedWeights(DistributedTest):
                                     name="self_attn.qkv_proj")
 
         torch.manual_seed(42)
-        inputs = torch.randn(2, hidden_dim, dtype=preferred_dtype(), device=get_accelerator().current_device())
+        inputs = torch.randn(2, hidden_dim, dtype=preferred_dtype(), device=get_accelerator().current_device_name())
         full_output = linear(inputs)
         tp_output = layer(inputs)
 

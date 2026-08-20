@@ -16,8 +16,11 @@ from deepspeed.utils import log_dist
 from ..util import get_deepcompile_handle
 from ..graph_param import DSGraphParamManager
 from ..profilers.graph_profile import is_profile_incomplete
+from .contract import PassContract, CAP_Z3_GATHER_RELEASE
 
 NAME = "selective_gather"
+# Chooses which zero3_compile all-gathers to keep resident, so it depends on that pass.
+CONTRACT = PassContract(requires=frozenset({CAP_Z3_GATHER_RELEASE}))
 
 max_alloc_mem = 0
 last_optimize_step = 0

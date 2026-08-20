@@ -27,7 +27,12 @@ HCN_LIST = [
 def get_candidate_batch_sizes(base_list, max_acceptable_batch_size):
     candidate_batch_size = []
     for base in base_list:
-        if base >= max_acceptable_batch_size:
+        if base > max_acceptable_batch_size:
+            # Every micro batch is checked against the cap, but their LCM is not,
+            # and scaling a base only grows it. Keeping such a base would offer a
+            # candidate the caller already said is too large.
+            continue
+        if base == max_acceptable_batch_size:
             candidate_batch_size.append(base)
         else:
             value = max_acceptable_batch_size // base
