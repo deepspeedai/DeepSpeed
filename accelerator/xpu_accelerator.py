@@ -26,7 +26,6 @@ class XPU_Accelerator(DeepSpeedAccelerator):
             # changed to xccl if not using torch-CCL on XPU device
             self._communication_backend_name = 'xccl'
         self._compile_backend = "inductor"
-        self.aligned_tensors = []
         self.class_dict = None
 
     def is_synchronized_device(self):
@@ -229,26 +228,11 @@ class XPU_Accelerator(DeepSpeedAccelerator):
     def LongTensor(self):
         return functools.partial(torch.tensor, dtype=torch.long, device=self._name)
 
-    def _pin_memory(self, tensor, align_bytes=1):
-        if align_bytes == 1:
-            return tensor.pin_memory(device=self.current_device_name())
-        elif align_bytes == 0:
-            # Page-locked host buffer without starting AIO worker threads.
-            from deepspeed.ops.op_builder import PinMemoryBuilder
-            self.aio_handle = PinMemoryBuilder().load().pin_handle()
-            aligned_t = self.aio_handle.new_cpu_locked_tensor(tensor.numel(), tensor)
-            aligned_t = aligned_t[:tensor.numel()].copy_(tensor)
-            self.aligned_tensors.append([aligned_t.data_ptr(), aligned_t[-1].data_ptr()])
-            return aligned_t
+    def _torch_pin_memory(self, tensor):
+        return tensor.pin_memory(device=self.current_device_name())
 
-    def is_pinned(self, tensor):
-        if tensor.is_pinned(device=self.current_device_name()):
-            return True
-        else:
-            for begin, end in self.aligned_tensors:
-                if begin <= tensor.data_ptr() and tensor.data_ptr() <= end:
-                    return True
-        return False
+    def _torch_is_pinned(self, tensor):
+        return tensor.is_pinned(device=self.current_device_name())
 
     def op_builder_dir(self):
         try:

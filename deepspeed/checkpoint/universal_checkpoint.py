@@ -10,7 +10,7 @@ import types
 from typing import List, Tuple, Union
 from dataclasses import dataclass
 from .constants import (FP32_WEIGHT_KEY, PARAM, VOCAB_TENSOR, CAT_DIM, PARAM_N_SUB_PARAMS, SUB_PARAM_SHAPE,
-                        EP_IS_EXPERT_PARAM, EP_NUM_EXPERTS, DS_AUTOTP_UC_META)
+                        EP_IS_EXPERT_PARAM, EP_NUM_EXPERTS, DS_AUTOTP_UC_META, UNIVERSAL_CHECKPOINT_VERSION_KEY)
 
 
 @dataclass
@@ -31,6 +31,46 @@ def _get_param_uc_restore_meta(param):
     return getattr(param, DS_AUTOTP_UC_META, None)
 
 
+def _narrow_sub_params(full_view, partition_dim, sub_dim_sizes, shard_widths, tp_rank, tp_world_size, uc_version):
+    """Take this rank's piece of every sub-parameter and concatenate them back together.
+
+    ``shard_widths`` gives the per-rank width of each sub-parameter, so a fused attention
+    weight is cut on key/value head boundaries. Metadata written before UCP version 0.4 carries
+    no widths and can only have been split evenly.
+    """
+    assert sum(sub_dim_sizes) == full_view.shape[partition_dim], (
+        f"Sub-parameter sizes {list(sub_dim_sizes)} sum to {sum(sub_dim_sizes)}, but dimension {partition_dim} "
+        f"of the parameter is {full_view.shape[partition_dim]}. The metadata describes a different parameter.")
+
+    if uc_version < 0.4:
+        # An even split is the only layout recoverable without recorded widths. Assuming it for
+        # an uneven sub-parameter shifts every offset and silently drops the trailing elements,
+        # so refuse rather than restore wrong weights.
+        uneven = [size for size in sub_dim_sizes if size % tp_world_size != 0]
+        assert not uneven, (
+            f"Sub-parameter sizes {uneven} are not divisible by tp_world_size {tp_world_size}, and this "
+            "metadata records no sub_param_shard_widths, so its uneven layout cannot be reconstructed.")
+        shard_widths = [[size // tp_world_size] * tp_world_size for size in sub_dim_sizes]
+
+    assert len(shard_widths) == len(sub_dim_sizes), (
+        f"Got {len(shard_widths)} shard width entries for {len(sub_dim_sizes)} sub-parameters.")
+
+    offset = 0
+    merged_chunks = []
+    for sub_dim_size, widths in zip(sub_dim_sizes, shard_widths):
+        assert len(widths) == tp_world_size, (
+            f"Sub-parameter of size {sub_dim_size} has {len(widths)} shard widths, expected one per tp rank "
+            f"({tp_world_size}).")
+        assert sum(widths) == sub_dim_size, (
+            f"Sub-parameter shard widths {list(widths)} sum to {sum(widths)}, expected {sub_dim_size}.")
+        start = offset + sum(widths[:tp_rank])
+        merged_chunks.append(full_view.narrow(partition_dim, start, widths[tp_rank]))
+        offset += sub_dim_size
+
+    slice_tensor = torch.cat(merged_chunks, dim=partition_dim)
+    return slice_tensor.flatten()
+
+
 def _resolve_autotp_partition(current_param, ckpt_dict, full_hp_param, tp_rank, tp_world_size):
     meta = _get_param_uc_restore_meta(current_param)
     if not meta:
@@ -40,7 +80,17 @@ def _resolve_autotp_partition(current_param, ckpt_dict, full_hp_param, tp_rank, 
     logical_shape = meta.get('logical_shape')
     sub_param_shape = meta.get('sub_param_shape')
     sub_param_sizes = meta.get('sub_param_sizes')
+    sub_param_shard_widths = meta.get('sub_param_shard_widths')
+    partition_sizes = meta.get('partition_sizes')
     replicated = meta.get('replicated', False)
+    uc_version = meta.get(UNIVERSAL_CHECKPOINT_VERSION_KEY, 0.0)
+
+    # The layer could not describe how it split this parameter, so conversion refuses it. The
+    # generic paths below would reassemble it as contiguous rank-ordered slices, which is not
+    # how a fused layout was cut, so restoring here would silently corrupt the weight.
+    unsupported_reason = meta.get('conversion', {}).get('unsupported_reason')
+    if unsupported_reason:
+        raise RuntimeError(f"Cannot restore a universal checkpoint into this AutoTP parameter: {unsupported_reason}")
 
     if replicated:
         assert partition_dim is None
@@ -55,43 +105,43 @@ def _resolve_autotp_partition(current_param, ckpt_dict, full_hp_param, tp_rank, 
 
     full_view = full_hp_param.view(logical_shape)
 
-    if sub_param_shape is not None:
+    # sub_param_sizes holds the resolved physical width of each sub-parameter, whereas
+    # sub_param_shape may be a logical view spec such as (3, -1) whose partition_dim entry is
+    # the sub-parameter *count*. Reading that count as a width restores only a fraction of the
+    # parameter, so only fall back to sub_param_shape for older metadata that lacks the sizes.
+    sub_dim_sizes = None
+    if sub_param_sizes is not None:
+        sub_dim_sizes = sub_param_sizes
+    elif sub_param_shape is not None:
         if hasattr(sub_param_shape, "shape") and hasattr(sub_param_shape, "partition_dim"):
             shape_spec = sub_param_shape.shape
             partition_dim = sub_param_shape.partition_dim
         else:
             shape_spec = sub_param_shape
-
         sub_dim_sizes = shape_spec[partition_dim]
-        if not isinstance(sub_dim_sizes, tuple):
+
+    if sub_dim_sizes is not None:
+        if not isinstance(sub_dim_sizes, (tuple, list)):
             sub_dim_sizes = (sub_dim_sizes, )
 
-        offset = 0
-        merged_chunks = []
-        for sub_dim_size in sub_dim_sizes:
-            sub_slice = full_view.narrow(partition_dim, offset, sub_dim_size) \
-                                .chunk(tp_world_size, dim=partition_dim)[tp_rank]
-            merged_chunks.append(sub_slice)
-            offset += sub_dim_size
+        return _narrow_sub_params(full_view, partition_dim, sub_dim_sizes, sub_param_shard_widths, tp_rank,
+                                  tp_world_size, uc_version)
 
-        slice_tensor = torch.cat(merged_chunks, dim=partition_dim)
+    if partition_sizes is not None:
+        shard_offset = sum(partition_sizes[:tp_rank])
+        shard_size = partition_sizes[tp_rank]
+        slice_tensor = full_view.narrow(partition_dim, shard_offset, shard_size)
         return slice_tensor.flatten()
 
-    if sub_param_sizes is not None:
-        if not isinstance(sub_param_sizes, (tuple, list)):
-            sub_param_sizes = (sub_param_sizes, )
-
-        offset = 0
-        merged_chunks = []
-        for sub_dim_size in sub_param_sizes:
-            sub_slice = full_view.narrow(partition_dim, offset, sub_dim_size) \
-                                .chunk(tp_world_size, dim=partition_dim)[tp_rank]
-            merged_chunks.append(sub_slice)
-            offset += sub_dim_size
-
-        slice_tensor = torch.cat(merged_chunks, dim=partition_dim)
-        return slice_tensor.flatten()
-
+    # torch.chunk sizes every block as ceil(size / tp_world_size) and shrinks the last one,
+    # while AutoTP hands one extra element to each of the first `size % tp_world_size` ranks.
+    # The two disagree once the split is uneven (10/4 -> chunk [3, 3, 3, 1] vs AutoTP
+    # [3, 3, 2, 2]), and chunk can even return fewer blocks than there are ranks.
+    partition_dim_size = full_view.shape[partition_dim]
+    assert partition_dim_size % tp_world_size == 0, (
+        f"Dimension {partition_dim} of size {partition_dim_size} is not divisible by tp_world_size "
+        f"{tp_world_size}, and this checkpoint records no partition_sizes, so its uneven layout cannot "
+        "be reconstructed.")
     slice_tensor = full_view.chunk(tp_world_size, dim=partition_dim)[tp_rank]
     return slice_tensor.flatten()
 
@@ -148,7 +198,11 @@ def load_hp_checkpoint_state(self, folder, tp_rank, tp_world_size, ep_rank=0, ep
         # implementation b.
         # this version requires no additional data passed from the client
         # if the shapes already match it must be slices that were averaged - so we just hack around those
-        if full_hp_param.shape == self.shape:
+        # AutoTP restore metadata already pins down this rank's slice of the universal tensor,
+        # including layouts where one rank owns the whole thing (e.g. a single KV head under MQA).
+        # Collapsing the TP topology here would contradict the recorded per-rank widths.
+        has_autotp_meta = _get_param_uc_restore_meta(self) is not None
+        if full_hp_param.shape == self.shape and not has_autotp_meta:
             tp_rank = 0
             tp_world_size = 1
 
@@ -156,7 +210,9 @@ def load_hp_checkpoint_state(self, folder, tp_rank, tp_world_size, ep_rank=0, ep
         # the converter to universal currently strips the original padding completely so the saved
         # weight is padding-free and we just need to add new padding depending on the target TP
         # degree
-        is_vocab_tensor = ckpt_dict.get(VOCAB_TENSOR, False) and not is_expert_param
+        # AutoTP restore metadata already describes the exact (possibly uneven) partition layout,
+        # so the legacy tp-degree-derived vocab padding must not be applied on top of it.
+        is_vocab_tensor = ckpt_dict.get(VOCAB_TENSOR, False) and not is_expert_param and not has_autotp_meta
         if is_vocab_tensor:
             # In the absence of data passed from the user wrt new padded vocab specific to tp degree
             # we can again derive that data by reverse engineering the target shapes like so:
