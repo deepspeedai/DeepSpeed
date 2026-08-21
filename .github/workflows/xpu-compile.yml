@@ -14,7 +14,6 @@ concurrency:
 
 permissions:
   contents: read
-  issues: write
 
 jobs:
   compile-tests:
