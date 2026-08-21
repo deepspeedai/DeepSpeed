@@ -10,7 +10,7 @@ import torch
 
 import deepspeed.comm as dist
 from deepspeed.accelerator import get_accelerator
-from .passes import zero1_compile, zero3_compile
+from .passes import zero_1_and_2_compile, zero3_compile
 from .backend import make_backend, launch_compile_passes, init_schedule
 from .util import get_deepcompile_handle, add_pre_backward_hook
 
@@ -57,69 +57,37 @@ def _build_flat_partition_grad_views(optimizer, group_idx):
     dtype = optimizer.gradient_accumulation_dtype
     device = get_accelerator().current_device_name()
     flat_buffer = torch.zeros(partition_size, dtype=dtype, device=device)
-
-    if any(optimizer.round_robin_bit16_padding[group_idx]):
-        views = []
-        current_size = 0
-        partition_id = dist.get_rank(group=optimizer.real_dp_process_group[group_idx])
-
-        for tensor in optimizer.params_in_partition[group_idx]:
-            param_id = optimizer.get_param_id(tensor)
-            dest_offset = optimizer.grad_partition_insertion_offset[group_idx][partition_id][param_id]
-            source_offset = optimizer.grad_start_offset[group_idx][partition_id][param_id]
-            num_elements = min(tensor.numel() - source_offset, partition_size - dest_offset)
-
-            if dest_offset > current_size:
-                padding = flat_buffer.narrow(0, current_size, dest_offset - current_size)
-                padding._zero_padding = True
-                views.append(padding)
-
-            if num_elements > 0:
-                view = flat_buffer.narrow(0, dest_offset, int(num_elements))
-                if source_offset == 0 and num_elements == tensor.numel():
-                    view = view.view(tensor.shape)
-                views.append(view)
-                current_size = dest_offset + int(num_elements)
-
-        if current_size < partition_size:
-            padding = flat_buffer.narrow(0, current_size, partition_size - current_size)
-            padding._zero_padding = True
-            views.append(padding)
-
-        return flat_buffer, views
+    partition_id = dist.get_rank(group=optimizer.real_dp_process_group[group_idx])
 
     views = []
     current_size = 0
-    for i, tensor in enumerate(optimizer.params_in_partition[group_idx]):
-        num_elements = tensor.numel()
-        tensor_offset = 0
+    for tensor in optimizer.params_in_partition[group_idx]:
+        param_id = optimizer.get_param_id(tensor)
+        source_offset = optimizer.grad_start_offset[group_idx][partition_id][param_id]
+        dest_offset = optimizer.grad_partition_insertion_offset[group_idx][partition_id][param_id]
+        num_elements = min(tensor.numel() - source_offset, partition_size - dest_offset)
 
-        if i == 0 and optimizer.first_offset[group_idx] > 0:
-            tensor_offset = int(optimizer.first_offset[group_idx])
-            num_elements -= tensor_offset
+        if dest_offset > current_size:
+            padding = flat_buffer.narrow(0, current_size, dest_offset - current_size)
+            padding._zero_padding = True
+            views.append(padding)
 
-        if num_elements > partition_size - current_size:
-            num_elements = partition_size - current_size
-
-        if num_elements <= 0:
-            continue
-
-        view = flat_buffer.narrow(0, current_size, int(num_elements))
-        if tensor_offset == 0 and num_elements == tensor.numel():
-            view = view.view(tensor.shape)
-        views.append(view)
-        current_size += int(num_elements)
-
-        if current_size >= partition_size:
-            break
+        if num_elements > 0:
+            view = flat_buffer.narrow(0, dest_offset, int(num_elements))
+            if source_offset == 0 and num_elements == tensor.numel():
+                view = view.view(tensor.shape)
+            views.append(view)
+            current_size = dest_offset + int(num_elements)
 
     if current_size < partition_size:
-        views.append(flat_buffer.narrow(0, current_size, partition_size - current_size))
+        padding = flat_buffer.narrow(0, current_size, partition_size - current_size)
+        padding._zero_padding = True
+        views.append(padding)
 
     return flat_buffer, views
 
 
-def init_z1(engine, backend, compile_config, compile_kwargs, schedule=None, use_z2=False):
+def init_z1_and_2(engine, backend, compile_config, compile_kwargs, schedule=None, use_z2=False):
 
     optimizer = engine.optimizer
     optimizer.contiguous_gradients = False  # Avoid creating unnecessary buffer
@@ -212,14 +180,15 @@ def init_z1(engine, backend, compile_config, compile_kwargs, schedule=None, use_
     if schedule is None:
         schedule = []
         if use_z2:
-            schedule.append((0, [zero1_compile.add_z2_reduce]))
+            schedule.append((0, [zero_1_and_2_compile.add_z2_reduce]))
         else:
-            schedule.append((0, [zero1_compile.add_z1_reduce]))
+            schedule.append((0, [zero_1_and_2_compile.add_z1_reduce]))
     else:
         for opt in schedule:
-            # avoid typical misconfiguration
             if zero3_compile.add_z3_gather_release in opt[1]:
-                raise ValueError("A pass for ZeRO3 is not specified though ZeRO1 is enabled")
+                raise ValueError("The schedule contains the ZeRO-3 pass add_z3_gather_release, but ZeRO stage 1 "
+                                 "or 2 is enabled. Use zero_1_and_2_compile.add_z1_reduce (stage 1) or add_z2_reduce "
+                                 "(stage 2), or set zero_optimization.stage to 3.")
 
     init_schedule(schedule)
 

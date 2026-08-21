@@ -8,16 +8,8 @@ from deepspeed.utils import get_full_hp_param, get_full_hp_grad, get_hp_fragment
 from deepspeed.utils import set_full_hp_param, set_full_hp_grad
 
 
-def link_hp_params(lp_param_list,
-                   flat_hp_partition,
-                   gradient_dict,
-                   offload_gradient_dict,
-                   use_offload,
-                   param_group_index,
-                   partition_start,
-                   partition_size,
-                   dp_group,
-                   param_offsets=None):
+def link_hp_params(lp_param_list, flat_hp_partition, gradient_dict, offload_gradient_dict, use_offload,
+                   param_group_index, partition_start, partition_size, dp_group, param_offsets=None):
     local_lp_param_and_offset = _init_lp_to_hp_mapping(lp_param_list, partition_start, partition_size, dp_group,
                                                        param_offsets)
 
@@ -55,7 +47,6 @@ def _init_lp_to_hp_mapping(lp_param_list, partition_start, partition_size, dp_gr
         if current_offset < partition_end and lp_param_end > partition_start:
             param_and_offset_list.append((lp_param, current_offset))
             lp_param._index_in_param_group = index_in_param_group
-            # Indices for params in this partition/GPU
             index_in_param_group += 1
         if param_offsets is None:
             current_offset += lp_param.numel()
