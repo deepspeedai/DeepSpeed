@@ -389,11 +389,13 @@ def parse_resource_filter(host_info, include_str="", exclude_str=""):
 
 
 def parse_inclusion_exclusion(resource_pool, inclusion, exclusion):
+    # Hand parse_resource_filter what the machines actually have. Seeding this
+    # from the inclusion string instead made it filter the request against
+    # itself, so a bare hostname resolved to no slots and an out-of-range slot
+    # passed the check it exists to fail.
     active_resources = collections.OrderedDict()
-    node_configs = parse_node_config_list(inclusion)
-
     for hostname, slots in resource_pool.items():
-        active_resources[hostname] = node_configs[hostname] if hostname in node_configs else list(range(slots))
+        active_resources[hostname] = list(range(slots))
 
     return parse_resource_filter(active_resources, include_str=inclusion, exclude_str=exclusion)
 
