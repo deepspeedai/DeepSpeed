@@ -57,7 +57,11 @@ Muon supports the following params:
 | weight\_decay  | Weight decay (AdamW-style).                                                                                          | 0.0       |
 | muon\_lr       | Learning rate override for Muon parameters. Defaults to `lr` if not set.                                             | -         |
 | adam\_lr       | Learning rate override for non-Muon (Adam) parameters. Defaults to `lr` if not set.                                  | -         |
+| torch\_adam    | Use torch Adam/AdamW for non-Muon parameters instead of the DeepSpeed Adam backend.                                  | false     |
+| adam\_w\_mode | Use AdamW rather than Adam for non-Muon parameters.                                                                  | true      |
 | ns\_method     | Newton-Schulz orthogonalization method: `"gram"` for Gram NS (~2x faster on rectangular matrices), `"standard"` for the original iteration. Use `"standard"` to fall back if you encounter convergence issues. | `"gram"`  |
+
+By default, non-Muon parameters use `FusedAdam`. When optimizer state is offloaded to the CPU, DeepSpeed selects `DeepSpeedCPUAdam`. This is the same backend selection used by the Adam and AdamW optimizer types.
 
   Example of <i>**optimizer**</i> with Adam
 

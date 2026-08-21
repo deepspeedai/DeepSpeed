@@ -2078,6 +2078,40 @@ class DeepSpeedEngine(Module):
             return
         configure(getattr(self, "_autoep_folding_spec", None))
 
+    def get_optimizer_configuration(self, optimizer_parameters, adam_w_mode, allow_legacy_fallback=False):
+        torch_adam = optimizer_parameters.pop(TORCH_ADAM_PARAM, False)
+        user_fp32_optimizer_states = optimizer_parameters.pop('fp32_optimizer_states', None)
+        if torch_adam:
+            foreach = optimizer_parameters.pop('foreach', None)
+            return (torch.optim.AdamW if adam_w_mode else torch.optim.Adam), {'foreach': foreach}
+
+        if self.zero_use_cpu_optimizer():
+            from deepspeed.ops.adam import DeepSpeedCPUAdam, ZenFlowCPUAdam
+            CPUAdam = ZenFlowCPUAdam if self.zenflow else DeepSpeedCPUAdam
+
+            if self.bf16_optimizer_states():
+                if user_fp32_optimizer_states:
+                    logger.warning("bf16_optimizer_states is enabled; overriding fp32_optimizer_states "
+                                   "to False so CPU Adam moments are stored in bf16.")
+                fp32_optimizer_states = False
+            elif user_fp32_optimizer_states is None:
+                fp32_optimizer_states = True
+            else:
+                fp32_optimizer_states = user_fp32_optimizer_states
+            optimizer_kwargs = {'adamw_mode': adam_w_mode, 'fp32_optimizer_states': fp32_optimizer_states}
+            if self.zenflow:
+                optimizer_kwargs['overlap_step'] = self.overlap_step
+            return CPUAdam, optimizer_kwargs
+
+        try:
+            from deepspeed.ops.adam import FusedAdam
+        except ImportError:
+            if not allow_legacy_fallback:
+                raise
+            logger.warning("FusedAdam is unavailable; falling back to Muon's inline Adam update.")
+            return None, {}
+        return FusedAdam, {'adam_w_mode': adam_w_mode}
+
     def _configure_basic_optimizer(self, model_parameters):
         # Copy so the pop() calls below (torch_adam, adam_w_mode, fp32_optimizer_states) do not
         # mutate the shared config dict returned by optimizer_params().
@@ -2089,50 +2123,13 @@ class DeepSpeedEngine(Module):
             )
 
         if self.optimizer_name() in [ADAM_OPTIMIZER, ADAMW_OPTIMIZER]:
-            torch_adam = optimizer_parameters.pop(TORCH_ADAM_PARAM, False)
             adam_w_mode = optimizer_parameters.pop(ADAM_W_MODE, ADAM_W_MODE_DEFAULT)
 
             # Optimizer name of Adam forces AdamW logic unless adam_w_mode is explicitly set
             effective_adam_w_mode = self.optimizer_name() == ADAMW_OPTIMIZER or adam_w_mode
-
-            if torch_adam:
-                if not effective_adam_w_mode:
-                    optimizer = torch.optim.Adam(model_parameters, **optimizer_parameters)
-                else:
-                    optimizer = torch.optim.AdamW(model_parameters, **optimizer_parameters)
-            else:
-                if self.zero_use_cpu_optimizer():
-                    from deepspeed.ops.adam import DeepSpeedCPUAdam, ZenFlowCPUAdam
-                    CPUAdam = ZenFlowCPUAdam if self.zenflow else DeepSpeedCPUAdam
-
-                    zenflow_kwargs = {'overlap_step': self.overlap_step} if self.zenflow else {}
-                    # Pop so a user-supplied value does not collide with the keyword built below.
-                    # None means the user did not set it, so no override warning is needed.
-                    user_fp32_optimizer_states = optimizer_parameters.pop('fp32_optimizer_states', None)
-                    if self.bf16_optimizer_states():
-                        # bf16 moments are required so the offloaded state matches the bf16 master weights.
-                        if user_fp32_optimizer_states:
-                            logger.warning("bf16_optimizer_states is enabled; overriding fp32_optimizer_states "
-                                           "to False so CPU Adam moments are stored in bf16.")
-                        fp32_optimizer_states = False
-                    elif user_fp32_optimizer_states is None:
-                        # Default preserves the pre-existing fp32 optimizer-state behavior.
-                        fp32_optimizer_states = True
-                    else:
-                        fp32_optimizer_states = user_fp32_optimizer_states
-                    optimizer = CPUAdam(model_parameters,
-                                        **optimizer_parameters,
-                                        adamw_mode=effective_adam_w_mode,
-                                        fp32_optimizer_states=fp32_optimizer_states,
-                                        **zenflow_kwargs)
-                else:
-                    from deepspeed.ops.adam import FusedAdam
-
-                    optimizer = FusedAdam(
-                        model_parameters,
-                        **optimizer_parameters,
-                        adam_w_mode=effective_adam_w_mode,
-                    )
+            adam_optimizer, adam_optimizer_kwargs = self.get_optimizer_configuration(
+                optimizer_parameters, effective_adam_w_mode)
+            optimizer = adam_optimizer(model_parameters, **optimizer_parameters, **adam_optimizer_kwargs)
 
         elif self.optimizer_name() == ADAGRAD_OPTIMIZER:
             if self.zero_use_cpu_optimizer():
@@ -2191,7 +2188,10 @@ class DeepSpeedEngine(Module):
                 logger.error("Install mup to use MuSGD optimizer")
             optimizer = MuSGD(model_parameters, **optimizer_parameters)
         elif self.optimizer_name() == MUON_OPTIMIZER:
-            zero_stage = self.zero_optimization_stage()
+            adam_w_mode = optimizer_parameters.pop(ADAM_W_MODE, ADAM_W_MODE_DEFAULT)
+            adam_optimizer, adam_optimizer_kwargs = self.get_optimizer_configuration(optimizer_parameters,
+                                                                                     adam_w_mode,
+                                                                                     allow_legacy_fallback=True)
             # Flatten param group dicts (created by MoE/EP) into a raw parameter list
             all_params = []
             for item in model_parameters:
@@ -2228,7 +2228,12 @@ class DeepSpeedEngine(Module):
             if self.has_moe_layers:
                 from deepspeed.moe.utils import split_params_into_different_moe_groups_for_optimizer
                 param_groups = split_params_into_different_moe_groups_for_optimizer(param_groups)
-            optimizer = MuonWithAuxAdam(param_groups)
+            optimizer = MuonWithAuxAdam(param_groups,
+                                        adam_optimizer=adam_optimizer,
+                                        adam_optimizer_kwargs=adam_optimizer_kwargs,
+                                        adam_w_mode=adam_w_mode,
+                                        fallback_to_inline=adam_optimizer is not None
+                                        and adam_optimizer.__name__ == "FusedAdam")
         else:
             torch_optimizer = getattr(torch.optim, self.optimizer_name())
             optimizer = torch_optimizer(model_parameters, **optimizer_parameters)

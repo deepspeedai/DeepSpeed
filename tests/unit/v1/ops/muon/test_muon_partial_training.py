@@ -20,10 +20,14 @@ The fix filters parameters to only include those with requires_grad=True,
 ensuring empty parameter groups are properly handled.
 """
 
+import torch
 import torch.nn as nn
 import deepspeed
 import pytest
 from unit.common import DistributedTest
+from deepspeed.ops.adam import DeepSpeedCPUAdam, FusedAdam, ZenFlowCPUAdam
+from deepspeed.runtime.engine import DeepSpeedEngine
+from deepspeed.runtime.zero.muon.muon_optimizer import MuonWithAuxAdam
 
 
 class PartialTrainableModel(nn.Module):
@@ -214,3 +218,184 @@ class TestMuonPartialModelTraining(DistributedTest):
         }
         assert group_lrs[True] == expected_muon_lr
         assert group_lrs[False] == expected_adam_lr
+
+    @pytest.mark.parametrize("adam_w_mode, expected_optimizer", [(True, torch.optim.AdamW), (False, torch.optim.Adam)])
+    def test_muon_aux_adam_backend_dispatch(self, adam_w_mode, expected_optimizer):
+        model = PartialTrainableModel()
+        ds_config = {
+            "train_micro_batch_size_per_gpu": 1,
+            "optimizer": {
+                "type": "Muon",
+                "params": {
+                    "lr": 0.02,
+                    "torch_adam": True,
+                    "adam_w_mode": adam_w_mode,
+                },
+            },
+            "zero_optimization": {
+                "stage": 2
+            },
+        }
+
+        model_engine, _, _, _ = deepspeed.initialize(model=model,
+                                                     model_parameters=model.parameters(),
+                                                     config=ds_config)
+
+        assert isinstance(model_engine.basic_optimizer.aux_optimizer, expected_optimizer)
+        assert model_engine.basic_optimizer.aux_optimizer.state is model_engine.basic_optimizer.state
+
+
+@pytest.mark.parametrize("optimizer_class", [torch.optim.Adam, torch.optim.AdamW])
+def test_muon_aux_adam_matches_torch(optimizer_class):
+    actual_param = torch.nn.Parameter(torch.tensor([1.0, -2.0]))
+    expected_param = torch.nn.Parameter(actual_param.detach().clone())
+    group_options = {
+        "lr": 0.01,
+        "betas": (0.8, 0.9),
+        "eps": 1e-8,
+        "weight_decay": 0.1,
+    }
+    optimizer = MuonWithAuxAdam([dict(params=[actual_param], use_muon=False, **group_options)],
+                                adam_optimizer=optimizer_class)
+    reference = optimizer_class([dict(params=[expected_param], **group_options)])
+
+    for grad in (torch.tensor([0.25, -0.5]), torch.tensor([-0.1, 0.2]), torch.tensor([0.3, 0.4])):
+        actual_param.grad = grad.clone()
+        expected_param.grad = grad.clone()
+        optimizer.step()
+        reference.step()
+
+    torch.testing.assert_close(actual_param, expected_param)
+    assert optimizer.aux_optimizer.state is optimizer.state
+    assert optimizer.state[actual_param].keys() == reference.state[expected_param].keys()
+
+
+@pytest.mark.parametrize("adam_w_mode, optimizer_class", [(True, torch.optim.AdamW), (False, torch.optim.Adam)])
+def test_muon_aux_adam_falls_back_to_inline_update(adam_w_mode, optimizer_class):
+    actual_param = torch.nn.Parameter(torch.tensor([1.0, -2.0]))
+    expected_param = torch.nn.Parameter(actual_param.detach().clone())
+    group_options = {
+        "lr": 0.01,
+        "betas": (0.8, 0.9),
+        "eps": 1e-8,
+        "weight_decay": 0.1,
+    }
+    optimizer = MuonWithAuxAdam([dict(params=[actual_param], use_muon=False, **group_options)],
+                                adam_w_mode=adam_w_mode)
+    reference = optimizer_class([expected_param], **group_options)
+
+    for grad in (torch.tensor([0.25, -0.5]), torch.tensor([-0.1, 0.2]), torch.tensor([0.3, 0.4])):
+        actual_param.grad = grad.clone()
+        expected_param.grad = grad.clone()
+        optimizer.step()
+        reference.step()
+
+    torch.testing.assert_close(actual_param, expected_param)
+
+
+def test_muon_aux_adam_falls_back_when_backend_initialization_fails():
+
+    class UnavailableAdam:
+
+        def __init__(self, *args, **kwargs):
+            raise RuntimeError("backend unavailable")
+
+    param = torch.nn.Parameter(torch.tensor([1.0]))
+    optimizer = MuonWithAuxAdam([dict(params=[param], use_muon=False)],
+                                adam_optimizer=UnavailableAdam,
+                                fallback_to_inline=True)
+
+    assert optimizer.aux_optimizer is None
+
+
+def test_muon_aux_adam_passes_step_id_to_sequential_zenflow():
+
+    class SequentialAdam(torch.optim.AdamW):
+
+        def __init__(self, params):
+            super().__init__(params)
+            self.overlap_step = False
+            self.received_step_id = None
+
+        def step(self, step_id, closure=None):
+            self.received_step_id = step_id
+            return super().step(closure)
+
+    param = torch.nn.Parameter(torch.tensor([1.0]))
+    optimizer = MuonWithAuxAdam([dict(params=[param], use_muon=False)], adam_optimizer=SequentialAdam)
+    param.grad = torch.ones_like(param)
+    optimizer.step(step_id=3)
+
+    assert optimizer.aux_optimizer.received_step_id == 3
+
+
+def test_muon_aux_adam_rebinds_zero_parameter_groups():
+    original_param = torch.nn.Parameter(torch.tensor([1.0]))
+    replacement_param = torch.nn.Parameter(torch.tensor([2.0]))
+    optimizer = MuonWithAuxAdam([dict(params=[original_param], use_muon=False, lr=0.1)],
+                                adam_optimizer=torch.optim.AdamW)
+
+    optimizer.param_groups[0]["params"] = [replacement_param]
+    replacement_param.grad = torch.ones_like(replacement_param)
+    optimizer.step()
+
+    assert original_param.item() == 1.0
+    assert replacement_param.item() < 2.0
+    assert original_param not in optimizer.state
+    assert replacement_param in optimizer.state
+    assert optimizer.aux_optimizer.param_groups[0] is optimizer.param_groups[0]
+
+
+class _AdamSelectionEngine:
+
+    def __init__(self, cpu_offload=False, bf16_states=False, zenflow=False):
+        self.cpu_offload = cpu_offload
+        self.bf16_states = bf16_states
+        self.zenflow = zenflow
+        self.overlap_step = True
+
+    def zero_use_cpu_optimizer(self):
+        return self.cpu_offload
+
+    def bf16_optimizer_states(self):
+        return self.bf16_states
+
+
+@pytest.mark.parametrize(
+    "engine, parameters, adam_w_mode, expected_class, expected_kwargs",
+    [
+        (_AdamSelectionEngine(), {
+            "torch_adam": True
+        }, True, torch.optim.AdamW, {
+            "foreach": None
+        }),
+        (_AdamSelectionEngine(cpu_offload=True), {
+            "torch_adam": True
+        }, False, torch.optim.Adam, {
+            "foreach": None
+        }),
+        (_AdamSelectionEngine(), {}, True, FusedAdam, {
+            "adam_w_mode": True
+        }),
+        (_AdamSelectionEngine(cpu_offload=True), {}, False, DeepSpeedCPUAdam, {
+            "adamw_mode": False,
+            "fp32_optimizer_states": True
+        }),
+        (_AdamSelectionEngine(cpu_offload=True, bf16_states=True), {
+            "fp32_optimizer_states": True
+        }, True, DeepSpeedCPUAdam, {
+            "adamw_mode": True,
+            "fp32_optimizer_states": False
+        }),
+        (_AdamSelectionEngine(cpu_offload=True, zenflow=True), {}, True, ZenFlowCPUAdam, {
+            "adamw_mode": True,
+            "fp32_optimizer_states": True,
+            "overlap_step": True
+        }),
+    ],
+)
+def test_adam_backend_selection(engine, parameters, adam_w_mode, expected_class, expected_kwargs):
+    optimizer_class, optimizer_kwargs = DeepSpeedEngine.get_optimizer_configuration(engine, parameters, adam_w_mode)
+
+    assert optimizer_class is expected_class
+    assert optimizer_kwargs == expected_kwargs
