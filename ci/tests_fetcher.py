@@ -90,7 +90,7 @@ WORKFLOWS: dict[str, WorkflowConfig] = {
     "modal-torch-latest":
     WorkflowConfig(
         name="modal-torch-latest",
-        test_scopes=("tests/unit/v1", ),
+        test_scopes=("tests/unit/v1", "tests/unit/model_parallelism"),
         extra_run_all_globs=(".github/workflows/modal*.yml", ),
     ),
 }

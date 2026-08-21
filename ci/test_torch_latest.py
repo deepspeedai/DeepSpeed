@@ -37,6 +37,9 @@ def _selection_file(content: str) -> tuple[Path, Path]:
     return root, path
 
 
+_ALL_MODE_SELECTION = "tests/unit/v1\ntests/unit/model_parallelism\n"
+
+
 def _valid_env(path: Path, **overrides: str) -> dict[str, str]:
     values = {
         "GITHUB_EVENT_NAME": "pull_request_target",
@@ -188,9 +191,11 @@ def test_transformers_ref_validation():
 
 def test_selection_modes_and_path_validation():
     cases = [
-        ("all", "tests/unit/v1\n", ("tests/unit/v1", )),
-        ("subset", "tests/unit/v1/test_one.py\ntests/unit/v1/sub/test_two.py\n", ("tests/unit/v1/test_one.py",
-                                                                                  "tests/unit/v1/sub/test_two.py")),
+        ("all", _ALL_MODE_SELECTION, ("tests/unit/v1", "tests/unit/model_parallelism")),
+        ("subset",
+         "tests/unit/v1/test_one.py\ntests/unit/v1/sub/test_two.py\ntests/unit/model_parallelism/test_autotp.py\n",
+         ("tests/unit/v1/test_one.py", "tests/unit/v1/sub/test_two.py",
+          "tests/unit/model_parallelism/test_autotp.py")),
         ("none", "", ()),
     ]
     for mode, content, expected in cases:
@@ -202,6 +207,7 @@ def test_selection_modes_and_path_validation():
 
     invalid = [
         ("all", ""),
+        ("all", "tests/unit/v1\n"),
         ("all", "tests/unit/v1/test_one.py\n"),
         ("subset", ""),
         ("subset", "tests/unit/v1/../test_bad.py\n"),
@@ -209,6 +215,7 @@ def test_selection_modes_and_path_validation():
         ("subset", "tests\\unit\\v1\\test_bad.py\n"),
         ("subset", "--collect-only\n"),
         ("subset", "tests/unit/v1/helper.py\n"),
+        ("subset", "tests/unit/other/test_bad.py\n"),
         ("none", "tests/unit/v1\n"),
         ("bogus", ""),
     ]
@@ -347,7 +354,7 @@ def test_git_environment_is_positive_allowlist():
 
 
 def test_controller_inputs_and_push_manual_fallback():
-    root, path = _selection_file("tests/unit/v1\n")
+    root, path = _selection_file(_ALL_MODE_SELECTION)
     try:
         explicit = torch_latest.resolve_controller_inputs(_valid_env(path))
         assert explicit.repository == "example/DeepSpeed"
@@ -420,7 +427,7 @@ def test_sandbox_kwargs_are_fixed_and_secret_free():
 
 
 def test_controller_creates_one_sandbox_without_forwarding_secrets_and_cleans_up():
-    root, path = _selection_file("tests/unit/v1\n")
+    root, path = _selection_file(_ALL_MODE_SELECTION)
     try:
         env = _valid_env(
             path,
@@ -445,7 +452,7 @@ def test_controller_creates_one_sandbox_without_forwarding_secrets_and_cleans_up
 
 
 def test_controller_propagates_command_and_cleanup_failures():
-    root, path = _selection_file("tests/unit/v1\n")
+    root, path = _selection_file(_ALL_MODE_SELECTION)
     try:
         env = _valid_env(path)
         fake, _, sandbox = _fake_modal("a" * 40, fail_label="pytest")
@@ -515,7 +522,7 @@ def test_remote_output_is_prefixed_escaped_capped_and_drained():
 
 
 def test_validate_selection_cli_needs_no_modal_install():
-    root, path = _selection_file("tests/unit/v1\n")
+    root, path = _selection_file(_ALL_MODE_SELECTION)
     try:
         script = Path(torch_latest.__file__).resolve()
         env = {
@@ -531,7 +538,7 @@ def test_validate_selection_cli_needs_no_modal_install():
             env=env,
         )
         assert result.returncode == 0, result.stderr
-        assert result.stdout.strip() == "Validated selection mode=all count=1"
+        assert result.stdout.strip() == f"Validated selection mode=all count={len(torch_latest._MODAL_TEST_SCOPES)}"
     finally:
         shutil.rmtree(root, ignore_errors=True)
 

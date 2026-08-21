@@ -26,6 +26,12 @@ from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 from typing import Any, Mapping, Sequence
 
+# The controller validates exactly what ci/tests_fetcher.py selects, so share its
+# scopes instead of re-declaring them here and letting the two drift apart.
+from tests_fetcher import WORKFLOWS
+
+_MODAL_TEST_SCOPES = WORKFLOWS["modal-torch-latest"].test_scopes
+
 DEFAULT_MODAL_TORCH_PRESET = "2.10.0-cuda12.8"
 DEFAULT_MODAL_TRANSFORMERS_SOURCE = "git"
 MODAL_TORCH_PRESETS = {
@@ -79,7 +85,8 @@ GDS_TEST_TARGET = "tests/unit/v1/nvme/test_gds.py"
 _REPOSITORY_COMPONENT = r"[A-Za-z0-9][A-Za-z0-9._-]{0,99}"
 _REPOSITORY_RE = re.compile(rf"{_REPOSITORY_COMPONENT}/{_REPOSITORY_COMPONENT}\Z")
 _SHA_RE = re.compile(r"[0-9a-fA-F]{40}\Z")
-_TEST_FILE_RE = re.compile(r"tests/unit/v1/(?:[^/\x00-\x1f\x7f]+/)*test_[^/\x00-\x1f\x7f]+\.py\Z")
+_TEST_FILE_RE = re.compile("(?:" + "|".join(rf"{re.escape(scope)}/(?:[^/\x00-\x1f\x7f]+/)*test_[^/\x00-\x1f\x7f]+\.py"
+                                            for scope in _MODAL_TEST_SCOPES) + r")\Z")
 
 
 def exclude_unsupported_gds_targets(targets: Sequence[str]) -> tuple[str, ...]:
@@ -153,7 +160,7 @@ def _validate_target(value: str) -> str:
     if path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
         raise ValueError(f"invalid pytest target: {value!r}")
     if not _TEST_FILE_RE.fullmatch(value):
-        raise ValueError(f"pytest target is outside tests/unit/v1 or is not a test file: {value!r}")
+        raise ValueError(f"pytest target is outside the workflow test scopes or is not a test file: {value!r}")
     return value
 
 
@@ -182,8 +189,8 @@ def load_test_selection(path: Path, mode: str) -> tuple[str, ...]:
     if len(lines) != len(set(lines)):
         raise ValueError("test selection contains duplicate targets")
     if mode == "all":
-        if lines != ["tests/unit/v1"]:
-            raise ValueError("all mode requires exactly tests/unit/v1")
+        if sorted(lines) != sorted(_MODAL_TEST_SCOPES):
+            raise ValueError(f"all mode requires exactly the workflow test scopes: {', '.join(_MODAL_TEST_SCOPES)}")
         return tuple(lines)
     if mode == "none":
         if lines:
