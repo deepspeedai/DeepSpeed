@@ -134,6 +134,12 @@ class DeepSpeedHybridEngine(DeepSpeedEngine):
                     self.inference_policies.update({orig_layer_class: (self.new_inference_container, plcy)})
             elif plcy._orig_layer_class is not None:
                 self.inference_policies.update({plcy._orig_layer_class: (self.new_inference_container, plcy)})
+
+        has_transformer_policy = any(module.__class__ in self.inference_policies for module in self.module.modules())
+        if not has_transformer_policy:
+            self.inference_policies = {}
+            return
+
         self.inference_policies.update({
             nn.Linear: (LinearLayer, ),
             nn.Embedding: (EmbeddingLayer, ),
