@@ -502,9 +502,9 @@ class SequenceChunk:
         self.chunk_dtype = chunk.dtype
         self.device = chunk.device if device is None else device
 
-        cpu_chunk = torch.empty(chunk.shape, dtype=chunk.dtype, device='cpu', pin_memory=True)
-
         if get_accelerator().on_accelerator(chunk):
+            cpu_chunk = get_accelerator().pin_memory(torch.empty(chunk.shape, dtype=chunk.dtype, device='cpu'),
+                                                     make_copy=False)
             cpu_chunk.copy_(chunk, non_blocking=True)
         else:
             cpu_chunk = chunk
@@ -831,8 +831,9 @@ class _FPDTGPUOffloadingAttentionImpl_(torch.autograd.Function):
             dq = [
                 SequenceChunk(torch.zeros(global_q[0].chunk_shape, dtype=torch.float, device=device), is_in_use=True)
             ] + [
-                SequenceChunk(torch.zeros(global_q[0].chunk_shape, dtype=torch.float, device='cpu', pin_memory=True),
-                              device) for _ in range(num_chunks - 1)
+                SequenceChunk(
+                    get_accelerator().pin_memory(torch.empty(global_q[0].chunk_shape, dtype=torch.float, device='cpu'),
+                                                 make_copy=False).zero_(), device) for _ in range(num_chunks - 1)
             ]
             dk_accum = torch.zeros(global_k[0].chunk_shape, dtype=torch.float, device=device)
             dv_accum = torch.zeros(global_v[0].chunk_shape, dtype=torch.float, device=device)

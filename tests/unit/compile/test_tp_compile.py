@@ -4,6 +4,7 @@
 # DeepSpeed Team
 
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 import torch
@@ -102,6 +103,22 @@ def build_engine(tp_size, use_compile_pass, gather_output_head=False):
     if use_compile_pass:
         engine.compile()
     return engine
+
+
+def test_gather_from_tp_region_supports_uneven_shards():
+    from deepspeed.compile.custom_ops import tp_collectives
+
+    local = torch.tensor([[1.0, 2.0, 3.0]])
+    with patch.object(tp_collectives, 'get_tp_group', return_value='group'), \
+         patch.object(dist, 'get_world_size', return_value=2), \
+         patch.object(dist, 'get_rank', return_value=1), \
+         patch.object(dist, 'all_gather_into_tensor',
+                      side_effect=lambda out, inp, group: out.copy_(torch.tensor([[[7.0, 8.0, 0.0]],
+                                                                                 [[1.0, 2.0, 3.0]]]).reshape(
+                                                                                     2 * inp.shape[0], *inp.shape[1:]))):
+        gathered = tp_collectives.gather_from_tp_region(local, [2, 3])
+
+    assert torch.equal(gathered, torch.tensor([[7.0, 8.0, 1.0, 2.0, 3.0]]))
 
 
 class TestAutoTPCompileEquivalence(DistributedTest):

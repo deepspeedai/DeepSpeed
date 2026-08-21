@@ -257,7 +257,7 @@ def _create_model_parallel(model_parallel_size_):
     Initialize model data parallel groups.
 
     Arguments:
-        model_parallel_size: number of GPUs used to parallelize model.
+        model_parallel_size_: number of GPUs used to parallelize model.
 
     Returns:
         Tuple of data parallel group and model parallel group

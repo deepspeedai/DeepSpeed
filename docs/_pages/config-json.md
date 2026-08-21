@@ -876,6 +876,36 @@ When a HuggingFace model provides a built-in `tp_plan` (via `model.config.base_m
 | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
 | Unused parameters in modules may be unexpected in static networks, but could be normal in dynamic networks. This controls whether or not training should terminate with an error message when unused parameters are detected. This is set to `True` by default, which means unused parameters are ignored and training continues. Now is just used in stage 2. | `True`  |
 
+### Hybrid Engine
+
+The Hybrid Engine (`DeepSpeedHybridEngine`) switches a model between training mode and DeepSpeed's inference kernels within a single training loop, which is what RLHF pipelines such as DeepSpeed-Chat use for the actor model.
+
+```json
+  "hybrid_engine": {
+    "enabled": true,
+    "max_out_tokens": 512,
+    "inference_tp_size": 1,
+    "release_inference_cache": false,
+    "pin_parameters": true,
+    "tp_gather_partition_size": 8,
+    "enable_cuda_graph": false
+  }
+```
+
+***enable_cuda_graph***: [boolean]
+
+| Description                                                                                                                                                                                                                                                                                                                                        | Default |
+| ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
+| Capture token generation into CUDA graphs. Generation issues on the order of a thousand kernel launches per token and is bound by CPU launch overhead rather than by the GPU, so replaying a captured graph removes most of the per-token cost. One graph is captured per decode position, and generated tokens are unchanged. | `false` |
+
+`enable_cuda_graph` requires a pinned generation length (`min_new_tokens` equal to `max_new_tokens`) and `max_out_tokens` large enough to cover the longest generation. It is ignored, with a warning, when any of the following apply, since captured graphs would not stay valid:
+
+* ZeRO stage 3, where parameters are gathered into fresh buffers for each generation
+* `release_inference_cache: true`, which frees the buffers the graphs write into
+* `inference_tp_size` greater than 1
+
+The first generation after enabling captures one graph per decode position and is therefore slower; subsequent generations replay them.
+
 ### Expert Parallel (AutoEP)
 Configure AutoEP expert parallelism for MoE models. AutoEP automatically detects MoE layers in HuggingFace models and replaces them with EP-enabled versions using TorchTitan's grouped GEMM kernels. Requires zero model code changes. Supports ZeRO stages 0, 1, 2, and constrained ZeRO Stage 3.
 ```json
