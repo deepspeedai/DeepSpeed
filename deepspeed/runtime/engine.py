@@ -150,7 +150,7 @@ from deepspeed.compile.util import (is_deepcompile_supported, get_deepcompile_ha
 from deepspeed.compile.backend import register_compile_pass, opt_passes
 from deepspeed.compile.passes.contract import validate_schedule
 from deepspeed.compile.passes import (zero_1_and_2_compile, zero3_compile, prefetch, selective_gather,
-                                      offload_parameters, offload_adam_states)
+                                      offload_parameters, offload_adam_states, offload_activation)
 from deepspeed.compile.init_z1_and_2 import init_z1_and_2
 from deepspeed.compile.init_z3 import init_z3
 from deepspeed.compile.z3_eager_fallback import deepcompile_z3_forward_context
