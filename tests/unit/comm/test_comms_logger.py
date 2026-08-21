@@ -3,6 +3,8 @@
 
 # DeepSpeed Team
 
+from types import SimpleNamespace
+
 from deepspeed.utils.comms_logging import CommsLogger
 
 
@@ -49,3 +51,26 @@ def test_trim_mean_does_not_mutate_its_argument():
     data = [3.0, 1.0, 2.0]
     assert trim_mean(data, 0.1) == 2.0
     assert data == [3.0, 1.0, 2.0]
+
+
+def test_timed_op_falls_back_to_the_op_name_when_log_name_is_missing(monkeypatch):
+    # timed_op looks up func_args['log_name'], so an op whose signature does not
+    # declare log_name used to raise KeyError as soon as profiling was turned on.
+    # Such an op must still be logged, under its own name.
+    from deepspeed.comm import comm
+
+    monkeypatch.setattr(comm, 'comms_logger', CommsLogger())
+    monkeypatch.setattr(
+        comm, 'cdb', SimpleNamespace(using_mpi=False, is_initialized=lambda: True,
+                                     get_world_size=lambda group=None: 1))
+    monkeypatch.setattr(comm, 'get_accelerator', lambda: SimpleNamespace(synchronize=lambda: None))
+
+    @comm.timed_op
+    def barrier():
+        return 'done'
+
+    comm.comms_logger.enabled = True
+    comm.comms_logger.start_profiling_comms()
+
+    assert barrier() == 'done'
+    assert 'barrier' in comm.comms_logger.comms_dict
