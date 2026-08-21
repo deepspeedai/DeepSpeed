@@ -365,6 +365,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
 
         self.round_robin_bit16_groups = []
         self.round_robin_bit16_indices = []
+        self.round_robin_bit16_meta = []
         self.round_robin_bit16_padding = []
         self.round_robin_bit16_offsets = []
 
@@ -427,6 +428,17 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
 
             self.round_robin_bit16_groups.append(round_robin_tensors)
             self.round_robin_bit16_indices.append(round_robin_indices)
+
+            # Keep shape/numel metadata independent of param.data. Dynamic state
+            # offload temporarily replaces model parameter storage with empty
+            # tensors, so reconstructing padded views cannot rely on p.numel().
+            meta_tensors = []
+            for param in round_robin_tensors:
+                if flatten_on_accelerator:
+                    meta_tensors.append(torch.zeros_like(param.data, device="meta"))
+                else:
+                    meta_tensors.append(torch.zeros_like(param.cpu_data, device="meta"))
+            self.round_robin_bit16_meta.append(meta_tensors)
 
             param_padding = []
             param_offsets = []
@@ -754,11 +766,13 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             partition_size = self.bit16_groups_flat[i].numel() // dist.get_world_size(
                 group=self.real_dp_process_group[i])
             flat_hp_partition = self.single_partition_of_fp32_groups[i]
-            offset_by_param = {
-                id(param): offset
-                for param, offset in zip(self.round_robin_bit16_groups[i], self.round_robin_bit16_offsets[i])
-            }
-            param_offsets = [offset_by_param[id(param)] for param in self.bit16_groups[i]]
+            param_offsets = None
+            if any(self.round_robin_bit16_padding[i]):
+                offset_by_param = {
+                    id(param): offset
+                    for param, offset in zip(self.round_robin_bit16_groups[i], self.round_robin_bit16_offsets[i])
+                }
+                param_offsets = [offset_by_param[id(param)] for param in self.bit16_groups[i]]
             link_hp_params(lp_param_list=self.bit16_groups[i],
                            flat_hp_partition=flat_hp_partition,
                            gradient_dict=self.averaged_gradients,
@@ -809,8 +823,10 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
 
     def _update_model_bit16_weights(self, group_index):
         flat_group = self.bit16_groups_flat[group_index]
-        for p, offset in zip(self.round_robin_bit16_groups[group_index], self.round_robin_bit16_offsets[group_index]):
-            p.data = flat_group.narrow(0, offset, p.numel()).view_as(p).data
+        for p, meta, offset in zip(self.round_robin_bit16_groups[group_index],
+                                   self.round_robin_bit16_meta[group_index],
+                                   self.round_robin_bit16_offsets[group_index]):
+            p.data = flat_group.narrow(0, offset, meta.numel()).view(meta.shape).data
 
         # set model fp16 weight to slices of reordered flattened buffer
         for param_index, param in enumerate(self.bit16_groups[group_index]):
@@ -1490,13 +1506,50 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
     ############################# CPU Offload Methods#############################
     ##############################################################################
     def get_grad_position(self, group_id, tensor_list, first_offset, partition_size):
+        if not any(self.round_robin_bit16_padding[group_id]):
+            current_offset = 0
+
+            for i, tensor in enumerate(tensor_list):
+                param_id = self.get_param_id(tensor)
+                param_start_offset = 0
+
+                num_elements = tensor.numel()
+
+                if i == 0 and first_offset > 0:
+                    tensor_offset = first_offset
+                    num_elements = num_elements - tensor_offset
+                    param_start_offset = first_offset
+
+                if num_elements > (partition_size - current_offset):
+                    num_elements = partition_size - current_offset
+
+                self.grad_position[param_id] = [
+                    int(group_id), int(param_start_offset),
+                    int(current_offset),
+                    int(num_elements)
+                ]
+                current_offset += num_elements
+            return
+
         partition_id = dist.get_rank(group=self.real_dp_process_group[group_id])
+        partition_start = partition_id * partition_size
+        partition_end = partition_start + partition_size
+        offset_by_param = {
+            id(param): offset
+            for param, offset in zip(self.round_robin_bit16_groups[group_id], self.round_robin_bit16_offsets[group_id])
+        }
 
         for tensor in tensor_list:
             param_id = self.get_param_id(tensor)
-            param_start_offset = self.grad_start_offset[group_id][partition_id][param_id]
-            dest_offset = self.grad_partition_insertion_offset[group_id][partition_id][param_id]
-            num_elements = min(tensor.numel() - param_start_offset, partition_size - dest_offset)
+            param_start = offset_by_param[id(tensor)]
+            param_end = param_start + tensor.numel()
+            overlap_start = max(param_start, partition_start)
+            overlap_end = min(param_end, partition_end)
+            assert overlap_start < overlap_end
+
+            param_start_offset = overlap_start - param_start
+            dest_offset = overlap_start - partition_start
+            num_elements = overlap_end - overlap_start
 
             self.grad_position[param_id] = [
                 int(group_id), int(param_start_offset),
@@ -2144,6 +2197,10 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                 return [zero_buffer]
             return zero_buffer
 
+        if not any(self.round_robin_bit16_padding[param_group_idx]):
+            return self._get_flat_partition_unpadded(tensor_list, first_offset, partition_size, dtype, device,
+                                                     param_group_idx, return_tensor_list)
+
         flat_tensor_list = []
         current_size = 0
         # find the flatten copy in the optimizer's state
@@ -2198,6 +2255,66 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             pad = torch.zeros(int(partition_size - current_size), dtype=dtype, device=device)
             pad._zero_padding = True
             flat_tensor_list.append(pad)
+
+        if return_tensor_list:
+            return flat_tensor_list
+
+        return self.flatten(flat_tensor_list)
+
+    def _get_flat_partition_unpadded(self,
+                                     tensor_list,
+                                     first_offset,
+                                     partition_size,
+                                     dtype,
+                                     device,
+                                     param_group_idx,
+                                     return_tensor_list=False):
+        flat_tensor_list = []
+        current_size = 0
+        flatten_copy = self.optimizer.param_groups[param_group_idx]['params'][0]
+        if (not self.optimizer.state[flatten_copy]) and getattr(
+                tensor_list[0], 'use_muon', False) and 'muon' in self.optimizer.__class__.__name__.lower():
+            self.optimizer.state[flatten_copy] = {}
+        if "momentum_buffer" not in self.optimizer.state[flatten_copy] and getattr(
+                tensor_list[0], 'use_muon', False) and 'muon' in self.optimizer.__class__.__name__.lower():
+            total_size = sum([t.numel() for t in tensor_list])
+            flatten_bf_list = [torch.zeros([total_size], dtype=dtype, device=device)]
+            self.optimizer.state[flatten_copy]["momentum_buffer"] = self.flatten(flatten_bf_list)
+
+        buffer_idx = 0
+        for i, tensor in enumerate(tensor_list):
+            grad_accum = self.all_grad_tensors[param_group_idx][i]
+            if getattr(tensor, 'use_muon', False) and 'muon' in self.optimizer.__class__.__name__.lower():
+                assert tensor.ndim > 1, f"if use muon, then tensor dim > 1, got {tensor.size()}"
+                buffer = torch.narrow(self.optimizer.state[flatten_copy]["momentum_buffer"], 0, buffer_idx,
+                                      tensor.numel()).view(tensor.size())
+                ns_method = self.optimizer.param_groups[param_group_idx].get('ns_method', 'gram')
+                grad_accum = muon_update(grad_accum,
+                                         buffer,
+                                         self.optimizer.param_groups[param_group_idx]['momentum'],
+                                         ns_method=ns_method,
+                                         is_expert_group=getattr(tensor, 'is_expert_group', False))
+            tensor = grad_accum
+            num_elements = tensor.numel()
+            buffer_idx += num_elements
+            tensor_offset = 0
+
+            if i == 0 and first_offset > 0:
+                tensor_offset = first_offset
+                num_elements = num_elements - tensor_offset
+
+            if num_elements > (partition_size - current_size):
+                num_elements = partition_size - current_size
+
+            if tensor_offset > 0 or num_elements < tensor.numel():
+                flat_tensor_list.append(tensor.contiguous().view(-1).narrow(0, int(tensor_offset), int(num_elements)))
+            else:
+                flat_tensor_list.append(tensor)
+
+            current_size = current_size + num_elements
+
+        if current_size < partition_size:
+            flat_tensor_list.append(torch.zeros(int(partition_size - current_size), dtype=dtype, device=device))
 
         if return_tensor_list:
             return flat_tensor_list
