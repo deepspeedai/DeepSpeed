@@ -9,6 +9,11 @@ import torch
 from torch.fx import Node, GraphModule
 from deepspeed.compile.util import get_last_uses
 from ..graph_param import DSGraphParamManager
+from .contract import CAP_Z3_GATHER_RELEASE, PassContract
+
+NAME = "offload_parameters"
+# Rewrites the all-gather nodes that zero3_compile emits, so it must run after that pass.
+CONTRACT = PassContract(requires=frozenset({CAP_Z3_GATHER_RELEASE}))
 
 
 def add_offload_parameter(graph_id: int, gm: GraphModule, node: Node, ds_id: int):
