@@ -29,6 +29,24 @@ class _MisalignedParamModel(torch.nn.Module):
         return (x @ self.weight).sum() + self.offset.sum()
 
 
+def _init_misaligned_engine(zero_stage):
+    config_dict = {
+        "train_micro_batch_size_per_gpu": 1,
+        "bf16": {
+            "enabled": True
+        },
+        "zero_optimization": {
+            "stage": zero_stage
+        },
+    }
+    model = _MisalignedParamModel()
+    optimizer = torch.optim.AdamW(model.parameters(), lr=0.1)
+    return deepspeed.initialize(config=config_dict,
+                                model=model,
+                                optimizer=optimizer,
+                                model_parameters=model.parameters())[0]
+
+
 def _apply_dtype_to_config(config_dict, dtype):
     """Set bf16/fp16 in config_dict based on dtype; skip if not supported."""
     if dtype == "bf16":
@@ -46,32 +64,23 @@ def _apply_dtype_to_config(config_dict, dtype):
 class TestStage12ParamAlignment(DistributedTest):
     world_size = 2
 
-    def test_model_params_remain_16_byte_aligned(self, zero_stage):
+    def test_model_params_remain_16_byte_aligned(self, tmpdir, zero_stage):
         if not get_accelerator().is_available():
             pytest.skip("Accelerator not available")
         if not get_accelerator().is_bf16_supported():
             pytest.skip("bf16 is not supported on this accelerator")
 
-        config_dict = {
-            "train_micro_batch_size_per_gpu": 1,
-            "bf16": {
-                "enabled": True
-            },
-            "zero_optimization": {
-                "stage": zero_stage
-            },
-        }
-        model = _MisalignedParamModel()
-        optimizer = torch.optim.AdamW(model.parameters(), lr=0.1)
-        engine, _, _, _ = deepspeed.initialize(config=config_dict,
-                                               model=model,
-                                               optimizer=optimizer,
-                                               model_parameters=model.parameters())
-
+        engine = _init_misaligned_engine(zero_stage)
         opt = engine.optimizer
-        flat_views = opt.unflatten(opt.bit16_groups_flat[0], opt.round_robin_bit16_meta[0])
-        assert flat_views[1].data_ptr() % 16 != 0
+        weight_idx = next(i for i, param in enumerate(opt.round_robin_bit16_groups[0])
+                          if param is engine.module.weight)
+        weight_offset = opt.round_robin_bit16_offsets[0][weight_idx]
+        flat_weight = opt.bit16_groups_flat[0].narrow(0, weight_offset,
+                                                      engine.module.weight.numel()).view_as(engine.module.weight)
+
+        assert weight_offset * engine.module.weight.element_size() % 16 == 0
         assert engine.module.weight.data_ptr() % 16 == 0
+        assert engine.module.weight.data_ptr() == flat_weight.data_ptr()
         weight_before_step = engine.module.weight.detach().clone()
 
         data = torch.ones(1, 8, device=engine.device, dtype=torch.bfloat16)
@@ -81,18 +90,35 @@ class TestStage12ParamAlignment(DistributedTest):
 
         assert engine.module.weight.data_ptr() % 16 == 0
         assert not torch.equal(engine.module.weight, weight_before_step)
-        flat_views = opt.unflatten(opt.bit16_groups_flat[0], opt.round_robin_bit16_meta[0])
-        assert torch.equal(engine.module.weight, flat_views[1])
+        assert engine.module.weight.data_ptr() == flat_weight.data_ptr()
 
-        # Universal checkpoint loading updates the fp32 partitions and then calls update_lp_params().
-        # Verify that path also keeps standalone aligned model parameters synchronized with the flat buffer.
-        for fp32_partition in opt.single_partition_of_fp32_groups:
-            fp32_partition.data.add_(1)
-        opt.update_lp_params()
+        expected_weight = engine.module.weight.detach().clone()
+        checkpoint_dir = str(tmpdir)
+        engine.save_checkpoint(checkpoint_dir, tag="alignment")
 
-        assert engine.module.weight.data_ptr() % 16 == 0
-        flat_views = opt.unflatten(opt.bit16_groups_flat[0], opt.round_robin_bit16_meta[0])
-        assert torch.equal(engine.module.weight, flat_views[1])
+        for load_kwargs in ({"load_module_only": True}, {"load_optimizer_states": False}):
+            loaded_engine = _init_misaligned_engine(zero_stage)
+            loaded_engine.load_checkpoint(checkpoint_dir, tag="alignment", **load_kwargs)
+            loaded_opt = loaded_engine.optimizer
+            loaded_weight_idx = next(i for i, param in enumerate(loaded_opt.round_robin_bit16_groups[0])
+                                     if param is loaded_engine.module.weight)
+            loaded_weight_offset = loaded_opt.round_robin_bit16_offsets[0][loaded_weight_idx]
+            loaded_flat_weight = loaded_opt.bit16_groups_flat[0].narrow(0, loaded_weight_offset,
+                                                                        loaded_engine.module.weight.numel()).view_as(
+                                                                            loaded_engine.module.weight)
+
+            assert loaded_engine.module.weight.data_ptr() % 16 == 0
+            assert loaded_engine.module.weight.data_ptr() == loaded_flat_weight.data_ptr()
+            assert torch.equal(loaded_engine.module.weight, expected_weight)
+
+            loaded_opt.optimizer.param_groups[0]["lr"] = 0.0
+            loaded_data = torch.ones(1, 8, device=loaded_engine.device, dtype=torch.bfloat16)
+            loaded_loss = loaded_engine(loaded_data)
+            loaded_engine.backward(loaded_loss)
+            loaded_engine.step()
+
+            assert loaded_engine.module.weight.data_ptr() == loaded_flat_weight.data_ptr()
+            assert torch.equal(loaded_engine.module.weight, expected_weight)
 
 
 @pytest.mark.parametrize("zero_stage", [1, 2])
