@@ -132,3 +132,95 @@ def test_fp_quant(dtype, q_bits):
         ds_error = (x_dequantized - ds_x).abs().sum() / x.numel()
 
         assert 0.0004 > abs(qtorch_error.item() - ds_error.item()), f"failed on iteration {i}"
+
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16], ids=["bf16"])
+def test_fp_quant_dequantize_rejects_zero_scale(dtype):
+    device_name = get_accelerator().device_name()
+    quant_config = QuantizationConfig()
+    quant_config.q_dtype = FPQuantizerBuilder.get_default_quant_dtype()
+    quant_config.group_size = 128
+    fpq = FP_Quantize(quantization_config=quant_config)
+
+    x = torch.rand(4, quant_config.group_size, dtype=dtype, device=device_name)
+    x_quantized = fpq.quantize(x, q_bits=8)
+
+    zero_scale = torch.zeros(fpq.num_groups, 1, dtype=torch.float32, device=device_name)
+    with pytest.raises(ValueError, match="finite non-zero"):
+        fpq.dequantize(x_quantized, q_bits=8, scale=zero_scale)
+
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16], ids=["bf16"])
+def test_fp_quant_dequantize_rejects_nonfinite_scale(dtype):
+    device_name = get_accelerator().device_name()
+    quant_config = QuantizationConfig()
+    quant_config.q_dtype = FPQuantizerBuilder.get_default_quant_dtype()
+    quant_config.group_size = 128
+    fpq = FP_Quantize(quantization_config=quant_config)
+
+    x = torch.rand(4, quant_config.group_size, dtype=dtype, device=device_name)
+    x_quantized = fpq.quantize(x, q_bits=8)
+
+    nan_scale = torch.full((fpq.num_groups, 1), float("nan"), dtype=torch.float32, device=device_name)
+    with pytest.raises(ValueError, match="finite non-zero"):
+        fpq.dequantize(x_quantized, q_bits=8, scale=nan_scale)
+
+
+def test_fp_quant_dequantize_rejects_zero_scalar_scale():
+    device_name = get_accelerator().device_name()
+    quant_config = QuantizationConfig()
+    quant_config.q_dtype = FPQuantizerBuilder.get_default_quant_dtype()
+    quant_config.group_size = 128
+    fpq = FP_Quantize(quantization_config=quant_config)
+
+    x = torch.rand(4, quant_config.group_size, dtype=torch.bfloat16, device=device_name)
+    x_quantized = fpq.quantize(x, q_bits=8)
+
+    with pytest.raises(ValueError, match="finite non-zero"):
+        fpq.dequantize(x_quantized, q_bits=8, scale=0.0)
+
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16], ids=["bf16"])
+def test_fp_quant_dequantize_rejects_zero_scale(dtype):
+    device_name = get_accelerator().device_name()
+    quant_config = QuantizationConfig()
+    quant_config.q_dtype = FPQuantizerBuilder.get_default_quant_dtype()
+    quant_config.group_size = 128
+    fpq = FP_Quantize(quantization_config=quant_config)
+
+    x = torch.rand(4, quant_config.group_size, dtype=dtype, device=device_name)
+    x_quantized = fpq.quantize(x, q_bits=8)
+
+    zero_scale = torch.zeros(fpq.num_groups, 1, dtype=torch.float32, device=device_name)
+    with pytest.raises(ValueError, match="finite non-zero"):
+        fpq.dequantize(x_quantized, q_bits=8, scale=zero_scale)
+
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16], ids=["bf16"])
+def test_fp_quant_dequantize_rejects_nonfinite_scale(dtype):
+    device_name = get_accelerator().device_name()
+    quant_config = QuantizationConfig()
+    quant_config.q_dtype = FPQuantizerBuilder.get_default_quant_dtype()
+    quant_config.group_size = 128
+    fpq = FP_Quantize(quantization_config=quant_config)
+
+    x = torch.rand(4, quant_config.group_size, dtype=dtype, device=device_name)
+    x_quantized = fpq.quantize(x, q_bits=8)
+
+    nan_scale = torch.full((fpq.num_groups, 1), float("nan"), dtype=torch.float32, device=device_name)
+    with pytest.raises(ValueError, match="finite non-zero"):
+        fpq.dequantize(x_quantized, q_bits=8, scale=nan_scale)
+
+
+def test_fp_quant_dequantize_rejects_zero_scalar_scale():
+    device_name = get_accelerator().device_name()
+    quant_config = QuantizationConfig()
+    quant_config.q_dtype = FPQuantizerBuilder.get_default_quant_dtype()
+    quant_config.group_size = 128
+    fpq = FP_Quantize(quantization_config=quant_config)
+
+    x = torch.rand(4, quant_config.group_size, dtype=torch.bfloat16, device=device_name)
+    x_quantized = fpq.quantize(x, q_bits=8)
+
+    with pytest.raises(ValueError, match="finite non-zero"):
+        fpq.dequantize(x_quantized, q_bits=8, scale=0.0)
