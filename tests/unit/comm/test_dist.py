@@ -3,6 +3,7 @@
 
 # DeepSpeed Team
 
+import importlib
 import os
 import torch
 import deepspeed.comm as dist
@@ -211,3 +212,133 @@ class TestDistInitWithModel(DistributedTest):
                                                   config=config_dict,
                                                   model_parameters=model.parameters(),
                                                   dist_init_required=dist_init_required)
+
+
+# `deepspeed.comm.torch` is shadowed by the real torch module in the `deepspeed.comm` namespace.
+ds_comm_torch = importlib.import_module("deepspeed.comm.torch")
+
+# Spelled out rather than imported, so the end-to-end checks also run against unpatched DeepSpeed.
+SET_DEVICE_ID_ENV = "DEEPSPEED_SET_DEVICE_ID"
+
+
+class FakeAccelerator:
+    """Stands in for a real accelerator so the device_id policy can be exercised on any host."""
+
+    def __init__(self, name='cuda', device_count=8):
+        self._name = name
+        self._device_count = device_count
+
+    def device_name(self, device_index=None):
+        if device_index is None:
+            return self._name
+        return f'{self._name}:{device_index}'
+
+    def device_count(self):
+        return self._device_count
+
+    def device(self, device_index=None):
+        return torch.device(self._name, device_index)
+
+
+def resolve_device_id(monkeypatch, world_size, local_rank=0, device_count=8, override=None, name='cuda'):
+    """Run the device_id policy against a pretend host, independent of the real accelerator."""
+    accelerator = FakeAccelerator(name=name, device_count=device_count)
+    monkeypatch.setattr(ds_comm_torch, 'get_accelerator', lambda: accelerator)
+    monkeypatch.setenv('LOCAL_RANK', str(local_rank))
+    monkeypatch.setenv('WORLD_SIZE', str(world_size))
+    monkeypatch.delenv(SET_DEVICE_ID_ENV, raising=False)
+    if override is not None:
+        monkeypatch.setenv(SET_DEVICE_ID_ENV, override)
+    return ds_comm_torch.get_init_process_group_device_id(world_size)
+
+
+def test_device_id_skipped_for_single_rank(monkeypatch):
+    # No peer to connect to, so eager init is pure failure surface. This is the case in #8248.
+    assert resolve_device_id(monkeypatch, world_size=1) is None
+
+
+def test_device_id_set_for_multi_rank(monkeypatch):
+    assert resolve_device_id(monkeypatch, world_size=2, local_rank=1) == torch.device('cuda', 1)
+
+
+@pytest.mark.parametrize("override", ["0", "false", "NO", "off", " 0 "])
+def test_device_id_disabled_by_env(monkeypatch, override):
+    assert resolve_device_id(monkeypatch, world_size=4, override=override) is None
+
+
+@pytest.mark.parametrize("override", ["1", "true", "YES", "on"])
+def test_device_id_forced_by_env_for_single_rank(monkeypatch, override):
+    assert resolve_device_id(monkeypatch, world_size=1, override=override) == torch.device('cuda', 0)
+
+
+@pytest.mark.parametrize("override", ["fasle", "banana", "2"])
+def test_unrecognized_env_value_falls_back_to_the_default(monkeypatch, override):
+    # A misspelt "false" must not silently mean "true"; the world_size default still decides.
+    assert resolve_device_id(monkeypatch, world_size=1, override=override) is None
+    assert resolve_device_id(monkeypatch, world_size=2, override=override) == torch.device('cuda', 0)
+
+
+def test_device_id_skipped_when_local_rank_is_not_visible(monkeypatch):
+    # CUDA_VISIBLE_DEVICES can be narrowed independently of the launcher's rank numbering.
+    assert resolve_device_id(monkeypatch, world_size=8, local_rank=3, device_count=1) is None
+
+
+def test_device_id_skipped_for_non_cuda_accelerator(monkeypatch):
+    assert resolve_device_id(monkeypatch, world_size=2, name='xpu') is None
+
+
+def test_env_var_name_matches_source():
+    assert ds_comm_torch.DS_SET_DEVICE_ID == SET_DEVICE_ID_ENV
+
+
+def test_world_size_read_from_env_when_not_supplied(monkeypatch):
+    monkeypatch.setenv('WORLD_SIZE', '4')
+    assert ds_comm_torch.resolve_world_size(-1) == 4
+
+
+def test_world_size_defaults_to_one_when_unknown(monkeypatch):
+    monkeypatch.delenv('WORLD_SIZE', raising=False)
+    assert ds_comm_torch.resolve_world_size(-1) == 1
+
+
+def assert_device_binding(override, expect_bound):
+    """Initialize the process group under an override and check what the binding does downstream."""
+    if get_accelerator().communication_backend_name() != 'nccl':
+        pytest.skip("device_id is only bound for the nccl backend")
+
+    if override is None:
+        os.environ.pop(SET_DEVICE_ID_ENV, None)
+    else:
+        os.environ[SET_DEVICE_ID_ENV] = override
+
+    deepspeed.init_distributed(dist_backend='nccl', auto_mpi_discovery=False)
+
+    default_pg = torch.distributed.distributed_c10d._get_default_group()
+    assert (default_pg.bound_device_id is not None) == expect_bound
+
+    # The eager split new_group() makes when a device is bound is the call that fails in #8248.
+    device = get_accelerator().device(int(os.environ["LOCAL_RANK"]))
+    default_backend = default_pg._get_backend(device)
+    if hasattr(default_backend, "comm_split_count"):
+        splits_before = default_backend.comm_split_count()
+        torch.distributed.new_group(ranks=list(range(dist.get_world_size())))
+        splits_after = default_backend.comm_split_count()
+        assert (splits_after > splits_before) == expect_bound
+
+
+@pytest.mark.parametrize("override,expect_bound", [(None, False), ("0", False), ("1", True)])
+class TestSingleRankDeviceId(DistributedTest):
+    world_size = 1
+    init_distributed = False
+
+    def test(self, override, expect_bound):
+        assert_device_binding(override, expect_bound)
+
+
+@pytest.mark.parametrize("override,expect_bound", [(None, True), ("0", False)])
+class TestMultiRankDeviceId(DistributedTest):
+    world_size = 2
+    init_distributed = False
+
+    def test(self, override, expect_bound):
+        assert_device_binding(override, expect_bound)
