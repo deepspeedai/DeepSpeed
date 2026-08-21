@@ -9,6 +9,9 @@ from typing import Dict, FrozenSet, List, Optional, Tuple
 # Capability tags produced and consumed by the built-in DeepCompile passes. Keeping the tags
 # in one place lets passes declare dependencies on each other without hard-coding pass names.
 CAP_Z3_GATHER_RELEASE = "z3_gather_release"
+# Optimizer state has been moved off the accelerator, so the profiling that follows measures memory
+# without it and a pass may plan its offloading against those numbers.
+CAP_OPT_STATES_EVICTED = "opt_states_evicted"
 
 
 @dataclass(frozen=True)
@@ -36,6 +39,9 @@ class PassContractError(ValueError):
 
 
 _pass_contracts: Dict[str, PassContract] = {}
+
+# Stands in for a pass with no registered contract: unconstrained, but still visible to conflicts.
+_UNCONSTRAINED = PassContract()
 
 
 def register_pass_contract(name: str, contract: Optional[PassContract]) -> None:
@@ -75,10 +81,10 @@ def validate_schedule(schedule: List[Tuple[int, List]], name_registry: Optional[
     it before names are converted to callables so the pass identity the user selected is preserved.
     Each entry in ``passes`` is normally a registered pass name; a raw callable is resolved back to
     its name through ``name_registry`` (the ``{name: fn}`` registry) by object identity, and a
-    callable registered under more than one name must instead be referenced by name. Passes with no
-    registered contract are treated as unconstrained and skipped, so mixed schedules of contracted
-    and ad-hoc passes remain valid. Raises :class:`PassContractError` on the first unmet requirement
-    or conflict.
+    callable registered under more than one name must instead be referenced by name. A pass with no
+    registered contract is unconstrained: it requires and provides nothing, so mixed schedules of
+    contracted and ad-hoc passes remain valid; it is still checked against conflicts that other
+    passes declare. Raises :class:`PassContractError` on the first unmet requirement or conflict.
 
     Each step is validated independently: DeepCompile resets Dynamo and recompiles from the
     original graph at every launched step (see ``launch_compile_passes``), so capabilities a pass
@@ -94,9 +100,7 @@ def validate_schedule(schedule: List[Tuple[int, List]], name_registry: Optional[
             if name is None:
                 continue
 
-            contract = _pass_contracts.get(name)
-            if contract is None:
-                continue
+            contract = _pass_contracts.get(name, _UNCONSTRAINED)
 
             missing = contract.requires - provided
             if missing:
@@ -106,8 +110,8 @@ def validate_schedule(schedule: List[Tuple[int, List]], name_registry: Optional[
             # Conflicts are treated symmetrically: either pass may declare the incompatibility.
             conflicts = set(contract.conflicts_with.intersection(applied))
             for prev_name in applied:
-                prev_contract = _pass_contracts.get(prev_name)
-                if prev_contract is not None and name in prev_contract.conflicts_with:
+                prev_contract = _pass_contracts.get(prev_name, _UNCONSTRAINED)
+                if name in prev_contract.conflicts_with:
                     conflicts.add(prev_name)
             if conflicts:
                 raise PassContractError(f"Pass '{name}' (step {step}) conflicts with already-scheduled pass(es) "
