@@ -113,3 +113,23 @@ def test_generate_calls_graph_capture_when_enabled():
 
     rollout.generate(req, sampling)
     rollout._generate_graph.assert_called_once()
+
+
+def test_generate_disables_eos_early_exit():
+    engine = _make_engine()
+    tok = _make_tokenizer()
+    rollout = HybridEngineRollout(engine, tok)
+    engine.module.generate.return_value = torch.tensor([[1, 2, 3, 4]])
+
+    req = MagicMock()
+    req.prompt_ids = torch.tensor([[1, 2]])
+    req.prompt_attention_mask = torch.ones(1, 2, dtype=torch.long)
+    sampling = MagicMock()
+    sampling.temperature = 0
+    sampling.n_samples_per_prompt = 1
+    sampling.max_new_tokens = 2
+    sampling.top_p = 1.0
+
+    rollout.generate(req, sampling)
+
+    assert engine.module.generate.call_args.kwargs['eos_token_id'] is None
