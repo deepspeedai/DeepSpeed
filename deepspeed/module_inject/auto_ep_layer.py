@@ -22,6 +22,8 @@ import deepspeed.comm as dist
 from deepspeed.module_inject.auto_ep_config import AutoEPConfig, MoELayerSpec, resolve_autoep_config_defaults
 from deepspeed.module_inject.auto_ep_folding import mark_autoep_folding_router_parameter
 from deepspeed.utils import logger
+from deepspeed.module_inject.auto_ep_comm import (DEEPEP_BACKEND, DeepEPExchange, assert_dtype_supported,
+                                                  deepep_combine, deepep_dispatch)
 from deepspeed.moe.ep_router import TokenChoiceTopKRouter
 from deepspeed.moe.ep_count import count_tokens_per_expert
 from deepspeed.moe.ep_experts import GroupedExperts
@@ -520,6 +522,15 @@ class AutoEPMoELayer(nn.Module):
 
         # Router-logit cache
         self._cached_router_logits = None
+        # Resolved once per layer: a DeepEP exchange sizes its buffer at
+        # construction, so it is built on first use and kept.
+        self.comm_backend = config.comm_backend
+        self.comm_num_sm = config.comm_num_sm
+        self.comm_qp_margin = config.comm_qp_margin
+        self._deepep_exchange = None
+        # The agreed capacity and the shape it was agreed for, so the
+        # agreement is not repeated on every layer of every step.
+        self.comm_max_tokens_per_rank = config.comm_max_tokens_per_rank
         self._register_logit_hook()
 
     def _register_logit_hook(self):
@@ -550,6 +561,13 @@ class AutoEPMoELayer(nn.Module):
 
         if folding_group_handles is not None:
             self.folding_group_handles = folding_group_handles
+            if self.comm_backend == DEEPEP_BACKEND and folding_group_handles.spec.tp_size > 1:
+                # DeepEP's combine returns token-major rows, which folded TP's
+                # assignment-metadata restore can't consume. Refuse rather than
+                # silently fall back to a backend the job didn't ask for.
+                raise ValueError(f'comm_backend="{DEEPEP_BACKEND}" does not support folded tensor parallelism '
+                                 f"(expert_tensor_parallel_size={folding_group_handles.spec.tp_size}). Set "
+                                 'expert_tensor_parallel_size to 1, or comm_backend to "comm".')
             self.ep_group_name = folding_group_handles.ep_group_name
             self.ep_group = folding_group_handles.ep_group
             self.tp_group = folding_group_handles.tp_group
@@ -571,6 +589,85 @@ class AutoEPMoELayer(nn.Module):
                 use_data_before_expert_parallel_=use_data_before_expert_parallel_,
             )
         self.ep_group = groups._get_expert_parallel_group(self.ep_group_name)
+
+    def _deepep_route(self, tokens: torch.Tensor, ro: "RouterOutput") -> torch.Tensor:
+        """Dispatch, run the experts, and combine through DeepEP.
+
+        ``tokens`` is [T, H] before top-k expansion. DeepEP replicates each
+        token to the ranks that need it rather than being handed one row per
+        selected expert, groups arrivals by expert for the grouped GEMM, and
+        sums them back. It therefore replaces the expansion and the reduction
+        around the collectives, not just the collectives, and returns [T, H]
+        ready for the shared tail of forward.
+        """
+        assert_dtype_supported(tokens.dtype)
+
+        # Sized once, on the first forward, then fixed. Construction is
+        # collective and needs the same num_max_tokens_per_rank everywhere, so
+        # capacity is agreed with one all-reduce here, where every rank arrives
+        # together. It's deliberately never re-agreed later: a resize decided
+        # from local token counts risks ranks disagreeing on whether to enter
+        # the collective at all, which hangs rather than fails. A batch that
+        # outgrows the buffer instead raises with a named remedy below.
+        if self._deepep_exchange is None:
+            capacity = torch.tensor([tokens.shape[0]], dtype=torch.int64, device=tokens.device)
+            dist.all_reduce(capacity, op=dist.ReduceOp.MAX, group=self.ep_group)
+            # Rounded up so a sequence length that varies a little still fits.
+            granularity = 512
+            sized_for = self.comm_max_tokens_per_rank or -(-int(capacity.item()) // granularity) * granularity
+            self._deepep_exchange = DeepEPExchange(
+                ep_group=self.ep_group,
+                num_experts=self.num_experts,
+                top_k=self.top_k,
+                hidden_size=self.hidden_size,
+                num_max_tokens_per_rank=sized_for,
+                num_sms=self.comm_num_sm,
+                qp_margin=self.comm_qp_margin,
+            )
+
+        if tokens.shape[0] > self._deepep_exchange.num_max_tokens_per_rank:
+            raise RuntimeError(
+                f"this rank routed {tokens.shape[0]} tokens, more than the "
+                f"{self._deepep_exchange.num_max_tokens_per_rank} the DeepEP buffer was built for. The buffer is "
+                "sized once, from the first batch, because resizing is collective and cannot be decided from one "
+                "rank's token count. Set comm_max_tokens_per_rank in the expert_parallel config to the largest "
+                "per-rank token count this job will produce, which is micro_batch_size * seq_len when sequences "
+                'are padded to a fixed length, or set comm_backend="comm".')
+
+        received, recv_weights, exchange = deepep_dispatch(self._deepep_exchange, tokens, ro.selected_experts,
+                                                           ro.top_scores)
+        handle = exchange.last_handle
+
+        # combine reads exactly the rows the handle says arrived, taken from
+        # the handle as a Python int rather than off the device prefix sum to
+        # avoid a device-to-host sync in front of every layer's expert GEMM.
+        arrived = handle.num_expanded_tokens
+        received = received[:arrived]
+
+        # Applied here, not handed to combine: DeepEP's combine transports and
+        # reduces topk_weights but doesn't multiply rows by them. Which side of
+        # the experts it lands on must match the collective path, since SwiGLU
+        # doesn't commute with the weight.
+        weights = None if recv_weights is None else recv_weights[:arrived].reshape(-1, 1)
+        if weights is not None and self.score_apply == "pre":
+            received = (received.float() * weights).to(received.dtype)
+            weights = None
+
+        # The grouped GEMM needs per-expert row counts, which arrive as a
+        # prefix sum over the experts this rank owns. Differencing it recovers
+        # the counts.
+        prefix = handle.psum_num_recv_tokens_per_expert
+        counts = torch.diff(prefix, prepend=prefix.new_zeros(1)).to(torch.int32)
+        if counts.numel() != self.num_local_experts:
+            raise RuntimeError(f"DeepEP returned {counts.numel()} expert counts, but this rank owns "
+                               f"{self.num_local_experts} experts")
+
+        expert_output = self.experts(received, counts)
+
+        if weights is not None:
+            expert_output = (expert_output.float() * weights).to(expert_output.dtype)
+
+        return deepep_combine(exchange, expert_output, handle)
 
     def forward(
         self,
@@ -601,6 +698,9 @@ class AutoEPMoELayer(nn.Module):
         expert_indices_sorted = ro.selected_experts.reshape(-1).index_select(0, token_indices_sorted)
 
         folded_tp = self.folding_group_handles is not None and self.folding_group_handles.spec.tp_size > 1
+        # Set only where DeepEP's combine actually produced the output, since
+        # that decides whether the reduction below has already happened.
+        deepep_combined = False
         restore_ctx = None
         if folded_tp:
             from deepspeed.moe.ep_tp_dispatch import (
@@ -678,14 +778,18 @@ class AutoEPMoELayer(nn.Module):
                     num_tokens_per_expert=ro.num_tokens_per_expert,
                 )
 
-            routed_input = _AllToAllV.apply(self.ep_group, routed_input, plan.input_splits, plan.output_splits)
+            if self.comm_backend == DEEPEP_BACKEND:
+                expert_output = self._deepep_route(x, ro)
+                deepep_combined = True
+            else:
+                routed_input = _AllToAllV.apply(self.ep_group, routed_input, plan.input_splits, plan.output_splits)
 
-            routed_input, perm_indices, aligned_counts, n_tokens = permute_by_local_expert(
-                routed_input, plan.local_counts_by_source)
-            expert_output = self.experts(routed_input, aligned_counts)
-            expert_output = unpermute_by_local_expert(expert_output, perm_indices, n_tokens)
+                routed_input, perm_indices, aligned_counts, n_tokens = permute_by_local_expert(
+                    routed_input, plan.local_counts_by_source)
+                expert_output = self.experts(routed_input, aligned_counts)
+                expert_output = unpermute_by_local_expert(expert_output, perm_indices, n_tokens)
 
-            expert_output = _AllToAllV.apply(self.ep_group, expert_output, plan.output_splits, plan.input_splits)
+                expert_output = _AllToAllV.apply(self.ep_group, expert_output, plan.output_splits, plan.input_splits)
 
         if folded_tp:
             output = restore_combined(expert_output,
@@ -693,6 +797,12 @@ class AutoEPMoELayer(nn.Module):
                                       tp_group=self.tp_group,
                                       validate_coverage=self.validate_folding_routing).reshape(bsz, seqlen, hdim)
             self._last_folding_dispatch_counters = dispatch_counters(restore_ctx)
+        elif deepep_combined:
+            # DeepEP's combine already reduced over top-k and restored token
+            # order. This is keyed on the route having run rather than on the
+            # backend being selected: with ep_size == 1 the local path runs
+            # instead and still has one row per assignment to reduce.
+            output = expert_output.reshape(bsz, seqlen, hdim)
         else:
             output = combine_from_routed(
                 expert_output,
