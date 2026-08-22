@@ -18,9 +18,15 @@ class MPSFusedAdam:
     """
 
     @staticmethod
-    @torch.no_grad()
     def multi_tensor_adam(chunk_size, noop_flag_buffer, tensor_lists, lr, beta1, beta2, epsilon, step, adam_w_mode,
                           bias_correction, weight_decay, *args):
+        # The caller passes bf16 params as leaf tensors (not .data), so the in-place update must bypass autograd.
+        with torch.no_grad():
+            MPSFusedAdam._adam_step(tensor_lists, lr, beta1, beta2, epsilon, step, adam_w_mode, bias_correction,
+                                    weight_decay)
+
+    @staticmethod
+    def _adam_step(tensor_lists, lr, beta1, beta2, epsilon, step, adam_w_mode, bias_correction, weight_decay):
         grads, params, exp_avgs, exp_avg_sqs = tensor_lists
 
         bias_correction1 = 1.0
