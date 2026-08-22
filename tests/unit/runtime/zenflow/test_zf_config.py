@@ -65,6 +65,12 @@ def test_topk_ratio_excludes_endpoints(topk_ratio):
         ZenFlowConfig(topk_ratio=topk_ratio)
 
 
+@pytest.mark.parametrize("update_interval", [0, -5])
+def test_update_interval_rejects_non_positive_values(update_interval):
+    with pytest.raises(ValidationError):
+        ZenFlowConfig(update_interval=update_interval)
+
+
 def test_offload_and_zenflow_combined():
     """
     offload_optimizer and zenflow can be used together under stage 2

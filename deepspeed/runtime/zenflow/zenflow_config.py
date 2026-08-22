@@ -60,6 +60,9 @@ class ZenFlowConfig(DeepSpeedConfigModel):
         if isinstance(self.update_interval, str) and self.update_interval != "auto":
             raise ValueError('If update_interval is a string, it must be "auto"')
 
+        if isinstance(self.update_interval, int) and self.update_interval < 1:
+            raise ValueError("If update_interval is a number, it must be at least 1")
+
         if not isinstance(self.full_warm_up_rounds, int):
             raise ValueError('full_warm_up_rounds must be an integer')
 
