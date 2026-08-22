@@ -17,7 +17,6 @@ from deepspeed.utils import groups
 from contextlib import contextmanager
 from torch import nn
 from deepspeed.module_inject.layers import LinearAllreduce, LinearLayer, set_autotp_mode, is_autotp_training_mode
-from deepspeed.module_inject.tp_shard import get_shard_size_list
 from unit.checkpoint.common import compare_lr_scheduler_states, compare_optimizer_states
 import os
 from deepspeed.runtime.utils import is_model_parallel_parameter
@@ -502,7 +501,7 @@ def run_tp_layer_fwd_bwd(tp_size,
         loss.backward()
 
         expected_out = torch_out
-        output_partition_sizes = get_shard_size_list(torch_out.shape[-1], tp_size, linear.name)
+        output_partition_sizes = list(linear._partition_sizes)
         tp_rank = groups.get_tensor_model_parallel_rank()
         if not gather_output:
             shard_offset = sum(output_partition_sizes[:tp_rank])
@@ -689,7 +688,7 @@ class TestParamsGather(DistributedTest):
         total_params = sum(p.numel() for p in torch_linear.parameters())
         tp_layer = LinearLayer(deepcopy(torch_linear), groups.get_tensor_model_parallel_group())
         tp_rank = groups.get_tensor_model_parallel_rank()
-        output_partition_sizes = get_shard_size_list(output_dim, tp_size, tp_layer.name)
+        output_partition_sizes = list(tp_layer._partition_sizes)
         expected_tp_params = output_partition_sizes[tp_rank] * (hidden_dim + 1)
 
         assert expected_tp_params == sum(p.numel() for p in tp_layer.parameters())
@@ -778,7 +777,7 @@ class TestUnevenVocabLmHeadCheckpoint(DistributedTest):
         engine, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config_dict)
 
         tp_rank = groups.get_tensor_model_parallel_rank()
-        output_partition_sizes = get_shard_size_list(vocab_size, self.world_size, "lm_head")
+        output_partition_sizes = list(engine.module.lm_head._partition_sizes)
         assert isinstance(engine.module.lm_head, LinearLayer)
         assert engine.module.lm_head.gather_output
         assert engine.module.lm_head.weight.shape == (output_partition_sizes[tp_rank], hidden_dim)

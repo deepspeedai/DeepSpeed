@@ -85,6 +85,7 @@ def _capture_matched_names(model, config):
             linear_layer_setting=None,
             orig_layer_impl=None,
             partition_config=config,
+            model_config=getattr(model, "config", None),
         )
         autotp._replace_module(model)
     finally:
@@ -151,6 +152,7 @@ def _build_gathered_lm_head_autotp(model, mp_size=1):
         linear_layer_setting=None,
         orig_layer_impl=None,
         partition_config=config,
+        model_config=getattr(model, "config", None),
     )
     autotp.set_tensor_parallel_config(mp_size, None)
     autotp.update_linear_policies()

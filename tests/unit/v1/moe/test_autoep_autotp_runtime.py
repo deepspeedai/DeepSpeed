@@ -112,6 +112,7 @@ def test_autotp_reaches_autoep_shared_experts(monkeypatch):
         linear_layer_setting=None,
         orig_layer_impl=None,
         partition_config=None,
+        model_config=getattr(model, "config", None),
     )
 
     calls = []
