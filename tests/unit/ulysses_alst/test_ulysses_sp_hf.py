@@ -6,6 +6,7 @@
 UlyssesPlus: UlyssesSPHF tests
 """
 
+import deepspeed.runtime.sequence_parallel.ulysses_sp as ulysses_sp
 from deepspeed.runtime.sequence_parallel.ulysses_sp import UlyssesSPAttentionHF, UlyssesSPDataLoaderAdapter
 from deepspeed.runtime.utils import move_to_device
 from deepspeed.utils import groups
@@ -17,7 +18,9 @@ from unit.util import torch_assert_equal, torch_assert_close, torch_assert_dicts
 import deepspeed
 import deepspeed.comm as dist
 import pytest
+import sys
 import torch
+import types
 
 
 def get_grad(param, zero_stage):
@@ -27,6 +30,177 @@ def get_grad(param, zero_stage):
     #     return param.grad
     # else:
     #     return safe_get_full_grad(param)
+
+
+class TestLinearAttentionCPHelpers:
+
+    def test_position_ids_to_packed_cu_seqlens_single_sequence(self):
+        position_ids = torch.tensor([[0, 1, 2, 3]])
+
+        cu_seqlens = ulysses_sp._position_ids_to_packed_cu_seqlens(position_ids)
+
+        torch_assert_equal(cu_seqlens, torch.tensor([0, 4], dtype=torch.long))
+
+    def test_position_ids_to_packed_cu_seqlens_packed_sequence(self):
+        position_ids = torch.tensor([[0, 1, 2, 0, 1, 0, 1, 2]])
+
+        cu_seqlens = ulysses_sp._position_ids_to_packed_cu_seqlens(position_ids)
+
+        torch_assert_equal(cu_seqlens, torch.tensor([0, 3, 5, 8], dtype=torch.long))
+
+    def test_modeling_module_candidates_strip_text_suffix(self):
+        cfg = types.SimpleNamespace(model_type="qwen3_5_text")
+
+        candidates = list(ulysses_sp._modeling_module_candidates(cfg, cfg))
+
+        assert "transformers.models.qwen3_5_text.modeling_qwen3_5_text" in candidates
+        assert "transformers.models.qwen3_5.modeling_qwen3_5" in candidates
+
+    def test_linear_attention_cp_noops_for_non_linear_config(self, monkeypatch):
+
+        def fail_if_called(_name):
+            raise AssertionError("FLA package version should not be probed for non-linear configs")
+
+        monkeypatch.setattr(ulysses_sp.importlib_metadata, "version", fail_if_called)
+        cfg = types.SimpleNamespace(model_type="llama", layer_types=["full_attention"])
+
+        assert ulysses_sp._register_linear_attention_cp(cfg, cfg) == 0
+
+    def test_linear_attention_cp_version_gate(self, monkeypatch):
+
+        def fake_version(_name):
+            return "0.4.1"
+
+        monkeypatch.setattr(ulysses_sp.importlib_metadata, "version", fake_version)
+
+        with pytest.raises(ImportError, match=">= 0.4.2"):
+            ulysses_sp._load_linear_attention_cp_ops()
+
+    def test_gated_delta_state_layout_kwargs_match_fla_version_signatures(self):
+
+        def old_chunk_gated_delta_rule(transpose_state_layout=False, **kwargs):
+            return transpose_state_layout, kwargs
+
+        def new_chunk_gated_delta_rule(state_v_first=False, **kwargs):
+            return state_v_first, kwargs
+
+        assert ulysses_sp._gated_delta_state_layout_kwargs(old_chunk_gated_delta_rule) == {
+            "transpose_state_layout": True
+        }
+        assert ulysses_sp._gated_delta_state_layout_kwargs(new_chunk_gated_delta_rule) == {"state_v_first": True}
+
+    def test_linear_attention_cp_ignores_transformers_forward_flags(self, monkeypatch):
+
+        class FakeNorm(torch.nn.Module):
+
+            def forward(self, hidden_states, gate):
+                return hidden_states
+
+        class FakeGatedDeltaNet(torch.nn.Module):
+
+            def __init__(self):
+                super().__init__()
+                self.in_proj_qkv = torch.nn.Linear(4, 12, bias=False)
+                self.in_proj_z = torch.nn.Linear(4, 4, bias=False)
+                self.in_proj_b = torch.nn.Linear(4, 1, bias=False)
+                self.in_proj_a = torch.nn.Linear(4, 1, bias=False)
+                self.conv1d = torch.nn.Conv1d(12, 12, kernel_size=1, groups=12)
+                self.activation = "silu"
+                self.num_v_heads = 1
+                self.num_k_heads = 1
+                self.head_k_dim = 4
+                self.head_v_dim = 4
+                self.conv_kernel_size = 1
+                self.A_log = torch.nn.Parameter(torch.zeros(1))
+                self.dt_bias = torch.nn.Parameter(torch.zeros(1))
+                self.norm = FakeNorm()
+                self.out_proj = torch.nn.Linear(4, 4, bias=False)
+
+            def chunk_gated_delta_rule(self, query, key, value, g=None, beta=None, cp_context=None, **kwargs):
+                return value, None
+
+        def fake_causal_conv1d(x, weight=None, bias=None, activation=None, cp_context=None):
+            return x
+
+        monkeypatch.setattr(ulysses_sp, "_get_sequence_parallel_info", lambda: (None, 2, 0))
+        monkeypatch.setattr(ulysses_sp, "_load_linear_attention_cp_ops", lambda: (None, fake_causal_conv1d))
+        monkeypatch.setattr(ulysses_sp, "_build_linear_attention_cp_context", lambda **kwargs: object())
+
+        layer = FakeGatedDeltaNet()
+        hidden_states = torch.randn(1, 2, 4)
+
+        output = ulysses_sp._gated_delta_cp_forward(
+            layer,
+            hidden_states,
+            use_cache=False,
+            output_hidden_states=True,
+            output_attentions=False,
+            return_dict=True,
+        )
+
+        assert output.shape == hidden_states.shape
+
+    def test_linear_attention_cp_patches_gdn_like_class(self, monkeypatch):
+        modeling_module_name = "transformers.models.fake_linear.modeling_fake_linear"
+        modeling_module = types.ModuleType(modeling_module_name)
+
+        class FakeGatedDeltaNet(torch.nn.Module):
+
+            def forward(self, hidden_states, cache_params=None, attention_mask=None, position_ids=None):
+                return hidden_states
+
+        modeling_module.FakeGatedDeltaNet = FakeGatedDeltaNet
+
+        fla_module = types.ModuleType("fla")
+        fla_ops_module = types.ModuleType("fla.ops")
+        fla_cp_module = types.ModuleType("fla.ops.cp")
+        fla_modules_module = types.ModuleType("fla.modules")
+        fla_conv_module = types.ModuleType("fla.modules.conv")
+
+        class FakeFLACPContext:
+            pass
+
+        def fake_build_cp_context(*args, **kwargs):
+            return FakeFLACPContext()
+
+        def fake_causal_conv1d(x, weight=None, bias=None, activation=None, cp_context=None):
+            return x, None
+
+        fla_cp_module.FLACPContext = FakeFLACPContext
+        fla_cp_module.build_cp_context = fake_build_cp_context
+        fla_conv_module.causal_conv1d = fake_causal_conv1d
+
+        fla_module.ops = fla_ops_module
+        fla_ops_module.cp = fla_cp_module
+        fla_module.modules = fla_modules_module
+        fla_modules_module.conv = fla_conv_module
+
+        for name, module in (
+            ("fla", fla_module),
+            ("fla.ops", fla_ops_module),
+            ("fla.ops.cp", fla_cp_module),
+            ("fla.modules", fla_modules_module),
+            ("fla.modules.conv", fla_conv_module),
+            (modeling_module_name, modeling_module),
+        ):
+            monkeypatch.setitem(sys.modules, name, module)
+
+        monkeypatch.setattr(ulysses_sp.importlib_metadata, "version", lambda _name: "0.5.0")
+
+        cfg = types.SimpleNamespace(model_type="fake_linear", layer_types=["linear_attention"])
+        original_forward = FakeGatedDeltaNet.forward
+
+        try:
+            installed = ulysses_sp._register_linear_attention_cp(cfg, cfg)
+            installed_again = ulysses_sp._register_linear_attention_cp(cfg, cfg)
+
+            assert installed == 1
+            assert installed_again == 0
+            assert FakeGatedDeltaNet.forward is ulysses_sp._gated_delta_cp_forward
+            assert ulysses_sp._LINEAR_ATTENTION_CP_ORIGINAL_FORWARDS[FakeGatedDeltaNet] is original_forward
+        finally:
+            FakeGatedDeltaNet.forward = original_forward
+            ulysses_sp._LINEAR_ATTENTION_CP_ORIGINAL_FORWARDS.pop(FakeGatedDeltaNet, None)
 
 
 @pytest.mark.parametrize("zero_stage", [2, 3])
