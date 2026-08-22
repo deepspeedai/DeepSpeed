@@ -3,14 +3,18 @@
 
 # DeepSpeed Team
 
+import sys
+
 from deepspeed.monitor.tensorboard import TensorBoardMonitor
 from deepspeed.monitor.wandb import WandbMonitor
 from deepspeed.monitor.csv_monitor import csvMonitor
 from deepspeed.monitor.config import DeepSpeedMonitorConfig
 from deepspeed.monitor.comet import CometMonitor
+from deepspeed.monitor.trackio import TrackioMonitor
+from deepspeed.monitor.monitor import MonitorMaster
 
 from unit.common import DistributedTest
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, MagicMock, patch
 from deepspeed.runtime.config import DeepSpeedConfig
 
 import deepspeed.comm as dist
@@ -164,3 +168,83 @@ class TestCometMonitor(DistributedTest):
         assert comet_monitor.enabled == defaults.enabled
         assert comet_monitor.samples_log_interval == defaults.samples_log_interval
         mock_start.assert_not_called()
+
+
+class TestTrackio(DistributedTest):
+    world_size = 2
+
+    def test_trackio(self):
+        # trackio is an optional dependency, so we stub the module rather
+        # than requiring it to be installed for CI.
+        mock_trackio = MagicMock()
+
+        config_dict = {"train_batch_size": 2, "trackio": {"enabled": True, "project": "my_project"}}
+        ds_config = DeepSpeedConfig(config_dict)
+
+        with patch.dict(sys.modules, {"trackio": mock_trackio}):
+            trackio_monitor = TrackioMonitor(ds_config.monitor_config.trackio)
+
+        assert trackio_monitor.enabled == True
+        assert trackio_monitor.project == "my_project"
+
+        # trackio.init should only be called on rank 0
+        if dist.get_rank() == 0:
+            mock_trackio.init.assert_called_once_with(project="my_project")
+        else:
+            mock_trackio.init.assert_not_called()
+
+    def test_empty_trackio(self):
+        mock_trackio = MagicMock()
+
+        config_dict = {"train_batch_size": 2, "trackio": {}}
+        ds_config = DeepSpeedConfig(config_dict)
+
+        with patch.dict(sys.modules, {"trackio": mock_trackio}):
+            trackio_monitor = TrackioMonitor(ds_config.monitor_config.trackio)
+
+        defaults = DeepSpeedMonitorConfig().trackio
+        assert trackio_monitor.enabled == defaults.enabled
+        assert trackio_monitor.project == defaults.project
+
+    def test_trackio_write_events(self):
+        # Verifies write_events() correctly converts 3-tuples into
+        # trackio.log() calls with the right step value.
+        mock_trackio = MagicMock()
+
+        config_dict = {"train_batch_size": 2, "trackio": {"enabled": True, "project": "my_project"}}
+        ds_config = DeepSpeedConfig(config_dict)
+
+        with patch.dict(sys.modules, {"trackio": mock_trackio}):
+            trackio_monitor = TrackioMonitor(ds_config.monitor_config.trackio)
+            events = [("Train/Loss", 0.5, 100)]
+            trackio_monitor.write_events(events)
+
+        if dist.get_rank() == 0:
+            mock_trackio.log.assert_called_once_with({"Train/Loss": 0.5}, step=100)
+        else:
+            mock_trackio.log.assert_not_called()
+
+
+class TestMonitorMasterTrackioWiring(DistributedTest):
+    world_size = 2
+
+    def test_trackio_enabled_creates_monitor(self):
+        mock_trackio = MagicMock()
+
+        config_dict = {"train_batch_size": 2, "trackio": {"enabled": True, "project": "my_project"}}
+        ds_config = DeepSpeedConfig(config_dict)
+
+        with patch.dict(sys.modules, {"trackio": mock_trackio}):
+            monitor_master = MonitorMaster(ds_config.monitor_config)
+
+        if dist.get_rank() == 0:
+            assert monitor_master.trackio_monitor is not None
+            assert isinstance(monitor_master.trackio_monitor, TrackioMonitor)
+        else:
+            assert monitor_master.trackio_monitor is None
+
+    def test_trackio_disabled_skips_monitor(self):
+        config_dict = {"train_batch_size": 2, "trackio": {"enabled": False}}
+        ds_config = DeepSpeedConfig(config_dict)
+        monitor_master = MonitorMaster(ds_config.monitor_config)
+        assert monitor_master.trackio_monitor is None
