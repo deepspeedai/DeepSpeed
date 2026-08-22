@@ -2943,7 +2943,8 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             if pin_memory:
                 if not hasattr(self, "hp_params_pin_buffers"):
                     self.hp_params_pin_buffers = [
-                        torch.empty_like(t, device=device).pin_memory() for t in self.single_partition_of_fp32_groups
+                        get_accelerator().pin_memory(torch.empty_like(t, device=device), make_copy=False)
+                        for t in self.single_partition_of_fp32_groups
                     ]
                 for src_tensor, dest_buf in zip(self.single_partition_of_fp32_groups, self.hp_params_pin_buffers):
                     dest_buf.copy_(src_tensor, non_blocking=non_blocking)
@@ -2966,7 +2967,8 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             if pin_memory:
                 if not hasattr(self, "lp_params_pin_buffers"):
                     self.lp_params_pin_buffers = [
-                        torch.empty_like(t, device=device).pin_memory() for t in self.bit16_groups_flat
+                        get_accelerator().pin_memory(torch.empty_like(t, device=device), make_copy=False)
+                        for t in self.bit16_groups_flat
                     ]
                 for src_tensor, dest_buf in zip(self.bit16_groups_flat, self.lp_params_pin_buffers):
                     dest_buf.copy_(src_tensor, non_blocking=non_blocking)
@@ -3015,12 +3017,18 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                 If True, attempts to perform reload operations asynchronously. Defaults to False.
         """
         device = get_accelerator().current_device_name()
+        # Host sources of the copies queued below. The native (mlock) backend has
+        # no CUDA stream tracking and frees as soon as the last reference drops,
+        # unlike the torch pinned allocator, so hold them until after the
+        # synchronize at the end of this method.
+        pending_host_buffers = []
 
         # Reload FP32 Master Parameters (HP Params)
         if OffloadStateTypeEnum.hp_params in self.offloaded_states:
             for buf in self.single_partition_of_fp32_groups:
                 buf.data = buf.data.to(device, non_blocking=non_blocking)
             if hasattr(self, "hp_params_pin_buffers"):
+                pending_host_buffers.append(self.hp_params_pin_buffers)
                 del self.hp_params_pin_buffers
             self._link_all_hp_params()
             self.offloaded_states.remove(OffloadStateTypeEnum.hp_params)
@@ -3040,6 +3048,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                 self._update_model_bit16_weights(i)
 
             if hasattr(self, "lp_params_pin_buffers"):
+                pending_host_buffers.append(self.lp_params_pin_buffers)
                 del self.lp_params_pin_buffers
             self._link_all_hp_params()
             self.offloaded_states.remove(OffloadStateTypeEnum.lp_params)
@@ -3059,11 +3068,13 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
 
         # Reload Optimizer States
         if OffloadStateTypeEnum.optim_states in self.offloaded_states:
-            reload_optimizer_states(self.optimizer, device, non_blocking=non_blocking)
+            pending_host_buffers.append(reload_optimizer_states(self.optimizer, device, non_blocking=non_blocking))
             self.offloaded_states.remove(OffloadStateTypeEnum.optim_states)
 
         if non_blocking:
             get_accelerator().synchronize()
+        # The copies have completed, so the host sources can be released.
+        del pending_host_buffers
 
 
 def _handle_overflow(cpu_sum, x, i):

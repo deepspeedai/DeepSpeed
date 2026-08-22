@@ -13,6 +13,7 @@ import torch.multiprocessing as mp
 import psutil
 
 from deepspeed.ops.adam import DeepSpeedCPUAdam
+from deepspeed.accelerator import get_accelerator
 from deepspeed.utils import logger
 
 
@@ -82,7 +83,8 @@ def superoffload_optimizer_worker(param_queue: mp.SimpleQueue, result_queue: mp.
         return
 
     # Pre-allocate reusable pinned memory buffer for gradients
-    pinned_grad_buffer = torch.empty(max_grad_numel, dtype=torch.float32, device='cpu', pin_memory=True)
+    pinned_grad_buffer = get_accelerator().pin_memory(torch.empty(max_grad_numel, dtype=torch.float32, device='cpu'),
+                                                      make_copy=False)
 
     while True:
         try:

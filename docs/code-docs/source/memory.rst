@@ -337,8 +337,14 @@ Whether to pin and how to pin are orthogonal:
 Backend Selection
 =================
 
-The pinning implementation is selected with the ``DS_PIN_MEMORY_BACKEND``
-environment variable (default ``torch``).
+Whether to pin ZeRO CPU/NVMe offload buffers is controlled by
+``zero_optimization.offload_param.pin_memory`` /
+``zero_optimization.offload_optimizer.pin_memory`` (both default ``true``).
+That is independent of **how** pages are locked.
+
+The pinning **backend** (Torch vs DeepSpeed native) is selected only with the
+``DS_PIN_MEMORY_BACKEND`` environment variable (default ``torch``). There is
+no ``ds_config`` field for the backend.
 
 The ``torch`` backend page-locks host memory for **accelerator DMA**
 (``cudaHostRegister`` / device-specific pin). The ``native`` backend
@@ -409,6 +415,11 @@ matches ``torch.pin_memory`` as closely as possible:
   garbage collection. ZeRO / ZenFlow optimizers do this for their owned
   CPU-offload buffers in ``destroy()``.
 * After ``unpin_memory``, the tensor storage must not be used (use-after-free).
+* Unlike the torch pinned allocator, native allocations are **not** stream
+  tracked: they are freed as soon as the last reference drops, even if an
+  asynchronous copy is still reading them. Code that issues
+  ``non_blocking=True`` copies out of a native-pinned buffer must keep a
+  reference to it until it synchronizes.
 
 ``is_pinned`` reports ``True`` for both torch-pinned tensors and native-managed
 buffers, including slices/views whose storage falls inside a managed range.
