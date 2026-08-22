@@ -537,12 +537,6 @@ Enabling and configuring ZeRO memory optimizations
 | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------- |
 | Initialize fp32 master weights from fp32 copies in checkpoint (no precision loss) or from model's fp16 copies (with precision loss). This can be used to initialize optimizer state even when checkpoint is missing optimizer state. | `True`  |
 
-<i>**grad_hooks**</i>: [boolean]
-
-| Description                                                                                                                               | Default |
-| ----------------------------------------------------------------------------------------------------------------------------------------- | ------- |
-| For use with ZeRO stage 1, enable backward hooks to reduce gradients during the backward pass or wait until the end of the backward pass. | `True`  |
-
 ***round_robin_gradients***: [boolean]
 
 | Description                                                                                                                                                                                                                                                                         | Default |
