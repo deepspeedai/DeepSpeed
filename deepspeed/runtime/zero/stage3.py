@@ -28,7 +28,7 @@ from deepspeed.runtime.zero.config import ZeroStageEnum
 from deepspeed.runtime.zero.offload_config import OffloadDeviceEnum, OffloadStateTypeEnum
 from deepspeed.runtime.zero.parameter_offload import DeepSpeedZeRoOffload
 import deepspeed.runtime.zenflow.engine_stage3 as zf_engine_stage3
-from deepspeed.runtime.zero.utils import get_mapping_to_flat_buffer, defragment
+from deepspeed.runtime.zero.utils import get_mapping_to_flat_buffer, defragment, get_norm_dtype
 from deepspeed.runtime.zero.offload_states import offload_adam_states, reload_adam_states
 from deepspeed.ops.adam import DeepSpeedCPUAdam
 from deepspeed.runtime.swap_tensor.partitioned_param_swapper import PartitionedParamStatus
@@ -1843,9 +1843,9 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         norm = None
         for part in input.view(-1).split(buffer_size):
             if norm is None:
-                norm = part.data.double().norm(2)**2.0
+                norm = part.data.to(get_norm_dtype()).norm(2)**2.0
             else:
-                norm += part.data.double().norm(2)**2.0
+                norm += part.data.to(get_norm_dtype()).norm(2)**2.0
         return norm**0.5
 
     def set_norm_for_param_grad_in_gpu(self, param):
@@ -2282,13 +2282,14 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             grad_norms = []
             for g, p in zip(gradients, params):
                 if is_model_parallel_parameter(p) or (self.model_parallel_rank == 0):
-                    grad_norms.append(g.to(get_accelerator().device_name(), non_blocking=True).double().norm(2))
+                    grad_norms.append(
+                        g.to(get_accelerator().device_name(), non_blocking=True).to(get_norm_dtype()).norm(2))
 
             # Sum across all model parallel GPUs.
             if len(grad_norms) == 0:
                 # FIX https://github.com/deepspeedai/DeepSpeed/issues/3564
-                total_norm_cuda = torch.tensor(0,
-                                               dtype=gradients[0].dtype).to(get_accelerator().device_name()).double()
+                total_norm_cuda = torch.tensor(0, dtype=gradients[0].dtype).to(get_accelerator().device_name()).to(
+                    get_norm_dtype())
             else:
                 total_norm_cuda = torch.sum(torch.pow(torch.stack(grad_norms), 2))
 

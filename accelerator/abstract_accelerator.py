@@ -174,6 +174,10 @@ class DeepSpeedAccelerator(ABC):
     def is_fp16_supported(self):
         ...
 
+    # Not abstract: nearly every accelerator supports fp64, so only those that do not need to override.
+    def is_fp64_supported(self):
+        return True
+
     @abc.abstractmethod
     def supported_dtypes(self):
         ...
