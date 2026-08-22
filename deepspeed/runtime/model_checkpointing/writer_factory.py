@@ -75,7 +75,16 @@ class CheckpointWriterFactory(object):
         self._writer = None
 
     def _setup_for_aio(self, aio_config):
-        self._io_buffer = torch.zeros(self._io_buffer_size, dtype=torch.uint8, device='cpu').pin_memory()
+        # Empty + make_copy=False avoids a useless memcpy under native; zero after pin.
+        # CPUAccelerator+torch is a historical no-op, so fall back to Tensor.pin_memory()
+        # so DeepNVMe can still skip bounce buffers on CUDA-capable hosts.
+        self._io_buffer = get_accelerator().pin_memory(torch.empty(self._io_buffer_size,
+                                                                   dtype=torch.uint8,
+                                                                   device='cpu'),
+                                                       make_copy=False)
+        if not get_accelerator().is_pinned(self._io_buffer):
+            self._io_buffer = self._io_buffer.pin_memory()
+        self._io_buffer.zero_()
         self._dnvme_handle = AsyncIOBuilder().load().aio_handle(
             block_size=aio_config[AIO_BLOCK_SIZE],
             queue_depth=aio_config[AIO_QUEUE_DEPTH],

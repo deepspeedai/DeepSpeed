@@ -47,30 +47,46 @@ def reduce_from_tp_region_fake(input: torch.Tensor):
 
 
 @torch.library.custom_op("autotp::gather_from_tp_region", mutates_args=())
-def gather_from_tp_region(input: torch.Tensor) -> torch.Tensor:
-    """All-gather the last dimension in the forward pass, take this rank's slice in the backward.
+def gather_from_tp_region(input: torch.Tensor, partition_sizes: list[int]) -> torch.Tensor:
+    """All-gather the last dimension using the frozen shard widths.
 
     Inserted after a column-parallel matmul whose layer asks for gather_output, so that
-    every rank leaves the layer holding the full output rather than its own shard.
+    every rank leaves the layer holding the full output rather than its own shard. Unlike the
+    even-width fast path, this takes an explicit `partition_sizes` list so uneven TP shards are
+    still reconstructed correctly.
     """
     group = get_tp_group()
     world_size = dist.get_world_size(group=group)
     if world_size == 1:
         return input.clone()
 
-    local_shard = input.contiguous()
+    if len(partition_sizes) != world_size:
+        raise ValueError(f"partition_sizes={partition_sizes} does not match TP world size {world_size}")
+
+    local_rank = dist.get_rank(group=group)
+    local_size = partition_sizes[local_rank]
+    if input.shape[-1] != local_size:
+        raise ValueError(
+            f"Rank {local_rank} produced width {input.shape[-1]}, but partition_sizes expects {local_size}")
+
+    max_partition_size = max(partition_sizes)
+    if local_size == max_partition_size:
+        local_shard = input.contiguous()
+    else:
+        local_shard = input.new_zeros((*input.shape[:-1], max_partition_size))
+        local_shard[..., :local_size].copy_(input)
+
     flat_gathered = torch.empty((world_size * local_shard.shape[0], *local_shard.shape[1:]),
                                 dtype=local_shard.dtype,
                                 device=local_shard.device)
     dist.all_gather_into_tensor(flat_gathered, local_shard, group=group)
     shards = flat_gathered.view(world_size, *local_shard.shape)
-    return torch.cat(shards.unbind(0), dim=-1)
+    return torch.cat([shards[i].narrow(-1, 0, size) for i, size in enumerate(partition_sizes)], dim=-1)
 
 
 @torch.library.register_fake("autotp::gather_from_tp_region")
-def gather_from_tp_region_fake(input: torch.Tensor):
-    world_size = dist.get_world_size(group=get_tp_group())
-    return input.new_empty((*input.shape[:-1], input.shape[-1] * world_size))
+def gather_from_tp_region_fake(input: torch.Tensor, partition_sizes: list[int]):
+    return input.new_empty((*input.shape[:-1], sum(partition_sizes)))
 
 
 def _copy_to_tp_region_backward(ctx, grad):
@@ -83,14 +99,22 @@ def _reduce_from_tp_region_backward(ctx, grad):
     return grad
 
 
+def _gather_from_tp_region_setup(ctx, inputs, output):
+    _, partition_sizes = inputs
+    ctx.partition_sizes = tuple(partition_sizes)
+
+
 def _gather_from_tp_region_backward(ctx, grad):
     group = get_tp_group()
     world_size = dist.get_world_size(group=group)
     if world_size == 1:
-        return grad
-    shard_width = grad.shape[-1] // world_size
-    shard_start = dist.get_rank(group=group) * shard_width
-    return grad.narrow(-1, shard_start, shard_width).contiguous()
+        return (grad, None)
+
+    partition_sizes = ctx.partition_sizes
+    rank = dist.get_rank(group=group)
+    shard_start = sum(partition_sizes[:rank])
+    shard_width = partition_sizes[rank]
+    return grad.narrow(-1, shard_start, shard_width).contiguous(), None
 
 
 def _setup_context_without_saved_tensors(ctx, inputs, output):
@@ -105,4 +129,4 @@ torch.library.register_autograd("autotp::reduce_from_tp_region",
                                 setup_context=_setup_context_without_saved_tensors)
 torch.library.register_autograd("autotp::gather_from_tp_region",
                                 _gather_from_tp_region_backward,
-                                setup_context=_setup_context_without_saved_tensors)
+                                setup_context=_gather_from_tp_region_setup)

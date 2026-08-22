@@ -29,6 +29,11 @@ def _all_real_if_tensor(args):
 
 def _to(v, device):
     if torch.is_tensor(v):
+        # A pinned host tensor inside a graph is an offloaded value: the op reading it expects it on
+        # the host, and copying it to the device would both undo the offload and hide from the
+        # profile the memory the offload just gave back.
+        if v.device.type == "cpu" and v.is_pinned():
+            return v
         with unset_fake_temporarily():
             return v.to(device)
     return v
@@ -91,6 +96,39 @@ def _backfill_missing_profile_metadata(graph: Graph, profile_complete: bool = Tr
             node.meta.setdefault(key, default)
 
 
+class ProfileAborted(RuntimeError):
+    """Raised on every rank once profiling has failed on any of them."""
+
+
+def _abort_if_any_rank_failed(error, device, distributed=True):
+    """Agree across ranks on whether profiling can go on, and stop everywhere if it cannot.
+
+    Profiling issues collectives node by node. A rank that hits an error and simply stops taking
+    part leaves every other rank waiting on a collective that will never be matched, which surfaces
+    half an hour later as an NCCL watchdog timeout and a killed job rather than as the error that
+    started it. Ranks therefore vote, and all of them raise together into the caller's handler,
+    which already knows how to carry on with an incomplete profile.
+
+    This covers a rank failing while it runs a node, which is where profiling runs out of memory.
+    It cannot cover a rank failing inside a collective, or while gathering a node's arguments,
+    because by then the other ranks are already waiting in a call this one will never make.
+    """
+    if not distributed or not dist.is_initialized():
+        if error is not None:
+            raise ProfileAborted(str(error)) from error
+        return
+
+    with unset_fake_temporarily():
+        failed_flag = torch.tensor([1 if error is not None else 0], device=device, dtype=torch.int)
+        dist.all_reduce(failed_flag, dist.ReduceOp.MAX)
+
+    if failed_flag.item() == 0:
+        return
+    if error is not None:
+        raise ProfileAborted(str(error)) from error
+    raise ProfileAborted("profiling failed on another rank")
+
+
 def _run_warmup_for_profile(call_fn, warmup):
     for _ in range(warmup):
         warmup_out = call_fn()
@@ -121,8 +159,13 @@ def _get_mem_usage_out_of_torch():
         handle = pynvml.nvmlDeviceGetHandleByIndex(current_dev_id)
         info = pynvml.nvmlDeviceGetMemoryInfo(handle)
 
-        torch_alloc = get_accelerator().memory_allocated()
-        adjust = info.used - torch_alloc
+        # Reserved, not allocated. This number is meant to be the memory *other* things hold, and
+        # it is added to every node's reading. Subtracting only what torch has handed out counts
+        # the allocator's own cache as somebody else's usage: with expandable_segments the cache is
+        # most of the card while live tensors are a fraction of it, which inflated a measured
+        # 125GiB peak to a reported 239GiB and left the planner reading it as hopeless.
+        torch_held = get_accelerator().memory_reserved()
+        adjust = max(0, info.used - torch_held)
     except Exception:
         # pynvml not available
         pass
@@ -226,65 +269,85 @@ class ProfilingInterpreter(Interpreter):
             n.meta["max_mem"] = max_mem
             n.meta["tensor_size"] = tensor_size
 
-        is_release_op = is_release_node(n)
-        run_only_once = cache_hit or is_release_op
-        iteration = 1 if run_only_once else self.iteration
-        accelerator = get_accelerator()
-        start_events = [accelerator.Event(enable_timing=True) for _ in range(iteration)]
-        end_events = [accelerator.Event(enable_timing=True) for _ in range(iteration)]
+        # Running the node is where profiling runs out of memory in practice, and it sits between
+        # two collectives every rank must reach. Record a failure and keep going to the vote at the
+        # end of the node rather than unwinding past those collectives and stranding the others.
+        error = None
+        out = None
+        alloc_mem = 0
+        max_memory = 0
+        tensor_size = 0
+        try:
+            is_release_op = is_release_node(n)
+            run_only_once = cache_hit or is_release_op
+            iteration = 1 if run_only_once else self.iteration
+            accelerator = get_accelerator()
+            start_events = [accelerator.Event(enable_timing=True) for _ in range(iteration)]
+            end_events = [accelerator.Event(enable_timing=True) for _ in range(iteration)]
 
-        get_accelerator().reset_peak_memory_stats()
-        alloc_mem_start = get_accelerator().memory_allocated()
-        max_mem_start = get_accelerator().max_memory_allocated()
+            get_accelerator().reset_peak_memory_stats()
+            alloc_mem_start = get_accelerator().memory_allocated()
+            max_mem_start = get_accelerator().max_memory_allocated()
 
-        def run_target():
-            return getattr(self, n.op)(n.target, args, kwargs)
+            def run_target():
+                return getattr(self, n.op)(n.target, args, kwargs)
 
-        warmup = 0 if run_only_once else self.warmup
-        _run_warmup_for_profile(run_target, warmup)
+            warmup = 0 if run_only_once else self.warmup
+            _run_warmup_for_profile(run_target, warmup)
 
-        if is_comm_op(n):
-            assert self.distributed, f"Distributed environment is not initialized but comm operator {n.name} {n.target} is used."
-            dist.barrier()
+            if is_comm_op(n):
+                assert self.distributed, f"Distributed environment is not initialized but comm operator {n.name} {n.target} is used."
+                dist.barrier()
 
-        start = time.time()
-        out = _run_repeatedly_for_profile(run_target, iteration, start_events, end_events)
-        accelerator.synchronize()
-        walltime_sum = time.time() - start
+            start = time.time()
+            out = _run_repeatedly_for_profile(run_target, iteration, start_events, end_events)
+            accelerator.synchronize()
+            walltime_sum = time.time() - start
 
-        if is_comm_op(n):
-            dist.barrier()
+            if is_comm_op(n):
+                dist.barrier()
 
-        alloc_mem = get_accelerator().memory_allocated() - alloc_mem_start + self.mem_usage_out_of_torch
-        max_memory = get_accelerator().max_memory_allocated() - max_mem_start + self.mem_usage_out_of_torch
-        tensor_size = _node_size(out)
+            alloc_mem = get_accelerator().memory_allocated() - alloc_mem_start + self.mem_usage_out_of_torch
+            max_memory = get_accelerator().max_memory_allocated() - max_mem_start + self.mem_usage_out_of_torch
+            tensor_size = _node_size(out)
 
-        def partition_param_if_necessary(v):
-            if id(v) in partitioned_params:
-                v = partitioned_params[id(v)]
-            if hasattr(v, "ds_id") and not v.ds_persist:
-                v.partition(param_list=[v], has_been_updated=False)
-            return v
+            def partition_param_if_necessary(v):
+                if id(v) in partitioned_params:
+                    v = partitioned_params[id(v)]
+                if hasattr(v, "ds_id") and not v.ds_persist:
+                    v.partition(param_list=[v], has_been_updated=False)
+                return v
 
-        args = map_aggregate(args, lambda x: partition_param_if_necessary(x))
+            args = map_aggregate(args, lambda x: partition_param_if_necessary(x))
+        except Exception as e:
+            error = e
 
         if not cache_hit:
-            device_time = statistics.mean([s.elapsed_time(e) for s, e in zip(start_events, end_events)])
-            wall_time = walltime_sum / iteration * 1000
+            if error is None:
+                device_time = statistics.mean([s.elapsed_time(e) for s, e in zip(start_events, end_events)])
+                wall_time = walltime_sum / iteration * 1000
+            else:
+                # Nothing worth averaging in, but this rank still has to take part in the reduce.
+                device_time = 0.0
+                wall_time = 0.0
 
             with unset_fake_temporarily():
                 vals_to_bcast = torch.tensor([device_time, wall_time, alloc_mem, max_memory, tensor_size],
                                              device=self.device)
                 if self.distributed:
                     dist.all_reduce(vals_to_bcast, dist.ReduceOp.AVG)
-                n.meta["device_time"] = vals_to_bcast[0].item()
-                n.meta["wall_time"] = vals_to_bcast[1].item()
-                n.meta["alloc_mem"] = int(vals_to_bcast[2].item())
-                n.meta["max_mem"] = int(vals_to_bcast[3].item())
-                n.meta["tensor_size"] = int(vals_to_bcast[4].item())
-                self.cache[cache_key] = (n.meta["device_time"], n.meta["wall_time"], n.meta["alloc_mem"],
-                                         n.meta["max_mem"], n.meta["tensor_size"])
+                if error is None:
+                    n.meta["device_time"] = vals_to_bcast[0].item()
+                    n.meta["wall_time"] = vals_to_bcast[1].item()
+                    n.meta["alloc_mem"] = int(vals_to_bcast[2].item())
+                    n.meta["max_mem"] = int(vals_to_bcast[3].item())
+                    n.meta["tensor_size"] = int(vals_to_bcast[4].item())
+                    self.cache[cache_key] = (n.meta["device_time"], n.meta["wall_time"], n.meta["alloc_mem"],
+                                             n.meta["max_mem"], n.meta["tensor_size"])
 
+        _abort_if_any_rank_failed(error, self.device, self.distributed)
+
+        if not cache_hit:
             if is_release_op:
                 n.meta["alloc_mem"] = -self.allgather_mem.get(args[2], 0)
 
@@ -345,15 +408,23 @@ class MemoryProfilingInterpreter(Interpreter):
     def run_node(self, n: torch.fx.Node) -> Any:
         get_accelerator().reset_peak_memory_stats()
 
-        if n.op in {"placeholder", "output"}:
-            ret = super().run_node(n)
-        else:
-            args, kwargs = self.fetch_args_kwargs_from_env(n)
-            args = map_aggregate(args, lambda x: _to(x, self.device))
-            kwargs = map_aggregate(kwargs, lambda x: _to(x, self.device))
-            ret = getattr(self, n.op)(n.target, args, kwargs)
+        ret = None
+        error = None
+        try:
+            if n.op in {"placeholder", "output"}:
+                ret = super().run_node(n)
+            else:
+                args, kwargs = self.fetch_args_kwargs_from_env(n)
+                args = map_aggregate(args, lambda x: _to(x, self.device))
+                kwargs = map_aggregate(kwargs, lambda x: _to(x, self.device))
+                ret = getattr(self, n.op)(n.target, args, kwargs)
 
-            del args, kwargs
+                del args, kwargs
+        except Exception as e:
+            # Leaving the node loop here would skip the collectives below, which every rank has to
+            # reach. Carry the error to the vote instead; running out of memory is the usual reason
+            # to land here, and reading the allocator counters still works afterwards.
+            error = e
 
         current_alloc = get_accelerator().memory_allocated() + self.mem_usage_out_of_torch
         max_alloc = get_accelerator().max_memory_allocated() + self.mem_usage_out_of_torch
@@ -361,6 +432,8 @@ class MemoryProfilingInterpreter(Interpreter):
         dist.all_reduce(vals_to_bcast, dist.ReduceOp.MAX)
         current_alloc = vals_to_bcast[0].item()
         max_alloc = vals_to_bcast[1].item()
+
+        _abort_if_any_rank_failed(error, self.device)
 
         self.mem_record.append((n.name, current_alloc, current_alloc - self.last_alloc, max_alloc))
 

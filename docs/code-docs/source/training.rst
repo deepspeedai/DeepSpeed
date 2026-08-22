@@ -501,10 +501,13 @@ The resolution priority is:
 2. HuggingFace ``tp_plan`` (from model config)
 3. AutoTP heuristics / ``preset_model`` (lowest priority)
 
-Currently only ``colwise`` and ``rowwise`` partition types from the HuggingFace
-``tp_plan`` are supported. Other types (``colwise_rep``, ``local_colwise``,
-``local_rowwise``, ``local_packed_rowwise``, ``gather``, ``sequence_parallel``)
-are not yet handled and will raise an error.
+Currently ``colwise``, ``rowwise``, and gathered column styles
+(``colwise_gather_output`` / ``colwise_rep``) from the HuggingFace ``tp_plan``
+are supported. Gathered column output layers may have output dimensions that are
+not divisible by ``autotp_size``; DeepSpeed uses uneven local shards and gathers
+back to the original logical output size. Other types (``local_colwise``,
+``local_rowwise``, ``local_packed_rowwise``, ``gather``,
+``sequence_parallel``) are not yet handled and will raise an error.
 
 Heuristic rules
 ^^^^^^^^^^^^^^^

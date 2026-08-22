@@ -1334,9 +1334,9 @@ Use a built-in preset but override specific naming/weight fields for a fine-tune
 
 <i>**cpu_checkpointing**</i>: [boolean]
 
-| Description                                                                 | Default |
-| --------------------------------------------------------------------------- | ------- |
-| Offloads partitioned activations to CPU if partition_activations is enabled | `false` |
+| Description                                                                                                                                                                                                                        | Default |
+| --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
+| Offloads activation checkpoint inputs to CPU. With `partition_activations` it offloads the partitioned activations; otherwise it uses an asynchronous pinned side-stream copy that overlaps the CPU transfer with compute. | `false` |
 
 
 <i>**contiguous_memory_optimization**</i>: [boolean]

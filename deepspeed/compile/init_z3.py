@@ -13,7 +13,7 @@ from deepspeed.accelerator import get_accelerator
 from deepspeed.runtime.zero.partition_parameters import InsertPostInitMethodToModuleSubClasses
 from deepspeed.runtime.zero.parameter_offload import DeepSpeedZeRoOffload
 
-from .passes import zero3_compile, prefetch, selective_gather, offload_parameters
+from .passes import zero3_compile, prefetch, selective_gather, offload_parameters, offload_activation
 from .backend import make_backend, launch_compile_passes, init_schedule
 from .patch_fake_tensor import patch_fake_tensor
 from .util import get_deepcompile_handle, add_pre_backward_hook, add_post_backward_hook
@@ -97,6 +97,12 @@ def init_z3(engine, backend, compile_config, compile_kwargs, schedule=None):
                          "and runs the optimizer there, while this pass keeps it resident when memory "
                          "allows and moves it around the compiled graph. Enable one of them.")
 
+    if compile_config.offload_activation and (compile_config.offload_parameters or compile_config.offload_opt_states):
+        raise ValueError("compile.offload_activation cannot be combined with offload_parameters or "
+                         "offload_opt_states; choose one offloading target per run. Each of them plans "
+                         "against the whole memory budget on its own, so two of them together move far "
+                         "more data than the run needs.")
+
     optimizer = engine.optimizer
     use_opt = not isinstance(optimizer, DeepSpeedZeRoOffload)
 
@@ -154,6 +160,24 @@ def init_z3(engine, backend, compile_config, compile_kwargs, schedule=None):
             # for_init empties them before profiling, so the plan is made against the floor and a
             # job that only fits with offloading never runs a step with everything resident.
             schedule.append((1, [offload_adam_states_for_init, zero3_compile.add_z3_gather_release, move_opt_states]))
+        elif compile_config.offload_activation:
+            offload_activation.register_activation_offload_ops()
+            # The floor pass must engage at step 0: a job that only fits with its activations
+            # moved out never reaches WARMUP otherwise. It offloads in the forward and reloads
+            # in the backward, so it runs correctly on its own.
+            #
+            # The planner runs at WARMUP because it only gives memory back, and because the
+            # floor it needs cannot be measured at step 0 -- a profile of the compiled forward
+            # graph cannot see work outside it, such as a tiled loss driving a nested backward.
+            #
+            # Both entries list the floor pass: passes are re-applied from the captured graph at
+            # each scheduled step rather than accumulated, which is also why the default
+            # schedule below repeats add_z3_gather_release.
+            schedule.append((0, [zero3_compile.add_z3_gather_release, offload_activation.offload_activation_floor]))
+            schedule.append((WARMUP, [
+                zero3_compile.add_z3_gather_release, offload_activation.offload_activation_floor,
+                offload_activation.offload_activation
+            ]))
         else:
             schedule.append((0, [zero3_compile.add_z3_gather_release]))
             schedule.append(
