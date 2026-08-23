@@ -1192,6 +1192,9 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
     ############### Independent Partition Gradient ########################
     def reduce_independent_p_g_buckets_and_remove_grads(self, param, i):
 
+        if param.numel() == 0:
+            return
+
         grad_reduc = self.get_gradient_for_reduction(param)
         comm_dtype = self.get_param_comm_dtype(param)
         bucket = self.ipg_buckets[comm_dtype]
