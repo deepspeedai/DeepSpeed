@@ -1049,8 +1049,6 @@ class DeepSpeedConfig(object):
             assert self.bfloat16_config.bf16_master_weights_and_grads, "bf16_optimizer_states requires bf16_master_weights_and_grads to be enabled."
 
     def _do_warning_check(self):
-        fp16_enabled = self.float16_config.enabled
-
         vocabulary_size = self._param_dict.get(VOCABULARY_SIZE, VOCABULARY_SIZE_DEFAULT)
         if vocabulary_size and vocabulary_size % TENSOR_CORE_ALIGN_SIZE != 0:
             logger.warning(
@@ -1059,13 +1057,9 @@ class DeepSpeedConfig(object):
 
         if (self.optimizer_params is not None and MAX_GRAD_NORM in self.optimizer_params.keys()
                 and self.optimizer_params[MAX_GRAD_NORM] > 0):
-            if fp16_enabled:
-                if self.global_rank == 0:
-                    logger.warning("DeepSpeedConfig: In FP16 mode, DeepSpeed will pass {}:{} to FP16 wrapper".format(
+            if self.global_rank == 0:
+                logger.warning(
+                    "DeepSpeedConfig: {} ({}) is not supported as an optimizer parameter, please switch to using the "
+                    "deepspeed parameter 'gradient_clipping' see: "
+                    "https://www.deepspeed.ai/docs/config-json/#gradient-clipping for more details".format(
                         MAX_GRAD_NORM, self.optimizer_params[MAX_GRAD_NORM]))
-            else:
-                if self.global_rank == 0:
-                    logger.warning(
-                        "DeepSpeedConfig: In FP32 mode, DeepSpeed does not permit MAX_GRAD_NORM ({}) > 0, setting to zero"
-                        .format(self.optimizer_params[MAX_GRAD_NORM]))
-                self.optimizer_params[MAX_GRAD_NORM] = 0.0
