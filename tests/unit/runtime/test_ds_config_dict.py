@@ -249,6 +249,25 @@ def test_compression_training_without_legacy_quantize_training_uses_defaults():
     assert ds_config.eigenvalue_verbose is False
 
 
+def test_max_grad_norm_leaves_caller_config_untouched():
+    # The dict handed to DeepSpeedConfig belongs to the caller and may be reused after
+    # initialization, so parsing it must not write back into it.
+    config_dict = {
+        "train_micro_batch_size_per_gpu": 1,
+        "optimizer": {
+            "type": "AdamW",
+            "params": {
+                "lr": 1e-3,
+                "max_grad_norm": 1.0,
+            },
+        },
+    }
+
+    DeepSpeedConfig(config_dict)
+
+    assert config_dict["optimizer"]["params"]["max_grad_norm"] == 1.0
+
+
 class TestConfigLoad(DistributedTest):
     world_size = 1
 
