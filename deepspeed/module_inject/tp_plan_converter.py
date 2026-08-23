@@ -6,8 +6,11 @@
 from typing import List, Dict, Optional
 from .autotp_config import TPLayerSpec, PartitionType
 
-SUPPORTED_STYLES = {"colwise", "colwise_rep", "colwise_gather_output", "rowwise", "replicated_with_grad_allreduce"}
+SUPPORTED_STYLES = {
+    "colwise", "colwise_rep", "colwise_gather_output", "rowwise", "replicated_with_grad_allreduce", "embedding_rowwise"
+}
 # `colwise_rep` was renamed to `colwise_gather_output` in huggingface/transformers#42809.
+# `embedding_rowwise` is injected for every tied-embedding model since huggingface/transformers#47579.
 
 
 class TPPlanConverter:
@@ -50,6 +53,10 @@ class TPPlanConverter:
                 gather_output = partition_style != "colwise"
             elif partition_style == "rowwise":
                 partition_type = PartitionType.ROW
+            elif partition_style == "embedding_rowwise":
+                # Vocabulary-parallel embeddings are not supported yet, so the embedding stays whole and
+                # the gathered-column tie fallback keeps any LM head tied to it replicated as well.
+                partition_type = PartitionType.SKIP
             else:  # replicated_with_grad_allreduce, the only other supported style
                 # The parameter stays whole; only its gradient needs summing across the group.
                 partition_type = PartitionType.SKIP
