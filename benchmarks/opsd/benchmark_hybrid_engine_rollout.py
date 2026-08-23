@@ -31,9 +31,7 @@ from deepspeed.accelerator import get_accelerator
 from deepspeed.runtime.rollout.base import RolloutRequest, SamplingConfig
 from deepspeed.runtime.rollout.hybrid_engine_rollout import HybridEngineRollout, HybridEngineRolloutConfig
 
-
-_TIMING_FIELDS = ("prompt_expansion_ms", "generation_ms", "post_processing_ms", "total_ms",
-                  "tokens_per_second")
+_TIMING_FIELDS = ("prompt_expansion_ms", "generation_ms", "post_processing_ms", "total_ms", "tokens_per_second")
 
 
 def _percentile(values, percentile):
@@ -78,9 +76,10 @@ def _load_model_and_tokenizer(model_name, dtype, device):
 
 def _build_engine(model, args):
     use_bf16 = args.dtype == "bf16"
+    max_effective_batch_size = max(args.batch_sizes) * max(args.samples_per_prompt)
     ds_config = {
-        "train_batch_size": max(args.batch_sizes),
-        "train_micro_batch_size_per_gpu": max(args.batch_sizes),
+        "train_batch_size": max_effective_batch_size,
+        "train_micro_batch_size_per_gpu": max_effective_batch_size,
         "fp16": {
             "enabled": not use_bf16,
         },
@@ -142,6 +141,15 @@ def _run_case(rollout, model, args, batch_size, samples_per_prompt, prompt_lengt
     }
 
 
+def _ordered_case_specs(args):
+    requested = list(
+        itertools.product(args.batch_sizes, args.samples_per_prompt, args.prompt_lengths, args.response_lengths))
+    execution_order = sorted(range(len(requested)),
+                             key=lambda index: requested[index][0] * requested[index][1],
+                             reverse=True)
+    return requested, execution_order
+
+
 def _run(args):
     _validate_args(args)
     world_size = int(os.getenv("WORLD_SIZE", "1"))
@@ -160,13 +168,14 @@ def _run(args):
         engine = _build_engine(model, args)
         rollout = HybridEngineRollout(engine, tokenizer, HybridEngineRolloutConfig(enable_profiling=True))
 
-        cases = []
-        matrix = itertools.product(args.batch_sizes, args.samples_per_prompt, args.prompt_lengths,
-                                   args.response_lengths)
-        for batch_size, samples_per_prompt, prompt_length, response_length in matrix:
-            cases.append(
-                _run_case(rollout, engine.module, args, batch_size, samples_per_prompt, prompt_length, response_length,
-                          device))
+        case_specs, execution_order = _ordered_case_specs(args)
+        cases = [None] * len(case_specs)
+        # HybridEngine sizes its inference workspace on the first forward. Run
+        # the largest effective batch first while preserving requested output order.
+        for case_index in execution_order:
+            batch_size, samples_per_prompt, prompt_length, response_length = case_specs[case_index]
+            cases[case_index] = _run_case(rollout, engine.module, args, batch_size, samples_per_prompt, prompt_length,
+                                          response_length, device)
 
         result = {
             "model": args.model,

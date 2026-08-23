@@ -12,7 +12,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 
-from benchmarks.opsd.benchmark_hybrid_engine_rollout import _summarize
+from benchmarks.opsd.benchmark_hybrid_engine_rollout import _ordered_case_specs, _summarize
 from deepspeed.runtime.rollout.base import RolloutRequest, SamplingConfig
 from deepspeed.runtime.rollout.hybrid_engine_rollout import (
     HybridEngineRollout,
@@ -141,6 +141,16 @@ def test_profiling_does_not_change_rollout_output():
     assert torch.equal(output_with_profiling.response_start_idx, output_without_profiling.response_start_idx)
 
 
+def test_generate_preserves_zero_pad_token_id():
+    engine = _make_engine()
+    engine.module.generate.return_value = torch.tensor([[0, 1, 2, 0], [0, 3, 4, 0]])
+    rollout = HybridEngineRollout(engine, _make_tokenizer())
+
+    output = rollout.generate(_make_request(), _make_sampling())
+
+    assert output.attention_mask[:, -1].tolist() == [0, 0]
+
+
 def test_benchmark_summarizes_profile_samples():
     profiles = []
     for value in range(1, 21):
@@ -156,6 +166,19 @@ def test_benchmark_summarizes_profile_samples():
 
     assert summary["generation_ms"] == {"mean": 21, "p50": 21.0, "p95": 38}
     assert summary["tokens_per_second"] == {"mean": 105, "p50": 105.0, "p95": 190}
+
+
+def test_benchmark_initializes_workspace_with_largest_effective_batch():
+    args = MagicMock()
+    args.batch_sizes = [1, 2]
+    args.samples_per_prompt = [1, 4]
+    args.prompt_lengths = [512]
+    args.response_lengths = [32]
+
+    requested, execution_order = _ordered_case_specs(args)
+
+    assert requested[0] == (1, 1, 512, 32)
+    assert requested[execution_order[0]][0:2] == (2, 4)
 
 
 # -- _sample_top_p ------------------------------------------------------

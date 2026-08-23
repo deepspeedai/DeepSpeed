@@ -52,7 +52,9 @@ class HybridEngineRollout(RolloutEngine):
         total = B * n
         prompt_len = request.prompt_ids.shape[1]
         max_new_tokens = sampling.max_new_tokens
-        pad_token_id = self.tokenizer.pad_token_id or self.tokenizer.eos_token_id
+        pad_token_id = self.tokenizer.pad_token_id
+        if pad_token_id is None:
+            pad_token_id = self.tokenizer.eos_token_id
 
         module = self.engine.module
 
