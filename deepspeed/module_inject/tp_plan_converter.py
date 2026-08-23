@@ -20,15 +20,21 @@ class TPPlanConverter:
     def convert(hf_tp_plan: Dict[str, str]) -> Optional[List[TPLayerSpec]]:
         """Convert HF tp_plan to DeepSpeed layer specs.
 
-        Entries whose style is not supported are converted to SKIP specs instead of invalidating
-        the whole plan. Discarding the plan used to send models like Llama4 or Qwen3 down the
-        heuristic path, which shards by name patterns alone and has no notion of the modules the
-        plan deliberately excluded — on Llama4 it wraps the MoE router, whose forward returns a
-        tuple, and breaks the model. A SKIP spec keeps such layers untouched on purpose while the
-        supported entries are still applied.
+        A style outside SUPPORTED_STYLES raises ValueError and invalidates the whole plan, so a
+        style newly introduced upstream fails loudly and gets a deliberate decision rather than
+        being dropped on the quiet. Converting only the recognized entries could shard one half
+        of a column/row pair, and silently discarding the plan would send models like Llama4 or
+        Qwen3 down the heuristic path, which shards by name patterns alone and has no notion of
+        the modules the plan deliberately excluded. On Llama4 that path wraps the MoE router,
+        whose forward returns a tuple, and breaks the model.
 
-        Returns None only when no entry is convertible, so the caller can fall back to the
-        existing AutoTP path for models whose plan gives us nothing to work with.
+        Supported styles that must stay whole become SKIP specs, which keeps those layers
+        untouched on purpose while the rest of the plan is still applied: `embedding_rowwise`,
+        because vocabulary-parallel embeddings are not supported yet, and
+        `replicated_with_grad_allreduce`, which additionally sums the gradient across the group.
+
+        Returns None only for an empty plan, so the caller can fall back to the existing AutoTP
+        path for models that give us nothing to work with.
         """
         if not hf_tp_plan:
             return None
