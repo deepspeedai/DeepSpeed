@@ -10,6 +10,7 @@ tags: getting-started training accelerator
 - [Intel XPU](#intel-xpu)
 - [Huawei Ascend NPU](#huawei-ascend-npu)
 - [Intel Gaudi](#intel-gaudi)
+- [Apple Silicon (MPS)](#apple-silicon-mps)
 
 # Introduction
 DeepSpeed supports different accelerators from different companies.   Setup steps to run DeepSpeed on certain accelerators might be different.  This guide allows user to lookup setup instructions for the accelerator family and hardware they are using.
@@ -276,3 +277,40 @@ PyTorch models can be run on Intel® Gaudi® AI accelerator using DeepSpeed. Ref
 * [DeepSpeed User Guide for Training](https://docs.habana.ai/en/latest/PyTorch/DeepSpeed/DeepSpeed_User_Guide/DeepSpeed_User_Guide.html#deepspeed-user-guide)
 * [Optimizing Large Language Models](https://docs.habana.ai/en/latest/PyTorch/DeepSpeed/Optimizing_LLM.html#llms-opt)
 * [Inference Using DeepSpeed](https://docs.habana.ai/en/latest/PyTorch/DeepSpeed/Inference_Using_DeepSpeed.html#deepspeed-inference-user-guide)
+
+# Apple Silicon (MPS)
+DeepSpeed can train on the GPU of Apple Silicon Macs through PyTorch's MPS backend. This support is new and currently covers single-device training; see the limitations below.
+
+DeepSpeed has been verified on the following hardware:
+* Apple M5 Max (macOS 26)
+
+## Installation steps for Apple Silicon
+1. Install PyTorch (2.4 or newer) with MPS support. The default macOS arm64 wheels include it:
+```
+pip install torch
+```
+
+2. Install DeepSpeed. There are no kernels to compile on MPS, but `setup.py` imports PyTorch, so disable build isolation:
+```
+DS_ACCELERATOR=mps pip install --no-build-isolation deepspeed
+```
+
+3. Verify that the MPS accelerator is detected:
+```
+ds_report
+```
+The accelerator is auto-detected when MPS is available; set `DS_ACCELERATOR=mps` to force it.
+
+## How to use DeepSpeed on Apple Silicon
+Launch a single-process job as usual; no hostfile is needed:
+```
+deepspeed --num_gpus 1 train.py --deepspeed --deepspeed_config ds_config.json
+```
+ZeRO stages 0 through 3 are supported with fp32, fp16, and bf16 (bf16 requires macOS 14 or newer). The fused Adam optimizer runs as a PyTorch implementation on MPS; ZeRO-Offload (`DeepSpeedCPUAdam`) is not yet available on this backend.
+
+## Limitations
+* PyTorch exposes one MPS device per machine, so `device_count()` is 1 and multi-device data parallelism on a single Mac is not possible.
+* There is no native collective backend for MPS. DeepSpeed uses `gloo` and stages tensors through CPU memory for each collective. This is cheap on unified memory, but multi-machine training over gloo is untested.
+* MPS does not support fp64; gradient norms are accumulated in fp32 on this backend.
+* MPS has no user-visible streams, so DeepSpeed treats it as a synchronized device and does not overlap communication with computation.
+* Tests and multiprocessing code must use the `spawn` start method, because MPS cannot be used from a forked child process.

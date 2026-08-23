@@ -24,6 +24,7 @@ from deepspeed.runtime.utils import (empty_cache, see_memory_usage, inf, is_mode
                                      align_dense_tensors, all_gather_dp_groups, mask_nan_or_inf_with_val_inplace,
                                      count_used_parameters_in_backward)
 from deepspeed.runtime.zero.config import ZeroStageEnum
+from deepspeed.runtime.zero.utils import get_norm_dtype
 from deepspeed.runtime.zero.offload_config import OffloadDeviceEnum, OffloadStateTypeEnum
 from deepspeed.ops.adam import DeepSpeedCPUAdam
 from deepspeed.utils import logger
@@ -1570,7 +1571,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         start = source_offset
         accumulated_grad = accumulated_grad.view(-1).narrow(0, start, num_elements)
 
-        self.norm_for_param_grads[param_id] = accumulated_grad.data.double().norm(2)
+        self.norm_for_param_grads[param_id] = accumulated_grad.data.to(get_norm_dtype()).norm(2)
 
     def set_norm_for_param_grad_in_gpu(self, param):
         param_id = self.get_param_id(param)
@@ -1585,7 +1586,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         start = source_offset
         accumulated_grad = accumulated_grad.view(-1).narrow(0, start, num_elements)
 
-        self.norm_for_param_grads[param_id] = accumulated_grad.data.double().norm(2)
+        self.norm_for_param_grads[param_id] = accumulated_grad.data.to(get_norm_dtype()).norm(2)
 
     def async_inplace_copy_grad_to_fp32_buffer_from_gpu(self, param):
         param_id = self.get_param_id(param)
@@ -2086,7 +2087,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                     continue
                 if is_model_parallel_parameter(p) or (self.model_parallel_rank == 0):
                     all_norms.append(
-                        torch.linalg.vector_norm(g.data.double().detach(),
+                        torch.linalg.vector_norm(g.data.to(get_norm_dtype()).detach(),
                                                  ord=norm_type).to(get_accelerator().current_device_name()))
             if len(all_norms) > 0:
                 total_norm = torch.stack(all_norms).square().sum().float()

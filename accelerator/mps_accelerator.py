@@ -19,11 +19,14 @@ class MPS_Accelerator(DeepSpeedAccelerator):
 
     def __init__(self):
         self._name = "mps"
-        self._communication_backend_name = None
+        # MPS has no native collective backend; gloo is the only torch backend available on macOS.
+        self._communication_backend_name = "gloo"
         self._compile_backend = "inductor"
 
     def is_synchronized_device(self):
-        return False
+        # MPS runs everything on a single in-order command queue and exposes no user-visible
+        # streams, so DeepSpeed never needs to synchronize between streams on this device.
+        return True
 
     def use_host_timers(self):
         # Event timers are not supported on MPS
@@ -90,7 +93,8 @@ class MPS_Accelerator(DeepSpeedAccelerator):
         return None
 
     def stream(self, stream):
-        return None
+        from deepspeed.runtime.utils import noop_context
+        return noop_context()
 
     def current_stream(self, device_index=None):
         return None
@@ -100,7 +104,7 @@ class MPS_Accelerator(DeepSpeedAccelerator):
 
     @property
     def Event(self):
-        return None
+        return torch.mps.Event
 
     # Memory management
     def empty_cache(self):
@@ -119,41 +123,53 @@ class MPS_Accelerator(DeepSpeedAccelerator):
         return
 
     def memory_cached(self, device_index=None):
-        return
+        return torch.mps.driver_allocated_memory()
 
     def max_memory_cached(self, device_index=None):
-        return
+        return torch.mps.driver_allocated_memory()
 
     def reset_max_memory_cached(self, device_index=None):
         return
 
     def memory_stats(self, device_index=None):
-        return
+        # torch.mps has no caching-allocator stats; expose what it does report under the CUDA key names.
+        return {
+            'allocated_bytes.all.current': torch.mps.current_allocated_memory(),
+            'reserved_bytes.all.current': torch.mps.driver_allocated_memory(),
+        }
 
     def reset_peak_memory_stats(self, device_index=None):
         return
 
     def memory_reserved(self, device_index=None):
-        return
+        return torch.mps.driver_allocated_memory()
 
     def max_memory_reserved(self, device_index=None):
-        return
+        return torch.mps.driver_allocated_memory()
 
     def total_memory(self, device_index=None):
-        return
+        # Unified memory: the driver-recommended working set is the usable budget for the GPU.
+        return torch.mps.recommended_max_memory()
 
     def available_memory(self, device_index=None):
-        return
+        return self.total_memory() - torch.mps.driver_allocated_memory()
 
     # Data types
     def is_bf16_supported(self):
-        return False
+        # bf16 on MPS requires macOS 14 (Sonoma) or newer.
+        return torch.backends.mps.is_macos_or_newer(14, 0)
 
     def is_fp16_supported(self):
+        return True
+
+    def is_fp64_supported(self):
         return False
 
     def supported_dtypes(self):
-        return [torch.float]
+        supported_dtypes = [torch.float, torch.half]
+        if self.is_bf16_supported():
+            supported_dtypes.append(torch.bfloat16)
+        return supported_dtypes
 
     # Misc
     def is_available(self):
@@ -188,31 +204,39 @@ class MPS_Accelerator(DeepSpeedAccelerator):
     # Tensor operations
     @property
     def BFloat16Tensor(self):
-        return
+        return torch.BFloat16Tensor
 
     @property
     def ByteTensor(self):
-        return
+        return torch.ByteTensor
 
     @property
     def DoubleTensor(self):
-        return
+        return torch.DoubleTensor
 
     @property
     def FloatTensor(self):
-        return
+        return torch.FloatTensor
 
     @property
     def HalfTensor(self):
-        return
+        return torch.HalfTensor
 
     @property
     def IntTensor(self):
-        return
+        return torch.IntTensor
 
     @property
     def LongTensor(self):
-        return
+        return torch.LongTensor
+
+    # Apple Silicon has unified memory, so host tensors are already directly accessible to the GPU
+    # and there is nothing to pin. torch's pin_memory() also raises for the MPS backend.
+    def _torch_pin_memory(self, tensor):
+        return tensor
+
+    def _torch_is_pinned(self, tensor):
+        return tensor.device.type == 'cpu'
 
     def on_accelerator(self, tensor):
         device_str = str(tensor.device)
@@ -227,9 +251,9 @@ class MPS_Accelerator(DeepSpeedAccelerator):
             # if successful this also means we're doing a local install and not JIT compile path
             from op_builder import __deepspeed__  # noqa: F401 # type: ignore
 
-            return "op_builder"
+            return "op_builder.mps"
         except ImportError:
-            return "deepspeed.ops.op_builder"
+            return "deepspeed.ops.op_builder.mps"
 
     # create an instance of op builder, specified by class_name
     def create_op_builder(self, op_name):
@@ -240,9 +264,18 @@ class MPS_Accelerator(DeepSpeedAccelerator):
 
     # return an op builder class, specified by class_name
     def get_op_builder(self, class_name):
-        from deepspeed.ops.op_builder.cpu import NotImplementedBuilder
+        try:
+            # is op_builder from deepspeed or a 3p version? this should only succeed if it's deepspeed
+            # if successful this also means we're doing a local install and not JIT compile path
+            from op_builder import __deepspeed__  # noqa: F401 # type: ignore
+            from op_builder.mps import FusedAdamBuilder, NotImplementedBuilder
+        except ImportError:
+            from deepspeed.ops.op_builder.mps import FusedAdamBuilder, NotImplementedBuilder
 
-        return NotImplementedBuilder
+        if class_name == "FusedAdamBuilder":
+            return FusedAdamBuilder
+        else:
+            return NotImplementedBuilder
 
     def build_extension(self):
         from torch.utils.cpp_extension import BuildExtension

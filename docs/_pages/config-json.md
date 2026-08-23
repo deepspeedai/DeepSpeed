@@ -1338,6 +1338,8 @@ Use a built-in preset but override specific naming/weight fields for a fine-tune
 | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
 | Offloads activation checkpoint inputs to CPU. With `partition_activations` it offloads the partitioned activations; otherwise it uses an asynchronous pinned side-stream copy that overlaps the CPU transfer with compute. | `false` |
 
+The asynchronous side-stream copy matches the peak-memory reduction of a blocking copy at a fraction of the step-time cost. On a single H200 with Qwen3-8B full-parameter SFT (`use_reentrant=False`), it lowers the GPU activation peak by up to ~14% at 32K sequence length while staying within ~2% of the no-offload step time, whereas a blocking offload is 1.4–1.9x slower. For very long sequences, set `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` to avoid allocator fragmentation from the offload/restore cycle.
+
 
 <i>**contiguous_memory_optimization**</i>: [boolean]
 

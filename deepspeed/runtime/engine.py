@@ -975,15 +975,20 @@ class DeepSpeedEngine(Module):
         """
         Pass through attributes defined in the model if they are not overridden by ds-engine.
         """
-
-        _module = {}
-        if "module" in self.__dict__:
-            _module = self.__dict__['module']
-        if name in dir(self):
-            return getattr(self, name)
-        elif name in dir(_module):
-            return getattr(_module, name)
-        else:
+        try:
+            return super().__getattr__(name)
+        except AttributeError:
+            _module = self.__dict__.get("module")
+            if _module is None:
+                try:
+                    _module = super().__getattr__("module")
+                except AttributeError:
+                    _module = None
+            if _module is not None:
+                try:
+                    return getattr(_module, name)
+                except AttributeError:
+                    pass
             raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
 
     def checkpoint_serialization_enabled(self):
