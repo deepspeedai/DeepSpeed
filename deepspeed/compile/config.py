@@ -22,7 +22,11 @@ class CompileConfig(DeepSpeedConfigModel):
     """ In free activation mode, activations no less than this threshold (in byte) are eagerly freed """
 
     offload_activation: bool = False
-    """ Turn on/off the activation offloading """
+    """ Move activations that the forward pass saves for the backward pass to pinned host memory,
+    and bring each one back shortly before the backward pass reads it. Only tensors of at least 5MB
+    with a fixed shape are considered, and only as many as the memory budget requires. Runs in place
+    of the prefetch/selective-gather passes and is mutually exclusive with offload_parameters and
+    offload_opt_states. """
 
     offload_activation_pin_memory: bool = True
     """ Pin host buffers used for DeepCompile activation offload. Required for

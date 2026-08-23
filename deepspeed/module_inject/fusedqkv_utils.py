@@ -228,7 +228,7 @@ def shard_value_with_share_qk(
     head_dim = total_size // num_heads
     assert (num_heads % world_size == 0)
     if world_size > num_heads // 2:
-        RuntimeError(f"world_size {world_size} is larger than half of num_heads {num_heads}")
+        raise RuntimeError(f"world_size {world_size} is larger than half of num_heads {num_heads}")
     head_per_rank = num_heads // world_size
     q_head_start = rank * head_per_rank
     # mapping q_head to v_head

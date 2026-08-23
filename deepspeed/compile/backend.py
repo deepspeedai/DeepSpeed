@@ -31,7 +31,7 @@ from .profilers.graph_profile import MemoryProfilingInterpreter
 from .patch_compiled_func import (clear_backward_inputs, patch_compiled_func, pop_backward_input,
                                   register_backward_frame, unpatch_compiled_func)
 from .util import get_input_nodes, get_activation_node_names, get_index_by_graph_id, get_deepcompile_handle, log_rank0, is_backend_inductor
-from .partitioner import get_wrapped_partitioner
+from .partitioner import get_num_fwd_outputs, get_wrapped_partitioner
 from .inductor import register_custom_ops, patch_create_aot_dispatcher_function
 from .input_storage import InputStorage
 
@@ -341,6 +341,7 @@ def make_backend(backend, compile_config, compile_kwargs={}, owned_frames=None):
             needs_backward = frame_id in frames_partitioned
             graph_order_with_frame_id.set_needs_backward(frame_id, needs_backward)
             profiling_results[graph_id].needs_backward = needs_backward
+            profiling_results[graph_id].num_fwd_outputs = get_num_fwd_outputs(frame_id)
 
             if needs_backward:
                 if len(frames_needing_bwd) == 0:

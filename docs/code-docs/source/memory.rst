@@ -313,15 +313,39 @@ APIs:
 callers can either allocate a shaped copy of ``tensor`` or obtain a flat locked
 buffer for later filling.
 
+Pin on/off vs backend
+=====================
+
+Whether to pin and how to pin are orthogonal:
+
+* **On/off:** ``zero_optimization.offload_*.pin_memory`` (ZeRO CPU offload),
+  ``use_pin_memory`` on eager activation checkpoint offload
+  (``CheckpointHiddenStatesOffload``), and
+  ``compile.offload_activation_pin_memory`` (DeepCompile activation offload).
+  All default to pinning so async copies can use full DMA bandwidth; set
+  false only under tight memlock limits (``ulimit -l``).
+* **How:** ``DS_PIN_MEMORY_BACKEND=torch|native`` (environment only; not a
+  ``ds_config`` field). Every call site that pins through
+  ``get_accelerator().pin_memory()`` honors this env var, including ZeRO
+  CPU-offload buffers and eager activation checkpoint offload. Keep the default
+  ``torch`` backend for activation offload: ``native`` is ``mlock`` without
+  ``cudaHostRegister``, so its host buffers are not registered for accelerator
+  DMA and the offload's async copies can still block. DeepCompile activation
+  offload pins with ATen ``pinned_memory`` and does **not** use
+  ``DS_PIN_MEMORY_BACKEND``.
+
 Backend Selection
 =================
 
 The pinning implementation is selected with the ``DS_PIN_MEMORY_BACKEND``
 environment variable (default ``torch``).
 
-Both backends page-lock host memory for DMA, are visible to AIO/GDS I/O
-handles (so DeepNVMe can skip bounce buffers), and are counted by
-``track_pinned_memory`` when pages are actually locked. Differences:
+The ``torch`` backend page-locks host memory for **accelerator DMA**
+(``cudaHostRegister`` / device-specific pin). The ``native`` backend
+page-locks via ``posix_memalign`` + ``mlock`` for AIO/GDS (DeepNVMe can
+skip bounce buffers) and does **not** register the allocation with CUDA/XPU,
+so async GPU copies to native-pinned tensors can still block. Both are
+counted by ``track_pinned_memory`` when pages are actually locked. Differences:
 
 .. list-table:: Differences between ``torch`` and ``native`` pin backends
    :header-rows: 1

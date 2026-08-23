@@ -14,9 +14,6 @@ from unit.common import DistributedTest
 from deepspeed.utils.torch import required_torch_version
 from deepspeed.accelerator import get_accelerator
 
-if torch.half not in get_accelerator().supported_dtypes():
-    pytest.skip(f"fp16 not supported, valid dtype: {get_accelerator().supported_dtypes()}", allow_module_level=True)
-
 pytestmark = pytest.mark.skipif(not required_torch_version(min_version=1.3),
                                 reason='requires Pytorch version 1.3 or above')
 
@@ -26,6 +23,34 @@ def within_range(val, target, tolerance):
 
 
 TOLERANCE = 0.05
+
+
+@pytest.mark.sequential
+@pytest.mark.skipif(not required_torch_version(min_version=2.0), reason="requires Pytorch version 2.0 or above")
+def test_repeated_profile_restores_operations():
+
+    class AttentionModel(torch.nn.Module):
+
+        def forward(self, query, key, value):
+            return torch.nn.functional.scaled_dot_product_attention(query, key, value)
+
+    model = AttentionModel()
+    inputs = [torch.randn(2, 4, 16, 8) for _ in range(3)]
+    prof = FlopsProfiler(model)
+    original_operations = (torch.nn.functional.scaled_dot_product_attention, torch.Tensor.__matmul__, torch.bmm)
+
+    profiles = []
+    for _ in range(3):
+        prof.start_profile()
+        model(*inputs)
+        prof.stop_profile()
+        profiles.append((prof.get_total_flops(), prof.get_total_macs()))
+        prof.end_profile()
+
+        restored_operations = (torch.nn.functional.scaled_dot_product_attention, torch.Tensor.__matmul__, torch.bmm)
+        assert restored_operations == original_operations
+
+    assert profiles == [(65536, 32768)] * 3
 
 
 class LeNet5(torch.nn.Module):
@@ -62,6 +87,9 @@ class TestFlopsProfiler(DistributedTest):
     world_size = 1
 
     def test(self):
+        if torch.half not in get_accelerator().supported_dtypes():
+            pytest.skip(f"fp16 not supported, valid dtype: {get_accelerator().supported_dtypes()}")
+
         config_dict = {
             "train_batch_size": 1,
             "steps_per_print": 1,

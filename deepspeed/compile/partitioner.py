@@ -3,7 +3,7 @@
 
 # DeepSpeed Team
 
-from typing import Tuple, List, Set
+from typing import Dict, Optional, Tuple, List, Set
 
 import torch
 from torch.fx import GraphModule, Graph, Node
@@ -80,6 +80,16 @@ def _recompute_param_aliases(joint_graph: Graph, param_indices: List[Tuple[int, 
         # and can make long-sequence compiled backward graphs OOM.
 
 
+# How many of a forward graph's outputs the caller receives, per dynamo frame. Passes that rewrite
+# the forward output need it to tell those values apart from the ones saved for the backward pass,
+# and the partitioner is the only place that knows the split.
+_num_fwd_outputs_by_frame: Dict[int, int] = {}
+
+
+def get_num_fwd_outputs(frame_id: int) -> Optional[int]:
+    return _num_fwd_outputs_by_frame.get(frame_id)
+
+
 def get_wrapped_partitioner(
     z3_partition: bool,
     param_indices: List[Tuple[int, int, torch.Size]],
@@ -91,6 +101,7 @@ def get_wrapped_partitioner(
     def partition_recompute_ds_params(joint_module: GraphModule, _joint_inputs, *, num_fwd_outputs,
                                       **kwargs) -> Tuple[GraphModule, GraphModule]:
         frames_partitioned.add(frame_id)
+        _num_fwd_outputs_by_frame[frame_id] = num_fwd_outputs
         if z3_partition:
             _recompute_param_aliases(joint_module.graph, param_indices)
         return partition_fn(joint_module, _joint_inputs, num_fwd_outputs=num_fwd_outputs, **kwargs)
