@@ -130,6 +130,8 @@ def stage_on_cpu(func):
             return [_stage(t, pairs) for t in arg]
         return arg
 
+    signature = inspect.signature(func)
+
     def wrapper(self, *args, **kwargs):
         pairs = []
         args = [_stage(arg, pairs) for arg in args]
@@ -143,7 +145,9 @@ def stage_on_cpu(func):
             for device_tensor, cpu_tensor in pairs:
                 device_tensor.copy_(cpu_tensor)
 
-        if kwargs.get('async_op', False):
+        # async_op is usually forwarded positionally, so resolve it against the real signature.
+        bound_args = signature.bind(self, *args, **kwargs)
+        if bound_args.arguments.get('async_op', False):
             return StagedWork(work, copy_back)
         copy_back()
         return work
