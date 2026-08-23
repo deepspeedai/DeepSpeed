@@ -985,8 +985,11 @@ class DeepSpeedEngine(Module):
                 except AttributeError:
                     _module = None
             if _module is not None:
-                return getattr(_module, name)
-            raise
+                try:
+                    return getattr(_module, name)
+                except AttributeError:
+                    pass
+            raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
 
     def checkpoint_serialization_enabled(self):
         return self._config.checkpoint_config[CHECKPOINT_SERIALIZATION]

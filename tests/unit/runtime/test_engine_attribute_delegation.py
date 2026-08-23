@@ -31,5 +31,7 @@ def test_getattr_delegates_missing_attributes_to_model():
 def test_getattr_raises_for_missing_attribute():
     engine = _make_engine()
 
-    with pytest.raises(AttributeError):
+    with pytest.raises(AttributeError) as exc_info:
         _ = engine.missing_attribute
+
+    assert str(exc_info.value) == "'DeepSpeedEngine' object has no attribute 'missing_attribute'"
