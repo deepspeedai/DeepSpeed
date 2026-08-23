@@ -416,21 +416,78 @@ def test_generate_calls_graph_capture_when_enabled():
     rollout._generate_graph.assert_called_once()
 
 
-def test_generate_disables_eos_early_exit():
+def test_generate_keeps_ranks_in_lockstep_and_pads_after_eos():
     engine = _make_engine()
     tok = _make_tokenizer()
     rollout = HybridEngineRollout(engine, tok)
-    engine.module.generate.return_value = torch.tensor([[1, 2, 3, 4]])
+    engine.module.generate.return_value = torch.tensor([[10, 11, 5, 2, 7, 8]])
 
     req = MagicMock()
-    req.prompt_ids = torch.tensor([[1, 2]])
+    req.prompt_ids = torch.tensor([[10, 11]])
     req.prompt_attention_mask = torch.ones(1, 2, dtype=torch.long)
     sampling = MagicMock()
     sampling.temperature = 0
     sampling.n_samples_per_prompt = 1
-    sampling.max_new_tokens = 2
+    sampling.max_new_tokens = 4
     sampling.top_p = 1.0
+
+    result = rollout.generate(req, sampling)
+
+    assert engine.module.generate.call_args.kwargs['eos_token_id'] is None
+    assert result.input_ids.tolist() == [[10, 11, 5, 2, 0, 0]]
+    assert result.attention_mask.tolist() == [[1, 1, 1, 1, 0, 0]]
+
+
+def test_pad_after_eos_handles_different_lengths_and_missing_eos():
+    output_ids = torch.tensor([
+        [10, 11, 2, 7, 8, 9],
+        [10, 11, 5, 6, 2, 9],
+        [10, 11, 5, 6, 7, 8],
+    ])
+
+    padded, response_attn = HybridEngineRollout._pad_after_eos(output_ids, 2, eos_token_id=2, pad_token_id=0)
+
+    assert padded.tolist() == [
+        [10, 11, 2, 0, 0, 0],
+        [10, 11, 5, 6, 2, 0],
+        [10, 11, 5, 6, 7, 8],
+    ]
+    assert response_attn.tolist() == [
+        [1, 0, 0, 0],
+        [1, 1, 1, 0],
+        [1, 1, 1, 1],
+    ]
+
+
+def test_pad_after_eos_keeps_eos_attended_when_eos_is_pad():
+    output_ids = torch.tensor([[10, 11, 5, 2, 7, 8]])
+
+    padded, response_attn = HybridEngineRollout._pad_after_eos(output_ids, 2, eos_token_id=2, pad_token_id=2)
+
+    assert padded.tolist() == [[10, 11, 5, 2, 2, 2]]
+    assert response_attn.tolist() == [[1, 1, 0, 0]]
+
+
+def test_pad_after_eos_supports_multiple_eos_ids():
+    output_ids = torch.tensor([[10, 11, 5, 3, 7, 2]])
+
+    padded, response_attn = HybridEngineRollout._pad_after_eos(output_ids, 2, eos_token_id=[2, 3], pad_token_id=0)
+
+    assert padded.tolist() == [[10, 11, 5, 3, 0, 0]]
+    assert response_attn.tolist() == [[1, 1, 0, 0]]
+
+
+def test_generate_accepts_zero_pad_token_id():
+    engine = _make_engine()
+    tok = _make_tokenizer()
+    rollout = HybridEngineRollout(engine, tok)
+    engine.module.generate.return_value = torch.tensor([[10, 11, 5, 6]])
+
+    req = MagicMock()
+    req.prompt_ids = torch.tensor([[10, 11]])
+    req.prompt_attention_mask = torch.ones(1, 2, dtype=torch.long)
+    sampling = MagicMock(temperature=0, n_samples_per_prompt=1, max_new_tokens=2, top_p=1.0)
 
     rollout.generate(req, sampling)
 
-    assert engine.module.generate.call_args.kwargs['eos_token_id'] is None
+    assert engine.module.generate.call_args.kwargs['pad_token_id'] == 0

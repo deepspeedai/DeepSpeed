@@ -57,6 +57,8 @@ class HybridEngineRollout(RolloutEngine):
         pad_token_id = self.tokenizer.pad_token_id
         if pad_token_id is None:
             pad_token_id = self.tokenizer.eos_token_id
+        if pad_token_id is None:
+            raise ValueError("The tokenizer must define pad_token_id or eos_token_id")
 
         module = self.engine.module
 
@@ -112,10 +114,22 @@ class HybridEngineRollout(RolloutEngine):
             accelerator.synchronize()
             generation_end = time.perf_counter()
 
+        # Generation deliberately ignores EOS above so ZeRO-3 ranks execute
+        # the same number of parameter-gather collectives. Restore the usual
+        # generation semantics before returning: retain the first EOS in each
+        # response and replace every later token with padding.
+        output_ids, response_attn = self._pad_after_eos(
+            output_ids,
+            response_start=prompt_len,
+            eos_token_id=self.tokenizer.eos_token_id,
+            pad_token_id=pad_token_id,
+        )
+
         # Build attention mask: pad positions (both left padding from prompt
         # and right padding from EOS / shorter sequences) are 0.
         response_start = prompt_len
         attention_mask = (output_ids != pad_token_id).long()
+        attention_mask[:, response_start:] = response_attn
         for i in range(total):
             prompt_valid = request.prompt_attention_mask[i // n if B > 1 else 0]
             attention_mask[i, :prompt_len] = prompt_valid
@@ -193,6 +207,29 @@ class HybridEngineRollout(RolloutEngine):
         pre_handle = module.register_forward_pre_hook(reduce_prompt_batch, with_kwargs=True)
         post_handle = module.register_forward_hook(expand_prompt_output, with_kwargs=True)
         return pre_handle, post_handle
+
+    @staticmethod
+    def _pad_after_eos(output_ids, response_start, eos_token_id, pad_token_id):
+        """Retain the first response EOS and pad every subsequent position."""
+        response_ids = output_ids[:, response_start:]
+        response_attn = (response_ids != pad_token_id)
+
+        if eos_token_id is None or response_ids.shape[1] == 0:
+            return output_ids, response_attn.long()
+
+        eos_ids = torch.as_tensor(eos_token_id, device=response_ids.device, dtype=response_ids.dtype).flatten()
+        is_eos = (response_ids.unsqueeze(-1) == eos_ids).any(dim=-1)
+        has_eos = is_eos.any(dim=-1)
+        first_eos_idx = is_eos.long().argmax(dim=-1)
+        positions = torch.arange(response_ids.shape[1], device=response_ids.device).unsqueeze(0)
+        after_first_eos = has_eos.unsqueeze(1) & (positions > first_eos_idx.unsqueeze(1))
+        first_eos = has_eos.unsqueeze(1) & (positions == first_eos_idx.unsqueeze(1))
+
+        output_ids = output_ids.clone()
+        output_ids[:, response_start:].masked_fill_(after_first_eos, pad_token_id)
+        # EOS is a valid generated token even when pad_token_id == eos_token_id.
+        response_attn = ((response_ids != pad_token_id) | first_eos) & ~after_first_eos
+        return output_ids, response_attn.long()
 
     # ------------------------------------------------------------------
     # Graph capture decode loop (greedy only)
