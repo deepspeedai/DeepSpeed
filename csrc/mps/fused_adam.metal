@@ -49,7 +49,10 @@ template [[host_name("fused_adam_half")]] kernel void fused_adam<half>(
     device half*, device const half*, device half*, device half*,
     constant float&, constant float&, constant float&, constant float&, constant float&,
     constant float&, constant float&, constant float&, uint);
+// bfloat is a Metal 3.1 type (macOS 14); older toolchains still get the float and half kernels.
+#if __METAL_VERSION__ >= 310
 template [[host_name("fused_adam_bfloat")]] kernel void fused_adam<bfloat>(
     device bfloat*, device const bfloat*, device bfloat*, device bfloat*,
     constant float&, constant float&, constant float&, constant float&, constant float&,
     constant float&, constant float&, constant float&, uint);
+#endif

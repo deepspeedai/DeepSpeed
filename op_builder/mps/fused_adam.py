@@ -16,6 +16,7 @@ class MPSFusedAdam:
     Falls back to torch._foreach_* ops when torch.mps.compile_shader is unavailable.
     """
     kernels = None
+    compile_failed = False
 
     @staticmethod
     def multi_tensor_adam(chunk_size, noop_flag_buffer, tensor_lists, lr, beta1, beta2, epsilon, step, adam_w_mode,
@@ -46,7 +47,11 @@ class MPSFusedAdam:
                 MPSFusedAdam._foreach_adam_step([[grad], [param], [exp_avg], [exp_avg_sq]], lr, beta1, beta2, epsilon,
                                                 adam_w_mode, bias_correction1, bias_correction2, weight_decay)
                 continue
-            kernel = MPSFusedAdam.kernels[param.dtype]
+            kernel = MPSFusedAdam.kernels.get(param.dtype)
+            if kernel is None:
+                MPSFusedAdam._foreach_adam_step([[grad], [param], [exp_avg], [exp_avg_sq]], lr, beta1, beta2, epsilon,
+                                                adam_w_mode, bias_correction1, bias_correction2, weight_decay)
+                continue
             kernel(param,
                    grad,
                    exp_avg,
@@ -65,6 +70,14 @@ class MPSFusedAdam:
     def _foreach_adam_step(tensor_lists, lr, beta1, beta2, epsilon, adam_w_mode, bias_correction1, bias_correction2,
                            weight_decay):
         grads, params, exp_avgs, exp_avg_sqs = tensor_lists
+        if params[0].dtype != torch.float32:
+            # Match the kernel contract (fp32 math, storage-dtype results); fp16 intermediates overflow otherwise.
+            fp32_lists = [[t.float() for t in tensors] for tensors in tensor_lists]
+            MPSFusedAdam._foreach_adam_step(fp32_lists, lr, beta1, beta2, epsilon, adam_w_mode, bias_correction1,
+                                            bias_correction2, weight_decay)
+            for originals, fp32_tensors in zip((params, exp_avgs, exp_avg_sqs), fp32_lists[1:]):
+                torch._foreach_copy_(originals, fp32_tensors)
+            return
 
         # L2 mode folds weight decay into the gradient; AdamW mode applies it to the parameter directly.
         if weight_decay != 0 and not adam_w_mode:
@@ -102,11 +115,22 @@ class FusedAdamBuilder(MetalOpBuilder):
         return MPSOpBuilder.is_compatible(self, verbose)
 
     def load(self, verbose=True):
-        if MPSFusedAdam.kernels is None and MetalOpBuilder.is_compatible(self):
-            library = self.load_metal_library()
+        if MPSFusedAdam.kernels is None and not MPSFusedAdam.compile_failed and MetalOpBuilder.is_compatible(self):
+            try:
+                library = self.load_metal_library()
+            except RuntimeError as e:
+                # Keep the foreach path usable rather than failing the optimizer on a shader compile error.
+                MPSFusedAdam.compile_failed = True
+                self.warning(f"Metal FusedAdam kernel failed to compile, using torch._foreach fallback: {e}")
+                return MPSFusedAdam
             MPSFusedAdam.kernels = {
                 torch.float32: library.fused_adam_float,
                 torch.float16: library.fused_adam_half,
-                torch.bfloat16: library.fused_adam_bfloat,
             }
+            # The bfloat kernel is only compiled on Metal 3.1+ (macOS 14); the library raises rather
+            # than returning an AttributeError for a missing entry point.
+            try:
+                MPSFusedAdam.kernels[torch.bfloat16] = library.fused_adam_bfloat
+            except RuntimeError:
+                pass
         return MPSFusedAdam
