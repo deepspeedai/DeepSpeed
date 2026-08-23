@@ -7,6 +7,8 @@ import deepspeed
 from deepspeed import utils
 from packaging import version
 import inspect
+from threading import Lock
+import weakref
 
 from .utils import *
 from .backend import *
@@ -96,17 +98,100 @@ class Noop:
 
 
 class StagedWork:
-    """Completes a staged collective by copying the CPU results back to the original device tensors."""
+    """Completes CPU-staged operations after their underlying work finishes."""
 
-    def __init__(self, work, copy_back):
+    def __init__(self, work, complete, staged_pairs=()):
         self.work = work
-        self.copy_back = copy_back
+        self._complete_callback = complete
+        self._complete_lock = Lock()
+        self._staged_tensors = {
+            id(cpu_tensor): (weakref.ref(cpu_tensor), device_tensor)
+            for device_tensor, cpu_tensor in staged_pairs
+        }
 
-    def wait(self):
+    def _complete(self):
+        with self._complete_lock:
+            if self._complete_callback is not None:
+                self._complete_callback()
+                self._complete_callback = None
+
+    def _discard(self):
+        with self._complete_lock:
+            self._complete_callback = None
+            self._staged_tensors.clear()
+
+    def _finish_if_successful(self):
+        if self.work is None:
+            self._complete()
+        elif self.work.is_completed():
+            if self.work.is_success():
+                self._complete()
+            else:
+                self._discard()
+
+    def _restore_staged_tensors(self, value):
+        staged_tensor = self._staged_tensors.get(id(value))
+        if staged_tensor is not None and staged_tensor[0]() is value:
+            return staged_tensor[1]
+        if isinstance(value, list):
+            return [self._restore_staged_tensors(item) for item in value]
+        if isinstance(value, tuple):
+            return tuple(self._restore_staged_tensors(item) for item in value)
+        return value
+
+    def wait(self, *args, **kwargs):
+        result = None
         if self.work is not None:
-            self.work.wait()
-        self.copy_back()
-        return None
+            result = self.work.wait(*args, **kwargs)
+        if result is False:
+            self._discard()
+        else:
+            self._complete()
+        return result
+
+    def is_completed(self):
+        completed = self.work is None or self.work.is_completed()
+        if completed:
+            self._finish_if_successful()
+        return completed
+
+    def synchronize(self):
+        if self.work is not None:
+            self.work.synchronize()
+        self._finish_if_successful()
+
+    def result(self):
+        result = None if self.work is None else self.work.result()
+        result = self._restore_staged_tensors(result)
+        self._finish_if_successful()
+        return result
+
+    def _wrap_future(self, future, restore_tensors, is_success=lambda value: True):
+
+        def complete(future):
+            value = future.value()
+            if not is_success(value):
+                self._discard()
+                return value
+            if restore_tensors:
+                value = self._restore_staged_tensors(value)
+            self._complete()
+            return value
+
+        return future.then(complete)
+
+    def get_future(self):
+        return self._wrap_future(self.work.get_future(), restore_tensors=True)
+
+    def get_future_result(self):
+        return self._wrap_future(self.work.get_future_result(),
+                                 restore_tensors=False,
+                                 is_success=lambda result: getattr(result, 'value', result) == 0)
+
+    def __getattr__(self, name):
+        if self.work is None:
+            raise AttributeError(name)
+        return getattr(self.work, name)
 
 
 def _needs_cpu_staging(tensor):
@@ -114,12 +199,15 @@ def _needs_cpu_staging(tensor):
     return isinstance(tensor, torch.Tensor) and tensor.device.type == 'mps'
 
 
-def stage_on_cpu(func):
-    """Runs a collective on CPU copies of any MPS tensor arguments, then copies the results back.
+def stage_on_cpu(func=None, *, always_async=False, copy_results=True):
+    """Runs a collective on CPU copies of MPS tensors and retains them until completion.
 
     This is what lets DeepSpeed use the gloo backend on Apple Silicon, where device tensors are
-    not supported by any torch.distributed backend. Unified memory keeps the copies cheap.
+    not supported by any torch.distributed backend. Results are copied back unless the operation
+    only reads its staged inputs.
     """
+    if func is None:
+        return lambda wrapped_func: stage_on_cpu(wrapped_func, always_async=always_async, copy_results=copy_results)
 
     def _stage(arg, pairs):
         if _needs_cpu_staging(arg):
@@ -141,15 +229,29 @@ def stage_on_cpu(func):
 
         work = func(self, *args, **kwargs)
 
-        def copy_back():
-            for device_tensor, cpu_tensor in pairs:
-                device_tensor.copy_(cpu_tensor)
+        if copy_results:
+
+            def complete():
+                with torch.no_grad():
+                    for device_tensor, cpu_tensor in pairs:
+                        device_tensor.copy_(cpu_tensor)
+                pairs.clear()
+
+            staged_pairs = pairs
+        else:
+            staged_inputs = [cpu_tensor for _, cpu_tensor in pairs]
+            pairs.clear()
+
+            def complete():
+                staged_inputs.clear()
+
+            staged_pairs = ()
 
         # async_op is usually forwarded positionally, so resolve it against the real signature.
         bound_args = signature.bind(self, *args, **kwargs)
-        if bound_args.arguments.get('async_op', False):
-            return StagedWork(work, copy_back)
-        copy_back()
+        if always_async or bound_args.arguments.get('async_op', False):
+            return StagedWork(work, complete, staged_pairs)
+        complete()
         return work
 
     return wrapper
@@ -427,12 +529,12 @@ class TorchBackend(Backend):
         return torch.distributed.recv(tensor=tensor, src=src, group=group, tag=tag)
 
     @disable_compiler_collective
-    @stage_on_cpu
+    @stage_on_cpu(always_async=True, copy_results=False)
     def isend(self, tensor, dst, group=None, tag=0):
         return torch.distributed.isend(tensor=tensor, dst=dst, group=group, tag=tag)
 
     @disable_compiler_collective
-    @stage_on_cpu
+    @stage_on_cpu(always_async=True)
     def irecv(self, tensor, src=None, group=None, tag=0):
         return torch.distributed.irecv(tensor=tensor, src=src, group=group, tag=tag)
 

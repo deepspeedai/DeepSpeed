@@ -384,13 +384,13 @@ def recv(tensor, src=None, group=None, tag=0, prof=False, log_name='recv', debug
 @timed_op
 def isend(tensor, dst, group=None, tag=0, prof=False, log_name='isend', debug=get_caller_func()):
     global cdb
-    return cdb.send(tensor=tensor, dst=dst, group=group, tag=tag)
+    return cdb.isend(tensor=tensor, dst=dst, group=group, tag=tag)
 
 
 @timed_op
 def irecv(tensor, src=None, group=None, tag=0, prof=False, log_name='irecv', debug=get_caller_func()):
     global cdb
-    return cdb.recv(tensor=tensor, src=src, group=group, tag=tag)
+    return cdb.irecv(tensor=tensor, src=src, group=group, tag=tag)
 
 
 @timed_op
