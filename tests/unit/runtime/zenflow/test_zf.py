@@ -6,10 +6,20 @@
 import pytest
 import deepspeed.comm as dist
 from deepspeed.accelerator import get_accelerator
+from deepspeed.runtime.zenflow.zenflow_stage_1_and_2 import _num_selected_columns
 
 from unit.common import DistributedTest
 from unit.simple_model import SimpleModel, random_dataloader
 import deepspeed
+
+
+@pytest.mark.parametrize("num_columns,topk_ratio,expected", [
+    (0, 0.01, 0),
+    (50, 0.01, 1),
+    (200, 0.01, 2),
+])
+def test_num_selected_columns_has_nonzero_floor(num_columns, topk_ratio, expected):
+    assert _num_selected_columns(num_columns, topk_ratio) == expected
 
 
 class BaseZenFlowTest:
