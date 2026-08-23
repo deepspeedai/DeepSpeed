@@ -23,7 +23,6 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_REPO_ROOT))
 
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer
 
 import deepspeed
 import deepspeed.comm as dist
@@ -64,6 +63,8 @@ def _validate_args(args):
 
 
 def _load_model_and_tokenizer(model_name, dtype, device):
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     if tokenizer.pad_token_id is None:
         if tokenizer.eos_token_id is None:
