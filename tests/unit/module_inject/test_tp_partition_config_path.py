@@ -13,6 +13,7 @@ import torch.nn as nn
 
 from deepspeed.module_inject.auto_tp import AutoTP, AutoTPConfig, PartitionType, TPLayerSpec
 from deepspeed.module_inject.layers import LinearLayer
+from deepspeed.module_inject.tp_plan_converter import TPPlanConverter
 
 
 class SubAttn(nn.Module):
@@ -170,6 +171,28 @@ def test_gathered_lm_head_falls_back_for_runtime_parameter_tie():
     assert model.lm_head.weight is model.embed_tokens.weight
 
     _build_gathered_lm_head_autotp(model)._replace_module(model)
+
+    assert isinstance(model.embed_tokens, nn.Embedding)
+    assert isinstance(model.lm_head, nn.Linear)
+    assert model.lm_head.weight is model.embed_tokens.weight
+
+
+def test_tied_embedding_plan_leaves_lm_head_and_embedding_replicated():
+    model = OutputModel(tied=True)
+    specs = TPPlanConverter.convert({"embed_tokens": "embedding_rowwise", "lm_head": "colwise_gather_output"})
+
+    autotp = AutoTP(
+        module=model,
+        all_reduce_linears=[],
+        prefix="",
+        state_dict=None,
+        linear_layer_setting=None,
+        orig_layer_impl=None,
+        partition_config=AutoTPConfig(layer_specs=specs),
+    )
+    autotp.set_tensor_parallel_config(1, None)
+    autotp.update_linear_policies()
+    autotp._replace_module(model)
 
     assert isinstance(model.embed_tokens, nn.Embedding)
     assert isinstance(model.lm_head, nn.Linear)
