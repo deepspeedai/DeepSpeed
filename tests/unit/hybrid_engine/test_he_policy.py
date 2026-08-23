@@ -29,13 +29,14 @@ def _make_engine(module):
     return engine
 
 
-def test_unsupported_model_uses_native_fallback(monkeypatch):
+def test_unsupported_model_uses_native_fallback(monkeypatch, caplog):
     monkeypatch.setattr(hybrid_engine, 'replace_policies', [SupportedPolicy])
     engine = _make_engine(nn.Sequential(UnsupportedLayer(), nn.Linear(2, 2), nn.LayerNorm(2)))
 
     engine.populate_all_inference_policies()
 
     assert engine.inference_policies == {}
+    assert "Hybrid Engine inference acceleration is unavailable" in caplog.text
 
 
 def test_supported_model_registers_auxiliary_policies(monkeypatch):

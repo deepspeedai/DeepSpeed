@@ -137,6 +137,12 @@ class DeepSpeedHybridEngine(DeepSpeedEngine):
 
         has_transformer_policy = any(module.__class__ in self.inference_policies for module in self.module.modules())
         if not has_transformer_policy:
+            logger.warning(
+                "No compatible DeepSpeed inference policy found for model type %s. "
+                "Hybrid Engine inference acceleration is unavailable; rollout will "
+                "use the model's native generate() path.",
+                type(self.module).__name__,
+            )
             self.inference_policies = {}
             return
 
