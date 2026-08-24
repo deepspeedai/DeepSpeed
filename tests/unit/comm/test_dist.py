@@ -128,6 +128,94 @@ class TestDistAllReduce(DistributedTest):
         assert torch.all(x == result)
 
 
+class FakeP2PWork:
+    """Stands in for a torch.distributed Work so the staging wrapper can be tested single-process."""
+
+    def __init__(self, fill=None):
+        self.fill = fill
+
+    def wait(self):
+        if self.fill is not None:
+            self.fill()
+        return True
+
+
+@pytest.mark.skipif(get_accelerator().device_name() != 'mps', reason="covers the MPS CPU-staging path")
+class TestMpsStagedP2P:
+
+    def test_irecv_defers_copy_back_to_wait(self, monkeypatch):
+        from deepspeed.comm.torch import TorchBackend, StagedWork
+        captured = {}
+
+        def fake_irecv(tensor, src=None, group=None, tag=0):
+            captured['staged'] = tensor
+            return FakeP2PWork(fill=lambda: tensor.copy_(torch.arange(16, dtype=torch.float32)))
+
+        monkeypatch.setattr(torch.distributed, 'irecv', fake_irecv)
+        backend = TorchBackend.__new__(TorchBackend)
+        received = torch.zeros(16, dtype=torch.float32, device='mps')
+
+        handle = backend.irecv(received, src=0)
+
+        # gloo must see a CPU tensor, and the MPS tensor must stay untouched until wait().
+        assert isinstance(handle, StagedWork)
+        assert captured['staged'].device.type == 'cpu'
+        assert received.abs().sum().item() == 0
+        assert handle.wait() is True
+        assert torch.equal(received.cpu(), torch.arange(16, dtype=torch.float32))
+
+    def test_isend_stages_payload_on_cpu(self, monkeypatch):
+        from deepspeed.comm.torch import TorchBackend, StagedWork
+        captured = {}
+
+        def fake_isend(tensor, dst=None, group=None, tag=0):
+            captured['staged'] = tensor
+            return FakeP2PWork()
+
+        monkeypatch.setattr(torch.distributed, 'isend', fake_isend)
+        backend = TorchBackend.__new__(TorchBackend)
+        payload = torch.arange(16, dtype=torch.float32, device='mps')
+
+        handle = backend.isend(payload, dst=0)
+
+        assert isinstance(handle, StagedWork)
+        assert captured['staged'].device.type == 'cpu'
+        assert torch.equal(captured['staged'], torch.arange(16, dtype=torch.float32))
+        assert handle.wait() is True
+
+
+class TestDistIsendIrecv(DistributedTest):
+    world_size = 2
+
+    def _launch_procs(self, num_procs, init_method):
+        # Two gloo ranks do not need two devices, but the base class gates process count on
+        # device_count(), which reports sockets on CPU and would skip this test on CI. Bypass
+        # the gate there and pin gloo so oneCCL bindings are not silently picked up.
+        if get_accelerator().device_name() != 'cpu':
+            return super()._launch_procs(num_procs, init_method)
+        self.backend = 'gloo'
+        torch.multiprocessing.set_start_method('forkserver', force=True)
+        self._launch_daemonic_procs(num_procs, init_method)
+
+    def test(self):
+        rank = dist.get_rank()
+        device = get_accelerator().device_name()
+        length = 4096
+        if rank == 0:
+            payload = torch.arange(length, dtype=torch.float32).to(device)
+            handle = dist.isend(payload, dst=1)
+        else:
+            received = torch.zeros(length, dtype=torch.float32).to(device)
+            handle = dist.irecv(received, src=0)
+        # isend/irecv are asynchronous by contract: they must hand back a waitable handle,
+        # and the received buffer is only valid after wait() completes.
+        assert hasattr(handle, 'wait')
+        handle.wait()
+        if rank == 1:
+            expected = torch.arange(length, dtype=torch.float32).to(device)
+            assert torch.equal(received, expected)
+
+
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("num_elements", [128, 3])
 class TestDistInferenceAllReduce(DistributedTest):
