@@ -81,10 +81,7 @@ class TestAdamConfigs(DistributedTest):
 
 
 @pytest.mark.parametrize('adam_w_mode', [True, False], ids=["adamw", "adam"])
-# fp32 only: torch.optim in bf16 does its math in bf16 while the fused kernels compute in fp32,
-# so it is not a valid bf16 reference. Low-precision dtypes are covered against an explicit
-# fp32-math reference in the FusedAdam rework (#8300).
-@pytest.mark.parametrize('dtype', [torch.float], ids=["fp32"])
+@pytest.mark.parametrize('dtype', [torch.float, torch.bfloat16], ids=["fp32", "bf16"])
 def test_fused_adam_matches_torch(adam_w_mode, dtype):
     if dtype not in get_accelerator().supported_dtypes():
         pytest.skip(f"{dtype} not supported on {get_accelerator().device_name()}")
@@ -108,6 +105,7 @@ def test_fused_adam_matches_torch(adam_w_mode, dtype):
         ref_optimizer.step()
         ds_optimizer.step()
 
-    atol = 1e-5
+    # bf16 storage rounds differently depending on where intermediates are kept, so allow one ulp.
+    atol = 1e-5 if dtype == torch.float else 2e-2
     for ref_param, ds_param in zip(ref_params, ds_params):
         torch.testing.assert_close(ds_param.float(), ref_param.float(), atol=atol, rtol=0)
