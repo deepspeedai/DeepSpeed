@@ -63,6 +63,13 @@ except ImportError:
     pass
 
 
+def get_norm_dtype():
+    """Gradient norms accumulate in fp64 for accuracy, except on devices without fp64 (e.g. MPS)."""
+    if get_accelerator().is_fp64_supported():
+        return torch.double
+    return torch.float
+
+
 def is_zero_supported_optimizer(optimizer):
     if dist.get_rank() == 0:
         logger.info(f'Checking ZeRO support for optimizer={optimizer.__class__.__name__} type={type(optimizer)}')
@@ -150,7 +157,7 @@ def apply_to_tensors_only(function, value, warning_msg_fn=None):
     Apply `function` to every Tensor in `value`.
 
     Args:
-        functional: The function class to apply.
+        function: The function class to apply.
         value (Any): Target object to apply `function` to.
 
     Returns:

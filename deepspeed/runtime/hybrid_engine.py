@@ -19,6 +19,7 @@ from torch import nn
 from deepspeed.utils import logger
 from deepspeed.module_inject.layers import LinearLayer, Normalize, EmbeddingLayer, OPTEmbedding
 from ..ops.transformer.inference.op_binding.workspace import WorkspaceOp
+from .hybrid_engine_graph import (DecodeGraphCache, decode_steps_from_generate_kwargs, validate_cuda_graph_support)
 
 try:
     import transformers
@@ -61,6 +62,17 @@ class DeepSpeedHybridEngine(DeepSpeedEngine):
 
         self.is_lora_fused = False
         self.workspace = WorkspaceOp()
+
+        self._orig_module_forward = None
+        self._decode_graphs = None
+        if self._config.hybrid_engine.enable_cuda_graph and len(self._inference_containers) > 0:
+            unsupported = validate_cuda_graph_support(self._config.hybrid_engine, self._config.zero_config.stage)
+            if unsupported is not None:
+                logger.warning(f"HybridEngine: running without CUDA graphs. {unsupported}.")
+            else:
+                self._orig_module_forward = self.module.forward
+                self._decode_graphs = DecodeGraphCache(self._orig_module_forward,
+                                                       max_positions=self._config.hybrid_engine.max_out_tokens)
 
     def convert_to_linear_transposed(self, model):
 
@@ -172,6 +184,9 @@ class DeepSpeedHybridEngine(DeepSpeedEngine):
             self._total_batch_size = bsz * dist.get_world_size()
 
         self._t0 = time.time()
+
+        if self._decode_graphs is not None:
+            self._decode_graphs.begin_sequence(decode_steps_from_generate_kwargs(kwargs))
 
         if self.Z3_enabled and self.gather_all_layers:
             if self._config.hybrid_engine.inference_tp_size > 1:
@@ -414,6 +429,8 @@ class DeepSpeedHybridEngine(DeepSpeedEngine):
             if not self.Z3_enabled or self.gather_all_layers:
                 for orig_module, inference_layer in zip(self._orig_modules_others, self._other_layers):
                     orig_module.forward = inference_layer.forward
+        if self._decode_graphs is not None:
+            self.module.forward = self._decode_graphs
         if self.Z3_enabled:
             gc.collect()
             get_accelerator().empty_cache()
@@ -428,6 +445,8 @@ class DeepSpeedHybridEngine(DeepSpeedEngine):
                 orig_module.forward = orig_fwd
             for orig_module, orig_fwd in zip(self._orig_modules_others, self._orig_fwds_others):
                 orig_module.forward = orig_fwd
+            if self._decode_graphs is not None:
+                self.module.forward = self._orig_module_forward
         super().train(mode)
         if mode:
             self._training_start_time = time.time()

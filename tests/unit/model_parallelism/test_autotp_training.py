@@ -16,8 +16,8 @@ from unit.simple_model import SimpleModel, random_dataloader
 from deepspeed.utils import groups
 from contextlib import contextmanager
 from torch import nn
-from deepspeed.module_inject.layers import (LinearAllreduce, LinearLayer, LmHeadLinearAllreduce, set_autotp_mode,
-                                            is_autotp_training_mode)
+from deepspeed.module_inject.layers import LinearAllreduce, LinearLayer, set_autotp_mode, is_autotp_training_mode
+from deepspeed.module_inject.tp_shard import get_shard_size_list
 from unit.checkpoint.common import compare_lr_scheduler_states, compare_optimizer_states
 import os
 from deepspeed.runtime.utils import is_model_parallel_parameter
@@ -416,10 +416,12 @@ class TestTpDataloaderCorrectness(DistributedTest):
             model(batch[0], batch[1])
 
 
-def process_linear_layer(hidden_dim, input):
+def process_linear_layer(hidden_dim, input, output_dim=None):
     torch.manual_seed(42)
+    if output_dim is None:
+        output_dim = hidden_dim
     torch_linear = nn.Linear(hidden_dim,
-                             hidden_dim,
+                             output_dim,
                              dtype=preferred_dtype(),
                              device=get_accelerator().current_device())
     torch_out = torch_linear(input)
@@ -428,7 +430,12 @@ def process_linear_layer(hidden_dim, input):
     return torch_linear, torch_out
 
 
-def run_tp_layer_fwd_bwd(tp_size, tp_overlap_comm, column_parallel, use_tp_model_init=False, gather_output=False):
+def run_tp_layer_fwd_bwd(tp_size,
+                         tp_overlap_comm,
+                         column_parallel,
+                         use_tp_model_init=False,
+                         gather_output=False,
+                         output_dim=None):
     skip_on_device()
     hidden_dim = 128
     batch_size_per_device = 1
@@ -485,7 +492,7 @@ def run_tp_layer_fwd_bwd(tp_size, tp_overlap_comm, column_parallel, use_tp_model
 
     # Note: correctness checks below use standalone TP wrappers and do not
     # rely on the model's AutoTP-partitioned parameters.
-    torch_linear, torch_out = process_linear_layer(hidden_dim, input)
+    torch_linear, torch_out = process_linear_layer(hidden_dim, input, output_dim=output_dim)
     if column_parallel:
         linear = LinearLayer(deepcopy(torch_linear),
                              groups.get_tensor_model_parallel_group(),
@@ -495,10 +502,13 @@ def run_tp_layer_fwd_bwd(tp_size, tp_overlap_comm, column_parallel, use_tp_model
         loss.backward()
 
         expected_out = torch_out
+        output_partition_sizes = get_shard_size_list(torch_out.shape[-1], tp_size, linear.name)
+        tp_rank = groups.get_tensor_model_parallel_rank()
         if not gather_output:
-            expected_out = torch.chunk(torch_out, tp_size, dim=-1)[groups.get_tensor_model_parallel_rank()]
-        torch_grad = torch.chunk(torch_linear.weight.grad, tp_size, dim=0)[groups.get_tensor_model_parallel_rank()]
-        torch_bias_grad = torch.chunk(torch_linear.bias.grad, tp_size, dim=0)[groups.get_tensor_model_parallel_rank()]
+            shard_offset = sum(output_partition_sizes[:tp_rank])
+            expected_out = torch_out.narrow(-1, shard_offset, output_partition_sizes[tp_rank])
+        torch_grad = torch_linear.weight.grad.split(output_partition_sizes, dim=0)[tp_rank]
+        torch_bias_grad = torch_linear.bias.grad.split(output_partition_sizes, dim=0)[tp_rank]
 
         torch.testing.assert_close(linear.bias.grad,
                                    torch_bias_grad.to(get_accelerator().current_device()),
@@ -547,6 +557,9 @@ class TestTpLayerFwdBwd(DistributedTest):
 
     def testGatheredColumnParallel(self, tp_size: int, tp_overlap_comm: bool):
         run_tp_layer_fwd_bwd(tp_size, tp_overlap_comm, column_parallel=True, gather_output=True)
+
+    def testUnevenGatheredColumnParallel(self, tp_size: int, tp_overlap_comm: bool):
+        run_tp_layer_fwd_bwd(tp_size, tp_overlap_comm, column_parallel=True, gather_output=True, output_dim=129)
 
 
 # @pytest.mark.sequential
@@ -636,6 +649,68 @@ class TestParamsGather(DistributedTest):
 
         assert expected_tp_params == tp_params2
 
+    def test_uneven_linear_gather_params(self):
+        skip_on_device()
+        tp_size = 4
+        hidden_dim = 128
+        output_dim = 129
+        config_dict = {
+            "train_micro_batch_size_per_gpu": 1,
+            "optimizer": {
+                "type": "Adam",
+                "params": {
+                    "lr": 1e-6
+                }
+            },
+            "tensor_parallel": {
+                "autotp_size": tp_size,
+                "partition_config": {
+                    "use_default_specs": False,
+                    "layer_specs": [{
+                        "patterns": [".*\\.weight$"],
+                        "partition_type": "skip",
+                    }],
+                }
+            },
+            "zero_optimization": {
+                "stage": 0,
+            }
+        }
+        if preferred_dtype() is torch.float16:
+            config_dict["fp16"] = {"enabled": True}
+        elif preferred_dtype() is torch.bfloat16:
+            config_dict["bf16"] = {"enabled": True}
+
+        torch.manual_seed(42)
+        model = SequentialLinearModel(hidden_dim=hidden_dim)
+        model, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config_dict)
+
+        torch_linear = nn.Linear(hidden_dim, output_dim, dtype=preferred_dtype(), device="cpu")
+        total_params = sum(p.numel() for p in torch_linear.parameters())
+        tp_layer = LinearLayer(deepcopy(torch_linear), groups.get_tensor_model_parallel_group())
+        tp_rank = groups.get_tensor_model_parallel_rank()
+        output_partition_sizes = get_shard_size_list(output_dim, tp_size, tp_layer.name)
+        expected_tp_params = output_partition_sizes[tp_rank] * (hidden_dim + 1)
+
+        assert expected_tp_params == sum(p.numel() for p in tp_layer.parameters())
+
+        for name, param in tp_layer.named_parameters(recurse=False):
+            if is_model_parallel_parameter(param):
+                param.gather_params([param])
+
+        torch_linear = torch_linear.to(get_accelerator().current_device())
+        is_same_weights = all(
+            torch.equal(param1, param2) for param1, param2 in zip(tp_layer.parameters(), torch_linear.parameters()))
+
+        assert is_same_weights
+        assert total_params == sum(p.numel() for p in tp_layer.parameters())
+
+        for name, param in tp_layer.named_parameters(recurse=False):
+            if is_model_parallel_parameter(param):
+                param._tp_partition([param])
+
+        assert expected_tp_params == sum(p.numel() for p in tp_layer.parameters())
+
 
 def dummy_init_engine(config):
     # This is a dummy initialization function for the DeepSpeed engine.
@@ -702,8 +777,11 @@ class TestUnevenVocabLmHeadCheckpoint(DistributedTest):
 
         engine, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config_dict)
 
-        assert isinstance(engine.module.lm_head, LmHeadLinearAllreduce)
-        assert engine.module.lm_head.weight.shape == (vocab_size, hidden_dim // self.world_size)
+        tp_rank = groups.get_tensor_model_parallel_rank()
+        output_partition_sizes = get_shard_size_list(vocab_size, self.world_size, "lm_head")
+        assert isinstance(engine.module.lm_head, LinearLayer)
+        assert engine.module.lm_head.gather_output
+        assert engine.module.lm_head.weight.shape == (output_partition_sizes[tp_rank], hidden_dim)
 
         checkpoint = engine._consolidated_16bit_state_dict()
 

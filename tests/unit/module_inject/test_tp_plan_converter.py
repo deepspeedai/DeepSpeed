@@ -3,6 +3,8 @@
 
 # DeepSpeed Team
 
+import pytest
+
 from deepspeed.module_inject.tp_plan_converter import TPPlanConverter
 from deepspeed.module_inject.autotp_config import AutoTPConfig, PartitionType
 
@@ -69,10 +71,9 @@ class TestTPPlanConverter:
         assert specs[0].patterns[0].endswith(r"\.weight$")
 
     def test_empty_plan(self):
-        hf_plan = {}
-        specs = TPPlanConverter.convert(hf_plan)
-
-        assert len(specs) == 0
+        """An empty plan has nothing to convert, so the caller should fall back rather than
+        silently partition nothing."""
+        assert TPPlanConverter.convert({}) is None
 
     def test_multiple_patterns(self):
         hf_plan = {
@@ -109,11 +110,43 @@ class TestTPPlanConverter:
 
         assert re.match(down_pattern.patterns[0], "model.layers.5.mlp.down_proj.weight")
 
-    def test_unsupported_style_returns_none(self):
-        """Unsupported styles cause convert() to return None for fallback."""
+    def test_unsupported_style_rejects_whole_plan(self):
+        """Any unknown style must reject the plan outright, not skip the entry.
+
+        The converter has no notion of which entries pair with which, so applying the supported
+        subset can shard one half of a column/row pair — here o_proj would be row-sharded while
+        the q_proj feeding it stays whole — and break the model. Failing loudly also keeps the
+        model off the heuristic path, which breaks models like Llama4 by wrapping its MoE router.
+        """
         hf_plan = {"layers.*.q_proj": "local_colwise", "layers.*.o_proj": "rowwise"}
-        result = TPPlanConverter.convert(hf_plan)
-        assert result is None
+        with pytest.raises(ValueError, match="local_colwise"):
+            TPPlanConverter.convert(hf_plan)
+
+        hf_plan = {"layers.*.q_proj": "local_colwise", "layers.*.experts": "moe_tp_experts"}
+        with pytest.raises(ValueError, match="unsupported partition style"):
+            TPPlanConverter.convert(hf_plan)
+
+    def test_tied_embedding_style_converts_to_skip(self):
+        """`embedding_rowwise` is injected for every tied-embedding model, so rejecting it would
+        strand those models on the heuristic path. Tied embeddings stay replicated here, and the
+        entry carries no gradient all-reduce because the parameter is never split."""
+        hf_plan = {
+            "layers.*.self_attn.q_proj": "colwise",
+            "layers.*.self_attn.o_proj": "rowwise",
+            "embed_tokens": "embedding_rowwise",
+            "lm_head": "colwise_gather_output",
+        }
+        specs = TPPlanConverter.convert(hf_plan)
+
+        assert len(specs) == 4
+
+        embed_spec = [s for s in specs if "embed_tokens" in s.patterns[0]][0]
+        lm_head_spec = [s for s in specs if "lm_head" in s.patterns[0]][0]
+
+        assert embed_spec.partition_type == PartitionType.SKIP
+        assert not embed_spec.grad_allreduce
+        assert lm_head_spec.partition_type == PartitionType.COLUMN
+        assert lm_head_spec.gather_output
 
     def test_alternate_prefixes(self):
         """Test tp_plan with non-layers prefix"""

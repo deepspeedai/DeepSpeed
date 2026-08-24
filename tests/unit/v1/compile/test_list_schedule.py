@@ -28,6 +28,7 @@ def _define_dc_ops():
         torch.ops.dc.wait_allgather.default
         torch.ops.dc.release_param.default
         torch.ops.dc.reduce_grad.default
+        torch.ops.dc.offload_tensor.default
         return
     except AttributeError:
         pass
@@ -40,6 +41,10 @@ def _define_dc_ops():
             "reduce_grad(Tensor a, int graph_id, int id) -> Tensor",
             "free_tensors(Tensor[] tensors) -> ()",
             "end_backward(Tensor[] tensors, int graph_id, bool release_reduce_buckets = True) -> ()",
+            "offload_tensor(Tensor a, int id, int id) -> Tensor",
+            "reload_tensor(Tensor a, int id, int id) -> Tensor",
+            "wait_offload(Tensor a, int id, int id) -> Tensor",
+            "wait_reload(Tensor a, int id, int id) -> Tensor",
     ):
         try:
             lib.define(schema)
@@ -131,6 +136,27 @@ def _release(graph, arg, ds_id, name):
 
 def _scheduled_names(graph):
     return [node.name for node in schedule_mod.fast_free_schedule(graph, 0, 0, debug_log=True).nodes]
+
+
+@pytest.mark.parametrize("case", ["only_consumer", "later_real_use"])
+def test_get_last_uses_unconsumed_no_copy_wait(case):
+    graph = Graph()
+    param = _placeholder(graph, f"{case}_param")
+    allgather = _allgather(graph, param, 1, case)
+    wait = _wait(graph, allgather, 1, case)
+
+    later_use = _neg(graph, allgather, f"{case}_later_use") if case == "later_real_use" else None
+    graph.output((later_use, ) if later_use is not None else ())
+    graph.lint()
+
+    node_to_last_use, user_to_last_uses = compile_util.get_last_uses(graph)
+    node_to_uses = compile_util.get_real_uses(graph)
+
+    expected_last_use = later_use if later_use is not None else wait
+    assert node_to_last_use[allgather] is expected_last_use
+    assert user_to_last_uses[expected_last_use] == [allgather]
+    assert user_to_last_uses.get(wait, []) == ([] if later_use is not None else [allgather])
+    assert node_to_uses[allgather] == ([] if later_use is None else [later_use])
 
 
 def test_fast_free_schedule_keeps_zero_free_acc_filter():
@@ -406,6 +432,31 @@ def test_mark_output_never_reuse_mixed_pytree():
 
     assert wrapped == outputs
     assert graph.never_reuse_buffers == {"tensor_buffer"}
+
+
+def test_register_custom_ops_defines_every_op_it_registers(monkeypatch):
+    """register_custom_ops must not raise when only _define_dc_ops has run.
+
+    It registers each dc op in sequence, so an op the helper does not define raises AttributeError
+    partway through and everything after it -- including the graphsafe rng lowering -- is silently
+    never registered. That only shows up where the C++ extension is absent, which is CI.
+    """
+    _define_dc_ops()
+    registered_ops = []
+
+    monkeypatch.setattr(inductor_mod, "add_needs_realized_inputs", lambda _op: None)
+    monkeypatch.setattr(inductor_mod, "register_lowering",
+                        lambda op_overload, **_kwargs: lambda handler: registered_ops.append(op_overload) or handler)
+    monkeypatch.setattr(inductor_mod, "fallbacks", set())
+    monkeypatch.setattr(inductor_mod.Scheduler, "is_dc_patched", True, raising=False)
+
+    inductor_mod.register_custom_ops()
+
+    # Every dc op named in register_custom_ops should have reached register_lowering.
+    names = {getattr(op, "__name__", str(op)) for op in registered_ops}
+    for expected in ("offload_tensor", "wait_offload", "reload_tensor", "wait_reload"):
+        assert any(expected in str(op) for op in registered_ops), \
+            f"{expected} was never registered; _define_dc_ops is missing its schema. Registered: {sorted(names)}"
 
 
 def test_register_custom_ops_includes_graphsafe_rng_state_no_reuse(monkeypatch):

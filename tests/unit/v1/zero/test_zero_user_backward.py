@@ -14,6 +14,8 @@ from unit.simple_model import SimpleModel, random_dataloader
 from deepspeed.accelerator import get_accelerator
 from deepspeed.utils import safe_get_full_grad
 from deepspeed.runtime.zero.partition_parameters import ZeroParamStatus
+from deepspeed.ops.aio import AsyncIOBuilder
+from deepspeed.runtime.zero.offload_config import OffloadDeviceEnum
 
 
 class SimpleNonScalarModel(torch.nn.Module):
@@ -2042,28 +2044,8 @@ class TestUnmanagedGradientAccumulation(DistributedTest):
 
 
 class TestUnmanagedGradientAccumulationValidation(DistributedTest):
-    """Unmanaged mode rejects ZeRO offload (until follow-up PR)."""
+    """Unmanaged mode accepts disabled offload template blocks (device=none)."""
     world_size = 1
-
-    def test_unmanaged_rejects_zero_offload(self):
-        hidden_dim = 4
-        initialize_distributed()
-        torch.manual_seed(42)
-        model = SimpleModel(hidden_dim=hidden_dim, nlayers=2)
-        config = build_managed_gas_config(2, gradient_accumulation_steps=1, managed_gradient_accumulation=False)
-        config["zero_optimization"]["offload_optimizer"] = {"device": "cpu"}
-        with pytest.raises(AssertionError, match="not supported with ZeRO optimizer state offload"):
-            deepspeed.initialize(config=config, model=model, model_parameters=model.parameters())
-
-    def test_unmanaged_rejects_param_offload(self):
-        hidden_dim = 4
-        initialize_distributed()
-        torch.manual_seed(42)
-        model = SimpleModel(hidden_dim=hidden_dim, nlayers=2)
-        config = build_managed_gas_config(3, gradient_accumulation_steps=1, managed_gradient_accumulation=False)
-        config["zero_optimization"]["offload_param"] = {"device": "cpu"}
-        with pytest.raises(AssertionError, match="not supported with ZeRO parameter offload"):
-            deepspeed.initialize(config=config, model=model, model_parameters=model.parameters())
 
     def test_unmanaged_accepts_disabled_offload_blocks(self):
         # A disabled offload block (device="none") is not offload, so init must succeed.
@@ -2079,19 +2061,230 @@ class TestUnmanagedGradientAccumulationValidation(DistributedTest):
         engine.destroy()
 
 
-class TestUnmanagedGradientAccumulationOffloadValidation(DistributedTest):
-    """Unmanaged mode does not support ZeRO optimizer offload (stage 1: before the stage-2/3 guard)."""
-    world_size = 1
+def _build_unmanaged_offload_config(zero_stage,
+                                    gradient_accumulation_steps,
+                                    managed,
+                                    offload_param=False,
+                                    offload_device="cpu",
+                                    nvme_path=None):
+    config = build_managed_gas_config(zero_stage, gradient_accumulation_steps, managed_gradient_accumulation=managed)
+    offload_opt = {"device": offload_device}
+    if offload_device == OffloadDeviceEnum.nvme:
+        assert nvme_path is not None, "nvme_path is required for NVMe offload"
+        offload_opt["nvme_path"] = str(nvme_path)
+    config["zero_optimization"]["offload_optimizer"] = offload_opt
+    if offload_param:
+        offload_p = {"device": offload_device}
+        if offload_device == OffloadDeviceEnum.nvme:
+            offload_p["nvme_path"] = str(nvme_path)
+        config["zero_optimization"]["offload_param"] = offload_p
+    if offload_device == OffloadDeviceEnum.nvme:
+        # Small sub_group_size so each large param is its own swappable subgroup.
+        config["zero_optimization"]["sub_group_size"] = 100
+        config["aio"] = {"block_size": 1048576}
+    return config
 
-    def test_unmanaged_rejects_offload(self):
+
+def _run_unmanaged_vs_managed_offload(zero_stage,
+                                      gradient_accumulation_steps,
+                                      num_cycles,
+                                      offload_param=False,
+                                      offload_device="cpu",
+                                      nvme_path=None,
+                                      hidden_dim=4,
+                                      label=""):
+    device, _, _ = initialize_distributed()
+
+    def make_config(managed):
+        return _build_unmanaged_offload_config(zero_stage,
+                                               gradient_accumulation_steps,
+                                               managed=managed,
+                                               offload_param=offload_param,
+                                               offload_device=offload_device,
+                                               nvme_path=nvme_path)
+
+    torch.manual_seed(42)
+    if zero_stage == 3 and offload_device == OffloadDeviceEnum.nvme:
+        with deepspeed.zero.Init(config_dict_or_path=make_config(True)):
+            model_managed = SimpleModel(hidden_dim=hidden_dim, nlayers=2)
+    else:
+        model_managed = SimpleModel(hidden_dim=hidden_dim, nlayers=2)
+    managed_engine, _, _, _ = deepspeed.initialize(config=make_config(True),
+                                                   model=model_managed,
+                                                   model_parameters=model_managed.parameters())
+
+    torch.manual_seed(42)
+    if zero_stage == 3 and offload_device == OffloadDeviceEnum.nvme:
+        with deepspeed.zero.Init(config_dict_or_path=make_config(False)):
+            model_unmanaged = SimpleModel(hidden_dim=hidden_dim, nlayers=2)
+    else:
+        model_unmanaged = SimpleModel(hidden_dim=hidden_dim, nlayers=2)
+    unmanaged_engine, _, _, _ = deepspeed.initialize(config=make_config(False),
+                                                     model=model_unmanaged,
+                                                     model_parameters=model_unmanaged.parameters())
+
+    total_samples = num_cycles * gradient_accumulation_steps
+    batches = list(
+        random_dataloader(model=managed_engine,
+                          total_samples=total_samples,
+                          hidden_dim=hidden_dim,
+                          device=device,
+                          dtype=torch.float32))
+
+    for batch in batches:
+        loss = managed_engine(batch[0], batch[1])
+        managed_engine.backward(loss)
+        managed_engine.step()
+
+    for cycle in range(num_cycles):
+        for micro in range(gradient_accumulation_steps):
+            batch = batches[cycle * gradient_accumulation_steps + micro]
+            loss = unmanaged_engine(batch[0], batch[1])
+            unmanaged_engine.backward(loss)
+        unmanaged_engine.step()
+
+    managed_params = collect_deepspeed_parameters(managed_engine, zero_stage)
+    unmanaged_params = collect_deepspeed_parameters(unmanaged_engine, zero_stage)
+    compare_parameters(managed_params, unmanaged_params, label)
+
+    managed_engine.destroy()
+    unmanaged_engine.destroy()
+
+
+@pytest.mark.parametrize("zero_stage", [1, 2, 3])
+class TestUnmanagedGradientAccumulationOffload(DistributedTest):
+    """Unmanaged mode with ZeRO optimizer offload matches managed offload."""
+    world_size = 2
+
+    def test_unmanaged_matches_managed_optimizer_offload(self, zero_stage):
+        _run_unmanaged_vs_managed_offload(zero_stage,
+                                          gradient_accumulation_steps=4,
+                                          num_cycles=3,
+                                          label=f"unmanaged vs managed optimizer offload (stage {zero_stage})")
+
+
+class TestUnmanagedGradientAccumulationParamOffload(DistributedTest):
+    """Unmanaged ZeRO-3 with parameter + optimizer offload matches managed mode."""
+    world_size = 2
+
+    def test_unmanaged_matches_managed_param_offload(self):
+        _run_unmanaged_vs_managed_offload(zero_stage=3,
+                                          gradient_accumulation_steps=4,
+                                          num_cycles=2,
+                                          offload_param=True,
+                                          label="unmanaged vs managed param+optimizer offload (stage 3)")
+
+
+@pytest.mark.sequential
+class TestUnmanagedGradientAccumulationNvmeOffload(DistributedTest):
+    """Unmanaged ZeRO-3 NVMe offload matches managed NVMe offload."""
+    world_size = 2
+
+    def _skip_if_nvme_unsupported(self):
+        if not deepspeed.ops.__compatible_ops__[AsyncIOBuilder.NAME]:
+            pytest.skip("Skip tests since async-io is not compatible")
+
+    def test_unmanaged_matches_managed_optimizer_nvme_offload(self, tmpdir):
+        self._skip_if_nvme_unsupported()
+        # Large enough that partitioned params exceed MIN_AIO_BYTES and exercise swap_out_gradients.
+        _run_unmanaged_vs_managed_offload(zero_stage=3,
+                                          gradient_accumulation_steps=2,
+                                          num_cycles=2,
+                                          offload_device=OffloadDeviceEnum.nvme,
+                                          nvme_path=tmpdir,
+                                          hidden_dim=1024,
+                                          label="unmanaged vs managed optimizer NVMe offload (stage 3)")
+
+    def test_unmanaged_matches_managed_param_nvme_offload(self, tmpdir):
+        self._skip_if_nvme_unsupported()
+        _run_unmanaged_vs_managed_offload(zero_stage=3,
+                                          gradient_accumulation_steps=2,
+                                          num_cycles=2,
+                                          offload_param=True,
+                                          offload_device=OffloadDeviceEnum.nvme,
+                                          nvme_path=tmpdir,
+                                          hidden_dim=1024,
+                                          label="unmanaged vs managed param+optimizer NVMe offload (stage 3)")
+
+
+class _TwoHeadModel(torch.nn.Module):
+    """Two independent heads; only one is exercised per window so the other receives no gradient."""
+
+    def __init__(self, hidden_dim):
+        super().__init__()
+        self.head_a = torch.nn.Linear(hidden_dim, hidden_dim, bias=False)
+        self.head_b = torch.nn.Linear(hidden_dim, hidden_dim, bias=False)
+        self.cross_entropy_loss = torch.nn.CrossEntropyLoss()
+        self.use_a = True
+
+    def forward(self, x, y):
+        out = self.head_a(x) if self.use_a else self.head_b(x)
+        return self.cross_entropy_loss(out, y)
+
+
+@pytest.mark.parametrize("zero_stage", [1, 2, 3])
+class TestUnmanagedGradientAccumulationOffloadInactiveParams(DistributedTest):
+    """Unmanaged optimizer offload must skip params that receive no gradient in a window (matches managed)."""
+    world_size = 2
+
+    def test_unmanaged_matches_managed_inactive_params(self, zero_stage):
         hidden_dim = 4
-        initialize_distributed()
-        torch.manual_seed(42)
-        model = SimpleModel(hidden_dim=hidden_dim, nlayers=2)
-        config = build_managed_gas_config(1, gradient_accumulation_steps=1, managed_gradient_accumulation=False)
-        config["zero_optimization"]["offload_optimizer"] = {"device": "cpu"}
-        with pytest.raises(AssertionError, match="not supported with ZeRO optimizer state offload"):
-            deepspeed.initialize(config=config, model=model, model_parameters=model.parameters())
+        gradient_accumulation_steps = 2
+        # One head is exclusively active per window, so the other head is inactive that whole window.
+        window_use_a = [True, False, True]
+
+        device, _, _ = initialize_distributed()
+
+        def offload_config(managed):
+            config = _build_unmanaged_offload_config(zero_stage, gradient_accumulation_steps, managed=managed)
+            config["zero_optimization"]["ignore_unused_parameters"] = True
+            return config
+
+        torch.manual_seed(123)
+        model_managed = _TwoHeadModel(hidden_dim)
+        managed_engine, _, _, _ = deepspeed.initialize(config=offload_config(True),
+                                                       model=model_managed,
+                                                       model_parameters=model_managed.parameters())
+
+        torch.manual_seed(123)
+        model_unmanaged = _TwoHeadModel(hidden_dim)
+        unmanaged_engine, _, _, _ = deepspeed.initialize(config=offload_config(False),
+                                                         model=model_unmanaged,
+                                                         model_parameters=model_unmanaged.parameters())
+
+        total_samples = len(window_use_a) * gradient_accumulation_steps
+        batches = list(
+            random_dataloader(model=managed_engine,
+                              total_samples=total_samples,
+                              hidden_dim=hidden_dim,
+                              device=device,
+                              dtype=torch.float32))
+
+        # Managed: symmetric forward/backward/step; optimizer applies on each GAS boundary.
+        for w, use_a in enumerate(window_use_a):
+            managed_engine.module.use_a = use_a
+            for micro in range(gradient_accumulation_steps):
+                batch = batches[w * gradient_accumulation_steps + micro]
+                loss = managed_engine(batch[0], batch[1])
+                managed_engine.backward(loss)
+                managed_engine.step()
+
+        # Unmanaged: N backwards then one step() per window.
+        for w, use_a in enumerate(window_use_a):
+            unmanaged_engine.module.use_a = use_a
+            for micro in range(gradient_accumulation_steps):
+                batch = batches[w * gradient_accumulation_steps + micro]
+                loss = unmanaged_engine(batch[0], batch[1])
+                unmanaged_engine.backward(loss)
+            unmanaged_engine.step()
+
+        managed_params = collect_deepspeed_parameters(managed_engine, zero_stage)
+        unmanaged_params = collect_deepspeed_parameters(unmanaged_engine, zero_stage)
+        compare_parameters(managed_params, unmanaged_params,
+                           f"unmanaged vs managed offload inactive params (stage {zero_stage})")
+
+        managed_engine.destroy()
+        unmanaged_engine.destroy()
 
 
 @pytest.mark.parametrize("zero_stage", [0, 1])

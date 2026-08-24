@@ -33,7 +33,7 @@ toc_label: "Contents"
 
 | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              | Default |
 | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
-| Controls how gradient accumulation boundaries are managed. When `true`, DeepSpeed tracks micro-steps and applies the optimizer step only at the accumulation boundary, so `forward`/`backward`/`step` can be called symmetrically on every micro-batch. When `false`, micro-step tracking is disabled and the client is responsible for calling `step()` at the accumulation boundary; each `step()` finalizes the locally-accumulated gradients and applies an optimizer update. The `false` setting currently supports ZeRO stage 0/1/2/3 (and DDP); ZeRO offload (optimizer state and parameter) is planned but not yet available (rejected at initialization). It is also incompatible with pipeline parallelism, DeepCompile, and Apex AMP. ZeRO `overlap_comm` is supported only with ZeRO stage 2 (rejected for stage 0/1, where reduction is deferred to `step()`). | `true`  |
+| Controls how gradient accumulation boundaries are managed. When `true`, DeepSpeed tracks micro-steps and applies the optimizer step only at the accumulation boundary, so `forward`/`backward`/`step` can be called symmetrically on every micro-batch. When `false`, micro-step tracking is disabled and the client is responsible for calling `step()` at the accumulation boundary; each `step()` finalizes the locally-accumulated gradients and applies an optimizer update. The `false` setting supports ZeRO stage 0/1/2/3 (and DDP), including ZeRO optimizer-state and parameter offload (CPU/NVMe). It is incompatible with pipeline parallelism, DeepCompile, and Apex AMP. ZeRO `overlap_comm` is supported only with ZeRO stage 2 (rejected for stage 0/1, where reduction is deferred to `step()`). | `true`  |
 
 
 
@@ -226,17 +226,23 @@ Example of <i>**scheduler**</i>
 | ----------------------------------------------------------------------------------------------------------------------------- | ------- |
 | During gradient averaging perform communication with selected data type. By default it will be determined by selected regime  |  None   |
 
+<i>**gradient_allreduce_op**</i>: [string]
+
+| Description                                                                                                                                                                                            | Default  |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | -------- |
+| Select `"mean"` to average gradients across data-parallel workers or `"sum"` to keep the unscaled sum. `"sum"` supports ZeRO stages 0, 1, and 2 when neither ZenFlow nor DeepCompile is enabled; ZeRO stage 3, ZenFlow, and DeepCompile reject this setting. | `"mean"` |
+
 <i>**prescale_gradients**</i>: [boolean]
 
 | Description                            | Default |
 | -------------------------------------- | ------- |
-| Scale gradients before doing allreduce | `false` |
+| Scale gradients before doing mean allreduce | `false` |
 
 <i>**gradient_predivide_factor**</i>: [float]
 
 | Description                                                                                                                                       | Default |
 | ------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
-| Before gradient averaging predivide gradients by a specified factor, can sometimes help with fp16 stability when scaling to large numbers of GPUs | `1.0`   |
+| Before mean gradient allreduce, predivide gradients by a specified factor; this can sometimes help with fp16 stability when scaling to large numbers of GPUs | `1.0`   |
 
 <i>**sparse_gradients**</i>: [boolean]
 
@@ -531,12 +537,6 @@ Enabling and configuring ZeRO memory optimizations
 | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------- |
 | Initialize fp32 master weights from fp32 copies in checkpoint (no precision loss) or from model's fp16 copies (with precision loss). This can be used to initialize optimizer state even when checkpoint is missing optimizer state. | `True`  |
 
-<i>**grad_hooks**</i>: [boolean]
-
-| Description                                                                                                                               | Default |
-| ----------------------------------------------------------------------------------------------------------------------------------------- | ------- |
-| For use with ZeRO stage 1, enable backward hooks to reduce gradients during the backward pass or wait until the end of the backward pass. | `True`  |
-
 ***round_robin_gradients***: [boolean]
 
 | Description                                                                                                                                                                                                                                                                         | Default |
@@ -657,7 +657,7 @@ Note that if the value of "device" is not specified or not supported, an asserti
 
 | Description                                                                                          | Default |
 | ---------------------------------------------------------------------------------------------------- | ------- |
-| Offload to page-locked CPU memory. This could boost throughput at the cost of extra memory overhead. | `false` |
+| Offload to page-locked (pinned) CPU memory. Pinning enables asynchronous, full-bandwidth CPU<->GPU DMA so parameter fetches during forward/backward overlap with compute. Pinned memory is non-swappable and counts against the host memlock limit (`ulimit -l`); on hosts with tight memlock limits this may fail at init or cause out-of-memory errors elsewhere — set to `false` in that case. | `true` |
 
 ***buffer_count***: [integer]
 
@@ -707,7 +707,10 @@ Note that if the value of "device" is not specified or not supported, an asserti
 
 | Description                                                                                          | Default |
 | ---------------------------------------------------------------------------------------------------- | ------- |
-| Offload to page-locked CPU memory. This could boost throughput at the cost of extra memory overhead. | `false` |
+| Offload to page-locked (pinned) CPU memory. Pinning is required for the asynchronous GPU->CPU gradient offload to run as a full-bandwidth DMA that overlaps with backward compute (needs `overlap_comm: true`). Pinned memory is non-swappable and counts against the host memlock limit (`ulimit -l`); on hosts with tight memlock limits this may fail at init or cause out-of-memory errors elsewhere — set to `false` in that case. | `true` |
+
+**Note:** `pin_memory` now defaults to `true` for both `offload_param` and `offload_optimizer` (previously `false`). If you see out-of-memory errors after upgrading — especially on hosts with a low memlock limit (`ulimit -l`) — explicitly set `"pin_memory": false`.
+{: .notice--warning}
 
 ***ratio***: [float]
 
@@ -866,6 +869,36 @@ When a HuggingFace model provides a built-in `tp_plan` (via `model.config.base_m
 | Description                                                                                                                                                                                                                                                                                                                                                     | Default |
 | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
 | Unused parameters in modules may be unexpected in static networks, but could be normal in dynamic networks. This controls whether or not training should terminate with an error message when unused parameters are detected. This is set to `True` by default, which means unused parameters are ignored and training continues. Now is just used in stage 2. | `True`  |
+
+### Hybrid Engine
+
+The Hybrid Engine (`DeepSpeedHybridEngine`) switches a model between training mode and DeepSpeed's inference kernels within a single training loop, which is what RLHF pipelines such as DeepSpeed-Chat use for the actor model.
+
+```json
+  "hybrid_engine": {
+    "enabled": true,
+    "max_out_tokens": 512,
+    "inference_tp_size": 1,
+    "release_inference_cache": false,
+    "pin_parameters": true,
+    "tp_gather_partition_size": 8,
+    "enable_cuda_graph": false
+  }
+```
+
+***enable_cuda_graph***: [boolean]
+
+| Description                                                                                                                                                                                                                                                                                                                                        | Default |
+| ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
+| Capture token generation into CUDA graphs. Generation issues on the order of a thousand kernel launches per token and is bound by CPU launch overhead rather than by the GPU, so replaying a captured graph removes most of the per-token cost. One graph is captured per decode position, and generated tokens are unchanged. | `false` |
+
+`enable_cuda_graph` requires a pinned generation length (`min_new_tokens` equal to `max_new_tokens`) and `max_out_tokens` large enough to cover the longest generation. It is ignored, with a warning, when any of the following apply, since captured graphs would not stay valid:
+
+* ZeRO stage 3, where parameters are gathered into fresh buffers for each generation
+* `release_inference_cache: true`, which frees the buffers the graphs write into
+* `inference_tp_size` greater than 1
+
+The first generation after enabling captures one graph per decode position and is therefore slower; subsequent generations replay them.
 
 ### Expert Parallel (AutoEP)
 Configure AutoEP expert parallelism for MoE models. AutoEP automatically detects MoE layers in HuggingFace models and replaces them with EP-enabled versions using TorchTitan's grouped GEMM kernels. Requires zero model code changes. Supports ZeRO stages 0, 1, 2, and constrained ZeRO Stage 3.
@@ -1295,9 +1328,11 @@ Use a built-in preset but override specific naming/weight fields for a fine-tune
 
 <i>**cpu_checkpointing**</i>: [boolean]
 
-| Description                                                                 | Default |
-| --------------------------------------------------------------------------- | ------- |
-| Offloads partitioned activations to CPU if partition_activations is enabled | `false` |
+| Description                                                                                                                                                                                                                        | Default |
+| --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
+| Offloads activation checkpoint inputs to CPU. With `partition_activations` it offloads the partitioned activations; otherwise it uses an asynchronous pinned side-stream copy that overlaps the CPU transfer with compute. | `false` |
+
+The asynchronous side-stream copy matches the peak-memory reduction of a blocking copy at a fraction of the step-time cost. On a single H200 with Qwen3-8B full-parameter SFT (`use_reentrant=False`), it lowers the GPU activation peak by up to ~14% at 32K sequence length while staying within ~2% of the no-offload step time, whereas a blocking offload is 1.4–1.9x slower. For very long sequences, set `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` to avoid allocator fragmentation from the offload/restore cycle.
 
 
 <i>**contiguous_memory_optimization**</i>: [boolean]
@@ -2176,11 +2211,49 @@ DeepSpeed provides compiler-based optimization passes through the `compile` conf
 }
 ```
 
+### AutoTP options
+
+The `autotp` pass emits AutoTP's tensor-parallel collectives into the compiled graph instead of
+running them from inside the injected `LinearLayer` / `LinearAllreduce` modules. The model is
+partitioned by the regular AutoTP path, so `tensor_parallel.autotp_size` must be greater than 1
+and the pass reuses the same tensor-parallel group.
+
+```json
+{
+    "zero_optimization": {"stage": 0},
+    "tensor_parallel": {"autotp_size": 4},
+    "compile": {
+        "deepcompile": true,
+        "passes": ["autotp"],
+    }
+}
+```
+
 <i>**passes**</i>: [array of strings]
 
-| Description                                                              | Default |
-| ------------------------------------------------------------------------ | ------- |
-| List of compiler passes to apply. Currently supported: `["autosp"]`.     | `[]`    |
+| Description                                                                       | Default |
+| ----------------------------------------------------------------------------------- | ------- |
+| List of compiler passes to apply. Currently supported: `["autosp", "autotp"]`.    | `[]`    |
+
+
+
+### DeepCompile activation offload
+
+These fields live under `compile` and apply when DeepCompile activation offload is scheduled.
+The offload pass is **not** in the default DeepCompile schedule; enable it only via a custom
+`schedule=` when calling DeepCompile init. Setting `offload_activation` alone has no effect.
+
+<i>**offload_activation**</i>: [boolean]
+
+| Description | Default |
+| ----------- | ------- |
+| Config field for DeepCompile activation offload. Requires a custom schedule that includes the offload pass; not enabled by the default `init_z3` / `init_z1` schedules. | `false` |
+
+<i>**offload_activation_pin_memory**</i>: [boolean]
+
+| Description | Default |
+| ----------- | ------- |
+| When activation offload runs, pin host buffers via ATen `pinned_memory` (Torch host pin). Does **not** use `DS_PIN_MEMORY_BACKEND`. Defaults to `true`; set `false` under tight memlock limits (`ulimit -l`). | `true` |
 
 ### Data Type options
 

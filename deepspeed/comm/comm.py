@@ -384,13 +384,13 @@ def recv(tensor, src=None, group=None, tag=0, prof=False, log_name='recv', debug
 @timed_op
 def isend(tensor, dst, group=None, tag=0, prof=False, log_name='isend', debug=get_caller_func()):
     global cdb
-    return cdb.send(tensor=tensor, dst=dst, group=group, tag=tag)
+    return cdb.isend(tensor=tensor, dst=dst, group=group, tag=tag)
 
 
 @timed_op
 def irecv(tensor, src=None, group=None, tag=0, prof=False, log_name='irecv', debug=get_caller_func()):
     global cdb
-    return cdb.recv(tensor=tensor, src=src, group=group, tag=tag)
+    return cdb.irecv(tensor=tensor, src=src, group=group, tag=tag)
 
 
 @timed_op
@@ -806,7 +806,7 @@ def init_distributed(dist_backend: Optional[str] = None,
         auto_mpi_discovery Optional (bool). if distributed environment variables are not set, attempt to discover them from MPI
         distributed_port: Optional (int). torch distributed backend port
         verbose: Optional (bool). verbose logging
-        timeout: Optional (timedelta). Timeout for operations executed against the process group. The default value of 30 minutes can be overridden by the environment variable `DEEPSPEED_TIMEOUT`.
+        timeout: Optional (timedelta). Timeout for operations executed against the process group. The default value of 10 minutes can be overridden by the environment variable `DEEPSPEED_TIMEOUT`.
         init_method: Optional (string). Torch distributed, URL specifying how to initialize the process group. Default is "env://" if no init_method or store is specified.
         config: Optional (DeepSpeedConfig). DeepSpeed configuration for setting up comms options (e.g. Comms profiling)
         rank: Optional (int). The current manually specified rank. Some init_method like "tcp://" need the rank and world_size as well (see: https://pytorch.org/docs/stable/distributed.html#tcp-initialization)

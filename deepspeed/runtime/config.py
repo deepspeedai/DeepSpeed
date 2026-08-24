@@ -231,6 +231,17 @@ def get_gradient_predivide_factor(param_dict):
     return get_scalar_param(param_dict, GRADIENT_PREDIVIDE_FACTOR, GRADIENT_PREDIVIDE_FACTOR_DEFAULT)
 
 
+def get_gradient_allreduce_op(param_dict):
+    value = get_scalar_param(param_dict, GRADIENT_ALLREDUCE_OP, GRADIENT_ALLREDUCE_OP_DEFAULT)
+    if isinstance(value, str):
+        value = value.lower()
+    if value not in GRADIENT_ALLREDUCE_OP_SUPPORTED:
+        raise ValueError(
+            f"Invalid {GRADIENT_ALLREDUCE_OP}. Supported operations: {list(GRADIENT_ALLREDUCE_OP_SUPPORTED)}. "
+            f"Got: {value!r}")
+    return value
+
+
 def get_steps_per_print(param_dict):
     return get_scalar_param(param_dict, STEPS_PER_PRINT, STEPS_PER_PRINT_DEFAULT)
 
@@ -508,6 +519,7 @@ class HybridEngineConfig(DeepSpeedConfigModel):
     release_inference_cache: bool = False
     pin_parameters: bool = True
     tp_gather_partition_size: int = 8
+    enable_cuda_graph: bool = False
 
 
 def get_hybrid_engine_config(param_dict):
@@ -795,6 +807,7 @@ class DeepSpeedConfig(object):
             param_dict, SEQ_PARALLEL_COMMUNICATION_DATA_TYPE, SEQ_PARALLEL_COMMUNICATION_DATA_TYPE_DEFAULT)
         self.prescale_gradients = get_prescale_gradients(param_dict)
         self.gradient_predivide_factor = get_gradient_predivide_factor(param_dict)
+        self.gradient_allreduce_op = get_gradient_allreduce_op(param_dict)
         self.sparse_gradients_enabled = get_sparse_gradients_enabled(param_dict)
 
         self.zero_config = get_zero_config(param_dict)
@@ -1013,6 +1026,14 @@ class DeepSpeedConfig(object):
                     <= ZeroStageEnum.max_stage), "DeepSpeedConfig: Maximum supported ZeRO stage is {}".format(
                         ZeroStageEnum.max_stage)
 
+        if (self.gradient_allreduce_op == GRADIENT_ALLREDUCE_OP_SUM
+                and self.zero_optimization_stage == ZeroStageEnum.weights):
+            raise ValueError(f"{GRADIENT_ALLREDUCE_OP}='sum' is not supported with ZeRO stage 3")
+        if self.gradient_allreduce_op == GRADIENT_ALLREDUCE_OP_SUM and self.zero_config.zenflow is not None:
+            raise ValueError(f"{GRADIENT_ALLREDUCE_OP}='sum' is not supported with ZenFlow")
+        if self.gradient_allreduce_op == GRADIENT_ALLREDUCE_OP_SUM and self.compile_config.deepcompile:
+            raise ValueError(f"{GRADIENT_ALLREDUCE_OP}='sum' is not supported with DeepCompile")
+
         if self.float16_config.fp16_master_weights_and_grads:
             assert self.zero_enabled and self.zero_optimization_stage in (
                 ZeroStageEnum.optimizer_states, ZeroStageEnum.gradients,
@@ -1028,8 +1049,6 @@ class DeepSpeedConfig(object):
             assert self.bfloat16_config.bf16_master_weights_and_grads, "bf16_optimizer_states requires bf16_master_weights_and_grads to be enabled."
 
     def _do_warning_check(self):
-        fp16_enabled = self.float16_config.enabled
-
         vocabulary_size = self._param_dict.get(VOCABULARY_SIZE, VOCABULARY_SIZE_DEFAULT)
         if vocabulary_size and vocabulary_size % TENSOR_CORE_ALIGN_SIZE != 0:
             logger.warning(
@@ -1038,13 +1057,9 @@ class DeepSpeedConfig(object):
 
         if (self.optimizer_params is not None and MAX_GRAD_NORM in self.optimizer_params.keys()
                 and self.optimizer_params[MAX_GRAD_NORM] > 0):
-            if fp16_enabled:
-                if self.global_rank == 0:
-                    logger.warning("DeepSpeedConfig: In FP16 mode, DeepSpeed will pass {}:{} to FP16 wrapper".format(
+            if self.global_rank == 0:
+                logger.warning(
+                    "DeepSpeedConfig: {} ({}) is not supported as an optimizer parameter, please switch to using the "
+                    "deepspeed parameter 'gradient_clipping' see: "
+                    "https://www.deepspeed.ai/docs/config-json/#gradient-clipping for more details".format(
                         MAX_GRAD_NORM, self.optimizer_params[MAX_GRAD_NORM]))
-            else:
-                if self.global_rank == 0:
-                    logger.warning(
-                        "DeepSpeedConfig: In FP32 mode, DeepSpeed does not permit MAX_GRAD_NORM ({}) > 0, setting to zero"
-                        .format(self.optimizer_params[MAX_GRAD_NORM]))
-                self.optimizer_params[MAX_GRAD_NORM] = 0.0

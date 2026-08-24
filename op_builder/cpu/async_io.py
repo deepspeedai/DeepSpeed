@@ -26,7 +26,7 @@ class AsyncIOBuilder(CPUOpBuilder):
             'csrc/aio/common/deepspeed_aio_utils.cpp', 'csrc/aio/common/deepspeed_aio_common.cpp',
             'csrc/aio/common/deepspeed_aio_types.cpp', 'csrc/aio/py_lib/deepspeed_cpu_op.cpp',
             'csrc/aio/py_lib/deepspeed_aio_op_desc.cpp', 'csrc/aio/py_lib/deepspeed_py_copy.cpp',
-            'csrc/aio/py_lib/deepspeed_pin_tensor.cpp'
+            'csrc/aio/py_lib/deepspeed_pin_tensor_client.cpp'
         ]
         return src_list
 
@@ -34,7 +34,7 @@ class AsyncIOBuilder(CPUOpBuilder):
         return self.lib_sources() + ['csrc/aio/py_lib/py_ds_aio.cpp']
 
     def include_paths(self):
-        return ['csrc/aio/py_lib', 'csrc/aio/common']
+        return ['csrc/aio/py_lib', 'csrc/aio/common', 'csrc/pin_memory']
 
     def cxx_args(self):
         # -O0 for improved debugging, since performance is bound by I/O
@@ -70,6 +70,13 @@ class AsyncIOBuilder(CPUOpBuilder):
                     self.warning(f"{self.NAME}: please install the {lib} package with {tool}")
                 break
         return found
+
+    def load(self, verbose=False):
+        # Pin manager is compiled only into pin_memory; load it first so aio can
+        # resolve the shared manager (and related symbols) across .so boundaries.
+        from .pin_memory import PinMemoryBuilder
+        PinMemoryBuilder().load(verbose=verbose)
+        return super().load(verbose=verbose)
 
     def is_compatible(self, verbose=False):
         # Check for the existence of libaio by using distutils

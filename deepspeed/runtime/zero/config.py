@@ -110,7 +110,7 @@ class DeepSpeedZeroConfig(DeepSpeedConfigModel):
     Uses reduce or reduce scatter instead of allreduce to average gradients
     """
 
-    reduce_bucket_size: int = Field(pp_int(5e8), ge=0)
+    reduce_bucket_size: int = Field(pp_int(5e8), gt=0)
     """
     Number of elements reduced/allreduced at a time. Limits the memory required
     for the allgather for large model sizes

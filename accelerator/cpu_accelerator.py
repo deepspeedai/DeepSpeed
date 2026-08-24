@@ -278,11 +278,20 @@ class CPU_Accelerator(DeepSpeedAccelerator):
     def LongTensor(self):
         return torch.LongTensor
 
-    def pin_memory(self, tensor, align_bytes=1):
+    def pin_memory(self, tensor, make_copy=True, match_shape=True):
+        # Torch cannot pin CPU tensors to a device; keep the historical no-op and
+        # bypass ABC pinned-memory accounting (nothing is page-locked in that path).
+        from deepspeed.utils.pin_memory import get_active_native_pinned_memory
+        pins = get_active_native_pinned_memory()
+        if pins is not None:
+            from deepspeed.utils.pin_memory_tracker import track_pinned_memory
+            track_pinned_memory(tensor.nbytes)
+            return pins.pin(tensor, make_copy=make_copy, match_shape=match_shape)
         return tensor
 
-    def is_pinned(self, tensor):
-        return tensor.is_pinned()
+    def _torch_pin_memory(self, tensor):
+        # torch cannot pin CPU tensors to a device; keep the historical no-op.
+        return tensor
 
     def op_builder_dir(self):
         try:
@@ -313,9 +322,9 @@ class CPU_Accelerator(DeepSpeedAccelerator):
             # is op_builder from deepspeed or a 3p version? this should only succeed if it's deepspeed
             # if successful this also means we're doing a local install and not JIT compile path
             from op_builder import __deepspeed__  # noqa: F401 # type: ignore
-            from op_builder.cpu import AsyncIOBuilder, CCLCommBuilder, ShareMemCommBuilder, FusedAdamBuilder, CPUAdamBuilder, NotImplementedBuilder
+            from op_builder.cpu import AsyncIOBuilder, CCLCommBuilder, ShareMemCommBuilder, FusedAdamBuilder, CPUAdamBuilder, PinMemoryBuilder, NotImplementedBuilder
         except ImportError:
-            from deepspeed.ops.op_builder.cpu import AsyncIOBuilder, CCLCommBuilder, ShareMemCommBuilder, FusedAdamBuilder, CPUAdamBuilder, NotImplementedBuilder
+            from deepspeed.ops.op_builder.cpu import AsyncIOBuilder, CCLCommBuilder, ShareMemCommBuilder, FusedAdamBuilder, CPUAdamBuilder, PinMemoryBuilder, NotImplementedBuilder
 
         if class_name == "CCLCommBuilder":
             return CCLCommBuilder
@@ -327,6 +336,8 @@ class CPU_Accelerator(DeepSpeedAccelerator):
             return CPUAdamBuilder
         elif class_name == "AsyncIOBuilder":
             return AsyncIOBuilder
+        elif class_name == "PinMemoryBuilder":
+            return PinMemoryBuilder
         else:
             # return a NotImplementedBuilder to avoid get NoneType[Name] in unit tests
             return NotImplementedBuilder

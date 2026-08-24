@@ -117,6 +117,8 @@ def set_accelerator_visible():
             br_smi = subprocess.check_output(['brsmi', 'gpu', 'list'])
             gpu_ids = filter(lambda s: 'GPU' in s, br_smi.decode('utf-8').strip().split('\n'))
             num_accelerators = len(list(gpu_ids))
+        elif get_accelerator().device_name() == 'mps':
+            num_accelerators = get_accelerator().device_count()
         else:
             assert get_accelerator().device_name() == 'cpu'
             num_accelerators = _get_cpu_socket_count()
@@ -274,7 +276,8 @@ class DistributedExec(ABC):
                 f"Skipping test because not enough GPUs are available: {num_procs} required, {get_accelerator().device_count()} available"
             )
 
-        if get_accelerator().device_name() == 'xpu':
+        # MPS cannot be used from a forked child (Metal's compiler service is lost), so spawn instead.
+        if get_accelerator().device_name() in ['xpu', 'mps']:
             self.non_daemonic_procs = True
             self.reuse_dist_env = False
 

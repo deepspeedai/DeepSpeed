@@ -191,6 +191,7 @@ def register_custom_ops():
                                   never_reuse_input,
                                   never_reuse_output,
                                   force_free_input,
+                                  block_input_reuse=False,
                                   add_to_fallback_set=True):
         if add_to_fallback_set:
             fallbacks.add(kernel)
@@ -211,7 +212,7 @@ def register_custom_ops():
                             assert hasattr(x, "get_name"), f"x doesn't have get_name {x.__class__}"
                             V.graph.never_reuse_buffers.add(x.get_name())
 
-                    if never_reuse_input:
+                    if never_reuse_input or block_input_reuse:
                         pytree.tree_map(add_to_never_reuse, args)
 
                 def get_var_name_for_arg(self, arg: str):
@@ -246,7 +247,7 @@ def register_custom_ops():
 
                     self.codegen_unbacked_symbol_defs(wrapper)
 
-            kernel_cls = CustomDCKernel if force_free_input else FallbackKernel
+            kernel_cls = CustomDCKernel if (force_free_input or block_input_reuse) else FallbackKernel
             return pytree.tree_map(wrap_tensors, kernel_cls.create(kernel, *args, **kwargs))
 
         return handler
@@ -254,13 +255,20 @@ def register_custom_ops():
     def register_fallback_no_reuse(op_overload,
                                    never_reuse_input=False,
                                    never_reuse_output=False,
-                                   force_free_input=False):
+                                   force_free_input=False,
+                                   block_input_reuse=False):
+        # block_input_reuse keeps inductor from planning another buffer into the input's storage
+        # without also freeing the input. An op that reads its input asynchronously needs that:
+        # in-place reuse writes through the allocator's back, so record_stream cannot hold it off.
+        # (never_reuse_input alone has never selected the kernel class that applies it; leaving that
+        # as it is keeps the ops which pass it today running exactly as before.)
         add_needs_realized_inputs(op_overload)
         return register_lowering(op_overload, type_promotion_kind=None)(fallback_handler_no_reuse(
             op_overload,
             never_reuse_input=never_reuse_input,
             never_reuse_output=never_reuse_output,
-            force_free_input=force_free_input))
+            force_free_input=force_free_input,
+            block_input_reuse=block_input_reuse))
 
     # Inductor tries to reuse output buffer when possible. We need to disable this behavior for some custom ops.
     # -> It seems that memory region is still reused in some cases. So we clone the inputs for some ops.
@@ -272,6 +280,13 @@ def register_custom_ops():
                                never_reuse_output=True,
                                force_free_input=True)
     register_fallback_no_reuse(torch.ops.dc.free_tensors.default, never_reuse_input=True, never_reuse_output=True)
+    # The input needs no protection: the pass waits for the copy immediately after this op, so the
+    # buffer is dead by the time inductor may recycle it. Blocking that reuse instead would keep the
+    # buffer alive for the whole forward pass and give back the memory the offload just freed.
+    register_fallback_no_reuse(torch.ops.dc.offload_tensor.default, never_reuse_output=True)
+    register_fallback_no_reuse(torch.ops.dc.wait_offload.default, never_reuse_input=True, never_reuse_output=True)
+    register_fallback_no_reuse(torch.ops.dc.reload_tensor.default, never_reuse_input=True, never_reuse_output=True)
+    register_fallback_no_reuse(torch.ops.dc.wait_reload.default, never_reuse_input=True, never_reuse_output=True)
     register_fallback_no_reuse(torch.ops.dc.end_backward.default, never_reuse_input=True, never_reuse_output=False)
     _register_graphsafe_rng_state_no_reuse(register_fallback_no_reuse)
 

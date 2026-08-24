@@ -40,23 +40,9 @@ from __future__ import annotations
 
 import torch
 
-try:
-    import triton
-    import triton.language as tl
-
-    _TRITON_AVAILABLE = True
-except ImportError:
-    _TRITON_AVAILABLE = False
-
-__all__ = ["group_gemm_triton", "is_available"]
+from deepspeed.ops.triton_ops._triton import _TRITON_AVAILABLE, triton, tl
 
 _SUPPORTED_DTYPES = (torch.float16, torch.bfloat16, torch.float32)
-
-
-def is_available() -> bool:
-    """Return True if the Triton grouped-GEMM path can be used."""
-    return _TRITON_AVAILABLE
-
 
 if _TRITON_AVAILABLE:
 
@@ -138,7 +124,10 @@ if _TRITON_AVAILABLE:
         mask_m = offs_m < (m_start + m_size)
         mask_n = offs_n < NO
 
-        b_base = b_ptr + selected * stride_be
+        # int64: ``selected * stride_be`` reaches E*K*N elements, which overflows
+        # int32 for large experts (e.g. 64 x 4096 x 14336) and wraps to a
+        # negative offset, giving an out-of-bounds pointer.
+        b_base = b_ptr + selected.to(tl.int64) * stride_be
 
         acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
         for k0 in range(0, KC, BLOCK_K):

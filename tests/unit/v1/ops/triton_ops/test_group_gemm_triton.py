@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # DeepSpeed Team
-"""Unit tests for the Triton grouped-GEMM drop-in (``deepspeed.moe.group_gemm_triton``).
+"""Unit tests for the Triton grouped-GEMM drop-in (``deepspeed.ops.triton_ops.group_gemm_triton``).
 
 Correctness is checked against:
   * a pure-PyTorch per-group reference (all dtypes), and
@@ -14,10 +14,11 @@ import pytest
 import torch
 
 from deepspeed.accelerator import get_accelerator
-from deepspeed.moe.group_gemm_triton import group_gemm_triton, is_available
-from deepspeed.moe.group_gemm_triton import _group_meta, _GROUP_META_BLOCK
+from deepspeed.ops.triton_ops import is_triton_available
+from deepspeed.ops.triton_ops.group_gemm_triton import group_gemm_triton
+from deepspeed.ops.triton_ops.group_gemm_triton import _group_meta, _GROUP_META_BLOCK
 
-if not is_available():
+if not is_triton_available():
     pytest.skip("Triton is not available", allow_module_level=True)
 
 if not (get_accelerator().is_available() and get_accelerator().device_name() == "cuda"):
@@ -301,7 +302,9 @@ def test_e2e_swiglu_experts_matches_native_grouped_mm():
     counts_t = torch.tensor(counts, device=dev, dtype=torch.int32)
 
     # Shared random init for the two paths.
-    x0 = torch.randn(M, dim, device=dev, dtype=torch.bfloat16)
+    # Bounded [-1, 1] inputs keep the SwiGLU activations small so the two paths' differing
+    # bf16 accumulation orders stay within tolerance (unbounded randn tails blow up weight grads).
+    x0 = torch.empty(M, dim, device=dev, dtype=torch.bfloat16).uniform_(-1, 1)
     w1_0 = torch.randn(E, hidden, dim, device=dev, dtype=torch.bfloat16) * 0.1
     w2_0 = torch.randn(E, dim, hidden, device=dev, dtype=torch.bfloat16) * 0.1
     w3_0 = torch.randn(E, hidden, dim, device=dev, dtype=torch.bfloat16) * 0.1
@@ -359,7 +362,8 @@ def test_grouped_experts_triton_path_parity():
     loop_experts.load_state_dict(triton_experts.state_dict())
     assert triton_experts.use_triton_grouped_mm is True
 
-    x = torch.randn(M, dim, device=dev, dtype=torch.bfloat16)
+    # Bounded [-1, 1] inputs keep activations small so the two paths agree within tolerance.
+    x = torch.empty(M, dim, device=dev, dtype=torch.bfloat16).uniform_(-1, 1)
     x_t = x.clone().requires_grad_(True)
     x_l = x.clone().requires_grad_(True)
     out_t = triton_experts(x_t, counts)
@@ -392,3 +396,36 @@ def test_grouped_experts_auto_selects_triton_on_ampere():
     # Config override disables the Triton path regardless of device.
     experts_off = GroupedExperts(32, 64, 2, use_grouped_mm=True, disable_triton_grouped_mm=True).to(dev)
     assert experts_off.use_triton_grouped_mm is False
+
+
+def test_expert_offset_exceeds_int32():
+    """Expert base offsets past 2**31 elements must be computed in int64.
+
+    ``b_base = b_ptr + selected * stride_be`` walks ``E * K * N`` elements. With
+    a large enough expert weight that product overflows int32 and wraps to a
+    negative offset, so the kernel reads out of bounds and faults. Sizes here put
+    the last expert at ~2.2e9 elements, just past the int32 limit.
+    """
+    K = N = 8192
+    num_experts = 34
+    rows_per_expert = 8
+    dtype = torch.bfloat16
+
+    stride_be = K * N
+    assert (num_experts - 1) * stride_be > 2**31 - 1, "sizes no longer exercise the overflow"
+
+    needed = num_experts * stride_be * torch.finfo(dtype).bits // 8
+    if get_accelerator().available_memory() < 2 * needed:
+        pytest.skip(f"needs ~{2 * needed / 2**30:.1f} GiB of free device memory")
+
+    dev = get_accelerator().current_device_name()
+    m = num_experts * rows_per_expert
+    a = torch.randn(m, K, dtype=dtype, device=dev)
+    b = torch.randn(num_experts, K, N, dtype=dtype, device=dev)
+    offs = _make_offs([rows_per_expert] * num_experts, dev)
+
+    out = group_gemm_triton(a, b, offs)
+
+    # Check the last expert specifically -- it carries the largest offset.
+    last = a[-rows_per_expert:] @ b[-1]
+    torch.testing.assert_close(out[-rows_per_expert:].float(), last.float(), **_tol(dtype))

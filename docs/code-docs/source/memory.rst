@@ -265,24 +265,24 @@ Note about gradients: While gradients are stored in fp16 (2 bytes), during the w
 
 **Pinned Memory**
 
-Pinned general RAM is included in normal general RAM allocations (i.e. this is not extra memory allocations but simply shows how much of the general RAM is pinned)
+Pinned general RAM is included in normal general RAM allocations (i.e. this is not extra memory allocations but simply shows how much of the general RAM is pinned). Pinning is controlled by the ``pin_memory`` field of ``offload_optimizer`` / ``offload_param`` (both default to ``true``); set to ``false`` on hosts with tight memlock limits (``ulimit -l``). See :ref:`host-memory-pinning` for how host memory is page-locked (``torch`` vs ``native`` backends).
 
-* ZeRO-2: can't be controlled
+* ZeRO-1/2: controlled by ``offload_optimizer.pin_memory`` (fp32 master weights / gradients and related offload scratch buffers may be pinned on the host)
 
-* ZeRO-3
+* ZeRO-3 with ``offload_param.pin_memory=true``: partitioned fp16/bf16 parameter buffers on CPU may also be pinned.
 
-To enable add: ``"cpu_offload_use_pin_memory" : true``
+With pinning enabled on ZeRO-3 there are 2 sub-cases:
 
-Now there are 2 sub-cases:
-
-1. ``"cpu_offload_params": true``:
+1. ``offload_param`` enabled (``device: cpu``):
 
    - 6 * params (2b for fp16 params + 4b for fp32 gradients)
    - if ``gradient_accumulation_steps > 1`` an additional 2b for fp16 gradients are pinned
 
-2. ``"cpu_offload_params": false``:
+2. ``offload_param`` not enabled:
 
    - 4b for fp32 gradients
+
+Exact pinned volume also depends on gradient-accumulation and other offload scratch buffers.
 
 
 **Activation Memory**
@@ -290,3 +290,145 @@ Now there are 2 sub-cases:
 XXX: For Transformers is probably around (2* seq * attn_heads + 16 * hidden_size) * sequence * batch/gpu
 
 This needs to be completed.
+
+
+.. _host-memory-pinning:
+
+Host Memory Pinning
+-----------------------
+
+DeepSpeed page-locks (pins) host memory so DMA engines can move data efficiently
+between CPU RAM and accelerators or NVMe. All pinning goes through the accelerator
+APIs:
+
+.. code-block:: python
+
+    from deepspeed.accelerator import get_accelerator
+
+    pinned = get_accelerator().pin_memory(tensor)          # default: copy + match shape
+    assert get_accelerator().is_pinned(pinned)
+    get_accelerator().unpin_memory(pinned)                # no-op for the torch backend
+
+``pin_memory`` accepts ``make_copy`` and ``match_shape`` (both default ``True``) so
+callers can either allocate a shaped copy of ``tensor`` or obtain a flat locked
+buffer for later filling.
+
+Pin on/off vs backend
+=====================
+
+Whether to pin and how to pin are orthogonal:
+
+* **On/off:** ``zero_optimization.offload_*.pin_memory`` (ZeRO CPU offload),
+  ``use_pin_memory`` on eager activation checkpoint offload
+  (``CheckpointHiddenStatesOffload``), and
+  ``compile.offload_activation_pin_memory`` (DeepCompile activation offload).
+  All default to pinning so async copies can use full DMA bandwidth; set
+  false only under tight memlock limits (``ulimit -l``).
+* **How:** ``DS_PIN_MEMORY_BACKEND=torch|native`` (environment only; not a
+  ``ds_config`` field). Every call site that pins through
+  ``get_accelerator().pin_memory()`` honors this env var, including ZeRO
+  CPU-offload buffers and eager activation checkpoint offload. Keep the default
+  ``torch`` backend for activation offload: ``native`` is ``mlock`` without
+  ``cudaHostRegister``, so its host buffers are not registered for accelerator
+  DMA and the offload's async copies can still block. DeepCompile activation
+  offload pins with ATen ``pinned_memory`` and does **not** use
+  ``DS_PIN_MEMORY_BACKEND``.
+
+Backend Selection
+=================
+
+The pinning implementation is selected with the ``DS_PIN_MEMORY_BACKEND``
+environment variable (default ``torch``).
+
+The ``torch`` backend page-locks host memory for **accelerator DMA**
+(``cudaHostRegister`` / device-specific pin). The ``native`` backend
+page-locks via ``posix_memalign`` + ``mlock`` for AIO/GDS (DeepNVMe can
+skip bounce buffers) and does **not** register the allocation with CUDA/XPU,
+so async GPU copies to native-pinned tensors can still block. Both are
+counted by ``track_pinned_memory`` when pages are actually locked. Differences:
+
+.. list-table:: Differences between ``torch`` and ``native`` pin backends
+   :header-rows: 1
+   :widths: 22 39 39
+
+   * - Aspect
+     - ``torch`` (default)
+     - ``native``
+   * - Allocator
+     - ``torch.Tensor.pin_memory()`` (device-specific accelerator hook)
+     - DeepNVMe page-locked allocator (``posix_memalign`` + ``mlock``) via pin_memory;
+       registered with the CUDA runtime by default for asynchronous DMA
+   * - Selection
+     - ``DS_PIN_MEMORY_BACKEND`` unset or ``torch``
+     - ``DS_PIN_MEMORY_BACKEND=native``
+   * - Build dependency
+     - None beyond the active accelerator / PyTorch
+     - DeepSpeed **pin_memory** op must build and load; fails early if unavailable (no silent fallback)
+   * - ``pin_memory`` extras
+     - ``make_copy`` / ``match_shape`` are ignored on this path
+     - Honors ``make_copy`` and ``match_shape`` (both default ``True``)
+   * - Pin recognition (``is_pinned``)
+     - Torch pinned status (``tensor.is_pinned()``)
+     - ``.ds_pinned`` and process-wide pointer ranges (slices/views included)
+   * - ``unpin_memory``
+     - No-op (returns ``None``)
+     - Frees the mlocked allocation immediately (returns ``True`` on success)
+   * - Lifetime / free
+     - Freed when the tensor is garbage-collected (PyTorch)
+     - ``weakref`` finalizer frees on GC; prefer explicit ``unpin_memory`` for long-lived buffers (e.g. ZeRO ``destroy()``)
+   * - CPU accelerator
+     - Historical no-op (torch cannot pin CPU tensors); accounting skipped
+     - Real ``mlock`` pins; accounting applies
+
+Example:
+
+.. code-block:: bash
+
+    export DS_PIN_MEMORY_BACKEND=native
+    deepspeed train.py ...
+
+Native device registration
+==========================
+
+Native allocations are device-independent ``mlock`` buffers. On CUDA systems,
+DeepSpeed additionally calls ``cudaHostRegister`` so PyTorch can use them for
+asynchronous H2D/D2H DMA. Device registration is enabled by default and can be
+disabled for comparison or debugging:
+
+.. code-block:: bash
+
+    export DS_PIN_MEMORY_BACKEND=native
+    export DS_PIN_MEMORY_REGISTER_DEVICE=0  # mlock only; default is 1
+
+``DS_PIN_MEMORY_REGISTER_DEVICE`` accepts ``1``/``0``, ``true``/``false``,
+``yes``/``no``, and ``on``/``off``. Accelerators without a registration hook
+continue to use the device-independent ``mlock`` buffer. If registration fails,
+DeepSpeed logs a warning and retains the valid ``mlock`` allocation for CPU and
+AIO use.
+
+Requirements for native
+=======================
+
+* The DeepSpeed **pin_memory** op must build and load successfully. If
+  ``pin_memory`` cannot be constructed, selecting ``native`` fails early rather
+  than silently falling back to ``torch``.
+* The process must be allowed to lock the requested host memory (see
+  ``ulimit -l`` / ``memlock`` limits). Large ZeRO CPU-offload footprints can
+  otherwise hit the memlock ceiling.
+
+Lifetime and unpinning (native)
+================================
+
+Native-pinned allocations are tracked by a process-wide manager. Lifetime
+matches ``torch.pin_memory`` as closely as possible:
+
+* Dropping the returned tensor frees the locked pages via a ``weakref``
+  finalizer (no explicit unpin required for short-lived buffers).
+* Prefer ``get_accelerator().unpin_memory(tensor)`` when you know a buffer is
+  finished, so mlocked memory is released immediately instead of waiting on
+  garbage collection. ZeRO / ZenFlow optimizers do this for their owned
+  CPU-offload buffers in ``destroy()``.
+* After ``unpin_memory``, the tensor storage must not be used (use-after-free).
+
+``is_pinned`` reports ``True`` for both torch-pinned tensors and native-managed
+buffers, including slices/views whose storage falls inside a managed range.
