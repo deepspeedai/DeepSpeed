@@ -27,8 +27,14 @@ class BaseZenFlowTest:
     batch_size = 4
     grad_acc_steps = 1
 
-    def get_config_dict(self, stage, offload_selective_optimizer, select_strategy, select_interval, update_interval,
-                        full_warm_up_rounds):
+    def get_config_dict(self,
+                        stage,
+                        offload_selective_optimizer,
+                        select_strategy,
+                        select_interval,
+                        update_interval,
+                        full_warm_up_rounds,
+                        topk_ratio=0.2):
         config = {
             "train_batch_size": self.batch_size,
             "gradient_accumulation_steps": self.grad_acc_steps,
@@ -46,7 +52,7 @@ class BaseZenFlowTest:
                 },
                 "overlap_comm": True,
                 "zenflow": {
-                    "topk_ratio": 0.2,
+                    "topk_ratio": topk_ratio,
                     "select_strategy": select_strategy,
                     "select_interval": select_interval,
                     "update_interval": update_interval,
@@ -118,6 +124,16 @@ class TestZenFlowDistributed(DistributedTest, BaseZenFlowTest):
                                  update_interval, full_warm_up_rounds):
         config_dict = self.get_config_dict(stage, offload_selective_optimizer, select_strategy, select_interval,
                                            update_interval, full_warm_up_rounds)
+        self.run_training_distributed(config_dict)
+
+
+@pytest.mark.parametrize("stage", [1, 2])
+class TestZenFlowSmallTopKRatio(DistributedTest, BaseZenFlowTest):
+    world_size = 2
+    hidden_dim = 50
+
+    def test_small_positive_topk_ratio(self, stage):
+        config_dict = self.get_config_dict(stage, False, "step", 1, 1, 0, topk_ratio=0.01)
         self.run_training_distributed(config_dict)
 
 
