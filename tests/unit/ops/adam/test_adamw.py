@@ -9,6 +9,7 @@ import pytest
 
 from deepspeed.ops.adam import FusedAdam
 from deepspeed.ops.adam import DeepSpeedCPUAdam
+from deepspeed.ops.op_builder import FusedAdamBuilder
 from unit.common import DistributedTest
 from unit.simple_model import SimpleModel
 from deepspeed.accelerator import get_accelerator
@@ -77,3 +78,34 @@ class TestAdamConfigs(DistributedTest):
         assert isinstance(ds_optimizer, opt_class)
         if adam_w_mode in [True, False]:
             assert ds_optimizer.adam_w_mode == adam_w_mode
+
+
+@pytest.mark.parametrize('adam_w_mode', [True, False], ids=["adamw", "adam"])
+@pytest.mark.parametrize('dtype', [torch.float, torch.bfloat16], ids=["fp32", "bf16"])
+def test_fused_adam_matches_torch(adam_w_mode, dtype):
+    if dtype not in get_accelerator().supported_dtypes():
+        pytest.skip(f"{dtype} not supported on {get_accelerator().device_name()}")
+    if not deepspeed.ops.__compatible_ops__[FusedAdamBuilder.NAME]:
+        pytest.skip("FusedAdam is not compatible")
+
+    device = get_accelerator().device_name()
+    torch.manual_seed(0)
+    ref_params = [torch.randn(1024, device=device, dtype=dtype, requires_grad=True) for _ in range(3)]
+    ds_params = [torch.nn.Parameter(p.detach().clone()) for p in ref_params]
+    optimizer_kwargs = dict(lr=1e-2, weight_decay=0.1)
+    torch_optimizer = torch.optim.AdamW if adam_w_mode else torch.optim.Adam
+    ref_optimizer = torch_optimizer(ref_params, **optimizer_kwargs)
+    ds_optimizer = FusedAdam(ds_params, adam_w_mode=adam_w_mode, **optimizer_kwargs)
+
+    for _ in range(5):
+        for ref_param, ds_param in zip(ref_params, ds_params):
+            grad = torch.randn_like(ref_param)
+            ref_param.grad = grad.clone()
+            ds_param.grad = grad.clone()
+        ref_optimizer.step()
+        ds_optimizer.step()
+
+    # bf16 storage rounds differently depending on where intermediates are kept, so allow one ulp.
+    atol = 1e-5 if dtype == torch.float else 2e-2
+    for ref_param, ds_param in zip(ref_params, ds_params):
+        torch.testing.assert_close(ds_param.float(), ref_param.float(), atol=atol, rtol=0)

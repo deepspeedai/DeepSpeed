@@ -174,6 +174,10 @@ class DeepSpeedAccelerator(ABC):
     def is_fp16_supported(self):
         ...
 
+    # Not abstract: nearly every accelerator supports fp64, so only those that do not need to override.
+    def is_fp64_supported(self):
+        return True
+
     @abc.abstractmethod
     def supported_dtypes(self):
         ...
@@ -270,6 +274,14 @@ class DeepSpeedAccelerator(ABC):
 
     def _torch_is_pinned(self, tensor):
         return tensor.is_pinned()
+
+    def register_host_memory(self, address, num_bytes):
+        """Register page-locked host memory with the active device runtime."""
+        return False
+
+    def unregister_host_memory(self, address):
+        """Unregister host memory previously registered with the device runtime."""
+        return None
 
     def pin_memory(self, tensor, make_copy=True, match_shape=True):
         from deepspeed.utils.pin_memory_tracker import track_pinned_memory

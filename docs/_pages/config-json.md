@@ -537,12 +537,6 @@ Enabling and configuring ZeRO memory optimizations
 | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------- |
 | Initialize fp32 master weights from fp32 copies in checkpoint (no precision loss) or from model's fp16 copies (with precision loss). This can be used to initialize optimizer state even when checkpoint is missing optimizer state. | `True`  |
 
-<i>**grad_hooks**</i>: [boolean]
-
-| Description                                                                                                                               | Default |
-| ----------------------------------------------------------------------------------------------------------------------------------------- | ------- |
-| For use with ZeRO stage 1, enable backward hooks to reduce gradients during the backward pass or wait until the end of the backward pass. | `True`  |
-
 ***round_robin_gradients***: [boolean]
 
 | Description                                                                                                                                                                                                                                                                         | Default |
@@ -1337,6 +1331,8 @@ Use a built-in preset but override specific naming/weight fields for a fine-tune
 | Description                                                                                                                                                                                                                        | Default |
 | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
 | Offloads activation checkpoint inputs to CPU. With `partition_activations` it offloads the partitioned activations; otherwise it uses an asynchronous pinned side-stream copy that overlaps the CPU transfer with compute. | `false` |
+
+The asynchronous side-stream copy matches the peak-memory reduction of a blocking copy at a fraction of the step-time cost. On a single H200 with Qwen3-8B full-parameter SFT (`use_reentrant=False`), it lowers the GPU activation peak by up to ~14% at 32K sequence length while staying within ~2% of the no-offload step time, whereas a blocking offload is 1.4–1.9x slower. For very long sequences, set `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` to avoid allocator fragmentation from the offload/restore cycle.
 
 
 <i>**contiguous_memory_optimization**</i>: [boolean]
