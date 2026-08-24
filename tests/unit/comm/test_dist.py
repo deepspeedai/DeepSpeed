@@ -128,6 +128,62 @@ class TestDistAllReduce(DistributedTest):
         assert torch.all(x == result)
 
 
+class FakeP2PWork:
+    """Stands in for a torch.distributed Work so the staging wrapper can be tested single-process."""
+
+    def __init__(self, fill=None):
+        self.fill = fill
+
+    def wait(self):
+        if self.fill is not None:
+            self.fill()
+        return True
+
+
+@pytest.mark.skipif(get_accelerator().device_name() != 'mps', reason="covers the MPS CPU-staging path")
+class TestMpsStagedP2P:
+
+    def test_irecv_defers_copy_back_to_wait(self, monkeypatch):
+        from deepspeed.comm.torch import TorchBackend, StagedWork
+        captured = {}
+
+        def fake_irecv(tensor, src=None, group=None, tag=0):
+            captured['staged'] = tensor
+            return FakeP2PWork(fill=lambda: tensor.copy_(torch.arange(16, dtype=torch.float32)))
+
+        monkeypatch.setattr(torch.distributed, 'irecv', fake_irecv)
+        backend = TorchBackend.__new__(TorchBackend)
+        received = torch.zeros(16, dtype=torch.float32, device='mps')
+
+        handle = backend.irecv(received, src=0)
+
+        # gloo must see a CPU tensor, and the MPS tensor must stay untouched until wait().
+        assert isinstance(handle, StagedWork)
+        assert captured['staged'].device.type == 'cpu'
+        assert received.abs().sum().item() == 0
+        assert handle.wait() is True
+        assert torch.equal(received.cpu(), torch.arange(16, dtype=torch.float32))
+
+    def test_isend_stages_payload_on_cpu(self, monkeypatch):
+        from deepspeed.comm.torch import TorchBackend, StagedWork
+        captured = {}
+
+        def fake_isend(tensor, dst=None, group=None, tag=0):
+            captured['staged'] = tensor
+            return FakeP2PWork()
+
+        monkeypatch.setattr(torch.distributed, 'isend', fake_isend)
+        backend = TorchBackend.__new__(TorchBackend)
+        payload = torch.arange(16, dtype=torch.float32, device='mps')
+
+        handle = backend.isend(payload, dst=0)
+
+        assert isinstance(handle, StagedWork)
+        assert captured['staged'].device.type == 'cpu'
+        assert torch.equal(captured['staged'], torch.arange(16, dtype=torch.float32))
+        assert handle.wait() is True
+
+
 class TestDistIsendIrecv(DistributedTest):
     world_size = 2
 
