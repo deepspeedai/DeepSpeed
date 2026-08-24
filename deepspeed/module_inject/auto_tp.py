@@ -17,7 +17,7 @@ from deepspeed.accelerator import get_accelerator
 from .fusedqkv_utils import require_tp_fused_qkvw
 from deepspeed.module_inject.tp_shard import get_shard_size, get_shard_size_list
 from deepspeed.utils import groups
-from deepspeed.utils.logging import log_dist
+from deepspeed.utils.logging import log_dist, print_dist
 from deepspeed.module_inject.layers import is_autotp_training_mode
 from deepspeed.module_inject.layers import _build_param_uc_restore_meta
 from deepspeed.checkpoint.constants import DS_AUTOTP_UC_META
