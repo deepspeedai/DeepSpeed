@@ -71,6 +71,13 @@ def test_update_interval_rejects_non_positive_values(update_interval):
         ZenFlowConfig(update_interval=update_interval)
 
 
+@pytest.mark.parametrize("update_interval", [1, "auto"])
+def test_update_interval_accepts_valid_boundary_values(update_interval):
+    config = ZenFlowConfig(update_interval=update_interval)
+
+    assert config.update_interval == update_interval
+
+
 def test_offload_and_zenflow_combined():
     """
     offload_optimizer and zenflow can be used together under stage 2
