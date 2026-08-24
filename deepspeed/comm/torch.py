@@ -103,10 +103,11 @@ class StagedWork:
         self.copy_back = copy_back
 
     def wait(self):
+        result = None
         if self.work is not None:
-            self.work.wait()
+            result = self.work.wait()
         self.copy_back()
-        return None
+        return result
 
 
 def _needs_cpu_staging(tensor):
@@ -114,12 +115,17 @@ def _needs_cpu_staging(tensor):
     return isinstance(tensor, torch.Tensor) and tensor.device.type == 'mps'
 
 
-def stage_on_cpu(func):
+def stage_on_cpu(func=None, *, always_async=False):
     """Runs a collective on CPU copies of any MPS tensor arguments, then copies the results back.
 
     This is what lets DeepSpeed use the gloo backend on Apple Silicon, where device tensors are
     not supported by any torch.distributed backend. Unified memory keeps the copies cheap.
+
+    always_async is for ops like isend/irecv that are asynchronous by contract but have no
+    async_op parameter: the copy back must wait until the returned work handle completes.
     """
+    if func is None:
+        return lambda wrapped_func: stage_on_cpu(wrapped_func, always_async=always_async)
 
     def _stage(arg, pairs):
         if _needs_cpu_staging(arg):
@@ -147,7 +153,7 @@ def stage_on_cpu(func):
 
         # async_op is usually forwarded positionally, so resolve it against the real signature.
         bound_args = signature.bind(self, *args, **kwargs)
-        if bound_args.arguments.get('async_op', False):
+        if always_async or bound_args.arguments.get('async_op', False):
             return StagedWork(work, copy_back)
         copy_back()
         return work
@@ -427,12 +433,12 @@ class TorchBackend(Backend):
         return torch.distributed.recv(tensor=tensor, src=src, group=group, tag=tag)
 
     @disable_compiler_collective
-    @stage_on_cpu
+    @stage_on_cpu(always_async=True)
     def isend(self, tensor, dst, group=None, tag=0):
         return torch.distributed.isend(tensor=tensor, dst=dst, group=group, tag=tag)
 
     @disable_compiler_collective
-    @stage_on_cpu
+    @stage_on_cpu(always_async=True)
     def irecv(self, tensor, src=None, group=None, tag=0):
         return torch.distributed.irecv(tensor=tensor, src=src, group=group, tag=tag)
 
