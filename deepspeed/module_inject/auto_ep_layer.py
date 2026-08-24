@@ -590,6 +590,31 @@ class AutoEPMoELayer(nn.Module):
             )
         self.ep_group = groups._get_expert_parallel_group(self.ep_group_name)
 
+    def _agree_deepep_capacity(self, tokens: torch.Tensor) -> int:
+        """Agree a buffer capacity across the EP group from the first batch.
+
+        Negating the count into a second slot makes one MAX all-reduce report
+        both the largest and the smallest per-rank token count, so every rank
+        also learns whether the ranks agree. Ranks that disagree are refused
+        here, together, because a buffer sized from a ragged first batch can
+        later overflow on some ranks and not others, and the overflow check in
+        _deepep_route is local: the ranks that still fit would go on to enter
+        the dispatch collective and block until it times out.
+        """
+        counts = torch.tensor([tokens.shape[0], -tokens.shape[0]], dtype=torch.int64, device=tokens.device)
+        dist.all_reduce(counts, op=dist.ReduceOp.MAX, group=self.ep_group)
+        most, fewest = int(counts[0].item()), -int(counts[1].item())
+        if most != fewest:
+            raise RuntimeError(
+                f"ranks in this expert-parallel group routed between {fewest} and {most} tokens in the same "
+                "batch, so the DeepEP buffer cannot be sized from that batch: a later one could outgrow it on "
+                "some ranks and not others, which hangs instead of failing. Set comm_max_tokens_per_rank in the "
+                "expert_parallel config to the largest per-rank token count this job will produce, or set "
+                'comm_backend="comm", which sizes itself per step.')
+        # Rounded up so a sequence length that varies a little still fits.
+        granularity = 512
+        return -(-most // granularity) * granularity
+
     def _deepep_route(self, tokens: torch.Tensor, ro: "RouterOutput") -> torch.Tensor:
         """Dispatch, run the experts, and combine through DeepEP.
 
@@ -603,18 +628,12 @@ class AutoEPMoELayer(nn.Module):
         assert_dtype_supported(tokens.dtype)
 
         # Sized once, on the first forward, then fixed. Construction is
-        # collective and needs the same num_max_tokens_per_rank everywhere, so
-        # capacity is agreed with one all-reduce here, where every rank arrives
-        # together. It's deliberately never re-agreed later: a resize decided
-        # from local token counts risks ranks disagreeing on whether to enter
-        # the collective at all, which hangs rather than fails. A batch that
-        # outgrows the buffer instead raises with a named remedy below.
+        # collective and needs the same num_max_tokens_per_rank everywhere.
+        # It's deliberately never re-agreed later: a resize decided from local
+        # token counts risks ranks disagreeing on whether to enter the
+        # collective at all, which hangs rather than fails.
         if self._deepep_exchange is None:
-            capacity = torch.tensor([tokens.shape[0]], dtype=torch.int64, device=tokens.device)
-            dist.all_reduce(capacity, op=dist.ReduceOp.MAX, group=self.ep_group)
-            # Rounded up so a sequence length that varies a little still fits.
-            granularity = 512
-            sized_for = self.comm_max_tokens_per_rank or -(-int(capacity.item()) // granularity) * granularity
+            sized_for = self.comm_max_tokens_per_rank or self._agree_deepep_capacity(tokens)
             self._deepep_exchange = DeepEPExchange(
                 ep_group=self.ep_group,
                 num_experts=self.num_experts,
@@ -625,6 +644,10 @@ class AutoEPMoELayer(nn.Module):
                 qp_margin=self.comm_qp_margin,
             )
 
+        # Local, because agreeing on it would cost a device-to-host sync in
+        # front of every layer. Ranks that route the same number of tokens hit
+        # this together, which _agree_deepep_capacity checked when it sized the
+        # buffer; the message names the other case since it cannot rule it out.
         if tokens.shape[0] > self._deepep_exchange.num_max_tokens_per_rank:
             raise RuntimeError(
                 f"this rank routed {tokens.shape[0]} tokens, more than the "
@@ -632,7 +655,9 @@ class AutoEPMoELayer(nn.Module):
                 "sized once, from the first batch, because resizing is collective and cannot be decided from one "
                 "rank's token count. Set comm_max_tokens_per_rank in the expert_parallel config to the largest "
                 "per-rank token count this job will produce, which is micro_batch_size * seq_len when sequences "
-                'are padded to a fixed length, or set comm_backend="comm".')
+                'are padded to a fixed length, or set comm_backend="comm". If the ranks disagree on how many '
+                "tokens they route, the ones that fit will block in the dispatch collective until it times out "
+                "rather than raise this.")
 
         received, recv_weights, exchange = deepep_dispatch(self._deepep_exchange, tokens, ro.selected_experts,
                                                            ro.top_scores)

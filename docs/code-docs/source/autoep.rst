@@ -111,7 +111,9 @@ that set nothing keep the existing path unchanged.
   a fixed length. Default 0, which sizes the buffer from the first batch. Set
   it when later batches can be larger than the first: the buffer is sized once
   and a batch that outgrows it is an error, because resizing is collective and
-  cannot be decided from one rank's token count without risking a hang.
+  cannot be decided from one rank's token count without risking a hang. It is
+  required when the ranks do not all route the same number of tokens, which is
+  checked when the buffer is sized and rejected on every rank at once.
 
 On 16 H100s across two nodes, replaying routing captured from real training,
 DeepEP reduced payload AllToAll time from roughly 100 ms to 48 ms per step. A
@@ -139,8 +141,9 @@ Requirements and limits:
   version the transport is unavailable regardless of the network.
 - DeepEP v1 (the legacy ``Buffer`` API, using NVSHMEM and IBGDA) is not
   supported.
-- bfloat16 only. DeepEP's dispatch kernel does not handle fp16, and selecting
-  this backend for an fp16 run is rejected rather than silently downgraded.
+- bfloat16 only. DeepEP's dispatch kernel takes bfloat16 rows, so selecting
+  this backend for an fp16 or fp32 run is rejected rather than silently
+  downgraded.
 - Not compatible with folded tensor parallelism
   (``expert_tensor_parallel_size > 1``), which is rejected at setup.
 

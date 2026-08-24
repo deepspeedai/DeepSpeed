@@ -12,7 +12,7 @@ from unittest import mock
 
 from deepspeed.module_inject.auto_ep_comm import (COMM_BACKEND, DEEPEP_BACKEND, SUPPORTED_DTYPES, _conform_rows,
                                                   _DeepEPCombine, _DeepEPDispatch, _import_deep_ep, _qps_for_sms,
-                                                  assert_dtype_supported)
+                                                  assert_dtype_supported, destroy_exchanges)
 from deepspeed.module_inject import auto_ep_layer
 from deepspeed.module_inject.auto_ep_config import parse_autoep_config, validate_autoep_config
 
@@ -71,18 +71,48 @@ class TestAutoEPCommBackendSelection(unittest.TestCase):
 
 
 class TestDtypeGuard(unittest.TestCase):
-    """DeepEP's dispatch kernel handles bfloat16, not fp16."""
+    """DeepEP's dispatch kernel takes bfloat16 rows and nothing else."""
 
     def test_rejects_fp16(self):
         with self.assertRaises(TypeError) as caught:
             assert_dtype_supported(torch.float16)
         self.assertIn("bfloat16", str(caught.exception))
 
+    def test_rejects_fp32(self):
+        # Not a near miss: the kernel asserts on it, and the buffer is sized in
+        # bfloat16 elements, so fp32 rows would not fit the capacity either.
+        with self.assertRaises(TypeError) as caught:
+            assert_dtype_supported(torch.float32)
+        self.assertIn("bfloat16", str(caught.exception))
+
     def test_accepts_bfloat16(self):
         self.assertIsNone(assert_dtype_supported(torch.bfloat16))
 
-    def test_fp16_is_not_quietly_in_the_supported_set(self):
-        self.assertNotIn(torch.float16, SUPPORTED_DTYPES)
+    def test_only_bfloat16_is_in_the_supported_set(self):
+        self.assertEqual(SUPPORTED_DTYPES, (torch.bfloat16, ))
+
+
+class TestTeardownScope(unittest.TestCase):
+    """Teardown belongs to one engine's module, not to the whole process."""
+
+    def test_only_the_given_module_tree_is_released(self):
+        # Several engines can exist at once, and buffers are built with
+        # explicitly_destroy: freeing another engine's would leave it dispatching
+        # into memory DeepEP has already reclaimed.
+        mine, theirs = mock.Mock(), mock.Mock()
+        owned, foreign = torch.nn.Linear(2, 2), torch.nn.Linear(2, 2)
+        owned._deepep_exchange = mine
+        foreign._deepep_exchange = theirs
+
+        destroy_exchanges(torch.nn.Sequential(owned))
+
+        mine.destroy.assert_called_once_with()
+        theirs.destroy.assert_not_called()
+        self.assertIsNone(owned._deepep_exchange)
+        self.assertIs(foreign._deepep_exchange, theirs)
+
+    def test_a_module_without_layers_is_a_no_op(self):
+        destroy_exchanges(torch.nn.Linear(2, 2))
 
 
 class TestDeepEPPreflight(unittest.TestCase):
@@ -262,22 +292,25 @@ class TestRoutingWeightsAreApplied(unittest.TestCase):
 class TestBufferLifecycle(unittest.TestCase):
     """The buffer is sized once, and never resized behind the group's back."""
 
+    @staticmethod
+    def calls_named(function, name):
+        tree = ast.parse(textwrap.dedent(inspect.getsource(function)))
+        return [
+            node for node in ast.walk(tree) if isinstance(node, ast.Call) and getattr(node.func, "attr", "") == name
+        ]
+
     def test_the_agreement_is_not_conditional_on_local_data(self):
         # A collective entered by only some ranks hangs the job. The size is
         # agreed on the first forward, which every rank reaches together, and
         # never re-agreed from a local token count afterwards.
-        source = inspect.getsource(auto_ep_layer.AutoEPMoELayer._deepep_route)
-        tree = ast.parse(textwrap.dedent(source))
-
-        reduces = [
-            node for node in ast.walk(tree)
-            if isinstance(node, ast.Call) and getattr(node.func, "attr", "") == "all_reduce"
-        ]
-        self.assertEqual(len(reduces), 1, "exactly one agreement, on the first forward")
+        route = auto_ep_layer.AutoEPMoELayer._deepep_route
+        self.assertEqual(self.calls_named(route, "all_reduce"), [], "the route agrees nothing per step")
+        self.assertEqual(len(self.calls_named(auto_ep_layer.AutoEPMoELayer._agree_deepep_capacity, "all_reduce")), 1)
 
         guards = [
-            node for node in ast.walk(tree) if isinstance(node, ast.If) and any(
-                isinstance(inner, ast.Call) and getattr(inner.func, "attr", "") == "all_reduce"
+            node for node in ast.walk(ast.parse(textwrap.dedent(inspect.getsource(route))))
+            if isinstance(node, ast.If) and any(
+                isinstance(inner, ast.Call) and getattr(inner.func, "attr", "") == "_agree_deepep_capacity"
                 for inner in ast.walk(node))
         ]
         self.assertTrue(guards, "the agreement must sit under the first-forward guard")
@@ -285,6 +318,33 @@ class TestBufferLifecycle(unittest.TestCase):
         # this rank happens to hold.
         self.assertIn("_deepep_exchange", ast.dump(guards[0].test))
         self.assertNotIn("tokens", ast.dump(guards[0].test))
+
+    def test_ranks_that_disagree_are_refused_together(self):
+        # Every rank reads the same largest and smallest count out of the
+        # all-reduce, so all of them raise: none is left inside a collective
+        # waiting for a peer that has already died.
+        layer = mock.Mock(ep_group=None)
+
+        def all_reduce(tensor, *args, **kwargs):
+            tensor.copy_(torch.tensor([600, -8], dtype=torch.int64))
+
+        with mock.patch.object(auto_ep_layer.dist, "all_reduce", all_reduce):
+            with self.assertRaises(RuntimeError) as caught:
+                auto_ep_layer.AutoEPMoELayer._agree_deepep_capacity(layer, torch.ones((8, 4)))
+
+        message = str(caught.exception)
+        self.assertIn("between 8 and 600", message)
+        self.assertIn("comm_max_tokens_per_rank", message)
+
+    def test_an_agreed_capacity_is_rounded_up(self):
+        # Rounded so a sequence length that varies a little still fits without
+        # a resize nobody can agree on.
+        layer = mock.Mock(ep_group=None)
+
+        with mock.patch.object(auto_ep_layer.dist, "all_reduce", lambda *a, **k: None):
+            sized = auto_ep_layer.AutoEPMoELayer._agree_deepep_capacity(layer, torch.ones((600, 4)))
+
+        self.assertEqual(sized, 1024)
 
     def test_outgrowing_the_buffer_names_the_remedy(self):
         exchange = mock.Mock(num_max_tokens_per_rank=512)

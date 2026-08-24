@@ -46,6 +46,11 @@ def _run_one_step(backend, ep_size, seed):
     seed_everything(seed)
 
     config = make_autoep_config(ep_size=ep_size)
+    # Pinned, because make_autoep_config prefers fp16 wherever it is available
+    # and DeepEP dispatches bfloat16 only. Both backends have to run the same
+    # dtype anyway for the comparison to mean anything.
+    config.pop("fp16", None)
+    config["bf16"] = {"enabled": True}
     config["expert_parallel"]["comm_backend"] = backend
     if backend == "deepep":
         # Sized explicitly rather than from the first batch, so both backends

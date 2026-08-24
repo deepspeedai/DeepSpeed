@@ -52,33 +52,34 @@ def _qps_for_sms(num_sms: int, qp_margin: int) -> int:
     return num_sms + qp_margin
 
 
-# Every buffer built in this process, in construction order. DeepEP buffers are
-# constructed with explicitly_destroy, so nothing reclaims them on its own, and
-# destroying them is collective: every rank has to do it in the same order.
-_LIVE_EXCHANGES: list["DeepEPExchange"] = []
-
-# DeepEP's dispatch kernel handles bfloat16 and fp8, not fp16. A half-precision
-# run would otherwise reach an assertion inside the kernel.
-SUPPORTED_DTYPES = (torch.bfloat16, torch.float32)
+# DeepEP's dispatch kernel takes bfloat16 rows, or an fp8 pair this backend
+# does not build. Anything else reaches an assertion inside the kernel, and the
+# buffer is sized in bfloat16 elements besides.
+SUPPORTED_DTYPES = (torch.bfloat16, )
 
 
 def assert_dtype_supported(dtype: torch.dtype) -> None:
     """Reject dtypes DeepEP's kernels cannot dispatch."""
     if dtype not in SUPPORTED_DTYPES:
         raise TypeError(f'comm_backend="{DEEPEP_BACKEND}" does not support {dtype}: DeepEP\'s dispatch kernel '
-                        'handles bfloat16, not fp16. Train in bfloat16, or set comm_backend="comm" to use the '
+                        'handles bfloat16 only. Train in bfloat16, or set comm_backend="comm" to use the '
                         "default all-to-all, which has no such restriction.")
 
 
-def destroy_all_exchanges() -> None:
-    """Release every DeepEP buffer this process built.
+def destroy_exchanges(module) -> None:
+    """Release the DeepEP buffers held by the AutoEP layers under ``module``.
 
-    Collective, and ordered by construction, so every rank tears the same
-    buffers down in the same order. Worth calling at the end of training: the
-    buffers ask DeepEP not to reclaim them, so nothing else will.
+    Collective, and ordered by the module tree, which every rank walks the same
+    way. Scoped to one module rather than to the process because several
+    engines can exist at once, and one engine's teardown must not free
+    another's buffers. Worth calling at the end of training: the buffers ask
+    DeepEP not to reclaim them, so nothing else will.
     """
-    for exchange in list(_LIVE_EXCHANGES):
-        exchange.destroy()
+    for submodule in module.modules():
+        exchange = getattr(submodule, "_deepep_exchange", None)
+        if exchange is not None:
+            exchange.destroy()
+            submodule._deepep_exchange = None
 
 
 def _import_deep_ep():
@@ -169,14 +170,10 @@ class DeepEPExchange:
         # passes replay against it, so it has to outlive the dispatch call.
         self.last_handle = None
         self.destroyed = False
-        # Constructed with explicitly_destroy, so nothing reclaims this buffer
-        # on its own. Registering it means a process that never calls the
-        # layer's teardown can still release every buffer in one call.
-        _LIVE_EXCHANGES.append(self)
         # Buffer construction is collective and allocates fabric resources, so
         # it's often where an unsuitable cluster kills the process silently.
-        logger.info(f"AutoEP DeepEP buffer {len(_LIVE_EXCHANGES)} built: "
-                    f"capacity={num_max_tokens_per_rank} sms={num_sms} qps={_qps_for_sms(num_sms, qp_margin)}")
+        logger.info(f"AutoEP DeepEP buffer built: capacity={num_max_tokens_per_rank} sms={num_sms} "
+                    f"qps={_qps_for_sms(num_sms, qp_margin)}")
 
     def dispatch(self, tokens: torch.Tensor, topk_idx: torch.Tensor, topk_weights: torch.Tensor):
         """Send tokens to their experts, returning rows, weights and handle.
@@ -250,8 +247,6 @@ class DeepEPExchange:
             return
         self.destroyed = True
         self.buffer.destroy()
-        if self in _LIVE_EXCHANGES:
-            _LIVE_EXCHANGES.remove(self)
 
 
 def _conform_rows(tensor: torch.Tensor, shape) -> torch.Tensor:
