@@ -1333,9 +1333,6 @@ class DeepSpeedEngine(Module):
     def zero_gather_16bit_weights_on_model_save(self):
         return self._config.zero_config.gather_16bit_weights_on_model_save
 
-    def zero_grad_hooks(self):
-        return self._config.zero_config.grad_hooks
-
     def zero_legacy_stage1(self):
         return self._config.zero_config.legacy_stage1
 
