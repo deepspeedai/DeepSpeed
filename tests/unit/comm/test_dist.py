@@ -128,6 +128,28 @@ class TestDistAllReduce(DistributedTest):
         assert torch.all(x == result)
 
 
+class TestDistIsendIrecv(DistributedTest):
+    world_size = 2
+
+    def test(self):
+        rank = dist.get_rank()
+        device = get_accelerator().device_name()
+        length = 4096
+        if rank == 0:
+            payload = torch.arange(length, dtype=torch.float32).to(device)
+            handle = dist.isend(payload, dst=1)
+        else:
+            received = torch.zeros(length, dtype=torch.float32).to(device)
+            handle = dist.irecv(received, src=0)
+        # isend/irecv are asynchronous by contract: they must hand back a waitable handle,
+        # and the received buffer is only valid after wait() completes.
+        assert hasattr(handle, 'wait')
+        handle.wait()
+        if rank == 1:
+            expected = torch.arange(length, dtype=torch.float32).to(device)
+            assert torch.equal(received, expected)
+
+
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("num_elements", [128, 3])
 class TestDistInferenceAllReduce(DistributedTest):
