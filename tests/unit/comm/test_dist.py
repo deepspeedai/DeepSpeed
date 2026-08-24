@@ -187,6 +187,16 @@ class TestMpsStagedP2P:
 class TestDistIsendIrecv(DistributedTest):
     world_size = 2
 
+    def _launch_procs(self, num_procs, init_method):
+        # Two gloo ranks do not need two devices, but the base class gates process count on
+        # device_count(), which reports sockets on CPU and would skip this test on CI. Bypass
+        # the gate there and pin gloo so oneCCL bindings are not silently picked up.
+        if get_accelerator().device_name() != 'cpu':
+            return super()._launch_procs(num_procs, init_method)
+        self.backend = 'gloo'
+        torch.multiprocessing.set_start_method('forkserver', force=True)
+        self._launch_daemonic_procs(num_procs, init_method)
+
     def test(self):
         rank = dist.get_rank()
         device = get_accelerator().device_name()
