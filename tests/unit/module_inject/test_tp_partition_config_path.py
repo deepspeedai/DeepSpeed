@@ -8,11 +8,13 @@ path).  Patterns like ``model.layers.0.self_attn.q_proj`` never matched
 because the name was just ``0.self_attn.q_proj``.
 """
 
+from contextlib import contextmanager
+
 import pytest
 import torch.nn as nn
 
 from deepspeed.module_inject.auto_tp import AutoTP, AutoTPConfig, PartitionType, TPLayerSpec
-from deepspeed.module_inject.layers import LinearLayer
+from deepspeed.module_inject.layers import LinearAllreduce, LinearLayer, LmHeadLinearAllreduce, set_autotp_mode
 from deepspeed.module_inject.tp_plan_converter import TPPlanConverter
 
 
@@ -158,6 +160,49 @@ def _build_gathered_lm_head_autotp(model, mp_size=1):
     return autotp
 
 
+def _build_legacy_lm_head_autotp(model):
+    autotp = AutoTP(
+        module=model,
+        all_reduce_linears=("lm_head", "embed_out"),
+        prefix="",
+        state_dict=None,
+        linear_layer_setting=(nn.Linear, nn.Embedding),
+        orig_layer_impl=None,
+    )
+    autotp.mp_size = 1
+    autotp.mp_group = None
+    autotp.update_linear_policies()
+    return autotp
+
+
+def _build_row_output_head_autotp(model, head="lm_head"):
+    config = AutoTPConfig(layer_specs=[
+        TPLayerSpec(patterns=[rf".*{head}\.weight$"], partition_type=PartitionType.ROW),
+    ])
+    autotp = AutoTP(
+        module=model,
+        all_reduce_linears=(),
+        prefix="",
+        state_dict=None,
+        linear_layer_setting=(nn.Linear, nn.Embedding),
+        orig_layer_impl=None,
+        partition_config=config,
+    )
+    autotp.mp_size = 1
+    autotp.mp_group = None
+    autotp.update_linear_policies()
+    return autotp
+
+
+@contextmanager
+def _training_mode():
+    set_autotp_mode(training=True)
+    try:
+        yield
+    finally:
+        set_autotp_mode(training=False)
+
+
 def test_gathered_lm_head_uses_column_parallel_layer_when_untied():
     model = OutputModel(tied=False)
     _build_gathered_lm_head_autotp(model)._replace_module(model)
@@ -207,6 +252,44 @@ def test_gathered_lm_head_uses_column_parallel_layer_when_output_dim_is_uneven()
 
     assert isinstance(model.lm_head, LinearLayer)
     assert model.lm_head.gather_output
+
+
+@pytest.mark.parametrize("head", ["lm_head", "embed_out"])
+def test_legacy_output_head_defaults_to_column_parallel_during_training(head):
+    model = OutputModel(tied=False)
+    if head == "embed_out":
+        model.embed_out = model.lm_head
+        del model.lm_head
+
+    with _training_mode():
+        _build_legacy_lm_head_autotp(model)._replace_last_linear_module(model)
+
+    output_head = getattr(model, head)
+    assert isinstance(output_head, LinearLayer)
+    assert not output_head.gather_output
+
+
+def test_legacy_lm_head_keeps_inference_allreduce_routing():
+    model = OutputModel(tied=False)
+    _build_legacy_lm_head_autotp(model)._replace_last_linear_module(model)
+
+    assert isinstance(model.lm_head, LmHeadLinearAllreduce)
+
+
+def test_explicit_row_parallel_lm_head_is_not_overridden_by_its_name():
+    model = OutputModel(tied=False)
+    with _training_mode():
+        _build_row_output_head_autotp(model)._replace_module(model)
+
+    assert isinstance(model.lm_head, LinearAllreduce)
+    assert not isinstance(model.lm_head, LmHeadLinearAllreduce)
+
+
+def test_explicit_row_parallel_lm_head_keeps_inference_specialization():
+    model = OutputModel(tied=False)
+    _build_row_output_head_autotp(model)._replace_module(model)
+
+    assert isinstance(model.lm_head, LmHeadLinearAllreduce)
 
 
 if __name__ == "__main__":

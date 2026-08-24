@@ -394,12 +394,15 @@ class AutoTP():
         down_proj = False
         if 'down_proj' in name:
             down_proj = True
-        if name in self.all_reduce_linears or arctic_w2_all_reduce_linear or down_proj:
+        legacy_lm_head = name == "lm_head" or name == 'embed_out'
+        training_column_lm_head = is_autotp_training_mode() and legacy_lm_head
+        if (name in self.all_reduce_linears or arctic_w2_all_reduce_linear
+                or down_proj) and not training_column_lm_head:
 
             setattr(child, "replaced", True)
             if self.conv_linear_layer:
                 return Conv_LinearALlreduce(child, self.mp_group, name=name)
-            elif name == "lm_head" or name == 'embed_out':
+            elif legacy_lm_head:
                 return LmHeadLinearAllreduce(child, self.mp_group)
 
             return LinearAllreduce(child, self.mp_group, name=name)
@@ -451,8 +454,7 @@ class AutoTP():
         """Create row-parallel layer (AllReduce after forward)."""
         if self.conv_linear_layer:
             return Conv_LinearALlreduce(module, self.mp_group, name=name)
-        # Check for lm_head / embed_out
-        if name == "lm_head" or name == 'embed_out':
+        if (name == "lm_head" or name == 'embed_out') and not is_autotp_training_mode():
             return LmHeadLinearAllreduce(module, self.mp_group)
 
         if spec.shape is not None:
