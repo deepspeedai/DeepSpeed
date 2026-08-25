@@ -32,7 +32,10 @@ class MetalOpBuilder(MPSOpBuilder):
 
     Shaders are compiled at load time through torch.mps.compile_shader, which dispatches them on
     PyTorch's own MPS command stream, so no Xcode toolchain or C++ extension build is needed.
-    Subclasses list their .metal files in metal_sources() and get back the compiled library.
+    There is deliberately no torch-extensions style disk cache: runtime compilation of these
+    kernels takes milliseconds, and macOS's Metal framework keeps its own per-app cache of
+    compiled pipelines. Subclasses list their .metal files in metal_sources() and get back the
+    compiled library.
     """
     _libraries = {}
 

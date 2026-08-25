@@ -63,7 +63,7 @@ class MPSFusedAdam:
                    float(weight_decay),
                    float(bias_correction1),
                    float(bias_correction2),
-                   float(adam_w_mode),
+                   int(adam_w_mode),
                    threads=param.numel())
 
     @staticmethod

@@ -123,7 +123,9 @@ def test_fused_adam_matches_reference(adam_w_mode, dtype):
         ds_optimizer.step()
 
     # fp32 operation order differs between implementations and accumulates over steps, so allow a
-    # few ulps of the storage dtype at the scale of the tensor (per-element rtol is too strict near zero).
+    # few ulps of the storage dtype at the scale of the tensor (per-element rtol is too strict near
+    # zero). For this data (|param| ~ 3) that is ~3e-6 for fp32 (tighter than the 1e-5 it replaces)
+    # and ~0.2 for bf16, against a measured implementation agreement of ~1e-6 and ~3e-5 respectively.
     for ds_param, ref_param in zip(ds_params, ref_params):
         atol = 8 * torch.finfo(dtype).eps * ref_param.abs().max().item()
         torch.testing.assert_close(ds_param.float(), ref_param.float(), rtol=0, atol=atol)
