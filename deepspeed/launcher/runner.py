@@ -398,6 +398,30 @@ def parse_inclusion_exclusion(resource_pool, inclusion, exclusion):
     return parse_resource_filter(active_resources, include_str=inclusion, exclude_str=exclusion)
 
 
+def apply_num_nodes_and_gpus(active_resources, num_nodes, num_gpus):
+    """Trim resolved resources to the top num_nodes hosts and num_gpus slots per host.
+
+    Split out of main() so the launcher backends can be exercised against the same
+    resource dict main() hands them. Both flags are mutually exclusive with
+    --include/--exclude, which main() enforces before calling this.
+    """
+    if num_nodes > 0:
+        updated_active_resources = collections.OrderedDict()
+        for count, hostname in enumerate(active_resources.keys()):
+            if num_nodes == count:
+                break
+            updated_active_resources[hostname] = active_resources[hostname]
+        active_resources = updated_active_resources
+
+    if num_gpus > 0:
+        updated_active_resources = collections.OrderedDict()
+        for hostname in active_resources.keys():
+            updated_active_resources[hostname] = list(range(num_gpus))
+        active_resources = updated_active_resources
+
+    return active_resources
+
+
 def encode_world_info(world_info):
     world_info_json = json.dumps(world_info).encode('utf-8')
     world_info_base64 = base64.urlsafe_b64encode(world_info_json).decode('utf-8')
@@ -518,19 +542,7 @@ def main(args=None):
         run_autotuning(args, active_resources)
         return
 
-    if args.num_nodes > 0:
-        updated_active_resources = collections.OrderedDict()
-        for count, hostname in enumerate(active_resources.keys()):
-            if args.num_nodes == count:
-                break
-            updated_active_resources[hostname] = active_resources[hostname]
-        active_resources = updated_active_resources
-
-    if args.num_gpus > 0:
-        updated_active_resources = collections.OrderedDict()
-        for hostname in active_resources.keys():
-            updated_active_resources[hostname] = list(range(args.num_gpus))
-        active_resources = updated_active_resources
+    active_resources = apply_num_nodes_and_gpus(active_resources, args.num_nodes, args.num_gpus)
 
     if args.elastic_training:
         assert not args.no_local_rank, "--no_local_rank argument is not supported in Elastic training"

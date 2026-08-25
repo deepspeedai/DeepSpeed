@@ -358,7 +358,9 @@ class SlurmRunner(MultiNodeRunner):
     def get_cmd(self, environment, active_resources):
         assert not getattr(self.args, 'detect_nvlink_pairs',
                            False), "slurm backend does not support remapping visible devices"
-        total_process_count = sum(self.resource_pool.values())
+        # --include/--exclude are already resolved into active_resources, so counting the
+        # whole pool here would ask srun for slots the user filtered out.
+        total_process_count = sum(len(slots) for slots in active_resources.values())
         srun_cmd = [
             'srun',
             '-n',
@@ -368,12 +370,19 @@ class SlurmRunner(MultiNodeRunner):
         if getattr(self.args, 'slurm_comment', ''):
             srun_cmd += ['--comment', self.args.slurm_comment]
 
-        if self.args.include != "":
-            srun_cmd.append('--include')
-            srun_cmd.append(f'{self.args.include}')
-        if self.args.exclude != "":
-            srun_cmd.append('--exclude')
-            srun_cmd.append(f'{self.args.exclude}')
+        if self.args.include != "" or self.args.exclude != "":
+            # srun has no --include, and the NAME[:SLOT,...] syntax DeepSpeed accepts is not
+            # a slurm hostlist, so name the hosts that survived the filter instead.
+            active_hosts = ",".join(active_resources.keys())
+            srun_cmd.append('--nodelist')
+            srun_cmd.append(active_hosts)
+            # --nodelist alone is only an upper bound: srun documents that a lower task count
+            # "may only require a subset of the supplied node list", so it could pack every
+            # rank onto one host and silently drop a host the filter kept. --nodes pins the
+            # count, and runner.py forbids --num_nodes alongside a resource filter, so the
+            # branch below cannot also set it.
+            srun_cmd.append('--nodes')
+            srun_cmd.append(f'{len(active_resources)}')
         if self.args.num_nodes > 0:
             srun_cmd.append('--nodes')
             srun_cmd.append(f'{self.args.num_nodes}')
