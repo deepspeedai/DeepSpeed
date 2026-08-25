@@ -497,6 +497,8 @@ def test_update_mp_params_uses_group_local_rank(monkeypatch):
     autotp.mp_group = tp_group
     autotp.mp_size = 2
     child = nn.Module()
+    child.proj = nn.Linear(1, 1, bias=False)
+    setattr(child.proj.weight, DS_AUTOTP_UC_META, {})
     child.num_heads = 12
 
     monkeypatch.setattr(dist, "get_rank", lambda group=None: 1 if group is tp_group else 0)
@@ -516,6 +518,8 @@ def test_update_mp_params_shards_attributes_like_their_weights(monkeypatch):
     autotp.mp_group = tp_group
     autotp.mp_size = 2
     child = nn.Module()
+    child.proj = nn.Linear(1, 1, bias=False)
+    setattr(child.proj.weight, DS_AUTOTP_UC_META, {})
     child.hidden_size = 12
 
     monkeypatch.setattr(dist, "get_rank", lambda group=None: 1 if group is tp_group else 0)
@@ -587,7 +591,7 @@ def test_update_mp_params_follows_actual_tp_parameter_metadata(monkeypatch):
     monkeypatch.setattr(dist, "get_rank", lambda group=None: 1 if group is tp_group else 0)
     set_num_kv_heads(None)
     try:
-        autotp.update_mp_params(child, "model.layers.0.mlp", only_if_sharded=True)
+        autotp.update_mp_params(child, "model.layers.0.mlp")
     finally:
         set_num_kv_heads(None)
 

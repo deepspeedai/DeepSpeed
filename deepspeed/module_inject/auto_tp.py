@@ -622,10 +622,10 @@ class AutoTP():
                 f"parameters, e.g. {registered[0]!r}",
                 ranks=[0])
 
-    def update_mp_params(self, child, name=None, only_if_sharded=False):
+    def update_mp_params(self, child, name=None):
         if getattr(child, "replaced", False) == True:
             return
-        if only_if_sharded and not any(hasattr(param, DS_AUTOTP_UC_META) for param in child.parameters()):
+        if not any(hasattr(param, DS_AUTOTP_UC_META) for param in child.parameters()):
             setattr(child, "replaced", True)
             return
         tp_index = dist.get_rank(group=self.mp_group) if self.mp_group is not None else 0
@@ -689,7 +689,7 @@ class AutoTP():
                 setattr(autoep_layer, child_name, self.linear_policies[key](child, full_name, self.conv_linear_layer))
             else:
                 self._replace_module(child, full_name, "")
-                self.update_mp_params(child, full_name, only_if_sharded=True)
+                self.update_mp_params(child, full_name)
 
     def _replace_module(self, r_module, prev_name='', prev_class_name=''):
         if prev_name == '' and prev_class_name == '':
@@ -738,7 +738,7 @@ class AutoTP():
                         setattr(r_module, name, new_child)
                 else:
                     self._replace_module(child, name, class_name)
-                    self.update_mp_params(child, full_name, only_if_sharded=True)
+                    self.update_mp_params(child, full_name)
             # Traditional path: use linear_policies for type-based routing
             elif child.__class__ in self.linear_policies:
                 setattr(r_module, name, self.linear_policies[child.__class__](child, prev_name + '.' + name,
@@ -758,7 +758,7 @@ class AutoTP():
                 self._replace_module(child, name, class_name)
                 # Descendants have now been replaced and carry universal-checkpoint TP metadata.
                 # Keep logical dimensions whole when no parameter in this subtree was actually sharded.
-                self.update_mp_params(child, name, only_if_sharded=True)
+                self.update_mp_params(child, name)
         return r_module
 
     @staticmethod
