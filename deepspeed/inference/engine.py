@@ -425,7 +425,7 @@ class InferenceEngine(Module):
 
         if isinstance(self.module, torch.nn.Module):
             # config is our DeepSpeedInferenceConfig and self.config is the HF model config
-            replace_transformer_layer(client_module, self.module, checkpoint, config, self.config)
+            replace_transformer_layer(client_module, self.module, checkpoint, config, self.config, training_mode=False)
 
     def _get_all_ckpt_names(self, checkpoints_path, tag):
         ckpt_file_pattern = self._get_ckpt_name(checkpoints_path, tag, mp_placeholder="*")

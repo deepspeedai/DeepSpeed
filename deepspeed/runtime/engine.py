@@ -799,7 +799,8 @@ class DeepSpeedEngine(Module):
                             linear_layer_setting=(torch.nn.Linear, torch.nn.Embedding),
                             orig_layer_impl=None,
                             keep_module_on_host=tp_config.keep_module_on_host,
-                            partition_config=partition_config)
+                            partition_config=partition_config,
+                            training_mode=True)
             autotp.set_tensor_parallel_config(tp_size, tp_config.tensor_parallel.tp_group)
             autotp.update_linear_policies()
             autotp._replace_module(model)
@@ -838,6 +839,7 @@ class DeepSpeedEngine(Module):
                     orig_layer_impl=None,
                     keep_module_on_host=tp_config.keep_module_on_host,
                     partition_config=tp_plan_config,
+                    training_mode=True,
                 )
                 autotp.set_tensor_parallel_config(tp_size, tp_config.tensor_parallel.tp_group)
                 autotp.update_linear_policies()
@@ -858,7 +860,7 @@ class DeepSpeedEngine(Module):
         parser_dict = AutoTP.tp_parser(model)
         for client_module, injection_policy in parser_dict:
             tp_config.injection_policy_tuple = injection_policy
-            replace_transformer_layer(client_module, model, None, tp_config, model_config)
+            replace_transformer_layer(client_module, model, None, tp_config, model_config, training_mode=True)
 
         setattr(model, UNIVERSAL_CHECKPOINT_INFO, collect_autotp_universal_checkpoint_info(model))
         setattr(model, "ds_autotp_parsed", True)

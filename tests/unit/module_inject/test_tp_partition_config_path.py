@@ -8,8 +8,6 @@ path).  Patterns like ``model.layers.0.self_attn.q_proj`` never matched
 because the name was just ``0.self_attn.q_proj``.
 """
 
-from contextlib import contextmanager
-
 import pytest
 import torch.nn as nn
 
@@ -160,7 +158,7 @@ def _build_gathered_lm_head_autotp(model, mp_size=1):
     return autotp
 
 
-def _build_legacy_lm_head_autotp(model):
+def _build_legacy_lm_head_autotp(model, training_mode=False):
     autotp = AutoTP(
         module=model,
         all_reduce_linears=("lm_head", "embed_out"),
@@ -168,6 +166,7 @@ def _build_legacy_lm_head_autotp(model):
         state_dict=None,
         linear_layer_setting=(nn.Linear, nn.Embedding),
         orig_layer_impl=None,
+        training_mode=training_mode,
     )
     autotp.mp_size = 1
     autotp.mp_group = None
@@ -175,7 +174,7 @@ def _build_legacy_lm_head_autotp(model):
     return autotp
 
 
-def _build_row_output_head_autotp(model, head="lm_head"):
+def _build_row_output_head_autotp(model, head="lm_head", training_mode=False):
     config = AutoTPConfig(layer_specs=[
         TPLayerSpec(patterns=[rf".*{head}\.weight$"], partition_type=PartitionType.ROW),
     ])
@@ -187,20 +186,12 @@ def _build_row_output_head_autotp(model, head="lm_head"):
         linear_layer_setting=(nn.Linear, nn.Embedding),
         orig_layer_impl=None,
         partition_config=config,
+        training_mode=training_mode,
     )
     autotp.mp_size = 1
     autotp.mp_group = None
     autotp.update_linear_policies()
     return autotp
-
-
-@contextmanager
-def _training_mode():
-    set_autotp_mode(training=True)
-    try:
-        yield
-    finally:
-        set_autotp_mode(training=False)
 
 
 def test_gathered_lm_head_uses_column_parallel_layer_when_untied():
@@ -261,12 +252,11 @@ def test_legacy_output_head_defaults_to_column_parallel_during_training(head):
         model.embed_out = model.lm_head
         del model.lm_head
 
-    with _training_mode():
-        _build_legacy_lm_head_autotp(model)._replace_last_linear_module(model)
+    _build_legacy_lm_head_autotp(model, training_mode=True)._replace_last_linear_module(model)
 
     output_head = getattr(model, head)
     assert isinstance(output_head, LinearLayer)
-    assert not output_head.gather_output
+    assert output_head.gather_output
 
 
 def test_legacy_lm_head_keeps_inference_allreduce_routing():
@@ -276,10 +266,32 @@ def test_legacy_lm_head_keeps_inference_allreduce_routing():
     assert isinstance(model.lm_head, LmHeadLinearAllreduce)
 
 
+def test_global_training_mode_does_not_leak_into_inference_routing():
+    model = OutputModel(tied=False)
+    set_autotp_mode(training=True)
+    try:
+        _build_legacy_lm_head_autotp(model, training_mode=False)._replace_last_linear_module(model)
+    finally:
+        set_autotp_mode(training=False)
+
+    assert isinstance(model.lm_head, LmHeadLinearAllreduce)
+
+
+def test_legacy_tied_lm_head_stays_replicated_during_training():
+    model = OutputModel(tied=True)
+    tied_weight = model.embed_tokens.weight
+
+    _build_legacy_lm_head_autotp(model, training_mode=True)._replace_last_linear_module(model)
+
+    assert isinstance(model.embed_tokens, nn.Embedding)
+    assert isinstance(model.lm_head, nn.Linear)
+    assert model.embed_tokens.weight is tied_weight
+    assert model.lm_head.weight is tied_weight
+
+
 def test_explicit_row_parallel_lm_head_is_not_overridden_by_its_name():
     model = OutputModel(tied=False)
-    with _training_mode():
-        _build_row_output_head_autotp(model)._replace_module(model)
+    _build_row_output_head_autotp(model, training_mode=True)._replace_module(model)
 
     assert isinstance(model.lm_head, LinearAllreduce)
     assert not isinstance(model.lm_head, LmHeadLinearAllreduce)
