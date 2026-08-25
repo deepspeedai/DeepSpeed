@@ -64,7 +64,7 @@ def test_gate_up_partition_covers_the_whole_weight(clean_tp_shard_globals):
 
     gate = torch.cat([shards[0][:3], shards[1][:2]], dim=0)
     up = torch.cat([shards[0][3:], shards[1][2:]], dim=0)
-    assert torch.equal(torch.cat([gate, up], dim=0), full_weight)
+    assert torch.equal(torch.cat([gate, up], dim=0), full_weight.to(gate.device))
 
 
 class _QWenAttention(torch.nn.Module):
