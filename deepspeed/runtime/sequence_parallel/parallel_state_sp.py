@@ -12,6 +12,7 @@ from deepspeed import comm as dist
 # These groups are used to reduce gradients and shard parameters and optimizer stages for ZeRO.
 _SEQUENCE_PARALLEL_GROUP = None
 _SEQUENCE_DATA_PARALLEL_GROUP = None
+_CREATED_SEQUENCE_PARALLEL_GROUPS = []
 
 
 def initialize_sequence_parallel(sequence_parallel_size: int) -> None:
@@ -39,23 +40,37 @@ def initialize_sequence_parallel(sequence_parallel_size: int) -> None:
 
     # Build the sequence parallel groups.
     global _SEQUENCE_PARALLEL_GROUP
-    assert _SEQUENCE_PARALLEL_GROUP is None, "sequence parallel group is already initialized"
-    for i in range(num_sequence_parallel_groups):
-        ranks = range(i * sequence_parallel_size, (i + 1) * sequence_parallel_size)
-        group = dist.new_group(ranks)
-        if rank in ranks:
-            _SEQUENCE_PARALLEL_GROUP = group
-
-    # Build the sequence data parallel groups.
     global _SEQUENCE_DATA_PARALLEL_GROUP
+    global _CREATED_SEQUENCE_PARALLEL_GROUPS
+    assert _SEQUENCE_PARALLEL_GROUP is None, "sequence parallel group is already initialized"
     assert _SEQUENCE_DATA_PARALLEL_GROUP is None, "sequence data parallel group is already initialized"
-    all_data_sequence_parallel_group_ranks = []
-    for i in range(num_sequence_data_parallel_groups):
-        ranks = range(i * sequence_data_parallel_size, (i + 1) * sequence_data_parallel_size)
-        group = dist.new_group(ranks)
-        all_data_sequence_parallel_group_ranks.append(list(ranks))
-        if rank in ranks:
-            _SEQUENCE_DATA_PARALLEL_GROUP = group
+    assert not _CREATED_SEQUENCE_PARALLEL_GROUPS, "sequence parallel process groups are already initialized"
+
+    created_groups = []
+    try:
+        for i in range(num_sequence_parallel_groups):
+            ranks = range(i * sequence_parallel_size, (i + 1) * sequence_parallel_size)
+            group = dist.new_group(ranks)
+            if rank in ranks:
+                _SEQUENCE_PARALLEL_GROUP = group
+                created_groups.append(group)
+
+        # Build the sequence data parallel groups.
+        for i in range(num_sequence_data_parallel_groups):
+            ranks = range(i * sequence_data_parallel_size, (i + 1) * sequence_data_parallel_size)
+            group = dist.new_group(ranks)
+            if rank in ranks:
+                _SEQUENCE_DATA_PARALLEL_GROUP = group
+                created_groups.append(group)
+    except Exception:
+        if dist.is_initialized():
+            for group in reversed(created_groups):
+                dist.destroy_process_group(group)
+        _SEQUENCE_PARALLEL_GROUP = None
+        _SEQUENCE_DATA_PARALLEL_GROUP = None
+        raise
+
+    _CREATED_SEQUENCE_PARALLEL_GROUPS = created_groups
 
 
 def get_sequence_parallel_group():
@@ -91,11 +106,18 @@ def get_sequence_data_parallel_rank():
 
 
 def destroy_sequence_parallel() -> None:
-    """Forget sequence-parallel groups after a failed or completed registration."""
+    """Destroy process groups created for sequence parallelism and clear local state."""
     global _SEQUENCE_PARALLEL_GROUP
     global _SEQUENCE_DATA_PARALLEL_GROUP
+    global _CREATED_SEQUENCE_PARALLEL_GROUPS
+
+    created_groups = _CREATED_SEQUENCE_PARALLEL_GROUPS
+    _CREATED_SEQUENCE_PARALLEL_GROUPS = []
     _SEQUENCE_PARALLEL_GROUP = None
     _SEQUENCE_DATA_PARALLEL_GROUP = None
+    if dist.is_initialized():
+        for group in reversed(created_groups):
+            dist.destroy_process_group(group)
 
 
 # since we only have 1 additional dimension over DP, we can just alias MP with SP
