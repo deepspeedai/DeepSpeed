@@ -174,7 +174,7 @@ def _build_legacy_lm_head_autotp(model, training_mode=False):
     return autotp
 
 
-def _build_row_output_head_autotp(model, head="lm_head", training_mode=False):
+def _build_row_output_head_autotp(model, head="lm_head", training_mode=False, mp_size=1):
     config = AutoTPConfig(layer_specs=[
         TPLayerSpec(patterns=[rf".*{head}\.weight$"], partition_type=PartitionType.ROW),
     ])
@@ -188,7 +188,7 @@ def _build_row_output_head_autotp(model, head="lm_head", training_mode=False):
         partition_config=config,
         training_mode=training_mode,
     )
-    autotp.mp_size = 1
+    autotp.mp_size = mp_size
     autotp.mp_group = None
     autotp.update_linear_policies()
     return autotp
@@ -295,6 +295,14 @@ def test_explicit_row_parallel_lm_head_is_not_overridden_by_its_name():
 
     assert isinstance(model.lm_head, LinearAllreduce)
     assert not isinstance(model.lm_head, LmHeadLinearAllreduce)
+
+
+@pytest.mark.parametrize("tied", [False, True])
+def test_explicit_row_parallel_lm_head_training_rejects_tp_greater_than_one(tied):
+    model = OutputModel(tied=tied)
+
+    with pytest.raises(NotImplementedError, match="row-parallel output heads"):
+        _build_row_output_head_autotp(model, training_mode=True, mp_size=2)._replace_module(model)
 
 
 def test_explicit_row_parallel_lm_head_keeps_inference_specialization():

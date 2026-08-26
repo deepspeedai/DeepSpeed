@@ -458,8 +458,13 @@ class AutoTP():
         """Create row-parallel layer (AllReduce after forward)."""
         if self.conv_linear_layer:
             return Conv_LinearALlreduce(module, self.mp_group, name=name)
-        if (name == "lm_head" or name == 'embed_out') and not self.training_mode:
-            return LmHeadLinearAllreduce(module, self.mp_group)
+        if name == "lm_head" or name == 'embed_out':
+            if not self.training_mode:
+                return LmHeadLinearAllreduce(module, self.mp_group)
+            if self.mp_size > 1:
+                raise NotImplementedError(
+                    "Training with explicit row-parallel output heads is not supported for tensor parallel size > 1. "
+                    "Use column-parallel with gather_output=True until a row-parallel autograd path is available.")
 
         if spec.shape is not None:
             return SubParamLinearAllreduce(
