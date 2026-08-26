@@ -222,21 +222,35 @@ def test_xpu_device_registration_calls_sycl(monkeypatch):
 
 
 def test_xpu_sycl_lookup_reuses_torch_runtime(monkeypatch):
-    """Opening a second SYCL runtime aborts at shutdown, so only RTLD_NOLOAD on the soname is allowed."""
+    """Only the already-mapped runtime may be opened, and only with RTLD_NOLOAD.
+
+    Opening a second SYCL runtime (or a hardcoded soname that may resolve to a
+    different oneAPI install) aborts at interpreter shutdown.
+    """
     calls = []
+    mapped = "/some/env/lib/libsycl.so.9"
 
     def fake_cdll(name, mode=0):
         calls.append((name, mode))
         raise OSError("not loaded")
 
+    monkeypatch.setattr(xpu_accelerator, "_mapped_sycl_runtime_path", lambda: mapped)
     monkeypatch.setattr(xpu_accelerator.ctypes, "CDLL", fake_cdll)
-    xpu_accelerator._sycl_host_copy_funcs.cache_clear()
-    try:
-        assert xpu_accelerator._sycl_host_copy_funcs() is None
-    finally:
-        xpu_accelerator._sycl_host_copy_funcs.cache_clear()
 
-    assert calls == [(xpu_accelerator.SYCL_RUNTIME_SONAME, xpu_accelerator.RTLD_NOLOAD)]
+    assert xpu_accelerator._sycl_host_copy_funcs() is None
+    assert calls == [(mapped, xpu_accelerator.RTLD_NOLOAD)]
+
+
+def test_xpu_sycl_lookup_without_mapped_runtime(monkeypatch):
+    """No libsycl mapped means XPU was never initialized; must not try to load one."""
+
+    def fail_cdll(name, mode=0):
+        raise AssertionError("must not dlopen a SYCL runtime that is not already mapped")
+
+    monkeypatch.setattr(xpu_accelerator, "_mapped_sycl_runtime_path", lambda: None)
+    monkeypatch.setattr(xpu_accelerator.ctypes, "CDLL", fail_cdll)
+
+    assert xpu_accelerator._sycl_host_copy_funcs() is None
 
 
 def test_xpu_device_registration_without_sycl_symbols(monkeypatch):

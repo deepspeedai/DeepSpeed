@@ -19,23 +19,44 @@ except ImportError as e:
 # Mangled names of ``sycl::ext::oneapi::experimental::prepare_for_device_copy(const void*, size_t, const queue&)``
 # and ``release_from_device_copy(const void*, const queue&)``. These are the SYCL
 # equivalent of ``cudaHostRegister``/``cudaHostUnregister``. Neither SYCL nor torch
-# exposes a C entry point for them, so the C++ symbols are resolved directly.
+# exposes a C entry point for them, so the C++ symbols are resolved directly. The
+# names live in SYCL's ``_V1`` inline ABI namespace and are stable across the
+# libsycl.so.8 (oneAPI 2025.x) and libsycl.so.9 (oneAPI 2026.x) runtimes.
 SYCL_PREPARE_FOR_DEVICE_COPY = "_ZN4sycl3_V13ext6oneapi12experimental23prepare_for_device_copyEPKvmRKNS0_5queueE"
 SYCL_RELEASE_FROM_DEVICE_COPY = "_ZN4sycl3_V13ext6oneapi12experimental24release_from_device_copyEPKvRKNS0_5queueE"
 
-# The soname (not the ``libsycl.so`` development symlink) of the runtime torch
-# links against. Loaded with RTLD_NOLOAD so we only ever bind to the instance
-# torch already initialized; opening a second SYCL runtime leaves both with
-# their own driver state and aborts at interpreter shutdown.
-SYCL_RUNTIME_SONAME = "libsycl.so.8"
+# Only ever bind to the SYCL runtime torch already initialized. Opening a second
+# one (e.g. via the ``libsycl.so`` development symlink, which may resolve to a
+# different oneAPI install) leaves both with their own driver state and aborts at
+# interpreter shutdown with UR_RESULT_ERROR_UNINITIALIZED.
 RTLD_NOLOAD = 0x00004
 
 
-@functools.lru_cache(maxsize=None)
+def _mapped_sycl_runtime_path():
+    """Path of the libsycl the current process already mapped, or None.
+
+    Read from /proc/self/maps rather than hardcoding a soname: the soname is
+    version-dependent (oneAPI 2025.x ships libsycl.so.8, 2026.x ships .so.9) and
+    the path also disambiguates between several oneAPI installs on one machine.
+    """
+    try:
+        with open("/proc/self/maps") as maps:
+            for line in maps:
+                path = line.rstrip("\n").rpartition(" ")[2]
+                if "/libsycl.so" in path:
+                    return path
+    except OSError:
+        return None
+    return None
+
+
 def _sycl_host_copy_funcs():
     """Resolve the SYCL host-registration functions, or return None when unavailable."""
+    runtime_path = _mapped_sycl_runtime_path()
+    if runtime_path is None:
+        return None
     try:
-        libsycl = ctypes.CDLL(SYCL_RUNTIME_SONAME, mode=RTLD_NOLOAD)
+        libsycl = ctypes.CDLL(runtime_path, mode=RTLD_NOLOAD)
         prepare = getattr(libsycl, SYCL_PREPARE_FOR_DEVICE_COPY)
         release = getattr(libsycl, SYCL_RELEASE_FROM_DEVICE_COPY)
     except (OSError, AttributeError):
@@ -273,7 +294,7 @@ class XPU_Accelerator(DeepSpeedAccelerator):
         if funcs is None:
             from deepspeed.utils import logger
             logger.warning_once("SYCL host-memory registration is unavailable (prepare_for_device_copy not found in "
-                                f"{SYCL_RUNTIME_SONAME}); native pinned memory stays mlock-only.")
+                                "the loaded SYCL runtime); native pinned memory stays mlock-only.")
             return False
         prepare, _ = funcs
         prepare(address, num_bytes, sycl_queue)
