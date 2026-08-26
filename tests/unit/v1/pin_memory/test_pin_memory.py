@@ -5,6 +5,8 @@
 import pytest
 import torch
 
+from deepspeed.accelerator.cpu_accelerator import CPU_Accelerator
+from deepspeed.accelerator.cuda_accelerator import CUDA_Accelerator
 from deepspeed.utils.pin_memory import NativePinnedMemory
 
 
@@ -114,3 +116,162 @@ def test_is_pinned_handles_storageless_tensors(native_pins):
 
     meta_tensor = torch.zeros(2, 8, device="meta")
     assert native_pins.is_pinned(meta_tensor) is False
+
+
+class _RegisteringAccelerator:
+
+    def __init__(self):
+        self.registered = []
+        self.unregistered = []
+
+    def register_host_memory(self, address, num_bytes):
+        self.registered.append((address, num_bytes))
+        return True
+
+    def unregister_host_memory(self, address):
+        self.unregistered.append(address)
+
+
+def test_native_device_registration_and_unpin(monkeypatch, native_pins):
+    accelerator = _RegisteringAccelerator()
+    monkeypatch.setattr("deepspeed.accelerator.get_accelerator", lambda: accelerator)
+    monkeypatch.setenv("DS_PIN_MEMORY_REGISTER_DEVICE", "1")
+
+    pinned = native_pins.pin(torch.empty(32), make_copy=False)
+    begin = pinned.data_ptr()
+    assert accelerator.registered == [(begin, pinned.nbytes)]
+    assert begin in native_pins._device_registered
+
+    assert native_pins.unpin(pinned) is True
+    assert accelerator.unregistered == [begin]
+    assert begin not in native_pins._device_registered
+    # A second call must not unregister or free the allocation twice.
+    assert native_pins.unpin(pinned) is False
+    assert accelerator.unregistered == [begin]
+
+
+def test_native_device_registration_disabled(monkeypatch, native_pins):
+    accelerator = _RegisteringAccelerator()
+    monkeypatch.setattr("deepspeed.accelerator.get_accelerator", lambda: accelerator)
+    monkeypatch.setenv("DS_PIN_MEMORY_REGISTER_DEVICE", "0")
+
+    pinned = native_pins.pin(torch.empty(32), make_copy=False)
+    assert native_pins.is_pinned(pinned)
+    assert accelerator.registered == []
+    assert native_pins.unpin(pinned) is True
+    assert accelerator.unregistered == []
+
+
+def test_cpu_device_registration_is_noop():
+    accelerator = CPU_Accelerator()
+    assert accelerator.register_host_memory(1234, 4096) is False
+    assert accelerator.unregister_host_memory(1234) is None
+
+
+def test_cuda_device_registration_calls_cudart(monkeypatch):
+
+    class _Cudart:
+
+        def __init__(self):
+            self.registered = []
+            self.unregistered = []
+
+        def cudaHostRegister(self, address, num_bytes, flags):
+            self.registered.append((address, num_bytes, flags))
+            return 0
+
+        def cudaHostUnregister(self, address):
+            self.unregistered.append(address)
+            return 0
+
+    cudart = _Cudart()
+    errors = []
+    monkeypatch.setattr(torch.cuda, "cudart", lambda: cudart)  #ignore-cuda
+    monkeypatch.setattr(torch.cuda, "check_error", errors.append)  #ignore-cuda
+    accelerator = CUDA_Accelerator.__new__(CUDA_Accelerator)
+
+    assert accelerator.register_host_memory(1234, 4096) is True
+    accelerator.unregister_host_memory(1234)
+    assert cudart.registered == [(1234, 4096, 0)]
+    assert cudart.unregistered == [1234]
+    assert errors == [0, 0]
+
+
+def test_cpu_native_pin_with_register_env_on(monkeypatch, native_pins):
+    """CPU accelerator has no register hook; native pin still works with default-on."""
+    monkeypatch.setenv("DS_PIN_MEMORY_REGISTER_DEVICE", "1")
+    monkeypatch.setattr("deepspeed.accelerator.get_accelerator", lambda: CPU_Accelerator())
+    pinned = native_pins.pin(torch.empty(32), make_copy=False)
+    assert native_pins.is_pinned(pinned)
+    assert native_pins.unpin(pinned) is True
+
+
+def test_device_registration_failure_keeps_mlock(monkeypatch, native_pins):
+
+    class _FailingAccelerator:
+
+        def register_host_memory(self, address, num_bytes):
+            raise RuntimeError("simulated cudaHostRegister failure")
+
+        def unregister_host_memory(self, address):
+            raise AssertionError("unregister must not run when register failed")
+
+    monkeypatch.setattr("deepspeed.accelerator.get_accelerator", lambda: _FailingAccelerator())
+    monkeypatch.setenv("DS_PIN_MEMORY_REGISTER_DEVICE", "1")
+    pinned = native_pins.pin(torch.empty(32), make_copy=False)
+    assert native_pins.is_pinned(pinned)
+    assert pinned.data_ptr() not in native_pins._device_registered
+    assert native_pins.unpin(pinned) is True
+
+
+def test_device_registration_gc_unregisters(monkeypatch, native_pins):
+    import gc
+
+    accelerator = _RegisteringAccelerator()
+    monkeypatch.setattr("deepspeed.accelerator.get_accelerator", lambda: accelerator)
+    monkeypatch.setenv("DS_PIN_MEMORY_REGISTER_DEVICE", "1")
+    pinned = native_pins.pin(torch.empty(32), make_copy=False)
+    begin = pinned.data_ptr()
+    del pinned
+    gc.collect()
+    assert begin not in native_pins._ranges
+    assert accelerator.unregistered == [begin]
+
+
+def test_invalid_register_device_env(monkeypatch, native_pins):
+    monkeypatch.setenv("DS_PIN_MEMORY_REGISTER_DEVICE", "maybe")
+    with pytest.raises(ValueError, match="DS_PIN_MEMORY_REGISTER_DEVICE"):
+        native_pins.pin(torch.empty(8), make_copy=False)
+
+
+def test_unpin_keeps_allocation_when_unregister_fails(monkeypatch, native_pins):
+
+    class _UnregisterFailAccelerator(_RegisteringAccelerator):
+
+        def __init__(self):
+            super().__init__()
+            self.fail_unregister = True
+
+        def unregister_host_memory(self, address):
+            if self.fail_unregister:
+                raise RuntimeError("simulated cudaHostUnregister failure")
+            super().unregister_host_memory(address)
+
+    accelerator = _UnregisterFailAccelerator()
+    monkeypatch.setattr("deepspeed.accelerator.get_accelerator", lambda: accelerator)
+    monkeypatch.setenv("DS_PIN_MEMORY_REGISTER_DEVICE", "1")
+    pinned = native_pins.pin(torch.empty(32), make_copy=False)
+    begin = pinned.data_ptr()
+
+    with pytest.raises(RuntimeError, match="cudaHostUnregister"):
+        native_pins.unpin(pinned)
+
+    assert native_pins.is_pinned(pinned)
+    assert begin in native_pins._device_registered
+    assert begin in native_pins._ranges
+    assert accelerator.unregistered == []
+
+    accelerator.fail_unregister = False
+    assert native_pins.unpin(pinned) is True
+    assert accelerator.unregistered == [begin]
+    assert begin not in native_pins._device_registered

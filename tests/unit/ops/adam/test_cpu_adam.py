@@ -19,7 +19,7 @@ from unit.common import DistributedTest
 if not deepspeed.ops.__compatible_ops__[CPUAdamBuilder.NAME]:
     pytest.skip("cpu-adam is not compatible", allow_module_level=True)
 
-pytest.cpu_vendor = get_cpu_info()["vendor_id_raw"].lower()
+pytest.cpu_vendor = get_cpu_info().get("vendor_id_raw", "").lower()
 
 
 def check_equal(first, second, atol=1e-2, verbose=False):

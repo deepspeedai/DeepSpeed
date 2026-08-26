@@ -275,6 +275,14 @@ class DeepSpeedAccelerator(ABC):
     def _torch_is_pinned(self, tensor):
         return tensor.is_pinned()
 
+    def register_host_memory(self, address, num_bytes):
+        """Register page-locked host memory with the active device runtime."""
+        return False
+
+    def unregister_host_memory(self, address):
+        """Unregister host memory previously registered with the device runtime."""
+        return None
+
     def pin_memory(self, tensor, make_copy=True, match_shape=True):
         from deepspeed.utils.pin_memory_tracker import track_pinned_memory
         track_pinned_memory(tensor.nbytes)

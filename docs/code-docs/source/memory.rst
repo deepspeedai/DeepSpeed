@@ -356,7 +356,8 @@ counted by ``track_pinned_memory`` when pages are actually locked. Differences:
      - ``native``
    * - Allocator
      - ``torch.Tensor.pin_memory()`` (device-specific accelerator hook)
-     - DeepNVMe page-locked allocator (``posix_memalign`` + ``mlock``) via pin_memory
+     - DeepNVMe page-locked allocator (``posix_memalign`` + ``mlock``) via pin_memory;
+       registered with the CUDA runtime by default for asynchronous DMA
    * - Selection
      - ``DS_PIN_MEMORY_BACKEND`` unset or ``torch``
      - ``DS_PIN_MEMORY_BACKEND=native``
@@ -385,6 +386,25 @@ Example:
 
     export DS_PIN_MEMORY_BACKEND=native
     deepspeed train.py ...
+
+Native device registration
+==========================
+
+Native allocations are device-independent ``mlock`` buffers. On CUDA systems,
+DeepSpeed additionally calls ``cudaHostRegister`` so PyTorch can use them for
+asynchronous H2D/D2H DMA. Device registration is enabled by default and can be
+disabled for comparison or debugging:
+
+.. code-block:: bash
+
+    export DS_PIN_MEMORY_BACKEND=native
+    export DS_PIN_MEMORY_REGISTER_DEVICE=0  # mlock only; default is 1
+
+``DS_PIN_MEMORY_REGISTER_DEVICE`` accepts ``1``/``0``, ``true``/``false``,
+``yes``/``no``, and ``on``/``off``. Accelerators without a registration hook
+continue to use the device-independent ``mlock`` buffer. If registration fails,
+DeepSpeed logs a warning and retains the valid ``mlock`` allocation for CPU and
+AIO use.
 
 Requirements for native
 =======================
