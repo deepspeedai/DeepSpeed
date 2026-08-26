@@ -23,12 +23,19 @@ except ImportError as e:
 SYCL_PREPARE_FOR_DEVICE_COPY = "_ZN4sycl3_V13ext6oneapi12experimental23prepare_for_device_copyEPKvmRKNS0_5queueE"
 SYCL_RELEASE_FROM_DEVICE_COPY = "_ZN4sycl3_V13ext6oneapi12experimental24release_from_device_copyEPKvRKNS0_5queueE"
 
+# The soname (not the ``libsycl.so`` development symlink) of the runtime torch
+# links against. Loaded with RTLD_NOLOAD so we only ever bind to the instance
+# torch already initialized; opening a second SYCL runtime leaves both with
+# their own driver state and aborts at interpreter shutdown.
+SYCL_RUNTIME_SONAME = "libsycl.so.8"
+RTLD_NOLOAD = 0x00004
+
 
 @functools.lru_cache(maxsize=None)
 def _sycl_host_copy_funcs():
     """Resolve the SYCL host-registration functions, or return None when unavailable."""
     try:
-        libsycl = ctypes.CDLL("libsycl.so", mode=ctypes.RTLD_GLOBAL)
+        libsycl = ctypes.CDLL(SYCL_RUNTIME_SONAME, mode=RTLD_NOLOAD)
         prepare = getattr(libsycl, SYCL_PREPARE_FOR_DEVICE_COPY)
         release = getattr(libsycl, SYCL_RELEASE_FROM_DEVICE_COPY)
     except (OSError, AttributeError):
@@ -259,27 +266,30 @@ class XPU_Accelerator(DeepSpeedAccelerator):
         return tensor.is_pinned(device=self.current_device_name())
 
     def register_host_memory(self, address, num_bytes):
+        # Resolve the queue first: it initializes torch's XPU runtime, which is
+        # what loads libsycl.so.8 and makes the RTLD_NOLOAD lookup below succeed.
+        sycl_queue = self._sycl_queue()
         funcs = _sycl_host_copy_funcs()
         if funcs is None:
             from deepspeed.utils import logger
-            logger.warning_once(
-                "SYCL host-memory registration is unavailable (prepare_for_device_copy not found in libsycl.so); "
-                "native pinned memory stays mlock-only.")
+            logger.warning_once("SYCL host-memory registration is unavailable (prepare_for_device_copy not found in "
+                                f"{SYCL_RUNTIME_SONAME}); native pinned memory stays mlock-only.")
             return False
         prepare, _ = funcs
-        prepare(address, num_bytes, self._sycl_queue())
+        prepare(address, num_bytes, sycl_queue)
         return True
 
     def unregister_host_memory(self, address):
+        sycl_queue = self._sycl_queue()
         funcs = _sycl_host_copy_funcs()
         if funcs is None:
             return None
         _, release = funcs
-        release(address, self._sycl_queue())
+        release(address, sycl_queue)
 
     def _sycl_queue(self):
         # prepare_for_device_copy registers with the queue's SYCL context, so any
-        # queue on the current device gives the same registration.
+        # queue on the current device yields the same registration.
         torch.xpu.init()
         return torch.xpu.current_stream().sycl_queue
 

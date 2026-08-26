@@ -221,6 +221,24 @@ def test_xpu_device_registration_calls_sycl(monkeypatch):
     assert released == [(1234, queue)]
 
 
+def test_xpu_sycl_lookup_reuses_torch_runtime(monkeypatch):
+    """Opening a second SYCL runtime aborts at shutdown, so only RTLD_NOLOAD on the soname is allowed."""
+    calls = []
+
+    def fake_cdll(name, mode=0):
+        calls.append((name, mode))
+        raise OSError("not loaded")
+
+    monkeypatch.setattr(xpu_accelerator.ctypes, "CDLL", fake_cdll)
+    xpu_accelerator._sycl_host_copy_funcs.cache_clear()
+    try:
+        assert xpu_accelerator._sycl_host_copy_funcs() is None
+    finally:
+        xpu_accelerator._sycl_host_copy_funcs.cache_clear()
+
+    assert calls == [(xpu_accelerator.SYCL_RUNTIME_SONAME, xpu_accelerator.RTLD_NOLOAD)]
+
+
 def test_xpu_device_registration_without_sycl_symbols(monkeypatch):
     """Missing prepare_for_device_copy must degrade to mlock-only, not raise."""
     monkeypatch.setattr(xpu_accelerator, "_sycl_host_copy_funcs", lambda: None)
