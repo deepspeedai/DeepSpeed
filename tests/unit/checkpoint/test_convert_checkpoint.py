@@ -3,12 +3,17 @@
 
 # DeepSpeed Team
 
+import shutil
+import subprocess
+import sys
+
 import torch
 import torch.nn as nn
 import pytest
 
 import deepspeed
 import deepspeed.utils.zero_to_fp32 as zero_to_fp32
+import deepspeed.utils.zero_to_torch as zero_to_torch
 from deepspeed.utils.zero_to_fp32 import (convert_zero_checkpoint_to_fp32_state_dict,
                                           convert_zero_checkpoint_to_state_dict, to_torch_tensor)
 from deepspeed.utils.zero_to_torch import main as zero_to_torch_main
@@ -65,6 +70,31 @@ def test_zero_to_torch_cli_passes_dtype(monkeypatch, tmp_path):
     assert call["output_dir"] == str(tmp_path)
     assert call["dtype"] == "fp16"
     assert call["max_shard_size"] == "1GB"
+
+
+def test_zero_to_torch_standalone_uses_local_converter(tmp_path):
+    script_path = tmp_path / "zero_to_torch.py"
+    shutil.copyfile(zero_to_torch.__file__, script_path)
+    (tmp_path / "zero_to_fp32.py").write_text(
+        "from pathlib import Path\n"
+        "OUTPUT_DTYPE_NAMES = {'fp16': None}\n"
+        "debug = False\n"
+        "def convert_zero_checkpoint_to_state_dict(checkpoint_dir, output_dir, **kwargs):\n"
+        "    Path(output_dir).write_text(kwargs['dtype'], encoding='utf-8')\n",
+        encoding="utf-8")
+    marker_path = tmp_path / "converter.txt"
+
+    subprocess.run([
+        sys.executable,
+        str(script_path),
+        "checkpoint",
+        str(marker_path),
+        "--dtype",
+        "fp16",
+    ], check=True)
+
+    assert script_path.read_text(encoding="utf-8").startswith("#!/usr/bin/env python\n")
+    assert marker_path.read_text(encoding="utf-8") == "fp16"
 
 
 class ModelWithSharedWeights(nn.Module):

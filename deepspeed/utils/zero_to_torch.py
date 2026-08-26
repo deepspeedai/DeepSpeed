@@ -1,9 +1,14 @@
+#!/usr/bin/env python
+
 # SPDX-License-Identifier: Apache-2.0
 # DeepSpeed Team
 
 import argparse
 
-import deepspeed.utils.zero_to_fp32 as zero_to_fp32
+if __package__:
+    from . import zero_to_fp32
+else:
+    import zero_to_fp32
 
 
 def main(args=None):
