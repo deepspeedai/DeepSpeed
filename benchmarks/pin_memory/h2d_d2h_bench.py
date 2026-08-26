@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # DeepSpeed Team
-"""Compare torch and native pinned-memory H2D/D2H bandwidth on one CUDA GPU."""
+"""Compare torch and native pinned-memory H2D/D2H bandwidth on one accelerator device."""
 
 import argparse
 import json
@@ -55,7 +55,9 @@ def _time_copy(accelerator, copy_fn, stream, warmup, iters):
 
 def _allocate_host(accelerator, numel, arm):
     if arm == "torch":
-        return torch.empty(numel, dtype=torch.float32, pin_memory=True)
+        # Go through the accelerator so non-CUDA backends pin against their own
+        # device rather than torch's CUDA-only ``pin_memory=True`` fast path.
+        return accelerator._torch_pin_memory(torch.empty(numel, dtype=torch.float32))
 
     return accelerator.pin_memory(torch.empty(numel, dtype=torch.float32), make_copy=False)
 
@@ -65,8 +67,8 @@ def _run_arm(args):
         os.environ[key] = value
 
     accelerator = get_accelerator()
-    if accelerator.device_name() != "cuda" or not accelerator.is_available():
-        raise RuntimeError("CUDA GPU is required")
+    if not accelerator.is_available():
+        raise RuntimeError(f"No {accelerator.device_name()} device is available")
     accelerator.set_device(0)
     stream = accelerator.Stream()
 
@@ -86,7 +88,7 @@ def _run_arm(args):
             "size_mib": size_mib,
             "h2d_gbps": num_bytes / h2d_seconds / 1e9,
             "d2h_gbps": num_bytes / d2h_seconds / 1e9,
-            "torch_is_pinned": host.is_pinned(),
+            "torch_is_pinned": accelerator._torch_is_pinned(host),
             "accelerator_is_pinned": accelerator.is_pinned(host),
         }
         print(f"RESULT={json.dumps(result, sort_keys=True)}", flush=True)

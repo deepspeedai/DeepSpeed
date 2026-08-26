@@ -7,6 +7,8 @@ import torch
 
 from deepspeed.accelerator.cpu_accelerator import CPU_Accelerator
 from deepspeed.accelerator.cuda_accelerator import CUDA_Accelerator
+from deepspeed.accelerator import xpu_accelerator
+from deepspeed.accelerator.xpu_accelerator import XPU_Accelerator
 from deepspeed.utils.pin_memory import NativePinnedMemory
 
 
@@ -195,6 +197,37 @@ def test_cuda_device_registration_calls_cudart(monkeypatch):
     assert cudart.registered == [(1234, 4096, 0)]
     assert cudart.unregistered == [1234]
     assert errors == [0, 0]
+
+
+def test_xpu_device_registration_calls_sycl(monkeypatch):
+
+    prepared = []
+    released = []
+    queue = 0xFEED
+
+    def prepare(address, num_bytes, sycl_queue):
+        prepared.append((address, num_bytes, sycl_queue))
+
+    def release(address, sycl_queue):
+        released.append((address, sycl_queue))
+
+    monkeypatch.setattr(xpu_accelerator, "_sycl_host_copy_funcs", lambda: (prepare, release))
+    accelerator = XPU_Accelerator.__new__(XPU_Accelerator)
+    monkeypatch.setattr(accelerator, "_sycl_queue", lambda: queue)
+
+    assert accelerator.register_host_memory(1234, 4096) is True
+    accelerator.unregister_host_memory(1234)
+    assert prepared == [(1234, 4096, queue)]
+    assert released == [(1234, queue)]
+
+
+def test_xpu_device_registration_without_sycl_symbols(monkeypatch):
+    """Missing prepare_for_device_copy must degrade to mlock-only, not raise."""
+    monkeypatch.setattr(xpu_accelerator, "_sycl_host_copy_funcs", lambda: None)
+    accelerator = XPU_Accelerator.__new__(XPU_Accelerator)
+
+    assert accelerator.register_host_memory(1234, 4096) is False
+    assert accelerator.unregister_host_memory(1234) is None
 
 
 def test_cpu_native_pin_with_register_env_on(monkeypatch, native_pins):
