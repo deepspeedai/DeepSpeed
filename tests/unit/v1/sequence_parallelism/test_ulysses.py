@@ -12,8 +12,8 @@ from deepspeed import initialize
 import deepspeed.runtime.sequence_parallel.parallel_state_sp as sp_mpu
 from transformers import AutoModel
 from unit.common import DistributedTest
-from deepspeed.sequence.layer import (DistributedAttention, _SeqAllToAll, _generate_layout_params,
-                                      post_all2all, pre_all2all_fun, single_all_to_all)
+from deepspeed.sequence.layer import (DistributedAttention, _SeqAllToAll, _generate_layout_params, post_all2all,
+                                      pre_all2all_fun, single_all_to_all)
 from deepspeed.sequence.fpdt_layer import _FPDTGPUOffloadingAttentionImpl_, FPDT_InputConstruct
 from unit.util import skip_on_arch
 from unit.simple_model import *

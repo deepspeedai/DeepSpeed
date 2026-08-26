@@ -9,7 +9,7 @@ the same result as the equivalent single-device (non-SP) computation.
 These tests require 2 GPUs.
 Run with:
 
-    NCCL_P2P_DISABLE=1 python -m pytest tests/unit/sequence_parallelism/test_autosp_equivalence.py -v
+    NCCL_P2P_DISABLE=1 python -m pytest tests/unit/v1/sequence_parallelism/test_autosp_equivalence.py -v
 """
 
 import torch
