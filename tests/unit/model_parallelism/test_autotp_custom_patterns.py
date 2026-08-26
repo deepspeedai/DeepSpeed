@@ -16,7 +16,8 @@ from deepspeed.utils import groups
 from deepspeed.module_inject.layers import (GateUpPack_LinearLayer, LinearAllreduce, LinearLayer,
                                             SubParamLinearAllreduce, SubParamLinearLayer, fused_LinearLayer)
 from deepspeed.module_inject.layers import collect_autotp_universal_checkpoint_info
-from deepspeed.checkpoint.constants import PARAMETER_WITH_ROW_PARALLELISM_PATTERNS, TP_REPLICATED_PARAMETER_PATTERNS
+from deepspeed.checkpoint.constants import (DS_AUTOTP_UC_META, PARAMETER_WITH_ROW_PARALLELISM_PATTERNS,
+                                            TP_REPLICATED_PARAMETER_PATTERNS)
 from deepspeed.module_inject.autotp_config import AutoTPConfig
 from deepspeed.module_inject.tp_shard import get_shard_size, get_shard_size_list, set_num_kv_heads
 from deepspeed.module_inject.auto_tp import AutoTP
@@ -496,6 +497,8 @@ def test_update_mp_params_uses_group_local_rank(monkeypatch):
     autotp.mp_group = tp_group
     autotp.mp_size = 2
     child = nn.Module()
+    child.proj = nn.Linear(1, 1, bias=False)
+    setattr(child.proj.weight, DS_AUTOTP_UC_META, {})
     child.num_heads = 12
 
     monkeypatch.setattr(dist, "get_rank", lambda group=None: 1 if group is tp_group else 0)
@@ -515,6 +518,8 @@ def test_update_mp_params_shards_attributes_like_their_weights(monkeypatch):
     autotp.mp_group = tp_group
     autotp.mp_size = 2
     child = nn.Module()
+    child.proj = nn.Linear(1, 1, bias=False)
+    setattr(child.proj.weight, DS_AUTOTP_UC_META, {})
     child.hidden_size = 12
 
     monkeypatch.setattr(dist, "get_rank", lambda group=None: 1 if group is tp_group else 0)
@@ -527,6 +532,70 @@ def test_update_mp_params_shards_attributes_like_their_weights(monkeypatch):
     # MLP layers are excluded from the KV-head split, so the attribute has to follow the same
     # near-even split that the MLP weights use rather than the [2, 1] KV-group split.
     assert child.hidden_size == get_shard_size(12, 2, "model.layers.0.mlp", rank=1)
+
+
+def test_update_mp_params_preserves_unsharded_high_dimensional_modules(monkeypatch):
+    tp_group = object()
+    autotp = object.__new__(AutoTP)
+    autotp.mp_group = tp_group
+    autotp.mp_size = 2
+    child = nn.Module()
+    child.embed_dim = 12
+    child.proj = nn.Conv3d(3, child.embed_dim, kernel_size=1)
+
+    monkeypatch.setattr(dist, "get_rank", lambda group=None: 1 if group is tp_group else 0)
+    set_num_kv_heads(3)
+    try:
+        autotp.update_mp_params(child, "model.visual.patch_embed")
+    finally:
+        set_num_kv_heads(None)
+
+    assert child.embed_dim == 12
+
+
+def test_replace_module_preserves_metadata_for_unsharded_subtree(monkeypatch):
+    tp_group = object()
+    autotp = object.__new__(AutoTP)
+    autotp.mp_group = tp_group
+    autotp.mp_size = 2
+    autotp.partition_config = None
+    autotp.state_dict = None
+    autotp.linear_policies = {}
+    autotp.prefix = ""
+    visual = nn.Module()
+    visual.attn = nn.Module()
+    visual.attn.num_heads = 16
+    visual.attn.qkv = nn.Linear(12, 36)
+    visual.attn.proj = nn.Linear(12, 12)
+
+    monkeypatch.setattr(dist, "get_rank", lambda group=None: 1 if group is tp_group else 0)
+    set_num_kv_heads(None)
+    try:
+        autotp._replace_module(visual, "model.visual")
+    finally:
+        set_num_kv_heads(None)
+
+    assert visual.attn.num_heads == 16
+
+
+def test_update_mp_params_follows_actual_tp_parameter_metadata(monkeypatch):
+    tp_group = object()
+    autotp = object.__new__(AutoTP)
+    autotp.mp_group = tp_group
+    autotp.mp_size = 2
+    child = nn.Module()
+    child.hidden_size = 12
+    child.proj = nn.Linear(12, 12)
+    setattr(child.proj.weight, DS_AUTOTP_UC_META, {})
+
+    monkeypatch.setattr(dist, "get_rank", lambda group=None: 1 if group is tp_group else 0)
+    set_num_kv_heads(None)
+    try:
+        autotp.update_mp_params(child, "model.layers.0.mlp")
+    finally:
+        set_num_kv_heads(None)
+
+    assert child.hidden_size == 6
 
 
 def test_sliced_embedding_publishes_row_partition_metadata(monkeypatch):

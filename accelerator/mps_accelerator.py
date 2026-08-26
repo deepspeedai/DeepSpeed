@@ -268,12 +268,14 @@ class MPS_Accelerator(DeepSpeedAccelerator):
             # is op_builder from deepspeed or a 3p version? this should only succeed if it's deepspeed
             # if successful this also means we're doing a local install and not JIT compile path
             from op_builder import __deepspeed__  # noqa: F401 # type: ignore
-            from op_builder.mps import FusedAdamBuilder, NotImplementedBuilder
+            from op_builder.mps import CPUAdamBuilder, FusedAdamBuilder, NotImplementedBuilder
         except ImportError:
-            from deepspeed.ops.op_builder.mps import FusedAdamBuilder, NotImplementedBuilder
+            from deepspeed.ops.op_builder.mps import CPUAdamBuilder, FusedAdamBuilder, NotImplementedBuilder
 
         if class_name == "FusedAdamBuilder":
             return FusedAdamBuilder
+        elif class_name == "CPUAdamBuilder":
+            return CPUAdamBuilder
         else:
             return NotImplementedBuilder
 
