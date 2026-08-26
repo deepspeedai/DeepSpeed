@@ -19,6 +19,9 @@ from torch.optim import Optimizer
 from torch.optim.lr_scheduler import _LRScheduler
 from torch._utils import _flatten_dense_tensors, _unflatten_dense_tensors
 from contextlib import contextmanager
+from contextvars import ContextVar
+from threading import Lock
+from weakref import ref
 
 from typing import Callable, Dict, Union, Iterable, Container, List
 
@@ -247,6 +250,85 @@ def _checkpoint_parallel_metadata(mpu):
             CHECKPOINT_TP_DEGREE: bwc_tensor_model_parallel_world_size(mpu),
         }
     }
+
+
+class _EngineBackwardGraphState:
+
+    def __init__(self):
+        self.active = False
+        self.graph_task_ids = []
+
+
+_ENGINE_BACKWARD_GRAPH_CONTEXT = ContextVar("deepspeed_engine_backward_graph_context", default=())
+
+
+class _EngineBackwardGraphTracker:
+
+    def __init__(self):
+        self._lock = Lock()
+        self._graph_task_refcounts = {}
+        self._active_states = set()
+
+    @staticmethod
+    def supported():
+        return hasattr(torch._C, "_current_graph_task_id")
+
+    def new_state(self):
+        return _EngineBackwardGraphState()
+
+    @staticmethod
+    def _clear_current_context(state):
+        context = _ENGINE_BACKWARD_GRAPH_CONTEXT.get()
+        _ENGINE_BACKWARD_GRAPH_CONTEXT.set(
+            tuple(state_ref for state_ref in context if state_ref() is not None and state_ref() is not state))
+
+    def register_current_graph(self, grad, state):
+        graph_task_id = torch._C._current_graph_task_id() if self.supported() else -1
+        with self._lock:
+            if not state.active:
+                state.active = True
+                self._active_states.add(state)
+            if graph_task_id != -1 and graph_task_id not in state.graph_task_ids:
+                self._graph_task_refcounts[graph_task_id] = self._graph_task_refcounts.get(graph_task_id, 0) + 1
+                state.graph_task_ids.append(graph_task_id)
+
+        context = _ENGINE_BACKWARD_GRAPH_CONTEXT.get()
+        with self._lock:
+            context = tuple(state_ref for state_ref in context if state_ref() in self._active_states)
+        _ENGINE_BACKWARD_GRAPH_CONTEXT.set((*context, ref(state)))
+        torch.autograd.Variable._execution_engine.queue_callback(lambda: self._clear_current_context(state))
+        return grad
+
+    def unregister(self, state):
+        with self._lock:
+            if not state.active:
+                return
+            for graph_task_id in state.graph_task_ids:
+                refcount = self._graph_task_refcounts[graph_task_id] - 1
+                if refcount:
+                    self._graph_task_refcounts[graph_task_id] = refcount
+                else:
+                    del self._graph_task_refcounts[graph_task_id]
+            state.active = False
+            self._active_states.remove(state)
+
+    def is_current_graph_registered(self):
+        graph_task_id = torch._C._current_graph_task_id() if self.supported() else -1
+        context = _ENGINE_BACKWARD_GRAPH_CONTEXT.get()
+        with self._lock:
+            if graph_task_id in self._graph_task_refcounts:
+                return True
+            active_context = tuple(state_ref for state_ref in context if state_ref() in self._active_states)
+        if active_context != context:
+            _ENGINE_BACKWARD_GRAPH_CONTEXT.set(active_context)
+        return bool(active_context)
+
+    def active_registration_count(self):
+        with self._lock:
+            return len(self._active_states)
+
+
+_ENGINE_BACKWARD_GRAPH_TRACKER = _EngineBackwardGraphTracker()
 
 
 class DeepSpeedEngine(Module):
@@ -505,11 +587,11 @@ class DeepSpeedEngine(Module):
         # Otherwise, we fallback to DeepSpeed style backward only.
         # See `count_used_parameters_in_backward` for more details.
         self._running_engine_backward = False
+        self._running_engine_backward_count = 0
+        self._running_engine_backward_lock = Lock()
         # True only while step() runs; the unmanaged-mode accumulation boundary.
         self._running_engine_step = False
         self._support_torch_style_backward = False
-        # Flag to control whether gradients should be scaled by gradient accumulation steps
-        self._scale_wrt_gas = True
         if isinstance(self.optimizer, ZeROOptimizer) and check_internal_apis_for_count_used_parameters():
             self._support_torch_style_backward = True
             # These hooks are used for non-scalar backward support, such as `out.backward(out_grad)`,
@@ -3003,8 +3085,10 @@ class DeepSpeedEngine(Module):
     def _backward_prologue_per_tensor(self, grad):
         if is_functorch_transforming():
             return grad
-        # Only scale gradients if scale_wrt_gas is True, consistent with backward() parameter
-        if grad is not None and self._scale_wrt_gas:
+        graph_loss_scaled = _ENGINE_BACKWARD_GRAPH_TRACKER.is_current_graph_registered()
+        if graph_loss_scaled:
+            return grad
+        if grad is not None:
             return grad / self.gradient_accumulation_steps()
         return grad
 
@@ -3012,6 +3096,11 @@ class DeepSpeedEngine(Module):
         if is_functorch_transforming():
             return
         if not self._running_engine_backward:
+            # An interrupted engine.backward() leaves the ZeRO backward depth active. The next
+            # direct backward must not run an epilogue over that incomplete reduction state.
+            if isinstance(self.optimizer, ZeROOptimizer) and self.optimizer._backward_active_depth > 1:
+                return
+
             # Check if loss scaling was required but not applied
             needs_scaler = False
             if isinstance(self.optimizer, ZeROOptimizer):
@@ -3227,45 +3316,57 @@ class DeepSpeedEngine(Module):
         assert maybe_loss_for_backward(
             loss), "loss must be a scalar tensor. If you need to pass output gradients, backward() of output tensors"
 
-        self._running_engine_backward = True
-        # Store scale_wrt_gas so the hook can respect it
-        self._scale_wrt_gas = scale_wrt_gas
+        with self._running_engine_backward_lock:
+            self._running_engine_backward_count += 1
+            self._running_engine_backward = True
+        engine_backward_graph_state = _ENGINE_BACKWARD_GRAPH_TRACKER.new_state()
+        engine_backward_graph_hook = None
+        try:
+            # Unmanaged mode: count this backward so step() can advance global_samples by the actual micro-batch count.
+            if not self.managed_gradient_accumulation():
+                self._unmanaged_backward_count += 1
 
-        # Unmanaged mode: count this backward so step() can advance global_samples by the actual micro-batch count.
-        if not self.managed_gradient_accumulation():
-            self._unmanaged_backward_count += 1
+            # Set flag to prevent hooks from firing (we'll manually call prologue/epilogue)
+            backward_kwargs = {"retain_graph": retain_graph}
+            if self.eigenvalue_enabled():
+                backward_kwargs["create_graph"] = True
+                backward_kwargs["retain_graph"] = True
 
-        # Set flag to prevent hooks from firing (we'll manually call prologue/epilogue)
-        backward_kwargs = {"retain_graph": retain_graph}
-        if self.eigenvalue_enabled():
-            backward_kwargs["create_graph"] = True
-            backward_kwargs["retain_graph"] = True
+            loss = loss / self.gradient_accumulation_steps() if scale_wrt_gas else loss
+            gas_scaled_loss = loss
 
-        # Used only for return value
-        gas_scaled_loss = loss / self.gradient_accumulation_steps() if scale_wrt_gas else loss
+            # TODO: handle these scaling with direct calls to loss.backward()
+            if isinstance(self.optimizer, ZeROOptimizer):
+                loss = self.optimizer.scale_if_loss(loss)
+            elif self.torch_autocast_z0_gradscaler:
+                loss = self.torch_autocast_z0_gradscaler.scale(loss)
 
-        # TODO: handle these scaling with direct calls to loss.backward()
-        if isinstance(self.optimizer, ZeROOptimizer):
-            loss = self.optimizer.scale_if_loss(loss)
-        elif self.torch_autocast_z0_gradscaler:
-            loss = self.torch_autocast_z0_gradscaler.scale(loss)
+            if loss.requires_grad:
+                engine_backward_graph_hook = loss.register_hook(
+                    lambda grad: _ENGINE_BACKWARD_GRAPH_TRACKER.register_current_graph(
+                        grad, engine_backward_graph_state))
 
-        with compiled_autograd(self._is_compiled_autograd_enabled, self._compile_kwargs):
-            if self.zero_optimization() or not self.amp_enabled():
-                loss.backward(**backward_kwargs)
-            elif self.amp_enabled():
-                # AMP requires delaying unscale when inside gradient accumulation boundaries
-                # https://nvidia.github.io/apex/advanced.html#gradient-accumulation-across-iterations
-                delay_unscale = not self.is_gradient_accumulation_boundary()
-                with amp.scale_loss(loss, self.optimizer, delay_unscale=delay_unscale) as scaled_loss:
-                    scaled_loss.backward(**backward_kwargs)
+            with compiled_autograd(self._is_compiled_autograd_enabled, self._compile_kwargs):
+                if self.zero_optimization() or not self.amp_enabled():
+                    loss.backward(**backward_kwargs)
+                elif self.amp_enabled():
+                    # AMP requires delaying unscale when inside gradient accumulation boundaries
+                    # https://nvidia.github.io/apex/advanced.html#gradient-accumulation-across-iterations
+                    delay_unscale = not self.is_gradient_accumulation_boundary()
+                    with amp.scale_loss(loss, self.optimizer, delay_unscale=delay_unscale) as scaled_loss:
+                        scaled_loss.backward(**backward_kwargs)
 
-            # backward_epilogue is not called in a hook when self._support_torch_style_backward is False
-            self._backward_epilogue()
+                # backward_epilogue is not called in a hook when self._support_torch_style_backward is False
+                self._backward_epilogue()
 
-        self._running_engine_backward = False
-
-        return gas_scaled_loss
+            return gas_scaled_loss
+        finally:
+            if engine_backward_graph_hook is not None:
+                engine_backward_graph_hook.remove()
+            _ENGINE_BACKWARD_GRAPH_TRACKER.unregister(engine_backward_graph_state)
+            with self._running_engine_backward_lock:
+                self._running_engine_backward_count -= 1
+                self._running_engine_backward = self._running_engine_backward_count > 0
 
     def is_gradient_accumulation_boundary(self):
         """
