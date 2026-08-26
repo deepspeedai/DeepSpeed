@@ -2,9 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # DeepSpeed Team
-"""CPU-only unit tests for HybridEngineRollout (no GPU needed).
+"""Unit tests for HybridEngineRollout.
 
-Tests cover configuration, profiling, generation dispatch, and the pure-tensor sampling helper.
+Most tests are CPU-only; the native shared-prefill cache test runs only when CUDA and
+the transformer inference extension are available.
 """
 
 from types import SimpleNamespace
@@ -154,6 +155,100 @@ def test_generate_preserves_zero_pad_token_id():
     output = rollout.generate(_make_request(), _make_sampling())
 
     assert output.attention_mask[:, -1].tolist() == [0, 0]
+
+
+def test_native_repeat_kv_cache_fp16_reverse_copy():
+    """Exercise the native reverse copy with multiple source cache rows."""
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is required for the native inference kernel")
+
+    from deepspeed.ops.op_builder import InferenceBuilder
+
+    builder = InferenceBuilder()
+    try:
+        is_compatible = builder.is_compatible()
+    except Exception as exc:
+        pytest.skip(f"Unable to inspect native transformer inference compatibility: {exc}")
+    if not is_compatible:
+        pytest.skip("The native transformer inference extension is not compatible")
+    try:
+        inference_op = builder.load()
+    except Exception as exc:
+        pytest.skip(f"Unable to load the native transformer inference extension: {exc}")
+
+    repeat_kv_cache = getattr(inference_op, "repeat_kv_cache_fp16", None)
+    if repeat_kv_cache is None:
+        pytest.skip("The native transformer inference extension lacks repeat_kv_cache_fp16")
+
+    device = torch.device("cuda")
+    source_batch_size = 2
+    repeats = 2
+    target_batch_size = source_batch_size * repeats
+    prompt_length = 2
+    hidden_dim = 2
+    num_heads = 1
+
+    inference_op.allocate_workspace_fp16(
+        hidden_dim,
+        num_heads,
+        prompt_length,
+        target_batch_size,
+        1,
+        1,
+        False,
+        0,
+        4,
+        1,
+    )
+    try:
+        query_key_value = torch.zeros((source_batch_size, prompt_length, hidden_dim * 3),
+                                      dtype=torch.float16,
+                                      device=device)
+        query_key_value = query_key_value.view(source_batch_size, prompt_length, 3, num_heads, hidden_dim)
+        query_key_value[0, :, 1, :, :] = 1
+        query_key_value[0, :, 2, :, :] = 10
+        query_key_value[1, :, 1, :, :] = 3
+        query_key_value[1, :, 2, :, :] = 30
+        query_key_value = query_key_value.reshape(source_batch_size, prompt_length, hidden_dim * 3)
+
+        empty_mask = torch.empty(1, dtype=torch.float16, device=device)
+        inference_op.softmax_context_fp16(
+            query_key_value,
+            empty_mask,
+            0,
+            False,
+            False,
+            num_heads,
+            0,
+            1.0,
+            False,
+            False,
+            1,
+            True,
+            0,
+            1,
+            empty_mask,
+            1.0,
+            True,
+            None,
+            None,
+        )
+        torch.cuda.synchronize()
+
+        repeated_cache = repeat_kv_cache(source_batch_size, repeats)
+        torch.cuda.synchronize()
+
+        assert len(repeated_cache) == 2
+        expected_key = torch.empty((target_batch_size, 1, prompt_length, hidden_dim),
+                                   dtype=torch.float16,
+                                   device=device)
+        expected_key[:source_batch_size] = 1
+        expected_key[source_batch_size:] = 3
+        expected_value = expected_key * 10
+        assert torch.equal(repeated_cache[0], expected_key)
+        assert torch.equal(repeated_cache[1], expected_value)
+    finally:
+        inference_op.release_workspace()
 
 
 def test_shared_prefill_hooks_reduce_prompt_and_expand_output():
