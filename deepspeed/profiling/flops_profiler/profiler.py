@@ -847,20 +847,12 @@ def _elementwise_flops_compute(input, other):
     elif not torch.is_tensor(other):
         return _prod(input.shape), 0
     else:
-        dim_input = len(input.shape)
-        dim_other = len(other.shape)
-        max_dim = max(dim_input, dim_other)
-
-        final_shape = []
-        for i in range(max_dim):
-            in_i = input.shape[i] if i < dim_input else 1
-            ot_i = other.shape[i] if i < dim_other else 1
-            if in_i > ot_i:
-                final_shape.append(in_i)
-            else:
-                final_shape.append(ot_i)
-        flops = _prod(final_shape)
-        return flops, 0
+        # Broadcasting lines the two shapes up from the trailing dimension, so the
+        # shorter one is padded on the left. Walking both from index 0 instead pairs
+        # unrelated dimensions and yields a shape the result never has: multiplying a
+        # [2, 3, 4] activation by a [4] bias was counted over [4, 3, 4], twice the
+        # elements the operation touches.
+        return _prod(torch.broadcast_shapes(input.shape, other.shape)), 0
 
 
 def _attn_flops_compute(q, k, v, *args, **kwargs):

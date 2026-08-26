@@ -180,3 +180,34 @@ def test_print_model_profile_with_none_dp_world_size(capsys):
     assert match is not None
     # The sequence-data-parallel world size is reported in place of the None dp_world_size.
     assert match.group(1) == "4"
+
+
+@pytest.mark.sequential
+@pytest.mark.parametrize("lhs_shape, rhs_shape", [
+    ((2, 3, 4), (4, )),
+    ((4, ), (2, 3, 4)),
+    ((8, ), (2, 8)),
+    ((3, 4), (4, )),
+    ((2, 3, 4), (2, 3, 4)),
+    ((4, 1, 7), (1, 5, 7)),
+])
+def test_elementwise_broadcast_flops(lhs_shape, rhs_shape):
+    """An elementwise op costs one flop per element of its broadcast result, and
+    broadcasting lines the operand shapes up from the trailing dimension."""
+
+    class Elementwise(torch.nn.Module):
+
+        def forward(self, lhs, rhs):
+            return torch.mul(lhs, rhs)
+
+    model = Elementwise()
+    lhs, rhs = torch.randn(*lhs_shape), torch.randn(*rhs_shape)
+
+    prof = FlopsProfiler(model)
+    prof.start_profile()
+    result = model(lhs, rhs)
+    prof.stop_profile()
+    flops = prof.get_total_flops()
+    prof.end_profile()
+
+    assert flops == result.numel()
