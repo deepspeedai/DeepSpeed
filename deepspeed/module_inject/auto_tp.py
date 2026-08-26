@@ -640,12 +640,17 @@ class AutoTP():
     def update_mp_params(self, child, name=None):
         if getattr(child, "replaced", False) == True:
             return
+        if not any(hasattr(param, DS_AUTOTP_UC_META) for param in child.parameters()):
+            setattr(child, "replaced", True)
+            return
         tp_index = dist.get_rank(group=self.mp_group) if self.mp_group is not None else 0
-        # Fused-expert containers (Mixtral/Llama4/Qwen-MoE style) hold their weights as 3D
-        # parameters that AutoTP does not shard, so their dimension attributes must stay whole.
-        # Halving e.g. Llama4TextExperts.hidden_size while its weights keep the full size breaks
-        # the experts' batched matmul.
-        if any(param.dim() >= 3 for param in child.parameters(recurse=False)):
+        # AutoTP does not shard high-dimensional weights, so their dimension attributes must stay whole.
+        # Some wrappers, such as Qwen2-VL PatchEmbed, keep that weight in a direct child module.
+        has_unsharded_high_dimensional_param = any(param.dim() >= 3 for param in child.parameters(recurse=False))
+        if not has_unsharded_high_dimensional_param:
+            has_unsharded_high_dimensional_param = any(param.dim() >= 3 for module in child.children()
+                                                       for param in module.parameters(recurse=False))
+        if has_unsharded_high_dimensional_param:
             setattr(child, "replaced", True)
             return
         param_list = [
@@ -698,8 +703,8 @@ class AutoTP():
                 key = next(lp for lp in self.linear_policies if isinstance(child, lp))
                 setattr(autoep_layer, child_name, self.linear_policies[key](child, full_name, self.conv_linear_layer))
             else:
-                self.update_mp_params(child, full_name)
                 self._replace_module(child, full_name, "")
+                self.update_mp_params(child, full_name)
 
     def _replace_module(self, r_module, prev_name='', prev_class_name=''):
         if prev_name == '' and prev_class_name == '':
@@ -747,8 +752,8 @@ class AutoTP():
                     if new_child is not None:
                         setattr(r_module, name, new_child)
                 else:
-                    self.update_mp_params(child, full_name)
                     self._replace_module(child, name, class_name)
+                    self.update_mp_params(child, full_name)
             # Traditional path: use linear_policies for type-based routing
             elif child.__class__ in self.linear_policies:
                 setattr(r_module, name, self.linear_policies[child.__class__](child, prev_name + '.' + name,
@@ -765,8 +770,10 @@ class AutoTP():
                 setattr(r_module, name, self.linear_policies[key](child, prev_name + '.' + name,
                                                                   self.conv_linear_layer))
             else:
-                self.update_mp_params(child, name)
                 self._replace_module(child, name, class_name)
+                # Descendants have now been replaced and carry universal-checkpoint TP metadata.
+                # Keep logical dimensions whole when no parameter in this subtree was actually sharded.
+                self.update_mp_params(child, name)
         return r_module
 
     @staticmethod

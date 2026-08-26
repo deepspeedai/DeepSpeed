@@ -131,10 +131,13 @@ class TestDistAllReduce(DistributedTest):
 class FakeP2PWork:
     """Stands in for a torch.distributed Work so the staging wrapper can be tested single-process."""
 
-    def __init__(self, fill=None):
+    def __init__(self, fill=None, error=None):
         self.fill = fill
+        self.error = error
 
     def wait(self):
+        if self.error is not None:
+            raise self.error
         if self.fill is not None:
             self.fill()
         return True
@@ -145,43 +148,119 @@ class TestMpsStagedP2P:
 
     def test_irecv_defers_copy_back_to_wait(self, monkeypatch):
         from deepspeed.comm.torch import TorchBackend, StagedWork
-        captured = {}
+        captured = {'device_reads': 0, 'publishes': 0}
+        backend = TorchBackend.__new__(TorchBackend)
+        received = torch.zeros(16, dtype=torch.float32, device='mps')
+        real_to = torch.Tensor.to
+        real_cpu = torch.Tensor.cpu
+        real_copy = torch.Tensor.copy_
+
+        def spy_to(tensor, *args, **kwargs):
+            result = real_to(tensor, *args, **kwargs)
+            if tensor is received and result.device.type == 'cpu':
+                captured['device_reads'] += 1
+            return result
+
+        def spy_cpu(tensor, *args, **kwargs):
+            result = real_cpu(tensor, *args, **kwargs)
+            if tensor is received:
+                captured['device_reads'] += 1
+            return result
+
+        def spy_copy(tensor, source, *args, **kwargs):
+            result = real_copy(tensor, source, *args, **kwargs)
+            if source is received and tensor.device.type == 'cpu':
+                captured['device_reads'] += 1
+            if tensor is received and source.device.type == 'cpu':
+                captured['publishes'] += 1
+            return result
 
         def fake_irecv(tensor, src=None, group=None, tag=0):
             captured['staged'] = tensor
             return FakeP2PWork(fill=lambda: tensor.copy_(torch.arange(16, dtype=torch.float32)))
 
+        monkeypatch.setattr(torch.Tensor, 'to', spy_to)
+        monkeypatch.setattr(torch.Tensor, 'cpu', spy_cpu)
+        monkeypatch.setattr(torch.Tensor, 'copy_', spy_copy)
         monkeypatch.setattr(torch.distributed, 'irecv', fake_irecv)
-        backend = TorchBackend.__new__(TorchBackend)
-        received = torch.zeros(16, dtype=torch.float32, device='mps')
 
         handle = backend.irecv(received, src=0)
 
-        # gloo must see a CPU tensor, and the MPS tensor must stay untouched until wait().
         assert isinstance(handle, StagedWork)
         assert captured['staged'].device.type == 'cpu'
+        assert captured['device_reads'] == 0
+        assert captured['publishes'] == 0
         assert received.abs().sum().item() == 0
         assert handle.wait() is True
-        assert torch.equal(received.cpu(), torch.arange(16, dtype=torch.float32))
+        assert captured['publishes'] == 1
+        assert torch.equal(real_cpu(received), torch.arange(16, dtype=torch.float32))
 
     def test_isend_stages_payload_on_cpu(self, monkeypatch):
         from deepspeed.comm.torch import TorchBackend, StagedWork
-        captured = {}
+        captured = {'payload_reads': 0, 'payload_copy_backs': 0}
+        backend = TorchBackend.__new__(TorchBackend)
+        payload = torch.arange(16, dtype=torch.float32, device='mps')
+        real_to = torch.Tensor.to
+        real_copy = torch.Tensor.copy_
+
+        def spy_to(tensor, *args, **kwargs):
+            result = real_to(tensor, *args, **kwargs)
+            if tensor is payload and result.device.type == 'cpu':
+                captured['payload_reads'] += 1
+            return result
+
+        def spy_copy(tensor, source, *args, **kwargs):
+            result = real_copy(tensor, source, *args, **kwargs)
+            if tensor is payload:
+                captured['payload_copy_backs'] += 1
+            return result
 
         def fake_isend(tensor, dst=None, group=None, tag=0):
             captured['staged'] = tensor
             return FakeP2PWork()
 
+        monkeypatch.setattr(torch.Tensor, 'to', spy_to)
+        monkeypatch.setattr(torch.Tensor, 'copy_', spy_copy)
         monkeypatch.setattr(torch.distributed, 'isend', fake_isend)
-        backend = TorchBackend.__new__(TorchBackend)
-        payload = torch.arange(16, dtype=torch.float32, device='mps')
 
         handle = backend.isend(payload, dst=0)
 
         assert isinstance(handle, StagedWork)
         assert captured['staged'].device.type == 'cpu'
         assert torch.equal(captured['staged'], torch.arange(16, dtype=torch.float32))
+        assert captured['payload_reads'] == 1
         assert handle.wait() is True
+        assert captured['payload_reads'] == 1
+        assert captured['payload_copy_backs'] == 0
+
+    def test_irecv_failure_does_not_publish_uninitialized_staging(self, monkeypatch):
+        from deepspeed.comm.torch import TorchBackend
+        backend = TorchBackend.__new__(TorchBackend)
+        received = torch.full((16, ), 7.0, dtype=torch.float32, device='mps')
+        captured = {}
+
+        def fake_irecv(tensor, src=None, group=None, tag=0):
+            captured['staged'] = tensor
+            return FakeP2PWork(error=RuntimeError("receive failed"))
+
+        monkeypatch.setattr(torch.distributed, 'irecv', fake_irecv)
+        handle = backend.irecv(received, src=0)
+
+        assert captured['staged'].device.type == 'cpu'
+        with pytest.raises(RuntimeError, match="receive failed"):
+            handle.wait()
+        assert torch.equal(received, torch.full_like(received, 7.0))
+
+    def test_irecv_without_work_preserves_native_return_and_destination(self, monkeypatch):
+        from deepspeed.comm.torch import TorchBackend
+        backend = TorchBackend.__new__(TorchBackend)
+        received = torch.full((16, ), 7.0, dtype=torch.float32, device='mps')
+
+        monkeypatch.setattr(torch.distributed, 'irecv', lambda *args, **kwargs: None)
+        handle = backend.irecv(received, src=0)
+
+        assert handle is None
+        assert torch.equal(received, torch.full_like(received, 7.0))
 
 
 class TestDistIsendIrecv(DistributedTest):
@@ -189,11 +268,16 @@ class TestDistIsendIrecv(DistributedTest):
 
     def _launch_procs(self, num_procs, init_method):
         # Two gloo ranks do not need two devices, but the base class gates process count on
-        # device_count(), which reports sockets on CPU and would skip this test on CI. Bypass
-        # the gate there and pin gloo so oneCCL bindings are not silently picked up.
-        if get_accelerator().device_name() != 'cpu':
+        # device_count(), which reports sockets on CPU and one physical device on MPS. Bypass
+        # the gate for both; MPS still needs spawned processes so each rank gets a Metal context.
+        device = get_accelerator().device_name()
+        if device not in ['cpu', 'mps']:
             return super()._launch_procs(num_procs, init_method)
         self.backend = 'gloo'
+        if device == 'mps':
+            self.non_daemonic_procs = True
+            self.reuse_dist_env = False
+            return self._launch_non_daemonic_procs(num_procs, init_method)
         torch.multiprocessing.set_start_method('forkserver', force=True)
         self._launch_daemonic_procs(num_procs, init_method)
 
@@ -214,6 +298,19 @@ class TestDistIsendIrecv(DistributedTest):
         if rank == 1:
             expected = torch.arange(length, dtype=torch.float32).to(device)
             assert torch.equal(received, expected)
+
+    def test_non_member_irecv_preserves_native_return(self):
+        rank = dist.get_rank()
+        device = get_accelerator().device_name()
+        subgroup = dist.new_group(ranks=[0])
+
+        if rank == 1:
+            received = torch.full((4096, ), 7.0, dtype=torch.float32, device=device)
+            handle = dist.irecv(received, src=0, group=subgroup)
+
+            assert handle is None
+            assert torch.equal(received, torch.full_like(received, 7.0))
+        dist.barrier()
 
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16, torch.float16])
