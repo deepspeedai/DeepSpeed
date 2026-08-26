@@ -470,9 +470,10 @@ class TestUlyssesKVHeadCount(DistributedTest):
         groups.mesh_device = dist.initialize_mesh_device((1, self.world_size), ("data_parallel", "sequence_parallel"))
         return groups.mesh_device.get_group(mesh_dim="sequence_parallel")
 
-    def _tagged(self, num_heads):
+    def _tagged(self, num_heads, batch_dim_idx=0):
         device = get_accelerator().current_device_name()
-        tensor = torch.zeros(1, self.LOCAL_SEQ, num_heads, self.HEAD_DIM, device=device, requires_grad=True)
+        shape = (1, self.LOCAL_SEQ) if batch_dim_idx == 0 else (self.LOCAL_SEQ, 1)
+        tensor = torch.zeros(*shape, num_heads, self.HEAD_DIM, device=device, requires_grad=True)
         with torch.no_grad():
             tensor[:] = torch.arange(num_heads, device=device).view(1, 1, -1, 1).float()
         return tensor
@@ -499,18 +500,20 @@ class TestUlyssesKVHeadCount(DistributedTest):
         assert self._run(student, 5) == [[0, 1, 2], [3, 4]][rank]
         assert self._run(teacher, 3) == expected_teacher
 
-    def test_gqa_partitions_by_kv_groups(self):
+    @pytest.mark.parametrize("batch_dim_idx", [0, 1])
+    def test_gqa_partitions_by_kv_groups(self, batch_dim_idx):
         # Q=6 / KV=3 over 2 ranks. 6 divides evenly, but a query head has to stay on the rank
         # holding its KV head, so the split follows the KV groups [2, 1] and Q becomes [4, 2].
         sp_group = self._sequence_parallel_group()
         rank = dist.get_rank(group=sp_group)
 
-        attn = DistributedAttention(_RecordingAttention(), sp_group, scatter_idx=2, gather_idx=1)
-        query = self._tagged(6)
-        key = self._tagged(3)
-        value = self._tagged(3)
+        gather_idx = 1 if batch_dim_idx == 0 else 0
+        attn = DistributedAttention(_RecordingAttention(), sp_group, scatter_idx=2, gather_idx=gather_idx)
+        query = self._tagged(6, batch_dim_idx)
+        key = self._tagged(3, batch_dim_idx)
+        value = self._tagged(3, batch_dim_idx)
 
-        output = attn(query, key, value, 0)
+        output = attn(query, key, value, batch_dim_idx)
         output.sum().backward()
 
         assert attn.local_attn.head_ids == [[0, 1, 2, 3], [4, 5]][rank]
