@@ -159,7 +159,7 @@ def test_generate_preserves_zero_pad_token_id():
 
 def test_native_repeat_kv_cache_fp16_reverse_copy():
     """Exercise the native reverse copy with multiple source cache rows."""
-    if not torch.cuda.is_available():
+    if not torch.cuda.is_available():  #ignore-cuda
         pytest.skip("CUDA is required for the native inference kernel")
 
     from deepspeed.ops.op_builder import InferenceBuilder
@@ -233,10 +233,10 @@ def test_native_repeat_kv_cache_fp16_reverse_copy():
             None,
             None,
         )
-        torch.cuda.synchronize()
+        torch.cuda.synchronize()  #ignore-cuda
 
         repeated_cache = repeat_kv_cache(source_batch_size, repeats)
-        torch.cuda.synchronize()
+        torch.cuda.synchronize()  #ignore-cuda
 
         assert len(repeated_cache) == 2
         expected_key = torch.empty((target_batch_size, 1, prompt_length, hidden_dim),
