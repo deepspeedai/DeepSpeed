@@ -540,11 +540,8 @@ def test_update_mp_params_preserves_unsharded_high_dimensional_modules(monkeypat
     child.proj = nn.Conv3d(3, child.embed_dim, kernel_size=1)
 
     monkeypatch.setattr(dist, "get_rank", lambda group=None: 1 if group is tp_group else 0)
-    set_num_kv_heads(3)
-    try:
-        autotp.update_mp_params(child, "model.visual.patch_embed")
-    finally:
-        set_num_kv_heads(None)
+    autotp.tp_meta = AutoTPMeta(num_kv_heads=3)
+    autotp.update_mp_params(child, "model.visual.patch_embed")
 
     assert child.embed_dim == 12
 
@@ -565,11 +562,8 @@ def test_replace_module_preserves_metadata_for_unsharded_subtree(monkeypatch):
     visual.attn.proj = nn.Linear(12, 12)
 
     monkeypatch.setattr(dist, "get_rank", lambda group=None: 1 if group is tp_group else 0)
-    set_num_kv_heads(None)
-    try:
-        autotp._replace_module(visual, "model.visual")
-    finally:
-        set_num_kv_heads(None)
+    autotp.tp_meta = AutoTPMeta()
+    autotp._replace_module(visual, "model.visual")
 
     assert visual.attn.num_heads == 16
 
@@ -585,11 +579,8 @@ def test_update_mp_params_follows_actual_tp_parameter_metadata(monkeypatch):
     setattr(child.proj.weight, DS_AUTOTP_UC_META, {})
 
     monkeypatch.setattr(dist, "get_rank", lambda group=None: 1 if group is tp_group else 0)
-    set_num_kv_heads(None)
-    try:
-        autotp.update_mp_params(child, "model.layers.0.mlp")
-    finally:
-        set_num_kv_heads(None)
+    autotp.tp_meta = AutoTPMeta()
+    autotp.update_mp_params(child, "model.layers.0.mlp")
 
     assert child.hidden_size == 6
 
