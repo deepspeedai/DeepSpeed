@@ -185,7 +185,7 @@ def test_native_repeat_kv_cache_fp16_reverse_copy():
     repeats = 2
     target_batch_size = source_batch_size * repeats
     prompt_length = 2
-    hidden_dim = 2
+    hidden_dim = 8  # The FP16 transform kernel processes eight values per thread.
     num_heads = 1
 
     inference_op.allocate_workspace_fp16(
