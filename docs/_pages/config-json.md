@@ -461,6 +461,7 @@ Enabling and configuring ZeRO memory optimizations
     "stage": [0|1|2|3],
     "allgather_partitions": [true|false],
     "allgather_bucket_size": 5e8,
+    "compute_grad_norm": [true|false],
     "overlap_comm": false,
     "reduce_scatter": [true|false],
     "reduce_bucket_size": 5e8,
@@ -510,6 +511,12 @@ Enabling and configuring ZeRO memory optimizations
 | Description                                                                                                  | Default |
 | ------------------------------------------------------------------------------------------------------------ | ------- |
 | Number of elements allgathered at a time. Limits the memory required for the allgather for large model sizes | `5e8`   |
+
+***compute_grad_norm***: [boolean]
+
+| Description                                                                                                                                                                                                                     | Default |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
+| Compute and retain the global gradient norm during ZeRO Stage 1/2 optimizer steps. Set to `false` only with a GPU optimizer, without ZenFlow or gradient clipping, and when callers do not use `get_global_grad_norm()`; finite/overflow checking is unchanged. | `true`  |
 
 <i>**overlap_comm**</i>: [boolean]
 
