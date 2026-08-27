@@ -102,6 +102,7 @@ def test_pin_memory_torch_backend_make_copy_false_allocates_pinned(monkeypatch):
     class _StubAccelerator:
         # Exercise the shared dispatch without needing a real pinning device.
         pin_memory = DeepSpeedAccelerator.pin_memory
+        _active_native_pins = DeepSpeedAccelerator._active_native_pins
 
         def _torch_pin_memory(self, tensor):
             calls.append(("pin_copy", tuple(tensor.shape)))
@@ -128,7 +129,9 @@ def test_pin_empty_torch_backend_uses_zero_element_template(monkeypatch):
     class _StubAccelerator:
         pin_empty = DeepSpeedAccelerator.pin_empty
         pin_empty_like = DeepSpeedAccelerator.pin_empty_like
-        _pin_uninitialized = DeepSpeedAccelerator._pin_uninitialized
+        pin_memory = DeepSpeedAccelerator.pin_memory
+        _shape_numel = staticmethod(DeepSpeedAccelerator._shape_numel)
+        _active_native_pins = DeepSpeedAccelerator._active_native_pins
 
         def _torch_empty_pinned(self, tensor, shape):
             calls.append((tuple(tensor.shape), tuple(shape), tensor.dtype, tensor.numel()))

@@ -40,45 +40,25 @@ class NativePinnedMemory(object):
 
     def pin(self, tensor, make_copy=True, match_shape=True):
         numel = tensor.numel()
+        out_shape = tensor.shape if match_shape else (numel, )
+        locked = self._new_locked(tensor, numel, out_shape)
+        if make_copy:
+            locked.copy_(tensor.reshape(out_shape))
+        return locked
+
+    def pin_empty(self, example, shape):
+        # ``example`` is dtype-only. ``pin()`` sizes the allocation from
+        # ``example.numel()``, so a 0-element template cannot be passed through.
+        numel = 1
+        for dim in shape:
+            numel *= int(dim)
+        return self._new_locked(example, numel, shape)
+
+    def _new_locked(self, example, numel, out_shape):
         # ``base`` is the allocation root and the view root for everything derived
         # from it. Every slice/view of the returned tensor keeps ``base`` alive via
         # ``._base``, so the allocation is freed only after the returned tensor and
         # all of its aliases are gone (a live view can never outlive the free).
-        base = self._handle.new_cpu_locked_tensor(numel, tensor)
-        begin = base.data_ptr()
-        locked = base[:numel]
-        if base.nbytes and self._device_registration_enabled():
-            from deepspeed.accelerator import get_accelerator
-            try:
-                if get_accelerator().register_host_memory(begin, base.nbytes):
-                    self._device_registered.add(begin)
-            except Exception as e:
-                logger.warning_once(
-                    f"Native pinned-memory device registration failed; continuing with mlock only: {e}")
-        if make_copy:
-            locked.copy_(tensor.reshape(-1))
-        if match_shape:
-            locked = locked.view(tensor.shape)
-        self._ranges[begin] = begin + numel * tensor.element_size()
-        locked.ds_pinned = True
-        # Remember the owning allocation address so an explicit unpin() frees the
-        # original region even if the tensor's ``.data`` is later redirected (e.g.
-        # ZeRO offload/reload rebinds ``.data`` to a different buffer).
-        locked.ds_pin_base = begin
-        # Match torch.pin_memory lifetime semantics: free the page-locked allocation
-        # once its root is garbage-collected, so call sites that never call unpin()
-        # do not accumulate mlocked host memory. The finalizer is tied to ``base``
-        # (not the returned view) and frees by address; ``base`` must not be passed
-        # as a finalize argument or it would be kept alive forever.
-        self._finalizers[begin] = weakref.finalize(base, self._release, self._handle, begin, self._ranges,
-                                                   self._finalizers, self._device_registered)
-        return locked
-
-    def pin_empty(self, example, shape):
-        # ``example`` is dtype-only (typically 0-element); size comes from ``shape``.
-        numel = 1
-        for dim in shape:
-            numel *= int(dim)
         base = self._handle.new_cpu_locked_tensor(numel, example)
         begin = base.data_ptr()
         locked = base[:numel]
@@ -90,10 +70,18 @@ class NativePinnedMemory(object):
             except Exception as e:
                 logger.warning_once(
                     f"Native pinned-memory device registration failed; continuing with mlock only: {e}")
-        locked = locked.view(shape)
+        locked = locked.view(out_shape)
         self._ranges[begin] = begin + numel * example.element_size()
         locked.ds_pinned = True
+        # Remember the owning allocation address so an explicit unpin() frees the
+        # original region even if the tensor's ``.data`` is later redirected (e.g.
+        # ZeRO offload/reload rebinds ``.data`` to a different buffer).
         locked.ds_pin_base = begin
+        # Match torch.pin_memory lifetime semantics: free the page-locked allocation
+        # once its root is garbage-collected, so call sites that never call unpin()
+        # do not accumulate mlocked host memory. The finalizer is tied to ``base``
+        # (not the returned view) and frees by address; ``base`` must not be passed
+        # as a finalize argument or it would be kept alive forever.
         self._finalizers[begin] = weakref.finalize(base, self._release, self._handle, begin, self._ranges,
                                                    self._finalizers, self._device_registered)
         return locked

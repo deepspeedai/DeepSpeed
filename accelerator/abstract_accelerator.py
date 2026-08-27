@@ -286,19 +286,39 @@ class DeepSpeedAccelerator(ABC):
         """Unregister host memory previously registered with the device runtime."""
         return None
 
-    def pin_memory(self, tensor, make_copy=True, match_shape=True):
+    @staticmethod
+    def _shape_numel(shape):
+        numel = 1
+        for dim in shape:
+            numel *= int(dim)
+        return numel
+
+    def _active_native_pins(self, nbytes):
         from deepspeed.utils.pin_memory_tracker import track_pinned_memory
-        track_pinned_memory(tensor.nbytes)
+        track_pinned_memory(nbytes)
         from deepspeed.utils.pin_memory import get_active_native_pinned_memory
-        pins = get_active_native_pinned_memory()
+        return get_active_native_pinned_memory()
+
+    def pin_memory(self, tensor, make_copy=True, match_shape=True, alloc_shape=None):
+        # ``alloc_shape`` is the size/dtype-only path used by pin_empty: ``tensor``
+        # is just a dtype template and must not dictate the allocation numel.
+        if alloc_shape is None:
+            nbytes = tensor.nbytes
+            out_shape = tensor.shape if match_shape else (tensor.numel(), )
+        else:
+            numel = self._shape_numel(alloc_shape)
+            nbytes = numel * tensor.element_size()
+            out_shape = tuple(alloc_shape) if match_shape else (numel, )
+        pins = self._active_native_pins(nbytes)
         if pins is not None:
+            if alloc_shape is not None:
+                return pins.pin_empty(tensor, out_shape)
             return pins.pin(tensor, make_copy=make_copy, match_shape=match_shape)
-        if make_copy:
+        if make_copy and alloc_shape is None:
             return self._torch_pin_memory(tensor)
         # ``tensor`` is only a shape/dtype template here, so page-lock a fresh
         # buffer instead of faulting it in and copying it into a second one.
-        shape = tensor.shape if match_shape else (tensor.numel(), )
-        return self._torch_empty_pinned(tensor, shape)
+        return self._torch_empty_pinned(tensor, out_shape)
 
     def pin_empty(self, *size, dtype=None, device='cpu'):
         # Scratch destinations: shape/dtype only, no pageable template of ``size``.
@@ -308,24 +328,12 @@ class DeepSpeedAccelerator(ABC):
         else:
             shape = tuple(size)
         template = torch.empty(0, dtype=dtype, device=device)
-        return self._pin_uninitialized(template, shape)
+        return self.pin_memory(template, make_copy=False, alloc_shape=shape)
 
     def pin_empty_like(self, tensor, device='cpu', dtype=None):
         import torch
         template = torch.empty(0, dtype=tensor.dtype if dtype is None else dtype, device=device)
-        return self._pin_uninitialized(template, tuple(tensor.shape))
-
-    def _pin_uninitialized(self, template, shape):
-        numel = 1
-        for dim in shape:
-            numel *= int(dim)
-        from deepspeed.utils.pin_memory_tracker import track_pinned_memory
-        track_pinned_memory(numel * template.element_size())
-        from deepspeed.utils.pin_memory import get_active_native_pinned_memory
-        pins = get_active_native_pinned_memory()
-        if pins is not None:
-            return pins.pin_empty(template, shape)
-        return self._torch_empty_pinned(template, shape)
+        return self.pin_memory(template, make_copy=False, alloc_shape=tuple(tensor.shape))
 
     def is_pinned(self, tensor):
         from deepspeed.utils.pin_memory import get_active_native_pinned_memory
