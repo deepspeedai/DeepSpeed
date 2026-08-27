@@ -23,6 +23,7 @@ from typing import Optional
 
 import torch
 
+import deepspeed.comm as dist
 from deepspeed.accelerator import get_accelerator
 from deepspeed.runtime.rollout.base import RolloutBatch, RolloutEngine, RolloutRequest, SamplingConfig
 from deepspeed.runtime.rollout.continuous_batching import ContinuousBatchRequest, ContinuousBatchScheduler
@@ -75,6 +76,39 @@ class _ForwardProfiler:
         if self.use_host_timer:
             return (end - start) * 1000.0
         return start.elapsed_time(end)
+
+
+class GlobalWorkRemaining:
+    """Rendezvous a local work flag over a distributed process group."""
+
+    def __init__(self, process_group=None):
+        self.process_group = process_group
+
+    def __call__(self, local_work_remaining):
+        work_remaining = torch.as_tensor(local_work_remaining, dtype=torch.int32).clone()
+        if dist.is_initialized() and dist.get_world_size(group=self.process_group) > 1:
+            dist.all_reduce(work_remaining, op=dist.ReduceOp.MAX, group=self.process_group)
+        return bool(work_remaining.item())
+
+
+class _GlobalEosStoppingCriteria:
+    """Stop all local sequences only after every rank has observed EOS."""
+
+    def __init__(self, response_start, eos_token_id, work_remaining):
+        self.response_start = response_start
+        self.eos_token_ids = torch.as_tensor(eos_token_id).flatten()
+        self.work_remaining = work_remaining
+
+    def __call__(self, input_ids, scores, **kwargs):  # noqa: ARG002
+        response_ids = input_ids[:, self.response_start:]
+        eos_token_ids = self.eos_token_ids.to(device=input_ids.device, dtype=input_ids.dtype)
+        sequence_has_eos = (response_ids.unsqueeze(-1) == eos_token_ids).any(dim=-1).any(dim=-1)
+        local_work_remaining = (~sequence_has_eos).any().to(dtype=torch.int32)
+        global_work_remaining = self.work_remaining(local_work_remaining)
+        # This is a rank-global decision, so a scalar preserves the same
+        # behavior for every local sequence and remains compatible with older
+        # Transformers releases that apply Python ``any`` to criterion results.
+        return not global_work_remaining
 
 
 @dataclass
@@ -197,12 +231,23 @@ class HybridEngineRollout(RolloutEngine):
                 output_ids = self._generate_graph(prompt_ids, prompt_attn, max_new_tokens, pad_token_id, module,
                                                   device, sampling)
             else:
+                zero3_sync = self._zero3_work_remaining()
+                stopping_criteria = None
+                if zero3_sync is not None and self.tokenizer.eos_token_id is not None:
+                    stopping_criteria = [
+                        _GlobalEosStoppingCriteria(prompt_len, self.tokenizer.eos_token_id, zero3_sync)
+                    ]
                 generate_kwargs = {
                     "attention_mask": prompt_attn,
                     "max_new_tokens": max_new_tokens,
-                    # ZeRO-3 gathers parameters during each decode forward, so every
-                    # data-parallel rank must execute the same number of iterations.
-                    "eos_token_id": None,
+                    # ZeRO-3 gathers parameters during each decode forward, so ranks stop on the
+                    # group-aware criterion rather than on a rank-local EOS.
+                    "eos_token_id": None if zero3_sync is not None else self.tokenizer.eos_token_id,
+                    "stopping_criteria": stopping_criteria,
+                    # Transformers enables synced_gpus from the default world size when it can observe
+                    # ZeRO-3, which issues an ungrouped world all-reduce. The criterion above already
+                    # synchronizes over the parameter-gather group, so opt out for the ZeRO-3 path only.
+                    "synced_gpus": False if zero3_sync is not None else None,
                     "pad_token_id": pad_token_id,
                     **self._hf_sampling_kwargs(sampling),
                 }
@@ -217,10 +262,10 @@ class HybridEngineRollout(RolloutEngine):
             accelerator.synchronize()
             generation_end = time.perf_counter()
 
-        # Generation deliberately ignores EOS above so ZeRO-3 ranks execute
-        # the same number of parameter-gather collectives. Restore the usual
-        # generation semantics before returning: retain the first EOS in each
-        # response and replace every later token with padding.
+        # ZeRO-3 generation ignores EOS in the decode loop so every rank runs the same
+        # number of parameter-gather collectives. Restore the usual generation semantics
+        # before returning: retain the first EOS in each response and replace every later
+        # token with padding.
         output_ids, response_attn = self._pad_after_eos(
             output_ids,
             response_start=prompt_len,
@@ -1307,6 +1352,20 @@ class HybridEngineRollout(RolloutEngine):
                                           dtype=torch.long,
                                           device=input_ids.device),
         )
+
+    def _zero3_work_remaining(self):
+        """Return a rendezvous over the group used for ZeRO-3 parameter gathers."""
+        is_zero3 = getattr(self.engine, "zero_optimization_partition_weights", None)
+        if not callable(is_zero3) or not is_zero3():
+            return None
+
+        process_group = None
+        if dist.is_initialized():
+            optimizer = getattr(self.engine, "optimizer", None)
+            process_group = getattr(optimizer, "dp_process_group", None)
+            if process_group is None:
+                raise RuntimeError("ZeRO-3 synchronized rollout requires optimizer.dp_process_group")
+        return GlobalWorkRemaining(process_group)
 
     def get_last_profile(self):
         """Return the most recent profiling snapshot for this rollout instance."""
