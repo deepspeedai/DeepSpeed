@@ -120,6 +120,59 @@ def test_pin_memory_torch_backend_make_copy_false_allocates_pinned(monkeypatch):
     assert calls == [("pin_copy", (4, 8)), ("empty_pinned", (4, 8)), ("empty_pinned", (32, ))]
 
 
+def test_pin_empty_torch_backend_uses_zero_element_template(monkeypatch):
+    """pin_empty must not build a full-size pageable tensor for the torch path."""
+    monkeypatch.delenv("DS_PIN_MEMORY_BACKEND", raising=False)
+    calls = []
+
+    class _StubAccelerator:
+        pin_empty = DeepSpeedAccelerator.pin_empty
+        pin_empty_like = DeepSpeedAccelerator.pin_empty_like
+        _pin_uninitialized = DeepSpeedAccelerator._pin_uninitialized
+
+        def _torch_empty_pinned(self, tensor, shape):
+            calls.append((tuple(tensor.shape), tuple(shape), tensor.dtype, tensor.numel()))
+            return tensor.new_empty(shape)
+
+    accel = _StubAccelerator()
+    buffer = accel.pin_empty(4, 8, dtype=torch.float32, device="cpu")
+    assert tuple(buffer.shape) == (4, 8)
+    src = torch.randn(2, 3, dtype=torch.float16)
+    like = accel.pin_empty_like(src, device="cpu")
+    assert tuple(like.shape) == (2, 3)
+    assert calls == [((0, ), (4, 8), torch.float32, 0), ((0, ), (2, 3), torch.float16, 0)]
+
+
+def test_pin_empty_torch_backend_is_pinned(monkeypatch):
+    """pin_empty page-locks a host buffer on accelerators that can pin."""
+    monkeypatch.delenv("DS_PIN_MEMORY_BACKEND", raising=False)
+    accel = get_accelerator()
+    if accel.device_name() == "cpu":
+        pytest.skip("torch cannot pin CPU tensors on the CPU accelerator")
+
+    buffer = accel.pin_empty(4, 8, dtype=torch.float32, device="cpu")
+    assert buffer.is_pinned()
+    assert tuple(buffer.shape) == (4, 8)
+    src = torch.randn(2, 3)
+    like = accel.pin_empty_like(src, device="cpu")
+    assert like.is_pinned()
+    assert tuple(like.shape) == (2, 3)
+
+
+def test_pin_empty_native_backend(monkeypatch):
+    _require_native(monkeypatch)
+    accel = get_accelerator()
+    buffer = accel.pin_empty(4, 8, dtype=torch.float32, device="cpu")
+    assert tuple(buffer.shape) == (4, 8)
+    assert accel.is_pinned(buffer)
+    src = torch.randn(2, 3)
+    like = accel.pin_empty_like(src, device="cpu")
+    assert tuple(like.shape) == (2, 3)
+    assert accel.is_pinned(like)
+    assert accel.unpin_memory(buffer) is True
+    assert accel.unpin_memory(like) is True
+
+
 def test_pin_memory_torch_backend_no_copy_is_pinned(monkeypatch):
     """The buffer returned for make_copy=False is really page-locked."""
     monkeypatch.delenv("DS_PIN_MEMORY_BACKEND", raising=False)

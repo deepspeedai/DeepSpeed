@@ -74,6 +74,30 @@ class NativePinnedMemory(object):
                                                    self._finalizers, self._device_registered)
         return locked
 
+    def pin_empty(self, example, shape):
+        # ``example`` is dtype-only (typically 0-element); size comes from ``shape``.
+        numel = 1
+        for dim in shape:
+            numel *= int(dim)
+        base = self._handle.new_cpu_locked_tensor(numel, example)
+        begin = base.data_ptr()
+        locked = base[:numel]
+        if base.nbytes and self._device_registration_enabled():
+            from deepspeed.accelerator import get_accelerator
+            try:
+                if get_accelerator().register_host_memory(begin, base.nbytes):
+                    self._device_registered.add(begin)
+            except Exception as e:
+                logger.warning_once(
+                    f"Native pinned-memory device registration failed; continuing with mlock only: {e}")
+        locked = locked.view(shape)
+        self._ranges[begin] = begin + numel * example.element_size()
+        locked.ds_pinned = True
+        locked.ds_pin_base = begin
+        self._finalizers[begin] = weakref.finalize(base, self._release, self._handle, begin, self._ranges,
+                                                   self._finalizers, self._device_registered)
+        return locked
+
     def is_pinned(self, tensor):
         if getattr(tensor, "ds_pinned", False):
             return True

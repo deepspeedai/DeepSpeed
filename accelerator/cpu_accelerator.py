@@ -293,6 +293,10 @@ class CPU_Accelerator(DeepSpeedAccelerator):
         # torch cannot pin CPU tensors to a device; keep the historical no-op.
         return tensor
 
+    def _torch_empty_pinned(self, tensor, shape):
+        # Same no-op as pin_memory: allocate host storage without page-locking.
+        return tensor.new_empty(shape)
+
     def op_builder_dir(self):
         try:
             # is op_builder from deepspeed or a 3p version? this should only succeed if it's deepspeed

@@ -316,6 +316,15 @@ shape/dtype template: both backends page-lock a fresh buffer and never read
 ``tensor``, so scratch destinations do not pay for a second full-size
 allocation and a copy.
 
+Empty scratch buffers should use ``pin_empty`` / ``pin_empty_like`` instead of
+``pin_memory(torch.empty(...), make_copy=False)``. Those helpers take a shape
+and dtype only, so neither backend allocates a full-size pageable template.
+
+.. code-block:: python
+
+    scratch = get_accelerator().pin_empty_like(src, device='cpu')
+    scratch = get_accelerator().pin_empty(1024, dtype=torch.float32, device='cpu')
+
 Pin on/off vs backend
 =====================
 

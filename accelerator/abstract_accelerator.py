@@ -300,6 +300,33 @@ class DeepSpeedAccelerator(ABC):
         shape = tensor.shape if match_shape else (tensor.numel(), )
         return self._torch_empty_pinned(tensor, shape)
 
+    def pin_empty(self, *size, dtype=None, device='cpu'):
+        # Scratch destinations: shape/dtype only, no pageable template of ``size``.
+        import torch
+        if len(size) == 1 and not isinstance(size[0], int):
+            shape = tuple(size[0])
+        else:
+            shape = tuple(size)
+        template = torch.empty(0, dtype=dtype, device=device)
+        return self._pin_uninitialized(template, shape)
+
+    def pin_empty_like(self, tensor, device='cpu', dtype=None):
+        import torch
+        template = torch.empty(0, dtype=tensor.dtype if dtype is None else dtype, device=device)
+        return self._pin_uninitialized(template, tuple(tensor.shape))
+
+    def _pin_uninitialized(self, template, shape):
+        numel = 1
+        for dim in shape:
+            numel *= int(dim)
+        from deepspeed.utils.pin_memory_tracker import track_pinned_memory
+        track_pinned_memory(numel * template.element_size())
+        from deepspeed.utils.pin_memory import get_active_native_pinned_memory
+        pins = get_active_native_pinned_memory()
+        if pins is not None:
+            return pins.pin_empty(template, shape)
+        return self._torch_empty_pinned(template, shape)
+
     def is_pinned(self, tensor):
         from deepspeed.utils.pin_memory import get_active_native_pinned_memory
         pins = get_active_native_pinned_memory()
