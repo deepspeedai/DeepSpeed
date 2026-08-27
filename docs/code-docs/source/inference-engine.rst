@@ -43,3 +43,17 @@ batch size, samples per prompt, prompt length, and returned response length.
 For benchmark matrices, cases execute from the largest effective batch to the
 smallest because HybridEngine sizes its inference workspace on the first
 forward. Results remain in the user-requested matrix order.
+
+Shared Prompt Prefill
+---------------------
+
+When one prompt branches into multiple response samples,
+``HybridEngineRolloutConfig(use_shared_prefill=True)`` computes the prompt
+forward once and repeats its KV cache before decoding the independent response
+branches. The option is disabled by default.
+
+Shared prefill currently requires HybridEngine kernel injection, ZeRO stage 0,
+inference tensor-parallel size 1, an internal KV cache, and a prompt longer than
+one token. It cannot be combined with CUDA graph capture or
+``release_inference_cache``. Sampling still happens independently for every
+response branch after the shared prompt forward.

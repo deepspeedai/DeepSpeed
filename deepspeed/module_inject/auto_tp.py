@@ -205,7 +205,8 @@ class AutoTP():
                  linear_layer_setting,
                  orig_layer_impl,
                  keep_module_on_host=False,
-                 partition_config: Optional[AutoTPConfig] = None):
+                 partition_config: Optional[AutoTPConfig] = None,
+                 training_mode: bool = False):
         self.module = module
         self.all_reduce_linears = all_reduce_linears
         self.prefix = prefix
@@ -218,6 +219,7 @@ class AutoTP():
         self.linear_policies = None
         self.conv_linear_layer = False
         self.partition_config = partition_config
+        self.training_mode = training_mode
         self._gathered_column_tie_fallbacks_configured = False
         self._tied_gathered_column_module_names = set()
         TensorParallel_Layer.set_keep_module_on_host(keep_module_on_host)
@@ -394,12 +396,15 @@ class AutoTP():
         down_proj = False
         if 'down_proj' in name:
             down_proj = True
-        if name in self.all_reduce_linears or arctic_w2_all_reduce_linear or down_proj:
+        legacy_lm_head = name == "lm_head" or name == 'embed_out'
+        training_column_lm_head = self.training_mode and legacy_lm_head
+        if (name in self.all_reduce_linears or arctic_w2_all_reduce_linear
+                or down_proj) and not training_column_lm_head:
 
             setattr(child, "replaced", True)
             if self.conv_linear_layer:
                 return Conv_LinearALlreduce(child, self.mp_group, name=name)
-            elif name == "lm_head" or name == 'embed_out':
+            elif legacy_lm_head:
                 return LmHeadLinearAllreduce(child, self.mp_group)
 
             return LinearAllreduce(child, self.mp_group, name=name)
@@ -408,6 +413,8 @@ class AutoTP():
             setattr(child, "replaced", True)
             if self.conv_linear_layer:
                 conv_LinearLayer(child, self.mp_group)
+            elif training_column_lm_head:
+                return LinearLayer(child, self.mp_group, name=name, gather_output=True)
             elif require_tp_fused_qkvw(name, self.mp_size):
                 #Check and handle fused qkv for TP
                 return fused_LinearLayer(child, self.mp_group, fused_module=self.module)
@@ -451,9 +458,13 @@ class AutoTP():
         """Create row-parallel layer (AllReduce after forward)."""
         if self.conv_linear_layer:
             return Conv_LinearALlreduce(module, self.mp_group, name=name)
-        # Check for lm_head / embed_out
         if name == "lm_head" or name == 'embed_out':
-            return LmHeadLinearAllreduce(module, self.mp_group)
+            if not self.training_mode:
+                return LmHeadLinearAllreduce(module, self.mp_group)
+            if self.mp_size > 1:
+                raise NotImplementedError(
+                    "Training with explicit row-parallel output heads is not supported for tensor parallel size > 1. "
+                    "Use column-parallel with gather_output=True until a row-parallel autograd path is available.")
 
         if spec.shape is not None:
             return SubParamLinearAllreduce(
@@ -487,7 +498,10 @@ class AutoTP():
 
     def _configure_gathered_column_tie_fallbacks(self):
         """Configure a replicated fallback for gathered output layers tied to embeddings."""
-        if self._gathered_column_tie_fallbacks_configured or self.partition_config is None:
+        if self._gathered_column_tie_fallbacks_configured:
+            return
+        if self.partition_config is None and not self.training_mode:
+            self._gathered_column_tie_fallbacks_configured = True
             return
 
         named_modules = list(self.module.named_modules())
@@ -520,8 +534,14 @@ class AutoTP():
             if tied_embedding_name is None:
                 continue
 
-            spec = self.partition_config.find_matching_spec(module_name + ".weight", model_type)
-            if spec is None or spec.partition_type != PartitionType.COLUMN or not spec.gather_output:
+            if self.partition_config is None:
+                uses_gathered_column = module_name in ("lm_head",
+                                                       "embed_out") and module_name in self.all_reduce_linears
+            else:
+                spec = self.partition_config.find_matching_spec(module_name + ".weight", model_type)
+                uses_gathered_column = (spec is not None and spec.partition_type == PartitionType.COLUMN
+                                        and spec.gather_output)
+            if not uses_gathered_column:
                 continue
 
             self._tied_gathered_column_module_names.update((module_name, tied_embedding_name))
@@ -777,6 +797,7 @@ class AutoTP():
         return num_kv_heads
 
     def _replace_last_linear_module(self, r_module):
+        self._configure_gathered_column_tie_fallbacks()
         if hasattr(r_module, "lm_head"):
             name = "lm_head"
             child = r_module.lm_head
@@ -784,6 +805,8 @@ class AutoTP():
             name = "embed_out"
             child = r_module.embed_out
         else:
+            return r_module
+        if name in self._tied_gathered_column_module_names:
             return r_module
         if child.__class__ in self.linear_policies:
             setattr(r_module, name, self.linear_policies[child.__class__](child, name, self.conv_linear_layer))
