@@ -158,10 +158,14 @@ class WorkspaceOp(BaseOp):
             super(WorkspaceOp, self).__init__(config)
             if config.dtype == torch.float32:
                 self.allocate_workspace_func = self.inference_module.allocate_workspace_fp32
+                repeat_kv_cache_name = "repeat_kv_cache_fp32"
             elif config.dtype == torch.bfloat16:
                 self.allocate_workspace_func = self.inference_module.allocate_workspace_bf16
+                repeat_kv_cache_name = "repeat_kv_cache_bf16"
             else:
                 self.allocate_workspace_func = self.inference_module.allocate_workspace_fp16
+                repeat_kv_cache_name = "repeat_kv_cache_fp16"
+            self.repeat_kv_cache_func = getattr(self.inference_module, repeat_kv_cache_name, None)
             self.release_workspace_func = self.inference_module.release_workspace
             self.retake_workspace_func = self.inference_module.retake_workspace
             self.reset_cache_func = self.inference_module.reset_cache
@@ -176,6 +180,7 @@ class WorkspaceOp(BaseOp):
             self.release_workspace_func = self.release_workspace_fallback
             self.retake_workspace_func = self.retake_workspace_fallback
             self.reset_cache_func = self.reset_cache_fallback
+            self.repeat_kv_cache_func = self.repeat_kv_cache_fallback
 
     def allocate_workspace(self, *args, **kwargs):
         self._is_allocated = True
@@ -190,6 +195,11 @@ class WorkspaceOp(BaseOp):
 
     def retake_workspace(self):
         return self.retake_workspace_func() if self.retake_workspace_func else None
+
+    def repeat_kv_cache(self, source_batch_size, repeats):
+        if self.repeat_kv_cache_func is None:
+            raise RuntimeError("Shared prefill requires rebuilding the transformer inference extension")
+        return self.repeat_kv_cache_func(source_batch_size, repeats)
 
     def allocate_workspace_fp32_fallback(self, hidden_dim, num_heads, prompt_length, batch_size, num_layers, mp_size,
                                          external_cache, rank, max_out_tokens, min_out_tokens):
@@ -217,6 +227,29 @@ class WorkspaceOp(BaseOp):
 
     def retake_workspace_fallback(self):
         return self.inference_context.retake_workspace()
+
+    def repeat_kv_cache_fallback(self, source_batch_size, repeats):
+        target_batch_size = source_batch_size * repeats
+        cache_size = self.inference_context.kv_cache_size
+        if cache_size is None or cache_size[0] != target_batch_size:
+            raise RuntimeError("KV cache repeat does not match the allocated workspace batch size")
+        if self.inference_context.kv_cache is None:
+            raise RuntimeError("KV cache repeat requires a completed prompt forward")
+        current_tokens = self.inference_context.current_tokens()
+        if current_tokens <= 1:
+            raise RuntimeError("KV cache repeat requires a completed prompt forward")
+        prompt_tokens = current_tokens - 1
+        repeated_cache = []
+        for key_cache, value_cache in self.inference_context.kv_cache:
+            # Backward copies preserve source rows that overlap the expanded destination range.
+            for destination in range(target_batch_size - 1, -1, -1):
+                source = destination // repeats
+                if source == destination:
+                    continue
+                key_cache[destination, :, :prompt_tokens, :].copy_(key_cache[source, :, :prompt_tokens, :])
+                value_cache[destination, :, :prompt_tokens, :].copy_(value_cache[source, :, :prompt_tokens, :])
+            repeated_cache.extend((key_cache[:, :, :prompt_tokens, :], value_cache[:, :, :prompt_tokens, :]))
+        return repeated_cache
 
     def is_allocated(self):
         return self._is_allocated

@@ -20,7 +20,7 @@ from deepspeed.runtime.zero.offload_states import offload_optimizer_states, relo
 from deepspeed.runtime.base_optimizer import ZeROOptimizer
 from deepspeed.runtime.fp16.loss_scaler import CreateLossScaler
 from deepspeed.runtime.torch_autocast import get_autocast_dtype, get_all_comm_dtypes, is_autocast_initialized, sort_dtypes
-from deepspeed.runtime.utils import (empty_cache, see_memory_usage, inf, is_model_parallel_parameter,
+from deepspeed.runtime.utils import (empty_cache, see_memory_usage, has_inf_or_nan, inf, is_model_parallel_parameter,
                                      align_dense_tensors, all_gather_dp_groups, mask_nan_or_inf_with_val_inplace,
                                      count_used_parameters_in_backward)
 from deepspeed.runtime.zero.config import ZeroStageEnum
@@ -2485,11 +2485,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
     # `x` is a torch.Tensor
     @staticmethod
     def _has_inf_or_nan(x, j=None):
-        float_x = x.float()
-        nan = float_x.isnan()
-        inf = float_x.isinf()
-        inf_or_nan = nan.logical_or(inf)
-        return inf_or_nan.float().max()
+        return has_inf_or_nan(x)
 
     def setup_buckets(self):
         if not self.ready_for_gradients:
