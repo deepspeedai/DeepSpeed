@@ -686,8 +686,6 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         for hook in self._grad_acc_hooks:
             hook.remove()
         self.print_rank_0("Removed grad acc hooks")
-        # offload_states(non_blocking=True) can still be copying into the host
-        # buffers. Native unpin frees immediately and has no stream tracking.
         if get_accelerator().is_available():
             get_accelerator().synchronize()
         self._unpin_offload_buffers()

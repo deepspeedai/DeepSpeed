@@ -158,8 +158,6 @@ class TestDestroyUnpinsNativeBuffers(DistributedTest):
 
     @pytest.mark.parametrize("stage", [1, 2, 3])
     def test_native_async_offload_destroy_synchronizes_before_unpin(self, stage, monkeypatch):
-        # destroy() after offload_states(non_blocking=True) must wait for the
-        # copies before native unpin frees the host sources.
         prev = os.environ.get("DS_PIN_MEMORY_BACKEND")
         try:
             native = _require_native()
@@ -198,8 +196,6 @@ class TestDestroyUnpinsNativeBuffers(DistributedTest):
             assert events and events[0] == "synchronize", f"destroy reached native unpin before completion: {events}"
             assert "unpin" in events
 
-            # DeepSpeedEngine.__del__ calls destroy() again after an explicit
-            # destroy, so the optimizer cleanup path must remain repeatable.
             events.clear()
             engine.destroy()
             assert events and events[0] == "synchronize", f"repeated destroy unpinned before sync: {events}"
