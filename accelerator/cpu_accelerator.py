@@ -278,19 +278,13 @@ class CPU_Accelerator(DeepSpeedAccelerator):
     def LongTensor(self):
         return torch.LongTensor
 
-    def pin_memory(self, tensor, make_copy=True, match_shape=True, alloc_shape=None):
+    _torch_pins_host_memory = False
+
+    def pin_memory(self, tensor, make_copy=True, match_shape=True):
         # Torch cannot pin CPU tensors to a device; keep the historical no-op and
         # bypass ABC pinned-memory accounting (nothing is page-locked in that path).
         from deepspeed.utils.pin_memory import get_active_native_pinned_memory
         pins = get_active_native_pinned_memory()
-        if alloc_shape is not None:
-            numel = self._shape_numel(alloc_shape)
-            out_shape = tuple(alloc_shape) if match_shape else (numel, )
-            if pins is not None:
-                from deepspeed.utils.pin_memory_tracker import track_pinned_memory
-                track_pinned_memory(numel * tensor.element_size())
-                return pins.pin_empty(tensor, out_shape)
-            return tensor.new_empty(out_shape)
         if pins is not None:
             from deepspeed.utils.pin_memory_tracker import track_pinned_memory
             track_pinned_memory(tensor.nbytes)

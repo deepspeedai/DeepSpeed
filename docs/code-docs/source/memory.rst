@@ -385,6 +385,9 @@ counted by ``track_pinned_memory`` when pages are actually locked. Differences:
    * - ``pin_memory`` extras
      - Honors ``make_copy`` and ``match_shape`` (both default ``True``)
      - Honors ``make_copy`` and ``match_shape`` (both default ``True``)
+   * - ``pin_empty`` / ``pin_empty_like``
+     - Host scratch allocation (cpu ``device``, required ``dtype``); no pageable template
+     - Same helper; native ``mlock`` via ``pin_empty``
    * - Pin recognition (``is_pinned``)
      - Torch pinned status (``tensor.is_pinned()``)
      - ``.ds_pinned`` and process-wide pointer ranges (slices/views included)

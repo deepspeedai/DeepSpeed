@@ -102,7 +102,9 @@ def test_pin_memory_torch_backend_make_copy_false_allocates_pinned(monkeypatch):
     class _StubAccelerator:
         # Exercise the shared dispatch without needing a real pinning device.
         pin_memory = DeepSpeedAccelerator.pin_memory
-        _active_native_pins = DeepSpeedAccelerator._active_native_pins
+        _pin_fresh = DeepSpeedAccelerator._pin_fresh
+        _shape_numel = staticmethod(DeepSpeedAccelerator._shape_numel)
+        _torch_pins_host_memory = True
 
         def _torch_pin_memory(self, tensor):
             calls.append(("pin_copy", tuple(tensor.shape)))
@@ -129,9 +131,10 @@ def test_pin_empty_torch_backend_uses_zero_element_template(monkeypatch):
     class _StubAccelerator:
         pin_empty = DeepSpeedAccelerator.pin_empty
         pin_empty_like = DeepSpeedAccelerator.pin_empty_like
-        pin_memory = DeepSpeedAccelerator.pin_memory
+        _pin_fresh = DeepSpeedAccelerator._pin_fresh
+        _require_host_device = staticmethod(DeepSpeedAccelerator._require_host_device)
         _shape_numel = staticmethod(DeepSpeedAccelerator._shape_numel)
-        _active_native_pins = DeepSpeedAccelerator._active_native_pins
+        _torch_pins_host_memory = True
 
         def _torch_empty_pinned(self, tensor, shape):
             calls.append((tuple(tensor.shape), tuple(shape), tensor.dtype, tensor.numel()))
@@ -144,6 +147,29 @@ def test_pin_empty_torch_backend_uses_zero_element_template(monkeypatch):
     like = accel.pin_empty_like(src, device="cpu")
     assert tuple(like.shape) == (2, 3)
     assert calls == [((0, ), (4, 8), torch.float32, 0), ((0, ), (2, 3), torch.float16, 0)]
+
+
+def test_pin_empty_requires_dtype_and_host_device(monkeypatch):
+    monkeypatch.delenv("DS_PIN_MEMORY_BACKEND", raising=False)
+    accel = get_accelerator()
+    with pytest.raises(TypeError):
+        accel.pin_empty(4, device="cpu")
+    with pytest.raises(ValueError, match="cpu"):
+        accel.pin_empty(4, dtype=torch.float32, device="cuda")
+
+
+def test_pin_empty_cpu_torch_skips_accounting(monkeypatch):
+    """CPU torch pinning is a no-op and must not inflate the pinned-byte total."""
+    monkeypatch.delenv("DS_PIN_MEMORY_BACKEND", raising=False)
+    from deepspeed.accelerator.cpu_accelerator import CPU_Accelerator
+    from deepspeed.utils import pin_memory_tracker
+
+    accel = CPU_Accelerator()
+    before = pin_memory_tracker._tracker._bytes
+    buffer = accel.pin_empty(8, dtype=torch.float32, device="cpu")
+    assert tuple(buffer.shape) == (8, )
+    assert accel.is_pinned(buffer) is False
+    assert pin_memory_tracker._tracker._bytes == before
 
 
 def test_pin_empty_torch_backend_is_pinned(monkeypatch):

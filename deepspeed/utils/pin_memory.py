@@ -39,9 +39,8 @@ class NativePinnedMemory(object):
                 "DS_PIN_MEMORY_BACKEND=native requires the pin_memory op, which failed to build/load.") from e
 
     def pin(self, tensor, make_copy=True, match_shape=True):
-        numel = tensor.numel()
-        out_shape = tensor.shape if match_shape else (numel, )
-        locked = self._new_locked(tensor, numel, out_shape)
+        out_shape = tensor.shape if match_shape else (tensor.numel(), )
+        locked = self._new_locked(tensor, out_shape)
         if make_copy:
             locked.copy_(tensor.reshape(out_shape))
         return locked
@@ -49,12 +48,12 @@ class NativePinnedMemory(object):
     def pin_empty(self, example, shape):
         # ``example`` is dtype-only. ``pin()`` sizes the allocation from
         # ``example.numel()``, so a 0-element template cannot be passed through.
-        numel = 1
-        for dim in shape:
-            numel *= int(dim)
-        return self._new_locked(example, numel, shape)
+        return self._new_locked(example, shape)
 
-    def _new_locked(self, example, numel, out_shape):
+    def _new_locked(self, example, out_shape):
+        numel = 1
+        for dim in out_shape:
+            numel *= int(dim)
         # ``base`` is the allocation root and the view root for everything derived
         # from it. Every slice/view of the returned tensor keeps ``base`` alive via
         # ``._base``, so the allocation is freed only after the returned tensor and
