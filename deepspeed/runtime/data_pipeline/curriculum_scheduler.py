@@ -137,6 +137,12 @@ class CurriculumScheduler(object):
             (self.state[CURRICULUM_LEARNING_MAX_DIFFICULTY] - self.state[CURRICULUM_LEARNING_MIN_DIFFICULTY]) +
             self.state[CURRICULUM_LEARNING_MIN_DIFFICULTY])
         next_difficulty -= (next_difficulty % s_state[CURRICULUM_LEARNING_SCHEDULE_DIFFICULTY_STEP])
+        # Flooring to a multiple of difficulty_step can land below the configured start,
+        # and does for pairs the tutorial itself recommends: min_difficulty 8 with
+        # difficulty_step 16 gives 0 on the first step, which is a zero-length sequence
+        # for the seqlen metric. Clamp the bottom the way the top already is; both ends
+        # are the configured values rather than multiples of the step.
+        next_difficulty = max(next_difficulty, self.state[CURRICULUM_LEARNING_MIN_DIFFICULTY])
         next_difficulty = min(next_difficulty, self.state[CURRICULUM_LEARNING_MAX_DIFFICULTY])
         return next_difficulty
 

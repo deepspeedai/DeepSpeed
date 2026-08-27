@@ -10,6 +10,7 @@ from deepspeed.accelerator import get_accelerator
 import pytest
 from unit.common import DistributedTest
 from unit.simple_model import Curriculum_SimpleModel, SimpleModel, random_dataloader, random_dataset
+from deepspeed.runtime.data_pipeline.curriculum_scheduler import CurriculumScheduler
 
 
 class MPU():
@@ -48,6 +49,43 @@ class MPU():
 
     def get_model_parallel_group(self):
         return self.tp_group
+
+
+def _curriculum_scheduler(min_difficulty, max_difficulty, difficulty_step, schedule_type="fixed_linear"):
+    config = {
+        "min_difficulty": min_difficulty,
+        "max_difficulty": max_difficulty,
+        "schedule_type": schedule_type,
+        "schedule_config": {
+            "total_curriculum_step": 100,
+            "difficulty_step": difficulty_step,
+        },
+    }
+    if schedule_type == "fixed_root":
+        config["schedule_config"]["root_degree"] = 2
+    return CurriculumScheduler(config)
+
+
+@pytest.mark.parametrize("schedule_type", ["fixed_linear", "fixed_root"])
+@pytest.mark.parametrize("min_difficulty, difficulty_step", [(8, 16), (1, 8), (10, 8), (64, 16), (8, 8)])
+def test_curriculum_never_starts_below_min_difficulty(schedule_type, min_difficulty, difficulty_step):
+    # Rounding down to a multiple of difficulty_step used to push the first steps under
+    # the configured start: min_difficulty 8 with difficulty_step 16, a pair the tutorial
+    # recommends for INT8 data on a million-scale model, gave a difficulty of 0, which is
+    # a zero-length sequence for the seqlen metric.
+    scheduler = _curriculum_scheduler(min_difficulty, 1024, difficulty_step, schedule_type)
+    difficulties = [scheduler.get_difficulty(step) for step in range(20)]
+    assert min(difficulties) >= min_difficulty
+    assert max(difficulties) <= 1024
+
+
+def test_curriculum_endpoints_are_the_configured_values():
+    # Neither end is a multiple of difficulty_step here. The top has always come back as
+    # max_difficulty once the schedule runs out, because the existing clamp says so; the
+    # bottom now comes back as min_difficulty for the same reason.
+    scheduler = _curriculum_scheduler(8, 1000, 16)
+    assert scheduler.get_difficulty(0) == 8
+    assert scheduler.get_difficulty(200) == 1000
 
 
 @pytest.mark.parametrize('dtype', [torch.bfloat16, torch.float16])
