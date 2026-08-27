@@ -13,6 +13,7 @@ import os
 import pytest
 import torch
 import deepspeed
+from deepspeed.accelerator import get_accelerator
 from deepspeed.utils.pin_memory import get_active_native_pinned_memory
 
 from unit.common import DistributedTest, preferred_dtype
@@ -152,6 +153,57 @@ class TestDestroyUnpinsNativeBuffers(DistributedTest):
             engine.destroy()
             assert len(native._ranges) <= ranges_before, (f"offload_states pins not released on destroy: "
                                                           f"offloaded={ranges_offloaded} after={len(native._ranges)}")
+        finally:
+            _restore_pin_backend(prev)
+
+    @pytest.mark.parametrize("stage", [1, 2, 3])
+    def test_native_async_offload_destroy_synchronizes_before_unpin(self, stage, monkeypatch):
+        # destroy() after offload_states(non_blocking=True) must wait for the
+        # copies before native unpin frees the host sources.
+        prev = os.environ.get("DS_PIN_MEMORY_BACKEND")
+        try:
+            native = _require_native()
+            config, dtype = _config(stage, pin_memory=True, offload_optimizer=False)
+            hidden_dim = 16
+            model = SimpleModel(hidden_dim, nlayers=2)
+            engine, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config)
+            _run_one_step(engine, hidden_dim, dtype)
+
+            accelerator = get_accelerator()
+            original_synchronize = accelerator.synchronize
+            original_unpin = accelerator.unpin_memory
+            events = []
+            safety_sync_done = False
+
+            def record_synchronize():
+                events.append("synchronize")
+                return original_synchronize()
+
+            def safely_record_unpin(tensor):
+                nonlocal safety_sync_done
+                if "synchronize" not in events and not safety_sync_done:
+                    original_synchronize()
+                    safety_sync_done = True
+                events.append("unpin")
+                return original_unpin(tensor)
+
+            monkeypatch.setattr(accelerator, "synchronize", record_synchronize)
+            monkeypatch.setattr(accelerator, "unpin_memory", safely_record_unpin)
+
+            ranges_before = len(native._ranges)
+            engine.offload_states(pin_memory=True, non_blocking=True)
+            assert len(native._ranges) > ranges_before, "expected offload_states to pin host buffers"
+            engine.destroy()
+
+            assert events and events[0] == "synchronize", f"destroy reached native unpin before completion: {events}"
+            assert "unpin" in events
+
+            # DeepSpeedEngine.__del__ calls destroy() again after an explicit
+            # destroy, so the optimizer cleanup path must remain repeatable.
+            events.clear()
+            engine.destroy()
+            assert events and events[0] == "synchronize", f"repeated destroy unpinned before sync: {events}"
+            assert "unpin" in events
         finally:
             _restore_pin_backend(prev)
 
