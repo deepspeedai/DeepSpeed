@@ -306,7 +306,9 @@ Launch a single-process job as usual; no hostfile is needed:
 ```
 deepspeed --num_gpus 1 train.py --deepspeed --deepspeed_config ds_config.json
 ```
-ZeRO stages 0 through 3 are supported with fp32, fp16, and bf16 (bf16 requires macOS 14 or newer). The fused Adam optimizer runs as a PyTorch implementation on MPS; ZeRO-Offload (`DeepSpeedCPUAdam`) is not yet available on this backend.
+ZeRO stages 0 through 3 are supported with fp32, fp16, and bf16 (bf16 requires macOS 14 or newer), with or without ZeRO-Offload.
+
+The fused Adam optimizer is a Metal kernel compiled at first use through `torch.mps.compile_shader`; no Xcode project or C++ build is involved. ZeRO-Offload uses the C++ `DeepSpeedCPUAdam` kernel, which is built just-in-time with the system clang. Apple's clang has no OpenMP, so the kernel is single-threaded unless Homebrew's `libomp` is installed (`brew install libomp`), in which case it is picked up automatically. On unified memory, offload does not increase total memory - CPU and GPU share the same DRAM - so it is not needed for capacity the way it is on discrete GPUs. It still helps when the GPU working-set budget binds (Metal caps a process's GPU working set below total RAM): optimizer states held as CPU tensors stay outside that budget, and the optimizer step runs on the CPU cores.
 
 ## Limitations
 * PyTorch exposes one MPS device per machine, so `device_count()` is 1 and multi-device data parallelism on a single Mac is not possible.

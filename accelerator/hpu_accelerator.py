@@ -234,6 +234,11 @@ class HPU_Accelerator(DeepSpeedAccelerator):
     def _torch_pin_memory(self, tensor):
         return tensor.pin_memory(self.device())
 
+    def _torch_empty_pinned(self, tensor, shape):
+        # Pinning on HPU needs an explicit device, which the allocation API
+        # cannot express, so allocate and then pin.
+        return self._torch_pin_memory(tensor.new_empty(shape))
+
     def on_accelerator(self, tensor):
         device_str = str(tensor.device)
         if device_str.startswith('hpu:'):

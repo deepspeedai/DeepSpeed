@@ -186,7 +186,7 @@ def generic_injection(module, dtype=None, enable_cuda_graph=True):
 container_g = None
 
 
-def replace_transformer_layer(orig_layer_impl, model, checkpoint_dict, config, model_config):
+def replace_transformer_layer(orig_layer_impl, model, checkpoint_dict, config, model_config, training_mode=False):
     """ Replace bert-style transformer layers with DeepSpeed's transformer layer
     Arguments:
         orig_layer_impl (torch.nn.Module): the original transformer layer implementation to look for,
@@ -286,7 +286,8 @@ def replace_transformer_layer(orig_layer_impl, model, checkpoint_dict, config, m
                          linear_layer_setting,
                          orig_layer_impl,
                          config.keep_module_on_host,
-                         partition_config=partition_config)
+                         partition_config=partition_config,
+                         training_mode=training_mode)
 
         # 2. Set the tensor parallelism config
         _autotp.set_tensor_parallel_config(config.tensor_parallel.tp_size, config.tensor_parallel.tp_group)
