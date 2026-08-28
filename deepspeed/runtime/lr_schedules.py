@@ -69,8 +69,8 @@ def add_tuning_arguments(parser):
     group.add_argument("--lr_range_test_step_rate", type=float, default=1.0, help='scaling rate for LR range test.')
     group.add_argument("--lr_range_test_step_size", type=int, default=1000, help='training steps per LR change.')
     group.add_argument("--lr_range_test_staircase",
-                       type=bool,
                        default=False,
+                       action='store_true',
                        help='use staircase scaling for LR range test.')
 
     # OneCycle schedule
