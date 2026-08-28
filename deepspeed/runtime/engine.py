@@ -329,6 +329,7 @@ class DeepSpeedEngine(Module):
         if self.log_level() is not None:
             set_log_level_from_string(self.log_level())
         self._configure_expert_parallel(model)
+        self._remap_client_optimizer_after_module_replacement(model)
         if self.autotp_size() > 1:
             self._configure_tensor_parallel(model, self.tensor_parallel_config())
         see_memory_usage("DeepSpeed Engine: After args sanity test", force=self.memory_breakdown())
@@ -566,6 +567,70 @@ class DeepSpeedEngine(Module):
                     p.offload()
                 else:
                     p.ds_offload = False
+
+    def _remap_client_optimizer_after_module_replacement(self, model):
+        """Re-point a caller-supplied optimizer at the post-replacement parameters.
+
+        AutoEP swaps every MoE block for an ``AutoEPMoELayer`` in
+        ``_configure_expert_parallel`` (above), which runs long before
+        ``_configure_optimizer``. ``torch.optim.Optimizer.__init__`` materialises its
+        argument eagerly (``param_groups = list(params)``), so an optimizer the caller
+        built from ``model.parameters()`` still holds the discarded expert tensors while
+        the live ``GroupedExperts`` weights belong to no param group at all.
+
+        Symptoms without this remap:
+          * with ``zero.Init`` -- silent. The stale params are still valid ZeRO params, so
+            ZeRO-3 accepts them and every expert and router simply never updates. Loss
+            still falls because attention, shared experts and norms train normally.
+          * without ``zero.Init`` -- ``AttributeError: 'Parameter' object has no attribute
+            'partition_numel'`` from ``_create_fp16_sub_groups``, because the stale params
+            were never converted.
+
+        Rebuilding the groups here keeps caller-supplied optimizers working and preserves
+        each group's hyper-parameters. When the mapping is ambiguous we raise rather than
+        guess, since guessing wrong silently mis-assigns weight decay.
+        """
+        optimizer = self.client_optimizer
+        if optimizer is None or not hasattr(optimizer, "param_groups"):
+            return  # DummyOptim / config-built optimizer: DeepSpeed builds it post-replacement
+
+        live = {id(p): p for p in model.parameters() if p.requires_grad}
+        groups = optimizer.param_groups
+
+        stale_by_group = {}
+        for gi, group in enumerate(groups):
+            stale = [p for p in group["params"] if id(p) not in live]
+            if stale:
+                stale_by_group[gi] = len(stale)
+        if not stale_by_group:
+            return  # nothing was replaced under this optimizer
+
+        owned = {id(p) for group in groups for p in group["params"]}
+        missing = [p for p in live.values() if id(p) not in owned]
+
+        if len(stale_by_group) > 1 and missing:
+            raise RuntimeError(
+                "Module replacement (AutoEP) invalidated optimizer parameters in more than one "
+                f"param group ({sorted(stale_by_group)}), so the replacement parameters cannot be "
+                "assigned unambiguously. Declare the optimizer in the DeepSpeed config "
+                '("optimizer": {...}) so it is built after replacement, or construct it after '
+                "deepspeed.initialize().")
+
+        target = next(iter(stale_by_group)) if stale_by_group else 0
+        for group in groups:
+            group["params"] = [p for p in group["params"] if id(p) in live]
+        groups[target]["params"].extend(missing)
+
+        # Adam/AdamW key their state dict on the parameter object; stale entries would leak.
+        state = getattr(optimizer, "state", None)
+        if state is not None:
+            for p in [p for p in list(state.keys()) if id(p) not in live]:
+                del state[p]
+
+        n_stale = sum(stale_by_group.values())
+        logger.info(
+            "Remapped client optimizer after module replacement: dropped %d stale parameter(s), "
+            "added %d replacement parameter(s) to param group %d.", n_stale, len(missing), target)
 
     def _configure_expert_parallel(self, model):
         """Initialize AutoEP: detect MoE layers, create EP groups, replace with EP-enabled layers."""
