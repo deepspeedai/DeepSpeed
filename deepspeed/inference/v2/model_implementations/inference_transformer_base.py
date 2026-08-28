@@ -165,6 +165,26 @@ class DSTransformerModelBase(DSInferenceModelBase):
     Derived helpers
     """
 
+    @property
+    def rope_theta(self) -> float:
+        """The rotary base, read from wherever the installed transformers keeps it.
+
+        transformers 5.0 folded the rotary settings into ``config.rope_parameters`` and
+        dropped the ``rope_theta`` attribute, so reading the attribute alone raises
+        against a stock config on 5.x. ``exaone4_5`` already reads both spellings; this
+        is the same lookup for every model that reaches it through this base.
+        """
+        theta = getattr(self._config, "rope_theta", None)
+        if theta is not None:
+            return theta
+
+        rope_parameters = getattr(self._config, "rope_parameters", None) or getattr(self._config, "rope_scaling", None)
+        if isinstance(rope_parameters, dict) and rope_parameters.get("rope_theta") is not None:
+            return rope_parameters["rope_theta"]
+
+        raise ValueError(f"{type(self._config).__name__} carries no rope_theta, either as an "
+                         "attribute or in rope_parameters/rope_scaling.")
+
     @cached_property
     def n_heads_q_local(self) -> int:
         """
