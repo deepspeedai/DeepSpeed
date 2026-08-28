@@ -271,6 +271,10 @@ def test_max_grad_norm_leaves_caller_config_untouched():
 def test_elasticity_leaves_caller_config_untouched():
     # Same contract as above on the elasticity path: the resolved batch sizes belong in
     # the copy handed to _initialize_params, not in the caller's dict.
+    #
+    # ignore_non_elastic_batch_info is deliberately left out. With it on, the batch-key
+    # guard is skipped and the second parse below cannot fail, so the test would pass
+    # whether or not the write-back is there.
     config_dict = {
         "elasticity": {
             "enabled": True,
@@ -280,7 +284,6 @@ def test_elasticity_leaves_caller_config_untouched():
             "max_gpus": 4,
             "min_time": 0,
             "version": 0.1,
-            "ignore_non_elastic_batch_info": True,
         }
     }
     keys_before = set(config_dict)
@@ -292,6 +295,15 @@ def test_elasticity_leaves_caller_config_untouched():
     assert ds_config.train_batch_size == 4
     assert ds_config.train_micro_batch_size_per_gpu == 2
     assert ds_config.gradient_accumulation_steps == 2
+
+    # The write-back made the same dict unparseable a second time: the injected keys
+    # trip the guard that rejects batch parameters under elasticity, and its message
+    # names three keys the caller never wrote.
+    second = DeepSpeedConfig(config_dict)
+
+    assert second.train_batch_size == ds_config.train_batch_size
+    assert second.train_micro_batch_size_per_gpu == ds_config.train_micro_batch_size_per_gpu
+    assert second.gradient_accumulation_steps == ds_config.gradient_accumulation_steps
 
 
 class TestConfigLoad(DistributedTest):
