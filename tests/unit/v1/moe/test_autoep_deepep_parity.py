@@ -30,7 +30,8 @@ from unit.v1.moe.autoep_test_utils import (
     skip_unless_h100_tests_enabled,
 )
 
-HIDDEN_SIZE = 64
+# DeepEP combine vectorizes one 16-byte element per warp lane.
+HIDDEN_SIZE = 256
 SEQ_LEN = 8
 
 
