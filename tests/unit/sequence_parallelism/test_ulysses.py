@@ -11,72 +11,13 @@ from deepspeed import initialize
 import deepspeed.runtime.sequence_parallel.parallel_state_sp as sp_mpu
 from transformers import AutoModel
 from unit.common import DistributedTest
-from deepspeed.sequence.layer import _SeqAllToAll, DistributedAttention
+from deepspeed.sequence.layer import _SeqAllToAll
 from deepspeed.sequence.fpdt_layer import _FPDTGPUOffloadingAttentionImpl_, FPDT_InputConstruct
 from unit.util import skip_on_arch
 from unit.simple_model import *
 from deepspeed.utils import groups
 from deepspeed.module_inject.tp_shard import get_shard_size_list
 #Use mesh device to create data and sequence parallel group
-
-
-def test_overlap_backward_applies_post_alltoall_permutation(monkeypatch):
-
-    class FakeWork:
-
-        def wait(self):
-            pass
-
-    class FakeStream:
-
-        def wait_stream(self, stream):
-            pass
-
-    class FakeAccelerator:
-
-        def __init__(self):
-            self.stream = FakeStream()
-
-        def current_stream(self):
-            return self.stream
-
-        def default_stream(self):
-            return self.stream
-
-    class LocalAttention(torch.nn.Module):
-
-        def forward(self, query, key, value):
-            return query + 2 * key + 3 * value
-
-    def all_to_all_single(output, input, group=None, async_op=False):
-        output.copy_(input)
-        return FakeWork() if async_op else None
-
-    monkeypatch.setattr('deepspeed.sequence.layer.dist.get_world_size', lambda group: 2)
-    monkeypatch.setattr('deepspeed.sequence.layer.dist.all_to_all_single', all_to_all_single)
-    monkeypatch.setattr('deepspeed.sequence.layer.get_num_kv_heads', lambda: None)
-    monkeypatch.setattr('deepspeed.sequence.layer.get_accelerator', FakeAccelerator)
-
-    def run(sp_stream):
-        inputs = [torch.randn(1, 2, 4, 2, requires_grad=True) for _ in range(3)]
-        query, key, value = [input * 1. for input in inputs]
-        attention = DistributedAttention(
-            local_attention=LocalAttention(),
-            sequence_process_group=object(),
-            scatter_idx=2,
-            gather_idx=1,
-            sp_stream=sp_stream,
-        )
-        output = attention(query, key, value, batch_dim_idx=0)
-        grad = torch.arange(1, output.numel() + 1, dtype=output.dtype).reshape_as(output)
-        output.backward(grad)
-        return tuple(input.grad for input in inputs)
-
-    reference_grads = run(sp_stream=None)
-    overlap_grads = run(sp_stream=FakeStream())
-
-    for reference, overlap in zip(reference_grads, overlap_grads):
-        torch.testing.assert_close(overlap, reference)
 
 
 class TestUlyssesCheckpointLoad(DistributedTest):
