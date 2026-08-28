@@ -316,4 +316,4 @@ def main():
 
 
 if __name__ == "__main__":
-    sweep_main()
+    main()
