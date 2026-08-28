@@ -32,6 +32,7 @@ from unit.v1.moe.autoep_test_utils import (
 
 # DeepEP combine vectorizes one 16-byte element per warp lane.
 HIDDEN_SIZE = 256
+INTERMEDIATE_SIZE = 128
 SEQ_LEN = 8
 
 
@@ -59,7 +60,17 @@ def _run_one_step(backend, ep_size, seed):
         # see identical shapes whatever that batch turns out to be.
         config["expert_parallel"]["comm_max_tokens_per_rank"] = 512
 
-    model = MockMoETransformer(hidden_size=HIDDEN_SIZE)
+    model = MockMoETransformer(hidden_size=HIDDEN_SIZE, intermediate_size=INTERMEDIATE_SIZE)
+    # Mock experts start from unscaled N(0, 1) tensors, unlike the linear
+    # layers around them. Scale each projection by its fan-in so two MoE layers
+    # do not amplify BF16 reduction-order differences into outputs in the
+    # thousands.
+    with torch.no_grad():
+        for name, parameter in model.named_parameters():
+            if name.endswith("experts.gate_up_proj"):
+                parameter.mul_(HIDDEN_SIZE**-0.5)
+            elif name.endswith("experts.down_proj"):
+                parameter.mul_(INTERMEDIATE_SIZE**-0.5)
     engine, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config)
 
     # Reseeded so the input is identical on every rank and across backends: the
