@@ -174,10 +174,13 @@ def validate_autoep_config(
         raise ValueError(f"comm_num_sm must be a positive integer, got {config.comm_num_sm!r}")
     if not isinstance(config.comm_qp_margin, int) or config.comm_qp_margin < 0:
         raise ValueError(f"comm_qp_margin must be a non-negative integer, got {config.comm_qp_margin!r}")
-    # Zero means "size from the first batch"; a negative size is meaningless.
     if not isinstance(config.comm_max_tokens_per_rank, int) or config.comm_max_tokens_per_rank < 0:
         raise ValueError("comm_max_tokens_per_rank must be a non-negative integer, "
                          f"got {config.comm_max_tokens_per_rank!r}")
+    if config.comm_backend == "deepep" and config.comm_max_tokens_per_rank == 0:
+        raise ValueError("comm_max_tokens_per_rank must be a positive integer when comm_backend='deepep'. "
+                         "Set it to the largest number of tokens one rank can route, normally "
+                         "train_micro_batch_size_per_gpu * maximum padded sequence length.")
 
     # Validate score_func
     valid_score_func = ("auto", "softmax", "sigmoid")

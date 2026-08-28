@@ -24,6 +24,7 @@ import deepspeed
 from unit.common import DistributedTest
 from unit.v1.moe.autoep_test_utils import (
     MockMoETransformer,
+    engine_input_dtype,
     make_autoep_config,
     seed_everything,
     skip_unless_h100_tests_enabled,
@@ -63,7 +64,7 @@ def _run_one_step(backend, ep_size, seed):
     # Reseeded so the input is identical on every rank and across backends: the
     # comparison is of the transport, so nothing else may differ.
     seed_everything(seed)
-    hidden = torch.randn(1, SEQ_LEN, HIDDEN_SIZE, device=engine.device)
+    hidden = torch.randn(1, SEQ_LEN, HIDDEN_SIZE, device=engine.device, dtype=engine_input_dtype(engine))
 
     output = engine(hidden)
     loss = output.float().pow(2).mean()
