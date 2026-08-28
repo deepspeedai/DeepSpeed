@@ -16,6 +16,7 @@ from unit.simple_model import SimpleModel, random_dataloader
 from deepspeed.utils import groups
 from contextlib import contextmanager
 from torch import nn
+from deepspeed.module_inject.auto_tp import AutoTP
 from deepspeed.module_inject.layers import LinearAllreduce, LinearLayer, set_autotp_mode, is_autotp_training_mode
 from deepspeed.module_inject.tp_shard import get_shard_size_list
 from unit.checkpoint.common import compare_lr_scheduler_states, compare_optimizer_states
@@ -560,6 +561,66 @@ class TestTpLayerFwdBwd(DistributedTest):
 
     def testUnevenGatheredColumnParallel(self, tp_size: int, tp_overlap_comm: bool):
         run_tp_layer_fwd_bwd(tp_size, tp_overlap_comm, column_parallel=True, gather_output=True, output_dim=129)
+
+
+class TestLegacyLmHeadGatheredTraining(DistributedTest):
+    world_size = 2
+    reuse_dist_env = False
+
+    def test_standard_cross_entropy_matches_unsharded_reference(self):
+        skip_on_device()
+        hidden_dim = 32
+        vocab_size = 269
+        tp_group = dist.get_world_group()
+        tp_rank = dist.get_rank(group=tp_group)
+
+        set_autotp_mode(training=True)
+        try:
+            torch.manual_seed(20260825)
+            model = UnevenVocabOutputModel(hidden_dim, vocab_size).to(get_accelerator().current_device())
+            reference_model = deepcopy(model)
+
+            autotp = AutoTP(module=model,
+                            all_reduce_linears=("lm_head", "embed_out"),
+                            prefix="",
+                            state_dict=None,
+                            linear_layer_setting=(nn.Linear, nn.Embedding),
+                            orig_layer_impl=None,
+                            training_mode=True)
+            autotp.mp_size = self.world_size
+            autotp.mp_group = tp_group
+            autotp.update_linear_policies()
+            autotp._replace_last_linear_module(model)
+
+            assert isinstance(model.lm_head, LinearLayer)
+            assert model.lm_head.gather_output
+
+            torch.manual_seed(17)
+            reference_input = torch.randn(4, hidden_dim, device=get_accelerator().current_device(), requires_grad=True)
+            dist.broadcast(reference_input, src=0, group=tp_group)
+            tp_input = reference_input.detach().clone().requires_grad_(True)
+
+            partition_sizes = get_shard_size_list(vocab_size, self.world_size, "lm_head")
+            labels = torch.tensor([0, vocab_size - 1, partition_sizes[0], 1],
+                                  device=get_accelerator().current_device())
+            reference_logits = reference_model(reference_input)
+            tp_logits = model(tp_input)
+            reference_loss = nn.functional.cross_entropy(reference_logits, labels)
+            tp_loss = nn.functional.cross_entropy(tp_logits, labels)
+
+            torch.testing.assert_close(tp_logits, reference_logits)
+            torch.testing.assert_close(tp_loss, reference_loss)
+
+            reference_loss.backward()
+            tp_loss.backward()
+
+            expected_weight_grad = reference_model.lm_head.weight.grad.split(partition_sizes, dim=0)[tp_rank]
+            expected_bias_grad = reference_model.lm_head.bias.grad.split(partition_sizes, dim=0)[tp_rank]
+            torch.testing.assert_close(tp_input.grad, reference_input.grad)
+            torch.testing.assert_close(model.lm_head.weight.grad, expected_weight_grad)
+            torch.testing.assert_close(model.lm_head.bias.grad, expected_bias_grad)
+        finally:
+            set_autotp_mode(training=False)
 
 
 # @pytest.mark.sequential

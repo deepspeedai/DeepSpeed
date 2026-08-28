@@ -2,5 +2,6 @@
 
 # DeepSpeed Team
 
+from .cpu_adam import CPUAdamBuilder
 from .fused_adam import FusedAdamBuilder
 from .no_impl import NotImplementedBuilder
