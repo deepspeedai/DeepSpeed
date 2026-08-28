@@ -20,6 +20,7 @@ from deepspeed.runtime.rollout.base import RolloutRequest, SamplingConfig
 from deepspeed.runtime.rollout.hybrid_engine_rollout import (
     HybridEngineRollout,
     HybridEngineRolloutConfig,
+    _ForwardProfiler,
 )
 
 
@@ -46,6 +47,19 @@ def _make_request():
 
 def _make_sampling(n_samples_per_prompt=1):
     return SamplingConfig(max_new_tokens=2, temperature=0, n_samples_per_prompt=n_samples_per_prompt)
+
+
+class _ForwardingGenerateModule(torch.nn.Module):
+
+    def forward(self, input_ids, **_kwargs):
+        return SimpleNamespace(logits=input_ids[:, :, None].float())
+
+    def generate(self, input_ids, attention_mask, max_new_tokens, **_kwargs):
+        self(input_ids, attention_mask=attention_mask)
+        for _ in range(max_new_tokens - 1):
+            self(input_ids[:, -1:], attention_mask=attention_mask)
+        response = torch.full((input_ids.shape[0], max_new_tokens), 5, dtype=input_ids.dtype)
+        return torch.cat((input_ids, response), dim=1)
 
 
 # -- config defaults ----------------------------------------------------
@@ -100,6 +114,10 @@ def test_generate_records_profile_when_enabled(mock_get_accelerator, mock_perf_c
     profile = rollout.get_last_profile()
     assert profile["prompt_expansion_ms"] == pytest.approx(1.0)
     assert profile["generation_ms"] == pytest.approx(10.0)
+    assert profile["prefill_forward_ms"] is None
+    assert profile["decode_forward_ms"] is None
+    assert profile["generation_overhead_ms"] == pytest.approx(10.0)
+    assert profile["num_decode_forwards"] == 0
     assert profile["post_processing_ms"] == pytest.approx(2.0)
     assert profile["total_ms"] == pytest.approx(13.0)
     assert profile["num_generated_tokens"] == 8
@@ -111,6 +129,60 @@ def test_generate_records_profile_when_enabled(mock_get_accelerator, mock_perf_c
     expected_prompt_masks = [[0, 1, 1], [0, 1, 1], [0, 1, 1], [0, 1, 1]]
     assert output.attention_mask[:, :3].tolist() == expected_prompt_masks
     assert mock_get_accelerator.return_value.synchronize.call_count == 4
+
+
+@patch("deepspeed.runtime.rollout.hybrid_engine_rollout.time.perf_counter")
+@patch("deepspeed.runtime.rollout.hybrid_engine_rollout.get_accelerator")
+def test_generate_profiles_prefill_and_decode_forwards(mock_get_accelerator, mock_perf_counter):
+    engine = _make_engine()
+    engine.module = _ForwardingGenerateModule()
+    rollout = HybridEngineRollout(engine, _make_tokenizer(), HybridEngineRolloutConfig(enable_profiling=True))
+    mock_get_accelerator.return_value.use_host_timers.return_value = True
+    mock_perf_counter.side_effect = [
+        1.000,
+        1.001,
+        1.002,
+        1.006,
+        1.007,
+        1.009,
+        1.016,
+        1.018,
+    ]
+
+    rollout.generate(_make_request(), _make_sampling())
+
+    profile = rollout.get_last_profile()
+    assert profile["generation_ms"] == pytest.approx(15.0)
+    assert profile["prefill_forward_ms"] == pytest.approx(4.0)
+    assert profile["decode_forward_ms"] == pytest.approx(2.0)
+    assert profile["generation_overhead_ms"] == pytest.approx(9.0)
+    assert profile["num_decode_forwards"] == 1
+    assert not engine.module._forward_pre_hooks
+    assert not engine.module._forward_hooks
+
+
+def test_forward_profiler_uses_accelerator_events_without_synchronizing():
+    prefill_start, prefill_end, decode_start, decode_end = [MagicMock() for _ in range(4)]
+    prefill_start.elapsed_time.return_value = 4.0
+    decode_start.elapsed_time.return_value = 2.0
+    event_type = MagicMock(side_effect=[prefill_start, prefill_end, decode_start, decode_end])
+    accelerator = SimpleNamespace(Event=event_type, use_host_timers=lambda: False)
+    profiler = _ForwardProfiler(accelerator)
+    module = _ForwardingGenerateModule()
+    handles = profiler.register(module)
+
+    module(torch.ones(2, 3, dtype=torch.long))
+    module(torch.ones(2, 1, dtype=torch.long))
+    for handle in handles:
+        handle.remove()
+
+    prefill_ms, decode_ms, num_decode_forwards = profiler.get_stage_times()
+    assert prefill_ms == 4.0
+    assert decode_ms == 2.0
+    assert num_decode_forwards == 1
+    assert event_type.call_count == 4
+    for event in (prefill_start, prefill_end, decode_start, decode_end):
+        event.record.assert_called_once_with()
 
 
 @patch("deepspeed.runtime.rollout.hybrid_engine_rollout.get_accelerator")
@@ -397,12 +469,15 @@ def test_sync_weights_is_noop():
 # -- generate dispatches correctly -------------------------------------
 
 
-def test_generate_calls_graph_capture_when_enabled():
+@patch("deepspeed.runtime.rollout.hybrid_engine_rollout.time.perf_counter")
+@patch("deepspeed.runtime.rollout.hybrid_engine_rollout.get_accelerator")
+def test_generate_calls_graph_capture_when_enabled(mock_get_accelerator, mock_perf_counter):
     engine = _make_engine()
     tok = _make_tokenizer()
-    cfg = HybridEngineRolloutConfig(use_graph_capture=True)
+    cfg = HybridEngineRolloutConfig(use_graph_capture=True, enable_profiling=True)
     rollout = HybridEngineRollout(engine, tok, cfg=cfg)
     rollout._generate_graph = MagicMock(return_value=torch.zeros(1, 5, dtype=torch.long))
+    mock_perf_counter.side_effect = [1.0, 1.001, 1.011, 1.013]
 
     req = MagicMock()
     req.prompt_ids = torch.tensor([[1, 2]])
@@ -414,6 +489,11 @@ def test_generate_calls_graph_capture_when_enabled():
 
     rollout.generate(req, sampling)
     rollout._generate_graph.assert_called_once()
+    profile = rollout.get_last_profile()
+    assert profile["prefill_forward_ms"] is None
+    assert profile["decode_forward_ms"] is None
+    assert profile["generation_overhead_ms"] == pytest.approx(10.0)
+    assert profile["num_decode_forwards"] == 0
 
 
 def test_generate_keeps_ranks_in_lockstep_and_pads_after_eos():
