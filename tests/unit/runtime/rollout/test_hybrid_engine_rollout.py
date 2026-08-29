@@ -536,7 +536,11 @@ def test_generate_keeps_ranks_in_lockstep_and_pads_after_eos():
 
     result = rollout.generate(req, sampling)
 
-    assert engine.module.generate.call_args.kwargs['eos_token_id'] is None
+    generate_kwargs = engine.module.generate.call_args.kwargs
+    assert generate_kwargs['max_new_tokens'] == sampling.max_new_tokens
+    assert generate_kwargs['min_new_tokens'] == sampling.max_new_tokens
+    assert generate_kwargs['min_new_tokens'] == generate_kwargs['max_new_tokens']
+    assert generate_kwargs['eos_token_id'] is None
     assert result.input_ids.tolist() == [[10, 11, 5, 2, 0, 0]]
     assert result.attention_mask.tolist() == [[1, 1, 1, 1, 0, 0]]
 
