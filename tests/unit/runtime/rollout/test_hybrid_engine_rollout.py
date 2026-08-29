@@ -138,6 +138,7 @@ def test_generate_profiles_prefill_and_decode_forwards(mock_get_accelerator, moc
     engine.module = _ForwardingGenerateModule()
     rollout = HybridEngineRollout(engine, _make_tokenizer(), HybridEngineRolloutConfig(enable_profiling=True))
     mock_get_accelerator.return_value.use_host_timers.return_value = True
+    mock_get_accelerator.return_value.Event = None
     mock_perf_counter.side_effect = [
         1.000,
         1.001,
@@ -183,6 +184,28 @@ def test_forward_profiler_uses_accelerator_events_without_synchronizing():
     assert event_type.call_count == 4
     for event in (prefill_start, prefill_end, decode_start, decode_end):
         event.record.assert_called_once_with()
+
+
+@patch("deepspeed.runtime.rollout.hybrid_engine_rollout.time.perf_counter")
+@patch("deepspeed.runtime.rollout.hybrid_engine_rollout.get_accelerator")
+def test_generate_skips_forward_breakdown_without_event_timing(mock_get_accelerator, mock_perf_counter):
+    engine = _make_engine()
+    engine.module = _ForwardingGenerateModule()
+    rollout = HybridEngineRollout(engine, _make_tokenizer(), HybridEngineRolloutConfig(enable_profiling=True))
+    mock_get_accelerator.return_value.use_host_timers.return_value = True
+    mock_get_accelerator.return_value.Event = MagicMock()
+    mock_perf_counter.side_effect = [1.000, 1.001, 1.016, 1.018]
+
+    rollout.generate(_make_request(), _make_sampling())
+
+    profile = rollout.get_last_profile()
+    assert profile["generation_ms"] == pytest.approx(15.0)
+    assert profile["prefill_forward_ms"] is None
+    assert profile["decode_forward_ms"] is None
+    assert profile["generation_overhead_ms"] == pytest.approx(15.0)
+    assert profile["num_decode_forwards"] == 0
+    assert not engine.module._forward_pre_hooks
+    assert not engine.module._forward_hooks
 
 
 @patch("deepspeed.runtime.rollout.hybrid_engine_rollout.get_accelerator")

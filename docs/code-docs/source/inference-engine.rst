@@ -44,11 +44,12 @@ forwards. ``num_decode_forwards`` reports how many forwards contributed to the
 decode time.
 
 Forward timings use accelerator events where supported and synchronize once at
-the end of generation instead of after every generated token. Accelerators that
-require host timers use synchronous wall-clock timings. The forward breakdown
-is unavailable for the CUDA graph path because graph replays bypass model
-forward hooks; its forward fields are ``None`` and its complete generation time
-is reported as generation overhead.
+the end of generation instead of after every generated token. Synchronous
+accelerators without events, such as CPU, use wall-clock timings. The forward
+breakdown is unavailable when an asynchronous accelerator lacks event timing,
+such as MPS, and for the CUDA graph path because graph replays bypass model
+forward hooks. In both cases its forward fields are ``None`` and its complete
+generation time is reported as generation overhead.
 
 Times are reported in milliseconds. ``num_generated_tokens`` counts all
 returned response positions across the expanded batch, including padding

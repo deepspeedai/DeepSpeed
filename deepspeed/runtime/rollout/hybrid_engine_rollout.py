@@ -27,10 +27,16 @@ class _ForwardProfiler:
     def __init__(self, accelerator):
         self.event_type = accelerator.Event
         self.use_host_timer = accelerator.use_host_timers()
+        # Host intervals are only reliable when there is no asynchronous device
+        # work, as on CPU. MPS exposes events but cannot time them, so its host
+        # intervals would measure enqueue latency rather than model execution.
+        self.is_available = not self.use_host_timer or self.event_type is None
         self.active_start = None
         self.measurements = []
 
     def register(self, module):
+        if not self.is_available:
+            return ()
         pre_handle = module.register_forward_pre_hook(self._start_forward)
         post_handle = module.register_forward_hook(self._end_forward)
         return pre_handle, post_handle
