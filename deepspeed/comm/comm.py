@@ -811,11 +811,6 @@ def init_distributed(dist_backend: Optional[str] = None,
         config: Optional (DeepSpeedConfig). DeepSpeed configuration for setting up comms options (e.g. Comms profiling)
         rank: Optional (int). The current manually specified rank. Some init_method like "tcp://" need the rank and world_size as well (see: https://pytorch.org/docs/stable/distributed.html#tcp-initialization)
         world_size: Optional (int). Desired world_size for the TCP or Shared file-system initialization.
-
-    On `cuda` with a multi-rank job, the local device is bound to the process group so that torch
-    knows which GPU this rank owns. That also switches torch to eager communicator init, which some
-    platforms cannot complete. Set the environment variable `DEEPSPEED_SET_DEVICE_ID` to 0 to never
-    bind a device, or to 1 to bind it even for a single-rank job.
     '''
     global cdb
 
