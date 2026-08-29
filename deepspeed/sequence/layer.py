@@ -30,6 +30,7 @@ def _generate_layout_params(scatter_idx, batch_dim_idx, seq_world_size, input):
     if batch_dim_idx == 0:
         if scatter_idx < 2:
             bs, global_seq_len, num_local_head, head_dim = input.shape
+            assert global_seq_len % seq_world_size == 0, f"Sequence length ({global_seq_len}) must be divisible by the sequence parallel size ({seq_world_size})!"
             pre_all2all_inp_shape = [bs, seq_world_size, global_seq_len // seq_world_size, num_local_head, head_dim]
             pre_all2all_permute_idx = (1, 0, 2, 3, 4)
 
@@ -46,6 +47,7 @@ def _generate_layout_params(scatter_idx, batch_dim_idx, seq_world_size, input):
     else:
         if scatter_idx < 2:
             global_seq_len, bs, num_local_head, head_dim = input.shape
+            assert global_seq_len % seq_world_size == 0, f"Sequence length ({global_seq_len}) must be divisible by the sequence parallel size ({seq_world_size})!"
             pre_all2all_inp_shape = [seq_world_size, global_seq_len // seq_world_size, bs, num_local_head, head_dim]
             pre_all2all_permute_idx = None
 
