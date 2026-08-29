@@ -637,7 +637,10 @@ def _conv_trans_flops_compute(
     paddings = padding if type(padding) is tuple else (padding, ) * length
     strides = stride if type(stride) is tuple else (stride, ) * length
     dilations = dilation if type(dilation) is tuple else (dilation, ) * length
-    output_paddings = output_padding if type(output_padding) is tuple else (output_padding, ) * length
+    # `nn.ConvTransposeNd.forward(x, output_size=...)` computes the per-dimension
+    # output_padding as a list, so a tuple check alone would wrap it and the shape
+    # arithmetic below would add a list to an int.
+    output_paddings = output_padding if isinstance(output_padding, (tuple, list)) else (output_padding, ) * length
 
     output_dims = []
     for idx, input_dim in enumerate(input_dims):
