@@ -100,6 +100,7 @@ class AutoEPConfig:
     autoep_size: int = 1
     expert_tensor_parallel_size: int = 1
     validate_folding_routing: bool = False
+    async_split_plan: bool = False
     preset_model: str | None = None
     moe_layer_pattern: str | None = None
     expert_pattern: str | None = None

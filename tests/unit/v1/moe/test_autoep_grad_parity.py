@@ -4,9 +4,14 @@
 # DeepSpeed Team
 """AutoEP gradient parity paths."""
 
+import functools
+
 import deepspeed
 import deepspeed.comm as dist
+import pytest
 import torch
+from deepspeed.accelerator import get_accelerator
+from deepspeed.module_inject.auto_ep_layer import AutoEPMoELayer
 from deepspeed.utils import safe_get_full_grad
 from unit.common import DistributedTest
 from unit.v1.moe.autoep_test_utils import (
@@ -229,3 +234,134 @@ class TestAutoEPGradParity(DistributedTest):
                                 zero2_expert,
                                 lhs_name="ZeRO-3 AutoEP expert",
                                 rhs_name="ZeRO-2 AutoEP expert")
+
+
+def _async_split_config(enabled):
+    return {
+        **_mixed_precision_config(),
+        "train_micro_batch_size_per_gpu": 1,
+        "gradient_clipping": 0.0,
+        "optimizer": {
+            "type": "AdamW",
+            "params": {
+                "lr": 1e-3,
+                "betas": [0.9, 0.999],
+                "eps": 1e-8,
+            },
+        },
+        "expert_parallel": {
+            "enabled": True,
+            "autoep_size": 2,
+            "preset_model": "mixtral",
+            "load_balance_coeff": None,
+            "use_grouped_mm": False,
+            "async_split_plan": enabled,
+        },
+    }
+
+
+def _checkpoint_autoep_layers(engine):
+    for module in engine.module.modules():
+        if isinstance(module, AutoEPMoELayer):
+            module.forward = functools.partial(torch.utils.checkpoint.checkpoint, module.forward, use_reentrant=False)
+
+
+def _trainable_parameters(engine):
+    return {
+        name: param.detach().float().cpu().clone()
+        for name, param in engine.module.named_parameters() if param.requires_grad
+    }
+
+
+def _trainable_gradients(engine):
+    gradients = {}
+    for name, param in engine.module.named_parameters():
+        if not param.requires_grad:
+            continue
+        grad = safe_get_full_grad(param)
+        if grad is not None:
+            gradients[name] = grad.detach().float().cpu().clone()
+    return gradients
+
+
+def _async_split_step(engine, seed, checkpoint_activations):
+    if checkpoint_activations:
+        _checkpoint_autoep_layers(engine)
+
+    generator = torch.Generator().manual_seed(seed)
+    batch = torch.randn((1, 16, 128), generator=generator, dtype=torch.float32)
+    batch = batch.to(engine.device, dtype=_engine_input_dtype(engine)).requires_grad_(True)
+    before = _trainable_parameters(engine)
+
+    output = engine(batch)
+    loss = output.float().square().mean()
+    engine.backward(loss)
+    gradients = _trainable_gradients(engine)
+    input_grad = batch.grad.detach().float().cpu().clone()
+    engine.step()
+    after = _trainable_parameters(engine)
+
+    return {
+        "loss": loss.detach().float().cpu(),
+        "output": output.detach().float().cpu(),
+        "input_grad": input_grad,
+        "gradients": gradients,
+        "delta": {
+            name: after[name] - value
+            for name, value in before.items()
+        },
+    }
+
+
+def _assert_async_split_step_matches(actual, expected):
+    tolerance = {"rtol": 1e-2, "atol": 1e-3}
+    for name in ("loss", "output", "input_grad"):
+        difference = (actual[name] - expected[name]).abs()
+        torch.testing.assert_close(actual[name],
+                                   expected[name],
+                                   msg=f"{name} mismatch; max_diff={difference.max().item()}",
+                                   **tolerance)
+
+    assert actual["gradients"]
+    assert set(actual["gradients"]) == set(expected["gradients"])
+    assert any(".router." in name for name in actual["gradients"])
+    assert any(".experts.w" in name for name in actual["gradients"])
+    for name in sorted(expected["gradients"]):
+        max_difference = (actual["gradients"][name] - expected["gradients"][name]).abs().max().item()
+        torch.testing.assert_close(actual["gradients"][name],
+                                   expected["gradients"][name],
+                                   msg=f"gradient mismatch for {name}; max_diff={max_difference}",
+                                   **tolerance)
+    for name in sorted(expected["delta"]):
+        max_difference = (actual["delta"][name] - expected["delta"][name]).abs().max().item()
+        torch.testing.assert_close(actual["delta"][name],
+                                   expected["delta"][name],
+                                   msg=f"parameter update mismatch for {name}; max_diff={max_difference}",
+                                   **tolerance)
+
+
+class TestAutoEPAsyncSplitPlanParity(DistributedTest):
+    world_size = 2
+
+    @pytest.mark.parametrize("checkpoint_activations", [False, True])
+    def test_async_split_plan_matches_synchronous_step(self, checkpoint_activations):
+        accelerator = get_accelerator()
+        if not accelerator.is_available() or not accelerator.device_name().startswith("cuda"):
+            pytest.skip("async split-plan parity requires CUDA")
+        seed = 9753
+        _seed_everything(seed)
+        reference_state = _make_model().state_dict()
+
+        sync_model = _make_model()
+        sync_model.load_state_dict(reference_state)
+        sync_engine, _, _, _ = deepspeed.initialize(model=sync_model, config=_async_split_config(False))
+        expected = _async_split_step(sync_engine, seed, checkpoint_activations)
+
+        async_model = _make_model()
+        async_model.load_state_dict(reference_state)
+        async_engine, _, _, _ = deepspeed.initialize(model=async_model, config=_async_split_config(True))
+        assert all(module.async_split_plan for module in async_engine.module.modules()
+                   if isinstance(module, AutoEPMoELayer))
+        actual = _async_split_step(async_engine, seed, checkpoint_activations)
+
+        _assert_async_split_step_matches(actual, expected)

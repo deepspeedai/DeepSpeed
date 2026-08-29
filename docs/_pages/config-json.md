@@ -937,6 +937,12 @@ Configure AutoEP expert parallelism for MoE models. AutoEP automatically detects
 | -------------------------------------------------------------------------------------------------- | ------- |
 | Reserved for expert tensor parallelism. AutoEP currently accepts only `1`; non-1 values are rejected. | `1`     |
 
+***async_split_plan***: [boolean]
+
+| Description                                                                                                                                                | Default |
+| ---------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
+| Overlap the expert-count AllToAll and pinned-memory split metadata transfer with token sorting and packing. The host waits for the metadata only immediately before payload dispatch. Requires CUDA, currently requires `tensor_parallel.autotp_size=1`, and has no effect when `autoep_size=1`. | `false` |
+
 ***preset_model***: [string]
 
 | Description                                                                                                                            | Default |

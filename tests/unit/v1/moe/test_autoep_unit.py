@@ -203,6 +203,7 @@ class TestAutoEPConfig:
         assert disabled.enabled is False
         assert disabled.autoep_size == 1
         assert disabled.validate_folding_routing is False
+        assert disabled.async_split_plan is False
         assert disabled.load_balance_coeff is None
         assert disabled._load_balance_coeff_explicit is False
 
@@ -214,12 +215,14 @@ class TestAutoEPConfig:
             "score_apply": "pre",
             "route_scale": 2.0,
             "validate_folding_routing": True,
+            "async_split_plan": True,
         })
 
         assert config.enabled is True
         assert config.autoep_size == 4
         assert config.preset_model == "mixtral"
         assert config.validate_folding_routing is True
+        assert config.async_split_plan is True
         assert config.load_balance_coeff is None
         assert config._load_balance_coeff_explicit is True
         assert config.score_apply == "pre"
@@ -232,6 +235,22 @@ class TestAutoEPConfig:
                                    world_size=1,
                                    pp_size=1,
                                    tp_size=1,
+                                   sp_size=1)
+
+    def test_async_split_plan_requires_boolean(self):
+        with pytest.raises(ValueError, match="async_split_plan"):
+            validate_autoep_config(AutoEPConfig(enabled=True, async_split_plan="true"),
+                                   world_size=1,
+                                   pp_size=1,
+                                   tp_size=1,
+                                   sp_size=1)
+
+    def test_async_split_plan_rejects_autotp_folding(self):
+        with pytest.raises(ValueError, match="async_split_plan.*AutoEP\\+AutoTP folding"):
+            validate_autoep_config(AutoEPConfig(enabled=True, autoep_size=2, async_split_plan=True),
+                                   world_size=4,
+                                   pp_size=1,
+                                   tp_size=2,
                                    sp_size=1)
 
     @pytest.mark.parametrize("value", UNSUPPORTED_LOAD_BALANCE_VALUES)
