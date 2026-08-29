@@ -11,8 +11,8 @@ import pytest
 import torch
 
 from deepspeed.accelerator import get_accelerator
-from deepspeed.moe import autoep_fused_token_ops as fused_ops
 from deepspeed.module_inject.auto_ep_layer import AutoEPMoELayer
+from deepspeed.ops.triton_ops import autoep_fused_token_ops as fused_ops
 from deepspeed.utils import safe_get_full_grad
 from unit.common import DistributedTest
 from unit.v1.moe.autoep_test_utils import (

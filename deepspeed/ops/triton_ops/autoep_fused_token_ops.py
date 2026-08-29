@@ -1,6 +1,4 @@
-# Copyright (c) DeepSpeed Team.
 # SPDX-License-Identifier: Apache-2.0
-
 # DeepSpeed Team
 """Fused AutoEP token restore without the eager scatter and FP32 intermediate.
 
@@ -12,20 +10,11 @@ from __future__ import annotations
 
 import torch
 
+from deepspeed.ops.triton_ops._triton import _TRITON_AVAILABLE, triton, tl
+
 _IS_ROCM_PYTORCH = getattr(torch.version, "hip", None) is not None
 
-if _IS_ROCM_PYTORCH:
-    _TRITON_AVAILABLE = False
-else:
-    try:
-        import triton
-        import triton.language as tl
-
-        _TRITON_AVAILABLE = True
-    except ImportError:
-        _TRITON_AVAILABLE = False
-
-SUPPORTED_ROW_DTYPES = (torch.bfloat16, torch.float16)
+SUPPORTED_ROW_DTYPES = (torch.bfloat16, torch.float16, torch.float32)
 
 _MAX_BLOCK_HIDDEN = 512
 _INVERT_INDEX_BLOCK = 256
@@ -158,7 +147,7 @@ if _TRITON_AVAILABLE:
 
 def is_available() -> bool:
     """Whether this build can run the fused weighted restore at all."""
-    return _TRITON_AVAILABLE
+    return _TRITON_AVAILABLE and not _IS_ROCM_PYTORCH
 
 
 def assert_supported(rows: torch.Tensor, *, score_apply: str) -> None:
@@ -166,12 +155,15 @@ def assert_supported(rows: torch.Tensor, *, score_apply: str) -> None:
     if not _TRITON_AVAILABLE:
         raise RuntimeError('combine_impl="fused_weighted_sum" needs Triton, which is not installed in this '
                            "environment. Install Triton, or leave combine_impl unset.")
+    if _IS_ROCM_PYTORCH:
+        raise RuntimeError('combine_impl="fused_weighted_sum" is not yet supported on ROCm. Leave combine_impl '
+                           "unset to run here.")
     if rows.device.type != "cuda":
         raise RuntimeError('combine_impl="fused_weighted_sum" runs CUDA kernels but this layer is on device '
                            f'"{rows.device.type}". Leave combine_impl unset to run here.')
     if rows.dtype not in SUPPORTED_ROW_DTYPES:
-        raise RuntimeError('combine_impl="fused_weighted_sum" supports bfloat16 and float16 rows, got '
-                           f"{rows.dtype}. Leave combine_impl unset, or train in bf16/fp16.")
+        raise RuntimeError('combine_impl="fused_weighted_sum" supports bfloat16, float16, and float32 rows, got '
+                           f"{rows.dtype}. Leave combine_impl unset, or use a supported floating-point dtype.")
     if score_apply != "post":
         raise RuntimeError('combine_impl="fused_weighted_sum" folds the routing weight into the top-k reduction, '
                            f'which only exists for score_apply="post", but this layer resolved '
@@ -190,11 +182,9 @@ def _padded_top_k(top_k: int) -> int:
 
 
 def _invert_index(index: torch.Tensor, num_inverse_rows: int) -> torch.Tensor:
-    """Invert a row permutation, leaving -1 wherever no slot claimed a row."""
-    inverse = torch.full((num_inverse_rows, ), -1, dtype=torch.int32, device=index.device)
+    """Invert the row permutation produced by sorting routed assignments."""
+    inverse = torch.empty((num_inverse_rows, ), dtype=torch.int32, device=index.device)
     num_indices = index.numel()
-    if num_indices == 0 or num_inverse_rows == 0:
-        return inverse
 
     grid = (triton.cdiv(num_indices, _INVERT_INDEX_BLOCK), )
     _invert_index_kernel[grid](
@@ -234,8 +224,6 @@ class _FusedWeightedRestore(torch.autograd.Function):
 
         ctx.save_for_backward(combined_rows, top_scores, inverse)
         ctx.top_k = top_k
-        if n_tokens == 0 or hidden == 0:
-            return output
 
         k_padded = _padded_top_k(top_k)
         block_hidden = _block_hidden(hidden, slots=k_padded)
@@ -265,13 +253,10 @@ class _FusedWeightedRestore(torch.autograd.Function):
                                                               ctx.top_k)
             return grad_rows, grad_scores, None, None
 
-        # Zero initialization keeps malformed direct calls deterministic.
-        grad_rows = torch.zeros_like(combined_rows)
+        grad_rows = torch.empty_like(combined_rows)
         grad_scores = torch.empty_like(top_scores)
 
         n_tokens, hidden = top_scores.shape[0], combined_rows.shape[-1]
-        if n_tokens == 0 or hidden == 0:
-            return grad_rows, torch.zeros_like(top_scores), None, None
 
         k_padded = _padded_top_k(ctx.top_k)
         _weighted_restore_backward_kernel[(n_tokens, )](
@@ -303,37 +288,8 @@ def fused_weighted_restore(
 ) -> torch.Tensor:
     """Restore ``[T * K, H]`` rows directly to weighted ``[B, S, H]`` output."""
     bsz, seqlen, hidden = shape
-    if top_k <= 0:
-        raise RuntimeError(f"fused weighted restore expects top_k > 0, got {top_k}.")
-    if bsz < 0 or seqlen < 0 or hidden < 0:
-        raise RuntimeError(f"fused weighted restore expects non-negative output dimensions, got {shape}.")
-    if combined_rows.ndim != 2:
-        raise RuntimeError(f"fused weighted restore expects combined_rows to be 2D, got shape "
-                           f"{tuple(combined_rows.shape)}.")
-    if combined_rows.shape[1] != hidden:
-        raise RuntimeError(f"fused weighted restore output hidden size is {hidden}, but combined rows have hidden "
-                           f"size {combined_rows.shape[1]}.")
-
     n_tokens = bsz * seqlen
     expected_rows = n_tokens * top_k
-    if combined_rows.shape[0] != expected_rows:
-        raise RuntimeError(f"fused weighted restore expects one row per assignment: {expected_rows} rows for "
-                           f"{n_tokens} tokens at top_k={top_k}, got {combined_rows.shape[0]}.")
-    if tuple(top_scores.shape) != (n_tokens, top_k):
-        raise RuntimeError(f"fused weighted restore expects top_scores shape {(n_tokens, top_k)}, got "
-                           f"{tuple(top_scores.shape)}.")
-    if token_indices_sorted.ndim != 1 or token_indices_sorted.numel() != expected_rows:
-        raise RuntimeError(f"fused weighted restore expects token_indices_sorted to contain {expected_rows} "
-                           f"assignments, got shape {tuple(token_indices_sorted.shape)}.")
-    if token_indices_sorted.dtype not in (torch.int32, torch.int64):
-        raise RuntimeError("fused weighted restore expects token_indices_sorted to use int32 or int64 indices, got "
-                           f"{token_indices_sorted.dtype}.")
-    if not torch.is_floating_point(top_scores):
-        raise RuntimeError(f"fused weighted restore expects floating-point top_scores, got {top_scores.dtype}.")
-    if combined_rows.device != top_scores.device or combined_rows.device != token_indices_sorted.device:
-        raise RuntimeError("fused weighted restore expects rows, scores, and indices on the same device, got "
-                           f"{combined_rows.device}, {top_scores.device}, and {token_indices_sorted.device}.")
-
     inverse = _invert_index(token_indices_sorted, expected_rows)
     output = _FusedWeightedRestore.apply(combined_rows, top_scores.contiguous(), inverse, top_k)
     return output.reshape(bsz, seqlen, hidden)
