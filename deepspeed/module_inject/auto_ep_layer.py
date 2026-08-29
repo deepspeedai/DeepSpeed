@@ -198,13 +198,11 @@ def _start_async_split_plan_from_expert_counts(
         count_matrix = num_tokens_per_expert.view(ep_size, num_local_experts)
         send_counts = count_matrix.reshape(-1).contiguous()
         received_counts_flat = torch.empty_like(send_counts)
-        count_work = dist.all_to_all_single(
+        dist.all_to_all_single(
             received_counts_flat,
             send_counts,
             group=ep_group,
-            async_op=True,
         )
-        count_work.wait()
         received_counts = received_counts_flat.view(ep_size, num_local_experts)
         local_counts = received_counts.sum(dim=0)
         device_splits = torch.stack((
