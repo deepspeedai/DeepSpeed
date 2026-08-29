@@ -2099,7 +2099,9 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                         torch.linalg.vector_norm(g.data.to(get_norm_dtype()).detach(),
                                                  ord=norm_type).to(get_accelerator().current_device_name()))
             if len(all_norms) > 0:
-                total_norm = torch.stack(all_norms).square().sum().float()
+                # vector_norm above already gives each ||g||_norm_type, and the 1/norm_type
+                # root is taken below, so the exponent here has to be norm_type too.
+                total_norm = torch.stack(all_norms).pow(norm_type).sum().float()
             else:
                 total_norm = torch.tensor(0.0, dtype=torch.float32).to(self.device)
             # Sum across all model parallel Device.
