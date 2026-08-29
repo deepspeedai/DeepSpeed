@@ -197,22 +197,6 @@ def _invert_index(index: torch.Tensor, num_inverse_rows: int) -> torch.Tensor:
     return inverse
 
 
-def _differentiable_backward(grad_output, combined_rows, top_scores, inverse, top_k):
-    """Build the rare higher-order backward with regular PyTorch operations."""
-    n_tokens, hidden = top_scores.shape[0], combined_rows.shape[-1]
-    valid = inverse >= 0
-    safe_inverse = inverse.clamp_min(0).to(torch.int64)
-    gathered_rows = combined_rows.index_select(0, safe_inverse).reshape(n_tokens, top_k, hidden)
-
-    grad_by_assignment = (grad_output[:, None, :] * top_scores[:, :, None]).to(combined_rows.dtype).reshape(-1, hidden)
-    grad_rows = torch.zeros_like(combined_rows)
-    grad_rows = grad_rows.index_copy(0, safe_inverse[valid], grad_by_assignment[valid])
-
-    grad_scores = (gathered_rows.float() * grad_output.float()[:, None, :]).sum(dim=-1)
-    grad_scores = torch.where(valid.reshape(n_tokens, top_k), grad_scores, 0.0).to(top_scores.dtype)
-    return grad_rows, grad_scores
-
-
 class _FusedWeightedRestore(torch.autograd.Function):
     """Weight rows by their routing score and reduce over top-k in one pass."""
 
@@ -247,11 +231,6 @@ class _FusedWeightedRestore(torch.autograd.Function):
     def backward(ctx, grad_output):
         combined_rows, top_scores, inverse = ctx.saved_tensors
         grad_output = grad_output.contiguous()
-
-        if torch.is_grad_enabled():
-            grad_rows, grad_scores = _differentiable_backward(grad_output, combined_rows, top_scores, inverse,
-                                                              ctx.top_k)
-            return grad_rows, grad_scores, None, None
 
         grad_rows = torch.empty_like(combined_rows)
         grad_scores = torch.empty_like(top_scores)
