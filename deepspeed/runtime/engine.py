@@ -5499,12 +5499,12 @@ class DeepSpeedEngine(Module):
 
     def _copy_recovery_script(self, save_path):
         base_dir = os.path.dirname(os.path.dirname(__file__))
-        script = "zero_to_fp32.py"
-        src = os.path.join(base_dir, "utils", script)
-        dst = os.path.join(save_path, script)
-        #logger.info(f"creating recovery script {dst}")
-        copyfile(src, dst)
-        self._change_recovery_script_permissions(dst)
+        for script in ("zero_to_fp32.py", "zero_to_torch.py"):
+            src = os.path.join(base_dir, "utils", script)
+            dst = os.path.join(save_path, script)
+            #logger.info(f"creating recovery script {dst}")
+            copyfile(src, dst)
+            self._change_recovery_script_permissions(dst)
 
     def _change_recovery_script_permissions(self, dst):
         # make executable (safeguard for file shares - Azure as example)
