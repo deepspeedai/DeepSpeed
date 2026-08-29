@@ -204,7 +204,7 @@ class TritonSelfAttention(nn.Module):
                                                                               layer_past=layer_past,
                                                                               alibi=alibi,
                                                                               is_prompt=is_prompt,
-                                                                              toke_idx=token_idx,
+                                                                              token_idx=token_idx,
                                                                               position_ids=position_ids)
         output = self.vector_matmul_func(input=context_layer, weight=self.attn_ow)
 
