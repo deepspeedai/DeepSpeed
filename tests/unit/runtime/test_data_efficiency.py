@@ -67,24 +67,35 @@ def _curriculum_scheduler(min_difficulty, max_difficulty, difficulty_step, sched
 
 
 @pytest.mark.parametrize("schedule_type", ["fixed_linear", "fixed_root"])
-@pytest.mark.parametrize("min_difficulty, difficulty_step", [(8, 16), (1, 8), (10, 8), (64, 16), (8, 8)])
+@pytest.mark.parametrize("min_difficulty, difficulty_step", [(8, 16), (1, 8), (10, 8), (64, 16), (8, 8), (100, 64)])
 def test_curriculum_never_starts_below_min_difficulty(schedule_type, min_difficulty, difficulty_step):
     # Rounding down to a multiple of difficulty_step used to push the first steps under
     # the configured start: min_difficulty 8 with difficulty_step 16, a pair the tutorial
     # recommends for INT8 data on a million-scale model, gave a difficulty of 0, which is
-    # a zero-length sequence for the seqlen metric.
+    # a zero-length sequence for the seqlen metric. The step alignment the constructor
+    # warns about has to survive the new floor, so it is asserted alongside.
     scheduler = _curriculum_scheduler(min_difficulty, 1024, difficulty_step, schedule_type)
-    difficulties = [scheduler.get_difficulty(step) for step in range(20)]
+    difficulties = [scheduler.get_difficulty(step) for step in range(100)]
     assert min(difficulties) >= min_difficulty
     assert max(difficulties) <= 1024
+    assert all(difficulty % difficulty_step == 0 for difficulty in difficulties)
 
 
-def test_curriculum_endpoints_are_the_configured_values():
-    # Neither end is a multiple of difficulty_step here. The top has always come back as
-    # max_difficulty once the schedule runs out, because the existing clamp says so; the
-    # bottom now comes back as min_difficulty for the same reason.
-    scheduler = _curriculum_scheduler(8, 1000, 16)
-    assert scheduler.get_difficulty(0) == 8
+def test_curriculum_first_difficulty_is_the_aligned_min():
+    # min_difficulty 8 is not a multiple of difficulty_step 16, so it cannot itself be a
+    # difficulty. The schedule starts at the first multiple at or above it, 16, which is
+    # the only value that is both no lower than asked and aligned to the step.
+    scheduler = _curriculum_scheduler(8, 1024, 16)
+    assert scheduler.get_difficulty(0) == 16
+
+    # a min_difficulty that is already a multiple is used unchanged
+    assert _curriculum_scheduler(64, 1024, 16).get_difficulty(0) == 64
+
+
+def test_curriculum_tops_out_at_the_configured_max():
+    # max_difficulty is not a multiple of difficulty_step here. The existing clamp caps
+    # the ramp at the configured value, and this change does not touch that end.
+    scheduler = _curriculum_scheduler(16, 1000, 16)
     assert scheduler.get_difficulty(200) == 1000
 
 
