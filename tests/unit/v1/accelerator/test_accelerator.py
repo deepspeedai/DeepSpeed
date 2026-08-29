@@ -13,6 +13,7 @@ import torch
 
 import deepspeed
 from deepspeed.accelerator import get_accelerator
+from deepspeed.accelerator.abstract_accelerator import DeepSpeedAccelerator
 
 DS_ACCEL_PATH = "deepspeed.accelerator"
 IGNORE_FILES = ["abstract_accelerator.py", "real_accelerator.py"]
@@ -91,6 +92,46 @@ def test_pin_memory_torch_backend(monkeypatch):
     assert accel.is_pinned(pinned) == pinned.is_pinned()
     # Unpinning a torch-pinned tensor is a no-op (freed on garbage collection).
     assert accel.unpin_memory(pinned) is None
+
+
+def test_pin_memory_torch_backend_make_copy_false_allocates_pinned(monkeypatch):
+    """make_copy=False must page-lock a new buffer instead of pinning a copy."""
+    monkeypatch.delenv("DS_PIN_MEMORY_BACKEND", raising=False)
+    calls = []
+
+    class _StubAccelerator:
+        # Exercise the shared dispatch without needing a real pinning device.
+        pin_memory = DeepSpeedAccelerator.pin_memory
+
+        def _torch_pin_memory(self, tensor):
+            calls.append(("pin_copy", tuple(tensor.shape)))
+            return tensor
+
+        def _torch_empty_pinned(self, tensor, shape):
+            calls.append(("empty_pinned", tuple(shape)))
+            return tensor.new_empty(shape)
+
+    accel = _StubAccelerator()
+    tensor = torch.randn(4, 8)
+
+    accel.pin_memory(tensor)
+    assert tuple(accel.pin_memory(tensor, make_copy=False).shape) == (4, 8)
+    assert tuple(accel.pin_memory(tensor, make_copy=False, match_shape=False).shape) == (32, )
+    assert calls == [("pin_copy", (4, 8)), ("empty_pinned", (4, 8)), ("empty_pinned", (32, ))]
+
+
+def test_pin_memory_torch_backend_no_copy_is_pinned(monkeypatch):
+    """The buffer returned for make_copy=False is really page-locked."""
+    monkeypatch.delenv("DS_PIN_MEMORY_BACKEND", raising=False)
+    accel = get_accelerator()
+    if accel.device_name() == "cpu":
+        pytest.skip("torch cannot pin CPU tensors on the CPU accelerator")
+
+    tensor = torch.randn(4, 8)
+    buffer = accel.pin_memory(tensor, make_copy=False)
+    assert buffer.is_pinned()
+    assert tuple(buffer.shape) == (4, 8)
+    assert buffer.data_ptr() != tensor.data_ptr()
 
 
 def test_pin_memory_native_backend(monkeypatch):

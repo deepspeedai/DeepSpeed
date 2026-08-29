@@ -272,6 +272,9 @@ class DeepSpeedAccelerator(ABC):
     def _torch_pin_memory(self, tensor):
         return tensor.pin_memory()
 
+    def _torch_empty_pinned(self, tensor, shape):
+        return tensor.new_empty(shape, pin_memory=True)
+
     def _torch_is_pinned(self, tensor):
         return tensor.is_pinned()
 
@@ -290,7 +293,12 @@ class DeepSpeedAccelerator(ABC):
         pins = get_active_native_pinned_memory()
         if pins is not None:
             return pins.pin(tensor, make_copy=make_copy, match_shape=match_shape)
-        return self._torch_pin_memory(tensor)
+        if make_copy:
+            return self._torch_pin_memory(tensor)
+        # ``tensor`` is only a shape/dtype template here, so page-lock a fresh
+        # buffer instead of faulting it in and copying it into a second one.
+        shape = tensor.shape if match_shape else (tensor.numel(), )
+        return self._torch_empty_pinned(tensor, shape)
 
     def is_pinned(self, tensor):
         from deepspeed.utils.pin_memory import get_active_native_pinned_memory

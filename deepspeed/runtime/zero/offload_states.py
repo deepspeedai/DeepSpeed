@@ -19,7 +19,7 @@ def offload_optimizer_states(optimizer, device, pin_memory=False, non_blocking=F
         for k, v in state.items():
             if torch.is_tensor(v):
                 if pin_memory and v.device.type != 'cpu':
-                    pinned_buffer = torch.empty_like(v, device='cpu').pin_memory()
+                    pinned_buffer = get_accelerator().pin_memory(torch.empty_like(v, device='cpu'), make_copy=False)
                     pinned_buffer.copy_(v, non_blocking=non_blocking)
                     state[k] = pinned_buffer
                 else:
@@ -27,10 +27,33 @@ def offload_optimizer_states(optimizer, device, pin_memory=False, non_blocking=F
 
 
 def reload_optimizer_states(optimizer, device, non_blocking=False):
+    """Move optimizer states back to ``device``.
+
+    Returns the replaced host tensors. A non-blocking copy may still be reading
+    them on return, so callers must keep them alive until they synchronize.
+    """
+    host_buffers = []
     for state in optimizer.state.values():
         for k, v in state.items():
             if torch.is_tensor(v):
+                host_buffers.append(v)
                 state[k] = v.to(device, non_blocking=non_blocking)
+    return host_buffers
+
+
+def unpin_offloaded_optimizer_states(optimizer):
+    """Release host buffers that offloading page-locked in the optimizer state.
+
+    Offload pins these regardless of the ZeRO CPU-offload config, so destroy()
+    must release them even when the optimizer itself owns no pinned memory.
+    """
+    accelerator = get_accelerator()
+    for state in optimizer.state.values():
+        for tensor in state.values():
+            if not torch.is_tensor(tensor) or tensor.device.type != 'cpu':
+                continue
+            if accelerator.is_pinned(tensor):
+                accelerator.unpin_memory(tensor)
 
 
 def offload_adam_states(optimizer, device, pin_memory: bool = False, non_blocking: bool = False):
