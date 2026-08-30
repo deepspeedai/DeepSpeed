@@ -253,7 +253,8 @@ class HybridEngineRollout(RolloutEngine):
                 write_positions[:survivor_count].fill_(cache_position)
                 position_ids = attention_mask[:survivor_count, :cache_position].sum(dim=1, keepdim=True)
                 attention_mask[:survivor_count, cache_position] = 1
-                output = module(
+                output = self._call_model(
+                    module,
                     decode_input,
                     attention_mask=attention_mask[:survivor_count],
                     past_key_values=cache,
@@ -316,7 +317,8 @@ class HybridEngineRollout(RolloutEngine):
                                      dim=0)
         prefill_cache = self._create_static_cache(static_cache_type, module.config, len(admitted_ids), prompt_len,
                                                   device, model_dtype)
-        prefill_output = module(
+        prefill_output = self._call_model(
+            module,
             prompt_ids,
             attention_mask=prompt_attention,
             past_key_values=prefill_cache,
@@ -342,6 +344,15 @@ class HybridEngineRollout(RolloutEngine):
             return False
         eos_ids = torch.as_tensor(eos_token_id, dtype=token.dtype, device=token.device).flatten()
         return bool((token == eos_ids).any().item())
+
+    @staticmethod
+    def _call_model(module, input_ids, **kwargs):
+        """Call models with only the cache arguments their HF version accepts."""
+        parameters = signature(module.forward).parameters
+        accepts_kwargs = any(parameter.kind == parameter.VAR_KEYWORD for parameter in parameters.values())
+        if not accepts_kwargs:
+            kwargs = {name: value for name, value in kwargs.items() if name in parameters}
+        return module(input_ids, **kwargs)
 
     @staticmethod
     def _create_static_cache(static_cache_type, config, batch_size, max_cache_len, device, dtype):
