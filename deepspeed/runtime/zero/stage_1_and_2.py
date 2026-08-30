@@ -1243,7 +1243,8 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                 # keeping the gradients contiguous to prevent memory fragmentation, and avoid flattening
                 if self.overlap_comm and not get_accelerator().resolves_data_dependency():
                     producer_stream = get_accelerator().current_stream()
-                    self._wait_for_ipg_buffer_reuse(bucket, producer_stream)
+                    if producer_stream not in bucket.copy_streams:
+                        self._wait_for_ipg_buffer_reuse(bucket, producer_stream)
                 new_grad_tensor = bucket.buffer[bucket.index].narrow(0, bucket.elements, param.numel())
                 new_grad_tensor.copy_(
                     grad_reduc.view(-1) if not self.zenflow else grad_reduc.permute(

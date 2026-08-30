@@ -3,7 +3,6 @@
 
 # DeepSpeed Team
 from contextlib import nullcontext
-import os
 
 import pytest
 import torch
@@ -369,16 +368,16 @@ def test_reduce_ipg_grads_records_completion_after_buffer_consumers(monkeypatch)
     assert operations == ["average", "copy", "record"]
 
 
-def test_ipg_buffer_reuse_wait_precedes_gradient_copy(monkeypatch):
+def test_ipg_buffer_reuse_waits_once_before_gradient_copies_from_same_stream(monkeypatch):
     operations = []
     optimizer = DeepSpeedZeroOptimizer.__new__(DeepSpeedZeroOptimizer)
     optimizer.reduce_bucket_size = 4
     optimizer.contiguous_gradients = True
     optimizer.overlap_comm = True
     optimizer.zenflow = False
-    optimizer.params_already_reduced = {7: False}
+    optimizer.params_already_reduced = {7: False, 8: False}
     optimizer._maybe_reduce_autoep_folding_tp_gradient = lambda param, grad: None
-    optimizer.get_param_id = lambda param: 7
+    optimizer.get_param_id = lambda param: param.test_id
     optimizer.get_param_comm_dtype = lambda param: torch.float32
     optimizer.get_gradient_for_reduction = lambda param: param.grad
     optimizer.report_ipg_memory_usage = lambda *args: None
@@ -392,14 +391,17 @@ def test_ipg_buffer_reuse_wait_precedes_gradient_copy(monkeypatch):
         "get_accelerator",
         lambda: _FakeAcceleratorWithCurrentStream(False, current),
     )
-    param = torch.nn.Parameter(torch.zeros(2))
-    param.grad = torch.ones(2)
-    param.param_idx_in_group = 0
+    params = [torch.nn.Parameter(torch.zeros(2)), torch.nn.Parameter(torch.zeros(2))]
+    for param_id, param in enumerate(params, start=7):
+        param.grad = torch.ones(2)
+        param.param_idx_in_group = 0
+        param.test_id = param_id
 
     with _CopyOrderMode(operations):
-        optimizer.reduce_independent_p_g_buckets_and_remove_grads(param, 0)
+        for param in params:
+            optimizer.reduce_independent_p_g_buckets_and_remove_grads(param, 0)
 
-    assert operations[:2] == ["wait", "copy"]
+    assert operations == ["wait", "copy", "copy"]
 
 
 class _MultiBucketModel(torch.nn.Module):
@@ -525,20 +527,17 @@ class TestZero2IPGBufferReuse(DistributedTest):
             # producer streams never wait for a physical buffer reuse.
             assert overlap[3] == 0
 
-    def test_overlap_matches_non_overlap_through_repeated_buffer_reuse(self):
+    @pytest.mark.parametrize("reduce_bucket_size,delay_cycles", [(20, int(2e7)), (32, int(5e7)), (48, int(1e8))])
+    def test_overlap_matches_non_overlap_through_repeated_buffer_reuse(self, reduce_bucket_size, delay_cycles):
         if not bf16_required_version_check():
             pytest.skip("BF16 ZeRO-2 test requires BF16 accelerator support.")
         _require_cuda_sleep()
 
-        stress_cases = [(20, int(2e7)), (32, int(5e7)), (48, int(1e8))]
-        stress_repeats = int(os.environ.get("DS_ZERO_BUFFER_REUSE_STRESS_REPEATS", "1"))
-        for repeat in range(stress_repeats):
-            reduce_bucket_size, delay_cycles = stress_cases[repeat % len(stress_cases)]
-            reference = _run_zero2_buffer_reuse(overlap_comm=False, reduce_bucket_size=reduce_bucket_size)
-            overlap = _run_zero2_buffer_reuse(overlap_comm=True,
-                                              reduce_bucket_size=reduce_bucket_size,
-                                              delay_cycles=delay_cycles)
+        reference = _run_zero2_buffer_reuse(overlap_comm=False, reduce_bucket_size=reduce_bucket_size)
+        overlap = _run_zero2_buffer_reuse(overlap_comm=True,
+                                          reduce_bucket_size=reduce_bucket_size,
+                                          delay_cycles=delay_cycles)
 
-            assert overlap[3] >= 2
-            assert overlap[4] > 0
-            _assert_zero2_runs_match(overlap, reference)
+        assert overlap[3] >= 2
+        assert overlap[4] > 0
+        _assert_zero2_runs_match(overlap, reference)
