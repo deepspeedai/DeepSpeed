@@ -70,7 +70,15 @@ responsible for applying that update, running prompt prefill, and constructing
 the attention metadata for the active rows.
 
 The prototype intentionally does not implement paged attention or change the
-default ``HybridEngineRollout.generate`` path. ``DeepSpeedStaticCache`` accepts
-one write position per row and can compact active rows while preserving its
-static tensor addresses. This mirrors the scheduler/cache separation used by
-systems such as vLLM and SGLang without copying their backend-specific kernels.
+default ``HybridEngineRollout.generate`` path. For a first end-to-end trial,
+``HybridEngineRollout.generate_continuous`` accepts one request per prompt row
+and a matching list of greedy ``SamplingConfig`` objects. It dynamically
+prefills admitted prompts and decodes surviving rows until every request has
+finished. CUDA Graph capture, sampling, multiple samples per prompt, and
+different prompt widths are intentionally rejected until the scheduling
+semantics are validated on real workloads.
+
+``DeepSpeedStaticCache`` accepts one write position per row and can compact
+active rows while preserving its static tensor addresses. This mirrors the
+scheduler/cache separation used by systems such as vLLM and SGLang without
+copying their backend-specific kernels.

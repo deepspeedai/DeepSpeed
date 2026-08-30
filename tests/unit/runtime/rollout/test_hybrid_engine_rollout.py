@@ -80,6 +80,25 @@ def test_constructor_defaults_without_cfg():
     assert rollout.use_shared_prefill is False
 
 
+def test_continuous_generation_rejects_unsupported_inputs():
+    rollout = HybridEngineRollout(_make_engine(), _make_tokenizer())
+    request = RolloutRequest(
+        prompt_ids=torch.tensor([[0, 1, 2]]),
+        prompt_attention_mask=torch.tensor([[0, 1, 1]]),
+    )
+
+    with pytest.raises(ValueError, match="at least one request"):
+        rollout.generate_continuous([], [], max_batch_size=1)
+    with pytest.raises(ValueError, match="same length"):
+        rollout.generate_continuous([request], [], max_batch_size=1)
+    with pytest.raises(ValueError, match="greedy"):
+        rollout.generate_continuous(
+            [request],
+            [SamplingConfig(max_new_tokens=2, temperature=0.5)],
+            max_batch_size=1,
+        )
+
+
 @patch("deepspeed.runtime.rollout.hybrid_engine_rollout.time.perf_counter")
 @patch("deepspeed.runtime.rollout.hybrid_engine_rollout.get_accelerator")
 def test_generate_records_profile_when_enabled(mock_get_accelerator, mock_perf_counter):

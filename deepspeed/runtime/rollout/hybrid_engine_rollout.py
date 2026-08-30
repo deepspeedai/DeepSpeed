@@ -10,6 +10,8 @@ Two generation paths:
      Pre-allocates a StaticCache, captures the decode forward pass with a
      CUDA graph, and replays it for each decode step.  Eliminates kernel
      launch overhead.
+  3. **generate_continuous()**: a bounded greedy prototype that refills
+     retired cache rows with pending prompts.
 """
 
 import time
@@ -19,6 +21,7 @@ import torch
 
 from deepspeed.accelerator import get_accelerator
 from deepspeed.runtime.rollout.base import RolloutBatch, RolloutEngine, RolloutRequest, SamplingConfig
+from deepspeed.runtime.rollout.continuous_batching import ContinuousBatchRequest, ContinuousBatchScheduler
 
 
 @dataclass
@@ -166,6 +169,195 @@ class HybridEngineRollout(RolloutEngine):
             }
 
         return rollout_batch
+
+    @torch.no_grad()
+    def generate_continuous(self, requests, sampling_configs, max_batch_size):
+        """Generate independent greedy requests in a continuously refilled batch.
+
+        This first integration targets the OPSD prototype: every request has a
+        single prompt row and one greedy response. Requests may use different
+        response budgets. Completed rows retire immediately and pending prompts
+        prefill into the released rows before the next decode step.
+        """
+        requests = tuple(requests)
+        sampling_configs = tuple(sampling_configs)
+        self._validate_continuous_inputs(requests, sampling_configs, max_batch_size)
+
+        from transformers import StaticCache
+        from deepspeed.utils.static_cache import DeepSpeedStaticCache
+
+        module = self.engine.module
+        device = requests[0].prompt_ids.device
+        prompt_len = requests[0].prompt_ids.shape[1]
+        model_dtype = next(module.parameters()).dtype
+        max_cache_len = prompt_len + sum(config.max_new_tokens for config in sampling_configs)
+        max_positions = getattr(module.config, "max_position_embeddings", max_cache_len)
+        if max_cache_len > max_positions:
+            raise ValueError("continuous batching cache exceeds the model maximum position embeddings")
+
+        scheduler = ContinuousBatchScheduler(max_batch_size)
+        request_by_id = {}
+        responses = {}
+        for request_id, (request, config) in enumerate(zip(requests, sampling_configs)):
+            scheduler.submit(ContinuousBatchRequest(request_id, config.max_new_tokens))
+            request_by_id[request_id] = request
+            responses[request_id] = []
+
+        cache = DeepSpeedStaticCache(
+            module.config,
+            batch_size=max_batch_size,
+            max_cache_len=max_cache_len,
+            device=device,
+            dtype=model_dtype,
+        )
+        write_positions = torch.full((max_batch_size, ), -1, dtype=torch.long, device=device)
+        cache.set_write_position(write_positions)
+        attention_mask = torch.zeros((max_batch_size, max_cache_len), dtype=torch.long, device=device)
+        next_tokens = {}
+        cache_position = prompt_len
+        update = scheduler.schedule()
+
+        while update.active:
+            keep_slots = torch.tensor(update.keep_slots, dtype=torch.long, device=device)
+            survivor_count = keep_slots.numel()
+            if survivor_count:
+                cache.compact(keep_slots)
+                survivor_attention = attention_mask.index_select(0, keep_slots).clone()
+                attention_mask.zero_()
+                attention_mask[:survivor_count].copy_(survivor_attention)
+            else:
+                cache.reset()
+                write_positions.fill_(-1)
+                attention_mask.zero_()
+                cache_position = prompt_len
+
+            admitted_tokens = self._continuous_prefill(
+                module,
+                StaticCache,
+                cache,
+                update,
+                request_by_id,
+                attention_mask,
+                cache_position,
+                prompt_len,
+                model_dtype,
+                device,
+            )
+
+            decoded_tokens = {}
+            if survivor_count:
+                survivor_ids = update.active_ids[:survivor_count]
+                decode_input = torch.cat([next_tokens[request_id] for request_id in survivor_ids], dim=0)
+                write_positions[:survivor_count].fill_(cache_position)
+                position_ids = attention_mask[:survivor_count, :cache_position].sum(dim=1, keepdim=True)
+                attention_mask[:survivor_count, cache_position] = 1
+                output = module(
+                    decode_input,
+                    attention_mask=attention_mask[:survivor_count],
+                    past_key_values=cache,
+                    use_cache=True,
+                    cache_position=torch.tensor([cache_position], dtype=torch.long, device=device),
+                    position_ids=position_ids,
+                )
+                decoded = output.logits[:, -1, :].argmax(dim=-1, keepdim=True)
+                decoded_tokens = dict(zip(survivor_ids, decoded.split(1, dim=0)))
+
+            next_tokens = decoded_tokens | admitted_tokens
+            finished_ids = []
+            for request_id in update.active_ids:
+                token = next_tokens[request_id]
+                responses[request_id].append(token)
+                if self._is_eos(token):
+                    finished_ids.append(request_id)
+
+            update = scheduler.advance(finished_ids)
+            if survivor_count:
+                cache_position += 1
+
+        return [
+            self._build_continuous_output(request, responses[request_id])
+            for request_id, request in enumerate(requests)
+        ]
+
+    def _validate_continuous_inputs(self, requests, sampling_configs, max_batch_size):
+        if not requests:
+            raise ValueError("continuous batching requires at least one request")
+        if len(requests) != len(sampling_configs):
+            raise ValueError("requests and sampling_configs must have the same length")
+        if max_batch_size <= 0:
+            raise ValueError("max_batch_size must be positive")
+        if self.use_graph_capture:
+            raise ValueError("continuous batching does not yet support CUDA graph capture")
+
+        prompt_len = requests[0].prompt_ids.shape[1]
+        device = requests[0].prompt_ids.device
+        for request, config in zip(requests, sampling_configs):
+            if request.prompt_ids.shape[0] != 1:
+                raise ValueError("continuous batching requires one prompt row per request")
+            if request.prompt_ids.shape[1] != prompt_len:
+                raise ValueError("continuous batching currently requires equal prompt widths")
+            if request.prompt_ids.device != device:
+                raise ValueError("continuous batching requests must use the same device")
+            if config.temperature > 0:
+                raise ValueError("continuous batching currently supports greedy decoding only")
+            if config.n_samples_per_prompt != 1:
+                raise ValueError("continuous batching currently supports one sample per prompt")
+
+    def _continuous_prefill(self, module, static_cache_type, cache, update, request_by_id, attention_mask,
+                            cache_position, prompt_len, model_dtype, device):
+        if not update.admitted:
+            return {}
+
+        admitted_ids = tuple(request.request_id for request in update.admitted)
+        prompt_ids = torch.cat([request_by_id[request_id].prompt_ids for request_id in admitted_ids], dim=0)
+        prompt_attention = torch.cat([request_by_id[request_id].prompt_attention_mask for request_id in admitted_ids],
+                                     dim=0)
+        prefill_cache = static_cache_type(
+            config=module.config,
+            batch_size=len(admitted_ids),
+            max_cache_len=prompt_len,
+            device=device,
+            dtype=model_dtype,
+        )
+        prefill_output = module(
+            prompt_ids,
+            attention_mask=prompt_attention,
+            past_key_values=prefill_cache,
+            use_cache=True,
+            cache_position=torch.arange(prompt_len, device=device),
+        )
+        prefill_tokens = prefill_output.logits[:, -1, :].argmax(dim=-1, keepdim=True)
+        cache_start = cache_position - prompt_len
+        for layer_idx, prefill_layer in enumerate(prefill_cache.layers):
+            target_layer = cache.layers[layer_idx]
+            for source_row, target_row in enumerate(update.admitted_slots):
+                target_layer.keys[target_row, :, cache_start:cache_position].copy_(prefill_layer.keys[source_row])
+                target_layer.values[target_row, :, cache_start:cache_position].copy_(prefill_layer.values[source_row])
+        for source_row, target_row in enumerate(update.admitted_slots):
+            attention_mask[target_row, cache_start:cache_position].copy_(prompt_attention[source_row])
+            write_positions = cache._write_position
+            write_positions[target_row] = cache_position
+        return dict(zip(admitted_ids, prefill_tokens.split(1, dim=0)))
+
+    def _is_eos(self, token):
+        eos_token_id = self.tokenizer.eos_token_id
+        if eos_token_id is None:
+            return False
+        eos_ids = torch.as_tensor(eos_token_id, dtype=token.dtype, device=token.device).flatten()
+        return bool((token == eos_ids).any().item())
+
+    @staticmethod
+    def _build_continuous_output(request, response_tokens):
+        response_ids = torch.cat(response_tokens, dim=1)
+        input_ids = torch.cat((request.prompt_ids, response_ids), dim=1)
+        response_attention = torch.ones_like(response_ids)
+        attention_mask = torch.cat((request.prompt_attention_mask, response_attention), dim=1)
+        response_start = request.prompt_ids.shape[1]
+        return RolloutBatch(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            response_start_idx=torch.tensor([response_start], dtype=torch.long, device=input_ids.device),
+        )
 
     def get_last_profile(self):
         """Return the most recent profiling snapshot for this rollout instance."""

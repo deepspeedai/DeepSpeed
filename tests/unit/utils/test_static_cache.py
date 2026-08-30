@@ -40,7 +40,7 @@ def test_static_cache_compact_preserves_rows_and_positions():
     cache.compact(torch.tensor([2, 0], dtype=torch.long))
 
     assert layer.keys[:2, 0, 0, 0].tolist() == [30.0, 10.0]
-    assert torch.equal(cache.get_seq_length(), torch.tensor([4, 2, 0]))
+    assert cache.get_seq_length().item() == 4
     assert layer.keys[2].abs().sum().item() == 0
 
 

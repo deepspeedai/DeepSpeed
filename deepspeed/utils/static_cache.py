@@ -101,7 +101,8 @@ class DeepSpeedStaticLayer:
             row_indices = torch.arange(key_states.shape[0], device=self.device)
             self.keys[row_indices, :, cache_position, :] = key_states[:, :, 0, :]
             self.values[row_indices, :, cache_position, :] = value_states[:, :, 0, :]
-            return self.keys, self.values
+            active_batch_size = key_states.shape[0]
+            return self.keys[:active_batch_size], self.values[:active_batch_size]
 
         if self._write_position is not None:
             cache_position = torch.arange(kv_length, device=self.device) + self._write_position
@@ -156,14 +157,7 @@ class DeepSpeedStaticLayer:
             raise ValueError("active_indices must not contain duplicates")
 
         count = active_indices.numel()
-        if count:
-            keys = self.keys.index_select(0, active_indices).clone()
-            values = self.values.index_select(0, active_indices).clone()
-            self.keys[:count].copy_(keys)
-            self.values[:count].copy_(values)
-        if count < self.max_batch_size:
-            self.keys[count:].zero_()
-            self.values[count:].zero_()
+        self._compact_rows(active_indices, count)
         if self._write_position is not None and self._write_position.dim() == 1:
             positions = self._write_position
             if positions.numel() != self.max_batch_size:
@@ -173,6 +167,19 @@ class DeepSpeedStaticLayer:
             self._write_position[:count].copy_(compacted)
             if count < self.max_batch_size:
                 self._write_position[count:].fill_(-1)
+
+    def _compact_rows(self, active_indices: torch.Tensor, count: int | None = None) -> None:
+        """Compact only the row tensors; used by the multi-layer cache."""
+        if count is None:
+            count = active_indices.numel()
+        if count:
+            keys = self.keys.index_select(0, active_indices).clone()
+            values = self.values.index_select(0, active_indices).clone()
+            self.keys[:count].copy_(keys)
+            self.values[:count].copy_(values)
+        if count < self.max_batch_size:
+            self.keys[count:].zero_()
+            self.values[count:].zero_()
 
     def reorder_cache(self, beam_idx: torch.LongTensor) -> None:
         if self.is_initialized:
@@ -242,8 +249,28 @@ class DeepSpeedStaticCache:
 
     def compact(self, active_indices: torch.Tensor) -> None:
         """Compact active rows after requests retire from a batch."""
+        if not isinstance(active_indices, torch.Tensor) or active_indices.dim() != 1:
+            raise ValueError("active_indices must be a 1-D tensor")
+        max_batch_size = self._layers[0].max_batch_size if self._layers else 0
+        active_indices = active_indices.to(device=self._layers[0].keys.device, dtype=torch.long)
+        if active_indices.numel() > max_batch_size:
+            raise ValueError("active_indices exceeds the cache batch size")
+        if active_indices.numel() and ((active_indices < 0).any() or (active_indices >= max_batch_size).any()):
+            raise ValueError("active_indices contains an out-of-range row")
+        if active_indices.unique().numel() != active_indices.numel():
+            raise ValueError("active_indices must not contain duplicates")
         for layer in self._layers:
-            layer.compact(active_indices)
+            layer._compact_rows(active_indices)
+        if self._write_position is not None and self._write_position.dim() == 1:
+            positions = self._write_position
+            if positions.numel() != max_batch_size:
+                raise ValueError("per-row write positions must match the cache batch size")
+            position_indices = active_indices.to(positions.device)
+            count = active_indices.numel()
+            compacted = positions.index_select(0, position_indices).clone() if count else positions[:0]
+            positions[:count].copy_(compacted)
+            if count < positions.numel():
+                positions[count:].fill_(-1)
 
     def update(
         self,
@@ -273,7 +300,13 @@ class DeepSpeedStaticCache:
     def get_seq_length(self, layer_idx: int = 0) -> int | torch.Tensor:
         if layer_idx >= len(self._layers):
             return 0
-        return self._layers[layer_idx].get_seq_length()
+        length = self._layers[layer_idx].get_seq_length()
+        if isinstance(length, torch.Tensor) and length.dim() == 1:
+            # Transformer decoder implementations use one scalar past length
+            # to build the causal mask. Continuous batching keeps rows aligned
+            # to a shared physical position, so the largest row is sufficient.
+            return length.max()
+        return length
 
     def get_max_cache_shape(self, layer_idx: int = 0) -> int:
         if layer_idx >= len(self._layers):
