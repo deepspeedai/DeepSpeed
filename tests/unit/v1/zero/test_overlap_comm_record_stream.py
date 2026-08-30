@@ -437,6 +437,7 @@ def _run_zero2_buffer_reuse(overlap_comm, reduce_bucket_size, delay_cycles=0):
     }
     engine, *_ = deepspeed.initialize(model=model, optimizer=optimizer, config=config)
     reuse_waits = 0
+    completion_records = 0
     if overlap_comm:
         original_wait = engine.optimizer._wait_for_ipg_buffer_reuse
 
@@ -447,6 +448,14 @@ def _run_zero2_buffer_reuse(overlap_comm, reduce_bucket_size, delay_cycles=0):
             original_wait(bucket, producer_stream)
 
         engine.optimizer._wait_for_ipg_buffer_reuse = count_reuse_waits
+        original_record = engine.optimizer._record_ipg_buffer_reduction_complete
+
+        def count_completion_records(bucket):
+            nonlocal completion_records
+            completion_records += 1
+            original_record(bucket)
+
+        engine.optimizer._record_ipg_buffer_reduction_complete = count_completion_records
         original_average = engine.optimizer.average_tensor
 
         def delayed_average(tensor, communication_data_type):
@@ -473,11 +482,42 @@ def _run_zero2_buffer_reuse(overlap_comm, reduce_bucket_size, delay_cycles=0):
         parameters = [param.detach().float().cpu() for param in engine.module.parameters()]
     finally:
         engine.destroy()
-    return losses, gradients, parameters, reuse_waits
+    return losses, gradients, parameters, reuse_waits, completion_records
+
+
+def _assert_zero2_runs_match(actual, expected):
+    for actual_loss, expected_loss in zip(actual[0], expected[0]):
+        torch.testing.assert_close(actual_loss, expected_loss, rtol=1e-5, atol=1e-6)
+    for actual_step, expected_step in zip(actual[1], expected[1]):
+        for actual_grad, expected_grad in zip(actual_step, expected_step):
+            torch.testing.assert_close(actual_grad, expected_grad, rtol=5e-3, atol=5e-3)
+    for actual_param, expected_param in zip(actual[2], expected[2]):
+        torch.testing.assert_close(actual_param, expected_param, rtol=5e-3, atol=5e-3)
 
 
 class TestZero2IPGBufferReuse(DistributedTest):
     world_size = 2
+
+    @pytest.mark.parametrize("reduce_bucket_size,uses_ipg_buffer", [(15, False), (16, True), (17, True)])
+    def test_parameter_size_around_bucket_boundary(self, reduce_bucket_size, uses_ipg_buffer):
+        if not bf16_required_version_check():
+            pytest.skip("BF16 ZeRO-2 test requires BF16 accelerator support.")
+        if not hasattr(torch.cuda, "_sleep"):  #ignore-cuda
+            pytest.skip("CUDA sleep helper is unavailable.")
+
+        reference = _run_zero2_buffer_reuse(overlap_comm=False, reduce_bucket_size=reduce_bucket_size)
+        overlap = _run_zero2_buffer_reuse(overlap_comm=True,
+                                          reduce_bucket_size=reduce_bucket_size,
+                                          delay_cycles=int(2e7))
+
+        _assert_zero2_runs_match(overlap, reference)
+        if uses_ipg_buffer:
+            assert overlap[3] >= 2
+            assert overlap[4] > 0
+        else:
+            # Oversized gradients bypass the physical IPG buffers, so their
+            # producer streams never wait for a physical buffer reuse.
+            assert overlap[3] == 0
 
     def test_overlap_matches_non_overlap_through_repeated_buffer_reuse(self):
         if not bf16_required_version_check():
@@ -495,10 +535,5 @@ class TestZero2IPGBufferReuse(DistributedTest):
                                               delay_cycles=delay_cycles)
 
             assert overlap[3] >= 2
-            for actual, expected in zip(overlap[0], reference[0]):
-                torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-6)
-            for actual_step, expected_step in zip(overlap[1], reference[1]):
-                for actual, expected in zip(actual_step, expected_step):
-                    torch.testing.assert_close(actual, expected, rtol=5e-3, atol=5e-3)
-            for actual, expected in zip(overlap[2], reference[2]):
-                torch.testing.assert_close(actual, expected, rtol=5e-3, atol=5e-3)
+            assert overlap[4] > 0
+            _assert_zero2_runs_match(overlap, reference)
