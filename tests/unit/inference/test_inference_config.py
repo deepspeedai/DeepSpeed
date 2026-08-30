@@ -6,8 +6,63 @@
 import pytest
 import torch
 import deepspeed
+from deepspeed.inference.config import DeepSpeedInferenceConfig
+from deepspeed.inference.engine import _validate_keep_module_on_host
 from unit.common import DistributedTest
 from unit.simple_model import create_config_from_dict
+
+
+@pytest.mark.inference
+def test_keep_module_on_host_requires_injection_or_auto_tp():
+    with pytest.raises(ValueError, match="requires an injection policy, kernel injection, or AutoTP"):
+        deepspeed.init_inference(
+            torch.nn.Module(),
+            dtype=torch.float32,
+            keep_module_on_host=True,
+        )
+
+
+@pytest.mark.inference
+@pytest.mark.parametrize(
+    "mode_config",
+    [
+        {
+            "injection_policy": {
+                torch.nn.Linear: ("output", )
+            }
+        },
+        {
+            "replace_with_kernel_inject": True
+        },
+        {
+            "tensor_parallel": {
+                "tp_size": 2
+            }
+        },
+        {
+            "mp_size": 2
+        },
+    ],
+    ids=["injection-policy", "kernel-injection", "auto-tp", "deprecated-mp-size"],
+)
+def test_keep_module_on_host_accepts_supported_modes(mode_config):
+    config = DeepSpeedInferenceConfig(keep_module_on_host=True, **mode_config)
+
+    _validate_keep_module_on_host(config)
+    assert config.keep_module_on_host
+    if "mp_size" in mode_config:
+        assert config.tensor_parallel.tp_size == mode_config["mp_size"]
+
+
+@pytest.mark.inference
+def test_keep_module_on_host_rejects_single_rank_mpu_mode():
+    config = DeepSpeedInferenceConfig(
+        keep_module_on_host=True,
+        tensor_parallel={"mpu": object()},
+    )
+
+    with pytest.raises(ValueError, match="requires an injection policy, kernel injection, or AutoTP"):
+        _validate_keep_module_on_host(config)
 
 
 @pytest.mark.inference

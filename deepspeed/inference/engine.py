@@ -40,6 +40,12 @@ from torch import nn
 INFERENCE_MODEL_TIMER = "model-forward-inference"
 
 
+def _validate_keep_module_on_host(config):
+    if config.keep_module_on_host and not (config.injection_policy or config.replace_with_kernel_inject
+                                           or config.tensor_parallel.tp_size > 1):
+        raise ValueError("keep_module_on_host=True requires an injection policy, kernel injection, or AutoTP")
+
+
 class InferenceEngine(Module):
     inference_mp_group = None
     inference_ep_group = None
@@ -115,6 +121,8 @@ class InferenceEngine(Module):
         elif config.tensor_parallel.tp_size > 1:
             self._create_model_parallel_group(config)
             config.tensor_parallel.tp_group = self.mp_group
+
+        _validate_keep_module_on_host(config)
 
         if self.injection_dict or not config.replace_with_kernel_inject:
             # This is a hack to redefine the alibi func due to TP. It runs after the tensor
