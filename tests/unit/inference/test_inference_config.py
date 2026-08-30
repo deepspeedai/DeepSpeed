@@ -14,12 +14,17 @@ from unit.simple_model import create_config_from_dict
 
 @pytest.mark.inference
 def test_keep_module_on_host_requires_injection_or_auto_tp():
+    model = torch.nn.Linear(2, 2)
+    original_dtypes = [parameter.dtype for parameter in model.parameters()]
+
     with pytest.raises(ValueError, match="requires an injection policy, kernel injection, or AutoTP"):
         deepspeed.init_inference(
-            torch.nn.Module(),
-            dtype=torch.float32,
+            model,
+            dtype=torch.float16,
             keep_module_on_host=True,
         )
+
+    assert [parameter.dtype for parameter in model.parameters()] == original_dtypes
 
 
 @pytest.mark.inference
