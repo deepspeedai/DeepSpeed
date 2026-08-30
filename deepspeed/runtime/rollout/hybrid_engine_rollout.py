@@ -16,6 +16,7 @@ Two generation paths:
 
 import time
 from dataclasses import dataclass
+from inspect import signature
 
 import torch
 
@@ -312,13 +313,8 @@ class HybridEngineRollout(RolloutEngine):
         prompt_ids = torch.cat([request_by_id[request_id].prompt_ids for request_id in admitted_ids], dim=0)
         prompt_attention = torch.cat([request_by_id[request_id].prompt_attention_mask for request_id in admitted_ids],
                                      dim=0)
-        prefill_cache = static_cache_type(
-            config=module.config,
-            batch_size=len(admitted_ids),
-            max_cache_len=prompt_len,
-            device=device,
-            dtype=model_dtype,
-        )
+        prefill_cache = self._create_static_cache(static_cache_type, module.config, len(admitted_ids), prompt_len,
+                                                  device, model_dtype)
         prefill_output = module(
             prompt_ids,
             attention_mask=prompt_attention,
@@ -345,6 +341,22 @@ class HybridEngineRollout(RolloutEngine):
             return False
         eos_ids = torch.as_tensor(eos_token_id, dtype=token.dtype, device=token.device).flatten()
         return bool((token == eos_ids).any().item())
+
+    @staticmethod
+    def _create_static_cache(static_cache_type, config, batch_size, max_cache_len, device, dtype):
+        """Construct StaticCache across Transformers' batch-size API variants."""
+        common_kwargs = {
+            "config": config,
+            "max_cache_len": max_cache_len,
+            "device": device,
+            "dtype": dtype,
+        }
+        parameters = signature(static_cache_type).parameters
+        if "batch_size" in parameters:
+            common_kwargs["batch_size"] = batch_size
+        elif "max_batch_size" in parameters:
+            common_kwargs["max_batch_size"] = batch_size
+        return static_cache_type(**common_kwargs)
 
     @staticmethod
     def _build_continuous_output(request, response_tokens):
@@ -439,13 +451,7 @@ class HybridEngineRollout(RolloutEngine):
         model_dtype = next(module.parameters()).dtype
 
         # --- Prefill with HF StaticCache (correct attention semantics) ---
-        prefill_cache = StaticCache(
-            config=module.config,
-            batch_size=batch_size,
-            max_cache_len=max_len,
-            device=device,
-            dtype=model_dtype,
-        )
+        prefill_cache = self._create_static_cache(StaticCache, module.config, batch_size, max_len, device, model_dtype)
         prefill_attn = torch.ones(batch_size, prompt_len, dtype=torch.long, device=device)
         prefill_attn[:, :prompt_len] = prompt_attn
         prefill_out = module(
