@@ -90,6 +90,7 @@ class MoELayerSpec:
     preset_adapter: str = "default"
     router_logits_capture_mode: Literal["raw", "post_score"] = "post_score"
     moe_output_shape: Literal["batched", "flat"] = "batched"
+    e_score_correction_bias_path: str | None = None
 
 
 @dataclass
