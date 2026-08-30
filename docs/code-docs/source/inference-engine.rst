@@ -57,3 +57,20 @@ inference tensor-parallel size 1, an internal KV cache, and a prompt longer than
 one token. It cannot be combined with CUDA graph capture or
 ``release_inference_cache``. Sampling still happens independently for every
 response branch after the shared prompt forward.
+
+Continuous-batching prototype
+-----------------------------
+
+``deepspeed.runtime.rollout.continuous_batching`` provides the scheduling and
+slot-lifecycle primitive needed to build a continuous decode batch. Requests
+are admitted in FIFO order up to a configured capacity. When a request retires,
+the update identifies the surviving cache rows to compact and the pending
+requests that can be prefetched into the newly free rows. The model backend is
+responsible for applying that update, running prompt prefill, and constructing
+the attention metadata for the active rows.
+
+The prototype intentionally does not implement paged attention or change the
+default ``HybridEngineRollout.generate`` path. ``DeepSpeedStaticCache`` accepts
+one write position per row and can compact active rows while preserving its
+static tensor addresses. This mirrors the scheduler/cache separation used by
+systems such as vLLM and SGLang without copying their backend-specific kernels.
