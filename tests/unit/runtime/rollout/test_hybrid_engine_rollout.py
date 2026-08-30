@@ -114,6 +114,44 @@ def test_static_cache_constructor_supports_legacy_batch_keyword():
     assert cache.config.num_key_value_heads == 4
 
 
+def test_continuous_generation_refills_legacy_cache_batch():
+    class LegacyCacheModel(torch.nn.Module):
+        _supports_cache_class = False
+
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.zeros(1))
+            self.calls = []
+            self.config = SimpleNamespace(max_position_embeddings=32)
+
+        def forward(self, input_ids, attention_mask, past_key_values=None, use_cache=True):
+            past_length = 0 if past_key_values is None else past_key_values[0][0].shape[2]
+            total_length = past_length + input_ids.shape[1]
+            assert attention_mask.shape == (input_ids.shape[0], total_length)
+            self.calls.append((input_ids.shape[0], input_ids.shape[1], past_length))
+            keys = torch.zeros((input_ids.shape[0], 1, total_length, 1))
+            logits = torch.zeros((input_ids.shape[0], input_ids.shape[1], 16))
+            logits[..., 7] = 1
+            return SimpleNamespace(logits=logits, past_key_values=((keys, keys.clone()), ))
+
+    model = LegacyCacheModel()
+    rollout = HybridEngineRollout(SimpleNamespace(module=model), SimpleNamespace(pad_token_id=0, eos_token_id=None))
+    requests = [
+        RolloutRequest(torch.tensor([[1, 2, token]]), torch.ones((1, 3), dtype=torch.long))
+        for token in (3, 4, 5)
+    ]
+    configs = [
+        SamplingConfig(max_new_tokens=1, temperature=0),
+        SamplingConfig(max_new_tokens=3, temperature=0),
+        SamplingConfig(max_new_tokens=2, temperature=0),
+    ]
+
+    outputs = rollout.generate_continuous(requests, configs, max_batch_size=2)
+
+    assert [output.input_ids.shape[1] - 3 for output in outputs] == [1, 3, 2]
+    assert model.calls[:3] == [(2, 3, 0), (1, 1, 3), (1, 3, 0)]
+
+
 @patch("deepspeed.runtime.rollout.hybrid_engine_rollout.time.perf_counter")
 @patch("deepspeed.runtime.rollout.hybrid_engine_rollout.get_accelerator")
 def test_generate_records_profile_when_enabled(mock_get_accelerator, mock_perf_counter):

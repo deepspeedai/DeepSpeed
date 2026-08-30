@@ -185,17 +185,20 @@ class HybridEngineRollout(RolloutEngine):
         sampling_configs = tuple(sampling_configs)
         self._validate_continuous_inputs(requests, sampling_configs, max_batch_size)
 
-        from transformers import StaticCache
-        from deepspeed.utils.static_cache import DeepSpeedStaticCache
-
         module = self.engine.module
-        device = requests[0].prompt_ids.device
         prompt_len = requests[0].prompt_ids.shape[1]
-        model_dtype = next(module.parameters()).dtype
         max_cache_len = prompt_len + sum(config.max_new_tokens for config in sampling_configs)
         max_positions = getattr(module.config, "max_position_embeddings", max_cache_len)
         if max_cache_len > max_positions:
             raise ValueError("continuous batching cache exceeds the model maximum position embeddings")
+        if not getattr(module, "_supports_cache_class", False):
+            return self._generate_continuous_legacy(requests, sampling_configs, max_batch_size)
+
+        from transformers import StaticCache
+        from deepspeed.utils.static_cache import DeepSpeedStaticCache
+
+        device = requests[0].prompt_ids.device
+        model_dtype = next(module.parameters()).dtype
 
         scheduler = ContinuousBatchScheduler(max_batch_size)
         request_by_id = {}
@@ -281,6 +284,113 @@ class HybridEngineRollout(RolloutEngine):
             self._build_continuous_output(request, responses[request_id])
             for request_id, request in enumerate(requests)
         ]
+
+    def _generate_continuous_legacy(self, requests, sampling_configs, max_batch_size):
+        """Continuous decode for Transformers models that return legacy KV tuples."""
+        module = self.engine.module
+        device = requests[0].prompt_ids.device
+        prompt_len = requests[0].prompt_ids.shape[1]
+        scheduler, request_by_id, responses = self._create_continuous_scheduler(requests, sampling_configs,
+                                                                                max_batch_size)
+        next_tokens = {}
+        attention_mask = None
+        past_key_values = None
+        update = scheduler.schedule()
+
+        while update.active:
+            survivor_count = len(update.keep_slots)
+            survivor_ids = update.active_ids[:survivor_count]
+            survivor_cache = None
+            survivor_attention = None
+            decoded_tokens = {}
+            if survivor_count:
+                keep_slots = torch.tensor(update.keep_slots, dtype=torch.long, device=device)
+                survivor_cache = self._select_legacy_cache_rows(past_key_values, keep_slots)
+                survivor_attention = attention_mask.index_select(0, keep_slots)
+                decode_input = torch.cat([next_tokens[request_id] for request_id in survivor_ids], dim=0)
+                survivor_attention = torch.cat(
+                    (survivor_attention, torch.ones((survivor_count, 1), dtype=torch.long, device=device)), dim=1)
+                decode_output = self._call_model(
+                    module,
+                    decode_input,
+                    attention_mask=survivor_attention,
+                    past_key_values=survivor_cache,
+                    use_cache=True,
+                )
+                survivor_cache = decode_output.past_key_values
+                decoded = decode_output.logits[:, -1, :].argmax(dim=-1, keepdim=True)
+                decoded_tokens = dict(zip(survivor_ids, decoded.split(1, dim=0)))
+
+            admitted_cache, admitted_attention, admitted_tokens = self._legacy_prefill(module, update, request_by_id)
+            past_key_values, attention_mask = self._merge_legacy_cache(
+                survivor_cache,
+                survivor_attention,
+                admitted_cache,
+                admitted_attention,
+                prompt_len,
+            )
+            next_tokens = decoded_tokens | admitted_tokens
+            finished_ids = []
+            for request_id in update.active_ids:
+                token = next_tokens[request_id]
+                responses[request_id].append(token)
+                if self._is_eos(token):
+                    finished_ids.append(request_id)
+            update = scheduler.advance(finished_ids)
+
+        return [
+            self._build_continuous_output(request, responses[request_id])
+            for request_id, request in enumerate(requests)
+        ]
+
+    @staticmethod
+    def _create_continuous_scheduler(requests, sampling_configs, max_batch_size):
+        scheduler = ContinuousBatchScheduler(max_batch_size)
+        request_by_id = {}
+        responses = {}
+        for request_id, (request, config) in enumerate(zip(requests, sampling_configs)):
+            scheduler.submit(ContinuousBatchRequest(request_id, config.max_new_tokens))
+            request_by_id[request_id] = request
+            responses[request_id] = []
+        return scheduler, request_by_id, responses
+
+    def _legacy_prefill(self, module, update, request_by_id):
+        if not update.admitted:
+            return None, None, {}
+        admitted_ids = tuple(request.request_id for request in update.admitted)
+        prompt_ids = torch.cat([request_by_id[request_id].prompt_ids for request_id in admitted_ids], dim=0)
+        prompt_attention = torch.cat(
+            [request_by_id[request_id].prompt_attention_mask for request_id in admitted_ids], dim=0)
+        output = self._call_model(module, prompt_ids, attention_mask=prompt_attention, use_cache=True)
+        tokens = output.logits[:, -1, :].argmax(dim=-1, keepdim=True)
+        return output.past_key_values, prompt_attention, dict(zip(admitted_ids, tokens.split(1, dim=0)))
+
+    @staticmethod
+    def _select_legacy_cache_rows(past_key_values, rows):
+        return tuple((keys.index_select(0, rows), values.index_select(0, rows)) for keys, values in past_key_values)
+
+    @staticmethod
+    def _merge_legacy_cache(survivor_cache, survivor_attention, admitted_cache, admitted_attention, prompt_len):
+        if survivor_cache is None:
+            return admitted_cache, admitted_attention
+        if admitted_cache is None:
+            return survivor_cache, survivor_attention
+
+        cache_len = survivor_cache[0][0].shape[2]
+        left_padding = cache_len - prompt_len
+        padded_admitted = tuple(
+            (torch.nn.functional.pad(keys, (0, 0, left_padding, 0)),
+             torch.nn.functional.pad(values, (0, 0, left_padding, 0))) for keys, values in admitted_cache)
+        merged_cache = tuple((torch.cat((survivor_keys, admitted_keys), dim=0),
+                              torch.cat((survivor_values, admitted_values), dim=0))
+                             for (survivor_keys, survivor_values), (admitted_keys,
+                                                                    admitted_values) in zip(survivor_cache,
+                                                                                            padded_admitted))
+        admitted_padding = torch.zeros((admitted_attention.shape[0], left_padding),
+                                       dtype=admitted_attention.dtype,
+                                       device=admitted_attention.device)
+        padded_attention = torch.cat((admitted_padding, admitted_attention), dim=1)
+        return merged_cache, torch.cat((survivor_attention, padded_attention), dim=0)
 
     def _validate_continuous_inputs(self, requests, sampling_configs, max_batch_size):
         if not requests:
