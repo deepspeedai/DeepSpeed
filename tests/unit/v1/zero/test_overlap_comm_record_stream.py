@@ -495,6 +495,13 @@ def _assert_zero2_runs_match(actual, expected):
         torch.testing.assert_close(actual_param, expected_param, rtol=5e-3, atol=5e-3)
 
 
+def _require_cuda_sleep():
+    if get_accelerator().device_name() != "cuda":
+        pytest.skip("CUDA sleep stress test requires a CUDA accelerator.")
+    if not hasattr(torch.cuda, "_sleep"):  #ignore-cuda
+        pytest.skip("CUDA sleep helper is unavailable.")
+
+
 class TestZero2IPGBufferReuse(DistributedTest):
     world_size = 2
 
@@ -502,8 +509,7 @@ class TestZero2IPGBufferReuse(DistributedTest):
     def test_parameter_size_around_bucket_boundary(self, reduce_bucket_size, uses_ipg_buffer):
         if not bf16_required_version_check():
             pytest.skip("BF16 ZeRO-2 test requires BF16 accelerator support.")
-        if not hasattr(torch.cuda, "_sleep"):  #ignore-cuda
-            pytest.skip("CUDA sleep helper is unavailable.")
+        _require_cuda_sleep()
 
         reference = _run_zero2_buffer_reuse(overlap_comm=False, reduce_bucket_size=reduce_bucket_size)
         overlap = _run_zero2_buffer_reuse(overlap_comm=True,
@@ -522,8 +528,7 @@ class TestZero2IPGBufferReuse(DistributedTest):
     def test_overlap_matches_non_overlap_through_repeated_buffer_reuse(self):
         if not bf16_required_version_check():
             pytest.skip("BF16 ZeRO-2 test requires BF16 accelerator support.")
-        if not hasattr(torch.cuda, "_sleep"):  #ignore-cuda
-            pytest.skip("CUDA sleep helper is unavailable.")
+        _require_cuda_sleep()
 
         stress_cases = [(20, int(2e7)), (32, int(5e7)), (48, int(1e8))]
         stress_repeats = int(os.environ.get("DS_ZERO_BUFFER_REUSE_STRESS_REPEATS", "1"))
