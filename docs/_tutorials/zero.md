@@ -282,7 +282,35 @@ Saving fp32 state dict to pytorch_model.bin (total_numel=60506624)
 
 The `zero_to_fp32.py` script gets created automatically when you save a checkpoint.
 
-Note: currently this script uses 2x memory (general RAM) of the size of the final checkpoint.
+To reduce the exported checkpoint size, use the accompanying `zero_to_torch.py`
+script and choose `float16` or `bfloat16`. The original `zero_to_fp32.py`
+behavior remains unchanged.
+
+```bash
+$ ./zero_to_torch.py . checkpoint-bf16 --dtype bfloat16
+```
+
+The conversion reconstructs the ZeRO master weights in fp32, casts each output
+shard immediately before it is saved, and plans shard sizes using the selected
+dtype. Shared parameters remain shared in the exported state dict. The same
+functionality is available from Python:
+
+```python
+import torch
+from deepspeed.utils.zero_to_fp32 import convert_zero_checkpoint_to_state_dict
+
+convert_zero_checkpoint_to_state_dict(
+    checkpoint_dir,
+    output_dir,
+    dtype=torch.bfloat16,
+)
+```
+
+Questions and maintenance: [@gaoxiaomo](https://github.com/gaoxiaomo).
+
+Note: fp32 conversion currently uses about 2x the final checkpoint size in CPU
+memory. Lower-precision export still reconstructs the fp32 master weights, so
+its peak memory is larger than 2x the final fp16/bf16 checkpoint size.
 {: .notice--info}
 
 Alternatively, if you have plenty of spare CPU memory and instead of getting the file you want your model to be updated to its fp32 weights, you can do the following at the end of the training:

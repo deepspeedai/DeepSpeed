@@ -12,6 +12,7 @@ Two generation paths:
      launch overhead.
 """
 
+import time
 from dataclasses import dataclass
 
 import torch
@@ -24,6 +25,8 @@ from deepspeed.runtime.rollout.base import RolloutBatch, RolloutEngine, RolloutR
 class HybridEngineRolloutConfig:
     """Configuration for HybridEngineRollout."""
     use_graph_capture: bool = False
+    enable_profiling: bool = False
+    use_shared_prefill: bool = False
 
 
 class HybridEngineRollout(RolloutEngine):
@@ -39,6 +42,9 @@ class HybridEngineRollout(RolloutEngine):
         self.engine = engine
         self.tokenizer = tokenizer
         self.use_graph_capture = getattr(cfg, 'use_graph_capture', False) if cfg else False
+        self.enable_profiling = getattr(cfg, 'enable_profiling', False) if cfg else False
+        self.use_shared_prefill = getattr(cfg, 'use_shared_prefill', False) if cfg else False
+        self._last_profile = None
 
     @torch.no_grad()
     def generate(self, request: RolloutRequest, sampling: SamplingConfig) -> RolloutBatch:
@@ -48,9 +54,18 @@ class HybridEngineRollout(RolloutEngine):
         total = B * n
         prompt_len = request.prompt_ids.shape[1]
         max_new_tokens = sampling.max_new_tokens
-        pad_token_id = self.tokenizer.pad_token_id or self.tokenizer.eos_token_id
+        pad_token_id = self.tokenizer.pad_token_id
+        if pad_token_id is None:
+            pad_token_id = self.tokenizer.eos_token_id
+        if pad_token_id is None:
+            raise ValueError("The tokenizer must define pad_token_id or eos_token_id")
 
         module = self.engine.module
+
+        if self.enable_profiling:
+            accelerator = get_accelerator()
+            accelerator.synchronize()
+            profile_start = time.perf_counter()
 
         # Expand prompts for n samples per prompt
         if n > 1:
@@ -60,37 +75,161 @@ class HybridEngineRollout(RolloutEngine):
             prompt_ids = request.prompt_ids
             prompt_attn = request.prompt_attention_mask
 
+        if self.enable_profiling:
+            accelerator.synchronize()
+            expansion_end = time.perf_counter()
+
         is_greedy = sampling.temperature <= 0.0
 
-        if self.use_graph_capture and is_greedy:
-            output_ids = self._generate_graph(prompt_ids, prompt_attn, max_new_tokens, pad_token_id, module, device)
-        else:
-            temperature = max(sampling.temperature, 1e-8)
-            do_sample = not is_greedy
-            output_ids = module.generate(
-                prompt_ids,
-                attention_mask=prompt_attn,
-                max_new_tokens=max_new_tokens,
-                do_sample=do_sample,
-                temperature=temperature if do_sample else 1.0,
-                top_p=sampling.top_p if do_sample else 1.0,
-                pad_token_id=pad_token_id,
-            )
+        shared_prefill_handles = []
+        if self.use_shared_prefill and n > 1:
+            if self.use_graph_capture:
+                raise RuntimeError("Shared prefill does not support CUDA graph capture")
+            self.engine.prepare_shared_prefill(B, n, prompt_len)
+            shared_prefill_handles = self._register_shared_prefill_hooks(module, B, n)
+        try:
+            if self.use_graph_capture and is_greedy:
+                output_ids = self._generate_graph(prompt_ids, prompt_attn, max_new_tokens, pad_token_id, module,
+                                                  device)
+            else:
+                temperature = max(sampling.temperature, 1e-8)
+                do_sample = not is_greedy
+                output_ids = module.generate(
+                    prompt_ids,
+                    attention_mask=prompt_attn,
+                    max_new_tokens=max_new_tokens,
+                    # ZeRO-3 gathers parameters during each decode forward, so every
+                    # data-parallel rank must execute the same number of iterations.
+                    eos_token_id=None,
+                    do_sample=do_sample,
+                    temperature=temperature if do_sample else 1.0,
+                    top_p=sampling.top_p if do_sample else 1.0,
+                    pad_token_id=pad_token_id,
+                )
+        finally:
+            for handle in shared_prefill_handles:
+                handle.remove()
+
+        if self.enable_profiling:
+            accelerator.synchronize()
+            generation_end = time.perf_counter()
+
+        # Generation deliberately ignores EOS above so ZeRO-3 ranks execute
+        # the same number of parameter-gather collectives. Restore the usual
+        # generation semantics before returning: retain the first EOS in each
+        # response and replace every later token with padding.
+        output_ids, response_attn = self._pad_after_eos(
+            output_ids,
+            response_start=prompt_len,
+            eos_token_id=self.tokenizer.eos_token_id,
+            pad_token_id=pad_token_id,
+        )
 
         # Build attention mask: pad positions (both left padding from prompt
         # and right padding from EOS / shorter sequences) are 0.
-        full_len = output_ids.shape[1]
         response_start = prompt_len
         attention_mask = (output_ids != pad_token_id).long()
+        attention_mask[:, response_start:] = response_attn
         for i in range(total):
             prompt_valid = request.prompt_attention_mask[i // n if B > 1 else 0]
             attention_mask[i, :prompt_len] = prompt_valid
 
-        return RolloutBatch(
+        rollout_batch = RolloutBatch(
             input_ids=output_ids,
             attention_mask=attention_mask,
             response_start_idx=torch.full((total, ), response_start, dtype=torch.long, device=device),
         )
+
+        if self.enable_profiling:
+            accelerator.synchronize()
+            post_processing_end = time.perf_counter()
+            prompt_expansion_ms = (expansion_end - profile_start) * 1000.0
+            generation_ms = (generation_end - expansion_end) * 1000.0
+            post_processing_ms = (post_processing_end - generation_end) * 1000.0
+            total_ms = (post_processing_end - profile_start) * 1000.0
+            response_length = int(output_ids.shape[1] - prompt_len)
+            num_generated_tokens = int(output_ids.shape[0] * response_length)
+            tokens_per_second = 0.0
+            if total_ms > 0.0:
+                tokens_per_second = num_generated_tokens / (total_ms / 1000.0)
+            self._last_profile = {
+                "prompt_expansion_ms": prompt_expansion_ms,
+                "generation_ms": generation_ms,
+                "post_processing_ms": post_processing_ms,
+                "total_ms": total_ms,
+                "num_generated_tokens": num_generated_tokens,
+                "tokens_per_second": tokens_per_second,
+                "batch_size": B,
+                "num_samples_per_prompt": n,
+                "prompt_length": prompt_len,
+                "response_length": response_length,
+            }
+
+        return rollout_batch
+
+    def get_last_profile(self):
+        """Return the most recent profiling snapshot for this rollout instance."""
+        return self._last_profile
+
+    def _register_shared_prefill_hooks(self, module, batch_size, repeats):
+        state = {"pending": True, "reduced": False}
+
+        def reduce_prompt_batch(_module, args, kwargs):
+            input_ids = kwargs.get("input_ids")
+            if not state["pending"]:
+                return args, kwargs
+            if input_ids is None:
+                raise RuntimeError("Shared prefill requires input_ids as a keyword argument")
+            expected_batch_size = batch_size * repeats
+            if input_ids.shape[0] != expected_batch_size:
+                raise RuntimeError("Shared prefill input batch does not match the expanded rollout batch")
+            if input_ids.shape[1] <= 1:
+                raise RuntimeError("Shared prefill requires a prompt with more than one token")
+            kwargs = dict(kwargs)
+            kwargs["input_ids"] = input_ids[::repeats]
+            for name in ("attention_mask", "position_ids", "token_type_ids"):
+                value = kwargs.get(name)
+                if isinstance(value, torch.Tensor) and value.shape[0] == expected_batch_size:
+                    kwargs[name] = value[::repeats]
+            state["reduced"] = True
+            return args, kwargs
+
+        def expand_prompt_output(_module, _args, _kwargs, output):
+            if not state["pending"]:
+                return output
+            if not state["reduced"]:
+                raise RuntimeError("Shared prefill did not reduce the prompt batch")
+            state["pending"] = False
+            output.past_key_values = self.engine.repeat_shared_prefill_cache(batch_size, repeats)
+            output.logits = output.logits.repeat_interleave(repeats, dim=0)
+            return output
+
+        pre_handle = module.register_forward_pre_hook(reduce_prompt_batch, with_kwargs=True)
+        post_handle = module.register_forward_hook(expand_prompt_output, with_kwargs=True)
+        return pre_handle, post_handle
+
+    @staticmethod
+    def _pad_after_eos(output_ids, response_start, eos_token_id, pad_token_id):
+        """Retain the first response EOS and pad every subsequent position."""
+        response_ids = output_ids[:, response_start:]
+        response_attn = (response_ids != pad_token_id)
+
+        if eos_token_id is None or response_ids.shape[1] == 0:
+            return output_ids, response_attn.long()
+
+        eos_ids = torch.as_tensor(eos_token_id, device=response_ids.device, dtype=response_ids.dtype).flatten()
+        is_eos = (response_ids.unsqueeze(-1) == eos_ids).any(dim=-1)
+        has_eos = is_eos.any(dim=-1)
+        first_eos_idx = is_eos.long().argmax(dim=-1)
+        positions = torch.arange(response_ids.shape[1], device=response_ids.device).unsqueeze(0)
+        after_first_eos = has_eos.unsqueeze(1) & (positions > first_eos_idx.unsqueeze(1))
+        first_eos = has_eos.unsqueeze(1) & (positions == first_eos_idx.unsqueeze(1))
+
+        output_ids = output_ids.clone()
+        output_ids[:, response_start:].masked_fill_(after_first_eos, pad_token_id)
+        # EOS is a valid generated token even when pad_token_id == eos_token_id.
+        response_attn = ((response_ids != pad_token_id) | first_eos) & ~after_first_eos
+        return output_ids, response_attn.long()
 
     # ------------------------------------------------------------------
     # Graph capture decode loop (greedy only)
