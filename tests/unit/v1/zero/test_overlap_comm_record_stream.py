@@ -225,10 +225,6 @@ def test_ipg_buffer_reuse_waits_on_matching_completion_only():
     bucket = zero_stage12.IPGBucket()
     producer = _FakeWaitStream()
 
-    bucket.index = 0
-    optimizer._wait_for_ipg_buffer_reuse(bucket, producer)
-    assert producer.waited_on_events == []
-
     buffer_0_complete = object()
     buffer_1_complete = object()
     bucket.reduction_complete_events = [buffer_0_complete, buffer_1_complete]

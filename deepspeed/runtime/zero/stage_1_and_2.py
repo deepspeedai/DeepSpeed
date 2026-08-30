@@ -127,6 +127,15 @@ class IPGBucket:
     # hooks run on different autograd streams), not just the current one (#8061).
     copy_streams: set = field(default_factory=set)
 
+    def set_buffers(self, buffers):
+        self.buffer = buffers
+        self.reduction_complete_events = [None] * len(buffers)
+        self.index = 0
+
+    def add_buffer(self, buf):
+        self.buffer.append(buf)
+        self.reduction_complete_events.append(None)
+
     def clear(self):
         self.params.clear()
         self.grads.clear()
@@ -840,8 +849,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
     def _release_ipg_buffers(self):
         if self.contiguous_gradients:
             for bucket in self.ipg_buckets.values():
-                bucket.buffer.clear()
-                bucket.reduction_complete_events.clear()
+                bucket.set_buffers([])
 
             self.grads_in_partition = None
             self.grads_in_partition_offset = 0
@@ -878,11 +886,10 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         # with PP we must create ipg buffer, since backward is handled outside zero
         if pipeline_parallel and self.contiguous_gradients:
             for dtype, bucket in self.ipg_buckets.items():
-                bucket.buffer.append(
+                bucket.add_buffer(
                     torch.empty(int(self.reduce_bucket_size),
                                 dtype=dtype,
                                 device=get_accelerator().current_device_name()))
-                bucket.reduction_complete_events = [None] * len(bucket.buffer)
                 bucket.index = 0
 
         if not self.overlap_comm:
@@ -1271,8 +1278,6 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         self.report_ipg_memory_usage("End ipg_remove_grads", 0)
 
     def _wait_for_ipg_buffer_reuse(self, bucket, producer_stream):
-        if bucket.index >= len(bucket.reduction_complete_events):
-            return
         completion_event = bucket.reduction_complete_events[bucket.index]
         if completion_event is not None:
             producer_stream.wait_event(completion_event)
@@ -2526,14 +2531,11 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
 
             if self.contiguous_gradients:
                 for _, bucket in self.ipg_buckets.items():
-                    bucket.buffer.clear()
-
                     # Buffer's dtype is the same as the dtype of optimizer, not dtype for autocast
                     buf_0 = torch.empty(int(self.reduce_bucket_size),
                                         dtype=self.dtype,
                                         device=get_accelerator().current_device_name())
-                    bucket.buffer.append(buf_0)
-                    bucket.index = 0
+                    bucket.set_buffers([buf_0])
 
                 # Use double buffers to avoid data access conflict when overlap_comm is enabled.
                 if self.overlap_comm:
@@ -2541,10 +2543,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                         buf_1 = torch.empty(int(self.reduce_bucket_size),
                                             dtype=self.dtype,
                                             device=get_accelerator().current_device_name())
-                        bucket.buffer.append(buf_1)
-
-                for _, bucket in self.ipg_buckets.items():
-                    bucket.reduction_complete_events = [None] * len(bucket.buffer)
+                        bucket.add_buffer(buf_1)
 
             self.ready_for_gradients = True
 
