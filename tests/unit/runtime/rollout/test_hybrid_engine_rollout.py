@@ -99,6 +99,21 @@ def test_continuous_generation_rejects_unsupported_inputs():
         )
 
 
+def test_static_cache_constructor_supports_legacy_batch_keyword():
+
+    class LegacyStaticCache:
+
+        def __init__(self, config, max_batch_size, max_cache_len, device, dtype):
+            self.config = config
+            self.max_batch_size = max_batch_size
+
+    config = SimpleNamespace(num_attention_heads=4)
+    cache = HybridEngineRollout._create_static_cache(LegacyStaticCache, config, 2, 8, "cpu", torch.float32)
+
+    assert cache.max_batch_size == 2
+    assert cache.config.num_key_value_heads == 4
+
+
 @patch("deepspeed.runtime.rollout.hybrid_engine_rollout.time.perf_counter")
 @patch("deepspeed.runtime.rollout.hybrid_engine_rollout.get_accelerator")
 def test_generate_records_profile_when_enabled(mock_get_accelerator, mock_perf_counter):

@@ -15,6 +15,7 @@ Two generation paths:
 """
 
 import time
+from copy import copy
 from dataclasses import dataclass
 from inspect import signature
 
@@ -345,8 +346,12 @@ class HybridEngineRollout(RolloutEngine):
     @staticmethod
     def _create_static_cache(static_cache_type, config, batch_size, max_cache_len, device, dtype):
         """Construct StaticCache across Transformers' batch-size API variants."""
+        cache_config = config
+        if not hasattr(config, "num_key_value_heads") or config.num_key_value_heads is None:
+            cache_config = copy(config)
+            cache_config.num_key_value_heads = config.num_attention_heads
         common_kwargs = {
-            "config": config,
+            "config": cache_config,
             "max_cache_len": max_cache_len,
             "device": device,
             "dtype": dtype,
