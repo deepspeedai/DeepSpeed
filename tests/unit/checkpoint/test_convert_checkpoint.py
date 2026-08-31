@@ -57,6 +57,31 @@ def test_checkpoint_file_output_dtype(monkeypatch, tmp_path):
     assert (bf16_dir / "pytorch_model.bin").stat().st_size < (fp32_dir / "pytorch_model.bin").stat().st_size * 0.6
 
 
+@pytest.mark.parametrize("max_shard_size", [None, "1GB"])
+def test_safe_serialization_with_tied_weights(monkeypatch, tmp_path, max_shard_size):
+    """safetensors rejects tensors that share storage, and tied weights (the usual
+    embedding / lm_head pair) are exactly that, so the shared entry needs its own copy."""
+    pytest.importorskip("safetensors")
+
+    def make_state_dict(*args, **kwargs):
+        weight = torch.arange(4096, dtype=torch.float32)
+        return {"weight": weight, "shared_weight": weight}
+
+    monkeypatch.setattr(zero_to_fp32, "get_fp32_state_dict_from_zero_checkpoint", make_state_dict)
+    output_dir = tmp_path / f"safetensors-{max_shard_size}"
+
+    convert_zero_checkpoint_to_state_dict("unused", output_dir, max_shard_size=max_shard_size, safe_serialization=True)
+
+    from safetensors.torch import load_file
+    state_dict = {}
+    for shard in sorted(output_dir.glob("*.safetensors")):
+        state_dict.update(load_file(shard))
+
+    assert sorted(state_dict) == ["shared_weight", "weight"]
+    torch.testing.assert_close(state_dict["weight"], state_dict["shared_weight"])
+    torch.testing.assert_close(state_dict["weight"], torch.arange(4096, dtype=torch.float32))
+
+
 def test_zero_to_torch_cli_passes_dtype(monkeypatch, tmp_path):
     call = {}
 
