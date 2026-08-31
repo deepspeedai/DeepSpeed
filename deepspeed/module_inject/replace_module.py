@@ -17,7 +17,6 @@ from .auto_tp import AutoTP, ReplaceWithTensorSlicing, Loading
 from .layers import TensorParallelOcShardConv2d, TensorParallelIcShardConv2d
 from deepspeed.module_inject.layers import is_autotp_training_mode
 from deepspeed import comm as dist
-from deepspeed.module_inject.tp_shard import set_num_kv_heads, set_n_embd, set_num_attention_heads, set_tp_grain_size
 
 from .load_checkpoint import load_model_with_checkpoint
 import time
@@ -278,7 +277,19 @@ def replace_transformer_layer(orig_layer_impl, model, checkpoint_dict, config, m
         if hasattr(config, 'get_partition_config_object'):
             partition_config = config.get_partition_config_object()
 
-        # 1. Create AutoTP object
+        # 1. Resolve which sub-config describes the layers being replaced (e.g. Mllama vision
+        # vs text); AutoTP reads its TP metadata from it.
+        if hasattr(model_config, "vision_config"):
+            if "MllamaVisionEncoderLayer" in str(module):
+                meta_config = model_config.vision_config
+            elif hasattr(model_config, "text_config"):
+                meta_config = model_config.text_config
+            else:
+                meta_config = model_config
+        else:
+            meta_config = model_config
+
+        # 2. Create AutoTP object; it derives its tp_meta from meta_config.
         _autotp = AutoTP(module,
                          all_reduce_linears,
                          prefix,
@@ -287,48 +298,17 @@ def replace_transformer_layer(orig_layer_impl, model, checkpoint_dict, config, m
                          orig_layer_impl,
                          config.keep_module_on_host,
                          partition_config=partition_config,
+                         model_config=meta_config,
+                         tp_grain_size=config.tensor_parallel.tp_grain_size,
                          training_mode=training_mode)
 
-        # 2. Set the tensor parallelism config
+        # 3. Set the tensor parallelism config
         _autotp.set_tensor_parallel_config(config.tensor_parallel.tp_size, config.tensor_parallel.tp_group)
 
-        # 3. Try to get num_key_heads from model_config.num_key_value_heads
-        if hasattr(model_config, "vision_config"):
-            if "MllamaVisionEncoderLayer" in str(module):
-                num_kv_heads = _autotp.get_model_num_kv_heads(model_config.vision_config)
-            elif hasattr(model_config, "text_config"):
-                num_kv_heads = _autotp.get_model_num_kv_heads(model_config.text_config)
-            else:
-                num_kv_heads = _autotp.get_model_num_kv_heads(model_config)
-        else:
-            num_kv_heads = _autotp.get_model_num_kv_heads(model_config)
-
-        # 4. When we have num_kv_heads defined, uneven division is possible, otherwise enforce even division
-        set_num_kv_heads(num_kv_heads)
-
-        # 4.1 Get n_embd
-        n_embd = None
-        multi_query_n_embd_names = ['n_embd', 'hidden_size']
-        for name in multi_query_n_embd_names:
-            if hasattr(model_config, name):
-                n_embd = getattr(model_config, name)
-            if n_embd != None:
-                break
-
-        # 4.2 set n_embd
-        set_n_embd(n_embd)
-
-        # 4.3 set attention_heads
-        if hasattr(model_config, 'num_attention_heads'):
-            set_num_attention_heads(getattr(model_config, 'num_attention_heads'))
-
-        # 4.4 set tp_grain_size
-        set_tp_grain_size(config.tensor_parallel.tp_grain_size)
-
-        # 5. Set linear policies
+        # 4. Set linear policies
         _autotp.update_linear_policies()
 
-        # 6. Replace modules
+        # 5. Replace modules
         if "lm_head" in all_reduce_linears or "embed_out" in all_reduce_linears:
             return _autotp._replace_last_linear_module(module)
         return _autotp._replace_module(module)

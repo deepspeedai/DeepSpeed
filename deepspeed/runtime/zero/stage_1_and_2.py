@@ -2099,7 +2099,9 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                         torch.linalg.vector_norm(g.data.to(get_norm_dtype()).detach(),
                                                  ord=norm_type).to(get_accelerator().current_device_name()))
             if len(all_norms) > 0:
-                total_norm = torch.stack(all_norms).square().sum().float()
+                # vector_norm above already gives each ||g||_norm_type, and the 1/norm_type
+                # root is taken below, so the exponent here has to be norm_type too.
+                total_norm = torch.stack(all_norms).pow(norm_type).sum().float()
             else:
                 total_norm = torch.tensor(0.0, dtype=torch.float32).to(self.device)
             # Sum across all model parallel Device.
@@ -2949,8 +2951,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             if pin_memory:
                 if not hasattr(self, "hp_params_pin_buffers"):
                     self.hp_params_pin_buffers = [
-                        get_accelerator().pin_memory(torch.empty_like(t, device=device), make_copy=False)
-                        for t in self.single_partition_of_fp32_groups
+                        get_accelerator().pin_empty_like(t, device='cpu') for t in self.single_partition_of_fp32_groups
                     ]
                 for src_tensor, dest_buf in zip(self.single_partition_of_fp32_groups, self.hp_params_pin_buffers):
                     dest_buf.copy_(src_tensor, non_blocking=non_blocking)
@@ -2973,8 +2974,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             if pin_memory:
                 if not hasattr(self, "lp_params_pin_buffers"):
                     self.lp_params_pin_buffers = [
-                        get_accelerator().pin_memory(torch.empty_like(t, device=device), make_copy=False)
-                        for t in self.bit16_groups_flat
+                        get_accelerator().pin_empty_like(t, device='cpu') for t in self.bit16_groups_flat
                     ]
                 for src_tensor, dest_buf in zip(self.bit16_groups_flat, self.lp_params_pin_buffers):
                     dest_buf.copy_(src_tensor, non_blocking=non_blocking)

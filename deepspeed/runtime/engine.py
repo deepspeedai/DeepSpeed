@@ -824,20 +824,15 @@ class DeepSpeedEngine(Module):
             partition_config = tp_config.get_partition_config_object()
 
         model_config = getattr(model, "config", None)
-        # The direct Hugging Face tp_plan path bypasses replace_transformer_layer, which
-        # normally initializes the shard-size globals that AutoTP layers consult. Without
-        # them attention projections are split by grain size and can be cut mid-head, so
-        # the model's later reshape onto head_dim fails.
-        from deepspeed.module_inject.tp_shard import set_num_kv_heads, set_n_embd, set_num_attention_heads
-        from deepspeed.module_inject.tp_shard import set_tp_grain_size
+        # AutoTP derives its per-model sharding metadata from the model config; the warning
+        # below only needs the kv-head count, which that same metadata already carries.
+        # from_model_config descends into text_config itself, so multimodal outer configs
+        # work here too.
+        from deepspeed.module_inject.tp_shard import AutoTPMeta
 
-        # 1. Try to get num_key_heads from model_config.num_key_value_heads
-        if hasattr(model_config, "text_config"):
-            num_kv_heads = AutoTP.get_model_num_kv_heads(model_config.text_config)
-        else:
-            num_kv_heads = AutoTP.get_model_num_kv_heads(model_config)
+        num_kv_heads = AutoTPMeta.from_model_config(model_config).num_kv_heads
 
-        # 2. Ranks beyond the KV head count get no attention shard. This still computes the
+        # Ranks beyond the KV head count get no attention shard. This still computes the
         # correct result because the row-parallel all-reduce sums their empty contribution,
         # but attention work concentrates on the first num_kv_heads ranks.
         if num_kv_heads is not None and tp_size > num_kv_heads:
@@ -847,28 +842,6 @@ class DeepSpeedEngine(Module):
                 "attention throughput will not scale past that point.",
                 ranks=[0],
                 level=logging.WARNING)
-
-        # 3. When we have num_kv_heads defined, uneven division is possible, otherwise enforce even division
-        set_num_kv_heads(num_kv_heads)
-
-        # 3.1 Get n_embd
-        n_embd = None
-        multi_query_n_embd_names = ['n_embd', 'hidden_size']
-        for name in multi_query_n_embd_names:
-            if hasattr(model_config, name):
-                n_embd = getattr(model_config, name)
-            if n_embd != None:
-                break
-
-        # 3.2 set n_embd
-        set_n_embd(n_embd)
-
-        # 3.3 set attention_heads
-        if hasattr(model_config, 'num_attention_heads'):
-            set_num_attention_heads(getattr(model_config, 'num_attention_heads'))
-
-        # 3.4 set tp_grain_size
-        set_tp_grain_size(tp_config.tensor_parallel.tp_grain_size)
 
         from deepspeed.runtime.tensor_parallel.config import _get_hf_tp_plan
         hf_tp_plan = _get_hf_tp_plan(model)
@@ -882,6 +855,8 @@ class DeepSpeedEngine(Module):
                             orig_layer_impl=None,
                             keep_module_on_host=tp_config.keep_module_on_host,
                             partition_config=partition_config,
+                            model_config=model_config,
+                            tp_grain_size=tp_config.tensor_parallel.tp_grain_size,
                             training_mode=True)
             autotp.set_tensor_parallel_config(tp_size, tp_config.tensor_parallel.tp_group)
             autotp.update_linear_policies()
@@ -921,6 +896,8 @@ class DeepSpeedEngine(Module):
                     orig_layer_impl=None,
                     keep_module_on_host=tp_config.keep_module_on_host,
                     partition_config=tp_plan_config,
+                    model_config=model_config,
+                    tp_grain_size=tp_config.tensor_parallel.tp_grain_size,
                     training_mode=True,
                 )
                 autotp.set_tensor_parallel_config(tp_size, tp_config.tensor_parallel.tp_group)
