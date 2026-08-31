@@ -25,7 +25,8 @@ from deepspeed.utils import logger
 from deepspeed.moe.ep_router import TokenChoiceTopKRouter
 from deepspeed.moe.ep_count import count_tokens_per_expert
 from deepspeed.moe.ep_experts import GroupedExperts
-from deepspeed.moe.ep_repack import _gather_source_zero_params, repack_expert_requires_grad_flags, repack_expert_weights
+from deepspeed.moe.ep_repack import (_gather_source_zero_params, repack_expert_requires_grad_flags,
+                                     repack_expert_source_params, repack_expert_weights)
 
 # ---------------------------------------------------------------------------
 # Named tuples
@@ -470,6 +471,34 @@ class AutoEPMoELayer(nn.Module):
         self.experts.w1.requires_grad_(w1_requires_grad)
         self.experts.w2.requires_grad_(w2_requires_grad)
         self.experts.w3.requires_grad_(w3_requires_grad)
+
+        # Record which source parameters produced each replacement. A caller-supplied optimizer
+        # has already sorted the sources into param groups, so this is what lets the engine put
+        # every replacement back into the group its sources came from. AutoEP.replace_moe_layers
+        # pops the attribute straight away, so the discarded source tensors are not kept alive.
+        w1_sources, w2_sources, w3_sources = repack_expert_source_params(
+            experts_source=getattr(source_module, spec.experts_name),
+            spec=spec,
+            ep_rank=ep_rank,
+            ep_size=ep_size,
+        )
+        replacement_sources = {
+            id(self.experts.w1): list(w1_sources),
+            id(self.experts.w2): list(w2_sources),
+            id(self.experts.w3): list(w3_sources),
+            id(self.router.gate.weight): [source_gate.weight],
+        }
+        if spec.gate_bias and source_gate_bias is not None:
+            replacement_sources[id(self.router.gate.bias)] = [source_gate_bias]
+        if source_ecb is not None and isinstance(source_ecb, nn.Parameter):
+            replacement_sources[id(self.router.e_score_correction_bias)] = [source_ecb]
+        # Anything else the router or the grouped experts allocated has no counterpart in the
+        # source module, so tie it to this block's gate weight: it carries no pretrained value of
+        # its own, but it still belongs with the rest of this block's parameters.
+        for fresh_module in (self.router, self.experts):
+            for param in fresh_module.parameters():
+                replacement_sources.setdefault(id(param), [source_gate.weight])
+        self._autoep_replacement_sources = replacement_sources
 
         self.shared_experts = getattr(source_module, spec.shared_experts_name,
                                       None) if spec.has_shared_experts else None

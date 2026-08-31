@@ -238,6 +238,48 @@ def _eigenvalue_summary_events(block_eigenvalue, global_samples):
             for i, ev_value in enumerate(block_eigenvalue.values())]
 
 
+def _resolve_replacement_param_groups(missing, replacement_sources, param_groups, stale_groups):
+    """Pick the param group each replacement parameter belongs to.
+
+    A replacement inherits the group its source parameters were in. Replacements the module
+    replacement could not trace back to a source fall back to the single group that lost
+    parameters, which is the only choice that cannot mis-assign hyper-parameters.
+    """
+    group_of_source = {}
+    for group_index, group in enumerate(param_groups):
+        for param in group["params"]:
+            group_of_source[id(param)] = group_index
+
+    placement = {}
+    untraced = []
+    for param in missing:
+        sources = replacement_sources.get(id(param), [])
+        source_groups = sorted({group_of_source[id(s)] for s in sources if id(s) in group_of_source})
+        if len(source_groups) > 1:
+            raise RuntimeError("Module replacement (AutoEP) built a single parameter from sources that the client "
+                               f"optimizer had split across param groups {source_groups}, so it cannot be assigned "
+                               "unambiguously. Put those source parameters in one param group, declare the optimizer "
+                               'in the DeepSpeed config ("optimizer": {...}) so it is built after replacement, or '
+                               "construct it after deepspeed.initialize().")
+        if source_groups:
+            placement[id(param)] = source_groups[0]
+        else:
+            untraced.append(param)
+
+    if untraced:
+        candidates = sorted(set(placement.values())) or stale_groups
+        if len(candidates) != 1:
+            raise RuntimeError(f"Module replacement (AutoEP) invalidated optimizer parameters in param groups "
+                               f"{stale_groups} and {len(untraced)} replacement parameter(s) could not be traced back "
+                               "to a source, so they cannot be assigned unambiguously. Declare the optimizer in the "
+                               'DeepSpeed config ("optimizer": {...}) so it is built after replacement, or construct '
+                               "it after deepspeed.initialize().")
+        for param in untraced:
+            placement[id(param)] = candidates[0]
+
+    return placement
+
+
 def _checkpoint_parallel_metadata(mpu):
     from deepspeed.utils.bwc import bwc_pipeline_parallel_world_size, bwc_tensor_model_parallel_world_size
 
@@ -328,8 +370,8 @@ class DeepSpeedEngine(Module):
         self._do_sanity_check()
         if self.log_level() is not None:
             set_log_level_from_string(self.log_level())
-        self._configure_expert_parallel(model)
-        self._remap_client_optimizer_after_module_replacement(model)
+        autoep_replacement_sources = self._configure_expert_parallel(model)
+        self._remap_client_optimizer_after_module_replacement(model, autoep_replacement_sources)
         if self.autotp_size() > 1:
             self._configure_tensor_parallel(model, self.tensor_parallel_config())
         see_memory_usage("DeepSpeed Engine: After args sanity test", force=self.memory_breakdown())
@@ -568,7 +610,7 @@ class DeepSpeedEngine(Module):
                 else:
                     p.ds_offload = False
 
-    def _remap_client_optimizer_after_module_replacement(self, model):
+    def _remap_client_optimizer_after_module_replacement(self, model, replacement_sources=None):
         """Re-point a caller-supplied optimizer at the post-replacement parameters.
 
         AutoEP swaps every MoE block for an ``AutoEPMoELayer`` in
@@ -586,40 +628,42 @@ class DeepSpeedEngine(Module):
             'partition_numel'`` from ``_create_fp16_sub_groups``, because the stale params
             were never converted.
 
-        Rebuilding the groups here keeps caller-supplied optimizers working and preserves
-        each group's hyper-parameters. When the mapping is ambiguous we raise rather than
-        guess, since guessing wrong silently mis-assigns weight decay.
+        A parameter counts as stale only when the replacement detached it from the module
+        tree. Frozen parameters are still part of the model, so they keep their place and are
+        left for the ZeRO optimizers to filter out; counting them as stale would make an
+        otherwise unambiguous remap look like it spanned several param groups.
+
+        ``replacement_sources`` maps each replacement parameter to the source parameters it was
+        built from, so a replacement rejoins the group its sources were already in. That keeps
+        per-layer groupings such as layer-wise learning-rate decay working, where every MoE layer
+        sits in a param group of its own. When a replacement's own sources were split across
+        groups we raise rather than guess, since guessing wrong silently mis-assigns weight decay.
         """
         optimizer = self.client_optimizer
         if optimizer is None or not hasattr(optimizer, "param_groups"):
-            return  # DummyOptim / config-built optimizer: DeepSpeed builds it post-replacement
+            return  # config-built or callable optimizer: DeepSpeed builds it post-replacement
 
-        live = {id(p): p for p in model.parameters() if p.requires_grad}
-        groups = optimizer.param_groups
+        live = {id(p): p for p in model.parameters()}
+        param_groups = optimizer.param_groups
 
         stale_by_group = {}
-        for gi, group in enumerate(groups):
+        for gi, group in enumerate(param_groups):
             stale = [p for p in group["params"] if id(p) not in live]
             if stale:
                 stale_by_group[gi] = len(stale)
         if not stale_by_group:
             return  # nothing was replaced under this optimizer
 
-        owned = {id(p) for group in groups for p in group["params"]}
-        missing = [p for p in live.values() if id(p) not in owned]
+        owned = {id(p) for group in param_groups for p in group["params"]}
+        missing = [p for p in live.values() if p.requires_grad and id(p) not in owned]
 
-        if len(stale_by_group) > 1 and missing:
-            raise RuntimeError(
-                "Module replacement (AutoEP) invalidated optimizer parameters in more than one "
-                f"param group ({sorted(stale_by_group)}), so the replacement parameters cannot be "
-                "assigned unambiguously. Declare the optimizer in the DeepSpeed config "
-                '("optimizer": {...}) so it is built after replacement, or construct it after '
-                "deepspeed.initialize().")
+        placement = _resolve_replacement_param_groups(missing, replacement_sources or {}, param_groups,
+                                                      sorted(stale_by_group))
 
-        target = next(iter(stale_by_group)) if stale_by_group else 0
-        for group in groups:
+        for group in param_groups:
             group["params"] = [p for p in group["params"] if id(p) in live]
-        groups[target]["params"].extend(missing)
+        for param in missing:
+            param_groups[placement[id(param)]]["params"].append(param)
 
         # Adam/AdamW key their state dict on the parameter object; stale entries would leak.
         state = getattr(optimizer, "state", None)
@@ -627,16 +671,19 @@ class DeepSpeedEngine(Module):
             for p in [p for p in list(state.keys()) if id(p) not in live]:
                 del state[p]
 
-        n_stale = sum(stale_by_group.values())
+        added_per_group = {}
+        for group_index in placement.values():
+            added_per_group[group_index] = added_per_group.get(group_index, 0) + 1
+        added_summary = ", ".join(f"{count} to group {gi}" for gi, count in sorted(added_per_group.items()))
         logger.info(
             "Remapped client optimizer after module replacement: dropped %d stale parameter(s), "
-            "added %d replacement parameter(s) to param group %d.", n_stale, len(missing), target)
+            "added %d replacement parameter(s) (%s).", sum(stale_by_group.values()), len(missing), added_summary)
 
     def _configure_expert_parallel(self, model):
         """Initialize AutoEP: detect MoE layers, create EP groups, replace with EP-enabled layers."""
         autoep_config = self._config.expert_parallel_config
         if autoep_config is None or not autoep_config.enabled:
-            return
+            return {}
 
         from deepspeed.module_inject.auto_ep import AutoEP
         from deepspeed.module_inject.auto_ep_config import validate_autoep_config, validate_autoep_post_detection
@@ -702,14 +749,16 @@ class DeepSpeedEngine(Module):
         auto_ep = AutoEP(model, autoep_config)
         specs = auto_ep.ep_parser()
 
+        replacement_sources = {}
         if specs:
             validate_autoep_post_detection(autoep_config, specs)
-            auto_ep.replace_moe_layers(specs, ep_size=ep_size, ep_rank=ep_rank)
+            replacement_sources = auto_ep.replace_moe_layers(specs, ep_size=ep_size, ep_rank=ep_rank)
             logger.info(f"AutoEP: replaced {len(specs)} MoE layer(s) with ep_size={ep_size}")
 
             # Re-tag optimizer flags for newly created AutoEP parameters
             from deepspeed import set_optimizer_flags
             set_optimizer_flags(self._config, model)
+        return replacement_sources
 
     def _autoep_sequence_parallel_world_size(self):
         if self.mpu is not None and hasattr(self.mpu, 'get_sequence_parallel_world_size'):

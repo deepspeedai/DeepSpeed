@@ -544,12 +544,20 @@ class AutoEP:
         specs: list[MoELayerSpec],
         ep_size: int,
         ep_rank: int,
-    ) -> None:
-        """Replace multiple MoE modules and batch post-replacement recorder retargeting."""
+    ) -> dict[int, list[nn.Parameter]]:
+        """Replace multiple MoE modules and batch post-replacement recorder retargeting.
+
+        Returns the source parameters behind each replacement parameter, keyed by ``id()``, so
+        that a caller-supplied optimizer can put each replacement back into the param group its
+        sources belonged to. The entries are popped off the layers as they are collected, so the
+        discarded source tensors are only referenced until the engine has finished the remap.
+        """
         replacements: list[tuple[MoELayerSpec, nn.Module]] = []
+        replacement_sources: dict[int, list[nn.Parameter]] = {}
         for spec in specs:
             replacement = self._replace_moe_layer_without_retarget(spec, ep_size, ep_rank)
             replacements.append((spec, replacement))
+            replacement_sources.update(replacement.__dict__.pop("_autoep_replacement_sources", {}))
             logger.info(f"AutoEP: replaced '{spec.moe_module_name}' with AutoEPMoELayer "
                         f"(ep_size={ep_size}, ep_rank={ep_rank}, "
                         f"local_experts={replacement.num_local_experts})")
@@ -561,6 +569,8 @@ class AutoEP:
 
         for spec, replacement in retarget_groups.values():
             self._retarget_transformers_output_recorders(spec, replacement)
+
+        return replacement_sources
 
     def _apply_config_overrides(self, preset: MoEModelPreset) -> MoEModelPreset:
         return apply_config_overrides(self.config, preset)

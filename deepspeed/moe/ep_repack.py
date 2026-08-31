@@ -94,6 +94,48 @@ def repack_expert_requires_grad_flags(
         raise ValueError(f"Unknown expert_storage type: {spec.expert_storage}")
 
 
+def repack_expert_source_params(
+    experts_source: nn.Module,
+    spec: MoELayerSpec,
+    ep_rank: int,
+    ep_size: int,
+) -> tuple[list[nn.Parameter], list[nn.Parameter], list[nn.Parameter]]:
+    """Return the source parameters that feed each repacked (w1, w2, w3) tensor.
+
+    A caller-supplied optimizer has already sorted the source parameters into param groups, so
+    the replacements have to be placed in the group their sources came from. Each entry is a
+    list because the mapping is not one-to-one: the fused gate/up layout feeds both w1 and w3
+    from a single source parameter, and module_list storage feeds one grouped tensor from one
+    parameter per local expert.
+    """
+    num_local_experts = spec.num_experts // ep_size
+    expert_start = ep_rank * num_local_experts
+    expert_end = expert_start + num_local_experts
+
+    if spec.expert_storage == "fused_3d":
+        w1_source = getattr(experts_source, spec.expert_w1_name)
+        w2_source = getattr(experts_source, spec.expert_w2_name)
+        if spec.expert_w3_name is None:
+            # gate and up are packed into one source tensor, so it feeds both w1 and w3
+            return [w1_source], [w2_source], [w1_source]
+        return [w1_source], [w2_source], [getattr(experts_source, spec.expert_w3_name)]
+    elif spec.expert_storage == "module_list":
+        w1_sources = []
+        w2_sources = []
+        w3_sources = []
+        for expert_idx in range(expert_start, expert_end):
+            expert = experts_source[expert_idx]
+            w1_sources.append(_get_expert_weight(expert, spec.expert_w1_name))
+            w2_sources.append(_get_expert_weight(expert, spec.expert_w2_name))
+            if spec.expert_w3_name is not None:
+                w3_sources.append(_get_expert_weight(expert, spec.expert_w3_name))
+        if spec.expert_w3_name is None:
+            w3_sources = list(w1_sources)
+        return w1_sources, w2_sources, w3_sources
+    else:
+        raise ValueError(f"Unknown expert_storage type: {spec.expert_storage}")
+
+
 def _repack_fused_3d(
     experts_source: nn.Module,
     spec: MoELayerSpec,
