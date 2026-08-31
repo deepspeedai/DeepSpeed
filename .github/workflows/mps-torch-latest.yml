@@ -12,8 +12,6 @@ on:
       - 'tests/unit/ops/adam/**'
       - 'tests/unit/comm/**'
       - '.github/workflows/mps-torch-latest.yml'
-  merge_group:
-    branches: [ master ]
   schedule:
     - cron: "0 0 * * *"
 

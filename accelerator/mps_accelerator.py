@@ -20,8 +20,9 @@ class MPS_Accelerator(DeepSpeedAccelerator):
     def __init__(self):
         self._name = "mps"
         # ZeRO sizes its buffers through torch.mps memory queries that first shipped in torch 2.3;
-        # fail with a clear message instead of an AttributeError deep inside the runtime.
-        if not hasattr(torch.mps, "recommended_max_memory"):
+        # fail with a clear message instead of an AttributeError deep inside the runtime. getattr
+        # keeps this safe even on torch builds where the module-level torch.mps import failed.
+        if getattr(getattr(torch, "mps", None), "recommended_max_memory", None) is None:
             raise ValueError("MPS_Accelerator requires torch>=2.3 "
                              "(this torch build has no torch.mps.recommended_max_memory)")
         # MPS has no native collective backend; gloo is the only torch backend available on macOS.
