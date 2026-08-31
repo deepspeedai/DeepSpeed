@@ -8,6 +8,7 @@ on:
       - 'op_builder/mps/**'
       - 'csrc/mps/**'
       - 'deepspeed/comm/**'
+      - 'tests/unit/accelerator/**'
       - 'tests/unit/ops/adam/**'
       - 'tests/unit/comm/**'
       - '.github/workflows/mps-torch-latest.yml'
@@ -55,6 +56,7 @@ jobs:
           cd tests
           DS_ACCELERATOR=mps DS_UNITTEST_TIMEOUT=300 python -m pytest -p no:randomly --verbose \
             -n 3 --max-worker-restart=2 \
+            unit/accelerator/test_mps_accelerator.py \
             unit/ops/adam/test_adamw.py \
             unit/comm/test_dist.py \
             unit/runtime/test_ds_config_dict.py
