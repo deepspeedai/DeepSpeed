@@ -80,7 +80,9 @@ class SoftmaxContextOp(BaseOp):
             from transformers.models.llama.modeling_llama import apply_rotary_pos_emb
 
             rotary = InferenceContext.Instance().get_rotary(rotary_dim, rope_theta, bat_0213_value.device)
-            cos, sin = rotary(bat_0213_value, InferenceContext.Instance().get_max_tokens_num())
+            # LlamaRotaryEmbedding.forward takes position_ids, not a token count. These are
+            # the same ids handed to apply_rotary_pos_emb two lines down.
+            cos, sin = rotary(bat_0213_value, position_ids)
             bat_0213_query, bat_0213_key = apply_rotary_pos_emb(bat_0213_query, bat_0213_key, cos, sin, position_ids)
 
         bat_0213_key, bat_0213_value = InferenceContext.Instance().update_cache(layer_id, token_idx, is_prompt,
