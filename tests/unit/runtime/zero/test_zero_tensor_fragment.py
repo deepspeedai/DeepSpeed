@@ -120,6 +120,33 @@ def test_safe_get_full_model_grads_coalesces_zero_gradients(monkeypatch):
     assert torch.equal(grads["second"], torch.tensor([0.0, 3.0, 0.0]))
 
 
+def test_safe_get_full_model_grads_includes_unowned_zero_buffers(monkeypatch):
+    first = torch.nn.Parameter(torch.zeros(2))
+    first._hp_mapping = _GradientMapping(torch.tensor([1.0, 2.0]))
+    first._index_in_param_group = 0
+    first._dp_group = object()
+
+    unowned = torch.nn.Parameter(torch.zeros(3))
+    unowned._hp_mapping = None
+    unowned._dp_group = first._dp_group
+
+    calls = []
+
+    def all_reduce_coalesced(buffers, group=None):
+        calls.append((buffers, group))
+        buffers[1].add_(torch.tensor([4.0, 5.0, 6.0]))
+
+    monkeypatch.setattr(tensor_fragment_module.dist, "has_all_reduce_coalesced", lambda: True)
+    monkeypatch.setattr(tensor_fragment_module.dist, "all_reduce_coalesced", all_reduce_coalesced)
+
+    grads = tensor_fragment_module.safe_get_full_model_grads(
+        _NamedParameterModel([("first", first), ("unowned", unowned)]))
+
+    assert len(calls) == 1
+    assert len(calls[0][0]) == 2
+    assert torch.equal(grads["unowned"], torch.tensor([4.0, 5.0, 6.0]))
+
+
 def run_fragmented_model(model, config_dict, hidden_dim, dtype, validate_after_bwd, validate_after_step):
     model, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config_dict)
     data_loader = random_dataloader(model=model,

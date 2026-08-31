@@ -253,18 +253,19 @@ def safe_get_full_model_grads(model):
             full_grads[name] = param._z3_optimizer.get_fp32_grad_for_param(param)
             continue
 
-        if not hasattr(param, '_hp_mapping') or param._hp_mapping is None:
+        if not hasattr(param, '_hp_mapping'):
             full_grads[name] = None
             continue
 
         mapping = param._hp_mapping
         reduce_buffer = torch.zeros_like(param, dtype=torch.float32).flatten()
-        grad_fragment = mapping.get_lp_grad_fragment(param._index_in_param_group).to(torch.float32).flatten()
-        fragment_address = mapping.lp_fragment_address
-        if reduce_buffer.shape == grad_fragment.shape:
-            reduce_buffer.data.copy_(grad_fragment.data)
-        else:
-            reduce_buffer.narrow(0, fragment_address.start, fragment_address.numel).data.copy_(grad_fragment.data)
+        if mapping is not None:
+            grad_fragment = mapping.get_lp_grad_fragment(param._index_in_param_group).to(torch.float32).flatten()
+            fragment_address = mapping.lp_fragment_address
+            if reduce_buffer.shape == grad_fragment.shape:
+                reduce_buffer.data.copy_(grad_fragment.data)
+            else:
+                reduce_buffer.narrow(0, fragment_address.start, fragment_address.numel).data.copy_(grad_fragment.data)
 
         group = param._dp_group
         group_id = id(group)
