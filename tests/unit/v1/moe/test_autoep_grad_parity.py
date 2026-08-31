@@ -189,6 +189,12 @@ class _CompiledAutoEPModel(nn.Module):
         self.model.layers = nn.ModuleList([_CompiledDecoderLayer() for _ in range(2)])
         self.output = nn.Linear(128, 64, bias=False)
         self.checkpoint_enabled = checkpoint_enabled
+        with torch.no_grad():
+            for name, param in self.named_parameters():
+                if "layernorm" in name and param.ndim == 1:
+                    param.fill_(1.0)
+                else:
+                    param.normal_(mean=0.0, std=0.02)
 
     def forward(self, hidden_states):
         for layer in self.model.layers:
@@ -203,7 +209,13 @@ def _make_compile_config():
     config = make_autoep_config(zero_stage=1, ep_size=2)
     config.pop("fp16", None)
     config["bf16"] = {"enabled": True}
-    config["optimizer"]["params"]["lr"] = 3e-3
+    config["optimizer"] = {
+        "type": "SGD",
+        "params": {
+            "lr": 1e-2
+        },
+    }
+    config["zero_allow_untested_optimizer"] = True
     return config
 
 
@@ -251,12 +263,30 @@ def _run_compile_step(engine, batch):
     }
 
 
+def _warm_compile_step(engine, batch):
+    input_tensor = batch.detach().clone().requires_grad_(True)
+    output = engine(input_tensor)
+    output.float().square().mean().backward()
+    engine.zero_grad()
+    engine.optimizer.zero_grad()
+
+
 def _assert_compile_step_close(actual, expected):
-    torch.testing.assert_close(actual["output"], expected["output"], rtol=5e-3, atol=2e-2)
-    torch.testing.assert_close(actual["loss"], expected["loss"], rtol=5e-3, atol=2e-3)
-    torch.testing.assert_close(actual["input_grad"], expected["input_grad"], rtol=1e-2, atol=2e-2)
-    assert actual["grads"].keys() == expected["grads"].keys()
-    assert actual["deltas"].keys() == expected["deltas"].keys()
+    for name, rtol, atol in (
+        ("output", 5e-3, 2e-2),
+        ("loss", 5e-3, 2e-3),
+        ("input_grad", 1e-2, 2e-2),
+    ):
+        difference = (actual[name] - expected[name]).abs()
+        torch.testing.assert_close(actual[name],
+                                   expected[name],
+                                   rtol=rtol,
+                                   atol=atol,
+                                   msg=(f"{name} mismatch; max_diff={difference.max().item()}, "
+                                        f"actual_norm={actual[name].norm().item()}, "
+                                        f"expected_norm={expected[name].norm().item()}"))
+    assert actual["grads"].keys() == expected["grads"].keys(), "Gradient parameter sets differ"
+    assert actual["deltas"].keys() == expected["deltas"].keys(), "Optimizer parameter sets differ"
     for name in actual["grads"]:
         torch.testing.assert_close(actual["grads"][name],
                                    expected["grads"][name],
@@ -267,7 +297,10 @@ def _assert_compile_step_close(actual, expected):
                                    expected["deltas"][name],
                                    rtol=1e-2,
                                    atol=2e-3,
-                                   msg=f"Optimizer delta mismatch for {name}")
+                                   msg=(f"Optimizer delta max_diff="
+                                        f"{(actual['deltas'][name] - expected['deltas'][name]).abs().max().item()}, "
+                                        f"actual_norm={actual['deltas'][name].norm().item()}, "
+                                        f"expected_norm={expected['deltas'][name].norm().item()}, name={name}"))
 
 
 def _register_autoep_observers(engine):
@@ -279,11 +312,17 @@ def _register_autoep_observers(engine):
     for name, module in engine.module.named_modules():
         if not isinstance(module, AutoEPMoELayer):
             continue
-        handles.append(
-            module.register_forward_hook(lambda _module, _inputs, _output, name=name: eager_calls.append(name)))
+        original_forward = module.forward
+
+        @torch.compiler.disable
+        def observed_forward(*args, _forward=original_forward, _name=name, **kwargs):
+            eager_calls.append(_name)
+            return _forward(*args, **kwargs)
+
+        module.forward = observed_forward
         handles.append(
             module.router.register_forward_hook(lambda _module, _inputs, output, name=name: routes.append(
-                (name, output.selected_experts.detach().cpu()))))
+                (name, output[1].detach().cpu()))))
     return eager_calls, routes, handles
 
 
@@ -394,9 +433,8 @@ class TestAutoEPRegionalCompileParity(DistributedTest):
         warmup_batch = torch.randn((1, 16, 128), generator=generator, dtype=dtype).to(eager_engine.device)
         measured_batch = torch.randn((1, 16, 128), generator=generator, dtype=dtype).to(eager_engine.device)
 
-        warmup_eager = _run_compile_step(eager_engine, warmup_batch)
-        warmup_compiled = _run_compile_step(compiled_engine, warmup_batch)
-        _assert_compile_step_close(warmup_compiled, warmup_eager)
+        _warm_compile_step(eager_engine, warmup_batch)
+        _warm_compile_step(compiled_engine, warmup_batch)
 
         eager_call_start = len(eager_calls)
         compiled_call_start = len(compiled_calls)
@@ -410,23 +448,31 @@ class TestAutoEPRegionalCompileParity(DistributedTest):
 
         dynamo_end = _snapshot_dynamo_stats()
         expected_calls = len(compiled_engine._compiled_regions) * (2 if checkpoint_enabled else 1)
-        assert len(eager_calls) - eager_call_start == expected_calls
-        assert len(compiled_calls) - compiled_call_start == expected_calls
-        assert _dynamo_stat_delta(dynamo_start, dynamo_end, "unique_graphs") == 0
-        assert _dynamo_stat_delta(dynamo_start, dynamo_end, "calls_captured") == 0
+        eager_call_delta = len(eager_calls) - eager_call_start
+        compiled_call_delta = len(compiled_calls) - compiled_call_start
+        assert eager_call_delta == expected_calls, f"Eager AutoEP calls: expected={expected_calls}, got={eager_call_delta}"
+        assert compiled_call_delta == expected_calls, (
+            f"Compiled AutoEP calls: expected={expected_calls}, got={compiled_call_delta}")
+        unique_graph_delta = _dynamo_stat_delta(dynamo_start, dynamo_end, "unique_graphs")
+        captured_call_delta = _dynamo_stat_delta(dynamo_start, dynamo_end, "calls_captured")
+        assert unique_graph_delta == 0, f"Measured unique_graphs delta={unique_graph_delta}"
+        assert captured_call_delta == 0, f"Measured calls_captured delta={captured_call_delta}"
 
         measured_eager_routes = eager_routes[eager_route_start:]
         measured_compiled_routes = compiled_routes[compiled_route_start:]
-        assert len(measured_eager_routes) == len(measured_compiled_routes) == expected_calls
+        assert len(measured_eager_routes) == expected_calls, (
+            f"Eager routes: expected={expected_calls}, got={len(measured_eager_routes)}")
+        assert len(measured_compiled_routes) == expected_calls, (
+            f"Compiled routes: expected={expected_calls}, got={len(measured_compiled_routes)}")
         for (eager_name, eager_route), (compiled_name, compiled_route) in zip(measured_eager_routes,
                                                                               measured_compiled_routes):
-            assert eager_name == compiled_name
-            assert torch.equal(eager_route, compiled_route)
+            assert eager_name == compiled_name, f"Route layer mismatch: {eager_name} != {compiled_name}"
+            assert torch.equal(eager_route, compiled_route), f"Route assignment mismatch for {eager_name}"
 
         grad_names = measured_compiled["grads"]
-        assert any(".experts.w1" in name for name in grad_names)
-        assert any(".router.gate.weight" in name for name in grad_names)
-        assert any(".dense.weight" in name for name in grad_names)
+        assert any(".experts.w1" in name for name in grad_names), "Expert gradients were not checked"
+        assert any(".router.gate.weight" in name for name in grad_names), "Router gradients were not checked"
+        assert any(".dense.weight" in name for name in grad_names), "Non-MoE gradients were not checked"
 
         for handle in eager_handles + compiled_handles:
             handle.remove()

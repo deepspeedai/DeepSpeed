@@ -965,6 +965,7 @@ class TestAutoEPRegionalCompile:
     def test_engine_rejects_unsupported_modes(self, monkeypatch, condition, match):
         model = _replace_callable_autoep_layers(num_layers=1)
         engine = object.__new__(DeepSpeedEngine)
+        nn.Module.__init__(engine)
         engine.module = model
         engine._config = SimpleNamespace(compile_config=SimpleNamespace(deepcompile=condition == "deepcompile"))
         engine._is_compiled = False
@@ -982,6 +983,7 @@ class TestAutoEPRegionalCompile:
     def test_engine_tracks_regional_compile_mode(self, monkeypatch):
         model = _replace_callable_autoep_layers()
         engine = object.__new__(DeepSpeedEngine)
+        nn.Module.__init__(engine)
         engine.module = model
         engine._config = SimpleNamespace(compile_config=SimpleNamespace(deepcompile=False))
         engine._is_compiled = False
