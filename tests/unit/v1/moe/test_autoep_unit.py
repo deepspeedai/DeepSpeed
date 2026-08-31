@@ -872,6 +872,16 @@ class TestAutoEPConfig:
 
 class TestAutoEPRegionalCompile:
 
+    def test_rejects_model_without_autoep_layers(self):
+        with pytest.raises(ValueError, match="requires at least one AutoEPMoELayer"):
+            compile_autoep_non_moe_regions(nn.Linear(4, 4), backend="eager", compile_kwargs={})
+
+    def test_rejects_non_callable_parent_region(self):
+        model = MockMoETransformer(num_layers=1)
+        replace_autoep_layers(model, "mixtral", expected_count=1)
+        with pytest.raises(ValueError, match="has no forward implementation"):
+            compile_autoep_non_moe_regions(model, backend="eager", compile_kwargs={})
+
     def test_compiles_decoder_parents_and_disables_autoep(self, monkeypatch):
         model = _replace_callable_autoep_layers()
         compile_calls = []
@@ -960,6 +970,8 @@ class TestAutoEPRegionalCompile:
             ("zero3", "ZeRO Stage 3"),
             ("optimizer_offload", "optimizer or parameter offload"),
             ("param_offload", "optimizer or parameter offload"),
+            ("schedule", "DeepCompile schedules"),
+            ("compiled_autograd", "compiled autograd"),
         ],
     )
     def test_engine_rejects_unsupported_modes(self, monkeypatch, condition, match):
@@ -978,7 +990,19 @@ class TestAutoEPRegionalCompile:
         monkeypatch.setattr(_CallableMoEDecoderLayer, "compile", lambda module, **kwargs: None)
 
         with pytest.raises(ValueError, match=match):
-            engine.compile(backend="eager", compile_mode="autoep_non_moe")
+            engine.compile(
+                backend="eager",
+                compile_mode="autoep_non_moe",
+                schedule=[] if condition == "schedule" else None,
+                compiled_autograd_enabled=condition == "compiled_autograd",
+            )
+
+    def test_engine_rejects_unknown_compile_mode(self):
+        engine = object.__new__(DeepSpeedEngine)
+        nn.Module.__init__(engine)
+        engine._is_compiled = False
+        with pytest.raises(ValueError, match="Unknown compile_mode"):
+            engine.compile(backend="eager", compile_mode="unknown")
 
     def test_engine_tracks_regional_compile_mode(self, monkeypatch):
         model = _replace_callable_autoep_layers()
