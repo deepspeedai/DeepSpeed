@@ -27,7 +27,7 @@ class TestInferenceCudaGraphConfig:
             intermediate_size=64,
             torch_dtype=torch.bfloat16,
         )
-        model = LlamaForCausalLM(model_config).to("cuda")
+        model = LlamaForCausalLM(model_config).to(get_accelerator().device_name())
 
         with pytest.raises(ValueError, match="enable_cuda_graph is not supported"):
             deepspeed.init_inference(
