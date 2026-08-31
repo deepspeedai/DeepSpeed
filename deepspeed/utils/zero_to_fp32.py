@@ -646,7 +646,10 @@ def get_fp32_state_dict_from_zero_checkpoint(checkpoint_dir,
     if lazy_mode:
         return state_dict
     else:
-        return to_torch_tensor(state_dict)
+        # Frozen parameters come out of the checkpoint in the dtype the model held them in, since
+        # the optimizer keeps no fp32 master copy of them. Cast here so the whole state_dict is
+        # fp32 as documented, the same way buffers are already upcast in parse_model_states.
+        return to_torch_tensor(state_dict, dtype=torch.float32)
 
 
 def convert_zero_checkpoint_to_state_dict(checkpoint_dir,

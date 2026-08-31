@@ -15,7 +15,8 @@ import deepspeed
 import deepspeed.utils.zero_to_fp32 as zero_to_fp32
 import deepspeed.utils.zero_to_torch as zero_to_torch
 from deepspeed.utils.zero_to_fp32 import (convert_zero_checkpoint_to_fp32_state_dict,
-                                          convert_zero_checkpoint_to_state_dict, to_torch_tensor)
+                                          convert_zero_checkpoint_to_state_dict,
+                                          get_fp32_state_dict_from_zero_checkpoint, to_torch_tensor)
 from deepspeed.utils.zero_to_torch import main as zero_to_torch_main
 from unit.common import DistributedTest
 
@@ -55,6 +56,30 @@ def test_checkpoint_file_output_dtype(monkeypatch, tmp_path):
     assert id(bf16_state_dict["weight"]) == id(bf16_state_dict["shared_weight"])
     torch.testing.assert_close(bf16_state_dict["weight"].float(), fp32_state_dict["weight"], rtol=5e-3, atol=5e-3)
     assert (bf16_dir / "pytorch_model.bin").stat().st_size < (fp32_dir / "pytorch_model.bin").stat().st_size * 0.6
+
+
+def test_fp32_state_dict_upcasts_frozen_params(monkeypatch, tmp_path):
+    """Frozen parameters are stored in the model's own dtype because the optimizer keeps no fp32
+    master copy of them, so the eager state_dict has to cast them to keep its fp32 contract."""
+    frozen = torch.arange(4, dtype=torch.bfloat16)
+    trainable = torch.arange(4, dtype=torch.float32)
+
+    def make_state_dict(*args, **kwargs):
+        return {"frozen": frozen, "trainable": trainable}
+
+    monkeypatch.setattr(zero_to_fp32, "_get_fp32_state_dict_from_zero_checkpoint", make_state_dict)
+    (tmp_path / "global_step1").mkdir()
+    (tmp_path / "latest").write_text("global_step1", encoding="utf-8")
+
+    state_dict = get_fp32_state_dict_from_zero_checkpoint(tmp_path)
+    assert state_dict["frozen"].dtype == torch.float32
+    assert state_dict["trainable"].dtype == torch.float32
+    torch.testing.assert_close(state_dict["frozen"], frozen.float())
+
+    # Lazy mode hands the tensors to the caller untouched; convert_zero_checkpoint_to_state_dict
+    # uses it and applies its own dtype, so upcasting there would undo its --dtype option.
+    lazy_state_dict = get_fp32_state_dict_from_zero_checkpoint(tmp_path, lazy_mode=True)
+    assert lazy_state_dict["frozen"].dtype == torch.bfloat16
 
 
 def test_zero_to_torch_cli_passes_dtype(monkeypatch, tmp_path):
