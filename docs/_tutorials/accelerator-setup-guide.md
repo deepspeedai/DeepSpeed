@@ -285,7 +285,7 @@ DeepSpeed has been verified on the following hardware:
 * Apple M5 Max (macOS 26)
 
 ## Installation steps for Apple Silicon
-1. Install PyTorch (2.3 or newer; 2.7+ enables the Metal fused Adam kernel) with MPS support. The default macOS arm64 wheels include it:
+1. Install PyTorch (2.5 or newer; 2.7+ enables the Metal fused Adam kernel) with MPS support. The default macOS arm64 wheels include it:
 ```
 pip install torch
 ```
