@@ -230,6 +230,62 @@ def safe_get_full_grad(param):
     return None
 
 
+def safe_get_full_model_grads(model):
+    """Assemble full gradients for all model parameters with coalesced communication.
+
+    Args:
+        model (``torch.nn.Module``): A model containing DeepSpeed-managed parameters.
+
+    Returns:
+        Dict[str, Union[torch.Tensor, None]]: Full gradients keyed by parameter name.
+    """
+    full_grads = {}
+    pending = {}
+    groups = {}
+
+    for name, param in model.named_parameters():
+        if param.grad is not None:
+            full_grads[name] = param.grad
+            continue
+
+        if hasattr(param, 'ds_id'):
+            # ZeRO-3 uses all-gather per parameter because partitions can have different sizes.
+            full_grads[name] = param._z3_optimizer.get_fp32_grad_for_param(param)
+            continue
+
+        if not hasattr(param, '_hp_mapping') or param._hp_mapping is None:
+            full_grads[name] = None
+            continue
+
+        mapping = param._hp_mapping
+        reduce_buffer = torch.zeros_like(param, dtype=torch.float32).flatten()
+        grad_fragment = mapping.get_lp_grad_fragment(param._index_in_param_group).to(torch.float32).flatten()
+        fragment_address = mapping.lp_fragment_address
+        if reduce_buffer.shape == grad_fragment.shape:
+            reduce_buffer.data.copy_(grad_fragment.data)
+        else:
+            reduce_buffer.narrow(0, fragment_address.start, fragment_address.numel).data.copy_(grad_fragment.data)
+
+        group = param._dp_group
+        group_id = id(group)
+        if group_id not in pending:
+            pending[group_id] = []
+            groups[group_id] = group
+        pending[group_id].append((name, param, reduce_buffer))
+
+    for group_id, records in pending.items():
+        buffers = [buffer for _, _, buffer in records]
+        if dist.has_all_reduce_coalesced():
+            dist.all_reduce_coalesced(buffers, group=groups[group_id])
+        else:
+            for buffer in buffers:
+                dist.all_reduce(buffer, group=groups[group_id])
+        for name, param, buffer in records:
+            full_grads[name] = buffer.reshape_as(param)
+
+    return full_grads
+
+
 def safe_set_full_grad(param, value):
     """
         Update the partitioned gradient of a low-precision (e.g., fp16) parameter.

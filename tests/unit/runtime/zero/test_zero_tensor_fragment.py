@@ -7,6 +7,7 @@ import pytest
 import deepspeed.comm as dist
 import torch
 import math
+import importlib
 
 from unit.common import DistributedTest
 from unit.simple_model import random_dataloader, SimpleModel
@@ -22,6 +23,8 @@ from deepspeed.runtime.zero.offload_config import OffloadDeviceEnum
 from deepspeed.ops.aio import AsyncIOBuilder
 from deepspeed.accelerator import get_accelerator
 from deepspeed.runtime.swap_tensor import MIN_SWAPPABLE_BYTES
+
+tensor_fragment_module = importlib.import_module("deepspeed.utils.tensor_fragment")
 
 WEIGHT_KEY = 'weight'
 FIRST_ORDER_KEY = 'exp_avg'
@@ -68,6 +71,53 @@ class MyModel(torch.nn.Module):
             x = l(x)
             x = self.act(x)
         return self.cel(x, y)
+
+
+class _GradientMapping:
+
+    def __init__(self, gradient, start=0):
+        self.gradient = gradient
+        self.lp_fragment_address = type("Address", (), {"start": start, "numel": gradient.numel()})()
+
+    def get_lp_grad_fragment(self, _):
+        return self.gradient
+
+
+class _NamedParameterModel:
+
+    def __init__(self, parameters):
+        self.parameters = parameters
+
+    def named_parameters(self):
+        return self.parameters
+
+
+def test_safe_get_full_model_grads_coalesces_zero_gradients(monkeypatch):
+    first = torch.nn.Parameter(torch.zeros(2))
+    first._hp_mapping = _GradientMapping(torch.tensor([1.0, 2.0]))
+    first._index_in_param_group = 0
+    first._dp_group = object()
+
+    second = torch.nn.Parameter(torch.zeros(3))
+    second._hp_mapping = _GradientMapping(torch.tensor([3.0]), start=1)
+    second._index_in_param_group = 0
+    second._dp_group = first._dp_group
+
+    calls = []
+
+    def all_reduce_coalesced(buffers, group=None):
+        calls.append((buffers, group))
+
+    monkeypatch.setattr(tensor_fragment_module.dist, "has_all_reduce_coalesced", lambda: True)
+    monkeypatch.setattr(tensor_fragment_module.dist, "all_reduce_coalesced", all_reduce_coalesced)
+
+    grads = tensor_fragment_module.safe_get_full_model_grads(
+        _NamedParameterModel([("first", first), ("second", second)]))
+
+    assert len(calls) == 1
+    assert len(calls[0][0]) == 2
+    assert torch.equal(grads["first"], torch.tensor([1.0, 2.0]))
+    assert torch.equal(grads["second"], torch.tensor([0.0, 3.0, 0.0]))
 
 
 def run_fragmented_model(model, config_dict, hidden_dim, dtype, validate_after_bwd, validate_after_step):
