@@ -50,7 +50,9 @@ def _generate_layout_params(scatter_idx, batch_dim_idx, seq_world_size, input):
             pre_all2all_permute_idx = None
 
             post_all2all_permute_idx = (1, 2, 0, 3, 4)
-            post_all2all_res_shape = [bs, seq_world_size * global_seq_len, num_local_head // seq_world_size, head_dim]
+            # seq-first layout: the all2all scatters the sequence and gathers the heads, so the
+            # result keeps bs in dim 1 with a local sequence and every rank's heads.
+            post_all2all_res_shape = [global_seq_len // seq_world_size, bs, seq_world_size * num_local_head, head_dim]
         else:
             local_seq_len, bs, num_total_head, head_dim = input.shape
             assert num_total_head % seq_world_size == 0, f"Number of heads ({num_total_head}) must be divisible by the sequence parallel size ({seq_world_size})!"

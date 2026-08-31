@@ -180,3 +180,44 @@ def test_print_model_profile_with_none_dp_world_size(capsys):
     assert match is not None
     # The sequence-data-parallel world size is reported in place of the None dp_world_size.
     assert match.group(1) == "4"
+
+
+class Block(torch.nn.Module):
+
+    def __init__(self, linear):
+        super().__init__()
+        self.linear = linear
+
+    def forward(self, x):
+        return self.linear(x)
+
+
+class SplitLinears(torch.nn.Module):
+    # Three blocks over three 100-wide slices of the input; with shared=True one Linear object
+    # is held by all three. The blocks are load bearing: named_children() already skips a
+    # repeat among immediate siblings, so a shared module must sit under distinct parents.
+    def __init__(self, shared):
+        super().__init__()
+        shared_linear = torch.nn.Linear(100, 100, bias=False)
+        self.blocks = torch.nn.ModuleList(
+            [Block(shared_linear if shared else torch.nn.Linear(100, 100, bias=False)) for _ in range(3)])
+
+    def forward(self, x):
+        return tuple(block(part) for block, part in zip(self.blocks, torch.split(x, 100, dim=1)))
+
+
+@pytest.mark.sequential
+@pytest.mark.parametrize("shared", [True, False])
+def test_flops_profiler_counts_shared_module_once(shared):
+    # Regression test for https://github.com/deepspeedai/DeepSpeed/issues/7256
+    # Sharing a submodule changes how many tree positions reach it, not how much work runs, so
+    # both models report the same totals: three Linear(100, 100) calls, 100 * 100 MACs each.
+    flops, macs, params = get_model_profile(model=SplitLinears(shared).eval(),
+                                            input_shape=(1, 300),
+                                            print_profile=False,
+                                            detailed=False,
+                                            warm_up=1,
+                                            as_string=False)
+    assert flops == 60000
+    assert macs == 30000
+    assert params == (10000 if shared else 30000)

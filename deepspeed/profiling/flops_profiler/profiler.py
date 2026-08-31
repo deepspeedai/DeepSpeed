@@ -1178,22 +1178,14 @@ def duration_to_string(duration, units=None, precision=DEFAULT_PRECISION):
     return f"{number_to_string(duration, units=units, precision=precision)}s"
 
 
-    # can not iterate over all submodules using self.model.modules()
-    # since modules() returns duplicate modules only once
 def get_module_flops(module):
-    sum = module.__flops__
-    # iterate over immediate children modules
-    for child in module.children():
-        sum += get_module_flops(child)
-    return sum
+    # Each module object owns a single __flops__ accumulator that every forward call adds
+    # into, so visiting an aliased module once already counts all of its calls.
+    return sum(m.__flops__ for m in module.modules())
 
 
 def get_module_macs(module):
-    sum = module.__macs__
-    # iterate over immediate children modules
-    for child in module.children():
-        sum += get_module_macs(child)
-    return sum
+    return sum(m.__macs__ for m in module.modules())
 
 
 def get_module_duration(module):
