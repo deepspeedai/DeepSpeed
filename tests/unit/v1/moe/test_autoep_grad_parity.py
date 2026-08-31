@@ -4,14 +4,23 @@
 # DeepSpeed Team
 """AutoEP gradient parity paths."""
 
+import copy
+
 import deepspeed
 import deepspeed.comm as dist
+import pytest
 import torch
-from deepspeed.utils import safe_get_full_grad
+import torch.nn as nn
+from deepspeed.utils import safe_get_full_fp32_param, safe_get_full_grad
+from torch.utils.checkpoint import checkpoint
 from unit.common import DistributedTest
 from unit.v1.moe.autoep_test_utils import (
+    MockHFConfig,
+    MockMoEBlock,
     MockMoETransformer,
     engine_input_dtype as _engine_input_dtype,
+    h100_tests_enabled,
+    make_autoep_config,
     mixed_precision_config as _mixed_precision_config,
     seed_everything as _seed_everything,
 )
@@ -151,6 +160,133 @@ def _assert_grad_maps_close(actual, expected, *, lhs_name, rhs_name):
                                         f"expected_norm={expected[name].norm().item()}"))
 
 
+class _CompiledDecoderLayer(nn.Module):
+
+    def __init__(self):
+        super().__init__()
+        self.input_layernorm = nn.LayerNorm(128)
+        self.dense = nn.Linear(128, 128, bias=False)
+        self.post_attention_layernorm = nn.LayerNorm(128)
+        self.mlp = MockMoEBlock(num_experts=4, ffn_hidden=256, hidden_size=128)
+
+    def forward(self, hidden_states):
+        residual = hidden_states
+        hidden_states = self.input_layernorm(hidden_states)
+        hidden_states = residual + self.dense(hidden_states)
+        residual = hidden_states
+        hidden_states = self.post_attention_layernorm(hidden_states)
+        return residual + self.mlp(hidden_states)
+
+
+class _CompiledAutoEPModel(nn.Module):
+
+    def __init__(self, checkpoint_enabled):
+        super().__init__()
+        self.config = copy.copy(MockHFConfig())
+        self.config.hidden_size = 128
+        self.config.intermediate_size = 256
+        self.model = nn.Module()
+        self.model.layers = nn.ModuleList([_CompiledDecoderLayer() for _ in range(2)])
+        self.output = nn.Linear(128, 64, bias=False)
+        self.checkpoint_enabled = checkpoint_enabled
+
+    def forward(self, hidden_states):
+        for layer in self.model.layers:
+            if self.checkpoint_enabled and self.training:
+                hidden_states = checkpoint(layer, hidden_states, use_reentrant=False)
+            else:
+                hidden_states = layer(hidden_states)
+        return self.output(hidden_states)
+
+
+def _make_compile_config():
+    config = make_autoep_config(zero_stage=1, ep_size=2)
+    config.pop("fp16", None)
+    config["bf16"] = {"enabled": True}
+    config["optimizer"]["params"]["lr"] = 3e-3
+    return config
+
+
+def _snapshot_dynamo_stats():
+    return dict(torch._dynamo.utils.counters["stats"])
+
+
+def _dynamo_stat_delta(before, after, key):
+    return after.get(key, 0) - before.get(key, 0)
+
+
+def _snapshot_parameter_data(engine):
+    snapshot = {}
+    for name, param in engine.module.named_parameters():
+        full_param = safe_get_full_fp32_param(param)
+        if full_param is None:
+            full_param = param
+        snapshot[name] = full_param.detach().float().cpu().clone()
+    return snapshot
+
+
+def _run_compile_step(engine, batch):
+    input_tensor = batch.detach().clone().requires_grad_(True)
+    params_before = _snapshot_parameter_data(engine)
+    output = engine(input_tensor)
+    loss = output.float().square().mean()
+    engine.backward(loss)
+
+    grads = {}
+    for name, param in engine.module.named_parameters():
+        grad = safe_get_full_grad(param)
+        assert grad is not None, f"Expected gradient for {name}"
+        grads[name] = grad.detach().float().cpu().clone()
+    input_grad = input_tensor.grad.detach().float().cpu().clone()
+
+    engine.step()
+    params_after = _snapshot_parameter_data(engine)
+    deltas = {name: params_after[name] - params_before[name] for name in params_before}
+    return {
+        "output": output.detach().float().cpu(),
+        "loss": loss.detach().float().cpu(),
+        "input_grad": input_grad,
+        "grads": grads,
+        "deltas": deltas,
+    }
+
+
+def _assert_compile_step_close(actual, expected):
+    torch.testing.assert_close(actual["output"], expected["output"], rtol=5e-3, atol=2e-2)
+    torch.testing.assert_close(actual["loss"], expected["loss"], rtol=5e-3, atol=2e-3)
+    torch.testing.assert_close(actual["input_grad"], expected["input_grad"], rtol=1e-2, atol=2e-2)
+    assert actual["grads"].keys() == expected["grads"].keys()
+    assert actual["deltas"].keys() == expected["deltas"].keys()
+    for name in actual["grads"]:
+        torch.testing.assert_close(actual["grads"][name],
+                                   expected["grads"][name],
+                                   rtol=1e-2,
+                                   atol=2e-2,
+                                   msg=f"Gradient mismatch for {name}")
+        torch.testing.assert_close(actual["deltas"][name],
+                                   expected["deltas"][name],
+                                   rtol=1e-2,
+                                   atol=2e-3,
+                                   msg=f"Optimizer delta mismatch for {name}")
+
+
+def _register_autoep_observers(engine):
+    from deepspeed.module_inject.auto_ep_layer import AutoEPMoELayer
+
+    eager_calls = []
+    routes = []
+    handles = []
+    for name, module in engine.module.named_modules():
+        if not isinstance(module, AutoEPMoELayer):
+            continue
+        handles.append(
+            module.register_forward_hook(lambda _module, _inputs, _output, name=name: eager_calls.append(name)))
+        handles.append(
+            module.router.register_forward_hook(lambda _module, _inputs, output, name=name: routes.append(
+                (name, output.selected_experts.detach().cpu()))))
+    return eager_calls, routes, handles
+
+
 class TestAutoEPGradParity(DistributedTest):
     world_size = 4
 
@@ -229,3 +365,68 @@ class TestAutoEPGradParity(DistributedTest):
                                 zero2_expert,
                                 lhs_name="ZeRO-3 AutoEP expert",
                                 rhs_name="ZeRO-2 AutoEP expert")
+
+
+@pytest.mark.skipif(not h100_tests_enabled(), reason="AutoEP regional compile parity requires an H100 test run")
+class TestAutoEPRegionalCompileParity(DistributedTest):
+    world_size = 2
+
+    @pytest.mark.parametrize("checkpoint_enabled", [True, False])
+    def test_regional_compile_matches_eager(self, checkpoint_enabled):
+        seed = 3456
+        _seed_everything(seed)
+        reference_model = _CompiledAutoEPModel(checkpoint_enabled)
+        reference_state = copy.deepcopy(reference_model.state_dict())
+
+        eager_model = _CompiledAutoEPModel(checkpoint_enabled)
+        compiled_model = _CompiledAutoEPModel(checkpoint_enabled)
+        eager_model.load_state_dict(reference_state)
+        compiled_model.load_state_dict(reference_state)
+
+        eager_engine, _, _, _ = deepspeed.initialize(model=eager_model, config=_make_compile_config())
+        compiled_engine, _, _, _ = deepspeed.initialize(model=compiled_model, config=_make_compile_config())
+        compiled_engine.compile(compile_mode="autoep_non_moe")
+
+        eager_calls, eager_routes, eager_handles = _register_autoep_observers(eager_engine)
+        compiled_calls, compiled_routes, compiled_handles = _register_autoep_observers(compiled_engine)
+        generator = torch.Generator().manual_seed(seed + dist.get_rank())
+        dtype = _engine_input_dtype(eager_engine)
+        warmup_batch = torch.randn((1, 16, 128), generator=generator, dtype=dtype).to(eager_engine.device)
+        measured_batch = torch.randn((1, 16, 128), generator=generator, dtype=dtype).to(eager_engine.device)
+
+        warmup_eager = _run_compile_step(eager_engine, warmup_batch)
+        warmup_compiled = _run_compile_step(compiled_engine, warmup_batch)
+        _assert_compile_step_close(warmup_compiled, warmup_eager)
+
+        eager_call_start = len(eager_calls)
+        compiled_call_start = len(compiled_calls)
+        eager_route_start = len(eager_routes)
+        compiled_route_start = len(compiled_routes)
+        dynamo_start = _snapshot_dynamo_stats()
+
+        measured_eager = _run_compile_step(eager_engine, measured_batch)
+        measured_compiled = _run_compile_step(compiled_engine, measured_batch)
+        _assert_compile_step_close(measured_compiled, measured_eager)
+
+        dynamo_end = _snapshot_dynamo_stats()
+        expected_calls = len(compiled_engine._compiled_regions) * (2 if checkpoint_enabled else 1)
+        assert len(eager_calls) - eager_call_start == expected_calls
+        assert len(compiled_calls) - compiled_call_start == expected_calls
+        assert _dynamo_stat_delta(dynamo_start, dynamo_end, "unique_graphs") == 0
+        assert _dynamo_stat_delta(dynamo_start, dynamo_end, "calls_captured") == 0
+
+        measured_eager_routes = eager_routes[eager_route_start:]
+        measured_compiled_routes = compiled_routes[compiled_route_start:]
+        assert len(measured_eager_routes) == len(measured_compiled_routes) == expected_calls
+        for (eager_name, eager_route), (compiled_name, compiled_route) in zip(measured_eager_routes,
+                                                                              measured_compiled_routes):
+            assert eager_name == compiled_name
+            assert torch.equal(eager_route, compiled_route)
+
+        grad_names = measured_compiled["grads"]
+        assert any(".experts.w1" in name for name in grad_names)
+        assert any(".router.gate.weight" in name for name in grad_names)
+        assert any(".dense.weight" in name for name in grad_names)
+
+        for handle in eager_handles + compiled_handles:
+            handle.remove()
