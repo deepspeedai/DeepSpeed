@@ -882,7 +882,7 @@ def mask_nan_or_inf_with_val_inplace(input, device=None, val=-1.):
     norm_is_inf = input.isinf()
     norm_is_nan = input.isnan()
     inf_or_nan = norm_is_nan.logical_or(norm_is_inf)
-    err = torch.tensor(-1.0, device=device, dtype=torch.float)
+    err = torch.tensor(val, device=device, dtype=torch.float)
     input.masked_fill_(inf_or_nan, err)
 
 
