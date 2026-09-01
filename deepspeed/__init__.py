@@ -80,19 +80,32 @@ __git_branch__ = git_branch
 # Set to torch's distributed package or deepspeed.comm based inside DeepSpeedEngine init
 dist = None
 
-# Attention projections Muon can orthogonalize per head, and which head count each one is
-# blocked by. Q and the output projection are blocked by the query heads; K and V by the
-# key/value heads, which differ under GQA/MQA.
-_QUERY_HEAD_PROJECTIONS = ("q_proj", "query", "o_proj", "out_proj", "dense")
-_KV_HEAD_PROJECTIONS = ("k_proj", "key", "v_proj", "value")
-# A single matrix holding Q, K and V. Splitting it per head means splitting each of the three
-# sections separately, and under GQA they do not even have the same head count, so leave it to
-# the full-matrix path rather than guessing the layout.
-_FUSED_QKV_PROJECTIONS = ("qkv_proj", "query_key_value", "c_attn", "in_proj_qkv", "Wqkv")
+# Only projections whose *output* dimension is blocked by heads, because the per-head split is on
+# dim 0 of the weight: Q/K/V are `[num_heads * head_dim, hidden]`. The output projection is
+# deliberately absent - its head structure is on the input dimension
+# (`[hidden, num_heads * head_dim]`), so splitting dim 0 would cut across the wrong axis, and in
+# the usual hidden == num_heads * head_dim case it still divides evenly, so it would be silently
+# wrong rather than an error.
+_QUERY_HEAD_LEAVES = ("q_proj", "query", "wq")
+_KV_HEAD_LEAVES = ("k_proj", "key", "wk", "v_proj", "value", "wv")
+# A single matrix holding Q, K and V. Its three sections split separately, and under GQA they do
+# not even share a head count, so leave it on the full-matrix path rather than guessing.
+_FUSED_QKV_LEAVES = ("qkv_proj", "query_key_value", "c_attn", "in_proj_qkv", "wqkv")
 
 
-def _attention_head_count(param_name: str, model: torch.nn.Module):
-    """Heads this projection splits into, or None to leave it on the full-matrix path."""
+def _leaf_module_name(param_name: str) -> str:
+    """`model.layers.0.self_attn.q_proj.weight` -> `q_proj`.
+
+    Matching the leaf rather than the whole path keeps generic names from matching by accident:
+    `dense` appears in both `attention.output.dense` and `intermediate.dense`, and an MLP matrix
+    tagged with a head count would be split on a dimension that has no heads in it.
+    """
+    parts = param_name.split(".")
+    return parts[-2].lower() if len(parts) >= 2 else parts[-1].lower()
+
+
+def _attention_head_count(param_name: str, param: torch.Tensor, model: torch.nn.Module):
+    """Heads this projection splits into on dim 0, or None to leave it on the full-matrix path."""
     config = getattr(model, "config", None)
     if config is None:
         return None
@@ -103,15 +116,25 @@ def _attention_head_count(param_name: str, model: torch.nn.Module):
         return None
     num_kv_heads = getattr(text_config, "num_key_value_heads", None) or num_attention_heads
 
-    leaf = param_name.lower()
-    if any(k.lower() in leaf for k in _FUSED_QKV_PROJECTIONS):
+    leaf = _leaf_module_name(param_name)
+    if any(leaf.startswith(k) for k in _FUSED_QKV_LEAVES):
         return None
-    if any(k.lower() in leaf for k in _KV_HEAD_PROJECTIONS):
-        return num_kv_heads
-    if any(k.lower() in leaf for k in _QUERY_HEAD_PROJECTIONS):
-        return num_attention_heads
+    if any(leaf.startswith(k) for k in _KV_HEAD_LEAVES):
+        num_heads = num_kv_heads
+    elif any(leaf.startswith(k) for k in _QUERY_HEAD_LEAVES):
+        num_heads = num_attention_heads
+    else:
+        return None
 
-    return None
+    # The name says attention; only the shape can confirm the layout. dim 0 has to be the
+    # head-blocked one, and where the config states head_dim it has to agree.
+    if param.ndim != 2 or param.shape[0] % num_heads != 0:
+        return None
+    config_head_dim = getattr(text_config, "head_dim", None)
+    if config_head_dim is not None and param.shape[0] != num_heads * config_head_dim:
+        return None
+
+    return num_heads
 
 
 def set_optimizer_flags(config_class: DeepSpeedConfig, model: torch.nn.Module) -> None:
@@ -123,13 +146,7 @@ def set_optimizer_flags(config_class: DeepSpeedConfig, model: torch.nn.Module) -
             else:
                 setattr(p, "use_muon", False)
 
-            num_heads = _attention_head_count(name, model) if (per_head and p.use_muon) else None
-            # Only tag when the parameter actually splits evenly; a projection whose output dim
-            # does not divide by the head count is not the layout we think it is.
-            if num_heads is not None and (p.ndim != 2 or p.shape[0] % num_heads != 0):
-                logger.warning(f"per_head_muon: skipping {name} with shape {tuple(p.shape)}, which does not "
-                               f"split into {num_heads} heads. It keeps the full-matrix update.")
-                num_heads = None
+            num_heads = _attention_head_count(name, p, model) if (per_head and p.use_muon) else None
             setattr(p, "muon_num_heads", num_heads)
 
 

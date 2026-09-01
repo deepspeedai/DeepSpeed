@@ -39,11 +39,43 @@ def _flags(model, per_head=True):
     return {name: getattr(p, "muon_num_heads", "MISSING") for name, p in model.named_parameters()}
 
 
-def test_query_and_output_projections_use_the_query_head_count():
+def test_query_projection_uses_the_query_head_count():
     tags = _flags(_Attn(q_heads=8, kv_heads=2))
 
     assert tags["q_proj.weight"] == 8
-    assert tags["o_proj.weight"] == 8
+
+
+def test_output_projection_is_left_alone():
+    """o_proj is `[hidden, num_heads * head_dim]` - its heads are on the input axis.
+
+    The split is on dim 0, so tagging it would cut across the wrong axis, and with the usual
+    hidden == num_heads * head_dim it still divides evenly, i.e. silently wrong rather than an
+    error. Regression test: it was tagged in the first version of this.
+    """
+    tags = _flags(_Attn(q_heads=8, kv_heads=2))
+
+    assert tags["o_proj.weight"] is None
+
+
+@pytest.mark.parametrize("mlp_name", [
+    "intermediate.dense.weight",
+    "output.dense.weight",
+    "mlp.dense_h_to_4h.weight",
+    "mlp.dense_4h_to_h.weight",
+])
+def test_mlp_matrices_named_dense_are_not_treated_as_attention(mlp_name):
+    """`dense` names an MLP matrix as often as an attention one.
+
+    Matching it anywhere in the path tagged `intermediate.dense` and `dense_h_to_4h` with a head
+    count, splitting a matrix that has no head structure. Regression test: the first version of
+    this matched on the full path and did exactly that.
+    """
+    from deepspeed import _attention_head_count
+
+    model = _Attn(q_heads=8, kv_heads=2)
+    weight = torch.zeros(4 * 64, 64)
+
+    assert _attention_head_count(f"encoder.layer.0.{mlp_name}", weight, model) is None
 
 
 def test_kv_projections_use_the_kv_head_count_under_gqa():
