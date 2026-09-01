@@ -255,7 +255,8 @@ class Muon(torch.optim.Optimizer):
                                          state["momentum_buffer"],
                                          beta=group["momentum"],
                                          ns_method=group.get("ns_method", "gram"),
-                                         is_expert_group=getattr(p, 'is_expert_group', False))
+                                         is_expert_group=getattr(p, 'is_expert_group', False),
+                                         num_heads=getattr(p, 'muon_num_heads', None))
                     p.mul_(1 - group["lr"] * group["weight_decay"])
                     p.add_(update.reshape(p.shape), alpha=-group["lr"])
                 dist.all_gather(params_pad[base_i:base_i + dist.get_world_size()],
@@ -293,7 +294,8 @@ class SingleDeviceMuon(torch.optim.Optimizer):
                                      state["momentum_buffer"],
                                      beta=group["momentum"],
                                      ns_method=group.get("ns_method", "gram"),
-                                     is_expert_group=getattr(p, 'is_expert_group', False))
+                                     is_expert_group=getattr(p, 'is_expert_group', False),
+                                     num_heads=getattr(p, 'muon_num_heads', None))
                 p.mul_(1 - group["lr"] * group["weight_decay"])
                 p.add_(update.reshape(p.shape), alpha=-group["lr"])
 
@@ -385,7 +387,8 @@ class MuonWithAuxAdam(torch.optim.Optimizer):
                                              state["momentum_buffer"],
                                              beta=group["momentum"],
                                              ns_method=group.get("ns_method", "gram"),
-                                             is_expert_group=getattr(p, 'is_expert_group', False))
+                                             is_expert_group=getattr(p, 'is_expert_group', False),
+                                             num_heads=getattr(p, 'muon_num_heads', None))
                         p.mul_(1 - group["lr"] * group["weight_decay"])
                         p.add_(update.reshape(p.shape), alpha=-group["lr"])
                     dist.all_gather(params_pad[base_i:base_i + dist.get_world_size()],
@@ -457,7 +460,8 @@ class SingleDeviceMuonWithAuxAdam(torch.optim.Optimizer):
                                          state["momentum_buffer"],
                                          beta=group["momentum"],
                                          ns_method=group.get("ns_method", "gram"),
-                                         is_expert_group=getattr(p, 'is_expert_group', False))
+                                         is_expert_group=getattr(p, 'is_expert_group', False),
+                                         num_heads=getattr(p, 'muon_num_heads', None))
                     p.mul_(1 - group["lr"] * group["weight_decay"])
                     p.add_(update.reshape(p.shape), alpha=-group["lr"])
             else:

@@ -80,14 +80,57 @@ __git_branch__ = git_branch
 # Set to torch's distributed package or deepspeed.comm based inside DeepSpeedEngine init
 dist = None
 
+# Attention projections Muon can orthogonalize per head, and which head count each one is
+# blocked by. Q and the output projection are blocked by the query heads; K and V by the
+# key/value heads, which differ under GQA/MQA.
+_QUERY_HEAD_PROJECTIONS = ("q_proj", "query", "o_proj", "out_proj", "dense")
+_KV_HEAD_PROJECTIONS = ("k_proj", "key", "v_proj", "value")
+# A single matrix holding Q, K and V. Splitting it per head means splitting each of the three
+# sections separately, and under GQA they do not even have the same head count, so leave it to
+# the full-matrix path rather than guessing the layout.
+_FUSED_QKV_PROJECTIONS = ("qkv_proj", "query_key_value", "c_attn", "in_proj_qkv", "Wqkv")
+
+
+def _attention_head_count(param_name: str, model: torch.nn.Module):
+    """Heads this projection splits into, or None to leave it on the full-matrix path."""
+    config = getattr(model, "config", None)
+    if config is None:
+        return None
+
+    text_config = getattr(config, "text_config", config)
+    num_attention_heads = getattr(text_config, "num_attention_heads", None)
+    if num_attention_heads is None:
+        return None
+    num_kv_heads = getattr(text_config, "num_key_value_heads", None) or num_attention_heads
+
+    leaf = param_name.lower()
+    if any(k.lower() in leaf for k in _FUSED_QKV_PROJECTIONS):
+        return None
+    if any(k.lower() in leaf for k in _KV_HEAD_PROJECTIONS):
+        return num_kv_heads
+    if any(k.lower() in leaf for k in _QUERY_HEAD_PROJECTIONS):
+        return num_attention_heads
+
+    return None
+
 
 def set_optimizer_flags(config_class: DeepSpeedConfig, model: torch.nn.Module) -> None:
     if config_class.optimizer_name == MUON_OPTIMIZER:
+        per_head = bool((config_class.optimizer_params or {}).get("per_head_muon", False))
         for name, p in model.named_parameters():
             if p.ndim >= 2 and not any(keyword in name.lower() for keyword in ("embed", "lm_head")):
                 setattr(p, "use_muon", True)
             else:
                 setattr(p, "use_muon", False)
+
+            num_heads = _attention_head_count(name, model) if (per_head and p.use_muon) else None
+            # Only tag when the parameter actually splits evenly; a projection whose output dim
+            # does not divide by the head count is not the layout we think it is.
+            if num_heads is not None and (p.ndim != 2 or p.shape[0] % num_heads != 0):
+                logger.warning(f"per_head_muon: skipping {name} with shape {tuple(p.shape)}, which does not "
+                               f"split into {num_heads} heads. It keeps the full-matrix update.")
+                num_heads = None
+            setattr(p, "muon_num_heads", num_heads)
 
 
 def initialize(
