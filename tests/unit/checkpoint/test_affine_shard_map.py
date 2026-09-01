@@ -76,10 +76,30 @@ def _source_indices(markers, shard, axis):
     return indices
 
 
-def _pieces_for_rank(markers, shard, rank, axis, cols):
+def _split_by_holders(indices, holders):
+    """Break runs wherever the set of ranks holding the data changes.
+
+    Merging across such a boundary would produce a piece whose own `locations` is wrong for
+    part of it. GPTBigCode's last rank is the case that forces this: its q slice ends exactly
+    where the replicated kv block begins, so unconstrained merging fuses a rank-private block
+    onto a fully replicated one.
+    """
+    split = []
+    for source_index, dest_index, length in _index_runs(indices):
+        start = 0
+        for step in range(1, length + 1):
+            at_end = step == length
+            if at_end or holders[source_index + step] != holders[source_index + start]:
+                split.append((source_index + start, dest_index + start, step - start))
+                start = step
+    return split
+
+
+def _pieces_for_rank(markers, shard, rank, axis, cols, holders):
     """Turn one rank's shard into affine pieces of the full tensor."""
     pieces = []
-    for source_index, dest_index, length in _index_runs(_source_indices(markers, shard, axis)):
+    indices = _source_indices(markers, shard, axis)
+    for source_index, dest_index, length in _split_by_holders(indices, holders):
         if axis == 'row':
             shape = (length, cols)
             source_offset = source_index * cols
@@ -97,19 +117,27 @@ def _pieces_for_rank(markers, shard, rank, axis, cols):
                         source_strides=(cols, 1),
                         dest_offset=dest_offset,
                         dest_strides=dest_strides,
-                        locations=[rank]))
+                        locations=sorted(holders[source_index])))
     return pieces
 
 
 def _build_map(shard_fn, rows, cols, mp_size, axis):
     """Derive the affine map of a layout by probing the real partition function."""
     markers = _row_markers(rows, cols) if axis == 'row' else _col_markers(rows, cols)
+    shards = {rank: shard_fn(markers.clone(), rank) for rank in range(mp_size)}
+
+    # Which ranks hold each slice of the full tensor. Needed before pieces can be cut,
+    # because a piece may not span slices with different holders.
+    holders = {}
+    for rank, shard in shards.items():
+        for index in _source_indices(markers, shard, axis):
+            holders.setdefault(index, set()).add(rank)
+
     pieces_by_rank = {}
     shard_shapes = {}
-    for rank in range(mp_size):
-        shard = shard_fn(markers.clone(), rank)
+    for rank, shard in shards.items():
         shard_shapes[rank] = tuple(shard.shape)
-        pieces_by_rank[rank] = _pieces_for_rank(markers, shard, rank, axis, cols)
+        pieces_by_rank[rank] = _pieces_for_rank(markers, shard, rank, axis, cols, holders)
     return ParamAffineMap(logical_shape=(rows, cols), shard_shapes=shard_shapes, pieces_by_rank=pieces_by_rank)
 
 
@@ -159,6 +187,12 @@ class TestAffineShardMap:
         configure()
         affine_map = _build_map(build_shard_fn(mp_size), rows, cols, mp_size, axis)
         assert affine_map.uncovered_offsets() == []
+
+    def test_every_piece_is_homogeneous(self, name, rows, cols, mp_size, axis, configure, build_shard_fn):
+        """No piece spans elements held by different sets of ranks, so locations is exact."""
+        configure()
+        affine_map = _build_map(build_shard_fn(mp_size), rows, cols, mp_size, axis)
+        affine_map.validate_coverage()
 
     def test_pieces_reproduce_shards_of_unseen_data(self, name, rows, cols, mp_size, axis, configure, build_shard_fn):
         """Pieces derived from markers must reproduce shards of data they were not derived from."""
@@ -216,3 +250,58 @@ def test_replicated_piece_is_shared_by_every_rank():
         for piece in affine_map.pieces_by_rank[rank]:
             held.update(piece.source_offsets())
         assert kv_offsets <= held, f'rank {rank} does not hold the whole kv block'
+
+
+def test_pieces_never_span_a_replication_boundary():
+    """GPTBigCode's last rank is where an unconstrained merge would cross one.
+
+    Its q slice ends exactly where the replicated kv block begins, so merging by adjacency
+    alone yields one piece that is rank-private in its first half and replicated in its
+    second. Splitting at the boundary costs one extra piece and keeps locations honest.
+    """
+    _configure_heads(4, n_embd=32, num_attention_heads=4)
+    mp_size = 4
+    affine_map = _build_map(_fused_qkv_shard_fn('GPTBigCodeBlock', mp_size), 48, 8, mp_size, 'row')
+
+    last_rank_pieces = affine_map.pieces_by_rank[mp_size - 1]
+    assert len(last_rank_pieces) == 2
+    assert {len(piece.locations) for piece in last_rank_pieces} == {1, mp_size}
+    affine_map.validate_coverage()
+
+
+def test_scale_round_trips_through_both_directions():
+    """A row-parallel bias is replicated pre-divided by the world size, so a piece scales it.
+
+    `shard == full * scale`, so extracting multiplies and rebuilding divides. Recording the
+    factor keeps the layout describable without a rule that names which parameters are biases.
+    """
+    world_size = 4
+    full_bias = torch.randn(16, dtype=torch.float64)
+    pieces_by_rank = {
+        rank: [
+            AffinePiece(shape=(16, ),
+                        source_offset=0,
+                        source_strides=(1, ),
+                        dest_offset=0,
+                        dest_strides=(1, ),
+                        locations=range(world_size),
+                        scale=1.0 / world_size)
+        ]
+        for rank in range(world_size)
+    }
+    affine_map = ParamAffineMap(logical_shape=(16, ),
+                                shard_shapes={rank: (16, )
+                                              for rank in range(world_size)},
+                                pieces_by_rank=pieces_by_rank)
+    affine_map.validate_coverage()
+
+    shards = {rank: affine_map.extract(full_bias, rank) for rank in range(world_size)}
+    assert torch.equal(shards[0], full_bias / world_size)
+    assert torch.equal(affine_map.rebuild(shards), full_bias)
+
+
+def test_scale_round_trip_is_exact_for_power_of_two_world_sizes():
+    """Dividing by a power of two only shifts the exponent, so no bias precision is lost."""
+    full_bias = torch.randn(1024, dtype=torch.float32)
+    for world_size in (2, 4, 8, 16):
+        assert torch.equal(full_bias / world_size * world_size, full_bias)
