@@ -6,8 +6,18 @@
 import pytest
 import torch
 import deepspeed
+from pydantic import ValidationError
+from deepspeed.inference.config import DeepSpeedInferenceConfig
 from unit.common import DistributedTest
 from unit.simple_model import create_config_from_dict
+
+
+@pytest.mark.inference
+@pytest.mark.parametrize("field", ["max_out_tokens", "max_tokens"])
+@pytest.mark.parametrize("value", [-1, 0])
+def test_max_out_tokens_must_be_positive(field, value):
+    with pytest.raises(ValidationError):
+        DeepSpeedInferenceConfig(**{field: value})
 
 
 @pytest.mark.inference
