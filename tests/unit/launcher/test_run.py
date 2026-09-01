@@ -3,6 +3,8 @@
 
 # DeepSpeed Team
 
+import os
+
 import pytest
 
 from deepspeed.launcher import runner as dsrun
@@ -115,15 +117,22 @@ def test_parse_inclusion_exclusion_errors():
 
 
 class _FakeAccelerator:
-    '''Enough of an accelerator for main()'s VISIBLE_DEVICES branch.'''
+    '''Enough of an accelerator for main()'s VISIBLE_DEVICES branch.
+
+    device_count() records the mask it was called under, because the count is
+    only the physical one if main() has already unset the variable. A fake that
+    just returns a number would keep passing if that order were reversed.
+    '''
 
     def __init__(self, device_count):
         self._device_count = device_count
+        self.masks_at_device_count = []
 
     def visible_devices_envs(self):
         return ['CUDA_VISIBLE_DEVICES']
 
     def device_count(self):
+        self.masks_at_device_count.append(os.environ.get('CUDA_VISIBLE_DEVICES'))
         return self._device_count
 
 
@@ -135,6 +144,7 @@ def _resolve_visible_devices(monkeypatch, visible_devices, device_count):
     '''
     captured = {}
     real_parse = dsrun.parse_inclusion_exclusion
+    accelerator = _FakeAccelerator(device_count)
 
     class _Stop(Exception):
         pass
@@ -145,7 +155,7 @@ def _resolve_visible_devices(monkeypatch, visible_devices, device_count):
         captured['exclude'] = exclusion
         raise _Stop
 
-    monkeypatch.setattr(dsrun, 'get_accelerator', lambda: _FakeAccelerator(device_count))
+    monkeypatch.setattr(dsrun, 'get_accelerator', lambda: accelerator)
     monkeypatch.setattr(dsrun, 'fetch_hostfile', lambda hostfile: {})
     monkeypatch.setattr(dsrun, 'parse_inclusion_exclusion', _spy)
     monkeypatch.setenv('CUDA_VISIBLE_DEVICES', visible_devices)
@@ -155,6 +165,7 @@ def _resolve_visible_devices(monkeypatch, visible_devices, device_count):
 
     # put the real one back so the caller can resolve what main() handed over
     monkeypatch.setattr(dsrun, 'parse_inclusion_exclusion', real_parse)
+    captured['masks_at_device_count'] = list(accelerator.masks_at_device_count)
     return captured
 
 
@@ -170,6 +181,8 @@ def test_visible_devices_resolve_to_the_requested_slots(monkeypatch):
 
     assert captured['include'] == 'localhost:0,2'
     assert captured['resource_pool'] == {'localhost': 4}
+    # the count has to be asked for after the mask is gone, or it is the masked one
+    assert captured['masks_at_device_count'] == [None]
 
     ret = dsrun.parse_inclusion_exclusion(captured['resource_pool'], captured['include'], captured['exclude'])
     assert (ret == {'localhost': [0, 2]})
@@ -187,6 +200,7 @@ def test_visible_devices_are_rejected_when_the_device_count_is_masked(monkeypatc
 
     assert captured['include'] == 'localhost:0,2'
     assert captured['resource_pool'] == {'localhost': 2}
+    assert captured['masks_at_device_count'] == [None]
 
     with pytest.raises(ValueError, match="No slot '2' specified on host 'localhost'"):
         dsrun.parse_inclusion_exclusion(captured['resource_pool'], captured['include'], captured['exclude'])
