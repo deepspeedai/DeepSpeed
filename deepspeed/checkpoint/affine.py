@@ -21,8 +21,8 @@ See ``deepspeed/checkpoint/affine_ir_spec.md`` for the full specification.
 import torch
 
 __all__ = [
-    'AffinePiece', 'ParamAffineMap', 'AFFINE_MAP_FORMAT_VERSION', 'row_major_strides', 'replicated_map',
-    'contiguous_split_map', 'sub_param_map'
+    'AffinePiece', 'ParamAffineMap', 'AFFINE_MAP_FORMAT_VERSION', 'replicated_map', 'contiguous_split_map',
+    'sub_param_map'
 ]
 
 # Encoding version of the stored map, independent of the universal checkpoint version so
@@ -291,7 +291,7 @@ def _product(shape):
     return count
 
 
-def row_major_strides(shape):
+def _row_major_strides(shape):
     """Element stride per axis for a densely packed tensor of this shape."""
     strides = [1] * len(shape)
     for axis in range(len(shape) - 2, -1, -1):
@@ -306,7 +306,7 @@ def replicated_map(shape, tp_degree):
     rank is cheapest rather than from a designated owner.
     """
     shape = tuple(shape)
-    strides = row_major_strides(shape)
+    strides = _row_major_strides(shape)
     ranks = list(range(tp_degree))
     pieces = [
         AffinePiece(shape=shape,
@@ -330,7 +330,7 @@ def contiguous_split_map(shape, per_rank_sizes, partition_dim, scale=1.0):
     the block is cut on, and therefore only in strides. ``per_rank_sizes`` may be uneven.
     """
     shape = tuple(shape)
-    source_strides = row_major_strides(shape)
+    source_strides = _row_major_strides(shape)
     pieces_by_rank = {}
     shard_shapes = {}
     start = 0
@@ -344,7 +344,7 @@ def contiguous_split_map(shape, per_rank_sizes, partition_dim, scale=1.0):
                         source_offset=start * source_strides[partition_dim],
                         source_strides=source_strides,
                         dest_offset=0,
-                        dest_strides=row_major_strides(shard_shape),
+                        dest_strides=_row_major_strides(shard_shape),
                         locations=[rank],
                         scale=scale)
         ]
@@ -361,7 +361,7 @@ def sub_param_map(shape, sub_dim_sizes, shard_widths, partition_dim):
     unevenly and need not be the same size as each other.
     """
     shape = tuple(shape)
-    source_strides = row_major_strides(shape)
+    source_strides = _row_major_strides(shape)
     tp_degree = len(shard_widths[0])
 
     shard_shapes = {}
@@ -379,7 +379,7 @@ def sub_param_map(shape, sub_dim_sizes, shard_widths, partition_dim):
         for rank in range(tp_degree):
             piece_shape = list(shape)
             piece_shape[partition_dim] = widths[rank]
-            dest_strides = row_major_strides(shard_shapes[rank])
+            dest_strides = _row_major_strides(shard_shapes[rank])
             pieces_by_rank[rank].append(
                 AffinePiece(shape=tuple(piece_shape),
                             source_offset=source_start * source_strides[partition_dim],
