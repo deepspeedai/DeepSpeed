@@ -20,7 +20,9 @@ See ``deepspeed/checkpoint/affine_ir_spec.md`` for the full specification.
 
 import torch
 
-__all__ = ['AffinePiece', 'ParamAffineMap']
+__all__ = [
+    'AffinePiece', 'ParamAffineMap', 'row_major_strides', 'replicated_map', 'contiguous_split_map', 'sub_param_map'
+]
 
 
 class AffinePiece:
@@ -255,3 +257,106 @@ def _product(shape):
     for dim in shape:
         count *= dim
     return count
+
+
+def row_major_strides(shape):
+    """Element stride per axis for a densely packed tensor of this shape."""
+    strides = [1] * len(shape)
+    for axis in range(len(shape) - 2, -1, -1):
+        strides[axis] = strides[axis + 1] * shape[axis + 1]
+    return tuple(strides)
+
+
+def replicated_map(shape, tp_degree):
+    """Every rank holds the whole parameter.
+
+    One piece, named by every rank, which is what lets a converter read it from whichever
+    rank is cheapest rather than from a designated owner.
+    """
+    shape = tuple(shape)
+    strides = row_major_strides(shape)
+    ranks = list(range(tp_degree))
+    pieces = [
+        AffinePiece(shape=shape,
+                    source_offset=0,
+                    source_strides=strides,
+                    dest_offset=0,
+                    dest_strides=strides,
+                    locations=ranks)
+    ]
+    return ParamAffineMap(logical_shape=shape,
+                          shard_shapes={rank: shape
+                                        for rank in ranks},
+                          pieces_by_rank={rank: list(pieces)
+                                          for rank in ranks})
+
+
+def contiguous_split_map(shape, per_rank_sizes, partition_dim, scale=1.0):
+    """Each rank holds one contiguous block along ``partition_dim``.
+
+    Covers row-parallel and column-parallel layers alike: they differ only in which axis
+    the block is cut on, and therefore only in strides. ``per_rank_sizes`` may be uneven.
+    """
+    shape = tuple(shape)
+    source_strides = row_major_strides(shape)
+    pieces_by_rank = {}
+    shard_shapes = {}
+    start = 0
+    for rank, size in enumerate(per_rank_sizes):
+        shard_shape = list(shape)
+        shard_shape[partition_dim] = size
+        shard_shape = tuple(shard_shape)
+        shard_shapes[rank] = shard_shape
+        pieces_by_rank[rank] = [
+            AffinePiece(shape=shard_shape,
+                        source_offset=start * source_strides[partition_dim],
+                        source_strides=source_strides,
+                        dest_offset=0,
+                        dest_strides=row_major_strides(shard_shape),
+                        locations=[rank],
+                        scale=scale)
+        ]
+        start += size
+    return ParamAffineMap(logical_shape=shape, shard_shapes=shard_shapes, pieces_by_rank=pieces_by_rank)
+
+
+def sub_param_map(shape, sub_dim_sizes, shard_widths, partition_dim):
+    """A parameter that is several sub-parameters concatenated, each split across ranks.
+
+    Fused QKV is the motivating case: the full parameter is Q then K then V along
+    ``partition_dim``, and a rank's shard holds its slice of each in turn. ``shard_widths[i]``
+    gives the per-rank widths of sub-parameter ``i``, so the sub-parameters may be split
+    unevenly and need not be the same size as each other.
+    """
+    shape = tuple(shape)
+    source_strides = row_major_strides(shape)
+    tp_degree = len(shard_widths[0])
+
+    shard_shapes = {}
+    for rank in range(tp_degree):
+        shard_shape = list(shape)
+        shard_shape[partition_dim] = sum(widths[rank] for widths in shard_widths)
+        shard_shapes[rank] = tuple(shard_shape)
+
+    pieces_by_rank = {rank: [] for rank in range(tp_degree)}
+    dest_starts = {rank: 0 for rank in range(tp_degree)}
+    sub_param_start = 0
+    for sub_index, sub_size in enumerate(sub_dim_sizes):
+        widths = shard_widths[sub_index]
+        source_start = sub_param_start
+        for rank in range(tp_degree):
+            piece_shape = list(shape)
+            piece_shape[partition_dim] = widths[rank]
+            dest_strides = row_major_strides(shard_shapes[rank])
+            pieces_by_rank[rank].append(
+                AffinePiece(shape=tuple(piece_shape),
+                            source_offset=source_start * source_strides[partition_dim],
+                            source_strides=source_strides,
+                            dest_offset=dest_starts[rank] * dest_strides[partition_dim],
+                            dest_strides=dest_strides,
+                            locations=[rank]))
+            source_start += widths[rank]
+            dest_starts[rank] += widths[rank]
+        sub_param_start += sub_size
+
+    return ParamAffineMap(logical_shape=shape, shard_shapes=shard_shapes, pieces_by_rank=pieces_by_rank)

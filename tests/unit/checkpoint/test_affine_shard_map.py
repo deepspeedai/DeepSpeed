@@ -21,7 +21,8 @@ process group or an accelerator.
 import pytest
 import torch
 
-from deepspeed.checkpoint.affine import AffinePiece, ParamAffineMap
+from deepspeed.checkpoint.affine import (AffinePiece, ParamAffineMap, replicated_map, contiguous_split_map,
+                                         sub_param_map)
 from deepspeed.module_inject.fusedqkv_utils import prepare_tp_fused_qkvw, shard_value_with_share_qk
 from deepspeed.module_inject.tp_shard import set_num_kv_heads, set_n_embd, set_num_attention_heads
 
@@ -305,3 +306,100 @@ def test_scale_round_trip_is_exact_for_power_of_two_world_sizes():
     full_bias = torch.randn(1024, dtype=torch.float32)
     for world_size in (2, 4, 8, 16):
         assert torch.equal(full_bias / world_size * world_size, full_bias)
+
+
+# The universal-checkpoint converter merges tp slices with a chain of category-specific
+# `torch.cat` arithmetic. The tests below rebuild the same parameter through the affine map
+# and require the two to agree exactly, so the map can replace a branch without changing
+# what any checkpoint converts to.
+
+
+def _random_slices(shapes):
+    torch.manual_seed(0)
+    return [torch.randn(shape, dtype=torch.float64) for shape in shapes]
+
+
+def test_parity_replicated():
+    """`merge_tp_slices` takes slices[0] after asserting every rank matches."""
+    tp_degree = 4
+    full = torch.randn(6, 8, dtype=torch.float64)
+    slices = [full.clone() for _ in range(tp_degree)]
+
+    expected = slices[0]
+    affine_map = replicated_map((6, 8), tp_degree)
+    assert torch.equal(affine_map.rebuild(dict(enumerate(slices))), expected)
+
+
+@pytest.mark.parametrize('cat_dim', [0, 1])
+def test_parity_contiguous_split(cat_dim):
+    """The default branch: `cat(slices, dim=1)` for row parallelism, `dim=0` otherwise."""
+    per_rank = [3, 3, 2, 2]  # deliberately uneven; `chunk` would disagree here
+    shapes = [(size, 8) if cat_dim == 0 else (8, size) for size in per_rank]
+    slices = _random_slices(shapes)
+
+    expected = torch.cat(slices, dim=cat_dim)
+    affine_map = contiguous_split_map(tuple(expected.shape), per_rank, cat_dim)
+    assert torch.equal(affine_map.rebuild(dict(enumerate(slices))), expected)
+
+
+def test_parity_two_sub_params_cat_dim_0():
+    """The 2-sub-param branch chunks each slice, merges each half, then concatenates."""
+    tp_degree, half = 4, 3
+    slices = _random_slices([(2 * half, 8)] * tp_degree)
+
+    chunked = [torch.chunk(tp_slice, 2, dim=0) for tp_slice in slices]
+    expected = torch.cat([
+        torch.cat([chunk[0] for chunk in chunked], dim=0),
+        torch.cat([chunk[1] for chunk in chunked], dim=0),
+    ],
+                         dim=0)
+
+    total = half * tp_degree
+    affine_map = sub_param_map(shape=(2 * total, 8),
+                               sub_dim_sizes=(total, total),
+                               shard_widths=[[half] * tp_degree, [half] * tp_degree],
+                               partition_dim=0)
+    assert torch.equal(affine_map.rebuild(dict(enumerate(slices))), expected)
+
+
+def test_parity_sub_params_with_uneven_widths():
+    """The sub-parameter branch, with the per-rank widths #8185 added for uneven splits.
+
+    Q, K and V are different sizes and none divides evenly by the tp degree, which is the
+    case the pre-0.4 metadata could not describe at all.
+    """
+    tp_degree = 3
+    shard_widths = [[3, 2, 2], [2, 2, 1], [1, 1, 1]]
+    sub_dim_sizes = [sum(widths) for widths in shard_widths]
+    rows_per_rank = [sum(widths[rank] for widths in shard_widths) for rank in range(tp_degree)]
+    slices = _random_slices([(rows, 8) for rows in rows_per_rank])
+
+    # Exactly the arithmetic in `merge_tp_slices`: for each sub-parameter, take every
+    # rank's block of it in turn, then concatenate the sub-parameters.
+    offsets = [0] * tp_degree
+    merged_chunks = []
+    for widths in shard_widths:
+        blocks = []
+        for rank, tp_slice in enumerate(slices):
+            blocks.append(tp_slice.narrow(0, offsets[rank], widths[rank]))
+            offsets[rank] += widths[rank]
+        merged_chunks.append(torch.cat(blocks, dim=0))
+    expected = torch.cat(merged_chunks, dim=0)
+
+    affine_map = sub_param_map(shape=(sum(sub_dim_sizes), 8),
+                               sub_dim_sizes=sub_dim_sizes,
+                               shard_widths=shard_widths,
+                               partition_dim=0)
+    affine_map.validate_coverage()
+    assert torch.equal(affine_map.rebuild(dict(enumerate(slices))), expected)
+
+
+def test_parity_round_trips_back_to_the_original_slices():
+    """Extracting from the merged parameter returns the slices it was built from."""
+    per_rank = [3, 3, 2, 2]
+    slices = _random_slices([(size, 8) for size in per_rank])
+    affine_map = contiguous_split_map((10, 8), per_rank, 0)
+
+    full = affine_map.rebuild(dict(enumerate(slices)))
+    for rank, tp_slice in enumerate(slices):
+        assert torch.equal(affine_map.extract(full, rank), tp_slice)
