@@ -36,6 +36,38 @@ def test_output_dtype_conversion_preserves_shared_tensors():
         to_torch_tensor(state_dict, dtype="int8")
 
 
+def test_sizing_pass_does_not_clone_a_tied_placeholder(monkeypatch):
+    """The shard planner asks for shapes only, so it must not copy anything.
+
+    With `share_tensors=False` a tied entry needs its own storage, because both
+    copies really are written, but during `return_empty_tensor` planning that
+    storage only has to exist, not be filled from another one. Cloning would
+    touch a second full-size buffer for every tied GB-scale weight before any
+    shard is saved.
+    """
+    tensor = torch.arange(16, dtype=torch.float32)
+    state_dict = {"weight": tensor, "shared_weight": tensor}
+
+    clones = []
+    original_clone = torch.Tensor.clone
+    monkeypatch.setattr(torch.Tensor, "clone",
+                        lambda self, *args, **kwargs: (clones.append(self.shape)
+                                                       or original_clone(self, *args, **kwargs)))
+
+    empty = to_torch_tensor(state_dict, return_empty_tensor=True, share_tensors=False)
+    assert clones == [], f"the sizing pass cloned {clones}"
+
+    # The copies still have to be separate, or the shard planner undercounts.
+    assert empty["weight"].data_ptr() != empty["shared_weight"].data_ptr()
+    assert empty["weight"].shape == empty["shared_weight"].shape == tensor.shape
+
+    # The saving pass is the one that must copy, so that safetensors accepts it.
+    written = to_torch_tensor(state_dict, share_tensors=False)
+    assert clones == [tensor.shape]
+    assert written["weight"].data_ptr() != written["shared_weight"].data_ptr()
+    assert torch.equal(written["weight"], written["shared_weight"])
+
+
 def test_checkpoint_file_output_dtype(monkeypatch, tmp_path):
 
     def make_state_dict(*args, **kwargs):

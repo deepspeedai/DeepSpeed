@@ -577,7 +577,16 @@ def to_torch_tensor(state_dict, return_empty_tensor=False, dtype=None, share_ten
         tensor_id = id(tensor)
         if tensor_id in converted_tensors:  # shared tensors
             shared_tensor = torch_state_dict[converted_tensors[tensor_id]]
-            torch_state_dict[name] = shared_tensor if share_tensors else shared_tensor.clone()
+            if share_tensors:
+                torch_state_dict[name] = shared_tensor
+            elif return_empty_tensor:
+                # The sizing pass only needs shapes, and a shared entry still has to
+                # count separately because the copies really are written. Allocate a
+                # placeholder rather than cloning one, so planning a sharded save of a
+                # tied GB-scale embedding does not touch a second full-size buffer.
+                torch_state_dict[name] = torch.empty(shared_tensor.shape, dtype=shared_tensor.dtype)
+            else:
+                torch_state_dict[name] = shared_tensor.clone()
         else:
             converted_tensors[tensor_id] = name
             if return_empty_tensor:
