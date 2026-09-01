@@ -24,7 +24,7 @@ import torch
 from deepspeed.checkpoint.affine import (AffinePiece, ParamAffineMap, replicated_map, contiguous_split_map,
                                          sub_param_map)
 from deepspeed.module_inject.fusedqkv_utils import prepare_tp_fused_qkvw, shard_value_with_share_qk
-from deepspeed.module_inject.tp_shard import set_num_kv_heads, set_n_embd, set_num_attention_heads
+from deepspeed.module_inject.tp_shard import AutoTPMeta
 
 
 class _NamedModule(torch.nn.Module):
@@ -142,63 +142,57 @@ def _build_map(shard_fn, rows, cols, mp_size, axis):
     return ParamAffineMap(logical_shape=(rows, cols), shard_shapes=shard_shapes, pieces_by_rank=pieces_by_rank)
 
 
-def _fused_qkv_shard_fn(layout_name, mp_size):
+def _fused_qkv_shard_fn(layout_name, mp_size, meta):
     module = _NamedModule(layout_name)
 
     def shard_fn(full_param, rank):
-        return prepare_tp_fused_qkvw(module, full_param, mp_size, rank)
+        return prepare_tp_fused_qkvw(module, full_param, mp_size, rank, meta)
 
     return shard_fn
 
 
-def _shared_qk_shard_fn(shard_value):
+def _shared_qk_shard_fn(shard_value, meta):
 
     def shard_fn(full_param, rank):
-        return shard_value_with_share_qk(full_param, None, rank, 2, shard_value)[0].data
+        return shard_value_with_share_qk(full_param, None, rank, 2, shard_value, meta)[0].data
 
     return shard_fn
 
 
-def _configure_heads(num_kv_heads, n_embd=None, num_attention_heads=None):
-    set_num_kv_heads(num_kv_heads)
-    if n_embd is not None:
-        set_n_embd(n_embd)
-    if num_attention_heads is not None:
-        set_num_attention_heads(num_attention_heads)
+def _meta(num_kv_heads, n_embd=None, num_attention_heads=None):
+    """The per-model shard metadata AutoTP derives from a model config."""
+    return AutoTPMeta(num_kv_heads=num_kv_heads, n_embd=n_embd, num_attention_heads=num_attention_heads)
 
 
-# (id, rows, cols, mp_size, axis, configure, build_shard_fn)
+# (id, rows, cols, mp_size, axis, make_meta, build_shard_fn)
 LAYOUTS = [
-    ('bigcode', 48, 8, 4, 'row', lambda: _configure_heads(4, n_embd=32, num_attention_heads=4),
-     lambda mp: _fused_qkv_shard_fn('GPTBigCodeBlock', mp)),
-    ('codegen', 24, 8, 2, 'row', lambda: _configure_heads(8, n_embd=8, num_attention_heads=8),
-     lambda mp: _fused_qkv_shard_fn('CodeGenBlock', mp)),
-    ('yuan_value', 32, 8, 2, 'row', lambda: _configure_heads(8), lambda mp: _shared_qk_shard_fn(True)),
-    ('yuan_oproj', 8, 32, 2, 'col', lambda: _configure_heads(8), lambda mp: _shared_qk_shard_fn(False)),
+    ('bigcode', 48, 8, 4, 'row', lambda: _meta(4, n_embd=32, num_attention_heads=4),
+     lambda mp, meta: _fused_qkv_shard_fn('GPTBigCodeBlock', mp, meta)),
+    ('codegen', 24, 8, 2, 'row', lambda: _meta(8, n_embd=8, num_attention_heads=8),
+     lambda mp, meta: _fused_qkv_shard_fn('CodeGenBlock', mp, meta)),
+    ('yuan_value', 32, 8, 2, 'row', lambda: _meta(8), lambda mp, meta: _shared_qk_shard_fn(True, meta)),
+    ('yuan_oproj', 8, 32, 2, 'col', lambda: _meta(8), lambda mp, meta: _shared_qk_shard_fn(False, meta)),
 ]
 
 
-@pytest.mark.parametrize('name, rows, cols, mp_size, axis, configure, build_shard_fn',
+@pytest.mark.parametrize('name, rows, cols, mp_size, axis, make_meta, build_shard_fn',
                          LAYOUTS,
                          ids=[layout[0] for layout in LAYOUTS])
 class TestAffineShardMap:
 
-    def test_shards_cover_the_full_parameter(self, name, rows, cols, mp_size, axis, configure, build_shard_fn):
+    def test_shards_cover_the_full_parameter(self, name, rows, cols, mp_size, axis, make_meta, build_shard_fn):
         """Every element of the full tensor is held by some rank, so it can be rebuilt."""
-        configure()
-        affine_map = _build_map(build_shard_fn(mp_size), rows, cols, mp_size, axis)
+        affine_map = _build_map(build_shard_fn(mp_size, make_meta()), rows, cols, mp_size, axis)
         assert affine_map.uncovered_offsets() == []
 
-    def test_every_piece_is_homogeneous(self, name, rows, cols, mp_size, axis, configure, build_shard_fn):
+    def test_every_piece_is_homogeneous(self, name, rows, cols, mp_size, axis, make_meta, build_shard_fn):
         """No piece spans elements held by different sets of ranks, so locations is exact."""
-        configure()
-        affine_map = _build_map(build_shard_fn(mp_size), rows, cols, mp_size, axis)
+        affine_map = _build_map(build_shard_fn(mp_size, make_meta()), rows, cols, mp_size, axis)
         affine_map.validate_coverage()
 
-    def test_pieces_reproduce_shards_of_unseen_data(self, name, rows, cols, mp_size, axis, configure, build_shard_fn):
+    def test_pieces_reproduce_shards_of_unseen_data(self, name, rows, cols, mp_size, axis, make_meta, build_shard_fn):
         """Pieces derived from markers must reproduce shards of data they were not derived from."""
-        configure()
-        shard_fn = build_shard_fn(mp_size)
+        shard_fn = build_shard_fn(mp_size, make_meta())
         affine_map = _build_map(shard_fn, rows, cols, mp_size, axis)
 
         torch.manual_seed(0)
@@ -207,10 +201,9 @@ class TestAffineShardMap:
             expected = shard_fn(full_param.clone(), rank)
             assert torch.equal(affine_map.extract(full_param, rank), expected)
 
-    def test_rebuild_inverts_extract(self, name, rows, cols, mp_size, axis, configure, build_shard_fn):
+    def test_rebuild_inverts_extract(self, name, rows, cols, mp_size, axis, make_meta, build_shard_fn):
         """Rebuilding from the shards returns the parameter the shards were cut from."""
-        configure()
-        shard_fn = build_shard_fn(mp_size)
+        shard_fn = build_shard_fn(mp_size, make_meta())
         affine_map = _build_map(shard_fn, rows, cols, mp_size, axis)
 
         torch.manual_seed(1)
@@ -227,9 +220,9 @@ def test_piece_count_does_not_grow_with_model_size():
     """
     piece_counts = set()
     for hidden in (8, 16, 32, 64, 128):
-        _configure_heads(8, n_embd=hidden, num_attention_heads=8)
+        meta = _meta(8, n_embd=hidden, num_attention_heads=8)
         rows = 3 * hidden
-        affine_map = _build_map(_fused_qkv_shard_fn('CodeGenBlock', 2), rows, 8, 2, 'row')
+        affine_map = _build_map(_fused_qkv_shard_fn('CodeGenBlock', 2, meta), rows, 8, 2, 'row')
         piece_counts.add(len(affine_map.pieces_by_rank[0]))
 
     assert len(piece_counts) == 1, f'piece count varied with model size: {sorted(piece_counts)}'
@@ -241,9 +234,9 @@ def test_replicated_piece_is_shared_by_every_rank():
     The kv rows appear in every rank's shard, so describing this layout needs replication
     to be expressible for part of a parameter rather than all of it.
     """
-    _configure_heads(4, n_embd=32, num_attention_heads=4)
+    meta = _meta(4, n_embd=32, num_attention_heads=4)
     mp_size = 4
-    affine_map = _build_map(_fused_qkv_shard_fn('GPTBigCodeBlock', mp_size), 48, 8, mp_size, 'row')
+    affine_map = _build_map(_fused_qkv_shard_fn('GPTBigCodeBlock', mp_size, meta), 48, 8, mp_size, 'row')
 
     kv_offsets = set(range(32 * 8, 48 * 8))
     for rank in range(mp_size):
@@ -260,9 +253,9 @@ def test_pieces_never_span_a_replication_boundary():
     alone yields one piece that is rank-private in its first half and replicated in its
     second. Splitting at the boundary costs one extra piece and keeps locations honest.
     """
-    _configure_heads(4, n_embd=32, num_attention_heads=4)
+    meta = _meta(4, n_embd=32, num_attention_heads=4)
     mp_size = 4
-    affine_map = _build_map(_fused_qkv_shard_fn('GPTBigCodeBlock', mp_size), 48, 8, mp_size, 'row')
+    affine_map = _build_map(_fused_qkv_shard_fn('GPTBigCodeBlock', mp_size, meta), 48, 8, mp_size, 'row')
 
     last_rank_pieces = affine_map.pieces_by_rank[mp_size - 1]
     assert len(last_rank_pieces) == 2
