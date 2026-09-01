@@ -68,7 +68,8 @@ class AffinePiece:
         self.dest_strides = tuple(int(stride) for stride in dest_strides)
         self.locations = frozenset(int(rank) for rank in locations)
         self.scale = float(scale)
-        assert self.scale != 0.0, 'A zero scale is not invertible, so the full tensor could not be rebuilt.'
+        if self.scale == 0.0:
+            raise ValueError('A zero scale is not invertible, so the full tensor could not be rebuilt.')
 
     @property
     def numel(self):
@@ -97,6 +98,10 @@ class AffinePiece:
         return self._offsets(self.source_offset, self.source_strides)
 
     def _offsets(self, base, strides):
+        if any(dim == 0 for dim in self.shape):
+            # An empty piece covers no elements. Walking it anyway would report offsets it
+            # does not hold, and a coverage check would accept a map that is missing data.
+            return
         if not self.shape:
             yield base
             return
@@ -205,27 +210,48 @@ class ParamAffineMap:
                                            f'{sorted(holders[offset])}. A piece must not span elements with different '
                                            'holders, or its locations cannot be trusted.')
 
-    def rebuild(self, shards):
+    def rebuild(self, shards, scale_power=1):
         """Rebuild the full parameter from per-rank shards, using the pieces as the plan.
 
-        ``shards`` maps a rank to its shard. Where pieces overlap the data is identical by
-        construction, so writing them in any order gives the same result.
+        ``shards`` maps a rank to its shard.
+
+        ``scale_power`` says how a piece's ``scale`` applies to the tensor being moved:
+        the shard holds ``full * scale ** scale_power``. A parameter uses 1. Optimizer
+        moments do not, because scaling a parameter by ``s`` scales its gradient by
+        ``1 / s``: Adam's first moment needs -1 and its second moment -2. The map records
+        the geometry; the caller knows which tensor it is moving.
         """
         self.validate()
+        for rank, shard in shards.items():
+            expected = _product(self.shard_shapes[rank])
+            if shard.numel() != expected:
+                raise ValueError(f'Rank {rank} supplied a shard of {shard.numel()} elements, but the map '
+                                 f'describes {expected}. Applying the pieces would silently read a prefix '
+                                 'of it and drop the rest.')
         any_shard = next(iter(shards.values()))
         full_param = torch.empty(self.numel, dtype=any_shard.dtype, device=any_shard.device)
 
+        written = {}
         for rank, pieces in self.pieces_by_rank.items():
             flat_shard = _flat_buffer(shards[rank])
             for piece in pieces:
                 target = piece.source_view(full_param)
-                target.copy_(piece.dest_view(flat_shard))
-                if piece.scale != 1.0:
-                    target.div_(piece.scale)
+                source = piece.dest_view(flat_shard)
+                if len(piece.locations) > 1 and piece.source_offset in written:
+                    # Every rank holding a replicated piece must agree. Letting the last
+                    # writer win would hide rank drift or a corrupt shard, which the
+                    # category-based converter guards against explicitly.
+                    if not torch.equal(target, _scaled(source, piece.scale, scale_power)):
+                        raise ValueError(f'Ranks {sorted(piece.locations)} hold different data for the same '
+                                         f'block of a replicated parameter, starting at offset '
+                                         f'{piece.source_offset}.')
+                    continue
+                target.copy_(_scaled(source, piece.scale, scale_power))
+                written[piece.source_offset] = True
 
         return full_param.view(self.logical_shape)
 
-    def extract(self, full_param, rank):
+    def extract(self, full_param, rank, scale_power=1):
         """Produce one rank's shard from the full parameter. The inverse of ``rebuild``."""
         flat_param = _flat_buffer(full_param)
         shard_shape = self.shard_shapes[rank]
@@ -234,8 +260,9 @@ class ParamAffineMap:
         for piece in self.pieces_by_rank[rank]:
             target = piece.dest_view(shard)
             target.copy_(piece.source_view(flat_param))
-            if piece.scale != 1.0:
-                target.mul_(piece.scale)
+            factor = piece.scale**scale_power
+            if factor != 1.0:
+                target.mul_(factor)
 
         return shard.view(shard_shape)
 
@@ -268,6 +295,14 @@ class ParamAffineMap:
     def __repr__(self):
         counts = {rank: len(pieces) for rank, pieces in sorted(self.pieces_by_rank.items())}
         return f'ParamAffineMap(logical_shape={self.logical_shape}, pieces_per_rank={counts})'
+
+
+def _scaled(tensor, scale, scale_power):
+    """Undo the shard's scaling, giving the block as it appears in the full tensor."""
+    factor = scale**scale_power
+    if factor == 1.0:
+        return tensor
+    return tensor / factor
 
 
 def _flat_buffer(tensor):

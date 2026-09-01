@@ -454,3 +454,94 @@ def test_serialisation_preserves_scale():
 def test_stored_version_is_the_format_version():
     """A map written now must declare the version this code writes, not the checkpoint's."""
     assert AFFINE_MAP_FORMAT_VERSION >= 1
+
+
+# Guards added in review. Each one covers a way a map could produce a plausible but wrong
+# parameter rather than failing, which is the failure mode that matters for a checkpoint.
+
+
+def _replicated_bias_map(world_size, scale):
+    piece = AffinePiece(shape=(4, ),
+                        source_offset=0,
+                        source_strides=(1, ),
+                        dest_offset=0,
+                        dest_strides=(1, ),
+                        locations=range(world_size),
+                        scale=scale)
+    return ParamAffineMap(logical_shape=(4, ),
+                          shard_shapes={rank: (4, )
+                                        for rank in range(world_size)},
+                          pieces_by_rank={rank: [piece]
+                                          for rank in range(world_size)})
+
+
+def test_zero_extent_piece_covers_nothing():
+    """A rank may hold none of a sub-parameter, and an empty piece must not claim coverage."""
+    piece = AffinePiece(shape=(0, 8),
+                        source_offset=0,
+                        source_strides=(8, 1),
+                        dest_offset=0,
+                        dest_strides=(8, 1),
+                        locations=[0])
+    assert piece.numel == 0
+    assert list(piece.source_offsets()) == []
+
+
+def test_disagreeing_replicas_are_refused():
+    """Replicas must match. Letting the last writer win would hide a corrupt shard."""
+    affine_map = _replicated_bias_map(world_size=2, scale=1.0)
+    shards = {0: torch.zeros(4, dtype=torch.float64), 1: torch.ones(4, dtype=torch.float64)}
+    with pytest.raises(ValueError, match='different data'):
+        affine_map.rebuild(shards)
+
+
+def test_shard_that_disagrees_with_the_map_is_refused():
+    """A shard longer than the map describes would be silently truncated to its prefix."""
+    affine_map = contiguous_split_map((10, 8), [3, 3, 2, 2], 0)
+    shards = {rank: torch.randn(shape, dtype=torch.float64) for rank, shape in affine_map.shard_shapes.items()}
+    shards[0] = torch.randn(5, 8, dtype=torch.float64)
+    with pytest.raises(ValueError, match='describes'):
+        affine_map.rebuild(shards)
+
+
+def test_zero_scale_is_refused():
+    """Zero cannot be inverted, so the full tensor could never be recovered."""
+    with pytest.raises(ValueError, match='not invertible'):
+        AffinePiece(shape=(4, ),
+                    source_offset=0,
+                    source_strides=(1, ),
+                    dest_offset=0,
+                    dest_strides=(1, ),
+                    locations=[0],
+                    scale=0.0)
+
+
+@pytest.mark.parametrize('scale_power', [1, -1, -2])
+def test_scale_power_round_trips_each_optimizer_state(scale_power):
+    """Adam's moments live in the parameter's scaled coordinate, so they undo differently.
+
+    Scaling a parameter by `s` scales its gradient by `1 / s`, so the first moment carries
+    the inverse of the parameter's factor and the second moment the inverse square. Using
+    the parameter's own factor for all three would corrupt the optimizer state.
+    """
+    world_size = 4
+    affine_map = _replicated_bias_map(world_size, scale=1.0 / world_size)
+    full = torch.randn(4, dtype=torch.float64)
+
+    shards = {rank: affine_map.extract(full, rank, scale_power) for rank in range(world_size)}
+    expected = full * (1.0 / world_size)**scale_power
+    assert torch.equal(shards[0], expected)
+    assert torch.equal(affine_map.rebuild(shards, scale_power), full)
+
+
+def test_optimizer_moments_do_not_use_the_parameter_factor():
+    """The three states must not come out of the same shard with the same value."""
+    world_size = 4
+    affine_map = _replicated_bias_map(world_size, scale=1.0 / world_size)
+    shard = torch.full((4, ), 8.0, dtype=torch.float64)
+    shards = {rank: shard.clone() for rank in range(world_size)}
+
+    rebuilt = {power: affine_map.rebuild(shards, power) for power in (1, -1, -2)}
+    assert torch.equal(rebuilt[1], shard * world_size)
+    assert torch.equal(rebuilt[-1], shard / world_size)
+    assert torch.equal(rebuilt[-2], shard / world_size**2)
