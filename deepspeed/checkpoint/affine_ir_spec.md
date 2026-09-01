@@ -70,6 +70,14 @@ restored at a different TP degree without a rule naming which parameters are bia
 is the kind of semantic category this IR exists to remove. §4.3 draws the line between this
 and the average op.
 
+**`scale` applies to the parameter, not to everything stored beside it.** A checkpoint also
+carries optimizer state, and Adam's moments live in the parameter's *scaled* coordinate:
+scaling a parameter by `s` scales its gradient by `1/s`, so the first moment carries `s⁻¹`
+and the second `s⁻²` where the parameter carries `s`. A converter that applies the
+parameter's own factor to all three corrupts the optimizer state and changes the trajectory
+after a resume. The map records the geometry and the factor; the caller says which power of
+it applies to the tensor being moved.
+
 **Homogeneity.** A piece must cover elements that are all held by the same set of ranks and
 all carry the same scale. This is what makes `locations` exact rather than advisory, and it
 constrains merging: see §3 (P5) and §6.3.
