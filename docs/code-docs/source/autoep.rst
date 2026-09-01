@@ -84,6 +84,66 @@ Weights-only/module-only Universal Checkpoint loads use the converted
 4. Expert parameters are marked for expert-data-parallel gradient reduction;
    router and shared-expert parameters use standard data-parallel reduction.
 
+**Communication backend (optional):**
+
+The expert AllToAll can be carried by `DeepEP <https://github.com/deepseek-ai/DeepEP>`__
+instead of the default collectives. This is opt-in and off by default; jobs
+that set nothing keep the existing path unchanged.
+
+.. code-block:: json
+
+    {
+      "expert_parallel": {
+        "enabled": true,
+        "autoep_size": 8,
+        "comm_backend": "deepep",
+        "comm_num_sm": 12,
+        "comm_qp_margin": 4
+      }
+    }
+
+- ``comm_backend``: ``"comm"`` (default) uses ``deepspeed.comm`` collectives;
+  ``"deepep"`` uses DeepEP's dispatch and combine kernels.
+- ``comm_num_sm``: SMs given to communication. Default 12.
+- ``comm_qp_margin``: RDMA queue pairs reserved beyond one per SM. Default 4.
+- ``comm_max_tokens_per_rank``: largest per-rank token count the job will
+  produce, which is ``micro_batch_size * seq_len`` when sequences are padded to
+  a fixed length. Required when ``comm_backend`` is ``"deepep"`` because the
+  DeepEP buffer is sized statically and must use the same capacity on every
+  rank. A batch that exceeds it is an error.
+
+On 16 H100s across two nodes, replaying routing captured from real training,
+DeepEP reduced payload AllToAll time from roughly 100 ms to 48 ms per step. A
+full SFT step on Qwen3.5-MoE went from roughly 325 ms to 266 ms, a 1.2x speedup
+that removes about 18% of the step, reproduced across two independent jobs
+(1.21x and 1.24x). Both backends are measured in the same job, on the same pods
+and alternating, since the same measurement varied by a quarter between jobs;
+the figures are medians rather than single observations, and DeepEP's own
+median moved by 0.3% between the two jobs while the collective baseline moved
+by 2.5%. The advantage grows with routing imbalance: at the most skewed
+step measured, the collective path degraded to 116 ms while DeepEP stayed flat.
+
+``comm_num_sm`` matters because communication competes with the expert GEMM for
+SMs. The default of 12 was chosen by measuring whole steps: 8 SMs gave a median
+297.9 ms against 265.4 ms at 12, and larger budgets were slower again.
+``comm_qp_margin`` exists because DeepEP's automatic queue-pair count assumes
+it is alone on the fabric, which exhausts the queue pairs ZeRO and the
+data-parallel groups have already claimed in a training step.
+
+Requirements and limits:
+
+- The ``deep_ep`` package must be installed. It is imported only when this
+  backend is selected, so installations without it are unaffected.
+- DeepEP v2 requires NCCL 2.30.4 or newer, built with GIN support. Below that
+  version the transport is unavailable regardless of the network.
+- DeepEP v1 (the legacy ``Buffer`` API, using NVSHMEM and IBGDA) is not
+  supported.
+- bfloat16 only. DeepEP's dispatch kernel takes bfloat16 rows, so selecting
+  this backend for an fp16 or fp32 run is rejected rather than silently
+  downgraded.
+- Not compatible with folded tensor parallelism
+  (``expert_tensor_parallel_size > 1``), which is rejected at setup.
+
 **Constraints:**
 
 - ``autoep_size`` must divide ``num_experts`` for all detected MoE layers.
