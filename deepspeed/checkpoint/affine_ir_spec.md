@@ -316,22 +316,24 @@ A reader that wants a different placement ignores the field entirely.
 ### 6.2 The document
 
 Written into `UNIVERSAL_CHECKPOINT_INFO` under a new `affine_map` key, keyed by the same
-exact-match patterns `collect_autotp_universal_checkpoint_info` already emits
-(`collect_autotp_universal_checkpoint_info` produces `rf"^{re.escape(full_name)}$"`, one per parameter):
+exact-match patterns `collect_autotp_universal_checkpoint_info` already emits — one
+`rf"^{re.escape(full_name)}$"` per parameter:
 
 ```python
 {
   "affine_map": {
     "version": 1,
-    "^transformer.h.0.attn.c_attn.weight$": {
-      "logical_shape": [48, 8],
-      "ranks": {
-        0: {"shard_shape": [24, 8],
-            "pieces": [
-              {"shape": [8, 8],  "source": [0,   [8, 1]], "dest": [0,  [8, 1]], "locations": [0]},
-              {"shape": [16, 8], "source": [256, [8, 1]], "dest": [64, [8, 1]], "locations": [0,1,2,3]}
-            ]},
-        ...
+    "params": {
+      "^transformer.h.0.attn.c_attn.weight$": {
+        "logical_shape": [48, 8],
+        "ranks": {
+          0: {"shard_shape": [16, 8],
+              "pieces": [
+                {"shape": [8, 8],  "source": [0,   [8, 1]], "dest": [0,  [8, 1]], "locations": [0]},
+                {"shape": [8, 8],  "source": [256, [8, 1]], "dest": [64, [8, 1]], "locations": [0,1,2,3]}
+              ]},
+          ...
+        }
       }
     }
   }
@@ -339,7 +341,11 @@ exact-match patterns `collect_autotp_universal_checkpoint_info` already emits
 ```
 
 Each piece is `shape` plus `[offset, strides]` on each side — the argument list of
-`torch.as_strided` twice over, so a reader applies it with no interpretation step.
+`torch.as_strided` twice over, so a reader applies it with no interpretation step. `scale`
+is omitted when it is 1, which is almost every piece.
+
+Per-parameter entries live under `params` rather than beside `version`, so that a parameter
+whose name matched a metadata key could never be confused for one.
 
 ### 6.3 Rules
 
