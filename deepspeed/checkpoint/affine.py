@@ -21,8 +21,14 @@ See ``deepspeed/checkpoint/affine_ir_spec.md`` for the full specification.
 import torch
 
 __all__ = [
-    'AffinePiece', 'ParamAffineMap', 'row_major_strides', 'replicated_map', 'contiguous_split_map', 'sub_param_map'
+    'AffinePiece', 'ParamAffineMap', 'AFFINE_MAP_FORMAT_VERSION', 'row_major_strides', 'replicated_map',
+    'contiguous_split_map', 'sub_param_map'
 ]
+
+# Encoding version of the stored map, independent of the universal checkpoint version so
+# the two can move separately. A reader refuses a version it predates rather than
+# misreading fields it does not know about.
+AFFINE_MAP_FORMAT_VERSION = 1
 
 
 class AffinePiece:

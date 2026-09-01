@@ -43,6 +43,7 @@ from deepspeed.checkpoint import (
     PARAMETER_TO_AVERAGE_PATTERNS,
     AFFINE_MAP,
     AFFINE_MAP_PARAMS,
+    AFFINE_MAP_VERSION,
     PARAMETER_WITH_ROW_PARALLELISM_PATTERNS,
     PARAMETER_WITH_2_SUB_PARAMS_CAT_DIM_0,
     PARAMETER_WITH_SUB_PARAMS,
@@ -59,7 +60,7 @@ from deepspeed.checkpoint.autoep_zero3_metadata import (
     is_autoep_zero3_partitioned_entry,
     validate_autoep_zero3_partitioned_metadata,
 )
-from deepspeed.checkpoint.affine import ParamAffineMap
+from deepspeed.checkpoint.affine import ParamAffineMap, AFFINE_MAP_FORMAT_VERSION
 
 
 def parse_arguments():
@@ -303,7 +304,12 @@ def merge_tp_slices(uc_info, dir, slice_dir, tp_degree, name_and_shapes):
     parameters_with_2_sub_params_cat_dim_0 = universal_checkpoint_info.get(PARAMETER_WITH_2_SUB_PARAMS_CAT_DIM_0, [])
     parameter_with_sub_params = universal_checkpoint_info.get(PARAMETER_WITH_SUB_PARAMS, [])
     sub_param_shard_widths = universal_checkpoint_info.get(SUB_PARAM_SHARD_WIDTHS, {})
-    affine_params = universal_checkpoint_info.get(AFFINE_MAP, {}).get(AFFINE_MAP_PARAMS, {})
+    affine_map_info = universal_checkpoint_info.get(AFFINE_MAP, {})
+    affine_map_version = affine_map_info.get(AFFINE_MAP_VERSION, AFFINE_MAP_FORMAT_VERSION)
+    assert affine_map_version <= AFFINE_MAP_FORMAT_VERSION, (
+        f"Checkpoint records affine map format version {affine_map_version}, but this DeepSpeed understands "
+        f"up to {AFFINE_MAP_FORMAT_VERSION}. Reading it could misinterpret fields added since.")
+    affine_params = affine_map_info.get(AFFINE_MAP_PARAMS, {})
     uc_version = universal_checkpoint_info.get(UNIVERSAL_CHECKPOINT_VERSION_KEY, 0.0)
 
     unmatched_patterns = set(replicated_parameters + parameters_to_average + parameters_with_row_parallelism +

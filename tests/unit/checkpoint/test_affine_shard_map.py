@@ -21,8 +21,8 @@ process group or an accelerator.
 import pytest
 import torch
 
-from deepspeed.checkpoint.affine import (AffinePiece, ParamAffineMap, replicated_map, contiguous_split_map,
-                                         sub_param_map)
+from deepspeed.checkpoint.affine import (AffinePiece, ParamAffineMap, AFFINE_MAP_FORMAT_VERSION, replicated_map,
+                                         contiguous_split_map, sub_param_map)
 from deepspeed.module_inject.fusedqkv_utils import prepare_tp_fused_qkvw, shard_value_with_share_qk
 from deepspeed.module_inject.tp_shard import AutoTPMeta
 
@@ -449,3 +449,8 @@ def test_serialisation_preserves_scale():
                                 })
     restored = ParamAffineMap.from_dict(affine_map.to_dict())
     assert restored.pieces_by_rank[0][0] == piece
+
+
+def test_stored_version_is_the_format_version():
+    """A map written now must declare the version this code writes, not the checkpoint's."""
+    assert AFFINE_MAP_FORMAT_VERSION >= 1
