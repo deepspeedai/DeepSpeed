@@ -129,10 +129,10 @@ def compile_autoep_non_moe_regions(model: nn.Module, backend, compile_kwargs: di
         raise ValueError("compile_mode='autoep_non_moe' requires at least one AutoEPMoELayer. "
                          "Enable expert_parallel and call compile() after deepspeed.initialize().")
 
-    if compile_kwargs.get("fullgraph", False):
+    if "fullgraph" in compile_kwargs and compile_kwargs["fullgraph"] is not False:
         raise ValueError("compile_mode='autoep_non_moe' requires fullgraph=False because AutoEP is an eager graph "
                          "break.")
-    if compile_kwargs.get("dynamic", False):
+    if "dynamic" in compile_kwargs and compile_kwargs["dynamic"] is not False:
         raise ValueError("compile_mode='autoep_non_moe' currently requires dynamic=False.")
 
     resolved_compile_kwargs = {

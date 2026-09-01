@@ -5835,8 +5835,16 @@ class DeepSpeedEngine(Module):
             if self.is_deepcompile_enabled():
                 raise ValueError("compile_mode='autoep_non_moe' uses vanilla torch.compile and cannot be combined "
                                  "with DeepCompile.")
+            autoep_config = getattr(self._config, "expert_parallel_config", None)
+            if getattr(autoep_config, "comm_backend", "comm") != "comm":
+                raise ValueError("compile_mode='autoep_non_moe' supports only expert_parallel.comm_backend='comm'.")
             if self.autotp_size() > 1:
                 raise ValueError("compile_mode='autoep_non_moe' does not support AutoEP+AutoTP folding yet.")
+            if self._autoep_sequence_parallel_world_size() > 1:
+                raise ValueError("compile_mode='autoep_non_moe' does not support sequence parallelism yet.")
+            folding_spec = getattr(self, "_autoep_folding_spec", None)
+            if getattr(self, "pipeline_parallelism", False) or getattr(folding_spec, "pp_size", 1) > 1:
+                raise ValueError("compile_mode='autoep_non_moe' does not support pipeline parallelism yet.")
             if self.zero_optimization_partition_weights():
                 raise ValueError("compile_mode='autoep_non_moe' does not support ZeRO Stage 3 yet.")
             if self.zero_offload_optimizer() is not None or self.zero_offload_param() is not None:

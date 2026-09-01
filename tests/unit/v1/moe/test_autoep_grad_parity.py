@@ -275,7 +275,7 @@ def _assert_compile_step_close(actual, expected):
     for name, rtol, atol in (
         ("output", 5e-3, 2e-2),
         ("loss", 5e-3, 2e-3),
-        ("input_grad", 1e-2, 2e-2),
+        ("input_grad", 5e-3, 5e-3),
     ):
         difference = (actual[name] - expected[name]).abs()
         torch.testing.assert_close(actual[name],
@@ -290,13 +290,13 @@ def _assert_compile_step_close(actual, expected):
     for name in actual["grads"]:
         torch.testing.assert_close(actual["grads"][name],
                                    expected["grads"][name],
-                                   rtol=1e-2,
-                                   atol=2e-2,
+                                   rtol=5e-3,
+                                   atol=5e-3,
                                    msg=f"Gradient mismatch for {name}")
         torch.testing.assert_close(actual["deltas"][name],
                                    expected["deltas"][name],
-                                   rtol=1e-2,
-                                   atol=2e-3,
+                                   rtol=5e-3,
+                                   atol=5e-5,
                                    msg=(f"Optimizer delta max_diff="
                                         f"{(actual['deltas'][name] - expected['deltas'][name]).abs().max().item()}, "
                                         f"actual_norm={actual['deltas'][name].norm().item()}, "
@@ -424,6 +424,8 @@ class TestAutoEPRegionalCompileParity(DistributedTest):
 
         eager_engine, _, _, _ = deepspeed.initialize(model=eager_model, config=_make_compile_config())
         compiled_engine, _, _, _ = deepspeed.initialize(model=compiled_model, config=_make_compile_config())
+        torch._dynamo.reset()
+        torch._dynamo.utils.counters.clear()
         compiled_engine.compile(compile_mode="autoep_non_moe")
 
         eager_calls, eager_routes, eager_handles = _register_autoep_observers(eager_engine)
@@ -441,6 +443,8 @@ class TestAutoEPRegionalCompileParity(DistributedTest):
         eager_route_start = len(eager_routes)
         compiled_route_start = len(compiled_routes)
         dynamo_start = _snapshot_dynamo_stats()
+        assert dynamo_start.get("unique_graphs", 0) > 0, f"Warmup did not capture graphs: {dynamo_start}"
+        assert dynamo_start.get("calls_captured", 0) > 0, f"Warmup did not capture calls: {dynamo_start}"
 
         measured_eager = _run_compile_step(eager_engine, measured_batch)
         measured_compiled = _run_compile_step(compiled_engine, measured_batch)

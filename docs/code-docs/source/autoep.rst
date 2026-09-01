@@ -98,11 +98,13 @@ its direct parent decoder block with ``fullgraph=False`` and ``dynamic=False``.
 The AutoEP layer is an explicit compiler-disabled graph break, so routing,
 AllToAll dispatch/combine, and expert execution remain eager.
 
-The initial experimental path supports vanilla ``torch.compile`` with ZeRO
-stages 0, 1, and 2. It rejects DeepCompile, AutoEP+AutoTP folding, ZeRO stage 3,
-optimizer or parameter offload, compiled autograd, DeepCompile schedules,
-``fullgraph=True``, and ``dynamic=True`` instead of silently changing the
-requested behavior.
+The initial experimental path supports vanilla ``torch.compile`` with the
+standard ``comm`` backend, sequence and pipeline parallel sizes of one, and
+ZeRO stages 0, 1, and 2. Distributed performance and parity validation currently
+target ZeRO stage 1. It rejects DeepEP, DeepCompile, AutoEP+AutoTP folding,
+sequence or pipeline parallelism, ZeRO stage 3, optimizer or parameter offload,
+compiled autograd, DeepCompile schedules, and any ``fullgraph`` or ``dynamic``
+value other than ``False`` instead of silently changing the requested behavior.
 
 **How it works:**
 

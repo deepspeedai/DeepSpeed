@@ -931,7 +931,13 @@ class TestAutoEPRegionalCompile:
                 "fullgraph": True
             }, "fullgraph=False"),
             ({
+                "fullgraph": None
+            }, "fullgraph=False"),
+            ({
                 "dynamic": True
+            }, "dynamic=False"),
+            ({
+                "dynamic": None
             }, "dynamic=False"),
         ],
     )
@@ -966,7 +972,10 @@ class TestAutoEPRegionalCompile:
         "condition, match",
         [
             ("deepcompile", "cannot be combined with DeepCompile"),
+            ("deepep", "comm_backend='comm'"),
             ("autotp", "AutoEP\\+AutoTP folding"),
+            ("sequence_parallel", "sequence parallelism"),
+            ("pipeline_parallel", "pipeline parallelism"),
             ("zero3", "ZeRO Stage 3"),
             ("optimizer_offload", "optimizer or parameter offload"),
             ("param_offload", "optimizer or parameter offload"),
@@ -979,11 +988,17 @@ class TestAutoEPRegionalCompile:
         engine = object.__new__(DeepSpeedEngine)
         nn.Module.__init__(engine)
         engine.module = model
-        engine._config = SimpleNamespace(compile_config=SimpleNamespace(deepcompile=condition == "deepcompile"))
+        engine._config = SimpleNamespace(
+            compile_config=SimpleNamespace(deepcompile=condition == "deepcompile"),
+            expert_parallel_config=SimpleNamespace(comm_backend="deepep" if condition == "deepep" else "comm"),
+        )
         engine._is_compiled = False
         engine._compile_mode = None
         engine._compiled_regions = []
         engine.autotp_size = lambda: 2 if condition == "autotp" else 1
+        engine._autoep_sequence_parallel_world_size = lambda: 2 if condition == "sequence_parallel" else 1
+        engine.pipeline_parallelism = condition == "pipeline_parallel"
+        engine._autoep_folding_spec = None
         engine.zero_optimization_partition_weights = lambda: condition == "zero3"
         engine.zero_offload_optimizer = lambda: object() if condition == "optimizer_offload" else None
         engine.zero_offload_param = lambda: object() if condition == "param_offload" else None
@@ -1009,12 +1024,18 @@ class TestAutoEPRegionalCompile:
         engine = object.__new__(DeepSpeedEngine)
         nn.Module.__init__(engine)
         engine.module = model
-        engine._config = SimpleNamespace(compile_config=SimpleNamespace(deepcompile=False))
+        engine._config = SimpleNamespace(
+            compile_config=SimpleNamespace(deepcompile=False),
+            expert_parallel_config=SimpleNamespace(comm_backend="comm"),
+        )
         engine._is_compiled = False
         engine._compile_mode = None
         engine._compiled_regions = []
         engine._is_compiled_autograd_enabled = False
         engine.autotp_size = lambda: 1
+        engine._autoep_sequence_parallel_world_size = lambda: 1
+        engine.pipeline_parallelism = False
+        engine._autoep_folding_spec = None
         engine.zero_optimization_partition_weights = lambda: False
         engine.zero_offload_optimizer = lambda: None
         engine.zero_offload_param = lambda: None
