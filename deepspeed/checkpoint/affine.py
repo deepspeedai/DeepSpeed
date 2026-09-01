@@ -10,9 +10,12 @@ layout that no category describes cannot be converted at all. This module descri
 shard geometrically instead: each rank holds a list of affine views of the full tensor,
 and the views alone say how to rebuild it.
 
-The representation is deliberately view-only. A piece never combines several elements of
-the full tensor, which is what keeps the mapping invertible: given the full tensor a rank's
-shard can be produced, and given the shards the full tensor can be rebuilt.
+A piece may carry an invertible elementwise map, but never a reduction. Scaling a block by
+a constant is reversible; averaging several elements into one is not, and would leave the
+full tensor unrecoverable from the shards. That line is what keeps conversion invertible in
+both directions.
+
+See ``deepspeed/checkpoint/affine_ir_spec.md`` for the full specification.
 """
 
 import torch
@@ -35,17 +38,29 @@ class AffinePiece:
     ``locations`` is a set of ranks rather than a single owner because a piece may be
     replicated. Naming one owner here would be a scheduling decision, and the cheapest
     source depends on the topology, which this description does not know about.
+
+    ``scale`` is the factor the shard holds the block by: ``shard == full * scale``. Row
+    parallel layers pre-divide a replicated bias by the world size so that summing the
+    all-reduced outputs adds the bias exactly once, and the divisor changes with the world
+    size. Recording it as a number keeps that describable without a rule naming which
+    parameters are biases.
+
+    A piece must be *homogeneous*: every element it covers is held by the same set of ranks
+    and carries the same scale. That is what makes ``locations`` exact rather than a hint,
+    and it is why merging two adjacent blocks is only allowed when both agree.
     """
 
-    __slots__ = ('shape', 'source_offset', 'source_strides', 'dest_offset', 'dest_strides', 'locations')
+    __slots__ = ('shape', 'source_offset', 'source_strides', 'dest_offset', 'dest_strides', 'locations', 'scale')
 
-    def __init__(self, shape, source_offset, source_strides, dest_offset, dest_strides, locations):
+    def __init__(self, shape, source_offset, source_strides, dest_offset, dest_strides, locations, scale=1.0):
         self.shape = tuple(int(dim) for dim in shape)
         self.source_offset = int(source_offset)
         self.source_strides = tuple(int(stride) for stride in source_strides)
         self.dest_offset = int(dest_offset)
         self.dest_strides = tuple(int(stride) for stride in dest_strides)
         self.locations = frozenset(int(rank) for rank in locations)
+        self.scale = float(scale)
+        assert self.scale != 0.0, 'A zero scale is not invertible, so the full tensor could not be rebuilt.'
 
     @property
     def numel(self):
@@ -97,18 +112,20 @@ class AffinePiece:
 
     def __repr__(self):
         return (f'AffinePiece(shape={self.shape}, source=({self.source_offset}, {self.source_strides}), '
-                f'dest=({self.dest_offset}, {self.dest_strides}), locations={sorted(self.locations)})')
+                f'dest=({self.dest_offset}, {self.dest_strides}), locations={sorted(self.locations)}, '
+                f'scale={self.scale})')
 
     def __eq__(self, other):
         if not isinstance(other, AffinePiece):
             return NotImplemented
         return (self.shape == other.shape and self.source_offset == other.source_offset
                 and self.source_strides == other.source_strides and self.dest_offset == other.dest_offset
-                and self.dest_strides == other.dest_strides and self.locations == other.locations)
+                and self.dest_strides == other.dest_strides and self.locations == other.locations
+                and self.scale == other.scale)
 
     def __hash__(self):
-        return hash(
-            (self.shape, self.source_offset, self.source_strides, self.dest_offset, self.dest_strides, self.locations))
+        return hash((self.shape, self.source_offset, self.source_strides, self.dest_offset, self.dest_strides,
+                     self.locations, self.scale))
 
 
 class ParamAffineMap:
@@ -139,17 +156,46 @@ class ParamAffineMap:
                 covered.update(piece.source_offsets())
         return sorted(set(range(self.numel)) - covered)
 
-    def validate(self):
-        missing = self.uncovered_offsets()
-        assert not missing, (f'Affine map for a parameter of shape {self.logical_shape} leaves '
-                             f'{len(missing)} element(s) uncovered, starting at offset {missing[0]}, '
-                             'so the parameter cannot be rebuilt from its shards.')
+    def holders(self):
+        """Map each element offset of the full tensor to the set of ranks holding it."""
+        holders = {}
+        for rank, pieces in self.pieces_by_rank.items():
+            for piece in pieces:
+                for offset in piece.source_offsets():
+                    holders.setdefault(offset, set()).add(rank)
+        return holders
 
+    def validate(self):
+        """Cheap structural check: every rank's pieces account for exactly its shard."""
         for rank, pieces in self.pieces_by_rank.items():
             held = sum(piece.numel for piece in pieces)
             expected = _product(self.shard_shapes[rank])
             assert held == expected, (f'Rank {rank} holds a shard of {expected} elements but its pieces '
                                       f'account for {held}.')
+
+    def validate_coverage(self):
+        """Full check: the shards cover the parameter, and every piece is homogeneous.
+
+        This walks the map element by element, so it costs O(numel) and is meant for tests
+        and for validating a newly built map, not for every conversion of a large tensor.
+        """
+        self.validate()
+
+        missing = self.uncovered_offsets()
+        assert not missing, (f'Affine map for a parameter of shape {self.logical_shape} leaves '
+                             f'{len(missing)} element(s) uncovered, starting at offset {missing[0]}, '
+                             'so the parameter cannot be rebuilt from its shards.')
+
+        # A piece whose elements are not all held by the same ranks would make its own
+        # `locations` a lie, and a reader trusting that field would miss a replica.
+        holders = self.holders()
+        for rank, pieces in self.pieces_by_rank.items():
+            for piece in pieces:
+                for offset in piece.source_offsets():
+                    assert holders[offset] == set(
+                        piece.locations), (f'Piece {piece} on rank {rank} covers offset {offset}, which is held by '
+                                           f'{sorted(holders[offset])}. A piece must not span elements with different '
+                                           'holders, or its locations cannot be trusted.')
 
     def rebuild(self, shards):
         """Rebuild the full parameter from per-rank shards, using the pieces as the plan.
@@ -164,7 +210,10 @@ class ParamAffineMap:
         for rank, pieces in self.pieces_by_rank.items():
             flat_shard = _flat_buffer(shards[rank])
             for piece in pieces:
-                piece.source_view(full_param).copy_(piece.dest_view(flat_shard))
+                target = piece.source_view(full_param)
+                target.copy_(piece.dest_view(flat_shard))
+                if piece.scale != 1.0:
+                    target.div_(piece.scale)
 
         return full_param.view(self.logical_shape)
 
@@ -175,7 +224,10 @@ class ParamAffineMap:
         shard = torch.empty(_product(shard_shape), dtype=full_param.dtype, device=full_param.device)
 
         for piece in self.pieces_by_rank[rank]:
-            piece.dest_view(shard).copy_(piece.source_view(flat_param))
+            target = piece.dest_view(shard)
+            target.copy_(piece.source_view(flat_param))
+            if piece.scale != 1.0:
+                target.mul_(piece.scale)
 
         return shard.view(shard_shape)
 
