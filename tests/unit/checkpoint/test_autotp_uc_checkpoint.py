@@ -1105,7 +1105,7 @@ class TestUnevenColumnUniversalCheckpoint(DistributedTest):
 
         tp_group = groups.get_tensor_model_parallel_group()
         tp_rank = groups.get_tensor_model_parallel_rank()
-        shard_sizes = get_shard_size_list(vocab_size, self.world_size, "lm_head")
+        shard_sizes = list(engine.module.lm_head._partition_sizes)
         assert shard_sizes == [51, 50], shard_sizes
         assert engine.module.lm_head.weight.shape[0] == shard_sizes[tp_rank]
 
@@ -1194,7 +1194,7 @@ class TestUnevenRowUniversalCheckpoint(DistributedTest):
         # Column and row parallelism must shard the same dimension identically.
         assert attn.q_proj.weight.shape[0] == attn.o_proj.weight.shape[1]
         head_dim = hidden_dim // num_heads
-        head_shards = get_shard_size_list(num_heads, self.world_size, attn.q_proj.name)
+        head_shards = get_shard_size_list(num_heads, self.world_size, attn.q_proj.tp_meta, attn.q_proj.name)
         assert head_shards == [2, 2, 1, 1], head_shards
         dim_shards = [h * head_dim for h in head_shards]
         assert attn.q_proj.weight.shape[0] == dim_shards[tp_rank], (attn.q_proj.weight.shape, dim_shards)
@@ -1383,7 +1383,7 @@ class TestUnevenTp3TrainingAndUniversalCheckpoint(DistributedTest):
 
         tp_group = groups.get_tensor_model_parallel_group()
         tp_rank = groups.get_tensor_model_parallel_rank()
-        shard_sizes = get_shard_size_list(vocab_size, self.world_size, "lm_head")
+        shard_sizes = list(engine.module.lm_head._partition_sizes)
         assert sum(shard_sizes) == vocab_size, shard_sizes
         assert shard_sizes == [4, 3, 3], shard_sizes
         assert engine.module.lm_head.weight.shape[0] == shard_sizes[tp_rank]
@@ -1506,7 +1506,7 @@ class TestUnevenTp3RowParallelGQA(DistributedTest):
         assert attn.q_proj.weight.shape[0] == attn.o_proj.weight.shape[1], (attn.q_proj.weight.shape,
                                                                             attn.o_proj.weight.shape)
         head_dim = hidden_dim // num_heads
-        head_shards = get_shard_size_list(num_heads, self.world_size, attn.q_proj.name)
+        head_shards = get_shard_size_list(num_heads, self.world_size, attn.q_proj.tp_meta, attn.q_proj.name)
         assert head_shards == [2, 1, 1], head_shards
         dim_shards = [h * head_dim for h in head_shards]
         assert attn.q_proj.weight.shape[0] == dim_shards[tp_rank], (attn.q_proj.weight.shape, dim_shards)

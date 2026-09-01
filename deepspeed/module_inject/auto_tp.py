@@ -15,7 +15,7 @@ from deepspeed import comm as dist
 from .layers import *
 from deepspeed.accelerator import get_accelerator
 from .fusedqkv_utils import require_tp_fused_qkvw
-from deepspeed.module_inject.tp_shard import get_shard_size, get_shard_size_list
+from deepspeed.module_inject.tp_shard import AutoTPMeta, get_shard_size, get_shard_size_list
 from deepspeed.utils import groups
 from deepspeed.utils.logging import log_dist, print_dist
 from deepspeed.module_inject.layers import is_autotp_training_mode
@@ -206,6 +206,8 @@ class AutoTP():
                  orig_layer_impl,
                  keep_module_on_host=False,
                  partition_config: Optional[AutoTPConfig] = None,
+                 model_config=None,
+                 tp_grain_size: int = 1,
                  training_mode: bool = False):
         self.module = module
         self.all_reduce_linears = all_reduce_linears
@@ -214,6 +216,9 @@ class AutoTP():
 
         self.mp_size = None
         self.mp_group = None
+        # Per-model TP metadata threaded through every layer / helper so each AutoTP instance
+        # shards by its own model's kv-head / grain values.
+        self.tp_meta = AutoTPMeta.from_model_config(model_config, tp_grain_size)
         self.linear_layer_setting = linear_layer_setting
         self.orig_layer_impl = orig_layer_impl
         self.linear_policies = None
@@ -380,14 +385,14 @@ class AutoTP():
         # For Yuan model
         if 'Yuan' in str(self.module):
             if 'v_proj' in name:
-                return Yuan_LinearLayer(child, self.mp_group)
+                return Yuan_LinearLayer(child, self.mp_group, tp_meta=self.tp_meta)
 
             elif 'o_proj' in name:
-                return Yuan_LinearAllreduce(child, self.mp_group)
+                return Yuan_LinearAllreduce(child, self.mp_group, tp_meta=self.tp_meta)
 
         # For MLP including chunk layer.
         if 'gate_up_proj' in name or ('dense_h_to_4h' in name and 'GLM' in str(self.module)):
-            return GateUpPack_LinearLayer(child, self.mp_group)
+            return GateUpPack_LinearLayer(child, self.mp_group, tp_meta=self.tp_meta)
             # For Arctic model, bypass to all_reduce replacement for w2 weights
         arctic_w2_all_reduce_linear = False
         if 'Arctic' in str(self.module) and 'w2' in name:
@@ -403,23 +408,23 @@ class AutoTP():
 
             setattr(child, "replaced", True)
             if self.conv_linear_layer:
-                return Conv_LinearALlreduce(child, self.mp_group, name=name)
+                return Conv_LinearALlreduce(child, self.mp_group, name=name, tp_meta=self.tp_meta)
             elif legacy_lm_head:
-                return LmHeadLinearAllreduce(child, self.mp_group)
+                return LmHeadLinearAllreduce(child, self.mp_group, tp_meta=self.tp_meta)
 
-            return LinearAllreduce(child, self.mp_group, name=name)
+            return LinearAllreduce(child, self.mp_group, name=name, tp_meta=self.tp_meta)
         else:
 
             setattr(child, "replaced", True)
             if self.conv_linear_layer:
-                conv_LinearLayer(child, self.mp_group)
+                conv_LinearLayer(child, self.mp_group, tp_meta=self.tp_meta)
             elif training_column_lm_head:
-                return LinearLayer(child, self.mp_group, name=name, gather_output=True)
+                return LinearLayer(child, self.mp_group, name=name, gather_output=True, tp_meta=self.tp_meta)
             elif require_tp_fused_qkvw(name, self.mp_size):
                 #Check and handle fused qkv for TP
-                return fused_LinearLayer(child, self.mp_group, fused_module=self.module)
+                return fused_LinearLayer(child, self.mp_group, fused_module=self.module, tp_meta=self.tp_meta)
 
-            return LinearLayer(child, self.mp_group, name=name)
+            return LinearLayer(child, self.mp_group, name=name, tp_meta=self.tp_meta)
 
     def _replace_with_config(self, child, name):
         """
@@ -457,10 +462,10 @@ class AutoTP():
     def _create_row_parallel_layer(self, module, spec: TPLayerSpec, name: str):
         """Create row-parallel layer (AllReduce after forward)."""
         if self.conv_linear_layer:
-            return Conv_LinearALlreduce(module, self.mp_group, name=name)
+            return Conv_LinearALlreduce(module, self.mp_group, name=name, tp_meta=self.tp_meta)
         if name == "lm_head" or name == 'embed_out':
             if not self.training_mode:
-                return LmHeadLinearAllreduce(module, self.mp_group)
+                return LmHeadLinearAllreduce(module, self.mp_group, tp_meta=self.tp_meta)
             if self.mp_size > 1:
                 raise NotImplementedError(
                     "Training with explicit row-parallel output heads is not supported for tensor parallel size > 1. "
@@ -473,17 +478,22 @@ class AutoTP():
                 shape=spec.shape,
                 partition_dim=spec.get_partition_dim(),
                 name=name,
+                tp_meta=self.tp_meta,
             )
-        return LinearAllreduce(module, self.mp_group, name=name)
+        return LinearAllreduce(module, self.mp_group, name=name, tp_meta=self.tp_meta)
 
     def _create_column_parallel_layer(self, module, spec: TPLayerSpec, name: str):
         """Create column-parallel layer (AllReduce in backward)."""
         if self.conv_linear_layer:
-            return conv_LinearLayer(module, self.mp_group, name=name, gather_output=spec.gather_output)
+            return conv_LinearLayer(module,
+                                    self.mp_group,
+                                    name=name,
+                                    gather_output=spec.gather_output,
+                                    tp_meta=self.tp_meta)
         # Only use fused-QKV heuristics when no partition_config is provided.
         elif self.partition_config is None and require_tp_fused_qkvw(name, self.mp_size):
             # Check and handle fused qkv for TP
-            return fused_LinearLayer(module, self.mp_group, fused_module=self.module)
+            return fused_LinearLayer(module, self.mp_group, fused_module=self.module, tp_meta=self.tp_meta)
         if spec.shape is not None:
             if spec.gather_output:
                 raise NotImplementedError("AutoTP gather_output does not yet support shaped sub-parameter layers.")
@@ -493,8 +503,9 @@ class AutoTP():
                 shape=spec.shape,
                 partition_dim=spec.get_partition_dim(),
                 name=name,
+                tp_meta=self.tp_meta,
             )
-        return LinearLayer(module, self.mp_group, name=name, gather_output=spec.gather_output)
+        return LinearLayer(module, self.mp_group, name=name, gather_output=spec.gather_output, tp_meta=self.tp_meta)
 
     def _configure_gathered_column_tie_fallbacks(self):
         """Configure a replicated fallback for gathered output layers tied to embeddings."""
@@ -581,7 +592,7 @@ class AutoTP():
         mp_replace = ReplaceWithTensorSlicing(mp_group=self.mp_group)
 
         original_shape = tuple(child.weight.shape)
-        partition_sizes = get_shard_size_list(original_shape[1], self.mp_size, name)
+        partition_sizes = get_shard_size_list(original_shape[1], self.mp_size, self.tp_meta, name)
         if hasattr(child.weight, 'ds_tensor'):
             data = child.weight.ds_tensor.data.split(partition_sizes, dim=1)
         else:
@@ -670,7 +681,7 @@ class AutoTP():
                 param_val = getattr(child, param)
                 # get_shard_size selects its partitioning strategy from the module name, so the
                 # attributes must be sharded under the same name as the weights they describe.
-                setattr(child, param, get_shard_size(param_val, self.mp_size, name, rank=tp_index))
+                setattr(child, param, get_shard_size(param_val, self.mp_size, self.tp_meta, name, rank=tp_index))
         setattr(child, "replaced", True)
 
     def update_linear_policies(self):
@@ -780,21 +791,6 @@ class AutoTP():
                 # Keep logical dimensions whole when no parameter in this subtree was actually sharded.
                 self.update_mp_params(child, name)
         return r_module
-
-    @staticmethod
-    def get_model_num_kv_heads(config):
-        num_kv_heads = None
-        # multi_query_group_num is for chatglm2 & chatglm3
-        kv_head_names = [
-            'multi_query_group_num', 'num_kv_heads', 'num_key_value_heads', 'num_attention_heads', 'n_heads',
-            'attention_heads'
-        ]
-        for name in kv_head_names:
-            if hasattr(config, name):
-                num_kv_heads = getattr(config, name)
-                if num_kv_heads is not None:
-                    break
-        return num_kv_heads
 
     def _replace_last_linear_module(self, r_module):
         self._configure_gathered_column_tie_fallbacks()
