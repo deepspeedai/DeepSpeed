@@ -14,6 +14,7 @@ import pytest
 import torch
 
 import deepspeed
+from deepspeed import _attention_head_count
 from deepspeed.runtime.config import MUON_OPTIMIZER
 
 
@@ -128,3 +129,49 @@ def test_head_counts_track_the_config(q_heads, kv_heads):
 
     assert tags["q_proj.weight"] == q_heads
     assert tags["k_proj.weight"] == kv_heads
+
+
+@pytest.mark.parametrize("arch", ["llama", "qwen2", "mistral"])
+def test_split_qkv_architectures_tag_only_qkv(arch):
+    """Real HF configs rather than a stand-in, so the leaf names are the ones models actually use."""
+    transformers = pytest.importorskip("transformers")
+    cfg_cls = {
+        "llama": transformers.LlamaConfig,
+        "qwen2": transformers.Qwen2Config,
+        "mistral": transformers.MistralConfig,
+    }[arch]
+    cfg = cfg_cls(hidden_size=64,
+                  num_attention_heads=8,
+                  num_key_value_heads=2,
+                  num_hidden_layers=1,
+                  intermediate_size=128,
+                  vocab_size=32)
+    model = transformers.AutoModelForCausalLM.from_config(cfg)
+
+    tags = {n.split(".")[-2]: _attention_head_count(n, p, model) for n, p in model.named_parameters() if p.ndim == 2}
+
+    assert tags["q_proj"] == 8
+    assert tags["k_proj"] == 2, "GQA: k/v are blocked by num_key_value_heads, not the query count"
+    assert tags["v_proj"] == 2
+    assert tags["o_proj"] is None, "o_proj's heads are on the input axis"
+    for mlp_leaf in ("gate_proj", "up_proj", "down_proj"):
+        assert tags[mlp_leaf] is None, f"{mlp_leaf} has no head structure"
+
+
+@pytest.mark.parametrize("arch", ["gpt_neox", "falcon"])
+def test_fused_qkv_architectures_tag_nothing(arch):
+    """These name their MLP matrices `dense_h_to_4h` / `dense_4h_to_h` and their output proj `dense`.
+
+    Matching `dense` anywhere in the path tagged all three; this pins that none of them are.
+    """
+    transformers = pytest.importorskip("transformers")
+    cfg_cls = {"gpt_neox": transformers.GPTNeoXConfig, "falcon": transformers.FalconConfig}[arch]
+    kwargs = dict(hidden_size=64, num_attention_heads=8, num_hidden_layers=1, vocab_size=32)
+    if arch == "gpt_neox":
+        kwargs["intermediate_size"] = 128
+    model = transformers.AutoModelForCausalLM.from_config(cfg_cls(**kwargs))
+
+    tags = {n: _attention_head_count(n, p, model) for n, p in model.named_parameters() if p.ndim == 2}
+
+    assert all(v is None for v in tags.values()), \
+        {k: v for k, v in tags.items() if v is not None}
