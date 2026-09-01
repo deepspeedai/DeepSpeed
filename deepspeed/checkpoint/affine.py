@@ -233,6 +233,32 @@ class ParamAffineMap:
 
         return shard.view(shard_shape)
 
+    def to_dict(self):
+        """Serialise to plain scalars, so the map can be read without importing torch."""
+        return {
+            'logical_shape': list(self.logical_shape),
+            'ranks': {
+                rank: {
+                    'shard_shape': list(self.shard_shapes[rank]),
+                    'pieces': [_piece_to_dict(piece) for piece in pieces],
+                }
+                for rank, pieces in sorted(self.pieces_by_rank.items())
+            },
+        }
+
+    @classmethod
+    def from_dict(cls, entry):
+        ranks = entry['ranks']
+        return cls(logical_shape=entry['logical_shape'],
+                   shard_shapes={
+                       int(rank): value['shard_shape']
+                       for rank, value in ranks.items()
+                   },
+                   pieces_by_rank={
+                       int(rank): [_piece_from_dict(piece) for piece in value['pieces']]
+                       for rank, value in ranks.items()
+                   })
+
     def __repr__(self):
         counts = {rank: len(pieces) for rank, pieces in sorted(self.pieces_by_rank.items())}
         return f'ParamAffineMap(logical_shape={self.logical_shape}, pieces_per_rank={counts})'
@@ -360,3 +386,29 @@ def sub_param_map(shape, sub_dim_sizes, shard_widths, partition_dim):
         sub_param_start += sub_size
 
     return ParamAffineMap(logical_shape=shape, shard_shapes=shard_shapes, pieces_by_rank=pieces_by_rank)
+
+
+def _piece_to_dict(piece):
+    entry = {
+        'shape': list(piece.shape),
+        'source': [piece.source_offset, list(piece.source_strides)],
+        'dest': [piece.dest_offset, list(piece.dest_strides)],
+        'locations': sorted(piece.locations),
+    }
+    # Most pieces are unscaled, so leaving the default out keeps the stored map smaller
+    # and lets a reader that predates scaling still make sense of one that does not use it.
+    if piece.scale != 1.0:
+        entry['scale'] = piece.scale
+    return entry
+
+
+def _piece_from_dict(entry):
+    source_offset, source_strides = entry['source']
+    dest_offset, dest_strides = entry['dest']
+    return AffinePiece(shape=entry['shape'],
+                       source_offset=source_offset,
+                       source_strides=source_strides,
+                       dest_offset=dest_offset,
+                       dest_strides=dest_strides,
+                       locations=entry['locations'],
+                       scale=entry.get('scale', 1.0))

@@ -62,6 +62,12 @@ UNIVERSAL_CHECKPOINT_VERSION_VALUE = 0.4
 # Attribute name used to store AutoTP universal-checkpoint metadata on torch Parameters.
 DS_AUTOTP_UC_META = "ds_autotp_universal_checkpoint_meta"
 AUTOTP_UNSUPPORTED_PARAMETER_PATTERNS = "autotp_unsupported_parameter_patterns"
+# Geometric description of how each parameter is sharded, keyed by parameter pattern.
+# Written alongside the pattern lists below rather than replacing them, so a converter
+# that predates it simply does not see the key. See checkpoint/affine_ir_spec.md.
+AFFINE_MAP = 'affine_map'
+AFFINE_MAP_VERSION = 'version'
+AFFINE_MAP_PARAMS = 'params'
 
 # Vocabulary padding
 VOCAB_TENSOR = 'vocab_tensor'

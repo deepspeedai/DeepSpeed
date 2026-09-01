@@ -403,3 +403,56 @@ def test_parity_round_trips_back_to_the_original_slices():
     full = affine_map.rebuild(dict(enumerate(slices)))
     for rank, tp_slice in enumerate(slices):
         assert torch.equal(affine_map.extract(full, rank), tp_slice)
+
+
+def test_serialisation_round_trips():
+    """The stored form must rebuild the same parameter as the map it came from."""
+    affine_map = sub_param_map(shape=(18, 8),
+                               sub_dim_sizes=[9, 9],
+                               shard_widths=[[4, 3, 2], [3, 3, 3]],
+                               partition_dim=0)
+    restored = ParamAffineMap.from_dict(affine_map.to_dict())
+
+    torch.manual_seed(0)
+    slices = {rank: torch.randn(shape, dtype=torch.float64) for rank, shape in affine_map.shard_shapes.items()}
+    assert torch.equal(restored.rebuild(slices), affine_map.rebuild(slices))
+
+
+def test_serialisation_holds_only_plain_scalars():
+    """Nothing torch-specific may reach the file, so the map stays readable on its own."""
+    stored = contiguous_split_map((10, 8), [3, 3, 2, 2], 0).to_dict()
+
+    def check(value):
+        if isinstance(value, dict):
+            for key, item in value.items():
+                assert isinstance(key, (str, int)), f'unexpected key type {type(key)}'
+                check(item)
+        elif isinstance(value, list):
+            for item in value:
+                check(item)
+        else:
+            assert isinstance(value, (int, float, str)), f'unexpected value type {type(value)}'
+
+    check(stored)
+
+
+def test_serialisation_preserves_scale():
+    """A scaled piece must survive the file, or a restored bias would be off by the divisor."""
+    piece = AffinePiece(shape=(4, ),
+                        source_offset=0,
+                        source_strides=(1, ),
+                        dest_offset=0,
+                        dest_strides=(1, ),
+                        locations=[0, 1],
+                        scale=0.25)
+    affine_map = ParamAffineMap(logical_shape=(4, ),
+                                shard_shapes={
+                                    0: (4, ),
+                                    1: (4, )
+                                },
+                                pieces_by_rank={
+                                    0: [piece],
+                                    1: [piece]
+                                })
+    restored = ParamAffineMap.from_dict(affine_map.to_dict())
+    assert restored.pieces_by_rank[0][0] == piece
