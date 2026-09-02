@@ -296,7 +296,7 @@ def test_elasticity_leaves_caller_config_untouched():
     assert ds_config.train_micro_batch_size_per_gpu == 2
     assert ds_config.gradient_accumulation_steps == 2
 
-    # The write-back made the same dict unparseable a second time: the injected keys
+    # The write-back made the same dict unparsable a second time: the injected keys
     # trip the guard that rejects batch parameters under elasticity, and its message
     # names three keys the caller never wrote.
     second = DeepSpeedConfig(config_dict)
