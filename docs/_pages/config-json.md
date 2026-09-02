@@ -998,6 +998,12 @@ smoke coverage used for this AutoEP surface produced the following version gates
 | -------------------------------------------------------------------------------------------------------------- | -------- |
 | When to apply router scores: `"pre"` (before experts), `"post"` (during combine), or `"auto"` (from preset). | `"auto"` |
 
+***combine_impl***: [string]
+
+| Description                                                                                                    | Default  |
+| -------------------------------------------------------------------------------------------------------------- | -------- |
+| How expert outputs are weighted by their router scores and reduced over top-k. `"auto"` resolves to `"weighted_sum"`. `"fused_weighted_sum"` is experimental and computes the same reduction in one Triton pass, without materializing the scattered assignment buffer or the `[tokens, top_k, hidden]` FP32 intermediate; it requires CUDA, Triton, bfloat16/float16 activations, `tensor_parallel.autotp_size=1`, `expert_tensor_parallel_size=1`, and a resolved `score_apply="post"`, and is rejected rather than silently ignored when any of those does not hold. `"legacy_bmm"` is a debug reduction retained for model-family verification. | `"auto"` |
+
 ***route_norm***: [boolean]
 
 | Description                                                                                                     | Default |
