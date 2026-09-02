@@ -148,11 +148,13 @@ def _get_compatible_gpus_v02(micro_batches,
             f"{num_gpus_per_node} should be divisible by " \
             f"model parallel size {model_parallel_size}")
 
-    def get_microbatch(final_batch_size):
+    def get_microbatch(final_batch_size, dp_world_size):
         candidate_microbatch = None
 
         for micro_batch in micro_batches:
-            if final_batch_size // current_num_gpus % micro_batch == 0:
+            # A data-parallel rank sees the global batch split across the DP groups, not
+            # across every GPU: dividing by current_num_gpus is off by model_parallel_size.
+            if final_batch_size // dp_world_size % micro_batch == 0:
                 if candidate_microbatch is None:
                     candidate_microbatch = micro_batch
                 if prefer_larger and candidate_microbatch < micro_batch:
@@ -171,7 +173,7 @@ def _get_compatible_gpus_v02(micro_batches,
     final_batch_size = int(final_batch_size) * dp_size_per_node
     valid_dp_world_size = [i * dp_size_per_node for i in valid_world_size]
     if current_num_gpus // model_parallel_size in valid_dp_world_size:
-        candidate_microbatch = get_microbatch(final_batch_size)
+        candidate_microbatch = get_microbatch(final_batch_size, current_num_gpus // model_parallel_size)
         return final_batch_size, valid_dp_world_size, candidate_microbatch
 
     current_dp_size = (current_num_gpus / num_gpus_per_node) * dp_size_per_node
@@ -188,7 +190,7 @@ def _get_compatible_gpus_v02(micro_batches,
     else:
         candidate_batch_size = min(candidate_batch_sizes)
 
-    candidate_microbatch = get_microbatch(candidate_batch_size)
+    candidate_microbatch = get_microbatch(candidate_batch_size, int(current_dp_size))
 
     return candidate_batch_size, [int(current_dp_size)], candidate_microbatch
 
