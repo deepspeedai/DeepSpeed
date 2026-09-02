@@ -724,10 +724,13 @@ def _upsample_flops_compute(*args, **kwargs):
         size = args[1]
 
     if size is not None:
+        # `size` is the output *spatial* shape only, so the batch and channel dims have to be
+        # carried over from the input. A scalar applies to every spatial dim.
         if isinstance(size, tuple) or isinstance(size, list):
-            return int(_prod(size)), 0
+            output_spatial = _prod(size)
         else:
-            return int(size), 0
+            output_spatial = size**(input.ndim - 2)
+        return int(output_spatial * _prod(input.shape[:2])), 0
 
     scale_factor = kwargs.get('scale_factor', None)
     if scale_factor is None and len(args) > 2:

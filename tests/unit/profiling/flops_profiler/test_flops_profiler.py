@@ -269,6 +269,56 @@ def test_elementwise_broadcast_flops(lhs_shape, rhs_shape):
     assert flops == result.numel()
 
 
+@pytest.mark.sequential
+@pytest.mark.parametrize("input_shape, interpolate_kwargs", [
+    ((8, 3, 32, 32), {
+        "size": (64, 64)
+    }),
+    ((8, 3, 32, 32), {
+        "size": 64
+    }),
+    ((8, 3, 32, 32), {
+        "scale_factor": 2
+    }),
+    ((8, 3, 32), {
+        "size": 64
+    }),
+    ((8, 3, 32), {
+        "size": (64, )
+    }),
+    ((2, 3, 8, 8, 8), {
+        "size": 16
+    }),
+    ((2, 3, 8, 8, 8), {
+        "size": (16, 16, 16)
+    }),
+    ((1, 4, 20, 20), {
+        "size": (10, 10)
+    }),
+])
+def test_interpolate_flops(input_shape, interpolate_kwargs):
+    """`size` is the output spatial shape, so the batch and channel dims still multiply it, and a
+    scalar `size` applies to every spatial dim. The `scale_factor` case is the control: it already
+    sized the job from `input.numel()` and has to keep giving the same answer as its `size` twin."""
+
+    class Interpolate(torch.nn.Module):
+
+        def forward(self, x):
+            return torch.nn.functional.interpolate(x, **interpolate_kwargs)
+
+    model = Interpolate()
+    x = torch.randn(*input_shape)
+
+    prof = FlopsProfiler(model)
+    prof.start_profile()
+    result = model(x)
+    prof.stop_profile()
+    flops = prof.get_total_flops()
+    prof.end_profile()
+
+    assert flops == result.numel()
+
+
 class Block(torch.nn.Module):
 
     def __init__(self, linear):
