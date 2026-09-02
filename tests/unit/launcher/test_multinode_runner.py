@@ -71,9 +71,8 @@ def test_slurm_runner(runner_info):
 
 
 @pytest.mark.parametrize('resource_filter, expected_hosts, expected_node_count, expected_process_count',
-                         [(['--include', 'worker-1:0,2'], 'worker-1', '1', '2'),
-                          (['--exclude', 'worker-1:0'], 'worker-0,worker-1', '2', '7'),
-                          (['--exclude', 'worker-1'], 'worker-0', '1', '4')])
+                         [(['--exclude', 'worker-1'], 'worker-0', '1', '4'),
+                          (['--include', 'worker-0:0,1@worker-1:0,1'], 'worker-0,worker-1', '2', '4')])
 def test_slurm_runner_resource_filter(runner_info, resource_filter, expected_hosts, expected_node_count,
                                       expected_process_count):
     env, resource_pool, world_info, _ = runner_info
@@ -88,8 +87,24 @@ def test_slurm_runner_resource_filter(runner_info, resource_filter, expected_hos
     assert cmd[cmd.index('-n') + 1] == expected_process_count
 
 
+@pytest.mark.parametrize('resource_filter, expected_error',
+                         [(['--include', 'worker-1:0,2'], 'specific device ids'),
+                          (['--exclude', 'worker-1:0'], 'specific device ids'),
+                          (['--exclude', 'worker-1:1,2,3'], 'same slot count')])
+def test_slurm_runner_rejects_unsupported_filter(runner_info, resource_filter, expected_error):
+    # srun cannot pin tasks to device ids or vary the count per host, so these filters have
+    # to fail loudly instead of launching a job that ignores them.
+    env, resource_pool, world_info, _ = runner_info
+    args = parse_args(resource_filter + ['test_launcher.py'])
+    active_resources = parse_inclusion_exclusion(resource_pool, args.include, args.exclude)
+    runner = mnrunner.SlurmRunner(args, world_info, resource_pool)
+    with pytest.raises(ValueError, match=expected_error):
+        runner.get_cmd(env, active_resources)
+
+
 @pytest.mark.parametrize('resource_flag, expected_srun_flag, expected_process_count',
-                         [(['--num_gpus', '2'], ('--gpus', '2'), '4'), (['--num_nodes', '1'], ('--nodes', '1'), '4')])
+                         [(['--num_gpus', '2'], ('--gpus-per-node', '2'), '4'),
+                          (['--num_nodes', '1'], ('--nodes', '1'), '4')])
 def test_slurm_runner_num_nodes_and_gpus(runner_info, resource_flag, expected_srun_flag, expected_process_count):
     # main() trims active_resources for these two flags as well, so sizing the job from it
     # moves their task count too. They are mutually exclusive with --include/--exclude, so the
