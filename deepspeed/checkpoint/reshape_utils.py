@@ -80,10 +80,14 @@ def _key_list_to_string(key_list):
 def merge_state_dict(dict_a, dict_b, key_list):
     merged_dict = type(dict_a)({})
 
-    for key, value in dict_b.items():
-        if key in dict_a.keys():
-            merged_dict[key] = merge_state(dict_a[key], dict_b[key], [str(key)])
+    for key, value in dict_a.items():
+        if key in dict_b:
+            merged_dict[key] = merge_state(value, dict_b[key], key_list + [str(key)])
         else:
+            merged_dict[key] = value
+
+    for key, value in dict_b.items():
+        if key not in dict_a:
             merged_dict[key] = value
 
     return merged_dict
@@ -108,6 +112,10 @@ def merge_state(state_a, state_b, key_list=[]):
     elif type(state_a) in (list, tuple):
         return type(state_a)(merge_state_list(state_a, state_b, key_list))
     elif torch.is_tensor(state_a):
+        # Scalars such as the optimizer step counter are replicated across ranks rather
+        # than partitioned, and torch.cat rejects 0-dim tensors outright.
+        if state_a.dim() == 0:
+            return state_a
         return torch.cat([state_a, state_b], 0)
     else:
         return state_a
