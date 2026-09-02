@@ -21,6 +21,7 @@ import torch.nn as nn
 import deepspeed.comm as dist
 from deepspeed.module_inject.auto_ep_config import AutoEPConfig, MoELayerSpec, resolve_autoep_config_defaults
 from deepspeed.module_inject.auto_ep_folding import mark_autoep_folding_router_parameter
+from deepspeed.ops.triton_ops import autoep_fused_token_ops as fused_token_ops
 from deepspeed.utils import logger
 from deepspeed.module_inject.auto_ep_comm import (DEEPEP_BACKEND, DeepEPExchange, assert_dtype_supported,
                                                   deepep_combine, deepep_dispatch)
@@ -63,7 +64,8 @@ def resolve_score_apply_mode(
 
 
 def resolve_combine_impl(
-    config_override: Literal["auto", "weighted_sum", "legacy_bmm"], ) -> Literal["weighted_sum", "legacy_bmm"]:
+    config_override: Literal["auto", "weighted_sum", "fused_weighted_sum", "legacy_bmm"],
+) -> Literal["weighted_sum", "fused_weighted_sum", "legacy_bmm"]:
     """Resolve combine implementation from config override or default."""
     if config_override != "auto":
         return config_override
@@ -379,6 +381,7 @@ class AutoEPMoELayer(nn.Module):
         self.top_k = spec.top_k
         self.score_apply = resolve_score_apply_mode(spec, config.score_apply)
         self.combine_impl = resolve_combine_impl(config.combine_impl)
+        self._fused_combine_checked = False
         route_norm = spec.route_norm if config.route_norm is None else config.route_norm
         self.ep_size = ep_size
         self.ep_rank = ep_rank
@@ -559,6 +562,11 @@ class AutoEPMoELayer(nn.Module):
 
         if folding_group_handles is not None:
             self.folding_group_handles = folding_group_handles
+            if self.combine_impl == "fused_weighted_sum" and folding_group_handles.spec.tp_size > 1:
+                # Folded TP restores tokens through a different path.
+                raise ValueError('combine_impl="fused_weighted_sum" does not support folded tensor parallelism '
+                                 f"(tensor_parallel.autotp_size={folding_group_handles.spec.tp_size}). Set "
+                                 'tensor_parallel.autotp_size to 1, or leave combine_impl unset.')
             if self.comm_backend == DEEPEP_BACKEND and folding_group_handles.spec.tp_size > 1:
                 # DeepEP's combine returns token-major rows, which folded TP's
                 # assignment-metadata restore can't consume. Refuse rather than
@@ -671,6 +679,11 @@ class AutoEPMoELayer(nn.Module):
         """
         bsz, seqlen, hdim = hidden_states.shape
         x = hidden_states.reshape(-1, hdim)  # [T, H]
+
+        # Fail all ranks before any collective can stall.
+        if self.combine_impl == "fused_weighted_sum" and not self._fused_combine_checked:
+            fused_token_ops.assert_supported(x, score_apply=self.score_apply)
+            self._fused_combine_checked = True
 
         # Router
         ro: RouterOutput = RouterOutput(*self.router(x, self.expert_bias))
@@ -790,6 +803,14 @@ class AutoEPMoELayer(nn.Module):
             # backend being selected: with ep_size == 1 the local path runs
             # instead and still has one row per assignment to reduce.
             output = expert_output.reshape(bsz, seqlen, hdim)
+        elif self.combine_impl == "fused_weighted_sum":
+            output = fused_token_ops.fused_weighted_restore(
+                expert_output,
+                top_scores=ro.top_scores,
+                token_indices_sorted=token_indices_sorted,
+                top_k=self.top_k,
+                shape=(bsz, seqlen, hdim),
+            )
         else:
             output = combine_from_routed(
                 expert_output,

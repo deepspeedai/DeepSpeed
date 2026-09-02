@@ -144,6 +144,51 @@ Requirements and limits:
 - Not compatible with folded tensor parallelism
   (``expert_tensor_parallel_size > 1``), which is rejected at setup.
 
+**Fused weighted restore (experimental):**
+
+After the combine all-to-all, AutoEP holds one row per routed assignment and has
+to turn it back into one row per token. ``combine_impl`` selects how:
+
+.. code-block:: json
+
+    {
+        "expert_parallel": {
+            "enabled": true,
+            "autoep_size": 16,
+            "preset_model": "qwen3_moe",
+            "combine_impl": "fused_weighted_sum"
+        }
+    }
+
+``"auto"`` (default) resolves to ``"weighted_sum"``, which scatters the rows into
+a zero-filled ``[tokens * top_k, hidden]`` buffer, widens it to FP32 to apply the
+routing weights, and reduces over top-k. ``"fused_weighted_sum"`` computes the
+same result in a single pass: each program owns one token and one slice of the
+hidden dimension, walks its top-k rows in registers and accumulates in FP32, so
+neither the scattered buffer nor the FP32 intermediate is allocated. At the
+canonical shape the FP32 intermediate alone is 64 MiB per layer.
+
+Routing weights are still accumulated in FP32 and cast once, so the result
+matches the eager reduction to within the order of the top-k summation. Only the
+reduction changes: the collectives, the router, the grouped GEMM and the
+expert-major reorder are untouched.
+
+``"fused_weighted_sum"`` is rejected, rather than quietly ignored, when it would
+have nothing to replace or would change semantics:
+
+- ``tensor_parallel.autotp_size`` greater than 1, which uses folded tensor
+  parallelism and restores combined tokens from assignment metadata instead;
+- ``expert_tensor_parallel_size`` greater than 1;
+- ``comm_backend="deepep"`` with expert parallelism, because DeepEP already
+  restores and reduces its routed rows;
+- a resolved ``score_apply`` other than ``"post"``;
+- activations that are not bfloat16, float16, or float32, a non-CUDA device, or
+  a build without Triton.
+
+Failing fast matters for measurement: a run that asked for the fused reduction
+and silently got the eager one would report the difference between an
+implementation and itself.
+
 **Constraints:**
 
 - ``autoep_size`` must divide ``num_experts`` for all detected MoE layers.
