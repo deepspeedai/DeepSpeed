@@ -20,8 +20,7 @@ except ModuleNotFoundError:
     installed_ops = dict.fromkeys(ALL_OPS.keys(), False)
     accelerator_name = ""
     # Keys must match what setup.py writes into git_version_info_installed, and "0.0" is the
-    # sentinel readers check to fall back to runtime detection. nccl_version was missing, so
-    # reading it off a source checkout raised KeyError instead of taking that fallback.
+    # sentinel readers check to fall back to runtime detection.
     torch_info = {'version': "0.0", "cuda_version": "0.0", "nccl_version": "0.0", "hip_version": "0.0"}
 
 # compatible_ops list is recreated for each launch
