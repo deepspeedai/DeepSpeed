@@ -256,9 +256,18 @@ class HybridEngineRollout(RolloutEngine):
 
         module = self.engine.module
         prompt_len = requests[0].prompt_ids.shape[1]
-        max_cache_len = prompt_len + sum(config.max_new_tokens for config in sampling_configs)
-        max_positions = getattr(module.config, "max_position_embeddings", max_cache_len)
-        if max_cache_len > max_positions:
+        max_positions = getattr(module.config, "max_position_embeddings", None)
+        if max_positions is not None:
+            for config in sampling_configs:
+                logical_length = prompt_len + config.max_new_tokens
+                if logical_length > max_positions:
+                    raise ValueError("continuous batching request exceeds the model maximum position embeddings")
+        max_cache_len = self._estimate_continuous_cache_len(
+            prompt_len,
+            [config.max_new_tokens for config in sampling_configs],
+            max_batch_size,
+        )
+        if max_positions is not None and max_cache_len > max_positions:
             raise ValueError("continuous batching cache exceeds the model maximum position embeddings")
         if not getattr(module, "_supports_cache_class", False):
             return self._generate_continuous_legacy(requests, sampling_configs, max_batch_size)
@@ -374,7 +383,7 @@ class HybridEngineRollout(RolloutEngine):
             decoded_tokens = {}
             if survivor_count:
                 keep_slots = torch.tensor(update.keep_slots, dtype=torch.long, device=device)
-                survivor_cache = self._select_legacy_cache_rows(past_key_values, keep_slots)
+                survivor_cache = self._select_legacy_cache_rows(past_key_values, keep_slots, attention_mask.shape[0])
                 survivor_attention = attention_mask.index_select(0, keep_slots)
                 decode_input = torch.cat([next_tokens[request_id] for request_id in survivor_ids], dim=0)
                 survivor_attention = torch.cat(
@@ -428,15 +437,66 @@ class HybridEngineRollout(RolloutEngine):
             return None, None, {}
         admitted_ids = tuple(request.request_id for request in update.admitted)
         prompt_ids = torch.cat([request_by_id[request_id].prompt_ids for request_id in admitted_ids], dim=0)
-        prompt_attention = torch.cat(
-            [request_by_id[request_id].prompt_attention_mask for request_id in admitted_ids], dim=0)
+        prompt_attention = torch.cat([request_by_id[request_id].prompt_attention_mask for request_id in admitted_ids],
+                                     dim=0)
         output = self._call_model(module, prompt_ids, attention_mask=prompt_attention, use_cache=True)
         tokens = output.logits[:, -1, :].argmax(dim=-1, keepdim=True)
         return output.past_key_values, prompt_attention, dict(zip(admitted_ids, tokens.split(1, dim=0)))
 
     @staticmethod
-    def _select_legacy_cache_rows(past_key_values, rows):
-        return tuple((keys.index_select(0, rows), values.index_select(0, rows)) for keys, values in past_key_values)
+    def _select_legacy_cache_rows(past_key_values, rows, logical_batch_size):
+        if logical_batch_size <= 0:
+            raise ValueError("logical batch size must be positive")
+        selected_cache = []
+        for keys, values in past_key_values:
+            if keys.shape[0] != values.shape[0]:
+                raise ValueError("legacy KV cache key/value batch dimensions must match")
+            cache_batch_size = keys.shape[0]
+            if cache_batch_size == logical_batch_size:
+                cache_rows = rows
+            elif cache_batch_size > logical_batch_size and cache_batch_size % logical_batch_size == 0:
+                heads_per_request = cache_batch_size // logical_batch_size
+                head_offsets = torch.arange(heads_per_request, device=rows.device)
+                cache_rows = (rows[:, None] * heads_per_request + head_offsets).reshape(-1)
+            else:
+                raise ValueError("cannot identify the logical batch dimension in the legacy KV cache")
+            selected_cache.append((keys.index_select(0, cache_rows), values.index_select(0, cache_rows)))
+        return tuple(selected_cache)
+
+    @staticmethod
+    def _estimate_continuous_cache_len(prompt_len, max_new_tokens, max_batch_size):
+        """Estimate the largest cache span before the scheduler becomes empty."""
+        pending = list(max_new_tokens)
+        active = []
+        max_cache_len = prompt_len
+        busy_span = 0
+
+        while active or pending:
+            if not active:
+                active = pending[:max_batch_size]
+                pending = pending[max_batch_size:]
+                busy_span = 0
+
+            busy_span += 1
+            max_cache_len = max(max_cache_len, prompt_len + busy_span)
+            survivors = [remaining - 1 for remaining in active if remaining > 1]
+            free_slots = max_batch_size - len(survivors)
+            admitted = pending[:free_slots]
+            pending = pending[free_slots:]
+
+            if survivors:
+                active = survivors + admitted
+                continue
+
+            if admitted:
+                active = admitted
+                # All previous rows retired, so the implementation resets the cache
+                # before prefilling the newly admitted requests.
+                busy_span = 0
+            else:
+                active = []
+
+        return max_cache_len
 
     @staticmethod
     def _merge_legacy_cache(survivor_cache, survivor_attention, admitted_cache, admitted_attention, prompt_len):
@@ -447,14 +507,13 @@ class HybridEngineRollout(RolloutEngine):
 
         cache_len = survivor_cache[0][0].shape[2]
         left_padding = cache_len - prompt_len
-        padded_admitted = tuple(
-            (torch.nn.functional.pad(keys, (0, 0, left_padding, 0)),
-             torch.nn.functional.pad(values, (0, 0, left_padding, 0))) for keys, values in admitted_cache)
-        merged_cache = tuple((torch.cat((survivor_keys, admitted_keys), dim=0),
-                              torch.cat((survivor_values, admitted_values), dim=0))
-                             for (survivor_keys, survivor_values), (admitted_keys,
-                                                                    admitted_values) in zip(survivor_cache,
-                                                                                            padded_admitted))
+        padded_admitted = tuple((torch.nn.functional.pad(keys, (0, 0, left_padding, 0)),
+                                 torch.nn.functional.pad(values, (0, 0, left_padding, 0)))
+                                for keys, values in admitted_cache)
+        merged_cache = tuple(
+            (torch.cat((survivor_keys, admitted_keys), dim=0), torch.cat((survivor_values, admitted_values), dim=0))
+            for (survivor_keys, survivor_values), (admitted_keys,
+                                                   admitted_values) in zip(survivor_cache, padded_admitted))
         admitted_padding = torch.zeros((admitted_attention.shape[0], left_padding),
                                        dtype=admitted_attention.dtype,
                                        device=admitted_attention.device)

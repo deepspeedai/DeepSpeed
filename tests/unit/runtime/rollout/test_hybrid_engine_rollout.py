@@ -114,7 +114,45 @@ def test_static_cache_constructor_supports_legacy_batch_keyword():
     assert cache.config.num_key_value_heads == 4
 
 
+def test_continuous_cache_span_does_not_sum_independent_requests():
+    cache_len = HybridEngineRollout._estimate_continuous_cache_len(64, [64] * 100, 100)
+
+    assert cache_len == 128
+    assert cache_len < 64 + 64 * 100
+
+
+def test_select_legacy_cache_rows_expands_flattened_heads():
+    keys = torch.arange(2 * 4 * 3).reshape(2 * 4, 1, 3)
+    values = keys + 100
+    rows = torch.tensor([1])
+
+    selected = HybridEngineRollout._select_legacy_cache_rows(((keys, values), ), rows, logical_batch_size=2)
+
+    assert torch.equal(selected[0][0], keys[4:8])
+    assert torch.equal(selected[0][1], values[4:8])
+
+
+def test_continuous_generation_validates_each_request_length():
+
+    class LimitedModel(torch.nn.Module):
+
+        _supports_cache_class = False
+
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.zeros(1))
+            self.config = SimpleNamespace(max_position_embeddings=4)
+
+    model = LimitedModel()
+    rollout = HybridEngineRollout(SimpleNamespace(module=model), SimpleNamespace(eos_token_id=None))
+    request = RolloutRequest(torch.tensor([[1, 2, 3]]), torch.ones((1, 3), dtype=torch.long))
+
+    with pytest.raises(ValueError, match="request exceeds"):
+        rollout.generate_continuous([request], [SamplingConfig(max_new_tokens=2, temperature=0)], 1)
+
+
 def test_continuous_generation_refills_legacy_cache_batch():
+
     class LegacyCacheModel(torch.nn.Module):
         _supports_cache_class = False
 
@@ -137,8 +175,7 @@ def test_continuous_generation_refills_legacy_cache_batch():
     model = LegacyCacheModel()
     rollout = HybridEngineRollout(SimpleNamespace(module=model), SimpleNamespace(pad_token_id=0, eos_token_id=None))
     requests = [
-        RolloutRequest(torch.tensor([[1, 2, token]]), torch.ones((1, 3), dtype=torch.long))
-        for token in (3, 4, 5)
+        RolloutRequest(torch.tensor([[1, 2, token]]), torch.ones((1, 3), dtype=torch.long)) for token in (3, 4, 5)
     ]
     configs = [
         SamplingConfig(max_new_tokens=1, temperature=0),
