@@ -32,7 +32,7 @@
 - Assert on observable outcomes through public/stable interfaces; do not assert private method return values or exact internal strings unless pinning a specific fixed bug (justify in a comment).
 - Anchor to an external oracle or an independently derived reference instead of re-implementing the logic under test.
 - Mocks must stand in for a collaborator's documented contract (schema, protocol), never for internals of the module under test.
-- Contract changes observable only at the training-loop or inference level require integration tests, not just unit tests (e.g. a minimal training loop with `SimpleModel`).
+- Changes that affect the external contract at the training-loop or inference level require integration tests, not just unit tests (e.g. a minimal training loop with `SimpleModel`).
 
 ## Tool Caveats
 
