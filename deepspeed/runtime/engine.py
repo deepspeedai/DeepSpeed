@@ -932,6 +932,14 @@ class DeepSpeedEngine(Module):
             logger.debug("DeepSpeedEngine.__del__ cleanup skipped: %s", exc, exc_info=True)
 
     def destroy(self):
+        # DeepEP buffers ask the library not to reclaim them, so they outlive
+        # the engine unless something releases them here. Only this engine's
+        # own buffers: another engine in the same process still needs its own.
+        module = getattr(self, "module", None)
+        if module is not None:
+            from deepspeed.module_inject.auto_ep_comm import destroy_exchanges
+            destroy_exchanges(module)
+
         self._release_deepcompile_compiled_backward_state()
         self._release_deepcompile_dynamo_config()
         optimizer = getattr(self, "optimizer", None)
@@ -4550,7 +4558,9 @@ class DeepSpeedEngine(Module):
         autoep_partitioned_experts = False
         allowed_missing_keys = None
         if self.zero_optimization_partition_weights() and not load_optimizer_states and not self.has_moe_layers:
-            checkpoint['module'] = get_fp32_state_dict_from_zero_checkpoint(load_dir)
+            # dtype=None keeps the checkpoint dtypes: these tensors are cast again when they
+            # land in the model, so upcasting frozen parameters here would only cost memory.
+            checkpoint['module'] = get_fp32_state_dict_from_zero_checkpoint(load_dir, dtype=None)
             fetch_z3_params = True
 
         if is_pipe_parallel:

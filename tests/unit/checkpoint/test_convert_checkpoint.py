@@ -81,6 +81,12 @@ def test_fp32_state_dict_upcasts_frozen_params(monkeypatch, tmp_path):
     lazy_state_dict = get_fp32_state_dict_from_zero_checkpoint(tmp_path, lazy_mode=True)
     assert lazy_state_dict["frozen"].dtype == torch.bfloat16
 
+    # dtype=None keeps the checkpoint dtypes. DeepSpeedEngine._load_checkpoint uses it so a
+    # ZeRO-3 load does not pay for an fp32 copy of every frozen parameter.
+    as_stored = get_fp32_state_dict_from_zero_checkpoint(tmp_path, dtype=None)
+    assert as_stored["frozen"].dtype == torch.bfloat16
+    assert as_stored["trainable"].dtype == torch.float32
+
 
 def test_zero_to_torch_cli_passes_dtype(monkeypatch, tmp_path):
     call = {}
