@@ -278,6 +278,8 @@ class CPU_Accelerator(DeepSpeedAccelerator):
     def LongTensor(self):
         return torch.LongTensor
 
+    _torch_pins_host_memory = False
+
     def pin_memory(self, tensor, make_copy=True, match_shape=True):
         # Torch cannot pin CPU tensors to a device; keep the historical no-op and
         # bypass ABC pinned-memory accounting (nothing is page-locked in that path).
@@ -292,6 +294,10 @@ class CPU_Accelerator(DeepSpeedAccelerator):
     def _torch_pin_memory(self, tensor):
         # torch cannot pin CPU tensors to a device; keep the historical no-op.
         return tensor
+
+    def _torch_empty_pinned(self, tensor, shape):
+        # Same no-op as pin_memory: allocate host storage without page-locking.
+        return tensor.new_empty(shape)
 
     def op_builder_dir(self):
         try:
