@@ -11,7 +11,7 @@ from torch import nn
 from torch.nn import functional as F
 from torch.nn.parameter import Parameter
 from deepspeed.accelerator import get_accelerator
-from deepspeed.module_inject.tp_shard import get_shard_size_list
+from deepspeed.module_inject.tp_shard import AutoTPMeta, get_shard_size_list
 from deepspeed.utils.logging import log_dist_once
 from deepspeed.runtime.zero.utils import is_zero_param
 from abc import ABC, abstractmethod
@@ -348,6 +348,10 @@ class TensorParallel_Layer(nn.Module, ABC):
         if kwargs.get('name') is not None:
             self.name = kwargs.get('name')  # Set the layer name if provided.
 
+        # Per-model TP metadata threaded from AutoTP; defaults for layers built outside it
+        # (e.g. the from_weights back-compat constructor).
+        self.tp_meta: AutoTPMeta = kwargs.get('tp_meta') or AutoTPMeta()
+
     @classmethod
     def set_keep_module_on_host(cls, value: bool):
         """
@@ -473,13 +477,11 @@ class TensorParallel_Layer(nn.Module, ABC):
     def _freeze_partition_sizes(self, total_size):
         """Resolve the tensor parallel split of this layer once, while the layer is built.
 
-        ``get_shard_size_list`` reads the process-wide tp_shard globals (``num_kv_heads``,
-        ``tp_grain_size``), which a later ``init_inference`` call or a second AutoTP model
-        overwrites. The split is part of the checkpoint contract, so it is resolved here and
-        every later consumer -- the forward gather, the parameter gather and the checkpoint
-        metadata -- reads the cached value rather than querying those globals again.
+        The split depends on this model's kv-head/grain metadata (``self.tp_meta``), so it is
+        resolved here and every later consumer -- the forward gather, the parameter gather and
+        the checkpoint metadata -- reads the cached value rather than re-deriving it.
         """
-        self._partition_sizes = tuple(get_shard_size_list(total_size, self.tp_world_size, self.name))
+        self._partition_sizes = tuple(get_shard_size_list(total_size, self.tp_world_size, self.tp_meta, self.name))
         return self._partition_sizes
 
     @torch.no_grad()
@@ -964,7 +966,8 @@ class SubParamColumnParallel(LinearLayer):
         self._subparam_sizes = subparam_sizes
         self._subparam_shard_widths = None
         if subparam_sizes is not None:
-            self._subparam_shard_widths = _subparam_shard_widths(subparam_sizes, self.tp_world_size, shard_name)
+            self._subparam_shard_widths = _subparam_shard_widths(subparam_sizes, self.tp_world_size, self.tp_meta,
+                                                                 shard_name)
 
     def _subparam_shape_spec(self, logical_shape):
         shape_spec = list(logical_shape)
@@ -1084,8 +1087,8 @@ class fused_LinearLayer(SubParamColumnParallel):
         self.fused_module = FusedModuleWrapper(kwargs.get('fused_module'))
         # prepare_tp_fused_qkvw takes its own shard sizes without a layer name, so the widths
         # describing its split must be resolved the same way.
-        self._subparam_layout_spec = (fused_qkv_subparam_sizes(kwargs.get('fused_module'),
-                                                               tuple(module.weight.shape)), None)
+        self._subparam_layout_spec = (fused_qkv_subparam_sizes(kwargs.get('fused_module'), tuple(module.weight.shape),
+                                                               kwargs['tp_meta']), None)
         super().__init__(module, mp_group, skip_partition, **kwargs)
 
     def _freeze_partition_sizes(self, total_size):
@@ -1101,7 +1104,8 @@ class fused_LinearLayer(SubParamColumnParallel):
             if param is None:
                 return
 
-            _partition = prepare_tp_fused_qkvw(self.fused_module.module, param, self.tp_world_size, self.tp_index)
+            _partition = prepare_tp_fused_qkvw(self.fused_module.module, param, self.tp_world_size, self.tp_index,
+                                               self.tp_meta)
 
             _partition = self.move(_partition).detach()
 
@@ -1118,13 +1122,15 @@ class conv_LinearLayer(LinearLayer):
             weight = params_list[0]
         elif len(params_list) == 2:
             weight, bias = params_list[0], params_list[1]
-        _partition = weight.data.split(get_shard_size_list(weight.shape[0], self.tp_world_size, self.name),
+        _partition = weight.data.split(get_shard_size_list(weight.shape[0], self.tp_world_size, self.tp_meta,
+                                                           self.name),
                                        dim=1)[self.tp_index]
         _partition = self.move(_partition).detach()
         weight.data = _partition
 
         if bias is not None:
-            _partition = bias.data.split(get_shard_size_list(weight.shape[1], self.tp_world_size, self.name),
+            _partition = bias.data.split(get_shard_size_list(weight.shape[1], self.tp_world_size, self.tp_meta,
+                                                             self.name),
                                          dim=0)[self.tp_index]
             _partition = self.move(_partition).detach()
 
@@ -1141,7 +1147,7 @@ class Yuan_LinearAllreduce(LinearAllreduce):
     @torch.no_grad()
     def _tp_partition(self, params_list):
         weight, bias = shard_value_with_share_qk(params_list[0].data, params_list[1], self.tp_index,
-                                                 self.tp_world_size, False)
+                                                 self.tp_world_size, False, self.tp_meta)
         params_list[0].data = weight
         if bias is not None:
             params_list[1].data = bias
@@ -1175,7 +1181,7 @@ class Yuan_LinearLayer(LinearLayer):
     @torch.no_grad()
     def _tp_partition(self, params_list):
         weight, bias = shard_value_with_share_qk(params_list[0].data, params_list[1], self.tp_index,
-                                                 self.tp_world_size, True)
+                                                 self.tp_world_size, True, self.tp_meta)
         params_list[0].data = self.move(weight).detach()
         if bias is not None:
             params_list[1].data = self.move(bias).detach()
@@ -1220,7 +1226,7 @@ class Conv_LinearALlreduce(LinearAllreduce):
                 return
             param.data = param.data.transpose(-1, -2).contiguous()
 
-            _partition = param.split(get_shard_size_list(param.shape[0], self.tp_world_size, self.name),
+            _partition = param.split(get_shard_size_list(param.shape[0], self.tp_world_size, self.tp_meta, self.name),
                                      dim=1)[self.tp_index]
 
             _partition = self.move(_partition).detach()
@@ -1517,7 +1523,7 @@ def _bias_subparam_shape_spec(output_shape, bias_partition_dim, subparam_sizes):
     return tuple(shape_spec)
 
 
-def _subparam_shard_widths(subparam_sizes, tp_world_size, name=None):
+def _subparam_shard_widths(subparam_sizes, tp_world_size, meta: AutoTPMeta, name=None):
     """Per-rank width of each sub-parameter, as one list per sub-parameter.
 
     Sub-parameters follow the same deterministic split as ordinary layers, so a fused
@@ -1525,7 +1531,7 @@ def _subparam_shard_widths(subparam_sizes, tp_world_size, name=None):
     """
     widths = []
     for size in subparam_sizes:
-        per_rank = get_shard_size_list(size, tp_world_size, name)
+        per_rank = get_shard_size_list(size, tp_world_size, meta, name)
         if min(per_rank) == 0:
             # Those ranks contribute zeros to the row-parallel all-reduce, so the result stays
             # correct and this matches how separate q/k/v projections already behave. Serving
@@ -1664,9 +1670,10 @@ class SubParamLinearLayer(TensorParallel_Layer):
          self._bias_partition_dim) = _infer_subparam_logical_shapes(self._orig_weight_shape, self.shape,
                                                                     self.partition_dim, self.name)
         # Resolve the per-rank widths once, for the same reason _freeze_partition_sizes does:
-        # get_shard_size_list reads process-wide globals that a later model can overwrite.
+        # the split depends on this model's tp_meta.
         self._subparam_shard_widths = _subparam_shard_widths(
-            self._subparam_sizes or (self._logical_shape[self.partition_dim], ), self.tp_world_size, self.name)
+            self._subparam_sizes or (self._logical_shape[self.partition_dim], ), self.tp_world_size, self.tp_meta,
+            self.name)
         self._bias_shape_spec = _bias_subparam_shape_spec(self._output_shape, self._bias_partition_dim,
                                                           self._subparam_sizes)
         if self.bias is not None and self.bias.numel() != _shape_prod(self._output_shape):
@@ -1796,9 +1803,10 @@ class SubParamLinearAllreduce(TensorParallel_Layer):
          self._bias_partition_dim) = _infer_subparam_logical_shapes(self._orig_weight_shape, self.shape,
                                                                     self.partition_dim, self.name)
         # Resolve the per-rank widths once, for the same reason _freeze_partition_sizes does:
-        # get_shard_size_list reads process-wide globals that a later model can overwrite.
+        # the split depends on this model's tp_meta.
         self._subparam_shard_widths = _subparam_shard_widths(
-            self._subparam_sizes or (self._logical_shape[self.partition_dim], ), self.tp_world_size, self.name)
+            self._subparam_sizes or (self._logical_shape[self.partition_dim], ), self.tp_world_size, self.tp_meta,
+            self.name)
 
         if self._should_materialize_tp_partition():
             self._tp_partition([self.weight, self.bias])

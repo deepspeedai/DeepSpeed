@@ -900,3 +900,52 @@ def test_lr_range_test_staircase_reaches_scheduler_params(argv, expected):
     lrs.override_lr_range_test_params(args, params)
 
     assert params[LR_RANGE_TEST_STAIRCASE] is expected
+
+
+def test_warmup_cosine_lr_config_from_args_carries_the_ratios():
+    # --warmup_min_ratio and --cos_min_ratio are declared by add_tuning_arguments and
+    # were then dropped: WarmupCosineLR fell into the WarmupLR branch, so the config
+    # came back with warmup_min_lr/warmup_max_lr instead, which WarmupCosineLR does
+    # not accept and which made building it from that config a TypeError.
+    parser = lrs.add_tuning_arguments(argparse.ArgumentParser())
+    args = parser.parse_args(
+        ["--lr_schedule", WARMUP_COSINE_LR, "--warmup_min_ratio", "0.1", "--cos_min_ratio", "0.05"])
+
+    config, err = lrs.get_config_from_args(args)
+    assert err is None
+    params = config["params"]
+
+    assert params[WARMUP_MIN_RATIO] == 0.1
+    assert params[COS_MIN_RATIO] == 0.05
+    assert WARMUP_MIN_LR not in params
+    assert WARMUP_MAX_LR not in params
+
+    param = torch.nn.Parameter(torch.zeros(1))
+    optimizer = torch.optim.Adam([param], lr=0.001)
+    scheduler = WarmupCosineLR(optimizer=optimizer, total_num_steps=2000, **params)
+    assert scheduler.warmup_min_ratio == 0.1
+    assert scheduler.cos_min_ratio == 0.05
+
+
+def test_warmup_cosine_lr_has_no_lr_in_its_config_params():
+    # get_lr_from_config read warmup_max_lr for every non-LRRangeTest, non-OneCycle
+    # schedule. WarmupCosineLR scales each param group's own lr by a ratio, so its
+    # params never hold one, and the lookup either returned an unrelated WarmupLR
+    # default or raised KeyError on a config written for this schedule.
+    config = {"type": WARMUP_COSINE_LR, "params": {WARMUP_MIN_RATIO: 0.1, COS_MIN_RATIO: 0.05}}
+
+    lr, err = lrs.get_lr_from_config(config)
+    assert lr is None
+    assert WARMUP_COSINE_LR in err
+
+
+def test_other_schedules_keep_their_config_params():
+    # The routing change must leave the three schedules that already worked alone.
+    parser = lrs.add_tuning_arguments(argparse.ArgumentParser())
+
+    for schedule, expected in ((LR_RANGE_TEST, LR_RANGE_TEST_MIN_LR), (ONE_CYCLE, CYCLE_MAX_LR),
+                               (WARMUP_LR, WARMUP_MAX_LR), (WARMUP_DECAY_LR, WARMUP_MAX_LR)):
+        config, err = lrs.get_config_from_args(parser.parse_args(["--lr_schedule", schedule]))
+        assert err is None
+        assert expected in config["params"]
+        assert lrs.get_lr_from_config(config)[0] == config["params"][expected]

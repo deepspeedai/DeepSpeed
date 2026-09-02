@@ -19,7 +19,7 @@ from deepspeed.module_inject.layers import collect_autotp_universal_checkpoint_i
 from deepspeed.checkpoint.constants import (DS_AUTOTP_UC_META, PARAMETER_WITH_ROW_PARALLELISM_PATTERNS,
                                             TP_REPLICATED_PARAMETER_PATTERNS)
 from deepspeed.module_inject.autotp_config import AutoTPConfig
-from deepspeed.module_inject.tp_shard import get_shard_size, get_shard_size_list, set_num_kv_heads
+from deepspeed.module_inject.tp_shard import AutoTPMeta, get_shard_size, get_shard_size_list
 from deepspeed.module_inject.auto_tp import AutoTP
 from deepspeed.module_inject.auto_tp_model_utils import (build_bloom_alibi_tensor, build_mpt_alibi_tensor,
                                                          get_alibi_mask, install_head_sharded_helper)
@@ -170,7 +170,8 @@ def apply_autotp_with_partition_config(model, tp_size, partition_config):
                     linear_layer_setting=None,
                     orig_layer_impl=None,
                     keep_module_on_host=False,
-                    partition_config=autotp_config)
+                    partition_config=autotp_config,
+                    model_config=getattr(model, "config", None))
     autotp.set_tensor_parallel_config(tp_size, groups.get_tensor_model_parallel_group())
     autotp.update_linear_policies()
     autotp._replace_module(model)
@@ -502,11 +503,8 @@ def test_update_mp_params_uses_group_local_rank(monkeypatch):
     child.num_heads = 12
 
     monkeypatch.setattr(dist, "get_rank", lambda group=None: 1 if group is tp_group else 0)
-    set_num_kv_heads(3)
-    try:
-        autotp.update_mp_params(child)
-    finally:
-        set_num_kv_heads(None)
+    autotp.tp_meta = AutoTPMeta(num_kv_heads=3)
+    autotp.update_mp_params(child)
 
     # Three KV groups split as [2, 1], so the second TP rank owns four query heads.
     assert child.num_heads == 4
@@ -523,15 +521,13 @@ def test_update_mp_params_shards_attributes_like_their_weights(monkeypatch):
     child.hidden_size = 12
 
     monkeypatch.setattr(dist, "get_rank", lambda group=None: 1 if group is tp_group else 0)
-    set_num_kv_heads(3)
-    try:
-        autotp.update_mp_params(child, "model.layers.0.mlp")
-    finally:
-        set_num_kv_heads(None)
+    meta = AutoTPMeta(num_kv_heads=3)
+    autotp.tp_meta = meta
+    autotp.update_mp_params(child, "model.layers.0.mlp")
 
     # MLP layers are excluded from the KV-head split, so the attribute has to follow the same
     # near-even split that the MLP weights use rather than the [2, 1] KV-group split.
-    assert child.hidden_size == get_shard_size(12, 2, "model.layers.0.mlp", rank=1)
+    assert child.hidden_size == get_shard_size(12, 2, meta, "model.layers.0.mlp", rank=1)
 
 
 def test_update_mp_params_preserves_unsharded_high_dimensional_modules(monkeypatch):
@@ -544,11 +540,8 @@ def test_update_mp_params_preserves_unsharded_high_dimensional_modules(monkeypat
     child.proj = nn.Conv3d(3, child.embed_dim, kernel_size=1)
 
     monkeypatch.setattr(dist, "get_rank", lambda group=None: 1 if group is tp_group else 0)
-    set_num_kv_heads(3)
-    try:
-        autotp.update_mp_params(child, "model.visual.patch_embed")
-    finally:
-        set_num_kv_heads(None)
+    autotp.tp_meta = AutoTPMeta(num_kv_heads=3)
+    autotp.update_mp_params(child, "model.visual.patch_embed")
 
     assert child.embed_dim == 12
 
@@ -569,11 +562,8 @@ def test_replace_module_preserves_metadata_for_unsharded_subtree(monkeypatch):
     visual.attn.proj = nn.Linear(12, 12)
 
     monkeypatch.setattr(dist, "get_rank", lambda group=None: 1 if group is tp_group else 0)
-    set_num_kv_heads(None)
-    try:
-        autotp._replace_module(visual, "model.visual")
-    finally:
-        set_num_kv_heads(None)
+    autotp.tp_meta = AutoTPMeta()
+    autotp._replace_module(visual, "model.visual")
 
     assert visual.attn.num_heads == 16
 
@@ -589,11 +579,8 @@ def test_update_mp_params_follows_actual_tp_parameter_metadata(monkeypatch):
     setattr(child.proj.weight, DS_AUTOTP_UC_META, {})
 
     monkeypatch.setattr(dist, "get_rank", lambda group=None: 1 if group is tp_group else 0)
-    set_num_kv_heads(None)
-    try:
-        autotp.update_mp_params(child, "model.layers.0.mlp")
-    finally:
-        set_num_kv_heads(None)
+    autotp.tp_meta = AutoTPMeta()
+    autotp.update_mp_params(child, "model.layers.0.mlp")
 
     assert child.hidden_size == 6
 
@@ -603,6 +590,7 @@ def test_sliced_embedding_publishes_row_partition_metadata(monkeypatch):
     autotp = object.__new__(AutoTP)
     autotp.mp_group = tp_group
     autotp.mp_size = 2
+    autotp.tp_meta = AutoTPMeta()
     embedding = nn.Embedding(5, 4)
 
     monkeypatch.setattr(dist, "get_rank", lambda group=None: 1 if group is tp_group else 0)
@@ -625,66 +613,70 @@ class TestAutoTPAlibiHelpers(DistributedTest):
         init_tp_engine(tp_size=2)
 
         num_heads = 5
-        set_num_kv_heads(num_heads)
-        try:
 
-            class MptTransformer(nn.Module):
+        class MptTransformer(nn.Module):
 
-                def build_mpt_alibi_tensor(self, heads, sequence_length, alibi_bias_max=8, device=None):
-                    return torch.arange(heads, dtype=torch.float32).view(heads, 1, 1).expand(heads, 1, sequence_length)
+            def build_mpt_alibi_tensor(self, heads, sequence_length, alibi_bias_max=8, device=None):
+                return torch.arange(heads, dtype=torch.float32).view(heads, 1, 1).expand(heads, 1, sequence_length)
 
-            transformer = MptTransformer()
-            install_head_sharded_helper(transformer, 'build_mpt_alibi_tensor', build_mpt_alibi_tensor)
+        transformer = MptTransformer()
+        install_head_sharded_helper(transformer,
+                                    'build_mpt_alibi_tensor',
+                                    build_mpt_alibi_tensor,
+                                    meta=AutoTPMeta(num_attention_heads=num_heads, num_kv_heads=num_heads))
 
-            alibi = transformer.build_mpt_alibi_tensor(num_heads, 3)
+        alibi = transformer.build_mpt_alibi_tensor(num_heads, 3)
 
-            # AutoTP splits 5 heads over 2 ranks as [3, 2]; an even split would give every rank
-            # 2 heads and drop the last one entirely.
-            expected_heads = get_shard_size_list(num_heads, dist.get_world_size())
-            offset = sum(expected_heads[:dist.get_rank()])
-            assert alibi.shape[0] == expected_heads[dist.get_rank()]
-            torch.testing.assert_close(alibi[:, 0, 0].cpu(),
-                                       torch.arange(offset, offset + alibi.shape[0], dtype=torch.float32))
-        finally:
-            set_num_kv_heads(None)
+        # AutoTP splits 5 heads over 2 ranks as [3, 2]; an even split would give every rank
+        # 2 heads and drop the last one entirely.
+        expected_heads = get_shard_size_list(num_heads, dist.get_world_size(), AutoTPMeta(num_kv_heads=num_heads))
+        offset = sum(expected_heads[:dist.get_rank()])
+        assert alibi.shape[0] == expected_heads[dist.get_rank()]
+        torch.testing.assert_close(alibi[:, 0, 0].cpu(),
+                                   torch.arange(offset, offset + alibi.shape[0], dtype=torch.float32))
 
     def test_head_sharded_helper_leaves_the_class_untouched(self):
         skip_on_device()
         init_tp_engine(tp_size=2)
 
         num_heads = 5
-        set_num_kv_heads(num_heads)
-        try:
 
-            class MptTransformer(nn.Module):
+        class MptTransformer(nn.Module):
 
-                def build_mpt_alibi_tensor(self, heads, sequence_length, alibi_bias_max=8, device=None):
-                    return torch.arange(heads, dtype=torch.float32).view(heads, 1, 1).expand(heads, 1, sequence_length)
+            def build_mpt_alibi_tensor(self, heads, sequence_length, alibi_bias_max=8, device=None):
+                return torch.arange(heads, dtype=torch.float32).view(heads, 1, 1).expand(heads, 1, sequence_length)
 
-            class MptSubclass(MptTransformer):
-                pass
+        class MptSubclass(MptTransformer):
+            pass
 
-            first = MptTransformer()
-            install_head_sharded_helper(first, 'build_mpt_alibi_tensor', build_mpt_alibi_tensor)
-            expected = first.build_mpt_alibi_tensor(num_heads, 3)
+        first = MptTransformer()
+        install_head_sharded_helper(first,
+                                    'build_mpt_alibi_tensor',
+                                    build_mpt_alibi_tensor,
+                                    meta=AutoTPMeta(num_attention_heads=num_heads, num_kv_heads=num_heads))
+        expected = first.build_mpt_alibi_tensor(num_heads, 3)
 
-            # Injecting a second model of the same architecture must not make either of them
-            # delegate to the other's wrapper.
-            second = MptTransformer()
-            install_head_sharded_helper(second, 'build_mpt_alibi_tensor', build_mpt_alibi_tensor)
-            torch.testing.assert_close(second.build_mpt_alibi_tensor(num_heads, 3), expected)
-            torch.testing.assert_close(first.build_mpt_alibi_tensor(num_heads, 3), expected)
+        # Injecting a second model of the same architecture must not make either of them
+        # delegate to the other's wrapper.
+        second = MptTransformer()
+        install_head_sharded_helper(second,
+                                    'build_mpt_alibi_tensor',
+                                    build_mpt_alibi_tensor,
+                                    meta=AutoTPMeta(num_attention_heads=num_heads, num_kv_heads=num_heads))
+        torch.testing.assert_close(second.build_mpt_alibi_tensor(num_heads, 3), expected)
+        torch.testing.assert_close(first.build_mpt_alibi_tensor(num_heads, 3), expected)
 
-            # A model of the same class that was never injected keeps its own method, and a
-            # subclass of it inherits that method rather than an installed wrapper.
-            plain = MptTransformer()
-            assert plain.build_mpt_alibi_tensor(num_heads, 3).shape[0] == num_heads
+        # A model of the same class that was never injected keeps its own method, and a
+        # subclass of it inherits that method rather than an installed wrapper.
+        plain = MptTransformer()
+        assert plain.build_mpt_alibi_tensor(num_heads, 3).shape[0] == num_heads
 
-            derived = MptSubclass()
-            install_head_sharded_helper(derived, 'build_mpt_alibi_tensor', build_mpt_alibi_tensor)
-            torch.testing.assert_close(derived.build_mpt_alibi_tensor(num_heads, 3), expected)
-        finally:
-            set_num_kv_heads(None)
+        derived = MptSubclass()
+        install_head_sharded_helper(derived,
+                                    'build_mpt_alibi_tensor',
+                                    build_mpt_alibi_tensor,
+                                    meta=AutoTPMeta(num_attention_heads=num_heads, num_kv_heads=num_heads))
+        torch.testing.assert_close(derived.build_mpt_alibi_tensor(num_heads, 3), expected)
 
     def test_head_sharded_helper_freezes_the_models_split(self):
         skip_on_device()
@@ -696,29 +688,23 @@ class TestAutoTPAlibiHelpers(DistributedTest):
                 return torch.arange(heads, dtype=torch.float32).view(heads, 1, 1).expand(heads, 1, sequence_length)
 
         num_heads = 6
-        set_num_kv_heads(3)
-        try:
-            transformer = MptTransformer()
-            install_head_sharded_helper(transformer,
-                                        'build_mpt_alibi_tensor',
-                                        build_mpt_alibi_tensor,
-                                        num_heads=num_heads,
-                                        num_kv_heads=3)
+        transformer = MptTransformer()
+        install_head_sharded_helper(transformer,
+                                    'build_mpt_alibi_tensor',
+                                    build_mpt_alibi_tensor,
+                                    meta=AutoTPMeta(num_attention_heads=num_heads, num_kv_heads=3))
 
-            # Initializing another model can replace this process-wide setting. The first
-            # model's helper must keep the [4, 2] split frozen with its weights.
-            set_num_kv_heads(2)
-            expected_sizes = [4, 2]
-            # AutoTP replaces the model's public head count with this rank's local count.
-            local_num_heads = expected_sizes[dist.get_rank()]
-            alibi = transformer.build_mpt_alibi_tensor(local_num_heads, 3)
+        # The helper freezes the [4, 2] split from this model's own num_kv_heads at install
+        # time.
+        expected_sizes = [4, 2]
+        # AutoTP replaces the model's public head count with this rank's local count.
+        local_num_heads = expected_sizes[dist.get_rank()]
+        alibi = transformer.build_mpt_alibi_tensor(local_num_heads, 3)
 
-            offset = sum(expected_sizes[:dist.get_rank()])
-            assert alibi.shape[0] == expected_sizes[dist.get_rank()]
-            torch.testing.assert_close(alibi[:, 0, 0].cpu(),
-                                       torch.arange(offset, offset + alibi.shape[0], dtype=torch.float32))
-        finally:
-            set_num_kv_heads(None)
+        offset = sum(expected_sizes[:dist.get_rank()])
+        assert alibi.shape[0] == expected_sizes[dist.get_rank()]
+        torch.testing.assert_close(alibi[:, 0, 0].cpu(),
+                                   torch.arange(offset, offset + alibi.shape[0], dtype=torch.float32))
 
     def test_bloom_alibi_uses_original_total_after_injection(self):
         skip_on_device()
@@ -753,7 +739,10 @@ class TestAutoTPAlibiHelpers(DistributedTest):
                                     dtype=torch.float32).view(-1, 1, 1).expand(-1, sequence_length, sequence_length)
 
         model = AlibiModel()
-        install_head_sharded_helper(model, 'get_alibi_mask', get_alibi_mask, num_heads=5, num_kv_heads=5)
+        install_head_sharded_helper(model,
+                                    'get_alibi_mask',
+                                    get_alibi_mask,
+                                    meta=AutoTPMeta(num_attention_heads=5, num_kv_heads=5))
 
         shard_sizes = [3, 2]
         model.n_head = shard_sizes[dist.get_rank()]
@@ -780,24 +769,22 @@ class TestAutoTPFusedWeights(DistributedTest):
 
         hidden_dim = 4
         gate_up_dim = 6
-        set_num_kv_heads(3)
-        try:
-            torch.manual_seed(17)
-            linear = nn.Linear(hidden_dim,
-                               gate_up_dim * 2,
-                               bias=False,
-                               dtype=preferred_dtype(),
-                               device=get_accelerator().current_device_name())
-            full_weight = deepcopy(linear.weight.data)
-            layer = GateUpPack_LinearLayer(deepcopy(linear), groups.get_tensor_model_parallel_group())
+        torch.manual_seed(17)
+        linear = nn.Linear(hidden_dim,
+                           gate_up_dim * 2,
+                           bias=False,
+                           dtype=preferred_dtype(),
+                           device=get_accelerator().current_device_name())
+        full_weight = deepcopy(linear.weight.data)
+        layer = GateUpPack_LinearLayer(deepcopy(linear),
+                                       groups.get_tensor_model_parallel_group(),
+                                       tp_meta=AutoTPMeta(num_kv_heads=3))
 
-            # The gate and the up halves are each cut in two, so a rank-order concatenation of
-            # the shards would interleave them instead of restoring the original weight.
-            gathered = nn.Parameter(layer.weight.data.clone())
-            layer.gather_params([gathered, None])
-            torch.testing.assert_close(gathered.data, full_weight)
-        finally:
-            set_num_kv_heads(None)
+        # The gate and the up halves are each cut in two, so a rank-order concatenation of
+        # the shards would interleave them instead of restoring the original weight.
+        gathered = nn.Parameter(layer.weight.data.clone())
+        layer.gather_params([gathered, None])
+        torch.testing.assert_close(gathered.data, full_weight)
 
     def test_gate_up_fused_weight_partition(self):
         skip_on_device()
@@ -951,29 +938,26 @@ class TestAutoTPFusedWeights(DistributedTest):
 
         hidden_dim = 8
         head_size = 12
-        set_num_kv_heads(3)
-        try:
-            torch.manual_seed(7)
-            linear = nn.Linear(hidden_dim,
-                               head_size * 3,
-                               bias=True,
-                               dtype=preferred_dtype(),
-                               device=get_accelerator().current_device_name())
-            full_weight = deepcopy(linear.weight.data)
-            full_bias = deepcopy(linear.bias.data)
+        torch.manual_seed(7)
+        linear = nn.Linear(hidden_dim,
+                           head_size * 3,
+                           bias=True,
+                           dtype=preferred_dtype(),
+                           device=get_accelerator().current_device_name())
+        full_weight = deepcopy(linear.weight.data)
+        full_bias = deepcopy(linear.bias.data)
 
-            layer = SubParamLinearLayer(deepcopy(linear),
-                                        groups.get_tensor_model_parallel_group(),
-                                        shape=((head_size, head_size, head_size), -1),
-                                        partition_dim=0,
-                                        name="self_attn.qkv_proj")
-            assert layer._subparam_shard_widths == [[8, 4], [8, 4], [8, 4]]
+        layer = SubParamLinearLayer(deepcopy(linear),
+                                    groups.get_tensor_model_parallel_group(),
+                                    shape=((head_size, head_size, head_size), -1),
+                                    partition_dim=0,
+                                    name="self_attn.qkv_proj",
+                                    tp_meta=AutoTPMeta(num_kv_heads=3))
+        assert layer._subparam_shard_widths == [[8, 4], [8, 4], [8, 4]]
 
-            layer.gather_params([layer.weight, layer.bias])
-            torch.testing.assert_close(layer.weight.data, full_weight)
-            torch.testing.assert_close(layer.bias.data, full_bias)
-        finally:
-            set_num_kv_heads(None)
+        layer.gather_params([layer.weight, layer.bias])
+        torch.testing.assert_close(layer.weight.data, full_weight)
+        torch.testing.assert_close(layer.bias.data, full_bias)
 
     def test_gqa_uneven_qkv_fused_forward(self):
         skip_on_device()
@@ -1001,3 +985,7 @@ class TestAutoTPFusedWeights(DistributedTest):
         gathered_output = gather_subparam_output(tp_output, (q_size, k_size, v_size),
                                                  groups.get_tensor_model_parallel_group())
         assert_close_for_preferred_dtype(gathered_output, full_output)
+
+
+# Multi-model (teacher + student in one process) and multimodal-config regressions live in
+# tests/unit/v1/autotp/test_autotp_multiple_models.py so they run on the GPU workflow too.
