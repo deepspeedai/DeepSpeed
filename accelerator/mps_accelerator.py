@@ -19,6 +19,12 @@ class MPS_Accelerator(DeepSpeedAccelerator):
 
     def __init__(self):
         self._name = "mps"
+        # ZeRO sizes its buffers through torch.mps memory queries that first shipped in torch 2.5;
+        # fail with a clear message instead of an AttributeError deep inside the runtime. getattr
+        # keeps this safe even on torch builds where the module-level torch.mps import failed.
+        if getattr(getattr(torch, "mps", None), "recommended_max_memory", None) is None:
+            raise ValueError("MPS_Accelerator requires torch>=2.5 "
+                             "(this torch build has no torch.mps.recommended_max_memory)")
         # MPS has no native collective backend; gloo is the only torch backend available on macOS.
         self._communication_backend_name = "gloo"
         self._compile_backend = "inductor"
@@ -268,12 +274,14 @@ class MPS_Accelerator(DeepSpeedAccelerator):
             # is op_builder from deepspeed or a 3p version? this should only succeed if it's deepspeed
             # if successful this also means we're doing a local install and not JIT compile path
             from op_builder import __deepspeed__  # noqa: F401 # type: ignore
-            from op_builder.mps import FusedAdamBuilder, NotImplementedBuilder
+            from op_builder.mps import CPUAdamBuilder, FusedAdamBuilder, NotImplementedBuilder
         except ImportError:
-            from deepspeed.ops.op_builder.mps import FusedAdamBuilder, NotImplementedBuilder
+            from deepspeed.ops.op_builder.mps import CPUAdamBuilder, FusedAdamBuilder, NotImplementedBuilder
 
         if class_name == "FusedAdamBuilder":
             return FusedAdamBuilder
+        elif class_name == "CPUAdamBuilder":
+            return CPUAdamBuilder
         else:
             return NotImplementedBuilder
 

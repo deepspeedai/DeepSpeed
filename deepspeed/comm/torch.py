@@ -28,6 +28,22 @@ def disable_compiler_collective(func):
     return compiler.disable(func)
 
 
+def known_world_size(world_size):
+    """The world size when it can be determined, otherwise None.
+
+    ``init_distributed`` defaults its ``world_size`` argument to -1, and the value can also be
+    carried in the ``init_method`` URL (``tcp://host:port?world_size=2``), where neither the
+    argument nor ``WORLD_SIZE`` reflects it. Return None rather than a guess so that callers do
+    not act on an assumed size.
+    """
+    if world_size is not None and world_size > 0:
+        return world_size
+    env_world_size = os.environ.get('WORLD_SIZE', '')
+    if env_world_size.isdigit() and int(env_world_size) > 0:
+        return int(env_world_size)
+    return None
+
+
 def build_shm_op():
     builder = get_accelerator().create_op_builder("ShareMemCommBuilder")
     if builder is None or not deepspeed.ops.__compatible_ops__.get(builder.NAME, False):
@@ -96,7 +112,10 @@ class Noop:
 
 
 class StagedWork:
-    """Completes a staged collective by copying the CPU results back to the original device tensors."""
+    """Completes a staged collective after the underlying work's bare ``wait()`` succeeds.
+
+    The narrow signature is deliberate: unsupported timeout and polling APIs must fail loudly.
+    """
 
     def __init__(self, work, copy_back):
         self.work = work
@@ -115,7 +134,7 @@ def _needs_cpu_staging(tensor):
     return isinstance(tensor, torch.Tensor) and tensor.device.type == 'mps'
 
 
-def stage_on_cpu(func=None, *, always_async=False):
+def stage_on_cpu(func=None, *, always_async=False, copy_to_cpu=True, copy_from_cpu=True):
     """Runs a collective on CPU copies of any MPS tensor arguments, then copies the results back.
 
     This is what lets DeepSpeed use the gloo backend on Apple Silicon, where device tensors are
@@ -123,13 +142,21 @@ def stage_on_cpu(func=None, *, always_async=False):
 
     always_async is for ops like isend/irecv that are asynchronous by contract but have no
     async_op parameter: the copy back must wait until the returned work handle completes.
+
+    copy_to_cpu=False allocates an output-only CPU target without reading the device tensor.
+    copy_from_cpu=False retains an input-only CPU snapshot without copying it back.
     """
     if func is None:
-        return lambda wrapped_func: stage_on_cpu(wrapped_func, always_async=always_async)
+        return lambda wrapped_func: stage_on_cpu(
+            wrapped_func,
+            always_async=always_async,
+            copy_to_cpu=copy_to_cpu,
+            copy_from_cpu=copy_from_cpu,
+        )
 
     def _stage(arg, pairs):
         if _needs_cpu_staging(arg):
-            cpu_tensor = arg.to('cpu')
+            cpu_tensor = arg.to('cpu') if copy_to_cpu else torch.empty_like(arg, device='cpu')
             pairs.append((arg, cpu_tensor))
             return cpu_tensor
         if isinstance(arg, list) and any(_needs_cpu_staging(t) for t in arg):
@@ -148,12 +175,17 @@ def stage_on_cpu(func=None, *, always_async=False):
         work = func(self, *args, **kwargs)
 
         def copy_back():
-            for device_tensor, cpu_tensor in pairs:
-                device_tensor.copy_(cpu_tensor)
+            if copy_from_cpu:
+                for device_tensor, cpu_tensor in pairs:
+                    device_tensor.copy_(cpu_tensor)
 
         # async_op is usually forwarded positionally, so resolve it against the real signature.
         bound_args = signature.bind(self, *args, **kwargs)
         if always_async or bound_args.arguments.get('async_op', False):
+            # torch.distributed returns None for ranks outside the requested group. Without a
+            # completion handle, an output-only staging buffer must never be published.
+            if work is None:
+                return None
             return StagedWork(work, copy_back)
         copy_back()
         return work
@@ -235,7 +267,11 @@ class TorchBackend(Backend):
             # 1. device_id arg was added in torch==2.3
             # 2. setting device_id leads to hanging in 2.6.0<torch<2.7.1 https://github.com/pytorch/pytorch/issues/153960
             # 3. device_id works and is needed for `cuda`, other accelerators may have issues at the moment. Therefore only do it for the `cuda` accelerator.
-            if ('device_id' in inspect.signature(torch.distributed.init_process_group).parameters
+            # 4. binding a device also makes torch build every later new_group() with ncclCommSplit;
+            #    a single-rank job has no peer to reach, so skip it there (#8248). Only skip when the
+            #    world size is actually known, never on an assumed one.
+            if (known_world_size(world_size) != 1
+                    and 'device_id' in inspect.signature(torch.distributed.init_process_group).parameters
                     and not (version.parse("2.6.0") < version.parse(torch.__version__) < version.parse("2.7.1"))
                     and get_accelerator().device_name() == 'cuda'):
                 local_rank = int(os.environ.get('LOCAL_RANK', 0))
@@ -433,12 +469,12 @@ class TorchBackend(Backend):
         return torch.distributed.recv(tensor=tensor, src=src, group=group, tag=tag)
 
     @disable_compiler_collective
-    @stage_on_cpu(always_async=True)
+    @stage_on_cpu(always_async=True, copy_from_cpu=False)
     def isend(self, tensor, dst, group=None, tag=0):
         return torch.distributed.isend(tensor=tensor, dst=dst, group=group, tag=tag)
 
     @disable_compiler_collective
-    @stage_on_cpu(always_async=True)
+    @stage_on_cpu(always_async=True, copy_to_cpu=False)
     def irecv(self, tensor, src=None, group=None, tag=0):
         return torch.distributed.irecv(tensor=tensor, src=src, group=group, tag=tag)
 

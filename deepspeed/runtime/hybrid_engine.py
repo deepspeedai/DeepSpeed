@@ -134,6 +134,18 @@ class DeepSpeedHybridEngine(DeepSpeedEngine):
                     self.inference_policies.update({orig_layer_class: (self.new_inference_container, plcy)})
             elif plcy._orig_layer_class is not None:
                 self.inference_policies.update({plcy._orig_layer_class: (self.new_inference_container, plcy)})
+
+        has_transformer_policy = any(module.__class__ in self.inference_policies for module in self.module.modules())
+        if not has_transformer_policy:
+            logger.warning(
+                "No compatible DeepSpeed inference policy found for model type %s. "
+                "Hybrid Engine inference acceleration is unavailable; rollout will "
+                "use the model's native generate() path.",
+                type(self.module).__name__,
+            )
+            self.inference_policies = {}
+            return
+
         self.inference_policies.update({
             nn.Linear: (LinearLayer, ),
             nn.Embedding: (EmbeddingLayer, ),
@@ -176,6 +188,46 @@ class DeepSpeedHybridEngine(DeepSpeedEngine):
 
                 if not retake_success:
                     raise RuntimeError("Unable to retake inference workspace.")
+
+    def prepare_shared_prefill(self, source_batch_size, repeats, prompt_length):
+        """Allocate a target-batch workspace before a shared prompt forward."""
+        hybrid_config = self._config.hybrid_engine
+        if self.Z3_enabled:
+            raise RuntimeError("Shared prefill does not support ZeRO stage 3")
+        if hybrid_config.inference_tp_size != 1:
+            raise RuntimeError("Shared prefill does not support inference tensor parallelism")
+        if hybrid_config.release_inference_cache:
+            raise RuntimeError("Shared prefill does not support release_inference_cache")
+        if hybrid_config.enable_cuda_graph:
+            raise RuntimeError("Shared prefill does not support CUDA graph capture")
+        if len(self._inference_containers) == 0:
+            raise RuntimeError("Shared prefill requires HybridEngine inference containers")
+
+        target_batch_size = source_batch_size * repeats
+        inference_module = self._inference_containers[0].module
+        config = inference_module.config
+        if config.bigscience_bloom:
+            raise RuntimeError("Shared prefill does not support external KV caches")
+        inference_module.workspace.allocate_workspace(
+            config.hidden_size,
+            config.heads,
+            prompt_length,
+            target_batch_size,
+            len(self._inference_containers),
+            config.mp_size,
+            config.bigscience_bloom,
+            dist.get_rank() if dist.is_initialized() else 0,
+            config.max_out_tokens,
+            config.min_out_tokens,
+        )
+        for container in self._inference_containers:
+            container.module._should_allocate_workspace = False
+        self._shared_prefill_workspace = inference_module.workspace
+
+    def repeat_shared_prefill_cache(self, source_batch_size, repeats):
+        """Expand the completed prompt cache for independent response branches."""
+        cache_tensors = self._shared_prefill_workspace.repeat_kv_cache(source_batch_size, repeats)
+        return tuple(zip(cache_tensors[::2], cache_tensors[1::2]))
 
     def generate(self, *inputs, **kwargs):
         if self._total_batch_size is None:
