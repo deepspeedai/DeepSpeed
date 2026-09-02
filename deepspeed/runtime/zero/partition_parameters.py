@@ -1889,7 +1889,7 @@ class Init(InsertPostInitMethodToModuleSubClasses):
                                                            device=self.remote_device)
 
                 if self.pin_memory:
-                    secondary_partitioned_tensor = secondary_partitioned_tensor.pin_memory()
+                    secondary_partitioned_tensor = get_accelerator().pin_memory(secondary_partitioned_tensor)
                 # quantize the tensor if it's not trainable
                 if not param.requires_grad and self.quantized_nontrainable_weights:
                     secondary_partitioned_tensor, secondary_partitioned_tensor.ds_quant_scale = self.quantizer_module.quantize(
