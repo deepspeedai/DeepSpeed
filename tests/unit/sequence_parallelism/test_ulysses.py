@@ -16,7 +16,7 @@ from deepspeed.sequence.fpdt_layer import _FPDTGPUOffloadingAttentionImpl_, FPDT
 from unit.util import skip_on_arch
 from unit.simple_model import *
 from deepspeed.utils import groups
-from deepspeed.module_inject.tp_shard import get_shard_size_list
+from deepspeed.module_inject.tp_shard import AutoTPMeta, get_shard_size_list
 #Use mesh device to create data and sequence parallel group
 
 
@@ -262,7 +262,7 @@ class TestUlyssesAll2All_odd(DistributedTest):
             d0_indices = torch.arange(s2h_tensor.shape[0]).reshape(-1, 1, 1, 1)
             d1_indices = torch.arange(s2h_tensor.shape[1]).reshape(1, -1, 1, 1)
             h_indices = torch.arange(s2h_tensor.shape[2]).reshape(1, 1, -1, 1)
-            shard_list = get_shard_size_list(num_heads, groups._get_sequence_parallel_world_size())
+            shard_list = get_shard_size_list(num_heads, groups._get_sequence_parallel_world_size(), AutoTPMeta())
             head_offset = sum(shard_list[:groups._get_sequence_parallel_rank()])
             s2h_truth = torch.zeros_like(s2h_tensor)
             s2h_truth[:] = seq_batch_heads_hash(d0_indices, d1_indices, h_indices, 0, 0, head_offset)

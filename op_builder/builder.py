@@ -481,6 +481,10 @@ class OpBuilder(ABC):
             cpu_info['arch'] = "PPC_"
         elif 'riscv64' in result:
             cpu_info['arch'] = "riscv64"
+        elif 'aarch64' in result:
+            cpu_info['arch'] = "ARM_8"
+            if ' sve ' in result:
+                cpu_info['flags'] = 'sve'
 
         return cpu_info
 
@@ -506,6 +510,8 @@ class OpBuilder(ABC):
                 return '-D__AVX512__'
             elif 'avx2' in cpu_info['flags']:
                 return '-D__AVX256__'
+        elif (cpu_info['arch'] or '').startswith('ARM') and 'sve' in cpu_info['flags']:
+            return '-D__SVE__'
         return '-D__SCALAR__'
 
     def command_exists(self, cmd):

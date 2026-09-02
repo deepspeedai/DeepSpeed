@@ -26,6 +26,54 @@ from deepspeed.runtime.rollout.base import RolloutBatch, RolloutEngine, RolloutR
 from deepspeed.runtime.rollout.continuous_batching import ContinuousBatchRequest, ContinuousBatchScheduler
 
 
+class _ForwardProfiler:
+    """Measure top-level model forwards without synchronizing each call."""
+
+    def __init__(self, accelerator):
+        self.event_type = accelerator.Event
+        self.use_host_timer = accelerator.use_host_timers()
+        # Host intervals are only reliable when there is no asynchronous device
+        # work, as on CPU. MPS exposes events but cannot time them, so its host
+        # intervals would measure enqueue latency rather than model execution.
+        self.is_available = not self.use_host_timer or self.event_type is None
+        self.active_start = None
+        self.measurements = []
+
+    def register(self, module):
+        if not self.is_available:
+            return ()
+        pre_handle = module.register_forward_pre_hook(self._start_forward)
+        post_handle = module.register_forward_hook(self._end_forward)
+        return pre_handle, post_handle
+
+    def get_stage_times(self):
+        if not self.measurements:
+            return None, None, 0
+
+        durations = [self._elapsed_time(start, end) for start, end in self.measurements]
+        return durations[0], sum(durations[1:]), len(durations) - 1
+
+    def _start_forward(self, _module, _args):
+        self.active_start = self._record_time()
+
+    def _end_forward(self, _module, _args, _output):
+        end = self._record_time()
+        self.measurements.append((self.active_start, end))
+        self.active_start = None
+
+    def _record_time(self):
+        if self.use_host_timer:
+            return time.perf_counter()
+        event = self.event_type(enable_timing=True)
+        event.record()
+        return event
+
+    def _elapsed_time(self, start, end):
+        if self.use_host_timer:
+            return (end - start) * 1000.0
+        return start.elapsed_time(end)
+
+
 @dataclass
 class HybridEngineRolloutConfig:
     """Configuration for HybridEngineRollout."""
@@ -86,13 +134,19 @@ class HybridEngineRollout(RolloutEngine):
 
         is_greedy = sampling.temperature <= 0.0
 
+        forward_profiler = None
+        forward_profile_handles = []
+        if self.enable_profiling and not (self.use_graph_capture and is_greedy):
+            forward_profiler = _ForwardProfiler(accelerator)
+            forward_profile_handles = forward_profiler.register(module)
+
         shared_prefill_handles = []
-        if self.use_shared_prefill and n > 1:
-            if self.use_graph_capture:
-                raise RuntimeError("Shared prefill does not support CUDA graph capture")
-            self.engine.prepare_shared_prefill(B, n, prompt_len)
-            shared_prefill_handles = self._register_shared_prefill_hooks(module, B, n)
         try:
+            if self.use_shared_prefill and n > 1:
+                if self.use_graph_capture:
+                    raise RuntimeError("Shared prefill does not support CUDA graph capture")
+                self.engine.prepare_shared_prefill(B, n, prompt_len)
+                shared_prefill_handles = self._register_shared_prefill_hooks(module, B, n)
             if self.use_graph_capture and is_greedy:
                 output_ids = self._generate_graph(prompt_ids, prompt_attn, max_new_tokens, pad_token_id, module,
                                                   device)
@@ -113,6 +167,8 @@ class HybridEngineRollout(RolloutEngine):
                 )
         finally:
             for handle in shared_prefill_handles:
+                handle.remove()
+            for handle in forward_profile_handles:
                 handle.remove()
 
         if self.enable_profiling:
@@ -152,6 +208,15 @@ class HybridEngineRollout(RolloutEngine):
             generation_ms = (generation_end - expansion_end) * 1000.0
             post_processing_ms = (post_processing_end - generation_end) * 1000.0
             total_ms = (post_processing_end - profile_start) * 1000.0
+            prefill_forward_ms = None
+            decode_forward_ms = None
+            num_decode_forwards = 0
+            if forward_profiler is not None:
+                prefill_forward_ms, decode_forward_ms, num_decode_forwards = forward_profiler.get_stage_times()
+            generation_overhead_ms = generation_ms
+            if prefill_forward_ms is not None:
+                generation_overhead_ms -= prefill_forward_ms + decode_forward_ms
+                generation_overhead_ms = max(0.0, generation_overhead_ms)
             response_length = int(output_ids.shape[1] - prompt_len)
             num_generated_tokens = int(output_ids.shape[0] * response_length)
             tokens_per_second = 0.0
@@ -160,6 +225,10 @@ class HybridEngineRollout(RolloutEngine):
             self._last_profile = {
                 "prompt_expansion_ms": prompt_expansion_ms,
                 "generation_ms": generation_ms,
+                "prefill_forward_ms": prefill_forward_ms,
+                "decode_forward_ms": decode_forward_ms,
+                "generation_overhead_ms": generation_overhead_ms,
+                "num_decode_forwards": num_decode_forwards,
                 "post_processing_ms": post_processing_ms,
                 "total_ms": total_ms,
                 "num_generated_tokens": num_generated_tokens,
