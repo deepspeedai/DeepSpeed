@@ -12,8 +12,31 @@ from einops import rearrange
 
 import deepspeed.comm as dist
 from deepspeed.accelerator import get_accelerator
-from deepspeed.module_inject.tp_shard import get_shard_size_list, set_num_kv_heads, get_num_kv_heads
+from deepspeed.module_inject.tp_shard import AutoTPMeta, get_shard_size_list
 from deepspeed.utils import groups
+
+# Ulysses sequence parallelism keeps its own kv-head count, memoized on the first uneven
+# all-to-all. The state lives here, independent of AutoTP.
+# TODO: this is process-wide and never reset, so the first model to take the uneven path locks
+# every later Ulysses call into it -- a second model with a different head count would then be
+# split against the first one's value. Moving it onto the attention instance means threading the
+# total head count through _SeqAllToAll and its backward pass, because the gather direction
+# cannot recover it from the tensor shape alone.
+_ulysses_num_kv_heads = None
+
+
+def set_ulysses_num_kv_heads(num):
+    global _ulysses_num_kv_heads
+    _ulysses_num_kv_heads = num
+
+
+def get_ulysses_num_kv_heads():
+    return _ulysses_num_kv_heads
+
+
+def _ulysses_meta():
+    return AutoTPMeta(num_kv_heads=_ulysses_num_kv_heads)
+
 
 try:
     from torchembed._triton import fused_rope_forward as _torchembed_rope_forward
@@ -136,7 +159,7 @@ def uneven_heads_all2all(input, scatter_idx, gather_idx, batch_dim_idx, group):
     assert batch_dim_idx in [0, 1], "batch_dim_idx must be either 0 or 1"
 
     if not (scatter_idx < 2):
-        input_splits = get_shard_size_list(inp_shape[scatter_idx], seq_world_size)
+        input_splits = get_shard_size_list(inp_shape[scatter_idx], seq_world_size, _ulysses_meta())
         input = input.transpose(0, scatter_idx).contiguous()
         local_heads = input_splits[groups._get_sequence_parallel_rank()]
         output_splits = [local_heads] * seq_world_size
@@ -170,7 +193,7 @@ def uneven_heads_all2all(input, scatter_idx, gather_idx, batch_dim_idx, group):
         elif batch_dim_idx == 1:  #s,b,h
             input = input.transpose(1, 2).contiguous()  #s,h,b
         seq_len, h, batch_size = input.shape
-        num_local_heads_list = get_shard_size_list(get_num_kv_heads(), seq_world_size)
+        num_local_heads_list = get_shard_size_list(get_ulysses_num_kv_heads(), seq_world_size, _ulysses_meta())
         local_heads = num_local_heads_list[groups._get_sequence_parallel_rank()]
         h_dim = h // local_heads
         local_seq_len = seq_len // seq_world_size
@@ -181,7 +204,7 @@ def uneven_heads_all2all(input, scatter_idx, gather_idx, batch_dim_idx, group):
         coeff = local_seq_len_with_heads // local_heads  #per head: dim size of local_seq_len*hdim
 
         #uneven seq_world_size coeff,  total_heads/local_heads.
-        heads_scale_coeff = get_num_kv_heads() / local_heads
+        heads_scale_coeff = get_ulysses_num_kv_heads() / local_heads
 
         output_splits = [num_local_heads * coeff for num_local_heads in num_local_heads_list]
         output_buff_d1_size = int(heads_scale_coeff * local_seq_len_with_heads)
@@ -198,9 +221,9 @@ def uneven_heads_all2all(input, scatter_idx, gather_idx, batch_dim_idx, group):
         #total_num_large_heads=sum([2,2,2])=7
         #total_num_small_heads=sum([1])=1
 
-        chunk_num_heads_small = get_num_kv_heads() // seq_world_size  # even heads compatible
+        chunk_num_heads_small = get_ulysses_num_kv_heads() // seq_world_size  # even heads compatible
         chunk_num_heads_large = chunk_num_heads_small + 1
-        num_chunk_heads_large = get_num_kv_heads() % seq_world_size
+        num_chunk_heads_large = get_ulysses_num_kv_heads() % seq_world_size
         num_chunk_heads_small = seq_world_size - num_chunk_heads_large
         total_num_large_heads = num_chunk_heads_large * chunk_num_heads_large
         total_num_small_heads = num_chunk_heads_small * chunk_num_heads_small
@@ -245,14 +268,14 @@ def single_all_to_all(input, scatter_idx, gather_idx, batch_dim_idx, group, asyn
     # we only need num_heads once
     num_heads = input.shape[2]
 
-    if get_num_kv_heads() is not None or (num_heads % seq_world_size != 0 and not scatter_idx < 2):
+    if get_ulysses_num_kv_heads() is not None or (num_heads % seq_world_size != 0 and not scatter_idx < 2):
         # Assuming here that the number of heads for q is consistent with kv
         # If not, additional logic is required for cases like GQA
-        if get_num_kv_heads() is None:
+        if get_ulysses_num_kv_heads() is None:
             assert num_heads > seq_world_size, f"Number of heads ({num_heads}) must be larger than sequence parallel size ({seq_world_size})"
             # set heads at first call by num_total_heads.
-            # then use ``get_num_kv_heads() is not None`` to re-entry uneven path.
-            set_num_kv_heads(num_heads)
+            # then use ``get_ulysses_num_kv_heads() is not None`` to re-entry uneven path.
+            set_ulysses_num_kv_heads(num_heads)
         assert async_op == False, "uneven head sp does not support async op"
         return uneven_heads_all2all(input, scatter_idx, gather_idx, batch_dim_idx, group)
 

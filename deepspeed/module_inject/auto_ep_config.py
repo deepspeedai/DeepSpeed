@@ -58,6 +58,10 @@ def parse_autoep_config(param_dict: dict) -> AutoEPConfig:
     config.route_scale = param_dict.get("route_scale", 1.0)
     config.score_apply = param_dict.get("score_apply", "auto")
     config.combine_impl = param_dict.get("combine_impl", "auto")
+    config.comm_backend = param_dict.get("comm_backend", "comm")
+    config.comm_num_sm = param_dict.get("comm_num_sm", 12)
+    config.comm_qp_margin = param_dict.get("comm_qp_margin", 4)
+    config.comm_max_tokens_per_rank = param_dict.get("comm_max_tokens_per_rank", 0)
     config.num_expert_groups = param_dict.get("num_expert_groups", None)
     config.num_limited_groups = param_dict.get("num_limited_groups", None)
     config.score_func = param_dict.get("score_func", "auto")
@@ -129,6 +133,10 @@ def validate_autoep_config(
             raise ValueError('combine_impl="fused_weighted_sum" requires expert_tensor_parallel_size=1, but got '
                              f"{config.expert_tensor_parallel_size}. Set expert_tensor_parallel_size to 1, or leave "
                              "combine_impl unset.")
+        if config.comm_backend == "deepep" and config.autoep_size > 1:
+            raise ValueError('combine_impl="fused_weighted_sum" cannot be used with comm_backend="deepep" because '
+                             "DeepEP already restores and reduces the routed rows. Set comm_backend to "
+                             '"comm", or leave combine_impl unset.')
 
     folding_spec = build_folding_spec(
         world_size=world_size,
@@ -168,6 +176,27 @@ def validate_autoep_config(
     if config.combine_impl not in valid_combine_impl:
         raise ValueError(f"combine_impl must be one of {valid_combine_impl}, "
                          f"got '{config.combine_impl}'")
+
+    # Validate comm_backend
+    valid_comm_backend = ("comm", "deepep")
+    if config.comm_backend not in valid_comm_backend:
+        raise ValueError(f"comm_backend must be one of {valid_comm_backend}, "
+                         f"got '{config.comm_backend}'")
+
+    # A zero budget would hand the whole GPU to the collective, and a negative
+    # one is meaningless; both are worth rejecting where the value is written
+    # rather than inside a buffer constructor.
+    if not isinstance(config.comm_num_sm, int) or config.comm_num_sm < 1:
+        raise ValueError(f"comm_num_sm must be a positive integer, got {config.comm_num_sm!r}")
+    if not isinstance(config.comm_qp_margin, int) or config.comm_qp_margin < 0:
+        raise ValueError(f"comm_qp_margin must be a non-negative integer, got {config.comm_qp_margin!r}")
+    if not isinstance(config.comm_max_tokens_per_rank, int) or config.comm_max_tokens_per_rank < 0:
+        raise ValueError("comm_max_tokens_per_rank must be a non-negative integer, "
+                         f"got {config.comm_max_tokens_per_rank!r}")
+    if config.comm_backend == "deepep" and config.comm_max_tokens_per_rank == 0:
+        raise ValueError("comm_max_tokens_per_rank must be a positive integer when comm_backend='deepep'. "
+                         "Set it to the largest number of tokens one rank can route, normally "
+                         "train_micro_batch_size_per_gpu * maximum padded sequence length.")
 
     # Validate score_func
     valid_score_func = ("auto", "softmax", "sigmoid")

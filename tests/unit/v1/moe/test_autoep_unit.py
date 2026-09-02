@@ -258,6 +258,17 @@ class TestAutoEPConfig:
         with pytest.raises(ValueError, match="requires expert_tensor_parallel_size=1"):
             validate_autoep_config(config, world_size=4, pp_size=1, tp_size=1, sp_size=1)
 
+    def test_fused_combine_rejects_deepep(self):
+        config = parse_autoep_config({
+            "enabled": True,
+            "autoep_size": 2,
+            "combine_impl": "fused_weighted_sum",
+            "comm_backend": "deepep",
+            "comm_max_tokens_per_rank": 4096,
+        })
+        with pytest.raises(ValueError, match='cannot be used with comm_backend="deepep"'):
+            validate_autoep_config(config, world_size=2, pp_size=1, tp_size=1, sp_size=1)
+
     @pytest.mark.parametrize("score_apply, spec_score_apply", [("auto", "pre"), ("pre", "post")])
     def test_fused_combine_requires_post_score_apply(self, score_apply, spec_score_apply):
         config = parse_autoep_config({
