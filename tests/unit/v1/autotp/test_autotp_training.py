@@ -596,7 +596,10 @@ class TestLegacyLmHeadGatheredTraining(DistributedTest):
             assert model.lm_head.gather_output
 
             torch.manual_seed(17)
-            reference_input = torch.randn(4, hidden_dim, device=get_accelerator().current_device_name(), requires_grad=True)
+            reference_input = torch.randn(4,
+                                          hidden_dim,
+                                          device=get_accelerator().current_device_name(),
+                                          requires_grad=True)
             dist.broadcast(reference_input, src=0, group=tp_group)
             tp_input = reference_input.detach().clone().requires_grad_(True)
 
