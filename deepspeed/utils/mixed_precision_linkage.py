@@ -8,8 +8,16 @@ from deepspeed.utils import get_full_hp_param, get_full_hp_grad, get_hp_fragment
 from deepspeed.utils import set_full_hp_param, set_full_hp_grad
 
 
-def link_hp_params(lp_param_list, flat_hp_partition, gradient_dict, offload_gradient_dict, use_offload,
-                   param_group_index, partition_start, partition_size, dp_group, param_offsets=None):
+def link_hp_params(lp_param_list,
+                   flat_hp_partition,
+                   gradient_dict,
+                   offload_gradient_dict,
+                   use_offload,
+                   param_group_index,
+                   partition_start,
+                   partition_size,
+                   dp_group,
+                   param_offsets=None):
     local_lp_param_and_offset = _init_lp_to_hp_mapping(lp_param_list, partition_start, partition_size, dp_group,
                                                        param_offsets)
 
@@ -30,6 +38,25 @@ def _init_lp_to_hp_mapping(lp_param_list, partition_start, partition_size, dp_gr
     param_and_offset_list = []
     partition_end = partition_start + partition_size
     index_in_param_group = 0
+    gradient_index_by_param = {}
+    if param_offsets is not None:
+        current_partition_offset = 0
+        gradient_list_index = 0
+        params_by_offset = sorted(zip(lp_param_list, param_offsets), key=lambda item: item[1])
+        for lp_param, param_offset in params_by_offset:
+            lp_param_end = param_offset + lp_param.numel()
+            overlap_start = max(param_offset, partition_start)
+            overlap_end = min(lp_param_end, partition_end)
+            if overlap_start >= overlap_end:
+                continue
+
+            dest_offset = overlap_start - partition_start
+            if dest_offset > current_partition_offset:
+                gradient_list_index += 1
+            gradient_index_by_param[id(lp_param)] = gradient_list_index
+            gradient_list_index += 1
+            current_partition_offset = overlap_end - partition_start
+
     for i, lp_param in enumerate(lp_param_list):
         if param_offsets is not None:
             current_offset = param_offsets[i]
@@ -46,8 +73,11 @@ def _init_lp_to_hp_mapping(lp_param_list, partition_start, partition_size, dp_gr
         lp_param_end = current_offset + lp_param.numel()
         if current_offset < partition_end and lp_param_end > partition_start:
             param_and_offset_list.append((lp_param, current_offset))
-            lp_param._index_in_param_group = index_in_param_group
-            index_in_param_group += 1
+            if param_offsets is None:
+                lp_param._index_in_param_group = index_in_param_group
+                index_in_param_group += 1
+            else:
+                lp_param._index_in_param_group = gradient_index_by_param[id(lp_param)]
         if param_offsets is None:
             current_offset += lp_param.numel()
 

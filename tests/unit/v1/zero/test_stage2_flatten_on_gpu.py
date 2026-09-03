@@ -11,7 +11,7 @@ import pytest
 import torch
 import deepspeed
 from deepspeed.accelerator import get_accelerator
-from deepspeed.utils import set_log_level_from_string
+from deepspeed.utils import safe_get_full_grad, safe_set_full_grad, set_log_level_from_string
 from unit.common import DistributedTest
 from unit.simple_model import SimpleModel, random_dataloader
 
@@ -29,6 +29,17 @@ class _MisalignedParamModel(torch.nn.Module):
         return (x @ self.weight).sum() + self.offset.sum()
 
 
+class _FallbackLayoutModel(torch.nn.Module):
+
+    def __init__(self):
+        super().__init__()
+        self.first = torch.nn.Parameter(torch.arange(64, dtype=torch.float32).reshape(8, 8) / 64)
+        self.second = torch.nn.Parameter((torch.arange(64, dtype=torch.float32) + 128).reshape(8, 8) / 64)
+
+    def forward(self, x):
+        return (x @ self.first).sum() + (x @ self.second).sum()
+
+
 def _init_alignment_engine(zero_stage):
     if not get_accelerator().is_available():
         pytest.skip("Accelerator not available")
@@ -36,10 +47,16 @@ def _init_alignment_engine(zero_stage):
         pytest.skip("bf16 is not supported on this accelerator")
     model = _MisalignedParamModel()
     optimizer = torch.optim.AdamW(model.parameters(), lr=0.1)
-    config = {"train_micro_batch_size_per_gpu": 1, "bf16": {"enabled": True}, "zero_optimization": {"stage": zero_stage}}
-    return deepspeed.initialize(config=config,
-                                model=model,
-                                optimizer=optimizer,
+    config = {
+        "train_micro_batch_size_per_gpu": 1,
+        "bf16": {
+            "enabled": True
+        },
+        "zero_optimization": {
+            "stage": zero_stage
+        }
+    }
+    return deepspeed.initialize(config=config, model=model, optimizer=optimizer,
                                 model_parameters=model.parameters())[0]
 
 
@@ -47,7 +64,8 @@ def _flat_weight(engine):
     opt = engine.optimizer
     index = next(i for i, param in enumerate(opt.round_robin_bit16_groups[0]) if param is engine.module.weight)
     offset = opt.round_robin_bit16_offsets[0][index]
-    return opt.bit16_groups_flat[0].narrow(0, offset, engine.module.weight.numel()).view_as(engine.module.weight), offset
+    return opt.bit16_groups_flat[0].narrow(0, offset,
+                                           engine.module.weight.numel()).view_as(engine.module.weight), offset
 
 
 def _alignment_step(engine, lr=None):
@@ -89,6 +107,63 @@ class TestStage12ParamAlignment(DistributedTest):
             _alignment_step(loaded, lr=0.0)
             assert loaded.module.weight.data_ptr() == loaded_flat_weight.data_ptr()
             assert torch.equal(loaded.module.weight, expected)
+
+    @pytest.mark.world_size(1)
+    def test_cpu_flatten_fallback_preserves_layout_and_trains(self, monkeypatch, zero_stage):
+        if not get_accelerator().is_available():
+            pytest.skip("Accelerator not available")
+        if not get_accelerator().is_bf16_supported():
+            pytest.skip("bf16 is not supported on this accelerator")
+
+        monkeypatch.setattr(get_accelerator(), "available_memory", lambda *args, **kwargs: 0)
+        model = _FallbackLayoutModel()
+        expected_first = model.first.detach().to(torch.bfloat16)
+        expected_second = model.second.detach().to(torch.bfloat16)
+        config = {
+            "train_micro_batch_size_per_gpu": 1,
+            "bf16": {
+                "enabled": True
+            },
+            "zero_optimization": {
+                "stage": zero_stage
+            },
+        }
+        optimizer = torch.optim.AdamW(model.parameters(), lr=0.1)
+        engine, _, _, _ = deepspeed.initialize(config=config,
+                                               model=model,
+                                               optimizer=optimizer,
+                                               model_parameters=model.parameters())
+
+        opt = engine.optimizer
+        offsets = {
+            id(param): offset
+            for param, offset in zip(opt.round_robin_bit16_groups[0], opt.round_robin_bit16_offsets[0])
+        }
+        assert offsets[id(engine.module.first)] == 0
+        assert offsets[id(engine.module.second)] == engine.module.first.numel()
+        assert torch.equal(engine.module.first.detach().cpu(), expected_first)
+        assert torch.equal(engine.module.second.detach().cpu(), expected_second)
+
+        before = engine.module.second.detach().clone()
+        data = torch.ones(1, 8, device=engine.device, dtype=torch.bfloat16)
+        for _ in range(2):
+            engine.backward(engine(data))
+            engine.step()
+        assert not torch.equal(engine.module.second, before)
+
+    @pytest.mark.world_size(1)
+    def test_safe_full_grad_accounts_for_alignment_padding(self, zero_stage):
+        engine = _init_alignment_engine(zero_stage)
+        data = torch.ones(1, 8, device=engine.device, dtype=torch.bfloat16)
+        engine.backward(engine(data))
+
+        weight = engine.module.weight
+        full_grad = safe_get_full_grad(weight)
+        assert torch.equal(full_grad, torch.ones_like(full_grad))
+
+        replacement = torch.full_like(full_grad, 3)
+        safe_set_full_grad(weight, replacement)
+        assert torch.equal(safe_get_full_grad(weight), replacement)
 
 
 def _apply_dtype_to_config(config_dict, dtype):

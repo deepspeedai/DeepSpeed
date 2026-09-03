@@ -443,10 +443,10 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             param_padding = []
             param_offsets = []
             current_offset = 0
-            for param_index, param in enumerate(round_robin_tensors):
+            for param_index, meta in enumerate(meta_tensors):
                 param_offsets.append(current_offset)
-                current_offset += param.numel()
-                padding = 0 if param_index == len(round_robin_tensors) - 1 else (-current_offset) % param_alignment
+                current_offset += meta.numel()
+                padding = 0 if param_index == len(meta_tensors) - 1 else (-current_offset) % param_alignment
                 param_padding.append(padding)
                 current_offset += padding
             padded_group_numel = current_offset
