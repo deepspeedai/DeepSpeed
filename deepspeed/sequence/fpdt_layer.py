@@ -155,6 +155,9 @@ class _FPDTGPUAttentionImpl_(torch.autograd.Function):
                 cpu_offloading=True):
 
         do_save = layernorm_output.requires_grad
+        # The all-to-all partitions by KV group, and only the caller knows that count: the
+        # gather-direction and backward calls below see an already-sharded head dim.
+        num_kv_heads = kv_projection_size // hidden_size_per_attention_head
 
         if rotary_pos_emb is not None:
             pos_emb_cos, pos_emb_sin = rotary_pos_emb[0].permute(1, 0, 2, 3), rotary_pos_emb[1].permute(1, 0, 2, 3)
@@ -180,6 +183,7 @@ class _FPDTGPUAttentionImpl_(torch.autograd.Function):
             ctx.dtype = layernorm_output.dtype
             ctx.projection_size = projection_size
             ctx.kv_projection_size = kv_projection_size
+            ctx.num_kv_heads = num_kv_heads
 
             global_q = []
             global_k = []
@@ -206,7 +210,7 @@ class _FPDTGPUAttentionImpl_(torch.autograd.Function):
                 q_chunk = qkv_chunk[:, :, :projection_size].contiguous().reshape(
                     qkv_chunk.shape[0], qkv_chunk.shape[1], -1,
                     hidden_size_per_attention_head).permute(1, 0, 2, 3).contiguous()  # b, l, nh, hd
-                q_chunk = single_all_to_all(q_chunk, scatter_idx, gather_idx, 0, spg)
+                q_chunk = single_all_to_all(q_chunk, scatter_idx, gather_idx, 0, spg, num_kv_heads=num_kv_heads)
                 global_q_chunk_len = q_chunk.shape[1]
                 if rotary_pos_emb is not None:
                     q_chunk = apply_rotary_pos_emb(q_chunk,
@@ -217,7 +221,7 @@ class _FPDTGPUAttentionImpl_(torch.autograd.Function):
                 k_chunk = qkv_chunk[:, :, projection_size:projection_size + kv_projection_size].contiguous().reshape(
                     qkv_chunk.shape[0], qkv_chunk.shape[1], -1,
                     hidden_size_per_attention_head).permute(1, 0, 2, 3).contiguous()  # b, l, nh, hd
-                k_chunk = single_all_to_all(k_chunk, scatter_idx, gather_idx, 0, spg)
+                k_chunk = single_all_to_all(k_chunk, scatter_idx, gather_idx, 0, spg, num_kv_heads=num_kv_heads)
                 if rotary_pos_emb is not None:
                     k_chunk = apply_rotary_pos_emb(k_chunk,
                                                    pos_emb_cos[:, global_q_chunk_len * i:global_q_chunk_len * (i + 1)],
@@ -227,7 +231,7 @@ class _FPDTGPUAttentionImpl_(torch.autograd.Function):
                 v_chunk = qkv_chunk[:, :, projection_size + kv_projection_size:].contiguous().reshape(
                     qkv_chunk.shape[0], qkv_chunk.shape[1], -1,
                     hidden_size_per_attention_head).permute(1, 0, 2, 3).contiguous()  # b, l, nh, hd
-                v_chunk = single_all_to_all(v_chunk, scatter_idx, gather_idx, 0, spg)
+                v_chunk = single_all_to_all(v_chunk, scatter_idx, gather_idx, 0, spg, num_kv_heads=num_kv_heads)
                 global_v.append(v_chunk)
 
                 for k_i in range(len(global_k)):
@@ -276,7 +280,12 @@ class _FPDTGPUAttentionImpl_(torch.autograd.Function):
 
             for i in range(num_chunks):
                 global_lse[i] = global_lse[i][:, :, :, 0].permute(0, 2, 1).contiguous()
-                output[i] = single_all_to_all(global_o[i].to(ctx.dtype).contiguous(), gather_idx, scatter_idx, 0, spg)
+                output[i] = single_all_to_all(global_o[i].to(ctx.dtype).contiguous(),
+                                              gather_idx,
+                                              scatter_idx,
+                                              0,
+                                              spg,
+                                              num_kv_heads=num_kv_heads)
             output = torch.cat(output, dim=1)
 
             head_dim = output.shape[-1]
@@ -312,6 +321,7 @@ class _FPDTGPUAttentionImpl_(torch.autograd.Function):
 
         projection_size = ctx.projection_size
         kv_projection_size = ctx.kv_projection_size
+        num_kv_heads = ctx.num_kv_heads
 
         layernorm_output = ctx.saved_tensors[0]
 
@@ -338,7 +348,12 @@ class _FPDTGPUAttentionImpl_(torch.autograd.Function):
             st = chunk_size * i
             ed = st + chunk_size
             grad_global_attn_output.append(
-                single_all_to_all(grad_output[:, st:ed].contiguous(), scatter_idx, gather_idx, 0, spg))
+                single_all_to_all(grad_output[:, st:ed].contiguous(),
+                                  scatter_idx,
+                                  gather_idx,
+                                  0,
+                                  spg,
+                                  num_kv_heads=num_kv_heads))
 
         del grad_output
 
@@ -440,8 +455,8 @@ class _FPDTGPUAttentionImpl_(torch.autograd.Function):
             else:
                 dk[i] = dk[i].to(dtype)
             dv[i] = dv[i].to(dtype)
-            dk[i] = single_all_to_all(dk[i].contiguous(), gather_idx, scatter_idx, 0, spg)
-            dv[i] = single_all_to_all(dv[i].contiguous(), gather_idx, scatter_idx, 0, spg)
+            dk[i] = single_all_to_all(dk[i].contiguous(), gather_idx, scatter_idx, 0, spg, num_kv_heads=num_kv_heads)
+            dv[i] = single_all_to_all(dv[i].contiguous(), gather_idx, scatter_idx, 0, spg, num_kv_heads=num_kv_heads)
 
             input_st = i * input_chunk_size
             input_ed = input_st + input_chunk_size
@@ -474,7 +489,12 @@ class _FPDTGPUAttentionImpl_(torch.autograd.Function):
                                                       ctx.pos_emb_sin[:, dq_seq_len * i:dq_seq_len * (i + 1)])
             else:
                 dq[i] = dq[i].to(dtype)
-            dq[i] = single_all_to_all(dq[i].to(dtype).contiguous(), gather_idx, scatter_idx, 0, spg)
+            dq[i] = single_all_to_all(dq[i].to(dtype).contiguous(),
+                                      gather_idx,
+                                      scatter_idx,
+                                      0,
+                                      spg,
+                                      num_kv_heads=num_kv_heads)
 
             input_chunk = layernorm_output[:input_chunk_size].reshape(-1, layernorm_output.shape[-1])
             layernorm_output = layernorm_output[input_chunk_size:]
@@ -565,6 +585,9 @@ class _FPDTGPUOffloadingAttentionImpl_(torch.autograd.Function):
                 cpu_offloading=True):
 
         do_save = layernorm_output.requires_grad
+        # The all-to-all partitions by KV group, and only the caller knows that count: the
+        # gather-direction and backward calls below see an already-sharded head dim.
+        num_kv_heads = kv_projection_size // hidden_size_per_attention_head
 
         if rotary_pos_emb is not None:
             pos_emb_cos, pos_emb_sin = rotary_pos_emb[0].permute(1, 0, 2, 3), rotary_pos_emb[1].permute(1, 0, 2, 3)
@@ -590,6 +613,7 @@ class _FPDTGPUOffloadingAttentionImpl_(torch.autograd.Function):
             ctx.dtype = layernorm_output.dtype
             ctx.projection_size = projection_size
             ctx.kv_projection_size = kv_projection_size
+            ctx.num_kv_heads = num_kv_heads
 
             global_q = []
             global_k = []
@@ -628,18 +652,18 @@ class _FPDTGPUOffloadingAttentionImpl_(torch.autograd.Function):
                 q_chunk = qkv_chunk[:, :, :projection_size].contiguous().reshape(
                     qkv_chunk.shape[0], qkv_chunk.shape[1], -1,
                     hidden_size_per_attention_head).permute(1, 0, 2, 3).contiguous()  # b, l, nh, hd
-                q_chunk = single_all_to_all(q_chunk, scatter_idx, gather_idx, 0, spg)
+                q_chunk = single_all_to_all(q_chunk, scatter_idx, gather_idx, 0, spg, num_kv_heads=num_kv_heads)
                 global_q_chunk_len = q_chunk.shape[1]
 
                 k_chunk = qkv_chunk[:, :, projection_size:projection_size + kv_projection_size].contiguous().reshape(
                     qkv_chunk.shape[0], qkv_chunk.shape[1], -1,
                     hidden_size_per_attention_head).permute(1, 0, 2, 3).contiguous()  # b, l, nh, hd
-                k_chunk = single_all_to_all(k_chunk, scatter_idx, gather_idx, 0, spg)
+                k_chunk = single_all_to_all(k_chunk, scatter_idx, gather_idx, 0, spg, num_kv_heads=num_kv_heads)
 
                 v_chunk = qkv_chunk[:, :, projection_size + kv_projection_size:].contiguous().reshape(
                     qkv_chunk.shape[0], qkv_chunk.shape[1], -1,
                     hidden_size_per_attention_head).permute(1, 0, 2, 3).contiguous()  # b, l, nh, hd
-                v_chunk = single_all_to_all(v_chunk, scatter_idx, gather_idx, 0, spg)
+                v_chunk = single_all_to_all(v_chunk, scatter_idx, gather_idx, 0, spg, num_kv_heads=num_kv_heads)
 
                 dist.barrier()
 
@@ -739,8 +763,12 @@ class _FPDTGPUOffloadingAttentionImpl_(torch.autograd.Function):
                 global_q[q_compute_chunk_idx].offload()
                 q_compute_chunk_idx += 1
 
-                all2all_output = single_all_to_all(
-                    cur_attn_output.to(ctx.dtype).contiguous(), gather_idx, scatter_idx, 0, spg)
+                all2all_output = single_all_to_all(cur_attn_output.to(ctx.dtype).contiguous(),
+                                                   gather_idx,
+                                                   scatter_idx,
+                                                   0,
+                                                   spg,
+                                                   num_kv_heads=num_kv_heads)
                 final_output.append(all2all_output)
                 with get_accelerator().stream(general_offload_stream):
                     global_o.append(SequenceChunk(cur_attn_output.to(ctx.dtype)))
@@ -783,6 +811,7 @@ class _FPDTGPUOffloadingAttentionImpl_(torch.autograd.Function):
 
         projection_size = ctx.projection_size
         kv_projection_size = ctx.kv_projection_size
+        num_kv_heads = ctx.num_kv_heads
 
         layernorm_output = ctx.layernorm_output
 
@@ -821,8 +850,12 @@ class _FPDTGPUOffloadingAttentionImpl_(torch.autograd.Function):
                                                device=qkv_linear_weight.device,
                                                dtype=torch.float)
 
-        grad_global_attn_output_chunk = single_all_to_all(grad_output[:, :chunk_size].contiguous(), scatter_idx,
-                                                          gather_idx, 0, spg)
+        grad_global_attn_output_chunk = single_all_to_all(grad_output[:, :chunk_size].contiguous(),
+                                                          scatter_idx,
+                                                          gather_idx,
+                                                          0,
+                                                          spg,
+                                                          num_kv_heads=num_kv_heads)
         get_accelerator().synchronize()
         grad_output = grad_output[:, chunk_size:]
 
@@ -931,7 +964,11 @@ class _FPDTGPUOffloadingAttentionImpl_(torch.autograd.Function):
 
                         if grad_global_attn_output[next_q_compute_chunk_idx] is None:
                             grad_global_attn_output_chunk = single_all_to_all(grad_output[:, :chunk_size].contiguous(),
-                                                                              scatter_idx, gather_idx, 0, spg)
+                                                                              scatter_idx,
+                                                                              gather_idx,
+                                                                              0,
+                                                                              spg,
+                                                                              num_kv_heads=num_kv_heads)
                             dist.barrier()
                             grad_output = grad_output[:, chunk_size:]
                             grad_global_attn_output[next_q_compute_chunk_idx] = SequenceChunk(
@@ -976,9 +1013,24 @@ class _FPDTGPUOffloadingAttentionImpl_(torch.autograd.Function):
                 dk_accum = dk_accum.to(dtype)
             dv_accum = dv_accum.to(dtype)
 
-            dq_accum = single_all_to_all(dq_accum.contiguous(), gather_idx, scatter_idx, 0, spg)
-            dk_accum = single_all_to_all(dk_accum.contiguous(), gather_idx, scatter_idx, 0, spg)
-            dv_accum = single_all_to_all(dv_accum.contiguous(), gather_idx, scatter_idx, 0, spg)
+            dq_accum = single_all_to_all(dq_accum.contiguous(),
+                                         gather_idx,
+                                         scatter_idx,
+                                         0,
+                                         spg,
+                                         num_kv_heads=num_kv_heads)
+            dk_accum = single_all_to_all(dk_accum.contiguous(),
+                                         gather_idx,
+                                         scatter_idx,
+                                         0,
+                                         spg,
+                                         num_kv_heads=num_kv_heads)
+            dv_accum = single_all_to_all(dv_accum.contiguous(),
+                                         gather_idx,
+                                         scatter_idx,
+                                         0,
+                                         spg,
+                                         num_kv_heads=num_kv_heads)
 
             general_offload_stream.synchronize()
             compute_stream.wait_stream(general_offload_stream)
