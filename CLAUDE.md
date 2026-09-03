@@ -25,6 +25,16 @@
 - Comments should explain **why**, not **what**. Describe the purpose and reasoning, not the mechanics that the code already shows.
 - New features must include corresponding tests and documentation updates.
 
+### Test discipline
+
+- Tests verify contracts, not implementations: a test is well-formed only if a different correct implementation of the same contract passes it.
+- Before writing a test, name the concrete incorrect behavior it would catch; if you cannot name one, do not write it.
+- Assert on observable outcomes through public/stable interfaces; do not assert private method return values or exact internal strings unless pinning a specific fixed bug (justify in a comment).
+- Anchor to an external oracle or an independently derived reference instead of re-implementing the logic under test.
+- Mocks must stand in for a collaborator's documented contract (schema, protocol), never for internals of the module under test.
+- Changes that affect the external contract at the training-loop or inference level require integration tests, not just unit tests (e.g. a minimal training loop with `SimpleModel`).
+- Integration tests must be executed on actual devices, not merely written: report the execution hardware spec and results in the PR.
+
 ## Tool Caveats
 
 ### Edit tool auto-formatter
