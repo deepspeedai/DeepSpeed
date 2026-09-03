@@ -321,7 +321,7 @@ class DeepSpeedDataSampler(object):
             CURRICULUM_LEARNING_CURRENT_DIFFICULTIES: self.current_difficulties,
             CURRICULUM_LEARNING_DATA_CLUSTER_PATHS: self.data_cluster_paths,
             CURRICULUM_LEARNING_DATA_CLUSTER_CURRENT_POSITION: self.data_cluster_current_position,
-            CURRICULUM_LEARNING_NP_RNG_STATE: np.random.get_state()
+            CURRICULUM_LEARNING_NP_RNG_STATE: self.np_rng.bit_generator.state
         }
 
     def load_state_dict(self, state_dict):
@@ -331,7 +331,13 @@ class DeepSpeedDataSampler(object):
         self.current_difficulties = state_dict[CURRICULUM_LEARNING_CURRENT_DIFFICULTIES]
         self.data_cluster_paths = state_dict[CURRICULUM_LEARNING_DATA_CLUSTER_PATHS]
         self.data_cluster_current_position = state_dict[CURRICULUM_LEARNING_DATA_CLUSTER_CURRENT_POSITION]
-        np.random.set_state(state_dict[CURRICULUM_LEARNING_NP_RNG_STATE])
+        np_rng_state = state_dict[CURRICULUM_LEARNING_NP_RNG_STATE]
+        if isinstance(np_rng_state, dict):
+            self.np_rng.bit_generator.state = np_rng_state
+        else:
+            # checkpoints written before this field held self.np_rng carry the tuple from
+            # np.random.get_state(), so restore that the way those checkpoints expect
+            np.random.set_state(np_rng_state)
         cluster_root_path = self.data_efficiency_config[DATA_SAMPLING][CURRICULUM_LEARNING][
             CURRICULUM_LEARNING_CLUSTER_PATH]
         # Backward compatibility: previously data_cluster_paths were stored as
