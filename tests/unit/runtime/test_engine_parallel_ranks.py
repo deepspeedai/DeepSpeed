@@ -42,6 +42,51 @@ def test_pipeline_engine_rank_uses_stage_id():
     assert engine.get_pipeline_parallel_rank() == 4
 
 
+def test_sequence_only_mpu_does_not_alias_tp_or_mp():
+    mpu = SimpleNamespace(
+        initialize_sequence_parallel=lambda *args, **kwargs: None,
+        get_model_parallel_rank=lambda: 3,
+        get_model_parallel_world_size=lambda: 4,
+        get_data_parallel_rank=lambda: 1,
+        get_data_parallel_world_size=lambda: None,
+    )
+    engine = _bare_engine(mpu=mpu)
+    assert engine.get_tensor_parallel_rank() == 0
+    assert engine.get_tensor_parallel_world_size() == 1
+    assert engine.get_model_parallel_rank() == 0
+    assert engine.get_model_parallel_world_size() == 1
+
+
+def test_data_parallel_world_size_is_int_for_sequence_only_mpu(monkeypatch):
+    mpu = SimpleNamespace(initialize_sequence_parallel=lambda *args, **kwargs: None)
+    engine = _bare_engine(mpu=mpu)
+
+    monkeypatch.setattr(deepspeed.utils.groups, "_get_data_parallel_world_size", lambda: None)
+    monkeypatch.setattr(deepspeed.runtime.engine.dist, "get_world_size", lambda: 8)
+
+    size = engine.get_data_parallel_world_size()
+    assert size == 8
+    assert isinstance(size, int)
+
+
+def test_pipeline_mpu_supplies_dp_and_tp_sizes():
+    mpu = SimpleNamespace(
+        get_data_parallel_rank=lambda: 1,
+        get_data_parallel_world_size=lambda: 2,
+        get_slice_parallel_rank=lambda: 1,
+        get_slice_parallel_world_size=lambda: 2,
+        get_pipe_parallel_rank=lambda: 0,
+        get_pipe_parallel_world_size=lambda: 2,
+    )
+    engine = _bare_engine(mpu=mpu)
+    assert engine.get_data_parallel_rank() == 1
+    assert engine.get_data_parallel_world_size() == 2
+    assert engine.get_tensor_parallel_rank() == 1
+    assert engine.get_tensor_parallel_world_size() == 2
+    assert engine.get_pipeline_parallel_rank() == 0
+    assert engine.get_pipeline_parallel_world_size() == 2
+
+
 class TestEngineParallelRanks(DistributedTest):
     world_size = 1
 

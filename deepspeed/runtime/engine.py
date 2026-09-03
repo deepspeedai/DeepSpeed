@@ -1170,36 +1170,59 @@ class DeepSpeedEngine(Module):
             raise ValueError('not yet support')
             #self.lr_scheduler = lr_schedules.WarmupLayerTokenDecayLR(self.optimizer, self.random_ltd_scheduler)
 
+    def _is_sequence_only_mpu(self):
+        # Ulysses parallel_state_sp aliases MP getters onto SP. Treat TP/MP as unused.
+        return self.mpu is not None and hasattr(self.mpu, 'initialize_sequence_parallel')
+
     def get_data_parallel_rank(self):
+        """Return this process's data-parallel rank."""
+        if self.mpu is not None and not self._is_sequence_only_mpu() and hasattr(self.mpu, 'get_data_parallel_rank'):
+            return self.mpu.get_data_parallel_rank()
         return groups._get_data_parallel_rank()
 
     def get_tensor_parallel_rank(self):
+        """Return this process's tensor-parallel rank, or 0 when TP is unused."""
+        if self._is_sequence_only_mpu():
+            return 0
         from deepspeed.utils.bwc import bwc_tensor_model_parallel_rank
         return bwc_tensor_model_parallel_rank(self.mpu)
 
     def get_model_parallel_rank(self):
-        if self.mpu is None:
-            rank = 0
-        elif hasattr(self.mpu, 'get_model_parallel_rank'):
-            rank = self.mpu.get_model_parallel_rank()
-        else:
-            rank = 0
-        return rank
+        """Return this process's model-parallel rank, or 0 when MP is unused."""
+        if self.mpu is None or self._is_sequence_only_mpu():
+            return 0
+        if hasattr(self.mpu, 'get_model_parallel_rank'):
+            return self.mpu.get_model_parallel_rank()
+        return 0
 
     def get_sequence_parallel_group(self):
         return self.seq_parallel_group
 
     def get_data_parallel_world_size(self):
-        return groups._get_data_parallel_world_size()
+        """Return the data-parallel world size."""
+        if self.mpu is not None and not self._is_sequence_only_mpu() and hasattr(self.mpu,
+                                                                                 'get_data_parallel_world_size'):
+            return self.mpu.get_data_parallel_world_size()
+        size = groups._get_data_parallel_world_size()
+        if size is None:
+            return dist.get_world_size()
+        return size
 
     def get_tensor_parallel_world_size(self):
+        """Return the tensor-parallel world size, or 1 when TP is unused."""
+        if self._is_sequence_only_mpu():
+            return 1
         from deepspeed.utils.bwc import bwc_tensor_model_parallel_world_size
         return bwc_tensor_model_parallel_world_size(self.mpu)
 
     def get_model_parallel_world_size(self):
+        """Return the model-parallel world size, or 1 when MP is unused."""
+        if self._is_sequence_only_mpu():
+            return 1
         return groups._get_model_parallel_world_size()
 
     def get_pipeline_parallel_rank(self):
+        """Return this process's pipeline-parallel rank, or 0 when PP is unused."""
         if self.mpu is None:
             rank = 0
         elif hasattr(self.mpu, 'get_pipeline_model_parallel_rank'):
@@ -1211,13 +1234,16 @@ class DeepSpeedEngine(Module):
         return rank
 
     def get_pipeline_parallel_world_size(self):
+        """Return the pipeline-parallel world size, or 1 when PP is unused."""
         from deepspeed.utils.bwc import bwc_pipeline_parallel_world_size
         return bwc_pipeline_parallel_world_size(self.mpu)
 
     def get_sequence_parallel_rank(self):
+        """Return this process's sequence-parallel rank, or 0 when SP is unused."""
         return groups._get_sequence_parallel_rank()
 
     def get_sequence_parallel_world_size(self):
+        """Return the sequence-parallel world size, or 1 when SP is unused."""
         return self._autoep_sequence_parallel_world_size()
 
     def wall_clock_breakdown(self):
