@@ -516,7 +516,7 @@ Enabling and configuring ZeRO memory optimizations
 
 | Description                                                                                                                                                                                                                     | Default |
 | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
-| Compute and retain the global gradient norm during ZeRO Stage 1/2 optimizer steps. Set to `false` only with a GPU optimizer, without ZenFlow or gradient clipping, and when callers do not use `get_global_grad_norm()`; finite/overflow checking is unchanged. | `true`  |
+| Compute and retain the global gradient norm during ZeRO Stage 1/2 optimizer steps. Set to `false` only with a GPU optimizer, without ZenFlow, gradient clipping, or ZeRO Stage 1 BF16 parameters with FP32 gradient accumulation, and when callers do not use `get_global_grad_norm()`; finite/overflow checking is unchanged. | `true`  |
 
 <i>**overlap_comm**</i>: [boolean]
 

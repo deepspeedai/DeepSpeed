@@ -2068,6 +2068,9 @@ class DeepSpeedEngine(Module):
                     logger.warning("**** You are using ZeRO with an untested optimizer, proceed with caution *****")
             if model_dtype == torch.bfloat16 and grad_accum_dtype == torch.float32 and self.zero_optimization_stage(
             ) == 1 and not self.zero_cpu_offload():
+                if not self.zero_compute_grad_norm():
+                    raise ValueError("zero_optimization.compute_grad_norm=false does not support ZeRO Stage 1 with "
+                                     "BF16 parameters and FP32 gradient accumulation")
                 return BFLOAT16
             return ZERO_OPTIMIZATION
         elif amp_enabled:

@@ -85,14 +85,13 @@ class TestZero1OptimizerFastPath(DistributedTest):
         torch.manual_seed(123)
         baseline_model = SimpleModel(hidden_dim=4)
         fast_model = copy.deepcopy(baseline_model)
-        baseline_engine, baseline_optimizer, _, _ = deepspeed.initialize(
-            model=baseline_model,
-            model_parameters=baseline_model.parameters(),
-            config=_config(compute_grad_norm=True, stage=stage))
-        fast_engine, fast_optimizer, _, _ = deepspeed.initialize(
-            model=fast_model,
-            model_parameters=fast_model.parameters(),
-            config=_config(compute_grad_norm=False, stage=stage))
+        baseline_engine, baseline_optimizer, _, _ = deepspeed.initialize(model=baseline_model,
+                                                                         model_parameters=baseline_model.parameters(),
+                                                                         config=_config(compute_grad_norm=True,
+                                                                                        stage=stage))
+        fast_engine, fast_optimizer, _, _ = deepspeed.initialize(model=fast_model,
+                                                                 model_parameters=fast_model.parameters(),
+                                                                 config=_config(compute_grad_norm=False, stage=stage))
         inputs = torch.randn(1, 4, device=baseline_engine.device, dtype=torch.bfloat16)
         targets = torch.randn(1, 4, device=baseline_engine.device, dtype=torch.bfloat16)
 
@@ -167,3 +166,11 @@ class TestZero1OptimizerFastPath(DistributedTest):
             deepspeed.initialize(model=model,
                                  model_parameters=model.parameters(),
                                  config=_config(compute_grad_norm=False, zenflow={}))
+
+    def test_fp32_gradient_accumulation_rejects_disabled_norm(self):
+        model = SimpleModel(hidden_dim=4)
+        config = _config(compute_grad_norm=False)
+        config["data_types"] = {"grad_accum_dtype": "fp32"}
+
+        with pytest.raises(ValueError, match="BF16 parameters and FP32 gradient accumulation"):
+            deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config)
