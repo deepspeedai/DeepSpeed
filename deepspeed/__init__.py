@@ -80,17 +80,22 @@ __git_branch__ = git_branch
 # Set to torch's distributed package or deepspeed.comm based inside DeepSpeedEngine init
 dist = None
 
-# Only projections whose *output* dimension is blocked by heads, because the per-head split is on
-# dim 0 of the weight: Q/K/V are `[num_heads * head_dim, hidden]`. The output projection is
-# deliberately absent - its head structure is on the input dimension
-# (`[hidden, num_heads * head_dim]`), so splitting dim 0 would cut across the wrong axis, and in
-# the usual hidden == num_heads * head_dim case it still divides evenly, so it would be silently
-# wrong rather than an error.
+# Projections whose *output* dimension is blocked by heads, because the per-head split is on
+# dim 0 of the weight. Standard attention blocks Q/K/V as `[num_heads * head_dim, hidden]`. MLA
+# blocks its two up-projections instead: `q_b_proj` is `[num_heads * (qk_nope + qk_rope), rank]`
+# and `kv_b_proj` is `[num_heads * (qk_nope + v_head_dim), rank]`, which is the split GLM-5's
+# "Muon Split" applies. The output projection is deliberately absent everywhere: its head
+# structure is on the input dimension, so splitting dim 0 would cut across the wrong axis, and
+# with the usual hidden == num_heads * head_dim it still divides evenly, i.e. silently wrong.
 _QUERY_HEAD_LEAVES = ("q_proj", "query", "wq")
 _KV_HEAD_LEAVES = ("k_proj", "key", "wk", "v_proj", "value", "wv")
-# A single matrix holding Q, K and V. Its three sections split separately, and under GQA they do
-# not even share a head count, so leave it on the full-matrix path rather than guessing.
+# MLA up-projections, keyed by which per-head width the config gives them.
+_MLA_Q_LEAVES = ("q_b_proj", )
+_MLA_KV_LEAVES = ("kv_b_proj", )
+# A single matrix holding Q, K and V, or an MLA down-projection that mixes latent and rope
+# components. Neither splits into uniform heads, so leave them on the full-matrix path.
 _FUSED_QKV_LEAVES = ("qkv_proj", "query_key_value", "c_attn", "in_proj_qkv", "wqkv")
+_MLA_DOWN_LEAVES = ("q_a_proj", "kv_a_proj", "kv_a_proj_with_mqa")
 
 
 def _leaf_module_name(param_name: str) -> str:
@@ -104,34 +109,59 @@ def _leaf_module_name(param_name: str) -> str:
     return parts[-2].lower() if len(parts) >= 2 else parts[-1].lower()
 
 
+def _mla_head_width(text_config, leaf: str):
+    """Per-head output width of an MLA up-projection, or None if this is not one."""
+    qk_nope = getattr(text_config, "qk_nope_head_dim", None)
+    qk_rope = getattr(text_config, "qk_rope_head_dim", None)
+    v_head_dim = getattr(text_config, "v_head_dim", None)
+    if any(leaf.startswith(k) for k in _MLA_Q_LEAVES):
+        if qk_nope is not None and qk_rope is not None:
+            return qk_nope + qk_rope
+    elif any(leaf.startswith(k) for k in _MLA_KV_LEAVES):
+        if qk_nope is not None and v_head_dim is not None:
+            return qk_nope + v_head_dim
+    return None
+
+
 def _attention_head_count(param_name: str, param: torch.Tensor, model: torch.nn.Module):
     """Heads this projection splits into on dim 0, or None to leave it on the full-matrix path."""
-    config = getattr(model, "config", None)
-    if config is None:
+    model_config = getattr(model, "config", None)
+    if model_config is None:
         return None
 
-    text_config = getattr(config, "text_config", config)
-    num_attention_heads = getattr(text_config, "num_attention_heads", None)
+    # AutoTPMeta.from_model_config is the repo's single source of truth for these counts: it
+    # descends into text_config and probes the several spellings models use (num_heads, n_head,
+    # attention_heads, ...) rather than assuming one attribute name.
+    from .module_inject.tp_shard import AutoTPMeta
+
+    meta = AutoTPMeta.from_model_config(model_config)
+    num_attention_heads = meta.num_attention_heads
     if num_attention_heads is None:
         return None
-    num_kv_heads = getattr(text_config, "num_key_value_heads", None) or num_attention_heads
+    num_kv_heads = meta.num_kv_heads or num_attention_heads
+    text_config = getattr(model_config, "text_config", model_config)
 
     leaf = _leaf_module_name(param_name)
-    if any(leaf.startswith(k) for k in _FUSED_QKV_LEAVES):
+    if any(leaf.startswith(k) for k in _FUSED_QKV_LEAVES) or any(leaf.startswith(k) for k in _MLA_DOWN_LEAVES):
         return None
-    if any(leaf.startswith(k) for k in _KV_HEAD_LEAVES):
-        num_heads = num_kv_heads
+
+    mla_width = _mla_head_width(text_config, leaf)
+    if mla_width is not None:
+        # MLA blocks both up-projections by the query head count; the two differ in per-head
+        # width, not in how many heads they carry.
+        num_heads, head_width = num_attention_heads, mla_width
+    elif any(leaf.startswith(k) for k in _KV_HEAD_LEAVES):
+        num_heads, head_width = num_kv_heads, getattr(text_config, "head_dim", None)
     elif any(leaf.startswith(k) for k in _QUERY_HEAD_LEAVES):
-        num_heads = num_attention_heads
+        num_heads, head_width = num_attention_heads, getattr(text_config, "head_dim", None)
     else:
         return None
 
     # The name says attention; only the shape can confirm the layout. dim 0 has to be the
-    # head-blocked one, and where the config states head_dim it has to agree.
-    if param.ndim != 2 or param.shape[0] % num_heads != 0:
+    # head-blocked one, and where a per-head width is known it has to agree exactly.
+    if param.ndim != 2 or num_heads is None or num_heads < 1 or param.shape[0] % num_heads != 0:
         return None
-    config_head_dim = getattr(text_config, "head_dim", None)
-    if config_head_dim is not None and param.shape[0] != num_heads * config_head_dim:
+    if head_width is not None and param.shape[0] != num_heads * head_width:
         return None
 
     return num_heads

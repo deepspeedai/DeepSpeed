@@ -175,3 +175,76 @@ def test_fused_qkv_architectures_tag_nothing(arch):
 
     assert all(v is None for v in tags.values()), \
         {k: v for k, v in tags.items() if v is not None}
+
+
+# Shapes and config values read off the real checkpoints delock pointed at in #8367:
+# inference-optimization/GLM-5.2-0.8B-A0.8B and inference-optimization/Kimi-K3-0.40B.
+def _glm52_mla_config():
+    return SimpleNamespace(num_attention_heads=16,
+                           num_key_value_heads=16,
+                           hidden_size=2048,
+                           head_dim=64,
+                           q_lora_rank=512,
+                           kv_lora_rank=128,
+                           qk_nope_head_dim=192,
+                           qk_rope_head_dim=64,
+                           v_head_dim=128)
+
+
+@pytest.mark.parametrize(
+    "leaf,shape,expected",
+    [
+        ("q_b_proj", (4096, 512), 16),  # 16 * (qk_nope 192 + qk_rope 64)
+        ("kv_b_proj", (5120, 128), 16),  # 16 * (qk_nope 192 + v_head_dim 128)
+        ("q_a_proj", (512, 2048), None),  # down-projection, no head structure
+        ("kv_a_proj_with_mqa", (192, 2048), None),  # latent + rope, does not split into heads
+        ("o_proj", (2048, 2048), None),  # heads on the input axis
+    ])
+def test_mla_tags_only_the_up_projections(leaf, shape, expected):
+    """MLA blocks its two up-projections by head, which is the split GLM-5's Muon Split applies.
+
+    Their per-head width is not `head_dim`: q_b is qk_nope + qk_rope and kv_b is
+    qk_nope + v_head_dim, so a tagger that assumes `num_heads * head_dim` rejects both.
+    """
+    model = SimpleNamespace(config=_glm52_mla_config())
+    name = f"model.layers.0.self_attn.{leaf}.weight"
+
+    assert _attention_head_count(name, torch.zeros(shape), model) == expected
+
+
+def test_mla_head_width_is_checked_not_assumed():
+    """A shape that does not equal num_heads * per-head width is not the layout we think it is."""
+    model = SimpleNamespace(config=_glm52_mla_config())
+
+    ok = _attention_head_count("l.0.self_attn.q_b_proj.weight", torch.zeros(4096, 512), model)
+    wrong = _attention_head_count("l.0.self_attn.q_b_proj.weight", torch.zeros(4080, 512), model)
+
+    assert ok == 16
+    assert wrong is None
+
+
+def test_linear_attention_named_like_standard_attention_is_rejected():
+    """Kimi-K3-0.40B is `kimi_linear`, not MLA: q_proj is [256, 1024] with 8 heads of 74.
+
+    The names match the standard-attention list, so only the shape check keeps it off the
+    per-head path.
+    """
+    text = SimpleNamespace(num_attention_heads=8,
+                           num_key_value_heads=8,
+                           hidden_size=1024,
+                           head_dim=74,
+                           qk_nope_head_dim=64,
+                           qk_rope_head_dim=32,
+                           v_head_dim=64)
+    model = SimpleNamespace(config=SimpleNamespace(text_config=text))
+
+    for leaf in ("q_proj", "k_proj", "v_proj"):
+        name = f"model.layers.0.self_attn.{leaf}.weight"
+        assert _attention_head_count(name, torch.zeros(256, 1024), model) is None
+
+
+def test_head_count_comes_from_the_shared_extractor():
+    """Head counts are read through AutoTPMeta, so alternative config spellings work."""
+    model = SimpleNamespace(config=SimpleNamespace(n_head=8, hidden_size=64, head_dim=8))
+
+    assert _attention_head_count("l.0.attn.q_proj.weight", torch.zeros(64, 64), model) == 8
