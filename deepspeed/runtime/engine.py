@@ -1171,16 +1171,54 @@ class DeepSpeedEngine(Module):
             #self.lr_scheduler = lr_schedules.WarmupLayerTokenDecayLR(self.optimizer, self.random_ltd_scheduler)
 
     def get_data_parallel_rank(self):
-        return groups.get_data_parallel_rank()
+        return groups._get_data_parallel_rank()
 
     def get_tensor_parallel_rank(self):
-        return groups.get_tensor_model_parallel_rank()
+        from deepspeed.utils.bwc import bwc_tensor_model_parallel_rank
+        return bwc_tensor_model_parallel_rank(self.mpu)
 
     def get_model_parallel_rank(self):
-        return groups.get_model_parallel_rank()
+        if self.mpu is None:
+            rank = 0
+        elif hasattr(self.mpu, 'get_model_parallel_rank'):
+            rank = self.mpu.get_model_parallel_rank()
+        else:
+            rank = 0
+        return rank
 
     def get_sequence_parallel_group(self):
         return self.seq_parallel_group
+
+    def get_data_parallel_world_size(self):
+        return groups._get_data_parallel_world_size()
+
+    def get_tensor_parallel_world_size(self):
+        from deepspeed.utils.bwc import bwc_tensor_model_parallel_world_size
+        return bwc_tensor_model_parallel_world_size(self.mpu)
+
+    def get_model_parallel_world_size(self):
+        return groups._get_model_parallel_world_size()
+
+    def get_pipeline_parallel_rank(self):
+        if self.mpu is None:
+            rank = 0
+        elif hasattr(self.mpu, 'get_pipeline_model_parallel_rank'):
+            rank = self.mpu.get_pipeline_model_parallel_rank()
+        elif hasattr(self.mpu, 'get_pipe_parallel_rank'):
+            rank = self.mpu.get_pipe_parallel_rank()
+        else:
+            rank = 0
+        return rank
+
+    def get_pipeline_parallel_world_size(self):
+        from deepspeed.utils.bwc import bwc_pipeline_parallel_world_size
+        return bwc_pipeline_parallel_world_size(self.mpu)
+
+    def get_sequence_parallel_rank(self):
+        return groups._get_sequence_parallel_rank()
+
+    def get_sequence_parallel_world_size(self):
+        return self._autoep_sequence_parallel_world_size()
 
     def wall_clock_breakdown(self):
         return self._config.wall_clock_breakdown
