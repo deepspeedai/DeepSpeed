@@ -575,8 +575,8 @@ def enable_determinism(seed: int):
 def reduce_boolean_flags(flag: bool, op=all) -> bool:
     if not dist.is_initialized():
         return flag
-    device = get_accelerator().current_device()
-    tensor_flag = torch.tensor(1 if flag else 0, dtype=torch.int, device=device)
+    device = get_accelerator().current_device_name()
+    tensor_flag = torch.tensor([1 if flag else 0], dtype=torch.int, device=device)
     world_size = dist.get_world_size()
     tensor_flag_buf = torch.zeros(world_size, dtype=torch.int, device=device)
     dist.all_gather_into_tensor(tensor_flag_buf, tensor_flag)

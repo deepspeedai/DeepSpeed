@@ -24,10 +24,31 @@ import deepspeed
 from deepspeed.runtime.engine import DeepSpeedEngine
 from deepspeed.runtime.bf16_optimizer import BF16_Optimizer
 from deepspeed.runtime.zero.partition_parameters import ZeroParamStatus
+from deepspeed.runtime.zero.stage_1_and_2 import split_half_float_double
 from deepspeed.utils.zero_to_fp32 import load_state_dict_from_zero_checkpoint
 from deepspeed.runtime.zero.utils import ZeRORuntimeException
 from deepspeed.accelerator import get_accelerator
 from deepspeed.utils import safe_get_full_fp32_param, safe_get_full_grad
+
+
+class TestSplitHalfFloatDouble:
+
+    def test_device_independent_buckets_exclude_sparse(self):
+        # Pins two fixed membership bugs: the legacy accelerator-prefixed type
+        # strings matched nothing on CPU, silently dropping every bucket, and
+        # dtype-only matching would admit sparse layouts, which cannot be
+        # flattened into a dense all-reduce buffer.
+        dense_grads = [
+            torch.zeros(2, dtype=dtype) for dtype in (torch.half, torch.float, torch.double, torch.bfloat16)
+        ]
+        sparse_grad = torch.sparse_coo_tensor(torch.tensor([[0]]), torch.tensor([1.0]), (1, ))
+
+        buckets = split_half_float_double(dense_grads + [sparse_grad])
+
+        assert len(buckets) == 4
+        for bucket, grad in zip(buckets, dense_grads):
+            assert len(bucket) == 1
+            assert bucket[0] is grad
 
 
 @pytest.mark.parametrize("zero_stage", [0, 1, 2])

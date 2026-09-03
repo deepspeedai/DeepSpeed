@@ -64,14 +64,15 @@ def input(msg):
 
 
 def split_half_float_double(tensors):
-    device_type = get_accelerator().device_name()
-    dtypes = [
-        "torch.{}.HalfTensor".format(device_type), "torch.{}.FloatTensor".format(device_type),
-        "torch.{}.DoubleTensor".format(device_type), "torch.{}.BFloat16Tensor".format(device_type)
-    ]
+    # Legacy type strings omit the device prefix on CPU ("torch.FloatTensor"), so
+    # building them from the accelerator device name matches nothing on CPU and
+    # silently drops every gradient bucket, skipping the all-reduce entirely.
+    # Compare dtypes directly so the buckets are device-independent. Sparse layouts
+    # never matched the legacy type strings on any device, so they stay excluded.
+    dtypes = [torch.half, torch.float, torch.double, torch.bfloat16]
     buckets = []
     for i, dtype in enumerate(dtypes):
-        bucket = [t for t in tensors if t.type() == dtype]
+        bucket = [t for t in tensors if t.dtype == dtype and not t.is_sparse]
         if bucket:
             buckets.append(bucket)
     return buckets
