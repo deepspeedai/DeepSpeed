@@ -6,6 +6,7 @@
 import json
 import os
 import sys
+from types import SimpleNamespace
 
 import deepspeed
 from deepspeed.monitor.tensorboard import TensorBoardMonitor
@@ -365,6 +366,55 @@ class TestCollectMonitorConfig(DistributedTest):
         assert cfg["data_parallel_rank"] == dist.get_rank()
         for value in cfg.values():
             assert value is None or isinstance(value, (bool, int, str))
+
+    def test_collect_monitor_config_reads_pipeline_mpu(self):
+        engine = Mock()
+        engine.zero_optimization_stage.return_value = 0
+        engine.zero_offload_optimizer.return_value = None
+        engine.zero_offload_param.return_value = None
+        engine.fp16_enabled.return_value = False
+        engine.bfloat16_enabled.return_value = False
+        engine.train_batch_size.return_value = 8
+        engine.train_micro_batch_size_per_gpu.return_value = 1
+        engine.gradient_accumulation_steps.return_value = 1
+        engine.pipeline_parallelism = True
+        engine.mpu = SimpleNamespace(
+            get_data_parallel_rank=lambda: 1,
+            get_data_parallel_world_size=lambda: 2,
+            get_slice_parallel_rank=lambda: 1,
+            get_slice_parallel_world_size=lambda: 2,
+            get_pipe_parallel_rank=lambda: 0,
+            get_pipe_parallel_world_size=lambda: 2,
+        )
+
+        cfg = collect_monitor_config(engine)
+        assert cfg["data_parallel_world_size"] == 2
+        assert cfg["data_parallel_rank"] == 1
+        assert cfg["tensor_parallel_world_size"] == 2
+        assert cfg["tensor_parallel_rank"] == 1
+        assert cfg["pipeline_parallel_world_size"] == 2
+        assert cfg["pipeline_parallel_rank"] == 0
+
+    def test_collect_monitor_config_ignores_sequence_only_mpu_tp_alias(self):
+        engine = Mock()
+        engine.zero_optimization_stage.return_value = 0
+        engine.zero_offload_optimizer.return_value = None
+        engine.zero_offload_param.return_value = None
+        engine.fp16_enabled.return_value = False
+        engine.bfloat16_enabled.return_value = False
+        engine.train_batch_size.return_value = 4
+        engine.train_micro_batch_size_per_gpu.return_value = 1
+        engine.gradient_accumulation_steps.return_value = 1
+        engine.pipeline_parallelism = False
+        engine.mpu = SimpleNamespace(
+            initialize_sequence_parallel=lambda *args, **kwargs: None,
+            get_model_parallel_rank=lambda: 3,
+            get_model_parallel_world_size=lambda: 4,
+        )
+
+        cfg = collect_monitor_config(engine)
+        assert cfg["tensor_parallel_world_size"] == 1
+        assert cfg["tensor_parallel_rank"] == 0
 
     def test_engine_init_collects_config(self, tmpdir):
         hidden_dim = 4
