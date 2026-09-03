@@ -143,7 +143,8 @@ class DeepSpeedZeroConfig(DeepSpeedConfigModel):
     compute_grad_norm: bool = True
     """
     Compute and retain the global gradient norm during ZeRO Stage 1/2 optimizer steps.
-    Disable only when gradient clipping is off and callers do not use ``get_global_grad_norm()``.
+    Disable only when gradient clipping is off, the dedicated ZeRO-1 BF16 optimizer is not selected,
+    and callers do not use ``get_global_grad_norm()``.
     """
 
     load_from_fp32_weights: bool = True
