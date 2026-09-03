@@ -1681,7 +1681,7 @@ Example of <i>**wandb**</i> configuration:
 | enabled   | Whether logging to [Comet](https://www.comet.com/site/) is enabled.   | `false`   |
 | workspace   | Comet workspace name.   | `None`  |
 | project   | Comet project name.   | `None`  |
-| samples_log_interval  | Metrics will be submitted to Comet after processing every `samples_log_intervas` samples.   | `100`   |
+| samples_log_interval  | Metrics will be submitted to Comet after processing every `samples_log_interval` samples.   | `100`   |
 | experiment_name   | The name for comet experiment to be used for logging.   | `None`  |
 | api_key   | Comet API key. It's not recommended to save the Comet API Key in code.  | `None`  |
 | experiment_key  | The key for comet experiment to be used for logging. Must be an alphanumeric string whose length is between 32 and 50 characters.   | `None`  |

@@ -73,7 +73,7 @@ class CometConfig(DeepSpeedConfigModel):
     """ Whether logging to Comet is enabled. Requires `comet_ml` package is installed. """
 
     samples_log_interval: int = 100
-    """ Metrics will be submitted to Comet after processing every `samples_log_intervas` samples"""
+    """ Metrics will be submitted to Comet after processing every `samples_log_interval` samples"""
 
     project: Optional[str] = None
     """
