@@ -108,6 +108,124 @@ def _test_activation_checkpoint_ordering(module, expected_ordering, *inputs):
     assert expected_ordering == test_ordering
 
 
+_CKPT_CONFIG_GLOBALS = (
+    'PARTITION_ACTIVATIONS',
+    'CONTIGUOUS_CHECKPOINTING',
+    'num_layers',
+    'CPU_CHECKPOINT',
+    'SYNCHRONIZE',
+    'PROFILE_TIME',
+    'mpu',
+    'deepspeed_checkpointing_enabled',
+)
+
+
+def _snapshot_ckpt_config():
+    cp = deepspeed.checkpointing
+    return {name: getattr(cp, name) for name in _CKPT_CONFIG_GLOBALS}
+
+
+def _restore_ckpt_config(saved):
+    cp = deepspeed.checkpointing
+    for name, value in saved.items():
+        setattr(cp, name, value)
+
+
+def _run_stacked(ckpt_fn, layers, x, do_checkpoint):
+    hidden = x
+    for layer in layers:
+        hidden = ckpt_fn(layer, hidden) if do_checkpoint else layer(hidden)
+    return hidden
+
+
+def _test_cpu_activation_checkpoint(ckpt_fn):
+    """Stack several checkpointed layers so the shared offload engine flushes
+    keep-last to real D2H/H2D, then compare outputs and grads to a plain run."""
+    import deepspeed.runtime.activation_checkpointing.checkpointing as ds_ckpt
+    if get_accelerator().device_name() == "cpu":
+        pytest.skip("CPU accelerator does not offload activations")
+
+    device = get_accelerator().device_name()
+    dim = 256
+    n_layers = 4
+    torch.manual_seed(1234)
+    ref_layers = torch.nn.ModuleList([torch.nn.Linear(dim, dim) for _ in range(n_layers)]).to(device)
+    test_layers = deepcopy(ref_layers)
+    x = torch.randn(8, dim, device=device)
+
+    x_ref = x.clone().requires_grad_()
+    out_ref = _run_stacked(ckpt_fn, ref_layers, x_ref, do_checkpoint=False)
+    out_ref.sum().backward()
+
+    saved = _snapshot_ckpt_config()
+    try:
+        ds_ckpt.configure(mpu_=None, checkpoint_in_cpu=True)
+        if ds_ckpt._cpu_offload_engine is not None:
+            ds_ckpt._cpu_offload_engine.reset()
+
+        x_test = x.clone().requires_grad_()
+        out_test = _run_stacked(ckpt_fn, test_layers, x_test, do_checkpoint=True)
+        out_test.sum().backward()
+
+        engine = ds_ckpt._cpu_offload_engine
+        assert engine is not None, "async offload engine was not created"
+        assert engine.stats.offloaded_tensors > 0, "keep-last never flushed to CPU"
+        assert engine.stats.restored_tensors > 0
+    finally:
+        _restore_ckpt_config(saved)
+
+    _match_outputs(out_ref, out_test)
+    torch.testing.assert_close(x_ref.grad, x_test.grad)
+    for p_ref, p_test in zip(ref_layers.parameters(), test_layers.parameters()):
+        torch.testing.assert_close(p_ref.grad, p_test.grad)
+
+
+class TestCPUActivationCheckpoint(DistributedTest):
+    world_size = 1
+
+    def test_cpu_offload_matches_baseline(self):
+        _test_cpu_activation_checkpoint(ckpt)
+
+    def test_cpu_offload_skips_non_float_input(self):
+        # A bool mask is not floating point, so it must pass through untouched
+        # while the float hidden state offloads. Parity confirms the mixed path.
+        if get_accelerator().device_name() == "cpu":
+            pytest.skip("CPU accelerator does not offload activations")
+        saved = _snapshot_ckpt_config()
+        try:
+            deepspeed.checkpointing.configure(mpu_=None, checkpoint_in_cpu=True)
+            module = MaskedLinear(HIDDEN_DIM, HIDDEN_DIM)
+            inputs = torch.rand(HIDDEN_DIM)
+            inputs.requires_grad = True
+            _test_activation_checkpoint(module, inputs, _mixed_mask())
+        finally:
+            _restore_ckpt_config(saved)
+
+    def test_eval_no_grad_does_not_grow_engine(self):
+        import deepspeed.runtime.activation_checkpointing.checkpointing as ds_ckpt
+        if get_accelerator().device_name() == "cpu":
+            pytest.skip("CPU accelerator does not offload activations")
+        device = get_accelerator().device_name()
+        dim = 256
+        layers = torch.nn.ModuleList([torch.nn.Linear(dim, dim) for _ in range(3)]).to(device)
+        x = torch.randn(4, dim, device=device)
+
+        saved = _snapshot_ckpt_config()
+        try:
+            ds_ckpt.configure(mpu_=None, checkpoint_in_cpu=True)
+            if ds_ckpt._cpu_offload_engine is not None:
+                ds_ckpt._cpu_offload_engine.reset()
+            with torch.no_grad():
+                _run_stacked(ckpt, layers, x, do_checkpoint=True)
+            engine = ds_ckpt._cpu_offload_engine
+            # no_grad forwards use the blocking fallback, so the engine stays idle
+            if engine is not None:
+                assert len(engine._tracker) == 0
+                assert len(engine._keep_last) == 0
+        finally:
+            _restore_ckpt_config(saved)
+
+
 #
 # Helpers
 #

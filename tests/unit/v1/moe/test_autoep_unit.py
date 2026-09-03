@@ -234,6 +234,56 @@ class TestAutoEPConfig:
                                    tp_size=1,
                                    sp_size=1)
 
+    def test_combine_impl_rejects_unknown_value(self):
+        config = parse_autoep_config({"enabled": True, "combine_impl": "triton"})
+        with pytest.raises(ValueError, match="combine_impl must be one of"):
+            validate_autoep_config(config, world_size=1, pp_size=1, tp_size=1, sp_size=1)
+
+    def test_fused_combine_rejects_folded_tensor_parallelism(self):
+        config = parse_autoep_config({
+            "enabled": True,
+            "autoep_size": 2,
+            "combine_impl": "fused_weighted_sum",
+        })
+        with pytest.raises(ValueError, match=r"tensor_parallel\.autotp_size=2"):
+            validate_autoep_config(config, world_size=4, pp_size=1, tp_size=2, sp_size=1)
+
+    def test_fused_combine_rejects_expert_tensor_parallelism(self):
+        config = parse_autoep_config({
+            "enabled": True,
+            "autoep_size": 2,
+            "expert_tensor_parallel_size": 2,
+            "combine_impl": "fused_weighted_sum",
+        })
+        with pytest.raises(ValueError, match="requires expert_tensor_parallel_size=1"):
+            validate_autoep_config(config, world_size=4, pp_size=1, tp_size=1, sp_size=1)
+
+    def test_fused_combine_rejects_deepep(self):
+        config = parse_autoep_config({
+            "enabled": True,
+            "autoep_size": 2,
+            "combine_impl": "fused_weighted_sum",
+            "comm_backend": "deepep",
+            "comm_max_tokens_per_rank": 4096,
+        })
+        with pytest.raises(ValueError, match='cannot be used with comm_backend="deepep"'):
+            validate_autoep_config(config, world_size=2, pp_size=1, tp_size=1, sp_size=1)
+
+    @pytest.mark.parametrize("score_apply, spec_score_apply", [("auto", "pre"), ("pre", "post")])
+    def test_fused_combine_requires_post_score_apply(self, score_apply, spec_score_apply):
+        config = parse_autoep_config({
+            "enabled": True,
+            "combine_impl": "fused_weighted_sum",
+            "score_apply": score_apply,
+        })
+        with pytest.raises(ValueError, match='requires score_apply="post"'):
+            validate_autoep_post_detection(config, [_make_spec(score_apply=spec_score_apply)])
+
+    def test_fused_combine_accepts_the_standard_path(self):
+        config = parse_autoep_config({"enabled": True, "autoep_size": 2, "combine_impl": "fused_weighted_sum"})
+        validate_autoep_config(config, world_size=2, pp_size=1, tp_size=1, sp_size=1)
+        validate_autoep_post_detection(config, [_make_spec(num_experts=4, score_apply="post")])
+
     @pytest.mark.parametrize("value", UNSUPPORTED_LOAD_BALANCE_VALUES)
     def test_load_balance_coeff_rejected_at_parse(self, value):
         with pytest.raises(ValueError) as exc_info:

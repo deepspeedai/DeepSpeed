@@ -6,8 +6,11 @@
 from typing import List, Dict, Optional
 from .autotp_config import TPLayerSpec, PartitionType
 
-SUPPORTED_STYLES = {"colwise", "colwise_rep", "colwise_gather_output", "rowwise", "replicated_with_grad_allreduce"}
+SUPPORTED_STYLES = {
+    "colwise", "colwise_rep", "colwise_gather_output", "rowwise", "replicated_with_grad_allreduce", "embedding_rowwise"
+}
 # `colwise_rep` was renamed to `colwise_gather_output` in huggingface/transformers#42809.
+# `embedding_rowwise` is injected for every tied-embedding model since huggingface/transformers#47579.
 
 
 class TPPlanConverter:
@@ -17,15 +20,21 @@ class TPPlanConverter:
     def convert(hf_tp_plan: Dict[str, str]) -> Optional[List[TPLayerSpec]]:
         """Convert HF tp_plan to DeepSpeed layer specs.
 
-        Entries whose style is not supported are converted to SKIP specs instead of invalidating
-        the whole plan. Discarding the plan used to send models like Llama4 or Qwen3 down the
-        heuristic path, which shards by name patterns alone and has no notion of the modules the
-        plan deliberately excluded — on Llama4 it wraps the MoE router, whose forward returns a
-        tuple, and breaks the model. A SKIP spec keeps such layers untouched on purpose while the
-        supported entries are still applied.
+        A style outside SUPPORTED_STYLES raises ValueError and invalidates the whole plan, so a
+        style newly introduced upstream fails loudly and gets a deliberate decision rather than
+        being dropped on the quiet. Converting only the recognized entries could shard one half
+        of a column/row pair, and silently discarding the plan would send models like Llama4 or
+        Qwen3 down the heuristic path, which shards by name patterns alone and has no notion of
+        the modules the plan deliberately excluded. On Llama4 that path wraps the MoE router,
+        whose forward returns a tuple, and breaks the model.
 
-        Returns None only when no entry is convertible, so the caller can fall back to the
-        existing AutoTP path for models whose plan gives us nothing to work with.
+        Supported styles that must stay whole become SKIP specs, which keeps those layers
+        untouched on purpose while the rest of the plan is still applied: `embedding_rowwise`,
+        because vocabulary-parallel embeddings are not supported yet, and
+        `replicated_with_grad_allreduce`, which additionally sums the gradient across the group.
+
+        Returns None only for an empty plan, so the caller can fall back to the existing AutoTP
+        path for models that give us nothing to work with.
         """
         if not hf_tp_plan:
             return None
@@ -50,6 +59,10 @@ class TPPlanConverter:
                 gather_output = partition_style != "colwise"
             elif partition_style == "rowwise":
                 partition_type = PartitionType.ROW
+            elif partition_style == "embedding_rowwise":
+                # Vocabulary-parallel embeddings are not supported yet, so the embedding stays whole and
+                # the gathered-column tie fallback keeps any LM head tied to it replicated as well.
+                partition_type = PartitionType.SKIP
             else:  # replicated_with_grad_allreduce, the only other supported style
                 # The parameter stays whole; only its gradient needs summing across the group.
                 partition_type = PartitionType.SKIP

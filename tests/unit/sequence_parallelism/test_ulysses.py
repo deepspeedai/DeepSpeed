@@ -11,12 +11,12 @@ from deepspeed import initialize
 import deepspeed.runtime.sequence_parallel.parallel_state_sp as sp_mpu
 from transformers import AutoModel
 from unit.common import DistributedTest
-from deepspeed.sequence.layer import _SeqAllToAll
+from deepspeed.sequence.layer import _SeqAllToAll, _generate_layout_params, post_all2all, pre_all2all_fun
 from deepspeed.sequence.fpdt_layer import _FPDTGPUOffloadingAttentionImpl_, FPDT_InputConstruct
 from unit.util import skip_on_arch
 from unit.simple_model import *
 from deepspeed.utils import groups
-from deepspeed.module_inject.tp_shard import get_shard_size_list
+from deepspeed.module_inject.tp_shard import AutoTPMeta, get_shard_size_list
 #Use mesh device to create data and sequence parallel group
 
 
@@ -148,6 +148,63 @@ class TestUlyssesAll2All(DistributedTest):
             assert torch.allclose(input_tensor, outputs[i]), f"Outputs differ for sequence dim {seq_dims[i]}"
 
 
+def _emulate_all_to_all(shards):
+    """CPU stand-in for dist.all_to_all_single: rank i sends chunk j of dim 0 to rank j."""
+    seq_world_size = len(shards)
+    return [
+        torch.cat([shards[src][dst:dst + 1] for src in range(seq_world_size)], dim=0) for dst in range(seq_world_size)
+    ]
+
+
+def _run_layout_all_to_all(scatter_idx, batch_dim_idx, seq_world_size, shards):
+    """single_all_to_all's layout math, driven by the emulated all2all above."""
+    pre_permute_idx, pre_inp_shape, post_permute_idx, post_res_shape = _generate_layout_params(
+        scatter_idx, batch_dim_idx, seq_world_size, shards[0])
+    sent = [pre_all2all_fun(pre_permute_idx, pre_inp_shape, shard) for shard in shards]
+    post_fun = post_all2all(post_permute_idx, post_res_shape)
+    return [post_fun(received) for received in _emulate_all_to_all(sent)]
+
+
+@pytest.mark.parametrize("batch_dim_idx", [0, 1])
+@pytest.mark.parametrize("seq_world_size", [2, 4])
+class TestUlyssesAll2AllLayout:
+    """_generate_layout_params is a pure function, so the shapes it hands to reshape can be
+    checked on CPU without a process group. TestUlyssesAll2All above only runs batch_dim_idx=0
+    and TestUlyssesAll2All_odd takes the uneven-head path, so the seq-first (s, b, n, h) layout
+    is otherwise never exercised."""
+
+    def _shards(self, batch_dim_idx, seq_world_size):
+        local_seq_len, bs, local_num_heads, head_dim = 3, 2, 2, 4
+        seq_len = local_seq_len * seq_world_size
+        num_heads = local_num_heads * seq_world_size
+        seq_dim = 1 if batch_dim_idx == 0 else 0
+        full = torch.arange(seq_len * bs * num_heads * head_dim, dtype=torch.float32)
+        full = full.reshape(seq_len, bs, num_heads, head_dim)
+        if batch_dim_idx == 0:
+            full = full.transpose(0, 1).contiguous()
+        # sequence parallel: every head, a slice of the sequence.
+        seq_parallel = [
+            full.narrow(seq_dim, r * local_seq_len, local_seq_len).contiguous() for r in range(seq_world_size)
+        ]
+        # head parallel: every position, a slice of the heads.
+        head_parallel = [
+            full.narrow(2, r * local_num_heads, local_num_heads).contiguous() for r in range(seq_world_size)
+        ]
+        return seq_dim, seq_parallel, head_parallel
+
+    def test_seq_to_head_parallel(self, batch_dim_idx, seq_world_size):
+        _, seq_parallel, head_parallel = self._shards(batch_dim_idx, seq_world_size)
+        got = _run_layout_all_to_all(2, batch_dim_idx, seq_world_size, seq_parallel)
+        for rank, (actual, expected) in enumerate(zip(got, head_parallel)):
+            assert torch.equal(actual, expected), f"rank {rank} got {actual.shape}, expected {expected.shape}"
+
+    def test_head_to_seq_parallel(self, batch_dim_idx, seq_world_size):
+        seq_dim, seq_parallel, head_parallel = self._shards(batch_dim_idx, seq_world_size)
+        got = _run_layout_all_to_all(seq_dim, batch_dim_idx, seq_world_size, head_parallel)
+        for rank, (actual, expected) in enumerate(zip(got, seq_parallel)):
+            assert torch.equal(actual, expected), f"rank {rank} got {actual.shape}, expected {expected.shape}"
+
+
 @pytest.mark.parametrize("d0", [2, 4])  #batch or sequence dimension
 @pytest.mark.parametrize("d1", [4, 8])  #batch or sequence dimension
 @pytest.mark.parametrize("num_heads", [3, 7])
@@ -205,7 +262,7 @@ class TestUlyssesAll2All_odd(DistributedTest):
             d0_indices = torch.arange(s2h_tensor.shape[0]).reshape(-1, 1, 1, 1)
             d1_indices = torch.arange(s2h_tensor.shape[1]).reshape(1, -1, 1, 1)
             h_indices = torch.arange(s2h_tensor.shape[2]).reshape(1, 1, -1, 1)
-            shard_list = get_shard_size_list(num_heads, groups._get_sequence_parallel_world_size())
+            shard_list = get_shard_size_list(num_heads, groups._get_sequence_parallel_world_size(), AutoTPMeta())
             head_offset = sum(shard_list[:groups._get_sequence_parallel_rank()])
             s2h_truth = torch.zeros_like(s2h_tensor)
             s2h_truth[:] = seq_batch_heads_hash(d0_indices, d1_indices, h_indices, 0, 0, head_offset)

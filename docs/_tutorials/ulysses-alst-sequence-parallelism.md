@@ -352,16 +352,27 @@ You can of course come up with a different way of computing the number of shards
 
 ### Activation checkpoint offload to CPU
 
-You will find a prototype implementation version [here](https://github.com/snowflakedb/ArcticTraining/blob/75758c863beff1c8a5c4e4987ba013ecaf377fc3/arctic_training/monkey_patches.py#L37)
+If you use the reentrant `torch.utils.checkpoint` API you can use the prototype monkeypatch from ArcticTraining [here](https://github.com/snowflakedb/ArcticTraining/blob/75758c863beff1c8a5c4e4987ba013ecaf377fc3/arctic_training/monkey_patches.py#L37):
 
 ```python
 from arctic_training.monkey_patches import monkey_patch_checkpoint_function_with_cpu_offload
 monkey_patch_checkpoint_function_with_cpu_offload()
 ```
 
-We hope PyTorch core will provide an internal support for offloading. If not we will need to come up with some better solution - perhaps using a context manager.
+For non-reentrant checkpointing (`use_reentrant=False`, the HF Transformers default) DeepSpeed provides a context manager that offloads only the checkpointed hidden-state inputs to pinned CPU memory on a side stream:
 
-This currently implementation isn't yet efficient (blocking), but it barely makes any difference for very long sequence lengths where `matmuls` dominate the compute.
+```python
+from deepspeed.runtime.activation_checkpointing.offload_activations import (
+    get_checkpoint_hidden_states_offloading_ctx_manager,
+)
+
+ctx = get_checkpoint_hidden_states_offloading_ctx_manager()
+with ctx:
+    loss = model(**batch).loss
+    loss.backward()
+```
+
+Re-use one manager and wrap each training step (forward+backward) in it; `backward()` must run inside the same context as forward. Requires `transformers`: the marker identifying checkpoint inputs is installed on `GradientCheckpointingLayer` only while a manager is active (so the same model can be reused for HybridEngine rollout), and all other saved tensors pass through untouched. Tune with `use_pin_memory` (pin on/off for async D2H/H2D; default true), `use_streams`, `min_offload_bytes` (threshold), `max_fwd_stash_count` (in-flight GPU copies), `max_cpu_buffer_pool_count` (pooled CPU buffers), and `keep_last_count` (default 1: leave the last checkpoint input on GPU so the first backward is not stalled by a D2H of an activation that is needed immediately). Peak extra GPU activations retained is `max_fwd_stash_count + keep_last_count`. Host buffers are pinned with `get_accelerator().pin_memory()`, so pinning honors `DS_PIN_MEMORY_BACKEND` and is reflected in DeepSpeed's pinned-memory accounting. Keep the default `torch` backend here: `native` is `mlock` without `cudaHostRegister`, so its buffers are not registered for accelerator DMA and side-stream D2H would stall. Same pin-on/off story as DeepCompile `compile.offload_activation_pin_memory`.
 
 ### PYTORCH_CUDA_ALLOC_CONF
 

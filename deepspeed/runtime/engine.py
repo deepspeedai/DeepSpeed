@@ -19,6 +19,9 @@ from torch.optim import Optimizer
 from torch.optim.lr_scheduler import _LRScheduler
 from torch._utils import _flatten_dense_tensors, _unflatten_dense_tensors
 from contextlib import contextmanager
+from contextvars import ContextVar
+from threading import Lock
+from weakref import ref
 
 from typing import Callable, Dict, Union, Iterable, Container, List
 
@@ -150,7 +153,7 @@ from deepspeed.compile.util import (is_deepcompile_supported, get_deepcompile_ha
 from deepspeed.compile.backend import register_compile_pass, opt_passes
 from deepspeed.compile.passes.contract import validate_schedule
 from deepspeed.compile.passes import (zero_1_and_2_compile, zero3_compile, prefetch, selective_gather,
-                                      offload_parameters, offload_adam_states)
+                                      offload_parameters, offload_adam_states, offload_activation)
 from deepspeed.compile.init_z1_and_2 import init_z1_and_2
 from deepspeed.compile.init_z3 import init_z3
 from deepspeed.compile.z3_eager_fallback import deepcompile_z3_forward_context
@@ -247,6 +250,85 @@ def _checkpoint_parallel_metadata(mpu):
             CHECKPOINT_TP_DEGREE: bwc_tensor_model_parallel_world_size(mpu),
         }
     }
+
+
+class _EngineBackwardGraphState:
+
+    def __init__(self):
+        self.active = False
+        self.graph_task_ids = []
+
+
+_ENGINE_BACKWARD_GRAPH_CONTEXT = ContextVar("deepspeed_engine_backward_graph_context", default=())
+
+
+class _EngineBackwardGraphTracker:
+
+    def __init__(self):
+        self._lock = Lock()
+        self._graph_task_refcounts = {}
+        self._active_states = set()
+
+    @staticmethod
+    def supported():
+        return hasattr(torch._C, "_current_graph_task_id")
+
+    def new_state(self):
+        return _EngineBackwardGraphState()
+
+    @staticmethod
+    def _clear_current_context(state):
+        context = _ENGINE_BACKWARD_GRAPH_CONTEXT.get()
+        _ENGINE_BACKWARD_GRAPH_CONTEXT.set(
+            tuple(state_ref for state_ref in context if state_ref() is not None and state_ref() is not state))
+
+    def register_current_graph(self, grad, state):
+        graph_task_id = torch._C._current_graph_task_id() if self.supported() else -1
+        with self._lock:
+            if not state.active:
+                state.active = True
+                self._active_states.add(state)
+            if graph_task_id != -1 and graph_task_id not in state.graph_task_ids:
+                self._graph_task_refcounts[graph_task_id] = self._graph_task_refcounts.get(graph_task_id, 0) + 1
+                state.graph_task_ids.append(graph_task_id)
+
+        context = _ENGINE_BACKWARD_GRAPH_CONTEXT.get()
+        with self._lock:
+            context = tuple(state_ref for state_ref in context if state_ref() in self._active_states)
+        _ENGINE_BACKWARD_GRAPH_CONTEXT.set((*context, ref(state)))
+        torch.autograd.Variable._execution_engine.queue_callback(lambda: self._clear_current_context(state))
+        return grad
+
+    def unregister(self, state):
+        with self._lock:
+            if not state.active:
+                return
+            for graph_task_id in state.graph_task_ids:
+                refcount = self._graph_task_refcounts[graph_task_id] - 1
+                if refcount:
+                    self._graph_task_refcounts[graph_task_id] = refcount
+                else:
+                    del self._graph_task_refcounts[graph_task_id]
+            state.active = False
+            self._active_states.remove(state)
+
+    def is_current_graph_registered(self):
+        graph_task_id = torch._C._current_graph_task_id() if self.supported() else -1
+        context = _ENGINE_BACKWARD_GRAPH_CONTEXT.get()
+        with self._lock:
+            if graph_task_id in self._graph_task_refcounts:
+                return True
+            active_context = tuple(state_ref for state_ref in context if state_ref() in self._active_states)
+        if active_context != context:
+            _ENGINE_BACKWARD_GRAPH_CONTEXT.set(active_context)
+        return bool(active_context)
+
+    def active_registration_count(self):
+        with self._lock:
+            return len(self._active_states)
+
+
+_ENGINE_BACKWARD_GRAPH_TRACKER = _EngineBackwardGraphTracker()
 
 
 class DeepSpeedEngine(Module):
@@ -489,6 +571,10 @@ class DeepSpeedEngine(Module):
                                        offload_parameters.CONTRACT)
             self.register_compile_pass(offload_adam_states.NAME, offload_adam_states.move_opt_states,
                                        offload_adam_states.CONTRACT)
+            self.register_compile_pass(offload_activation.FLOOR_NAME, offload_activation.offload_activation_floor,
+                                       offload_activation.CONTRACT)
+            self.register_compile_pass(offload_activation.NAME, offload_activation.offload_activation,
+                                       offload_activation.CONTRACT)
             self.register_compile_pass(offload_adam_states.NAME_SYNC, offload_adam_states.move_opt_states_sync,
                                        offload_adam_states.CONTRACT_SYNC)
             self.register_compile_pass(offload_adam_states.NAME_FOR_INIT,
@@ -501,11 +587,11 @@ class DeepSpeedEngine(Module):
         # Otherwise, we fallback to DeepSpeed style backward only.
         # See `count_used_parameters_in_backward` for more details.
         self._running_engine_backward = False
+        self._running_engine_backward_count = 0
+        self._running_engine_backward_lock = Lock()
         # True only while step() runs; the unmanaged-mode accumulation boundary.
         self._running_engine_step = False
         self._support_torch_style_backward = False
-        # Flag to control whether gradients should be scaled by gradient accumulation steps
-        self._scale_wrt_gas = True
         if isinstance(self.optimizer, ZeROOptimizer) and check_internal_apis_for_count_used_parameters():
             self._support_torch_style_backward = True
             # These hooks are used for non-scalar backward support, such as `out.backward(out_grad)`,
@@ -738,20 +824,15 @@ class DeepSpeedEngine(Module):
             partition_config = tp_config.get_partition_config_object()
 
         model_config = getattr(model, "config", None)
-        # The direct Hugging Face tp_plan path bypasses replace_transformer_layer, which
-        # normally initializes the shard-size globals that AutoTP layers consult. Without
-        # them attention projections are split by grain size and can be cut mid-head, so
-        # the model's later reshape onto head_dim fails.
-        from deepspeed.module_inject.tp_shard import set_num_kv_heads, set_n_embd, set_num_attention_heads
-        from deepspeed.module_inject.tp_shard import set_tp_grain_size
+        # AutoTP derives its per-model sharding metadata from the model config; the warning
+        # below only needs the kv-head count, which that same metadata already carries.
+        # from_model_config descends into text_config itself, so multimodal outer configs
+        # work here too.
+        from deepspeed.module_inject.tp_shard import AutoTPMeta
 
-        # 1. Try to get num_key_heads from model_config.num_key_value_heads
-        if hasattr(model_config, "text_config"):
-            num_kv_heads = AutoTP.get_model_num_kv_heads(model_config.text_config)
-        else:
-            num_kv_heads = AutoTP.get_model_num_kv_heads(model_config)
+        num_kv_heads = AutoTPMeta.from_model_config(model_config).num_kv_heads
 
-        # 2. Ranks beyond the KV head count get no attention shard. This still computes the
+        # Ranks beyond the KV head count get no attention shard. This still computes the
         # correct result because the row-parallel all-reduce sums their empty contribution,
         # but attention work concentrates on the first num_kv_heads ranks.
         if num_kv_heads is not None and tp_size > num_kv_heads:
@@ -761,28 +842,6 @@ class DeepSpeedEngine(Module):
                 "attention throughput will not scale past that point.",
                 ranks=[0],
                 level=logging.WARNING)
-
-        # 3. When we have num_kv_heads defined, uneven division is possible, otherwise enforce even division
-        set_num_kv_heads(num_kv_heads)
-
-        # 3.1 Get n_embd
-        n_embd = None
-        multi_query_n_embd_names = ['n_embd', 'hidden_size']
-        for name in multi_query_n_embd_names:
-            if hasattr(model_config, name):
-                n_embd = getattr(model_config, name)
-            if n_embd != None:
-                break
-
-        # 3.2 set n_embd
-        set_n_embd(n_embd)
-
-        # 3.3 set attention_heads
-        if hasattr(model_config, 'num_attention_heads'):
-            set_num_attention_heads(getattr(model_config, 'num_attention_heads'))
-
-        # 3.4 set tp_grain_size
-        set_tp_grain_size(tp_config.tensor_parallel.tp_grain_size)
 
         from deepspeed.runtime.tensor_parallel.config import _get_hf_tp_plan
         hf_tp_plan = _get_hf_tp_plan(model)
@@ -795,7 +854,10 @@ class DeepSpeedEngine(Module):
                             linear_layer_setting=(torch.nn.Linear, torch.nn.Embedding),
                             orig_layer_impl=None,
                             keep_module_on_host=tp_config.keep_module_on_host,
-                            partition_config=partition_config)
+                            partition_config=partition_config,
+                            model_config=model_config,
+                            tp_grain_size=tp_config.tensor_parallel.tp_grain_size,
+                            training_mode=True)
             autotp.set_tensor_parallel_config(tp_size, tp_config.tensor_parallel.tp_group)
             autotp.update_linear_policies()
             autotp._replace_module(model)
@@ -834,6 +896,9 @@ class DeepSpeedEngine(Module):
                     orig_layer_impl=None,
                     keep_module_on_host=tp_config.keep_module_on_host,
                     partition_config=tp_plan_config,
+                    model_config=model_config,
+                    tp_grain_size=tp_config.tensor_parallel.tp_grain_size,
+                    training_mode=True,
                 )
                 autotp.set_tensor_parallel_config(tp_size, tp_config.tensor_parallel.tp_group)
                 autotp.update_linear_policies()
@@ -854,7 +919,7 @@ class DeepSpeedEngine(Module):
         parser_dict = AutoTP.tp_parser(model)
         for client_module, injection_policy in parser_dict:
             tp_config.injection_policy_tuple = injection_policy
-            replace_transformer_layer(client_module, model, None, tp_config, model_config)
+            replace_transformer_layer(client_module, model, None, tp_config, model_config, training_mode=True)
 
         setattr(model, UNIVERSAL_CHECKPOINT_INFO, collect_autotp_universal_checkpoint_info(model))
         setattr(model, "ds_autotp_parsed", True)
@@ -867,6 +932,14 @@ class DeepSpeedEngine(Module):
             logger.debug("DeepSpeedEngine.__del__ cleanup skipped: %s", exc, exc_info=True)
 
     def destroy(self):
+        # DeepEP buffers ask the library not to reclaim them, so they outlive
+        # the engine unless something releases them here. Only this engine's
+        # own buffers: another engine in the same process still needs its own.
+        module = getattr(self, "module", None)
+        if module is not None:
+            from deepspeed.module_inject.auto_ep_comm import destroy_exchanges
+            destroy_exchanges(module)
+
         self._release_deepcompile_compiled_backward_state()
         self._release_deepcompile_dynamo_config()
         optimizer = getattr(self, "optimizer", None)
@@ -971,15 +1044,20 @@ class DeepSpeedEngine(Module):
         """
         Pass through attributes defined in the model if they are not overridden by ds-engine.
         """
-
-        _module = {}
-        if "module" in self.__dict__:
-            _module = self.__dict__['module']
-        if name in dir(self):
-            return getattr(self, name)
-        elif name in dir(_module):
-            return getattr(_module, name)
-        else:
+        try:
+            return super().__getattr__(name)
+        except AttributeError:
+            _module = self.__dict__.get("module")
+            if _module is None:
+                try:
+                    _module = super().__getattr__("module")
+                except AttributeError:
+                    _module = None
+            if _module is not None:
+                try:
+                    return getattr(_module, name)
+                except AttributeError:
+                    pass
             raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
 
     def checkpoint_serialization_enabled(self):
@@ -1323,9 +1401,6 @@ class DeepSpeedEngine(Module):
 
     def zero_gather_16bit_weights_on_model_save(self):
         return self._config.zero_config.gather_16bit_weights_on_model_save
-
-    def zero_grad_hooks(self):
-        return self._config.zero_config.grad_hooks
 
     def zero_legacy_stage1(self):
         return self._config.zero_config.legacy_stage1
@@ -2078,6 +2153,40 @@ class DeepSpeedEngine(Module):
             return
         configure(getattr(self, "_autoep_folding_spec", None))
 
+    def get_optimizer_configuration(self, optimizer_parameters, adam_w_mode, allow_legacy_fallback=False):
+        torch_adam = optimizer_parameters.pop(TORCH_ADAM_PARAM, False)
+        user_fp32_optimizer_states = optimizer_parameters.pop('fp32_optimizer_states', None)
+        if torch_adam:
+            foreach = optimizer_parameters.pop('foreach', None)
+            return (torch.optim.AdamW if adam_w_mode else torch.optim.Adam), {'foreach': foreach}
+
+        if self.zero_use_cpu_optimizer():
+            from deepspeed.ops.adam import DeepSpeedCPUAdam, ZenFlowCPUAdam
+            CPUAdam = ZenFlowCPUAdam if self.zenflow else DeepSpeedCPUAdam
+
+            if self.bf16_optimizer_states():
+                if user_fp32_optimizer_states:
+                    logger.warning("bf16_optimizer_states is enabled; overriding fp32_optimizer_states "
+                                   "to False so CPU Adam moments are stored in bf16.")
+                fp32_optimizer_states = False
+            elif user_fp32_optimizer_states is None:
+                fp32_optimizer_states = True
+            else:
+                fp32_optimizer_states = user_fp32_optimizer_states
+            optimizer_kwargs = {'adamw_mode': adam_w_mode, 'fp32_optimizer_states': fp32_optimizer_states}
+            if self.zenflow:
+                optimizer_kwargs['overlap_step'] = self.overlap_step
+            return CPUAdam, optimizer_kwargs
+
+        try:
+            from deepspeed.ops.adam import FusedAdam
+        except ImportError:
+            if not allow_legacy_fallback:
+                raise
+            logger.warning("FusedAdam is unavailable; falling back to Muon's inline Adam update.")
+            return None, {}
+        return FusedAdam, {'adam_w_mode': adam_w_mode}
+
     def _configure_basic_optimizer(self, model_parameters):
         # Copy so the pop() calls below (torch_adam, adam_w_mode, fp32_optimizer_states) do not
         # mutate the shared config dict returned by optimizer_params().
@@ -2089,50 +2198,13 @@ class DeepSpeedEngine(Module):
             )
 
         if self.optimizer_name() in [ADAM_OPTIMIZER, ADAMW_OPTIMIZER]:
-            torch_adam = optimizer_parameters.pop(TORCH_ADAM_PARAM, False)
             adam_w_mode = optimizer_parameters.pop(ADAM_W_MODE, ADAM_W_MODE_DEFAULT)
 
             # Optimizer name of Adam forces AdamW logic unless adam_w_mode is explicitly set
             effective_adam_w_mode = self.optimizer_name() == ADAMW_OPTIMIZER or adam_w_mode
-
-            if torch_adam:
-                if not effective_adam_w_mode:
-                    optimizer = torch.optim.Adam(model_parameters, **optimizer_parameters)
-                else:
-                    optimizer = torch.optim.AdamW(model_parameters, **optimizer_parameters)
-            else:
-                if self.zero_use_cpu_optimizer():
-                    from deepspeed.ops.adam import DeepSpeedCPUAdam, ZenFlowCPUAdam
-                    CPUAdam = ZenFlowCPUAdam if self.zenflow else DeepSpeedCPUAdam
-
-                    zenflow_kwargs = {'overlap_step': self.overlap_step} if self.zenflow else {}
-                    # Pop so a user-supplied value does not collide with the keyword built below.
-                    # None means the user did not set it, so no override warning is needed.
-                    user_fp32_optimizer_states = optimizer_parameters.pop('fp32_optimizer_states', None)
-                    if self.bf16_optimizer_states():
-                        # bf16 moments are required so the offloaded state matches the bf16 master weights.
-                        if user_fp32_optimizer_states:
-                            logger.warning("bf16_optimizer_states is enabled; overriding fp32_optimizer_states "
-                                           "to False so CPU Adam moments are stored in bf16.")
-                        fp32_optimizer_states = False
-                    elif user_fp32_optimizer_states is None:
-                        # Default preserves the pre-existing fp32 optimizer-state behavior.
-                        fp32_optimizer_states = True
-                    else:
-                        fp32_optimizer_states = user_fp32_optimizer_states
-                    optimizer = CPUAdam(model_parameters,
-                                        **optimizer_parameters,
-                                        adamw_mode=effective_adam_w_mode,
-                                        fp32_optimizer_states=fp32_optimizer_states,
-                                        **zenflow_kwargs)
-                else:
-                    from deepspeed.ops.adam import FusedAdam
-
-                    optimizer = FusedAdam(
-                        model_parameters,
-                        **optimizer_parameters,
-                        adam_w_mode=effective_adam_w_mode,
-                    )
+            adam_optimizer, adam_optimizer_kwargs = self.get_optimizer_configuration(
+                optimizer_parameters, effective_adam_w_mode)
+            optimizer = adam_optimizer(model_parameters, **optimizer_parameters, **adam_optimizer_kwargs)
 
         elif self.optimizer_name() == ADAGRAD_OPTIMIZER:
             if self.zero_use_cpu_optimizer():
@@ -2191,7 +2263,10 @@ class DeepSpeedEngine(Module):
                 logger.error("Install mup to use MuSGD optimizer")
             optimizer = MuSGD(model_parameters, **optimizer_parameters)
         elif self.optimizer_name() == MUON_OPTIMIZER:
-            zero_stage = self.zero_optimization_stage()
+            adam_w_mode = optimizer_parameters.pop(ADAM_W_MODE, ADAM_W_MODE_DEFAULT)
+            adam_optimizer, adam_optimizer_kwargs = self.get_optimizer_configuration(optimizer_parameters,
+                                                                                     adam_w_mode,
+                                                                                     allow_legacy_fallback=True)
             # Flatten param group dicts (created by MoE/EP) into a raw parameter list
             all_params = []
             for item in model_parameters:
@@ -2228,7 +2303,12 @@ class DeepSpeedEngine(Module):
             if self.has_moe_layers:
                 from deepspeed.moe.utils import split_params_into_different_moe_groups_for_optimizer
                 param_groups = split_params_into_different_moe_groups_for_optimizer(param_groups)
-            optimizer = MuonWithAuxAdam(param_groups)
+            optimizer = MuonWithAuxAdam(param_groups,
+                                        adam_optimizer=adam_optimizer,
+                                        adam_optimizer_kwargs=adam_optimizer_kwargs,
+                                        adam_w_mode=adam_w_mode,
+                                        fallback_to_inline=adam_optimizer is not None
+                                        and adam_optimizer.__name__ == "FusedAdam")
         else:
             torch_optimizer = getattr(torch.optim, self.optimizer_name())
             optimizer = torch_optimizer(model_parameters, **optimizer_parameters)
@@ -2992,8 +3072,10 @@ class DeepSpeedEngine(Module):
     def _backward_prologue_per_tensor(self, grad):
         if is_functorch_transforming():
             return grad
-        # Only scale gradients if scale_wrt_gas is True, consistent with backward() parameter
-        if grad is not None and self._scale_wrt_gas:
+        graph_loss_scaled = _ENGINE_BACKWARD_GRAPH_TRACKER.is_current_graph_registered()
+        if graph_loss_scaled:
+            return grad
+        if grad is not None:
             return grad / self.gradient_accumulation_steps()
         return grad
 
@@ -3001,6 +3083,11 @@ class DeepSpeedEngine(Module):
         if is_functorch_transforming():
             return
         if not self._running_engine_backward:
+            # An interrupted engine.backward() leaves the ZeRO backward depth active. The next
+            # direct backward must not run an epilogue over that incomplete reduction state.
+            if isinstance(self.optimizer, ZeROOptimizer) and self.optimizer._backward_active_depth > 1:
+                return
+
             # Check if loss scaling was required but not applied
             needs_scaler = False
             if isinstance(self.optimizer, ZeROOptimizer):
@@ -3216,45 +3303,57 @@ class DeepSpeedEngine(Module):
         assert maybe_loss_for_backward(
             loss), "loss must be a scalar tensor. If you need to pass output gradients, backward() of output tensors"
 
-        self._running_engine_backward = True
-        # Store scale_wrt_gas so the hook can respect it
-        self._scale_wrt_gas = scale_wrt_gas
+        with self._running_engine_backward_lock:
+            self._running_engine_backward_count += 1
+            self._running_engine_backward = True
+        engine_backward_graph_state = _ENGINE_BACKWARD_GRAPH_TRACKER.new_state()
+        engine_backward_graph_hook = None
+        try:
+            # Unmanaged mode: count this backward so step() can advance global_samples by the actual micro-batch count.
+            if not self.managed_gradient_accumulation():
+                self._unmanaged_backward_count += 1
 
-        # Unmanaged mode: count this backward so step() can advance global_samples by the actual micro-batch count.
-        if not self.managed_gradient_accumulation():
-            self._unmanaged_backward_count += 1
+            # Set flag to prevent hooks from firing (we'll manually call prologue/epilogue)
+            backward_kwargs = {"retain_graph": retain_graph}
+            if self.eigenvalue_enabled():
+                backward_kwargs["create_graph"] = True
+                backward_kwargs["retain_graph"] = True
 
-        # Set flag to prevent hooks from firing (we'll manually call prologue/epilogue)
-        backward_kwargs = {"retain_graph": retain_graph}
-        if self.eigenvalue_enabled():
-            backward_kwargs["create_graph"] = True
-            backward_kwargs["retain_graph"] = True
+            loss = loss / self.gradient_accumulation_steps() if scale_wrt_gas else loss
+            gas_scaled_loss = loss
 
-        # Used only for return value
-        gas_scaled_loss = loss / self.gradient_accumulation_steps() if scale_wrt_gas else loss
+            # TODO: handle these scaling with direct calls to loss.backward()
+            if isinstance(self.optimizer, ZeROOptimizer):
+                loss = self.optimizer.scale_if_loss(loss)
+            elif self.torch_autocast_z0_gradscaler:
+                loss = self.torch_autocast_z0_gradscaler.scale(loss)
 
-        # TODO: handle these scaling with direct calls to loss.backward()
-        if isinstance(self.optimizer, ZeROOptimizer):
-            loss = self.optimizer.scale_if_loss(loss)
-        elif self.torch_autocast_z0_gradscaler:
-            loss = self.torch_autocast_z0_gradscaler.scale(loss)
+            if loss.requires_grad:
+                engine_backward_graph_hook = loss.register_hook(
+                    lambda grad: _ENGINE_BACKWARD_GRAPH_TRACKER.register_current_graph(
+                        grad, engine_backward_graph_state))
 
-        with compiled_autograd(self._is_compiled_autograd_enabled, self._compile_kwargs):
-            if self.zero_optimization() or not self.amp_enabled():
-                loss.backward(**backward_kwargs)
-            elif self.amp_enabled():
-                # AMP requires delaying unscale when inside gradient accumulation boundaries
-                # https://nvidia.github.io/apex/advanced.html#gradient-accumulation-across-iterations
-                delay_unscale = not self.is_gradient_accumulation_boundary()
-                with amp.scale_loss(loss, self.optimizer, delay_unscale=delay_unscale) as scaled_loss:
-                    scaled_loss.backward(**backward_kwargs)
+            with compiled_autograd(self._is_compiled_autograd_enabled, self._compile_kwargs):
+                if self.zero_optimization() or not self.amp_enabled():
+                    loss.backward(**backward_kwargs)
+                elif self.amp_enabled():
+                    # AMP requires delaying unscale when inside gradient accumulation boundaries
+                    # https://nvidia.github.io/apex/advanced.html#gradient-accumulation-across-iterations
+                    delay_unscale = not self.is_gradient_accumulation_boundary()
+                    with amp.scale_loss(loss, self.optimizer, delay_unscale=delay_unscale) as scaled_loss:
+                        scaled_loss.backward(**backward_kwargs)
 
-            # backward_epilogue is not called in a hook when self._support_torch_style_backward is False
-            self._backward_epilogue()
+                # backward_epilogue is not called in a hook when self._support_torch_style_backward is False
+                self._backward_epilogue()
 
-        self._running_engine_backward = False
-
-        return gas_scaled_loss
+            return gas_scaled_loss
+        finally:
+            if engine_backward_graph_hook is not None:
+                engine_backward_graph_hook.remove()
+            _ENGINE_BACKWARD_GRAPH_TRACKER.unregister(engine_backward_graph_state)
+            with self._running_engine_backward_lock:
+                self._running_engine_backward_count -= 1
+                self._running_engine_backward = self._running_engine_backward_count > 0
 
     def is_gradient_accumulation_boundary(self):
         """
@@ -5385,12 +5484,12 @@ class DeepSpeedEngine(Module):
 
     def _copy_recovery_script(self, save_path):
         base_dir = os.path.dirname(os.path.dirname(__file__))
-        script = "zero_to_fp32.py"
-        src = os.path.join(base_dir, "utils", script)
-        dst = os.path.join(save_path, script)
-        #logger.info(f"creating recovery script {dst}")
-        copyfile(src, dst)
-        self._change_recovery_script_permissions(dst)
+        for script in ("zero_to_fp32.py", "zero_to_torch.py"):
+            src = os.path.join(base_dir, "utils", script)
+            dst = os.path.join(save_path, script)
+            #logger.info(f"creating recovery script {dst}")
+            copyfile(src, dst)
+            self._change_recovery_script_permissions(dst)
 
     def _change_recovery_script_permissions(self, dst):
         # make executable (safeguard for file shares - Azure as example)
