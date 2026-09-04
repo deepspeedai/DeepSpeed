@@ -435,10 +435,17 @@ class TestTiledFusedLogitsLossInputLayout:
         y = torch.randint(0, vocab_size, (batch_size, seqlen))
 
         model = self.make_model(hidden_dim, vocab_size, dtype)
-        losses = []
+        losses, param_grads = [], []
         for x in (strided, contiguous):
             model.zero_grad()
             loss = TiledFusedLogitsLoss.apply(self.loss_fn, model, x, y, None, shards, list(model.parameters()), "sum")
+            # The backward scatters into a zeros_like of the same flattened activation, so the
+            # gradient path runs through the flatten under test as well as the forward.
+            loss.backward()
             losses.append(loss)
+            param_grads.append([p.grad.detach().clone() for p in model.parameters()])
 
         torch_assert_close(losses[0], losses[1])
+        torch_assert_close(strided.grad, contiguous.grad)
+        for grad_a, grad_b in zip(*param_grads):
+            torch_assert_close(grad_a, grad_b)
