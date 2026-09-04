@@ -52,6 +52,40 @@ def test_falls_back_when_rope_parameters_carries_no_theta():
     assert _get_rope_theta(self_attn) == 250000.0
 
 
+def test_resolves_against_a_real_llama_config():
+    """The six cases above build the config by hand, so none of them pins the claim this
+    change rests on: which spelling a stock `LlamaConfig` actually carries.
+
+    This one stays meaningful on either side of the 5.0 boundary — it takes the legacy
+    attribute on 4.x and `rope_parameters` on 5.x — and it uses a non-default theta, so a
+    helper that returned the class default would fail it.
+    """
+    LlamaConfig = pytest.importorskip("transformers.models.llama.configuration_llama").LlamaConfig
+
+    self_attn = SimpleNamespace(config=LlamaConfig(rope_theta=500000.0))
+
+    assert _get_rope_theta(self_attn) == 500000.0
+
+
+def test_the_two_spellings_do_not_disagree_on_a_real_config():
+    """Guards the branch rather than the value.
+
+    If transformers reinstates `rope_theta` as a deprecated property, the test above still
+    passes while the injection path silently changes which branch it takes. That is only a
+    problem if the two spellings can disagree, so this asserts they cannot.
+    """
+    LlamaConfig = pytest.importorskip("transformers.models.llama.configuration_llama").LlamaConfig
+    config = LlamaConfig(rope_theta=500000.0)
+
+    parameters = getattr(config, "rope_parameters", None) or {}
+    carried = [
+        value for value in (getattr(config, "rope_theta", None), parameters.get("rope_theta")) if value is not None
+    ]
+
+    assert carried, "neither spelling carries rope_theta on the installed transformers"
+    assert all(value == 500000.0 for value in carried), f"the spellings disagree: {carried}"
+
+
 def test_raises_when_nothing_carries_it():
     with pytest.raises(AttributeError):
         _get_rope_theta(SimpleNamespace(config=SimpleNamespace()))
