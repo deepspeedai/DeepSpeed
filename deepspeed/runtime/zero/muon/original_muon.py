@@ -142,7 +142,6 @@ def zeropower_via_gram_newtonschulz(G, steps: int):
 NS_METHODS = {"standard", "gram"}
 
 
-@compiler.compile()
 def _per_head_orthogonalize(update, num_heads, ns_steps, ns_method):
     """Newton-Schulz per attention head, then fold the head dim back."""
     if update.ndim != 2:
@@ -162,6 +161,7 @@ def _per_head_orthogonalize(update, num_heads, ns_steps, ns_method):
     return per_head.reshape(out_features, in_features)
 
 
+@compiler.compile()
 def muon_update(grad,
                 momentum,
                 beta=0.95,
