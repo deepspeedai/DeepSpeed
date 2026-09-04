@@ -1923,7 +1923,7 @@ class DeepSpeedEngine(Module):
                     "DeepSpeed Sequence Parallelism (Ulysses) with PyTorch < 2.3 may encounter "
                     "rank indexing errors during backward pass when sp_size < world_size. "
                     "Please use the weighted all-reduce workaround shown in the regression test "
-                    "(https://github.com/deepspeedai/DeepSpeed/blob/master/tests/unit/sequence_parallelism/test_ulysses.py) "
+                    "(https://github.com/deepspeedai/DeepSpeed/blob/master/tests/unit/v1/sequence_parallelism/test_ulysses.py) "
                     "or upgrade to PyTorch 2.3+.")
             self.communication_data_type = self._config.seq_parallel_communication_data_type
             self.seq_parallel_group = groups._get_sequence_parallel_group()
