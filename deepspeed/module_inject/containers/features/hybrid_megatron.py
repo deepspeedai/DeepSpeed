@@ -43,7 +43,9 @@ class HybridMegatronContainer(MegatronContainer, HybridEngineContainer):
             param_list = [self.qkvw, self.qkvb]
             non_active_params = [param for param in param_list if (hasattr(param, 'ds_id') and \
                             param.ds_status == ZeroParamStatus.NOT_AVAILABLE)]
-            with GatheredParameters(non_active_params):
+            # Persist the QKV layout mutation when ZeRO-3 repartitions the
+            # gathered parameters on context exit.
+            with GatheredParameters(non_active_params, modifier_rank=0):
                 self._align_qkv(self.qkvw)
                 self._align_qkv(self.qkvb)
         else:
@@ -79,7 +81,8 @@ class HybridMegatronContainer(MegatronContainer, HybridEngineContainer):
             param_list = [self.qkvw, self.qkvb]
             non_active_params = [param for param in param_list if (hasattr(param, 'ds_id') and \
                             param.ds_status == ZeroParamStatus.NOT_AVAILABLE)]
-            with GatheredParameters(non_active_params):
+            # Persist the inverse mutation before returning to training.
+            with GatheredParameters(non_active_params, modifier_rank=0):
                 self._partition_qkv(self.qkvw)
                 self._partition_qkv(self.qkvb)
         else:
