@@ -21,6 +21,21 @@ def _module_with_fp32_buffer(hidden_dim=8):
     return module
 
 
+# FP8/MX/NVFP4 storage dtypes, whichever this torch exposes.
+NARROW_DTYPES = [
+    getattr(torch, name) for name in ("float8_e4m3fn", "float8_e5m2", "float8_e4m3fnuz", "float8_e5m2fnuz",
+                                      "float8_e8m0fnu", "float4_e2m1fn_x2") if hasattr(torch, name)
+]
+
+
+def _module_with_narrow_param(dtype, hidden_dim=8):
+    """Linear layer plus a frozen quantized param and its scale buffer."""
+    module = torch.nn.Sequential(torch.nn.Linear(hidden_dim, hidden_dim))
+    module.quantized = torch.nn.Parameter(torch.zeros(hidden_dim, hidden_dim, dtype=dtype), requires_grad=False)
+    module.register_buffer("scale", torch.zeros(hidden_dim, dtype=dtype))
+    return module
+
+
 class TestMixedPrecisionDtypeResolution:
 
     def _engine(self, param_dtype=None, buffer_dtype=None, fp16=False, bf16=False):
@@ -93,6 +108,15 @@ class TestCastModuleMixedPrecision:
         DeepSpeedEngine._cast_module_mixed_precision(self._engine(module), None, torch.bfloat16, False)
         assert all(p.dtype == torch.float32 for p in module.parameters())
         assert module.inv_freq.dtype == torch.bfloat16
+
+    @pytest.mark.parametrize("dtype", NARROW_DTYPES, ids=lambda d: str(d).rsplit(".", 1)[-1])
+    def test_narrow_dtypes_preserved(self, dtype):
+        # NVFP4 has no copy_, so casting it used to raise rather than silently degrade.
+        module = _module_with_narrow_param(dtype)
+        DeepSpeedEngine._cast_module_mixed_precision(self._engine(module), torch.bfloat16, torch.bfloat16, False)
+        assert module.quantized.dtype == dtype
+        assert module.scale.dtype == dtype
+        assert module[0].weight.dtype == torch.bfloat16
 
 
 @pytest.mark.skipif(torch.bfloat16 not in get_accelerator().supported_dtypes(), reason="bf16 not supported")
