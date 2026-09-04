@@ -223,6 +223,59 @@ def test_mla_head_width_is_checked_not_assumed():
     assert wrong is None
 
 
+# Shapes measured by instantiating DeepseekV2Attention on the released
+# deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct config under transformers 5.16.1.
+def _deepseek_v2_lite_mla_config():
+    return SimpleNamespace(num_attention_heads=16,
+                           num_key_value_heads=16,
+                           hidden_size=2048,
+                           head_dim=64,
+                           q_lora_rank=None,
+                           kv_lora_rank=512,
+                           qk_nope_head_dim=128,
+                           qk_rope_head_dim=64,
+                           v_head_dim=128)
+
+
+@pytest.mark.parametrize(
+    "leaf,shape,expected",
+    [
+        ("q_proj", (3072, 2048), 16),  # 16 * (qk_nope 128 + qk_rope 64)
+        ("kv_b_proj", (4096, 512), 16),  # 16 * (qk_nope 128 + v_head_dim 128)
+        ("kv_a_proj_with_mqa", (576, 2048), None),  # kv_lora_rank + qk_rope, no head structure
+        ("o_proj", (2048, 2048), None),  # heads on the input axis, and 2048 still divides by 16
+    ])
+def test_mla_without_q_lora_rank_tags_the_plain_q_proj(leaf, shape, expected):
+    """Without a q_lora_rank there is no q_a/q_b pair; the up-projection is `q_proj` itself.
+
+    Its per-head width stays `qk_nope + qk_rope`, so reading `head_dim` gives 16 * 64 = 1024
+    against a real 3072 and drops the model off the per-head path.
+    """
+    model = SimpleNamespace(config=_deepseek_v2_lite_mla_config())
+    name = f"model.layers.0.self_attn.{leaf}.weight"
+
+    assert _attention_head_count(name, torch.zeros(shape), model) == expected
+
+
+def test_head_dim_alone_would_reject_the_mla_q_proj():
+    """Guards the width source rather than the outcome: head_dim is present and wrong here."""
+    config = _deepseek_v2_lite_mla_config()
+
+    assert config.head_dim is not None
+    assert config.num_attention_heads * config.head_dim == 1024
+    assert _attention_head_count("l.0.self_attn.q_proj.weight", torch.zeros(3072, 2048),
+                                 SimpleNamespace(config=config)) == 16
+
+
+def test_q_proj_on_a_non_mla_config_still_uses_head_dim():
+    """The MLA width only applies where the config carries the MLA head dimensions."""
+    config = SimpleNamespace(num_attention_heads=8, num_key_value_heads=8, hidden_size=512, head_dim=64)
+    model = SimpleNamespace(config=config)
+
+    assert _attention_head_count("l.0.self_attn.q_proj.weight", torch.zeros(512, 512), model) == 8
+    assert _attention_head_count("l.0.self_attn.q_proj.weight", torch.zeros(768, 512), model) is None
+
+
 def test_linear_attention_named_like_standard_attention_is_rejected():
     """Kimi-K3-0.40B is `kimi_linear`, not MLA: q_proj is [256, 1024] with 8 heads of 74.
 

@@ -89,8 +89,10 @@ dist = None
 # with the usual hidden == num_heads * head_dim it still divides evenly, i.e. silently wrong.
 _QUERY_HEAD_LEAVES = ("q_proj", "query", "wq")
 _KV_HEAD_LEAVES = ("k_proj", "key", "wk", "v_proj", "value", "wv")
-# MLA up-projections, keyed by which per-head width the config gives them.
-_MLA_Q_LEAVES = ("q_b_proj", )
+# MLA up-projections, keyed by which per-head width the config gives them. Without a
+# q_lora_rank there is no q_a/q_b pair and the query up-projection is a plain `q_proj`
+# (DeepSeek-V2-Lite), still `qk_nope + qk_rope` wide per head rather than `head_dim`.
+_MLA_Q_LEAVES = ("q_b_proj", "q_proj")
 _MLA_KV_LEAVES = ("kv_b_proj", )
 # A single matrix holding Q, K and V, or an MLA down-projection that mixes latent and rope
 # components. Neither splits into uniform heads, so leave them on the full-matrix path.
@@ -110,7 +112,11 @@ def _leaf_module_name(param_name: str) -> str:
 
 
 def _mla_head_width(text_config, leaf: str):
-    """Per-head output width of an MLA up-projection, or None if this is not one."""
+    """Per-head output width of an MLA up-projection, or None if this is not one.
+
+    A config without the MLA head dimensions returns None here, so `q_proj` on an ordinary
+    attention model falls through to the `head_dim` path below.
+    """
     qk_nope = getattr(text_config, "qk_nope_head_dim", None)
     qk_rope = getattr(text_config, "qk_rope_head_dim", None)
     v_head_dim = getattr(text_config, "v_head_dim", None)
