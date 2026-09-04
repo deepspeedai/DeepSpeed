@@ -13,7 +13,7 @@ TORCH_LIBRARY(dc, m)
     m.def("allgather_param(Tensor a, int graph_id, int id, ScalarType? dtype = None) -> Tensor");
     m.def(
         "prefetch_params_fused(int graph_id, Tensor[] params, int[] ids,"
-        "                      ScalarType[]? dtypes = None) -> ()");
+        "                      ScalarType[]? dtypes = None) -> Tensor[]");
     m.def("wait_allgather(Tensor(a) a, int graph_id, int id) -> Tensor(a)");
     m.def("release_param(Tensor(a) a, int graph_id, int id, int n_users) -> Tensor(a)");
     m.def("reduce_grad(Tensor a, int graph_id, int id) -> Tensor");
@@ -105,9 +105,13 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
     m.def("register_graph_z3",
           &dc::register_graph_z3,
           "Register graph with a list of ds parameter ids");
+    m.def("configure_z3_gather_arena",
+          &dc::configure_z3_gather_arena,
+          "Configure an executor-local ZeRO-3 gather arena plan");
     m.def("start_forward", &dc::start_forward, "Start forward pass");
     m.def("end_forward", &dc::end_forward, "End forward pass");
     m.def("start_backward", &dc::start_backward, "Start backward pass");
+    m.def("end_backward_phase", &dc::end_backward_phase, "End backward phase");
     m.def("cleanup", &dc::cleanup, "Clean up DeepCompile");
     m.def("reset", &dc::reset, "Reset the state");
     m.def("invalidate_gathered_param", &dc::invalidate_gathered_param, "Invalidate gathered param");

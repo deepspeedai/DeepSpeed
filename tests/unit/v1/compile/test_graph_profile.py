@@ -28,6 +28,9 @@ class FakeAccelerator:
         self.event_count = 0
 
     def current_device(self):
+        return 7
+
+    def current_device_name(self):
         return "cpu"
 
     def memory_allocated(self):
@@ -126,7 +129,7 @@ def test_profiling_interpreter_wall_time_excludes_warmup(monkeypatch):
     monkeypatch.setattr(graph_profile, "is_comm_op", lambda node: False)
     monkeypatch.setattr(graph_profile, "is_release_node", lambda node: False)
     monkeypatch.setattr(graph_profile.dist, "is_initialized", lambda: False)
-    monkeypatch.setattr(graph_profile.dist, "get_rank", lambda: 0)
+    monkeypatch.setattr(graph_profile.dist, "get_rank", lambda group=None: 0)
 
     timestamps = iter(range(20))
     monkeypatch.setattr(graph_profile.time, "time", lambda: next(timestamps))
@@ -228,7 +231,7 @@ class RecordingAllReduce:
         self.shapes = []
         self.peer_failed = peer_failed
 
-    def __call__(self, tensor, op=None):
+    def __call__(self, tensor, op=None, group=None):
         self.shapes.append(tuple(tensor.shape))
         if self.peer_failed and tensor.numel() == 1:
             tensor.fill_(1)
@@ -237,8 +240,8 @@ class RecordingAllReduce:
 def _install_fake_distributed(monkeypatch, all_reduce):
     monkeypatch.setattr(graph_profile.dist, "is_initialized", lambda: True)
     monkeypatch.setattr(graph_profile.dist, "all_reduce", all_reduce)
-    monkeypatch.setattr(graph_profile.dist, "get_rank", lambda: 0)
-    monkeypatch.setattr(graph_profile.dist, "barrier", lambda: None)
+    monkeypatch.setattr(graph_profile.dist, "get_rank", lambda group=None: 0)
+    monkeypatch.setattr(graph_profile.dist, "barrier", lambda group=None: None)
 
 
 def test_abort_helper_passes_when_every_rank_is_healthy(monkeypatch):
@@ -292,14 +295,12 @@ def test_memory_profiler_finishes_the_node_collectives_before_reporting_a_failur
     assert not interpreter.profile_complete
     assert interpreter.mem_record == []
 
-    # The failing node took part in its memory reduce (2 values) and then in the vote (1 value):
+    # The failing node took part in its absolute-memory reduce (3 values) and then in the vote (1 value):
     # the same pair of collectives every healthy rank issues for that node.
-    assert all_reduce.shapes[-2:] == [(2, ), (1, )]
+    assert all_reduce.shapes[-2:] == [(3, ), (1, )]
 
 
-def test_time_profiler_finishes_the_node_collectives_before_reporting_a_failure(monkeypatch):
-    all_reduce = RecordingAllReduce()
-    _install_fake_distributed(monkeypatch, all_reduce)
+def test_time_profiler_rank_asymmetric_failure_keeps_collective_order(monkeypatch):
     monkeypatch.setattr(graph_profile, "get_deepcompile_handle", lambda: FakeDeepCompileHandle())
     monkeypatch.setattr(graph_profile, "get_accelerator", lambda: FakeAccelerator())
     monkeypatch.setattr(graph_profile, "_all_real_if_tensor", lambda args: True)
@@ -307,20 +308,56 @@ def test_time_profiler_finishes_the_node_collectives_before_reporting_a_failure(
     monkeypatch.setattr(graph_profile, "is_comm_op", lambda node: False)
     monkeypatch.setattr(graph_profile, "is_release_node", lambda node: False)
 
-    def out_of_memory(x):
-        raise RuntimeError("CUDA out of memory. Tried to allocate 1.06 GiB")
+    def run_profile(*, local_failure, peer_failed):
+        all_reduce = RecordingAllReduce(peer_failed=peer_failed)
+        _install_fake_distributed(monkeypatch, all_reduce)
 
-    graph = Graph()
-    x = graph.placeholder("x")
-    y = graph.call_function(out_of_memory, (x, ))
-    graph.output(y)
-    gm = GraphModule(torch.nn.Module(), graph)
+        def maybe_out_of_memory(x):
+            if local_failure:
+                raise RuntimeError("CUDA out of memory. Tried to allocate 1.06 GiB")
+            return x
 
-    interpreter = graph_profile.ProfilingInterpreter(gm, iteration=1, warmup=0)
+        graph = Graph()
+        x = graph.placeholder("x")
+        y = graph.call_function(maybe_out_of_memory, (x, ))
+        graph.output(y)
+        gm = GraphModule(torch.nn.Module(), graph)
 
-    assert interpreter.run(torch.ones(1)) is None
+        interpreter = graph_profile.ProfilingInterpreter(gm, iteration=1, warmup=0)
+        assert interpreter.run(torch.ones(1)) is None
+        assert graph_profile.is_profile_incomplete(gm.graph)
+        return all_reduce.shapes
 
-    # Cache vote (1), the timing reduce this rank has nothing to contribute to (5), then the
-    # failure vote (1). Skipping the middle one is what stranded the other ranks.
-    assert all_reduce.shapes[-3:] == [(1, ), (5, ), (1, )]
-    assert graph_profile.is_profile_incomplete(gm.graph)
+    failing_rank_shapes = run_profile(local_failure=True, peer_failed=False)
+    healthy_rank_shapes = run_profile(local_failure=False, peer_failed=True)
+
+    # Both perspectives reach the cache vote (1), timing reduce (5), and failure vote (1). The
+    # absolute-memory reduce occurs only after a healthy vote, so neither rank enters it here.
+    assert failing_rank_shapes[-3:] == [(1, ), (5, ), (1, )]
+    assert healthy_rank_shapes == failing_rank_shapes
+
+
+def test_profiling_interpreter_restores_state_if_gathered_param_cleanup_fails(monkeypatch):
+    fake_handle = FakeDeepCompileHandle()
+
+    def fail_clear():
+        fake_handle.events.append(("clear", None))
+        raise RuntimeError("cleanup failed")
+
+    fake_handle.clear_all_gathered_params = fail_clear
+
+    monkeypatch.setattr(graph_profile, "get_deepcompile_handle", lambda: fake_handle)
+    monkeypatch.setattr(graph_profile, "get_accelerator", lambda: FakeAccelerator())
+    monkeypatch.setattr(graph_profile, "_all_real_if_tensor", lambda args: True)
+    monkeypatch.setattr(graph_profile, "_get_mem_usage_out_of_torch", lambda: 0)
+    monkeypatch.setattr(graph_profile.dist, "is_initialized", lambda: False)
+    monkeypatch.setattr(graph_profile.Interpreter, "run", lambda self, *args: None)
+
+    interpreter = graph_profile.ProfilingInterpreter(_make_empty_graph_module(), iteration=1)
+    interpreter.env["retained"] = object()
+
+    with pytest.raises(RuntimeError, match="cleanup failed"):
+        interpreter.run()
+
+    assert fake_handle.events == [("enable", True), ("clear", None), ("enable", False)]
+    assert interpreter.env == {}

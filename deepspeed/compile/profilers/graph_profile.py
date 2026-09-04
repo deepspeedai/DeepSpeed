@@ -65,6 +65,8 @@ _PROFILE_META_DEFAULTS = {
     "tensor_size": 0,
     "alloc_mem": 0,
     "max_mem": 0,
+    "profile_mem_start": 0,
+    "profile_mem_peak": 0,
 }
 _PROFILE_INCOMPLETE_ATTR = "_deepcompile_profile_incomplete"
 _PROFILE_INCOMPLETE_META_KEY = "deepcompile_profile_incomplete"
@@ -100,7 +102,7 @@ class ProfileAborted(RuntimeError):
     """Raised on every rank once profiling has failed on any of them."""
 
 
-def _abort_if_any_rank_failed(error, device, distributed=True):
+def _abort_if_any_rank_failed(error, device, distributed=True, process_group=None):
     """Agree across ranks on whether profiling can go on, and stop everywhere if it cannot.
 
     Profiling issues collectives node by node. A rank that hits an error and simply stops taking
@@ -120,13 +122,21 @@ def _abort_if_any_rank_failed(error, device, distributed=True):
 
     with unset_fake_temporarily():
         failed_flag = torch.tensor([1 if error is not None else 0], device=device, dtype=torch.int)
-        dist.all_reduce(failed_flag, dist.ReduceOp.MAX)
+        dist.all_reduce(failed_flag, dist.ReduceOp.MAX, group=process_group)
 
     if failed_flag.item() == 0:
         return
     if error is not None:
         raise ProfileAborted(str(error)) from error
     raise ProfileAborted("profiling failed on another rank")
+
+
+def _clear_interpreter_env(interpreter: Interpreter):
+    """Release FX interpreter references so profiling outputs do not remain live."""
+    try:
+        interpreter.env.clear()
+    except Exception:
+        pass
 
 
 def _run_warmup_for_profile(call_fn, warmup):
@@ -155,8 +165,11 @@ def _get_mem_usage_out_of_torch():
         import pynvml
         pynvml.nvmlInit()
 
-        current_dev_id = get_accelerator().current_device()
-        handle = pynvml.nvmlDeviceGetHandleByIndex(current_dev_id)
+        accelerator = get_accelerator()
+        current_dev_id = accelerator.current_device()
+        map_nvml_device = getattr(accelerator, "_get_nvml_gpu_id", None)
+        nvml_dev_id = map_nvml_device(current_dev_id) if callable(map_nvml_device) else current_dev_id
+        handle = pynvml.nvmlDeviceGetHandleByIndex(nvml_dev_id)
         info = pynvml.nvmlDeviceGetMemoryInfo(handle)
 
         # Reserved, not allocated. This number is meant to be the memory *other* things hold, and
@@ -164,8 +177,8 @@ def _get_mem_usage_out_of_torch():
         # the allocator's own cache as somebody else's usage: with expandable_segments the cache is
         # most of the card while live tensors are a fraction of it, which inflated a measured
         # 125GiB peak to a reported 239GiB and left the planner reading it as hopeless.
-        torch_held = get_accelerator().memory_reserved()
-        adjust = max(0, info.used - torch_held)
+        torch_held = accelerator.memory_reserved()
+        adjust = max(0, int(info.used) - int(torch_held or 0))
     except Exception:
         # pynvml not available
         pass
@@ -173,10 +186,24 @@ def _get_mem_usage_out_of_torch():
     return adjust
 
 
+def _absolute_profile_memory(mem_usage_out_of_torch):
+    """Read absolute allocator residency and peak with external memory included once."""
+    return (int(get_accelerator().memory_allocated()) + int(mem_usage_out_of_torch),
+            int(get_accelerator().max_memory_allocated()) + int(mem_usage_out_of_torch))
+
+
+def _rank_max_profile_memory(start_mem, peak_mem, device, distributed, process_group=None):
+    """Return per-field worst-rank absolute memory without averaging rank asymmetry."""
+    values = torch.tensor([int(start_mem), int(peak_mem)], device=device, dtype=torch.int64)
+    if distributed:
+        dist.all_reduce(values, dist.ReduceOp.MAX, group=process_group)
+    return int(values[0].item()), int(values[1].item())
+
+
 # https://pytorch.org/tutorials/intermediate/fx_profiling_tutorial.html
 class ProfilingInterpreter(Interpreter):
 
-    def __init__(self, gm: GraphModule, iteration: int = 10, warmup: int = 5, debug_log=False):
+    def __init__(self, gm: GraphModule, iteration: int = 10, warmup: int = 5, debug_log=False, process_group=None):
         super().__init__(gm)
 
         self.nz3 = get_deepcompile_handle()
@@ -185,9 +212,10 @@ class ProfilingInterpreter(Interpreter):
         assert warmup >= 0
         self.iteration = iteration
         self.warmup = warmup
-        self.device = torch.device(get_accelerator().current_device())
+        self.device = torch.device(get_accelerator().current_device_name())
         self.cache: Dict[Tuple, Any] = {}
         self.distributed = dist.is_initialized()
+        self.process_group = process_group
         self.allgather_mem: Dict[int, int] = {}
         self.debug_log = debug_log
         self.mem_usage_out_of_torch = 0
@@ -211,27 +239,38 @@ class ProfilingInterpreter(Interpreter):
         except Exception as e:
             profile_complete = False
             msg = e.msg if "msg" in dir(e) else str(e)
-            if not self.distributed or dist.get_rank() == 0:
+            if not self.distributed or dist.get_rank(group=self.process_group) == 0:
                 print(f"DeepCompile profiling failed; using default profile metadata for incomplete nodes: {msg}")
         finally:
+            # Keep this try/finally so profiling state is restored if gathered-param cleanup fails.
             try:
                 self.nz3.clear_all_gathered_params()
             finally:
                 try:
                     self.nz3.enable_profiling(False)
                 finally:
+                    _clear_interpreter_env(self)
                     _backfill_missing_profile_metadata(self.graph, profile_complete=profile_complete)
         return return_val
 
     def run_node(self, n: torch.fx.Node) -> Any:
 
         if n.op in {"placeholder", "output"}:
+            get_accelerator().reset_peak_memory_stats()
+            profile_mem_start, _ = _absolute_profile_memory(self.mem_usage_out_of_torch)
+            ret = super().run_node(n)
+            _, profile_mem_peak = _absolute_profile_memory(self.mem_usage_out_of_torch)
+            profile_mem_start, profile_mem_peak = _rank_max_profile_memory(profile_mem_start, profile_mem_peak,
+                                                                           self.device, self.distributed,
+                                                                           self.process_group)
             n.meta["device_time"] = 0.0
             n.meta["wall_time"] = 0.0
             n.meta["alloc_mem"] = 0
             n.meta["max_mem"] = 0
             n.meta["tensor_size"] = _node_size(n)
-            return super().run_node(n)
+            n.meta["profile_mem_start"] = profile_mem_start
+            n.meta["profile_mem_peak"] = profile_mem_peak
+            return ret
 
         args, kwargs = self.fetch_args_kwargs_from_env(n)
         assert isinstance(args, tuple)
@@ -258,7 +297,7 @@ class ProfilingInterpreter(Interpreter):
 
         cache_hit_flag = torch.tensor([0 if cache_hit else 1], device=self.device, dtype=torch.int)
         if self.distributed:
-            dist.all_reduce(cache_hit_flag, dist.ReduceOp.SUM)
+            dist.all_reduce(cache_hit_flag, dist.ReduceOp.SUM, group=self.process_group)
         cache_hit = cache_hit_flag.item() == 0
 
         if cache_hit:
@@ -288,6 +327,7 @@ class ProfilingInterpreter(Interpreter):
             get_accelerator().reset_peak_memory_stats()
             alloc_mem_start = get_accelerator().memory_allocated()
             max_mem_start = get_accelerator().max_memory_allocated()
+            profile_mem_start, _ = _absolute_profile_memory(self.mem_usage_out_of_torch)
 
             def run_target():
                 return getattr(self, n.op)(n.target, args, kwargs)
@@ -297,7 +337,7 @@ class ProfilingInterpreter(Interpreter):
 
             if is_comm_op(n):
                 assert self.distributed, f"Distributed environment is not initialized but comm operator {n.name} {n.target} is used."
-                dist.barrier()
+                dist.barrier(group=self.process_group)
 
             start = time.time()
             out = _run_repeatedly_for_profile(run_target, iteration, start_events, end_events)
@@ -305,10 +345,11 @@ class ProfilingInterpreter(Interpreter):
             walltime_sum = time.time() - start
 
             if is_comm_op(n):
-                dist.barrier()
+                dist.barrier(group=self.process_group)
 
             alloc_mem = get_accelerator().memory_allocated() - alloc_mem_start + self.mem_usage_out_of_torch
             max_memory = get_accelerator().max_memory_allocated() - max_mem_start + self.mem_usage_out_of_torch
+            _, profile_mem_peak = _absolute_profile_memory(self.mem_usage_out_of_torch)
             tensor_size = _node_size(out)
 
             def partition_param_if_necessary(v):
@@ -335,7 +376,7 @@ class ProfilingInterpreter(Interpreter):
                 vals_to_bcast = torch.tensor([device_time, wall_time, alloc_mem, max_memory, tensor_size],
                                              device=self.device)
                 if self.distributed:
-                    dist.all_reduce(vals_to_bcast, dist.ReduceOp.AVG)
+                    dist.all_reduce(vals_to_bcast, dist.ReduceOp.AVG, group=self.process_group)
                 if error is None:
                     n.meta["device_time"] = vals_to_bcast[0].item()
                     n.meta["wall_time"] = vals_to_bcast[1].item()
@@ -345,13 +386,22 @@ class ProfilingInterpreter(Interpreter):
                     self.cache[cache_key] = (n.meta["device_time"], n.meta["wall_time"], n.meta["alloc_mem"],
                                              n.meta["max_mem"], n.meta["tensor_size"])
 
-        _abort_if_any_rank_failed(error, self.device, self.distributed)
+        _abort_if_any_rank_failed(error, self.device, self.distributed, self.process_group)
+
+        # Publish absolute metadata only after every rank agrees that the node succeeded. A rank
+        # that failed while running the operator must not skip this reduction while healthy peers
+        # enter it, or the following collectives become mismatched.
+        profile_mem_start, profile_mem_peak = _rank_max_profile_memory(profile_mem_start, profile_mem_peak,
+                                                                       self.device, self.distributed,
+                                                                       self.process_group)
+        n.meta["profile_mem_start"] = profile_mem_start
+        n.meta["profile_mem_peak"] = profile_mem_peak
 
         if not cache_hit:
             if is_release_op:
                 n.meta["alloc_mem"] = -self.allgather_mem.get(args[2], 0)
 
-            if dist.get_rank() == 0 and self.debug_log:
+            if dist.get_rank(group=self.process_group) == 0 and self.debug_log:
                 print(
                     f"{n.target} {n.meta['device_time']:.2f}ms {n.meta['wall_time']:.2f}ms alloc_mem={n.meta['alloc_mem'] / 1024 / 1024:.2f}MB max_mem={n.meta['max_mem'] / 1024 / 1024:.2f}MB tensor_size={n.meta['tensor_size']}"
                 )
@@ -370,25 +420,28 @@ class ProfilingInterpreter(Interpreter):
 
 class MemoryProfilingInterpreter(Interpreter):
 
-    def __init__(self, gm: GraphModule, debug_log=False):
+    def __init__(self, gm: GraphModule, debug_log=False, process_group=None):
         super().__init__(gm)
         self.nz3 = get_deepcompile_handle()
-        self.device = torch.device(get_accelerator().current_device())
+        self.device = torch.device(get_accelerator().current_device_name())
         self.mem_record = []
         self.last_alloc = get_accelerator().memory_allocated()
         self.profile_complete = True
+        self.process_group = process_group
 
         self.node_counter = 0
         self.node_num = len(gm.graph.nodes)
         self.debug_log = debug_log
 
     def run(self, *args) -> Any:
+        """Profile absolute memory and release gathered/interpreter state on every exit."""
         return_val = None
         self.profile_complete = True
         try:
             assert _all_real_if_tensor(args), "Inputs must be real tensors"
             self.nz3.enable_profiling(True)
             self.mem_usage_out_of_torch = _get_mem_usage_out_of_torch()
+            self.last_alloc = int(get_accelerator().memory_allocated()) + int(self.mem_usage_out_of_torch)
 
             with unset_fake_temporarily():
                 with get_accelerator().random().fork_rng(devices=[self.device]):
@@ -396,17 +449,23 @@ class MemoryProfilingInterpreter(Interpreter):
         except Exception as e:
             self.profile_complete = False
             self.mem_record.clear()
+            _backfill_missing_profile_metadata(self.graph, profile_complete=False)
             print(f"MemoryProfiling error {e}")
         finally:
+            # Keep this try/finally so profiling state is restored if gathered-param cleanup fails.
             try:
                 self.nz3.clear_all_gathered_params()
             finally:
-                self.nz3.enable_profiling(False)
+                try:
+                    self.nz3.enable_profiling(False)
+                finally:
+                    _clear_interpreter_env(self)
 
         return return_val
 
     def run_node(self, n: torch.fx.Node) -> Any:
         get_accelerator().reset_peak_memory_stats()
+        profile_mem_start, _ = _absolute_profile_memory(self.mem_usage_out_of_torch)
 
         ret = None
         error = None
@@ -426,19 +485,22 @@ class MemoryProfilingInterpreter(Interpreter):
             # to land here, and reading the allocator counters still works afterwards.
             error = e
 
-        current_alloc = get_accelerator().memory_allocated() + self.mem_usage_out_of_torch
-        max_alloc = get_accelerator().max_memory_allocated() + self.mem_usage_out_of_torch
-        vals_to_bcast = torch.tensor([current_alloc, max_alloc], device=self.device, dtype=torch.int64)
-        dist.all_reduce(vals_to_bcast, dist.ReduceOp.MAX)
-        current_alloc = vals_to_bcast[0].item()
-        max_alloc = vals_to_bcast[1].item()
+        current_alloc, max_alloc = _absolute_profile_memory(self.mem_usage_out_of_torch)
+        absolute_record = torch.tensor([profile_mem_start, current_alloc, max_alloc],
+                                       device=self.device,
+                                       dtype=torch.int64)
+        if dist.is_initialized():
+            dist.all_reduce(absolute_record, dist.ReduceOp.MAX, group=self.process_group)
+        profile_mem_start, current_alloc, max_alloc = (int(value.item()) for value in absolute_record)
+        n.meta["profile_mem_start"] = profile_mem_start
+        n.meta["profile_mem_peak"] = max_alloc
 
-        _abort_if_any_rank_failed(error, self.device)
+        _abort_if_any_rank_failed(error, self.device, process_group=self.process_group)
 
         self.mem_record.append((n.name, current_alloc, current_alloc - self.last_alloc, max_alloc))
 
         self.node_counter += 1
-        if self.debug_log and dist.get_rank() == 0:
+        if self.debug_log and dist.get_rank(group=self.process_group) == 0:
             print(
                 f"Mem prof Node {self.node_counter}/{self.node_num} {n.name} memory {current_alloc / 1024 / 1024:.2f}MB delta {(current_alloc - self.last_alloc) / 1024 / 1024:.2f}MB"
             )

@@ -432,6 +432,7 @@ class DeepSpeedEngine(Module):
         )
 
         self._deepcompile_active = False
+        self._deepcompile_native_initialized = False
 
         # Configure distributed model
         self._configure_distributed_model(model)
@@ -945,8 +946,8 @@ class DeepSpeedEngine(Module):
         optimizer = getattr(self, "optimizer", None)
         if optimizer is not None and hasattr(optimizer, 'destroy'):
             optimizer.destroy()
-        if self.is_deepcompile_active():
-            get_deepcompile_handle().cleanup()
+        if self.is_deepcompile_active() or getattr(self, "_deepcompile_native_initialized", False):
+            self._deactivate_deepcompile()
         debug_clear_module_and_param_names()
 
         checkpoint_engine = getattr(self, "checkpoint_engine", None)
@@ -2897,8 +2898,15 @@ class DeepSpeedEngine(Module):
             # We can't have this in forward prologue as the compiler compiles hooks including the forward prologue.
             self.launch_compile_passes(self.global_steps)
 
-        with deepcompile_z3_forward_context(self) as z3_eager_fallback, autocast_if_enabled(self):
-            loss = self.module(*inputs, **kwargs)
+        deepcompile_native = get_deepcompile_handle() if self.is_deepcompile_active() else None
+        if deepcompile_native is not None:
+            deepcompile_native.start_forward()
+        try:
+            with deepcompile_z3_forward_context(self) as z3_eager_fallback, autocast_if_enabled(self):
+                loss = self.module(*inputs, **kwargs)
+        finally:
+            if deepcompile_native is not None:
+                deepcompile_native.end_forward()
 
         forward_graph_id = None
 
@@ -5794,7 +5802,11 @@ class DeepSpeedEngine(Module):
         elif self.compile_autotp():
             resolved_backend = self.get_autotp_backend(compile_kwargs)
         else:
-            resolved_backend = self.get_deepcompile_backend(backend, compile_kwargs, schedule)
+            try:
+                resolved_backend = self.get_deepcompile_backend(backend, compile_kwargs, schedule)
+            except BaseException:
+                self._deactivate_deepcompile()
+                raise
 
         return resolved_backend, schedule
 
@@ -5836,9 +5848,9 @@ class DeepSpeedEngine(Module):
         try:
             self.module.compile(**{**compile_kwargs, 'backend': backend})
         except BaseException:
-            if is_deepspeed_compile_backend:
+            if is_deepspeed_compile_backend or getattr(self, "_deepcompile_native_initialized", False):
                 # Restore default hooks if compilation fails before completing.
-                self._set_deepcompile_active(False)
+                self._deactivate_deepcompile()
             raise
 
         self._is_compiled = True
@@ -5849,6 +5861,24 @@ class DeepSpeedEngine(Module):
             else:
                 logger.warning("Compiled autograd is not compatible with DeepCompile, disabling compiled autograd.")
                 self._is_compiled_autograd_enabled = False
+
+    def _initialize_deepcompile_native(self, compile_config):
+        dc = get_deepcompile_handle()
+        dc.init(self.data_parallel_group, compile_config, self.zero_reduce_bucket_size())
+        self._deepcompile_native_initialized = True
+        return dc
+
+    def _cleanup_deepcompile_native(self) -> None:
+        if not getattr(self, "_deepcompile_native_initialized", False):
+            return
+        self._deepcompile_native_initialized = False
+        get_deepcompile_handle().cleanup()
+
+    def _deactivate_deepcompile(self) -> None:
+        try:
+            self._cleanup_deepcompile_native()
+        finally:
+            self._set_deepcompile_active(False)
 
     def _set_deepcompile_active(self, active: bool) -> None:
         """Toggle DeepCompile runtime state and manage forward hooks accordingly."""

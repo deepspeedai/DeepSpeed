@@ -27,6 +27,9 @@ class FakeAccelerator:
     def current_device(self):
         return self._device
 
+    def current_device_name(self):
+        return self._device
+
 
 class FakeDeepCompileHandle:
 
@@ -68,13 +71,14 @@ def test_compute_persistence_budget_clamps_when_transient_peak_exceeds_budget():
     assert budget["available_mem"] == 0
 
 
-def test_selective_gather_sets_persistent_params_when_transient_headroom_exists(monkeypatch):
+def test_selective_gather_reserves_fixed_live_budget_before_persistence(monkeypatch):
     fake_handle = FakeDeepCompileHandle()
 
+    monkeypatch.setattr(selective_gather_pass, "DEFAULT_LIVE_BUDGET", 0)
     monkeypatch.setattr(selective_gather_pass, "get_accelerator", lambda: FakeAccelerator(available_mem=220))
     monkeypatch.setattr(selective_gather_pass, "get_deepcompile_handle", lambda: fake_handle)
-    monkeypatch.setattr(selective_gather_pass.dist, "get_rank", lambda: 0)
-    monkeypatch.setattr(selective_gather_pass.dist, "all_reduce", lambda tensor, op: tensor)
+    monkeypatch.setattr(selective_gather_pass.dist, "get_rank", lambda group=None: 0)
+    monkeypatch.setattr(selective_gather_pass.dist, "all_reduce", lambda tensor, op, group=None: tensor)
 
     profiling_results = {
         0:
@@ -101,21 +105,24 @@ def test_selective_gather_sets_persistent_params_when_transient_headroom_exists(
                                                       graph_order=[(0, True)],
                                                       profiling_results=profiling_results,
                                                       create_inputs_fn=None,
-                                                      mem_budget=0.0,
+                                                      mem_budget=123.0,
                                                       param_manager=param_manager,
                                                       bwd=True)
 
     assert returned is gm
     assert fake_handle.persistent_ds_ids == [1]
+    assert param_manager[0].params["small"].param.ds_persist
+    assert not param_manager[0].params["large"].param.ds_persist
 
 
 def test_selective_gather_uses_profiled_headroom_instead_of_current_available_memory(monkeypatch):
     fake_handle = FakeDeepCompileHandle()
 
+    monkeypatch.setattr(selective_gather_pass, "DEFAULT_LIVE_BUDGET", 0)
     monkeypatch.setattr(selective_gather_pass, "get_accelerator", lambda: FakeAccelerator(available_mem=1000))
     monkeypatch.setattr(selective_gather_pass, "get_deepcompile_handle", lambda: fake_handle)
-    monkeypatch.setattr(selective_gather_pass.dist, "get_rank", lambda: 0)
-    monkeypatch.setattr(selective_gather_pass.dist, "all_reduce", lambda tensor, op: tensor)
+    monkeypatch.setattr(selective_gather_pass.dist, "get_rank", lambda group=None: 0)
+    monkeypatch.setattr(selective_gather_pass.dist, "all_reduce", lambda tensor, op, group=None: tensor)
 
     profiling_results = {
         0:
@@ -152,13 +159,13 @@ def test_selective_gather_uses_profiled_headroom_instead_of_current_available_me
     assert fake_handle.persistent_ds_ids == [1, 2]
 
 
-def test_selective_gather_uses_profiled_headroom_when_current_available_memory_is_low(monkeypatch):
+def test_selective_gather_caps_profiled_headroom_by_current_available_memory(monkeypatch):
     fake_handle = FakeDeepCompileHandle()
 
     monkeypatch.setattr(selective_gather_pass, "get_accelerator", lambda: FakeAccelerator(available_mem=100))
     monkeypatch.setattr(selective_gather_pass, "get_deepcompile_handle", lambda: fake_handle)
-    monkeypatch.setattr(selective_gather_pass.dist, "get_rank", lambda: 0)
-    monkeypatch.setattr(selective_gather_pass.dist, "all_reduce", lambda tensor, op: tensor)
+    monkeypatch.setattr(selective_gather_pass.dist, "get_rank", lambda group=None: 0)
+    monkeypatch.setattr(selective_gather_pass.dist, "all_reduce", lambda tensor, op, group=None: tensor)
 
     profiling_results = {
         0:
@@ -192,7 +199,7 @@ def test_selective_gather_uses_profiled_headroom_when_current_available_memory_i
                                                       bwd=True)
 
     assert returned is gm
-    assert fake_handle.persistent_ds_ids == [1, 2]
+    assert fake_handle.persistent_ds_ids == []
 
 
 def test_selective_gather_skips_persistence_when_memory_profile_incomplete(monkeypatch):
@@ -200,8 +207,8 @@ def test_selective_gather_skips_persistence_when_memory_profile_incomplete(monke
 
     monkeypatch.setattr(selective_gather_pass, "get_accelerator", lambda: FakeAccelerator(available_mem=1000))
     monkeypatch.setattr(selective_gather_pass, "get_deepcompile_handle", lambda: fake_handle)
-    monkeypatch.setattr(selective_gather_pass.dist, "get_rank", lambda: 0)
-    monkeypatch.setattr(selective_gather_pass.dist, "all_reduce", lambda tensor, op: tensor)
+    monkeypatch.setattr(selective_gather_pass.dist, "get_rank", lambda group=None: 0)
+    monkeypatch.setattr(selective_gather_pass.dist, "all_reduce", lambda tensor, op, group=None: tensor)
 
     profiling_results = {
         0:

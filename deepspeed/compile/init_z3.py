@@ -16,10 +16,14 @@ from deepspeed.runtime.zero.parameter_offload import DeepSpeedZeRoOffload
 from .passes import zero3_compile, prefetch, selective_gather, offload_parameters, offload_activation
 from .backend import make_backend, launch_compile_passes, init_schedule
 from .patch_fake_tensor import patch_fake_tensor
-from .util import get_deepcompile_handle, add_pre_backward_hook, add_post_backward_hook
+from .util import add_pre_backward_hook, add_post_backward_hook
 from .z3_eager_fallback import DeepCompileZ3EagerFallback
 
 WARMUP = 5
+DEFAULT_Z3_PERSISTENCE_PASSES = (zero3_compile.add_z3_gather_release, selective_gather.selective_gather)
+DEFAULT_Z3_OPTIMIZATION_PASSES = (zero3_compile.add_z3_gather_release, prefetch.schedule_prefetch)
+DEFAULT_Z3_SCHEDULE = ((0, (zero3_compile.add_z3_gather_release, )), (WARMUP, DEFAULT_Z3_PERSISTENCE_PASSES),
+                       (WARMUP + 1, DEFAULT_Z3_OPTIMIZATION_PASSES))
 
 _MISSING = object()
 _DYNAMO_CONFIG_NAMES = ("force_parameter_static_shapes", "force_nn_module_property_static_shapes")
@@ -110,8 +114,7 @@ def init_z3(engine, backend, compile_config, compile_kwargs, schedule=None):
         optimizer.ipg_buckets.clear()
         get_accelerator().empty_cache()
 
-    dc = get_deepcompile_handle()
-    dc.init(engine.data_parallel_group, compile_config, engine.zero_reduce_bucket_size())
+    dc = engine._initialize_deepcompile_native(compile_config)
 
     engine._deepcompile_z3_eager_fallback = DeepCompileZ3EagerFallback(engine)
     add_post_backward_hook(engine._deepcompile_z3_eager_fallback.complete_backward)
@@ -179,10 +182,9 @@ def init_z3(engine, backend, compile_config, compile_kwargs, schedule=None):
                 offload_activation.offload_activation
             ]))
         else:
-            schedule.append((0, [zero3_compile.add_z3_gather_release]))
-            schedule.append(
-                (WARMUP,
-                 [zero3_compile.add_z3_gather_release, prefetch.schedule_prefetch, selective_gather.selective_gather]))
+            # Persistence is selected in its own compile generation so the following
+            # prefetch generation rebuilds arena plans from the frozen ds_persist set.
+            schedule.extend((step, list(passes)) for step, passes in DEFAULT_Z3_SCHEDULE)
 
     init_schedule(schedule)
 
@@ -221,4 +223,5 @@ def init_z3(engine, backend, compile_config, compile_kwargs, schedule=None):
     return make_backend(backend,
                         compile_config,
                         compile_kwargs=compile_kwargs,
+                        process_group=engine.data_parallel_group,
                         owned_frames=engine._deepcompile_owned_frames)

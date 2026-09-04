@@ -83,6 +83,7 @@ def deepcompile_backward_prologue(is_gradient_accumulation_boundary):
 def deepcompile_backward_epilogue():
     for hook in post_backward_hooks:
         hook()
+    get_deepcompile_handle().end_backward_phase()
 
 
 def log_rank0(msg: str, enable: bool = False):
