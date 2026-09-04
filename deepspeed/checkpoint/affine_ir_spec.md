@@ -43,7 +43,7 @@ A **piece** is a block of elements, described by where it sits in the full tenso
 where it sits in the shard:
 
 ```python
-Piece = (shape, source_offset, source_strides, dest_offset, dest_strides, locations)
+Piece = (shape, source_offset, source_strides, dest_offset, dest_strides, locations, scale)
 ```
 
 - `shape` — the extent of the block, **shared by both sides**: a piece holds the same
@@ -77,6 +77,22 @@ and the second `s⁻²` where the parameter carries `s`. A converter that applie
 parameter's own factor to all three corrupts the optimizer state and changes the trajectory
 after a resume. The map records the geometry and the factor; the caller says which power of
 it applies to the tensor being moved.
+
+**Worked example.** A row-parallel bias `b` at world size 4. Each rank stores `p = b/4`, so
+the piece records `scale = 1/4` and every rank appears in `locations`. Writing `s` for that
+factor, a shard holds `full * s**power`, and conversion recovers `full = shard / s**power`:
+
+| state | power | `s**power` | a rank holds | `F` recovers to |
+|---|---|---|---|---|
+| `fp32` | 1 | 1/4 | 2.0 | **8.0** — the logical bias |
+| `exp_avg` | -1 | 4 | 8.0 | **2.0** |
+| `exp_avg_sq` | -2 | 16 | 32.0 | **2.0** |
+
+The moments move the *opposite* way to the parameter, and the second moment twice as far.
+The reason is the chain rule: the optimizer trains `p`, and `∂L/∂b = (∂L/∂p)·(1/4)`, so the
+first moment of `b` is the stored moment divided by 4 and the second is divided by 16. Using
+the parameter's own factor for all three would multiply `exp_avg` by 4 where it should be
+divided — off by 16× — and silently change the trajectory after a resume.
 
 **Homogeneity.** A piece must cover elements that are all held by the same set of ranks and
 all carry the same scale. This is what makes `locations` exact rather than advisory, and it
