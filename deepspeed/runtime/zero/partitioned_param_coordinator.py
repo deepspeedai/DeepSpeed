@@ -362,14 +362,16 @@ class PartitionedParameterCoordinator:
                 }))
 
         params_to_fetch = set(iter_params(current_submodule, recurse=is_leaf))
-        fetch_numel = sum(
-            [p.partition_numel() for p in params_to_fetch if p.ds_status == ZeroParamStatus.NOT_AVAILABLE])
+        # Gate on whether anything still has to be gathered, not on how many elements that is:
+        # a zero-sized parameter contributes 0 to the sum but still has to leave NOT_AVAILABLE,
+        # and the wait loop below asserts that it did.
+        params_to_gather = [p for p in params_to_fetch if p.ds_status == ZeroParamStatus.NOT_AVAILABLE]
+        fetch_numel = sum(p.partition_numel() for p in params_to_gather)
 
-        if fetch_numel > 0:
+        if params_to_gather:
             event_name = __class__.FORWARD_FETCH_SUBMIT if forward else __class__.BACKWARD_FETCH_SUBMIT
             self._dump_param_ids(event_name, current_submodule.ds_id,
-                                 [(p.ds_id, p.ds_shape)
-                                  for p in params_to_fetch if p.ds_status == ZeroParamStatus.NOT_AVAILABLE])
+                                 [(p.ds_id, p.ds_shape) for p in params_to_gather])
             # self._dump_params(event_name, current_submodule, [p for p in params_to_fetch if p.ds_status == ZeroParamStatus.NOT_AVAILABLE])
 
             self.__profiler.start_event(event_name)
