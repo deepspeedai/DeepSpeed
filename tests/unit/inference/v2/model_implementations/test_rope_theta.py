@@ -55,6 +55,54 @@ def test_raises_instead_of_guessing_when_nothing_carries_it():
         _ = _Model(SimpleNamespace()).rope_theta
 
 
+def test_unwraps_a_per_layer_type_dict():
+    """A config that sets RoPE per layer type nests one level deeper.
+
+    ``standardize_rope_params`` leaves the class default at the top level of the same
+    dict, so reading the top level returns 10000.0 rather than the 1000000.0 the
+    checkpoint asked for.
+    """
+    config = SimpleNamespace(
+        rope_parameters={
+            "sliding_attention": {
+                "rope_theta": 1000000.0,
+                "rope_type": "default"
+            },
+            "full_attention": {
+                "rope_theta": 1000000.0,
+                "rope_type": "default"
+            },
+            "rope_theta": 10000.0,
+            "rope_type": "default",
+        })
+
+    assert _Model(config).rope_theta == 1000000.0
+
+
+def test_refuses_a_config_whose_layer_types_disagree():
+    """Callers feed one ``RotateHalfConfig.theta_base`` for the whole model.
+
+    Picking either base would be wrong for the layers using the other one, so this is
+    refused rather than resolved.
+    """
+    config = SimpleNamespace(
+        rope_parameters={
+            "sliding_attention": {
+                "rope_theta": 1000000.0,
+                "rope_type": "default"
+            },
+            "full_attention": {
+                "rope_theta": 16000000.0,
+                "rope_type": "default"
+            },
+            "rope_theta": 10000.0,
+            "rope_type": "default",
+        })
+
+    with pytest.raises(ValueError, match="different rope_theta per layer type"):
+        _ = _Model(config).rope_theta
+
+
 @pytest.mark.parametrize(
     "module_name, config_name",
     [

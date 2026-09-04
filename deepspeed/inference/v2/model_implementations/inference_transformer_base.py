@@ -171,16 +171,37 @@ class DSTransformerModelBase(DSInferenceModelBase):
 
         transformers 5.0 folded the rotary settings into ``config.rope_parameters`` and
         dropped the ``rope_theta`` attribute, so reading the attribute alone raises
-        against a stock config on 5.x. ``exaone4_5`` already reads both spellings; this
-        is the same lookup for every model that reaches it through this base.
+        against a stock config on 5.x.
+
+        A config that sets RoPE per layer type gets nested one level deeper, keyed by
+        the layer type, and ``standardize_rope_params`` leaves the class default at the
+        top level of the same dict. Reading the top level there returns that default
+        rather than anything the checkpoint asked for, so the nested entries win. Every
+        caller of this property feeds a single ``RotateHalfConfig.theta_base`` for the
+        whole model, so distinct per-layer bases cannot be represented and are refused
+        rather than silently resolved to one of them.
         """
         theta = getattr(self._config, "rope_theta", None)
         if theta is not None:
             return theta
 
         rope_parameters = getattr(self._config, "rope_parameters", None) or getattr(self._config, "rope_scaling", None)
-        if isinstance(rope_parameters, dict) and rope_parameters.get("rope_theta") is not None:
-            return rope_parameters["rope_theta"]
+        if isinstance(rope_parameters, dict):
+            per_layer = {
+                layer_type: parameters["rope_theta"]
+                for layer_type, parameters in rope_parameters.items()
+                if isinstance(parameters, dict) and parameters.get("rope_theta") is not None
+            }
+            if per_layer:
+                distinct = set(per_layer.values())
+                if len(distinct) > 1:
+                    raise ValueError(f"{type(self._config).__name__} sets a different rope_theta per "
+                                     f"layer type ({per_layer}); Inference V2 applies one rotary base "
+                                     "to every layer and cannot represent this config.")
+                return distinct.pop()
+
+            if rope_parameters.get("rope_theta") is not None:
+                return rope_parameters["rope_theta"]
 
         raise ValueError(f"{type(self._config).__name__} carries no rope_theta, either as an "
                          "attribute or in rope_parameters/rope_scaling.")
