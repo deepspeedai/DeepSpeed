@@ -21,13 +21,15 @@ Taken and modified for DeepSpeed from:
 Commit: 93ab4bea59dc5cbf97c079d313741866af4deac9
 """
 
+import logging
+
 import torch
 from dataclasses import dataclass
 from typing import Optional
 from enum import Enum
 from deepspeed.runtime.config_utils import DeepSpeedConfigObject
 from deepspeed import comm as dist
-from deepspeed.utils import logger
+from deepspeed.utils import log_dist, logger
 from deepspeed.runtime.utils import has_inf_or_nan
 
 INITIAL_LOSS_SCALE = 'init_scale'
@@ -147,7 +149,12 @@ class LossScalerBase(DeepSpeedConfigObject):
         return tuple(self.loss_scale * g for g in grad_in)
 
     def update_scale(self, overflow):
-        pass
+        # A static scale has nothing to update, but the step was still skipped.
+        # DynamicLossScaler overrides this and reports the skip itself.
+        if overflow:
+            log_dist("[deepspeed] OVERFLOW! Skipping step. Gradients are non-finite, weights were not updated.",
+                     ranks=[0],
+                     level=logging.WARNING)
 
     def scale_loss(self, loss):
         """ Scales the loss by the current loss scale.

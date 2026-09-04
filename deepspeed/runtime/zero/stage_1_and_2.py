@@ -2305,10 +2305,6 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         prev_scale = self.loss_scale
         self._update_scale(self.overflow)
         if self.overflow:
-            # DynamicLossScaler already logs this; a static scale (bf16 always) does not.
-            if not self.dynamic_loss_scale and dist.get_rank() == 0:
-                logger.warning("[deepspeed] OVERFLOW! Skipping step. "
-                               "Gradients are non-finite, weights were not updated.")
             see_memory_usage('After overflow before clearing gradients')
             self.zero_grad(set_to_none=True)
             self._release_preflattened_grad_buffers()
