@@ -20,6 +20,24 @@ from ..policy import (
 )
 
 
+def _get_rope_theta(self_attn):
+    """Read rope_theta from whichever place the installed transformers keeps it.
+
+    transformers < 5.0 exposes it as ``config.rope_theta``; 5.0 moved the rotary
+    settings into the ``rope_parameters`` dict and dropped the attribute, so the
+    older reads raise AttributeError against a stock LlamaConfig. Very old
+    versions kept it on the attention module itself.
+    """
+    config = getattr(self_attn, 'config', None)
+    if config is not None:
+        if hasattr(config, 'rope_theta'):
+            return config.rope_theta
+        rope_parameters = getattr(config, 'rope_parameters', None)
+        if rope_parameters is not None and 'rope_theta' in rope_parameters:
+            return rope_parameters['rope_theta']
+    return self_attn.rope_theta
+
+
 class DS_LLAMAContainer(MetaTensorContainer, HybridGatedMLPContainer, HybridSplitQKVContainer,
                         BaseTransformerContainer):
 
@@ -34,10 +52,7 @@ class DS_LLAMAContainer(MetaTensorContainer, HybridGatedMLPContainer, HybridSpli
         _config.rotate_half = True
         _config.rotate_every_two = False
         _config.rotary_dim = self.hidden_size // self.num_attention_heads
-        if hasattr(self.policy.client_module.self_attn, 'config'):
-            _config.rope_theta = self.policy.client_module.self_attn.config.rope_theta
-        else:
-            _config.rope_theta = self.policy.client_module.self_attn.rope_theta
+        _config.rope_theta = _get_rope_theta(self.policy.client_module.self_attn)
         self.module = DeepSpeedGPTInference(_config, mp_group=self.mp_group)
 
         return self.module
