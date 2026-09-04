@@ -177,10 +177,7 @@ def _run_one_step(backend, ep_size, seed, *, cleanup=True, activation_checkpoint
     for name, scores in score_tensors:
         if scores.grad is not None:
             score_gradient_parts.setdefault(name, []).append(scores.grad.detach().float())
-    score_gradients = {
-        name: torch.stack(parts).sum(dim=0)
-        for name, parts in score_gradient_parts.items()
-    }
+    score_gradients = {name: torch.stack(parts).sum(dim=0) for name, parts in score_gradient_parts.items()}
     input_gradient = hidden.grad.detach().float().clone()
     engine.step()
     parameter_deltas = {
@@ -242,18 +239,20 @@ def _assert_cleanup_results_close(actual, expected, *, compare_score_gradients):
     assert actual["gradients"].keys() == expected["gradients"].keys()
     assert actual["parameter_deltas"].keys() == expected["parameter_deltas"].keys()
     for name in actual["gradients"]:
-        torch.testing.assert_close(actual["gradients"][name],
-                                   expected["gradients"][name],
-                                   rtol=5e-2,
-                                   atol=5e-2,
-                                   msg=(f"gradient for {name}; max_diff="
-                                        f"{(actual['gradients'][name] - expected['gradients'][name]).abs().max().item()}"))
-        torch.testing.assert_close(actual["parameter_deltas"][name],
-                                   expected["parameter_deltas"][name],
-                                   rtol=5e-3,
-                                   atol=5e-4,
-                                   msg=(f"optimizer delta for {name}; max_diff="
-                                        f"{(actual['parameter_deltas'][name] - expected['parameter_deltas'][name]).abs().max().item()}"))
+        torch.testing.assert_close(
+            actual["gradients"][name],
+            expected["gradients"][name],
+            rtol=5e-2,
+            atol=5e-2,
+            msg=(f"gradient for {name}; max_diff="
+                 f"{(actual['gradients'][name] - expected['gradients'][name]).abs().max().item()}"))
+        torch.testing.assert_close(
+            actual["parameter_deltas"][name],
+            expected["parameter_deltas"][name],
+            rtol=5e-3,
+            atol=5e-4,
+            msg=(f"optimizer delta for {name}; max_diff="
+                 f"{(actual['parameter_deltas'][name] - expected['parameter_deltas'][name]).abs().max().item()}"))
 
 
 @pytest.mark.skipif(not _deepep_available(), reason="deep_ep is not installed")
