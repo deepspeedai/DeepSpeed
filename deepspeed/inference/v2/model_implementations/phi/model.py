@@ -97,7 +97,7 @@ class PhiInferenceModel(DSTransformerModelBase):
     @property
     def positional_embedding_config(self) -> Optional[RotateHalfConfig]:
         rotary_dim = int(self._config.partial_rotary_factor * self.head_size)
-        return RotateHalfConfig(rotate_dim=rotary_dim, theta_base=self._config.rope_theta)
+        return RotateHalfConfig(rotate_dim=rotary_dim, theta_base=self.rope_theta)
 
     """
     Forward implementations
