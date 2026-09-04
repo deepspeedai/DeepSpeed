@@ -2521,6 +2521,11 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             partitioned_param.data = q.data
 
     def _overflow_clean_up(self, prev_scale):
+        # DynamicLossScaler reports the skip itself; a static scale (always the case for bf16)
+        # does not, leaving the step silently skipped.
+        if not self.dynamic_loss_scale:
+            logger.warning(f"[deepspeed] OVERFLOW! Rank {dist.get_rank()} Skipping step. "
+                           "Gradients are non-finite, weights were not updated.")
         see_memory_usage('After overflow before clearing gradients', force=False)
         self.zero_grad(set_to_none=True)
 
