@@ -32,7 +32,12 @@ class DSVAE(CUDAGraph, torch.nn.Module):
         return self.static_decoder_output
 
     def _decode(self, x, return_dict=True, generator=None):
-        return self.vae.decode(x, return_dict=return_dict)
+        # Every diffusers pipeline passes `generator` to `vae.decode`, and a stochastic decoder such as
+        # ConsistencyDecoderVAE samples with it. Only forward it when one was given, since not every
+        # VAE's `decode` accepts the argument.
+        if generator is None:
+            return self.vae.decode(x, return_dict=return_dict)
+        return self.vae.decode(x, return_dict=return_dict, generator=generator)
 
     def _create_cuda_graph_decoder(self, *inputs, **kwargs):
         # warmup to create the workspace and cublas handle
@@ -119,7 +124,7 @@ class DSVAE(CUDAGraph, torch.nn.Module):
 
     def forward(self, *inputs, **kwargs):
         if self.enable_cuda_graph:
-            if self.cuda_graph_created:
+            if self.all_cuda_graph_created:
                 outputs = self._graph_replay(*inputs, **kwargs)
             else:
                 self._create_cuda_graph(*inputs, **kwargs)
@@ -147,5 +152,5 @@ class DSVAE(CUDAGraph, torch.nn.Module):
 
         self.all_cuda_graph_created = True
 
-    def _forward(self, sample, timestamp, encoder_hidden_states, return_dict=True):
-        return self.vae(sample, timestamp, encoder_hidden_states, return_dict)
+    def _forward(self, sample, sample_posterior=False, return_dict=True, generator=None):
+        return self.vae(sample, sample_posterior=sample_posterior, return_dict=return_dict, generator=generator)
