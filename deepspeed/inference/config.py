@@ -321,3 +321,15 @@ class DeepSpeedInferenceConfig(DeepSpeedConfigModel):
         if field_value and not deepspeed.HAS_TRITON:
             raise ValueError('Triton needs to be installed to use deepspeed with triton kernels')
         return field_value
+
+    @field_validator("max_out_tokens")
+    def validate_max_out_tokens(cls, field_value):
+        if field_value <= 0:
+            raise ValueError(f"max_out_tokens must be positive, got {field_value}")
+        return field_value
+
+    @field_validator("min_out_tokens")
+    def validate_min_out_tokens(cls, field_value):
+        if field_value <= 0:
+            raise ValueError(f"min_out_tokens must be positive, got {field_value}")
+        return field_value
