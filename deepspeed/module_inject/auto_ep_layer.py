@@ -497,6 +497,15 @@ class AutoEPMoELayer(nn.Module):
             param.allreduce = True
             mark_autoep_folding_router_parameter(param)
             param.ds_zero_placement_family = "replicated"
+            # Keep the router resident under ZeRO-3. Its gate weight is num_experts x hidden_size,
+            # which exceeds stage3_param_persistence_threshold (default 100_000) for any
+            # fine-grained MoE -- 524_288 for a 128-expert/4096-hidden model. ZeRO-3 then releases
+            # it once the parameter trace is in use (from step 2), and backward fails in
+            # zero/linear.py with a 0-length weight. Marking it here costs
+            # num_layers * num_experts * hidden * 2 bytes (~98 MB for a 94-layer 128-expert model)
+            # and, unlike escalating the whole block to a leaf module, does not change gather
+            # granularity for the experts.
+            param.ds_force_persist = True
         if self.shared_experts is not None:
             for param in self.shared_experts.parameters():
                 param.allreduce = True

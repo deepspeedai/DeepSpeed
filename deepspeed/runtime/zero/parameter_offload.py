@@ -322,7 +322,9 @@ class DeepSpeedZeRoOffload(object):
             if param.ds_numel + total_persistent_parameters > model_threshold:
                 continue
 
-            if param.ds_numel <= param_threshold:
+            # ds_force_persist lets a transform (e.g. AutoEP) keep a parameter resident even when
+            # it is larger than the size threshold, without escalating its whole module to a leaf.
+            if param.ds_numel <= param_threshold or getattr(param, "ds_force_persist", False):
                 params_count += 1
                 param.ds_persist = True
                 persistent_params.append(param)
