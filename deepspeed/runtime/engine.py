@@ -113,6 +113,7 @@ from deepspeed.utils.timer import NoopTimer, ThroughputTimer, SynchronizedWallCl
     STEP_GLOBAL_TIMER
 from deepspeed.utils.debug import debug_extract_module_and_param_names, debug_clear_module_and_param_names
 from deepspeed.monitor.monitor import MonitorMaster
+from deepspeed.monitor.utils import collect_monitor_config
 from deepspeed.runtime.progressive_layer_drop import ProgressiveLayerDrop
 from deepspeed.runtime.utils import clip_grad_norm_, compare_tensors_in_structures, maybe_loss_for_backward
 from deepspeed.runtime.eigenvalue import Eigenvalue
@@ -612,6 +613,9 @@ class DeepSpeedEngine(Module):
 
         if self.dist_backend is None:
             self.enable_backward_allreduce = False
+
+        if self.monitor.enabled:
+            self.monitor.update_config(collect_monitor_config(self))
 
     def _optimized_linear_offload_setup(self):
         self.optimized_linear_base_weight_sharding = False
