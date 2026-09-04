@@ -1584,11 +1584,8 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
 
     def set_norm_for_param_grad_in_gpu(self, param):
         param_id = self.get_param_id(param)
-        grad_accum = self.get_param_gradient_attribute(param)
-        if grad_accum is None:
-            accumulated_grad = param.grad
-        else:
-            accumulated_grad = grad_accum
+        accumulated_grad = self.get_param_gradient_attribute(param)
+        assert accumulated_grad is not None, "Gradient attribute is missing for a parameter being finalized"
 
         [i, source_offset, dest_offset, num_elements] = self.grad_position[param_id]
 

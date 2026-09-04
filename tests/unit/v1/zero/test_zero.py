@@ -24,6 +24,7 @@ import deepspeed
 from deepspeed.runtime.engine import DeepSpeedEngine
 from deepspeed.runtime.bf16_optimizer import BF16_Optimizer
 from deepspeed.runtime.zero.partition_parameters import ZeroParamStatus
+from deepspeed.runtime.zero.stage_1_and_2 import DeepSpeedZeroOptimizer
 from deepspeed.utils.zero_to_fp32 import load_state_dict_from_zero_checkpoint
 from deepspeed.runtime.zero.utils import ZeRORuntimeException
 from deepspeed.accelerator import get_accelerator
@@ -2018,3 +2019,36 @@ class TestZero3ClientModuleID(DistributedTest):
         post_init_m_id = model.id
         assert pre_init_m_id == post_init_m_id
         model.destroy()
+
+
+class TestSetNormForParamGradInGPU:
+
+    @pytest.mark.parametrize("use_grad_accum_attribute", [False, True])
+    def test_uses_selected_gradient_attribute(self, use_grad_accum_attribute):
+        param = Parameter(torch.ones(2))
+        param.grad = torch.tensor([3.0, 4.0]) if not use_grad_accum_attribute else None
+        param.grad_accum = torch.tensor([3.0, 4.0]) if use_grad_accum_attribute else None
+
+        optimizer = object.__new__(DeepSpeedZeroOptimizer)
+        optimizer.use_grad_accum_attribute = use_grad_accum_attribute
+        optimizer.param_id = {id(param): 0}
+        optimizer.grad_position = {0: [0, 0, 0, param.numel()]}
+        optimizer.norm_for_param_grads = {}
+
+        optimizer.set_norm_for_param_grad_in_gpu(param)
+
+        torch.testing.assert_close(optimizer.norm_for_param_grads[0], torch.tensor(5.0, dtype=torch.double))
+
+    def test_does_not_fallback_to_param_grad(self):
+        param = Parameter(torch.ones(2))
+        param.grad = torch.tensor([3.0, 4.0])
+        param.grad_accum = None
+
+        optimizer = object.__new__(DeepSpeedZeroOptimizer)
+        optimizer.use_grad_accum_attribute = True
+        optimizer.param_id = {id(param): 0}
+        optimizer.grad_position = {0: [0, 0, 0, param.numel()]}
+        optimizer.norm_for_param_grads = {}
+
+        with pytest.raises(AssertionError, match="Gradient attribute is missing"):
+            optimizer.set_norm_for_param_grad_in_gpu(param)
