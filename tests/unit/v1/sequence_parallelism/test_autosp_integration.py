@@ -15,7 +15,7 @@ the autosp_detector registry, then verifies two things:
 These tests require 2 GPUs.
 Run with:
 
-    NCCL_P2P_DISABLE=1 python -m pytest tests/unit/sequence_parallelism/test_autosp_integration.py -v
+    NCCL_P2P_DISABLE=1 python -m pytest tests/unit/v1/sequence_parallelism/test_autosp_integration.py -v
 """
 
 import torch
