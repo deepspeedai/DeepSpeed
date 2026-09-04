@@ -2521,8 +2521,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             partitioned_param.data = q.data
 
     def _overflow_clean_up(self, prev_scale):
-        # DynamicLossScaler reports the skip itself; a static scale does not, leaving the step
-        # silently skipped. Overflow is all-reduced, so rank 0 speaks.
+        # DynamicLossScaler already logs this; a static scale does not.
         if not self.dynamic_loss_scale and dist.get_rank() == 0:
             logger.warning("[deepspeed] OVERFLOW! Skipping step. "
                            "Gradients are non-finite, weights were not updated.")

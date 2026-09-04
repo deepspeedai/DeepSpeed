@@ -2305,8 +2305,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         prev_scale = self.loss_scale
         self._update_scale(self.overflow)
         if self.overflow:
-            # DynamicLossScaler reports the skip itself; a static scale (always the case for bf16)
-            # does not, leaving the step silently skipped. Overflow is all-reduced, so rank 0 speaks.
+            # DynamicLossScaler already logs this; a static scale (bf16 always) does not.
             if not self.dynamic_loss_scale and dist.get_rank() == 0:
                 logger.warning("[deepspeed] OVERFLOW! Skipping step. "
                                "Gradients are non-finite, weights were not updated.")
