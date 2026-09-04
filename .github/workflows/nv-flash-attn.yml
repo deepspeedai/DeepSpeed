@@ -5,7 +5,7 @@ on:
   pull_request:
     paths:
       - 'deepspeed/sequence/**'
-      - 'tests/unit/sequence_parallelism/**'
+      - 'tests/unit/v1/sequence_parallelism/**'
       - '.github/workflows/nv-flash-attn.yml'
   schedule:
     - cron: "0 0 * * *"
@@ -57,7 +57,7 @@ jobs:
         run: |
           unset TORCH_CUDA_ARCH_LIST # only jit compile for current arch
           cd tests
-          python -m pytest --color=yes --durations=0 --verbose -rF unit/sequence_parallelism/test_ulysses.py --torch_ver="2.6" --cuda_ver="12"
+          python -m pytest --color=yes --durations=0 --verbose -rF unit/v1/sequence_parallelism/test_ulysses.py --torch_ver="2.6" --cuda_ver="12"
       - name: Open GitHub issue if nightly CI fails
         if: ${{ failure() && (github.event_name == 'schedule') }}
         uses: JasonEtco/create-an-issue@v2

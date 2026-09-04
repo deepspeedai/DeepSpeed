@@ -111,9 +111,16 @@ def create_ddp_model(model_class, device, rank, dtype, seed=42, lr=1e-3, **model
     torch.manual_seed(seed)
     model = model_class(**model_kwargs)
     model = model.to(device=device, dtype=dtype)
-    model = DDP(model, device_ids=[rank], output_device=rank)
+    model = wrap_ddp_reference(model, device, rank)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     return model, optimizer
+
+
+def wrap_ddp_reference(model, device, rank):
+    # Only indexed devices take device_ids/output_device; CPU modules live on one shared device.
+    if torch.device(device).type == 'cpu':
+        return DDP(model)
+    return DDP(model, device_ids=[rank], output_device=rank)
 
 
 def create_deepspeed_engine(model_class, zero_stage, seed=42, gradient_accumulation_steps=1, **model_kwargs):
@@ -280,7 +287,7 @@ def run_frozen_checkpoint_comparison(model_cls,
     torch.manual_seed(42)
     model_ddp = model_cls(hidden_dim=hidden_dim, use_reentrant=use_reentrant, **model_kwargs)
     model_ddp = model_ddp.to(device=device, dtype=dtype)
-    model_ddp = DDP(model_ddp, device_ids=[rank], output_device=rank)
+    model_ddp = wrap_ddp_reference(model_ddp, device, rank)
     optimizer_ddp = torch.optim.Adam([p for p in model_ddp.parameters() if p.requires_grad], lr=1e-3)
 
     # DeepSpeed engine with ZeRO partitioning. Only trainable params go to the optimizer;
@@ -1370,7 +1377,7 @@ class TestZeroUserBackwardWithCheckpointing(DistributedTest):
         torch.manual_seed(42)
         model_ddp = CheckpointedModel(hidden_dim=hidden_dim, use_reentrant=use_reentrant)
         model_ddp = model_ddp.to(device=device, dtype=dtype)
-        model_ddp = DDP(model_ddp, device_ids=[rank], output_device=rank)
+        model_ddp = wrap_ddp_reference(model_ddp, device, rank)
         optimizer_ddp = torch.optim.Adam(model_ddp.parameters(), lr=1e-3)
 
         # Create DeepSpeed model with ZeRO-3
@@ -1444,7 +1451,7 @@ class TestZeroUserBackwardWithCheckpointing(DistributedTest):
         torch.manual_seed(42)
         model_ddp = CheckpointedModel(hidden_dim=hidden_dim, use_reentrant=use_reentrant)
         model_ddp = model_ddp.to(device=device, dtype=dtype)
-        model_ddp = DDP(model_ddp, device_ids=[rank], output_device=rank)
+        model_ddp = wrap_ddp_reference(model_ddp, device, rank)
         optimizer_ddp = torch.optim.Adam(model_ddp.parameters(), lr=1e-3)
 
         # Create DeepSpeed model with ZeRO-3
@@ -1516,7 +1523,7 @@ class TestZeroUserBackwardWithCheckpointing(DistributedTest):
         torch.manual_seed(42)
         model_ddp = CheckpointedModel(hidden_dim=hidden_dim, use_reentrant=use_reentrant)
         model_ddp = model_ddp.to(device=device, dtype=dtype)
-        model_ddp = DDP(model_ddp, device_ids=[rank], output_device=rank)
+        model_ddp = wrap_ddp_reference(model_ddp, device, rank)
         optimizer_ddp = torch.optim.Adam(model_ddp.parameters(), lr=1e-3)
 
         # Create DeepSpeed model WITH checkpointing, using PyTorch Adam
