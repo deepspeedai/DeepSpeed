@@ -149,8 +149,6 @@ class LossScalerBase(DeepSpeedConfigObject):
         return tuple(self.loss_scale * g for g in grad_in)
 
     def update_scale(self, overflow):
-        # A static scale has nothing to update, but the step was still skipped.
-        # DynamicLossScaler overrides this and reports the skip itself.
         if overflow:
             log_dist("[deepspeed] OVERFLOW! Skipping step. Gradients are non-finite, weights were not updated.",
                      ranks=[0],
