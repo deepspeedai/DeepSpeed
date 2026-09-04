@@ -737,14 +737,19 @@ def _upsample_flops_compute(*args, **kwargs):
         scale_factor = args[2]
     assert scale_factor is not None, "either size or scale_factor should be defined"
 
-    flops = input.numel()
     if isinstance(scale_factor, (list, tuple)):
         # see documentation of `F.interpolate`
         # the spatial dims are defined as the last `n-2` dims of the tensor
         assert len(scale_factor) == input.ndim - 2
-        flops *= _prod(scale_factor)
+        scales = scale_factor
     else:
-        flops *= scale_factor**(input.ndim - 2)
+        scales = (scale_factor, ) * (input.ndim - 2)
+
+    # Each output spatial dim is floored on its own, so the scales cannot be multiplied together
+    # and truncated once: `scale_factor=1.4` on a 32x32 input gives 44x44, not floor(32*32*1.96).
+    flops = _prod(input.shape[:2])
+    for dim, scale in zip(input.shape[2:], scales):
+        flops *= int(dim * scale)
 
     return int(flops), 0
 
