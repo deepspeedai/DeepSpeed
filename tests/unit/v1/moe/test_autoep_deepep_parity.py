@@ -16,10 +16,16 @@ mock-level test still passed; only comparing the two paths' numbers exposes it.
 Requires GPUs and a DeepEP build, so it is opt-in.
 """
 
+import functools
+
 import pytest
 import torch
+from torch.utils.checkpoint import checkpoint
 
 import deepspeed
+from deepspeed.module_inject import auto_ep_layer
+from deepspeed.module_inject.auto_ep_comm import destroy_exchanges
+from deepspeed.module_inject.auto_ep_layer import AutoEPMoELayer
 
 from unit.common import DistributedTest
 from unit.v1.moe.autoep_test_utils import (
@@ -44,7 +50,62 @@ def _deepep_available() -> bool:
     return True
 
 
-def _run_one_step(backend, ep_size, seed):
+def _install_legacy_deepep_prep(engine):
+    """Reproduce the pre-cleanup work without changing DeepEP mathematics."""
+    for module in engine.module.modules():
+        if not isinstance(module, AutoEPMoELayer):
+            continue
+        deepep_route = module._deepep_route
+
+        @functools.wraps(deepep_route)
+        def legacy_deepep_route(tokens, ro, *, _module=module, _deepep_route=deepep_route):
+            token_indices_sorted = torch.argsort(ro.selected_experts.view(-1), stable=True)
+            top_scores_sorted = ro.top_scores.view(-1)[token_indices_sorted]
+            ro.selected_experts.reshape(-1).index_select(0, token_indices_sorted)
+            routed_input = tokens[token_indices_sorted // _module.top_k]
+            auto_ep_layer.apply_scores_before_experts_if_enabled(routed_input,
+                                                                 top_scores_sorted,
+                                                                 score_apply=_module.score_apply)
+            auto_ep_layer.compute_split_plan(
+                selected_experts=ro.selected_experts,
+                num_experts=_module.num_experts,
+                ep_size=_module.ep_size,
+                num_local_experts=_module.num_local_experts,
+                ep_group=_module.ep_group,
+                num_tokens_per_expert=ro.num_tokens_per_expert,
+            )
+            return _deepep_route(tokens, ro)
+
+        module._deepep_route = legacy_deepep_route
+
+
+def _install_skewed_routing(engine):
+    for module in engine.module.modules():
+        if not isinstance(module, AutoEPMoELayer):
+            continue
+        router = module.router
+
+        def skewed_forward(hidden_states, _expert_bias, *, _router=router):
+            logits = _router.gate(hidden_states)
+            scores = torch.softmax(logits.float(), dim=-1).to(hidden_states.dtype)
+            pattern = torch.tensor([[1, 0], [1, 0], [2, 0], [1, 2]], dtype=torch.long, device=hidden_states.device)
+            selected_experts = pattern.repeat((hidden_states.shape[0] + pattern.shape[0] - 1) // pattern.shape[0],
+                                              1)[:hidden_states.shape[0]]
+            top_scores = scores.gather(1, selected_experts)
+            top_scores = top_scores / top_scores.sum(dim=-1, keepdim=True)
+            counts = torch.bincount(selected_experts.flatten(), minlength=_router.num_experts).to(torch.int32)
+            return top_scores, selected_experts, counts
+
+        router.forward = skewed_forward
+
+
+def _checkpoint_autoep_layers(engine):
+    for module in engine.module.modules():
+        if isinstance(module, AutoEPMoELayer):
+            module.forward = functools.partial(checkpoint, module.forward, use_reentrant=False)
+
+
+def _run_one_step(backend, ep_size, seed, *, cleanup=True, activation_checkpointing=False, skewed_routing=False):
     """Build a model on ``backend``, run one step, return its output and grads."""
     seed_everything(seed)
 
@@ -72,11 +133,37 @@ def _run_one_step(backend, ep_size, seed):
             elif name.endswith("experts.down_proj"):
                 parameter.mul_(INTERMEDIATE_SIZE**-0.5)
     engine, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config)
+    if backend == "deepep" and not cleanup:
+        _install_legacy_deepep_prep(engine)
+    if skewed_routing:
+        _install_skewed_routing(engine)
+    if activation_checkpointing:
+        _checkpoint_autoep_layers(engine)
 
     # Reseeded so the input is identical on every rank and across backends: the
     # comparison is of the transport, so nothing else may differ.
     seed_everything(seed)
-    hidden = torch.randn(1, SEQ_LEN, HIDDEN_SIZE, device=engine.device, dtype=engine_input_dtype(engine))
+    hidden = torch.randn(1, SEQ_LEN, HIDDEN_SIZE, device=engine.device,
+                         dtype=engine_input_dtype(engine)).requires_grad_(True)
+    parameters_before = {
+        name: parameter.detach().float().clone()
+        for name, parameter in engine.module.named_parameters()
+    }
+    routes = []
+    score_tensors = []
+    hooks = []
+    for name, module in engine.module.named_modules():
+        if not isinstance(module, AutoEPMoELayer):
+            continue
+
+        def capture_route(_module, _inputs, output, *, _name=name):
+            scores, selected_experts = output[:2]
+            if scores.requires_grad:
+                scores.retain_grad()
+                score_tensors.append((_name, scores))
+            routes.append((_name, selected_experts.detach().cpu().clone()))
+
+        hooks.append(module.router.register_forward_hook(capture_route))
 
     output = engine(hidden)
     loss = output.float().pow(2).mean()
@@ -86,7 +173,56 @@ def _run_one_step(backend, ep_size, seed):
         name: parameter.grad.detach().float().clone()
         for name, parameter in engine.module.named_parameters() if parameter.grad is not None
     }
-    return output.detach().float().clone(), gradients
+    score_gradients = [(name, scores.grad.detach().float().clone()) for name, scores in score_tensors
+                       if scores.grad is not None]
+    input_gradient = hidden.grad.detach().float().clone()
+    engine.step()
+    parameter_deltas = {
+        name: parameter.detach().float() - parameters_before[name]
+        for name, parameter in engine.module.named_parameters()
+    }
+    for hook in hooks:
+        hook.remove()
+    result = {
+        "output": output.detach().float().clone(),
+        "loss": loss.detach().float().clone(),
+        "routes": routes,
+        "input_gradient": input_gradient,
+        "score_gradients": score_gradients,
+        "gradients": gradients,
+        "parameter_deltas": parameter_deltas,
+    }
+    if backend == "deepep":
+        destroy_exchanges(engine.module)
+    return result
+
+
+def _assert_cleanup_results_close(actual, expected):
+    torch.testing.assert_close(actual["output"], expected["output"], rtol=2e-3, atol=2e-3)
+    torch.testing.assert_close(actual["loss"], expected["loss"], rtol=2e-3, atol=2e-3)
+    torch.testing.assert_close(actual["input_gradient"], expected["input_gradient"], rtol=5e-3, atol=5e-3)
+    assert len(actual["routes"]) == len(expected["routes"])
+    for (actual_name, actual_route), (expected_name, expected_route) in zip(actual["routes"], expected["routes"]):
+        assert actual_name == expected_name
+        assert torch.equal(actual_route, expected_route)
+    assert len(actual["score_gradients"]) == len(expected["score_gradients"])
+    for (actual_name, actual_grad), (expected_name, expected_grad) in zip(actual["score_gradients"],
+                                                                          expected["score_gradients"]):
+        assert actual_name == expected_name
+        torch.testing.assert_close(actual_grad, expected_grad, rtol=5e-3, atol=5e-3)
+    assert actual["gradients"].keys() == expected["gradients"].keys()
+    assert actual["parameter_deltas"].keys() == expected["parameter_deltas"].keys()
+    for name in actual["gradients"]:
+        torch.testing.assert_close(actual["gradients"][name],
+                                   expected["gradients"][name],
+                                   rtol=5e-3,
+                                   atol=5e-3,
+                                   msg=f"gradient for {name}")
+        torch.testing.assert_close(actual["parameter_deltas"][name],
+                                   expected["parameter_deltas"][name],
+                                   rtol=5e-3,
+                                   atol=5e-4,
+                                   msg=f"optimizer delta for {name}")
 
 
 @pytest.mark.skipif(not _deepep_available(), reason="deep_ep is not installed")
@@ -99,17 +235,22 @@ class TestDeepEPMatchesCollective(DistributedTest):
     def test_forward_and_backward_match_the_collective_path(self):
         skip_unless_h100_tests_enabled("DeepEP parity needs H100s and a DeepEP build")
 
-        collective_output, collective_grads = _run_one_step("comm", self.world_size, seed=1234)
-        deepep_output, deepep_grads = _run_one_step("deepep", self.world_size, seed=1234)
+        collective = _run_one_step("comm", self.world_size, seed=1234)
+        deepep = _run_one_step("deepep", self.world_size, seed=1234)
 
         # bfloat16 with a different reduction order, so exact equality is not
         # the bar. A dropped weight or a missing expert is orders of magnitude
         # larger than a reordered sum.
-        torch.testing.assert_close(deepep_output, collective_output, rtol=2e-2, atol=2e-2)
+        torch.testing.assert_close(deepep["output"], collective["output"], rtol=2e-2, atol=2e-2)
 
-        assert set(deepep_grads) == set(collective_grads), "the two paths produced gradients for different parameters"
-        for name, expected in collective_grads.items():
-            torch.testing.assert_close(deepep_grads[name], expected, rtol=5e-2, atol=5e-2, msg=f"gradient for {name}")
+        assert set(deepep["gradients"]) == set(
+            collective["gradients"]), "the two paths produced gradients for different parameters"
+        for name, expected in collective["gradients"].items():
+            torch.testing.assert_close(deepep["gradients"][name],
+                                       expected,
+                                       rtol=5e-2,
+                                       atol=5e-2,
+                                       msg=f"gradient for {name}")
 
     def test_the_router_gate_receives_gradients(self):
         """The gate silently never learning is what a dropped weight costs.
@@ -120,8 +261,42 @@ class TestDeepEPMatchesCollective(DistributedTest):
         """
         skip_unless_h100_tests_enabled("DeepEP parity needs H100s and a DeepEP build")
 
-        _, gradients = _run_one_step("deepep", self.world_size, seed=99)
+        result = _run_one_step("deepep", self.world_size, seed=99)
 
-        gate_grads = [value for name, value in gradients.items() if "gate" in name]
+        gate_grads = [value for name, value in result["gradients"].items() if "gate" in name]
         assert gate_grads, "the router gate received no gradient at all"
         assert any(value.abs().sum() > 0 for value in gate_grads), "the router gate's gradient was entirely zero"
+
+    @pytest.mark.parametrize(
+        "activation_checkpointing, skewed_routing",
+        [
+            (True, False),
+            (False, True),
+        ],
+    )
+    def test_cleanup_matches_legacy_preparation(self, activation_checkpointing, skewed_routing):
+        skip_unless_h100_tests_enabled("DeepEP cleanup parity needs H100s and a DeepEP build")
+        seed = 5678
+
+        legacy = _run_one_step(
+            "deepep",
+            self.world_size,
+            seed,
+            cleanup=False,
+            activation_checkpointing=activation_checkpointing,
+            skewed_routing=skewed_routing,
+        )
+        cleanup = _run_one_step(
+            "deepep",
+            self.world_size,
+            seed,
+            cleanup=True,
+            activation_checkpointing=activation_checkpointing,
+            skewed_routing=skewed_routing,
+        )
+
+        _assert_cleanup_results_close(cleanup, legacy)
+        if skewed_routing:
+            all_routes = torch.cat([route.flatten() for _, route in cleanup["routes"]])
+            assert torch.count_nonzero(all_routes == 3) == 0
+            assert torch.count_nonzero(all_routes == 1) > torch.count_nonzero(all_routes == 2)
