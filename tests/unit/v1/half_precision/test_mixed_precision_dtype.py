@@ -21,27 +21,16 @@ def _module_with_fp32_buffer(hidden_dim=8):
     return module
 
 
-# FP8/MX/NVFP4 storage dtypes, whichever this torch exposes.
 NARROW_DTYPES = [
-    getattr(torch, name) for name in ("float8_e4m3fn", "float8_e5m2", "float8_e4m3fnuz", "float8_e5m2fnuz",
-                                      "float8_e8m0fnu", "float4_e2m1fn_x2") if hasattr(torch, name)
-]
-
-# The subset that survives a full deepspeed.initialize. NCCL rejects e8m0 in the
-# parameter broadcast and float4 has no fill_, both before any casting happens.
-E2E_NARROW_DTYPES = [
     getattr(torch, name) for name in ("float8_e4m3fn", "float8_e5m2", "float8_e4m3fnuz", "float8_e5m2fnuz")
     if hasattr(torch, name)
 ]
 
+HELPER_ONLY_DTYPES = [getattr(torch, name) for name in ("float8_e8m0fnu", "float4_e2m1fn_x2") if hasattr(torch, name)]
+
 
 def _module_with_narrow_param(dtype, hidden_dim=8):
-    """Linear layer plus a frozen quantized weight and its scale buffer.
-
-    The quantized tensors sit in a submodule so that a standard-dtype parameter
-    comes first, as in a real model: ZeRO-3 takes the model dtype from
-    ``list(module.parameters())[0]``.
-    """
+    """Linear layer plus a submodule holding a frozen quantized weight and its scale."""
     quantized = torch.nn.Module()
     quantized.weight = torch.nn.Parameter(torch.zeros(hidden_dim, hidden_dim, dtype=dtype), requires_grad=False)
     quantized.register_buffer("scale", torch.zeros(hidden_dim, dtype=dtype))
@@ -125,9 +114,8 @@ class TestCastModuleMixedPrecision:
         assert all(p.dtype == torch.float32 for p in module.parameters())
         assert module.inv_freq.dtype == torch.bfloat16
 
-    @pytest.mark.parametrize("dtype", NARROW_DTYPES, ids=lambda d: str(d).rsplit(".", 1)[-1])
+    @pytest.mark.parametrize("dtype", HELPER_ONLY_DTYPES, ids=lambda d: str(d).rsplit(".", 1)[-1])
     def test_narrow_dtypes_preserved(self, dtype):
-        # NVFP4 has no copy_, so casting it used to raise rather than silently degrade.
         module = _module_with_narrow_param(dtype)
         DeepSpeedEngine._cast_module_mixed_precision(self._engine(module), torch.bfloat16, torch.bfloat16, False)
         assert module.quantized.weight.dtype == dtype
@@ -185,9 +173,8 @@ class TestMixedPrecisionDtypeEndToEnd(DistributedTest):
                                                model_parameters=model.parameters())
         assert engine.module.inv_freq.dtype == torch.bfloat16
 
-    @pytest.mark.parametrize("dtype", E2E_NARROW_DTYPES, ids=lambda d: str(d).rsplit(".", 1)[-1])
+    @pytest.mark.parametrize("dtype", NARROW_DTYPES, ids=lambda d: str(d).rsplit(".", 1)[-1])
     def test_narrow_dtypes_preserved(self, zero_stage, dtype):
-        """The same contract as above, through the public entry point."""
         model = _module_with_narrow_param(dtype, 1024)
         engine, _, _, _ = deepspeed.initialize(config=self._config(zero_stage),
                                                model=model,
