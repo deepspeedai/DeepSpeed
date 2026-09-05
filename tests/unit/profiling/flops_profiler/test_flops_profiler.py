@@ -308,3 +308,81 @@ def test_flops_profiler_counts_shared_module_once(shared):
     assert flops == 60000
     assert macs == 30000
     assert params == (10000 if shared else 30000)
+
+
+@pytest.mark.sequential
+@pytest.mark.parametrize("bias", [True, False])
+def test_linear_bias_flops(bias):
+    """A bias is added once per output element, exactly as the convolution counter charges for
+    its own bias."""
+    model = torch.nn.Linear(8, 16, bias=bias)
+    inputs = torch.randn(4, 8)
+
+    prof = FlopsProfiler(model)
+    prof.start_profile()
+    result = model(inputs)
+    prof.stop_profile()
+    flops, macs = prof.get_total_flops(), prof.get_total_macs()
+    prof.end_profile()
+
+    assert macs == 4 * 8 * 16
+    assert flops == 2 * macs + (result.numel() if bias else 0)
+
+
+@pytest.mark.sequential
+@pytest.mark.parametrize("lhs_shape, rhs_shape", [
+    ((8, ), (8, )),
+    ((4, 8), (8, )),
+    ((8, ), (8, 5)),
+    ((4, 8), (8, 5)),
+    ((3, 4, 8), (3, 8, 5)),
+    ((2, 1, 4, 8), (3, 8, 5)),
+])
+def test_matmul_flops(lhs_shape, rhs_shape):
+    """matmul costs one multiply-accumulate per output element per contracted element. The
+    singleton dimension matmul adds for a 1-D operand is dropped from the result, so it must not
+    be counted."""
+
+    class Matmul(torch.nn.Module):
+
+        def forward(self, lhs, rhs):
+            return torch.matmul(lhs, rhs)
+
+    model = Matmul()
+    lhs, rhs = torch.randn(*lhs_shape), torch.randn(*rhs_shape)
+
+    prof = FlopsProfiler(model)
+    prof.start_profile()
+    result = model(lhs, rhs)
+    prof.stop_profile()
+    flops, macs = prof.get_total_flops(), prof.get_total_macs()
+    prof.end_profile()
+
+    expected_macs = max(result.numel(), 1) * lhs_shape[-1]
+    assert macs == expected_macs
+    assert flops == 2 * expected_macs
+
+
+@pytest.mark.sequential
+@pytest.mark.parametrize("bias_shape", [(4, 5), (5, ), (1, 5), (4, 1), (1, )])
+def test_addmm_broadcast_bias_flops(bias_shape):
+    """The added tensor reaches every output element, so a broadcast bias costs one flop per
+    output element rather than one per element of its own shape."""
+
+    class Addmm(torch.nn.Module):
+
+        def forward(self, bias, mat1, mat2):
+            return torch.addmm(bias, mat1, mat2)
+
+    model = Addmm()
+    bias, mat1, mat2 = torch.randn(*bias_shape), torch.randn(4, 8), torch.randn(8, 5)
+
+    prof = FlopsProfiler(model)
+    prof.start_profile()
+    result = model(bias, mat1, mat2)
+    prof.stop_profile()
+    flops, macs = prof.get_total_flops(), prof.get_total_macs()
+    prof.end_profile()
+
+    assert macs == 4 * 8 * 5
+    assert flops == 2 * macs + result.numel()

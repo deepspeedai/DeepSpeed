@@ -523,7 +523,10 @@ def _prod(dims):
 def _linear_flops_compute(input, weight, bias=None):
     out_features = weight.shape[0]
     macs = input.numel() * out_features
-    return 2 * macs, macs
+    # A bias adds one flop per output element, the same way the convolution and addmm
+    # counters below charge for theirs.
+    bias_flops = 0 if bias is None else _prod(input.shape[:-1]) * out_features
+    return 2 * macs + bias_flops, macs
 
 
 def _relu_flops_compute(input, inplace=False):
@@ -770,7 +773,14 @@ def _matmul_flops_compute(input, other, *, out=None):
     """
     Count flops for the matmul operation.
     """
-    macs = _prod(input.shape) * other.shape[-1]
+    # One multiply-accumulate per output element per contracted element. A 1-D operand gets a
+    # singleton dimension prepended (left) or appended (right) that matmul drops again from the
+    # result, so counting over `input`'s own shape charges a dot product and a matrix-vector
+    # product for a dimension their outputs never have.
+    lhs = tuple(input.shape) if input.dim() > 1 else (1, ) + tuple(input.shape)
+    rhs = tuple(other.shape) if other.dim() > 1 else tuple(other.shape) + (1, )
+    output_shape = torch.broadcast_shapes(lhs[:-2], rhs[:-2]) + (lhs[-2], rhs[-1])
+    macs = _prod(output_shape) * lhs[-1]
     return 2 * macs, macs
 
 
@@ -779,7 +789,9 @@ def _addmm_flops_compute(input, mat1, mat2, *, beta=1, alpha=1, out=None):
     Count flops for the addmm operation.
     """
     macs = _prod(mat1.shape) * mat2.shape[-1]
-    return 2 * macs + _prod(input.shape), macs
+    # `input` is added to every output element, so a broadcast bias still costs one flop per
+    # output element, not one per element of its own shape.
+    return 2 * macs + mat1.shape[0] * mat2.shape[-1], macs
 
 
 def _einsum_flops_compute(equation, *operands):
@@ -832,7 +844,8 @@ def _tensor_addmm_flops_compute(self, mat1, mat2, *, beta=1, alpha=1, out=None):
     Count flops for the tensor addmm operation.
     """
     macs = _prod(mat1.shape) * mat2.shape[-1]
-    return 2 * macs + _prod(self.shape), macs
+    # Same as `_addmm_flops_compute`: the added tensor covers the whole output.
+    return 2 * macs + mat1.shape[0] * mat2.shape[-1], macs
 
 
 def _mul_flops_compute(input, other, *, out=None):
