@@ -32,6 +32,7 @@ def _reset_offload_pass_globals():
     # The plan lives in module globals; reset it so tests pass in any order.
     yield
     offload_pass._offload_plans.clear()
+    offload_pass._resident_bytes.clear()
     offload_pass.reset_offload_activation_stats()
     offload_pass._h2d_bytes_per_sec = None
 
@@ -465,6 +466,198 @@ def test_fwd_skips_values_that_alias_another_tensor(forced_budget):
     _run_pass(gm, _make_profile(graph), bwd=False)
 
     assert [n for n in _node_names(graph) if n.startswith("offload_")] == ["offload_act_1"]
+
+
+def _make_view_graph(base_is_saved, view_val=None):
+    """x -> relu(base) -> aten.view(viewed) -> sum(out), shaped the way the partitioner leaves it.
+
+    AOTAutograd saves whichever values the backward pass reads, and that is often the view alone.
+    The view is then the last value holding the storage `base` allocated, so moving it to the host
+    releases the whole allocation.
+    """
+    graph = torch.fx.Graph()
+    x = graph.placeholder("x")
+    x.meta["val"] = _meta_tensor(16)
+
+    base = _add_node(graph, torch.relu, (x, ), "base", LARGE_NUMEL)
+    viewed = graph.create_node('call_function', torch.ops.aten.view.default, (base, [LARGE_NUMEL]), {}, name="viewed")
+    viewed.meta["val"] = _meta_tensor(LARGE_NUMEL) if view_val is None else view_val
+    out = _add_node(graph, torch.sum, (viewed, ), "out", 1)
+
+    graph.output((out, base, viewed) if base_is_saved else (out, viewed))
+    return graph
+
+
+def test_eligible_includes_saved_view_when_base_is_not_saved():
+    _ensure_dc_ops()
+    # Nothing but the view points at that storage once the forward pass ends: `base` is not saved,
+    # not returned, and read by nothing else. Dropping the view here is what left the memory floor
+    # growing about 5GB per thousand tokens per GPU on a 2xH200 Qwen3.5-9B run.
+    graph = _make_view_graph(base_is_saved=False)
+
+    eligible = offload_pass._eligible_activations(graph, 0, 1, {})
+
+    assert [node.name for node, _, _ in eligible] == ["viewed"]
+    assert offload_pass._skipped["alias"] == 0
+
+
+def test_eligible_skips_saved_view_when_base_is_also_saved():
+    _ensure_dc_ops()
+    # `base` is saved too, so it holds the storage on the device whatever the view does. Copying
+    # the view out would return nothing and cost a copy each way.
+    graph = _make_view_graph(base_is_saved=True)
+
+    eligible = offload_pass._eligible_activations(graph, 0, 1, {})
+
+    assert [node.name for node, _, _ in eligible] == ["base"]
+    assert offload_pass._skipped["alias"] == LARGE_SIZE
+
+
+def test_eligible_skips_a_view_whose_elements_overlap():
+    _ensure_dc_ops()
+    # An expanded view repeats one row with a stride of zero. The host buffer is built with
+    # empty_like, which allocates one element per entry -- all four rows, four times the storage
+    # the view actually holds -- so the round trip would copy four times what it releases.
+    expanded = torch.empty(LARGE_NUMEL, device="meta").expand(4, LARGE_NUMEL)
+    graph = _make_view_graph(base_is_saved=False, view_val=expanded)
+
+    eligible = offload_pass._eligible_activations(graph, 0, 1, {})
+
+    assert eligible == []
+    assert offload_pass._skipped["alias"] == 0
+    assert offload_pass._skipped["overlapping"] == 4 * LARGE_SIZE
+
+
+def test_overlap_check_matches_what_empty_like_would_allocate():
+    """The predicate has one job: reject a tensor empty_like would allocate more storage for.
+
+    csrc/compile/z3.cpp builds both the pinned host buffer and the reloaded device tensor with
+    at::empty_like, which allocates one element per entry. A tensor whose entries overlap in
+    storage therefore costs more to move than it releases.
+    """
+    _ensure_dc_ops()
+    base = torch.empty(64, 64)
+    cases = {
+        "contiguous": base,
+        "transposed": base.t(),
+        "channels_last": torch.empty(2, 3, 4, 4).to(memory_format=torch.channels_last),
+        "dense prefix": base.view(-1)[:1024],
+        "strided slice": base[:, ::2],
+        "single row": base[0:1, :],
+        "one piece of a split": torch.empty(2, 8, 24).chunk(3, dim=-1)[0],
+        "expanded": torch.empty(64).expand(64, 64),
+        "broadcast row": torch.empty(1000).expand(4, 1000),
+    }
+    for name, tensor in cases.items():
+        node = torch.fx.Graph().placeholder("x")
+        node.meta["val"] = tensor
+        storage_elements = tensor.untyped_storage().nbytes() // tensor.element_size()
+        costs_more_than_it_holds = torch.empty_like(tensor).numel() > storage_elements
+        assert offload_pass._has_non_overlapping_storage(node) == (not costs_more_than_it_holds), name
+
+
+def test_eligible_skips_a_zero3_gathered_parameter():
+    """A gathered weight reaches the forward graph through an aliasing op, and must not be moved.
+
+    zero3_compile.add_gather_and_release fuses a narrowing dtype cast into the all-gather and
+    rewires the cast's users -- the output node included -- to the wait node. The saved value is
+    then dc.wait_allgather itself, which is in the no-copy set, so it is an alias whose root is the
+    all-gather. ZeRO owns that buffer and release_param returns it; copying it out frees nothing
+    and costs a pinned host buffer plus a reload allocation on every step.
+    """
+    _ensure_dc_ops()
+    graph = torch.fx.Graph()
+    param = graph.placeholder("primals_1")
+    param.meta["val"] = _meta_tensor(LARGE_NUMEL)
+
+    gathered = graph.create_node('call_function',
+                                 torch.ops.dc.allgather_param.default, (param, 0, 7), {},
+                                 name="allgather_ds_param_primals_1_7")
+    gathered.meta["val"] = _meta_tensor(LARGE_NUMEL)
+    wait = graph.create_node('call_function',
+                             torch.ops.dc.wait_allgather.default, (gathered, 0, 7), {},
+                             name="wait_allgather_ds_param__primals_1_7")
+    wait.meta["val"] = _meta_tensor(LARGE_NUMEL)
+    out = _add_node(graph, torch.sum, (wait, ), "out", 1)
+    graph.output((out, wait))
+
+    eligible = offload_pass._eligible_activations(graph, 0, 1, {})
+
+    assert eligible == []
+    assert offload_pass._skipped["alias"] == LARGE_SIZE
+
+
+def test_eligible_skips_a_view_of_a_module_constant():
+    """A get_attr reads a tensor the GraphModule owns for the life of the process.
+
+    Attention masks and rotary embedding tables arrive this way. The storage stays allocated
+    whatever this pass does, so a view of one is not the last holder of anything.
+    """
+    _ensure_dc_ops()
+    graph = torch.fx.Graph()
+    constant = graph.get_attr("_tensor_constant0")
+    constant.meta["val"] = _meta_tensor(LARGE_NUMEL)
+    viewed = graph.create_node('call_function',
+                               torch.ops.aten.view.default, (constant, [LARGE_NUMEL]), {},
+                               name="viewed")
+    viewed.meta["val"] = _meta_tensor(LARGE_NUMEL)
+    out = _add_node(graph, torch.sum, (viewed, ), "out", 1)
+    graph.output((out, viewed))
+
+    eligible = offload_pass._eligible_activations(graph, 0, 1, {})
+
+    assert eligible == []
+    assert offload_pass._skipped["alias"] == LARGE_SIZE
+
+
+def test_eligible_follows_unsafe_view_to_the_tensor_it_aliases():
+    """aten._unsafe_view declares a fresh tensor return but hands back a view.
+
+    AOTAutograd emits it after nearly every matmul. Reading only the schema, as get_no_copy_ops
+    does, would make it look like a tensor of its own, and the pass would copy it out while the
+    tensor it points into is still saved and resident.
+    """
+    _ensure_dc_ops()
+    graph = torch.fx.Graph()
+    x = graph.placeholder("x")
+    x.meta["val"] = _meta_tensor(16)
+    base = _add_node(graph, torch.relu, (x, ), "base", LARGE_NUMEL)
+    unsafe = graph.create_node('call_function',
+                               torch.ops.aten._unsafe_view.default, (base, [LARGE_NUMEL]), {},
+                               name="unsafe")
+    unsafe.meta["val"] = _meta_tensor(LARGE_NUMEL)
+    out = _add_node(graph, torch.sum, (unsafe, ), "out", 1)
+    graph.output((out, base, unsafe))
+
+    eligible = offload_pass._eligible_activations(graph, 0, 1, {})
+
+    assert [node.name for node, _, _ in eligible] == ["base"]
+    assert offload_pass._skipped["alias"] == LARGE_SIZE
+
+
+def test_a_saved_view_is_charged_for_the_allocation_it_holds_not_its_own_bytes():
+    """Keeping a view resident retains the whole allocation it points into.
+
+    The planner spends headroom to bring values back. Charging the view's own bytes would let a
+    quarter-sized slice retain four times the memory the planner thought it had spent.
+    """
+    _ensure_dc_ops()
+    quarter = LARGE_NUMEL // 4
+    graph = torch.fx.Graph()
+    x = graph.placeholder("x")
+    x.meta["val"] = _meta_tensor(16)
+    base = _add_node(graph, torch.relu, (x, ), "base", LARGE_NUMEL)
+    sliced = graph.create_node('call_function', torch.ops.aten.slice.Tensor, (base, 0, 0, quarter), {}, name="sliced")
+    # A prefix of a contiguous tensor: its elements do not overlap, and it is a quarter the size
+    # of the allocation it keeps alive.
+    sliced.meta["val"] = torch.empty(LARGE_NUMEL, device="meta")[:quarter]
+    out = _add_node(graph, torch.sum, (sliced, ), "out", 1)
+    graph.output((out, sliced))
+
+    eligible = offload_pass._eligible_activations(graph, 0, 1, {})
+
+    assert [(node.name, copied, resident)
+            for node, copied, resident in eligible] == [("sliced", LARGE_SIZE // 4, LARGE_SIZE)]
 
 
 def test_fwd_skips_values_already_on_the_host(forced_budget):

@@ -3,6 +3,7 @@
 
 # DeepSpeed Team
 
+import functools
 import os
 import time
 from collections import OrderedDict, defaultdict
@@ -61,6 +62,12 @@ _activation_ops_lib = None
 # The backward graph receives those tensors as placeholders carrying the same names, which is how
 # the two halves of the pass find each other.
 _offload_plans: Dict[int, "OrderedDict[str, Tuple[int, int]]"] = {}
+
+# Bytes each planned value keeps allocated if it stays on the device, keyed the same way. This is
+# not the size of the copy: a saved view holds its whole base allocation alive, so a 4KB row of a
+# 4MB tensor costs 4MB of residency and 4KB of copy. The planner spends headroom in residency
+# bytes, while the backward pass schedules its copies in copy bytes.
+_resident_bytes: Dict[int, Dict[str, int]] = {}
 
 # Value ids identify a host buffer inside the C++ executor. They never repeat, so a buffer holding
 # a tensor of one shape is never reused for another.
@@ -279,8 +286,120 @@ def _skip_bytes(node) -> int:
         return 0
 
 
-def _eligible_activations(graph: Graph, graph_id: int, num_fwd_outputs, param_manager) -> List[Tuple[Node, int]]:
-    """Every saved activation this pass is allowed to move, largest first."""
+@functools.lru_cache
+def _aliasing_ops():
+    """Ops whose output shares storage with an input, for the purpose of tracking that storage.
+
+    get_no_copy_ops() reads the aten schemas, and aten._unsafe_view declares a fresh tensor return
+    even though it hands back a view -- that declaration is the entire point of the op. It shares
+    storage all the same, and AOTAutograd emits it after nearly every matmul, so this pass has to
+    know about it. It is added here rather than in get_no_copy_ops() because that set also decides
+    where the ZeRO-3 passes release parameters, and this pass has no business changing that.
+    """
+    return frozenset(get_no_copy_ops() | {torch.ops.aten._unsafe_view.default})
+
+
+def _zero3_gathered_param_ops():
+    """The op that produces a ZeRO-3 gathered parameter buffer, empty if DeepCompile is not built."""
+    try:
+        return {torch.ops.dc.allgather_param.default}
+    except (AttributeError, RuntimeError):
+        return set()
+
+
+def _alias_root(node: Node, no_copy_ops, cache: Dict[Node, Node]) -> Node:
+    """The node that allocated the storage `node` reads.
+
+    An aliasing op returns a tensor that shares the storage of its first tensor input, so following
+    that input back through the aliasing ops reaches the node that allocated the memory. A node
+    whose op is not an aliasing one owns its storage and is its own root. Ops that alias an input
+    other than the first are rare enough that they are not tracked; such a node is treated as
+    owning its storage, which only costs a copy that frees nothing.
+    """
+    chain = []
+    current = node
+    while current not in cache:
+        if current.target not in no_copy_ops:
+            break
+        base = next((arg for arg in current.all_input_nodes if isinstance(arg.meta.get("val"), torch.Tensor)), None)
+        if base is None or base in chain:
+            break
+        chain.append(current)
+        current = base
+
+    root = cache.get(current, current)
+    for aliasing_node in chain:
+        cache[aliasing_node] = root
+    cache[current] = root
+    return root
+
+
+def _storage_keeper_counts(graph: Graph, saved_nodes: List[Node], returned_to_caller, no_copy_ops,
+                           cache: Dict[Node, Node]) -> Dict[Node, int]:
+    """How many values that outlive the forward pass hold each storage.
+
+    Moving a saved value to the host releases its memory only if nothing else still points at that
+    storage. Four kinds of value still do:
+
+    - the graph's own inputs, which the caller owns;
+    - get_attr nodes, whose tensor the GraphModule holds for the life of the process (attention
+      masks, rotary embedding tables, and the other constants inductor bakes in);
+    - ZeRO-3 gathered parameters, whose buffer belongs to ZeRO's own registry and is released by
+      release_param, not by this graph. The forward graph reaches one of these through
+      dc.wait_allgather, which is an aliasing op, so without this the gathered weight looks like
+      an ordinary activation with nothing else holding it;
+    - the values the graph returns to the caller, and every other saved value.
+    """
+    counts = defaultdict(int)
+    gather_ops = _zero3_gathered_param_ops()
+    keepers = [node for node in graph.nodes if node.op in ("placeholder", "get_attr") or node.target in gather_ops]
+    keepers.extend(returned_to_caller)
+    keepers.extend(saved_nodes)
+    for keeper in keepers:
+        counts[_alias_root(keeper, no_copy_ops, cache)] += 1
+    return counts
+
+
+def _has_non_overlapping_storage(node: Node) -> bool:
+    """Whether the tensor's elements each occupy their own place in storage.
+
+    Both the host buffer and the reloaded device tensor are made with `empty_like`, which allocates
+    one element per logical element. A tensor whose elements overlap holds fewer elements of
+    storage than it has entries -- `expand` is the ordinary case, repeating a row with a stride of
+    zero -- so the round trip would copy and allocate several times what the value actually keeps
+    alive. An expanded row of 1000 floats seen as 4x1000 copies 16KB each way to release 4KB.
+
+    Strides that are merely non-contiguous are fine and are deliberately allowed. `empty_like` does
+    return a contiguous tensor for a strided slice or one piece of a split, so the reload hands the
+    backward pass different strides than the traced metadata promises. That was measured on torch
+    2.6.0+cu124 with torch._inductor.config.size_asserts off, as init_z3.py sets it: an opaque op
+    whose meta claims stride (576, 8, 72, 1) while returning (192, 8, 24, 1), consumed by matmul,
+    batched matmul, linear and reductions under torch.compile, matched eager exactly in every case.
+    """
+    val = node.meta.get("val")
+    if not isinstance(val, torch.Tensor):
+        return False
+    try:
+        shape, strides = val.shape, val.stride()
+    except (RuntimeError, NotImplementedError):
+        # Sparse, nested and other non-strided layouts have no strides to compare.
+        return False
+    # Symbolic sizes or strides cannot be checked here; the static-size rule rejects them anyway.
+    if any(not isinstance(dim, int) for dim in (*shape, *strides)):
+        return False
+
+    # How many elements of storage the tensor spans, against how many entries it has.
+    span = 1 + sum((size - 1) * abs(stride) for size, stride in zip(shape, strides))
+    return val.numel() <= span
+
+
+def _eligible_activations(graph: Graph, graph_id: int, num_fwd_outputs, param_manager) -> List[Tuple[Node, int, int]]:
+    """Every saved activation this pass is allowed to move, largest first.
+
+    Each entry is (node, bytes copied, bytes kept allocated if the value stays resident). The two
+    sizes differ for a view: the copy carries the view's own bytes while residency holds the whole
+    allocation the view points into.
+    """
     output_node = get_output_node(graph)
     outputs = output_node.args[0]
     if not isinstance(outputs, (list, tuple)):
@@ -296,7 +415,7 @@ def _eligible_activations(graph: Graph, graph_id: int, num_fwd_outputs, param_ma
 
     returned_to_caller = set(node for node in outputs[:num_fwd_outputs] if isinstance(node, Node))
     param_names = set(param_manager[graph_id].param_names) if graph_id in param_manager else set()
-    no_copy_ops = get_no_copy_ops()
+    no_copy_ops = _aliasing_ops()
 
     # No profile means no peak to plan against, and the usual reason it is missing is that profiling
     # itself ran out of memory -- which is evidence of exactly the pressure this pass relieves. Take
@@ -306,6 +425,8 @@ def _eligible_activations(graph: Graph, graph_id: int, num_fwd_outputs, param_ma
     _skipped.clear()
 
     saved_nodes = [node for node in outputs[num_fwd_outputs:] if isinstance(node, Node)]
+    alias_roots: Dict[Node, Node] = {}
+    storage_keepers = _storage_keeper_counts(graph, saved_nodes, returned_to_caller, no_copy_ops, alias_roots)
 
     candidates = []
     seen = set()
@@ -324,9 +445,20 @@ def _eligible_activations(graph: Graph, graph_id: int, num_fwd_outputs, param_ma
             _skipped["param_or_output"] += _skip_bytes(node)
             continue
         # A value that only aliases another tensor shares its storage, so copying it out frees
-        # nothing while the tensor it aliases is still live.
-        if node.target in no_copy_ops:
+        # nothing while another value that outlives the forward pass still points at that storage.
+        # When no other value does -- AOTAutograd routinely saves the view and not the tensor it
+        # came from -- this view is the last holder, and moving it releases the whole allocation.
+        root = _alias_root(node, no_copy_ops, alias_roots)
+        # root is node for an aliasing op only when the walk could not find the tensor it aliases,
+        # and an unknown base is not a base this pass may assume is dead.
+        if node.target in no_copy_ops and (root is node or storage_keepers[root] > 1):
             _skipped["alias"] += _skip_bytes(node)
+            continue
+        # Checked for every candidate, not only the ones the rule above let through: a piece of a
+        # split reaches here through operator.getitem, which is not an aliasing op, so the alias
+        # rule never sees it even though the tensor is a view.
+        if not _has_non_overlapping_storage(node):
+            _skipped["overlapping"] += _skip_bytes(node)
             continue
         # Only floating-point values are activations. The rest are bookkeeping the backward pass
         # needs -- indices, masks, and the random-number state that attention saves. That state is
@@ -339,7 +471,11 @@ def _eligible_activations(graph: Graph, graph_id: int, num_fwd_outputs, param_ma
         if size is None or size < min_size:
             _skipped["too_small" if size is not None else "no_static_size"] += _skip_bytes(node)
             continue
-        candidates.append((node, size))
+        # Keeping this value resident holds its whole allocation, which for a view is the base's.
+        # The alias rule above guarantees this view is the only saved value pointing there, so no
+        # two entries ever charge the planner for the same bytes.
+        resident = _static_tensor_size(root) if root is not node else size
+        candidates.append((node, size, resident if resident is not None else size))
 
     if _skipped:
         breakdown = " ".join(f"{k}={v}" for k, v in sorted(_skipped.items()))
@@ -400,6 +536,7 @@ def _offload_everything_fwd(gm: GraphModule, graph_id: int, profiling_results, p
     graph = gm.graph
     # A later compile phase plans again from the original graph, so drop any earlier plan first.
     _offload_plans[graph_id] = OrderedDict()
+    _resident_bytes[graph_id] = {}
 
     _report_partitioner_split(graph, graph_id, profiling_results[graph_id].num_fwd_outputs)
 
@@ -408,7 +545,7 @@ def _offload_everything_fwd(gm: GraphModule, graph_id: int, profiling_results, p
         return None
 
     output_node = get_output_node(graph)
-    for node, size in selected:
+    for node, size, resident in selected:
         value_id = _new_value_id()
         # The graph is re-read for every tensor because each insertion changes it.
         insert_before = _insertion_point_after_last_use(list(graph.nodes), node)
@@ -431,11 +568,13 @@ def _offload_everything_fwd(gm: GraphModule, graph_id: int, profiling_results, p
 
         output_node.replace_input_with(node, wait_node)
         _offload_plans[graph_id][node.name] = (value_id, size)
+        _resident_bytes.setdefault(graph_id, {})[node.name] = resident
         _stats["offload_nodes"] += 1
 
     graph.lint()
     print_rank_0(f"offload_activation graph_id={graph_id} floor: moved all {len(selected)} eligible "
-                 f"activations ({sum(size for _, size in selected) / 1e9:.1f}GB) before profiling")
+                 f"activations ({sum(size for _, size, _ in selected) / 1e9:.1f}GB copied, "
+                 f"{sum(resident for _, _, resident in selected) / 1e9:.1f}GB released) before profiling")
     # Returned, not None: the caller profiles what it gets back, and that profile is the floor the
     # planner needs.
     return gm
@@ -545,16 +684,21 @@ def _plan_against_floor_fwd(gm: GraphModule, graph_id: int, profiling_results) -
     print_rank_0(f"offload_activation graph_id={graph_id} {margin_note} "
                  f"floor_peak={floor_peak} budget={budget} headroom={headroom}")
 
-    # Largest first: each one returned buys back the most memory per copy avoided.
+    # Largest first: each one returned buys back the most memory per copy avoided. What it costs
+    # is residency, which for a saved view is the whole allocation the view points into, not the
+    # view's own bytes. Charging the copy size here would let a handful of small views of large
+    # tensors retain many times the headroom the planner thinks it spent.
+    resident_bytes = _resident_bytes.get(graph_id, {})
     by_size = sorted(plan.items(), key=lambda item: item[1][1], reverse=True)
     kept_resident = 0
     for name, (_, size) in by_size:
-        if size > headroom:
+        cost = resident_bytes.get(name, size)
+        if cost > headroom:
             continue
         _bring_back(gm.graph, name)
         del plan[name]
-        headroom -= size
-        kept_resident += size
+        headroom -= cost
+        kept_resident += cost
         _stats["offload_nodes"] -= 1
 
     moved_bytes = sum(size for _, size in plan.values())
