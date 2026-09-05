@@ -1308,7 +1308,9 @@ class TestModelDetectionAndReplacement:
         FakeGatheredParameters.calls = []
         monkeypatch.setattr(ep_repack, "GatheredParameters", FakeGatheredParameters)
         monkeypatch.setattr(get_preset_adapter("deepseek_v3"), "_installed_transformers_version", lambda: "5.0.0")
+
         model = MockDeepSeekV3Transformer(num_layers=1, num_experts=8)
+
         auto_ep = AutoEP(model, _runtime_config(enabled=True, autoep_size=2))
         specs = auto_ep.ep_parser()
 
@@ -1317,6 +1319,7 @@ class TestModelDetectionAndReplacement:
         assert specs[0].expert_storage == "module_list"
         assert specs[0].expert_w1_name == "gate_proj"
         assert specs[0].has_shared_experts is True
+        assert specs[0].e_score_correction_bias_path is None
 
         source_bias = torch.arange(8, dtype=torch.float32)
         model.model.layers[0].mlp.gate.e_score_correction_bias = nn.Parameter(source_bias.clone())
@@ -1332,6 +1335,59 @@ class TestModelDetectionAndReplacement:
         assert replaced.router.e_score_correction_bias is not None
         torch.testing.assert_close(replaced.router.e_score_correction_bias, source_bias)
         assert ["router.e_score_correction_bias"] in [call["names"] for call in FakeGatheredParameters.calls]
+
+    @pytest.mark.parametrize(
+        "owner_path,bias_kind,persistent",
+        [
+            ("gate", "buffer", True),
+            ("", "buffer", False),
+            ("router", "buffer", True),
+            ("gate.moe_statics", "parameter", True),
+        ],
+    )
+    def test_score_correction_bias_location_and_registration(self, monkeypatch, owner_path, bias_kind, persistent):
+        monkeypatch.setattr(get_preset_adapter("deepseek_v3"), "_installed_transformers_version", lambda: "5.0.0")
+        model = MockDeepSeekV3Transformer(num_layers=1, num_experts=8)
+        source = model.model.layers[0].mlp
+        owner = source
+        for part in owner_path.split(".") if owner_path else ():
+            if not hasattr(owner, part):
+                owner.add_module(part, nn.Module())
+            owner = getattr(owner, part)
+
+        source_bias = torch.arange(8, dtype=torch.float32)
+        if bias_kind == "parameter":
+            owner.e_score_correction_bias = nn.Parameter(source_bias.clone(), requires_grad=False)
+        else:
+            owner.register_buffer("e_score_correction_bias", source_bias.clone(), persistent=persistent)
+
+        auto_ep = AutoEP(model, _runtime_config(enabled=True, autoep_size=2))
+        spec = auto_ep.ep_parser()[0]
+        assert spec.e_score_correction_bias_path == owner_path
+
+        auto_ep.replace_moe_layer(spec, ep_size=2, ep_rank=0)
+
+        replaced_bias = model.model.layers[0].mlp.router.e_score_correction_bias
+        torch.testing.assert_close(replaced_bias, source_bias)
+        assert replaced_bias.requires_grad is False
+        if bias_kind == "parameter":
+            assert dict(
+                model.model.layers[0].mlp.router.named_parameters())["e_score_correction_bias"] is replaced_bias
+            assert "e_score_correction_bias" not in dict(model.model.layers[0].mlp.router.named_buffers())
+        else:
+            assert dict(model.model.layers[0].mlp.router.named_buffers())["e_score_correction_bias"] is replaced_bias
+            assert "e_score_correction_bias" not in dict(model.model.layers[0].mlp.router.named_parameters())
+            assert ("e_score_correction_bias" in model.model.layers[0].mlp.router.state_dict()) is persistent
+
+    def test_score_correction_bias_multiple_locations_are_rejected(self, monkeypatch):
+        monkeypatch.setattr(get_preset_adapter("deepseek_v3"), "_installed_transformers_version", lambda: "5.0.0")
+        model = MockDeepSeekV3Transformer(num_layers=1, num_experts=8)
+        source = model.model.layers[0].mlp
+        source.register_buffer("e_score_correction_bias", torch.zeros(8))
+        source.gate.register_buffer("e_score_correction_bias", torch.ones(8))
+
+        with pytest.raises(ValueError, match="e_score_correction_bias in multiple locations"):
+            AutoEP(model, _runtime_config(enabled=True, autoep_size=2)).ep_parser()
 
 
 def _eager_pep604_lines(module):
