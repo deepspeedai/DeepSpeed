@@ -785,6 +785,7 @@ When a HuggingFace model provides a built-in `tp_plan` (via `model.config.base_m
     "autotp_size": 4,
     "preset_model": "llama",
     "tp_overlap_comm": false,
+    "vocab_parallel_lm_head": false,
     "partition_config": {
       "use_default_specs": false,
       "layer_specs": [
@@ -819,6 +820,12 @@ When a HuggingFace model provides a built-in `tp_plan` (via `model.config.base_m
 | Description                                                                                              | Default |
 | -------------------------------------------------------------------------------------------------------- | ------- |
 | Overlap tensor-parallel allreduce communication with computation (training only).                       | `false` |
+
+***vocab_parallel_lm_head***: [boolean]
+
+| Description                                                                                                                                                  | Default |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------- |
+| Keep an untied `lm_head`/`embed_out` output vocabulary sharded and install DeepSpeed's pure-PyTorch vocab-parallel causal-LM loss instead of gathering logits. | `false` |
 
 ***partition_config***: [dictionary]
 

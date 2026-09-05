@@ -846,6 +846,22 @@ class DeepSpeedEngine(Module):
         from deepspeed.runtime.tensor_parallel.config import _get_hf_tp_plan
         hf_tp_plan = _get_hf_tp_plan(model)
 
+        def finalize_autotp(autotp=None, attach_uc_metadata=False):
+            if autotp is not None:
+                autotp.register_replicated_grad_hooks(model)
+
+            from deepspeed.module_inject.layers import VocabParallelLinear
+            vocab_parallel_heads = [module for module in model.modules() if isinstance(module, VocabParallelLinear)]
+            if len(vocab_parallel_heads) > 1:
+                raise ValueError("Unable to choose a loss for multiple no-gather vocab-parallel LM heads")
+            if vocab_parallel_heads:
+                from deepspeed.sequence.cross_entropy import configure_vocab_parallel_loss
+                configure_vocab_parallel_loss(model, vocab_parallel_heads[0])
+
+            if attach_uc_metadata:
+                setattr(model, UNIVERSAL_CHECKPOINT_INFO, collect_autotp_universal_checkpoint_info(model))
+            setattr(model, "ds_autotp_parsed", True)
+
         if partition_config is not None:
             autotp = AutoTP(module=model,
                             all_reduce_linears=(),
@@ -855,15 +871,14 @@ class DeepSpeedEngine(Module):
                             orig_layer_impl=None,
                             keep_module_on_host=tp_config.keep_module_on_host,
                             partition_config=partition_config,
+                            vocab_parallel_lm_head=tp_config.vocab_parallel_lm_head,
                             model_config=model_config,
                             tp_grain_size=tp_config.tensor_parallel.tp_grain_size,
                             training_mode=True)
             autotp.set_tensor_parallel_config(tp_size, tp_config.tensor_parallel.tp_group)
             autotp.update_linear_policies()
             autotp._replace_module(model)
-            autotp.register_replicated_grad_hooks(model)
-            setattr(model, UNIVERSAL_CHECKPOINT_INFO, collect_autotp_universal_checkpoint_info(model))
-            setattr(model, "ds_autotp_parsed", True)
+            finalize_autotp(autotp, attach_uc_metadata=True)
             return
 
         if tp_size <= 1:
@@ -896,6 +911,7 @@ class DeepSpeedEngine(Module):
                     orig_layer_impl=None,
                     keep_module_on_host=tp_config.keep_module_on_host,
                     partition_config=tp_plan_config,
+                    vocab_parallel_lm_head=tp_config.vocab_parallel_lm_head,
                     model_config=model_config,
                     tp_grain_size=tp_config.tensor_parallel.tp_grain_size,
                     training_mode=True,
@@ -903,9 +919,7 @@ class DeepSpeedEngine(Module):
                 autotp.set_tensor_parallel_config(tp_size, tp_config.tensor_parallel.tp_group)
                 autotp.update_linear_policies()
                 autotp._replace_module(model)
-                autotp.register_replicated_grad_hooks(model)
-                setattr(model, UNIVERSAL_CHECKPOINT_INFO, collect_autotp_universal_checkpoint_info(model))
-                setattr(model, "ds_autotp_parsed", True)
+                finalize_autotp(autotp, attach_uc_metadata=True)
                 return
             log_dist(
                 f"AutoTP: effective HuggingFace tp_plan could not be converted; falling back to heuristic AutoTP. "
@@ -921,8 +935,7 @@ class DeepSpeedEngine(Module):
             tp_config.injection_policy_tuple = injection_policy
             replace_transformer_layer(client_module, model, None, tp_config, model_config, training_mode=True)
 
-        setattr(model, UNIVERSAL_CHECKPOINT_INFO, collect_autotp_universal_checkpoint_info(model))
-        setattr(model, "ds_autotp_parsed", True)
+        finalize_autotp(attach_uc_metadata=True)
 
     def __del__(self):
         try:

@@ -27,7 +27,7 @@ from typing import Union
 __all__ = [
     "TensorParallel_Layer", "LinearAllreduce", "LinearLayer", "LmHeadLinearAllreduce", "Yuan_LinearAllreduce",
     "Yuan_LinearLayer", "GateUpPack_LinearLayer", "Conv_LinearALlreduce", "fused_LinearLayer", "conv_LinearLayer",
-    "SubParamLinearLayer", "SubParamLinearAllreduce"
+    "SubParamLinearLayer", "SubParamLinearAllreduce", "VocabParallelLinear"
 ]
 
 DEEPSPEED_AUTOTP_MODE = AUTOTP_MODE.INFERENCE
@@ -939,6 +939,22 @@ class LinearLayer(TensorParallel_Layer):
             out_features = weight_shape[0]
             linear = nn.Linear(in_features, out_features, bias=(bias is not None))
         return cls(linear, skip_partition=True, gather_output=gather_output)
+
+
+class VocabParallelLinear(LinearLayer):
+    """Column-parallel vocabulary projection that keeps rank-local logits."""
+
+    def __init__(self, module, mp_group=None, **kwargs):
+        super().__init__(module, mp_group, gather_output=False, **kwargs)
+        if min(self._partition_sizes) == 0:
+            # The shard-size list is identical on every TP rank, so all ranks raise here
+            # together instead of one rank failing into a collective hang at the loss.
+            raise ValueError(f"vocab_parallel_lm_head requires a vocabulary of at least tp_size="
+                             f"{self.tp_world_size} rows, but '{self.name}' has {self._orig_weight_shape[0]}")
+        self.is_vocab_parallel_lm_head = True
+        self.vocab_size = self._orig_weight_shape[0]
+        self.vocab_start_index = sum(self._partition_sizes[:self.tp_index])
+        self.vocab_end_index = self.vocab_start_index + self._partition_sizes[self.tp_index]
 
 
 class SubParamColumnParallel(LinearLayer):
