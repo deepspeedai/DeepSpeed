@@ -3,6 +3,8 @@
 
 # DeepSpeed Team
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 
@@ -353,3 +355,107 @@ def test_deactivation_releases_only_the_engine_owned_state(monkeypatch):
     finally:
         backend_mod.frames_needing_bwd.clear()
         backend_mod.unpatch_compiled_func()
+
+
+def test_repeated_engine_destroy_cleans_native_state_once_and_deactivates(monkeypatch):
+    engine = object.__new__(DeepSpeedEngine)
+    torch.nn.Module.__init__(engine)
+    engine._deepcompile_active = True
+    engine._deepcompile_native_initialized = True
+    cleanup_calls = []
+    engine._release_deepcompile_compiled_backward_state = lambda: None
+    engine._release_deepcompile_dynamo_config = lambda: None
+    engine.is_deepcompile_active = lambda: engine._deepcompile_active
+    engine._set_deepcompile_active = lambda active: setattr(engine, "_deepcompile_active", active)
+
+    fake_handle = type("FakeDeepCompileHandle", (), {"cleanup": lambda self: cleanup_calls.append("cleanup")})()
+    monkeypatch.setattr("deepspeed.runtime.engine.get_deepcompile_handle", lambda: fake_handle)
+    monkeypatch.setattr("deepspeed.runtime.engine.debug_clear_module_and_param_names", lambda: None)
+
+    engine.destroy()
+    engine.destroy()
+    engine.__del__()
+
+    assert cleanup_calls == ["cleanup"]
+    assert engine._deepcompile_active is False
+
+
+def test_backend_setup_failure_after_native_init_cleans_once(monkeypatch):
+    engine = object.__new__(DeepSpeedEngine)
+    torch.nn.Module.__init__(engine)
+    engine._deepcompile_active = False
+    engine._deepcompile_native_initialized = False
+    engine.data_parallel_group = object()
+    engine.zero_reduce_bucket_size = lambda: 1
+    engine._release_deepcompile_compiled_backward_state = lambda: None
+    engine._release_deepcompile_dynamo_config = lambda: None
+    engine.compile_autosp = lambda: False
+    engine.compile_autotp = lambda: False
+    init_calls = []
+    cleanup_calls = []
+    fake_handle = SimpleNamespace(init=lambda *_: init_calls.append("init"),
+                                  cleanup=lambda: cleanup_calls.append("cleanup"))
+
+    def fail_after_native_init(*_):
+        engine._initialize_deepcompile_native(SimpleNamespace())
+        raise RuntimeError("backend setup failed")
+
+    engine.get_deepcompile_backend = fail_after_native_init
+    monkeypatch.setattr("deepspeed.runtime.engine.get_deepcompile_handle", lambda: fake_handle)
+    monkeypatch.setattr("deepspeed.runtime.engine.debug_clear_module_and_param_names", lambda: None)
+
+    with pytest.raises(RuntimeError, match="backend setup failed"):
+        engine.get_deepspeed_compile_backend("inductor", {}, None)
+
+    assert init_calls == ["init"]
+    assert cleanup_calls == ["cleanup"]
+    assert engine._deepcompile_native_initialized is False
+    assert engine.is_deepcompile_active() is False
+
+    engine.destroy()
+    assert cleanup_calls == ["cleanup"]
+
+
+def test_module_compile_failure_cleans_native_state_once_before_destroy(monkeypatch):
+    engine = object.__new__(DeepSpeedEngine)
+    torch.nn.Module.__init__(engine)
+    engine._config = SimpleNamespace(compile_config=SimpleNamespace(deepcompile=True))
+    engine._is_compiled = False
+    engine._deepcompile_active = False
+    engine._deepcompile_native_initialized = False
+    engine.data_parallel_group = object()
+    engine.zero_reduce_bucket_size = lambda: 1
+    engine.module_forward_pre_hook = None
+    engine.module_forward_post_hook = None
+    engine._create_module_forward_pre_hook = lambda: None
+    engine._create_module_forward_post_hook = lambda: None
+    engine._release_deepcompile_compiled_backward_state = lambda: None
+    engine._release_deepcompile_dynamo_config = lambda: None
+    init_calls = []
+    cleanup_calls = []
+    fake_handle = SimpleNamespace(init=lambda *_: init_calls.append("init"),
+                                  cleanup=lambda: cleanup_calls.append("cleanup"))
+
+    def resolve_backend(*_):
+        engine._initialize_deepcompile_native(SimpleNamespace())
+        return object(), None
+
+    def fail_compile(**_):
+        raise RuntimeError("module compile failed")
+
+    engine.get_deepspeed_compile_backend = resolve_backend
+    engine.module = SimpleNamespace(compile=fail_compile, modules=lambda: [])
+    monkeypatch.setattr("deepspeed.runtime.engine.is_compile_supported", lambda: True)
+    monkeypatch.setattr("deepspeed.runtime.engine.get_deepcompile_handle", lambda: fake_handle)
+    monkeypatch.setattr("deepspeed.runtime.engine.debug_clear_module_and_param_names", lambda: None)
+
+    with pytest.raises(RuntimeError, match="module compile failed"):
+        engine.compile(backend="inductor")
+
+    assert init_calls == ["init"]
+    assert cleanup_calls == ["cleanup"]
+    assert engine._deepcompile_native_initialized is False
+    assert engine.is_deepcompile_active() is False
+
+    engine.destroy()
+    assert cleanup_calls == ["cleanup"]
