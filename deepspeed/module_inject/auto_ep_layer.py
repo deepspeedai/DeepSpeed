@@ -14,16 +14,18 @@ Contains AutoEPMoELayer, compute_split_plan, _AllToAllV, and helper functions.
 
 from __future__ import annotations
 
+from functools import lru_cache
 from typing import Literal, NamedTuple
 
 import torch
 import torch.nn as nn
 import deepspeed.comm as dist
+from deepspeed.accelerator import get_accelerator
 from deepspeed.module_inject.auto_ep_config import AutoEPConfig, MoELayerSpec, resolve_autoep_config_defaults
 from deepspeed.module_inject.auto_ep_folding import mark_autoep_folding_router_parameter
 from deepspeed.ops.triton_ops import autoep_fused_token_ops as fused_token_ops
 from deepspeed.utils import logger
-from deepspeed.module_inject.auto_ep_comm import (DEEPEP_BACKEND, DeepEPExchange, assert_dtype_supported,
+from deepspeed.module_inject.auto_ep_comm import (COMM_BACKEND, DEEPEP_BACKEND, DeepEPExchange, assert_dtype_supported,
                                                   deepep_combine, deepep_dispatch)
 from deepspeed.moe.ep_router import TokenChoiceTopKRouter
 from deepspeed.moe.ep_count import count_tokens_per_expert
@@ -46,6 +48,41 @@ class SplitPlan(NamedTuple):
     output_splits: list[int]  # len=ep_size
     local_counts: torch.Tensor  # [E_local]
     local_counts_by_source: torch.Tensor  # [ep_size, E_local]
+
+
+class _PendingSplitPlan:
+    """Split metadata whose device-to-host transfer is still in flight."""
+
+    def __init__(
+        self,
+        host_splits: torch.Tensor,
+        local_counts: torch.Tensor,
+        local_counts_by_source: torch.Tensor,
+        ready_event,
+        keepalive: tuple[torch.Tensor, ...],
+    ) -> None:
+        self._host_splits = host_splits
+        self._local_counts = local_counts
+        self._local_counts_by_source = local_counts_by_source
+        self._ready_event = ready_event
+        self._keepalive = keepalive
+        self._plan = None
+
+    def wait(self) -> SplitPlan:
+        if self._plan is None:
+            self._ready_event.synchronize()
+            input_splits, output_splits = self._host_splits.tolist()
+            consumer_stream = get_accelerator().current_stream(self._local_counts.device)
+            self._local_counts.record_stream(consumer_stream)
+            self._local_counts_by_source.record_stream(consumer_stream)
+            self._plan = SplitPlan(
+                input_splits=input_splits,
+                output_splits=output_splits,
+                local_counts=self._local_counts,
+                local_counts_by_source=self._local_counts_by_source,
+            )
+            self._keepalive = ()
+        return self._plan
 
 
 # ---------------------------------------------------------------------------
@@ -160,6 +197,58 @@ def _split_plan_from_expert_counts(
         output_splits=output_splits,
         local_counts=received_counts.sum(dim=0),  # [E_local]
         local_counts_by_source=received_counts,
+    )
+
+
+@lru_cache(maxsize=None)
+def _get_async_split_plan_stream(device_index: int):
+    return get_accelerator().Stream(device=device_index)
+
+
+def _start_async_split_plan_from_expert_counts(
+    num_tokens_per_expert: torch.Tensor,
+    ep_size: int,
+    num_local_experts: int,
+    ep_group: dist.ProcessGroup | None,
+    host_splits: torch.Tensor,
+    ready_event,
+) -> _PendingSplitPlan:
+    """Start count exchange and pinned-memory D2H without blocking the host."""
+    if num_tokens_per_expert.device.type != "cuda":
+        raise RuntimeError("expert_parallel.async_split_plan requires CUDA tensors")
+
+    device_index = num_tokens_per_expert.device.index
+    if device_index is None:
+        device_index = get_accelerator().current_device()
+    split_stream = _get_async_split_plan_stream(device_index)
+    current_stream = get_accelerator().current_stream(num_tokens_per_expert.device)
+    split_stream.wait_stream(current_stream)
+    num_tokens_per_expert.record_stream(split_stream)
+
+    with get_accelerator().stream(split_stream):
+        count_matrix = num_tokens_per_expert.view(ep_size, num_local_experts)
+        send_counts = count_matrix.reshape(-1).contiguous()
+        received_counts_flat = torch.empty_like(send_counts)
+        dist.all_to_all_single(
+            received_counts_flat,
+            send_counts,
+            group=ep_group,
+        )
+        received_counts = received_counts_flat.view(ep_size, num_local_experts)
+        local_counts = received_counts.sum(dim=0)
+        device_splits = torch.stack((
+            count_matrix.sum(dim=1),
+            received_counts.sum(dim=1),
+        ))
+        host_splits.copy_(device_splits, non_blocking=True)
+        ready_event.record(split_stream)
+
+    return _PendingSplitPlan(
+        host_splits=host_splits,
+        local_counts=local_counts,
+        local_counts_by_source=received_counts,
+        ready_event=ready_event,
+        keepalive=(num_tokens_per_expert, send_counts, received_counts_flat, device_splits),
     )
 
 
@@ -421,6 +510,11 @@ class AutoEPMoELayer(nn.Module):
         self.tp_group = None
         resolved_config = resolve_autoep_config_defaults(config, spec.model_family)
         self.validate_folding_routing = bool(resolved_config.validate_folding_routing)
+        self.async_split_plan = resolved_config.async_split_plan
+        self._async_split_plan_host_splits = None
+        self._async_split_plan_ready_event = None
+        self._async_split_plan_device_index = None
+        self._async_split_plan_pending = None
 
         # Router: copy gate weights from source
         source_gate = getattr(source_module, spec.router_name)
@@ -565,6 +659,38 @@ class AutoEPMoELayer(nn.Module):
         self.comm_max_tokens_per_rank = config.comm_max_tokens_per_rank
         self._register_logit_hook()
 
+    def _start_async_split_plan(self, num_tokens_per_expert: torch.Tensor) -> _PendingSplitPlan:
+        if self._async_split_plan_pending is not None:
+            raise RuntimeError("An AutoEP async split plan is already pending")
+        device_index = num_tokens_per_expert.device.index
+        if device_index is None:
+            device_index = get_accelerator().current_device()
+        if self._async_split_plan_device_index != device_index:
+            self._async_split_plan_ready_event = get_accelerator().Event()
+            self._async_split_plan_device_index = device_index
+        if (self._async_split_plan_host_splits is None
+                or self._async_split_plan_host_splits.dtype != num_tokens_per_expert.dtype):
+            self._async_split_plan_host_splits = get_accelerator().pin_memory(
+                torch.empty((2, self.ep_size), dtype=num_tokens_per_expert.dtype, device="cpu"))
+
+        pending = _start_async_split_plan_from_expert_counts(
+            num_tokens_per_expert=num_tokens_per_expert,
+            ep_size=self.ep_size,
+            num_local_experts=self.num_local_experts,
+            ep_group=self.ep_group,
+            host_splits=self._async_split_plan_host_splits,
+            ready_event=self._async_split_plan_ready_event,
+        )
+        self._async_split_plan_pending = pending
+        return pending
+
+    def _wait_async_split_plan(self, pending: _PendingSplitPlan) -> SplitPlan:
+        if pending is not self._async_split_plan_pending:
+            raise RuntimeError("Attempted to wait on a stale AutoEP async split plan")
+        plan = pending.wait()
+        self._async_split_plan_pending = None
+        return plan
+
     def _register_logit_hook(self):
         """Register a forward hook that caches gate logits for OutputRecorder capture."""
         if self.router_logits_capture_target != "router":
@@ -708,6 +834,23 @@ class AutoEPMoELayer(nn.Module):
             [B, S, H] or ([B, S, H], [T, E]) if return_router_logits.
             Some HF MoE contracts return ([T, H], [T, E]) instead.
         """
+        pending_on_entry = self._async_split_plan_pending
+        try:
+            return self._forward(hidden_states)
+        except BaseException:
+            pending = self._async_split_plan_pending
+            if pending is not None and pending is not pending_on_entry:
+                # Packing can fail after D2H has started. Drain it before the
+                # next invocation can reuse the layer's pinned metadata buffer.
+                try:
+                    self._wait_async_split_plan(pending)
+                except Exception:
+                    # Keep the pending tensors alive if the device also failed,
+                    # and preserve the error that interrupted the forward.
+                    logger.warning("Failed to drain AutoEP async split plan after forward failed", exc_info=True)
+            raise
+
+    def _forward(self, hidden_states: torch.Tensor) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         bsz, seqlen, hdim = hidden_states.shape
         x = hidden_states.reshape(-1, hdim)  # [T, H]
 
@@ -719,6 +862,13 @@ class AutoEPMoELayer(nn.Module):
         # Router
         ro: RouterOutput = RouterOutput(*self.router(x, self.expert_bias))
 
+        folded_tp = self.folding_group_handles is not None and self.folding_group_handles.spec.tp_size > 1
+        pending_plan = None
+        if self.async_split_plan and self.ep_size > 1 and self.comm_backend == COMM_BACKEND:
+            if folded_tp:
+                raise RuntimeError("expert_parallel.async_split_plan does not support AutoEP+AutoTP folding yet")
+            pending_plan = self._start_async_split_plan(ro.num_tokens_per_expert)
+
         # Accumulate expert utilization
         with torch.no_grad():
             self.tokens_per_expert.add_(ro.num_tokens_per_expert)
@@ -728,7 +878,6 @@ class AutoEPMoELayer(nn.Module):
         top_scores_sorted = ro.top_scores.view(-1)[token_indices_sorted]
         expert_indices_sorted = ro.selected_experts.reshape(-1).index_select(0, token_indices_sorted)
 
-        folded_tp = self.folding_group_handles is not None and self.folding_group_handles.spec.tp_size > 1
         # Set only where DeepEP's combine actually produced the output, since
         # that decides whether the reduction below has already happened.
         deepep_combined = False
@@ -791,7 +940,9 @@ class AutoEPMoELayer(nn.Module):
             expert_output = unpermute_by_local_expert(expert_output, perm_indices, n_tokens)
         else:
             # EP dispatch/compute/combine
-            if folded_tp:
+            if pending_plan is not None:
+                plan = self._wait_async_split_plan(pending_plan)
+            elif folded_tp:
                 plan = compute_split_plan_from_expert_indices(
                     expert_indices=expert_indices_for_plan,
                     num_experts=self.num_experts,
