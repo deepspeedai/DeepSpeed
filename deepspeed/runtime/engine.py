@@ -3325,6 +3325,16 @@ class DeepSpeedEngine(Module):
             # TODO: handle these scaling with direct calls to loss.backward()
             if isinstance(self.optimizer, ZeROOptimizer):
                 loss = self.optimizer.scale_if_loss(loss)
+            elif self.fp16_enabled() and not self.zero_optimization():
+                # fp16 + ZeRO stage 0: FP16_Optimizer.step() always divides gradients
+                # by cur_scale, so loss must be pre-scaled before backward. Calling
+                # loss.backward() directly makes effective gradient updates ~cur_scale
+                # times too small, stalling training. Route through
+                # FP16_Optimizer.backward() which applies the scaling correctly.
+                self.optimizer.backward(loss, **backward_kwargs)
+                self._backward_epilogue()
+                self._running_engine_backward = False
+                return gas_scaled_loss
             elif self.torch_autocast_z0_gradscaler:
                 loss = self.torch_autocast_z0_gradscaler.scale(loss)
 
