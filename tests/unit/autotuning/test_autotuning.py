@@ -91,6 +91,9 @@ def test_get_best_space_record_ignores_runs_without_a_metric(tmpdir):
 
     tuner.update_records("z0_space", {"name": "exp1"}, None, 1)
     tuner.update_records("z0_space", {"name": "exp2"}, None, 1)
+    # tune_space's callers already fall back to a default when this is None,
+    # so returning None here (instead of a record carrying a None metric) must
+    # stay a safe, handled outcome rather than a new crash.
     assert tuner.get_best_space_record("z0_space") is None
 
     tuner.update_records("z0_space", {"name": "exp3"}, 3.5, 1)

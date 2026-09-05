@@ -583,7 +583,8 @@ class Autotuner:
         fast_best_record = self.get_best_space_record(tuning_space_name)
         fast_best_metric_val = fast_best_record[1] if fast_best_record else 0
         fast_best_mbs = fast_best_record[0][DS_CONFIG][TRAIN_MICRO_BATCH_SIZE_PER_GPU] if fast_best_record else 0
-        logger.info(f"fast_best_mbs = {fast_best_mbs}, name = {fast_best_record[0]['name']}")
+        fast_best_name = fast_best_record[0]['name'] if fast_best_record else None
+        logger.info(f"fast_best_mbs = {fast_best_mbs}, name = {fast_best_name}")
 
         if self.fast_enabled() or stage == 0:
             logger.info(f"End tuning for space: {tuning_space_name}")
