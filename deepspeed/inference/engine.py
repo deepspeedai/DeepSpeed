@@ -41,6 +41,12 @@ from torch import nn
 INFERENCE_MODEL_TIMER = "model-forward-inference"
 
 
+def _validate_keep_module_on_host(config):
+    if config.keep_module_on_host and not (config.injection_policy or config.replace_with_kernel_inject
+                                           or config.tensor_parallel.tp_size > 1):
+        raise ValueError("keep_module_on_host=True requires an injection policy, kernel injection, or AutoTP")
+
+
 class InferenceEngine(Module):
     inference_mp_group = None
     inference_ep_group = None
@@ -106,16 +112,18 @@ class InferenceEngine(Module):
             assert pkg_version.parse(torch.__version__) >= pkg_version.parse("1.10"), \
                 "If you want to use cuda graph, please upgrade torch to at least v1.10"
 
-        # convert model to intended dtype
-        if config.dtype:
-            self._convert_to_dtype(config)
-
         if self.mpu:
             config.tensor_parallel.tp_size = dist.get_world_size(group=self.mpu.get_model_parallel_group())
             self.mp_group = self.mpu.get_model_parallel_group()
         elif config.tensor_parallel.tp_size > 1:
             self._create_model_parallel_group(config)
             config.tensor_parallel.tp_group = self.mp_group
+
+        _validate_keep_module_on_host(config)
+
+        # convert model to intended dtype
+        if config.dtype:
+            self._convert_to_dtype(config)
 
         if self.injection_dict or not config.replace_with_kernel_inject:
             # This is a hack to redefine the alibi func due to TP. It runs after the tensor
