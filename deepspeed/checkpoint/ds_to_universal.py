@@ -41,6 +41,9 @@ from deepspeed.checkpoint import (
     PIPELINE_REPLICATED_PARAMETER_PATTERNS,
     TP_REPLICATED_PARAMETER_PATTERNS,
     PARAMETER_TO_AVERAGE_PATTERNS,
+    AFFINE_MAP,
+    AFFINE_MAP_PARAMS,
+    AFFINE_MAP_VERSION,
     PARAMETER_WITH_ROW_PARALLELISM_PATTERNS,
     PARAMETER_WITH_2_SUB_PARAMS_CAT_DIM_0,
     PARAMETER_WITH_SUB_PARAMS,
@@ -57,6 +60,7 @@ from deepspeed.checkpoint.autoep_zero3_metadata import (
     is_autoep_zero3_partitioned_entry,
     validate_autoep_zero3_partitioned_metadata,
 )
+from deepspeed.checkpoint.affine import ParamAffineMap, AFFINE_MAP_FORMAT_VERSION
 
 
 def parse_arguments():
@@ -300,6 +304,13 @@ def merge_tp_slices(uc_info, dir, slice_dir, tp_degree, name_and_shapes):
     parameters_with_2_sub_params_cat_dim_0 = universal_checkpoint_info.get(PARAMETER_WITH_2_SUB_PARAMS_CAT_DIM_0, [])
     parameter_with_sub_params = universal_checkpoint_info.get(PARAMETER_WITH_SUB_PARAMS, [])
     sub_param_shard_widths = universal_checkpoint_info.get(SUB_PARAM_SHARD_WIDTHS, {})
+    affine_map_info = universal_checkpoint_info.get(AFFINE_MAP, {})
+    affine_map_version = affine_map_info.get(AFFINE_MAP_VERSION, AFFINE_MAP_FORMAT_VERSION)
+    if affine_map_version > AFFINE_MAP_FORMAT_VERSION:
+        raise RuntimeError(
+            f"Checkpoint records affine map format version {affine_map_version}, but this DeepSpeed understands "
+            f"up to {AFFINE_MAP_FORMAT_VERSION}. Reading it could misinterpret fields added since.")
+    affine_params = affine_map_info.get(AFFINE_MAP_PARAMS, {})
     uc_version = universal_checkpoint_info.get(UNIVERSAL_CHECKPOINT_VERSION_KEY, 0.0)
 
     unmatched_patterns = set(replicated_parameters + parameters_to_average + parameters_with_row_parallelism +
@@ -324,11 +335,29 @@ def merge_tp_slices(uc_info, dir, slice_dir, tp_degree, name_and_shapes):
                     return subparam_shape, pattern_
         return None, None
 
+    def get_matched_affine_map(name_):
+        """An affine map describes the layout geometrically, so it needs no category.
+
+        Its patterns are a separate namespace from the category lists, and are not part of
+        `unmatched_patterns`: a map covers only the parameters it was written for, and the
+        rest still take the branches below.
+        """
+        matched_ = [pattern_ for pattern_ in affine_params if re.match(pattern_, name_)]
+        assert len(matched_) <= 1, f'Got more than one matching affine map patterns={matched_} for {name_}'
+        return ParamAffineMap.from_dict(affine_params[matched_[0]]) if matched_ else None
+
+    matched_affine_map = get_matched_affine_map(name)
     matched_sub_params_shape, matched_sub_params_pattern = get_matched_sub_params_pattern(name)
 
     step_merged = _merge_zero_shards(slice_base_path, "step", tp_degree, per_tp_shapes)
     if step_merged:
         _save_checkpoint(os.path.join(param_base_path, "step.pt"), step_merged[0])
+
+    # How a piece's scale applies to each state. Scaling a parameter by `s` scales its
+    # gradient by `1 / s`, so Adam's first moment carries the inverse and its second moment
+    # the inverse square. Using the parameter's factor for all three would corrupt the
+    # optimizer state and change the trajectory after a resume.
+    scale_powers = {"fp32": 1, "exp_avg": -1, "exp_avg_sq": -2}
 
     for state in ("fp32", "exp_avg", "exp_avg_sq"):
         slices = _merge_zero_shards(slice_base_path, state, tp_degree, per_tp_shapes)
@@ -337,7 +366,14 @@ def merge_tp_slices(uc_info, dir, slice_dir, tp_degree, name_and_shapes):
         #print(f"Expected shape: {shape}")
         #print(f"Fragment sizes:", list(frag.shape for frag in slices))
         ckpt_dict = {}
-        if get_matched_pattern(replicated_parameters, name):
+        if matched_affine_map is not None:
+            # The pieces say where every element of the parameter lives, so none of the
+            # category branches below are consulted. This branch only decides `param`; it
+            # writes none of the per-category keys those branches add to `ckpt_dict`,
+            # because the geometry is what a restoring job needs and it is not tied to a
+            # category.
+            param = matched_affine_map.rebuild(dict(enumerate(slices)), scale_powers[state])
+        elif get_matched_pattern(replicated_parameters, name):
             if len(slices) > 1:
                 assert all([slices[0].equal(other_slice) for other_slice in slices[1:]])
             param = slices[0]
