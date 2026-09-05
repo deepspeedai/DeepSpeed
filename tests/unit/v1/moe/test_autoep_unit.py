@@ -47,6 +47,7 @@ from deepspeed.moe.ep_repack import repack_expert_weights
 from deepspeed.moe.ep_router import TokenChoiceTopKRouter
 from deepspeed.runtime.engine import DeepSpeedEngine
 from deepspeed.runtime.compiler import compile_autoep_non_moe_regions
+from deepspeed.runtime.zero.offload_config import DeepSpeedZeroOffloadOptimizerConfig, DeepSpeedZeroOffloadParamConfig
 from deepspeed.runtime.zero.stage3 import DeepSpeedZeroOptimizer_Stage3
 from deepspeed.utils import groups
 from unit.v1.moe.autoep_test_utils import (
@@ -1000,8 +1001,10 @@ class TestAutoEPRegionalCompile:
         engine.pipeline_parallelism = condition == "pipeline_parallel"
         engine._autoep_folding_spec = None
         engine.zero_optimization_partition_weights = lambda: condition == "zero3"
-        engine.zero_offload_optimizer = lambda: object() if condition == "optimizer_offload" else None
-        engine.zero_offload_param = lambda: object() if condition == "param_offload" else None
+        optimizer_offload = DeepSpeedZeroOffloadOptimizerConfig(device="cpu")
+        param_offload = DeepSpeedZeroOffloadParamConfig(device="cpu")
+        engine.zero_offload_optimizer = lambda: optimizer_offload if condition == "optimizer_offload" else None
+        engine.zero_offload_param = lambda: param_offload if condition == "param_offload" else None
         monkeypatch.setattr(_CallableMoEDecoderLayer, "compile", lambda module, **kwargs: None)
 
         with pytest.raises(ValueError, match=match):
@@ -1019,7 +1022,8 @@ class TestAutoEPRegionalCompile:
         with pytest.raises(ValueError, match="Unknown compile_mode"):
             engine.compile(backend="eager", compile_mode="unknown")
 
-    def test_engine_tracks_regional_compile_mode(self, monkeypatch):
+    @pytest.mark.parametrize("offload_config", [None, {}, {"device": "none"}])
+    def test_engine_tracks_regional_compile_mode(self, monkeypatch, offload_config):
         model = _replace_callable_autoep_layers()
         engine = object.__new__(DeepSpeedEngine)
         nn.Module.__init__(engine)
@@ -1037,8 +1041,10 @@ class TestAutoEPRegionalCompile:
         engine.pipeline_parallelism = False
         engine._autoep_folding_spec = None
         engine.zero_optimization_partition_weights = lambda: False
-        engine.zero_offload_optimizer = lambda: None
-        engine.zero_offload_param = lambda: None
+        optimizer_offload = None if offload_config is None else DeepSpeedZeroOffloadOptimizerConfig(**offload_config)
+        param_offload = None if offload_config is None else DeepSpeedZeroOffloadParamConfig(**offload_config)
+        engine.zero_offload_optimizer = lambda: optimizer_offload
+        engine.zero_offload_param = lambda: param_offload
         monkeypatch.setattr(_CallableMoEDecoderLayer, "compile",
                             lambda module, **kwargs: setattr(module, "_compiled_call_impl", object()))
 

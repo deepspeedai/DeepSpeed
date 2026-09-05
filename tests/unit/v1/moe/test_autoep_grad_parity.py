@@ -11,6 +11,7 @@ import deepspeed.comm as dist
 import pytest
 import torch
 import torch.nn as nn
+from deepspeed.runtime.compiler import is_compiling
 from deepspeed.utils import safe_get_full_fp32_param, safe_get_full_grad
 from torch.utils.checkpoint import checkpoint
 from unit.common import DistributedTest
@@ -231,8 +232,8 @@ def _snapshot_parameter_data(engine):
     snapshot = {}
     for name, param in engine.module.named_parameters():
         full_param = safe_get_full_fp32_param(param)
-        if full_param is None:
-            full_param = param
+        assert full_param is not None, f"Expected FP32 master parameter for {name}"
+        assert full_param.dtype == torch.float32, f"Expected FP32 master parameter dtype for {name}"
         snapshot[name] = full_param.detach().float().cpu().clone()
     return snapshot
 
@@ -271,6 +272,15 @@ def _warm_compile_step(engine, batch):
     engine.optimizer.zero_grad()
 
 
+def _assert_relative_tensor_error(actual, expected, name):
+    reference_norm = expected.double().norm().item()
+    error_norm = (actual.double() - expected.double()).norm().item()
+    # Elementwise absolute tolerances alone can accept dropping small gradients or updates.
+    allowed_error = 5e-2 * reference_norm
+    assert error_norm <= allowed_error, (
+        f"{name} relative L2 error exceeds 5%; error_norm={error_norm}, reference_norm={reference_norm}")
+
+
 def _assert_compile_step_close(actual, expected):
     for name, rtol, atol in (
         ("output", 5e-3, 2e-2),
@@ -285,6 +295,7 @@ def _assert_compile_step_close(actual, expected):
                                    msg=(f"{name} mismatch; max_diff={difference.max().item()}, "
                                         f"actual_norm={actual[name].norm().item()}, "
                                         f"expected_norm={expected[name].norm().item()}"))
+    _assert_relative_tensor_error(actual["input_grad"], expected["input_grad"], "input_grad")
     assert actual["grads"].keys() == expected["grads"].keys(), "Gradient parameter sets differ"
     assert actual["deltas"].keys() == expected["deltas"].keys(), "Optimizer parameter sets differ"
     for name in actual["grads"]:
@@ -301,6 +312,8 @@ def _assert_compile_step_close(actual, expected):
                                         f"{(actual['deltas'][name] - expected['deltas'][name]).abs().max().item()}, "
                                         f"actual_norm={actual['deltas'][name].norm().item()}, "
                                         f"expected_norm={expected['deltas'][name].norm().item()}, name={name}"))
+        _assert_relative_tensor_error(actual["grads"][name], expected["grads"][name], f"grads[{name}]")
+        _assert_relative_tensor_error(actual["deltas"][name], expected["deltas"][name], f"deltas[{name}]")
 
 
 def _register_autoep_observers(engine):
@@ -312,18 +325,47 @@ def _register_autoep_observers(engine):
     for name, module in engine.module.named_modules():
         if not isinstance(module, AutoEPMoELayer):
             continue
-        original_forward = module.forward
 
-        @torch.compiler.disable
-        def observed_forward(*args, _forward=original_forward, _name=name, **kwargs):
-            eager_calls.append(_name)
-            return _forward(*args, **kwargs)
+        def observe_router(_module, _inputs, output, name=name):
+            # Observe the production eager boundary without installing one in the test.
+            assert not is_compiling(), f"AutoEP router was traced for {name}"
+            eager_calls.append(name)
+            routes.append((name, output[1].detach().cpu()))
 
-        module.forward = observed_forward
-        handles.append(
-            module.router.register_forward_hook(lambda _module, _inputs, output, name=name: routes.append(
-                (name, output[1].detach().cpu()))))
+        handles.append(module.router.register_forward_hook(observe_router))
     return eager_calls, routes, handles
+
+
+class TestAutoEPCompileParityAssertions:
+
+    @pytest.mark.parametrize("field", ["grads", "deltas"])
+    @pytest.mark.parametrize("multiplier", [0.0, -1.0, 1.01])
+    def test_small_gradient_and_update_relative_error(self, field, multiplier):
+        expected = {
+            "output": torch.ones(2),
+            "loss": torch.ones(()),
+            "input_grad": torch.ones(2),
+            "grads": {
+                "router.weight": torch.tensor([1e-5, -2e-5])
+            },
+            "deltas": {
+                "router.weight": torch.tensor([-1e-7, 2e-7])
+            },
+        }
+        actual = copy.deepcopy(expected)
+        actual[field]["router.weight"].mul_(multiplier)
+
+        if multiplier <= 0:
+            with pytest.raises(AssertionError, match=f"{field}.*relative L2 error"):
+                _assert_compile_step_close(actual, expected)
+        else:
+            _assert_compile_step_close(actual, expected)
+
+    def test_zero_reference_requires_zero_actual(self):
+        reference = torch.zeros(2)
+        _assert_relative_tensor_error(reference.clone(), reference, "zero")
+        with pytest.raises(AssertionError, match="zero relative L2 error"):
+            _assert_relative_tensor_error(torch.tensor([1e-10, 0.0]), reference, "zero")
 
 
 class TestAutoEPGradParity(DistributedTest):

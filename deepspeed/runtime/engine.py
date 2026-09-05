@@ -5847,8 +5847,10 @@ class DeepSpeedEngine(Module):
                 raise ValueError("compile_mode='autoep_non_moe' does not support pipeline parallelism yet.")
             if self.zero_optimization_partition_weights():
                 raise ValueError("compile_mode='autoep_non_moe' does not support ZeRO Stage 3 yet.")
-            if self.zero_offload_optimizer() is not None or self.zero_offload_param() is not None:
-                raise ValueError("compile_mode='autoep_non_moe' does not support optimizer or parameter offload yet.")
+            for offload_config in (self.zero_offload_optimizer(), self.zero_offload_param()):
+                if offload_config is not None and offload_config.device != OffloadDeviceEnum.none:
+                    raise ValueError(
+                        "compile_mode='autoep_non_moe' does not support optimizer or parameter offload yet.")
             if schedule is not None:
                 raise ValueError("compile_mode='autoep_non_moe' does not support DeepCompile schedules.")
             if compiled_autograd_enabled:
