@@ -74,6 +74,38 @@ Weights-only/module-only Universal Checkpoint loads use the converted
         }
     }
 
+Experimental regional ``torch.compile``
+----------------------------------------
+
+AutoEP can keep its router, token movement, expert computation, and collectives
+in eager mode while compiling the surrounding decoder blocks with vanilla
+``torch.compile``. This targets fragmented attention, normalization, residual,
+and dense backward work without capturing AutoEP communication in the graph.
+The path is opt-in and does not change the default eager execution:
+
+.. code-block:: python
+
+    engine, optimizer, _, _ = deepspeed.initialize(
+        model=model,
+        model_parameters=model.parameters(),
+        config=ds_config,
+    )
+    engine.compile(compile_mode="autoep_non_moe")
+
+The call must happen after ``deepspeed.initialize()`` so AutoEP replacement is
+complete. DeepSpeed discovers each ``AutoEPMoELayer`` and regionally compiles
+its direct parent decoder block with ``fullgraph=False`` and ``dynamic=False``.
+The AutoEP layer is an explicit compiler-disabled graph break, so routing,
+AllToAll dispatch/combine, and expert execution remain eager.
+
+The initial experimental path supports vanilla ``torch.compile`` with the
+standard ``comm`` backend, sequence and pipeline parallel sizes of one, and
+ZeRO stages 0, 1, and 2. Distributed performance and parity validation currently
+target ZeRO stage 1. It rejects DeepEP, DeepCompile, AutoEP+AutoTP folding,
+sequence or pipeline parallelism, ZeRO stage 3, optimizer or parameter offload,
+compiled autograd, DeepCompile schedules, and any ``fullgraph`` or ``dynamic``
+value other than ``False`` instead of silently changing the requested behavior.
+
 **How it works:**
 
 1. During ``deepspeed.initialize()``, AutoEP scans the model for MoE layers
