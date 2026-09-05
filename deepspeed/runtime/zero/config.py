@@ -140,6 +140,13 @@ class DeepSpeedZeroConfig(DeepSpeedConfigModel):
     Attempts to overlap the reduction of the gradients with backward computation
     """
 
+    compute_grad_norm: bool = True
+    """
+    Compute and retain the global gradient norm during ZeRO Stage 1/2 optimizer steps.
+    Disable only when gradient clipping is off, the dedicated ZeRO-1 BF16 optimizer is not selected,
+    and callers do not use ``get_global_grad_norm()``.
+    """
+
     load_from_fp32_weights: bool = True
     """
     Boolean indicating whether to initialize fp32 master weights from fp32
@@ -383,6 +390,12 @@ class DeepSpeedZeroConfig(DeepSpeedConfigModel):
     def overlap_comm_valid(self):
         if self.overlap_comm is None:
             self.overlap_comm = self.stage == ZeroStageEnum.weights
+        return self
+
+    @model_validator(mode="after")
+    def compute_grad_norm_valid(self):
+        if not self.compute_grad_norm and self.stage not in (ZeroStageEnum.optimizer_states, ZeroStageEnum.gradients):
+            raise ValueError("compute_grad_norm=false is supported only with ZeRO Stage 1 or 2")
         return self
 
     @model_validator(mode="after")

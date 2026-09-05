@@ -23,7 +23,7 @@ from contextvars import ContextVar
 from threading import Lock
 from weakref import ref
 
-from typing import Callable, Dict, Union, Iterable, Container, List
+from typing import Callable, Dict, Union, Iterable, Container, List, Optional
 
 import deepspeed
 
@@ -1028,15 +1028,16 @@ class DeepSpeedEngine(Module):
         if self.training_dataloader is not None and self.curriculum_learning_enabled():
             self.training_dataloader.data_sampler.set_custom_curriculum_learning_schedule(schedule_func_dict)
 
-    def get_global_grad_norm(self) -> float:
+    def get_global_grad_norm(self) -> Optional[float]:
         """Return the 2-norm of all gradients. If there is model parallelism,
         the norm will be global.
         The computed norm will be cached and reused until the next step() pass.
+        Returns ``None`` when ZeRO Stage 1/2 gradient-norm computation is disabled.
         .. note::
             In the presence of model parallelism, this is a collective call
             and acts as a barrier among ``mpu.get_model_parallel_group()``.
         Returns:
-            float: norm
+            Optional[float]: norm, or ``None`` when disabled
         """
         return self._global_grad_norm
 
@@ -1355,6 +1356,9 @@ class DeepSpeedEngine(Module):
 
     def zero_allgather_bucket_size(self):
         return self._config.zero_config.allgather_bucket_size
+
+    def zero_compute_grad_norm(self):
+        return self._config.zero_config.compute_grad_norm
 
     def zero_optimization_partition_gradients(self):
         return self.zero_optimization_stage() >= ZeroStageEnum.gradients
@@ -2064,6 +2068,9 @@ class DeepSpeedEngine(Module):
                     logger.warning("**** You are using ZeRO with an untested optimizer, proceed with caution *****")
             if model_dtype == torch.bfloat16 and grad_accum_dtype == torch.float32 and self.zero_optimization_stage(
             ) == 1 and not self.zero_cpu_offload():
+                if not self.zero_compute_grad_norm():
+                    raise ValueError("zero_optimization.compute_grad_norm=false does not support ZeRO Stage 1 with "
+                                     "BF16 parameters and FP32 gradient accumulation")
                 return BFLOAT16
             return ZERO_OPTIMIZATION
         elif amp_enabled:
@@ -2505,7 +2512,8 @@ class DeepSpeedEngine(Module):
                 gradient_accumulation_dtype=gradient_accumulation_dtype,
                 communication_data_type=self.communication_data_type,
                 elastic_checkpoint=self.zero_elastic_checkpoint(),
-                check_grad_overflow=check_grad_overflow)
+                check_grad_overflow=check_grad_overflow,
+                compute_grad_norm=self.zero_compute_grad_norm())
 
         elif zero_stage == ZeroStageEnum.weights:
             self._validate_zero3_moe_compatibility()
