@@ -499,6 +499,7 @@ class DistributedAttention(torch.nn.Module):
                 grad = list(grad)
                 grad[0] = self.overlap_handles[type + '_post_all2all_func'](all2all_output)
                 grad = tuple(grad)
+                return grad
 
             return pre_hook_fun
 
