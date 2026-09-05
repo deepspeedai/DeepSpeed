@@ -1103,8 +1103,16 @@ class Init(InsertPostInitMethodToModuleSubClasses):
 
         self.zero_param_process_group = zero_param_parallel_group
         if _ds_config is not None and _ds_config.zero_config.zero_hpz_partition_size > 1 and self.zero_param_process_group is None:
-            groups._create_zero_param_parallel_group(_ds_config.zero_config.zero_hpz_partition_size)
+            hpz_partition_size = min(_ds_config.zero_config.zero_hpz_partition_size, dist.get_world_size())
             self.zero_param_process_group = groups._get_zero_param_intra_parallel_group()
+            if self.zero_param_process_group is None:
+                groups._create_zero_param_parallel_group(hpz_partition_size)
+                self.zero_param_process_group = groups._get_zero_param_intra_parallel_group()
+            elif dist.get_world_size(group=self.zero_param_process_group) != hpz_partition_size:
+                raise RuntimeError(
+                    "zero.Init cannot reuse an existing ZeRO parameter parallel group with a different size: "
+                    f"existing={dist.get_world_size(group=self.zero_param_process_group)}, requested={hpz_partition_size}"
+                )
 
         self.num_ranks_in_param_group = self.dp_world_size
         self.rank_in_group = self.rank

@@ -165,6 +165,27 @@ class TestMiCSGatheredParametersFree(DistributedTest):
         assert model.l1.weight.numel() == 0, "outside of GatheredParameters the param should go back to be 0-sized"
 
 
+class TestNestingInitWithHpZ(DistributedTest):
+    world_size = 2
+
+    def test(self):
+        config_dict = {
+            "train_batch_size": self.world_size,
+            "zero_optimization": {
+                "stage": 3,
+                "zero_hpz_partition_size": self.world_size,
+            },
+        }
+
+        with deepspeed.zero.Init(config_dict_or_path=config_dict):
+            with deepspeed.zero.Init(config_dict_or_path=config_dict):
+                model = torch.nn.Linear(4, 4)
+
+        assert hasattr(model.weight, "ds_id")
+        assert model.weight.ds_zero_param_process_group is not None
+        assert dist.get_world_size(group=model.weight.ds_zero_param_process_group) == self.world_size
+
+
 class TestGatheredParametersAllRanksErrorOnModification(DistributedTest):
     world_size = 2
 
