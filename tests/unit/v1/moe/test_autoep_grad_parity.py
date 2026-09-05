@@ -27,6 +27,19 @@ def _make_model():
     return MockMoETransformer(num_layers=1, num_experts=4, hidden_size=128, intermediate_size=256)
 
 
+def _make_async_split_model():
+    model = _make_model()
+    # The mock experts use unscaled N(0, 1) weights. Keep the multi-step squared-loss
+    # parity test finite so it compares planner behavior rather than overflow.
+    with torch.no_grad():
+        for name, parameter in model.named_parameters():
+            if name.endswith("experts.gate_up_proj"):
+                parameter.mul_(128**-0.5)
+            elif name.endswith("experts.down_proj"):
+                parameter.mul_(256**-0.5)
+    return model
+
+
 def _make_zero2_config():
     return {
         **_mixed_precision_config(),
@@ -365,6 +378,8 @@ def _assert_async_split_step_matches(actual, expected):
 
 def _assert_relative_l2_close(actual, expected, name):
     # An absolute tolerance can hide a missing gradient or a small Adam update.
+    assert torch.isfinite(actual).all(), f"{name} contains non-finite values"
+    assert torch.isfinite(expected).all(), f"reference {name} contains non-finite values"
     difference_norm = torch.linalg.vector_norm((actual.double() - expected.double()).flatten())
     reference_norm = torch.linalg.vector_norm(expected.double().flatten())
     assert difference_norm <= 0.05 * reference_norm, (
@@ -447,9 +462,9 @@ class TestAutoEPAsyncSplitPlanParity(DistributedTest):
             pytest.skip("async split-plan parity requires CUDA")
         seed = 9753
         _seed_everything(seed)
-        reference_state = _make_model().state_dict()
+        reference_state = _make_async_split_model().state_dict()
 
-        sync_model = _make_model()
+        sync_model = _make_async_split_model()
         sync_model.load_state_dict(reference_state)
         sync_engine, _, _, _ = deepspeed.initialize(model=sync_model, config=_async_split_config(False))
         if checkpoint_activations:
@@ -459,7 +474,7 @@ class TestAutoEPAsyncSplitPlanParity(DistributedTest):
             _async_split_step(sync_engine, seed + step, seq_len) for step, seq_len in enumerate(sequence_lengths)
         ]
 
-        async_model = _make_model()
+        async_model = _make_async_split_model()
         async_model.load_state_dict(reference_state)
         async_engine, _, _, _ = deepspeed.initialize(model=async_model, config=_async_split_config(True))
         assert all(module.async_split_plan for module in async_engine.module.modules()
