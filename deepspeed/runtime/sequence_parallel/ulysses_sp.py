@@ -32,19 +32,30 @@ https://github.com/snowflakedb/ArcticTraining/blob/main/projects/sequence-parall
 from collections import defaultdict, deque
 from deepspeed.runtime.utils import see_memory_usage
 from deepspeed.sequence.layer import _DimZeroAllToAll
+from deepspeed.runtime.sequence_parallel.ulysses_linear_attention import (
+    CURRENT_FORWARD_METADATA,
+    create_qwen35_linear_attention_registration,
+    position_ids_to_document_ids,
+    position_ids_to_packed_cu_seqlens,
+    prepare_qwen35_linear_attention_cp,
+)
 from deepspeed.utils.logging import logger
 from einops import rearrange
 from packaging import version
 from torch import Tensor
 from torch.utils.data import DataLoader
-from typing import Any
-from typing import Tuple
+from typing import Any, Tuple
 import deepspeed.comm as dist
-import importlib.metadata
+from importlib import metadata as importlib_metadata
+import inspect
 import math
 import re
 import torch
 import torch.distributed.nn
+
+_ACTIVE_LINEAR_ATTENTION_REGISTRATION = None
+_ACTIVE_ATTENTION_REGISTRATIONS = {}
+_PACKED_FLEX_TRANSFORMERS_MIN_VERSION = "4.57.0"
 
 
 class UlyssesSPAttentionHF(torch.nn.Module):
@@ -124,7 +135,10 @@ class UlyssesSPAttentionHF(torch.nn.Module):
 
         self.core_attn_implementation = None  # set by register_with_transformers
         self._flex_block_mask_cached = None  # cached BlockMask for flex_attention
-        self._flex_block_mask_cache_key = None  # (batch_size, seq_len) for cache invalidation
+        self._flex_block_mask_cache_key = None
+        self._cached_local_position_ids = None
+        self._cached_local_position_ids_version = None
+        self._cached_full_position_ids = None
 
         self.local_q_head_count = attn_head_count // self.world_size
 
@@ -136,7 +150,7 @@ class UlyssesSPAttentionHF(torch.nn.Module):
             self.local_kv_head_count = kv_head_count // self.world_size
 
         transformers_version_min = "4.51.3"
-        transformers_version_have = importlib.metadata.version("transformers")
+        transformers_version_have = importlib_metadata.version("transformers")
         if version.parse(transformers_version_have) < version.parse(transformers_version_min):
             raise ValueError(
                 f"transformers>={transformers_version_min} is required, but you have transformers=={transformers_version_have}"
@@ -226,6 +240,55 @@ class UlyssesSPAttentionHF(torch.nn.Module):
         # [sl_l bs em]
         return output
 
+    def _get_full_position_ids(self, local_position_ids: torch.LongTensor) -> torch.LongTensor:
+        metadata = CURRENT_FORWARD_METADATA.get()
+        if metadata is not None:
+            return metadata.full_position_ids
+
+        current_version = getattr(local_position_ids, "_version", None)
+        if (self._cached_local_position_ids is local_position_ids
+                and self._cached_local_position_ids_version == current_version):
+            return self._cached_full_position_ids
+
+        position_id_shards = [torch.empty_like(local_position_ids) for _ in range(self.world_size)]
+        dist.all_gather(position_id_shards, local_position_ids.contiguous(), group=self.process_group)
+        full_position_ids = torch.cat(position_id_shards, dim=-1)
+        self._cached_local_position_ids = local_position_ids
+        self._cached_local_position_ids_version = current_version
+        self._cached_full_position_ids = full_position_ids
+        return full_position_ids
+
+    @staticmethod
+    def _validate_flex_attention_pattern(module: torch.nn.Module, kwargs: dict) -> None:
+        """Reject mask patterns that cannot be reconstructed after sequence all-to-all."""
+        active_pattern_keys = []
+        for key in ("sliding_window", "window_size", "attention_chunk_size", "chunk_size", "prefix_length"):
+            value = kwargs.get(key)
+            if value not in (None, False, 0):
+                active_pattern_keys.append(key)
+
+        config = getattr(module, "config", None)
+        layer_types = getattr(config, "layer_types", None) or ()
+        layer_idx = getattr(module, "layer_idx", None)
+        layer_type = None
+        if layer_idx is not None and 0 <= layer_idx < len(layer_types):
+            layer_type = str(layer_types[layer_idx]).lower()
+        if layer_type is not None and any(marker in layer_type for marker in ("sliding", "chunk", "prefix")):
+            active_pattern_keys.append(f"layer_types[{layer_idx}]={layer_type}")
+        elif not layer_types and config is not None:
+            for key in ("sliding_window", "attention_chunk_size", "chunk_size"):
+                value = getattr(config, key, None)
+                if value not in (None, False, 0):
+                    active_pattern_keys.append(f"config.{key}")
+
+        if getattr(module, "is_causal", True) is False:
+            active_pattern_keys.append("is_causal=False")
+        if active_pattern_keys:
+            patterns = ", ".join(active_pattern_keys)
+            raise RuntimeError(
+                "Ulysses flex_attention currently reconstructs only standard causal and packed document-causal "
+                f"masks; unsupported attention pattern(s): {patterns}.")
+
     def forward(
         self,
         module: torch.nn.Module,
@@ -289,9 +352,23 @@ class UlyssesSPAttentionHF(torch.nn.Module):
             "For non-packed sequences: position_ids = torch.arange(seq_len) per sample. "
             "For packed sequences: position_ids must reset at document boundaries. "
             "Ensure your data collator or UlyssesSPDataLoaderAdapter includes position_ids.")
-        position_ids_list = [torch.empty_like(kwargs["position_ids"]) for _ in range(self.world_size)]
-        dist.all_gather(position_ids_list, kwargs["position_ids"], group=self.process_group)
-        kwargs["position_ids"] = torch.cat(position_ids_list, dim=1)
+        full_position_ids = self._get_full_position_ids(kwargs["position_ids"])
+        kwargs["position_ids"] = full_position_ids
+        metadata = CURRENT_FORWARD_METADATA.get()
+        if metadata is not None:
+            global_cu_seqlens = metadata.global_cu_seqlens
+            document_ids = metadata.document_ids
+            is_packed = metadata.is_packed
+            global_cu_seqlens_cpu = metadata.global_cu_seqlens_cpu
+        else:
+            document_ids = position_ids_to_document_ids(full_position_ids)
+            global_cu_seqlens = position_ids_to_packed_cu_seqlens(full_position_ids)
+            is_packed = bool((document_ids[:, 1:] != document_ids[:, :-1]).any().item())
+            global_cu_seqlens_cpu = global_cu_seqlens.detach().cpu()
+        if self.core_attn_implementation == "sdpa" and is_packed:
+            raise RuntimeError(
+                "Packed Ulysses SP is not supported with SDPA because SDPA requires a quadratic document-aware "
+                "attention mask. Use flash_attention_2/3 or flex_attention for packed training.")
 
         # please don't remove the white-space vertical alignment in the error message
         assert query.shape == self.required_query_shape, (
@@ -314,29 +391,78 @@ class UlyssesSPAttentionHF(torch.nn.Module):
         if self.kv_replication_factor > 1:
             module.num_key_value_groups = query_layer.size(-3) // key_layer.size(-3)
 
-        # For flex_attention: the wrapper preserved the BlockMask from the model, but it
-        # was built for the local shard's sequence length. Rebuild it for the full gathered
-        # sequence length after the all-to-all.
-        # XXX: currently hardcodes a causal mask_mod — models with sliding window or other
-        # non-standard patterns would need the mask_mod extracted from the original BlockMask.
+        # The model built the BlockMask for the local shard. Rebuild it for the full sequence
+        # and preserve packed-document boundaries.
         if self.core_attn_implementation == "flex_attention":
-            from torch.nn.attention.flex_attention import BlockMask, create_block_mask
-            if isinstance(attention_mask, BlockMask):
-                seq_len = query_layer.shape[2]
-                batch_size = query_layer.shape[0]
-                cache_key = (batch_size, seq_len)
+            self._validate_flex_attention_pattern(module, kwargs)
+            try:
+                from torch.nn.attention.flex_attention import create_block_mask
+            except (ImportError, AttributeError) as exc:
+                raise RuntimeError("Ulysses flex_attention requires a PyTorch version exposing "
+                                   "torch.nn.attention.flex_attention.create_block_mask.") from exc
+            seq_len = query_layer.shape[2]
+            batch_size = query_layer.shape[0]
+            cache_key = (
+                batch_size,
+                seq_len,
+                query_layer.device.type,
+                query_layer.device.index,
+                tuple(global_cu_seqlens_cpu.tolist()),
+            )
 
-                # Cache the BlockMask — create_block_mask is expensive and the mask is the
-                # same for all layers within a forward pass. Only rebuild when dimensions change.
-                if self._flex_block_mask_cache_key != cache_key:
+            if self._flex_block_mask_cache_key != cache_key:
+                if is_packed:
+                    transformers_version_have = importlib_metadata.version("transformers")
+                    if version.parse(transformers_version_have) < version.parse(_PACKED_FLEX_TRANSFORMERS_MIN_VERSION):
+                        raise RuntimeError("Packed Ulysses flex_attention requires "
+                                           f"transformers>={_PACKED_FLEX_TRANSFORMERS_MIN_VERSION}; found "
+                                           f"transformers=={transformers_version_have}.")
+                    try:
+                        from transformers.masking_utils import create_causal_mask
+                    except ImportError as exc:
+                        raise RuntimeError(
+                            "Packed Ulysses flex_attention requires transformers.masking_utils.create_causal_mask "
+                            f"from transformers>={_PACKED_FLEX_TRANSFORMERS_MIN_VERSION}.") from exc
+
+                    document_ids = document_ids.to(device=query_layer.device, dtype=torch.long).contiguous()
+                    token_indices = torch.arange(seq_len, device=query_layer.device, dtype=torch.long)
+                    token_indices = token_indices.unsqueeze(0).expand(batch_size, -1)
+                    document_starts = torch.ones_like(document_ids, dtype=torch.bool)
+                    document_starts[:, 1:] = document_ids[:, 1:] != document_ids[:, :-1]
+                    latest_start = torch.where(document_starts, token_indices,
+                                               torch.zeros_like(token_indices)).cummax(dim=1).values
+                    canonical_position_ids = token_indices - latest_start
+
+                    mask_kwargs = {
+                        "config": module.config,
+                        "attention_mask": None,
+                        "past_key_values": None,
+                        "position_ids": canonical_position_ids,
+                    }
+                    mask_parameters = inspect.signature(create_causal_mask).parameters
+                    placeholder = query_layer.new_empty((batch_size, seq_len, 1))
+                    if "input_embeds" in mask_parameters:
+                        mask_kwargs["input_embeds"] = placeholder
+                    elif "inputs_embeds" in mask_parameters:
+                        mask_kwargs["inputs_embeds"] = placeholder
+                    else:
+                        raise RuntimeError(
+                            "Unsupported transformers.masking_utils.create_causal_mask signature: missing "
+                            "input_embeds/inputs_embeds.")
+                    if "cache_position" in mask_parameters:
+                        mask_kwargs["cache_position"] = torch.arange(
+                            seq_len,
+                            device=query_layer.device,
+                            dtype=torch.long,
+                        )
+                    self._flex_block_mask_cached = create_causal_mask(**mask_kwargs)
+                    if self._flex_block_mask_cached is None:
+                        raise RuntimeError("Transformers did not construct a packed flex_attention BlockMask.")
+                else:
 
                     def causal_mask(batch_idx, head_idx, q_idx, kv_idx):
                         return q_idx >= kv_idx
 
-                    # Don't compile create_block_mask here — it runs inside the model's
-                    # forward pass where flex_attention already uses torch.compile, and
-                    # nesting compiled contexts causes gradient explosion in the backward
-                    # pass. The BlockMask is cached so creation cost is negligible.
                     self._flex_block_mask_cached = create_block_mask(
                         mask_mod=causal_mask,
                         B=batch_size,
@@ -345,9 +471,9 @@ class UlyssesSPAttentionHF(torch.nn.Module):
                         KV_LEN=seq_len,
                         device=query_layer.device,
                     )
-                self._flex_block_mask_cache_key = cache_key
+            self._flex_block_mask_cache_key = cache_key
 
-                attention_mask = self._flex_block_mask_cached
+            attention_mask = self._flex_block_mask_cached
 
         if not self.skip_all_but_last_attention_debug_mode:
             # expects: [bs hc_l sl hs]
@@ -439,8 +565,6 @@ class UlyssesSPAttentionHF(torch.nn.Module):
 
         import deepspeed.runtime.sequence_parallel.parallel_state_sp as mpu
 
-        mpu.initialize_sequence_parallel(sequence_parallel_size=sequence_parallel_size)
-
         from transformers import PreTrainedModel
         if hasattr(model_name_or_path, "config") or isinstance(model_name_or_path, PreTrainedModel):
             # we already have the model (or a PEFT wrapper with config attribute)
@@ -484,81 +608,213 @@ class UlyssesSPAttentionHF(torch.nn.Module):
             )
         core_attn_function = ALL_ATTENTION_FUNCTIONS[core_attn_implementation]
 
-        if seq_length_is_variable:
-            local_seq_length = None
-            global_seq_length = None
-        else:
-            local_seq_length = seq_length // mpu.get_sequence_parallel_world_size()
-            global_seq_length = seq_length
+        if _ACTIVE_ATTENTION_REGISTRATIONS:
+            raise RuntimeError(
+                "Ulysses SP is already registered in this process. Call unregister_from_transformers() before "
+                "registering another model.")
 
         arch_cfg = hf_model_config.get_text_config()
-
-        uattn = UlyssesSPAttentionHF(
-            attn=core_attn_function,
-            batch_size=micro_batch_size,
-            attn_head_count=arch_cfg.num_attention_heads,
-            attn_head_size=getattr(
-                arch_cfg,
-                "head_dim",
-                arch_cfg.hidden_size // arch_cfg.num_attention_heads,
-            ),
-            kv_head_count=arch_cfg.num_key_value_heads,
-            num_hidden_layers=arch_cfg.num_hidden_layers,
-            process_group=mpu.get_sequence_parallel_group(),
-            seq_length_is_variable=seq_length_is_variable,
-            local_seq_length=local_seq_length,
-            global_seq_length=global_seq_length,
+        prepared_linear_attention = prepare_qwen35_linear_attention_cp(
+            model=model_name_or_path,
+            hf_model_config=hf_model_config,
+            arch_cfg=arch_cfg,
+            core_attn_implementation=core_attn_implementation,
             disable_in_eval=disable_in_eval,
+            micro_batch_size=micro_batch_size,
         )
-        uattn.core_attn_implementation = core_attn_implementation
 
-        def uattn_wrapper(
-            module: torch.nn.Module,
-            query: torch.Tensor,
-            key: torch.Tensor,
-            value: torch.Tensor,
-            attention_mask: torch.Tensor,
-            *args,
-            **kwargs,
-        ) -> Tuple[torch.Tensor, torch.Tensor]:
+        transformers_version_min = "4.51.3"
+        transformers_version_have = importlib_metadata.version("transformers")
+        if version.parse(transformers_version_have) < version.parse(transformers_version_min):
+            raise ValueError(f"transformers>={transformers_version_min} is required, but you have "
+                             f"transformers=={transformers_version_have}")
+        if arch_cfg.num_attention_heads % sequence_parallel_size != 0:
+            raise ValueError(f"Attention head count {arch_cfg.num_attention_heads} is not divisible by SP size "
+                             f"{sequence_parallel_size}")
+        if not (arch_cfg.num_key_value_heads % sequence_parallel_size == 0
+                or sequence_parallel_size % arch_cfg.num_key_value_heads == 0):
+            raise ValueError(
+                f"KV attention head count {arch_cfg.num_key_value_heads} and SP size {sequence_parallel_size} "
+                "must divide one another")
+        if not seq_length_is_variable and seq_length % sequence_parallel_size != 0:
+            raise ValueError(f"Sequence length {seq_length} is not divisible by SP size {sequence_parallel_size}")
 
-            # SP relies on position_ids (not attention_mask) for causal masking.
-            # HF doesn't know about the SP wrapper, so it creates an attention_mask for
-            # the local shard's sequence length — which is invalid after the SP all-to-all
-            # gathers the full sequence. A 4D mask at full sequence length would also be
-            # O(n²) memory. So we discard 4D tensor masks.
-            #
-            # Keep BlockMask (flex_attention) — it's a compressed sparse representation.
-            # It will be rebuilt for the full gathered sequence in forward().
-            _is_block_mask = False
-            if core_attn_implementation == "flex_attention":
-                from torch.nn.attention.flex_attention import BlockMask
-                _is_block_mask = isinstance(attention_mask, BlockMask)
+        owned_module_ids = set()
+        owned_config_ids = {id(arch_cfg)}
+        if isinstance(model_name_or_path, torch.nn.Module):
+            for module in model_name_or_path.modules():
+                module_config = getattr(module, "config", None)
+                module_name = type(module).__name__.lower()
+                has_attention_projections = (all(hasattr(module, name) for name in ("q_proj", "k_proj", "v_proj"))
+                                             or "attention" in module_name or module_name.endswith("attn"))
+                if id(module_config) in owned_config_ids and has_attention_projections:
+                    owned_module_ids.add(id(module))
+        if isinstance(prepared_linear_attention, dict):
+            owned_module_ids.update(prepared_linear_attention["dense_attention_module_ids"])
 
-            if not _is_block_mask:
-                attention_mask = None
+        expected_model_type = str(getattr(arch_cfg, "model_type", "") or "").lower()
+        expected_model_path = (model_name_or_path if isinstance(model_name_or_path, str) else None)
+        expected_head_dim = getattr(arch_cfg, "head_dim", arch_cfg.hidden_size // arch_cfg.num_attention_heads)
 
-            attn_output, attn_weights = uattn(
-                module,
-                query,
-                key,
-                value,
-                attention_mask,
+        def owns_attention_module(module, query, key):
+            if (linear_registration is not None and hasattr(linear_registration, "owns_dense_attention_module")
+                    and linear_registration.owns_dense_attention_module(module)):
+                return True
+            if id(module) in owned_module_ids:
+                return True
+            module_config = getattr(module, "config", None)
+            if expected_model_path is None:
+                return False
+            if module_config is None:
+                return False
+            module_model_type = str(getattr(module_config, "model_type", "") or "").lower()
+            module_model_path = getattr(module_config, "_name_or_path", None)
+            if module_model_type != expected_model_type or module_model_path != expected_model_path:
+                return False
+            return (query.ndim == 4 and key.ndim == 4 and query.shape[1] == arch_cfg.num_attention_heads
+                    and key.shape[1] == arch_cfg.num_key_value_heads and query.shape[-1] == expected_head_dim)
+
+        global _ACTIVE_LINEAR_ATTENTION_REGISTRATION
+        linear_registration = None
+        uattn_wrapper = None
+        mpu.initialize_sequence_parallel(sequence_parallel_size=sequence_parallel_size)
+        try:
+            if seq_length_is_variable:
+                local_seq_length = None
+                global_seq_length = None
+            else:
+                local_seq_length = seq_length // mpu.get_sequence_parallel_world_size()
+                global_seq_length = seq_length
+
+            uattn = cls(
+                attn=core_attn_function,
+                batch_size=micro_batch_size,
+                attn_head_count=arch_cfg.num_attention_heads,
+                attn_head_size=expected_head_dim,
+                kv_head_count=arch_cfg.num_key_value_heads,
+                num_hidden_layers=arch_cfg.num_hidden_layers,
+                process_group=mpu.get_sequence_parallel_group(),
+                seq_length_is_variable=seq_length_is_variable,
+                local_seq_length=local_seq_length,
+                global_seq_length=global_seq_length,
+                disable_in_eval=disable_in_eval,
+            )
+            uattn.core_attn_implementation = core_attn_implementation
+
+            def uattn_wrapper(
+                module: torch.nn.Module,
+                query: torch.Tensor,
+                key: torch.Tensor,
+                value: torch.Tensor,
+                attention_mask: torch.Tensor,
                 *args,
                 **kwargs,
-            )
-            return attn_output, attn_weights
+            ) -> Tuple[torch.Tensor, torch.Tensor]:
+                if not owns_attention_module(module, query, key):
+                    return core_attn_function(module, query, key, value, attention_mask, *args, **kwargs)
 
-        # We don't do: ALL_ATTENTION_FUNCTIONS.register("ulysses", uattn_wrapper)
-        # The problem with that approach is that we'd miss all the special-case branches in
-        # HF Transformers that check `if self.config._attn_implementation == "flash_attention_2": ...`
-        # So instead we override the requested core implementation key in ALL_ATTENTION_FUNCTIONS
-        # with our wrapper. All other code paths relying on the original core attn_implementation
-        # will still be executed — we only intercept at the point of calling attention.
-        # This is what we called "Being John Malkovich".
-        ALL_ATTENTION_FUNCTIONS[core_attn_implementation] = uattn_wrapper
+                # Eval bypass must retain the model's original padding/custom mask.
+                if disable_in_eval and not module.training:
+                    return core_attn_function(module, query, key, value, attention_mask, *args, **kwargs)
+
+                # Local dense masks cannot be used after sequence all-to-all. Flex BlockMask is
+                # retained only as a signal that the model selected its flex path; forward()
+                # rebuilds a canonical full-sequence document-causal mask.
+                is_block_mask = False
+                if core_attn_implementation == "flex_attention":
+                    try:
+                        from torch.nn.attention.flex_attention import BlockMask
+                    except (ImportError, AttributeError) as exc:
+                        raise RuntimeError(
+                            "Ulysses flex_attention requires torch.nn.attention.flex_attention.BlockMask.") from exc
+                    is_block_mask = isinstance(attention_mask, BlockMask)
+                    if attention_mask is not None and not is_block_mask:
+                        raise RuntimeError(
+                            "Ulysses flex_attention cannot reconstruct an arbitrary dense/custom attention mask; "
+                            "only standard causal or packed document-causal BlockMask inputs are supported.")
+
+                if not is_block_mask:
+                    attention_mask = None
+
+                return uattn(module, query, key, value, attention_mask, *args, **kwargs)
+
+            # Override the selected backend so Transformers still follows all of its backend-specific
+            # setup branches. The wrapper delegates immediately for modules outside this registration.
+            ALL_ATTENTION_FUNCTIONS[core_attn_implementation] = uattn_wrapper
+            linear_registration = create_qwen35_linear_attention_registration(
+                prepared_linear_attention,
+                sp_group=mpu.get_sequence_parallel_group(),
+                sp_world_size=mpu.get_sequence_parallel_world_size(),
+            )
+            if linear_registration is not None:
+                linear_registration.install()
+        except Exception:
+            if uattn_wrapper is not None and ALL_ATTENTION_FUNCTIONS.get(core_attn_implementation) is uattn_wrapper:
+                ALL_ATTENTION_FUNCTIONS[core_attn_implementation] = core_attn_function
+            if linear_registration is not None:
+                linear_registration.restore()
+            mpu.destroy_sequence_parallel()
+            raise
+
+        _ACTIVE_ATTENTION_REGISTRATIONS[core_attn_implementation] = (core_attn_function, uattn_wrapper)
+        _ACTIVE_LINEAR_ATTENTION_REGISTRATION = linear_registration
 
         return mpu
+
+    @classmethod
+    def unregister_from_transformers(cls, core_attn_implementation=None):
+        """Restore Transformers and Qwen3.5 forwards modified by Ulysses registration."""
+        from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
+        import deepspeed.runtime.sequence_parallel.parallel_state_sp as mpu
+
+        global _ACTIVE_LINEAR_ATTENTION_REGISTRATION
+        if (core_attn_implementation is not None and core_attn_implementation not in _ACTIVE_ATTENTION_REGISTRATIONS):
+            active = sorted(_ACTIVE_ATTENTION_REGISTRATIONS)
+            raise ValueError(
+                f"Ulysses SP backend {core_attn_implementation!r} is not registered; active backends: {active}.")
+
+        implementations = ([core_attn_implementation]
+                           if core_attn_implementation is not None else list(_ACTIVE_ATTENTION_REGISTRATIONS))
+        for implementation in implementations:
+            registration = _ACTIVE_ATTENTION_REGISTRATIONS.pop(implementation)
+            original, wrapper = registration
+            if ALL_ATTENTION_FUNCTIONS.get(implementation) is wrapper:
+                ALL_ATTENTION_FUNCTIONS[implementation] = original
+
+        if not _ACTIVE_ATTENTION_REGISTRATIONS:
+            if _ACTIVE_LINEAR_ATTENTION_REGISTRATION is not None:
+                _ACTIVE_LINEAR_ATTENTION_REGISTRATION.restore()
+                _ACTIVE_LINEAR_ATTENTION_REGISTRATION = None
+            mpu.destroy_sequence_parallel()
+
+
+# ----------------------------------------------------------------------------
+# Compatibility alias retained for existing callers and tests.
+_position_ids_to_packed_cu_seqlens = position_ids_to_packed_cu_seqlens
+
+_GLOBAL_CU_SEQLENS_KEYS = frozenset({
+    "cu_seq_lens_q",
+    "cu_seq_lens_k",
+    "cu_seqlens",
+    "cu_seqlens_q",
+    "cu_seqlens_k",
+})
+_CU_SEQLENS_POSITION_PRIORITY = (
+    "cu_seq_lens_q",
+    "cu_seqlens_q",
+    "cu_seqlens",
+    "cu_seq_lens_k",
+    "cu_seqlens_k",
+)
+_MULTIMODAL_BATCH_KEYS = frozenset({
+    "images",
+    "videos",
+    "pixel_values",
+    "pixel_values_videos",
+    "image_grid_thw",
+    "video_grid_thw",
+    "image_sizes",
+})
 
 
 class UlyssesSPDataLoaderAdapter:
@@ -570,6 +826,8 @@ class UlyssesSPDataLoaderAdapter:
         sp_group,
         sp_world_size,
         device,
+        pad_to_sp_multiple=True,
+        pad_token_id=0,
     ):
         """
         This a DataLoader adapter which wraps around any existing DataLoader. It is used in conjunction with Ulysses to perform batch sharding on the sequence dimension.
@@ -625,6 +883,8 @@ class UlyssesSPDataLoaderAdapter:
         self.sp_group = sp_group
         self.sp_world_size = sp_world_size
         self.device = device
+        self.pad_to_sp_multiple = pad_to_sp_multiple
+        self.pad_token_id = pad_token_id
 
         self.iter = iter(dl)
         self.micro_batches: deque[Any] = deque()
@@ -641,6 +901,141 @@ class UlyssesSPDataLoaderAdapter:
 
         return self.micro_batches.popleft()
 
+    @staticmethod
+    def _is_multimodal_key(key):
+        return (key in _MULTIMODAL_BATCH_KEYS or key.startswith("pixel_") or key.startswith("image_")
+                or key.startswith("video_") or key.startswith("vision_"))
+
+    @staticmethod
+    def _position_ids_from_seq_idx(seq_idx):
+        if seq_idx.ndim != 2:
+            raise ValueError(f"seq_idx must have shape [batch, sequence], got {tuple(seq_idx.shape)}")
+        indices = torch.arange(seq_idx.shape[1], device=seq_idx.device, dtype=torch.long).expand_as(seq_idx)
+        starts = torch.ones_like(seq_idx, dtype=torch.bool)
+        starts[:, 1:] = seq_idx[:, 1:] != seq_idx[:, :-1]
+        latest_start = torch.where(starts, indices, torch.zeros_like(indices)).cummax(dim=1).values
+        return indices - latest_start
+
+    @staticmethod
+    def _position_ids_from_cu_seqlens(cu_seqlens, batch_size, seq_length, device):
+        cu_seqlens = cu_seqlens.to(device=device, dtype=torch.long)
+        total_length = batch_size * seq_length
+        if (cu_seqlens.ndim != 1 or cu_seqlens.numel() < batch_size + 1 or cu_seqlens[0].item() != 0
+                or cu_seqlens[-1].item() != total_length or bool((cu_seqlens[1:] <= cu_seqlens[:-1]).any())):
+            raise ValueError(
+                "cu-seqlens used to generate position_ids must be a strictly increasing 1-D tensor from 0 to "
+                f"batch_size * seq_length ({total_length}).")
+        row_boundaries = torch.arange(
+            0,
+            total_length + 1,
+            seq_length,
+            device=device,
+            dtype=torch.long,
+        )
+        if not bool(torch.isin(row_boundaries, cu_seqlens).all()):
+            raise ValueError("cu-seqlens must contain every batch-row boundary before position_ids can be generated.")
+        lengths = cu_seqlens[1:] - cu_seqlens[:-1]
+        starts = torch.repeat_interleave(cu_seqlens[:-1], lengths)
+        flat_position_ids = torch.arange(total_length, device=device, dtype=torch.long) - starts
+        return flat_position_ids.reshape(batch_size, seq_length)
+
+    def _ensure_position_ids(self, batch):
+        if "position_ids" in batch:
+            position_ids = batch["position_ids"]
+            if position_ids.ndim != 2 or position_ids.shape != batch["input_ids"].shape:
+                raise ValueError(
+                    "Text-only Ulysses SP requires position_ids with the same [batch, sequence] shape as input_ids; "
+                    f"got {tuple(position_ids.shape)} and {tuple(batch['input_ids'].shape)}.")
+            return
+
+        batch_size, seq_length = batch["input_ids"].shape[:2]
+        seq_idx = batch.get("seq_idx")
+        if torch.is_tensor(seq_idx):
+            if seq_idx.shape != batch["input_ids"].shape:
+                raise ValueError(f"seq_idx must match input_ids shape, got {tuple(seq_idx.shape)} and "
+                                 f"{tuple(batch['input_ids'].shape)}.")
+            batch["position_ids"] = self._position_ids_from_seq_idx(seq_idx)
+            return
+        cu_seqlens = next(
+            (batch[key] for key in _CU_SEQLENS_POSITION_PRIORITY if torch.is_tensor(batch.get(key))),
+            None,
+        )
+        if cu_seqlens is not None:
+            batch["position_ids"] = self._position_ids_from_cu_seqlens(
+                cu_seqlens,
+                batch_size,
+                seq_length,
+                batch["input_ids"].device,
+            )
+            return
+        batch["position_ids"] = torch.arange(
+            seq_length,
+            device=batch["input_ids"].device,
+            dtype=torch.long,
+        ).unsqueeze(0).expand(batch_size, -1).clone()
+
+    def _gather_tensor(self, tensor):
+        shapes = [None for _ in range(self.sp_world_size)]
+        dist.all_gather_object(shapes, tuple(tensor.shape), group=self.sp_group)
+        tensor_list = [torch.empty(shape, dtype=tensor.dtype, device=tensor.device) for shape in shapes]
+        dist.all_gather(tensor_list, tensor.contiguous(), group=self.sp_group)
+        return tensor_list
+
+    def _pad_sequence_tensor(self, key, tensor, target_seq_length):
+        pad_length = target_seq_length - tensor.shape[1]
+        if pad_length <= 0:
+            return tensor
+        if key == "position_ids":
+            increments = torch.arange(1, pad_length + 1, device=tensor.device, dtype=tensor.dtype)
+            padding = tensor[:, -1:].expand(-1, pad_length) + increments.unsqueeze(0)
+            return torch.cat((tensor, padding), dim=1)
+        if key == "seq_idx":
+            repeats = [1] * tensor.ndim
+            repeats[1] = pad_length
+            padding = tensor[:, -1:].repeat(*repeats)
+            return torch.cat((tensor, padding), dim=1)
+
+        if key in ("labels", "shift_labels"):
+            fill_value = -100
+        elif key == "input_ids":
+            fill_value = self.pad_token_id
+        else:
+            fill_value = 0
+        padded_shape = list(tensor.shape)
+        padded_shape[1] = target_seq_length
+        padded = torch.full(padded_shape, fill_value, dtype=tensor.dtype, device=tensor.device)
+        padded[:, :tensor.shape[1]] = tensor
+        return padded
+
+    @staticmethod
+    def _adjust_cu_seqlens_for_padding(batch, old_seq_length, new_seq_length):
+        if old_seq_length == new_seq_length:
+            return
+        adjusted_cu_seqlens = []
+        for key in _GLOBAL_CU_SEQLENS_KEYS:
+            cu_seqlens = batch.get(key)
+            if not torch.is_tensor(cu_seqlens):
+                continue
+            batch_size = batch["input_ids"].shape[0]
+            expected_end = batch_size * old_seq_length
+            if cu_seqlens.ndim != 1 or cu_seqlens[-1].item() != expected_end:
+                raise ValueError(
+                    f"{key} must be 1-D and end at the unpadded flattened sequence length {expected_end}.")
+            rows = torch.div(cu_seqlens, old_seq_length, rounding_mode="floor")
+            columns = torch.remainder(cu_seqlens, old_seq_length)
+            adjusted = rows * new_seq_length + columns
+            batch[key] = adjusted
+            adjusted_cu_seqlens.append(adjusted)
+
+        if adjusted_cu_seqlens:
+            max_seqlen = max(int((cu[1:] - cu[:-1]).max().item()) for cu in adjusted_cu_seqlens)
+            for key in ("max_seqlen", "max_seqlen_q", "max_seqlen_k", "max_length_q", "max_length_k"):
+                value = batch.get(key)
+                if torch.is_tensor(value):
+                    batch[key] = value.new_tensor(max_seqlen)
+                elif value is not None:
+                    batch[key] = max_seqlen
+
     def refill(self):
         # reset the iterator if StopIteration arrives, and re-raise it to allow multiple epochs to run
         try:
@@ -648,40 +1043,41 @@ class UlyssesSPDataLoaderAdapter:
         except StopIteration:
             self.iter = iter(self.dl)
             raise StopIteration
+        if not isinstance(batch, dict) or "input_ids" not in batch or not torch.is_tensor(batch["input_ids"]):
+            raise ValueError("Ulysses SP dataloader batches must be dictionaries containing tensor input_ids.")
+        if batch["input_ids"].ndim != 2:
+            raise ValueError(f"input_ids must have shape [batch, sequence], got {tuple(batch['input_ids'].shape)}")
+        multimodal_keys = [key for key, value in batch.items() if value is not None and self._is_multimodal_key(key)]
+        if multimodal_keys:
+            raise ValueError(
+                "Ulysses SP currently supports text tokens only; multimodal/vision inputs require a separate "
+                f"visual-token sharding contract. Unsupported keys: {sorted(multimodal_keys)}")
+        if "labels" not in batch or not torch.is_tensor(batch["labels"]):
+            raise ValueError("Ulysses SP dataloader batches must contain tensor labels.")
+        if batch["labels"].shape[:2] != batch["input_ids"].shape:
+            raise ValueError(
+                f"labels must match input_ids [batch, sequence] shape, got {tuple(batch['labels'].shape)} and "
+                f"{tuple(batch['input_ids'].shape)}.")
+
+        self._ensure_position_ids(batch)
         micro_batches = defaultdict(dict)
+        tensor_kinds = {}
         # XXX: replace with more efficient all-to-all?
 
-        # position_ids must exist before sharding so that after all_gather in
-        # UlyssesSPAttentionHF.forward() they reconstruct to correct global positions.
-        # Without them, the Trainer generates local [0,...,chunk_len-1] per rank AFTER
-        # sharding, which after all_gather looks like packed sequences and breaks
-        # sdpa/flex_attention causal masking.
-        if "position_ids" not in batch:
-            raise ValueError("Ulysses SP requires `position_ids` in every dataloader batch so that "
-                             "each token retains its correct global position after sequence sharding. "
-                             "For non-packed sequences: position_ids = torch.arange(seq_len) per sample. "
-                             "For packed sequences: position_ids must reset at document boundaries. "
-                             "Ensure your data collator includes position_ids in its output.")
-
-        # we have batches of variable seqlen so in order to do all_gather on batches - we need to know the exact length of each tensor on each rank
-        seqlen = torch.tensor(batch["input_ids"].shape[1], dtype=torch.int64, device=self.device)
-        seqlens = [torch.zeros(1, dtype=torch.int64, device=self.device) for _ in range(self.sp_world_size)]
-        dist.all_gather(seqlens, seqlen, group=self.sp_group)
-        seqlens = [x[0].item() for x in seqlens]
-
+        input_shape = batch["input_ids"].shape
         for k in batch.keys():
             if torch.is_tensor(batch[k]):
                 batch[k] = batch[k].to(self.device)
-                if seqlen != batch[k].shape[1]:
-                    raise ValueError(
-                        f"{k}'s shape {batch[k].shape} must match input_ids's shape {batch['input_ids'].shape}")
+                if k in _GLOBAL_CU_SEQLENS_KEYS:
+                    tensor_kinds[k] = "global_metadata"
+                elif batch[k].ndim >= 2 and batch[k].shape[:2] == input_shape[:2]:
+                    tensor_kinds[k] = "sequence"
+                else:
+                    tensor_kinds[k] = "replicated"
                 with torch.no_grad():
-                    tensor_list = [
-                        torch.zeros((batch[k].shape[0], seqlens[i]), dtype=batch[k].dtype, device=batch[k].device)
-                        for i in range(self.sp_world_size)
-                    ]
-                    dist.all_gather(tensor_list, batch[k], group=self.sp_group)
+                    tensor_list = self._gather_tensor(batch[k])
             else:
+                tensor_kinds[k] = "replicated"
                 tensor_list = [None for _ in range(self.sp_world_size)]
                 dist.all_gather_object(tensor_list, batch[k], group=self.sp_group)
 
@@ -695,7 +1091,14 @@ class UlyssesSPDataLoaderAdapter:
             seq_length = len(batch["input_ids"][0])
 
             if seq_length % self.sp_world_size != 0:
-                raise ValueError(f"batch's seqlen={seq_length} isn't divisible by sp-size={self.sp_world_size}")
+                if not self.pad_to_sp_multiple:
+                    raise ValueError(f"batch's seqlen={seq_length} isn't divisible by sp-size={self.sp_world_size}")
+                padded_seq_length = math.ceil(seq_length / self.sp_world_size) * self.sp_world_size
+                self._adjust_cu_seqlens_for_padding(batch, seq_length, padded_seq_length)
+                for key, kind in tensor_kinds.items():
+                    if kind == "sequence" and key in batch:
+                        batch[key] = self._pad_sequence_tensor(key, batch[key], padded_seq_length)
+                seq_length = padded_seq_length
             chunk_len = seq_length // self.sp_world_size
 
             # because we have to gather logits from all sp ranks we have to do the loss function ourselves
@@ -703,16 +1106,18 @@ class UlyssesSPDataLoaderAdapter:
             labels = batch.pop("labels")
             labels = torch.nn.functional.pad(labels, (0, 1), value=-100)
             batch["shift_labels"] = labels[..., 1:].contiguous()
+            tensor_kinds["shift_labels"] = "sequence"
             # free up temp memory
             del labels
 
             # batch sharding
             for k in batch.keys():
-                # leave non-tensors alone
                 if not torch.is_tensor(batch[k]):
                     continue
-                # at seqlen>10M and 32+ gpus this can take GBs of memory so keep the prefill buffer on cpu
-                batch[k] = batch[k][:, chunk_len * self.sp_rank:chunk_len * (self.sp_rank + 1)].cpu()
+                if tensor_kinds[k] == "sequence":
+                    batch[k] = batch[k][:, chunk_len * self.sp_rank:chunk_len * (self.sp_rank + 1)]
+                # At seqlen>10M and 32+ GPUs this can take GBs, so keep queued batches on CPU.
+                batch[k] = batch[k].cpu()
 
             self.micro_batches.append(batch)
 
