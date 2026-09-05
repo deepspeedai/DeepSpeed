@@ -7,6 +7,8 @@ import pytest
 import torch
 import deepspeed
 from deepspeed.accelerator import get_accelerator
+from pydantic import ValidationError
+from deepspeed.inference.config import DeepSpeedInferenceConfig
 from unit.common import DistributedTest
 from unit.simple_model import create_config_from_dict
 
@@ -38,6 +40,14 @@ class TestInferenceCudaGraphConfig:
                     "replace_with_kernel_inject": True,
                 },
             )
+
+
+@pytest.mark.inference
+@pytest.mark.parametrize("field", ["min_out_tokens", "min_tokens"])
+@pytest.mark.parametrize("value", [-1, 0])
+def test_min_out_tokens_must_be_positive(field, value):
+    with pytest.raises(ValidationError):
+        DeepSpeedInferenceConfig(**{field: value})
 
 
 @pytest.mark.inference
