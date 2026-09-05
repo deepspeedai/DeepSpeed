@@ -4558,7 +4558,9 @@ class DeepSpeedEngine(Module):
         autoep_partitioned_experts = False
         allowed_missing_keys = None
         if self.zero_optimization_partition_weights() and not load_optimizer_states and not self.has_moe_layers:
-            checkpoint['module'] = get_fp32_state_dict_from_zero_checkpoint(load_dir)
+            # dtype=None keeps the checkpoint dtypes: these tensors are cast again when they
+            # land in the model, so upcasting frozen parameters here would only cost memory.
+            checkpoint['module'] = get_fp32_state_dict_from_zero_checkpoint(load_dir, dtype=None)
             fetch_z3_params = True
 
         if is_pipe_parallel:

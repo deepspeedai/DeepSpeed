@@ -587,7 +587,8 @@ def to_torch_tensor(state_dict, return_empty_tensor=False, dtype=None):
 def get_fp32_state_dict_from_zero_checkpoint(checkpoint_dir,
                                              tag=None,
                                              exclude_frozen_parameters=False,
-                                             lazy_mode=False):
+                                             lazy_mode=False,
+                                             dtype=torch.float32):
     """
     Convert ZeRO 2 or 3 checkpoint into a single fp32 consolidated state_dict that can be loaded with
     ``load_state_dict()`` and used for training without DeepSpeed or shared with others, for example
@@ -599,6 +600,8 @@ def get_fp32_state_dict_from_zero_checkpoint(checkpoint_dir,
         - ``exclude_frozen_parameters``: exclude frozen parameters
         - ``lazy_mode``: get state_dict in lazy mode. It returns a dict of pesduo tensor instead of torch tensor, which is more memory efficient.
           Convert the pesduo tensor to torch tensor by ``.contiguous()``
+        - ``dtype``: dtype of the returned tensors, fp32 by default. Pass ``None`` to keep each
+          tensor's checkpoint dtype, which avoids upcasting frozen parameters. Ignored in lazy mode.
 
     Returns:
         - pytorch ``state_dict``
@@ -646,7 +649,9 @@ def get_fp32_state_dict_from_zero_checkpoint(checkpoint_dir,
     if lazy_mode:
         return state_dict
     else:
-        return to_torch_tensor(state_dict)
+        # Frozen parameters keep the model's dtype because the optimizer holds no fp32 master
+        # copy of them, so cast here to make the whole state_dict fp32 as documented.
+        return to_torch_tensor(state_dict, dtype=dtype)
 
 
 def convert_zero_checkpoint_to_state_dict(checkpoint_dir,
