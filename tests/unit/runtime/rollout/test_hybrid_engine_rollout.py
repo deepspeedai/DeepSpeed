@@ -81,6 +81,115 @@ def test_constructor_defaults_without_cfg():
     assert rollout.use_shared_prefill is False
 
 
+def test_continuous_generation_rejects_unsupported_inputs():
+    rollout = HybridEngineRollout(_make_engine(), _make_tokenizer())
+    request = RolloutRequest(
+        prompt_ids=torch.tensor([[0, 1, 2]]),
+        prompt_attention_mask=torch.tensor([[0, 1, 1]]),
+    )
+
+    with pytest.raises(ValueError, match="at least one request"):
+        rollout.generate_continuous([], [], max_batch_size=1)
+    with pytest.raises(ValueError, match="same length"):
+        rollout.generate_continuous([request], [], max_batch_size=1)
+    with pytest.raises(ValueError, match="greedy"):
+        rollout.generate_continuous(
+            [request],
+            [SamplingConfig(max_new_tokens=2, temperature=0.5)],
+            max_batch_size=1,
+        )
+
+
+def test_static_cache_constructor_supports_legacy_batch_keyword():
+
+    class LegacyStaticCache:
+
+        def __init__(self, config, max_batch_size, max_cache_len, device, dtype):
+            self.config = config
+            self.max_batch_size = max_batch_size
+
+    config = SimpleNamespace(num_attention_heads=4)
+    cache = HybridEngineRollout._create_static_cache(LegacyStaticCache, config, 2, 8, "cpu", torch.float32)
+
+    assert cache.max_batch_size == 2
+    assert cache.config.num_key_value_heads == 4
+
+
+def test_continuous_cache_span_does_not_sum_independent_requests():
+    cache_len = HybridEngineRollout._estimate_continuous_cache_len(64, [64] * 100, 100)
+
+    assert cache_len == 128
+    assert cache_len < 64 + 64 * 100
+
+
+def test_select_legacy_cache_rows_expands_flattened_heads():
+    keys = torch.arange(2 * 4 * 3).reshape(2 * 4, 1, 3)
+    values = keys + 100
+    rows = torch.tensor([1])
+
+    selected = HybridEngineRollout._select_legacy_cache_rows(((keys, values), ), rows, logical_batch_size=2)
+
+    assert torch.equal(selected[0][0], keys[4:8])
+    assert torch.equal(selected[0][1], values[4:8])
+
+
+def test_continuous_generation_validates_each_request_length():
+
+    class LimitedModel(torch.nn.Module):
+
+        _supports_cache_class = False
+
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.zeros(1))
+            self.config = SimpleNamespace(max_position_embeddings=4)
+
+    model = LimitedModel()
+    rollout = HybridEngineRollout(SimpleNamespace(module=model), SimpleNamespace(eos_token_id=None))
+    request = RolloutRequest(torch.tensor([[1, 2, 3]]), torch.ones((1, 3), dtype=torch.long))
+
+    with pytest.raises(ValueError, match="request exceeds"):
+        rollout.generate_continuous([request], [SamplingConfig(max_new_tokens=2, temperature=0)], 1)
+
+
+def test_continuous_generation_refills_legacy_cache_batch():
+
+    class LegacyCacheModel(torch.nn.Module):
+        _supports_cache_class = False
+
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.zeros(1))
+            self.calls = []
+            self.config = SimpleNamespace(max_position_embeddings=32)
+
+        def forward(self, input_ids, attention_mask, past_key_values=None, use_cache=True):
+            past_length = 0 if past_key_values is None else past_key_values[0][0].shape[2]
+            total_length = past_length + input_ids.shape[1]
+            assert attention_mask.shape == (input_ids.shape[0], total_length)
+            self.calls.append((input_ids.shape[0], input_ids.shape[1], past_length))
+            keys = torch.zeros((input_ids.shape[0], 1, total_length, 1))
+            logits = torch.zeros((input_ids.shape[0], input_ids.shape[1], 16))
+            logits[..., 7] = 1
+            return SimpleNamespace(logits=logits, past_key_values=((keys, keys.clone()), ))
+
+    model = LegacyCacheModel()
+    rollout = HybridEngineRollout(SimpleNamespace(module=model), SimpleNamespace(pad_token_id=0, eos_token_id=None))
+    requests = [
+        RolloutRequest(torch.tensor([[1, 2, token]]), torch.ones((1, 3), dtype=torch.long)) for token in (3, 4, 5)
+    ]
+    configs = [
+        SamplingConfig(max_new_tokens=1, temperature=0),
+        SamplingConfig(max_new_tokens=3, temperature=0),
+        SamplingConfig(max_new_tokens=2, temperature=0),
+    ]
+
+    outputs = rollout.generate_continuous(requests, configs, max_batch_size=2)
+
+    assert [output.input_ids.shape[1] - 3 for output in outputs] == [1, 3, 2]
+    assert model.calls[:3] == [(2, 3, 0), (1, 1, 3), (1, 3, 0)]
+
+
 @patch("deepspeed.runtime.rollout.hybrid_engine_rollout.time.perf_counter")
 @patch("deepspeed.runtime.rollout.hybrid_engine_rollout.get_accelerator")
 def test_generate_records_profile_when_enabled(mock_get_accelerator, mock_perf_counter):

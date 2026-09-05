@@ -18,6 +18,8 @@ from deepspeed.runtime.rollout.base import (
     SamplingConfig,
 )
 from deepspeed.runtime.rollout.hybrid_engine_rollout import HybridEngineRollout
+from deepspeed.runtime.rollout.continuous_batching import (ContinuousBatchRequest, ContinuousBatchScheduler,
+                                                           ContinuousBatchUpdate)
 
 __all__ = [
     "HybridEngineRollout",
@@ -27,6 +29,9 @@ __all__ = [
     "RolloutRequest",
     "SamplingConfig",
     "build_rollout",
+    "ContinuousBatchRequest",
+    "ContinuousBatchScheduler",
+    "ContinuousBatchUpdate",
 ]
 
 
