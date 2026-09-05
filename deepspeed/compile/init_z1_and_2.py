@@ -8,6 +8,7 @@ from functools import partial
 
 import torch
 
+import deepspeed.comm as dist
 from deepspeed.accelerator import get_accelerator
 from .passes import zero_1_and_2_compile, zero3_compile
 from .backend import make_backend, launch_compile_passes, init_schedule
@@ -56,34 +57,32 @@ def _build_flat_partition_grad_views(optimizer, group_idx):
     dtype = optimizer.gradient_accumulation_dtype
     device = get_accelerator().current_device_name()
     flat_buffer = torch.zeros(partition_size, dtype=dtype, device=device)
+    partition_id = dist.get_rank(group=optimizer.real_dp_process_group[group_idx])
 
     views = []
     current_size = 0
-    for i, tensor in enumerate(optimizer.params_in_partition[group_idx]):
-        num_elements = tensor.numel()
-        tensor_offset = 0
+    for tensor in optimizer.params_in_partition[group_idx]:
+        param_id = optimizer.get_param_id(tensor)
+        source_offset = optimizer.grad_start_offset[group_idx][partition_id][param_id]
+        dest_offset = optimizer.grad_partition_insertion_offset[group_idx][partition_id][param_id]
+        num_elements = min(tensor.numel() - source_offset, partition_size - dest_offset)
 
-        if i == 0 and optimizer.first_offset[group_idx] > 0:
-            tensor_offset = int(optimizer.first_offset[group_idx])
-            num_elements -= tensor_offset
+        if dest_offset > current_size:
+            padding = flat_buffer.narrow(0, current_size, dest_offset - current_size)
+            padding._zero_padding = True
+            views.append(padding)
 
-        if num_elements > partition_size - current_size:
-            num_elements = partition_size - current_size
-
-        if num_elements <= 0:
-            continue
-
-        view = flat_buffer.narrow(0, current_size, int(num_elements))
-        if tensor_offset == 0 and num_elements == tensor.numel():
-            view = view.view(tensor.shape)
-        views.append(view)
-        current_size += int(num_elements)
-
-        if current_size >= partition_size:
-            break
+        if num_elements > 0:
+            view = flat_buffer.narrow(0, dest_offset, int(num_elements))
+            if source_offset == 0 and num_elements == tensor.numel():
+                view = view.view(tensor.shape)
+            views.append(view)
+            current_size = dest_offset + int(num_elements)
 
     if current_size < partition_size:
-        views.append(flat_buffer.narrow(0, current_size, partition_size - current_size))
+        padding = flat_buffer.narrow(0, current_size, partition_size - current_size)
+        padding._zero_padding = True
+        views.append(padding)
 
     return flat_buffer, views
 
@@ -102,7 +101,12 @@ def init_z1_and_2(engine, backend, compile_config, compile_kwargs, schedule=None
     if use_z2:
         grad_buffer = {}
         for i, group in enumerate(optimizer.bit16_groups):
-            grad_buffer[i] = [p.clone().detach() for p in _build_partition_grad_views(optimizer, i)]
+            partition_grad_views = _build_partition_grad_views(optimizer, i)
+            grad_buffer[i] = [p.clone().detach() for p in partition_grad_views]
+            param_grad_buffers = [
+                cloned for original, cloned in zip(partition_grad_views, grad_buffer[i])
+                if not getattr(original, "_zero_padding", False)
+            ]
 
             index_in_partition = 0
             first_in_partition = True
@@ -112,7 +116,7 @@ def init_z1_and_2(engine, backend, compile_config, compile_kwargs, schedule=None
                 in_partition = optimizer.is_param_in_current_partition[param_id]
 
                 if in_partition:
-                    buf = grad_buffer[i][index_in_partition]
+                    buf = param_grad_buffers[index_in_partition]
                     offset = optimizer.first_offset[i] if first_in_partition else 0
                     dc.register_param(p.param_id, p.shape, p, buf, int(offset))
                     index_in_partition += 1
@@ -158,7 +162,8 @@ def init_z1_and_2(engine, backend, compile_config, compile_kwargs, schedule=None
                 flat_grad_buffer, group_grad_buffers = _build_flat_partition_grad_views(optimizer, group_idx)
                 current_grad_buffers[group_idx] = _FlatPartitionGradBufferGroup(
                     group_grad_buffers, flat_grad_buffer, lambda group_idx=group_idx: release_grad_buffer(group_idx))
-                for (param_id, _, offset), grad_buffer in zip(grad_buffer_metadata[group_idx], group_grad_buffers):
+                param_grad_buffers = [g for g in group_grad_buffers if not getattr(g, "_zero_padding", False)]
+                for (param_id, _, offset), grad_buffer in zip(grad_buffer_metadata[group_idx], param_grad_buffers):
                     dc.update_param_grad_buffer(param_id, grad_buffer, offset)
             optimizer.averaged_gradients = current_grad_buffers
 
@@ -180,7 +185,6 @@ def init_z1_and_2(engine, backend, compile_config, compile_kwargs, schedule=None
             schedule.append((0, [zero_1_and_2_compile.add_z1_reduce]))
     else:
         for opt in schedule:
-            # avoid typical misconfiguration
             if zero3_compile.add_z3_gather_release in opt[1]:
                 raise ValueError("The schedule contains the ZeRO-3 pass add_z3_gather_release, but ZeRO stage 1 "
                                  "or 2 is enabled. Use zero_1_and_2_compile.add_z1_reduce (stage 1) or add_z2_reduce "
