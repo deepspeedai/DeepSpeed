@@ -82,6 +82,19 @@ def _raise_if_duplicate_moe_specs(specs: list[MoELayerSpec]) -> None:
                      "AutoEP patterns so each MoE module matches exactly one preset.")
 
 
+def _resolve_e_score_correction_bias_path(moe_module: nn.Module, module_name: str) -> str | None:
+    matches = [
+        path for path, candidate in moe_module.named_modules()
+        if getattr(candidate, "e_score_correction_bias", None) is not None
+    ]
+    if len(matches) > 1:
+        locations = ", ".join(repr(path or "<root>") for path in matches)
+        raise ValueError(
+            f"AutoEP found e_score_correction_bias in multiple locations in layer '{module_name}': {locations}. "
+            "Keep exactly one score correction bias in each MoE layer so AutoEP can preserve it unambiguously.")
+    return matches[0] if matches else None
+
+
 def _source_param_shape(param: torch.Tensor | nn.Parameter) -> torch.Size:
     if is_zero_param(param):
         return torch.Size(param.ds_shape)
@@ -413,6 +426,7 @@ class AutoEP:
                     gate_bias = getattr(router_child, 'bias', None) is not None
 
                 forward_contract = adapter.adjust_forward_contract(_detect_forward_contract(module, router_child))
+                e_score_correction_bias_path = _resolve_e_score_correction_bias_path(module, module_name)
 
                 # Check shared experts
                 has_shared = False
@@ -472,6 +486,7 @@ class AutoEP:
                     preset_adapter=preset.preset_adapter,
                     router_logits_capture_mode=forward_contract.router_logits_capture_mode,
                     moe_output_shape=forward_contract.moe_output_shape,
+                    e_score_correction_bias_path=e_score_correction_bias_path,
                 )
                 specs.append(spec)
                 logger.debug(f"Detected MoE layer: {module_name} (family={preset_name}, "

@@ -7,6 +7,7 @@
 import ast
 import inspect
 from collections import OrderedDict
+from contextlib import nullcontext
 from types import SimpleNamespace
 
 import pytest
@@ -252,6 +253,56 @@ class TestAutoEPConfig:
                                    pp_size=1,
                                    tp_size=2,
                                    sp_size=1)
+
+    def test_combine_impl_rejects_unknown_value(self):
+        config = parse_autoep_config({"enabled": True, "combine_impl": "triton"})
+        with pytest.raises(ValueError, match="combine_impl must be one of"):
+            validate_autoep_config(config, world_size=1, pp_size=1, tp_size=1, sp_size=1)
+
+    def test_fused_combine_rejects_folded_tensor_parallelism(self):
+        config = parse_autoep_config({
+            "enabled": True,
+            "autoep_size": 2,
+            "combine_impl": "fused_weighted_sum",
+        })
+        with pytest.raises(ValueError, match=r"tensor_parallel\.autotp_size=2"):
+            validate_autoep_config(config, world_size=4, pp_size=1, tp_size=2, sp_size=1)
+
+    def test_fused_combine_rejects_expert_tensor_parallelism(self):
+        config = parse_autoep_config({
+            "enabled": True,
+            "autoep_size": 2,
+            "expert_tensor_parallel_size": 2,
+            "combine_impl": "fused_weighted_sum",
+        })
+        with pytest.raises(ValueError, match="requires expert_tensor_parallel_size=1"):
+            validate_autoep_config(config, world_size=4, pp_size=1, tp_size=1, sp_size=1)
+
+    def test_fused_combine_rejects_deepep(self):
+        config = parse_autoep_config({
+            "enabled": True,
+            "autoep_size": 2,
+            "combine_impl": "fused_weighted_sum",
+            "comm_backend": "deepep",
+            "comm_max_tokens_per_rank": 4096,
+        })
+        with pytest.raises(ValueError, match='cannot be used with comm_backend="deepep"'):
+            validate_autoep_config(config, world_size=2, pp_size=1, tp_size=1, sp_size=1)
+
+    @pytest.mark.parametrize("score_apply, spec_score_apply", [("auto", "pre"), ("pre", "post")])
+    def test_fused_combine_requires_post_score_apply(self, score_apply, spec_score_apply):
+        config = parse_autoep_config({
+            "enabled": True,
+            "combine_impl": "fused_weighted_sum",
+            "score_apply": score_apply,
+        })
+        with pytest.raises(ValueError, match='requires score_apply="post"'):
+            validate_autoep_post_detection(config, [_make_spec(score_apply=spec_score_apply)])
+
+    def test_fused_combine_accepts_the_standard_path(self):
+        config = parse_autoep_config({"enabled": True, "autoep_size": 2, "combine_impl": "fused_weighted_sum"})
+        validate_autoep_config(config, world_size=2, pp_size=1, tp_size=1, sp_size=1)
+        validate_autoep_post_detection(config, [_make_spec(num_experts=4, score_apply="post")])
 
     @pytest.mark.parametrize("value", UNSUPPORTED_LOAD_BALANCE_VALUES)
     def test_load_balance_coeff_rejected_at_parse(self, value):
@@ -1073,6 +1124,159 @@ class TestSplitPlan:
         assert torch.equal(plan.local_counts_by_source, counts.view(1, 4))
 
 
+@pytest.fixture
+def async_split_layer(monkeypatch):
+    source = MockMoEBlock(num_experts=4, ffn_hidden=128, hidden_size=64)
+    layer = AutoEPMoELayer(_make_spec(),
+                           source,
+                           ep_size=2,
+                           ep_rank=0,
+                           config=_runtime_config(enabled=True, autoep_size=2, async_split_plan=True))
+    activity = {"buffers": [], "waits": [], "records": []}
+    event = SimpleNamespace(synchronize=lambda: activity["waits"].append("ready"),
+                            record=lambda stream: activity["records"].append("submitted"))
+    stream = SimpleNamespace(wait_stream=lambda stream: None)
+
+    class CUDADeviceCounts(torch.Tensor):
+
+        @property
+        def device(self):
+            return torch.device("cuda", 0)
+
+    def pin_memory(tensor):
+        activity["buffers"].append(tensor)
+        return tensor
+
+    accelerator = SimpleNamespace(current_device=lambda: 0,
+                                  current_stream=lambda device: "consumer",
+                                  Event=lambda: event,
+                                  Stream=lambda device: stream,
+                                  stream=lambda stream: nullcontext(),
+                                  pin_memory=pin_memory)
+
+    def device_counts(_module, _inputs, output):
+        scores, selected, counts = output
+        return scores, selected, counts.as_subclass(CUDADeviceCounts)
+
+    def exchange(output, input_, **kwargs):
+        output.copy_(input_)
+
+    # Counts have CUDA device metadata with host storage so the real planner
+    # can run against deterministic stream/collective protocol doubles.
+    hook = layer.router.register_forward_hook(device_counts)
+    monkeypatch.setattr(auto_ep_layer, "get_accelerator", lambda: accelerator)
+    monkeypatch.setattr(auto_ep_layer.dist, "all_to_all_single", exchange)
+    monkeypatch.setattr(torch.Tensor, "record_stream", lambda tensor, stream: None)
+    auto_ep_layer._get_async_split_plan_stream.cache_clear()
+    yield layer, event, activity
+    hook.remove()
+    auto_ep_layer._get_async_split_plan_stream.cache_clear()
+
+
+class TestAsyncSplitPlanLifecycle:
+    """Pin the pending-buffer reuse bug as well as the public retry behavior."""
+
+    def test_packing_failure_drains_pending_and_allows_retry(self, monkeypatch, async_split_layer):
+        layer, _, activity = async_split_layer
+        hidden = torch.randn(1, 8, 64)
+        layer.async_split_plan = False
+        expected = layer(hidden)
+        layer.async_split_plan = True
+        packing_error = RuntimeError("token packing failed")
+
+        def fail_packing(*args, **kwargs):
+            raise packing_error
+
+        with monkeypatch.context() as patch:
+            patch.setattr(torch, "argsort", fail_packing)
+            with pytest.raises(RuntimeError) as raised:
+                layer(hidden)
+
+        assert raised.value is packing_error
+        assert activity["waits"] == ["ready"]
+        assert layer._async_split_plan_pending is None
+        actual = layer(hidden)
+        torch.testing.assert_close(actual, expected)
+        assert activity["waits"] == ["ready", "ready"]
+        assert activity["records"] == ["submitted", "submitted"]
+        assert len(activity["buffers"]) == 1
+        assert layer._async_split_plan_pending is None
+
+    def test_drain_failure_preserves_original_error_and_pending_buffers(self, monkeypatch, async_split_layer):
+        layer, event, activity = async_split_layer
+        packing_error = RuntimeError("token packing failed")
+
+        def fail_packing(*args, **kwargs):
+            raise packing_error
+
+        def fail_drain():
+            activity["waits"].append("failed")
+            raise RuntimeError("device failed while draining")
+
+        monkeypatch.setattr(torch, "argsort", fail_packing)
+        event.synchronize = fail_drain
+        hidden = torch.randn(1, 8, 64)
+        with pytest.raises(RuntimeError) as raised:
+            layer(hidden)
+        assert raised.value is packing_error
+        pending = layer._async_split_plan_pending
+        assert pending._host_splits is activity["buffers"][0]
+        assert pending._keepalive
+
+        with pytest.raises(RuntimeError, match="already pending"):
+            layer(hidden)
+        assert layer._async_split_plan_pending is pending
+        assert activity["waits"] == ["failed"]
+        assert activity["records"] == ["submitted"]
+
+    @pytest.mark.parametrize("backend, ep_size", [("comm", 1), ("deepep", 1), ("deepep", 2)])
+    def test_unused_async_planner_is_bypassed(self, monkeypatch, backend, ep_size):
+        source = MockMoEBlock(num_experts=4, ffn_hidden=128, hidden_size=64).to(torch.bfloat16)
+        layer = AutoEPMoELayer(_make_spec(),
+                               source,
+                               ep_size=ep_size,
+                               ep_rank=0,
+                               config=_runtime_config(enabled=True,
+                                                      autoep_size=ep_size,
+                                                      comm_backend=backend,
+                                                      comm_max_tokens_per_rank=16))
+        monkeypatch.setattr(auto_ep_layer.dist, "all_to_all_single",
+                            lambda output, input_, **kwargs: output.copy_(input_))
+        # The loopback exchange must not initialize a real EP communicator.
+        monkeypatch.setattr(auto_ep_layer.dist, "barrier", lambda **kwargs: None)
+
+        class LoopbackExchange:
+
+            def __init__(self, *, num_experts, num_max_tokens_per_rank, **kwargs):
+                self.num_local_experts = num_experts // ep_size
+                self.num_max_tokens_per_rank = num_max_tokens_per_rank
+
+            def dispatch(self, tokens, topk_idx, topk_weights):
+                local_experts = topk_idx.flatten() % self.num_local_experts
+                order = torch.argsort(local_experts, stable=True)
+                token_indices = order // topk_idx.shape[1]
+                counts = torch.bincount(local_experts, minlength=self.num_local_experts)
+                self.last_handle = SimpleNamespace(num_expanded_tokens=order.numel(),
+                                                   psum_num_recv_tokens_per_expert=counts.cumsum(0),
+                                                   token_indices=token_indices,
+                                                   num_tokens=tokens.shape[0])
+                return tokens[token_indices], topk_weights.flatten()[order].float(), self.last_handle
+
+            def combine(self, rows, handle):
+                output = rows.new_zeros((handle.num_tokens, rows.shape[1]))
+                return output.index_add_(0, handle.token_indices, rows)
+
+        monkeypatch.setattr(auto_ep_layer, "DeepEPExchange", LoopbackExchange)
+        hidden = torch.randn(1, 8, 64, dtype=torch.bfloat16)
+        expected = layer(hidden)
+        layer.async_split_plan = True
+        for _ in range(2):
+            torch.testing.assert_close(layer(hidden), expected)
+            assert layer._async_split_plan_pending is None
+        assert layer._async_split_plan_host_splits is None
+        assert layer._async_split_plan_ready_event is None
+
+
 class TestModelDetectionAndReplacement:
 
     def test_mixtral_detect_replace_and_mock_forward(self):
@@ -1277,7 +1481,9 @@ class TestModelDetectionAndReplacement:
         FakeGatheredParameters.calls = []
         monkeypatch.setattr(ep_repack, "GatheredParameters", FakeGatheredParameters)
         monkeypatch.setattr(get_preset_adapter("deepseek_v3"), "_installed_transformers_version", lambda: "5.0.0")
+
         model = MockDeepSeekV3Transformer(num_layers=1, num_experts=8)
+
         auto_ep = AutoEP(model, _runtime_config(enabled=True, autoep_size=2))
         specs = auto_ep.ep_parser()
 
@@ -1286,6 +1492,7 @@ class TestModelDetectionAndReplacement:
         assert specs[0].expert_storage == "module_list"
         assert specs[0].expert_w1_name == "gate_proj"
         assert specs[0].has_shared_experts is True
+        assert specs[0].e_score_correction_bias_path is None
 
         source_bias = torch.arange(8, dtype=torch.float32)
         model.model.layers[0].mlp.gate.e_score_correction_bias = nn.Parameter(source_bias.clone())
@@ -1301,6 +1508,59 @@ class TestModelDetectionAndReplacement:
         assert replaced.router.e_score_correction_bias is not None
         torch.testing.assert_close(replaced.router.e_score_correction_bias, source_bias)
         assert ["router.e_score_correction_bias"] in [call["names"] for call in FakeGatheredParameters.calls]
+
+    @pytest.mark.parametrize(
+        "owner_path,bias_kind,persistent",
+        [
+            ("gate", "buffer", True),
+            ("", "buffer", False),
+            ("router", "buffer", True),
+            ("gate.moe_statics", "parameter", True),
+        ],
+    )
+    def test_score_correction_bias_location_and_registration(self, monkeypatch, owner_path, bias_kind, persistent):
+        monkeypatch.setattr(get_preset_adapter("deepseek_v3"), "_installed_transformers_version", lambda: "5.0.0")
+        model = MockDeepSeekV3Transformer(num_layers=1, num_experts=8)
+        source = model.model.layers[0].mlp
+        owner = source
+        for part in owner_path.split(".") if owner_path else ():
+            if not hasattr(owner, part):
+                owner.add_module(part, nn.Module())
+            owner = getattr(owner, part)
+
+        source_bias = torch.arange(8, dtype=torch.float32)
+        if bias_kind == "parameter":
+            owner.e_score_correction_bias = nn.Parameter(source_bias.clone(), requires_grad=False)
+        else:
+            owner.register_buffer("e_score_correction_bias", source_bias.clone(), persistent=persistent)
+
+        auto_ep = AutoEP(model, _runtime_config(enabled=True, autoep_size=2))
+        spec = auto_ep.ep_parser()[0]
+        assert spec.e_score_correction_bias_path == owner_path
+
+        auto_ep.replace_moe_layer(spec, ep_size=2, ep_rank=0)
+
+        replaced_bias = model.model.layers[0].mlp.router.e_score_correction_bias
+        torch.testing.assert_close(replaced_bias, source_bias)
+        assert replaced_bias.requires_grad is False
+        if bias_kind == "parameter":
+            assert dict(
+                model.model.layers[0].mlp.router.named_parameters())["e_score_correction_bias"] is replaced_bias
+            assert "e_score_correction_bias" not in dict(model.model.layers[0].mlp.router.named_buffers())
+        else:
+            assert dict(model.model.layers[0].mlp.router.named_buffers())["e_score_correction_bias"] is replaced_bias
+            assert "e_score_correction_bias" not in dict(model.model.layers[0].mlp.router.named_parameters())
+            assert ("e_score_correction_bias" in model.model.layers[0].mlp.router.state_dict()) is persistent
+
+    def test_score_correction_bias_multiple_locations_are_rejected(self, monkeypatch):
+        monkeypatch.setattr(get_preset_adapter("deepseek_v3"), "_installed_transformers_version", lambda: "5.0.0")
+        model = MockDeepSeekV3Transformer(num_layers=1, num_experts=8)
+        source = model.model.layers[0].mlp
+        source.register_buffer("e_score_correction_bias", torch.zeros(8))
+        source.gate.register_buffer("e_score_correction_bias", torch.ones(8))
+
+        with pytest.raises(ValueError, match="e_score_correction_bias in multiple locations"):
+            AutoEP(model, _runtime_config(enabled=True, autoep_size=2)).ep_parser()
 
 
 def _eager_pep604_lines(module):

@@ -5,6 +5,7 @@
 """AutoEP gradient parity paths."""
 
 import functools
+from types import SimpleNamespace
 
 import deepspeed
 import deepspeed.comm as dist
@@ -12,7 +13,7 @@ import pytest
 import torch
 from deepspeed.accelerator import get_accelerator
 from deepspeed.module_inject.auto_ep_layer import AutoEPMoELayer
-from deepspeed.utils import safe_get_full_grad
+from deepspeed.utils import safe_get_full_fp32_param, safe_get_full_grad
 from unit.common import DistributedTest
 from unit.v1.moe.autoep_test_utils import (
     MockMoETransformer,
@@ -267,10 +268,31 @@ def _checkpoint_autoep_layers(engine):
 
 
 def _trainable_parameters(engine):
-    return {
-        name: param.detach().float().cpu().clone()
-        for name, param in engine.module.named_parameters() if param.requires_grad
-    }
+    optimizer = engine.optimizer
+    master_parameters = {}
+    # Stage-0 low-precision wrappers do not expose the safe_get parameter mapping.
+    if hasattr(optimizer, "fp16_groups"):
+        state = optimizer.state_dict()
+        for index, parameters in enumerate(optimizer.fp16_groups):
+            if "fp32_groups_flat" in state:
+                master_group = engine.unflatten(state["fp32_groups_flat"][index], parameters)
+            else:
+                assert "fp32_groups" in state, "Expected FP32 master parameters in optimizer state_dict"
+                master_group = state["fp32_groups"][index]
+            assert len(master_group) == len(parameters), "FP32 master parameter group does not match model parameters"
+            master_parameters.update(zip(parameters, master_group))
+
+    snapshot = {}
+    for name, parameter in engine.module.named_parameters():
+        if not parameter.requires_grad:
+            continue
+        full_parameter = master_parameters.get(parameter)
+        if full_parameter is None:
+            full_parameter = safe_get_full_fp32_param(parameter)
+        assert full_parameter is not None, f"Expected FP32 master parameter for {name}"
+        assert full_parameter.dtype == torch.float32, f"Expected FP32 master parameter dtype for {name}"
+        snapshot[name] = full_parameter.detach().cpu().clone()
+    return snapshot
 
 
 def _trainable_gradients(engine):
@@ -284,12 +306,9 @@ def _trainable_gradients(engine):
     return gradients
 
 
-def _async_split_step(engine, seed, checkpoint_activations):
-    if checkpoint_activations:
-        _checkpoint_autoep_layers(engine)
-
-    generator = torch.Generator().manual_seed(seed)
-    batch = torch.randn((1, 16, 128), generator=generator, dtype=torch.float32)
+def _async_split_step(engine, seed, seq_len):
+    generator = torch.Generator().manual_seed(seed + dist.get_rank())
+    batch = torch.randn((1, seq_len, 128), generator=generator, dtype=torch.float32)
     batch = batch.to(engine.device, dtype=_engine_input_dtype(engine)).requires_grad_(True)
     before = _trainable_parameters(engine)
 
@@ -321,6 +340,7 @@ def _assert_async_split_step_matches(actual, expected):
                                    expected[name],
                                    msg=f"{name} mismatch; max_diff={difference.max().item()}",
                                    **tolerance)
+    _assert_relative_l2_close(actual["input_grad"], expected["input_grad"], "input gradient")
 
     assert actual["gradients"]
     assert set(actual["gradients"]) == set(expected["gradients"])
@@ -332,12 +352,89 @@ def _assert_async_split_step_matches(actual, expected):
                                    expected["gradients"][name],
                                    msg=f"gradient mismatch for {name}; max_diff={max_difference}",
                                    **tolerance)
+        _assert_relative_l2_close(actual["gradients"][name], expected["gradients"][name], f"gradient {name}")
+    assert set(actual["delta"]) == set(expected["delta"])
     for name in sorted(expected["delta"]):
         max_difference = (actual["delta"][name] - expected["delta"][name]).abs().max().item()
         torch.testing.assert_close(actual["delta"][name],
                                    expected["delta"][name],
                                    msg=f"parameter update mismatch for {name}; max_diff={max_difference}",
                                    **tolerance)
+        _assert_relative_l2_close(actual["delta"][name], expected["delta"][name], f"parameter update {name}")
+
+
+def _assert_relative_l2_close(actual, expected, name):
+    # An absolute tolerance can hide a missing gradient or a small Adam update.
+    difference_norm = torch.linalg.vector_norm((actual.double() - expected.double()).flatten())
+    reference_norm = torch.linalg.vector_norm(expected.double().flatten())
+    assert difference_norm <= 0.05 * reference_norm, (
+        f"{name} relative L2 error exceeds 5%: error_norm={difference_norm.item()}, "
+        f"reference_norm={reference_norm.item()}")
+
+
+def _small_async_split_result(scale=1.0):
+    values = torch.tensor([1e-6, -2e-6]) * scale
+    names = ("layer.router.gate.weight", "layer.experts.w1")
+    return {
+        "loss": torch.tensor(1.0),
+        "output": torch.ones(2),
+        "input_grad": values.clone(),
+        "gradients": {
+            name: values.clone()
+            for name in names
+        },
+        "delta": {
+            name: values.clone()
+            for name in names
+        },
+    }
+
+
+@pytest.mark.parametrize("field", ["input_grad", "gradients", "delta"])
+@pytest.mark.parametrize("scale", [0.0, -1.0])
+def test_async_parity_rejects_small_missing_or_reversed_signal(field, scale):
+    expected = _small_async_split_result()
+    actual = _small_async_split_result()
+    if field == "input_grad":
+        actual[field].mul_(scale)
+    else:
+        actual[field]["layer.router.gate.weight"].mul_(scale)
+
+    with pytest.raises(AssertionError, match="relative L2 error"):
+        _assert_async_split_step_matches(actual, expected)
+
+
+def test_async_parity_accepts_one_percent_relative_error():
+    _assert_async_split_step_matches(_small_async_split_result(1.01), _small_async_split_result())
+
+
+@pytest.mark.parametrize("master_key", ["fp32_groups_flat", "fp32_groups"])
+def test_async_master_snapshot_preserves_updates_below_bf16_resolution(master_key):
+    model = torch.nn.Linear(2, 1, bias=False, dtype=torch.bfloat16)
+    with torch.no_grad():
+        model.weight.fill_(1)
+    master = torch.ones_like(model.weight, dtype=torch.float32)
+    groups = [master.flatten()] if master_key == "fp32_groups_flat" else [[master]]
+    optimizer = SimpleNamespace(fp16_groups=[[model.weight]], state_dict=lambda: {master_key: groups})
+    engine = SimpleNamespace(module=model,
+                             optimizer=optimizer,
+                             unflatten=lambda flat, parameters: [flat.reshape_as(parameters[0])])
+
+    before = _trainable_parameters(engine)
+    update = 2**-16
+    master.add_(update)
+    after = _trainable_parameters(engine)
+
+    torch.testing.assert_close(model.weight.float(), torch.ones_like(master), rtol=0, atol=0)
+    torch.testing.assert_close(before["weight"], torch.ones_like(master), rtol=0, atol=0)
+    torch.testing.assert_close(after["weight"] - before["weight"], torch.full_like(master, update), rtol=0, atol=0)
+
+
+def test_async_master_snapshot_requires_real_fp32_parameters():
+    model = torch.nn.Linear(2, 1, bias=False, dtype=torch.bfloat16)
+    engine = SimpleNamespace(module=model, optimizer=object())
+    with pytest.raises(AssertionError, match="Expected FP32 master parameter"):
+        _trainable_parameters(engine)
 
 
 class TestAutoEPAsyncSplitPlanParity(DistributedTest):
@@ -355,13 +452,22 @@ class TestAutoEPAsyncSplitPlanParity(DistributedTest):
         sync_model = _make_model()
         sync_model.load_state_dict(reference_state)
         sync_engine, _, _, _ = deepspeed.initialize(model=sync_model, config=_async_split_config(False))
-        expected = _async_split_step(sync_engine, seed, checkpoint_activations)
+        if checkpoint_activations:
+            _checkpoint_autoep_layers(sync_engine)
+        sequence_lengths = (16, 7, 23)
+        expected = [
+            _async_split_step(sync_engine, seed + step, seq_len) for step, seq_len in enumerate(sequence_lengths)
+        ]
 
         async_model = _make_model()
         async_model.load_state_dict(reference_state)
         async_engine, _, _, _ = deepspeed.initialize(model=async_model, config=_async_split_config(True))
         assert all(module.async_split_plan for module in async_engine.module.modules()
                    if isinstance(module, AutoEPMoELayer))
-        actual = _async_split_step(async_engine, seed, checkpoint_activations)
-
-        _assert_async_split_step_matches(actual, expected)
+        if checkpoint_activations:
+            _checkpoint_autoep_layers(async_engine)
+        for step, seq_len in enumerate(sequence_lengths):
+            actual = _async_split_step(async_engine, seed + step, seq_len)
+            _assert_async_split_step_matches(actual, expected[step])
+            assert all(module._async_split_plan_pending is None for module in async_engine.module.modules()
+                       if isinstance(module, AutoEPMoELayer))

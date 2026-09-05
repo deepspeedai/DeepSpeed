@@ -23,7 +23,10 @@ import deepspeed.comm as dist
 from deepspeed.accelerator import get_accelerator
 from deepspeed.module_inject.auto_ep_config import AutoEPConfig, MoELayerSpec, resolve_autoep_config_defaults
 from deepspeed.module_inject.auto_ep_folding import mark_autoep_folding_router_parameter
+from deepspeed.ops.triton_ops import autoep_fused_token_ops as fused_token_ops
 from deepspeed.utils import logger
+from deepspeed.module_inject.auto_ep_comm import (COMM_BACKEND, DEEPEP_BACKEND, DeepEPExchange, assert_dtype_supported,
+                                                  deepep_combine, deepep_dispatch)
 from deepspeed.moe.ep_router import TokenChoiceTopKRouter
 from deepspeed.moe.ep_count import count_tokens_per_expert
 from deepspeed.moe.ep_experts import GroupedExperts
@@ -98,7 +101,8 @@ def resolve_score_apply_mode(
 
 
 def resolve_combine_impl(
-    config_override: Literal["auto", "weighted_sum", "legacy_bmm"], ) -> Literal["weighted_sum", "legacy_bmm"]:
+    config_override: Literal["auto", "weighted_sum", "fused_weighted_sum", "legacy_bmm"],
+) -> Literal["weighted_sum", "fused_weighted_sum", "legacy_bmm"]:
     """Resolve combine implementation from config override or default."""
     if config_override != "auto":
         return config_override
@@ -116,6 +120,33 @@ def _copy_parameter_data(target: nn.Parameter, source: torch.Tensor) -> None:
                 or target.data.device != source_data.device):
             target.data = torch.empty(full_shape, dtype=source_data.dtype, device=source_data.device)
         target.data.copy_(source_data)
+
+
+def _copy_e_score_correction_bias(
+    target_router: nn.Module,
+    source_owner: nn.Module,
+    source_bias,
+    source_path: str,
+) -> None:
+    if isinstance(source_bias, nn.Parameter):
+        target_router.e_score_correction_bias = nn.Parameter(source_bias.data.clone(),
+                                                             requires_grad=source_bias.requires_grad)
+    elif (torch.is_tensor(source_bias) and source_owner._buffers.get("e_score_correction_bias") is source_bias):
+        copied_bias = source_bias.detach().clone()
+        copied_bias.requires_grad_(source_bias.requires_grad)
+        if hasattr(target_router, "e_score_correction_bias"):
+            delattr(target_router, "e_score_correction_bias")
+        persistent = "e_score_correction_bias" not in source_owner._non_persistent_buffers_set
+        target_router.register_buffer("e_score_correction_bias", copied_bias, persistent=persistent)
+    else:
+        logger.warning(
+            "AutoEP: cannot copy e_score_correction_bias from source module path '%s': expected "
+            "an nn.Parameter or registered buffer, got %s.", source_path or "<root>",
+            type(source_bias).__name__)
+        return
+
+    logger.info("AutoEP: copied e_score_correction_bias from source module path '%s' (shape=%s)", source_path
+                or "<root>", source_bias.shape)
 
 
 def apply_scores_before_experts_if_enabled(
@@ -466,6 +497,7 @@ class AutoEPMoELayer(nn.Module):
         self.top_k = spec.top_k
         self.score_apply = resolve_score_apply_mode(spec, config.score_apply)
         self.combine_impl = resolve_combine_impl(config.combine_impl)
+        self._fused_combine_checked = False
         route_norm = spec.route_norm if config.route_norm is None else config.route_norm
         self.ep_size = ep_size
         self.ep_rank = ep_rank
@@ -487,7 +519,14 @@ class AutoEPMoELayer(nn.Module):
         # Router: copy gate weights from source
         source_gate = getattr(source_module, spec.router_name)
         source_gate_bias = getattr(source_gate, 'bias', None)
-        source_ecb = getattr(source_gate, 'e_score_correction_bias', None)
+        source_ecb_path = spec.e_score_correction_bias_path
+        if source_ecb_path is None:
+            source_ecb_owner = source_gate
+            source_ecb_path = spec.router_name
+        else:
+            source_ecb_owner = (source_module
+                                if source_ecb_path == "" else source_module.get_submodule(source_ecb_path))
+        source_ecb = getattr(source_ecb_owner, "e_score_correction_bias", None)
         unsupported_router_biases = [
             getattr(source_gate, bias_name, None) for bias_name in spec.unsupported_router_bias_names
         ]
@@ -523,11 +562,8 @@ class AutoEPMoELayer(nn.Module):
                 self.router.gate.bias.requires_grad_(source_gate_bias.requires_grad)
 
             # Copy pre-trained score correction bias (DeepSeek-V3/Moonlight noaux_tc routing)
-            if source_ecb is not None and isinstance(source_ecb, nn.Parameter):
-                self.router.e_score_correction_bias = nn.Parameter(source_ecb.data.clone(),
-                                                                   requires_grad=source_ecb.requires_grad)
-                logger.info('AutoEP: copied e_score_correction_bias from source gate '
-                            '(shape=%s)', source_ecb.shape)
+            if source_ecb is not None:
+                _copy_e_score_correction_bias(self.router, source_ecb_owner, source_ecb, source_ecb_path)
 
         # Alias router under the name OutputRecorder expects (layer_name if provided),
         # but only when OutputRecorder captures from the router child and the alias is safe.
@@ -614,6 +650,13 @@ class AutoEPMoELayer(nn.Module):
 
         # Router-logit cache
         self._cached_router_logits = None
+        # Resolved once per layer: a DeepEP exchange sizes its buffer at
+        # construction, so it is built on first use and kept.
+        self.comm_backend = config.comm_backend
+        self.comm_num_sm = config.comm_num_sm
+        self.comm_qp_margin = config.comm_qp_margin
+        self._deepep_exchange = None
+        self.comm_max_tokens_per_rank = config.comm_max_tokens_per_rank
         self._register_logit_hook()
 
     def _start_async_split_plan(self, num_tokens_per_expert: torch.Tensor) -> _PendingSplitPlan:
@@ -676,6 +719,18 @@ class AutoEPMoELayer(nn.Module):
 
         if folding_group_handles is not None:
             self.folding_group_handles = folding_group_handles
+            if self.combine_impl == "fused_weighted_sum" and folding_group_handles.spec.tp_size > 1:
+                # Folded TP restores tokens through a different path.
+                raise ValueError('combine_impl="fused_weighted_sum" does not support folded tensor parallelism '
+                                 f"(tensor_parallel.autotp_size={folding_group_handles.spec.tp_size}). Set "
+                                 'tensor_parallel.autotp_size to 1, or leave combine_impl unset.')
+            if self.comm_backend == DEEPEP_BACKEND and folding_group_handles.spec.tp_size > 1:
+                # DeepEP's combine returns token-major rows, which folded TP's
+                # assignment-metadata restore can't consume. Refuse rather than
+                # silently fall back to a backend the job didn't ask for.
+                raise ValueError(f'comm_backend="{DEEPEP_BACKEND}" does not support folded tensor parallelism '
+                                 f"(expert_tensor_parallel_size={folding_group_handles.spec.tp_size}). Set "
+                                 'expert_tensor_parallel_size to 1, or comm_backend to "comm".')
             self.ep_group_name = folding_group_handles.ep_group_name
             self.ep_group = folding_group_handles.ep_group
             self.tp_group = folding_group_handles.tp_group
@@ -698,6 +753,74 @@ class AutoEPMoELayer(nn.Module):
             )
         self.ep_group = groups._get_expert_parallel_group(self.ep_group_name)
 
+    def _deepep_route(self, tokens: torch.Tensor, ro: "RouterOutput") -> torch.Tensor:
+        """Dispatch, run the experts, and combine through DeepEP.
+
+        ``tokens`` is [T, H] before top-k expansion. DeepEP replicates each
+        token to the ranks that need it rather than being handed one row per
+        selected expert, groups arrivals by expert for the grouped GEMM, and
+        sums them back. It therefore replaces the expansion and the reduction
+        around the collectives, not just the collectives, and returns [T, H]
+        ready for the shared tail of forward.
+        """
+        assert_dtype_supported(tokens.dtype)
+
+        # The configured worst-case capacity is identical across ranks, so
+        # buffer construction needs no rank-local decision or synchronization.
+        if self._deepep_exchange is None:
+            self._deepep_exchange = DeepEPExchange(
+                ep_group=self.ep_group,
+                num_experts=self.num_experts,
+                top_k=self.top_k,
+                hidden_size=self.hidden_size,
+                num_max_tokens_per_rank=self.comm_max_tokens_per_rank,
+                num_sms=self.comm_num_sm,
+                qp_margin=self.comm_qp_margin,
+            )
+
+        if tokens.shape[0] > self._deepep_exchange.num_max_tokens_per_rank:
+            raise RuntimeError(
+                f"this rank routed {tokens.shape[0]} tokens, more than the "
+                f"{self._deepep_exchange.num_max_tokens_per_rank} configured for the DeepEP buffer. Set "
+                "comm_max_tokens_per_rank in the expert_parallel config to the largest per-rank token count this "
+                "job will produce, normally train_micro_batch_size_per_gpu * maximum padded sequence length, or "
+                'set comm_backend="comm".')
+
+        received, recv_weights, exchange = deepep_dispatch(self._deepep_exchange, tokens, ro.selected_experts,
+                                                           ro.top_scores)
+        handle = exchange.last_handle
+
+        # combine reads exactly the rows the handle says arrived, taken from
+        # the handle as a Python int rather than off the device prefix sum to
+        # avoid a device-to-host sync in front of every layer's expert GEMM.
+        arrived = handle.num_expanded_tokens
+        received = received[:arrived]
+
+        # Applied here, not handed to combine: DeepEP's combine transports and
+        # reduces topk_weights but doesn't multiply rows by them. Which side of
+        # the experts it lands on must match the collective path, since SwiGLU
+        # doesn't commute with the weight.
+        weights = None if recv_weights is None else recv_weights[:arrived].reshape(-1, 1)
+        if weights is not None and self.score_apply == "pre":
+            received = (received.float() * weights).to(received.dtype)
+            weights = None
+
+        # The grouped GEMM needs per-expert row counts, which arrive as a
+        # prefix sum over the experts this rank owns. Differencing it recovers
+        # the counts.
+        prefix = handle.psum_num_recv_tokens_per_expert
+        counts = torch.diff(prefix, prepend=prefix.new_zeros(1)).to(torch.int32)
+        if counts.numel() != self.num_local_experts:
+            raise RuntimeError(f"DeepEP returned {counts.numel()} expert counts, but this rank owns "
+                               f"{self.num_local_experts} experts")
+
+        expert_output = self.experts(received, counts)
+
+        if weights is not None:
+            expert_output = (expert_output.float() * weights).to(expert_output.dtype)
+
+        return deepep_combine(exchange, expert_output, handle)
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -711,15 +834,37 @@ class AutoEPMoELayer(nn.Module):
             [B, S, H] or ([B, S, H], [T, E]) if return_router_logits.
             Some HF MoE contracts return ([T, H], [T, E]) instead.
         """
+        pending_on_entry = self._async_split_plan_pending
+        try:
+            return self._forward(hidden_states)
+        except BaseException:
+            pending = self._async_split_plan_pending
+            if pending is not None and pending is not pending_on_entry:
+                # Packing can fail after D2H has started. Drain it before the
+                # next invocation can reuse the layer's pinned metadata buffer.
+                try:
+                    self._wait_async_split_plan(pending)
+                except Exception:
+                    # Keep the pending tensors alive if the device also failed,
+                    # and preserve the error that interrupted the forward.
+                    logger.warning("Failed to drain AutoEP async split plan after forward failed", exc_info=True)
+            raise
+
+    def _forward(self, hidden_states: torch.Tensor) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         bsz, seqlen, hdim = hidden_states.shape
         x = hidden_states.reshape(-1, hdim)  # [T, H]
+
+        # Fail all ranks before any collective can stall.
+        if self.combine_impl == "fused_weighted_sum" and not self._fused_combine_checked:
+            fused_token_ops.assert_supported(x, score_apply=self.score_apply)
+            self._fused_combine_checked = True
 
         # Router
         ro: RouterOutput = RouterOutput(*self.router(x, self.expert_bias))
 
         folded_tp = self.folding_group_handles is not None and self.folding_group_handles.spec.tp_size > 1
         pending_plan = None
-        if self.async_split_plan and self.ep_size > 1:
+        if self.async_split_plan and self.ep_size > 1 and self.comm_backend == COMM_BACKEND:
             if folded_tp:
                 raise RuntimeError("expert_parallel.async_split_plan does not support AutoEP+AutoTP folding yet")
             pending_plan = self._start_async_split_plan(ro.num_tokens_per_expert)
@@ -733,6 +878,9 @@ class AutoEPMoELayer(nn.Module):
         top_scores_sorted = ro.top_scores.view(-1)[token_indices_sorted]
         expert_indices_sorted = ro.selected_experts.reshape(-1).index_select(0, token_indices_sorted)
 
+        # Set only where DeepEP's combine actually produced the output, since
+        # that decides whether the reduction below has already happened.
+        deepep_combined = False
         restore_ctx = None
         if folded_tp:
             from deepspeed.moe.ep_tp_dispatch import (
@@ -812,14 +960,18 @@ class AutoEPMoELayer(nn.Module):
                     num_tokens_per_expert=ro.num_tokens_per_expert,
                 )
 
-            routed_input = _AllToAllV.apply(self.ep_group, routed_input, plan.input_splits, plan.output_splits)
+            if self.comm_backend == DEEPEP_BACKEND:
+                expert_output = self._deepep_route(x, ro)
+                deepep_combined = True
+            else:
+                routed_input = _AllToAllV.apply(self.ep_group, routed_input, plan.input_splits, plan.output_splits)
 
-            routed_input, perm_indices, aligned_counts, n_tokens = permute_by_local_expert(
-                routed_input, plan.local_counts_by_source)
-            expert_output = self.experts(routed_input, aligned_counts)
-            expert_output = unpermute_by_local_expert(expert_output, perm_indices, n_tokens)
+                routed_input, perm_indices, aligned_counts, n_tokens = permute_by_local_expert(
+                    routed_input, plan.local_counts_by_source)
+                expert_output = self.experts(routed_input, aligned_counts)
+                expert_output = unpermute_by_local_expert(expert_output, perm_indices, n_tokens)
 
-            expert_output = _AllToAllV.apply(self.ep_group, expert_output, plan.output_splits, plan.input_splits)
+                expert_output = _AllToAllV.apply(self.ep_group, expert_output, plan.output_splits, plan.input_splits)
 
         if folded_tp:
             output = restore_combined(expert_output,
@@ -827,6 +979,20 @@ class AutoEPMoELayer(nn.Module):
                                       tp_group=self.tp_group,
                                       validate_coverage=self.validate_folding_routing).reshape(bsz, seqlen, hdim)
             self._last_folding_dispatch_counters = dispatch_counters(restore_ctx)
+        elif deepep_combined:
+            # DeepEP's combine already reduced over top-k and restored token
+            # order. This is keyed on the route having run rather than on the
+            # backend being selected: with ep_size == 1 the local path runs
+            # instead and still has one row per assignment to reduce.
+            output = expert_output.reshape(bsz, seqlen, hdim)
+        elif self.combine_impl == "fused_weighted_sum":
+            output = fused_token_ops.fused_weighted_restore(
+                expert_output,
+                top_scores=ro.top_scores,
+                token_indices_sorted=token_indices_sorted,
+                top_k=self.top_k,
+                shape=(bsz, seqlen, hdim),
+            )
         else:
             output = combine_from_routed(
                 expert_output,

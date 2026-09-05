@@ -19,7 +19,7 @@ def offload_optimizer_states(optimizer, device, pin_memory=False, non_blocking=F
         for k, v in state.items():
             if torch.is_tensor(v):
                 if pin_memory and v.device.type != 'cpu':
-                    pinned_buffer = get_accelerator().pin_memory(torch.empty_like(v, device='cpu'), make_copy=False)
+                    pinned_buffer = get_accelerator().pin_empty_like(v, device='cpu')
                     pinned_buffer.copy_(v, non_blocking=non_blocking)
                     state[k] = pinned_buffer
                 else:

@@ -3,6 +3,7 @@
 
 # DeepSpeed Team
 
+import math
 import os
 import sys
 import torch
@@ -43,6 +44,71 @@ def _compare_optimizers(model_size, param1, optimizer1, param2, optimizer2):
 
     tolerance = param1.float().norm().detach().numpy() * 1e-2
     check_equal(param1.float().norm(), param2.float().cpu().norm(), atol=tolerance, verbose=True)
+
+
+def _reference_adam_step(param, grad, exp_avg, exp_avg_sq, step, lr, betas, eps, weight_decay, adamw_mode,
+                         bias_correction):
+    beta1, beta2 = betas
+    adjusted_grad = grad
+    if weight_decay > 0 and not adamw_mode:
+        adjusted_grad = grad.add(param, alpha=weight_decay)
+
+    exp_avg.mul_(beta1).add_(adjusted_grad, alpha=1 - beta1)
+    exp_avg_sq.mul_(beta2).addcmul_(adjusted_grad, adjusted_grad, value=1 - beta2)
+
+    if bias_correction:
+        bias_correction1 = 1 - beta1**step
+        bias_correction2 = 1 / math.sqrt(1 - beta2**step)
+    else:
+        bias_correction1 = 1
+        bias_correction2 = 1
+
+    if weight_decay > 0 and adamw_mode:
+        param.add_(param, alpha=-lr * weight_decay)
+    denominator = exp_avg_sq.sqrt().mul_(bias_correction2).add_(eps)
+    param.addcdiv_(exp_avg, denominator, value=-lr / bias_correction1)
+
+
+@pytest.mark.parametrize('model_size', [3, 4, 5, 15, 16, 17, 511, 512, 513, 524287, 524288, 524289])
+@pytest.mark.parametrize('adamw_mode,weight_decay,bias_correction', [
+    (True, 0.0, True),
+    (True, 0.07, True),
+    (False, 0.07, True),
+    (True, 0.07, False),
+])
+def test_cpu_adam_strict_state_updates(model_size, adamw_mode, weight_decay, bias_correction):
+    from deepspeed.ops.adam import DeepSpeedCPUAdam
+
+    generator = torch.Generator().manual_seed(model_size)
+    initial = torch.rand(model_size, generator=generator).mul_(1.5).sub_(0.75)
+    cpu_param = torch.nn.Parameter(initial.clone())
+    ref_param = initial.clone()
+    ref_exp_avg = torch.zeros_like(ref_param)
+    ref_exp_avg_sq = torch.zeros_like(ref_param)
+    lr = 7e-4
+    betas = (0.85, 0.97)
+    eps = 1e-7
+
+    optimizer = DeepSpeedCPUAdam([cpu_param],
+                                 lr=lr,
+                                 betas=betas,
+                                 eps=eps,
+                                 weight_decay=weight_decay,
+                                 adamw_mode=adamw_mode,
+                                 bias_correction=bias_correction)
+
+    for step in range(1, 6):
+        grad = torch.rand(model_size, generator=generator).mul_(1.5).sub_(0.75)
+        cpu_param.grad = grad
+        optimizer.step()
+        _reference_adam_step(ref_param, grad, ref_exp_avg, ref_exp_avg_sq, step, lr, betas, eps, weight_decay,
+                             adamw_mode, bias_correction)
+
+        state = optimizer.state[cpu_param]
+        assert state['step'] == step
+        torch.testing.assert_close(cpu_param, ref_param, rtol=3e-5, atol=2e-6)
+        torch.testing.assert_close(state['exp_avg'], ref_exp_avg, rtol=3e-5, atol=2e-6)
+        torch.testing.assert_close(state['exp_avg_sq'], ref_exp_avg_sq, rtol=3e-5, atol=2e-6)
 
 
 @pytest.mark.parametrize('dtype', [torch.half, torch.bfloat16, torch.float], ids=["fp16", "bf16", "fp32"])
