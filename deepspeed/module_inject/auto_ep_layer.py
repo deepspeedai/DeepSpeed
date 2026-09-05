@@ -28,7 +28,8 @@ from deepspeed.module_inject.auto_ep_comm import (DEEPEP_BACKEND, DeepEPExchange
 from deepspeed.moe.ep_router import TokenChoiceTopKRouter
 from deepspeed.moe.ep_count import count_tokens_per_expert
 from deepspeed.moe.ep_experts import GroupedExperts
-from deepspeed.moe.ep_repack import _gather_source_zero_params, repack_expert_requires_grad_flags, repack_expert_weights
+from deepspeed.moe.ep_repack import (_gather_source_zero_params, repack_expert_requires_grad_flags,
+                                     repack_expert_source_params, repack_expert_weights)
 
 # ---------------------------------------------------------------------------
 # Named tuples
@@ -877,3 +878,42 @@ class AutoEPMoELayer(nn.Module):
 
         self._cached_router_logits = None
         return output
+
+
+def collect_replacement_sources(source_module, replacement, spec, ep_size, ep_rank):
+    """Map every parameter of ``replacement`` to the source parameters it was built from.
+
+    Keyed by ``id()``. A caller-supplied optimizer has already sorted the sources into param
+    groups, so this is what lets the engine put each replacement back into the group its sources
+    came from.
+
+    Built by the caller rather than stashed on the layer: the values are the discarded pre-shard
+    expert weights, and an attribute on a long-lived module would keep them alive for the whole
+    run, defeating the sharding AutoEP exists to do.
+    """
+    source_gate = getattr(source_module, spec.router_name)
+    w1_sources, w2_sources, w3_sources = repack_expert_source_params(
+        experts_source=getattr(source_module, spec.experts_name),
+        spec=spec,
+        ep_rank=ep_rank,
+        ep_size=ep_size,
+    )
+    sources = {
+        id(replacement.experts.w1): list(w1_sources),
+        id(replacement.experts.w2): list(w2_sources),
+        id(replacement.experts.w3): list(w3_sources),
+        id(replacement.router.gate.weight): [source_gate.weight],
+    }
+    source_gate_bias = getattr(source_gate, 'bias', None)
+    if spec.gate_bias and source_gate_bias is not None:
+        sources[id(replacement.router.gate.bias)] = [source_gate_bias]
+    source_ecb = getattr(source_gate, 'e_score_correction_bias', None)
+    if isinstance(source_ecb, nn.Parameter):
+        sources[id(replacement.router.e_score_correction_bias)] = [source_ecb]
+    # Anything else the router or the grouped experts allocated has no counterpart in the source
+    # module, so tie it to this block's gate weight: it carries no pretrained value of its own,
+    # but it still belongs with the rest of this block's parameters.
+    for fresh_module in (replacement.router, replacement.experts):
+        for param in fresh_module.parameters():
+            sources.setdefault(id(param), [source_gate.weight])
+    return sources
