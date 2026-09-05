@@ -685,10 +685,9 @@ class ZenFlowZeroOptimizerParallel(ZenFlowZeroOptimizer):
             0, dest_offset, num_elements)
 
         grad_accum = self.get_param_gradient_attribute(param)
-        if grad_accum is None:
-            src_tensor = grad_accum.view(-1).narrow(0, source_offset, num_elements)
-        else:
-            src_tensor = grad_accum.view(-1).narrow(0, source_offset, num_elements)
+        assert grad_accum is not None
+
+        src_tensor = grad_accum.view(-1).narrow(0, source_offset, num_elements)
         if src_tensor.dtype != self.master_weights_and_grads_dtype:
             src_tensor = src_tensor.to(self.master_weights_and_grads_dtype)
 

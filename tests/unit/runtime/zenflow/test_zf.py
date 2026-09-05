@@ -3,10 +3,13 @@
 
 # DeepSpeed Team
 
+from types import SimpleNamespace
+
 import pytest
+import torch
 import deepspeed.comm as dist
 from deepspeed.accelerator import get_accelerator
-from deepspeed.runtime.zenflow.zenflow_stage_1_and_2 import _num_selected_columns
+from deepspeed.runtime.zenflow.zenflow_stage_1_and_2 import ZenFlowZeroOptimizerParallel, _num_selected_columns
 
 from unit.common import DistributedTest
 from unit.simple_model import SimpleModel, random_dataloader
@@ -20,6 +23,23 @@ import deepspeed
 ])
 def test_num_selected_columns_has_nonzero_floor(num_columns, topk_ratio, expected):
     assert _num_selected_columns(num_columns, topk_ratio) == expected
+
+
+def test_async_inplace_copy_grad_requires_a_gradient():
+    # The base ZeRO-1/2 copy asserts the gradient attribute is set. The override used to
+    # branch on `grad_accum is None` and then call `.view()` on the None it had just tested
+    # for, so a missing gradient surfaced as an AttributeError from inside the copy.
+    stub = SimpleNamespace(
+        grad_position={0: [0, 0, 0, 4]},
+        single_partition_of_fp32_groups=[SimpleNamespace(overlap_grad=[torch.zeros(4)])],
+        master_weights_and_grads_dtype=torch.float32,
+        get_param_id=lambda param: 0,
+        get_overlap_step_state=lambda: 0,
+        get_param_gradient_attribute=lambda param: None,
+    )
+
+    with pytest.raises(AssertionError):
+        ZenFlowZeroOptimizerParallel.async_inplace_copy_grad_to_fp32_buffer_from_gpu(stub, SimpleNamespace(grad=None))
 
 
 class BaseZenFlowTest:
