@@ -79,6 +79,27 @@ def test_autotuner_resources(tmpdir, active_resources):
     assert expected_num_gpus == tuner.exp_num_gpus
 
 
+def test_get_best_space_record_ignores_runs_without_a_metric(tmpdir):
+    # A run that fails to produce a metric (e.g. OOM) is recorded with metric_val=None.
+    # get_best_space_record used to crash with "TypeError: '>' not supported between
+    # instances of 'NoneType' and 'NoneType'" whenever every run in a space had no
+    # metric, discarding all previously gathered results for the whole tuning run.
+    config_dict = {"autotuning": {"enabled": True, "exps_dir": os.path.join(tmpdir, 'exps_dir'), "arg_mappings": {}}}
+    config_path = create_config_from_dict(tmpdir, config_dict)
+    args = dsrun.parse_args(args=f'--autotuning {TUNE_OPTION} foo.py --deepspeed_config {config_path}'.split())
+    tuner = Autotuner(args=args, active_resources={"worker-0": [0, 1]})
+
+    tuner.update_records("z0_space", {"name": "exp1"}, None, 1)
+    tuner.update_records("z0_space", {"name": "exp2"}, None, 1)
+    assert tuner.get_best_space_record("z0_space") is None
+
+    tuner.update_records("z0_space", {"name": "exp3"}, 3.5, 1)
+    best = tuner.get_best_space_record("z0_space")
+    assert best[0]["name"] == "exp3"
+    assert best[1] == 3.5
+    assert best[2] == 3
+
+
 def test_get_val_by_key_searches_all_nested_subdicts():
     # get_val_by_key must mirror its sibling set_val_by_key: both walk every
     # nested subdict, not just the first one. Here 'device' lives in the SECOND

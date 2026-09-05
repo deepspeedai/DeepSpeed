@@ -719,6 +719,9 @@ class Autotuner:
         space_num_exps = 0
         for (exp, metric_val, num_exps) in space_records:
             space_num_exps += num_exps
+            if metric_val is None:
+                # a run that did not produce a metric (e.g. OOM) is not a valid candidate
+                continue
             if best_space_record is None or metric_val > best_space_record[1]:
                 best_space_record = (exp, metric_val)
         if best_space_record:
