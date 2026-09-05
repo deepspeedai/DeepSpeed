@@ -308,6 +308,93 @@ class TestRoutingWeightsAreApplied(unittest.TestCase):
         self.assertNotIn("psum_num_recv_tokens_per_expert[-1]", source)
 
 
+class TestDeepEPEarlyRoute(unittest.TestCase):
+    """DeepEP must branch before collective-only token preparation."""
+
+    class Router(torch.nn.Module):
+
+        def __init__(self, output):
+            super().__init__()
+            self.output = output
+
+        def forward(self, *_args):
+            return self.output
+
+    @staticmethod
+    def layer(ep_size=2, comm_backend=DEEPEP_BACKEND, *, return_router_logits=False):
+        layer = object.__new__(auto_ep_layer.AutoEPMoELayer)
+        torch.nn.Module.__init__(layer)
+        scores = torch.tensor([[0.75, 0.25], [0.6, 0.4]])
+        experts = torch.tensor([[1, 0], [1, 0]], dtype=torch.long)
+        counts = torch.tensor([2, 2], dtype=torch.int32)
+        layer.router = TestDeepEPEarlyRoute.Router((scores, experts, counts))
+        layer.expert_bias = None
+        layer.register_buffer("tokens_per_expert", torch.zeros_like(counts, dtype=torch.float32))
+        layer.combine_impl = "weighted_sum"
+        layer._fused_combine_checked = False
+        layer.ep_size = ep_size
+        layer.comm_backend = comm_backend
+        # Keep the fixture valid when composed with opt-in async split planning.
+        layer.async_split_plan = False
+        layer._async_split_plan_pending = None
+        layer.top_k = 2
+        layer.num_experts = 2
+        layer.num_local_experts = 1
+        layer.folding_group_handles = None
+        layer.score_apply = "post"
+        layer.shared_experts = None
+        layer.shared_experts_gate = None
+        layer.moe_output_shape = "batched"
+        layer.return_router_logits = return_router_logits
+        layer._cached_router_logits = torch.randn(2, 2) if return_router_logits else None
+        layer._deepep_route = mock.Mock(return_value=torch.ones((2, 4)))
+        return layer
+
+    def test_deepep_bypasses_collective_preparation(self):
+        layer = self.layer()
+        hidden = torch.randn(1, 2, 4)
+
+        with mock.patch.object(auto_ep_layer.torch, "argsort", side_effect=AssertionError("argsort ran")), \
+                mock.patch.object(auto_ep_layer, "compute_split_plan",
+                                  side_effect=AssertionError("split plan ran")), \
+                mock.patch.object(auto_ep_layer, "compute_split_plan_from_expert_indices",
+                                  side_effect=AssertionError("folded split plan ran")), \
+                mock.patch.object(auto_ep_layer, "apply_scores_before_experts_if_enabled",
+                                  side_effect=AssertionError("score application ran")):
+            output = auto_ep_layer.AutoEPMoELayer.forward(layer, hidden)
+
+        self.assertEqual(tuple(output.shape), (1, 2, 4))
+        tokens, router_output = layer._deepep_route.call_args.args
+        self.assertEqual(tuple(tokens.shape), (2, 4))
+        self.assertTrue(torch.equal(tokens, hidden.reshape(2, 4)))
+        self.assertTrue(torch.equal(router_output.selected_experts, torch.tensor([[1, 0], [1, 0]])))
+        self.assertTrue(torch.equal(layer.tokens_per_expert, torch.tensor([2.0, 2.0])))
+
+    def test_standard_comm_and_ep1_keep_the_existing_path(self):
+        for ep_size, backend in ((2, COMM_BACKEND), (1, DEEPEP_BACKEND)):
+            with self.subTest(ep_size=ep_size, backend=backend):
+                layer = self.layer(ep_size=ep_size, comm_backend=backend)
+                with mock.patch.object(auto_ep_layer.torch, "argsort", side_effect=RuntimeError("sort reached")):
+                    with self.assertRaisesRegex(RuntimeError, "sort reached"):
+                        auto_ep_layer.AutoEPMoELayer.forward(layer, torch.randn(1, 2, 4))
+                layer._deepep_route.assert_not_called()
+
+    def test_shared_tail_and_router_logits_are_preserved(self):
+        layer = self.layer(return_router_logits=True)
+        expected_logits = layer._cached_router_logits
+        layer.moe_output_shape = "flat"
+        layer.shared_experts = mock.Mock(side_effect=lambda x: x * 2)
+        hidden = torch.arange(8, dtype=torch.float32).reshape(1, 2, 4)
+
+        output, logits = auto_ep_layer.AutoEPMoELayer.forward(layer, hidden)
+
+        self.assertEqual(tuple(output.shape), (2, 4))
+        self.assertTrue(torch.equal(output, torch.ones_like(output) + hidden.reshape(2, 4) * 2))
+        self.assertIs(logits, expected_logits)
+        self.assertIsNone(layer._cached_router_logits)
+        layer.shared_experts.assert_called_once()
+
+
 class TestBufferLifecycle(unittest.TestCase):
     """The statically sized buffer never makes a rank-local resize decision."""
 
@@ -336,10 +423,21 @@ class TestBufferLifecycle(unittest.TestCase):
         self.assertIn("600", message)
 
     def test_the_configured_capacity_sizes_the_buffer(self):
-        layer = mock.Mock(_deepep_exchange=None, comm_max_tokens_per_rank=4096, comm_num_sm=12, comm_qp_margin=4)
+        layer = TestDeepEPEarlyRoute.layer()
+        layer._deepep_exchange = None
+        layer.ep_group = object()
+        layer.hidden_size = 8
+        layer.comm_max_tokens_per_rank = 4096
+        layer.comm_num_sm = 12
+        layer.comm_qp_margin = 4
+        tokens = torch.ones((8, 8), dtype=torch.bfloat16)
 
-        built = mock.Mock(return_value=mock.Mock(num_max_tokens_per_rank=4096))
-        with mock.patch.object(auto_ep_layer, "DeepEPExchange", built), \
+        def build_exchange(**kwargs):
+            barrier.assert_called_once_with(group=layer.ep_group, device_ids=[tokens.device.index])
+            return mock.Mock(num_max_tokens_per_rank=4096)
+
+        with mock.patch.object(auto_ep_layer.dist, "barrier") as barrier, \
+                mock.patch.object(auto_ep_layer, "DeepEPExchange", side_effect=build_exchange) as built, \
                 mock.patch.object(auto_ep_layer, "deepep_dispatch", side_effect=RuntimeError("stop here")), \
                 mock.patch.object(auto_ep_layer.dist, "all_reduce", lambda *a, **k: None):
             router_output = auto_ep_layer.RouterOutput(
@@ -347,11 +445,13 @@ class TestBufferLifecycle(unittest.TestCase):
                 selected_experts=torch.zeros((8, 1), dtype=torch.long),
                 num_tokens_per_expert=torch.zeros(4, dtype=torch.long),
             )
-            with self.assertRaises(RuntimeError):
-                auto_ep_layer.AutoEPMoELayer._deepep_route(layer, torch.ones((8, 8), dtype=torch.bfloat16),
-                                                           router_output)
+            for _ in range(2):
+                with self.assertRaisesRegex(RuntimeError, "stop here"):
+                    auto_ep_layer.AutoEPMoELayer._deepep_route(layer, tokens, router_output)
 
         self.assertEqual(built.call_args.kwargs["num_max_tokens_per_rank"], 4096)
+        built.assert_called_once()
+        barrier.assert_called_once_with(group=layer.ep_group, device_ids=[tokens.device.index])
 
 
 class TestAutogradSignatures(unittest.TestCase):

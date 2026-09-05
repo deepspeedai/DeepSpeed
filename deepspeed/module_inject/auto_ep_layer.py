@@ -640,8 +640,12 @@ class AutoEPMoELayer(nn.Module):
         assert_dtype_supported(tokens.dtype)
 
         # The configured worst-case capacity is identical across ranks, so
-        # buffer construction needs no rank-local decision or synchronization.
+        # buffer construction needs no rank-local resize decision.
         if self._deepep_exchange is None:
+            # An externally initialized process group may still have a lazy
+            # NCCL communicator. DeepEP needs it before constructing its team;
+            # the removed split-count collective used to initialize it for us.
+            dist.barrier(group=self.ep_group, device_ids=[tokens.device.index])
             self._deepep_exchange = DeepEPExchange(
                 ep_group=self.ep_group,
                 num_experts=self.num_experts,
@@ -695,6 +699,34 @@ class AutoEPMoELayer(nn.Module):
 
         return deepep_combine(exchange, expert_output, handle)
 
+    def _finalize_output(self, output: torch.Tensor, x: torch.Tensor, hidden_states: torch.Tensor,
+                         hdim: int) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        """Apply the model-specific output tail shared by every communication backend."""
+        if self.moe_output_shape == "flat":
+            output = output.reshape(-1, hdim)
+            shared_expert_input = x
+        elif self.shared_experts_gate is not None:
+            shared_expert_input = x
+        else:
+            shared_expert_input = hidden_states
+
+        if self.shared_experts is not None:
+            shared_expert_output = self.shared_experts(shared_expert_input)
+            if self.shared_experts_gate is not None:
+                shared_expert_gate = torch.sigmoid(self.shared_experts_gate(shared_expert_input))
+                shared_expert_output = shared_expert_gate * shared_expert_output
+            if shared_expert_output.shape != output.shape:
+                shared_expert_output = shared_expert_output.reshape_as(output)
+            output = output + shared_expert_output
+
+        if self.return_router_logits:
+            logits = self._cached_router_logits
+            self._cached_router_logits = None
+            return output, logits
+
+        self._cached_router_logits = None
+        return output
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -723,15 +755,16 @@ class AutoEPMoELayer(nn.Module):
         with torch.no_grad():
             self.tokens_per_expert.add_(ro.num_tokens_per_expert)
 
+        if self.ep_size > 1 and self.comm_backend == DEEPEP_BACKEND:
+            output = self._deepep_route(x, ro).reshape(bsz, seqlen, hdim)
+            return self._finalize_output(output, x, hidden_states, hdim)
+
         # Reorder tokens into expert-contiguous order.
         token_indices_sorted = torch.argsort(ro.selected_experts.view(-1), stable=True)
         top_scores_sorted = ro.top_scores.view(-1)[token_indices_sorted]
         expert_indices_sorted = ro.selected_experts.reshape(-1).index_select(0, token_indices_sorted)
 
         folded_tp = self.folding_group_handles is not None and self.folding_group_handles.spec.tp_size > 1
-        # Set only where DeepEP's combine actually produced the output, since
-        # that decides whether the reduction below has already happened.
-        deepep_combined = False
         restore_ctx = None
         if folded_tp:
             from deepspeed.moe.ep_tp_dispatch import (
@@ -809,18 +842,14 @@ class AutoEPMoELayer(nn.Module):
                     num_tokens_per_expert=ro.num_tokens_per_expert,
                 )
 
-            if self.comm_backend == DEEPEP_BACKEND:
-                expert_output = self._deepep_route(x, ro)
-                deepep_combined = True
-            else:
-                routed_input = _AllToAllV.apply(self.ep_group, routed_input, plan.input_splits, plan.output_splits)
+            routed_input = _AllToAllV.apply(self.ep_group, routed_input, plan.input_splits, plan.output_splits)
 
-                routed_input, perm_indices, aligned_counts, n_tokens = permute_by_local_expert(
-                    routed_input, plan.local_counts_by_source)
-                expert_output = self.experts(routed_input, aligned_counts)
-                expert_output = unpermute_by_local_expert(expert_output, perm_indices, n_tokens)
+            routed_input, perm_indices, aligned_counts, n_tokens = permute_by_local_expert(
+                routed_input, plan.local_counts_by_source)
+            expert_output = self.experts(routed_input, aligned_counts)
+            expert_output = unpermute_by_local_expert(expert_output, perm_indices, n_tokens)
 
-                expert_output = _AllToAllV.apply(self.ep_group, expert_output, plan.output_splits, plan.input_splits)
+            expert_output = _AllToAllV.apply(self.ep_group, expert_output, plan.output_splits, plan.input_splits)
 
         if folded_tp:
             output = restore_combined(expert_output,
@@ -828,12 +857,6 @@ class AutoEPMoELayer(nn.Module):
                                       tp_group=self.tp_group,
                                       validate_coverage=self.validate_folding_routing).reshape(bsz, seqlen, hdim)
             self._last_folding_dispatch_counters = dispatch_counters(restore_ctx)
-        elif deepep_combined:
-            # DeepEP's combine already reduced over top-k and restored token
-            # order. This is keyed on the route having run rather than on the
-            # backend being selected: with ep_size == 1 the local path runs
-            # instead and still has one row per assignment to reduce.
-            output = expert_output.reshape(bsz, seqlen, hdim)
         elif self.combine_impl == "fused_weighted_sum":
             output = fused_token_ops.fused_weighted_restore(
                 expert_output,
@@ -853,27 +876,4 @@ class AutoEPMoELayer(nn.Module):
                 shape=(bsz, seqlen, hdim),
             )
 
-        if self.moe_output_shape == "flat":
-            output = output.reshape(-1, hdim)
-            shared_expert_input = x
-        elif self.shared_experts_gate is not None:
-            shared_expert_input = x
-        else:
-            shared_expert_input = hidden_states
-
-        if self.shared_experts is not None:
-            shared_expert_output = self.shared_experts(shared_expert_input)
-            if self.shared_experts_gate is not None:
-                shared_expert_gate = torch.sigmoid(self.shared_experts_gate(shared_expert_input))
-                shared_expert_output = shared_expert_gate * shared_expert_output
-            if shared_expert_output.shape != output.shape:
-                shared_expert_output = shared_expert_output.reshape_as(output)
-            output = output + shared_expert_output
-
-        if self.return_router_logits:
-            logits = self._cached_router_logits
-            self._cached_router_logits = None
-            return output, logits
-
-        self._cached_router_logits = None
-        return output
+        return self._finalize_output(output, x, hidden_states, hdim)
