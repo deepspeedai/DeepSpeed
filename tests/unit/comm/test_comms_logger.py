@@ -3,6 +3,8 @@
 
 # DeepSpeed Team
 
+from types import SimpleNamespace
+
 from deepspeed.utils.comms_logging import CommsLogger
 
 
@@ -49,3 +51,83 @@ def test_trim_mean_does_not_mutate_its_argument():
     data = [3.0, 1.0, 2.0]
     assert trim_mean(data, 0.1) == 2.0
     assert data == [3.0, 1.0, 2.0]
+
+
+def test_timed_op_falls_back_to_the_op_name_when_log_name_is_missing(monkeypatch):
+    # timed_op looks up func_args['log_name'], so an op whose signature does not
+    # declare log_name used to raise KeyError as soon as profiling was turned on.
+    # Such an op must still be logged, under its own name.
+    from deepspeed.comm import comm
+
+    monkeypatch.setattr(comm, 'comms_logger', CommsLogger())
+    monkeypatch.setattr(
+        comm, 'cdb', SimpleNamespace(using_mpi=False, is_initialized=lambda: True,
+                                     get_world_size=lambda group=None: 1))
+    monkeypatch.setattr(comm, 'get_accelerator', lambda: SimpleNamespace(synchronize=lambda: None))
+
+    @comm.timed_op
+    def barrier():
+        return 'done'
+
+    comm.comms_logger.enabled = True
+    comm.comms_logger.start_profiling_comms()
+
+    assert barrier() == 'done'
+    assert 'barrier' in comm.comms_logger.comms_dict
+
+
+def test_timed_op_profiles_default_log_name_with_prof_ops(monkeypatch):
+    from deepspeed.comm import comm
+
+    monkeypatch.setattr(comm, 'comms_logger', CommsLogger())
+    monkeypatch.setattr(
+        comm, 'cdb', SimpleNamespace(using_mpi=False, is_initialized=lambda: True,
+                                     get_world_size=lambda group=None: 1))
+    monkeypatch.setattr(comm, 'get_accelerator', lambda: SimpleNamespace(synchronize=lambda: None))
+
+    @comm.timed_op
+    def barrier(log_name='barrier'):
+        return 'done'
+
+    comm.comms_logger.enabled = True
+    comm.comms_logger.prof_ops = ['barrier']
+
+    assert barrier() == 'done'
+    assert 'barrier' in comm.comms_logger.comms_dict
+
+
+def test_timed_op_reads_prof_and_log_name_from_positional_args(monkeypatch):
+    # prof/log_name are ordinary parameters, so callers may pass them positionally
+    # (e.g. dist.all_to_all(out, inp, None, False, True, "my_all_to_all")). timed_op
+    # used to look them up only in kwargs, silently ignoring positional values.
+    from deepspeed.comm import comm
+
+    monkeypatch.setattr(comm, 'comms_logger', CommsLogger())
+    monkeypatch.setattr(
+        comm, 'cdb', SimpleNamespace(using_mpi=False, is_initialized=lambda: True,
+                                     get_world_size=lambda group=None: 1))
+    monkeypatch.setattr(comm, 'get_accelerator', lambda: SimpleNamespace(synchronize=lambda: None))
+
+    @comm.timed_op
+    def barrier(prof=False, log_name='barrier'):
+        return 'done'
+
+    comm.comms_logger.enabled = True
+
+    assert barrier(True, 'custom_barrier') == 'done'
+    assert 'custom_barrier' in comm.comms_logger.comms_dict
+
+
+def test_calc_bw_log_supports_object_and_list_collectives(monkeypatch):
+    # broadcast_object_list and all_to_all gained profiling support but were
+    # missing from calc_bw_log, so profiling them hit the "wrong comm_op
+    # specified" fallback and exited the process instead of logging bandwidth.
+    import deepspeed.comm as dist
+    from deepspeed.utils.comms_logging import calc_bw_log
+
+    monkeypatch.setattr(dist, 'get_world_size', lambda group=None: 2)
+
+    for comm_op in ('broadcast_object_list', 'all_to_all'):
+        tput, busbw = calc_bw_log(comm_op, 1024, 1.0)
+        assert tput > 0
+        assert busbw > 0

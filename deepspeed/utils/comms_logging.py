@@ -37,7 +37,7 @@ def calc_bw_log(comm_op, size, duration):
     n = dist.get_world_size()
     tput = 0
     busbw = 0
-    if comm_op == "all_to_all_single":
+    if comm_op == "all_to_all_single" or comm_op == "all_to_all":
         tput = (size / duration)
         busbw = (size / duration) * ((n - 1) / n)
     elif comm_op == "all_gather" or comm_op == "all_gather_into_tensor" or comm_op == "reduce_scatter" or comm_op == "reduce_scatter_tensor":
@@ -47,7 +47,7 @@ def calc_bw_log(comm_op, size, duration):
     elif comm_op == "all_reduce" or comm_op == "all_reduce_coalesced" or comm_op == "inference_all_reduce":
         tput = (size * 2 / duration)
         busbw = (size / duration) * (2 * (n - 1) / n)
-    elif comm_op == "send" or comm_op == "recv" or comm_op == "isend" or comm_op == "irecv" or comm_op == "broadcast" or comm_op == "reduce" or comm_op == "gather" or comm_op == "scatter" or comm_op == "barrier":
+    elif comm_op == "send" or comm_op == "recv" or comm_op == "isend" or comm_op == "irecv" or comm_op == "broadcast" or comm_op == "broadcast_object_list" or comm_op == "reduce" or comm_op == "gather" or comm_op == "scatter" or comm_op == "barrier":
         tput = (size / duration)
         busbw = tput
     else:
