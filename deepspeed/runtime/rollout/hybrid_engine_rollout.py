@@ -152,6 +152,7 @@ class HybridEngineRollout(RolloutEngine):
                     prompt_ids,
                     attention_mask=prompt_attn,
                     max_new_tokens=max_new_tokens,
+                    min_new_tokens=max_new_tokens,
                     # ZeRO-3 gathers parameters during each decode forward, so every
                     # data-parallel rank must execute the same number of iterations.
                     eos_token_id=None,
