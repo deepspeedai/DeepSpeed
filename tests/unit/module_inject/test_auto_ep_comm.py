@@ -334,6 +334,9 @@ class TestDeepEPEarlyRoute(unittest.TestCase):
         layer._fused_combine_checked = False
         layer.ep_size = ep_size
         layer.comm_backend = comm_backend
+        # Keep the fixture valid when composed with opt-in async split planning.
+        layer.async_split_plan = False
+        layer._async_split_plan_pending = None
         layer.top_k = 2
         layer.num_experts = 2
         layer.num_local_experts = 1
@@ -420,10 +423,21 @@ class TestBufferLifecycle(unittest.TestCase):
         self.assertIn("600", message)
 
     def test_the_configured_capacity_sizes_the_buffer(self):
-        layer = mock.Mock(_deepep_exchange=None, comm_max_tokens_per_rank=4096, comm_num_sm=12, comm_qp_margin=4)
+        layer = TestDeepEPEarlyRoute.layer()
+        layer._deepep_exchange = None
+        layer.ep_group = object()
+        layer.hidden_size = 8
+        layer.comm_max_tokens_per_rank = 4096
+        layer.comm_num_sm = 12
+        layer.comm_qp_margin = 4
+        tokens = torch.ones((8, 8), dtype=torch.bfloat16)
 
-        built = mock.Mock(return_value=mock.Mock(num_max_tokens_per_rank=4096))
-        with mock.patch.object(auto_ep_layer, "DeepEPExchange", built), \
+        def build_exchange(**kwargs):
+            barrier.assert_called_once_with(group=layer.ep_group, device_ids=[tokens.device.index])
+            return mock.Mock(num_max_tokens_per_rank=4096)
+
+        with mock.patch.object(auto_ep_layer.dist, "barrier") as barrier, \
+                mock.patch.object(auto_ep_layer, "DeepEPExchange", side_effect=build_exchange) as built, \
                 mock.patch.object(auto_ep_layer, "deepep_dispatch", side_effect=RuntimeError("stop here")), \
                 mock.patch.object(auto_ep_layer.dist, "all_reduce", lambda *a, **k: None):
             router_output = auto_ep_layer.RouterOutput(
@@ -431,11 +445,13 @@ class TestBufferLifecycle(unittest.TestCase):
                 selected_experts=torch.zeros((8, 1), dtype=torch.long),
                 num_tokens_per_expert=torch.zeros(4, dtype=torch.long),
             )
-            with self.assertRaises(RuntimeError):
-                auto_ep_layer.AutoEPMoELayer._deepep_route(layer, torch.ones((8, 8), dtype=torch.bfloat16),
-                                                           router_output)
+            for _ in range(2):
+                with self.assertRaisesRegex(RuntimeError, "stop here"):
+                    auto_ep_layer.AutoEPMoELayer._deepep_route(layer, tokens, router_output)
 
         self.assertEqual(built.call_args.kwargs["num_max_tokens_per_rank"], 4096)
+        built.assert_called_once()
+        barrier.assert_called_once_with(group=layer.ep_group, device_ids=[tokens.device.index])
 
 
 class TestAutogradSignatures(unittest.TestCase):

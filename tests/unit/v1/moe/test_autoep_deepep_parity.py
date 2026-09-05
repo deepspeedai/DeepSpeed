@@ -16,16 +16,20 @@ mock-level test still passed; only comparing the two paths' numbers exposes it.
 Requires GPUs and a DeepEP build, so it is opt-in.
 """
 
+import copy
 import functools
+from unittest import mock
 
 import pytest
 import torch
 from torch.utils.checkpoint import checkpoint
 
 import deepspeed
+import deepspeed.comm as dist
 from deepspeed.module_inject import auto_ep_layer
 from deepspeed.module_inject.auto_ep_comm import destroy_exchanges
 from deepspeed.module_inject.auto_ep_layer import AutoEPMoELayer
+from deepspeed.utils import safe_get_full_fp32_param
 
 from unit.common import DistributedTest
 from unit.v1.moe.autoep_test_utils import (
@@ -105,6 +109,32 @@ def _checkpoint_autoep_layers(engine):
             module.forward = functools.partial(checkpoint, module.forward, use_reentrant=False)
 
 
+def _snapshot_fp32_parameters(engine):
+    optimizer = engine.optimizer
+    master_parameters = {}
+    # Stage-0 low-precision wrappers do not expose the safe_get parameter mapping.
+    if hasattr(optimizer, "fp16_groups"):
+        state = optimizer.state_dict()
+        for index, parameters in enumerate(optimizer.fp16_groups):
+            if "fp32_groups_flat" in state:
+                master_group = engine.unflatten(state["fp32_groups_flat"][index], parameters)
+            else:
+                assert "fp32_groups" in state, "Expected FP32 master parameters in optimizer state_dict"
+                master_group = state["fp32_groups"][index]
+            assert len(master_group) == len(parameters), "FP32 master parameter group does not match model parameters"
+            master_parameters.update(zip(parameters, master_group))
+
+    snapshot = {}
+    for name, parameter in engine.module.named_parameters():
+        full_parameter = master_parameters.get(parameter)
+        if full_parameter is None:
+            full_parameter = safe_get_full_fp32_param(parameter)
+        assert full_parameter is not None, f"Expected FP32 master parameter for {name}"
+        assert full_parameter.dtype == torch.float32, f"Expected FP32 master parameter dtype for {name}"
+        snapshot[name] = full_parameter.detach().cpu().clone()
+    return snapshot
+
+
 def _run_one_step(backend, ep_size, seed, *, cleanup=True, activation_checkpointing=False, skewed_routing=False):
     """Build a model on ``backend``, run one step, return its output and grads."""
     seed_everything(seed)
@@ -145,10 +175,7 @@ def _run_one_step(backend, ep_size, seed, *, cleanup=True, activation_checkpoint
     seed_everything(seed)
     hidden = torch.randn(1, SEQ_LEN, HIDDEN_SIZE, device=engine.device,
                          dtype=engine_input_dtype(engine)).requires_grad_(True)
-    parameters_before = {
-        name: parameter.detach().float().clone()
-        for name, parameter in engine.module.named_parameters()
-    }
+    parameters_before = _snapshot_fp32_parameters(engine)
     routes = []
     score_tensors = []
     hooks = []
@@ -180,10 +207,8 @@ def _run_one_step(backend, ep_size, seed, *, cleanup=True, activation_checkpoint
     score_gradients = {name: torch.stack(parts).sum(dim=0) for name, parts in score_gradient_parts.items()}
     input_gradient = hidden.grad.detach().float().clone()
     engine.step()
-    parameter_deltas = {
-        name: parameter.detach().float() - parameters_before[name]
-        for name, parameter in engine.module.named_parameters()
-    }
+    parameters_after = _snapshot_fp32_parameters(engine)
+    parameter_deltas = {name: parameters_after[name] - parameters_before[name] for name in parameters_before}
     for hook in hooks:
         hook.remove()
     result = {
@@ -200,6 +225,15 @@ def _run_one_step(backend, ep_size, seed, *, cleanup=True, activation_checkpoint
     return result
 
 
+def _assert_relative_tensor_error(actual, expected, name):
+    reference_norm = expected.double().norm().item()
+    error_norm = (actual.double() - expected.double()).norm().item()
+    # Absolute tolerances alone can accept missing small gradients or optimizer updates.
+    allowed_error = 5e-2 * reference_norm
+    assert error_norm <= allowed_error, (
+        f"{name} relative L2 error exceeds 5%; error_norm={error_norm}, reference_norm={reference_norm}")
+
+
 def _assert_cleanup_results_close(actual, expected, *, compare_score_gradients):
     for name, rtol, atol in (
         ("output", 2e-3, 2e-3),
@@ -214,6 +248,7 @@ def _assert_cleanup_results_close(actual, expected, *, compare_score_gradients):
                                    msg=(f"{name} mismatch; max_diff={difference.max().item()}, "
                                         f"actual_norm={actual[name].norm().item()}, "
                                         f"expected_norm={expected[name].norm().item()}"))
+    _assert_relative_tensor_error(actual["input_gradient"], expected["input_gradient"], "input_gradient")
     assert len(actual["routes"]) == len(expected["routes"])
     for (actual_name, actual_route), (expected_name, expected_route) in zip(actual["routes"], expected["routes"]):
         assert actual_name == expected_name
@@ -253,6 +288,46 @@ def _assert_cleanup_results_close(actual, expected, *, compare_score_gradients):
             atol=5e-4,
             msg=(f"optimizer delta for {name}; max_diff="
                  f"{(actual['parameter_deltas'][name] - expected['parameter_deltas'][name]).abs().max().item()}"))
+        _assert_relative_tensor_error(actual["gradients"][name], expected["gradients"][name], f"gradients[{name}]")
+        _assert_relative_tensor_error(actual["parameter_deltas"][name], expected["parameter_deltas"][name],
+                                      f"parameter_deltas[{name}]")
+
+
+class TestDeepEPCleanupParityAssertions:
+
+    @pytest.mark.parametrize("field", ["input_gradient", "gradients", "parameter_deltas"])
+    @pytest.mark.parametrize("multiplier", [0.0, -1.0, 1.01])
+    def test_small_gradient_and_update_relative_error(self, field, multiplier):
+        expected = {
+            "output": torch.ones(2),
+            "loss": torch.ones(()),
+            "input_gradient": torch.tensor([1e-5, -2e-5]),
+            "routes": [("moe", torch.tensor([[0, 1]]))],
+            "score_gradients": {
+                "moe": torch.tensor([1e-5, -2e-5])
+            },
+            "gradients": {
+                "router.weight": torch.tensor([1e-5, -2e-5])
+            },
+            "parameter_deltas": {
+                "router.weight": torch.tensor([-1e-7, 2e-7])
+            },
+        }
+        actual = copy.deepcopy(expected)
+        changed_tensor = actual[field] if field == "input_gradient" else actual[field]["router.weight"]
+        changed_tensor.mul_(multiplier)
+
+        if multiplier <= 0:
+            with pytest.raises(AssertionError, match=f"{field}.*relative L2 error"):
+                _assert_cleanup_results_close(actual, expected, compare_score_gradients=True)
+        else:
+            _assert_cleanup_results_close(actual, expected, compare_score_gradients=True)
+
+    def test_zero_reference_requires_zero_actual(self):
+        reference = torch.zeros(2)
+        _assert_relative_tensor_error(reference.clone(), reference, "zero")
+        with pytest.raises(AssertionError, match="zero relative L2 error"):
+            _assert_relative_tensor_error(torch.tensor([1e-10, 0.0]), reference, "zero")
 
 
 @pytest.mark.skipif(not _deepep_available(), reason="deep_ep is not installed")
@@ -330,3 +405,31 @@ class TestDeepEPMatchesCollective(DistributedTest):
             all_routes = torch.cat([route.flatten() for _, route in cleanup["routes"]])
             assert torch.count_nonzero(all_routes == 3) == 0
             assert torch.count_nonzero(all_routes == 1) > torch.count_nonzero(all_routes == 2)
+
+
+@pytest.mark.skipif(not _deepep_available(), reason="deep_ep is not installed")
+class TestDeepEPColdStart(DistributedTest):
+    world_size = 4
+    init_distributed = False
+    reuse_dist_env = False
+
+    def test_cleanup_initializes_a_lazy_ep_communicator(self):
+        skip_unless_h100_tests_enabled("DeepEP cold start needs H100s and a DeepEP build")
+
+        # Exercise an unbound process group, as when a caller initializes
+        # distributed without device_id before handing the model to DeepSpeed.
+        with mock.patch("deepspeed.comm.torch.known_world_size", return_value=1):
+            deepspeed.init_distributed(dist_backend="nccl")
+        assert dist.get_world_group().bound_device_id is None
+
+        cleanup = _run_one_step("deepep", self.world_size, seed=1234)
+        collective = _run_one_step("comm", self.world_size, seed=1234)
+
+        torch.testing.assert_close(cleanup["output"], collective["output"], rtol=2e-2, atol=2e-2)
+        assert cleanup["gradients"].keys() == collective["gradients"].keys()
+        for name, expected in collective["gradients"].items():
+            torch.testing.assert_close(cleanup["gradients"][name],
+                                       expected,
+                                       rtol=5e-2,
+                                       atol=5e-2,
+                                       msg=f"cold-start gradient for {name}")

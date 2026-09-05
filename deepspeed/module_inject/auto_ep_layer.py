@@ -640,8 +640,12 @@ class AutoEPMoELayer(nn.Module):
         assert_dtype_supported(tokens.dtype)
 
         # The configured worst-case capacity is identical across ranks, so
-        # buffer construction needs no rank-local decision or synchronization.
+        # buffer construction needs no rank-local resize decision.
         if self._deepep_exchange is None:
+            # An externally initialized process group may still have a lazy
+            # NCCL communicator. DeepEP needs it before constructing its team;
+            # the removed split-count collective used to initialize it for us.
+            dist.barrier(group=self.ep_group, device_ids=[tokens.device.index])
             self._deepep_exchange = DeepEPExchange(
                 ep_group=self.ep_group,
                 num_experts=self.num_experts,
