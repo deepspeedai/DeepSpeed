@@ -355,10 +355,32 @@ class SlurmRunner(MultiNodeRunner):
     def name(self):
         return 'slurm'
 
+    @staticmethod
+    def _assert_expressible_in_srun(active_resources):
+        """srun places tasks by count, not by device id.
+
+        It can run N tasks on a named set of hosts, but it cannot pin them to
+        particular slots, and -n gives it no way to put fewer tasks on one host
+        than another. Fail here rather than launch a job that ignores the filter.
+        """
+        slot_counts = set()
+        for hostname, slots in active_resources.items():
+            if list(slots) != list(range(len(slots))):
+                raise ValueError(f"slurm backend cannot select specific device ids, got "
+                                 f"{list(slots)} on {hostname}. Filter whole hosts, or keep the "
+                                 f"first N slots on every host.")
+            slot_counts.add(len(slots))
+        if len(slot_counts) > 1:
+            counts = {hostname: len(slots) for hostname, slots in active_resources.items()}
+            raise ValueError(f"slurm backend needs the same slot count on every host, got {counts}.")
+
     def get_cmd(self, environment, active_resources):
         assert not getattr(self.args, 'detect_nvlink_pairs',
                            False), "slurm backend does not support remapping visible devices"
-        total_process_count = sum(self.resource_pool.values())
+        self._assert_expressible_in_srun(active_resources)
+        # --include/--exclude are already resolved into active_resources, so counting the
+        # whole pool would ask srun for slots the user filtered out.
+        total_process_count = sum(len(slots) for slots in active_resources.values())
         srun_cmd = [
             'srun',
             '-n',
@@ -368,17 +390,20 @@ class SlurmRunner(MultiNodeRunner):
         if getattr(self.args, 'slurm_comment', ''):
             srun_cmd += ['--comment', self.args.slurm_comment]
 
-        if self.args.include != "":
-            srun_cmd.append('--include')
-            srun_cmd.append(f'{self.args.include}')
-        if self.args.exclude != "":
-            srun_cmd.append('--exclude')
-            srun_cmd.append(f'{self.args.exclude}')
+        if self.args.include != "" or self.args.exclude != "":
+            # srun has no --include, and DeepSpeed's NAME[:SLOT,...] syntax is not a slurm
+            # hostlist, so name the hosts that survived the filter.
+            srun_cmd.append('--nodelist')
+            srun_cmd.append(",".join(active_resources.keys()))
+            # --nodelist is only an upper bound: srun may satisfy -n from a subset of it.
+            srun_cmd.append('--nodes')
+            srun_cmd.append(f'{len(active_resources)}')
         if self.args.num_nodes > 0:
             srun_cmd.append('--nodes')
             srun_cmd.append(f'{self.args.num_nodes}')
         if self.args.num_gpus > 0:
-            srun_cmd.append('--gpus')
+            # --num_gpus is per node, so --gpus (a job total) would under-request.
+            srun_cmd.append('--gpus-per-node')
             srun_cmd.append(f'{self.args.num_gpus}')
 
         exports = '--export=ALL'
