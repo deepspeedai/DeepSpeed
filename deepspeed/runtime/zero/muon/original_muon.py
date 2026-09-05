@@ -142,11 +142,47 @@ def zeropower_via_gram_newtonschulz(G, steps: int):
 NS_METHODS = {"standard", "gram"}
 
 
+def _per_head_orthogonalize(update, num_heads, ns_steps, ns_method):
+    """Newton-Schulz per attention head, then fold the head dim back."""
+    if update.ndim != 2:
+        raise ValueError(f"Per-head Muon expects a 2D attention projection, got shape {tuple(update.shape)}.")
+
+    out_features, in_features = update.shape
+    if num_heads < 1 or out_features % num_heads != 0:
+        raise ValueError(f"Per-head Muon needs the output dim to split evenly across heads, but "
+                         f"{out_features} is not divisible by num_heads={num_heads}.")
+
+    head_dim = out_features // num_heads
+    ns_fn = zeropower_via_gram_newtonschulz if ns_method == "gram" else zeropower_via_newtonschulz5
+    # Scale per head block, matching what the full-matrix path does for the whole matrix.
+    scale = max(1, head_dim / in_features)**0.5
+    per_head = ns_fn(update.view(num_heads, head_dim, in_features), steps=ns_steps) * scale
+
+    return per_head.reshape(out_features, in_features)
+
+
 @compiler.compile()
-def muon_update(grad, momentum, beta=0.95, ns_steps=5, nesterov=True, ns_method="gram", is_expert_group=False):
+def muon_update(grad,
+                momentum,
+                beta=0.95,
+                ns_steps=5,
+                nesterov=True,
+                ns_method="gram",
+                is_expert_group=False,
+                num_heads=None):
+    """Muon update, optionally orthogonalizing each attention head separately.
+
+    With ``num_heads`` set, the update for an attention projection of shape
+    ``[num_heads * head_dim, in_features]`` is viewed as ``[num_heads, head_dim, in_features]``
+    and Newton-Schulz runs on that batch, so each head is orthogonalized against itself instead
+    of sharing one update direction with every other head. Both NS kernels are already batched,
+    so this is the same path the expert-group branch takes.
+    """
     orig_dtype = grad.dtype
     momentum.lerp_(grad, 1 - beta)
     update = grad.lerp_(momentum, beta) if nesterov else momentum
+    if num_heads is not None:
+        return _per_head_orthogonalize(update, num_heads, ns_steps, ns_method).to(orig_dtype)
     if is_expert_group:
         ns_fn = zeropower_via_gram_newtonschulz if ns_method == "gram" else zeropower_via_newtonschulz5
         scale = max(1, update.size(-2) / update.size(-1))**0.5
@@ -219,7 +255,8 @@ class Muon(torch.optim.Optimizer):
                                          state["momentum_buffer"],
                                          beta=group["momentum"],
                                          ns_method=group.get("ns_method", "gram"),
-                                         is_expert_group=getattr(p, 'is_expert_group', False))
+                                         is_expert_group=getattr(p, 'is_expert_group', False),
+                                         num_heads=getattr(p, 'muon_num_heads', None))
                     p.mul_(1 - group["lr"] * group["weight_decay"])
                     p.add_(update.reshape(p.shape), alpha=-group["lr"])
                 dist.all_gather(params_pad[base_i:base_i + dist.get_world_size()],
@@ -257,7 +294,8 @@ class SingleDeviceMuon(torch.optim.Optimizer):
                                      state["momentum_buffer"],
                                      beta=group["momentum"],
                                      ns_method=group.get("ns_method", "gram"),
-                                     is_expert_group=getattr(p, 'is_expert_group', False))
+                                     is_expert_group=getattr(p, 'is_expert_group', False),
+                                     num_heads=getattr(p, 'muon_num_heads', None))
                 p.mul_(1 - group["lr"] * group["weight_decay"])
                 p.add_(update.reshape(p.shape), alpha=-group["lr"])
 
@@ -349,7 +387,8 @@ class MuonWithAuxAdam(torch.optim.Optimizer):
                                              state["momentum_buffer"],
                                              beta=group["momentum"],
                                              ns_method=group.get("ns_method", "gram"),
-                                             is_expert_group=getattr(p, 'is_expert_group', False))
+                                             is_expert_group=getattr(p, 'is_expert_group', False),
+                                             num_heads=getattr(p, 'muon_num_heads', None))
                         p.mul_(1 - group["lr"] * group["weight_decay"])
                         p.add_(update.reshape(p.shape), alpha=-group["lr"])
                     dist.all_gather(params_pad[base_i:base_i + dist.get_world_size()],
@@ -421,7 +460,8 @@ class SingleDeviceMuonWithAuxAdam(torch.optim.Optimizer):
                                          state["momentum_buffer"],
                                          beta=group["momentum"],
                                          ns_method=group.get("ns_method", "gram"),
-                                         is_expert_group=getattr(p, 'is_expert_group', False))
+                                         is_expert_group=getattr(p, 'is_expert_group', False),
+                                         num_heads=getattr(p, 'muon_num_heads', None))
                     p.mul_(1 - group["lr"] * group["weight_decay"])
                     p.add_(update.reshape(p.shape), alpha=-group["lr"])
             else:
