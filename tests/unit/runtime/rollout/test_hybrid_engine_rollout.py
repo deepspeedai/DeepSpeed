@@ -21,6 +21,7 @@ from deepspeed.runtime.rollout.hybrid_engine_rollout import (
     HybridEngineRollout,
     HybridEngineRolloutConfig,
 )
+from deepspeed.utils.static_cache import DeepSpeedStaticCache
 
 
 def _make_engine():
@@ -503,3 +504,27 @@ def test_generate_accepts_zero_pad_token_id():
     rollout.generate(req, sampling)
 
     assert engine.module.generate.call_args.kwargs['pad_token_id'] == 0
+
+
+def _cache_config(head_dim=None):
+    config = SimpleNamespace(num_hidden_layers=2, hidden_size=64, num_attention_heads=4, num_key_value_heads=2)
+    if head_dim is not None:
+        config.head_dim = head_dim
+    return config
+
+
+def test_static_cache_preallocates_with_config_head_dim():
+    cache = DeepSpeedStaticCache(_cache_config(head_dim=32),
+                                 batch_size=1,
+                                 max_cache_len=8,
+                                 device="cpu",
+                                 dtype=torch.float32)
+
+    assert tuple(cache.layers[0].keys.shape) == (1, 2, 8, 32)
+    assert tuple(cache.layers[0].values.shape) == (1, 2, 8, 32)
+
+
+def test_static_cache_falls_back_to_derived_head_dim():
+    cache = DeepSpeedStaticCache(_cache_config(), batch_size=1, max_cache_len=8, device="cpu", dtype=torch.float32)
+
+    assert tuple(cache.layers[0].keys.shape) == (1, 2, 8, 16)
