@@ -414,3 +414,22 @@ def test_the_flag_errors_rather_than_silently_doing_nothing():
 
     # ...and with the flag off it is simply not asked for.
     assert _flags(_NoAttention(), per_head=False)["mlp.weight"] is None
+
+
+def test_the_head_count_is_read_from_the_layer_shape_under_zero_init():
+    """`zero.Init` leaves a flat placeholder and records the layer's shape as `ds_shape`.
+
+    Reading `param.shape` there sees a 1-D tensor for every parameter, so nothing confirms and
+    the flag raises on a model it could describe perfectly well.
+    """
+    model = _Attn(hidden=64, q_heads=8, kv_heads=2, head_dim=8)
+    for p in model.parameters():
+        p.ds_shape = torch.Size(p.shape)
+        p.data = torch.zeros(0, dtype=p.dtype)
+
+    tags = _flags(model)
+
+    assert model.q_proj.weight.ndim == 1, "the partitioned parameter really is 1-D here"
+    assert tags["q_proj.weight"] == 8
+    assert tags["k_proj.weight"] == 2
+    assert tags["o_proj.weight"] is None

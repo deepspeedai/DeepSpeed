@@ -102,6 +102,18 @@ _MLA_DOWN_LEAVES = ("q_a_proj", "kv_a_proj", "kv_a_proj_with_mqa")
 QUERY, KV, MLA_Q, MLA_KV, NOT_HEAD_BLOCKED = "query", "kv", "mla_q", "mla_kv", "not-head-blocked"
 
 
+def _layer_shape(param: torch.Tensor):
+    """The parameter's shape as a layer, rather than as a ZeRO-3 partition.
+
+    Under ``deepspeed.zero.Init`` a partitioned parameter's data is a flat placeholder -
+    ``torch.Size([0])`` on the ranks that do not hold it - and the shape it has as a layer is
+    recorded as ``ds_shape``. Reading ``param.shape`` there sees a 1-D tensor for every
+    parameter in the model.
+    """
+    ds_shape = getattr(param, "ds_shape", None)
+    return tuple(param.shape) if ds_shape is None else tuple(ds_shape)
+
+
 def _per_head_muon_meta(model: torch.nn.Module):
     """The head-count reader and the config the widths come from, built once per model.
 
@@ -199,12 +211,13 @@ def _confirm(param: torch.Tensor, candidates):
     at once; that is only an ambiguity if they disagree on the head count, which is the whole
     output, so agreeing candidates are not a conflict.
     """
-    if param.ndim != 2:
+    shape = _layer_shape(param)
+    if len(shape) != 2:
         return None, "not-2d"
     if not candidates:
         return None, "no-candidate-geometry"
 
-    rows = param.shape[0]
+    rows = shape[0]
     exact = [c for c in candidates if rows == c[0] * c[1]]
     if not exact:
         return None, "width-mismatch"
@@ -276,7 +289,7 @@ def set_optimizer_flags(config_class: DeepSpeedConfig, model: torch.nn.Module) -
         skipped: dict = {}
 
         for name, p in model.named_parameters():
-            if p.ndim >= 2 and not any(keyword in name.lower() for keyword in ("embed", "lm_head")):
+            if len(_layer_shape(p)) >= 2 and not any(keyword in name.lower() for keyword in ("embed", "lm_head")):
                 setattr(p, "use_muon", True)
             else:
                 setattr(p, "use_muon", False)
@@ -286,13 +299,13 @@ def set_optimizer_flags(config_class: DeepSpeedConfig, model: torch.nn.Module) -
                 num_heads, reason = _resolve_attention_head_count(name, p, meta, text_config)
                 leaf = _leaf_module_name(name)
                 if num_heads is not None:
-                    tagged[leaf] = f"{num_heads} heads of {p.shape[0] // num_heads} ({reason})"
+                    tagged[leaf] = f"{num_heads} heads of {_layer_shape(p)[0] // num_heads} ({reason})"
                 else:
                     skipped[leaf] = reason
             setattr(p, "muon_num_heads", num_heads)
             # The width, not the count, is what survives a column-parallel split; see
             # `resolve_per_head_muon_after_sharding`.
-            setattr(p, "muon_head_dim", p.shape[0] // num_heads if num_heads else None)
+            setattr(p, "muon_head_dim", _layer_shape(p)[0] // num_heads if num_heads else None)
 
         if per_head:
             _report_per_head_tagging(tagged, skipped)
@@ -320,7 +333,7 @@ def resolve_per_head_muon_after_sharding(model: torch.nn.Module) -> None:
         if head_dim is None:
             continue
         leaf = _leaf_module_name(name)
-        rows = p.shape[0]
+        rows = _layer_shape(p)[0]
         if rows % head_dim:
             setattr(p, "muon_num_heads", None)
             dropped[leaf] = f"{rows} rows do not divide into heads of {head_dim}"
