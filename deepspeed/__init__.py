@@ -204,6 +204,62 @@ def _geometry_candidates(kind, meta, text_config):
     return [c for c in candidates if c[0] and c[0] >= 1 and c[1] and c[1] >= 1]
 
 
+# Head geometry the config does not describe. Kimi-K3's linear-attention layers keep their
+# counts in `linear_attn_config` and build q/k/v at `num_k_heads * head_k_dim`, which is not the
+# `num_attention_heads * head_dim` the config-derived candidates describe, so those projections
+# were declining a width check rather than being recognized. The module that built the
+# projection holds both numbers as plain attributes, so ask it.
+#
+# Only modules that say they are attention are asked. GLM-5.2's sparse-attention indexer carries
+# an `n_heads`/`head_dim` pair of its own and its `wq_b` is exactly `index_n_heads *
+# index_head_dim`, so an unconditional read would tag it; #8420 settled that Muon Split covers
+# attention, not the indexer that picks which keys attention will see.
+_ATTENTION_OWNER_MARKERS = ("attention", "attn")
+_OWNER_Q_COUNTS = ("num_heads", "num_attention_heads", "n_heads")
+_OWNER_K_COUNTS = ("num_k_heads", "num_key_value_heads", "num_kv_heads") + _OWNER_Q_COUNTS
+_OWNER_V_COUNTS = ("num_v_heads", ) + _OWNER_K_COUNTS
+_OWNER_Q_WIDTHS = ("head_k_dim", "head_dim", "head_size")
+_OWNER_K_WIDTHS = _OWNER_Q_WIDTHS
+_OWNER_V_WIDTHS = ("head_v_dim", "head_dim", "head_size")
+_VALUE_LEAVES = ("v_proj", "value", "wv")
+
+
+def _first_int_attr(module, names):
+    for name in names:
+        value = getattr(module, name, None)
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 1:
+            return value
+    return None
+
+
+def _owner_module(param_name: str, owners):
+    """The module that holds the Linear, i.e. the attention module, not the Linear itself."""
+    if not owners:
+        return None
+    parts = param_name.split(".")
+    if len(parts) < 3:
+        return None
+    return owners.get(".".join(parts[:-2]))
+
+
+def _owner_candidate(kind, leaf: str, owner):
+    """The geometry the owning attention module says it built this projection with."""
+    if owner is None or kind not in (QUERY, KV):
+        return []
+    if not any(marker in type(owner).__name__.lower() for marker in _ATTENTION_OWNER_MARKERS):
+        return []
+
+    if kind == QUERY:
+        counts, widths, source = _OWNER_Q_COUNTS, _OWNER_Q_WIDTHS, "owner-q"
+    elif any(leaf.startswith(v) for v in _VALUE_LEAVES):
+        counts, widths, source = _OWNER_V_COUNTS, _OWNER_V_WIDTHS, "owner-v"
+    else:
+        counts, widths, source = _OWNER_K_COUNTS, _OWNER_K_WIDTHS, "owner-k"
+
+    heads, width = _first_int_attr(owner, counts), _first_int_attr(owner, widths)
+    return [(heads, width, source)] if heads and width else []
+
+
 def _confirm(param: torch.Tensor, candidates):
     """Resolve candidates against the shape. Returns (num_heads or None, reason).
 
@@ -228,6 +284,12 @@ def _confirm(param: torch.Tensor, candidates):
     return exact[0][0], exact[0][2]
 
 
+def _owner_modules(model):
+    """`named_modules()` as a lookup, or None when the object does not have any."""
+    named_modules = getattr(model, "named_modules", None)
+    return dict(named_modules()) if callable(named_modules) else None
+
+
 def _attention_head_count(param_name: str, param: torch.Tensor, model: torch.nn.Module):
     """Heads this projection splits into on dim 0, or None to leave it on the full-matrix path.
 
@@ -237,18 +299,21 @@ def _attention_head_count(param_name: str, param: torch.Tensor, model: torch.nn.
     meta, text_config = _per_head_muon_meta(model)
     if meta is None:
         return None
-    num_heads, _ = _resolve_attention_head_count(param_name, param, meta, text_config)
+    num_heads, _ = _resolve_attention_head_count(param_name, param, meta, text_config, _owner_modules(model))
     return num_heads
 
 
-def _resolve_attention_head_count(param_name: str, param: torch.Tensor, meta, text_config):
+def _resolve_attention_head_count(param_name: str, param: torch.Tensor, meta, text_config, owners=None):
     """As above, with the reason, so callers can report why a parameter was not tagged."""
-    kind = _classify_leaf(_leaf_module_name(param_name))
+    leaf = _leaf_module_name(param_name)
+    kind = _classify_leaf(leaf)
     if kind is None:
         return None, "not-attention"
     if kind == NOT_HEAD_BLOCKED:
         return None, NOT_HEAD_BLOCKED
-    return _confirm(param, _geometry_candidates(kind, meta, text_config))
+    candidates = _geometry_candidates(kind, meta, text_config)
+    candidates += _owner_candidate(kind, leaf, _owner_module(param_name, owners))
+    return _confirm(param, candidates)
 
 
 def _report_per_head_tagging(tagged: dict, skipped: dict) -> None:
@@ -285,6 +350,7 @@ def set_optimizer_flags(config_class: DeepSpeedConfig, model: torch.nn.Module) -
     if config_class.optimizer_name == MUON_OPTIMIZER:
         per_head = bool((config_class.optimizer_params or {}).get("per_head_muon", False))
         meta, text_config = _per_head_muon_meta(model) if per_head else (None, None)
+        owners = _owner_modules(model) if per_head else None
         tagged: dict = {}
         skipped: dict = {}
 
@@ -296,7 +362,7 @@ def set_optimizer_flags(config_class: DeepSpeedConfig, model: torch.nn.Module) -
 
             num_heads = None
             if per_head and p.use_muon and meta is not None:
-                num_heads, reason = _resolve_attention_head_count(name, p, meta, text_config)
+                num_heads, reason = _resolve_attention_head_count(name, p, meta, text_config, owners)
                 leaf = _leaf_module_name(name)
                 if num_heads is not None:
                     tagged[leaf] = f"{num_heads} heads of {_layer_shape(p)[0] // num_heads} ({reason})"

@@ -80,6 +80,15 @@ What is tagged, and what deliberately is not:
 | `o_proj` and other output projections | no | the head structure is on the input dimension, so splitting dim 0 would cut across the wrong axis |
 | fused `qkv_proj` / `query_key_value` / `c_attn` / `wqkv` | no | the three sections do not share a head count under GQA |
 | MLA `q_a_proj`, `kv_a_proj_with_mqa` | no | down-projections mixing latent and rope components, with no head structure |
+| linear-attention `q_proj` / `k_proj` / `v_proj` | yes | blocked by the head count the attention module was built with, which for hybrids such as Kimi-K3 is not `num_attention_heads * head_dim` |
+| sparse-attention indexers | no | the indexer selects which keys attention will see; the split is defined on attention itself |
+
+**Where the geometry comes from.** The config first: head counts through `AutoTPMeta`, per-head
+widths from the fields the architecture defines. When no config geometry confirms, the module
+that owns the projection is asked for the counts it was built with, which is how hybrid models
+that keep their linear-attention geometry outside the top-level config fields are covered. Only
+modules that identify as attention are asked, so a module with a head count of its own that is
+not attention keeps the full-matrix path.
 
 **The shape confirms the name.** A leaf name is treated as a claim about the layout, never as
 proof of it. Every geometry the config makes plausible for that name is evaluated, and a

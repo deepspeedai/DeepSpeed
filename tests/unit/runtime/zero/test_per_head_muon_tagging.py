@@ -433,3 +433,170 @@ def test_the_head_count_is_read_from_the_layer_shape_under_zero_init():
     assert tags["q_proj.weight"] == 8
     assert tags["k_proj.weight"] == 2
     assert tags["o_proj.weight"] is None
+
+
+# --- geometry the config does not carry (#8420) ---------------------------------
+#
+# Kimi-K3's linear-attention layers build q/k/v at `linear_attn_config`'s num_heads x head_dim,
+# which no top-level config field describes, so the candidates above decline them. The module
+# that built the projection knows both numbers. Asking it is architecture-agnostic; restricting
+# the question to modules that say they are attention is what keeps GLM-5.2's sparse-attention
+# indexer out, which is where #8420 landed.
+
+
+class _KimiDeltaAttention(torch.nn.Module):
+    """The KDA layer of inference-optimization/Kimi-K3-0.40B, attributes and shapes as built.
+
+    Named after the real class because the class name is load-bearing: the owning module is only
+    asked for geometry when it says it is attention.
+    """
+
+    def __init__(self, hidden=1024, num_heads=8, head_dim=32, head_v_dim=None):
+        super().__init__()
+        self.num_heads = self.num_k_heads = num_heads
+        self.head_dim = self.head_k_dim = head_dim
+        self.head_v_dim = head_v_dim if head_v_dim is not None else head_dim
+        self.q_proj = torch.nn.Linear(hidden, num_heads * head_dim, bias=False)
+        self.k_proj = torch.nn.Linear(hidden, num_heads * head_dim, bias=False)
+        self.v_proj = torch.nn.Linear(hidden, num_heads * self.head_v_dim, bias=False)
+        # Same width as q_proj, and no head structure the split can use: the gate is elementwise
+        # and f_b_proj/b_proj are per-head scalars fanned out. None of these are attention
+        # projections, and none of their leaf names are on the list, so none are candidates.
+        self.g_proj = torch.nn.Linear(hidden, num_heads * head_dim, bias=False)
+        self.f_b_proj = torch.nn.Linear(head_dim, num_heads * head_dim, bias=False)
+        self.b_proj = torch.nn.Linear(hidden, num_heads, bias=False)
+        self.o_proj = torch.nn.Linear(num_heads * head_dim, hidden, bias=False)
+
+
+class _GlmMoeDsaIndexer(torch.nn.Module):
+    """The DSA indexer of inference-optimization/GLM-5.2-0.8B-A0.8B.
+
+    `wq_b` is exactly `index_n_heads 8 x index_head_dim 64`, so it would confirm if the geometry
+    were read off any module carrying an n_heads/head_dim pair.
+    """
+
+    def __init__(self, hidden=2048, q_lora_rank=512, n_heads=8, head_dim=64):
+        super().__init__()
+        self.n_heads, self.head_dim = n_heads, head_dim
+        self.wq_b = torch.nn.Linear(q_lora_rank, n_heads * head_dim, bias=False)
+        self.wk = torch.nn.Linear(hidden, head_dim, bias=False)
+        self.weights_proj = torch.nn.Linear(hidden, n_heads, bias=False)
+
+
+class _HybridLayer(torch.nn.Module):
+    """One decoder layer, so parameter names have an owner two levels above the weight."""
+
+    def __init__(self, attn):
+        super().__init__()
+        self.self_attn = attn
+
+
+class _HybridModel(torch.nn.Module):
+
+    def __init__(self, attn, config=None):
+        super().__init__()
+        self.layers = torch.nn.ModuleList([_HybridLayer(attn)])
+        self.config = config if config is not None else _kimi_k3_hybrid_config()
+
+
+@pytest.mark.parametrize("leaf", ["q_proj", "k_proj", "v_proj"])
+def test_linear_attention_geometry_comes_from_the_owning_module(leaf):
+    """The case #8420 was opened for: 8 x 32 is in the module, not in the config.
+
+    The same config that declines these in `test_linear_attention_on_a_config_with_mla_leftovers_is_declined`
+    is used here, so the module is the only thing that changed.
+    """
+    model = _HybridModel(_KimiDeltaAttention())
+
+    name = f"layers.0.self_attn.{leaf}.weight"
+    param = dict(model.named_parameters())[name]
+
+    assert param.shape == (256, 1024)
+    assert _attention_head_count(name, param, model) == 8
+
+
+@pytest.mark.parametrize("leaf", ["g_proj", "f_b_proj", "b_proj", "o_proj"])
+def test_the_other_matrices_of_a_linear_attention_layer_stay_whole(leaf):
+    """g_proj is the same 256 x 1024 shape as q_proj and must not ride along on the name check."""
+    model = _HybridModel(_KimiDeltaAttention())
+
+    name = f"layers.0.self_attn.{leaf}.weight"
+    assert _attention_head_count(name, dict(model.named_parameters())[name], model) is None
+
+
+def test_the_value_projection_uses_the_value_width():
+    """head_v_dim can differ from head_k_dim; the k width would reject v_proj at 512 rows."""
+    model = _HybridModel(_KimiDeltaAttention(head_dim=32, head_v_dim=64))
+    params = dict(model.named_parameters())
+
+    assert params["layers.0.self_attn.v_proj.weight"].shape == (512, 1024)
+    assert _attention_head_count("layers.0.self_attn.v_proj.weight", params["layers.0.self_attn.v_proj.weight"],
+                                 model) == 8
+    assert _attention_head_count("layers.0.self_attn.k_proj.weight", params["layers.0.self_attn.k_proj.weight"],
+                                 model) == 8
+
+
+def test_the_sparse_attention_indexer_is_not_tagged():
+    """#8420: Muon Split covers attention, not the indexer that selects the keys it will see.
+
+    `wq_b` confirms on the indexer's own geometry, so this is declined by the module not saying
+    it is attention rather than by the shape.
+    """
+    indexer = _GlmMoeDsaIndexer()
+    model = _HybridModel(indexer, config=_glm52_mla_config())
+    params = dict(model.named_parameters())
+
+    assert params["layers.0.self_attn.wq_b.weight"].shape == (512, 512)
+    assert indexer.n_heads * indexer.head_dim == 512, "the geometry does confirm; the module is why it is declined"
+    for leaf in ("wq_b", "wk", "weights_proj"):
+        name = f"layers.0.self_attn.{leaf}.weight"
+        assert _attention_head_count(name, params[name], model) is None
+
+
+def test_a_module_that_does_not_say_it_is_attention_is_not_asked():
+    """The gate is the owning module's class name, and this pins its cost.
+
+    Qwen3-Next's linear attention is `Qwen3NextGatedDeltaNet`, which does not say attention, so
+    it keeps the full-matrix path. That is #8384's behaviour rather than a regression: the
+    question is only asked where it is known to be the right one to ask, and widening it is a
+    marker away. The alternative, asking every module and naming the ones to skip, would have
+    tagged the DSA indexer by default.
+    """
+
+    class _GatedDeltaNet(_KimiDeltaAttention):
+        pass
+
+    model = _HybridModel(_GatedDeltaNet())
+    name = "layers.0.self_attn.q_proj.weight"
+
+    assert _attention_head_count(name, dict(model.named_parameters())[name], model) is None
+
+
+def test_owner_geometry_still_has_to_match_the_shape():
+    """The module is another candidate, not an override: #8384's shape confirmation still rules."""
+    attn = _KimiDeltaAttention()
+    attn.num_heads = attn.num_k_heads = 7  # 7 x 32 = 224, against 256 rows
+    model = _HybridModel(attn)
+    name = "layers.0.self_attn.q_proj.weight"
+
+    assert _attention_head_count(name, dict(model.named_parameters())[name], model) is None
+
+
+def test_a_standard_model_is_unchanged_when_the_module_agrees():
+    """On ordinary attention both the config and the module describe the same geometry.
+
+    They agree, so there is nothing to be ambiguous about and the head count is still tagged.
+    """
+    transformers = pytest.importorskip("transformers")
+    cfg = transformers.LlamaConfig(hidden_size=64,
+                                   num_attention_heads=8,
+                                   num_key_value_heads=2,
+                                   num_hidden_layers=1,
+                                   intermediate_size=128,
+                                   vocab_size=32)
+    model = transformers.AutoModelForCausalLM.from_config(cfg)
+
+    tags = {n.split(".")[-2]: _attention_head_count(n, p, model) for n, p in model.named_parameters() if p.ndim == 2}
+
+    assert (tags["q_proj"], tags["k_proj"], tags["v_proj"]) == (8, 2, 2)
+    assert tags["o_proj"] is None
