@@ -13,11 +13,11 @@ No accelerator needed: this covers the construction and the rope values, and the
 fallback path is unchanged.
 """
 
-import inspect
-
 import pytest
 import torch
 
+from deepspeed.ops.transformer.inference.config import DeepSpeedInferenceConfig
+from deepspeed.ops.transformer.inference.op_binding.softmax_context import SoftmaxContextOp
 from deepspeed.ops.transformer.inference.op_binding.workspace import InferenceContext
 
 
@@ -65,8 +65,12 @@ def test_get_rotary_is_cached(context):
     assert context.get_rotary(64, 10000.0) is first
 
 
-def test_rotary_is_applied_through_cos_sin_not_a_fifth_argument():
-    """The fallback hands `apply_rotary_pos_emb` four arguments, and has to.
+class _StopAfterRotary(Exception):
+    """Ends the fallback at the call under test, before it wants a workspace."""
+
+
+def test_the_fallback_passes_apply_rotary_pos_emb_four_arguments(monkeypatch, context):
+    """Asserts this repo's call, not the library's signature.
 
     transformers 5.0 dropped the deprecated `position_ids` parameter, so the fifth
     positional slot became `unsqueeze_dim`:
@@ -74,23 +78,35 @@ def test_rotary_is_applied_through_cos_sin_not_a_fifth_argument():
         4.51.3 .. 4.57.0   (q, k, cos, sin, position_ids=None, unsqueeze_dim=1)
         5.0.0  .. 5.16.1   (q, k, cos, sin, unsqueeze_dim=1)
 
-    Passing position_ids there reaches `unsqueeze(dim=...)` as a tensor.
+    Passing `position_ids` there reaches `unsqueeze(dim=...)` as a tensor. Checking the
+    library's own signature would not catch that, since the mistake is in the caller; the
+    recorded call has to come from `softmax_context_fallback` itself.
+
+    The recorder raises so execution stops at the rotary block. `update_cache` sits two
+    lines below and needs a workspace, which is not what this is about.
     """
     llama = pytest.importorskip("transformers.models.llama.modeling_llama")
-    apply_rotary_pos_emb = llama.apply_rotary_pos_emb
 
-    seq_len, rotary_dim = 8, 16
-    q = torch.randn(1, 4, seq_len, rotary_dim)
-    k = torch.randn(1, 4, seq_len, rotary_dim)
-    cos = torch.randn(1, seq_len, rotary_dim)
-    sin = torch.randn(1, seq_len, rotary_dim)
+    recorded = {}
+
+    def recorder(*args, **kwargs):
+        recorded["args"], recorded["kwargs"] = args, kwargs
+        raise _StopAfterRotary
+
+    monkeypatch.setattr(llama, "apply_rotary_pos_emb", recorder)
+
+    heads, head_dim, seq_len, rotary_dim = 4, 16, 8, 16
+    query_key_value = torch.randn(1, seq_len, 3 * heads * head_dim)
     position_ids = torch.arange(seq_len).unsqueeze(0)
 
-    rotated_q, rotated_k = apply_rotary_pos_emb(q, k, cos, sin)
-    assert rotated_q.shape == q.shape
-    assert rotated_k.shape == k.shape
+    config = DeepSpeedInferenceConfig(hidden_size=heads * head_dim, heads=heads, dtype=torch.float32)
+    op = SoftmaxContextOp.__new__(SoftmaxContextOp)
+    op.config = config
 
-    fifth = list(inspect.signature(apply_rotary_pos_emb).parameters)[4]
-    if fifth == "unsqueeze_dim":
-        with pytest.raises(TypeError):
-            apply_rotary_pos_emb(q, k, cos, sin, position_ids)
+    with pytest.raises(_StopAfterRotary):
+        op.softmax_context_fallback(query_key_value, None, rotary_dim, True, False, heads, heads, 1.0, False, False, 0,
+                                    False, 0, 1, None, 10000.0, True, 0, position_ids)
+
+    assert len(recorded["args"]) == 4, \
+        f"the fallback passed {len(recorded['args'])} positional arguments; the fifth is unsqueeze_dim"
+    assert not recorded["kwargs"], f"unexpected keyword arguments: {sorted(recorded['kwargs'])}"
