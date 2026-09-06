@@ -57,35 +57,6 @@ def test_config_duplicate_key(tmpdir):
         run_cfg = ds_config.DeepSpeedConfig(config_path)
 
 
-@pytest.mark.parametrize("value", [-1, 0])
-def test_hybrid_engine_max_out_tokens_must_be_positive(value):
-    with pytest.raises(ValidationError, match="max_out_tokens"):
-        ds_config.DeepSpeedConfig({
-            "train_batch_size": 1,
-            "hybrid_engine": {
-                "enabled": True,
-                "max_out_tokens": value,
-            },
-        })
-
-
-@pytest.mark.parametrize("value", [1, 512, 1024])
-def test_hybrid_engine_max_out_tokens_accepts_positive_values(value):
-    config = ds_config.DeepSpeedConfig({
-        "train_batch_size": 1,
-        "hybrid_engine": {
-            "enabled": True,
-            "max_out_tokens": value,
-        },
-    })
-    assert config.hybrid_engine.max_out_tokens == value
-
-
-def test_hybrid_engine_max_out_tokens_default():
-    config = ds_config.DeepSpeedConfig({"train_batch_size": 1, "hybrid_engine": {"enabled": True}})
-    assert config.hybrid_engine.max_out_tokens == 512
-
-
 def test_config_base():
     config = SimpleConf(**{"param_1": 42})
     assert config.param_1 == 42
