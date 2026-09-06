@@ -17,5 +17,7 @@ from .megatron_gpt import DS_MegatronGPTContainer, MegatronLayerPolicy
 from .megatron_gpt_moe import DS_MegatronGPTMoEContainer, MegatronMoELayerPolicy
 from .opt import DS_OPTContainer, HFOPTLayerPolicy
 from .clip import DS_CLIPContainer, HFCLIPLayerPolicy
+from .qwen2 import DS_QWEN2Container, Qwen2LayerPolicy
+from .qwen3_5 import DS_QWEN3_5Container, Qwen3_5LayerPolicy
 from .unet import UNetPolicy
 from .vae import VAEPolicy

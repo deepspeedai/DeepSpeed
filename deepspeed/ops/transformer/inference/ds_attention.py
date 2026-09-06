@@ -81,12 +81,16 @@ class DeepSpeedSelfAttention(nn.Module):
         self.linear_func = LinearOp(config)
         self.vector_matmul_func = VectorMatMulOp(config)
         if len(DeepSpeedSelfAttention._qkv_buffers) == 0:
+            # GQA packs fewer KV rows than the MHA q|k|v layout, so the shared
+            # merge scratch must be sized from the actual per-partition layout.
+            if self.config.num_kv < 0:
+                qkv_merge_rows = self.hidden_size_per_partition * 3
+            else:
+                qkv_merge_rows = self.hidden_size_per_partition + \
+                    2 * self.num_kv_partition * self.hidden_size_per_attention_head
             DeepSpeedSelfAttention._qkv_buffers = [
-                torch.empty(self.hidden_size_per_partition * 3,
-                            self.config.hidden_size,
-                            dtype=data_type_fp,
-                            device=device),
-                torch.empty(self.hidden_size_per_partition * 3, dtype=data_type_fp, device=device)
+                torch.empty(qkv_merge_rows, self.config.hidden_size, dtype=data_type_fp, device=device),
+                torch.empty(qkv_merge_rows, dtype=data_type_fp, device=device)
             ]
 
     def compute_attention(self, qkv_out, input_mask, layer_past, alibi, is_prompt, token_idx, position_ids):
@@ -118,14 +122,19 @@ class DeepSpeedSelfAttention(nn.Module):
 
     def _merge_qkv(self):
         qvkw = DeepSpeedSelfAttention._qkv_buffers[0]
-        qvkw[:self.hidden_size_per_partition, :] = self.attn_qw  # type: ignore
-        qvkw[self.hidden_size_per_partition:2 * self.hidden_size_per_partition, :] = self.attn_kw  # type: ignore
-        qvkw[2 * self.hidden_size_per_partition:, :] = self.attn_vw  # type: ignore
+        # Under GQA the k/v blocks are num_kv_partition * head_dim rows, not a
+        # full hidden_size_per_partition block each.
+        q_rows = self.hidden_size_per_partition
+        kv_rows = self.hidden_size_per_partition if self.config.num_kv < 0 else \
+            self.num_kv_partition * self.hidden_size_per_attention_head
+        qvkw[:q_rows, :] = self.attn_qw  # type: ignore
+        qvkw[q_rows:q_rows + kv_rows, :] = self.attn_kw  # type: ignore
+        qvkw[q_rows + kv_rows:, :] = self.attn_vw  # type: ignore
         if self.attn_qb is not None:
             qvkb = DeepSpeedSelfAttention._qkv_buffers[1]
-            qvkb[:self.hidden_size_per_partition] = self.attn_qb
-            qvkb[self.hidden_size_per_partition:2 * self.hidden_size_per_partition] = self.attn_kb  # type: ignore
-            qvkb[2 * self.hidden_size_per_partition:] = self.attn_vb  # type: ignore
+            qvkb[:q_rows] = self.attn_qb
+            qvkb[q_rows:q_rows + kv_rows] = self.attn_kb  # type: ignore
+            qvkb[q_rows + kv_rows:] = self.attn_vb  # type: ignore
         return DeepSpeedSelfAttention._qkv_buffers
 
     def forward(self,

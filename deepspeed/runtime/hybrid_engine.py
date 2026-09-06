@@ -289,6 +289,13 @@ class DeepSpeedHybridEngine(DeepSpeedEngine):
     def create_inference_containers(self, module, layer_id=0):
         for name, child in module.named_children():
             if child.__class__ in self.inference_policies:
+                # Hybrid-architecture families (e.g. Qwen3.5) expose one decoder-layer
+                # class for several block types; a policy can opt out per instance so
+                # unsupported blocks keep their native forward.
+                policy_cls = self.inference_policies[child.__class__][-1]
+                if hasattr(policy_cls, 'should_replace') and not policy_cls.should_replace(child):
+                    self.create_inference_containers(child, layer_id=layer_id)
+                    continue
                 if self.inference_policies[child.__class__][0] == self.new_inference_container:
                     self._inference_containers.append(self.inference_policies[child.__class__][0](
                         child, self.inference_policies[child.__class__][-1], layer_id))
@@ -389,9 +396,22 @@ class DeepSpeedHybridEngine(DeepSpeedEngine):
                     # Set the is_lora_fused to true when reaching the last layer
                     if layer_id == len(self.layer_params) - 1:
                         self.is_lora_fused = True
-                return self._inference_containers[layer_id].module.forward(*inputs, **kwargs)
+                output = self._inference_containers[layer_id].module.forward(*inputs, **kwargs)
+                # transformers >= 5 decoder loops expect the bare hidden states; the
+                # v1 inference layer answers with the legacy (output, presents) tuple
+                # whenever a cache is requested during generation.
+                return output[0] if isinstance(output, tuple) else output
 
         return run_forward
+
+    def _ds_forward_adapter(self, container):
+        """Unwrap the legacy tuple return for transformers >= 5 layer loops."""
+
+        def forward(*inputs, **kwargs):
+            output = container.module(*inputs, **kwargs)
+            return output[0] if isinstance(output, tuple) else output
+
+        return forward
 
     def eval(self):
         if self._t_start is not None:
@@ -422,7 +442,7 @@ class DeepSpeedHybridEngine(DeepSpeedEngine):
                 if self.Z3_enabled and not self.gather_all_layers:
                     orig_module.forward = self._zero3_forward(i)
                 else:
-                    orig_module.forward = inference_container.module.forward
+                    orig_module.forward = self._ds_forward_adapter(inference_container)
 
                 inference_container.transform_for_inference()
 
