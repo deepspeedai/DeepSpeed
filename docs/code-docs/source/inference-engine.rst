@@ -35,11 +35,27 @@ behavior and adds overhead. Enable it through ``HybridEngineRolloutConfig``::
     profile = rollout.get_last_profile()
 
 The profile contains synchronized times for prompt expansion, generation,
-post-processing, and the complete rollout. Times are reported in milliseconds.
-``num_generated_tokens`` counts all returned response positions across the
-expanded batch, including padding positions. ``tokens_per_second`` divides
-that count by the end-to-end rollout time. The profile also records the input
-batch size, samples per prompt, prompt length, and returned response length.
+post-processing, and the complete rollout. Generation is further divided into
+the first model forward (``prefill_forward_ms``), all later model forwards
+(``decode_forward_ms``), and residual generation work
+(``generation_overhead_ms``). The residual includes sampling, generation-loop
+bookkeeping, shared-cache expansion, and other work outside the top-level model
+forwards. ``num_decode_forwards`` reports how many forwards contributed to the
+decode time.
+
+Forward timings use accelerator events where supported and synchronize once at
+the end of generation instead of after every generated token. Synchronous
+accelerators without events, such as CPU, use wall-clock timings. The forward
+breakdown is unavailable when an asynchronous accelerator lacks event timing,
+such as MPS, and for the CUDA graph path because graph replays bypass model
+forward hooks. In both cases its forward fields are ``None`` and its complete
+generation time is reported as generation overhead.
+
+Times are reported in milliseconds. ``num_generated_tokens`` counts all
+returned response positions across the expanded batch, including padding
+positions. ``tokens_per_second`` divides that count by the end-to-end rollout
+time. The profile also records the input batch size, samples per prompt, prompt
+length, and returned response length.
 For benchmark matrices, cases execute from the largest effective batch to the
 smallest because HybridEngine sizes its inference workspace on the first
 forward. Results remain in the user-requested matrix order.

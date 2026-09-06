@@ -2287,7 +2287,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             for g, p in zip(gradients, params):
                 if is_model_parallel_parameter(p) or (self.model_parallel_rank == 0):
                     grad_norms.append(
-                        g.to(get_accelerator().device_name(), non_blocking=True).to(get_norm_dtype()).norm(2))
+                        g.to(get_accelerator().device_name(), non_blocking=True).to(get_norm_dtype()).norm(norm_type))
 
             # Sum across all model parallel GPUs.
             if len(grad_norms) == 0:
@@ -2295,7 +2295,9 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                 total_norm_cuda = torch.tensor(0, dtype=gradients[0].dtype).to(get_accelerator().device_name()).to(
                     get_norm_dtype())
             else:
-                total_norm_cuda = torch.sum(torch.pow(torch.stack(grad_norms), 2))
+                # Each entry is ||g||_norm_type and the 1/norm_type root is taken below, so
+                # both the per-tensor norm above and this exponent follow norm_type.
+                total_norm_cuda = torch.sum(torch.pow(torch.stack(grad_norms), norm_type))
 
             dist.all_reduce(total_norm_cuda, op=dist.ReduceOp.SUM, group=process_group)
 

@@ -195,6 +195,23 @@ def override_warmupLR_params(args, params):
         params[WARMUP_TYPE] = args.warmup_type
 
 
+def override_warmupCosineLR_params(args, params):
+    # WarmupCosineLR scales each param group's own lr by a ratio, so it takes
+    # warmup_min_ratio/cos_min_ratio and does not accept warmup_min_lr or
+    # warmup_max_lr.
+    if hasattr(args, WARMUP_NUM_STEPS) and args.warmup_num_steps is not None:
+        params[WARMUP_NUM_STEPS] = args.warmup_num_steps
+
+    if hasattr(args, WARMUP_TYPE) and args.warmup_type is not None:
+        params[WARMUP_TYPE] = args.warmup_type
+
+    if hasattr(args, WARMUP_MIN_RATIO) and args.warmup_min_ratio is not None:
+        params[WARMUP_MIN_RATIO] = args.warmup_min_ratio
+
+    if hasattr(args, COS_MIN_RATIO) and args.cos_min_ratio is not None:
+        params[COS_MIN_RATIO] = args.cos_min_ratio
+
+
 def override_params(args, params):
     # LR range test params
     override_lr_range_test_params(args, params)
@@ -204,6 +221,9 @@ def override_params(args, params):
 
     # WarmupLR params
     override_warmupLR_params(args, params)
+
+    # WarmupCosineLR params
+    override_warmupCosineLR_params(args, params)
 
 
 def get_config_from_args(args):
@@ -221,6 +241,8 @@ def get_config_from_args(args):
         override_lr_range_test_params(args, config['params'])
     elif args.lr_schedule == ONE_CYCLE:
         override_1cycle_params(args, config['params'])
+    elif args.lr_schedule == WARMUP_COSINE_LR:
+        override_warmupCosineLR_params(args, config['params'])
     else:
         override_warmupLR_params(args, config['params'])
 
@@ -244,6 +266,9 @@ def get_lr_from_config(config):
         return lr_params[LR_RANGE_TEST_MIN_LR], ''
     if lr_schedule == ONE_CYCLE:
         return lr_params[CYCLE_MAX_LR], ''
+    if lr_schedule == WARMUP_COSINE_LR:
+        return None, '{} scales the optimizer learning rate by a ratio, so its params define no lr'.format(
+            WARMUP_COSINE_LR)
     # Warmup LR
     return lr_params[WARMUP_MAX_LR], ''
 

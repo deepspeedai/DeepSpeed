@@ -1026,8 +1026,10 @@ class TiledMLP(torch.autograd.Function):
         x_shape_orig = x.shape
 
         # flatten bs+seqlen to avoid having stride issues when narrowing into seqlen w/ bs>1
-        x = x.view(-1, hidden_size)
-        incoming_grad = grads[0].view(-1, hidden_size)
+        # reshape rather than view: a caller may pass a non-contiguous x or incoming grad (a transposed or
+        # channel-sliced activation), for which view cannot produce the flattened shape
+        x = x.reshape(-1, hidden_size)
+        incoming_grad = grads[0].reshape(-1, hidden_size)
         x_grad = torch.zeros_like(x)
 
         x_shards = list(torch.chunk(x, chunks=shards, dim=0))

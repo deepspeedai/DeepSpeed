@@ -231,6 +231,52 @@ class TestTiledCompute(DistributedTest):
         torch_assert_close(x_grad_a, x_grad_c)
 
 
+@pytest.mark.parametrize("shards", [2, 4])
+@pytest.mark.parametrize("layout", ["transposed", "channel_slice"])
+class TestTiledMLPInputLayout:
+    """
+    A caller may hand TiledMLP an activation that is not contiguous: a transposed tensor, or a slice along the
+    hidden dimension of a wider one. The backward flattens batch and sequence into one axis, and for these
+    layouts that flattening needs a copy, so it must not be expressed as a view.
+    """
+
+    def make_input(self, layout, batch_size, seqlen, hidden_dim, dtype):
+        if layout == "transposed":
+            # [bs, hidden, seqlen] transposed into [bs, seqlen, hidden] keeps the original strides
+            source = torch.rand((batch_size, hidden_dim, seqlen), dtype=dtype)
+            x = source.transpose(1, 2)
+        else:
+            # a hidden-dimension slice of a wider activation keeps the wider row stride
+            source = torch.rand((batch_size, seqlen, hidden_dim * 2), dtype=dtype)
+            x = source[..., :hidden_dim]
+        assert not x.is_contiguous(), f"{layout} input is contiguous, so it does not exercise the flattening"
+        # detach preserves the strides and makes this a leaf, so x.grad is populated with the same layout
+        return x.detach().requires_grad_(True)
+
+    def test_tiled_mlp_accepts_a_non_contiguous_input(self, layout, shards, batch_size=2, seqlen=12, hidden_dim=16):
+        dtype = torch.float32
+        torch.manual_seed(42)
+        mlp = SimpleMLP(hidden_dim).to(dtype)
+        compute_params = [mlp.down_proj.weight, mlp.up_proj.weight]
+
+        x_tiled = self.make_input(layout, batch_size, seqlen, hidden_dim, dtype)
+        x_reference = x_tiled.clone().detach().requires_grad_(True)
+
+        output_tiled = TiledMLP.apply(mlp_forward_orig, mlp, x_tiled, shards, compute_params)
+        output_tiled.sum().backward()
+        grads_tiled = [p.grad.clone() for p in compute_params]
+        for p in compute_params:
+            p.grad = None
+
+        output_reference = mlp_forward_orig(mlp, x_reference)
+        output_reference.sum().backward()
+
+        torch_assert_close(output_tiled, output_reference)
+        torch_assert_close(x_tiled.grad, x_reference.grad)
+        for grad_tiled, param in zip(grads_tiled, compute_params):
+            torch_assert_close(grad_tiled, param.grad)
+
+
 @pytest.mark.parametrize("batch_size", [1, 2])
 @pytest.mark.parametrize("zero_stage", [2, 3])
 class TestTiledFusedLogitsLoss(DistributedTest):

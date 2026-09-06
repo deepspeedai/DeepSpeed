@@ -7,6 +7,7 @@ import pytest
 import deepspeed
 import deepspeed.comm as dist
 import torch
+from deepspeed import get_accelerator
 from unit.common import DistributedTest
 from unit.simple_model import SimpleModel, random_dataloader
 
@@ -76,6 +77,7 @@ class TestMultipleModels(DistributedTest):
     @pytest.mark.parametrize('fp32_grad_accum', [False, True])
     @pytest.mark.parametrize('contiguous_gradients', [False, True])
     @pytest.mark.parametrize('overlap_comm', [False, True])
+    @pytest.mark.skipif(not get_accelerator().is_fp16_supported(), reason="fp16 is not supported on this accelerator")
     def test_zero_optimizer(self, num_models, shared_loss, zero_stage, fp32_grad_accum, contiguous_gradients,
                             overlap_comm):
         config_dict = {
