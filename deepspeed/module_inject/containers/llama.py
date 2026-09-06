@@ -19,6 +19,23 @@ from ..policy import (
     maybe_get_lora,
 )
 
+# The injected kernel builds its rotary embedding from a scalar base and nothing else
+# (`InferenceContext.get_rotary(rotary_dim, rope_theta)`), so a config asking for a scaled
+# variant cannot be honoured here. These are the spellings that mean "no scaling".
+_UNSCALED_ROPE_TYPES = (None, 'default')
+
+
+def _rope_type(config, rope_parameters):
+    """The rotary variant a config asks for, however the installed transformers spells it."""
+    if rope_parameters:
+        rope_type = rope_parameters.get('rope_type', rope_parameters.get('type'))
+        if rope_type is not None:
+            return rope_type
+    scaling = getattr(config, 'rope_scaling', None)
+    if isinstance(scaling, dict):
+        return scaling.get('rope_type', scaling.get('type'))
+    return None
+
 
 def _get_rope_theta(self_attn):
     """Read rope_theta from whichever place the installed transformers keeps it.
@@ -27,14 +44,29 @@ def _get_rope_theta(self_attn):
     settings into the ``rope_parameters`` dict and dropped the attribute, so the
     older reads raise AttributeError against a stock LlamaConfig. Very old
     versions kept it on the attention module itself.
+
+    A scaled variant is refused rather than silently reduced to its base. The kernel
+    implements a scalar theta only, so running one of these with just ``rope_theta``
+    produces wrong positions with no error, which is worse than the AttributeError this
+    function exists to remove.
     """
     config = getattr(self_attn, 'config', None)
-    if config is not None:
-        if hasattr(config, 'rope_theta'):
-            return config.rope_theta
-        rope_parameters = getattr(config, 'rope_parameters', None)
-        if rope_parameters is not None and 'rope_theta' in rope_parameters:
-            return rope_parameters['rope_theta']
+    if config is None:
+        return self_attn.rope_theta
+
+    rope_parameters = getattr(config, 'rope_parameters', None)
+    rope_type = _rope_type(config, rope_parameters if isinstance(rope_parameters, dict) else None)
+    if rope_type not in _UNSCALED_ROPE_TYPES:
+        raise ValueError(f"DeepSpeed kernel injection cannot serve rope_type={rope_type!r}. The injected "
+                         "attention kernel builds its rotary embedding from rope_theta alone, so the "
+                         "scaling parameters this configuration carries would be dropped and the model "
+                         "would run with unscaled positions. Run this model without kernel injection "
+                         "(replace_with_kernel_inject=False).")
+
+    if hasattr(config, 'rope_theta'):
+        return config.rope_theta
+    if isinstance(rope_parameters, dict) and 'rope_theta' in rope_parameters:
+        return rope_parameters['rope_theta']
     return self_attn.rope_theta
 
 

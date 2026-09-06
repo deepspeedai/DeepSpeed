@@ -89,3 +89,54 @@ def test_the_two_spellings_do_not_disagree_on_a_real_config():
 def test_raises_when_nothing_carries_it():
     with pytest.raises(AttributeError):
         _get_rope_theta(SimpleNamespace(config=SimpleNamespace()))
+
+
+# --- scaled rotary variants ----------------------------------------------------
+#
+# The injected kernel builds its rotary embedding from a scalar base
+# (`InferenceContext.get_rotary(rotary_dim, rope_theta)`) and carries no scaling
+# parameters at all, so a config asking for one cannot be served here.
+
+
+@pytest.mark.parametrize("rope_type", ["llama3", "linear", "dynamic", "yarn", "longrope"])
+def test_a_scaled_rope_variant_is_refused(rope_type):
+    """Reading only rope_theta out of a scaled config is silently wrong.
+
+    DeepSeek-R1-Distill-Llama-8B (#8340) is the live case: `rope_type="llama3"` with
+    `factor`, `low_freq_factor`, `high_freq_factor` and `original_max_position_embeddings`.
+    Dropping those and keeping the base runs the model with unscaled positions and no error,
+    which is worse than the AttributeError this helper exists to remove.
+    """
+    config = SimpleNamespace(rope_parameters={
+        "rope_type": rope_type,
+        "rope_theta": 500000.0,
+        "factor": 8.0,
+        "low_freq_factor": 1.0,
+        "high_freq_factor": 4.0,
+        "original_max_position_embeddings": 8192,
+    })
+
+    with pytest.raises(ValueError, match="cannot serve rope_type"):
+        _get_rope_theta(SimpleNamespace(config=config))
+
+
+def test_a_scaled_variant_in_the_legacy_rope_scaling_spelling_is_refused():
+    """transformers < 5.0 carries the same request under `rope_scaling`."""
+    config = SimpleNamespace(rope_theta=500000.0, rope_scaling={"rope_type": "llama3", "factor": 8.0})
+
+    with pytest.raises(ValueError, match="cannot serve rope_type"):
+        _get_rope_theta(SimpleNamespace(config=config))
+
+
+def test_the_default_rope_type_is_not_refused():
+    """`rope_type: "default"` is what standardize_rope_params writes for plain RoPE."""
+    config = SimpleNamespace(rope_parameters={"rope_theta": 500000.0, "rope_type": "default"})
+
+    assert _get_rope_theta(SimpleNamespace(config=config)) == 500000.0
+
+
+def test_a_real_llama_config_is_not_refused():
+    """The stock config the crash fix targets carries no scaling and must still resolve."""
+    LlamaConfig = pytest.importorskip("transformers.models.llama.configuration_llama").LlamaConfig
+
+    assert _get_rope_theta(SimpleNamespace(config=LlamaConfig(rope_theta=500000.0))) == 500000.0
