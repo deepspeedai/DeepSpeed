@@ -1,4 +1,4 @@
-# Copyright (c) Microsoft Corporation.
+# Copyright (c) DeepSpeed Team.
 # SPDX-License-Identifier: Apache-2.0
 
 # DeepSpeed Team
@@ -67,11 +67,20 @@ def test_replaced_submodule_is_released():
 
 
 def test_clear_and_re_extract():
-    debug_extract_module_and_param_names(_Model())
+    # The model has to stay alive across the clear. The maps hold weak references, so
+    # a temporary would be collected when extract returns and the emptiness assertions
+    # below would pass whether or not the clear did anything.
+    model = _Model()
+    debug_extract_module_and_param_names(model)
+
+    assert len(module_names) > 0
+    assert len(param_names) > 0
+
     debug_clear_module_and_param_names()
 
     assert len(module_names) == 0
     assert len(param_names) == 0
+    assert model.head.weight is not None  # keeps `model` referenced past the assertions
 
     other = _Model(num_blocks=1)
     debug_extract_module_and_param_names(other)
@@ -79,12 +88,21 @@ def test_clear_and_re_extract():
     assert debug_param2name(other.head.weight) == "head.weight"
 
 
-def test_a_recycled_id_is_not_a_stale_hit():
+def test_collected_parameter_entry_is_removed():
+    """A collected parameter must leave no entry behind.
+
+    Asserting that a freshly built parameter resolves to "unknown" does not show this:
+    it only holds if that parameter reused the collected one's id, which is not
+    something a test can arrange. Assert the removal directly instead.
+    """
     debug_clear_module_and_param_names()
     doomed = nn.Linear(4, 4, bias=False)
     param_names[doomed.weight] = "ghost"
 
+    assert len(param_names) == 1
+
     del doomed
     gc.collect()
 
+    assert len(param_names) == 0
     assert debug_param2name(nn.Linear(4, 4, bias=False).weight) == "unknown"
