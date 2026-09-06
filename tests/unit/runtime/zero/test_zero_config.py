@@ -69,6 +69,24 @@ def test_zero_config_offload_configs():
     assert isinstance(config.offload_optimizer, DeepSpeedZeroOffloadOptimizerConfig)
 
 
+def test_zero_config_adaptive_prefetch_defaults():
+    config = DeepSpeedZeroConfig()
+    assert config.adaptive_prefetch_bucket_size == False
+    assert config.adaptive_prefetch_min_size == int(1e7)
+    assert config.adaptive_prefetch_max_size == int(5e8)
+
+
+def test_zero_config_adaptive_prefetch_aliases():
+    config = DeepSpeedZeroConfig(**{"stage3_adaptive_prefetch_bucket_size": True})
+    assert config.adaptive_prefetch_bucket_size == True
+
+    config = DeepSpeedZeroConfig(**{"stage3_adaptive_prefetch_min_size": 5_000_000})
+    assert config.adaptive_prefetch_min_size == 5_000_000
+
+    config = DeepSpeedZeroConfig(**{"stage3_adaptive_prefetch_max_size": 1_000_000_000})
+    assert config.adaptive_prefetch_max_size == 1_000_000_000
+
+
 def test_zero_offload_optimizer_config_pipeline():
     config = DeepSpeedZeroOffloadOptimizerConfig()
     assert config.pipeline == False
