@@ -96,28 +96,30 @@ def unwrap_model_for_generation(model):
     with GatheredParameters(model.parameters()):
         # Removes the optimizer hooks from a DeepSpeed ZeRO-3 model.
 
-        # Remove hooks
-        if model.optimizer is not None and hasattr(model.optimizer, "parameter_offload"):
-            optimizer_offload = model.optimizer.parameter_offload
-        elif model.optimizer is not None:
-            optimizer_offload = model.optimizer
+        if model.optimizer is not None:
+            # Remove hooks
+            if hasattr(model.optimizer, "parameter_offload"):
+                optimizer_offload = model.optimizer.parameter_offload
+            else:
+                optimizer_offload = model.optimizer
 
-        for hook in optimizer_offload.forward_hooks:
-            hook.remove()
-        for hook in optimizer_offload.backward_hooks:
-            hook.remove()
+            for hook in optimizer_offload.forward_hooks:
+                hook.remove()
+            for hook in optimizer_offload.backward_hooks:
+                hook.remove()
 
-        optimizer_offload.forward_hooks = []
-        optimizer_offload.backward_hooks = []
+            optimizer_offload.forward_hooks = []
+            optimizer_offload.backward_hooks = []
 
         yield model
 
         # Adds the optimizer hooks from a DeepSpeed ZeRO-3 model.
-        if model.optimizer is not None and hasattr(model.optimizer, "parameter_offload"):
-            optimizer_offload = model.optimizer.parameter_offload
-        elif model.optimizer is not None:
-            optimizer_offload = model.optimizer
-        optimizer_offload._register_deepspeed_module(optimizer_offload.module)
+        if model.optimizer is not None:
+            if hasattr(model.optimizer, "parameter_offload"):
+                optimizer_offload = model.optimizer.parameter_offload
+            else:
+                optimizer_offload = model.optimizer
+            optimizer_offload._register_deepspeed_module(optimizer_offload.module)
     return
 
 
@@ -2089,7 +2091,6 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
     ######################Reduction Related Methods##############################
 
     def allreduce_bucket(self, bucket, rank=None, log=None, group=None):
-        rank = None
         if group is None:
             group = self.dp_process_group
         tensor = self.flatten(bucket)
