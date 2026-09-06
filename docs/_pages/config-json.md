@@ -60,6 +60,39 @@ Muon supports the following params:
 | torch\_adam    | Use torch Adam/AdamW for non-Muon parameters instead of the DeepSpeed Adam backend.                                  | false     |
 | adam\_w\_mode | Use AdamW rather than Adam for non-Muon parameters.                                                                  | true      |
 | ns\_method     | Newton-Schulz orthogonalization method: `"gram"` for Gram NS (~2x faster on rectangular matrices), `"standard"` for the original iteration. Use `"standard"` to fall back if you encounter convergence issues. | `"gram"`  |
+| per\_head\_muon | Orthogonalize each attention head separately instead of the whole projection. See below. | false |
+
+#### Per-head Muon
+
+With `per_head_muon: true`, an attention projection shaped `[num_heads * head_dim, in_features]`
+is viewed as `[num_heads, head_dim, in_features]` and Newton-Schulz runs on that batch, so each
+head is orthogonalized against itself rather than sharing one update direction with every other
+head. This is the split described by Kimi K3 ("Per-Head Muon") and GLM-5 ("Muon Split"). Off by
+default; communication volume is unchanged.
+
+What is tagged, and what deliberately is not:
+
+| matrix | per-head | why |
+| --- | --- | --- |
+| `q_proj` / `query` / `wq` | yes | blocked by the query head count |
+| `k_proj` / `v_proj` / `key` / `value` / `wk` / `wv` | yes | blocked by the KV head count, which differs from the query count under GQA |
+| MLA `q_b_proj`, `kv_b_proj` | yes | the two up-projections, whose per-head widths are `qk_nope + qk_rope` and `qk_nope + v_head_dim` rather than `head_dim` |
+| `o_proj` and other output projections | no | the head structure is on the input dimension, so splitting dim 0 would cut across the wrong axis |
+| fused `qkv_proj` / `query_key_value` / `c_attn` / `wqkv` | no | the three sections do not share a head count under GQA |
+| MLA `q_a_proj`, `kv_a_proj_with_mqa` | no | down-projections mixing latent and rope components, with no head structure |
+
+**The shape confirms the name.** A leaf name is treated as a claim about the layout, never as
+proof of it. Every geometry the config makes plausible for that name is evaluated, and a
+parameter is tagged only when its rows equal `num_heads * width` exactly for one of them. Two
+geometries that confirm and agree on the head count are not a conflict; two that confirm and
+disagree are, and the parameter is skipped with a warning.
+
+**The flag reports what it did.** Because it is an explicit opt-in, DeepSpeed raises at
+`deepspeed.initialize` if it is enabled and no attention projection could be tagged, rather than
+training on without it. The most likely cause is tensor parallelism: the config describes the
+whole model while each rank holds a shard, so every projection fails its width check. Parameters
+that match an attention name but confirm no geometry are reported as a warning and stay on the
+full-matrix path, so a hybrid model still gets per-head on its recognized layers.
 
 By default, non-Muon parameters use `FusedAdam`. When optimizer state is offloaded to the CPU, DeepSpeed selects `DeepSpeedCPUAdam`. This is the same backend selection used by the Adam and AdamW optimizer types.
 

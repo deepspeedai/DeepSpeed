@@ -33,6 +33,19 @@ from deepspeed.runtime import compiler
 from deepspeed.accelerator import get_accelerator
 
 
+def ns_compute_dtype(ns_method: str = "gram") -> torch.dtype:
+    """The dtype a Newton-Schulz iteration runs in, by method.
+
+    `gram` uses fp16 for better precision than bf16, `standard` uses bf16, and either falls
+    back to fp32 where the accelerator does not support its choice. Exported so that anything
+    reasoning about NS precision -- test tolerances in particular -- reads it from here rather
+    than restating it, which would let the two drift apart silently.
+    """
+    if ns_method == "gram":
+        return torch.float16 if get_accelerator().is_fp16_supported() else torch.float32
+    return torch.bfloat16 if get_accelerator().is_bf16_supported() else torch.float32
+
+
 @compiler.compile()
 def zeropower_via_newtonschulz5(G, steps: int):
     """
@@ -46,8 +59,7 @@ def zeropower_via_newtonschulz5(G, steps: int):
     """
     assert G.ndim >= 2  # batched Muon implementation by @scottjmaddox, and put into practice in the record by @YouJiacheng
     a, b, c = (3.4445, -4.7750, 2.0315)
-    # Use bf16 when hardware supports it; fp32 otherwise
-    compute_dtype = torch.bfloat16 if get_accelerator().is_bf16_supported() else torch.float32
+    compute_dtype = ns_compute_dtype("standard")
     X = G.to(compute_dtype)
     if G.size(-2) > G.size(-1):
         X = X.mT
@@ -86,8 +98,7 @@ def zeropower_via_gram_newtonschulz(G, steps: int):
     """
     assert G.ndim >= 2
     a, b, c = (3.4445, -4.7750, 2.0315)
-    # Use fp16 for better precision than bf16 when hardware supports it; fp32 otherwise
-    compute_dtype = torch.float16 if get_accelerator().is_fp16_supported() else torch.float32
+    compute_dtype = ns_compute_dtype("gram")
     X = G.to(compute_dtype)
     if G.size(-2) > G.size(-1):
         X = X.mT

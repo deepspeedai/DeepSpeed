@@ -1,4 +1,3 @@
-# Copyright (c) Microsoft Corporation.
 # SPDX-License-Identifier: Apache-2.0
 
 # DeepSpeed Team
@@ -14,10 +13,10 @@ CPU-only: these pin the arithmetic, not the accelerator path.
 import pytest
 import torch
 
-from deepspeed.accelerator import get_accelerator
 from deepspeed.runtime.zero.muon.original_muon import (
     muon_update,
     zeropower_via_gram_newtonschulz,
+    ns_compute_dtype,
     zeropower_via_newtonschulz5,
 )
 
@@ -29,21 +28,13 @@ def _ns_tolerance(ns_method):
     amplifies rounding, so batched and unbatched NS agree to a handful of ulps rather than
     bitwise. Deriving the bound from the dtype keeps it honest instead of tuned to pass.
     """
-    if ns_method == "gram":
-        dtype = torch.float16 if get_accelerator().is_fp16_supported() else torch.float32
-    else:
-        dtype = torch.bfloat16 if get_accelerator().is_bf16_supported() else torch.float32
-    eps = torch.finfo(dtype).eps
+    eps = torch.finfo(ns_compute_dtype(ns_method)).eps
     return dict(rtol=8 * eps, atol=8 * eps)
 
 
 def _norm_rtol(ns_method):
     """Scale agreement: a couple of ulps of the compute dtype, and never looser than 1%."""
-    if ns_method == "gram":
-        dtype = torch.float16 if get_accelerator().is_fp16_supported() else torch.float32
-    else:
-        dtype = torch.bfloat16 if get_accelerator().is_bf16_supported() else torch.float32
-    return max(1e-2, 2 * torch.finfo(dtype).eps)
+    return max(1e-2, 2 * torch.finfo(ns_compute_dtype(ns_method)).eps)
 
 
 def _update_only(grad, momentum, beta=0.95, nesterov=True):

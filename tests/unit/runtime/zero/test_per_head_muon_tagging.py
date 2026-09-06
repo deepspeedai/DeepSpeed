@@ -1,4 +1,3 @@
-# Copyright (c) Microsoft Corporation.
 # SPDX-License-Identifier: Apache-2.0
 
 # DeepSpeed Team
@@ -30,7 +29,12 @@ class _Attn(torch.nn.Module):
         self.embed_tokens = torch.nn.Embedding(16, hidden)
         if fused:
             self.qkv_proj = torch.nn.Linear(hidden, (q_heads + 2 * kv_heads) * head_dim, bias=False)
-        self.config = SimpleNamespace(num_attention_heads=q_heads, num_key_value_heads=kv_heads)
+        # Real configs carry the per-head width, either as head_dim or derivably from
+        # hidden_size. Without one the shape cannot confirm the name, and the tagger declines.
+        self.config = SimpleNamespace(num_attention_heads=q_heads,
+                                      num_key_value_heads=kv_heads,
+                                      hidden_size=hidden,
+                                      head_dim=head_dim)
 
 
 def _flags(model, per_head=True):
@@ -301,3 +305,112 @@ def test_head_count_comes_from_the_shared_extractor():
     model = SimpleNamespace(config=SimpleNamespace(n_head=8, hidden_size=64, head_dim=8))
 
     assert _attention_head_count("l.0.attn.q_proj.weight", torch.zeros(64, 64), model) == 8
+
+
+# --- candidate resolution ------------------------------------------------------
+#
+# `q_proj` can be either the standard query projection or, on an MLA model without a
+# q_lora_rank, the query up-projection. Both candidates are evaluated and the shape decides,
+# so the outcome does not depend on which config fields happen to be present.
+
+
+def _kimi_k3_hybrid_config():
+    """Kimi-K3-0.40B: linear-attention layers on a config that also carries MLA fields.
+
+    `linear_attn_config` gives `num_heads: 8, head_dim: 32`, so its `q_proj` is (256, 1024).
+    The top-level MLA dimensions belong to the model's two MLA layers, and `head_dim` is 74.
+    Neither top-level geometry describes the KDA projection.
+    """
+    return SimpleNamespace(num_attention_heads=8,
+                           num_key_value_heads=8,
+                           hidden_size=1024,
+                           head_dim=74,
+                           qk_nope_head_dim=64,
+                           qk_rope_head_dim=32,
+                           v_head_dim=64)
+
+
+@pytest.mark.parametrize("leaf", ["q_proj", "k_proj", "v_proj"])
+def test_linear_attention_on_a_config_with_mla_leftovers_is_declined(leaf):
+    """No candidate confirms, so it stays on the full-matrix path.
+
+    8 x (qk_nope 64 + qk_rope 32) = 768 and 8 x head_dim 74 = 592, against 256 rows. This is
+    the case tracked in #8420; until the linear-attention geometry is read, declining is the
+    correct outcome and it must come from the shape rather than from branch ordering.
+    """
+    model = SimpleNamespace(config=_kimi_k3_hybrid_config())
+
+    assert _attention_head_count(f"model.layers.0.self_attn.{leaf}.weight", torch.zeros(256, 1024), model) is None
+
+
+def test_two_candidates_agreeing_on_the_head_count_are_not_ambiguous():
+    """Ambiguity is about the answer, not the route.
+
+    The output is a head count, so two candidates that confirm with the same count give the
+    same answer and there is nothing to be ambiguous about.
+    """
+    config = SimpleNamespace(num_attention_heads=8,
+                             num_key_value_heads=8,
+                             hidden_size=512,
+                             head_dim=96,
+                             qk_nope_head_dim=64,
+                             qk_rope_head_dim=32,
+                             v_head_dim=64)
+    model = SimpleNamespace(config=config)
+
+    # 8 x 96 = 768 by head_dim, and 8 x (64 + 32) = 768 by the MLA width.
+    assert _attention_head_count("l.0.self_attn.q_proj.weight", torch.zeros(768, 512), model) == 8
+
+
+def test_candidates_that_disagree_on_the_head_count_are_skipped():
+    """A real ambiguity: both confirm the shape, and they give different answers."""
+    from deepspeed import _confirm
+
+    candidates = [(8, 96, "mla-q"), (12, 64, "head-dim")]
+    num_heads, reason = _confirm(torch.zeros(768, 512), candidates)
+
+    assert num_heads is None
+    assert reason.startswith("ambiguous:")
+    assert "mla-q=8" in reason and "head-dim=12" in reason
+
+
+def test_a_config_without_a_per_head_width_is_declined():
+    """Divisibility alone is not confirmation.
+
+    `rows % heads == 0` holds for matrices that are not head-blocked at all, which is how
+    o_proj used to slip through. Without a width there is nothing to confirm against.
+    """
+    config = SimpleNamespace(num_attention_heads=8, num_key_value_heads=8)
+    model = SimpleNamespace(config=config)
+
+    assert _attention_head_count("l.0.self_attn.q_proj.weight", torch.zeros(512, 512), model) is None
+
+
+def test_head_dim_is_derived_when_the_config_omits_it():
+    """Configs that leave head_dim out still define it as hidden_size // num_attention_heads."""
+    config = SimpleNamespace(num_attention_heads=8, num_key_value_heads=8, hidden_size=512)
+    model = SimpleNamespace(config=config)
+
+    assert _attention_head_count("l.0.self_attn.q_proj.weight", torch.zeros(512, 512), model) == 8
+
+
+def test_the_flag_errors_rather_than_silently_doing_nothing():
+    """An explicit opt-in that tags nothing is the tensor-parallel failure mode.
+
+    Under TP the config describes the whole model while each rank holds a shard, so every
+    projection fails its width check and per-head is off model-wide while the user believes it
+    is on. There is no partial result to keep, so this is an error.
+    """
+
+    class _NoAttention(torch.nn.Module):
+
+        def __init__(self):
+            super().__init__()
+            self.mlp = torch.nn.Linear(64, 64, bias=False)
+            self.config = SimpleNamespace(num_attention_heads=8, num_key_value_heads=8, hidden_size=64, head_dim=8)
+
+    with pytest.raises(ValueError, match="no attention projection could be tagged"):
+        _flags(_NoAttention())
+
+    # ...and with the flag off it is simply not asked for.
+    assert _flags(_NoAttention(), per_head=False)["mlp.weight"] is None
