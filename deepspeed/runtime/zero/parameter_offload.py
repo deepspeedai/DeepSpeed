@@ -186,6 +186,11 @@ class DeepSpeedZeRoOffload(object):
         self._prefetch_bucket_sz = int(prefetch_bucket_size)
         self._max_reuse_distance_in_numel = int(max_reuse_distance)
         self._max_available_parameters_in_numel = int(max_live_parameters)
+
+        zero_cfg = getattr(ds_config, 'zero_config', None)
+        self._adaptive_prefetch = getattr(zero_cfg, 'adaptive_prefetch_bucket_size', False)
+        self._adaptive_prefetch_min_sz = int(getattr(zero_cfg, 'adaptive_prefetch_min_size', 10_000_000))
+        self._adaptive_prefetch_max_sz = int(getattr(zero_cfg, 'adaptive_prefetch_max_size', 500_000_000))
         self.__allgather_stream = None if get_accelerator().is_synchronized_device() else get_accelerator().Stream(
         ) if overlap_comm else get_accelerator().default_stream()
 
@@ -215,6 +220,9 @@ class DeepSpeedZeRoOffload(object):
             zero_quantized_nontrainable_weights=self.zero_quantized_nontrainable_weights,
             fast_sharding_for_leaf_module=self.fast_sharding_for_leaf_module,
             log_trace_cache_warnings=self.log_trace_cache_warnings,
+            adaptive_prefetch=self._adaptive_prefetch,
+            adaptive_prefetch_min_sz=self._adaptive_prefetch_min_sz,
+            adaptive_prefetch_max_sz=self._adaptive_prefetch_max_sz,
         )
 
         self.forward_hooks = []
