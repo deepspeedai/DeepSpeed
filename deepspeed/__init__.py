@@ -249,11 +249,13 @@ def _report_per_head_tagging(tagged: dict, skipped: dict) -> None:
     """
     if not tagged:
         raise ValueError("per_head_muon is enabled but no attention projection could be tagged. Per-head "
-                         "Newton-Schulz is therefore inactive for every parameter. Likely causes: tensor "
-                         "parallelism is active, so each rank holds a shard whose width no longer matches "
-                         "the config; the architecture's attention layout is not recognized; or the model "
-                         "has no attention projections. Unset per_head_muon to train without it. "
-                         f"Leaves examined: {dict(sorted(skipped.items())) or 'none'}")
+                         "Newton-Schulz is therefore inactive for every parameter. Likely causes: the model "
+                         "arrives already sharded by an external tensor-parallel implementation, so each "
+                         "rank holds a shard whose width no longer matches the config; the architecture's "
+                         "attention layout is not recognized; or the model has no attention projections. "
+                         "AutoTP is not one of the causes - it partitions after this runs, and the counts "
+                         "are re-resolved against the shards afterwards. Unset per_head_muon to train "
+                         f"without it. Leaves examined: {dict(sorted(skipped.items())) or 'none'}")
 
     unrecognized = {
         leaf: reason
@@ -288,9 +290,54 @@ def set_optimizer_flags(config_class: DeepSpeedConfig, model: torch.nn.Module) -
                 else:
                     skipped[leaf] = reason
             setattr(p, "muon_num_heads", num_heads)
+            # The width, not the count, is what survives a column-parallel split; see
+            # `resolve_per_head_muon_after_sharding`.
+            setattr(p, "muon_head_dim", p.shape[0] // num_heads if num_heads else None)
 
         if per_head:
             _report_per_head_tagging(tagged, skipped)
+
+
+def resolve_per_head_muon_after_sharding(model: torch.nn.Module) -> None:
+    """Re-derive head counts from the shapes the parameters actually have.
+
+    `set_optimizer_flags` runs before the engine partitions the model, so the count it records
+    is the model's, not the rank's. Column-parallel tensor parallelism splits an attention
+    projection on dim 0, which is the axis the heads are on, so after the split the per-head
+    width is unchanged and the head count is not. Nothing catches that on its own: with tp=2 a
+    tag of 8 heads lands on a shard holding 4 heads' worth of rows, `out_features % num_heads`
+    still divides, and Newton-Schulz runs on half of each head.
+
+    Re-deriving the count from the width is not just a repair. A column-parallel shard holds
+    whole heads, so per-head Newton-Schulz on the shard is exactly the corresponding blocks of
+    per-head Newton-Schulz on the whole matrix - the split is along the same axis the batch is
+    taken over. A shard whose rows are not a multiple of the width does not hold whole heads,
+    and is dropped rather than guessed at.
+    """
+    tagged, dropped = {}, {}
+    for name, p in model.named_parameters():
+        head_dim = getattr(p, "muon_head_dim", None)
+        if head_dim is None:
+            continue
+        leaf = _leaf_module_name(name)
+        rows = p.shape[0]
+        if rows % head_dim:
+            setattr(p, "muon_num_heads", None)
+            dropped[leaf] = f"{rows} rows do not divide into heads of {head_dim}"
+            continue
+        setattr(p, "muon_num_heads", rows // head_dim)
+        tagged[leaf] = f"{rows // head_dim} heads of {head_dim}"
+
+    if not tagged and not dropped:
+        return
+    if dropped:
+        logger.warning("per_head_muon: %s are sharded across head boundaries and stay on the full-matrix "
+                       "path", dict(sorted(dropped.items())))
+    if not tagged:
+        raise ValueError("per_head_muon is enabled but every tagged projection is sharded across head "
+                         "boundaries, so per-head Newton-Schulz is inactive for all of them. Unset "
+                         f"per_head_muon to train without it. Parameters examined: {dict(sorted(dropped.items()))}")
+    logger.info("per_head_muon: after sharding, tagged %s", dict(sorted(tagged.items())))
 
 
 def initialize(

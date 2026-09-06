@@ -413,6 +413,9 @@ class DeepSpeedEngine(Module):
         self._configure_expert_parallel(model)
         if self.autotp_size() > 1:
             self._configure_tensor_parallel(model, self.tensor_parallel_config())
+            # Head counts were recorded against the whole model; the parameters are shards now.
+            from deepspeed import resolve_per_head_muon_after_sharding
+            resolve_per_head_muon_after_sharding(model)
         see_memory_usage("DeepSpeed Engine: After args sanity test", force=self.memory_breakdown())
         if mpu is not None:
             if self.elasticity_enabled():

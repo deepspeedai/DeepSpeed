@@ -87,12 +87,20 @@ parameter is tagged only when its rows equal `num_heads * width` exactly for one
 geometries that confirm and agree on the head count are not a conflict; two that confirm and
 disagree are, and the parameter is skipped with a warning.
 
+**Tensor parallelism.** Column-parallel TP splits an attention projection on dim 0, which is
+the axis the heads are on, so a rank holds whole heads and the per-head width is unchanged. That
+makes the per-head split exact under TP: Newton-Schulz on a rank's heads is the same computation
+whether the other ranks' heads are present or not. The head *count* is not invariant, so with
+AutoTP the counts are re-resolved against the shards after partitioning; a shard whose rows are
+not a multiple of the per-head width does not hold whole heads and stays on the full-matrix path.
+A model that arrives already sharded by an external tensor-parallel implementation cannot be
+tagged at all, because the config then describes a width no parameter has.
+
 **The flag reports what it did.** Because it is an explicit opt-in, DeepSpeed raises at
 `deepspeed.initialize` if it is enabled and no attention projection could be tagged, rather than
-training on without it. The most likely cause is tensor parallelism: the config describes the
-whole model while each rank holds a shard, so every projection fails its width check. Parameters
-that match an attention name but confirm no geometry are reported as a warning and stay on the
-full-matrix path, so a hybrid model still gets per-head on its recognized layers.
+training on without it. Parameters that match an attention name but confirm no geometry are
+reported as a warning and stay on the full-matrix path, so a hybrid model still gets per-head on
+its recognized layers.
 
 By default, non-Muon parameters use `FusedAdam`. When optimizer state is offloaded to the CPU, DeepSpeed selects `DeepSpeedCPUAdam`. This is the same backend selection used by the Adam and AdamW optimizer types.
 
