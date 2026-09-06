@@ -12,6 +12,7 @@ import json
 import hjson
 import copy
 import base64
+from pydantic import Field
 
 from .constants import *
 from .config_utils import (
@@ -514,7 +515,7 @@ def get_memory_breakdown(param_dict):
 
 class HybridEngineConfig(DeepSpeedConfigModel):
     enabled: bool = False
-    max_out_tokens: int = 512
+    max_out_tokens: int = Field(512, gt=0)
     inference_tp_size: int = 1
     release_inference_cache: bool = False
     pin_parameters: bool = True
