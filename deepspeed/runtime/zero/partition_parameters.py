@@ -401,7 +401,7 @@ class InsertPostInitMethodToModuleSubClasses(object):
                 self.dtype = torch.float
         else:
             self.dtype = dtype or torch.float16 if get_accelerator().is_fp16_supported(
-            ) else torch.bfloat16 if get_accelerator().is_bf16_supported else torch.float32
+            ) else torch.bfloat16 if get_accelerator().is_bf16_supported() else torch.float32
 
     def _enable_mem_efficient_linear(self):
         print_rank_0(
