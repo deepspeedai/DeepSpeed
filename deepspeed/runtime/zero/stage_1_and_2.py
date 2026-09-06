@@ -2149,12 +2149,23 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         if (not self.optimizer.state[flatten_copy]) and getattr(
                 tensor_list[0], 'use_muon', False) and 'muon' in self.optimizer.__class__.__name__.lower():
             self.optimizer.state[flatten_copy] = {}
-        if "momentum_buffer" not in self.optimizer.state[flatten_copy] and getattr(
-                tensor_list[0], 'use_muon', False) and 'muon' in self.optimizer.__class__.__name__.lower():
-            # need to check the total # of elements in the parameters in this group and this partition
-            total_size = sum([t.numel() for t in tensor_list])
-            flatten_bf_list = [torch.zeros([total_size], dtype=dtype, device=device)]
-            self.optimizer.state[flatten_copy]["momentum_buffer"] = self.flatten(flatten_bf_list)
+        if getattr(tensor_list[0], 'use_muon', False) and 'muon' in self.optimizer.__class__.__name__.lower():
+            momentum_buffer = self.optimizer.state[flatten_copy].get("momentum_buffer")
+            if momentum_buffer is None:
+                # need to check the total # of elements in the parameters in this group and this partition
+                total_size = sum([t.numel() for t in tensor_list])
+                flatten_bf_list = [torch.zeros([total_size], dtype=dtype, device=device)]
+                self.optimizer.state[flatten_copy]["momentum_buffer"] = self.flatten(flatten_bf_list)
+            elif momentum_buffer.dtype != dtype:
+                # A restored buffer arrives in the dtype the checkpoint holds optimizer state
+                # in, which is fp32, while the gradients it is combined with are in the
+                # gradient accumulation dtype. muon_update does momentum.lerp_(grad), which
+                # requires both to match, so resuming a bf16 run raised:
+                #   RuntimeError: expected dtype torch.float32 for `end`, but got dtype
+                #   torch.bfloat16
+                # Convert rather than reallocate: the momentum a resume just restored is the
+                # reason the checkpoint carries it.
+                self.optimizer.state[flatten_copy]["momentum_buffer"] = momentum_buffer.to(dtype=dtype, device=device)
 
         buffer_idx = 0
         for i, tensor in enumerate(tensor_list):
