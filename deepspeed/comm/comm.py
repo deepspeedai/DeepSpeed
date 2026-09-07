@@ -846,11 +846,20 @@ def init_distributed(dist_backend: Optional[str] = None,
                 try:
                     mpi_discovery(distributed_port=distributed_port, verbose=verbose)
                 except ImportError as err:
-                    if in_multi_rank_mpi_job():
-                        raise ImportError("A multi-rank MPI job is running but mpi4py is not installed, so the "
-                                          "rank and world size cannot be discovered from it. Install mpi4py, or "
-                                          "set RANK, WORLD_SIZE, LOCAL_RANK, MASTER_ADDR and MASTER_PORT "
-                                          "yourself.") from err
+                    launcher_world_size = mpi_world_size_from_env()
+                    if launcher_world_size is not None and launcher_world_size > 1:
+                        raise ImportError(
+                            f"A launcher reports a world size of {launcher_world_size} but mpi4py is not "
+                            "installed, so "
+                            "the rank cannot be discovered from it. Install mpi4py, or set RANK, WORLD_SIZE, "
+                            "LOCAL_RANK, MASTER_ADDR and MASTER_PORT yourself.") from err
+                    if launcher_world_size is None and launched_by_mpi():
+                        raise ImportError(
+                            "A launcher started this process but does not report a world size in the "
+                            "environment - PMIx launched directly, prterun or prun, sets a rank and no size - "
+                            "so whether this is one rank of several cannot be determined without mpi4py. "
+                            "Install mpi4py, or set RANK, WORLD_SIZE, LOCAL_RANK, MASTER_ADDR and MASTER_PORT "
+                            "yourself.") from err
                     single_process_discovery(distributed_port=distributed_port, verbose=verbose)
 
         if cdb is not None and cdb.is_initialized():
@@ -866,23 +875,30 @@ def init_distributed(dist_backend: Optional[str] = None,
             cdb = TorchBackend(dist_backend, timeout, init_method, rank, world_size)
 
 
-# World-size variables the MPI launchers export: OpenMPI, MPICH and Intel MPI, PMIx, MVAPICH,
-# and Slurm's srun. The size rather than the rank, because a rank variable only says a launcher
-# is present - `srun -n1` sets SLURM_PROCID for a single-task step, which is one process on one
-# device and wants the fallback below, not an error about mpi4py. Every launcher listed sets its
-# size variable alongside its rank one.
-MPI_WORLD_SIZE_ENV_VARS = ("OMPI_COMM_WORLD_SIZE", "PMI_SIZE", "PMIX_SIZE", "MV2_COMM_WORLD_SIZE", "SLURM_NTASKS")
+# World sizes the launchers export. The size rather than the rank, because a rank only says a
+# launcher is present: `srun -n1` sets SLURM_PROCID for a single-task step, which is one process
+# on one device and wants the fallback below rather than an error about mpi4py.
+MPI_WORLD_SIZE_ENV_VARS = ("OMPI_COMM_WORLD_SIZE", "PMI_SIZE", "MV2_COMM_WORLD_SIZE", "SLURM_NTASKS")
+
+# Ranks the launchers export, used only to tell "no launcher" from "a launcher that reports no
+# size". PMIx launched directly - prterun, prun - is the case that needs it: it sets PMIX_RANK
+# and PMIX_NAMESPACE and no size at all, so the world cannot be read from the environment.
+MPI_RANK_ENV_VARS = ("OMPI_COMM_WORLD_RANK", "PMI_RANK", "PMIX_RANK", "MV2_COMM_WORLD_RANK", "SLURM_PROCID")
 
 
-def in_multi_rank_mpi_job():
-    """Whether a launcher started this process as one of several ranks."""
+def mpi_world_size_from_env():
+    """The launcher's world size, or None when no launcher reports one."""
     for var in MPI_WORLD_SIZE_ENV_VARS:
         try:
-            if int(os.environ[var]) > 1:
-                return True
+            return int(os.environ[var])
         except (KeyError, ValueError):
             continue
-    return False
+    return None
+
+
+def launched_by_mpi():
+    """Whether a launcher started this process, whatever world size it reports."""
+    return any(var in os.environ for var in MPI_RANK_ENV_VARS)
 
 
 def single_process_discovery(distributed_port=TORCH_DISTRIBUTED_DEFAULT_PORT, verbose=True):

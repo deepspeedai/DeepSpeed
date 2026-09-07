@@ -13,49 +13,52 @@ import os
 
 import pytest
 
-from deepspeed.comm.comm import MPI_WORLD_SIZE_ENV_VARS, in_multi_rank_mpi_job, single_process_discovery
+from deepspeed.comm.comm import (MPI_RANK_ENV_VARS, MPI_WORLD_SIZE_ENV_VARS, launched_by_mpi, mpi_world_size_from_env,
+                                 single_process_discovery)
 
 LAUNCHER_ENV = ("RANK", "WORLD_SIZE", "LOCAL_RANK", "MASTER_ADDR", "MASTER_PORT")
 
 
 @pytest.fixture
 def clean_env(monkeypatch):
-    for name in LAUNCHER_ENV + MPI_WORLD_SIZE_ENV_VARS + ("SLURM_PROCID", "OMPI_COMM_WORLD_RANK"):
+    for name in LAUNCHER_ENV + MPI_WORLD_SIZE_ENV_VARS + MPI_RANK_ENV_VARS + ("PMIX_NAMESPACE", ):
         monkeypatch.delenv(name, raising=False)
 
 
-def test_no_mpi_variables_is_not_a_multi_rank_job(clean_env):
-    assert in_multi_rank_mpi_job() is False
+def test_a_bare_environment_reports_no_launcher_and_no_size(clean_env):
+    assert mpi_world_size_from_env() is None
+    assert launched_by_mpi() is False
 
 
 @pytest.mark.parametrize("var", MPI_WORLD_SIZE_ENV_VARS)
-def test_each_launcher_size_variable_above_one_marks_a_multi_rank_job(clean_env, monkeypatch, var):
-    """OpenMPI, MPICH/Intel MPI, PMIx, MVAPICH and srun each export a different one."""
+def test_each_launcher_size_variable_is_read(clean_env, monkeypatch, var):
+    """OpenMPI, MPICH/Intel MPI, MVAPICH and srun each export a different one."""
     monkeypatch.setenv(var, "4")
 
-    assert in_multi_rank_mpi_job() is True
+    assert mpi_world_size_from_env() == 4
 
 
 @pytest.mark.parametrize("var", MPI_WORLD_SIZE_ENV_VARS)
-def test_a_launcher_reporting_one_task_is_not_a_multi_rank_job(clean_env, monkeypatch, var):
+def test_a_launcher_reporting_one_task_reports_one(clean_env, monkeypatch, var):
     """`srun -n1` is a launcher and a single process at once; it wants the fallback, not an error."""
     monkeypatch.setenv(var, "1")
 
-    assert in_multi_rank_mpi_job() is False
+    assert mpi_world_size_from_env() == 1
 
 
-def test_a_rank_variable_alone_does_not_make_it_multi_rank(clean_env, monkeypatch):
-    """A rank says a launcher is present, not that the world is bigger than one."""
-    monkeypatch.setenv("SLURM_PROCID", "0")
-    monkeypatch.setenv("OMPI_COMM_WORLD_RANK", "0")
+@pytest.mark.parametrize("var", MPI_RANK_ENV_VARS)
+def test_a_rank_variable_marks_a_launcher_but_gives_no_size(clean_env, monkeypatch, var):
+    """A rank says a launcher is present, not how big the world is."""
+    monkeypatch.setenv(var, "0")
 
-    assert in_multi_rank_mpi_job() is False
+    assert launched_by_mpi() is True
+    assert mpi_world_size_from_env() is None
 
 
-def test_an_unparseable_size_is_not_taken_as_multi_rank(clean_env, monkeypatch):
+def test_an_unparseable_size_falls_through_to_the_next_variable(clean_env, monkeypatch):
     monkeypatch.setenv("SLURM_NTASKS", "")
 
-    assert in_multi_rank_mpi_job() is False
+    assert mpi_world_size_from_env() is None
 
 
 def test_single_process_discovery_fills_the_environment(clean_env):
@@ -120,3 +123,45 @@ def test_a_single_task_slurm_step_without_mpi4py_falls_back(clean_env, monkeypat
 
     assert reached.get("yes"), "a one-task step took the mpi4py error instead of the fallback"
     assert os.environ["WORLD_SIZE"] == "1"
+
+
+def test_a_launcher_that_reports_no_size_is_refused(clean_env, monkeypatch):
+    """PMIx launched directly sets PMIX_RANK and no size at all.
+
+    `prterun -n4` and `prterun -n1` are indistinguishable from the environment, so falling back
+    would turn the four-rank case into four separate world-size-1 runs. Refusing costs the
+    one-rank case an error naming mpi4py, which is the recoverable half of that trade.
+    """
+    import deepspeed.comm.comm as comm
+
+    def no_mpi4py(*args, **kwargs):
+        raise ImportError("No module named 'mpi4py'")
+
+    monkeypatch.setattr(comm, "mpi_discovery", no_mpi4py)
+    monkeypatch.setenv("PMIX_RANK", "0")
+    monkeypatch.setenv("PMIX_NAMESPACE", "prterun-host-1234@1")
+
+    with pytest.raises(ImportError, match="does not report a world size"):
+        comm.init_distributed(dist_backend="gloo", auto_mpi_discovery=True, dist_init_required=True)
+
+    assert "WORLD_SIZE" not in os.environ
+
+
+def test_a_bare_environment_initializes_end_to_end(clean_env, monkeypatch):
+    """`python train.py` with nothing set, all the way through init_distributed.
+
+    The helper tests above pass on a version of this that shadows `init_distributed`'s own
+    `world_size` parameter and hands `None` to the backend, because they never reach the
+    backend. This one does.
+    """
+    import deepspeed.comm.comm as comm
+
+    def no_mpi4py(*args, **kwargs):
+        raise ImportError("No module named 'mpi4py'")
+
+    monkeypatch.setattr(comm, "mpi_discovery", no_mpi4py)
+
+    comm.init_distributed(dist_backend="gloo", auto_mpi_discovery=True, dist_init_required=True)
+
+    assert os.environ["WORLD_SIZE"] == "1"
+    assert os.environ["RANK"] == "0"
