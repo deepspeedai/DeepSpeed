@@ -969,9 +969,12 @@ def clip_tensors_by_global_norm(input_tensors, max_norm=1.0, global_norm=None, m
     """Clip list of tensors by global norm.
     Args:
         input_tensors: List of tensors to be clipped
+        max_norm (float, optional): Max norm used for clipping. Defaults to 1.0
         global_norm (float, optional): Precomputed norm. Defaults to None.
         mpu (optional): model parallelism unit. Defaults to None.
         eps (float, optional): epsilon value added to grad norm. Defaults to 1e-6
+        use_graph (bool, optional): Whether to capture the norm computation in
+            a CUDA graph. Defaults to False
     Returns:
         float: the global norm
     """
