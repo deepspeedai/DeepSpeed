@@ -404,14 +404,50 @@ class DeepSpeedHybridEngine(DeepSpeedEngine):
 
         return run_forward
 
-    def _ds_forward_adapter(self, container):
-        """Unwrap the legacy tuple return for transformers >= 5 layer loops."""
+    def _ds_forward_adapter(self, container, layer_idx=None):
+        """Unwrap the legacy tuple return for transformers >= 5 layer loops and
+        mirror the DS KV into the HF cache.
+
+        The DS layer keeps its own KV internally and answers with the full
+        history K/V in the legacy (output, presents) tuple. transformers >= 5
+        expects layers to update the DynamicCache in place; without the
+        write-back the cache stays empty, generate builds [1,1] decode masks,
+        and every step attends only to itself (degenerate repeats).
+        """
 
         def forward(*inputs, **kwargs):
+            # The v1 ops predate SDPA-style bool masks: they interpret masks as
+            # additive floats and rely on their own triangular causal masking
+            # when the mask is None. Neutralize bool masks (no-padding rollout
+            # case) instead of feeding the kernel garbage; real padded batches
+            # still need an additive conversion (documented limitation).
+            if isinstance(kwargs.get("attention_mask"), torch.Tensor) and kwargs["attention_mask"].dtype == torch.bool:
+                kwargs["attention_mask"] = None
             output = container.module(*inputs, **kwargs)
-            return output[0] if isinstance(output, tuple) else output
+            if not isinstance(output, tuple):
+                return output
+            hidden = output[0]
+            self._write_back_cache(output, inputs, kwargs, layer_idx)
+            return hidden
 
         return forward
+
+    @staticmethod
+    def _write_back_cache(output, inputs, kwargs, layer_idx):
+        if len(output) < 2 or output[1] is None:
+            return
+        cache = kwargs.get("past_key_values", None)
+        if not kwargs.get("use_cache") or not hasattr(cache, "update"):
+            return
+        if layer_idx is None:
+            return
+        key, value = output[1]
+        # presents carry the full history; DynamicCache.update appends, so
+        # slice off only the tokens introduced by this call. The layer index
+        # comes from the engine enumeration: transformers >= 5 decoder layers
+        # no longer store layer_idx themselves.
+        n_new = inputs[0].shape[1] if inputs else kwargs.get("input_ids").shape[1]
+        cache.update(key[:, :, -n_new:, :], value[:, :, -n_new:, :], layer_idx)
 
     def eval(self):
         if self._t_start is not None:
@@ -442,7 +478,7 @@ class DeepSpeedHybridEngine(DeepSpeedEngine):
                 if self.Z3_enabled and not self.gather_all_layers:
                     orig_module.forward = self._zero3_forward(i)
                 else:
-                    orig_module.forward = self._ds_forward_adapter(inference_container)
+                    orig_module.forward = self._ds_forward_adapter(inference_container, i)
 
                 inference_container.transform_for_inference()
 

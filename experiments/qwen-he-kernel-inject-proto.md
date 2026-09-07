@@ -116,13 +116,39 @@ DS_SRC=$WT dscpu/torchrun --standalone --nproc_per_node=2 \
 二分证据：**facebook/opt-1.3b**（HFOPTLayerPolicy 原生支持、无 rotary、
 排除 theta 类配置因素）注入后同样退化为重复 token
 （" Paris Paris Paris ..."，首 token 对、后续重复）→ 不是 Qwen 特有 gap。
-症状指向 decode 步 KV/位置协议错位：HF 5.x 的 DynamicCache 期待层内
-in-place update，DS 层不写回（自身 workspace KV 各自为政）→ HF 侧
-cache_position/causal mask 与 DS 内部状态逐步错位。
 
-工程含义：数值 parity 需要一个 **DS 层 ↔ HF Cache 协议适配层**
-（预估 1-3 小时调试量级，含不确定性），这是 prototype 量化出的
-v1 路径维护成本的核心组成部分。
+## 数值修复战役 (2026-09-07/08, 4h GPU 窗口，逐层二分)
+
+已修复并验证的两个协议 bug（均必要但均不充分）：
+1. **KV 写回**（`_write_back_cache`）：DS 全历史 presents 按新增切片
+   append 到 HF DynamicCache（5.x 层不存 `layer_idx`，用 engine 枚举）。
+   探针实证 cache 5→6→7 与 position_ids 同步。
+2. **bool mask 中和**：防御性（本例 mask 实为 None，非主因）。
+
+单层二分结论（probe6-14，全部有数字）：
+| 段 | 判定 | 证据 |
+|---|---|---|
+| 权重填充 | ✅ | q/k/v block diff 全 0.0 |
+| embed / lm_head wrapper | ✅ | diff 0.0（other_layers 泛型 wrapper 无辜） |
+| RMSNorm+qkv GEMM | ⚠️ | norm corr 0.999996 但 **DS-vs-FP32 maxdiff 0.082 = HF(0.043) 的 2 倍** |
+| attention（rope 1M/GQA/causal/o_proj） | ✅ | corr 0.999997，max 0.024 |
+| MLP + residual 结构 | ✅ | 层输出 corr 0.99974 |
+| **整模型 logits** | ❌ | max 25.5 / mean 4.0，**argmax 一致率 0%** |
+
+**最终诊断：kernel 精度族问题 × 模型动态范围放大**。v1 csrc kernel 的
+bf16 精度（RMSNorm 2× 误差等）产生每层 ~0.7% 系统偏差，24 层线性累积，
+且 Qwen2 深层激活动态范围 ~700×（层输出 max 968 vs std 1.4）放大残差流
+误差 → logits ~20% 偏差 → greedy 全错。不是逻辑 bug：单层相对正确
+（corr 0.9997），是**精度假设对高动态范围现代模型失效**。
+
+顺带修掉（独立成立）：`pt_binding.cpp:197` 旧绑定 `alpha=norm_factor`
+未平方（fallback 在 :374 有平方）——head_dim^(-1/4) vs ^(-1/2) 的
+scale 错误；主路径走 template 版（正确）不受影响，但该绑定是潜在地雷。
+
+**修复选项**（超出本窗口，未做）：a) csrc RMSNorm kernel 改 fp32 累加
+（kernel 工程 + 重编 + 重验证）；b) 架构级结论——v1 megakernel 资产
+"可被签名层直接复用"的假设被精度证据削弱，复用需要重制精度关键 kernel，
+这反过来加强 segment KI（composite/oracle 路径精度可控）的论点。
 
 ## AutoTP 联合执行实验 (2026-09-05, Qwen2.5-0.5B-Instruct, world=2, GPU)
 
