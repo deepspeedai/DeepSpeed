@@ -394,6 +394,7 @@ class DeepSpeedEngine(Module):
         self.mesh_device = mesh_device
         self._autoep_folding_spec = None
         self._autoep_folding_group_handles = None
+        self._python_gc_generation = None
 
         # Flag to indicate that scale() was called before manual backward pass
         self._manual_backward_expected = False
@@ -932,26 +933,44 @@ class DeepSpeedEngine(Module):
             logger.debug("DeepSpeedEngine.__del__ cleanup skipped: %s", exc, exc_info=True)
 
     def destroy(self):
-        # DeepEP buffers ask the library not to reclaim them, so they outlive
-        # the engine unless something releases them here. Only this engine's
-        # own buffers: another engine in the same process still needs its own.
-        module = getattr(self, "module", None)
-        if module is not None:
-            from deepspeed.module_inject.auto_ep_comm import destroy_exchanges
-            destroy_exchanges(module)
+        try:
+            # DeepEP buffers ask the library not to reclaim them, so they outlive
+            # the engine unless something releases them here. Only this engine's
+            # own buffers: another engine in the same process still needs its own.
+            module = getattr(self, "module", None)
+            if module is not None:
+                from deepspeed.module_inject.auto_ep_comm import destroy_exchanges
+                destroy_exchanges(module)
 
-        self._release_deepcompile_compiled_backward_state()
-        self._release_deepcompile_dynamo_config()
-        optimizer = getattr(self, "optimizer", None)
-        if optimizer is not None and hasattr(optimizer, 'destroy'):
-            optimizer.destroy()
-        if self.is_deepcompile_active():
-            get_deepcompile_handle().cleanup()
-        debug_clear_module_and_param_names()
+            self._release_deepcompile_compiled_backward_state()
+            self._release_deepcompile_dynamo_config()
+            optimizer = getattr(self, "optimizer", None)
+            if optimizer is not None and hasattr(optimizer, 'destroy'):
+                optimizer.destroy()
+            if self.is_deepcompile_active():
+                get_deepcompile_handle().cleanup()
+            debug_clear_module_and_param_names()
 
-        checkpoint_engine = getattr(self, "checkpoint_engine", None)
-        if checkpoint_engine is not None and checkpoint_engine.is_decoupled():
-            checkpoint_engine.cleanup()
+            checkpoint_engine = getattr(self, "checkpoint_engine", None)
+            if checkpoint_engine is not None and checkpoint_engine.is_decoupled():
+                checkpoint_engine.cleanup()
+        finally:
+            python_gc_generation = getattr(self, "_python_gc_generation", None)
+            if python_gc_generation is not None:
+                from deepspeed.runtime.python_gc import python_gc_manager
+                python_gc_manager.release(python_gc_generation)
+                self._python_gc_generation = None
+
+    def collect_python_gc(self):
+        """Run Python cyclic GC at an application-selected safe boundary."""
+        from deepspeed.runtime.python_gc import python_gc_manager
+        return python_gc_manager.collect()
+
+    def _configure_python_gc(self):
+        autoep_config = self._config.expert_parallel_config
+        if autoep_config.enabled and autoep_config.python_gc_policy == "disable_during_training":
+            from deepspeed.runtime.python_gc import python_gc_manager
+            self._python_gc_generation = python_gc_manager.acquire()
 
     def _get_model_parameters(self):
         if self.autotuning_profile_model_info():
