@@ -90,22 +90,36 @@ def find_glu_segments(root: torch.nn.Module) -> List[GLUSegment]:
 
 
 def _fused_glu_forward(self, input):
-    """Replacement forward: one GEMM over the fused gate|up weight, fused
-    SiLU-mul activation, then delegate to the untouched down projection (which
-    keeps its own collective). The parent's return contract is unchanged."""
+    """Replacement forward: one GEMM over the fused gate|up weight, then the
+    fused SiLU-mul activation (native CUDA op when installed, torch composite
+    otherwise), then delegate to the untouched down projection (which keeps
+    its own collective). The parent's return contract is unchanged."""
     hidden = torch.matmul(input, self._ki_fused_glu_weight.transpose(-1, -2))
+    if getattr(self, "_ki_fused_glu_op", None) is not None:
+        return self.down_proj(self._ki_fused_glu_op.fused_silu_mul_halves(hidden))
     gate_out, up_out = hidden.chunk(2, dim=-1)
     return self.down_proj(F.silu(gate_out) * up_out)
 
 
-def apply_segment_ki(model: torch.nn.Module, kernel: str = "fused_glu") -> dict:
+def apply_segment_ki(model: torch.nn.Module, kernel: str = "fused_glu", backend: str = "auto") -> dict:
     """Install segment kernels on ``model`` (post-AutoTP, pre-generate).
+
+    ``backend`` selects the implementation: "auto" uses the native CUDA op
+    when a non-cpu accelerator backend won (falls back to the torch composite
+    oracle otherwise); "composite" forces the oracle path.
 
     Returns a small report so callers (tests, journals) can assert what was
     found and replaced without introspecting the module tree again.
     """
     if kernel != "fused_glu":
         raise ValueError(f"Unknown segment kernel {kernel!r}; only 'fused_glu' is implemented")
+
+    cuda_op = None
+    if backend in ("auto", "cuda"):
+        from deepspeed.accelerator import get_accelerator
+        if get_accelerator().device_name() != "cpu" or backend == "cuda":
+            from deepspeed.ops.module_inject import get_fused_glu_op
+            cuda_op = get_fused_glu_op()
 
     segments = find_glu_segments(model)
     replaced = 0
@@ -116,11 +130,13 @@ def apply_segment_ki(model: torch.nn.Module, kernel: str = "fused_glu") -> dict:
         # partitioning step instead of materializing a copy here.
         fused_weight = torch.cat([seg.gate.weight.data, seg.up.weight.data], dim=0)
         seg.parent._ki_fused_glu_weight = fused_weight
+        seg.parent._ki_fused_glu_op = cuda_op
         seg.parent.forward = _fused_glu_forward.__get__(seg.parent, type(seg.parent))
         replaced += 1
 
     return {
         "kernel": kernel,
+        "backend": "cuda" if cuda_op is not None else "composite",
         "segments_found": len(segments),
         "segments_replaced": replaced,
         "boundaries_delegated": replaced,  # each replacement delegates one collective module

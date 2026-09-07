@@ -62,13 +62,36 @@ KI 只在**无通信段**内替换计算。验收 = 与 native 路径 greedy bit
 2. gate/up 的两次输入聚合若在训练路径真实执行，则段式融合天然把它们合并
    为零/一次——第一个"融合即省通信"的联合优化案例
 
-## GPU-phase checklist（~1 小时实例时间）
+## GPU-phase 结果 (2026-09-07, Qwen2.5-0.5B-Instruct, bf16, batch1, greedy 128 tok)
 
-1. 复跑 Qwen2.5/3.5 的 autotp_ki（bf16 + nccl）确认 GPU bit-exact
-2. Triton fused silu·mul kernel（替换 `F.silu(g)*u` 两 op 为一），
-   验证数值 + 计入 launch 统计
-3. torch profiler 实测三条路径（native AutoTP / +KI composite / +KI triton）
-   的 kernel 提交数，对照设计估算（native ~13-14/层 → KI ~9-10/层）
+Native CUDA kernel `fused_glu.cu`（op_builder JIT，~100 行）：fp32 diff 2.4e-07；
+bf16 diff ~1-2 ULP（单次舍入 vs composite 双次舍入），端到端文本正常。
+性能矩阵（hf 基线 / old KI / segKI）：
+
+| 路径 | 配置 | prefill_ms | decode tok/s | 数值 |
+|---|---|---|---|---|
+| hf.generate | 单卡 eager | 24.1 | 50.0 | ✅ |
+| hf.generate + graph capture | 单卡，torch.compile reduce-overhead | 23.0 | 50.4 | ✅ |
+| **hf + segKI（native kernel）** | 单卡，无 AutoTP | 22.3 | **51.6（+3.2%）** | ✅ ULP 级 |
+| AutoTP native（对照） | TP=2 | 44.3 | 24.1 | ✅ |
+| **AutoTP + segKI（native kernel）** | TP=2 | 35.8 | **33.2（+38%）** | ✅ |
+
+old KI（container 注入）的性能数据**待数值修复后补录**——其 KV 协议
+问题已修两处（DynamicCache 写回 + bool mask 中和，见
+qwen-he-kernel-inject-proto 线），但输出仍为乱码，病灶定位到单层内部
+（qkv 布局或 other_layers wrapper），修复前任何 old KI 性能数字均无效。
+
+要点：
+1. segKI 净贡献：单卡 +3.2%（MLP 段在 0.5B 占比小、attention+lm_head
+   主导），**TP=2 下放大到 +38%**（融合省下的 launch/带宽在通信受限
+   场景相对成本更高）。
+2. graph capture（torch.compile reduce-overhead）在 hf.generate 上无收益
+   （50.0→50.4）：capture 区只覆盖 forward，HF generate 每步 Python 循环
+   开销在区外。
+3. **两条线的合流论据**：segKI 证明可组合性与正确性 + 通信委托下仍有
+   净收益；old KI 的 csrc megakernel 性能上限待数值修复后量化——若
+   2.3× 级别成立，把 csrc megakernel 包进 segKI 的 op 签名层 = 正确性 +
+   性能上限。
 
 ## Reproduction
 
