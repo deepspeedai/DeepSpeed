@@ -352,6 +352,23 @@ class TensorParallel_Layer(nn.Module, ABC):
         # (e.g. the from_weights back-compat constructor).
         self.tp_meta: AutoTPMeta = kwargs.get('tp_meta') or AutoTPMeta()
 
+    def _assert_compiled_if_deferred(self):
+        """Fail loudly if a deferred layer is executed outside a compiled region.
+
+        defer_collectives_to_compiler switches this layer's collectives off because the AutoTP
+        compile pass promises to emit them into the graph instead. If the forward runs eagerly --
+        TORCH_COMPILE_DISABLE=1, torch._dynamo.config.disable, a fallback to eager after the flag
+        was set -- that promise is not kept and the layer simply stops communicating, producing
+        wrong numbers with no other symptom.
+        """
+        if self.defer_collectives_to_compiler and not torch.compiler.is_compiling():
+            raise RuntimeError(
+                f"{type(self).__name__} has its tensor-parallel collectives deferred to the AutoTP compile "
+                "pass, but its forward is running eagerly, so the collectives would be dropped and the "
+                "results would be silently wrong. This usually means compilation was disabled "
+                "(TORCH_COMPILE_DISABLE / torch._dynamo.config.disable) or fell back to eager after "
+                "engine.compile(). Remove 'autotp' from the DeepCompile passes to run without it.")
+
     @classmethod
     def set_keep_module_on_host(cls, value: bool):
         """
@@ -770,6 +787,7 @@ class LinearAllreduce(TensorParallel_Layer):
         self._mark_uc_metadata()
 
     def forward(self, input):
+        self._assert_compiled_if_deferred()
         output = torch.matmul(input, self.weight.transpose(-1, -2))
         if not self.defer_collectives_to_compiler:
             output = RowParallel.apply(self.mp_group, output, not self.is_training_mode())
@@ -851,6 +869,7 @@ class LinearLayer(TensorParallel_Layer):
         self._mark_uc_metadata()
 
     def forward(self, input):
+        self._assert_compiled_if_deferred()
         if not self.__class__.tp_overlap_comm:
             if getattr(self, 'mp_group', None) is not None and not self.defer_collectives_to_compiler:
                 input = ColumnParallel.apply(self.mp_group, input)
@@ -1689,6 +1708,7 @@ class SubParamLinearLayer(TensorParallel_Layer):
         self._mark_uc_metadata()
 
     def forward(self, input):
+        self._assert_compiled_if_deferred()
         if getattr(self, 'mp_group', None) is not None and not self.defer_collectives_to_compiler:
             input = ColumnParallel.apply(self.mp_group, input)
         output = torch.matmul(input, self.weight.transpose(-1, -2))
@@ -1817,6 +1837,7 @@ class SubParamLinearAllreduce(TensorParallel_Layer):
         self._mark_uc_metadata()
 
     def forward(self, input):
+        self._assert_compiled_if_deferred()
         output = torch.matmul(input, self.weight.transpose(-1, -2))
         if not self.defer_collectives_to_compiler:
             output = RowParallel.apply(self.mp_group, output, not self.is_training_mode())
