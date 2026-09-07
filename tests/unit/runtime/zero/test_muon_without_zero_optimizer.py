@@ -17,6 +17,7 @@ import torch
 
 import deepspeed
 import deepspeed.runtime.zero.muon.original_muon as original_muon
+from deepspeed.runtime.zero.utils import ZeRORuntimeException
 from unit.common import DistributedTest
 
 NS_KERNELS = ("zeropower_via_gram_newtonschulz", "zeropower_via_newtonschulz5")
@@ -127,3 +128,36 @@ class TestMuonRunsWithoutAZeroOptimizer(DistributedTest):
 
         assert len(calls) == 2, \
             f"Newton-Schulz ran {len(calls)} times for two Muon matrices; the step was not Muon"
+
+
+class TestMuonRefusesBF16Optimizer(DistributedTest):
+    """The one wrapper that hands Muon flat partitions without orthogonalizing them.
+
+    `BF16_Optimizer` replaces the param groups with flat fp32 partitions and knows nothing about
+    `use_muon`, so the shape test in `step` reads them as "ZeRO already did the update" and the
+    step is SGD. The original shapes are not recoverable there, so this is refused rather than
+    fixed. Selected by bf16 with `grad_accum_dtype: fp32` at ZeRO stage 1.
+    """
+    world_size = 1
+
+    def test_bf16_optimizer_with_muon_is_refused(self):
+        model = _model()
+        config = _config(1, "bf16")
+        config["data_types"] = {"grad_accum_dtype": "fp32"}
+
+        with pytest.raises(ZeRORuntimeException, match="BF16_Optimizer"):
+            deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config)
+
+    def test_the_same_config_without_grad_accum_dtype_still_runs_muon(self):
+        """The neighbouring config, so the refusal is shown to be narrow."""
+        model = _model()
+        engine, _, _, _ = deepspeed.initialize(model=model,
+                                               model_parameters=model.parameters(),
+                                               config=_config(1, "bf16"))
+
+        with counting_newton_schulz() as calls:
+            x = torch.ones(2, 32, device=engine.device, dtype=next(engine.module.parameters()).dtype)
+            engine.backward(engine(x).square().sum())
+            engine.step()
+
+        assert len(calls) == 2
