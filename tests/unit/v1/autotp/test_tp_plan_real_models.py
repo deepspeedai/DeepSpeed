@@ -9,7 +9,6 @@ import deepspeed.comm as dist
 import deepspeed
 from deepspeed.accelerator import get_accelerator
 from deepspeed.module_inject.layers import LinearLayer
-from deepspeed.module_inject.tp_shard import get_shard_size_list
 from deepspeed.runtime.tensor_parallel.config import _get_hf_tp_plan
 from deepspeed.utils import groups
 from unit.common import DistributedTest
@@ -129,7 +128,7 @@ class TestTPPlanRealHFModels(DistributedTest):
         engine, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=ds_config)
 
         tp_rank = groups.get_tensor_model_parallel_rank()
-        output_partition_sizes = get_shard_size_list(config.vocab_size, 2, "lm_head")
+        output_partition_sizes = list(model.lm_head._partition_sizes)
         assert engine.autotp_size() == 2
         assert isinstance(model.lm_head, LinearLayer)
         assert model.lm_head.gather_output

@@ -50,7 +50,12 @@ class TpTrainingManager():
         from deepspeed.module_inject import replace_transformer_layer
         """Apply the given injection policy to a client module."""
         if isinstance(self.module, torch.nn.Module):
-            replace_transformer_layer(client_module, self.module, None, self.config, self.model_config)
+            replace_transformer_layer(client_module,
+                                      self.module,
+                                      None,
+                                      self.config,
+                                      self.model_config,
+                                      training_mode=True)
 
     def _initialize_tp_config(self, tp_size):
         """Perform TP configuration initialization."""

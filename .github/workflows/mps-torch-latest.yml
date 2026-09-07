@@ -1,0 +1,60 @@
+name: mps-torch-latest
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'accelerator/**'
+      - 'op_builder/mps/**'
+      - 'csrc/mps/**'
+      - 'deepspeed/comm/**'
+      - 'tests/unit/accelerator/**'
+      - 'tests/unit/ops/adam/**'
+      - 'tests/unit/comm/**'
+      - '.github/workflows/mps-torch-latest.yml'
+  schedule:
+    - cron: "0 0 * * *"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unit-tests:
+    name: mps-torch-latest / unit tests
+    # GitHub's macOS arm64 runners have an Apple Silicon GPU with a working MPS device.
+    runs-on: macos-15
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Install PyTorch
+        run: |
+          pip install torch torchvision
+          python -c "import torch; assert torch.backends.mps.is_available(), 'no MPS device on this runner'; print(torch.__version__)"
+
+      - name: Install DeepSpeed
+        run: |
+          pip install -r requirements/requirements.txt
+          DS_ACCELERATOR=mps pip install --no-build-isolation -e .
+          # DistributedFixture registers itself through pytest internals that changed in 8.4,
+          # so honor the same upper bound as requirements-dev.txt.
+          pip install "pytest>=7.2.0,<8.4.0" pytest-forked pytest-randomly pytest-xdist
+          ds_report
+
+      - name: Unit tests
+        # Spawn-based DistributedTest cases cost 60-75s each on the shared arm64 runners, so run
+        # them across xdist workers and fail hung launches fast instead of eating the job budget.
+        run: |
+          cd tests
+          DS_ACCELERATOR=mps DS_UNITTEST_TIMEOUT=300 python -m pytest -p no:randomly --verbose \
+            -n 3 --max-worker-restart=2 \
+            unit/accelerator/test_mps_accelerator.py \
+            unit/ops/adam/test_adamw.py \
+            unit/comm/test_dist.py \
+            unit/runtime/test_ds_config_dict.py

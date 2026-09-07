@@ -19,21 +19,23 @@ from deepspeed.compile.passes import selective_gather as selective_gather_mod
 from deepspeed.compile.profilers import ProfilingResult
 from deepspeed.compile.profilers.graph_profile import _backfill_missing_profile_metadata, is_profile_incomplete
 
+_TEST_DC_NAMESPACE = "dc_list_schedule_test"
 _DC_LIBRARIES = []
 
 
 def _define_dc_ops():
+    test_dc_ops = getattr(torch.ops, _TEST_DC_NAMESPACE)
     try:
-        torch.ops.dc.allgather_param.default
-        torch.ops.dc.wait_allgather.default
-        torch.ops.dc.release_param.default
-        torch.ops.dc.reduce_grad.default
-        torch.ops.dc.offload_tensor.default
-        return
+        test_dc_ops.allgather_param.default
+        test_dc_ops.wait_allgather.default
+        test_dc_ops.release_param.default
+        test_dc_ops.reduce_grad.default
+        test_dc_ops.offload_tensor.default
+        return test_dc_ops
     except AttributeError:
         pass
 
-    lib = torch.library.Library("dc", "DEF")
+    lib = torch.library.Library(_TEST_DC_NAMESPACE, "DEF")
     for schema in (
             "allgather_param(Tensor a, int graph_id, int id, ScalarType? dtype = None) -> Tensor",
             "wait_allgather(Tensor(a) a, int graph_id, int id) -> Tensor(a)",
@@ -52,13 +54,19 @@ def _define_dc_ops():
             if "already been registered" not in str(exc):
                 raise
     _DC_LIBRARIES.append(lib)
+    return test_dc_ops
 
 
 @pytest.fixture(autouse=True)
 def stub_deepcompile_ops(monkeypatch):
-    _define_dc_ops()
-    no_copy_ops = {torch.ops.dc.wait_allgather.default}
-    monkeypatch.setattr(compile_util, "get_no_copy_ops", lambda: no_copy_ops)
+    test_dc_ops = _define_dc_ops()
+    original_dc_ops = torch.ops.dc
+    with monkeypatch.context() as fixture_patch:
+        fixture_patch.setattr(torch.ops, "dc", test_dc_ops)
+        no_copy_ops = {torch.ops.dc.wait_allgather.default}
+        fixture_patch.setattr(compile_util, "get_no_copy_ops", lambda: no_copy_ops)
+        yield
+    assert torch.ops.dc is original_dc_ops
 
 
 def _with_meta(node, tensor_size=0, device_time=0):
@@ -66,6 +74,10 @@ def _with_meta(node, tensor_size=0, device_time=0):
     if device_time is not None:
         node.meta["device_time"] = device_time
     return node
+
+
+def test_stub_deepcompile_ops_uses_isolated_namespace():
+    assert torch.ops.dc is getattr(torch.ops, _TEST_DC_NAMESPACE)
 
 
 def _placeholder(graph, name):
