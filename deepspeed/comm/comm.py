@@ -846,10 +846,11 @@ def init_distributed(dist_backend: Optional[str] = None,
                 try:
                     mpi_discovery(distributed_port=distributed_port, verbose=verbose)
                 except ImportError as err:
-                    if in_mpi_job():
-                        raise ImportError("An MPI job is running but mpi4py is not installed, so the rank and "
-                                          "world size cannot be discovered from it. Install mpi4py, or set RANK, "
-                                          "WORLD_SIZE, LOCAL_RANK, MASTER_ADDR and MASTER_PORT yourself.") from err
+                    if in_multi_rank_mpi_job():
+                        raise ImportError("A multi-rank MPI job is running but mpi4py is not installed, so the "
+                                          "rank and world size cannot be discovered from it. Install mpi4py, or "
+                                          "set RANK, WORLD_SIZE, LOCAL_RANK, MASTER_ADDR and MASTER_PORT "
+                                          "yourself.") from err
                     single_process_discovery(distributed_port=distributed_port, verbose=verbose)
 
         if cdb is not None and cdb.is_initialized():
@@ -865,15 +866,23 @@ def init_distributed(dist_backend: Optional[str] = None,
             cdb = TorchBackend(dist_backend, timeout, init_method, rank, world_size)
 
 
-# Rank variables the MPI launchers export: OpenMPI, MPICH and Intel MPI, PMIx, MVAPICH, and
-# Slurm's srun. Used only to tell an MPI job that is missing mpi4py from a machine that has no
-# launcher at all, so an unrecognized launcher still reaches mpi_discovery as before.
-MPI_RANK_ENV_VARS = ("OMPI_COMM_WORLD_RANK", "PMI_RANK", "PMIX_RANK", "MV2_COMM_WORLD_RANK", "SLURM_PROCID")
+# World-size variables the MPI launchers export: OpenMPI, MPICH and Intel MPI, PMIx, MVAPICH,
+# and Slurm's srun. The size rather than the rank, because a rank variable only says a launcher
+# is present - `srun -n1` sets SLURM_PROCID for a single-task step, which is one process on one
+# device and wants the fallback below, not an error about mpi4py. Every launcher listed sets its
+# size variable alongside its rank one.
+MPI_WORLD_SIZE_ENV_VARS = ("OMPI_COMM_WORLD_SIZE", "PMI_SIZE", "PMIX_SIZE", "MV2_COMM_WORLD_SIZE", "SLURM_NTASKS")
 
 
-def in_mpi_job():
-    """Whether an MPI launcher started this process."""
-    return any(var in os.environ for var in MPI_RANK_ENV_VARS)
+def in_multi_rank_mpi_job():
+    """Whether a launcher started this process as one of several ranks."""
+    for var in MPI_WORLD_SIZE_ENV_VARS:
+        try:
+            if int(os.environ[var]) > 1:
+                return True
+        except (KeyError, ValueError):
+            continue
+    return False
 
 
 def single_process_discovery(distributed_port=TORCH_DISTRIBUTED_DEFAULT_PORT, verbose=True):
