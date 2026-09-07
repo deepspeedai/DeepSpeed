@@ -77,22 +77,18 @@ response branch after the shared prompt forward.
 Continuous-batching prototype
 -----------------------------
 
-``deepspeed.runtime.rollout.continuous_batching`` provides the scheduling and
-slot-lifecycle primitive needed to build a continuous decode batch. Requests
-are admitted in FIFO order up to a configured capacity. When a request retires,
-the update identifies the surviving cache rows to compact and the pending
-requests that can be prefetched into the newly free rows. The model backend is
-responsible for applying that update, running prompt prefill, and constructing
-the attention metadata for the active rows.
+Continuous batching is enabled through ``SamplingConfig.continuous_batch_size``
+on the regular ``HybridEngineRollout.generate(request, sampling)`` entry point.
+When unset, generation keeps its existing behavior. When set to a positive
+value, at most that many prompt rows are active at once; completed rows retire
+and pending rows are prefetched into the released slots. The returned
+``RolloutBatch`` remains in the original ``RolloutRequest`` row order.
 
 The prototype intentionally does not implement paged attention or change the
-default ``HybridEngineRollout.generate`` path. For a first end-to-end trial,
-``HybridEngineRollout.generate_continuous`` accepts one request per prompt row
-and a matching list of greedy ``SamplingConfig`` objects. It dynamically
-prefills admitted prompts and decodes surviving rows until every request has
-finished. CUDA Graph capture, sampling, multiple samples per prompt, and
-different prompt widths are intentionally rejected until the scheduling
-semantics are validated on real workloads.
+default generation semantics. It currently requires one prompt width for all
+rows, greedy decoding, and one sample per prompt. CUDA Graph capture and
+multiple prompt widths are rejected until the scheduling semantics are
+validated on real workloads.
 
 ``DeepSpeedStaticCache`` accepts one write position per row and can compact
 active rows while preserving its static tensor addresses. This mirrors the

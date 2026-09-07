@@ -20,11 +20,6 @@ class ContinuousBatchRequest:
     """A request waiting for a slot in a continuous decode batch."""
 
     request_id: Hashable
-    max_new_tokens: int
-
-    def __post_init__(self) -> None:
-        if self.max_new_tokens <= 0:
-            raise ValueError("max_new_tokens must be positive")
 
 
 @dataclass(frozen=True)
@@ -55,16 +50,21 @@ class ContinuousBatchUpdate:
 class ContinuousBatchScheduler:
     """FIFO scheduler for bounded, slot-based continuous batching.
 
+    All submitted requests share the scheduler's ``max_new_tokens`` budget;
+    requests may still retire earlier when the model emits EOS.
     ``schedule`` performs admission/retirement without advancing tokens.
     ``advance`` represents one decode step for every active request and also
     retires requests whose token budget has been consumed. A caller may pass
     explicit finished IDs when the model emits EOS before that budget.
     """
 
-    def __init__(self, max_batch_size: int):
+    def __init__(self, max_batch_size: int, max_new_tokens: int):
         if max_batch_size <= 0:
             raise ValueError("max_batch_size must be positive")
+        if max_new_tokens <= 0:
+            raise ValueError("max_new_tokens must be positive")
         self.max_batch_size = max_batch_size
+        self.max_new_tokens = max_new_tokens
         self._pending = deque()
         self._active = []
         self._generated = {}
@@ -127,7 +127,7 @@ class ContinuousBatchScheduler:
         for request, generated in self._active:
             generated += 1
             self._generated[request.request_id] = generated
-            if generated >= request.max_new_tokens:
+            if generated >= self.max_new_tokens:
                 finished.add(request.request_id)
             updated.append((request, generated))
         self._active = updated

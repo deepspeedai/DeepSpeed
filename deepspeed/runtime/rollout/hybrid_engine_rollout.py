@@ -10,8 +10,8 @@ Two generation paths:
      Pre-allocates a StaticCache, captures the decode forward pass with a
      CUDA graph, and replays it for each decode step.  Eliminates kernel
      launch overhead.
-  3. **generate_continuous()**: a bounded greedy prototype that refills
-     retired cache rows with pending prompts.
+  3. **continuous batching**: an opt-in bounded greedy path selected through
+     ``SamplingConfig.continuous_batch_size``.
 """
 
 import time
@@ -101,6 +101,9 @@ class HybridEngineRollout(RolloutEngine):
 
     @torch.no_grad()
     def generate(self, request: RolloutRequest, sampling: SamplingConfig) -> RolloutBatch:
+        if sampling.continuous_batch_size is not None:
+            return self._generate_continuous(request, sampling, sampling.continuous_batch_size)
+
         device = request.prompt_ids.device
         B = request.prompt_ids.shape[0]
         n = sampling.n_samples_per_prompt
@@ -242,35 +245,36 @@ class HybridEngineRollout(RolloutEngine):
         return rollout_batch
 
     @torch.no_grad()
-    def generate_continuous(self, requests, sampling_configs, max_batch_size):
+    def _generate_continuous(self, request, sampling, max_batch_size):
         """Generate independent greedy requests in a continuously refilled batch.
 
         This first integration targets the OPSD prototype: every request has a
-        single prompt row and one greedy response. Requests may use different
-        response budgets. Completed rows retire immediately and pending prompts
-        prefill into the released rows before the next decode step.
+        single prompt row and one greedy response. Completed rows retire
+        immediately and pending prompts prefill into the released rows before
+        the next decode step.
         """
-        requests = tuple(requests)
-        sampling_configs = tuple(sampling_configs)
-        self._validate_continuous_inputs(requests, sampling_configs, max_batch_size)
+        original_request = request
+        requests = tuple(
+            RolloutRequest(request.prompt_ids[index:index + 1], request.prompt_attention_mask[index:index + 1])
+            for index in range(request.prompt_ids.shape[0]))
+        self._validate_continuous_inputs(requests, sampling, max_batch_size)
 
         module = self.engine.module
         prompt_len = requests[0].prompt_ids.shape[1]
         max_positions = getattr(module.config, "max_position_embeddings", None)
         if max_positions is not None:
-            for config in sampling_configs:
-                logical_length = prompt_len + config.max_new_tokens
-                if logical_length > max_positions:
-                    raise ValueError("continuous batching request exceeds the model maximum position embeddings")
+            logical_length = prompt_len + sampling.max_new_tokens
+            if logical_length > max_positions:
+                raise ValueError("continuous batching request exceeds the model maximum position embeddings")
         max_cache_len = self._estimate_continuous_cache_len(
             prompt_len,
-            [config.max_new_tokens for config in sampling_configs],
+            [sampling.max_new_tokens] * len(requests),
             max_batch_size,
         )
         if max_positions is not None and max_cache_len > max_positions:
             raise ValueError("continuous batching cache exceeds the model maximum position embeddings")
         if not getattr(module, "_supports_cache_class", False):
-            return self._generate_continuous_legacy(requests, sampling_configs, max_batch_size)
+            return self._generate_continuous_legacy(requests, sampling, max_batch_size)
 
         from transformers import StaticCache
         from deepspeed.utils.static_cache import DeepSpeedStaticCache
@@ -278,11 +282,11 @@ class HybridEngineRollout(RolloutEngine):
         device = requests[0].prompt_ids.device
         model_dtype = next(module.parameters()).dtype
 
-        scheduler = ContinuousBatchScheduler(max_batch_size)
+        scheduler = ContinuousBatchScheduler(max_batch_size, sampling.max_new_tokens)
         request_by_id = {}
         responses = {}
-        for request_id, (request, config) in enumerate(zip(requests, sampling_configs)):
-            scheduler.submit(ContinuousBatchRequest(request_id, config.max_new_tokens))
+        for request_id, request in enumerate(requests):
+            scheduler.submit(ContinuousBatchRequest(request_id))
             request_by_id[request_id] = request
             responses[request_id] = []
 
@@ -358,18 +362,14 @@ class HybridEngineRollout(RolloutEngine):
             if survivor_count:
                 cache_position += 1
 
-        return [
-            self._build_continuous_output(request, responses[request_id])
-            for request_id, request in enumerate(requests)
-        ]
+        return self._build_continuous_batch(original_request, responses)
 
-    def _generate_continuous_legacy(self, requests, sampling_configs, max_batch_size):
+    def _generate_continuous_legacy(self, requests, sampling, max_batch_size):
         """Continuous decode for Transformers models that return legacy KV tuples."""
         module = self.engine.module
         device = requests[0].prompt_ids.device
         prompt_len = requests[0].prompt_ids.shape[1]
-        scheduler, request_by_id, responses = self._create_continuous_scheduler(requests, sampling_configs,
-                                                                                max_batch_size)
+        scheduler, request_by_id, responses = self._create_continuous_scheduler(requests, sampling, max_batch_size)
         next_tokens = {}
         attention_mask = None
         past_key_values = None
@@ -416,18 +416,19 @@ class HybridEngineRollout(RolloutEngine):
                     finished_ids.append(request_id)
             update = scheduler.advance(finished_ids)
 
-        return [
-            self._build_continuous_output(request, responses[request_id])
-            for request_id, request in enumerate(requests)
-        ]
+        request = RolloutRequest(
+            torch.cat([request.prompt_ids for request in requests], dim=0),
+            torch.cat([request.prompt_attention_mask for request in requests], dim=0),
+        )
+        return self._build_continuous_batch(request, responses)
 
     @staticmethod
-    def _create_continuous_scheduler(requests, sampling_configs, max_batch_size):
-        scheduler = ContinuousBatchScheduler(max_batch_size)
+    def _create_continuous_scheduler(requests, sampling, max_batch_size):
+        scheduler = ContinuousBatchScheduler(max_batch_size, sampling.max_new_tokens)
         request_by_id = {}
         responses = {}
-        for request_id, (request, config) in enumerate(zip(requests, sampling_configs)):
-            scheduler.submit(ContinuousBatchRequest(request_id, config.max_new_tokens))
+        for request_id, request in enumerate(requests):
+            scheduler.submit(ContinuousBatchRequest(request_id))
             request_by_id[request_id] = request
             responses[request_id] = []
         return scheduler, request_by_id, responses
@@ -520,11 +521,9 @@ class HybridEngineRollout(RolloutEngine):
         padded_attention = torch.cat((admitted_padding, admitted_attention), dim=1)
         return merged_cache, torch.cat((survivor_attention, padded_attention), dim=0)
 
-    def _validate_continuous_inputs(self, requests, sampling_configs, max_batch_size):
+    def _validate_continuous_inputs(self, requests, sampling, max_batch_size):
         if not requests:
             raise ValueError("continuous batching requires at least one request")
-        if len(requests) != len(sampling_configs):
-            raise ValueError("requests and sampling_configs must have the same length")
         if max_batch_size <= 0:
             raise ValueError("max_batch_size must be positive")
         if self.use_graph_capture:
@@ -532,17 +531,19 @@ class HybridEngineRollout(RolloutEngine):
 
         prompt_len = requests[0].prompt_ids.shape[1]
         device = requests[0].prompt_ids.device
-        for request, config in zip(requests, sampling_configs):
+        if sampling.max_new_tokens <= 0:
+            raise ValueError("max_new_tokens must be positive")
+        if sampling.temperature > 0:
+            raise ValueError("continuous batching currently supports greedy decoding only")
+        if sampling.n_samples_per_prompt != 1:
+            raise ValueError("continuous batching currently supports one sample per prompt")
+        for request in requests:
             if request.prompt_ids.shape[0] != 1:
                 raise ValueError("continuous batching requires one prompt row per request")
             if request.prompt_ids.shape[1] != prompt_len:
                 raise ValueError("continuous batching currently requires equal prompt widths")
             if request.prompt_ids.device != device:
                 raise ValueError("continuous batching requests must use the same device")
-            if config.temperature > 0:
-                raise ValueError("continuous batching currently supports greedy decoding only")
-            if config.n_samples_per_prompt != 1:
-                raise ValueError("continuous batching currently supports one sample per prompt")
 
     def _continuous_prefill(self, module, static_cache_type, cache, update, request_by_id, attention_mask,
                             cache_position, prompt_len, model_dtype, device):
@@ -612,17 +613,42 @@ class HybridEngineRollout(RolloutEngine):
             common_kwargs["max_batch_size"] = batch_size
         return static_cache_type(**common_kwargs)
 
-    @staticmethod
-    def _build_continuous_output(request, response_tokens):
-        response_ids = torch.cat(response_tokens, dim=1)
-        input_ids = torch.cat((request.prompt_ids, response_ids), dim=1)
-        response_attention = torch.ones_like(response_ids)
-        attention_mask = torch.cat((request.prompt_attention_mask, response_attention), dim=1)
+    def _build_continuous_batch(self, request, responses):
+        response_ids = [torch.cat(responses[index], dim=1) for index in range(request.prompt_ids.shape[0])]
+        max_response_len = max(response.shape[1] for response in response_ids)
+        pad_token_id = self.tokenizer.pad_token_id
+        if pad_token_id is None:
+            pad_token_id = self.tokenizer.eos_token_id
+        if pad_token_id is None:
+            raise ValueError("The tokenizer must define pad_token_id or eos_token_id")
+        input_rows = []
+        attention_rows = []
+        for index, response in enumerate(response_ids):
+            padding = max_response_len - response.shape[1]
+            if padding:
+                response_padding = torch.full((1, padding), pad_token_id, dtype=response.dtype, device=response.device)
+                attention_padding = torch.zeros((1, padding), dtype=request.prompt_attention_mask.dtype,
+                                                device=response.device)
+                response = torch.cat((response, response_padding), dim=1)
+            else:
+                attention_padding = torch.empty((1, 0),
+                                                dtype=request.prompt_attention_mask.dtype,
+                                                device=response.device)
+            input_rows.append(torch.cat((request.prompt_ids[index:index + 1], response), dim=1))
+            response_attention = torch.ones((1, response_ids[index].shape[1]),
+                                             dtype=request.prompt_attention_mask.dtype,
+                                             device=response.device)
+            attention_rows.append(torch.cat(
+                (request.prompt_attention_mask[index:index + 1], response_attention, attention_padding), dim=1))
+
+        input_ids = torch.cat(input_rows, dim=0)
+        attention_mask = torch.cat(attention_rows, dim=0)
         response_start = request.prompt_ids.shape[1]
         return RolloutBatch(
             input_ids=input_ids,
             attention_mask=attention_mask,
-            response_start_idx=torch.tensor([response_start], dtype=torch.long, device=input_ids.device),
+            response_start_idx=torch.full((request.prompt_ids.shape[0], ), response_start, dtype=torch.long,
+                                          device=input_ids.device),
         )
 
     def get_last_profile(self):
