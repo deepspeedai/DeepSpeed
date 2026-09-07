@@ -234,6 +234,56 @@ class TestAutoEPConfig:
                                    tp_size=1,
                                    sp_size=1)
 
+    def test_combine_impl_rejects_unknown_value(self):
+        config = parse_autoep_config({"enabled": True, "combine_impl": "triton"})
+        with pytest.raises(ValueError, match="combine_impl must be one of"):
+            validate_autoep_config(config, world_size=1, pp_size=1, tp_size=1, sp_size=1)
+
+    def test_fused_combine_rejects_folded_tensor_parallelism(self):
+        config = parse_autoep_config({
+            "enabled": True,
+            "autoep_size": 2,
+            "combine_impl": "fused_weighted_sum",
+        })
+        with pytest.raises(ValueError, match=r"tensor_parallel\.autotp_size=2"):
+            validate_autoep_config(config, world_size=4, pp_size=1, tp_size=2, sp_size=1)
+
+    def test_fused_combine_rejects_expert_tensor_parallelism(self):
+        config = parse_autoep_config({
+            "enabled": True,
+            "autoep_size": 2,
+            "expert_tensor_parallel_size": 2,
+            "combine_impl": "fused_weighted_sum",
+        })
+        with pytest.raises(ValueError, match="requires expert_tensor_parallel_size=1"):
+            validate_autoep_config(config, world_size=4, pp_size=1, tp_size=1, sp_size=1)
+
+    def test_fused_combine_rejects_deepep(self):
+        config = parse_autoep_config({
+            "enabled": True,
+            "autoep_size": 2,
+            "combine_impl": "fused_weighted_sum",
+            "comm_backend": "deepep",
+            "comm_max_tokens_per_rank": 4096,
+        })
+        with pytest.raises(ValueError, match='cannot be used with comm_backend="deepep"'):
+            validate_autoep_config(config, world_size=2, pp_size=1, tp_size=1, sp_size=1)
+
+    @pytest.mark.parametrize("score_apply, spec_score_apply", [("auto", "pre"), ("pre", "post")])
+    def test_fused_combine_requires_post_score_apply(self, score_apply, spec_score_apply):
+        config = parse_autoep_config({
+            "enabled": True,
+            "combine_impl": "fused_weighted_sum",
+            "score_apply": score_apply,
+        })
+        with pytest.raises(ValueError, match='requires score_apply="post"'):
+            validate_autoep_post_detection(config, [_make_spec(score_apply=spec_score_apply)])
+
+    def test_fused_combine_accepts_the_standard_path(self):
+        config = parse_autoep_config({"enabled": True, "autoep_size": 2, "combine_impl": "fused_weighted_sum"})
+        validate_autoep_config(config, world_size=2, pp_size=1, tp_size=1, sp_size=1)
+        validate_autoep_post_detection(config, [_make_spec(num_experts=4, score_apply="post")])
+
     @pytest.mark.parametrize("value", UNSUPPORTED_LOAD_BALANCE_VALUES)
     def test_load_balance_coeff_rejected_at_parse(self, value):
         with pytest.raises(ValueError) as exc_info:
@@ -1258,7 +1308,9 @@ class TestModelDetectionAndReplacement:
         FakeGatheredParameters.calls = []
         monkeypatch.setattr(ep_repack, "GatheredParameters", FakeGatheredParameters)
         monkeypatch.setattr(get_preset_adapter("deepseek_v3"), "_installed_transformers_version", lambda: "5.0.0")
+
         model = MockDeepSeekV3Transformer(num_layers=1, num_experts=8)
+
         auto_ep = AutoEP(model, _runtime_config(enabled=True, autoep_size=2))
         specs = auto_ep.ep_parser()
 
@@ -1267,6 +1319,7 @@ class TestModelDetectionAndReplacement:
         assert specs[0].expert_storage == "module_list"
         assert specs[0].expert_w1_name == "gate_proj"
         assert specs[0].has_shared_experts is True
+        assert specs[0].e_score_correction_bias_path is None
 
         source_bias = torch.arange(8, dtype=torch.float32)
         model.model.layers[0].mlp.gate.e_score_correction_bias = nn.Parameter(source_bias.clone())
@@ -1282,6 +1335,59 @@ class TestModelDetectionAndReplacement:
         assert replaced.router.e_score_correction_bias is not None
         torch.testing.assert_close(replaced.router.e_score_correction_bias, source_bias)
         assert ["router.e_score_correction_bias"] in [call["names"] for call in FakeGatheredParameters.calls]
+
+    @pytest.mark.parametrize(
+        "owner_path,bias_kind,persistent",
+        [
+            ("gate", "buffer", True),
+            ("", "buffer", False),
+            ("router", "buffer", True),
+            ("gate.moe_statics", "parameter", True),
+        ],
+    )
+    def test_score_correction_bias_location_and_registration(self, monkeypatch, owner_path, bias_kind, persistent):
+        monkeypatch.setattr(get_preset_adapter("deepseek_v3"), "_installed_transformers_version", lambda: "5.0.0")
+        model = MockDeepSeekV3Transformer(num_layers=1, num_experts=8)
+        source = model.model.layers[0].mlp
+        owner = source
+        for part in owner_path.split(".") if owner_path else ():
+            if not hasattr(owner, part):
+                owner.add_module(part, nn.Module())
+            owner = getattr(owner, part)
+
+        source_bias = torch.arange(8, dtype=torch.float32)
+        if bias_kind == "parameter":
+            owner.e_score_correction_bias = nn.Parameter(source_bias.clone(), requires_grad=False)
+        else:
+            owner.register_buffer("e_score_correction_bias", source_bias.clone(), persistent=persistent)
+
+        auto_ep = AutoEP(model, _runtime_config(enabled=True, autoep_size=2))
+        spec = auto_ep.ep_parser()[0]
+        assert spec.e_score_correction_bias_path == owner_path
+
+        auto_ep.replace_moe_layer(spec, ep_size=2, ep_rank=0)
+
+        replaced_bias = model.model.layers[0].mlp.router.e_score_correction_bias
+        torch.testing.assert_close(replaced_bias, source_bias)
+        assert replaced_bias.requires_grad is False
+        if bias_kind == "parameter":
+            assert dict(
+                model.model.layers[0].mlp.router.named_parameters())["e_score_correction_bias"] is replaced_bias
+            assert "e_score_correction_bias" not in dict(model.model.layers[0].mlp.router.named_buffers())
+        else:
+            assert dict(model.model.layers[0].mlp.router.named_buffers())["e_score_correction_bias"] is replaced_bias
+            assert "e_score_correction_bias" not in dict(model.model.layers[0].mlp.router.named_parameters())
+            assert ("e_score_correction_bias" in model.model.layers[0].mlp.router.state_dict()) is persistent
+
+    def test_score_correction_bias_multiple_locations_are_rejected(self, monkeypatch):
+        monkeypatch.setattr(get_preset_adapter("deepseek_v3"), "_installed_transformers_version", lambda: "5.0.0")
+        model = MockDeepSeekV3Transformer(num_layers=1, num_experts=8)
+        source = model.model.layers[0].mlp
+        source.register_buffer("e_score_correction_bias", torch.zeros(8))
+        source.gate.register_buffer("e_score_correction_bias", torch.ones(8))
+
+        with pytest.raises(ValueError, match="e_score_correction_bias in multiple locations"):
+            AutoEP(model, _runtime_config(enabled=True, autoep_size=2)).ep_parser()
 
 
 def _eager_pep604_lines(module):

@@ -40,10 +40,9 @@ def _allocate_worker_grad_buffer(max_grad_numel: int, pin_memory: bool) -> torch
     # Scratch destination for the GPU->CPU grad copy. Pinning is optional: it
     # speeds DMA but is not required for correctness, so honor
     # offload_optimizer.pin_memory rather than always page-locking.
-    buffer = torch.empty(max_grad_numel, dtype=torch.float32, device='cpu')
     if pin_memory:
-        buffer = get_accelerator().pin_memory(buffer, make_copy=False)
-    return buffer
+        return get_accelerator().pin_empty(max_grad_numel, dtype=torch.float32, device='cpu')
+    return torch.empty(max_grad_numel, dtype=torch.float32, device='cpu')
 
 
 def superoffload_optimizer_worker(param_queue: mp.SimpleQueue,

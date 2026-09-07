@@ -2951,8 +2951,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             if pin_memory:
                 if not hasattr(self, "hp_params_pin_buffers"):
                     self.hp_params_pin_buffers = [
-                        get_accelerator().pin_memory(torch.empty_like(t, device=device), make_copy=False)
-                        for t in self.single_partition_of_fp32_groups
+                        get_accelerator().pin_empty_like(t, device='cpu') for t in self.single_partition_of_fp32_groups
                     ]
                 for src_tensor, dest_buf in zip(self.single_partition_of_fp32_groups, self.hp_params_pin_buffers):
                     dest_buf.copy_(src_tensor, non_blocking=non_blocking)
@@ -2975,8 +2974,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             if pin_memory:
                 if not hasattr(self, "lp_params_pin_buffers"):
                     self.lp_params_pin_buffers = [
-                        get_accelerator().pin_memory(torch.empty_like(t, device=device), make_copy=False)
-                        for t in self.bit16_groups_flat
+                        get_accelerator().pin_empty_like(t, device='cpu') for t in self.bit16_groups_flat
                     ]
                 for src_tensor, dest_buf in zip(self.bit16_groups_flat, self.lp_params_pin_buffers):
                     dest_buf.copy_(src_tensor, non_blocking=non_blocking)
