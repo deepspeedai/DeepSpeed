@@ -107,14 +107,15 @@ def test_a_scaled_rope_variant_is_refused(rope_type):
     Dropping those and keeping the base runs the model with unscaled positions and no error,
     which is worse than the AttributeError this helper exists to remove.
     """
-    config = SimpleNamespace(rope_parameters={
-        "rope_type": rope_type,
-        "rope_theta": 500000.0,
-        "factor": 8.0,
-        "low_freq_factor": 1.0,
-        "high_freq_factor": 4.0,
-        "original_max_position_embeddings": 8192,
-    })
+    config = SimpleNamespace(
+        rope_parameters={
+            "rope_type": rope_type,
+            "rope_theta": 500000.0,
+            "factor": 8.0,
+            "low_freq_factor": 1.0,
+            "high_freq_factor": 4.0,
+            "original_max_position_embeddings": 8192,
+        })
 
     with pytest.raises(ValueError, match="cannot serve rope_type"):
         _get_rope_theta(SimpleNamespace(config=config))
