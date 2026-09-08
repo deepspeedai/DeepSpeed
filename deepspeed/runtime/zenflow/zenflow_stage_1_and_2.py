@@ -14,6 +14,7 @@ from deepspeed.ops.adam import ZenFlowSelectiveAdamW
 from deepspeed.moe.utils import is_moe_param
 
 from deepspeed.accelerator import get_accelerator
+from deepspeed.utils import logger
 
 from deepspeed.runtime.utils import all_gather_dp_groups
 
@@ -119,9 +120,9 @@ class ZenFlowZeroOptimizer(DeepSpeedZeroOptimizer):
         if self.select_strategy == 'auto':
             self.select_strategy = "epoch"
             if isinstance(zenflow_config.select_interval, int):
-                raise Warning(
-                    "If use auto select strategy, select_interval will be set to 1 and select_strategy will be set to epoch, thus select_interval would be overwritten."
-                )
+                logger.warning(
+                    "ZenFlow: select_strategy is 'auto', so select_interval is one epoch and the "
+                    "configured value %s is ignored.", zenflow_config.select_interval)
             self.select_interval = 1
         else:
             if isinstance(zenflow_config.select_interval, str):
@@ -139,6 +140,13 @@ class ZenFlowZeroOptimizer(DeepSpeedZeroOptimizer):
             if zenflow_config.steps_per_epoch is not None:
                 self.select_interval = self.select_interval * zenflow_config.steps_per_epoch
             else:
+                # 0 makes is_zenflow_select_boundary() true exactly once, so the
+                # columns picked at the first step are used for the whole run.
+                logger.warning("ZenFlow: select_strategy resolves to 'epoch', but the number of steps in an "
+                               "epoch is unknown. Important columns will be selected once and never "
+                               "re-selected. Set \"steps_per_epoch\" in the zenflow config, or pass "
+                               "training_data= to deepspeed.initialize(), or use \"select_strategy\": "
+                               "\"step\" with an explicit \"select_interval\".")
                 self.select_interval = 0
 
         if not self.auto_update and self.select_interval != 0 and self.select_interval < self.update_interval:

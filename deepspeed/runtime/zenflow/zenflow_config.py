@@ -45,8 +45,10 @@ class ZenFlowConfig(DeepSpeedConfigModel):
 
     steps_per_epoch: Optional[int] = Field(
         default=None,
-        description=
-        "Number of steps per epoch. This field is initialized during execution and should not be set by users.",
+        description="Number of steps in one epoch, used by the 'epoch' select strategy (which "
+        "'auto' resolves to) to turn select_interval into a number of steps. DeepSpeed fills this "
+        "in from the training dataloader when it owns one; set it explicitly when you drive your "
+        "own dataloader, otherwise the important columns are selected once and never re-selected.",
         exclude=True)
 
     @model_validator(mode="after")
