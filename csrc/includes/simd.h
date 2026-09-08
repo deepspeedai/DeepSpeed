@@ -11,8 +11,12 @@
 #endif
 
 #define TILE (128 * 1024 * 1024)
-#if defined(__AVX512__) or defined(__AVX256__)
+#if defined(__AVX512__) or defined(__AVX256__) or defined(__NEON__)
+#if defined(__NEON__)
+#include <arm_neon.h>
+#else
 #include <immintrin.h>
+#endif
 
 template <typename T>
 inline T readAs(const void* src)
@@ -114,6 +118,60 @@ static void store_16_f32_as_bf16_nearest(__m512 v, void* data)
     _mm_store_ps(x, _mm_castsi128_ps(_mm256_cvtps_ph(d, _MM_FROUND_TO_NEAREST_INT)))
 
 #define INTV __m128i
+#elif defined(__NEON__)
+#define SIMD_STORE(a, d) vst1q_f32(a, d)
+#define SIMD_LOAD(x) vld1q_f32(x)
+#define SIMD_SET(x) vdupq_n_f32(x)
+#define SIMD_ADD(x, y) vaddq_f32(x, y)
+#define SIMD_MUL(x, y) vmulq_f32(x, y)
+// vfmaq accumulates into its first operand, while the x86 macros take the addend last.
+#define SIMD_FMA(x, y, c) vfmaq_f32(c, x, y)
+#define SIMD_SQRT(x) vsqrtq_f32(x)
+#define SIMD_DIV(x, y) vdivq_f32(x, y)
+#define SIMD_AND(x, y) \
+    vreinterpretq_f32_u32(vandq_u32(vreinterpretq_u32_f32(x), vreinterpretq_u32_f32(y)))
+// x86 andnot(x, y) computes ~x & y; NEON bic(a, b) computes a & ~b, so the operands swap.
+#define SIMD_ANDNOT(x, y) \
+    vreinterpretq_f32_u32(vbicq_u32(vreinterpretq_u32_f32(y), vreinterpretq_u32_f32(x)))
+#define SIMD_OR(x, y) \
+    vreinterpretq_f32_u32(vorrq_u32(vreinterpretq_u32_f32(x), vreinterpretq_u32_f32(y)))
+#define SIMD_XOR(x, y) \
+    vreinterpretq_f32_u32(veorq_u32(vreinterpretq_u32_f32(x), vreinterpretq_u32_f32(y)))
+#define SIMD_WIDTH 4
+
+static inline float32x4_t load_4_bf16_as_f32(const void* data)
+{
+    // bf16 is the high half of an fp32 pattern, so widen and shift into place.
+    uint16x4_t a = vld1_u16((const uint16_t*)data);
+    uint32x4_t b = vshlq_n_u32(vmovl_u16(a), 16);
+    return vreinterpretq_f32_u32(b);
+}
+
+static inline void store_4_f32_as_bf16_nearest(float32x4_t v, void* data)
+{
+    // Same round-to-nearest-even-with-nan-quieting flow as the AVX512 version above.
+    uint32x4_t u32 = vreinterpretq_u32_f32(v);
+
+    // uint32_t rounding_bias = ((U32 >> 16) & 1) + UINT32_C(0x7FFF);
+    uint32x4_t lsb = vandq_u32(vshrq_n_u32(u32, 16), vdupq_n_u32(1));
+    uint32x4_t rounding_bias = vaddq_u32(lsb, vdupq_n_u32(0x7fff));
+    // vaddhn keeps the high halves of the sums, which is exactly (u32 + bias) >> 16 narrowed.
+    uint16x4_t non_nan_res = vaddhn_u32(u32, rounding_bias);
+
+    // if ((x & 0x7fffffffU) > 0x7f800000U) the result is a quiet nan
+    uint32x4_t non_sign_bits = vandq_u32(u32, vdupq_n_u32(0x7fffffff));
+    uint16x4_t nan_mask = vmovn_u32(vcgtq_u32(non_sign_bits, vdupq_n_u32(0x7f800000)));
+    uint16x4_t res = vbsl_u16(nan_mask, vdup_n_u16(0x7fc0), non_nan_res);
+
+    vst1_u16((uint16_t*)data, res);
+}
+#define SIMD_LOAD_BF16(x) load_4_bf16_as_f32(x)
+#define SIMD_STORE_BF16(x, d) store_4_f32_as_bf16_nearest(d, x)
+
+#define SIMD_LOAD_FP16(x) vcvt_f32_f16(vld1_f16((const float16_t*)(x)))
+#define SIMD_STORE_FP16(x, d) vst1_f16((float16_t*)(x), vcvt_f16_f32(d))
+
+#define INTV uint16x4_t
 #endif
 
 union AVX_Data {
@@ -121,6 +179,8 @@ union AVX_Data {
     __m512 data;
 #elif defined(__AVX256__)
     __m256 data;
+#elif defined(__NEON__)
+    float32x4_t data;
 #endif
     // float data_f[16];
 };
@@ -138,7 +198,7 @@ template <int span, typename T>
 inline typename std::enable_if_t<std::is_same_v<T, c10::BFloat16>, void> simd_store(T* dst,
                                                                                     AVX_Data* src)
 {
-#ifdef __AVX512__
+#if defined(__AVX512__) or defined(__NEON__)
     size_t width = SIMD_WIDTH;
 #pragma unroll
     for (size_t i = 0; i < span; ++i) { SIMD_STORE_BF16((float*)(dst + width * i), src[i].data); }
@@ -168,7 +228,7 @@ template <int span, typename T>
 inline typename std::enable_if_t<std::is_same_v<T, c10::BFloat16>, void> simd_load(AVX_Data* dst,
                                                                                    T* src)
 {
-#ifdef __AVX512__
+#if defined(__AVX512__) or defined(__NEON__)
     size_t width = SIMD_WIDTH;
 #pragma unroll
     for (size_t i = 0; i < span; ++i) { dst[i].data = SIMD_LOAD_BF16((float*)(src + width * i)); }

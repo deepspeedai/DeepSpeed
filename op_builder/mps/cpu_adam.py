@@ -46,7 +46,7 @@ class CPUAdamBuilder(MPSOpBuilder):
             return None
 
     def cxx_args(self):
-        args = ['-O3', '-std=c++17', '-g', '-Wno-reorder', '-D__SCALAR__']
+        args = ['-O3', '-std=c++17', '-g', '-Wno-reorder', '-D__NEON__']
         libomp = self._libomp_prefix()
         if libomp is not None:
             args += ['-Xpreprocessor', '-fopenmp', f'-I{libomp}/include']
