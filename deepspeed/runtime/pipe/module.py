@@ -20,7 +20,7 @@ from ..activation_checkpointing import checkpointing
 from .topology import PipeDataParallelTopology, PipelineParallelGrid
 from deepspeed.runtime.state_dict_factory import SDLoaderFactory
 from deepspeed.accelerator import get_accelerator
-from deepspeed.checkpoint.utils import clone_tensors_for_torch_save
+from deepspeed.checkpoint.utils import clone_tensors_for_torch_save, natural_keys
 
 
 class PipelineError(Exception):
@@ -601,7 +601,8 @@ class PipelineModule(nn.Module):
         layer_ckpt_path = os.path.join(ckpt_dir, f'layer_{idx:02d}-')
         layer_ckpt_path += "*model_states.pt"
         ckpt_files = glob.glob(layer_ckpt_path)
-        ckpt_files.sort()
+        # Callers index this list by model-parallel rank, so it must be ordered numerically.
+        ckpt_files.sort(key=natural_keys)
         return ckpt_files
 
     def save_state_dict(self, save_dir, checkpoint_engine, exclude_frozen_params=False):
