@@ -932,6 +932,14 @@ class DeepSpeedEngine(Module):
             logger.debug("DeepSpeedEngine.__del__ cleanup skipped: %s", exc, exc_info=True)
 
     def destroy(self):
+        # DeepEP buffers ask the library not to reclaim them, so they outlive
+        # the engine unless something releases them here. Only this engine's
+        # own buffers: another engine in the same process still needs its own.
+        module = getattr(self, "module", None)
+        if module is not None:
+            from deepspeed.module_inject.auto_ep_comm import destroy_exchanges
+            destroy_exchanges(module)
+
         self._release_deepcompile_compiled_backward_state()
         self._release_deepcompile_dynamo_config()
         optimizer = getattr(self, "optimizer", None)
@@ -1915,7 +1923,7 @@ class DeepSpeedEngine(Module):
                     "DeepSpeed Sequence Parallelism (Ulysses) with PyTorch < 2.3 may encounter "
                     "rank indexing errors during backward pass when sp_size < world_size. "
                     "Please use the weighted all-reduce workaround shown in the regression test "
-                    "(https://github.com/deepspeedai/DeepSpeed/blob/master/tests/unit/sequence_parallelism/test_ulysses.py) "
+                    "(https://github.com/deepspeedai/DeepSpeed/blob/master/tests/unit/v1/sequence_parallelism/test_ulysses.py) "
                     "or upgrade to PyTorch 2.3+.")
             self.communication_data_type = self._config.seq_parallel_communication_data_type
             self.seq_parallel_group = groups._get_sequence_parallel_group()
