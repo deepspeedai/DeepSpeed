@@ -401,3 +401,51 @@ class TestTiledFusedLogitsLoss(DistributedTest):
 
         # restore
         MyModel.forward = MyModel.forward_orig
+
+
+@pytest.mark.parametrize("shards", [2, 4])
+class TestTiledFusedLogitsLossInputLayout:
+    """
+    Same caller contract as TestTiledMLPInputLayout, on the loss. TiledFusedLogitsLoss flattens batch and
+    sequence into one axis before sharding, and a transposed activation cannot be flattened by a view.
+    """
+
+    def make_model(self, hidden_dim, vocab_size, dtype):
+        model = Linear(hidden_dim, vocab_size, bias=False, dtype=dtype)
+        torch.nn.init.normal_(model.weight, std=0.02)
+        return model
+
+    @staticmethod
+    def loss_fn(model, x_shard, y_shard):
+        return torch.nn.functional.cross_entropy(model(x_shard), y_shard, reduction="sum")
+
+    def test_transposed_input_matches_a_contiguous_copy(self,
+                                                        shards,
+                                                        batch_size=2,
+                                                        seqlen=12,
+                                                        hidden_dim=16,
+                                                        vocab_size=32):
+        dtype = torch.float32
+        torch.manual_seed(0)
+        # [bs, hidden, seqlen] transposed into [bs, seqlen, hidden] keeps the original strides
+        source = torch.rand((batch_size, hidden_dim, seqlen), dtype=dtype)
+        strided = source.transpose(1, 2).detach().requires_grad_(True)
+        assert not strided.is_contiguous(), "input is contiguous, so it does not exercise the flattening"
+        contiguous = strided.detach().clone().contiguous().requires_grad_(True)
+        y = torch.randint(0, vocab_size, (batch_size, seqlen))
+
+        model = self.make_model(hidden_dim, vocab_size, dtype)
+        losses, param_grads = [], []
+        for x in (strided, contiguous):
+            model.zero_grad()
+            loss = TiledFusedLogitsLoss.apply(self.loss_fn, model, x, y, None, shards, list(model.parameters()), "sum")
+            # The backward scatters into a zeros_like of the same flattened activation, so the
+            # gradient path runs through the flatten under test as well as the forward.
+            loss.backward()
+            losses.append(loss)
+            param_grads.append([p.grad.detach().clone() for p in model.parameters()])
+
+        torch_assert_close(losses[0], losses[1])
+        torch_assert_close(strided.grad, contiguous.grad)
+        for grad_a, grad_b in zip(*param_grads):
+            torch_assert_close(grad_a, grad_b)

@@ -24,6 +24,7 @@ from deepspeed.utils.torch import required_torch_version
 class TestSimpleMoE(DistributedTest):
     world_size = 2
 
+    @pytest.mark.skipif(not get_accelerator().is_fp16_supported(), reason="fp16 is not supported on this accelerator")
     def test(self, zero_stage):
         if not required_torch_version(min_version=1.8):
             pytest.skip("DeepSpeed MoE tests need torch 1.8 or higher to run correctly")
@@ -66,6 +67,7 @@ class TestSimpleMoE(DistributedTest):
 class TestMoE(DistributedTest):
     world_size = 4
 
+    @pytest.mark.skipif(not get_accelerator().is_fp16_supported(), reason="fp16 is not supported on this accelerator")
     def test(self, ep_size, zero_stage, use_residual):
         if not required_torch_version(min_version=1.8):
             pytest.skip("DeepSpeed MoE tests need torch 1.8 or higher to run correctly")
@@ -164,6 +166,7 @@ class TestMoE(DistributedTest):
 class TestPRMoE(DistributedTest):
     world_size = 4
 
+    @pytest.mark.skipif(not get_accelerator().is_fp16_supported(), reason="fp16 is not supported on this accelerator")
     def test(self, ep_size, use_residual):
         if not required_torch_version(min_version=1.8):
             pytest.skip("DeepSpeed MoE tests need torch 1.8 or higher to run correctly")
