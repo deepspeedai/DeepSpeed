@@ -136,47 +136,17 @@ class DeepSpeedStaticLayer:
             self.keys.zero_()
             self.values.zero_()
 
-    def compact(self, active_indices: torch.Tensor) -> None:
-        """Move active cache rows to the front and update their positions.
-
-        Continuous batching retires requests from arbitrary rows. Copying the
-        survivors in one operation avoids in-place overlap when a later row is
-        moved into an earlier slot, while retaining the tensors' static
-        addresses for CUDA graph users.
-        """
-        if not self.is_initialized:
-            raise RuntimeError("cannot compact an uninitialized cache")
-        if not isinstance(active_indices, torch.Tensor) or active_indices.dim() != 1:
-            raise ValueError("active_indices must be a 1-D tensor")
-        active_indices = active_indices.to(device=self.keys.device, dtype=torch.long)
-        if active_indices.numel() > self.max_batch_size:
-            raise ValueError("active_indices exceeds the cache batch size")
-        if active_indices.numel() and ((active_indices < 0).any() or (active_indices >= self.max_batch_size).any()):
-            raise ValueError("active_indices contains an out-of-range row")
-        if active_indices.unique().numel() != active_indices.numel():
-            raise ValueError("active_indices must not contain duplicates")
-
-        count = active_indices.numel()
-        self._compact_rows(active_indices, count)
-        if self._write_position is not None and self._write_position.dim() == 1:
-            positions = self._write_position
-            if positions.numel() != self.max_batch_size:
-                raise ValueError("per-row write positions must match the cache batch size")
-            position_indices = active_indices.to(positions.device)
-            compacted = positions.index_select(0, position_indices).clone() if count else positions[:0]
-            self._write_position[:count].copy_(compacted)
-            if count < self.max_batch_size:
-                self._write_position[count:].fill_(-1)
-
     def _compact_rows(self, active_indices: torch.Tensor, count: int | None = None) -> None:
         """Compact only the row tensors; used by the multi-layer cache."""
         if count is None:
             count = active_indices.numel()
-        if count:
+        identity = torch.arange(count, device=active_indices.device, dtype=active_indices.dtype)
+        if count and not torch.equal(active_indices, identity):
             keys = self.keys.index_select(0, active_indices).clone()
             values = self.values.index_select(0, active_indices).clone()
             self.keys[:count].copy_(keys)
             self.values[:count].copy_(values)
+        # Clear retired rows so their stale KV cannot be observed after refill.
         if count < self.max_batch_size:
             self.keys[count:].zero_()
             self.values[count:].zero_()

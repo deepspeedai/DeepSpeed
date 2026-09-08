@@ -10,8 +10,8 @@ Two generation paths:
      Pre-allocates a StaticCache, captures the decode forward pass with a
      CUDA graph, and replays it for each decode step.  Eliminates kernel
      launch overhead.
-  3. **continuous batching**: an opt-in bounded greedy path selected through
-     ``SamplingConfig.continuous_batch_size``.
+  3. **continuous batching (experimental)**: an opt-in bounded greedy path
+     selected through ``SamplingConfig.continuous_batch_size``.
 """
 
 import time
@@ -246,12 +246,11 @@ class HybridEngineRollout(RolloutEngine):
 
     @torch.no_grad()
     def _generate_continuous(self, request, sampling, max_batch_size):
-        """Generate independent greedy requests in a continuously refilled batch.
+        """Generate independent greedy requests in an experimental continuous batch.
 
-        This first integration targets the OPSD prototype: every request has a
-        single prompt row and one greedy response. Completed rows retire
-        immediately and pending prompts prefill into the released rows before
-        the next decode step.
+        Continuous batching currently requires one prompt row per request and
+        greedy decoding. Completed rows retire immediately and pending prompts
+        prefill into the released rows before the next decode step.
         """
         original_request = request
         requests = tuple(
@@ -274,7 +273,8 @@ class HybridEngineRollout(RolloutEngine):
         if max_positions is not None and max_cache_len > max_positions:
             raise ValueError("continuous batching cache exceeds the model maximum position embeddings")
         if not getattr(module, "_supports_cache_class", False):
-            return self._generate_continuous_legacy(requests, sampling, max_batch_size)
+            raise ValueError("continuous batching requires a model with cache-class support; use the default "
+                             "generate() path or upgrade transformers")
 
         from transformers import StaticCache
         from deepspeed.utils.static_cache import DeepSpeedStaticCache
@@ -308,10 +308,13 @@ class HybridEngineRollout(RolloutEngine):
             keep_slots = torch.tensor(update.keep_slots, dtype=torch.long, device=device)
             survivor_count = keep_slots.numel()
             if survivor_count:
-                cache.compact(keep_slots)
-                survivor_attention = attention_mask.index_select(0, keep_slots).clone()
-                attention_mask.zero_()
-                attention_mask[:survivor_count].copy_(survivor_attention)
+                if update.retired:
+                    cache.compact(keep_slots)
+                    identity = torch.arange(survivor_count, dtype=torch.long, device=device)
+                    if not torch.equal(keep_slots, identity):
+                        survivor_attention = attention_mask.index_select(0, keep_slots).clone()
+                        attention_mask[:survivor_count].copy_(survivor_attention)
+                    attention_mask[survivor_count:].zero_()
             else:
                 cache.reset()
                 write_positions.fill_(-1)
@@ -325,6 +328,7 @@ class HybridEngineRollout(RolloutEngine):
                 update,
                 request_by_id,
                 attention_mask,
+                write_positions,
                 cache_position,
                 prompt_len,
                 model_dtype,
@@ -364,106 +368,6 @@ class HybridEngineRollout(RolloutEngine):
 
         return self._build_continuous_batch(original_request, responses)
 
-    def _generate_continuous_legacy(self, requests, sampling, max_batch_size):
-        """Continuous decode for Transformers models that return legacy KV tuples."""
-        module = self.engine.module
-        device = requests[0].prompt_ids.device
-        prompt_len = requests[0].prompt_ids.shape[1]
-        scheduler, request_by_id, responses = self._create_continuous_scheduler(requests, sampling, max_batch_size)
-        next_tokens = {}
-        attention_mask = None
-        past_key_values = None
-        update = scheduler.schedule()
-
-        while update.active:
-            survivor_count = len(update.keep_slots)
-            survivor_ids = update.active_ids[:survivor_count]
-            survivor_cache = None
-            survivor_attention = None
-            decoded_tokens = {}
-            if survivor_count:
-                keep_slots = torch.tensor(update.keep_slots, dtype=torch.long, device=device)
-                survivor_cache = self._select_legacy_cache_rows(past_key_values, keep_slots, attention_mask.shape[0])
-                survivor_attention = attention_mask.index_select(0, keep_slots)
-                decode_input = torch.cat([next_tokens[request_id] for request_id in survivor_ids], dim=0)
-                survivor_attention = torch.cat(
-                    (survivor_attention, torch.ones((survivor_count, 1), dtype=torch.long, device=device)), dim=1)
-                decode_output = self._call_model(
-                    module,
-                    decode_input,
-                    attention_mask=survivor_attention,
-                    past_key_values=survivor_cache,
-                    use_cache=True,
-                )
-                survivor_cache = decode_output.past_key_values
-                decoded = decode_output.logits[:, -1, :].argmax(dim=-1, keepdim=True)
-                decoded_tokens = dict(zip(survivor_ids, decoded.split(1, dim=0)))
-
-            admitted_cache, admitted_attention, admitted_tokens = self._legacy_prefill(module, update, request_by_id)
-            past_key_values, attention_mask = self._merge_legacy_cache(
-                survivor_cache,
-                survivor_attention,
-                admitted_cache,
-                admitted_attention,
-                prompt_len,
-            )
-            next_tokens = decoded_tokens | admitted_tokens
-            finished_ids = []
-            for request_id in update.active_ids:
-                token = next_tokens[request_id]
-                responses[request_id].append(token)
-                if self._is_eos(token):
-                    finished_ids.append(request_id)
-            update = scheduler.advance(finished_ids)
-
-        request = RolloutRequest(
-            torch.cat([request.prompt_ids for request in requests], dim=0),
-            torch.cat([request.prompt_attention_mask for request in requests], dim=0),
-        )
-        return self._build_continuous_batch(request, responses)
-
-    @staticmethod
-    def _create_continuous_scheduler(requests, sampling, max_batch_size):
-        scheduler = ContinuousBatchScheduler(max_batch_size, sampling.max_new_tokens)
-        request_by_id = {}
-        responses = {}
-        for request_id, request in enumerate(requests):
-            scheduler.submit(ContinuousBatchRequest(request_id))
-            request_by_id[request_id] = request
-            responses[request_id] = []
-        return scheduler, request_by_id, responses
-
-    def _legacy_prefill(self, module, update, request_by_id):
-        if not update.admitted:
-            return None, None, {}
-        admitted_ids = tuple(request.request_id for request in update.admitted)
-        prompt_ids = torch.cat([request_by_id[request_id].prompt_ids for request_id in admitted_ids], dim=0)
-        prompt_attention = torch.cat([request_by_id[request_id].prompt_attention_mask for request_id in admitted_ids],
-                                     dim=0)
-        output = self._call_model(module, prompt_ids, attention_mask=prompt_attention, use_cache=True)
-        tokens = output.logits[:, -1, :].argmax(dim=-1, keepdim=True)
-        return output.past_key_values, prompt_attention, dict(zip(admitted_ids, tokens.split(1, dim=0)))
-
-    @staticmethod
-    def _select_legacy_cache_rows(past_key_values, rows, logical_batch_size):
-        if logical_batch_size <= 0:
-            raise ValueError("logical batch size must be positive")
-        selected_cache = []
-        for keys, values in past_key_values:
-            if keys.shape[0] != values.shape[0]:
-                raise ValueError("legacy KV cache key/value batch dimensions must match")
-            cache_batch_size = keys.shape[0]
-            if cache_batch_size == logical_batch_size:
-                cache_rows = rows
-            elif cache_batch_size > logical_batch_size and cache_batch_size % logical_batch_size == 0:
-                heads_per_request = cache_batch_size // logical_batch_size
-                head_offsets = torch.arange(heads_per_request, device=rows.device)
-                cache_rows = (rows[:, None] * heads_per_request + head_offsets).reshape(-1)
-            else:
-                raise ValueError("cannot identify the logical batch dimension in the legacy KV cache")
-            selected_cache.append((keys.index_select(0, cache_rows), values.index_select(0, cache_rows)))
-        return tuple(selected_cache)
-
     @staticmethod
     def _estimate_continuous_cache_len(prompt_len, max_new_tokens, max_batch_size):
         """Estimate the largest cache span before the scheduler becomes empty."""
@@ -499,28 +403,6 @@ class HybridEngineRollout(RolloutEngine):
 
         return max_cache_len
 
-    @staticmethod
-    def _merge_legacy_cache(survivor_cache, survivor_attention, admitted_cache, admitted_attention, prompt_len):
-        if survivor_cache is None:
-            return admitted_cache, admitted_attention
-        if admitted_cache is None:
-            return survivor_cache, survivor_attention
-
-        cache_len = survivor_cache[0][0].shape[2]
-        left_padding = cache_len - prompt_len
-        padded_admitted = tuple((torch.nn.functional.pad(keys, (0, 0, left_padding, 0)),
-                                 torch.nn.functional.pad(values, (0, 0, left_padding, 0)))
-                                for keys, values in admitted_cache)
-        merged_cache = tuple(
-            (torch.cat((survivor_keys, admitted_keys), dim=0), torch.cat((survivor_values, admitted_values), dim=0))
-            for (survivor_keys, survivor_values), (admitted_keys,
-                                                   admitted_values) in zip(survivor_cache, padded_admitted))
-        admitted_padding = torch.zeros((admitted_attention.shape[0], left_padding),
-                                       dtype=admitted_attention.dtype,
-                                       device=admitted_attention.device)
-        padded_attention = torch.cat((admitted_padding, admitted_attention), dim=1)
-        return merged_cache, torch.cat((survivor_attention, padded_attention), dim=0)
-
     def _validate_continuous_inputs(self, requests, sampling, max_batch_size):
         if not requests:
             raise ValueError("continuous batching requires at least one request")
@@ -546,7 +428,7 @@ class HybridEngineRollout(RolloutEngine):
                 raise ValueError("continuous batching requests must use the same device")
 
     def _continuous_prefill(self, module, static_cache_type, cache, update, request_by_id, attention_mask,
-                            cache_position, prompt_len, model_dtype, device):
+                            write_positions, cache_position, prompt_len, model_dtype, device):
         if not update.admitted:
             return {}
 
@@ -573,7 +455,6 @@ class HybridEngineRollout(RolloutEngine):
                 target_layer.values[target_row, :, cache_start:cache_position].copy_(prefill_layer.values[source_row])
         for source_row, target_row in enumerate(update.admitted_slots):
             attention_mask[target_row, cache_start:cache_position].copy_(prompt_attention[source_row])
-            write_positions = cache._write_position
             write_positions[target_row] = cache_position
         return dict(zip(admitted_ids, prefill_tokens.split(1, dim=0)))
 

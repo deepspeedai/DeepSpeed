@@ -74,8 +74,8 @@ one token. It cannot be combined with CUDA graph capture or
 ``release_inference_cache``. Sampling still happens independently for every
 response branch after the shared prompt forward.
 
-Continuous-batching prototype
------------------------------
+Continuous batching (experimental)
+-----------------------------------
 
 Continuous batching is enabled through ``SamplingConfig.continuous_batch_size``
 on the regular ``HybridEngineRollout.generate(request, sampling)`` entry point.
@@ -84,11 +84,13 @@ value, at most that many prompt rows are active at once; completed rows retire
 and pending rows are prefetched into the released slots. The returned
 ``RolloutBatch`` remains in the original ``RolloutRequest`` row order.
 
-The prototype intentionally does not implement paged attention or change the
+The experimental path intentionally does not implement paged attention or change the
 default generation semantics. It currently requires one prompt width for all
-rows, greedy decoding, and one sample per prompt. CUDA Graph capture and
-multiple prompt widths are rejected until the scheduling semantics are
-validated on real workloads.
+rows, a model with cache-class support, greedy decoding, and one sample per
+prompt. CUDA Graph capture and multiple prompt widths are rejected until the
+scheduling semantics are validated on real workloads. Models without
+cache-class support should use the default ``generate()`` path or upgrade
+Transformers.
 
 ``DeepSpeedStaticCache`` accepts one write position per row and can compact
 active rows while preserving its static tensor addresses. This mirrors the

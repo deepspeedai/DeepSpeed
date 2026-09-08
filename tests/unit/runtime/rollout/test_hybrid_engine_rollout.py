@@ -96,16 +96,16 @@ def test_continuous_generation_rejects_unsupported_inputs():
         rollout.generate(request, SamplingConfig(max_new_tokens=2, temperature=0.5, continuous_batch_size=1))
 
 
-def test_static_cache_constructor_supports_legacy_batch_keyword():
+def test_static_cache_constructor_supports_max_batch_keyword():
 
-    class LegacyStaticCache:
+    class MaxBatchStaticCache:
 
         def __init__(self, config, max_batch_size, max_cache_len, device, dtype):
             self.config = config
             self.max_batch_size = max_batch_size
 
     config = SimpleNamespace(num_attention_heads=4)
-    cache = HybridEngineRollout._create_static_cache(LegacyStaticCache, config, 2, 8, "cpu", torch.float32)
+    cache = HybridEngineRollout._create_static_cache(MaxBatchStaticCache, config, 2, 8, "cpu", torch.float32)
 
     assert cache.max_batch_size == 2
     assert cache.config.num_key_value_heads == 4
@@ -116,17 +116,6 @@ def test_continuous_cache_span_does_not_sum_independent_requests():
 
     assert cache_len == 128
     assert cache_len < 64 + 64 * 100
-
-
-def test_select_legacy_cache_rows_expands_flattened_heads():
-    keys = torch.arange(2 * 4 * 3).reshape(2 * 4, 1, 3)
-    values = keys + 100
-    rows = torch.tensor([1])
-
-    selected = HybridEngineRollout._select_legacy_cache_rows(((keys, values), ), rows, logical_batch_size=2)
-
-    assert torch.equal(selected[0][0], keys[4:8])
-    assert torch.equal(selected[0][1], values[4:8])
 
 
 def test_continuous_generation_validates_each_request_length():
@@ -148,29 +137,58 @@ def test_continuous_generation_validates_each_request_length():
         rollout.generate(request, SamplingConfig(max_new_tokens=2, temperature=0, continuous_batch_size=1))
 
 
-def test_continuous_generation_refills_legacy_cache_batch():
+def test_continuous_generation_rejects_legacy_cache_model():
 
-    class LegacyCacheModel(torch.nn.Module):
-        _supports_cache_class = False
+    class LegacyModel(torch.nn.Module):
+
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.zeros(1))
+            self.config = SimpleNamespace(max_position_embeddings=32)
+
+    model = LegacyModel()
+    rollout = HybridEngineRollout(SimpleNamespace(module=model), SimpleNamespace(eos_token_id=None))
+    request = RolloutRequest(torch.tensor([[1, 2, 3]]), torch.ones((1, 3), dtype=torch.long))
+
+    with pytest.raises(ValueError, match="cache-class support"):
+        rollout.generate(request, SamplingConfig(max_new_tokens=2, temperature=0, continuous_batch_size=1))
+
+
+def test_continuous_generation_covers_modern_static_cache_path():
+
+    class CacheClassModel(torch.nn.Module):
+        _supports_cache_class = True
 
         def __init__(self):
             super().__init__()
             self.weight = torch.nn.Parameter(torch.zeros(1))
             self.calls = []
-            self.config = SimpleNamespace(max_position_embeddings=32)
 
-        def forward(self, input_ids, attention_mask, past_key_values=None, use_cache=True):
-            past_length = 0 if past_key_values is None else past_key_values[0][0].shape[2]
-            total_length = past_length + input_ids.shape[1]
-            assert attention_mask.shape == (input_ids.shape[0], total_length)
-            self.calls.append((input_ids.shape[0], input_ids.shape[1], past_length))
-            keys = torch.zeros((input_ids.shape[0], 1, total_length, 1))
+            class CacheConfig(SimpleNamespace):
+
+                def get_text_config(self, **_kwargs):
+                    return self
+
+            self.config = CacheConfig(
+                max_position_embeddings=32,
+                num_hidden_layers=1,
+                num_attention_heads=1,
+                num_key_value_heads=1,
+                hidden_size=1,
+                head_dim=1,
+            )
+
+        def forward(self, input_ids, attention_mask, past_key_values=None, use_cache=True, **kwargs):
+            key_states = input_ids[:, None, :, None].to(dtype=torch.float32)
+            _, cache_values = past_key_values.update(key_states, key_states, layer_idx=0, **kwargs)
+            cache_sums = cache_values[:, 0].sum(dim=(1, 2))
+            next_tokens = torch.where(cache_sums == 6, 2, 7).long()
+            self.calls.append((input_ids.shape[0], input_ids.shape[1]))
             logits = torch.zeros((input_ids.shape[0], input_ids.shape[1], 16))
-            for row, token in enumerate(input_ids[:, -1].tolist()):
-                logits[row, :, 2 if token == 3 else 7] = 1
-            return SimpleNamespace(logits=logits, past_key_values=((keys, keys.clone()), ))
+            logits.scatter_(2, next_tokens[:, None, None].expand(-1, input_ids.shape[1], 1), 1)
+            return SimpleNamespace(logits=logits, past_key_values=past_key_values)
 
-    model = LegacyCacheModel()
+    model = CacheClassModel()
     rollout = HybridEngineRollout(SimpleNamespace(module=model), SimpleNamespace(pad_token_id=0, eos_token_id=2))
     request = RolloutRequest(
         torch.tensor([[1, 2, 3], [1, 2, 4], [1, 2, 5]]),
@@ -183,8 +201,8 @@ def test_continuous_generation_refills_legacy_cache_batch():
     assert output.input_ids[:, 3:].tolist() == [[2, 0, 0], [7, 7, 7], [7, 7, 7]]
     assert output.attention_mask[:, 3:].tolist() == [[1, 0, 0], [1, 1, 1], [1, 1, 1]]
     assert output.response_start_idx.tolist() == [3, 3, 3]
-    assert model.calls[0] == (2, 3, 0)
-    assert (1, 3, 0) in model.calls
+    assert model.calls[0] == (2, 3)
+    assert (1, 3) in model.calls
 
 
 @patch("deepspeed.runtime.rollout.hybrid_engine_rollout.time.perf_counter")

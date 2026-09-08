@@ -1,4 +1,3 @@
-# Copyright (c) Microsoft Corporation.
 # SPDX-License-Identifier: Apache-2.0
 
 # DeepSpeed Team
@@ -41,6 +40,25 @@ def test_static_cache_compact_preserves_rows_and_positions():
 
     assert layer.keys[:2, 0, 0, 0].tolist() == [30.0, 10.0]
     assert cache.get_seq_length().item() == 4
+    assert layer.keys[2].abs().sum().item() == 0
+
+
+def test_static_cache_compact_identity_keeps_active_rows_and_clears_tail():
+    config = type("Config", (), {"num_hidden_layers": 1, "num_attention_heads": 1, "hidden_size": 2})()
+    cache = DeepSpeedStaticCache(config=config,
+                                 batch_size=3,
+                                 max_cache_len=4,
+                                 device=torch.device("cpu"),
+                                 dtype=torch.float32)
+    cache.set_write_position(torch.tensor([1, 2, 3], dtype=torch.long))
+    layer = cache.layers[0]
+    layer.keys[:, 0, 0, :] = torch.tensor([[10.0, 10.0], [20.0, 20.0], [30.0, 30.0]])
+    layer.values.copy_(layer.keys)
+
+    cache.compact(torch.tensor([0, 1], dtype=torch.long))
+
+    assert layer.keys[:2, 0, 0, 0].tolist() == [10.0, 20.0]
+    assert layer.get_seq_length().tolist() == [2, 3, 0]
     assert layer.keys[2].abs().sum().item() == 0
 
 
