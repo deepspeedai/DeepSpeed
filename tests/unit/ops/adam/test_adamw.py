@@ -14,8 +14,6 @@ from unit.common import DistributedTest
 from unit.simple_model import SimpleModel
 from deepspeed.accelerator import get_accelerator
 
-if torch.half not in get_accelerator().supported_dtypes():
-    pytest.skip(f"fp16 not supported, valid dtype: {get_accelerator().supported_dtypes()}", allow_module_level=True)
 # yapf: disable
 #'optimizer, zero_offload, torch_adam, adam_w_mode, resulting_optimizer
 adam_configs = [["AdamW", False, False, False, (FusedAdam, True)],
@@ -38,6 +36,10 @@ adam_configs = [["AdamW", False, False, False, (FusedAdam, True)],
 @pytest.mark.parametrize(
     'optimizer, zero_offload, torch_adam, adam_w_mode, resulting_optimizer',
     adam_configs)
+# Skipping at module level would also hide the dtype-parametrized reference test below, which is
+# what let the CPU adam_w_mode bug go unnoticed on runners without fp16 support.
+@pytest.mark.skipif(torch.half not in get_accelerator().supported_dtypes(),
+                    reason=f"fp16 not supported, valid dtype: {get_accelerator().supported_dtypes()}")
 class TestAdamConfigs(DistributedTest):
     world_size = 1
     reuse_dist_env = True

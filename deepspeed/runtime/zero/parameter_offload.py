@@ -62,7 +62,13 @@ class ZeROOrderedDict(OrderedDict):
         if param is None:
             return param
 
-        is_eager_forward = self._parent_module._parameters._in_forward and not torch.compiler.is_compiling()
+        # Dynamo traces this getter while lifting module parameters. The
+        # physical ZeRO status is intentionally volatile across compiled
+        # forwards and must not become a cache guard.
+        if torch.compiler.is_compiling():
+            return param
+
+        is_eager_forward = self._parent_module._parameters._in_forward
         fallback = None
         if hasattr(param, "ds_status") and is_eager_forward:
             from deepspeed.compile.z3_eager_fallback import get_active_z3_eager_fallback, is_dynamo_guard_evaluation

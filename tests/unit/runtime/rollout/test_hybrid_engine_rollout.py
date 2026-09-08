@@ -21,6 +21,7 @@ from deepspeed.runtime.rollout.hybrid_engine_rollout import (
     HybridEngineRollout,
     HybridEngineRolloutConfig,
 )
+from deepspeed.utils.static_cache import DeepSpeedStaticCache
 
 
 def _make_engine():
@@ -100,6 +101,10 @@ def test_generate_records_profile_when_enabled(mock_get_accelerator, mock_perf_c
     profile = rollout.get_last_profile()
     assert profile["prompt_expansion_ms"] == pytest.approx(1.0)
     assert profile["generation_ms"] == pytest.approx(10.0)
+    assert profile["prefill_forward_ms"] is None
+    assert profile["decode_forward_ms"] is None
+    assert profile["generation_overhead_ms"] == pytest.approx(10.0)
+    assert profile["num_decode_forwards"] == 0
     assert profile["post_processing_ms"] == pytest.approx(2.0)
     assert profile["total_ms"] == pytest.approx(13.0)
     assert profile["num_generated_tokens"] == 8
@@ -397,12 +402,15 @@ def test_sync_weights_is_noop():
 # -- generate dispatches correctly -------------------------------------
 
 
-def test_generate_calls_graph_capture_when_enabled():
+@patch("deepspeed.runtime.rollout.hybrid_engine_rollout.time.perf_counter")
+@patch("deepspeed.runtime.rollout.hybrid_engine_rollout.get_accelerator")
+def test_generate_calls_graph_capture_when_enabled(mock_get_accelerator, mock_perf_counter):
     engine = _make_engine()
     tok = _make_tokenizer()
-    cfg = HybridEngineRolloutConfig(use_graph_capture=True)
+    cfg = HybridEngineRolloutConfig(use_graph_capture=True, enable_profiling=True)
     rollout = HybridEngineRollout(engine, tok, cfg=cfg)
     rollout._generate_graph = MagicMock(return_value=torch.zeros(1, 5, dtype=torch.long))
+    mock_perf_counter.side_effect = [1.0, 1.001, 1.011, 1.013]
 
     req = MagicMock()
     req.prompt_ids = torch.tensor([[1, 2]])
@@ -414,3 +422,109 @@ def test_generate_calls_graph_capture_when_enabled():
 
     rollout.generate(req, sampling)
     rollout._generate_graph.assert_called_once()
+    profile = rollout.get_last_profile()
+    assert profile["prefill_forward_ms"] is None
+    assert profile["decode_forward_ms"] is None
+    assert profile["generation_overhead_ms"] == pytest.approx(10.0)
+    assert profile["num_decode_forwards"] == 0
+
+
+def test_generate_keeps_ranks_in_lockstep_and_pads_after_eos():
+    engine = _make_engine()
+    tok = _make_tokenizer()
+    rollout = HybridEngineRollout(engine, tok)
+    engine.module.generate.return_value = torch.tensor([[10, 11, 5, 2, 7, 8]])
+
+    req = MagicMock()
+    req.prompt_ids = torch.tensor([[10, 11]])
+    req.prompt_attention_mask = torch.ones(1, 2, dtype=torch.long)
+    sampling = MagicMock()
+    sampling.temperature = 0
+    sampling.n_samples_per_prompt = 1
+    sampling.max_new_tokens = 4
+    sampling.top_p = 1.0
+
+    result = rollout.generate(req, sampling)
+
+    assert engine.module.generate.call_args.kwargs['eos_token_id'] is None
+    assert result.input_ids.tolist() == [[10, 11, 5, 2, 0, 0]]
+    assert result.attention_mask.tolist() == [[1, 1, 1, 1, 0, 0]]
+
+
+def test_pad_after_eos_handles_different_lengths_and_missing_eos():
+    output_ids = torch.tensor([
+        [10, 11, 2, 7, 8, 9],
+        [10, 11, 5, 6, 2, 9],
+        [10, 11, 5, 6, 7, 8],
+    ])
+
+    padded, response_attn = HybridEngineRollout._pad_after_eos(output_ids, 2, eos_token_id=2, pad_token_id=0)
+
+    assert padded.tolist() == [
+        [10, 11, 2, 0, 0, 0],
+        [10, 11, 5, 6, 2, 0],
+        [10, 11, 5, 6, 7, 8],
+    ]
+    assert response_attn.tolist() == [
+        [1, 0, 0, 0],
+        [1, 1, 1, 0],
+        [1, 1, 1, 1],
+    ]
+
+
+def test_pad_after_eos_keeps_eos_attended_when_eos_is_pad():
+    output_ids = torch.tensor([[10, 11, 5, 2, 7, 8]])
+
+    padded, response_attn = HybridEngineRollout._pad_after_eos(output_ids, 2, eos_token_id=2, pad_token_id=2)
+
+    assert padded.tolist() == [[10, 11, 5, 2, 2, 2]]
+    assert response_attn.tolist() == [[1, 1, 0, 0]]
+
+
+def test_pad_after_eos_supports_multiple_eos_ids():
+    output_ids = torch.tensor([[10, 11, 5, 3, 7, 2]])
+
+    padded, response_attn = HybridEngineRollout._pad_after_eos(output_ids, 2, eos_token_id=[2, 3], pad_token_id=0)
+
+    assert padded.tolist() == [[10, 11, 5, 3, 0, 0]]
+    assert response_attn.tolist() == [[1, 1, 0, 0]]
+
+
+def test_generate_accepts_zero_pad_token_id():
+    engine = _make_engine()
+    tok = _make_tokenizer()
+    rollout = HybridEngineRollout(engine, tok)
+    engine.module.generate.return_value = torch.tensor([[10, 11, 5, 6]])
+
+    req = MagicMock()
+    req.prompt_ids = torch.tensor([[10, 11]])
+    req.prompt_attention_mask = torch.ones(1, 2, dtype=torch.long)
+    sampling = MagicMock(temperature=0, n_samples_per_prompt=1, max_new_tokens=2, top_p=1.0)
+
+    rollout.generate(req, sampling)
+
+    assert engine.module.generate.call_args.kwargs['pad_token_id'] == 0
+
+
+def _cache_config(head_dim=None):
+    config = SimpleNamespace(num_hidden_layers=2, hidden_size=64, num_attention_heads=4, num_key_value_heads=2)
+    if head_dim is not None:
+        config.head_dim = head_dim
+    return config
+
+
+def test_static_cache_preallocates_with_config_head_dim():
+    cache = DeepSpeedStaticCache(_cache_config(head_dim=32),
+                                 batch_size=1,
+                                 max_cache_len=8,
+                                 device="cpu",
+                                 dtype=torch.float32)
+
+    assert tuple(cache.layers[0].keys.shape) == (1, 2, 8, 32)
+    assert tuple(cache.layers[0].values.shape) == (1, 2, 8, 32)
+
+
+def test_static_cache_falls_back_to_derived_head_dim():
+    cache = DeepSpeedStaticCache(_cache_config(), batch_size=1, max_cache_len=8, device="cpu", dtype=torch.float32)
+
+    assert tuple(cache.layers[0].keys.shape) == (1, 2, 8, 16)

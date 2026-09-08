@@ -231,6 +231,52 @@ class TestTiledCompute(DistributedTest):
         torch_assert_close(x_grad_a, x_grad_c)
 
 
+@pytest.mark.parametrize("shards", [2, 4])
+@pytest.mark.parametrize("layout", ["transposed", "channel_slice"])
+class TestTiledMLPInputLayout:
+    """
+    A caller may hand TiledMLP an activation that is not contiguous: a transposed tensor, or a slice along the
+    hidden dimension of a wider one. The backward flattens batch and sequence into one axis, and for these
+    layouts that flattening needs a copy, so it must not be expressed as a view.
+    """
+
+    def make_input(self, layout, batch_size, seqlen, hidden_dim, dtype):
+        if layout == "transposed":
+            # [bs, hidden, seqlen] transposed into [bs, seqlen, hidden] keeps the original strides
+            source = torch.rand((batch_size, hidden_dim, seqlen), dtype=dtype)
+            x = source.transpose(1, 2)
+        else:
+            # a hidden-dimension slice of a wider activation keeps the wider row stride
+            source = torch.rand((batch_size, seqlen, hidden_dim * 2), dtype=dtype)
+            x = source[..., :hidden_dim]
+        assert not x.is_contiguous(), f"{layout} input is contiguous, so it does not exercise the flattening"
+        # detach preserves the strides and makes this a leaf, so x.grad is populated with the same layout
+        return x.detach().requires_grad_(True)
+
+    def test_tiled_mlp_accepts_a_non_contiguous_input(self, layout, shards, batch_size=2, seqlen=12, hidden_dim=16):
+        dtype = torch.float32
+        torch.manual_seed(42)
+        mlp = SimpleMLP(hidden_dim).to(dtype)
+        compute_params = [mlp.down_proj.weight, mlp.up_proj.weight]
+
+        x_tiled = self.make_input(layout, batch_size, seqlen, hidden_dim, dtype)
+        x_reference = x_tiled.clone().detach().requires_grad_(True)
+
+        output_tiled = TiledMLP.apply(mlp_forward_orig, mlp, x_tiled, shards, compute_params)
+        output_tiled.sum().backward()
+        grads_tiled = [p.grad.clone() for p in compute_params]
+        for p in compute_params:
+            p.grad = None
+
+        output_reference = mlp_forward_orig(mlp, x_reference)
+        output_reference.sum().backward()
+
+        torch_assert_close(output_tiled, output_reference)
+        torch_assert_close(x_tiled.grad, x_reference.grad)
+        for grad_tiled, param in zip(grads_tiled, compute_params):
+            torch_assert_close(grad_tiled, param.grad)
+
+
 @pytest.mark.parametrize("batch_size", [1, 2])
 @pytest.mark.parametrize("zero_stage", [2, 3])
 class TestTiledFusedLogitsLoss(DistributedTest):
@@ -355,3 +401,51 @@ class TestTiledFusedLogitsLoss(DistributedTest):
 
         # restore
         MyModel.forward = MyModel.forward_orig
+
+
+@pytest.mark.parametrize("shards", [2, 4])
+class TestTiledFusedLogitsLossInputLayout:
+    """
+    Same caller contract as TestTiledMLPInputLayout, on the loss. TiledFusedLogitsLoss flattens batch and
+    sequence into one axis before sharding, and a transposed activation cannot be flattened by a view.
+    """
+
+    def make_model(self, hidden_dim, vocab_size, dtype):
+        model = Linear(hidden_dim, vocab_size, bias=False, dtype=dtype)
+        torch.nn.init.normal_(model.weight, std=0.02)
+        return model
+
+    @staticmethod
+    def loss_fn(model, x_shard, y_shard):
+        return torch.nn.functional.cross_entropy(model(x_shard), y_shard, reduction="sum")
+
+    def test_transposed_input_matches_a_contiguous_copy(self,
+                                                        shards,
+                                                        batch_size=2,
+                                                        seqlen=12,
+                                                        hidden_dim=16,
+                                                        vocab_size=32):
+        dtype = torch.float32
+        torch.manual_seed(0)
+        # [bs, hidden, seqlen] transposed into [bs, seqlen, hidden] keeps the original strides
+        source = torch.rand((batch_size, hidden_dim, seqlen), dtype=dtype)
+        strided = source.transpose(1, 2).detach().requires_grad_(True)
+        assert not strided.is_contiguous(), "input is contiguous, so it does not exercise the flattening"
+        contiguous = strided.detach().clone().contiguous().requires_grad_(True)
+        y = torch.randint(0, vocab_size, (batch_size, seqlen))
+
+        model = self.make_model(hidden_dim, vocab_size, dtype)
+        losses, param_grads = [], []
+        for x in (strided, contiguous):
+            model.zero_grad()
+            loss = TiledFusedLogitsLoss.apply(self.loss_fn, model, x, y, None, shards, list(model.parameters()), "sum")
+            # The backward scatters into a zeros_like of the same flattened activation, so the
+            # gradient path runs through the flatten under test as well as the forward.
+            loss.backward()
+            losses.append(loss)
+            param_grads.append([p.grad.detach().clone() for p in model.parameters()])
+
+        torch_assert_close(losses[0], losses[1])
+        torch_assert_close(strided.grad, contiguous.grad)
+        for grad_a, grad_b in zip(*param_grads):
+            torch_assert_close(grad_a, grad_b)

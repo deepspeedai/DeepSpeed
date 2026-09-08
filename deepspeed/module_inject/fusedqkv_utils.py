@@ -4,7 +4,7 @@
 # DeepSpeed Team
 import torch
 from deepspeed.utils.logging import warning_once
-from deepspeed.module_inject.tp_shard import get_shard_size, get_shard_size_list, get_num_kv_heads, get_n_embd, get_num_attention_heads
+from deepspeed.module_inject.tp_shard import AutoTPMeta, get_shard_size, get_shard_size_list
 
 
 def split_by_qkvlist_and_refuse(qkv_list, split_size, split_dim=0, cat_dim=0):
@@ -51,7 +51,7 @@ def get_fused_qkv_type(module):
     return FUSED_QKV_TYPE_DICT[max(module_name_matches, key=len)]
 
 
-def fused_qkv_subparam_sizes(module, weight_shape):
+def fused_qkv_subparam_sizes(module, weight_shape, meta: AutoTPMeta):
     """Sizes of the sub-parameters a fused qkv weight is cut into, or None.
 
     ``prepare_tp_fused_qkvw`` splits most layouts into q/k/v (or a single block) and
@@ -68,15 +68,15 @@ def fused_qkv_subparam_sizes(module, weight_shape):
     if fused_type == 'bloomtype':
         return (total_size, )
     if fused_type in ('glmtype', 'qwentype'):
-        if get_num_kv_heads() == 2:
-            hidden_dim = get_n_embd()
-            kv_dim = (total_size - hidden_dim) // get_num_kv_heads()
+        if meta.num_kv_heads == 2:
+            hidden_dim = meta.n_embd
+            kv_dim = (total_size - hidden_dim) // meta.num_kv_heads
             return (hidden_dim, kv_dim, kv_dim)
         third = total_size // 3
         return (third, third, third)
     if fused_type == 'phi3type':
-        head_dim = weight_shape[1] // get_num_attention_heads()
-        kv_dim = get_num_kv_heads() * head_dim
+        head_dim = weight_shape[1] // meta.num_attention_heads
+        kv_dim = meta.num_kv_heads * head_dim
         return (total_size - 2 * kv_dim, kv_dim, kv_dim)
     # codegentype interleaves blocks across ranks and bigcodetype replicates the kv block,
     # so neither is a per-sub-parameter split.
@@ -102,79 +102,83 @@ def set_fused_qkv_shard_state(module, shard_widths, tp_index):
     module.attn.split_size = query_width
 
 
-def prepare_tp_fused_qkvw(module, src, mp_size, gpu_index):
+def prepare_tp_fused_qkvw(module, src, mp_size, gpu_index, meta: AutoTPMeta):
 
     if src is None:
         return
 
-    def _codegen_type_transpose(input, mp_size, codegen_mp_num=4):
+    def _codegen_type_transpose(input, mp_size, codegen_mp_num=4, meta=meta):
         # codegen_mp_num defined in https://github.com/huggingface/transformers/blob/main/src/transformers/models/codegen/modeling_codegen.py
-        assert get_num_kv_heads() % (
+        assert meta.num_kv_heads % (
             mp_size * codegen_mp_num) == 0, "codgen autoTP requires num_kv_heads % (mp_size*codegen_mp_num) == 0"
         #input : [3*hidden_dim, hidden_dim](weight) or [3*hidden_dim](bias)
 
         shape = input.shape
-        dst_shape = get_shard_size(shape[0], mp_size, rank=gpu_index)
+        dst_shape = get_shard_size(shape[0], mp_size, meta, rank=gpu_index)
         num_mp_blocks = input.reshape(codegen_mp_num, shape[0] // codegen_mp_num, shape[1])
 
         #num_mp_blocks : [codegen_mp_num, 3*hidden_dim/codegen_mp_num, :]
         src_split = list(torch.split(num_mp_blocks, num_mp_blocks.shape[1] // 3, dim=1))
         src_split = [x.reshape(codegen_mp_num * mp_size, -1, shape[1]) for x in src_split]
 
-        split_fusedqkv = split_by_qkvlist_and_refuse(src_split, get_shard_size(shape[0] // 3, mp_size, rank=gpu_index),
-                                                     0, 1)
+        split_fusedqkv = split_by_qkvlist_and_refuse(src_split,
+                                                     get_shard_size(shape[0] // 3, mp_size, meta, rank=gpu_index), 0,
+                                                     1)
         tp_fuseqkv_weight = torch.cat(split_fusedqkv, dim=0).reshape(shape[0], -1)
 
         return tp_fuseqkv_weight[gpu_index * dst_shape:(gpu_index + 1) * dst_shape]
 
-    def _glm_type_transpose(input, mp_size):
+    def _glm_type_transpose(input, mp_size, meta=meta):
         #input : [3*hidden_dim, hidden_dim](weight) or [3*hidden_dim](bias)
 
         # For chatglm2 & chatglm3(kv_heads=2), need to special handle.
-        if get_num_kv_heads() == 2:
+        if meta.num_kv_heads == 2:
             shape = input.shape
-            hidden_dim = get_n_embd()
-            kv_dim = (shape[0] - hidden_dim) // get_num_kv_heads()
+            hidden_dim = meta.n_embd
+            kv_dim = (shape[0] - hidden_dim) // meta.num_kv_heads
             q = input[:hidden_dim]
             k = input[hidden_dim:hidden_dim + kv_dim]
             v = input[hidden_dim + kv_dim:]
-            q_split = q.split(get_shard_size_list(q.shape[0], mp_size), dim=0)
-            k_split = k.split(get_shard_size_list(k.shape[0], mp_size), dim=0)
-            v_split = v.split(get_shard_size_list(v.shape[0], mp_size), dim=0)
+            q_split = q.split(get_shard_size_list(q.shape[0], mp_size, meta), dim=0)
+            k_split = k.split(get_shard_size_list(k.shape[0], mp_size, meta), dim=0)
+            v_split = v.split(get_shard_size_list(v.shape[0], mp_size, meta), dim=0)
             return torch.cat((q_split[gpu_index], k_split[gpu_index], v_split[gpu_index]), dim=0)
         else:
             shape = input.shape
             src_split = torch.split(input, shape[0] // 3, dim=0)
 
-            split_fusedqkv = split_by_qkvlist_and_refuse(src_split, get_shard_size_list(shape[0] // 3, mp_size))
+            split_fusedqkv = split_by_qkvlist_and_refuse(src_split, get_shard_size_list(shape[0] // 3, mp_size, meta))
             return split_fusedqkv[gpu_index]
 
-    def _bloom_type_transpose(input, mp_size):
+    def _bloom_type_transpose(input, mp_size, meta=meta):
         shape = input.shape
 
-        split_fusedqkv = input.split(get_shard_size_list(shape[0], mp_size), dim=0)
+        split_fusedqkv = input.split(get_shard_size_list(shape[0], mp_size, meta), dim=0)
         return split_fusedqkv[gpu_index]
 
-    def _bigcode_type_transpose(input, mp_size):
-        n_embd = get_n_embd()
+    def _bigcode_type_transpose(input, mp_size, meta=meta):
+        n_embd = meta.n_embd
+        # A missing hidden size would slice as input[:None], handing the whole fused weight to q
+        # and leaving kv empty rather than failing.
+        assert n_embd is not None
         q = input[:n_embd]
         kv = input[n_embd:]
         shape = q.shape
-        split_q = q.split(get_shard_size_list(shape[0], mp_size), dim=0)
+        split_q = q.split(get_shard_size_list(shape[0], mp_size, meta), dim=0)
         return torch.cat((split_q[gpu_index], kv), dim=0)
 
-    def _phi3_type_transpose(input, mp_size):
-        num_kv_heads = get_num_kv_heads()
-        num_heads = get_num_attention_heads()
+    def _phi3_type_transpose(input, mp_size, meta=meta):
+        num_kv_heads = meta.num_kv_heads
+        num_heads = meta.num_attention_heads
         hidden_size = input.shape[1]
         head_dim = hidden_size // num_heads
         q_pos = input.shape[0] - 2 * num_kv_heads * head_dim
         q = input[:q_pos]
         k = input[q_pos:q_pos + num_kv_heads * head_dim]
         v = input[q_pos + num_kv_heads * head_dim:]
-        split_q = q.split(get_shard_size_list(q.shape[0], mp_size), dim=0)
-        split_k = k.split(get_shard_size_list(k.shape[0], mp_size), dim=0)
-        split_v = v.split(get_shard_size_list(v.shape[0], mp_size), dim=0)
+        split_q = q.split(get_shard_size_list(q.shape[0], mp_size, meta), dim=0)
+        split_k = k.split(get_shard_size_list(k.shape[0], mp_size, meta), dim=0)
+        split_v = v.split(get_shard_size_list(v.shape[0], mp_size, meta), dim=0)
         return torch.cat((split_q[gpu_index], split_k[gpu_index], split_v[gpu_index]), dim=0)
 
     def _transpose_fused_qkvw(src, mp_size, fused_qkv_type=None, module=None):
@@ -216,15 +220,15 @@ def shard_value_with_share_qk(
         bias,
         rank,
         world_size,
-        shard_value=True  # True -> shard_value; False -> shard_oproj
-):
+        shard_value,  # True -> shard_value; False -> shard_oproj
+        meta: AutoTPMeta):
     if shard_value:
         total_size = weight.shape[0]
         weight_cat_dim = 0
     else:
         total_size = weight.shape[1]
         weight_cat_dim = 1
-    num_heads = get_num_kv_heads()
+    num_heads = meta.num_kv_heads
     head_dim = total_size // num_heads
     assert (num_heads % world_size == 0)
     if world_size > num_heads // 2:

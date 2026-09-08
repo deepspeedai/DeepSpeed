@@ -409,7 +409,10 @@ def clip_grad_norm_(parameters, max_norm, norm_type=2, mpu=None):
                 param_norm = p.grad.data.detach().float().norm(norm_type)
                 all_norms.append(param_norm)
         if len(all_norms) > 0:
-            total_norm = torch.stack(all_norms).square().sum().float()
+            # The p-norm over every gradient is (sum_i ||g_i||_p ** p) ** (1/p), and the
+            # 1/norm_type root is taken below, so each per-parameter norm has to be raised
+            # to norm_type here. Squaring only matches that for norm_type == 2.
+            total_norm = torch.stack(all_norms).pow(norm_type).sum().float()
         else:
             total_norm = get_accelerator().FloatTensor([0.0])
         total_norm = total_norm.to(get_accelerator().current_device_name())
