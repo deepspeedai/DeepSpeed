@@ -85,6 +85,33 @@ def _copy_parameter_data(target: nn.Parameter, source: torch.Tensor) -> None:
         target.data.copy_(source_data)
 
 
+def _copy_e_score_correction_bias(
+    target_router: nn.Module,
+    source_owner: nn.Module,
+    source_bias,
+    source_path: str,
+) -> None:
+    if isinstance(source_bias, nn.Parameter):
+        target_router.e_score_correction_bias = nn.Parameter(source_bias.data.clone(),
+                                                             requires_grad=source_bias.requires_grad)
+    elif (torch.is_tensor(source_bias) and source_owner._buffers.get("e_score_correction_bias") is source_bias):
+        copied_bias = source_bias.detach().clone()
+        copied_bias.requires_grad_(source_bias.requires_grad)
+        if hasattr(target_router, "e_score_correction_bias"):
+            delattr(target_router, "e_score_correction_bias")
+        persistent = "e_score_correction_bias" not in source_owner._non_persistent_buffers_set
+        target_router.register_buffer("e_score_correction_bias", copied_bias, persistent=persistent)
+    else:
+        logger.warning(
+            "AutoEP: cannot copy e_score_correction_bias from source module path '%s': expected "
+            "an nn.Parameter or registered buffer, got %s.", source_path or "<root>",
+            type(source_bias).__name__)
+        return
+
+    logger.info("AutoEP: copied e_score_correction_bias from source module path '%s' (shape=%s)", source_path
+                or "<root>", source_bias.shape)
+
+
 def apply_scores_before_experts_if_enabled(
     routed_input: torch.Tensor,
     top_scores: torch.Tensor,
@@ -398,7 +425,14 @@ class AutoEPMoELayer(nn.Module):
         # Router: copy gate weights from source
         source_gate = getattr(source_module, spec.router_name)
         source_gate_bias = getattr(source_gate, 'bias', None)
-        source_ecb = getattr(source_gate, 'e_score_correction_bias', None)
+        source_ecb_path = spec.e_score_correction_bias_path
+        if source_ecb_path is None:
+            source_ecb_owner = source_gate
+            source_ecb_path = spec.router_name
+        else:
+            source_ecb_owner = (source_module
+                                if source_ecb_path == "" else source_module.get_submodule(source_ecb_path))
+        source_ecb = getattr(source_ecb_owner, "e_score_correction_bias", None)
         unsupported_router_biases = [
             getattr(source_gate, bias_name, None) for bias_name in spec.unsupported_router_bias_names
         ]
@@ -434,11 +468,8 @@ class AutoEPMoELayer(nn.Module):
                 self.router.gate.bias.requires_grad_(source_gate_bias.requires_grad)
 
             # Copy pre-trained score correction bias (DeepSeek-V3/Moonlight noaux_tc routing)
-            if source_ecb is not None and isinstance(source_ecb, nn.Parameter):
-                self.router.e_score_correction_bias = nn.Parameter(source_ecb.data.clone(),
-                                                                   requires_grad=source_ecb.requires_grad)
-                logger.info('AutoEP: copied e_score_correction_bias from source gate '
-                            '(shape=%s)', source_ecb.shape)
+            if source_ecb is not None:
+                _copy_e_score_correction_bias(self.router, source_ecb_owner, source_ecb, source_ecb_path)
 
         # Alias router under the name OutputRecorder expects (layer_name if provided),
         # but only when OutputRecorder captures from the router child and the alias is safe.
