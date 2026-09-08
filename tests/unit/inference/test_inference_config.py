@@ -82,3 +82,27 @@ class TestInferenceConfig(DistributedTest):
             config = DeepSpeedInferenceConfig(moe=value)
             assert isinstance(config.moe, DeepSpeedMoEConfig)
             assert config.moe.enabled == value
+
+
+@pytest.mark.inference
+class TestInferenceConfigValidation:
+    """CPU-only validation tests for DeepSpeedInferenceConfig."""
+
+    def test_negative_max_out_tokens_rejected(self):
+        # Regression test for https://github.com/deepspeedai/DeepSpeed/issues/8339
+        from deepspeed.inference.config import DeepSpeedInferenceConfig
+
+        with pytest.raises(ValueError, match="max_out_tokens must be a positive integer"):
+            DeepSpeedInferenceConfig(max_out_tokens=-1)
+
+    def test_zero_max_out_tokens_rejected(self):
+        from deepspeed.inference.config import DeepSpeedInferenceConfig
+
+        with pytest.raises(ValueError, match="max_out_tokens must be a positive integer"):
+            DeepSpeedInferenceConfig(max_out_tokens=0)
+
+    def test_positive_max_out_tokens_accepted(self):
+        from deepspeed.inference.config import DeepSpeedInferenceConfig
+
+        config = DeepSpeedInferenceConfig(max_out_tokens=128)
+        assert config.max_out_tokens == 128
