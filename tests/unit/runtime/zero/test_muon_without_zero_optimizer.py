@@ -16,6 +16,7 @@ import pytest
 import torch
 
 import deepspeed
+from deepspeed.accelerator import get_accelerator
 import deepspeed.runtime.zero.muon.original_muon as original_muon
 from deepspeed.runtime.zero.utils import ZeRORuntimeException
 from unit.common import DistributedTest
@@ -75,6 +76,22 @@ def _config(stage, dtype="fp32"):
     return config
 
 
+def _skip_if_unsupported(dtype):
+    """Mirror the check the engine itself makes.
+
+    `_do_sanity_check` raises `Type fp16 is not supported on your device.` on
+    `not get_accelerator().is_fp16_supported()`, which is a different predicate from
+    `supported_dtypes()` -- the cpu-torch-latest runner reports fp16 in the latter and
+    False from the former, so guarding on the wrong one still fails there.
+    """
+    supported = {
+        "fp16": get_accelerator().is_fp16_supported,
+        "bf16": get_accelerator().is_bf16_supported,
+    }.get(dtype)
+    if supported is not None and not supported():
+        pytest.skip(f"{dtype} not supported on this accelerator")
+
+
 class TestMuonRunsWithoutAZeroOptimizer(DistributedTest):
     world_size = 1
 
@@ -85,6 +102,7 @@ class TestMuonRunsWithoutAZeroOptimizer(DistributedTest):
         Each hands `step` the weight itself rather than a flat partition, so nothing upstream has
         orthogonalized it. On master all three do zero orthogonalizations and train as SGD.
         """
+        _skip_if_unsupported(dtype)
         model = _model()
         engine, _, _, _ = deepspeed.initialize(model=model,
                                                model_parameters=model.parameters(),
@@ -141,6 +159,7 @@ class TestMuonRefusesBF16Optimizer(DistributedTest):
     world_size = 1
 
     def test_bf16_optimizer_with_muon_is_refused(self):
+        _skip_if_unsupported("bf16")
         model = _model()
         config = _config(1, "bf16")
         config["data_types"] = {"grad_accum_dtype": "fp32"}
@@ -150,6 +169,7 @@ class TestMuonRefusesBF16Optimizer(DistributedTest):
 
     def test_the_same_config_without_grad_accum_dtype_still_runs_muon(self):
         """The neighbouring config, so the refusal is shown to be narrow."""
+        _skip_if_unsupported("bf16")
         model = _model()
         engine, _, _, _ = deepspeed.initialize(model=model,
                                                model_parameters=model.parameters(),
