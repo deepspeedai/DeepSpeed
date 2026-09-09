@@ -13,7 +13,7 @@ from __future__ import annotations
 import math
 import re
 from collections import OrderedDict
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 import torch
 import torch.nn as nn
@@ -35,6 +35,9 @@ from deepspeed.module_inject.auto_ep_presets.registry import (
 from deepspeed.moe.fused_expert_layout import classify_fused_gate_up_layout
 from deepspeed.runtime.zero.utils import is_zero_param
 from deepspeed.utils import logger
+
+if TYPE_CHECKING:
+    from deepspeed.module_inject.auto_ep_layer import ReplacementSourceMap
 
 
 def _remove_transformers_output_capture_hooks(model: nn.Module) -> int:

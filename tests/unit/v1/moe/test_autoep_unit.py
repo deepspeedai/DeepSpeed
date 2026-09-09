@@ -1496,6 +1496,83 @@ class TestClientOptimizerRemap:
         after = [list(group["params"]) for group in optimizer.param_groups]
         assert after == before, "the optimizer was modified even though no module was replaced"
 
+    def test_populated_optimizer_state_raises_before_remap(self):
+        """Moment tensors cannot be transferred from arbitrary source layouts without an explicit
+        repacking contract. Refuse a resumed optimizer rather than silently resetting its experts.
+        """
+        model = MockMoETransformer()
+        optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
+        stale = model.model.layers[0].mlp.experts.gate_up_proj
+        optimizer.state[stale] = {
+            "step": torch.tensor(1.0),
+            "exp_avg": torch.ones_like(stale),
+            "exp_avg_sq": torch.ones_like(stale),
+        }
+        replacement_sources = _detach_moe_blocks(model)
+        before = [list(group["params"]) for group in optimizer.param_groups]
+
+        with pytest.raises(RuntimeError, match="restore a checkpoint.*after initialization"):
+            _remap(optimizer, model, replacement_sources)
+
+        assert optimizer.state[stale]["step"] == 1
+        assert [list(group["params"]) for group in optimizer.param_groups] == before
+
+    @pytest.mark.parametrize("grouped", [False, True])
+    def test_eager_model_parameters_are_remapped(self, grouped):
+        """Config-built and callable optimizers receive ``model_parameters`` only after AutoEP.
+        An eager flat or grouped list therefore needs the same source-to-replacement mapping as an
+        already-instantiated optimizer.
+        """
+        model = MockMoETransformer()
+        named = list(model.named_parameters())
+        if grouped:
+            model_parameters = [{
+                "params": (p for name, p in named if name.endswith("bias")),
+                "weight_decay": 0.0,
+            }, {
+                "params": (p for name, p in named if not name.endswith("bias")),
+                "weight_decay": 0.1,
+            }]
+        else:
+            model_parameters = [p for _, p in named]
+
+        if grouped:
+            for group in model_parameters:
+                group["params"] = list(group["params"])
+        assert ds_engine._model_parameters_need_remap(model_parameters)
+        replacement_sources = _detach_moe_blocks(model)
+        ds_engine._remap_model_parameters_after_module_replacement(model_parameters, model, replacement_sources)
+
+        groups = model_parameters if grouped else [{"params": model_parameters}]
+        owned = {id(p) for group in groups for p in group["params"]}
+        live = {id(p) for p in model.parameters()}
+        assert not owned - live, "eager model_parameters retained parameters AutoEP detached"
+        assert not live - owned, "eager model_parameters omitted live replacement parameters"
+
+        optimizer = torch.optim.AdamW(model_parameters, lr=1e-3)
+        replacement = next(p for name, p in model.named_parameters() if ".router." in name)
+        before = replacement.detach().clone()
+        replacement.grad = torch.ones_like(replacement)
+        optimizer.step()
+        assert not torch.equal(replacement, before), "a remapped replacement parameter did not update"
+
+    @pytest.mark.parametrize("grouped", [False, True])
+    def test_lazy_model_parameters_stay_lazy_until_after_replacements(self, grouped):
+        """AutoTP runs after AutoEP and may replace more parameter identities. Do not consume a
+        canonical lazy iterable early just to service the AutoEP remap.
+        """
+        model = MockMoETransformer()
+        lazy = model.parameters()
+        model_parameters = [{"params": lazy}] if grouped else lazy
+        assert not ds_engine._model_parameters_need_remap(model_parameters)
+
+        old = model.lm_head.weight
+        model.lm_head = nn.Linear(old.shape[1], old.shape[0], bias=False)
+        current = model.lm_head.weight
+        consumed = list(model_parameters[0]["params"] if grouped else model_parameters)
+        assert any(p is current for p in consumed)
+        assert all(p is not old for p in consumed)
+
     def test_optimizer_over_a_superset_of_the_model_is_untouched(self):
         """AutoEP off, and the optimizer holds a parameter that is not in the model.
 

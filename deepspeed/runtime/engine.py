@@ -9,7 +9,7 @@ import stat
 import torch
 import hashlib
 import logging
-from collections import Counter, defaultdict, OrderedDict, deque
+from collections import defaultdict, OrderedDict, deque
 from shutil import copyfile
 import gc
 
@@ -253,6 +253,29 @@ def _client_optimizer_needs_remap(optimizer):
     return optimizer is not None and hasattr(optimizer, "param_groups")
 
 
+def _model_parameters_need_remap(model_parameters):
+    """Whether caller-supplied parameters were materialized before module replacement.
+
+    A lazy iterable remains valid because the engine consumes it after AutoEP and AutoTP have
+    replaced modules. Consuming it here would make it stale for later replacements. Flat lists and
+    optimizer-style groups whose ``params`` values are lists already hold concrete identities and
+    need the AutoEP source-aware remap.
+    """
+    if not isinstance(model_parameters, list):
+        return False
+    if model_parameters and isinstance(model_parameters[0], dict):
+        return all(isinstance(group.get("params"), list) for group in model_parameters)
+    return True
+
+
+def _model_parameter_groups(model_parameters):
+    if model_parameters is None:
+        return None
+    if model_parameters and isinstance(model_parameters[0], dict):
+        return model_parameters
+    return [{"params": model_parameters}]
+
+
 def _resolve_replacement_param_groups(missing, replacement_sources, param_groups):
     """Pick the param group each replacement parameter belongs to.
 
@@ -297,6 +320,48 @@ def _resolve_replacement_param_groups(missing, replacement_sources, param_groups
     return placement, unoptimized
 
 
+def _remap_param_groups_after_module_replacement(param_groups, model, replacement_sources):
+    """Replace stale parameters in optimizer-style groups and return remap counts."""
+    if not replacement_sources:
+        return 0, 0, 0
+
+    live = {id(p): p for p in model.parameters()}
+    sources = replacement_sources.sources
+    discarded = replacement_sources.discarded
+
+    def _was_replaced(param):
+        return id(param) in discarded and id(param) not in live
+
+    stale = 0
+    owned = set()
+    for group in param_groups:
+        for param in group["params"]:
+            owned.add(id(param))
+            if _was_replaced(param):
+                stale += 1
+    if not stale:
+        return 0, 0, 0
+
+    missing = [p for p in live.values() if id(p) not in owned and id(p) in sources]
+    placement, unoptimized = _resolve_replacement_param_groups(missing, sources, param_groups)
+    missing = [p for p in missing if id(p) in placement]
+
+    for group in param_groups:
+        group["params"][:] = [p for p in group["params"] if not _was_replaced(p)]
+    for param in missing:
+        param_groups[placement[id(param)]]["params"].append(param)
+
+    return stale, len(missing), unoptimized
+
+
+def _remap_model_parameters_after_module_replacement(model_parameters, model, replacement_sources):
+    """Re-point eagerly materialized ``model_parameters`` at replacement parameters."""
+    param_groups = _model_parameter_groups(model_parameters)
+    if param_groups is None:
+        return
+    _remap_param_groups_after_module_replacement(param_groups, model, replacement_sources)
+
+
 def _remap_client_optimizer_after_module_replacement(optimizer, model, replacement_sources):
     """Re-point a caller-supplied optimizer at the post-replacement parameters.
 
@@ -338,46 +403,34 @@ def _remap_client_optimizer_after_module_replacement(optimizer, model, replaceme
     if not replacement_sources:
         return  # nothing was replaced: leave the caller's optimizer exactly as it was
 
-    live = {id(p): p for p in model.parameters()}
     param_groups = optimizer.param_groups
-    sources = replacement_sources.sources
     discarded = replacement_sources.discarded
+    live = {id(p) for p in model.parameters()}
 
     def _was_replaced(param):
         return id(param) in discarded and id(param) not in live
 
-    stale = 0
-    owned = set()
-    for group in param_groups:
-        for param in group["params"]:
-            owned.add(id(param))
-            if _was_replaced(param):
-                stale += 1
-    if not stale:
-        return  # nothing this optimizer holds was replaced
-
-    missing = [p for p in live.values() if id(p) not in owned and id(p) in sources]
-    placement, unoptimized = _resolve_replacement_param_groups(missing, sources, param_groups)
-    missing = [p for p in missing if id(p) in placement]
-
-    for group in param_groups:
-        group["params"] = [p for p in group["params"] if not _was_replaced(p)]
-    for param in missing:
-        param_groups[placement[id(param)]]["params"].append(param)
-
-    # Adam/AdamW key their state dict on the parameter object; stale entries would leak.
     state = getattr(optimizer, "state", None)
     if state is not None:
-        for param in [p for p in list(state.keys()) if _was_replaced(p)]:
+        populated = [p for p, value in state.items() if _was_replaced(p) and value]
+        if populated:
+            raise RuntimeError("Module replacement (AutoEP) cannot preserve already-populated optimizer state for "
+                               f"{len(populated)} replaced parameter(s). Pass an optimizer with empty state and "
+                               "restore a checkpoint created from the post-replacement layout after initialization.")
+
+    stale, added, unoptimized = _remap_param_groups_after_module_replacement(param_groups, model, replacement_sources)
+    if not stale:
+        return
+
+    # Empty state entries for detached parameters are safe to discard.
+    if state is not None:
+        for param in [p for p in list(state) if _was_replaced(p)]:
             del state[param]
 
-    added_per_group = Counter(placement.values())
-    added_summary = ", ".join(f"{count} to group {gi}" for gi, count in sorted(added_per_group.items()))
     logger.info(
         "Remapped client optimizer after module replacement: dropped %d stale parameter(s), "
-        "added %d replacement parameter(s) (%s), left %d replacement parameter(s) unoptimized "
-        "because none of their sources were in this optimizer.", stale, len(missing), added_summary or "none",
-        unoptimized)
+        "added %d replacement parameter(s), left %d replacement parameter(s) unoptimized "
+        "because none of their sources were in this optimizer.", stale, added, unoptimized)
 
 
 def _checkpoint_parallel_metadata(mpu):
@@ -549,8 +602,12 @@ class DeepSpeedEngine(Module):
         self._do_sanity_check()
         if self.log_level() is not None:
             set_log_level_from_string(self.log_level())
-        autoep_replacement_sources = self._configure_expert_parallel(model)
+        eager_model_parameters = _model_parameters_need_remap(model_parameters)
+        autoep_replacement_sources = self._configure_expert_parallel(
+            model, collect_sources=_client_optimizer_needs_remap(self.client_optimizer) or eager_model_parameters)
         _remap_client_optimizer_after_module_replacement(self.client_optimizer, model, autoep_replacement_sources)
+        if eager_model_parameters:
+            _remap_model_parameters_after_module_replacement(model_parameters, model, autoep_replacement_sources)
         # Only the remap needs it. Keeping it would reference the discarded pre-shard expert
         # weights for the rest of __init__, which is where ZeRO partitioning allocates.
         del autoep_replacement_sources
@@ -617,7 +674,8 @@ class DeepSpeedEngine(Module):
         if model_parameters is None:
             model_parameters = self.module.parameters()
 
-        # Convert model parameters from generator to list
+        # Explicit parameters were materialized before any module replacement; the default
+        # module generator is materialized here, after replacement.
         if not isinstance(model_parameters, list):
             model_parameters = list(model_parameters)
 
@@ -792,7 +850,7 @@ class DeepSpeedEngine(Module):
                 else:
                     p.ds_offload = False
 
-    def _configure_expert_parallel(self, model):
+    def _configure_expert_parallel(self, model, collect_sources=None):
         """Initialize AutoEP: detect MoE layers, create EP groups, replace with EP-enabled layers."""
         from deepspeed.module_inject.auto_ep_layer import ReplacementSourceMap
 
@@ -873,7 +931,8 @@ class DeepSpeedEngine(Module):
                 specs,
                 ep_size=ep_size,
                 ep_rank=ep_rank,
-                collect_sources=_client_optimizer_needs_remap(self.client_optimizer),
+                collect_sources=(_client_optimizer_needs_remap(self.client_optimizer)
+                                 if collect_sources is None else collect_sources),
             )
             logger.info(f"AutoEP: replaced {len(specs)} MoE layer(s) with ep_size={ep_size}")
 
