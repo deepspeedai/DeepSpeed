@@ -8,6 +8,7 @@ from deepspeed.utils import logger
 try:
     from deepspeed.runtime.zero.muon.original_muon import MuonWithAuxAdam as BaseMuonWithAuxAdam
     from deepspeed.runtime.zero.muon.original_muon import adam_update
+    from deepspeed.runtime.zero.muon.original_muon import muon_update
 except ImportError:
     pass
 
@@ -60,11 +61,27 @@ class MuonWithAuxAdam(BaseMuonWithAuxAdam):
                 loss = closure()
         for group in self.param_groups:
             if group["use_muon"]:
-                # we move the muon update part to the deepspeed's optimizer since the parameter here is a flat version
-                # thus not suitable for muon update
                 for p in group["params"]:
+                    if p.grad is None:
+                        p.grad = torch.zeros_like(p)  # force synchronization
+                    if p.dim() < 2:
+                        # A flat ZeRO partition. ZeRO 1/2 orthogonalizes in get_flat_partition and
+                        # ZeRO-3 in its sub-group loop, so the gradient already holds the update
+                        # and only the weight decay and step size are left to apply.
+                        update = p.grad
+                    else:
+                        # The weight itself, so nothing has orthogonalized it: no ZeRO optimizer is
+                        # in play. Muon has to run here or the step degenerates to SGD.
+                        state = self.state[p]
+                        if len(state) == 0:
+                            state["momentum_buffer"] = torch.zeros_like(p)
+                        update = muon_update(p.grad,
+                                             state["momentum_buffer"],
+                                             beta=group["momentum"],
+                                             ns_method=group.get("ns_method", "gram"),
+                                             is_expert_group=getattr(p, "is_expert_group", False))
                     p.mul_(1 - group["lr"] * group["weight_decay"])
-                    p.add_(p.grad.reshape(p.shape), alpha=-group["lr"])
+                    p.add_(update.reshape(p.shape), alpha=-group["lr"])
 
         aux_param_groups = [group for group in self.param_groups if not group["use_muon"]]
         if self.aux_optimizer is not None:
