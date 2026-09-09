@@ -137,7 +137,7 @@ class ZenFlowZeroOptimizer(DeepSpeedZeroOptimizer):
             self.update_interval = int(zenflow_config.update_interval)
 
         if self.select_strategy == 'epoch':
-            if zenflow_config.steps_per_epoch is not None:
+            if zenflow_config.steps_per_epoch:
                 self.select_interval = self.select_interval * zenflow_config.steps_per_epoch
             else:
                 # 0 makes is_zenflow_select_boundary() true exactly once, so the

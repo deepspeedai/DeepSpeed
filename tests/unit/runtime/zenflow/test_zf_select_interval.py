@@ -89,6 +89,41 @@ def test_no_epoch_length_selects_once_and_says_so(select_strategy, select_interv
     assert any("never re-selected" in record.getMessage() for record in caplog.records)
 
 
+@pytest.mark.parametrize("steps_per_epoch", [0, -5])
+def test_a_non_positive_epoch_length_is_refused(steps_per_epoch):
+    """Reported by @ebarkhordar on #8456.
+
+    0 multiplies select_interval straight to 0, which is_zenflow_select_boundary
+    reads as "never re-select" -- the state the warning exists to announce, reached
+    silently through the knob that documents it, because the warning only fires in
+    the None branch. -5 is worse: select_interval stays negative and
+    `micro_step % -5` fires on a schedule nobody asked for, 8 times in 40 steps.
+
+    validate_fields already rejects an update_interval below 1 one field away.
+    """
+    with pytest.raises(ValueError, match="steps_per_epoch"):
+        ZenFlowConfig(select_strategy="auto",
+                      select_interval="auto",
+                      update_interval="auto",
+                      steps_per_epoch=steps_per_epoch)
+
+
+def test_an_empty_dataloader_warns_rather_than_selecting_once_in_silence(caplog):
+    """The programmatic path to the same 0: len(dataloader) == 0.
+
+    configure_zenflow fills steps_per_epoch from the dataloader it owns, and the
+    config validator never sees that assignment.
+    """
+    config = ZenFlowConfig(select_strategy="auto", select_interval="auto", update_interval="auto")
+    engine = _StubEngine(config, training_dataloader=_Loader(0))
+
+    with caplog.at_level("WARNING"):
+        configure_zenflow(engine)
+
+    assert engine.select_interval == 0
+    assert any("never re-selected" in record.getMessage() for record in caplog.records)
+
+
 def test_step_strategy_needs_no_epoch_length():
     config = ZenFlowConfig(select_strategy="step", select_interval=10, update_interval="auto")
     engine = _StubEngine(config, training_dataloader=None)

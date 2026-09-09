@@ -65,6 +65,15 @@ class ZenFlowConfig(DeepSpeedConfigModel):
         if isinstance(self.update_interval, int) and self.update_interval < 1:
             raise ValueError("If update_interval is a number, it must be at least 1")
 
+        # 0 would multiply select_interval straight to 0, which
+        # is_zenflow_select_boundary reads as "never re-select" -- the state the
+        # warning in configure_zenflow exists to announce, reached silently
+        # through the knob that documents it. A negative value is worse: it
+        # leaves select_interval negative, and micro_step % -n fires on a
+        # schedule nobody asked for.
+        if self.steps_per_epoch is not None and self.steps_per_epoch < 1:
+            raise ValueError("If steps_per_epoch is set, it must be at least 1")
+
         if not isinstance(self.full_warm_up_rounds, int):
             raise ValueError('full_warm_up_rounds must be an integer')
 

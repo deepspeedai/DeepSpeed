@@ -48,7 +48,7 @@ def configure_zenflow(optimizer_z3, zenflow_config):
         optimizer_z3.update_interval = int(zenflow_config.update_interval)
 
     if optimizer_z3.select_strategy == 'epoch':
-        if zenflow_config.steps_per_epoch is not None:
+        if zenflow_config.steps_per_epoch:
             optimizer_z3.select_interval = optimizer_z3.select_interval * zenflow_config.steps_per_epoch
         else:
             logger.warning("ZenFlow: select_strategy resolves to 'epoch', but the number of steps in an "

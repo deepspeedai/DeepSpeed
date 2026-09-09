@@ -56,9 +56,14 @@ def configure_zenflow(engine: "DeepSpeedEngine") -> None:
     if select_strategy == 'epoch':
         # `steps_per_epoch` may already be set by the user; otherwise it can only
         # come from a dataloader DeepSpeed owns.
-        if zenflow_config.steps_per_epoch is None and engine.training_dataloader is not None:
-            zenflow_config.steps_per_epoch = len(engine.training_dataloader)
-        if zenflow_config.steps_per_epoch is not None:
+        if not zenflow_config.steps_per_epoch and engine.training_dataloader is not None:
+            # An empty dataloader would assign 0, which the config validator now
+            # rejects on assignment -- and a crash is the wrong answer for a
+            # degenerate-but-legal dataloader. Fall through to the warning.
+            epoch_steps = len(engine.training_dataloader)
+            if epoch_steps > 0:
+                zenflow_config.steps_per_epoch = epoch_steps
+        if zenflow_config.steps_per_epoch:
             engine.select_interval = engine.select_interval * zenflow_config.steps_per_epoch
         else:
             # is_zenflow_select_boundary() treats 0 as "never again", so this
