@@ -422,7 +422,7 @@ def scatter(tensor,
 @timed_op
 def barrier(group=None, async_op=False, device_ids=None, prof=False, log_name='barrier', debug=get_caller_func()):
     global cdb
-    return cdb.barrier(group=group, async_op=async_op)
+    return cdb.barrier(group=group, async_op=async_op, device_ids=device_ids)
 
 
 @timed_op

@@ -896,7 +896,7 @@ class CUDAOpBuilder(OpBuilder):
 
             cuda_major, cuda_minor = installed_cuda_version()
             if cuda_major > 10:
-                if cuda_major == 12 and cuda_minor >= 5:
+                if (cuda_major == 12 and cuda_minor >= 5) or cuda_major >= 13:
                     std_lib = '-std=c++20'
                 else:
                     std_lib = '-std=c++17'

@@ -7,11 +7,13 @@ import pytest
 import torch
 import torch.nn.functional as F
 import deepspeed.comm as dist
+from deepspeed.accelerator import get_accelerator
 from deepspeed import initialize
 import deepspeed.runtime.sequence_parallel.parallel_state_sp as sp_mpu
 from transformers import AutoModel
 from unit.common import DistributedTest
-from deepspeed.sequence.layer import _SeqAllToAll, _generate_layout_params, post_all2all, pre_all2all_fun
+from deepspeed.sequence.layer import (DistributedAttention, _SeqAllToAll, _generate_layout_params, post_all2all,
+                                      pre_all2all_fun, single_all_to_all)
 from deepspeed.sequence.fpdt_layer import _FPDTGPUOffloadingAttentionImpl_, FPDT_InputConstruct
 from unit.util import skip_on_arch
 from unit.simple_model import *
@@ -256,7 +258,7 @@ class TestUlyssesAll2All_odd(DistributedTest):
 
             ### first all2all: sequence parallel to head parallel
             s2h_tensor = _SeqAllToAll.apply(ds_engine.seq_parallel_group, input_tensor, scatter_idx, gather_idx,
-                                            batch_dim_idx)
+                                            batch_dim_idx, None, None, None, True, num_heads)
 
             # s2h_tensor check for the first all2all: compare with the expected ground truth
             d0_indices = torch.arange(s2h_tensor.shape[0]).reshape(-1, 1, 1, 1)
@@ -271,8 +273,10 @@ class TestUlyssesAll2All_odd(DistributedTest):
                                   s2h_tensor), f"s2h_tensor differs from the expected for sequence dim: {seq_dim}"
             #No op
             ### second all2all: head parallel to sequence parallel
+            # The gather direction cannot read an uneven count off an already-sharded tensor,
+            # so this call site supplies it too.
             h2s_tensor = _SeqAllToAll.apply(ds_engine.seq_parallel_group, s2h_tensor, gather_idx, scatter_idx,
-                                            batch_dim_idx)
+                                            batch_dim_idx, None, None, None, True, num_heads)
             print(
                 f'[{dist.get_rank()}] s={seq_dim} input: {input_tensor.shape} s2h: {s2h_tensor.shape} h2s_tensor: {h2s_tensor.shape}'
             )
@@ -433,3 +437,115 @@ class TestUlyssesLossBackward(DistributedTest):
         expected_grad = 0.5
         assert torch.allclose(local_loss.grad, torch.tensor(expected_grad, device=ds_engine.device)), \
             f"Gradient mismatch! Expected {expected_grad}, got {local_loss.grad}"
+
+
+class _RecordingAttention(torch.nn.Module):
+    """Stands in for the local attention and records the head shard it was handed."""
+
+    def __init__(self):
+        super().__init__()
+        self.head_ids = None
+
+    def forward(self, query, key, value, *args, **kwargs):
+        # Each head carries its own global index, so the shard is readable off the tensor.
+        self.head_ids = sorted({int(v) for v in query[0, 0, :, 0].tolist()})
+        # Fold the query heads onto the kv width the way GQA groups them, so the output is the
+        # shape the reverse all-to-all expects and all three inputs carry a gradient.
+        group_size = query.shape[2] // value.shape[2]
+        grouped_query = query.view(*query.shape[:2], value.shape[2], group_size, query.shape[3]).mean(dim=3)
+        return grouped_query + key + value
+
+
+class TestUlyssesKVHeadCount(DistributedTest):
+    """The count the uneven all-to-all splits against is threaded per call (#8291).
+
+    It used to sit in a process-wide slot memoized on the first uneven all-to-all, so the first
+    model to take that path decided how every later one was sharded.
+    """
+    world_size = 2
+    LOCAL_SEQ = 4
+    HEAD_DIM = 8
+
+    def _sequence_parallel_group(self):
+        groups.mesh_device = dist.initialize_mesh_device((1, self.world_size), ("data_parallel", "sequence_parallel"))
+        return groups.mesh_device.get_group(mesh_dim="sequence_parallel")
+
+    def _tagged(self, num_heads, batch_dim_idx=0):
+        device = get_accelerator().current_device_name()
+        shape = (1, self.LOCAL_SEQ) if batch_dim_idx == 0 else (self.LOCAL_SEQ, 1)
+        tensor = torch.zeros(*shape, num_heads, self.HEAD_DIM, device=device, requires_grad=True)
+        with torch.no_grad():
+            tensor[:] = torch.arange(num_heads, device=device).view(1, 1, -1, 1).float()
+        return tensor
+
+    def _run(self, attn, num_heads, num_kv_heads=None):
+        """One forward + backward; returns the query head ids this rank received."""
+        query = self._tagged(num_heads)
+        key = self._tagged(num_kv_heads if num_kv_heads is not None else num_heads)
+        output = attn(query, key, key.clone(), 0)
+        output.sum().backward()
+        return attn.local_attn.head_ids
+
+    def test_second_model_does_not_reshard_the_first(self):
+        # 3 heads over 2 ranks is uneven ([2, 1]) and so is 5 ([3, 2]). The two splits are
+        # distinguishable, so a shared count shows up as one model taking the other's.
+        sp_group = self._sequence_parallel_group()
+        rank = dist.get_rank(group=sp_group)
+
+        teacher = DistributedAttention(_RecordingAttention(), sp_group, scatter_idx=2, gather_idx=1)
+        student = DistributedAttention(_RecordingAttention(), sp_group, scatter_idx=2, gather_idx=1)
+        expected_teacher = [[0, 1], [2]][rank]
+
+        assert self._run(teacher, 3) == expected_teacher
+        assert self._run(student, 5) == [[0, 1, 2], [3, 4]][rank]
+        assert self._run(teacher, 3) == expected_teacher
+
+    @pytest.mark.parametrize("batch_dim_idx", [0, 1])
+    def test_gqa_partitions_by_kv_groups(self, batch_dim_idx):
+        # Q=6 / KV=3 over 2 ranks. 6 divides evenly, but a query head has to stay on the rank
+        # holding its KV head, so the split follows the KV groups [2, 1] and Q becomes [4, 2].
+        sp_group = self._sequence_parallel_group()
+        rank = dist.get_rank(group=sp_group)
+
+        gather_idx = 1 if batch_dim_idx == 0 else 0
+        attn = DistributedAttention(_RecordingAttention(), sp_group, scatter_idx=2, gather_idx=gather_idx)
+        query = self._tagged(6, batch_dim_idx)
+        key = self._tagged(3, batch_dim_idx)
+        value = self._tagged(3, batch_dim_idx)
+
+        output = attn(query, key, value, batch_dim_idx)
+        output.sum().backward()
+
+        assert attn.local_attn.head_ids == [[0, 1, 2, 3], [4, 5]][rank]
+        for tensor in (query, key, value):
+            assert tensor.grad is not None and torch.isfinite(tensor.grad).all()
+
+    def test_fewer_kv_heads_than_ranks_is_rejected_before_the_collective(self):
+        # 1 KV head over 2 ranks leaves rank 1 with nothing to attend over. Both ranks have to
+        # reject it together: one of them raising inside the all-to-all hangs the other.
+        sp_group = self._sequence_parallel_group()
+
+        attn = DistributedAttention(_RecordingAttention(), sp_group, scatter_idx=2, gather_idx=1)
+        query = self._tagged(2)
+        key = self._tagged(1)
+
+        with pytest.raises(AssertionError, match="at least the sequence parallel size"):
+            attn(query, key, key.clone(), 0)
+
+    def test_even_count_keeps_the_fast_path_and_its_async_op(self):
+        # An explicit count that divides the world size must not be routed to the uneven
+        # implementation, which rejects async_op and so would disable the overlapped q/k path.
+        sp_group = self._sequence_parallel_group()
+        handle = {}
+
+        output = single_all_to_all(self._tagged(4), 2, 1, 0, sp_group, True, handle, 'dq', num_kv_heads=4)
+
+        assert output.shape[2] == 4 // self.world_size
+
+    def test_uneven_count_still_takes_the_uneven_path(self):
+        sp_group = self._sequence_parallel_group()
+        rank = dist.get_rank(group=sp_group)
+
+        output = single_all_to_all(self._tagged(3), 2, 1, 0, sp_group, num_kv_heads=3)
+
+        assert output.shape[2] == [2, 1][rank]
