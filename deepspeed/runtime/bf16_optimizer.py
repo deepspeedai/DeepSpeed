@@ -12,9 +12,10 @@ from deepspeed.runtime.constants import PIPE_REPLICATED
 from deepspeed.runtime.base_optimizer import ZeROOptimizer
 from packaging import version as pkg_version
 from deepspeed.git_version_info import version
-from deepspeed.runtime.utils import (get_global_norm_of_tensors, clip_tensors_by_global_norm, DummyOptim,
-                                     align_dense_tensors, all_gather_dp_groups, is_model_parallel_parameter,
-                                     see_memory_usage, graph_process, get_norm_with_moe_layers)
+from deepspeed.runtime.utils import (bind_flat_views, get_global_norm_of_tensors, clip_tensors_by_global_norm,
+                                     DummyOptim, align_dense_tensors, all_gather_dp_groups,
+                                     is_model_parallel_parameter, see_memory_usage, graph_process,
+                                     get_norm_with_moe_layers)
 from deepspeed.utils import link_hp_params, lazy_init_hp_params_optimizer_state, fragment_address, groups
 from deepspeed.moe.utils import is_moe_param, is_moe_param_group
 from deepspeed.utils.bwc import bwc_tensor_model_parallel_rank
@@ -293,8 +294,7 @@ class BF16_Optimizer(ZeROOptimizer):
 
     def _update_storage_to_flattened_tensor(self, tensor_list, flat_tensor):
         updated_params = self.unflatten(flat_tensor, tensor_list)
-        for p, q in zip(tensor_list, updated_params):
-            p.data = q.data
+        bind_flat_views(tensor_list, updated_params)
 
     def _flatten_dense_tensors_aligned(self, tensor_list, alignment):
         return self.flatten(align_dense_tensors(tensor_list, alignment))

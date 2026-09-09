@@ -21,9 +21,9 @@ from deepspeed.runtime.zero.offload_states import (offload_optimizer_states, rel
 from deepspeed.runtime.base_optimizer import ZeROOptimizer
 from deepspeed.runtime.fp16.loss_scaler import CreateLossScaler
 from deepspeed.runtime.torch_autocast import get_autocast_dtype, get_all_comm_dtypes, is_autocast_initialized, sort_dtypes
-from deepspeed.runtime.utils import (empty_cache, see_memory_usage, has_inf_or_nan, inf, is_model_parallel_parameter,
-                                     align_dense_tensors, all_gather_dp_groups, mask_nan_or_inf_with_val_inplace,
-                                     count_used_parameters_in_backward)
+from deepspeed.runtime.utils import (bind_flat_views, empty_cache, see_memory_usage, has_inf_or_nan, inf,
+                                     is_model_parallel_parameter, align_dense_tensors, all_gather_dp_groups,
+                                     mask_nan_or_inf_with_val_inplace, count_used_parameters_in_backward)
 from deepspeed.runtime.zero.config import ZeroStageEnum
 from deepspeed.runtime.zero.utils import get_norm_dtype
 from deepspeed.runtime.zero.offload_config import OffloadDeviceEnum, OffloadStateTypeEnum
@@ -804,15 +804,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
 
     def _update_model_bit16_weights(self, group_index):
         updated_params = self.unflatten(self.bit16_groups_flat[group_index], self.round_robin_bit16_meta[group_index])
-        for p, q in zip(self.round_robin_bit16_groups[group_index], updated_params):
-            if p.numel() == 0:
-                # torch's unflatten_dense_tensors special-cases a zero-element tensor and
-                # hands back a freshly allocated 1-D `zeros({0})` instead of a view of the
-                # requested shape, so assigning it would replace e.g. a (0, 8) parameter
-                # with a (0,) one and break the module's own forward. There is nothing in
-                # the flat buffer to point such a parameter at anyway.
-                continue
-            p.data = q.data
+        bind_flat_views(self.round_robin_bit16_groups[group_index], updated_params)
 
         # set model fp16 weight to slices of reordered flattened buffer
         for param_index, param in enumerate(self.bit16_groups[group_index]):
