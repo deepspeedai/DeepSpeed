@@ -205,6 +205,66 @@ def test_continuous_generation_covers_modern_static_cache_path():
     assert (1, 3) in model.calls
 
 
+def test_continuous_generation_trims_cache_after_staggered_eos():
+
+    class CacheConfig(SimpleNamespace):
+
+        def get_text_config(self, **_kwargs):
+            return self
+
+    class CacheClassModel(torch.nn.Module):
+        _supports_cache_class = True
+
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.zeros(1))
+            self.config = CacheConfig(
+                max_position_embeddings=32,
+                num_hidden_layers=1,
+                num_attention_heads=1,
+                num_key_value_heads=1,
+                hidden_size=1,
+                head_dim=1,
+            )
+
+        def forward(self, input_ids, attention_mask, past_key_values=None, use_cache=True, **kwargs):
+            states = input_ids[:, None, :, None].to(dtype=torch.float32)
+            _, values = past_key_values.update(states, states, layer_idx=0, **kwargs)
+            cache_sums = values[:, 0].sum(dim=(1, 2))
+            eos_rows = (cache_sums == 6) | (cache_sums == 8) | (cache_sums == 10)
+            next_tokens = torch.where(eos_rows, 2, 7).long()
+            logits = torch.zeros((input_ids.shape[0], input_ids.shape[1], 16))
+            logits.scatter_(2, next_tokens[:, None, None].expand(-1, input_ids.shape[1], 1), 1)
+            return SimpleNamespace(logits=logits, past_key_values=past_key_values)
+
+    model = CacheClassModel()
+    rollout = HybridEngineRollout(SimpleNamespace(module=model), SimpleNamespace(pad_token_id=0, eos_token_id=2))
+    request = RolloutRequest(
+        torch.tensor([[1, 2, 3], [1, 2, 4], [1, 2, 5], [1, 2, 6], [1, 2, 7], [1, 2, 8]]),
+        torch.ones((6, 3), dtype=torch.long),
+    )
+
+    output = rollout.generate(request, SamplingConfig(max_new_tokens=4, temperature=0, continuous_batch_size=2))
+
+    assert output.input_ids.shape == (6, 7)
+    assert output.input_ids[:, 3:].tolist() == [
+        [2, 0, 0, 0],
+        [7, 7, 7, 7],
+        [2, 0, 0, 0],
+        [7, 7, 7, 7],
+        [2, 0, 0, 0],
+        [7, 7, 7, 7],
+    ]
+    assert output.attention_mask[:, 3:].tolist() == [
+        [1, 0, 0, 0],
+        [1, 1, 1, 1],
+        [1, 0, 0, 0],
+        [1, 1, 1, 1],
+        [1, 0, 0, 0],
+        [1, 1, 1, 1],
+    ]
+
+
 @patch("deepspeed.runtime.rollout.hybrid_engine_rollout.time.perf_counter")
 @patch("deepspeed.runtime.rollout.hybrid_engine_rollout.get_accelerator")
 def test_generate_records_profile_when_enabled(mock_get_accelerator, mock_perf_counter):

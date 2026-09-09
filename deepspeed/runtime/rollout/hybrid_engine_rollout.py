@@ -302,6 +302,7 @@ class HybridEngineRollout(RolloutEngine):
         attention_mask = torch.zeros((max_batch_size, max_cache_len), dtype=torch.long, device=device)
         next_tokens = {}
         cache_position = prompt_len
+        trim_threshold = max(1, prompt_len)
         update = scheduler.schedule()
 
         while update.active:
@@ -315,6 +316,17 @@ class HybridEngineRollout(RolloutEngine):
                         survivor_attention = attention_mask.index_select(0, keep_slots).clone()
                         attention_mask[:survivor_count].copy_(survivor_attention)
                     attention_mask[survivor_count:].zero_()
+
+                if update.retired or cache_position >= max_cache_len - trim_threshold:
+                    dead_prefix = self._continuous_dead_prefix(attention_mask, survivor_count)
+                    if dead_prefix >= trim_threshold or cache_position >= max_cache_len:
+                        if dead_prefix == 0:
+                            raise ValueError("continuous batching cache exhausted before active requests retired")
+                        cache.trim_left(dead_prefix)
+                        attention_mask[:, :-dead_prefix].copy_(attention_mask[:, dead_prefix:].clone())
+                        attention_mask[:, -dead_prefix:].zero_()
+                        write_positions[:survivor_count].sub_(dead_prefix)
+                        cache_position -= dead_prefix
             else:
                 cache.reset()
                 write_positions.fill_(-1)
@@ -426,6 +438,15 @@ class HybridEngineRollout(RolloutEngine):
                 raise ValueError("continuous batching currently requires equal prompt widths")
             if request.prompt_ids.device != device:
                 raise ValueError("continuous batching requests must use the same device")
+
+    @staticmethod
+    def _continuous_dead_prefix(attention_mask, active_count):
+        if active_count == 0:
+            return 0
+        occupied = attention_mask[:active_count].any(dim=0)
+        if not occupied.any():
+            return 0
+        return int(occupied.to(dtype=torch.int32).argmax().item())
 
     def _continuous_prefill(self, module, static_cache_type, cache, update, request_by_id, attention_mask,
                             write_positions, cache_position, prompt_len, model_dtype, device):

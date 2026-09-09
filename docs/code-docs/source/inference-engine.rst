@@ -83,6 +83,8 @@ When unset, generation keeps its existing behavior. When set to a positive
 value, at most that many prompt rows are active at once; completed rows retire
 and pending rows are prefetched into the released slots. The returned
 ``RolloutBatch`` remains in the original ``RolloutRequest`` row order.
+The experimental path periodically trims unused cache columns from the left
+to keep long-running staggered-EOS workloads within the allocated cache span.
 
 The experimental path intentionally does not implement paged attention or change the
 default generation semantics. It currently requires one prompt width for all

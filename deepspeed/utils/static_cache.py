@@ -151,6 +151,18 @@ class DeepSpeedStaticLayer:
             self.keys[count:].zero_()
             self.values[count:].zero_()
 
+    def _trim_left(self, count: int) -> None:
+        """Shift the cache contents left while preserving tensor addresses."""
+        if count <= 0:
+            return
+        if count >= self.max_cache_len:
+            self.reset()
+            return
+        self.keys[:, :, :-count].copy_(self.keys[:, :, count:].clone())
+        self.values[:, :, :-count].copy_(self.values[:, :, count:].clone())
+        self.keys[:, :, -count:].zero_()
+        self.values[:, :, -count:].zero_()
+
     def reorder_cache(self, beam_idx: torch.LongTensor) -> None:
         if self.is_initialized:
             self.keys = self.keys.index_select(0, beam_idx.to(self.keys.device))
@@ -243,6 +255,15 @@ class DeepSpeedStaticCache:
             positions[:count].copy_(compacted)
             if count < positions.numel():
                 positions[count:].fill_(-1)
+
+    def trim_left(self, count: int) -> None:
+        """Shift all cache layers left to reclaim an unused prefix span."""
+        if not isinstance(count, int) or count < 0:
+            raise ValueError("trim count must be a non-negative integer")
+        if count == 0:
+            return
+        for layer in self._layers:
+            layer._trim_left(count)
 
     def update(
         self,

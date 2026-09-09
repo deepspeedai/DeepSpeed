@@ -62,6 +62,23 @@ def test_static_cache_compact_identity_keeps_active_rows_and_clears_tail():
     assert layer.keys[2].abs().sum().item() == 0
 
 
+def test_static_cache_trim_left_shifts_values_and_clears_tail():
+    config = type("Config", (), {"num_hidden_layers": 1, "num_attention_heads": 1, "hidden_size": 1})()
+    cache = DeepSpeedStaticCache(config=config,
+                                 batch_size=1,
+                                 max_cache_len=4,
+                                 device=torch.device("cpu"),
+                                 dtype=torch.float32)
+    layer = cache.layers[0]
+    layer.keys[0, 0, :, 0] = torch.tensor([0.0, 1.0, 2.0, 3.0])
+    layer.values.copy_(layer.keys)
+
+    cache.trim_left(1)
+
+    assert layer.keys[0, 0, :, 0].tolist() == [1.0, 2.0, 3.0, 0.0]
+    assert layer.values[0, 0, :, 0].tolist() == [1.0, 2.0, 3.0, 0.0]
+
+
 def test_static_layer_rejects_mismatched_per_row_positions():
     layer = DeepSpeedStaticLayer(max_cache_len=4)
     keys = torch.zeros((2, 1, 1, 2))
