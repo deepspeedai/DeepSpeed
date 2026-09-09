@@ -93,17 +93,63 @@ qwen-he-kernel-inject-proto 线），但输出仍为乱码，病灶定位到单�
    2.3× 级别成立，把 csrc megakernel 包进 segKI 的 op 签名层 = 正确性 +
    性能上限。
 
-## Reproduction
+## 4B 目标家族实验结果 (2026-09-08, Qwen3.5-4B-Base, bf16, greedy 128 tok)
 
-```bash
-WT=.worktrees/segment-ki
-$WT/../dscpu/python $WT/experiments/test_segment_ki.py --mode baseline --out /tmp/ski_golden.pt
-DS_SRC=$WT dscpu/torchrun --standalone --nproc_per_node=2 \
-    $WT/experiments/test_segment_ki.py --mode autotp --ref /tmp/ski_golden.pt
-DS_SRC=$WT dscpu/torchrun --standalone --nproc_per_node=2 \
-    $WT/experiments/test_segment_ki.py --mode autotp_ki --ref /tmp/ski_golden.pt
-# 跨家族（py3.12 + tok023）:
-DS_SRC=$WT PYTHONPATH=/tmp/tok023 torchrun --standalone --nproc_per_node=2 \
-    python3 $WT/experiments/test_segment_ki.py --mode autotp_ki \
-    --ref /tmp/ski_q35_golden.pt --model Qwen/Qwen3.5-0.8B-Base
-```
+性能矩阵（替换 0.5B headline）：
+
+| 路径 | b1 tok/s | b8 tok/s (合计) |
+|---|---|---|
+| hf eager 单卡 | 22.8 | 176.7 |
+| AutoTP TP=2 | 12.3 | 99.0 |
+| **AutoTP + segKI** | **13.3（+8%）** | **104.8（+5.9%）** |
+
+正确性：GPU bf16 下 segKI 与 eager 前段完全一致，**首个分叉在第 68 个
+生成 token**（token match rate 0.61 为分叉后词表重叠所致，文本各自连贯）
+——bf16 单舍入 vs eager 双舍入的 ULP 级分歧长生成放大，非结构性错误；
+CPU fp32 bit-exact 结论不变。
+
+归因（轻量 profiler，短窗口噪声大，取定性）：TP=2 下 NCCL 占 device
+time 37-58%——4B 通信主导。**+38%（0.5B，overhead 主导）→ +6-8%
+（4B，通信/带宽受限）符合"融合收益 ∝ overhead 受限程度"的预测**：
+MLP 融合省 launch/CPU，不省权重带宽。
+
+## v1-on-4B 尝试 (csrc 修改授权首日, 推进两站)
+
+1. **head_dim 解耦（gap #1）Python 侧修复**：config 增加 `head_dim=-1`
+   参数（向后兼容），ds_attention 全部 `hidden//heads` 推导点改用
+   attn_head_dim（qkv 布局/norm_factor/merge 的 q_rows=heads×head_dim）；
+   qwen3_5 容器 set head_dim + set_q_k_v 切 2x q_proj（gap #2）。
+   → **容器构造通过**（此前崩在 _merge_qkv 8192 vs 2560）
+2. **混合 cache 交互修复**：HF Cache 的 GDN 槽（LinearAttentionLayer）
+   与 attention 槽 API 不同 + container 枚举层号≠模型层号——改为从
+   orig_module.self_attn.layer_idx 取真实层号 + 槽型防御守卫
+   → **通过**
+3. 当前障碍（队列下一项）：softmax_context CUDA 绑定的 host-pointer
+   error（疑与 head_dim 解耦后的 kernel 分发路径有关，未及深挖）
+
+教训：v1 对 qwen3_5 族的启用是"剥洋葱"——每修一层露出下一层；今日
+证实构造层与协议层均可修，剩 kernel 分发层。
+
+## GDN 段融合首战 (2026-09-09, 4080 SUPER, Qwen3.5-4B)
+
+实现：`find_gdn_segments`（AutoTP 下安全降级——分片投影与全量 conv1d 布局
+不匹配，实测确认）+ `_fused_gdn_forward`（in_proj_qkv/z/b/a 四合一 GEMM，
+conv/FLA-scan/gated-norm/out_proj 全委托原模块）+ native `gdn_gates`
+kernel（beta/g 融合，fp32 数学，softplus 大 x 稳定分支——初版没有，
+relmax 0.46%→修复后 0.39% = 1 bf16 ULP）。
+
+CPU 门禁：0.8B 纯 HF 18/18 GDN + 24/24 GLU **bit-exact 首跑通过**；
+AutoTP world=2 GDN 安全跳过 + GLU 照常、输出一致。
+
+GPU 4B 端到端：**MATCH_REF=True（greedy 与 hf eager 完全一致）**。
+调试战果（4 个 kwargs 委托坑，全部记录在案）：GPU fused decode kernel
+拒绝 cu_seqlens（CPU dispatcher 容忍）；层 kwargs（cache_params/
+use_cache 等）经 **kwargs 泄漏进 scan——最终方案：scan 参数白名单。
+
+性能：22.6 vs 22.9 tok/s（持平），prefill 183.8 vs 65.3ms（回归）。
+归因（实测）：fused 输出切片的 non-contiguous 链（slice+transpose+
+contiguous 单次 403μs @ prefill 尺寸）× 24 层，吞掉 4→1 GEMM 的收益；
+FLA scan 主导 GDN 层时间，glue 占比小（4B 教训重演）。
+
+Next（明确优化项，非架构问题）：fused 权重按目标布局预排（消除
+slice/contiguous 链）；gates kernel 接受 strided 输入；之后重测。

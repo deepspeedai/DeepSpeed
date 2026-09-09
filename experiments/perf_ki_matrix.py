@@ -33,9 +33,9 @@ PROMPT = "The capital of France is"
 NEW_TOKENS = 128
 
 
-def bench(generate_fn, tok, warmup=2):
+def bench(generate_fn, tok, warmup=2, batch=1, out_path=None, ref_path=None, tag=""):
     device = get_accelerator().current_device_name()
-    enc = {k: v.to(device) for k, v in tok(PROMPT, return_tensors="pt").items()}
+    enc = {k: v.to(device) for k, v in tok([PROMPT] * batch, return_tensors="pt").items()}
 
     for _ in range(warmup):
         generate_fn(enc["input_ids"], enc["attention_mask"], 4)
@@ -52,7 +52,13 @@ def bench(generate_fn, tok, warmup=2):
     total_ms = (time.perf_counter() - t0) * 1e3
 
     decode_ms = max(total_ms - prefill_ms, 1e-6)
-    tps = (NEW_TOKENS - 1) / (decode_ms / 1e3)
+    tps = (NEW_TOKENS - 1) * batch / (decode_ms / 1e3)
+    if out_path is not None:
+        torch.save({"ids": out.cpu()}, out_path)
+    if ref_path is not None:
+        ref = torch.load(ref_path, weights_only=False)["ids"]
+        match = torch.equal(ref.cpu(), out.cpu())
+        print(f"{tag} MATCH_REF={match}", flush=True)
     return prefill_ms, total_ms, decode_ms, tps, out
 
 
@@ -62,6 +68,9 @@ def main():
                    choices=["hf", "hf_graph", "hf_segki", "zero0_ki", "zero3_ki", "autotp", "autotp_segki"],
                    required=True)
     p.add_argument("--model", default=MODEL)
+    p.add_argument("--batch", type=int, default=1)
+    p.add_argument("--out", default=None, help="save generated ids for correctness comparison")
+    p.add_argument("--ref", default=None, help="compare greedy ids against a saved reference")
     args = p.parse_args()
 
     from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -83,14 +92,24 @@ def main():
     tag = f"[{args.mode} r{os.environ.get('RANK', '0')}]"
 
     if args.mode == "hf":
-        prefill, total, decode, tps, out = bench(hf_generate, tok)
+        prefill, total, decode, tps, out = bench(hf_generate,
+                                                 tok,
+                                                 batch=args.batch,
+                                                 out_path=args.out,
+                                                 ref_path=args.ref,
+                                                 tag=tag)
     elif args.mode == "hf_segki":
         # Segment KI on the plain single-GPU HF model (no AutoTP): isolates the
         # kernel contribution from any TP/communication effects.
         from deepspeed.module_inject.segment_ki import apply_segment_ki
         report = apply_segment_ki(model, backend="auto")
         print(f"{tag} KI_REPORT={report}", flush=True)
-        prefill, total, decode, tps, out = bench(hf_generate, tok)
+        prefill, total, decode, tps, out = bench(hf_generate,
+                                                 tok,
+                                                 batch=args.batch,
+                                                 out_path=args.out,
+                                                 ref_path=args.ref,
+                                                 tag=tag)
     elif args.mode == "hf_graph":
         # Graph capture via cudagraph trees; HF decode steps keep a [1,1]
         # input shape with KV caches so the captured graph can replay.
@@ -103,7 +122,13 @@ def main():
                                      do_sample=False,
                                      pad_token_id=tok.pad_token_id)
 
-        prefill, total, decode, tps, out = bench(graph_generate, tok, warmup=4)
+        prefill, total, decode, tps, out = bench(graph_generate,
+                                                 tok,
+                                                 warmup=4,
+                                                 batch=args.batch,
+                                                 out_path=args.out,
+                                                 ref_path=args.ref,
+                                                 tag=tag)
     else:
         import deepspeed
         deepspeed.init_distributed(dist_backend="nccl")
@@ -140,7 +165,12 @@ def main():
                                           do_sample=False,
                                           pad_token_id=tok.pad_token_id)
 
-        prefill, total, decode, tps, out = bench(engine_generate, tok)
+        prefill, total, decode, tps, out = bench(engine_generate,
+                                                 tok,
+                                                 batch=args.batch,
+                                                 out_path=args.out,
+                                                 ref_path=args.ref,
+                                                 tag=tag)
 
     new = out[0, -NEW_TOKENS:]
     print(
