@@ -13,7 +13,7 @@ from __future__ import annotations
 import math
 import re
 from collections import OrderedDict
-from typing import Literal
+from typing import Callable, Literal
 
 import torch
 import torch.nn as nn
@@ -559,11 +559,14 @@ class AutoEP:
         specs: list[MoELayerSpec],
         ep_size: int,
         ep_rank: int,
+        on_moe_layer_replaced: Callable[[nn.Module], None] | None = None,
     ) -> None:
         """Replace multiple MoE modules and batch post-replacement recorder retargeting."""
         replacements: list[tuple[MoELayerSpec, nn.Module]] = []
         for spec in specs:
             replacement = self._replace_moe_layer_without_retarget(spec, ep_size, ep_rank)
+            if on_moe_layer_replaced is not None:
+                on_moe_layer_replaced(replacement)
             replacements.append((spec, replacement))
             logger.info(f"AutoEP: replaced '{spec.moe_module_name}' with AutoEPMoELayer "
                         f"(ep_size={ep_size}, ep_rank={ep_rank}, "

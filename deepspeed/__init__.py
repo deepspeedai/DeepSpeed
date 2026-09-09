@@ -84,7 +84,10 @@ dist = None
 def set_optimizer_flags(config_class: DeepSpeedConfig, model: torch.nn.Module) -> None:
     if config_class.optimizer_name == MUON_OPTIMIZER:
         for name, p in model.named_parameters():
-            if p.ndim >= 2 and not any(keyword in name.lower() for keyword in ("embed", "lm_head")):
+            is_partitioned_autoep_expert = (getattr(p, "ds_zero_placement_family", None) == "autoep_expert"
+                                            and hasattr(p, "ds_shape"))
+            ndim = len(p.ds_shape) if is_partitioned_autoep_expert else p.ndim
+            if ndim >= 2 and not any(keyword in name.lower() for keyword in ("embed", "lm_head")):
                 setattr(p, "use_muon", True)
             else:
                 setattr(p, "use_muon", False)
