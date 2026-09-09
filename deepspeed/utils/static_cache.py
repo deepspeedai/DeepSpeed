@@ -163,7 +163,9 @@ class DeepSpeedStaticCache:
 
         if dtype is not None and device is not None and batch_size > 0:
             num_heads = getattr(text_config, "num_key_value_heads", getattr(text_config, "num_attention_heads", 1))
-            head_dim = getattr(text_config, "hidden_size", 1) // getattr(text_config, "num_attention_heads", 1)
+            # head_dim is not always hidden_size // num_attention_heads, so prefer the config value
+            head_dim = getattr(text_config, "head_dim", None) or (getattr(text_config, "hidden_size", 1) //
+                                                                  getattr(text_config, "num_attention_heads", 1))
             self.early_initialization(batch_size, num_heads, head_dim, dtype, device)
 
     @property
