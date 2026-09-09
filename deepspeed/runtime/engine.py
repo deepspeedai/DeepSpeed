@@ -5954,10 +5954,6 @@ class DeepSpeedEngine(Module):
         param_offload_config = self.zero_offload_param()
         assert param_offload_config is None or param_offload_config.device == OffloadDeviceEnum.none, "Moving states across devices is not supported for offloaded parameters."
 
-        assert not isinstance(
-            self.optimizer,
-            DeepSpeedZeRoOffload), "Moving states across devices is not supported without an optimizer."
-
         if device == OffloadDeviceEnum.none:
             logger.warning("No device specified for offloading states.")
             return
@@ -5973,8 +5969,4 @@ class DeepSpeedEngine(Module):
         Arguments:
             non_blocking: Optional. Whether to offload the states asynchronously.
         """
-        assert not isinstance(
-            self.optimizer,
-            DeepSpeedZeRoOffload), "Moving states across devices is not supported without an optimizer."
-
         self.optimizer.reload_states(non_blocking=non_blocking)
