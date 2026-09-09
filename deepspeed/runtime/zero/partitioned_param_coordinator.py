@@ -477,7 +477,12 @@ class PartitionedParameterCoordinator:
                         params_to_prefetch.add(param_in_trace.param)
                         numel_prefetching += param_in_trace.param.ds_numel
 
-                if numel_prefetching > 0:
+                # Same reason as the fetch gate above: the element count is a proxy for
+                # "is there anything to gather". A set holding only zero-element parameters
+                # is popped off the queue and then never submitted; the fetch still gathers
+                # those parameters when their submodule is reached, so what the count costs
+                # here is the prefetch overlap rather than the step.
+                if params_to_prefetch:
                     event_name = __class__.FORWARD_PREFETCH_SUBMIT if forward else __class__.BACKWARD_PREFETCH_SUBMIT
                     self.__profiler.start_event(event_name)
                     if logger.isEnabledFor(logging.DEBUG):
