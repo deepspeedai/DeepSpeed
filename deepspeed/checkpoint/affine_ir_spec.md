@@ -94,6 +94,15 @@ first moment of `b` is the stored moment divided by 4 and the second is divided 
 the parameter's own factor for all three would multiply `exp_avg` by 4 where it should be
 divided — off by 16× — and silently change the trajectory after a resume.
 
+**Optimizer states are refused for now.** The moment powers above are correct — verified
+end to end on real training in #8385 — but they are not sufficient. Adam's update also
+depends on `lr` and `eps`, and those live in the coordinate the optimizer was training in:
+resuming a rescaled parameter needs `lr / s` and `eps * s`. Keeping the source values
+resumes on a different trajectory, with an error that grows every step and nothing to
+signal it. Since that transform is a property of the optimizer rather than of the
+parameter's geometry, it is outside this IR, and `rebuild` refuses a scaled optimizer
+state until the checkpoint contract covers it. A scaled *parameter* converts normally.
+
 **Homogeneity.** A piece must cover elements that are all held by the same set of ranks and
 all carry the same scale. This is what makes `locations` exact rather than advisory, and it
 constrains merging: see §3 (P5) and §6.3.

@@ -222,6 +222,7 @@ class ParamAffineMap:
         the geometry; the caller knows which tensor it is moving.
         """
         self.validate()
+        self._reject_scaled_optimizer_state(scale_power)
         for rank, shard in shards.items():
             expected = _product(self.shard_shapes[rank])
             if shard.numel() != expected:
@@ -251,8 +252,29 @@ class ParamAffineMap:
 
         return full_param.view(self.logical_shape)
 
+    def _reject_scaled_optimizer_state(self, scale_power):
+        """Refuse to move an optimizer state through a scaled piece.
+
+        The moments themselves convert correctly under their powers, but Adam's update also
+        depends on ``lr`` and ``eps``, and those live in the coordinate the optimizer was
+        training in. Restoring a rescaled parameter without rescaling them
+        (``lr / scale``, ``eps * scale``) resumes on a different trajectory, with an error
+        that grows step by step and no failure to show for it. Describing that transform is
+        outside this module, which knows about parameter geometry and not about optimizers,
+        so refuse until the checkpoint contract covers it.
+        """
+        if scale_power == 1:
+            return
+        scaled = [piece for pieces in self.pieces_by_rank.values() for piece in pieces if piece.scale != 1.0]
+        if scaled:
+            raise NotImplementedError(
+                'Converting an optimizer state through a scaled piece is not supported: the moments transform '
+                'correctly, but the optimizer group hyperparameters would still be in the source coordinate, '
+                'so a resumed run would diverge.')
+
     def extract(self, full_param, rank, scale_power=1):
         """Produce one rank's shard from the full parameter. The inverse of ``rebuild``."""
+        self._reject_scaled_optimizer_state(scale_power)
         flat_param = _flat_buffer(full_param)
         shard_shape = self.shard_shapes[rank]
         shard = torch.empty(_product(shard_shape), dtype=full_param.dtype, device=full_param.device)

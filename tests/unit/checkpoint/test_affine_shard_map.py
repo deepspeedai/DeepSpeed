@@ -22,7 +22,7 @@ import pytest
 import torch
 
 from deepspeed.checkpoint.affine import (AffinePiece, ParamAffineMap, AFFINE_MAP_FORMAT_VERSION, replicated_map,
-                                         contiguous_split_map, sub_param_map)
+                                         contiguous_split_map, sub_param_map, _scaled)
 from deepspeed.module_inject.fusedqkv_utils import prepare_tp_fused_qkvw, shard_value_with_share_qk
 from deepspeed.module_inject.tp_shard import AutoTPMeta
 
@@ -460,21 +460,6 @@ def test_stored_version_is_the_format_version():
 # parameter rather than failing, which is the failure mode that matters for a checkpoint.
 
 
-def _replicated_bias_map(world_size, scale):
-    piece = AffinePiece(shape=(4, ),
-                        source_offset=0,
-                        source_strides=(1, ),
-                        dest_offset=0,
-                        dest_strides=(1, ),
-                        locations=range(world_size),
-                        scale=scale)
-    return ParamAffineMap(logical_shape=(4, ),
-                          shard_shapes={rank: (4, )
-                                        for rank in range(world_size)},
-                          pieces_by_rank={rank: [piece]
-                                          for rank in range(world_size)})
-
-
 def test_zero_extent_piece_covers_nothing():
     """A rank may hold none of a sub-parameter, and an empty piece must not claim coverage."""
     piece = AffinePiece(shape=(0, 8),
@@ -516,32 +501,69 @@ def test_zero_scale_is_refused():
                     scale=0.0)
 
 
-@pytest.mark.parametrize('scale_power', [1, -1, -2])
-def test_scale_power_round_trips_each_optimizer_state(scale_power):
-    """Adam's moments live in the parameter's scaled coordinate, so they undo differently.
+def _replicated_bias_map(world_size, scale):
+    piece = AffinePiece(shape=(4, ),
+                        source_offset=0,
+                        source_strides=(1, ),
+                        dest_offset=0,
+                        dest_strides=(1, ),
+                        locations=range(world_size),
+                        scale=scale)
+    return ParamAffineMap(logical_shape=(4, ),
+                          shard_shapes={rank: (4, )
+                                        for rank in range(world_size)},
+                          pieces_by_rank={rank: [piece]
+                                          for rank in range(world_size)})
 
-    Scaling a parameter by `s` scales its gradient by `1 / s`, so the first moment carries
-    the inverse of the parameter's factor and the second moment the inverse square. Using
-    the parameter's own factor for all three would corrupt the optimizer state.
+
+def test_scale_power_gives_each_state_its_own_factor():
+    """The moments' factors are the inverse and inverse square of the parameter's.
+
+    Verified at the arithmetic level because `rebuild` refuses a scaled optimizer state
+    until the checkpoint contract covers the optimizer's own hyperparameters. The factors
+    themselves are correct, and are what that contract will build on.
     """
+    scale = 0.25
+    shard = torch.full((4, ), 8.0, dtype=torch.float64)
+    assert torch.equal(_scaled(shard, scale, 1), shard * 4)  # parameter: divided by 1/4
+    assert torch.equal(_scaled(shard, scale, -1), shard / 4)  # first moment: the inverse
+    assert torch.equal(_scaled(shard, scale, -2), shard / 16)  # second moment: inverse square
+
+
+def test_scaled_parameter_still_round_trips():
+    """The parameter itself converts through a scaled piece, which is the supported case."""
     world_size = 4
     affine_map = _replicated_bias_map(world_size, scale=1.0 / world_size)
     full = torch.randn(4, dtype=torch.float64)
 
-    shards = {rank: affine_map.extract(full, rank, scale_power) for rank in range(world_size)}
-    expected = full * (1.0 / world_size)**scale_power
-    assert torch.equal(shards[0], expected)
-    assert torch.equal(affine_map.rebuild(shards, scale_power), full)
+    shards = {rank: affine_map.extract(full, rank) for rank in range(world_size)}
+    assert torch.equal(shards[0], full / world_size)
+    assert torch.equal(affine_map.rebuild(shards), full)
 
 
-def test_optimizer_moments_do_not_use_the_parameter_factor():
-    """The three states must not come out of the same shard with the same value."""
-    world_size = 4
-    affine_map = _replicated_bias_map(world_size, scale=1.0 / world_size)
-    shard = torch.full((4, ), 8.0, dtype=torch.float64)
-    shards = {rank: shard.clone() for rank in range(world_size)}
+# Guards added in review. Each one covers a way a map could produce a plausible but wrong
+# parameter rather than failing, which is the failure mode that matters for a checkpoint.
 
-    rebuilt = {power: affine_map.rebuild(shards, power) for power in (1, -1, -2)}
-    assert torch.equal(rebuilt[1], shard * world_size)
-    assert torch.equal(rebuilt[-1], shard / world_size)
-    assert torch.equal(rebuilt[-2], shard / world_size**2)
+
+def test_scaled_optimizer_state_is_refused():
+    """Correct moments are not enough: Adam's lr and eps live in the source coordinate.
+
+    Converting them without rescaling `lr / scale` and `eps * scale` resumes a run on a
+    different trajectory, with an error that grows each step and nothing to signal it. Until
+    the checkpoint contract covers those hyperparameters, refuse rather than convert.
+    """
+    affine_map = _replicated_bias_map(world_size=4, scale=0.25)
+    shards = {rank: torch.ones(4, dtype=torch.float64) for rank in range(4)}
+
+    affine_map.rebuild(shards, scale_power=1)  # the parameter itself is fine
+    for scale_power in (-1, -2):
+        with pytest.raises(NotImplementedError, match='source coordinate'):
+            affine_map.rebuild(shards, scale_power)
+
+
+def test_unscaled_optimizer_state_still_converts():
+    """The refusal is about scaling, not about optimizer states."""
+    affine_map = _replicated_bias_map(world_size=2, scale=1.0)
+    shards = {rank: torch.ones(4, dtype=torch.float64) for rank in range(2)}
+    for scale_power in (1, -1, -2):
+        assert torch.equal(affine_map.rebuild(shards, scale_power), torch.ones(4, dtype=torch.float64))
