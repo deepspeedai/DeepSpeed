@@ -41,7 +41,7 @@ void Adam_Optimizer::Step_1(ds_params_precision_t* _params,
                             bool parallel)
 {
     size_t rounded_size = 0;
-#if defined(__AVX512__) or defined(__AVX256__)
+#if defined(__AVX512__) or defined(__AVX256__) or defined(__NEON__)
     Step_AVX<1>(&rounded_size, _params, grads, _exp_avg, _exp_avg_sq, _param_size, parallel);
 #elif defined(__SVE__) && defined(__ARM_FEATURE_SVE)
     Step_SVE<1>(&rounded_size, _params, grads, _exp_avg, _exp_avg_sq, _param_size, parallel);
@@ -93,7 +93,7 @@ void Adam_Optimizer::Step_4(ds_params_precision_t* _params,
                             bool parallel)
 {
     size_t rounded_size = 0;
-#if defined(__AVX512__) or defined(__AVX256__)
+#if defined(__AVX512__) or defined(__AVX256__) or defined(__NEON__)
     Step_AVX<4>(&rounded_size, _params, grads, _exp_avg, _exp_avg_sq, _param_size, parallel);
 #elif defined(__SVE__) && defined(__ARM_FEATURE_SVE)
     Step_SVE<4>(&rounded_size, _params, grads, _exp_avg, _exp_avg_sq, _param_size, parallel);
@@ -156,7 +156,7 @@ void Adam_Optimizer::Step_8(ds_params_precision_t* _params,
                             bool parallel)
 {
     size_t rounded_size = 0;
-#if defined(__AVX512__) or defined(__AVX256__)
+#if defined(__AVX512__) or defined(__AVX256__) or defined(__NEON__)
     Step_AVX<8>(&rounded_size, _params, grads, _exp_avg, _exp_avg_sq, _param_size, parallel);
 #elif defined(__SVE__) && defined(__ARM_FEATURE_SVE)
     Step_SVE<8>(&rounded_size, _params, grads, _exp_avg, _exp_avg_sq, _param_size, parallel);
@@ -476,7 +476,7 @@ private:
 
 // SIMD block the Adam AVX kernel rounds to (Step_8 => span 8). Slicing on multiples of
 // this keeps each slice's AVX/scalar boundary identical to the whole-tensor kernel.
-#if defined(__AVX512__) or defined(__AVX256__)
+#if defined(__AVX512__) or defined(__AVX256__) or defined(__NEON__)
 static constexpr size_t kZenAdamAlign = SIMD_WIDTH * 8;
 #else
 static constexpr size_t kZenAdamAlign = 1;
