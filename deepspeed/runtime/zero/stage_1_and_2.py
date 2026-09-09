@@ -805,6 +805,13 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
     def _update_model_bit16_weights(self, group_index):
         updated_params = self.unflatten(self.bit16_groups_flat[group_index], self.round_robin_bit16_meta[group_index])
         for p, q in zip(self.round_robin_bit16_groups[group_index], updated_params):
+            if p.numel() == 0:
+                # torch's unflatten_dense_tensors special-cases a zero-element tensor and
+                # hands back a freshly allocated 1-D `zeros({0})` instead of a view of the
+                # requested shape, so assigning it would replace e.g. a (0, 8) parameter
+                # with a (0,) one and break the module's own forward. There is nothing in
+                # the flat buffer to point such a parameter at anyway.
+                continue
             p.data = q.data
 
         # set model fp16 weight to slices of reordered flattened buffer
