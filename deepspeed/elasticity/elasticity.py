@@ -370,6 +370,24 @@ def compute_elastic_config(ds_config: dict, target_deepspeed_version: str, world
         if float(elastic_config.version) == 0.2:
             return final_batch_size, valid_gpus, candidate_microbatch_size
         else:
+            # Only an unset world_size reaches here, since the block above returns
+            # for every positive value. Resolve it the same way version 0.2 does.
+            if world_size <= 0:
+                env_world_size = os.getenv('WORLD_SIZE')
+                if env_world_size is not None and env_world_size.isnumeric():
+                    world_size = int(env_world_size)
+                else:
+                    raise ElasticityConfigError(
+                        f'Elasticity V {elastic_config.version} needs WORLD_SIZE '\
+                        'to compute a micro batch size. '\
+                        'Either give it as argument to function compute_elastic_config '\
+                        'or set it as an environment variable. '\
+                        f'Value of WORLD_SIZE as environment variable is {env_world_size}')
+
+            if world_size not in valid_gpus:
+                raise ElasticityIncompatibleWorldSize(f"World size ({world_size}) is not valid " \
+                                                      f"with the current list of valid GPU counts: {valid_gpus}")
+
             micro_batch_size = None
             for mbsz in sorted(list(set(elastic_config.micro_batches)), reverse=True):
                 if final_batch_size // world_size % mbsz == 0:

@@ -23,7 +23,8 @@ import argparse
 
 import torch
 
-from deepspeed.moe.group_gemm_triton import group_gemm_triton, is_available
+from deepspeed.ops.triton_ops import is_triton_available
+from deepspeed.ops.triton_ops.group_gemm_triton import group_gemm_triton
 
 
 def _unbalanced_offs(num_experts, avg_tokens, device):
@@ -85,7 +86,7 @@ def benchmark(num_experts, dim=2048, hidden=768, avg_tokens=32, dtype=torch.bflo
 
 
 if __name__ == "__main__":
-    assert is_available() and torch.cuda.is_available(), "Triton + CUDA required"  #ignore-cuda
+    assert is_triton_available() and torch.cuda.is_available(), "Triton + CUDA required"  #ignore-cuda
     parser = argparse.ArgumentParser()
     parser.add_argument("--experts", type=int, nargs="+", default=[16, 32], help="experts per rank to benchmark")
     parser.add_argument("--dim", type=int, default=2048)

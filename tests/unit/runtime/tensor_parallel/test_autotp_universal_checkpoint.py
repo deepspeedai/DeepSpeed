@@ -12,6 +12,7 @@ from deepspeed.checkpoint.constants import (AUTOTP_UNSUPPORTED_PARAMETER_PATTERN
                                             VOCABULARY_PARAMETER_PATTERNS, DS_AUTOTP_UC_META,
                                             UNIVERSAL_CHECKPOINT_VERSION_VALUE)
 from deepspeed.checkpoint.universal_checkpoint import _narrow_sub_params, _resolve_autotp_partition
+from deepspeed.module_inject.tp_shard import AutoTPMeta
 from deepspeed.module_inject.layers import (_build_param_uc_restore_meta, _get_param_uc_conversion_meta,
                                             _subparam_shard_widths, GateUpPack_LinearLayer, LinearAllreduce,
                                             LinearLayer, SubParamLinearAllreduce, SubParamLinearLayer,
@@ -340,7 +341,8 @@ def test_collect_records_fused_layouts_without_a_sub_param_split():
                               mp_group=None,
                               skip_partition=True,
                               fused_module=fused_module,
-                              name="qkv_proj")
+                              name="qkv_proj",
+                              tp_meta=AutoTPMeta())
     model = torch.nn.Module()
     model.qkv_proj = layer
 
@@ -403,7 +405,7 @@ def test_sub_param_shard_widths_round_trip_with_zero_width_ranks(tp_world_size):
     # More ranks than kv heads leaves some ranks holding none of a sub-parameter. Those empty
     # shards still have to tile the sub-parameter and survive a restore round trip.
     sub_param_sizes = (8, 2, 2)
-    widths = _subparam_shard_widths(sub_param_sizes, tp_world_size)
+    widths = _subparam_shard_widths(sub_param_sizes, tp_world_size, AutoTPMeta())
 
     assert any(width == 0 for per_rank in widths for width in per_rank)
     for size, per_rank in zip(sub_param_sizes, widths):
@@ -474,27 +476,35 @@ def test_sub_param_layer_materializes_zero_width_final_dimension(layer_cls):
 
 
 def test_lm_head_forward_uses_frozen_partition_sizes():
-    # The weight columns were cut when the layer was built. A second AutoTP model overwrites the
-    # process-wide tp_shard globals, so re-deriving the split in forward would slice the input
-    # differently than the weight and the row-parallel all-reduce would hide the mismatch.
-    from deepspeed.module_inject import tp_shard
+    # The weight columns were cut when the layer was built; forward must slice the input with
+    # the same frozen partition sizes rather than re-derive them.
     from deepspeed.module_inject.layers import LmHeadLinearAllreduce
+    from deepspeed.module_inject.tp_shard import AutoTPMeta
 
-    grain_size, kv_heads = tp_shard.tp_grain_size, tp_shard.num_kv_heads
-    try:
-        tp_shard.set_tp_grain_size(1)
-        tp_shard.set_num_kv_heads(None)
-        layer = LmHeadLinearAllreduce(torch.nn.Linear(101, 8, bias=False), mp_group=None)
-        layer.tp_world_size = 2
-        layer.tp_index = 1
-        frozen = layer._freeze_partition_sizes(101)
-        assert frozen == (51, 50)
+    layer = LmHeadLinearAllreduce(torch.nn.Linear(101, 8, bias=False),
+                                  mp_group=None,
+                                  tp_meta=AutoTPMeta(tp_grain_size=1))
+    layer.tp_world_size = 2
+    layer.tp_index = 1
+    frozen = layer._freeze_partition_sizes(101)
+    assert frozen == (51, 50)
+    assert layer.tp_meta.tp_grain_size == 1
+    layer.weight.data = torch.zeros(8, frozen[1])
 
-        # A later model narrows the grain, which would change a recomputed split.
-        tp_shard.set_tp_grain_size(64)
-        layer.weight.data = torch.zeros(8, frozen[1])
+    # A second layer of a different model is then built and initialized in the same process:
+    # a coarser grain (vocabulary sharding) and a different kv-head count (GQA attention
+    # sharding). Neither may leak into the first layer, whose meta and frozen split describe
+    # its own model only.
+    second = LmHeadLinearAllreduce(torch.nn.Linear(101, 8, bias=False),
+                                   mp_group=None,
+                                   tp_meta=AutoTPMeta(tp_grain_size=64, num_kv_heads=1))
+    second.tp_world_size = 2
+    second.tp_index = 1
+    assert second._freeze_partition_sizes(101) == (64, 37)
 
-        layer(torch.zeros(1, 1, 101))
-    finally:
-        tp_shard.set_tp_grain_size(grain_size)
-        tp_shard.set_num_kv_heads(kv_heads)
+    assert layer.tp_meta.tp_grain_size == 1
+    assert layer.tp_meta.num_kv_heads is None
+    assert layer._freeze_partition_sizes(101) == frozen
+    assert layer._partition_sizes == frozen
+
+    layer(torch.zeros(1, 1, 101))

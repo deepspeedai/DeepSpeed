@@ -60,6 +60,10 @@ public:
     {
         _workSpaceSize = 0;
         _workspace = 0;
+        _batch_size = 0;
+        _num_layers = 0;
+        _num_heads = 0;
+        _hidden_dim = 0;
 
         cublasStatus_t stat = cublasCreate(&_cublasHandle);
         if (stat != CUBLAS_STATUS_SUCCESS) {
@@ -108,6 +112,10 @@ public:
                       unsigned min_out_tokens)
     {
         size_t total_size;
+        _batch_size = batch_size;
+        _num_layers = num_layers;
+        _num_heads = num_heads;
+        _hidden_dim = hidden_dim;
         if (!_free_memory_size) { cudaMemGetInfo(&_free_memory_size, &total_size); }
 
         // Flash attention requires padded heads and we'll conservatively allocate
@@ -181,6 +189,10 @@ public:
         _attention_unfused_workspace_offset = workSpaceSize - temp_size;
     }
     inline size_t GetMaxTokenLength() const { return _max_seq_len; }
+    inline size_t GetBatchSize() const { return _batch_size; }
+    inline unsigned GetNumLayers() const { return _num_layers; }
+    inline unsigned GetNumHeads() const { return _num_heads; }
+    inline size_t GetHiddenDim() const { return _hidden_dim; }
 
     cudaEvent_t GetCompEvent(int id) { return id == 1 ? _comp1_event : _comp2_event; }
 
@@ -275,6 +287,10 @@ private:
     size_t _free_memory_size;
 
     size_t _max_seq_len;
+    size_t _batch_size;
+    unsigned _num_layers;
+    unsigned _num_heads;
+    size_t _hidden_dim;
 
     cudaEvent_t _comp1_event;
     cudaEvent_t _comp2_event;

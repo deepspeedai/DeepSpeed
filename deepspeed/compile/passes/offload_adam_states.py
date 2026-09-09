@@ -28,13 +28,25 @@ except ImportError:
 from ..profilers import ProfilingResult
 from ..graph_param import DSGraphParamManager
 from ..fx import move_primals_to_head
-from .contract import PassContract
+from .contract import CAP_OPT_STATES_EVICTED, PassContract
 
 import deepspeed.comm as dist
 
 NAME = "offload_adam_states"
-# Offloads optimizer state and does not depend on the graph-rewriting passes.
-CONTRACT = PassContract()
+NAME_SYNC = "offload_adam_states_sync"
+NAME_FOR_INIT = "offload_adam_states_for_init"
+# All three act on optimizer state that only init_z3 registers, and DeepSpeed supports a single
+# offload target per run, so none of them may share a schedule with offload_parameters or with the
+# ZeRO-1/2 reduce passes.
+_INCOMPATIBLE = frozenset({"offload_parameters", "zero1_compile", "zero2_compile"})
+# move_opt_states plans from the profiled per-node peaks, which describe the run only if the
+# optimizer state was already off the accelerator when the profilers ran.
+CONTRACT = PassContract(requires=frozenset({CAP_OPT_STATES_EVICTED}), conflicts_with=_INCOMPATIBLE)
+# The synchronous variant needs no such profile: it offloads everything at the head of the first
+# graph and reloads at the tail of the last, so it takes no requires. It replaces move_opt_states
+# rather than running alongside it.
+CONTRACT_SYNC = PassContract(conflicts_with=_INCOMPATIBLE | {NAME})
+CONTRACT_FOR_INIT = PassContract(provides=frozenset({CAP_OPT_STATES_EVICTED}), conflicts_with=_INCOMPATIBLE)
 
 
 def print_r0(msg):

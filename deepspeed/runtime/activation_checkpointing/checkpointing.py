@@ -30,6 +30,7 @@ from deepspeed.utils.timer import SynchronizedWallClockTimer as Timers, FORWARD_
 from deepspeed.utils.bwc import bwc_tensor_model_parallel_rank
 from deepspeed.accelerator import get_accelerator
 from deepspeed.runtime import compiler
+from deepspeed.runtime.activation_checkpointing.offload_activations import _ActivationOffloadEngine
 
 # DeepSpeed Checkpointing Enabled or Disabled
 deepspeed_checkpointing_enabled = False
@@ -60,6 +61,15 @@ CPU_CHECKPOINT = False
 CONTIGUOUS_CHECKPOINTING = False
 SYNCHRONIZE = False
 PROFILE_TIME = False
+
+# Shared async CPU offload engine for cpu_checkpointing (non-partition path), so
+# keep-last/stash span the whole forward. Built lazily so its stream binds to the
+# selected device.
+_cpu_offload_engine = None
+
+# Function.forward always runs with grad disabled, so grad mode is captured in the
+# checkpoint() wrapper and read in CheckpointFunction.forward.
+_checkpoint_grad_enabled = True
 
 # Default name for the model parallel rng tracker.
 _MODEL_PARALLEL_RNG_TRACKER_NAME = 'model-parallel-rng'
@@ -485,6 +495,75 @@ def get_cpu_activations_for_backward(args, inputs):
     return new_args
 
 
+def _get_cpu_offload_engine():
+    """Shared async CPU-offload engine, or None to use blocking copies.
+
+    Only the non-partition ``cpu_checkpointing`` path uses it; synchronized
+    accelerators have no side stream and fall back to blocking copies.
+    """
+    global _cpu_offload_engine
+    if not CPU_CHECKPOINT or PARTITION_ACTIVATIONS:
+        return None
+    if get_accelerator().is_synchronized_device():
+        return None
+    if _cpu_offload_engine is None:
+        _cpu_offload_engine = _ActivationOffloadEngine(keep_last_count=1, min_offload_bytes=0)
+    return _cpu_offload_engine
+
+
+def _reset_cpu_offload_engine():
+    if _cpu_offload_engine is not None:
+        _cpu_offload_engine.reset()
+
+
+def get_offloaded_activations_for_backward(args, engine):
+    """Offload checkpoint inputs asynchronously and empty their GPU storage.
+
+    The engine holds a detached alias that keeps the source storage alive until
+    the D2H drains, so emptying ``arg`` afterwards is safe. Aliased args share one
+    id; skipped args stay on GPU.
+    """
+    new_args = []
+    tokens = {}
+    to_empty = []
+    for arg in args:
+        if not is_activation_to_checkpoint(arg):
+            new_args.append(arg)
+            continue
+        key = id(arg)
+        if key not in tokens:
+            tokens[key] = engine.offload_input(arg.detach())
+        token = tokens[key]
+        if token is not None:
+            arg.ds_offload_id = token
+            to_empty.append(arg)
+        new_args.append(arg)
+
+    # Empty only after all offloads register, so a repeated arg is never emptied
+    # mid-offload.
+    for arg in to_empty:
+        arg.data = torch.empty([], device=arg.device).data
+
+    return new_args
+
+
+def restore_offloaded_activations(tensors, engine):
+    """Restore async-offloaded inputs in place onto their saved tensors.
+
+    Mutating ``t.data`` (not replacing the object) preserves autograd identity and
+    ``requires_grad`` for ``detach_variable``.
+    """
+    for t in tensors:
+        if not torch.is_tensor(t):
+            continue
+        token = getattr(t, 'ds_offload_id', None)
+        if token is None:
+            continue
+        t.data = engine.restore_input(token).data
+        t.ds_offload_id = None
+    return tensors
+
+
 class CheckpointFunction(torch.autograd.Function):
     """This function is adapted from torch.utils.checkpoint with
        two main changes:
@@ -525,9 +604,14 @@ class CheckpointFunction(torch.autograd.Function):
         cuda_device = get_accelerator().current_device_name()
         transport_stream = get_accelerator().Stream(device=cuda_device)
 
+        # Offload only when a backward will run; eval/no_grad ids never get consumed.
+        offload_engine = _get_cpu_offload_engine() if (CPU_CHECKPOINT and _checkpoint_grad_enabled) else None
+        ctx.ds_offload_engine = offload_engine
+
+        inputs = None
         if PARTITION_ACTIVATIONS:
             inputs = partition_activations(args, CPU_CHECKPOINT, CONTIGUOUS_CHECKPOINTING)
-        elif CPU_CHECKPOINT:
+        elif CPU_CHECKPOINT and offload_engine is None:
             inputs = copy_to_device(args, device=torch.device('cpu'), criterion_func=is_activation_to_checkpoint)
 
         # just in case something funky is happening such as reuse of inputs
@@ -549,6 +633,9 @@ class CheckpointFunction(torch.autograd.Function):
         if PARTITION_ACTIVATIONS:
             new_args = get_partitioned_activations_for_backward(args, inputs, CONTIGUOUS_CHECKPOINTING)
             assert len(new_args) % 2 == 0, f'save_for_backward called with odd number of args, {len(new_args)}'
+            save_args_for_backward(*new_args)
+        elif CPU_CHECKPOINT and offload_engine is not None:
+            new_args = get_offloaded_activations_for_backward(args, offload_engine)
             save_args_for_backward(*new_args)
         elif CPU_CHECKPOINT:
             new_args = get_cpu_activations_for_backward(args, inputs)
@@ -617,10 +704,14 @@ class CheckpointFunction(torch.autograd.Function):
                 t.data = t.saved_data.to(t.device)
                 t.saved_data = None
 
+        offload_engine = getattr(ctx, 'ds_offload_engine', None)
         if PARTITION_ACTIVATIONS:
             # with get_accelerator().stream(transport_stream):
             inputs = gather_partitioned_activations(ctx.deepspeed_saved_tensors,
                                                     device=cuda_device if CPU_CHECKPOINT else None)
+            detached_inputs = detach_variable(inputs)
+        elif CPU_CHECKPOINT and offload_engine is not None:
+            inputs = restore_offloaded_activations(ctx.deepspeed_saved_tensors, offload_engine)
             detached_inputs = detach_variable(inputs)
         elif CPU_CHECKPOINT:
             inputs = move_to_device(ctx.deepspeed_saved_tensors, cuda_device, is_activation_to_checkpoint)
@@ -747,9 +838,13 @@ def non_reentrant_checkpoint(function, *args):
     cuda_device = get_accelerator().current_device_name()
     transport_stream = get_accelerator().Stream(device=cuda_device)
 
+    # Offload only when a backward will run; eval/no_grad ids never get consumed.
+    offload_engine = _get_cpu_offload_engine() if (CPU_CHECKPOINT and torch.is_grad_enabled()) else None
+
+    inputs = None
     if PARTITION_ACTIVATIONS:
         inputs = partition_activations(args, CPU_CHECKPOINT, CONTIGUOUS_CHECKPOINTING)
-    elif CPU_CHECKPOINT:
+    elif CPU_CHECKPOINT and offload_engine is None:
         inputs = copy_to_device(args, device=torch.device('cpu'), criterion_func=is_activation_to_checkpoint)
 
     # just in case something funky is happening such as reuse of inputs
@@ -759,16 +854,6 @@ def non_reentrant_checkpoint(function, *args):
     fwd_cpu_rng_state = torch.get_rng_state()
     fwd_cuda_rng_state = get_accelerator().get_rng_state()
     fwd_cuda_rng_state_tracker = get_cuda_rng_tracker().get_states()
-
-    if PARTITION_ACTIVATIONS:
-        new_args = get_partitioned_activations_for_backward(args, inputs, CONTIGUOUS_CHECKPOINTING)
-        assert len(new_args) % 2 == 0, f'save_for_backward called with odd number of args, {len(new_args)}'
-        save_args_for_backward(*new_args)
-    elif CPU_CHECKPOINT:
-        new_args = get_cpu_activations_for_backward(args, inputs)
-        save_args_for_backward(*new_args)
-    else:
-        save_args_for_backward(*args)
 
     class Holder():
         """the place holder object used as activations to save memory"""
@@ -856,11 +941,20 @@ def non_reentrant_checkpoint(function, *args):
             cuda_device = get_accelerator().current_device_name()
             transport_stream = get_accelerator().Stream(device=cuda_device)
 
+            # Rebuild tensors emptied by the blocking CPU path.
+            for t in deepspeed_saved_tensors:
+                if t is not None and hasattr(t, 'saved_data') and t.saved_data is not None:
+                    t.data = t.saved_data.to(t.device)
+                    t.saved_data = None
+
             # gather inputs which is partitioned or checkpointed before first forward
             if PARTITION_ACTIVATIONS:
                 # with get_accelerator().stream(transport_stream):
                 inputs = gather_partitioned_activations(deepspeed_saved_tensors,
                                                         device=cuda_device if CPU_CHECKPOINT else None)
+                detached_inputs = detach_variable(inputs)
+            elif CPU_CHECKPOINT and offload_engine is not None:
+                inputs = restore_offloaded_activations(deepspeed_saved_tensors, offload_engine)
                 detached_inputs = detach_variable(inputs)
             elif CPU_CHECKPOINT:
                 inputs = move_to_device(deepspeed_saved_tensors, cuda_device, is_activation_to_checkpoint)
@@ -920,6 +1014,22 @@ def non_reentrant_checkpoint(function, *args):
 
     with torch.autograd.graph.saved_tensors_hooks(checkpoint_pack, checkpoint_unpack):
         outputs = function(*inputs_cuda)
+
+    # Save after forward has consumed inputs, so emptying GPU storage cannot
+    # corrupt the forward (inputs_cuda may alias args).
+    if PARTITION_ACTIVATIONS:
+        new_args = get_partitioned_activations_for_backward(args, inputs, CONTIGUOUS_CHECKPOINTING)
+        assert len(new_args) % 2 == 0, f'save_for_backward called with odd number of args, {len(new_args)}'
+        save_args_for_backward(*new_args)
+    elif CPU_CHECKPOINT and offload_engine is not None:
+        new_args = get_offloaded_activations_for_backward(args, offload_engine)
+        save_args_for_backward(*new_args)
+    elif CPU_CHECKPOINT:
+        new_args = get_cpu_activations_for_backward(args, inputs)
+        save_args_for_backward(*new_args)
+    else:
+        save_args_for_backward(*args)
+
     if PROFILE_TIME or SYNCHRONIZE:
         for leaf_tensor in leaf_tensors:
             leaf_tensor.register_hook(after_backward_hook)
@@ -965,6 +1075,9 @@ def checkpoint(function, *args, **kwargs):
         function = function_with_kwargs
         args = args + tuple(kwargs.values())
 
+    global _checkpoint_grad_enabled
+    _checkpoint_grad_enabled = torch.is_grad_enabled()
+
     all_outputs = []
     CheckpointFunction.apply(function, all_outputs, *args)
     if len(all_outputs) == 1:
@@ -1009,6 +1122,10 @@ def reset():
         contiguous_size_buffers = []
         data_offsets = []
         size_offsets = []
+
+    # Eval runs forwards without backward; drain the engine so refs and in-flight
+    # copies do not accumulate.
+    _reset_cpu_offload_engine()
 
 
 def _configure_using_config_file(config, mpu=None):

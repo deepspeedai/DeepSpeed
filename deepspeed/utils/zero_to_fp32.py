@@ -53,6 +53,26 @@ debug = 0
 # load to cpu
 device = torch.device('cpu')
 
+OUTPUT_DTYPE_NAMES = {
+    'float32': torch.float32,
+    'fp32': torch.float32,
+    'float16': torch.float16,
+    'fp16': torch.float16,
+    'bfloat16': torch.bfloat16,
+    'bf16': torch.bfloat16,
+}
+
+
+def _resolve_output_dtype(dtype):
+    requested_dtype = dtype
+    if isinstance(dtype, str):
+        dtype_name = dtype[6:] if dtype.startswith('torch.') else dtype
+        dtype = OUTPUT_DTYPE_NAMES.get(dtype_name.lower())
+    if dtype not in set(OUTPUT_DTYPE_NAMES.values()):
+        supported = ', '.join(sorted(OUTPUT_DTYPE_NAMES))
+        raise ValueError(f"Unsupported output dtype {requested_dtype!r}. Choose one of: {supported}")
+    return dtype
+
 
 def atoi(text):
     return int(text) if text.isdigit() else text
@@ -540,10 +560,13 @@ def _get_fp32_state_dict_from_zero3_checkpoint(world_size, fp32_flat_groups, zer
     return state_dict
 
 
-def to_torch_tensor(state_dict, return_empty_tensor=False):
+def to_torch_tensor(state_dict, return_empty_tensor=False, dtype=None):
     """
     Convert state_dict of GatheredTensor to torch tensor
     """
+    if dtype is not None:
+        dtype = _resolve_output_dtype(dtype)
+
     torch_state_dict = {}
     converted_tensors = {}
     for name, tensor in state_dict.items():
@@ -554,9 +577,10 @@ def to_torch_tensor(state_dict, return_empty_tensor=False):
         else:
             converted_tensors[tensor_id] = name
             if return_empty_tensor:
-                torch_state_dict[name] = torch.empty(tensor.shape, dtype=tensor.dtype)
+                torch_state_dict[name] = torch.empty(tensor.shape, dtype=dtype or tensor.dtype)
             else:
-                torch_state_dict[name] = tensor.contiguous()
+                contiguous_tensor = tensor.contiguous()
+                torch_state_dict[name] = contiguous_tensor.to(dtype=dtype) if dtype else contiguous_tensor
     return torch_state_dict
 
 
@@ -625,24 +649,28 @@ def get_fp32_state_dict_from_zero_checkpoint(checkpoint_dir,
         return to_torch_tensor(state_dict)
 
 
-def convert_zero_checkpoint_to_fp32_state_dict(checkpoint_dir,
-                                               output_dir,
-                                               max_shard_size="5GB",
-                                               safe_serialization=False,
-                                               tag=None,
-                                               exclude_frozen_parameters=False):
+def convert_zero_checkpoint_to_state_dict(checkpoint_dir,
+                                          output_dir,
+                                          dtype=torch.float32,
+                                          max_shard_size="5GB",
+                                          safe_serialization=False,
+                                          tag=None,
+                                          exclude_frozen_parameters=False):
     """
-    Convert ZeRO 2 or 3 checkpoint into a single fp32 consolidated ``state_dict`` file that can be
+    Convert ZeRO 2 or 3 checkpoint into a consolidated ``state_dict`` file that can be
     loaded with ``torch.load(file)`` + ``load_state_dict()`` and used for training without DeepSpeed.
 
     Args:
         - ``checkpoint_dir``: path to the desired checkpoint folder. (one that contains the tag-folder, like ``global_step14``)
-        - ``output_dir``: directory to the pytorch fp32 state_dict output files
+        - ``output_dir``: directory for the PyTorch state_dict output files
+        - ``dtype``: output tensor dtype. Supports float32, float16, and bfloat16 as strings or torch dtypes.
         - ``max_shard_size``: the maximum size for a checkpoint before being sharded, default value is 5GB
         - ``safe_serialization``:  whether to save the model using `safetensors` or the traditional PyTorch way (that uses `pickle`).
         - ``tag``: checkpoint tag used as a unique identifier for checkpoint. If not provided will attempt to load tag in the file named ``latest`` in the checkpoint folder, e.g., ``global_step14``
         - ``exclude_frozen_parameters``: exclude frozen parameters
     """
+
+    dtype = _resolve_output_dtype(dtype)
 
     # Dependency pre-check
     if safe_serialization:
@@ -669,7 +697,7 @@ def convert_zero_checkpoint_to_fp32_state_dict(checkpoint_dir,
     if max_shard_size is not None:
         filename_pattern = weights_name.replace(".bin", "{suffix}.bin").replace(".safetensors", "{suffix}.safetensors")
         # an memory-efficient approach for sharding
-        empty_state_dict = to_torch_tensor(state_dict, return_empty_tensor=True)
+        empty_state_dict = to_torch_tensor(state_dict, return_empty_tensor=True, dtype=dtype)
         state_dict_split = split_torch_state_dict_into_shards(empty_state_dict,
                                                               filename_pattern=filename_pattern,
                                                               max_shard_size=max_shard_size)
@@ -684,7 +712,7 @@ def convert_zero_checkpoint_to_fp32_state_dict(checkpoint_dir,
     filename_to_tensors = state_dict_split.filename_to_tensors.items()
     for shard_file, tensors in tqdm(filename_to_tensors, desc="Saving checkpoint shards"):
         shard_state_dict = {tensor_name: state_dict[tensor_name] for tensor_name in tensors}
-        shard_state_dict = to_torch_tensor(shard_state_dict)
+        shard_state_dict = to_torch_tensor(shard_state_dict, dtype=dtype)
         output_path = os.path.join(output_dir, shard_file)
         if safe_serialization:
             save_file(shard_state_dict, output_path, metadata={"format": "pt"})
@@ -708,6 +736,22 @@ def convert_zero_checkpoint_to_fp32_state_dict(checkpoint_dir,
         with open(save_index_file, "w", encoding="utf-8") as f:
             content = json.dumps(index, indent=2, sort_keys=True) + "\n"
             f.write(content)
+
+
+def convert_zero_checkpoint_to_fp32_state_dict(checkpoint_dir,
+                                               output_dir,
+                                               max_shard_size="5GB",
+                                               safe_serialization=False,
+                                               tag=None,
+                                               exclude_frozen_parameters=False):
+    """Backward-compatible fp32 checkpoint conversion."""
+    return convert_zero_checkpoint_to_state_dict(checkpoint_dir,
+                                                 output_dir,
+                                                 dtype=torch.float32,
+                                                 max_shard_size=max_shard_size,
+                                                 safe_serialization=safe_serialization,
+                                                 tag=tag,
+                                                 exclude_frozen_parameters=exclude_frozen_parameters)
 
 
 def load_state_dict_from_zero_checkpoint(model, checkpoint_dir, tag=None):

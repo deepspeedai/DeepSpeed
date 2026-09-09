@@ -311,17 +311,59 @@ APIs:
 
 ``pin_memory`` accepts ``make_copy`` and ``match_shape`` (both default ``True``) so
 callers can either allocate a shaped copy of ``tensor`` or obtain a flat locked
-buffer for later filling.
+buffer for later filling. With ``make_copy=False`` the input is only a
+shape/dtype template: both backends page-lock a fresh buffer and never read
+``tensor``, so scratch destinations do not pay for a second full-size
+allocation and a copy.
+
+Empty scratch buffers should use ``pin_empty`` / ``pin_empty_like`` instead of
+``pin_memory(torch.empty(...), make_copy=False)``. Those helpers take a shape
+and dtype only, so neither backend allocates a full-size pageable template.
+
+.. code-block:: python
+
+    scratch = get_accelerator().pin_empty_like(src, device='cpu')
+    scratch = get_accelerator().pin_empty(1024, dtype=torch.float32, device='cpu')
+
+Pin on/off vs backend
+=====================
+
+Whether to pin and how to pin are orthogonal:
+
+* **On/off:** ``zero_optimization.offload_*.pin_memory`` (ZeRO CPU offload),
+  ``use_pin_memory`` on eager activation checkpoint offload
+  (``CheckpointHiddenStatesOffload``), and
+  ``compile.offload_activation_pin_memory`` (DeepCompile activation offload).
+  All default to pinning so async copies can use full DMA bandwidth; set
+  false only under tight memlock limits (``ulimit -l``).
+* **How:** ``DS_PIN_MEMORY_BACKEND=torch|native`` (environment only; not a
+  ``ds_config`` field). Every call site that pins through
+  ``get_accelerator().pin_memory()`` honors this env var, including ZeRO
+  CPU-offload buffers and eager activation checkpoint offload. Keep the default
+  ``torch`` backend for activation offload: ``native`` is ``mlock`` without
+  ``cudaHostRegister``, so its host buffers are not registered for accelerator
+  DMA and the offload's async copies can still block. DeepCompile activation
+  offload pins with ATen ``pinned_memory`` and does **not** use
+  ``DS_PIN_MEMORY_BACKEND``.
 
 Backend Selection
 =================
 
-The pinning implementation is selected with the ``DS_PIN_MEMORY_BACKEND``
-environment variable (default ``torch``).
+Whether to pin ZeRO CPU/NVMe offload buffers is controlled by
+``zero_optimization.offload_param.pin_memory`` /
+``zero_optimization.offload_optimizer.pin_memory`` (both default ``true``).
+That is independent of **how** pages are locked.
 
-Both backends page-lock host memory for DMA, are visible to AIO/GDS I/O
-handles (so DeepNVMe can skip bounce buffers), and are counted by
-``track_pinned_memory`` when pages are actually locked. Differences:
+The pinning **backend** (Torch vs DeepSpeed native) is selected only with the
+``DS_PIN_MEMORY_BACKEND`` environment variable (default ``torch``). There is
+no ``ds_config`` field for the backend.
+
+The ``torch`` backend page-locks host memory for **accelerator DMA**
+(``cudaHostRegister`` / device-specific pin). The ``native`` backend
+page-locks via ``posix_memalign`` + ``mlock`` for AIO/GDS (DeepNVMe can
+skip bounce buffers) and does **not** register the allocation with CUDA/XPU,
+so async GPU copies to native-pinned tensors can still block. Both are
+counted by ``track_pinned_memory`` when pages are actually locked. Differences:
 
 .. list-table:: Differences between ``torch`` and ``native`` pin backends
    :header-rows: 1
@@ -332,7 +374,8 @@ handles (so DeepNVMe can skip bounce buffers), and are counted by
      - ``native``
    * - Allocator
      - ``torch.Tensor.pin_memory()`` (device-specific accelerator hook)
-     - DeepNVMe page-locked allocator (``posix_memalign`` + ``mlock``) via pin_memory
+     - DeepNVMe page-locked allocator (``posix_memalign`` + ``mlock``) via pin_memory;
+       registered with the CUDA runtime by default for asynchronous DMA
    * - Selection
      - ``DS_PIN_MEMORY_BACKEND`` unset or ``torch``
      - ``DS_PIN_MEMORY_BACKEND=native``
@@ -340,8 +383,11 @@ handles (so DeepNVMe can skip bounce buffers), and are counted by
      - None beyond the active accelerator / PyTorch
      - DeepSpeed **pin_memory** op must build and load; fails early if unavailable (no silent fallback)
    * - ``pin_memory`` extras
-     - ``make_copy`` / ``match_shape`` are ignored on this path
      - Honors ``make_copy`` and ``match_shape`` (both default ``True``)
+     - Honors ``make_copy`` and ``match_shape`` (both default ``True``)
+   * - ``pin_empty`` / ``pin_empty_like``
+     - Host scratch allocation (cpu ``device``, required ``dtype``); no pageable template
+     - Same helper; native ``mlock`` via ``pin_empty``
    * - Pin recognition (``is_pinned``)
      - Torch pinned status (``tensor.is_pinned()``)
      - ``.ds_pinned`` and process-wide pointer ranges (slices/views included)
@@ -361,6 +407,25 @@ Example:
 
     export DS_PIN_MEMORY_BACKEND=native
     deepspeed train.py ...
+
+Native device registration
+==========================
+
+Native allocations are device-independent ``mlock`` buffers. On CUDA systems,
+DeepSpeed additionally calls ``cudaHostRegister`` so PyTorch can use them for
+asynchronous H2D/D2H DMA. Device registration is enabled by default and can be
+disabled for comparison or debugging:
+
+.. code-block:: bash
+
+    export DS_PIN_MEMORY_BACKEND=native
+    export DS_PIN_MEMORY_REGISTER_DEVICE=0  # mlock only; default is 1
+
+``DS_PIN_MEMORY_REGISTER_DEVICE`` accepts ``1``/``0``, ``true``/``false``,
+``yes``/``no``, and ``on``/``off``. Accelerators without a registration hook
+continue to use the device-independent ``mlock`` buffer. If registration fails,
+DeepSpeed logs a warning and retains the valid ``mlock`` allocation for CPU and
+AIO use.
 
 Requirements for native
 =======================
@@ -385,6 +450,11 @@ matches ``torch.pin_memory`` as closely as possible:
   garbage collection. ZeRO / ZenFlow optimizers do this for their owned
   CPU-offload buffers in ``destroy()``.
 * After ``unpin_memory``, the tensor storage must not be used (use-after-free).
+* Unlike the torch pinned allocator, native allocations are **not** stream
+  tracked: they are freed as soon as the last reference drops, even if an
+  asynchronous copy is still reading them. Code that issues
+  ``non_blocking=True`` copies out of a native-pinned buffer must keep a
+  reference to it until it synchronizes.
 
 ``is_pinned`` reports ``True`` for both torch-pinned tensors and native-managed
 buffers, including slices/views whose storage falls inside a managed range.

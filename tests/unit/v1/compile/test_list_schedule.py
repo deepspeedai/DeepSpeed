@@ -19,20 +19,23 @@ from deepspeed.compile.passes import selective_gather as selective_gather_mod
 from deepspeed.compile.profilers import ProfilingResult
 from deepspeed.compile.profilers.graph_profile import _backfill_missing_profile_metadata, is_profile_incomplete
 
+_TEST_DC_NAMESPACE = "dc_list_schedule_test"
 _DC_LIBRARIES = []
 
 
 def _define_dc_ops():
+    test_dc_ops = getattr(torch.ops, _TEST_DC_NAMESPACE)
     try:
-        torch.ops.dc.allgather_param.default
-        torch.ops.dc.wait_allgather.default
-        torch.ops.dc.release_param.default
-        torch.ops.dc.reduce_grad.default
-        return
+        test_dc_ops.allgather_param.default
+        test_dc_ops.wait_allgather.default
+        test_dc_ops.release_param.default
+        test_dc_ops.reduce_grad.default
+        test_dc_ops.offload_tensor.default
+        return test_dc_ops
     except AttributeError:
         pass
 
-    lib = torch.library.Library("dc", "DEF")
+    lib = torch.library.Library(_TEST_DC_NAMESPACE, "DEF")
     for schema in (
             "allgather_param(Tensor a, int graph_id, int id, ScalarType? dtype = None) -> Tensor",
             "wait_allgather(Tensor(a) a, int graph_id, int id) -> Tensor(a)",
@@ -40,6 +43,10 @@ def _define_dc_ops():
             "reduce_grad(Tensor a, int graph_id, int id) -> Tensor",
             "free_tensors(Tensor[] tensors) -> ()",
             "end_backward(Tensor[] tensors, int graph_id, bool release_reduce_buckets = True) -> ()",
+            "offload_tensor(Tensor a, int id, int id) -> Tensor",
+            "reload_tensor(Tensor a, int id, int id) -> Tensor",
+            "wait_offload(Tensor a, int id, int id) -> Tensor",
+            "wait_reload(Tensor a, int id, int id) -> Tensor",
     ):
         try:
             lib.define(schema)
@@ -47,13 +54,19 @@ def _define_dc_ops():
             if "already been registered" not in str(exc):
                 raise
     _DC_LIBRARIES.append(lib)
+    return test_dc_ops
 
 
 @pytest.fixture(autouse=True)
 def stub_deepcompile_ops(monkeypatch):
-    _define_dc_ops()
-    no_copy_ops = {torch.ops.dc.wait_allgather.default}
-    monkeypatch.setattr(compile_util, "get_no_copy_ops", lambda: no_copy_ops)
+    test_dc_ops = _define_dc_ops()
+    original_dc_ops = torch.ops.dc
+    with monkeypatch.context() as fixture_patch:
+        fixture_patch.setattr(torch.ops, "dc", test_dc_ops)
+        no_copy_ops = {torch.ops.dc.wait_allgather.default}
+        fixture_patch.setattr(compile_util, "get_no_copy_ops", lambda: no_copy_ops)
+        yield
+    assert torch.ops.dc is original_dc_ops
 
 
 def _with_meta(node, tensor_size=0, device_time=0):
@@ -61,6 +74,10 @@ def _with_meta(node, tensor_size=0, device_time=0):
     if device_time is not None:
         node.meta["device_time"] = device_time
     return node
+
+
+def test_stub_deepcompile_ops_uses_isolated_namespace():
+    assert torch.ops.dc is getattr(torch.ops, _TEST_DC_NAMESPACE)
 
 
 def _placeholder(graph, name):
@@ -427,6 +444,31 @@ def test_mark_output_never_reuse_mixed_pytree():
 
     assert wrapped == outputs
     assert graph.never_reuse_buffers == {"tensor_buffer"}
+
+
+def test_register_custom_ops_defines_every_op_it_registers(monkeypatch):
+    """register_custom_ops must not raise when only _define_dc_ops has run.
+
+    It registers each dc op in sequence, so an op the helper does not define raises AttributeError
+    partway through and everything after it -- including the graphsafe rng lowering -- is silently
+    never registered. That only shows up where the C++ extension is absent, which is CI.
+    """
+    _define_dc_ops()
+    registered_ops = []
+
+    monkeypatch.setattr(inductor_mod, "add_needs_realized_inputs", lambda _op: None)
+    monkeypatch.setattr(inductor_mod, "register_lowering",
+                        lambda op_overload, **_kwargs: lambda handler: registered_ops.append(op_overload) or handler)
+    monkeypatch.setattr(inductor_mod, "fallbacks", set())
+    monkeypatch.setattr(inductor_mod.Scheduler, "is_dc_patched", True, raising=False)
+
+    inductor_mod.register_custom_ops()
+
+    # Every dc op named in register_custom_ops should have reached register_lowering.
+    names = {getattr(op, "__name__", str(op)) for op in registered_ops}
+    for expected in ("offload_tensor", "wait_offload", "reload_tensor", "wait_reload"):
+        assert any(expected in str(op) for op in registered_ops), \
+            f"{expected} was never registered; _define_dc_ops is missing its schema. Registered: {sorted(names)}"
 
 
 def test_register_custom_ops_includes_graphsafe_rng_state_no_reuse(monkeypatch):

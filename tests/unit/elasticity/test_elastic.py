@@ -75,6 +75,30 @@ def test_invalid_world_size(ds_config):
             ds_config=ds_config, target_deepspeed_version=ds_version, world_size=128)
 
 
+def test_return_microbatch_without_world_size(ds_config, monkeypatch):
+    monkeypatch.delenv("WORLD_SIZE", raising=False)
+    with pytest.raises(deepspeed.elasticity.config.ElasticityConfigError):
+        deepspeed.elasticity.compute_elastic_config(ds_config=ds_config,
+                                                    target_deepspeed_version=ds_version,
+                                                    return_microbatch=True)
+
+
+def test_return_microbatch_world_size_from_env(ds_config, monkeypatch):
+    monkeypatch.setenv("WORLD_SIZE", "64")
+    final_batch_size, valid_gpus, mbsize = deepspeed.elasticity.compute_elastic_config(
+        ds_config=ds_config, target_deepspeed_version=ds_version, return_microbatch=True)
+    assert final_batch_size == 9792
+    assert mbsize == 17
+
+
+def test_return_microbatch_invalid_world_size_from_env(ds_config, monkeypatch):
+    monkeypatch.setenv("WORLD_SIZE", "128")
+    with pytest.raises(deepspeed.elasticity.config.ElasticityIncompatibleWorldSize):
+        deepspeed.elasticity.compute_elastic_config(ds_config=ds_config,
+                                                    target_deepspeed_version=ds_version,
+                                                    return_microbatch=True)
+
+
 def test_future_elastic_version(ds_config):
     ds_config['elasticity']['version'] = '0.3'
     with pytest.raises(deepspeed.elasticity.config.ElasticityError):

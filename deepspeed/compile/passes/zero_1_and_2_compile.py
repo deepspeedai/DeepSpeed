@@ -11,8 +11,13 @@ from torch.fx import GraphModule
 from ..util import get_deepcompile_handle
 from ..fx import (add_postprocess, move_primals_to_head, _make_node_meta, add_end_backward,
                   replace_reduce_outputs_with_none, should_release_reduce_buckets)
+from .contract import PassContract
 
-NAME = "zero1_compile"
+NAME_Z1 = "zero1_compile"
+NAME_Z2 = "zero2_compile"
+# ZeRO-1/2 reduce gradients in place of the ZeRO-3 rewrite, so a schedule holds one or the other.
+CONTRACT_Z1 = PassContract(conflicts_with=frozenset({"zero3_compile"}))
+CONTRACT_Z2 = PassContract(conflicts_with=frozenset({"zero3_compile", NAME_Z1}))
 
 
 def add_z1_reduce_fw(gm: GraphModule, graph_id: int, profiling_results, param_manager, use_z2=False) -> GraphModule:

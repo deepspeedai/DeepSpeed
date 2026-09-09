@@ -57,7 +57,11 @@ Muon supports the following params:
 | weight\_decay  | Weight decay (AdamW-style).                                                                                          | 0.0       |
 | muon\_lr       | Learning rate override for Muon parameters. Defaults to `lr` if not set.                                             | -         |
 | adam\_lr       | Learning rate override for non-Muon (Adam) parameters. Defaults to `lr` if not set.                                  | -         |
+| torch\_adam    | Use torch Adam/AdamW for non-Muon parameters instead of the DeepSpeed Adam backend.                                  | false     |
+| adam\_w\_mode | Use AdamW rather than Adam for non-Muon parameters.                                                                  | true      |
 | ns\_method     | Newton-Schulz orthogonalization method: `"gram"` for Gram NS (~2x faster on rectangular matrices), `"standard"` for the original iteration. Use `"standard"` to fall back if you encounter convergence issues. | `"gram"`  |
+
+By default, non-Muon parameters use `FusedAdam`. When optimizer state is offloaded to the CPU, DeepSpeed selects `DeepSpeedCPUAdam`. This is the same backend selection used by the Adam and AdamW optimizer types.
 
   Example of <i>**optimizer**</i> with Adam
 
@@ -537,12 +541,6 @@ Enabling and configuring ZeRO memory optimizations
 | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------- |
 | Initialize fp32 master weights from fp32 copies in checkpoint (no precision loss) or from model's fp16 copies (with precision loss). This can be used to initialize optimizer state even when checkpoint is missing optimizer state. | `True`  |
 
-<i>**grad_hooks**</i>: [boolean]
-
-| Description                                                                                                                               | Default |
-| ----------------------------------------------------------------------------------------------------------------------------------------- | ------- |
-| For use with ZeRO stage 1, enable backward hooks to reduce gradients during the backward pass or wait until the end of the backward pass. | `True`  |
-
 ***round_robin_gradients***: [boolean]
 
 | Description                                                                                                                                                                                                                                                                         | Default |
@@ -1000,6 +998,12 @@ smoke coverage used for this AutoEP surface produced the following version gates
 | -------------------------------------------------------------------------------------------------------------- | -------- |
 | When to apply router scores: `"pre"` (before experts), `"post"` (during combine), or `"auto"` (from preset). | `"auto"` |
 
+***combine_impl***: [string]
+
+| Description                                                                                                    | Default  |
+| -------------------------------------------------------------------------------------------------------------- | -------- |
+| How expert outputs are weighted by their router scores and reduced over top-k. `"auto"` resolves to `"weighted_sum"`. `"fused_weighted_sum"` is experimental and computes the same reduction in one Triton pass, without materializing the scattered assignment buffer or the `[tokens, top_k, hidden]` FP32 intermediate; it requires CUDA, Triton, bfloat16/float16 activations, `tensor_parallel.autotp_size=1`, `expert_tensor_parallel_size=1`, and a resolved `score_apply="post"`, and is rejected rather than silently ignored when any of those does not hold. `"legacy_bmm"` is a debug reduction retained for model-family verification. | `"auto"` |
+
 ***route_norm***: [boolean]
 
 | Description                                                                                                     | Default |
@@ -1334,9 +1338,11 @@ Use a built-in preset but override specific naming/weight fields for a fine-tune
 
 <i>**cpu_checkpointing**</i>: [boolean]
 
-| Description                                                                 | Default |
-| --------------------------------------------------------------------------- | ------- |
-| Offloads partitioned activations to CPU if partition_activations is enabled | `false` |
+| Description                                                                                                                                                                                                                        | Default |
+| --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
+| Offloads activation checkpoint inputs to CPU. With `partition_activations` it offloads the partitioned activations; otherwise it uses an asynchronous pinned side-stream copy that overlaps the CPU transfer with compute. | `false` |
+
+The asynchronous side-stream copy matches the peak-memory reduction of a blocking copy at a fraction of the step-time cost. On a single H200 with Qwen3-8B full-parameter SFT (`use_reentrant=False`), it lowers the GPU activation peak by up to ~14% at 32K sequence length while staying within ~2% of the no-offload step time, whereas a blocking offload is 1.4–1.9x slower. For very long sequences, set `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` to avoid allocator fragmentation from the offload/restore cycle.
 
 
 <i>**contiguous_memory_optimization**</i>: [boolean]

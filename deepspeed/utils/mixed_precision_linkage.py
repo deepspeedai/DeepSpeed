@@ -41,11 +41,14 @@ def _init_lp_to_hp_mapping(lp_param_list, partition_start, partition_size, dp_gr
         # 1) current_offset < partition_end,
         # 2) current_offset + lp_param.numel() >= partition_start
         lp_param_end = current_offset + lp_param.numel()
-        if current_offset < partition_end and lp_param_end > partition_start:
-            param_and_offset_list.append((lp_param, current_offset))
+        in_partition = (partition_start <= current_offset < partition_end
+                        or current_offset < partition_start < lp_param_end)
+        if in_partition:
             lp_param._index_in_param_group = index_in_param_group
             # Indices for params in this partition/GPU
             index_in_param_group += 1
+            if lp_param.numel() > 0:
+                param_and_offset_list.append((lp_param, current_offset))
         current_offset += lp_param.numel()
 
     return param_and_offset_list

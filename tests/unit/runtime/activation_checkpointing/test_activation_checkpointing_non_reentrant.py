@@ -51,6 +51,14 @@ class TestCheckpointNonTensorOutputOrderingWithGrad(test_act_ckpt.TestCheckpoint
     pass
 
 
+class TestCPUActivationCheckpointNonReentrant(DistributedTest):
+    """Async cpu_checkpointing through the non-reentrant path."""
+    world_size = 1
+
+    def test_cpu_offload_matches_baseline(self):
+        test_act_ckpt._test_cpu_activation_checkpoint(non_reentrant_checkpoint)
+
+
 # below classes are used to test the graph with inputs have no grad and parameters has grad, namely partial graph?
 @pytest.mark.parametrize('mask', [
     _mixed_mask(),

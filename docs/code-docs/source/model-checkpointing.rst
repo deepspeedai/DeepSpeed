@@ -23,6 +23,8 @@ DeepSpeed provides routines for extracting fp32 weights from the saved ZeRO chec
 
 .. autofunction:: deepspeed.utils.zero_to_fp32.convert_zero_checkpoint_to_fp32_state_dict
 
+.. autofunction:: deepspeed.utils.zero_to_fp32.convert_zero_checkpoint_to_state_dict
+
 
 Avoiding ZeRO Checkpoint Bloat
 ------------------------------

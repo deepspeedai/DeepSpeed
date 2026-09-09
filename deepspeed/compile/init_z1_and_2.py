@@ -9,7 +9,7 @@ from functools import partial
 import torch
 
 from deepspeed.accelerator import get_accelerator
-from .passes import zero1_compile, zero3_compile
+from .passes import zero_1_and_2_compile, zero3_compile
 from .backend import make_backend, launch_compile_passes, init_schedule
 from .util import get_deepcompile_handle, add_pre_backward_hook
 
@@ -88,7 +88,7 @@ def _build_flat_partition_grad_views(optimizer, group_idx):
     return flat_buffer, views
 
 
-def init_z1(engine, backend, compile_config, compile_kwargs, schedule=None, use_z2=False):
+def init_z1_and_2(engine, backend, compile_config, compile_kwargs, schedule=None, use_z2=False):
 
     optimizer = engine.optimizer
     optimizer.contiguous_gradients = False  # Avoid creating unnecessary buffer
@@ -175,14 +175,16 @@ def init_z1(engine, backend, compile_config, compile_kwargs, schedule=None, use_
     if schedule is None:
         schedule = []
         if use_z2:
-            schedule.append((0, [zero1_compile.add_z2_reduce]))
+            schedule.append((0, [zero_1_and_2_compile.add_z2_reduce]))
         else:
-            schedule.append((0, [zero1_compile.add_z1_reduce]))
+            schedule.append((0, [zero_1_and_2_compile.add_z1_reduce]))
     else:
         for opt in schedule:
             # avoid typical misconfiguration
             if zero3_compile.add_z3_gather_release in opt[1]:
-                raise ValueError("A pass for ZeRO3 is not specified though ZeRO1 is enabled")
+                raise ValueError("The schedule contains the ZeRO-3 pass add_z3_gather_release, but ZeRO stage 1 "
+                                 "or 2 is enabled. Use zero_1_and_2_compile.add_z1_reduce (stage 1) or add_z2_reduce "
+                                 "(stage 2), or set zero_optimization.stage to 3.")
 
     init_schedule(schedule)
 

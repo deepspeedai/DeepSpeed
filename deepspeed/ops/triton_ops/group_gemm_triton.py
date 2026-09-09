@@ -40,23 +40,9 @@ from __future__ import annotations
 
 import torch
 
-try:
-    import triton
-    import triton.language as tl
-
-    _TRITON_AVAILABLE = True
-except ImportError:
-    _TRITON_AVAILABLE = False
-
-__all__ = ["group_gemm_triton", "is_available"]
+from deepspeed.ops.triton_ops._triton import _TRITON_AVAILABLE, triton, tl
 
 _SUPPORTED_DTYPES = (torch.float16, torch.bfloat16, torch.float32)
-
-
-def is_available() -> bool:
-    """Return True if the Triton grouped-GEMM path can be used."""
-    return _TRITON_AVAILABLE
-
 
 if _TRITON_AVAILABLE:
 

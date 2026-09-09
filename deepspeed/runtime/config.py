@@ -727,6 +727,7 @@ class DeepSpeedConfig(object):
             self.world_size = 1
         logger.info(f"Config mesh_device {mesh_device} world_size = {self.world_size}")
         # If elastic-mode enabled, update compute + update _param_dict
+        elastic_batch_params = {}
         self.elasticity_enabled = elasticity_enabled(self._param_dict)
         if self.elasticity_enabled:
             logger.info("DeepSpeed elasticity support enabled")
@@ -784,12 +785,18 @@ class DeepSpeedConfig(object):
 
             logger.info(f"[Elasticity] valid GPU counts: {valid_gpus}")
 
-            self._param_dict[TRAIN_BATCH_SIZE] = final_batch_size
-            self._param_dict[TRAIN_MICRO_BATCH_SIZE_PER_GPU] = micro_batch_size
-            self._param_dict[GRADIENT_ACCUMULATION_STEPS] = gradient_accu_steps
+            elastic_batch_params = {
+                TRAIN_BATCH_SIZE: final_batch_size,
+                TRAIN_MICRO_BATCH_SIZE_PER_GPU: micro_batch_size,
+                GRADIENT_ACCUMULATION_STEPS: gradient_accu_steps,
+            }
 
-        # Pass a copy so that user json is unmodified, e.g. for logging
-        self._initialize_params(copy.copy(self._param_dict))
+        # Pass a copy so that user json is unmodified, e.g. for logging. The elasticity
+        # overrides go into that copy for the same reason -- all three are top-level
+        # keys, so the shallow copy keeps them off the caller's dict.
+        param_dict = copy.copy(self._param_dict)
+        param_dict.update(elastic_batch_params)
+        self._initialize_params(param_dict)
         self._configure_train_batch_size()
         self._do_sanity_check()
 
@@ -1049,8 +1056,6 @@ class DeepSpeedConfig(object):
             assert self.bfloat16_config.bf16_master_weights_and_grads, "bf16_optimizer_states requires bf16_master_weights_and_grads to be enabled."
 
     def _do_warning_check(self):
-        fp16_enabled = self.float16_config.enabled
-
         vocabulary_size = self._param_dict.get(VOCABULARY_SIZE, VOCABULARY_SIZE_DEFAULT)
         if vocabulary_size and vocabulary_size % TENSOR_CORE_ALIGN_SIZE != 0:
             logger.warning(
@@ -1059,13 +1064,9 @@ class DeepSpeedConfig(object):
 
         if (self.optimizer_params is not None and MAX_GRAD_NORM in self.optimizer_params.keys()
                 and self.optimizer_params[MAX_GRAD_NORM] > 0):
-            if fp16_enabled:
-                if self.global_rank == 0:
-                    logger.warning("DeepSpeedConfig: In FP16 mode, DeepSpeed will pass {}:{} to FP16 wrapper".format(
+            if self.global_rank == 0:
+                logger.warning(
+                    "DeepSpeedConfig: {} ({}) is not supported as an optimizer parameter, please switch to using the "
+                    "deepspeed parameter 'gradient_clipping' see: "
+                    "https://www.deepspeed.ai/docs/config-json/#gradient-clipping for more details".format(
                         MAX_GRAD_NORM, self.optimizer_params[MAX_GRAD_NORM]))
-            else:
-                if self.global_rank == 0:
-                    logger.warning(
-                        "DeepSpeedConfig: In FP32 mode, DeepSpeed does not permit MAX_GRAD_NORM ({}) > 0, setting to zero"
-                        .format(self.optimizer_params[MAX_GRAD_NORM]))
-                self.optimizer_params[MAX_GRAD_NORM] = 0.0
