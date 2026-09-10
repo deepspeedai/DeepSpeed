@@ -98,7 +98,8 @@ that set nothing keep the existing path unchanged.
         "autoep_size": 8,
         "comm_backend": "deepep",
         "comm_num_sm": 12,
-        "comm_qp_margin": 4
+        "comm_qp_margin": 4,
+        "comm_max_tokens_per_rank": 4096
       }
     }
 
@@ -111,6 +112,14 @@ that set nothing keep the existing path unchanged.
   a fixed length. Required when ``comm_backend`` is ``"deepep"`` because the
   DeepEP buffer is sized statically and must use the same capacity on every
   rank. A batch that exceeds it is an error.
+
+For ``autoep_size > 1``, DeepEP receives the router output directly, bypassing
+the collective backend's sorting, token expansion, and split-count exchange.
+Shared experts and router-logit outputs retain the same behavior. The EP
+communicator is initialized once before each layer's first DeepEP buffer is
+constructed, including when the caller supplied a lazily initialized process
+group. This initialization does not run on subsequent forwards. The standard
+``comm`` and ``autoep_size=1`` paths are unchanged.
 
 On 16 H100s across two nodes, replaying routing captured from real training,
 DeepEP reduced payload AllToAll time from roughly 100 ms to 48 ms per step. A

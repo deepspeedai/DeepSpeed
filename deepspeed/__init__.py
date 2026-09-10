@@ -346,6 +346,18 @@ def _report_per_head_tagging(tagged: dict, skipped: dict) -> None:
     logger.info("per_head_muon: tagged %s", dict(sorted(tagged.items())))
 
 
+def _layer_shape(param: torch.Tensor):
+    """The parameter's shape as a layer, rather than as a ZeRO-3 partition.
+
+    Under ``deepspeed.zero.Init`` a partitioned parameter's data is a flat placeholder -
+    ``torch.Size([0])`` on the ranks that do not hold it - and the shape it has as a layer is
+    recorded as ``ds_shape``. Reading ``param.shape`` there sees a 1-D tensor for every
+    parameter in the model.
+    """
+    ds_shape = getattr(param, "ds_shape", None)
+    return tuple(param.shape) if ds_shape is None else tuple(ds_shape)
+
+
 def set_optimizer_flags(config_class: DeepSpeedConfig, model: torch.nn.Module) -> None:
     if config_class.optimizer_name == MUON_OPTIMIZER:
         per_head = bool((config_class.optimizer_params or {}).get("per_head_muon", False))
@@ -355,6 +367,9 @@ def set_optimizer_flags(config_class: DeepSpeedConfig, model: torch.nn.Module) -
         skipped: dict = {}
 
         for name, p in model.named_parameters():
+            # Muon is defined on matrices, so the test is on the layer's shape. `zero.Init`
+            # makes every parameter report as 1-D, which would switch Muon off for the whole
+            # model without anything saying so.
             if len(_layer_shape(p)) >= 2 and not any(keyword in name.lower() for keyword in ("embed", "lm_head")):
                 setattr(p, "use_muon", True)
             else:
