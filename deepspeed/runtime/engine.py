@@ -2123,6 +2123,7 @@ class DeepSpeedEngine(Module):
         log_dist(f"DeepSpeed Basic Optimizer = {basic_optimizer.__class__.__name__}", ranks=[0])
 
         optimizer_wrapper = self._do_optimizer_sanity_check(basic_optimizer)
+        self._check_muon_can_reach_its_parameters(basic_optimizer, optimizer_wrapper)
 
         if optimizer_wrapper == ZERO_OPTIMIZATION:
             self.optimizer = self._configure_zero_optimizer(basic_optimizer)
@@ -2146,6 +2147,27 @@ class DeepSpeedEngine(Module):
 
         self.compression_scheduler = self._configure_compression_scheduler()
         self.quantizer = self._configure_quantization()
+
+    def _check_muon_can_reach_its_parameters(self, basic_optimizer, optimizer_wrapper):
+        """Refuse the one wrapper that hands Muon flat partitions and does not orthogonalize them.
+
+        `MuonWithAuxAdam.step` tells the two cases apart by shape: a matrix is the weight itself
+        and is orthogonalized there, a 1-D tensor is a ZeRO partition whose update the ZeRO
+        optimizer already applied. `BF16_Optimizer` breaks that reading - it replaces the param
+        groups with flat fp32 partitions (`param_group['params'] = [self.fp32_groups_flat_partition[i]]`)
+        and knows nothing about `use_muon`, so the update is never applied and the step is SGD.
+
+        The original shapes are not recoverable from `step`, so this is a refusal rather than a
+        fix; implementing Muon inside BF16_Optimizer is its own change. Reached by bf16 with
+        `grad_accum_dtype: fp32` at ZeRO stage 1.
+        """
+        if not isinstance(basic_optimizer, MuonWithAuxAdam) or optimizer_wrapper != BFLOAT16:
+            return
+        raise ZeRORuntimeException(
+            "Muon cannot be used with the BF16_Optimizer, which this configuration selects: bf16 "
+            "with grad_accum_dtype fp32 at ZeRO stage 1. That optimizer hands Muon flat fp32 "
+            "partitions and never applies the Newton-Schulz update, so training would silently "
+            "proceed as SGD. Drop grad_accum_dtype, or use ZeRO stage 2 or 3.")
 
     def _configure_autoep_folding_optimizer_gradient_reduction(self):
         configure = getattr(self.optimizer, "configure_autoep_folding_tp_gradient_reduction", None)
