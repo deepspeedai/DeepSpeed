@@ -12,6 +12,7 @@ from pydantic import Field, ValidationError
 
 from deepspeed.runtime import config as ds_config
 from deepspeed.runtime.config_utils import DeepSpeedConfigModel
+from deepspeed.runtime.precision_config import DeepSpeedFP16Config
 
 
 class SimpleConf(DeepSpeedConfigModel):
@@ -84,3 +85,36 @@ def test_config_base_literalfail(config_dict):
 def test_config_base_deprecatedfail():
     with pytest.raises(AssertionError):
         config = SimpleConf(**{"param_2": ["DS"], "param_2_old": "DS"})
+
+
+@pytest.mark.parametrize(
+    "fp16_overrides",
+    [
+        {"loss_scale": float("inf")},
+        {"loss_scale": float("-inf")},
+        {"loss_scale": float("nan")},
+        {"loss_scale": -1.0},
+        {"loss_scale_window": 0},
+        {"hysteresis": 0},
+        {"min_loss_scale": 0},
+    ],
+)
+def test_fp16_config_rejects_invalid_loss_scale_inputs(fp16_overrides):
+    with pytest.raises(ValidationError):
+        DeepSpeedFP16Config(enabled=True, **fp16_overrides)
+
+
+def test_fp16_config_accepts_dynamic_loss_scale_sentinel():
+    config = DeepSpeedFP16Config(enabled=True, loss_scale=0)
+    assert config.loss_scale == 0.0
+
+
+def test_deepspeed_config_rejects_non_finite_fp16_loss_scale():
+    with pytest.raises(ValidationError):
+        ds_config.DeepSpeedConfig({
+            "train_batch_size": 1,
+            "fp16": {
+                "enabled": True,
+                "loss_scale": float("inf"),
+            },
+        })
