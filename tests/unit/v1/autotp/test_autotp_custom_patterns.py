@@ -989,3 +989,64 @@ class TestAutoTPFusedWeights(DistributedTest):
 
 # Multi-model (teacher + student in one process) and multimodal-config regressions live in
 # tests/unit/v1/autotp/test_autotp_multiple_models.py so they run on the GPU workflow too.
+
+
+class _WeightOnlyNorm(nn.Module):
+    """A norm with the shape every transformers RMSNorm has: one 1-D `weight`."""
+
+    def __init__(self, size=8):
+        super().__init__()
+        self.weight = nn.Parameter(torch.ones(size))
+
+    def forward(self, hidden_states):
+        return hidden_states * self.weight
+
+
+def test_is_load_module_recognizes_a_norm_it_has_never_heard_of():
+    """Two norms with identical structure, differing only in class name (#8447).
+
+    `Loading.is_load_module` gated on a hardcoded list of 26 class names, so a norm
+    whose architecture was not on it returned False, `_replace_module` skipped it,
+    and on the meta-device path its weight was never materialized. transformers
+    defines one norm class per architecture, so the list named a small fraction of
+    them and the rest were silently left uninitialized.
+    """
+    from deepspeed.module_inject.auto_tp import Loading
+
+    on_the_list = type("LlamaRMSNorm", (_WeightOnlyNorm, ), {})()
+    not_on_the_list = type("GemmaRMSNorm", (_WeightOnlyNorm, ), {})()
+
+    assert Loading.is_load_module(on_the_list)
+    assert Loading.is_load_module(not_on_the_list), (
+        "a norm must be recognized by its shape, not by whether its class name was listed")
+
+
+def test_is_load_module_still_refuses_what_it_refused_before():
+    """The shape test must admit norms and nothing that wants a different load path."""
+    from deepspeed.module_inject.auto_tp import Loading
+
+    # 2-D weights: these are matched by class above and must not start matching by shape.
+    assert Loading.is_load_module(nn.Linear(4, 4))
+    assert Loading.is_load_module(nn.Embedding(4, 4))
+    assert Loading.is_load_module(nn.LayerNorm(4))
+
+    class _TwoDimLeaf(nn.Module):
+
+        def __init__(self):
+            super().__init__()
+            self.weight = nn.Parameter(torch.ones(4, 4))
+
+    assert not Loading.is_load_module(_TwoDimLeaf())
+    assert not Loading.is_load_module(nn.Conv1d(2, 2, 3))
+    assert not Loading.is_load_module(nn.MultiheadAttention(4, 2))
+    # A container owns its children's parameters but none of its own.
+    assert not Loading.is_load_module(nn.Sequential(nn.Linear(4, 4)))
+
+    class _NormWithExtraParam(_WeightOnlyNorm):
+
+        def __init__(self):
+            super().__init__()
+            self.scale = nn.Parameter(torch.ones(8))
+
+    assert not Loading.is_load_module(_NormWithExtraParam())
+
