@@ -15,7 +15,8 @@ import torch
 import deepspeed
 import deepspeed.comm as dist
 from deepspeed.accelerator import get_accelerator
-from deepspeed.checkpoint.constants import BASE_OPTIMIZER_STATE, GROUP_PADDINGS, SINGLE_PARTITION_OF_FP32_GROUPS
+from deepspeed.checkpoint.constants import (BASE_OPTIMIZER_STATE, BASE_OPTIMIZER_STATE_STEP, GROUP_PADDINGS,
+                                            SINGLE_PARTITION_OF_FP32_GROUPS)
 from deepspeed.checkpoint.constants import OPTIMIZER_STATE_DICT, PARAM_ALIGNMENT_PADDINGS
 from deepspeed.utils import safe_get_full_grad, safe_set_full_grad, set_log_level_from_string
 from deepspeed.utils.zero_to_fp32 import get_fp32_state_dict_from_zero_checkpoint
@@ -175,7 +176,8 @@ class TestStage12ParamAlignment(DistributedTest):
         with pytest.raises(RuntimeError, match="parameter-alignment layout"):
             loaded.load_checkpoint(checkpoint_dir, tag="padded-layout")
 
-    def test_legacy_unpadded_checkpoint_resumes_with_default_layout(self, tmpdir, zero_stage):
+    @pytest.mark.parametrize("load_parameter_alignment", [False, True], ids=["unpadded", "aligned"])
+    def test_legacy_unpadded_checkpoint_migrates_across_layouts(self, tmpdir, zero_stage, load_parameter_alignment):
         engine = _init_alignment_engine(zero_stage, parameter_alignment=False)
         _alignment_step(engine)
         checkpoint_dir = str(tmpdir)
@@ -197,7 +199,7 @@ class TestStage12ParamAlignment(DistributedTest):
         _alignment_step(engine, input_value=2)
         expected = {name: param.detach().clone() for name, param in engine.module.named_parameters()}
 
-        loaded = _init_alignment_engine(zero_stage, parameter_alignment=False)
+        loaded = _init_alignment_engine(zero_stage, parameter_alignment=load_parameter_alignment)
         loaded.load_checkpoint(checkpoint_dir, tag=tag)
         _alignment_step(loaded, input_value=2)
         for name, param in loaded.module.named_parameters():
@@ -301,6 +303,42 @@ class TestStage12ParamAlignment(DistributedTest):
         converted_state = converted["state"][param_id]
         assert converted_state["exp_avg"].numel() == opt.single_partition_of_fp32_groups[group_id].numel()
         assert torch.equal(converted_state["tensor_step"], tensor_step)
+
+    def test_pre_padding_elastic_checkpoint_preserves_tensor_metadata(self, zero_stage):
+        engine = _init_alignment_engine(zero_stage, parameter_alignment=True)
+        _alignment_step(engine)
+        opt = engine.optimizer
+        group_id = 0
+        world_size = dist.get_world_size(group=opt.real_dp_process_group[group_id])
+        alignment = opt.nccl_start_alignment_factor * world_size
+        unpadded_numel = sum(param.numel() for param in opt.round_robin_bit16_groups[group_id])
+        old_group_numel = ((unpadded_numel + alignment - 1) // alignment) * alignment
+        old_partition_size = old_group_numel // world_size
+        tensor_step = torch.tensor([17], dtype=torch.int64)
+        all_state_dict = []
+
+        for rank in range(world_size):
+            partition_start = rank * old_partition_size
+            group_padding = max(0, partition_start + old_partition_size - unpadded_numel)
+            group_padding = min(group_padding, old_partition_size)
+            lean_partition_size = old_partition_size - group_padding
+            all_state_dict.append({
+                BASE_OPTIMIZER_STATE: [{
+                    "exp_avg": torch.arange(lean_partition_size, dtype=torch.float32),
+                    "tensor_step": tensor_step.clone(),
+                }],
+                BASE_OPTIMIZER_STATE_STEP:
+                17,
+                SINGLE_PARTITION_OF_FP32_GROUPS: [torch.zeros(lean_partition_size, dtype=torch.float32)],
+                GROUP_PADDINGS: [group_padding],
+            })
+
+        opt._restore_elastic_base_optimizer_state(all_state_dict, unpadded_layout=True)
+        flat_param = opt.optimizer.param_groups[group_id]["params"][0]
+        restored_state = opt.optimizer.state[flat_param]
+        assert restored_state["exp_avg"].numel() == flat_param.numel()
+        assert restored_state["tensor_step"].numel() == 1
+        assert restored_state["tensor_step"].item() == tensor_step.item()
 
 
 def _apply_dtype_to_config(config_dict, dtype):

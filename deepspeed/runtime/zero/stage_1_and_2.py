@@ -2935,11 +2935,18 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         self._restore_from_bit16_weights()
 
     # Extract optimizer state for current partition from merged states of all partitions
-    def _partition_base_optimizer_state(self, state_key, all_partition_states, group_id, unpadded_layout=False):
+    def _partition_base_optimizer_state(self,
+                                        state_key,
+                                        all_partition_states,
+                                        group_id,
+                                        unpadded_layout=False,
+                                        is_partition_state=True):
         partition_id = dist.get_rank(group=self.real_dp_process_group[group_id])
         alignment = self.nccl_start_alignment_factor * dist.get_world_size(group=self.real_dp_process_group[group_id])
         if torch.is_tensor(all_partition_states[0]):
-            if unpadded_layout and all_partition_states[0].dim() > 0:
+            if not is_partition_state:
+                return all_partition_states[0]
+            if unpadded_layout:
                 flat_merged_partitions = self._expand_unpadded_flat_group(self.flatten(all_partition_states), group_id)
             else:
                 flat_merged_partitions = self.flatten_dense_tensors_aligned(all_partition_states, alignment)
@@ -2998,18 +3005,24 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         base_optimizer_group_states = []
         for i in range(len(self.optimizer.param_groups)):
             partition_states = {}
-            all_partition_group_states = [sd[BASE_OPTIMIZER_STATE][i] for sd in all_state_dict]
+            group_state_dicts = all_state_dict
 
             if self.is_moe_group(self.optimizer.param_groups[i]):
                 ranks = self.get_ep_ranks(group_name=self.optimizer.param_groups[i]['name'])
-                all_partition_group_states = [all_partition_group_states[i] for i in ranks]
+                group_state_dicts = [all_state_dict[rank] for rank in ranks]
+
+            all_partition_group_states = [sd[BASE_OPTIMIZER_STATE][i] for sd in group_state_dicts]
 
             for key in all_partition_group_states[0].keys():
                 all_partition_states = [all_states[key] for all_states in all_partition_group_states]
+                is_partition_state = all(
+                    torch.is_tensor(state) and state.shape == sd[SINGLE_PARTITION_OF_FP32_GROUPS][i].shape
+                    for state, sd in zip(all_partition_states, group_state_dicts))
                 partition_states[key] = self._partition_base_optimizer_state(key,
                                                                              all_partition_states,
                                                                              i,
-                                                                             unpadded_layout=unpadded_layout)
+                                                                             unpadded_layout=unpadded_layout,
+                                                                             is_partition_state=is_partition_state)
             base_optimizer_group_states.append(partition_states)
 
         self._restore_base_optimizer_state(base_optimizer_group_states,
@@ -3081,16 +3094,15 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         self._load_global_state(current_rank_sd)
 
         ckpt_is_rigid = isinstance(current_rank_sd[BASE_OPTIMIZER_STATE], dict)
-        saved_param_padding = current_rank_sd.get(PARAM_ALIGNMENT_PADDINGS)
-        if saved_param_padding is None:
-            saved_param_padding = [[0] * len(group_padding) for group_padding in self.round_robin_bit16_padding]
-        incompatible_param_layout = saved_param_padding != self.round_robin_bit16_padding
+        has_param_alignment_layout = PARAM_ALIGNMENT_PADDINGS in current_rank_sd
+        unpadded_layout = (not has_param_alignment_layout
+                           and any(any(group_padding) for group_padding in self.round_robin_bit16_padding))
+        incompatible_param_layout = (has_param_alignment_layout
+                                     and current_rank_sd[PARAM_ALIGNMENT_PADDINGS] != self.round_robin_bit16_padding)
         if incompatible_param_layout and (load_optimizer_states or load_from_fp32_weights):
             raise RuntimeError("The ZeRO checkpoint parameter-alignment layout does not match the current "
                                "zero_optimization.parameter_alignment setting. Load with the setting used to save "
                                "the checkpoint, or disable optimizer-state loading for a module-only warm start.")
-        unpadded_layout = (PARAM_ALIGNMENT_PADDINGS not in current_rank_sd
-                           and any(any(group_padding) for group_padding in self.round_robin_bit16_padding))
 
         # padding is always at the last rank/partition
         # if DP=1024 and param-group elems=16 -> padding will be 1024-16 across all but one rank
