@@ -12,10 +12,12 @@ from torch.fx import Graph, GraphModule
 
 import deepspeed.compile.util as compile_util
 from deepspeed.compile import backend as backend_mod
+from deepspeed.compile import executor_arena as executor_arena_mod
 from deepspeed.compile import inductor as inductor_mod
 from deepspeed.compile import list_schedule as schedule_mod
 from deepspeed.compile.passes import prefetch as prefetch_mod
 from deepspeed.compile.passes import selective_gather as selective_gather_mod
+from deepspeed.compile.passes import zero3_compile as zero3_compile_mod
 from deepspeed.compile.profilers import ProfilingResult
 from deepspeed.compile.profilers.graph_profile import _backfill_missing_profile_metadata, is_profile_incomplete
 
@@ -27,9 +29,11 @@ def _define_dc_ops():
     test_dc_ops = getattr(torch.ops, _TEST_DC_NAMESPACE)
     try:
         test_dc_ops.allgather_param.default
+        test_dc_ops.prefetch_params_fused.default
         test_dc_ops.wait_allgather.default
         test_dc_ops.release_param.default
         test_dc_ops.reduce_grad.default
+        test_dc_ops.reload_parameter.default
         test_dc_ops.offload_tensor.default
         return test_dc_ops
     except AttributeError:
@@ -38,9 +42,12 @@ def _define_dc_ops():
     lib = torch.library.Library(_TEST_DC_NAMESPACE, "DEF")
     for schema in (
             "allgather_param(Tensor a, int graph_id, int id, ScalarType? dtype = None) -> Tensor",
+            "prefetch_params_fused(int graph_id, Tensor[] params, int[] ids, "
+            "ScalarType[]? dtypes = None) -> Tensor[]",
             "wait_allgather(Tensor(a) a, int graph_id, int id) -> Tensor(a)",
             "release_param(Tensor(a) a, int graph_id, int id, int n_users) -> Tensor(a)",
             "reduce_grad(Tensor a, int graph_id, int id) -> Tensor",
+            "reload_parameter(Tensor a, int graph_id, int id) -> ()",
             "free_tensors(Tensor[] tensors) -> ()",
             "end_backward(Tensor[] tensors, int graph_id, bool release_reduce_buckets = True) -> ()",
             "offload_tensor(Tensor a, int id, int id) -> Tensor",
@@ -71,6 +78,9 @@ def stub_deepcompile_ops(monkeypatch):
 
 def _with_meta(node, tensor_size=0, device_time=0):
     node.meta["tensor_size"] = tensor_size
+    node.meta["alloc_mem"] = 0
+    node.meta["profile_mem_start"] = 0
+    node.meta["profile_mem_peak"] = 0
     if device_time is not None:
         node.meta["device_time"] = device_time
     return node
@@ -82,6 +92,17 @@ def test_stub_deepcompile_ops_uses_isolated_namespace():
 
 def _placeholder(graph, name):
     return _with_meta(graph.placeholder(name))
+
+
+def test_end_backward_is_not_added_without_reduce_nodes():
+    graph = Graph()
+    grad = graph.placeholder("grad")
+    graph.output((grad, ))
+
+    before = list(graph.nodes)
+    zero3_compile_mod.add_end_backward(graph, 7)
+
+    assert list(graph.nodes) == before
 
 
 def test_sync_memory_profile_complete_noops_without_distributed(monkeypatch):
@@ -98,7 +119,7 @@ def test_sync_memory_profile_complete_noops_without_distributed(monkeypatch):
 
 def test_sync_memory_profile_complete_reduces_asymmetric_failure(monkeypatch):
     monkeypatch.setattr(backend_mod.dist, "is_initialized", lambda: True)
-    monkeypatch.setattr(backend_mod, "get_accelerator", lambda: SimpleNamespace(current_device=lambda: "cpu"))
+    monkeypatch.setattr(backend_mod, "get_accelerator", lambda: SimpleNamespace(current_device_name=lambda: "cpu"))
 
     def mark_any_rank_failed(tensor, op):
         assert op == backend_mod.dist.ReduceOp.MIN
@@ -107,6 +128,79 @@ def test_sync_memory_profile_complete_reduces_asymmetric_failure(monkeypatch):
     monkeypatch.setattr(backend_mod.dist, "all_reduce", mark_any_rank_failed)
 
     assert not backend_mod._sync_memory_profile_complete(True)
+
+
+def test_scheduler_debug_env_flag_values(monkeypatch):
+    monkeypatch.delenv(zero3_compile_mod.SCHEDULER_DEBUG_ENV, raising=False)
+    assert not zero3_compile_mod._scheduler_debug_enabled()
+
+    for value in ("", "0", "false", "FALSE", "no", "No"):
+        monkeypatch.setenv(zero3_compile_mod.SCHEDULER_DEBUG_ENV, value)
+        assert not zero3_compile_mod._scheduler_debug_enabled()
+
+    for value in ("1", "true", "TRUE", "yes", "debug"):
+        monkeypatch.setenv(zero3_compile_mod.SCHEDULER_DEBUG_ENV, value)
+        assert zero3_compile_mod._scheduler_debug_enabled()
+
+
+def test_unreleased_scheduler_debug_alias_is_not_supported(monkeypatch):
+    monkeypatch.delenv(zero3_compile_mod.SCHEDULER_DEBUG_ENV, raising=False)
+    monkeypatch.setenv("DEEPSPEED_DEEPCOMPILE_SCHEDULER_DEBUG", "1")
+
+    assert not zero3_compile_mod._scheduler_debug_enabled()
+
+
+def test_zero3_scheduler_budget_uses_rank_reduced_non_gathered_peak(monkeypatch):
+    monkeypatch.setattr(zero3_compile_mod.dist, "is_initialized", lambda: True)
+
+    class FakeAccelerator:
+
+        def current_device(self):
+            return "cpu"
+
+        def current_device_name(self):
+            return "cpu"
+
+        def total_memory(self):
+            return 2000
+
+    max_reductions = iter((850, 200))
+
+    def reduce_budget_inputs(tensor, op, group=None):
+        assert group is None
+        if op == zero3_compile_mod.dist.ReduceOp.MIN:
+            tensor[0] = 1000
+        elif op == zero3_compile_mod.dist.ReduceOp.MAX:
+            tensor[0] = next(max_reductions)
+        else:
+            raise AssertionError(f"unexpected reduce op {op}")
+
+    monkeypatch.setattr(zero3_compile_mod, "get_accelerator", lambda: FakeAccelerator())
+    monkeypatch.setattr(zero3_compile_mod.dist, "all_reduce", reduce_budget_inputs)
+
+    graph = Graph()
+    param = _placeholder(graph, "budget_builder_param")
+    ag = _allgather(graph, param, 1, "budget_builder", tensor_size=200)
+    wait = _wait(graph, ag, 1, "budget_builder")
+    op = _neg(graph, wait, "budget_builder_op")
+    op.meta.update(max_mem=800, profile_mem_start=250, profile_mem_peak=1050)
+    release = _release(graph, op, 1, "budget_builder")
+    graph.output((release, ))
+    graph.lint()
+    for node in graph.nodes:
+        node.meta.setdefault("alloc_mem", 0)
+        node.meta.setdefault("max_mem", 0)
+        node.meta.setdefault("profile_mem_start", 0)
+        node.meta.setdefault("profile_mem_peak", 0)
+
+    budget = zero3_compile_mod._build_scheduler_budget_from_operator_profile(graph)
+
+    assert budget.source == "profiled_non_gathered_peak_memory_clamped_to_minimum_gather_residency"
+    assert budget.total_mem == 1000
+    assert budget.profiled_non_gathered_peak_mem == 850
+    assert budget.safety_margin == 100
+    assert budget.available_mem == 50
+    assert budget.max_gathered_bytes == 200
 
 
 # The helpers below build nodes through Graph.create_node instead of Graph.call_function
@@ -139,15 +233,212 @@ def _add(graph, lhs, rhs, name, device_time=0):
                       device_time=device_time)
 
 
-def _release(graph, arg, ds_id, name):
+def _release(graph, arg, ds_id, name, n_users=1):
     return _with_meta(
         graph.create_node('call_function',
-                          torch.ops.dc.release_param.default, (arg, 0, ds_id, 1), {},
+                          torch.ops.dc.release_param.default, (arg, 0, ds_id, n_users), {},
                           name=f"release_ds_param_{name}_{ds_id}"))
 
 
-def _scheduled_names(graph):
-    return [node.name for node in schedule_mod.fast_free_schedule(graph, 0, 0, debug_log=True).nodes]
+def test_fused_prefetch_outputs_replace_ordinary_allgather_edges():
+    graph = Graph()
+    first = _placeholder(graph, "first")
+    second = _placeholder(graph, "second")
+    first_ag = _allgather(graph, first, 1, "first", tensor_size=256)
+    second_ag = _allgather(graph, second, 2, "second", tensor_size=512)
+    first_wait = _wait(graph, first_ag, 1, "first")
+    second_wait = _wait(graph, second_ag, 2, "second")
+    use = _add(graph, first_wait, second_wait, "use")
+    first_release = _release(graph, use, 1, "first")
+    second_release = _release(graph, first_release, 2, "second")
+    output = graph.output((second_release, ))
+    graph.lint()
+
+    ordered_nodes = (first, second, [first_ag, second_ag], first_ag, second_ag, first_wait, second_wait, use,
+                     first_release, second_release, output)
+    rewritten = prefetch_mod._rewrite_fused_prefetch(ordered_nodes, graph_id=0)
+    fused = [node for node in rewritten.nodes if node.target == torch.ops.dc.prefetch_params_fused.default]
+    waits = [node for node in rewritten.nodes if node.target == torch.ops.dc.wait_allgather.default]
+
+    assert len(fused) == 1
+    assert fused[0].args[2] == [1, 2]
+    assert fused[0].args[3] == [torch.float16, torch.float16]
+    assert not any(node.target == torch.ops.dc.allgather_param.default for node in rewritten.nodes)
+    assert len(waits) == 2
+    assert all(wait.args[0].target == operator.getitem for wait in waits)
+    assert all(wait.args[0].args[0] is fused[0] for wait in waits)
+    assert [wait.args[0].args[1] for wait in waits] == [0, 1]
+    assert all(len(wait.args) == 3 for wait in waits)
+    arena_plan = executor_arena_mod.plan_graph_executor_arena(rewritten)
+    assert [(entry.ds_id, entry.occurrence) for entry in arena_plan.packed.entries] == [(1, 0), (2, 0)]
+    assert arena_plan.packed.fallbacks == ()
+
+
+def test_fused_prefetch_mixed_dtype_group_preserves_independent_allgathers():
+    graph = Graph()
+    first = _placeholder(graph, "mixed_first")
+    second = _placeholder(graph, "mixed_second")
+    first_ag = _allgather(graph, first, 1, "mixed_first")
+    second_ag = _allgather(graph, second, 2, "mixed_second")
+    second_ag.kwargs = {}
+    first_wait = _wait(graph, first_ag, 1, "mixed_first")
+    second_wait = _wait(graph, second_ag, 2, "mixed_second")
+    use = _add(graph, first_wait, second_wait, "mixed_use")
+    release = _release(graph, use, 1, "mixed")
+    output = graph.output((release, ))
+    graph.lint()
+
+    rewritten = prefetch_mod._rewrite_fused_prefetch(
+        (first, second, [first_ag, second_ag], first_ag, second_ag, first_wait, second_wait, use, release, output),
+        graph_id=0)
+
+    assert not any(node.target == torch.ops.dc.prefetch_params_fused.default for node in rewritten.nodes)
+    assert len([node for node in rewritten.nodes if node.target == torch.ops.dc.allgather_param.default]) == 2
+
+
+def test_fused_prefetch_duplicate_ds_id_preserves_single_lease_semantics():
+    graph = Graph()
+    param = _placeholder(graph, "duplicate_param")
+    first_ag = _allgather(graph, param, 3, "duplicate_first")
+    second_ag = _allgather(graph, param, 3, "duplicate_second")
+    first_wait = _wait(graph, first_ag, 3, "duplicate_first")
+    second_wait = _wait(graph, second_ag, 3, "duplicate_second")
+    use = _add(graph, first_wait, second_wait, "duplicate_use")
+    release = _release(graph, use, 3, "duplicate")
+    output = graph.output((release, ))
+    graph.lint()
+
+    rewritten = prefetch_mod._rewrite_fused_prefetch(
+        (param, [first_ag, second_ag], first_ag, second_ag, first_wait, second_wait, use, release, output), graph_id=0)
+
+    assert not any(node.target == torch.ops.dc.prefetch_params_fused.default for node in rewritten.nodes)
+    assert len([node for node in rewritten.nodes if node.target == torch.ops.dc.allgather_param.default]) == 2
+
+
+def test_graph_executor_arena_excludes_wait_tensor_that_escapes_as_output():
+    graph = Graph()
+    param = _placeholder(graph, "escaping_param")
+    ag = _allgather(graph, param, 11, "escaping", tensor_size=256)
+    wait = _wait(graph, ag, 11, "escaping")
+    _release(graph, wait, 11, "escaping")
+    graph.output((wait, ))
+    graph.lint()
+
+    plan = executor_arena_mod.plan_graph_executor_arena(graph)
+
+    assert plan.packed.entries == ()
+    assert len(plan.packed.fallbacks) == 1
+    assert plan.packed.fallbacks[0].fallback_reason == "graph_output_escape"
+
+
+def test_graph_executor_arena_lifetime_ends_at_final_multi_user_release():
+    graph = Graph()
+    param = _placeholder(graph, "multi_user_param")
+    ag = _allgather(graph, param, 12, "multi_user", tensor_size=256)
+    wait = _wait(graph, ag, 12, "multi_user")
+    first_use = _neg(graph, wait, "multi_user_first")
+    second_use = _neg(graph, wait, "multi_user_second")
+    first_release = _release(graph, first_use, 12, "multi_user_first", n_users=2)
+    second_release = _release(graph, second_use, 12, "multi_user_second", n_users=2)
+    graph.output((first_release, second_release))
+    graph.lint()
+
+    plan = executor_arena_mod.plan_graph_executor_arena(graph)
+    positions = {node: index for index, node in enumerate(graph.nodes)}
+
+    assert len(plan.packed.entries) == 1
+    assert plan.packed.entries[0].release == positions[second_release]
+
+
+def test_graph_executor_arena_reuses_slice_for_repeated_ds_id_after_release():
+    graph = Graph()
+    param = _placeholder(graph, "repeated_param")
+    first_ag = _allgather(graph, param, 14, "repeated_first", tensor_size=256)
+    first_wait = _wait(graph, first_ag, 14, "repeated_first")
+    first_use = _neg(graph, first_wait, "repeated_first_use")
+    first_release = _release(graph, first_use, 14, "repeated_first")
+    second_ag = _allgather(graph, param, 14, "repeated_second", tensor_size=256)
+    second_wait = _wait(graph, second_ag, 14, "repeated_second")
+    second_use = _add(graph, first_release, second_wait, "repeated_second_use")
+    second_release = _release(graph, second_use, 14, "repeated_second")
+    graph.output((second_release, ))
+    graph.lint()
+
+    plan = executor_arena_mod.plan_graph_executor_arena(graph)
+
+    assert [(entry.ds_id, entry.occurrence, entry.offset) for entry in plan.packed.entries] == [(14, 0, 0), (14, 1, 0)]
+
+
+def test_graph_executor_arena_excludes_alias_view_saved_as_output():
+    graph = Graph()
+    param = _placeholder(graph, "alias_escape_param")
+    ag = _allgather(graph, param, 13, "alias_escape", tensor_size=256)
+    wait = _wait(graph, ag, 13, "alias_escape")
+    view = graph.call_method("view", args=(wait, -1))
+    _release(graph, view, 13, "alias_escape")
+    graph.output((view, ))
+    graph.lint()
+
+    plan = executor_arena_mod.plan_graph_executor_arena(graph)
+
+    assert plan.packed.entries == ()
+    assert plan.packed.fallbacks[0].fallback_reason == "graph_output_alias_escape"
+
+
+def test_graph_executor_arena_excludes_getitem_alias_saved_as_output():
+    graph = Graph()
+    param = _placeholder(graph, "getitem_escape_param")
+    ag = _allgather(graph, param, 15, "getitem_escape", tensor_size=256)
+    wait = _wait(graph, ag, 15, "getitem_escape")
+    view = graph.call_function(operator.getitem, args=(wait, slice(None)))
+    _release(graph, view, 15, "getitem_escape")
+    graph.output((view, ))
+    graph.lint()
+
+    plan = executor_arena_mod.plan_graph_executor_arena(graph)
+
+    assert plan.packed.entries == ()
+    assert plan.packed.fallbacks[0].fallback_reason == "graph_output_alias_escape"
+
+
+def test_final_arena_planning_excludes_frozen_persistent_param():
+    graph = Graph()
+    param = graph.placeholder("frozen_param")
+    param.meta["val"] = torch.empty(4, dtype=torch.float16)
+    use = graph.call_function(operator.neg, (param, ))
+    graph.output((use, ))
+
+    registered_param = SimpleNamespace(numel=4, dtype=torch.float16, param=SimpleNamespace(ds_persist=True))
+    param_manager = SimpleNamespace(params={"frozen_param": registered_param}, ds_ids={"frozen_param": 77})
+
+    rewritten = zero3_compile_mod.add_gather_and_release(0, graph, param_manager, [param])
+    plan = executor_arena_mod.plan_graph_executor_arena(rewritten)
+
+    assert plan.packed.entries == ()
+    assert len(plan.packed.fallbacks) == 1
+    assert plan.packed.fallbacks[0].ds_id == 77
+    assert plan.packed.fallbacks[0].fallback_reason == "persistent_param"
+
+
+def test_prefetch_size_bounds_exclude_oversized_single_gather(monkeypatch):
+    monkeypatch.setattr(prefetch_mod, "MAX_BUFFERED_SIZE", 1024)
+    monkeypatch.setattr(prefetch_mod, "MAX_FUSE_SIZE", 512)
+
+    assert prefetch_mod._prefetch_size_admissible(512)
+    assert not prefetch_mod._prefetch_size_admissible(513)
+    assert not prefetch_mod._prefetch_size_admissible(0)
+
+
+def _scheduled_graph(graph, scheduler_budget=None):
+    return schedule_mod.fast_free_schedule(graph, 0, 0, debug_log=True, scheduler_budget=scheduler_budget)
+
+
+def _scheduled_names(graph, scheduler_budget=None):
+    return [node.name for node in _scheduled_graph(graph, scheduler_budget=scheduler_budget).nodes]
+
+
+def _scheduler_diagnostics(graph):
+    return getattr(graph, schedule_mod.DS_SCHEDULER_BUDGET_DIAGNOSTICS_ATTR)
 
 
 @pytest.mark.parametrize("case", ["only_consumer", "later_real_use"])
@@ -263,6 +554,49 @@ def test_fast_free_schedule_uses_pressure_tiebreaker_in_fallback_bucket():
     assert names.index(low_ag.name) < names.index(high_ag.name)
 
 
+def test_fast_free_schedule_counts_live_gathered_bytes_when_filtering_candidates():
+    graph = Graph()
+
+    first_param = _placeholder(graph, "budget_first_param")
+    high_param = _placeholder(graph, "budget_high_param")
+    low_param = _placeholder(graph, "budget_low_param")
+
+    first_ag = _allgather(graph, first_param, 80, "budget_first", tensor_size=70)
+    first_wait = _wait(graph, first_ag, 80, "budget_first")
+
+    high_dep = _add(graph, high_param, first_wait, "budget_high_dep")
+    high_ag = _allgather(graph, high_dep, 81, "budget_high", tensor_size=40)
+    high_wait = _wait(graph, high_ag, 81, "budget_high")
+    high_use = _neg(graph, high_wait, "budget_high_use", device_time=1)
+    high_release = _release(graph, high_use, 81, "budget_high")
+
+    low_dep = _add(graph, low_param, first_wait, "budget_low_dep")
+    low_ag = _allgather(graph, low_dep, 82, "budget_low", tensor_size=20)
+    low_wait = _wait(graph, low_ag, 82, "budget_low")
+    low_use = _neg(graph, low_wait, "budget_low_use", device_time=100)
+    low_release = _release(graph, low_use, 82, "budget_low")
+
+    high_low_pair = _add(graph, high_wait, low_wait, "budget_high_low_pair")
+    first_use = _add(graph, first_wait, high_low_pair, "budget_first_use")
+    first_release = _release(graph, first_use, 80, "budget_first")
+
+    graph.output((first_release, high_release, low_release))
+    graph.lint()
+
+    no_budget_names = _scheduled_names(graph)
+    assert no_budget_names.index(high_ag.name) < no_budget_names.index(low_ag.name)
+
+    budget = schedule_mod.SchedulerMemoryBudget(max_gathered_bytes=100, source="test")
+    scheduled_graph = _scheduled_graph(graph, scheduler_budget=budget)
+    names = [node.name for node in scheduled_graph.nodes]
+    diagnostics = _scheduler_diagnostics(scheduled_graph)
+
+    assert names.index(first_ag.name) < names.index(low_ag.name)
+    assert names.index(low_ag.name) < names.index(high_ag.name)
+    assert diagnostics["budget_rejections"] > 0
+    assert any(record["node"] == high_ag.name for record in diagnostics["budget_rejected_candidates"])
+
+
 def test_fast_free_schedule_keeps_single_allgather_release_order():
     graph = Graph()
 
@@ -322,6 +656,9 @@ def test_profile_backfill_makes_partial_profile_safe_for_profile_dependent_passe
     class FakeAccelerator:
 
         def current_device(self):
+            return "cpu"
+
+        def current_device_name(self):
             return "cpu"
 
         def total_memory(self):
@@ -407,6 +744,134 @@ def test_schedule_prefetch_skips_when_memory_profile_incomplete(monkeypatch):
                                           bwd=False) is gm
     assert gm.graph is graph
     assert any("incomplete profiling data" in message for message in logs)
+
+
+def test_schedule_prefetch_rejected_fused_admission_restores_enabled_backward_demand_arena(monkeypatch):
+    graph = Graph()
+    param = _placeholder(graph, "admission_param")
+    output = graph.output((param, ))
+    _with_meta(output)
+    graph.lint()
+
+    profile_records = [(node.name, 0, 0, 0) for node in graph.nodes]
+    time_records = [(node.name, 0, 0) for node in graph.nodes]
+    size_records = [(node.name, 0) for node in graph.nodes]
+    profiling_results = {
+        0:
+        ProfilingResult(bwd_graph=graph,
+                        bwd_mem=profile_records,
+                        bwd_time=time_records,
+                        bwd_tensor_sizes=size_records,
+                        bwd_mem_complete=True)
+    }
+    gm = GraphModule(torch.nn.Module(), graph)
+
+    demand_occurrences = (executor_arena_mod.ArenaOccurrence(ds_id=101,
+                                                             occurrence=0,
+                                                             first_use=0,
+                                                             release=1,
+                                                             nbytes=256,
+                                                             dtype=torch.float16), )
+    final_occurrences = (executor_arena_mod.ArenaOccurrence(ds_id=101,
+                                                            occurrence=0,
+                                                            first_use=0,
+                                                            release=1,
+                                                            nbytes=512,
+                                                            dtype=torch.float16), )
+    plans = iter(
+        (
+            executor_arena_mod.GraphArenaPlan(demand_occurrences,
+                                              executor_arena_mod.pack_executor_arena(demand_occurrences)),
+            executor_arena_mod.GraphArenaPlan(final_occurrences,
+                                              executor_arena_mod.pack_executor_arena(final_occurrences)),
+        ))
+
+    class FakeAccelerator:
+
+        def current_device_name(self):
+            return "cpu"
+
+        def total_memory(self):
+            return 1024
+
+        def available_memory(self):
+            return 1024
+
+        def memory_allocated(self):
+            return 0
+
+        def max_memory_allocated(self):
+            return 0
+
+    class FakeNative:
+
+        def configure_z3_gather_arena(self, *args):
+            self.arena_config = args
+
+    native = FakeNative()
+    admissions = []
+
+    def record_admission(plan, demand_profile_bytes, live_budget):
+        admission = executor_arena_mod.admit_executor_arena(plan, demand_profile_bytes, live_budget)
+        admissions.append(admission)
+        return admission
+
+    monkeypatch.setattr(prefetch_mod, "MAX_BUFFERED_SIZE", 255)
+    monkeypatch.setattr(prefetch_mod, "get_accelerator", lambda: FakeAccelerator())
+    monkeypatch.setattr(prefetch_mod, "print_rank_0", lambda _message: None)
+    monkeypatch.setattr(prefetch_mod, "create_predictor", lambda: lambda _size: 0)
+    monkeypatch.setattr(prefetch_mod, "is_profile_incomplete", lambda _graph: False)
+    monkeypatch.setattr(prefetch_mod, "plan_graph_executor_arena", lambda _graph: next(plans))
+    monkeypatch.setattr(prefetch_mod, "admit_executor_arena", record_admission)
+    monkeypatch.setattr(prefetch_mod, "get_deepcompile_handle", lambda: native)
+    monkeypatch.setattr(prefetch_mod.dist, "all_reduce", lambda tensor, op, group=None: tensor)
+
+    returned = prefetch_mod.schedule_prefetch(gm,
+                                              graph_id=0,
+                                              graph_order=[(0, True)],
+                                              profiling_results=profiling_results,
+                                              create_inputs_fn=lambda: (),
+                                              mem_budget=0,
+                                              param_manager={},
+                                              bwd=True)
+
+    assert returned is gm
+    assert gm.graph is graph
+    assert [(admission.accepted, admission.capacity, admission.demand_profile_bytes, admission.incremental_bytes)
+            for admission in admissions] == [(False, 512, 256, 256), (True, 256, 256, 0)]
+    assert gm._deepcompile_executor_arena_plan.packed.capacity == 256
+    assert gm._deepcompile_executor_arena_admission.accepted
+    assert gm._deepcompile_executor_arena_admission.incremental_bytes == 0
+    assert gm._deepcompile_executor_arena_registration.enabled
+    assert gm._deepcompile_executor_arena_registration.reason == "accepted"
+    assert native.arena_config[0:5] == (0, True, 256, 256, [101])
+
+    admissions.clear()
+    plans = iter(
+        (
+            executor_arena_mod.GraphArenaPlan(demand_occurrences,
+                                              executor_arena_mod.pack_executor_arena(demand_occurrences)),
+            executor_arena_mod.GraphArenaPlan(final_occurrences,
+                                              executor_arena_mod.pack_executor_arena(final_occurrences)),
+        ))
+    gm = GraphModule(torch.nn.Module(), graph)
+    monkeypatch.setattr(prefetch_mod, "MAX_BUFFERED_SIZE", 256)
+
+    prefetch_mod.schedule_prefetch(gm,
+                                   graph_id=0,
+                                   graph_order=[(0, True)],
+                                   profiling_results=profiling_results,
+                                   create_inputs_fn=lambda: (),
+                                   mem_budget=0,
+                                   param_manager={},
+                                   bwd=True)
+
+    assert gm.graph is not graph
+    assert len(admissions) == 1
+    assert gm._deepcompile_executor_arena_plan.packed.capacity == 512
+    assert gm._deepcompile_executor_arena_admission.accepted
+    assert gm._deepcompile_executor_arena_registration.enabled
+    assert native.arena_config[0:4] == (0, True, 512, 256)
 
 
 def test_graphsafe_rng_state_outputs_are_registered_no_reuse():

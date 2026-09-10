@@ -10,6 +10,16 @@
 namespace dc {
 
 void register_graph_z3(long graph_id, const std::vector<long>& ds_ids);
+void configure_z3_gather_arena(long graph_id,
+                               bool bwd,
+                               int64_t capacity_bytes,
+                               int64_t alignment,
+                               const std::vector<long>& ds_ids,
+                               const std::vector<long>& occurrences,
+                               const std::vector<int64_t>& offsets,
+                               const std::vector<int64_t>& nbytes,
+                               const std::vector<at::ScalarType>& dtypes,
+                               const std::string& signature);
 void register_graph_ops_z3(long graph_id,
                            const std::vector<std::string>& op_names,
                            const std::vector<long>& n_args);
@@ -27,14 +37,16 @@ at::Tensor allgather_param(at::Tensor param_tensor,
                            long ds_id,
                            std::optional<at::ScalarType> dtype);
 void set_persistent(long ds_id);
-void prefetch_params_fused(long graph_id,
-                           const std::vector<at::Tensor>& params,
-                           const std::vector<long>& ds_ids,
-                           const std::optional<std::vector<at::ScalarType>>& dtypes);
-void prefetch_params_fused_meta(long graph_id,
-                                const std::vector<at::Tensor>& params,
-                                const std::vector<long>& ds_ids,
-                                const std::optional<std::vector<at::ScalarType>>& dtypes);
+std::vector<at::Tensor> prefetch_params_fused(
+    long graph_id,
+    const std::vector<at::Tensor>& params,
+    const std::vector<long>& ds_ids,
+    const std::optional<std::vector<at::ScalarType>>& dtypes);
+std::vector<at::Tensor> prefetch_params_fused_meta(
+    long graph_id,
+    const std::vector<at::Tensor>& params,
+    const std::vector<long>& ds_ids,
+    const std::optional<std::vector<at::ScalarType>>& dtypes);
 // for profiling
 void invalidate_gathered_param(long ds_id);
 void clear_all_gathered_params();
