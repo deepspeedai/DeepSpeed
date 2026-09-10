@@ -11,7 +11,7 @@ import torch
 from deepspeed.accelerator import get_accelerator
 from .passes import zero_1_and_2_compile, zero3_compile
 from .backend import make_backend, launch_compile_passes, init_schedule
-from .util import get_deepcompile_handle, add_pre_backward_hook
+from .util import add_pre_backward_hook
 
 WARMUP = 5
 
@@ -96,8 +96,7 @@ def init_z1_and_2(engine, backend, compile_config, compile_kwargs, schedule=None
         hook.remove()
     optimizer._grad_acc_hooks.clear()
 
-    dc = get_deepcompile_handle()
-    dc.init(engine.data_parallel_group, compile_config, engine.zero_reduce_bucket_size())
+    dc = engine._initialize_deepcompile_native(compile_config)
 
     if use_z2:
         grad_buffer = {}
