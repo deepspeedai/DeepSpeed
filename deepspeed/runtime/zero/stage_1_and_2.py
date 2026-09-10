@@ -181,9 +181,18 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                  bf16_master_weights_and_gradients=False,
                  bf16_optimizer_states=False,
                  elastic_checkpoint=False,
-                 check_grad_overflow=True):
+                 check_grad_overflow=True,
+                 compute_grad_norm=True):
 
         super().__init__()
+
+        if not compute_grad_norm and clip_grad > 0.0:
+            raise ValueError("zero_optimization.compute_grad_norm=false requires gradient_clipping=0")
+        if not compute_grad_norm and zenflow_config is not None:
+            raise ValueError("zero_optimization.compute_grad_norm=false does not support ZenFlow")
+        if (not compute_grad_norm and offload_optimizer_config is not None
+                and offload_optimizer_config.device != OffloadDeviceEnum.none):
+            raise ValueError("zero_optimization.compute_grad_norm=false does not support optimizer offload")
 
         if offload_optimizer_config is not None and offload_optimizer_config.device != OffloadDeviceEnum.none:
             self.cpu_offload = True
@@ -206,6 +215,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
 
         self.elastic_checkpoint = elastic_checkpoint
         self.check_grad_overflow = check_grad_overflow
+        self.compute_grad_norm = compute_grad_norm
         self.param_names = param_names
         self.mpu = mpu
         # differences from apex.fp16_utils:
@@ -2296,6 +2306,9 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         if self.cpu_offload:
             self._offload_accumulated_param_ids = set()
 
+        if not self.compute_grad_norm:
+            self._global_grad_norm = None
+
         see_memory_usage("In step before checking overflow")
 
         # First compute norm for all group so we know if there is overflow
@@ -2322,11 +2335,12 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                 self.timers(timer).stop()
             return
 
-        # Step 1:- Calculate gradient norm using bit-16 grads
-        see_memory_usage('Before norm calculation')
-        scaled_global_grad_norm = self.scaled_global_norm()
-        self._global_grad_norm = scaled_global_grad_norm / prev_scale
-        see_memory_usage('After norm before optimizer')
+        scaled_global_grad_norm = None
+        if self.compute_grad_norm:
+            see_memory_usage('Before norm calculation')
+            scaled_global_grad_norm = self.scaled_global_norm()
+            self._global_grad_norm = scaled_global_grad_norm / prev_scale
+            see_memory_usage('After norm before optimizer')
 
         # Step 2:- run optimizer and upscaling simultaneously
         for i, group in enumerate(self.bit16_groups):
@@ -2444,6 +2458,9 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                 norm_groups[i] = scaled_norm_tensor.to(self.device)
 
     def unscale_and_clip_grads(self, grad_groups_flat, total_norm):
+        if self.clip_grad == 0.0 and self.loss_scale == 1.0:
+            return
+
         # compute combined scale factor for this group
         combined_scale = self.loss_scale
         if self.clip_grad > 0.:
@@ -2772,7 +2789,11 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         self.loss_scaler = sd.get(LOSS_SCALER, self.loss_scaler)
         self.dynamic_loss_scale = sd.get('dynamic_loss_scale', self.dynamic_loss_scale)
         self.overflow = sd.get('overflow', self.overflow)
-        self.clip_grad = sd.get(CLIP_GRAD, self.clip_grad)
+        checkpoint_clip_grad = sd.get(CLIP_GRAD, self.clip_grad)
+        if not self.compute_grad_norm and checkpoint_clip_grad > 0.0:
+            raise ValueError("Cannot load a checkpoint with gradient clipping into "
+                             "zero_optimization.compute_grad_norm=false")
+        self.clip_grad = checkpoint_clip_grad
 
         ckpt_version = sd.get(DS_VERSION, False)
         assert ckpt_version, "Empty ds_version in checkpoint, not clear how to proceed"
