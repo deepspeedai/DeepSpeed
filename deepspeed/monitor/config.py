@@ -10,7 +10,7 @@ from deepspeed.runtime.config_utils import DeepSpeedConfigModel
 
 
 def get_monitor_config(param_dict):
-    monitor_dict = {key: param_dict.get(key, {}) for key in ("tensorboard", "wandb", "csv_monitor", "comet")}
+    monitor_dict = {key: param_dict.get(key, {}) for key in ("tensorboard", "wandb", "csv_monitor", "comet", "trackio")}
     return DeepSpeedMonitorConfig(**monitor_dict)
 
 
@@ -23,7 +23,7 @@ class TensorBoardConfig(DeepSpeedConfigModel):
     output_path: str = ""
     """
     Path to where the Tensorboard logs will be written. If not provided, the
-    output path is set under the training script’s launching path.
+    output path is set under the training script's launching path.
     """
 
     job_name: str = "DeepSpeedJobName"
@@ -55,7 +55,7 @@ class CSVConfig(DeepSpeedConfigModel):
     output_path: str = ""
     """
     Path to where the csv files will be written. If not provided, the output
-    path is set under the training script’s launching path.
+    path is set under the training script's launching path.
     """
 
     job_name: str = "DeepSpeedJobName"
@@ -122,6 +122,16 @@ class CometConfig(DeepSpeedConfigModel):
     """
 
 
+class TrackioConfig(DeepSpeedConfigModel):
+    """Sets parameters for Trackio monitor."""
+
+    enabled: bool = False
+    """ Whether logging to Trackio is enabled. Requires `trackio` package is installed. """
+
+    project: str = "deepspeed"
+    """ Name for the Trackio project. """
+
+
 class DeepSpeedMonitorConfig(DeepSpeedConfigModel):
     """Sets parameters for various monitoring methods."""
 
@@ -137,8 +147,11 @@ class DeepSpeedMonitorConfig(DeepSpeedConfigModel):
     csv_monitor: CSVConfig = {}
     """ Local CSV output of monitoring data. """
 
+    trackio: TrackioConfig = {}
+    """ Trackio monitor, requires `trackio` package is installed. """
+
     @model_validator(mode="after")
     def check_enabled(self):
-        enabled = self.tensorboard.enabled or self.wandb.enabled or self.csv_monitor.enabled or self.comet.enabled
+        enabled = self.tensorboard.enabled or self.wandb.enabled or self.csv_monitor.enabled or self.comet.enabled or self.trackio.enabled
         self.__dict__["enabled"] = enabled
         return self
