@@ -159,9 +159,29 @@ mpu = UlyssesSPAttentionHF.register_with_transformers(
 
 It also creates nccl process groups encapsulated by the `mpu` object it returns.
 
-For the `model_name_or_path` argument you can also pass the already existing HF Transformers `model` object.
+For dense-attention-only models, `model_name_or_path` can be either a model path/name or an already instantiated HF
+Transformers model. Path-based registration remains process-global because the target module instances do not exist yet.
 
-`UlyssesSPAttentionHF.register_with_transformers` has to be called before `from_pretrained` is called.
+Hybrid Qwen3.5/Qwen3.5-MoE linear-attention models require an already instantiated **text-only** causal-LM model. This
+allows DeepSpeed to install reversible adapters only on that model's text attention layers and preserve Accelerate
+hooks. Multimodal Qwen3.5 inputs are not supported because visual-token sequence partitioning has a different contract.
+
+```python
+model = AutoModelForCausalLM.from_pretrained(
+    model_name_or_path,
+    torch_dtype=torch.bfloat16,
+    attn_implementation="flash_attention_2",
+)
+mpu = UlyssesSPAttentionHF.register_with_transformers(
+    model_name_or_path=model,
+    core_attn_implementation="flash_attention_2",
+    sequence_parallel_size=sequence_parallel_size,
+    micro_batch_size=1,
+)
+```
+
+FLA linear-attention CP currently requires `micro_batch_size=1`. Dense-only Ulysses continues to support larger
+micro-batches.
 
 If `seq_length_is_variable` is `True` (which is also the default value), `UlyssesSPAttentionHF` will recalculate the shapes on each `forward` based on the incoming batch's shapes - in which case you don't need to set `seq_length` - you can just skip it like so:
 ```
@@ -185,6 +205,25 @@ mpu = UlyssesSPAttentionHF.register_with_transformers(
 ```
 
 If you pass `seq_length`, remember that it has to be divisible by `sequence_parallel_size`. And of course, this also applies to all batches, even if you use `seq_length_is_variable=True`.
+
+For non-packed batches, `UlyssesSPDataLoaderAdapter` generates missing `position_ids` before sharding. Packed batches
+must provide consistent document boundaries through reset/discontinuous `position_ids`, token-shaped `seq_idx`, or
+global `cu_seq_lens_q`/`cu_seq_lens_k`. When multiple forms are present, DeepSpeed validates that they describe the
+same boundaries on every SP rank. Global cu-seqlens are replicated rather than sequence-sharded.
+
+The adapter pads a final short sequence to an SP-size multiple by default, masks the padded labels, and adjusts global
+cu-seqlens/max-length metadata. Set `pad_to_sp_multiple=False` to retain strict divisibility errors.
+
+Packed SDPA is rejected because it would require a quadratic document-aware mask. Use FlashAttention or supported
+standard-causal flex attention for packed training. Sliding-window, chunked, prefix, and arbitrary custom flex masks are
+rejected rather than silently reconstructed incorrectly.
+
+When running multiple Trainers sequentially in one process, restore the Transformers backend and destroy the temporary
+SP process groups after the engine is no longer in use:
+
+```python
+UlyssesSPAttentionHF.unregister_from_transformers(core_attn_implementation)
+```
 
 
 ### UlyssesSPDataLoaderAdapter
