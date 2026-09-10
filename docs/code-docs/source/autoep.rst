@@ -84,6 +84,111 @@ Weights-only/module-only Universal Checkpoint loads use the converted
 4. Expert parameters are marked for expert-data-parallel gradient reduction;
    router and shared-expert parameters use standard data-parallel reduction.
 
+**Communication backend (optional):**
+
+The expert AllToAll can be carried by `DeepEP <https://github.com/deepseek-ai/DeepEP>`__
+instead of the default collectives. This is opt-in and off by default; jobs
+that set nothing keep the existing path unchanged.
+
+.. code-block:: json
+
+    {
+      "expert_parallel": {
+        "enabled": true,
+        "autoep_size": 8,
+        "comm_backend": "deepep",
+        "comm_num_sm": 12,
+        "comm_qp_margin": 4
+      }
+    }
+
+- ``comm_backend``: ``"comm"`` (default) uses ``deepspeed.comm`` collectives;
+  ``"deepep"`` uses DeepEP's dispatch and combine kernels.
+- ``comm_num_sm``: SMs given to communication. Default 12.
+- ``comm_qp_margin``: RDMA queue pairs reserved beyond one per SM. Default 4.
+- ``comm_max_tokens_per_rank``: largest per-rank token count the job will
+  produce, which is ``micro_batch_size * seq_len`` when sequences are padded to
+  a fixed length. Required when ``comm_backend`` is ``"deepep"`` because the
+  DeepEP buffer is sized statically and must use the same capacity on every
+  rank. A batch that exceeds it is an error.
+
+On 16 H100s across two nodes, replaying routing captured from real training,
+DeepEP reduced payload AllToAll time from roughly 100 ms to 48 ms per step. A
+full SFT step on Qwen3.5-MoE went from roughly 325 ms to 266 ms, a 1.2x speedup
+that removes about 18% of the step, reproduced across two independent jobs
+(1.21x and 1.24x). Both backends are measured in the same job, on the same pods
+and alternating, since the same measurement varied by a quarter between jobs;
+the figures are medians rather than single observations, and DeepEP's own
+median moved by 0.3% between the two jobs while the collective baseline moved
+by 2.5%. The advantage grows with routing imbalance: at the most skewed
+step measured, the collective path degraded to 116 ms while DeepEP stayed flat.
+
+``comm_num_sm`` matters because communication competes with the expert GEMM for
+SMs. The default of 12 was chosen by measuring whole steps: 8 SMs gave a median
+297.9 ms against 265.4 ms at 12, and larger budgets were slower again.
+``comm_qp_margin`` exists because DeepEP's automatic queue-pair count assumes
+it is alone on the fabric, which exhausts the queue pairs ZeRO and the
+data-parallel groups have already claimed in a training step.
+
+Requirements and limits:
+
+- The ``deep_ep`` package must be installed. It is imported only when this
+  backend is selected, so installations without it are unaffected.
+- DeepEP v2 requires NCCL 2.30.4 or newer, built with GIN support. Below that
+  version the transport is unavailable regardless of the network.
+- DeepEP v1 (the legacy ``Buffer`` API, using NVSHMEM and IBGDA) is not
+  supported.
+- bfloat16 only. DeepEP's dispatch kernel takes bfloat16 rows, so selecting
+  this backend for an fp16 or fp32 run is rejected rather than silently
+  downgraded.
+- Not compatible with folded tensor parallelism
+  (``expert_tensor_parallel_size > 1``), which is rejected at setup.
+
+**Fused weighted restore (experimental):**
+
+After the combine all-to-all, AutoEP holds one row per routed assignment and has
+to turn it back into one row per token. ``combine_impl`` selects how:
+
+.. code-block:: json
+
+    {
+        "expert_parallel": {
+            "enabled": true,
+            "autoep_size": 16,
+            "preset_model": "qwen3_moe",
+            "combine_impl": "fused_weighted_sum"
+        }
+    }
+
+``"auto"`` (default) resolves to ``"weighted_sum"``, which scatters the rows into
+a zero-filled ``[tokens * top_k, hidden]`` buffer, widens it to FP32 to apply the
+routing weights, and reduces over top-k. ``"fused_weighted_sum"`` computes the
+same result in a single pass: each program owns one token and one slice of the
+hidden dimension, walks its top-k rows in registers and accumulates in FP32, so
+neither the scattered buffer nor the FP32 intermediate is allocated. At the
+canonical shape the FP32 intermediate alone is 64 MiB per layer.
+
+Routing weights are still accumulated in FP32 and cast once, so the result
+matches the eager reduction to within the order of the top-k summation. Only the
+reduction changes: the collectives, the router, the grouped GEMM and the
+expert-major reorder are untouched.
+
+``"fused_weighted_sum"`` is rejected, rather than quietly ignored, when it would
+have nothing to replace or would change semantics:
+
+- ``tensor_parallel.autotp_size`` greater than 1, which uses folded tensor
+  parallelism and restores combined tokens from assignment metadata instead;
+- ``expert_tensor_parallel_size`` greater than 1;
+- ``comm_backend="deepep"`` with expert parallelism, because DeepEP already
+  restores and reduces its routed rows;
+- a resolved ``score_apply`` other than ``"post"``;
+- activations that are not bfloat16, float16, or float32, a non-CUDA device, or
+  a build without Triton.
+
+Failing fast matters for measurement: a run that asked for the fused reduction
+and silently got the eager one would report the difference between an
+implementation and itself.
+
 **Constraints:**
 
 - ``autoep_size`` must divide ``num_experts`` for all detected MoE layers.
