@@ -15,6 +15,7 @@ from deepspeed.runtime.lr_schedules import LR_RANGE_TEST, LR_RANGE_TEST_MIN_LR, 
 from deepspeed.runtime.lr_schedules import WARMUP_LR, WARMUP_MIN_LR, WARMUP_MAX_LR, WARMUP_NUM_STEPS, WARMUP_TYPE, WARMUP_LOG_RATE, WARMUP_LINEAR_RATE
 from deepspeed.runtime.lr_schedules import ONE_CYCLE, CYCLE_MIN_LR, CYCLE_MAX_LR, CYCLE_FIRST_STEP_SIZE, DECAY_LR_RATE, DECAY_STEP_SIZE
 from deepspeed.runtime.lr_schedules import CYCLE_MIN_MOM, CYCLE_MAX_MOM, DECAY_MOM_RATE
+from deepspeed.runtime.lr_schedules import CYCLE_MOMENTUM, CYCLE_FIRST_STAIR_COUNT, CYCLE_SECOND_STEP_SIZE, CYCLE_SECOND_STAIR_COUNT
 from deepspeed.runtime.lr_schedules import WARMUP_DECAY_LR, TOTAL_NUM_STEPS
 from deepspeed.runtime.lr_schedules import WARMUP_COSINE_LR, WARMUP_MIN_RATIO, COS_MIN_RATIO, WarmupCosineLR
 from deepspeed.runtime.lr_schedules import WarmupLR, WarmupDecayLR, LRRangeTest, OneCycle
@@ -949,3 +950,91 @@ def test_other_schedules_keep_their_config_params():
         assert err is None
         assert expected in config["params"]
         assert lrs.get_lr_from_config(config)[0] == config["params"][expected]
+
+
+def test_one_cycle_config_from_args_builds_a_scheduler():
+    # The three "unset" flags defaulted to -1 and override_1cycle_params copied them
+    # through, since -1 is not None. OneCycle rejects a negative second step size, so
+    # the plain CLI invocation for this schedule raised before it ever ran:
+    #   ValueError: cycle_second_step_size must be non-negative, got -1.0
+    parser = lrs.add_tuning_arguments(argparse.ArgumentParser())
+    args = parser.parse_args([
+        "--lr_schedule", ONE_CYCLE, "--cycle_min_lr", "1e-4", "--cycle_max_lr", "1e-3",
+        "--cycle_first_step_size", "4"
+    ])
+
+    config, err = lrs.get_config_from_args(args)
+    assert err is None
+    params = config["params"]
+    # Left out entirely, so OneCycle's own defaults apply rather than a sentinel.
+    assert CYCLE_SECOND_STEP_SIZE not in params
+    assert CYCLE_FIRST_STAIR_COUNT not in params
+    assert CYCLE_SECOND_STAIR_COUNT not in params
+
+    optimizer = torch.optim.Adam([torch.nn.Parameter(torch.zeros(1))], lr=1e-3)
+    scheduler = OneCycle(optimizer, **params)
+    # The help text says the second step defaults to the first.
+    assert scheduler.second_step_size == scheduler.first_step_size == 4
+
+
+def test_one_cycle_second_stair_count_falls_back_to_the_first():
+    # cycle_second_stair_count=None means "same as the first"; the -1 default reached
+    # OneCycle as a real value, so the second half of the cycle lost its stairs while
+    # the first half kept them.
+    parser = lrs.add_tuning_arguments(argparse.ArgumentParser())
+    args = parser.parse_args([
+        "--lr_schedule", ONE_CYCLE, "--cycle_min_lr", "1e-4", "--cycle_max_lr", "1e-3",
+        "--cycle_first_step_size", "4", "--cycle_first_stair_count", "5"
+    ])
+
+    config, _ = lrs.get_config_from_args(args)
+    optimizer = torch.optim.Adam([torch.nn.Parameter(torch.zeros(1))], lr=1e-3)
+    scheduler = OneCycle(optimizer, **config["params"])
+
+    assert scheduler.first_stair_count == 5
+    assert scheduler.second_stair_count == 5
+
+    direct = OneCycle(torch.optim.Adam([torch.nn.Parameter(torch.zeros(1))], lr=1e-3),
+                      cycle_min_lr=1e-4,
+                      cycle_max_lr=1e-3,
+                      cycle_first_step_size=4,
+                      cycle_first_stair_count=5)
+    assert scheduler.second_stair_count == direct.second_stair_count
+
+
+@pytest.mark.parametrize("argv, expected", [([], False), (["--cycle_momentum"], True)])
+def test_cycle_momentum_reaches_scheduler_params(argv, expected):
+    # --cycle_momentum was declared but never copied into the config, so OneCycle fell
+    # back to its own cycle_momentum=True either way: the flag could not turn momentum
+    # cycling on (it was already on) or off (its documented default).
+    args = lrs.add_tuning_arguments(argparse.ArgumentParser()).parse_args(argv)
+    params = {}
+    lrs.override_1cycle_params(args, params)
+
+    assert params[CYCLE_MOMENTUM] is expected
+
+
+@pytest.mark.parametrize("argv, cycles", [([], False), (["--cycle_momentum"], True)])
+def test_cycle_momentum_flag_decides_whether_betas_move(argv, cycles):
+    # The observable half: OneCycle rewrites param_groups["betas"][0] on every step when
+    # momentum cycling is on. Without the flag the optimizer's own beta1 must survive.
+    parser = lrs.add_tuning_arguments(argparse.ArgumentParser())
+    args = parser.parse_args([
+        "--lr_schedule", ONE_CYCLE, "--cycle_min_lr", "1e-4", "--cycle_max_lr", "1e-3",
+        "--cycle_first_step_size", "4", "--cycle_min_mom", "0.80", "--cycle_max_mom", "0.99"
+    ] + argv)
+
+    config, _ = lrs.get_config_from_args(args)
+    optimizer = torch.optim.Adam([torch.nn.Parameter(torch.zeros(1))], lr=1e-3, betas=(0.9, 0.999))
+    scheduler = OneCycle(optimizer, **config["params"])
+    assert scheduler.cycle_momentum is cycles
+
+    seen = {optimizer.param_groups[0]["betas"][0]}
+    for _ in range(4):
+        scheduler.step()
+        seen.add(optimizer.param_groups[0]["betas"][0])
+
+    if cycles:
+        assert len(seen) > 1
+    else:
+        assert seen == {0.9}
