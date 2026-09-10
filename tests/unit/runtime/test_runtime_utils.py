@@ -51,6 +51,37 @@ class TestClipGradNorm(DistributedTest):
 
         assert gathered_norm[0] == gathered_norm[1], "norm at rank 0 does not match the norm at rank 1"
 
+    def test_sharded_experts_count_once(self):
+        """The global norm must not depend on how experts are spread over ranks.
+
+        Rank-averaging the per-rank norms only reconstructs a global norm when every
+        rank holds the same parameters. Under expert parallelism they do not, so the
+        four experts below gave sqrt(20) and sqrt(100) averaged to 7.236 instead of
+        the sqrt(120) = 10.954 that counting each expert once produces (#8469).
+        """
+        groups._create_expert_and_data_parallel(2)
+        rank = dist.get_rank()
+        device = get_accelerator().device_name(rank)
+
+        experts = [torch.full((4, ), float(v)) for v in (1.0, 2.0, 3.0, 4.0)]
+        expected = torch.cat(experts).norm(2).item()
+
+        owned = experts[:2] if rank == 0 else experts[2:]
+        params = []
+        for grad in owned:
+            param = torch.nn.Parameter(torch.zeros(4, device=device))
+            param.grad = grad.clone().to(device)
+            param.allreduce = False
+            param.group_name = "ep_size_2"
+            params.append(param)
+
+        # A max_norm far above the norm leaves the gradients alone, so this reads the
+        # computed norm rather than the clipped result.
+        norm = ds_utils.clip_grad_norm_(params, max_norm=1e9)
+
+        assert abs(float(norm) - expected) < 1e-4, (
+            f"global norm {float(norm)} should be {expected} regardless of expert placement")
+
     def test_clipped_val(self):
         max_norm = 0.1
 
