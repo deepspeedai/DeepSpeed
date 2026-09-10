@@ -389,9 +389,28 @@ def clip_grad_norm_(parameters, max_norm, norm_type=2, mpu=None):
         parameters = [parameters]
     parameters = list(filter(lambda p: p.grad is not None, parameters))
     norm_type = float(norm_type)
+
+    # Expert parameters are not replicated across the data parallel group, so the
+    # rank-averaging below cannot reconstruct a global norm from them: each rank's
+    # norm covers a different set of experts. Combine those the way the bf16 and
+    # fp16 optimizers already do, over the expert parallel group.
+    expert_tensors: Dict[str, List[torch.Tensor]] = {}
+    for p in parameters:
+        if not is_moe_param(p):
+            continue
+        # An expert parameter built by hand may carry no group name, and without one
+        # there is no expert parallel group to reduce over. Leave every such call on
+        # the original path rather than guessing which group it belongs to.
+        group_name = getattr(p, "group_name", None)
+        if group_name is None:
+            expert_tensors = {}
+            break
+        expert_tensors.setdefault(group_name, []).append(p.grad.data)
+    norm_parameters = [p for p in parameters if not is_moe_param(p)] if expert_tensors else parameters
+
     all_norms = []
     if norm_type == inf:
-        for p in parameters:
+        for p in norm_parameters:
             all_norms.append(p.grad.data.abs().max().float())
         total_norm = torch.stack(all_norms).max()
         total_norm = total_norm.to(get_accelerator().current_device_name())
@@ -400,7 +419,7 @@ def clip_grad_norm_(parameters, max_norm, norm_type=2, mpu=None):
             dist.all_reduce(total_norm, op=dist.ReduceOp.MAX, group=mpu.get_model_parallel_group())
     else:
         total_norm = 0
-        for p in parameters:
+        for p in norm_parameters:
             if mpu is not None:
                 if (mpu.get_model_parallel_rank() == 0) or is_model_parallel_parameter(p):
                     param_norm = p.grad.data.detach().float().norm(norm_type)
@@ -421,14 +440,29 @@ def clip_grad_norm_(parameters, max_norm, norm_type=2, mpu=None):
             dist.all_reduce(total_norm, op=dist.ReduceOp.SUM, group=mpu.get_model_parallel_group())
         total_norm = total_norm.pow(1. / norm_type)
 
-    # Need to average total_norm across different GPUs due to the presence of moe params
-    pg = groups._get_data_parallel_group()
-    scaled_norm = total_norm * 1.0 / float(dist.get_world_size(group=pg))
-    scaled_norm_tensor = scaled_norm
+    if expert_tensors:
+        # `total_norm` now covers only the replicated parameters, so it is already the
+        # same on every rank. Fold the experts in over their own group, counting each
+        # expert once, rather than averaging norms that describe different parameters.
+        moe_norm = get_norm_with_moe_layers(total_norm,
+                                            mpu=mpu,
+                                            expert_tensors=expert_tensors,
+                                            norm_type=norm_type)
+        # That helper reports a non-finite norm as -1. Left as-is it would make
+        # `clip_coef` negative and flip the sign of every gradient; inf keeps the
+        # behaviour the averaging path already had, which is to scale them to zero.
+        if moe_norm == -1:
+            moe_norm = float('inf')
+        total_norm = torch.tensor([float(moe_norm)], device=parameters[0].device, dtype=torch.float)
+    else:
+        # Need to average total_norm across different GPUs due to the presence of moe params
+        pg = groups._get_data_parallel_group()
+        scaled_norm = total_norm * 1.0 / float(dist.get_world_size(group=pg))
+        scaled_norm_tensor = scaled_norm
 
-    dist.all_reduce(scaled_norm_tensor, group=pg)
-    total_norm = scaled_norm_tensor
-    total_norm = total_norm.to(parameters[0].device)
+        dist.all_reduce(scaled_norm_tensor, group=pg)
+        total_norm = scaled_norm_tensor
+        total_norm = total_norm.to(parameters[0].device)
 
     max_norm = torch.tensor([float(max_norm)], device=total_norm.device)
     clip_coef = max_norm / (total_norm + 1e-6)
