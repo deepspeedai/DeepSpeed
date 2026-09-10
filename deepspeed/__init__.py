@@ -258,6 +258,8 @@ def initialize(
     # Restore zero.Init context if necessary
     zero.partition_parameters.restore_init_context()
 
+    engine._configure_python_gc()
+
     return_items = [
         engine,
         engine.optimizer,

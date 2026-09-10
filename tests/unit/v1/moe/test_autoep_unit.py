@@ -207,6 +207,7 @@ class TestAutoEPConfig:
         assert disabled.enabled is False
         assert disabled.autoep_size == 1
         assert disabled.validate_folding_routing is False
+        assert disabled.python_gc_policy == "default"
         assert disabled.load_balance_coeff is None
         assert disabled._load_balance_coeff_explicit is False
 
@@ -218,12 +219,14 @@ class TestAutoEPConfig:
             "score_apply": "pre",
             "route_scale": 2.0,
             "validate_folding_routing": True,
+            "python_gc_policy": "disable_during_training",
         })
 
         assert config.enabled is True
         assert config.autoep_size == 4
         assert config.preset_model == "mixtral"
         assert config.validate_folding_routing is True
+        assert config.python_gc_policy == "disable_during_training"
         assert config.load_balance_coeff is None
         assert config._load_balance_coeff_explicit is True
         assert config.score_apply == "pre"
@@ -237,6 +240,11 @@ class TestAutoEPConfig:
                                    pp_size=1,
                                    tp_size=1,
                                    sp_size=1)
+
+    def test_python_gc_policy_rejects_unknown_value(self):
+        config = parse_autoep_config({"enabled": True, "python_gc_policy": "aggressive"})
+        with pytest.raises(ValueError, match="python_gc_policy must be one of"):
+            validate_autoep_config(config, world_size=1, pp_size=1, tp_size=1, sp_size=1)
 
     def test_combine_impl_rejects_unknown_value(self):
         config = parse_autoep_config({"enabled": True, "combine_impl": "triton"})
