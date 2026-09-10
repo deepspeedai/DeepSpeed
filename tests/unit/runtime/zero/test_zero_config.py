@@ -55,6 +55,15 @@ def test_zero_config_overlapcomm():
     assert config.overlap_comm == True
 
 
+def test_zero_config_compute_grad_norm():
+    assert DeepSpeedZeroConfig(stage=1).compute_grad_norm is True
+    assert DeepSpeedZeroConfig(stage=1, compute_grad_norm=False).compute_grad_norm is False
+
+    for stage in (0, 3):
+        with pytest.raises(ValueError, match="only with ZeRO Stage 1 or 2"):
+            DeepSpeedZeroConfig(stage=stage, compute_grad_norm=False)
+
+
 def test_zero_config_offload_configs():
     config = DeepSpeedZeroConfig()
     assert config.offload_param is None
