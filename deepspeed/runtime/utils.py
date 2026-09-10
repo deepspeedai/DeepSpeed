@@ -397,15 +397,18 @@ def clip_grad_norm_(parameters, max_norm, norm_type=2, mpu=None):
     pg = groups._get_data_parallel_group()
     all_norms = []
     if autoep_global_l2:
-        dp_world_size = dist.get_world_size(group=pg)
+        # Mesh DP groups can contain only replicas of one expert shard. With no
+        # MPU, include both DP and SP ranks so every expert contributes to the norm.
+        pg = groups._clone_world_group()
+        norm_world_size = dist.get_world_size(group=pg)
         total_norm = torch.zeros((), device=get_accelerator().current_device_name(), dtype=torch.float32)
         for p in parameters:
-            weight = 1.0 / dp_world_size
+            weight = 1.0 / norm_world_size
             if getattr(p, "ds_zero_placement_family", None) == "autoep_expert":
                 ep_size = getattr(p, "ds_autoep_ep_size", None)
-                if not isinstance(ep_size, int) or ep_size <= 0 or dp_world_size % ep_size != 0:
+                if not isinstance(ep_size, int) or ep_size <= 0 or norm_world_size % ep_size != 0:
                     raise RuntimeError("AutoEP expert parameter has invalid EP ownership metadata")
-                weight = ep_size / dp_world_size
+                weight = ep_size / norm_world_size
             total_norm += p.grad.detach().float().square().sum() * weight
         # Sum ownership-weighted squares before taking the root. Averaging
         # rank-local norms does not recover the norm of the unique parameters.

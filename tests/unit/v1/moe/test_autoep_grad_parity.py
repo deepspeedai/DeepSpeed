@@ -7,7 +7,7 @@
 import deepspeed
 import deepspeed.comm as dist
 import torch
-from deepspeed.utils import safe_get_full_grad
+from deepspeed.utils import groups, safe_get_full_grad
 from unit.common import DistributedTest
 from unit.v1.moe.autoep_test_utils import (
     MockMoETransformer,
@@ -152,9 +152,21 @@ def _assert_grad_maps_close(actual, expected, *, lhs_name, rhs_name):
 
 
 class TestAutoEPFP32Clipping(DistributedTest):
-    world_size = 2
+    world_size = [2, 4]
 
     def test_clipping_counts_each_unique_parameter_once(self):
+        self._check_clipping()
+
+    def test_clipping_includes_expert_shards_across_mesh_sp_ranks(self):
+        # The mesh DP group contains replicas of one shard, not all experts.
+        # Check against the same complete gradient vector as the non-mesh run.
+        previous_mesh = groups.mesh_device
+        try:
+            self._check_clipping(mesh_param=(dist.get_world_size() // 2, 2))
+        finally:
+            groups.mesh_device = previous_mesh
+
+    def _check_clipping(self, mesh_param=None):
 
         class Model(torch.nn.Module):
 
@@ -170,6 +182,7 @@ class TestAutoEPFP32Clipping(DistributedTest):
                     model.expert.ds_zero_placement_family = "autoep_expert"
                     model.expert.ds_autoep_ep_size = ep_size
                     engine, _, _, _ = deepspeed.initialize(model=model,
+                                                           mesh_param=mesh_param,
                                                            config={
                                                                "train_micro_batch_size_per_gpu": 1,
                                                                "gradient_accumulation_steps": 1,
