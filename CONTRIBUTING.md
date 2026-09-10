@@ -15,6 +15,9 @@ can also run these manually:
 ```bash
 pre-commit run --files  $(git diff --name-only master)
 ```
+The pre-commit suite also validates CUDA header tracking rules. Avoid adding a global
+`*.cuh` ignore rule, because core headers such as `csrc/adam/multi_tensor_apply.cuh`
+must remain tracked for fused optimizer builds.
 If a formatting test fails, it will fix the modified code in place and abort
 the `git commit`. After looking over the changes, you can `git add <modified files>`
 and then repeat the previous `git commit` command.

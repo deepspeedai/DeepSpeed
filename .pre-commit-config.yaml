@@ -44,6 +44,14 @@ repos:
 
 -   repo: local
     hooks:
+    -   id: check-cuh-ignore
+        name: check-cuh-ignore
+        entry: ./scripts/check_cuh_ignore.py
+        language: python
+        files: ^(\.gitignore|csrc/adam/multi_tensor_apply\.cuh)$
+
+-   repo: local
+    hooks:
     -   id: check-license
         name: check-license
         entry: ./scripts/check-license.py
