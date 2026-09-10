@@ -686,10 +686,10 @@ def test_generate_accepts_zero_pad_token_id():
     req.prompt_ids = torch.tensor([[10, 11]])
     req.prompt_attention_mask = torch.ones(1, 2, dtype=torch.long)
     sampling = MagicMock(temperature=0,
-                        n_samples_per_prompt=1,
-                        max_new_tokens=2,
-                        top_p=1.0,
-                        continuous_batch_size=None)
+                         n_samples_per_prompt=1,
+                         max_new_tokens=2,
+                         top_p=1.0,
+                         continuous_batch_size=None)
 
     rollout.generate(req, sampling)
 

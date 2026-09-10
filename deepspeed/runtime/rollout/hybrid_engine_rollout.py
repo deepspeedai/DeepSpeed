@@ -529,7 +529,8 @@ class HybridEngineRollout(RolloutEngine):
             padding = max_response_len - response.shape[1]
             if padding:
                 response_padding = torch.full((1, padding), pad_token_id, dtype=response.dtype, device=response.device)
-                attention_padding = torch.zeros((1, padding), dtype=request.prompt_attention_mask.dtype,
+                attention_padding = torch.zeros((1, padding),
+                                                dtype=request.prompt_attention_mask.dtype,
                                                 device=response.device)
                 response = torch.cat((response, response_padding), dim=1)
             else:
@@ -538,10 +539,11 @@ class HybridEngineRollout(RolloutEngine):
                                                 device=response.device)
             input_rows.append(torch.cat((request.prompt_ids[index:index + 1], response), dim=1))
             response_attention = torch.ones((1, response_ids[index].shape[1]),
-                                             dtype=request.prompt_attention_mask.dtype,
-                                             device=response.device)
-            attention_rows.append(torch.cat(
-                (request.prompt_attention_mask[index:index + 1], response_attention, attention_padding), dim=1))
+                                            dtype=request.prompt_attention_mask.dtype,
+                                            device=response.device)
+            attention_rows.append(
+                torch.cat((request.prompt_attention_mask[index:index + 1], response_attention, attention_padding),
+                          dim=1))
 
         input_ids = torch.cat(input_rows, dim=0)
         attention_mask = torch.cat(attention_rows, dim=0)
@@ -549,7 +551,9 @@ class HybridEngineRollout(RolloutEngine):
         return RolloutBatch(
             input_ids=input_ids,
             attention_mask=attention_mask,
-            response_start_idx=torch.full((request.prompt_ids.shape[0], ), response_start, dtype=torch.long,
+            response_start_idx=torch.full((request.prompt_ids.shape[0], ),
+                                          response_start,
+                                          dtype=torch.long,
                                           device=input_ids.device),
         )
 
