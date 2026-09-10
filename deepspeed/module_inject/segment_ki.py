@@ -162,7 +162,10 @@ def _fused_gdn_forward(self, hidden_states, *args, **kwargs):
     qkv_end = key_dim * 2 + value_dim
     z_end = qkv_end + value_dim
     b_end = z_end + self.num_v_heads
-    mixed_qkv = fused[..., :qkv_end].transpose(1, 2)
+    # One explicit repack of the qkv slice into the [b, conv_dim, s] layout
+    # conv1d consumes; handing FLA a non-contiguous view triggers a slower
+    # multi-op internal path (measured as ~40 extra launches per layer).
+    mixed_qkv = fused[..., :qkv_end].transpose(1, 2).contiguous()
     z = fused[..., qkv_end:z_end].reshape(batch_size, seq_len, -1, self.head_v_dim)
     b = fused[..., z_end:b_end]
     a = fused[..., b_end:]
@@ -190,7 +193,9 @@ def _fused_gdn_forward(self, hidden_states, *args, **kwargs):
     if gdn_op is not None and get_accelerator().on_accelerator(a):
         a_log_f = self.A_log.detach().float().contiguous()
         dt_f = self.dt_bias.detach().float().contiguous()
-        beta, g = gdn_op.gdn_gates(a.contiguous(), b.contiguous(), a_log_f, dt_f)
+        # gdn_gates accepts row-strided a/b, so the fused-output slices go in
+        # without contiguous copies.
+        beta, g = gdn_op.gdn_gates(a, b, a_log_f, dt_f)
     else:
         beta = b.sigmoid()
         g = -self.A_log.float().exp() * F.softplus(a.float() + self.dt_bias)
@@ -251,15 +256,15 @@ def _install_gdn_segment(seg: GDNSegment, backend: str) -> bool:
                        **kw)
 
     def scan(query, key, value, **kw):
+        # Route through the block's own instance-bound kernels: transformers
+        # binds the FLA fused implementations onto the module when available
+        # (recurrent_gated_delta_rule/chunk_gated_delta_rule) and only falls
+        # back to the pure-torch references otherwise. Calling the module-level
+        # torch_* functions directly forces the slow fallback on every layer.
         single = kw.get("initial_state") is not None and query.shape[1] == 1
-        if single:
-            # The fused decode kernel's signature has no cu_seqlens slot, and
-            # transformers threads ragged-layout kwargs down to every layer.
-            kw.pop("cu_seqlens", None)
-            kw.pop("cu_seq_lens_q", None)
-            fn = m5.torch_recurrent_gated_delta_rule
-        else:
-            fn = m5.torch_chunk_gated_delta_rule
+        kw.pop("cu_seqlens", None)
+        kw.pop("cu_seq_lens_q", None)
+        fn = parent.recurrent_gated_delta_rule if single else parent.chunk_gated_delta_rule
         return fn(query, key, value, **kw)
 
     cuda_op = None

@@ -91,14 +91,18 @@ __global__ void gdn_gates_kernel(const __nv_bfloat16* __restrict__ a,
                                  __nv_bfloat16* __restrict__ beta_out,
                                  __nv_bfloat16* __restrict__ g_out,
                                  int64_t total,
-                                 int num_heads)
+                                 int num_heads,
+                                 int64_t row_stride)
 {
     int64_t i = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
     if (i < total) {
         int64_t tok = i / num_heads;
         int h = (int)(i - tok * num_heads);
-        float av = __bfloat162float(a[i]);
-        float bv = __bfloat162float(b[i]);
+        // a/b arrive as [tokens, num_heads] slices of the fused GEMM output,
+        // contiguous within each row but with a fused-width row stride.
+        int64_t off = tok * row_stride + h;
+        float av = __bfloat162float(a[off]);
+        float bv = __bfloat162float(b[off]);
         float sp_x = av + dt_bias[h];
         // Numerically stable softplus: for large x, log(1+exp(x)) == x to fp32
         // precision and the naive form loses significant digits.
@@ -111,7 +115,7 @@ __global__ void gdn_gates_kernel(const __nv_bfloat16* __restrict__ a,
 std::vector<at::Tensor> gdn_gates(at::Tensor a, at::Tensor b, at::Tensor a_log, at::Tensor dt_bias)
 {
     TORCH_CHECK(a.is_cuda() && b.is_cuda(), "gdn_gates is CUDA-only");
-    TORCH_CHECK(a.is_contiguous() && b.is_contiguous(), "a/b must be contiguous");
+    TORCH_CHECK(a.stride(-1) == 1 && b.stride(-1) == 1, "a/b must be unit-stride in the last dim");
     auto beta = at::empty_like(a);
     auto g = at::empty_like(b);
     int64_t total = a.numel();
@@ -128,7 +132,8 @@ std::vector<at::Tensor> gdn_gates(at::Tensor a, at::Tensor b, at::Tensor a_log, 
         reinterpret_cast<__nv_bfloat16*>(beta.data_ptr<at::BFloat16>()),
         reinterpret_cast<__nv_bfloat16*>(g.data_ptr<at::BFloat16>()),
         total,
-        heads);
+        heads,
+        (int64_t)a.stride(-2));
     C10_CUDA_KERNEL_LAUNCH_CHECK();
     return {beta, g};
 }

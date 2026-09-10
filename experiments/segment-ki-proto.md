@@ -153,3 +153,30 @@ FLA scan 主导 GDN 层时间，glue 占比小（4B 教训重演）。
 
 Next（明确优化项，非架构问题）：fused 权重按目标布局预排（消除
 slice/contiguous 链）；gates kernel 接受 strided 输入；之后重测。
+
+## FLA 路由修复与 4B 正收益 (2026-09-10)
+
+根因（profiler 三层证据不一致逼出的真凶）：transformers 5.14 在
+`__init__` 用**实例属性**绑定 GDN kernel（`self.recurrent_gated_delta_rule
+= fused_recurrent_gated_delta_rule or torch_...`），FLA 可用时绑 fused
+kernel；segKI 委托误调模块级 `m5.torch_recurrent_gated_delta_rule`
+（纯 torch 参考实现）→ 每层每步走慢速回退 → mul/add/sum 爆炸
+（+604 elementwise/step）、gdn_core 减半。修复一行：委托改走实例属性，
+自动跟随 transformers 的 kernel 选择。
+
+最终数字（3 次均值，Qwen3.5-4B bf16 b1 单卡）：
+| | tok/s |
+|---|---|
+| HF eager | 22.5 ± 0.2 |
+| **segKI v4** | **24.8 ± 0.4（+10.3%）** |
+
+收益分解（profiler 实证）：
+- device time -3%（30.3→29.4ms/step）：GEMM 次数减半但权重带宽不变
+  （mm+gemv device 时间 12.5 vs 12.7ms 持平），大头 FLA scan 委托未动
+- 其余 ~7% 为 CPU dispatch 消除：每步少 ~250 次 aten/Python 穿越
+  （4 个 in_proj forward → 1 matmul；门控 6-8 op → 1）
+- 本质：batch 1 decode 是权重带宽受限，可收割的是 CPU 调度税——
+  overhead 占比越高的场景收益越大
+正确性：分叉位 [0,75] 与 GLU 时代 ULP 分叉完全同位（非结构性）。
+layout 修复（strided gates + 显式 qkv repack + stride(-2) 越界修复）
+同轮落地。
