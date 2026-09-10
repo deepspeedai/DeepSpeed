@@ -356,11 +356,16 @@ def _row_major_strides(shape):
     return tuple(strides)
 
 
-def replicated_map(shape, tp_degree):
+def replicated_map(shape, tp_degree, scale=1.0):
     """Every rank holds the whole parameter.
 
     One piece, named by every rank, which is what lets a converter read it from whichever
     rank is cheapest rather than from a designated owner.
+
+    ``scale`` belongs here rather than on a split, because the layouts that pre-divide a
+    value hold it whole on every rank: a row-parallel layer replicates its bias divided by
+    the world size so that summing the all-reduced outputs adds it exactly once. The weight
+    beside it is split and unscaled.
     """
     shape = tuple(shape)
     strides = _row_major_strides(shape)
@@ -371,7 +376,8 @@ def replicated_map(shape, tp_degree):
                     source_strides=strides,
                     dest_offset=0,
                     dest_strides=strides,
-                    locations=ranks)
+                    locations=ranks,
+                    scale=scale)
     ]
     return ParamAffineMap(logical_shape=shape,
                           shard_shapes={rank: shape
@@ -380,7 +386,7 @@ def replicated_map(shape, tp_degree):
                                           for rank in ranks})
 
 
-def contiguous_split_map(shape, per_rank_sizes, partition_dim, scale=1.0):
+def contiguous_split_map(shape, per_rank_sizes, partition_dim):
     """Each rank holds one contiguous block along ``partition_dim``.
 
     Covers row-parallel and column-parallel layers alike: they differ only in which axis
@@ -402,8 +408,7 @@ def contiguous_split_map(shape, per_rank_sizes, partition_dim, scale=1.0):
                         source_strides=source_strides,
                         dest_offset=0,
                         dest_strides=_row_major_strides(shard_shape),
-                        locations=[rank],
-                        scale=scale)
+                        locations=[rank])
         ]
         start += size
     return ParamAffineMap(logical_shape=shape, shard_shapes=shard_shapes, pieces_by_rank=pieces_by_rank)

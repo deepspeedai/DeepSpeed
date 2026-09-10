@@ -567,3 +567,21 @@ def test_unscaled_optimizer_state_still_converts():
     shards = {rank: torch.ones(4, dtype=torch.float64) for rank in range(2)}
     for scale_power in (1, -1, -2):
         assert torch.equal(affine_map.rebuild(shards, scale_power), torch.ones(4, dtype=torch.float64))
+
+
+def test_replicated_map_carries_the_scale():
+    """The layouts that pre-divide a value replicate it whole, so the scale belongs here.
+
+    A row-parallel layer divides its bias by the world size and gives every rank the whole
+    thing, so summing the all-reduced outputs adds the bias once. The weight beside it is
+    split and unscaled, which is why the split constructors take no scale.
+    """
+    world_size = 4
+    full_bias = torch.randn(5, dtype=torch.float64)
+    affine_map = replicated_map((5, ), world_size, scale=1.0 / world_size)
+    affine_map.validate_coverage()
+
+    shards = {rank: affine_map.extract(full_bias, rank) for rank in range(world_size)}
+    assert torch.equal(shards[0], full_bias / world_size)
+    assert torch.equal(affine_map.rebuild(shards), full_bias)
+    assert affine_map.pieces_by_rank[0][0].locations == frozenset(range(world_size))
