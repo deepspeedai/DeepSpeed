@@ -461,6 +461,7 @@ Enabling and configuring ZeRO memory optimizations
     "stage": [0|1|2|3],
     "allgather_partitions": [true|false],
     "allgather_bucket_size": 5e8,
+    "compute_grad_norm": [true|false],
     "overlap_comm": false,
     "reduce_scatter": [true|false],
     "reduce_bucket_size": 5e8,
@@ -480,6 +481,7 @@ Enabling and configuring ZeRO memory optimizations
     "stage3_gather_16bit_weights_on_model_save": [true|false],
     "ignore_unused_parameters": [true|false],
     "round_robin_gradients": [true|false],
+    "parameter_alignment": [true|false],
     "zero_hpz_partition_size": 1,
     "zero_quantized_weights": [true|false],
     "zero_quantized_gradients": [true|false],
@@ -510,6 +512,12 @@ Enabling and configuring ZeRO memory optimizations
 | Description                                                                                                  | Default |
 | ------------------------------------------------------------------------------------------------------------ | ------- |
 | Number of elements allgathered at a time. Limits the memory required for the allgather for large model sizes | `5e8`   |
+
+***compute_grad_norm***: [boolean]
+
+| Description                                                                                                                                                                                                                     | Default |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
+| Compute and retain the global gradient norm during ZeRO Stage 1/2 optimizer steps. Set to `false` only with a GPU optimizer, without ZenFlow, gradient clipping, or ZeRO Stage 1 BF16 parameters with FP32 gradient accumulation, and when callers do not use `get_global_grad_norm()`; finite/overflow checking is unchanged. | `true`  |
 
 <i>**overlap_comm**</i>: [boolean]
 
@@ -546,6 +554,12 @@ Enabling and configuring ZeRO memory optimizations
 | Description                                                                                                                                                                                                                                                                         | Default |
 | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
 | Stage 1 and 2 optimization for CPU offloading that parallelizes gradient copying to CPU memory among ranks by fine-grained gradient partitioning. Performance benefit grows with gradient accumulation steps (more copying between optimizer steps) or GPU count (increased parallelism). | `False` |
+
+***parameter_alignment***: [boolean]
+
+| Description | Default |
+| ----------- | ------- |
+| Pad ZeRO Stage 1 and 2 flat buffers between parameters so every parameter starts at a 16-byte-aligned address. Enable this for operations such as grouped matrix multiplication that require aligned parameters. Padding increases flat-buffer and optimizer-state memory usage. Optimizer checkpoints must be resumed with a compatible effective padding layout; module-only warm starts may use either setting. | `False` |
 
 ***offload_param***: [dictionary]
 
@@ -997,6 +1011,12 @@ smoke coverage used for this AutoEP surface produced the following version gates
 | Description                                                                                                    | Default  |
 | -------------------------------------------------------------------------------------------------------------- | -------- |
 | When to apply router scores: `"pre"` (before experts), `"post"` (during combine), or `"auto"` (from preset). | `"auto"` |
+
+***combine_impl***: [string]
+
+| Description                                                                                                    | Default  |
+| -------------------------------------------------------------------------------------------------------------- | -------- |
+| How expert outputs are weighted by their router scores and reduced over top-k. `"auto"` resolves to `"weighted_sum"`. `"fused_weighted_sum"` is experimental and computes the same reduction in one Triton pass, without materializing the scattered assignment buffer or the `[tokens, top_k, hidden]` FP32 intermediate; it requires CUDA, Triton, bfloat16/float16 activations, `tensor_parallel.autotp_size=1`, `expert_tensor_parallel_size=1`, and a resolved `score_apply="post"`, and is rejected rather than silently ignored when any of those does not hold. `"legacy_bmm"` is a debug reduction retained for model-family verification. | `"auto"` |
 
 ***route_norm***: [boolean]
 

@@ -43,6 +43,8 @@ void Adam_Optimizer::Step_1(ds_params_precision_t* _params,
     size_t rounded_size = 0;
 #if defined(__AVX512__) or defined(__AVX256__)
     Step_AVX<1>(&rounded_size, _params, grads, _exp_avg, _exp_avg_sq, _param_size, parallel);
+#elif defined(__SVE__) && defined(__ARM_FEATURE_SVE)
+    Step_SVE<1>(&rounded_size, _params, grads, _exp_avg, _exp_avg_sq, _param_size, parallel);
 #endif
     if (_param_size > rounded_size) {
         float betta1_minus1 = 1 - _betta1;
@@ -93,6 +95,8 @@ void Adam_Optimizer::Step_4(ds_params_precision_t* _params,
     size_t rounded_size = 0;
 #if defined(__AVX512__) or defined(__AVX256__)
     Step_AVX<4>(&rounded_size, _params, grads, _exp_avg, _exp_avg_sq, _param_size, parallel);
+#elif defined(__SVE__) && defined(__ARM_FEATURE_SVE)
+    Step_SVE<4>(&rounded_size, _params, grads, _exp_avg, _exp_avg_sq, _param_size, parallel);
 #endif
     if (_param_size > rounded_size)
         Step_1((_params + rounded_size),
@@ -118,20 +122,20 @@ int create_adam_optimizer(int optimizer_id,
     s_optimizers[optimizer_id] = opt;
 
     if (should_log) {
-        std::string avx_type = "";
+        std::string vectorization = "";
 #if defined(__AVX512__)
-        avx_type = "AVX512";
+        vectorization = "AVX512";
+#elif defined(__AVX256__)
+        vectorization = "AVX2";
+#elif defined(__SVE__) && defined(__ARM_FEATURE_SVE)
+        vectorization = "SVE";
 #else
-#if defined(__AVX256__)
-        avx_type = "AVX2";
-#else
-        avx_type = "scalar";
-#endif
+        vectorization = "scalar";
 #endif
 
         printf("Adam Optimizer #%d is created with %s arithmetic capability.\n",
                optimizer_id,
-               avx_type.c_str());
+               vectorization.c_str());
         printf("Config: alpha=%f, betas=(%f, %f), weight_decay=%f, adam_w=%d\n",
                alpha,
                betta1,
@@ -154,6 +158,8 @@ void Adam_Optimizer::Step_8(ds_params_precision_t* _params,
     size_t rounded_size = 0;
 #if defined(__AVX512__) or defined(__AVX256__)
     Step_AVX<8>(&rounded_size, _params, grads, _exp_avg, _exp_avg_sq, _param_size, parallel);
+#elif defined(__SVE__) && defined(__ARM_FEATURE_SVE)
+    Step_SVE<8>(&rounded_size, _params, grads, _exp_avg, _exp_avg_sq, _param_size, parallel);
 #endif
     if (_param_size > rounded_size)
         Step_4((_params + rounded_size),

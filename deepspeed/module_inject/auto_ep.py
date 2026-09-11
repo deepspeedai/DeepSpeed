@@ -13,7 +13,7 @@ from __future__ import annotations
 import math
 import re
 from collections import OrderedDict
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 import torch
 import torch.nn as nn
@@ -35,6 +35,9 @@ from deepspeed.module_inject.auto_ep_presets.registry import (
 from deepspeed.moe.fused_expert_layout import classify_fused_gate_up_layout
 from deepspeed.runtime.zero.utils import is_zero_param
 from deepspeed.utils import logger
+
+if TYPE_CHECKING:
+    from deepspeed.module_inject.auto_ep_layer import ReplacementSourceMap
 
 
 def _remove_transformers_output_capture_hooks(model: nn.Module) -> int:
@@ -80,6 +83,19 @@ def _raise_if_duplicate_moe_specs(specs: list[MoELayerSpec]) -> None:
     raise ValueError("AutoEP detection is ambiguous and produced multiple replacement specs for the same "
                      f"MoE module(s): {details}. Set expert_parallel.preset_model or provide custom "
                      "AutoEP patterns so each MoE module matches exactly one preset.")
+
+
+def _resolve_e_score_correction_bias_path(moe_module: nn.Module, module_name: str) -> str | None:
+    matches = [
+        path for path, candidate in moe_module.named_modules()
+        if getattr(candidate, "e_score_correction_bias", None) is not None
+    ]
+    if len(matches) > 1:
+        locations = ", ".join(repr(path or "<root>") for path in matches)
+        raise ValueError(
+            f"AutoEP found e_score_correction_bias in multiple locations in layer '{module_name}': {locations}. "
+            "Keep exactly one score correction bias in each MoE layer so AutoEP can preserve it unambiguously.")
+    return matches[0] if matches else None
 
 
 def _source_param_shape(param: torch.Tensor | nn.Parameter) -> torch.Size:
@@ -413,6 +429,7 @@ class AutoEP:
                     gate_bias = getattr(router_child, 'bias', None) is not None
 
                 forward_contract = adapter.adjust_forward_contract(_detect_forward_contract(module, router_child))
+                e_score_correction_bias_path = _resolve_e_score_correction_bias_path(module, module_name)
 
                 # Check shared experts
                 has_shared = False
@@ -472,6 +489,7 @@ class AutoEP:
                     preset_adapter=preset.preset_adapter,
                     router_logits_capture_mode=forward_contract.router_logits_capture_mode,
                     moe_output_shape=forward_contract.moe_output_shape,
+                    e_score_correction_bias_path=e_score_correction_bias_path,
                 )
                 specs.append(spec)
                 logger.debug(f"Detected MoE layer: {module_name} (family={preset_name}, "
@@ -491,8 +509,10 @@ class AutoEP:
         spec: MoELayerSpec,
         ep_size: int,
         ep_rank: int,
-    ) -> nn.Module:
-        from deepspeed.module_inject.auto_ep_layer import AutoEPMoELayer
+        collect_sources: bool = False,
+    ) -> tuple[nn.Module, "ReplacementSourceMap"]:
+        from deepspeed.module_inject.auto_ep_layer import (AutoEPMoELayer, ReplacementSourceMap,
+                                                           collect_replacement_sources)
 
         # Navigate to the parent module and get the child name
         parts = spec.moe_module_name.split(".")
@@ -511,9 +531,14 @@ class AutoEP:
             config=self.config,
         )
 
+        # Collected before the source module leaves the tree, and only when a caller-supplied
+        # optimizer needs it: the values are the discarded pre-shard expert weights.
+        sources = (collect_replacement_sources(source_module, replacement, spec, ep_size, ep_rank)
+                   if collect_sources else ReplacementSourceMap())
+
         # Replace in-place on parent
         setattr(parent, child_name, replacement)
-        return replacement
+        return replacement, sources
 
     def _retarget_transformers_output_recorders(self, spec: MoELayerSpec, replacement: nn.Module) -> None:
         adapter = get_preset_adapter(spec.preset_adapter)
@@ -532,7 +557,7 @@ class AutoEP:
         ep_rank: int,
     ) -> None:
         """Replace a single MoE module with AutoEPMoELayer in-place on the model."""
-        replacement = self._replace_moe_layer_without_retarget(spec, ep_size, ep_rank)
+        replacement, _ = self._replace_moe_layer_without_retarget(spec, ep_size, ep_rank)
         self._retarget_transformers_output_recorders(spec, replacement)
 
         logger.info(f"AutoEP: replaced '{spec.moe_module_name}' with AutoEPMoELayer "
@@ -544,12 +569,26 @@ class AutoEP:
         specs: list[MoELayerSpec],
         ep_size: int,
         ep_rank: int,
-    ) -> None:
-        """Replace multiple MoE modules and batch post-replacement recorder retargeting."""
+        collect_sources: bool = False,
+    ) -> "ReplacementSourceMap":
+        """Replace multiple MoE modules and batch post-replacement recorder retargeting.
+
+        With ``collect_sources``, returns a ``ReplacementSourceMap``: the source parameters behind
+        each replacement parameter, so a caller-supplied optimizer can put each replacement back
+        into the param group its sources belonged to, plus the identity of every parameter the
+        replacement detached, so the same optimizer can drop exactly those. The source values are
+        the discarded pre-shard expert weights and stay alive until the engine has finished the
+        remap, so the caller asks for them only when there is such an optimizer. Otherwise the map
+        is empty and each source module is freed as its replacement takes its place.
+        """
+        from deepspeed.module_inject.auto_ep_layer import ReplacementSourceMap
+
         replacements: list[tuple[MoELayerSpec, nn.Module]] = []
+        replacement_sources = ReplacementSourceMap()
         for spec in specs:
-            replacement = self._replace_moe_layer_without_retarget(spec, ep_size, ep_rank)
+            replacement, sources = self._replace_moe_layer_without_retarget(spec, ep_size, ep_rank, collect_sources)
             replacements.append((spec, replacement))
+            replacement_sources.update(sources)
             logger.info(f"AutoEP: replaced '{spec.moe_module_name}' with AutoEPMoELayer "
                         f"(ep_size={ep_size}, ep_rank={ep_rank}, "
                         f"local_experts={replacement.num_local_experts})")
@@ -561,6 +600,8 @@ class AutoEP:
 
         for spec, replacement in retarget_groups.values():
             self._retarget_transformers_output_recorders(spec, replacement)
+
+        return replacement_sources
 
     def _apply_config_overrides(self, preset: MoEModelPreset) -> MoEModelPreset:
         return apply_config_overrides(self.config, preset)

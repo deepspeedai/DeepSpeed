@@ -1,4 +1,3 @@
-# Copyright (c) Microsoft Corporation.
 # SPDX-License-Identifier: Apache-2.0
 
 # DeepSpeed Team
@@ -21,6 +20,7 @@ from deepspeed.runtime.rollout.hybrid_engine_rollout import (
     HybridEngineRollout,
     HybridEngineRolloutConfig,
 )
+from deepspeed.utils.static_cache import DeepSpeedStaticCache
 
 
 def _make_engine():
@@ -80,6 +80,191 @@ def test_constructor_defaults_without_cfg():
     assert rollout.use_shared_prefill is False
 
 
+def test_continuous_generation_rejects_unsupported_inputs():
+    rollout = HybridEngineRollout(_make_engine(), _make_tokenizer())
+    request = RolloutRequest(
+        prompt_ids=torch.tensor([[0, 1, 2]]),
+        prompt_attention_mask=torch.tensor([[0, 1, 1]]),
+    )
+
+    empty_request = RolloutRequest(torch.empty((0, 3), dtype=torch.long), torch.empty((0, 3), dtype=torch.long))
+    with pytest.raises(ValueError, match="at least one request"):
+        rollout.generate(empty_request, SamplingConfig(max_new_tokens=2, continuous_batch_size=1))
+    with pytest.raises(ValueError, match="positive"):
+        rollout.generate(request, SamplingConfig(max_new_tokens=2, continuous_batch_size=0))
+    with pytest.raises(ValueError, match="greedy"):
+        rollout.generate(request, SamplingConfig(max_new_tokens=2, temperature=0.5, continuous_batch_size=1))
+
+
+def test_static_cache_constructor_supports_max_batch_keyword():
+
+    class MaxBatchStaticCache:
+
+        def __init__(self, config, max_batch_size, max_cache_len, device, dtype):
+            self.config = config
+            self.max_batch_size = max_batch_size
+
+    config = SimpleNamespace(num_attention_heads=4)
+    cache = HybridEngineRollout._create_static_cache(MaxBatchStaticCache, config, 2, 8, "cpu", torch.float32)
+
+    assert cache.max_batch_size == 2
+    assert cache.config.num_key_value_heads == 4
+
+
+def test_continuous_cache_span_does_not_sum_independent_requests():
+    cache_len = HybridEngineRollout._estimate_continuous_cache_len(64, [64] * 100, 100)
+
+    assert cache_len == 128
+    assert cache_len < 64 + 64 * 100
+
+
+def test_continuous_generation_validates_each_request_length():
+
+    class LimitedModel(torch.nn.Module):
+
+        _supports_cache_class = False
+
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.zeros(1))
+            self.config = SimpleNamespace(max_position_embeddings=4)
+
+    model = LimitedModel()
+    rollout = HybridEngineRollout(SimpleNamespace(module=model), SimpleNamespace(eos_token_id=None))
+    request = RolloutRequest(torch.tensor([[1, 2, 3]]), torch.ones((1, 3), dtype=torch.long))
+
+    with pytest.raises(ValueError, match="request exceeds"):
+        rollout.generate(request, SamplingConfig(max_new_tokens=2, temperature=0, continuous_batch_size=1))
+
+
+def test_continuous_generation_rejects_legacy_cache_model():
+
+    class LegacyModel(torch.nn.Module):
+
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.zeros(1))
+            self.config = SimpleNamespace(max_position_embeddings=32)
+
+    model = LegacyModel()
+    rollout = HybridEngineRollout(SimpleNamespace(module=model), SimpleNamespace(eos_token_id=None))
+    request = RolloutRequest(torch.tensor([[1, 2, 3]]), torch.ones((1, 3), dtype=torch.long))
+
+    with pytest.raises(ValueError, match="cache-class support"):
+        rollout.generate(request, SamplingConfig(max_new_tokens=2, temperature=0, continuous_batch_size=1))
+
+
+def test_continuous_generation_covers_modern_static_cache_path():
+
+    class CacheClassModel(torch.nn.Module):
+        _supports_cache_class = True
+
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.zeros(1))
+            self.calls = []
+
+            class CacheConfig(SimpleNamespace):
+
+                def get_text_config(self, **_kwargs):
+                    return self
+
+            self.config = CacheConfig(
+                max_position_embeddings=32,
+                num_hidden_layers=1,
+                num_attention_heads=1,
+                num_key_value_heads=1,
+                hidden_size=1,
+                head_dim=1,
+            )
+
+        def forward(self, input_ids, attention_mask, past_key_values=None, use_cache=True, **kwargs):
+            key_states = input_ids[:, None, :, None].to(dtype=torch.float32)
+            _, cache_values = past_key_values.update(key_states, key_states, layer_idx=0, **kwargs)
+            cache_sums = cache_values[:, 0].sum(dim=(1, 2))
+            next_tokens = torch.where(cache_sums == 6, 2, 7).long()
+            self.calls.append((input_ids.shape[0], input_ids.shape[1]))
+            logits = torch.zeros((input_ids.shape[0], input_ids.shape[1], 16))
+            logits.scatter_(2, next_tokens[:, None, None].expand(-1, input_ids.shape[1], 1), 1)
+            return SimpleNamespace(logits=logits, past_key_values=past_key_values)
+
+    model = CacheClassModel()
+    rollout = HybridEngineRollout(SimpleNamespace(module=model), SimpleNamespace(pad_token_id=0, eos_token_id=2))
+    request = RolloutRequest(
+        torch.tensor([[1, 2, 3], [1, 2, 4], [1, 2, 5]]),
+        torch.ones((3, 3), dtype=torch.long),
+    )
+    output = rollout.generate(request, SamplingConfig(max_new_tokens=3, temperature=0, continuous_batch_size=2))
+
+    assert output.input_ids.shape == (3, 6)
+    assert output.input_ids[:, :3].tolist() == request.prompt_ids.tolist()
+    assert output.input_ids[:, 3:].tolist() == [[2, 0, 0], [7, 7, 7], [7, 7, 7]]
+    assert output.attention_mask[:, 3:].tolist() == [[1, 0, 0], [1, 1, 1], [1, 1, 1]]
+    assert output.response_start_idx.tolist() == [3, 3, 3]
+    assert model.calls[0] == (2, 3)
+    assert (1, 3) in model.calls
+
+
+def test_continuous_generation_trims_cache_after_staggered_eos():
+
+    class CacheConfig(SimpleNamespace):
+
+        def get_text_config(self, **_kwargs):
+            return self
+
+    class CacheClassModel(torch.nn.Module):
+        _supports_cache_class = True
+
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.zeros(1))
+            self.config = CacheConfig(
+                max_position_embeddings=32,
+                num_hidden_layers=1,
+                num_attention_heads=1,
+                num_key_value_heads=1,
+                hidden_size=1,
+                head_dim=1,
+            )
+
+        def forward(self, input_ids, attention_mask, past_key_values=None, use_cache=True, **kwargs):
+            states = input_ids[:, None, :, None].to(dtype=torch.float32)
+            _, values = past_key_values.update(states, states, layer_idx=0, **kwargs)
+            cache_sums = values[:, 0].sum(dim=(1, 2))
+            eos_rows = (cache_sums == 6) | (cache_sums == 8) | (cache_sums == 10)
+            next_tokens = torch.where(eos_rows, 2, 7).long()
+            logits = torch.zeros((input_ids.shape[0], input_ids.shape[1], 16))
+            logits.scatter_(2, next_tokens[:, None, None].expand(-1, input_ids.shape[1], 1), 1)
+            return SimpleNamespace(logits=logits, past_key_values=past_key_values)
+
+    model = CacheClassModel()
+    rollout = HybridEngineRollout(SimpleNamespace(module=model), SimpleNamespace(pad_token_id=0, eos_token_id=2))
+    request = RolloutRequest(
+        torch.tensor([[1, 2, 3], [1, 2, 4], [1, 2, 5], [1, 2, 6], [1, 2, 7], [1, 2, 8]]),
+        torch.ones((6, 3), dtype=torch.long),
+    )
+
+    output = rollout.generate(request, SamplingConfig(max_new_tokens=4, temperature=0, continuous_batch_size=2))
+
+    assert output.input_ids.shape == (6, 7)
+    assert output.input_ids[:, 3:].tolist() == [
+        [2, 0, 0, 0],
+        [7, 7, 7, 7],
+        [2, 0, 0, 0],
+        [7, 7, 7, 7],
+        [2, 0, 0, 0],
+        [7, 7, 7, 7],
+    ]
+    assert output.attention_mask[:, 3:].tolist() == [
+        [1, 0, 0, 0],
+        [1, 1, 1, 1],
+        [1, 0, 0, 0],
+        [1, 1, 1, 1],
+        [1, 0, 0, 0],
+        [1, 1, 1, 1],
+    ]
+
+
 @patch("deepspeed.runtime.rollout.hybrid_engine_rollout.time.perf_counter")
 @patch("deepspeed.runtime.rollout.hybrid_engine_rollout.get_accelerator")
 def test_generate_records_profile_when_enabled(mock_get_accelerator, mock_perf_counter):
@@ -100,6 +285,10 @@ def test_generate_records_profile_when_enabled(mock_get_accelerator, mock_perf_c
     profile = rollout.get_last_profile()
     assert profile["prompt_expansion_ms"] == pytest.approx(1.0)
     assert profile["generation_ms"] == pytest.approx(10.0)
+    assert profile["prefill_forward_ms"] is None
+    assert profile["decode_forward_ms"] is None
+    assert profile["generation_overhead_ms"] == pytest.approx(10.0)
+    assert profile["num_decode_forwards"] == 0
     assert profile["post_processing_ms"] == pytest.approx(2.0)
     assert profile["total_ms"] == pytest.approx(13.0)
     assert profile["num_generated_tokens"] == 8
@@ -397,12 +586,15 @@ def test_sync_weights_is_noop():
 # -- generate dispatches correctly -------------------------------------
 
 
-def test_generate_calls_graph_capture_when_enabled():
+@patch("deepspeed.runtime.rollout.hybrid_engine_rollout.time.perf_counter")
+@patch("deepspeed.runtime.rollout.hybrid_engine_rollout.get_accelerator")
+def test_generate_calls_graph_capture_when_enabled(mock_get_accelerator, mock_perf_counter):
     engine = _make_engine()
     tok = _make_tokenizer()
-    cfg = HybridEngineRolloutConfig(use_graph_capture=True)
+    cfg = HybridEngineRolloutConfig(use_graph_capture=True, enable_profiling=True)
     rollout = HybridEngineRollout(engine, tok, cfg=cfg)
     rollout._generate_graph = MagicMock(return_value=torch.zeros(1, 5, dtype=torch.long))
+    mock_perf_counter.side_effect = [1.0, 1.001, 1.011, 1.013]
 
     req = MagicMock()
     req.prompt_ids = torch.tensor([[1, 2]])
@@ -411,9 +603,15 @@ def test_generate_calls_graph_capture_when_enabled():
     sampling.temperature = 0
     sampling.n_samples_per_prompt = 1
     sampling.max_new_tokens = 3
+    sampling.continuous_batch_size = None
 
     rollout.generate(req, sampling)
     rollout._generate_graph.assert_called_once()
+    profile = rollout.get_last_profile()
+    assert profile["prefill_forward_ms"] is None
+    assert profile["decode_forward_ms"] is None
+    assert profile["generation_overhead_ms"] == pytest.approx(10.0)
+    assert profile["num_decode_forwards"] == 0
 
 
 def test_generate_keeps_ranks_in_lockstep_and_pads_after_eos():
@@ -430,6 +628,7 @@ def test_generate_keeps_ranks_in_lockstep_and_pads_after_eos():
     sampling.n_samples_per_prompt = 1
     sampling.max_new_tokens = 4
     sampling.top_p = 1.0
+    sampling.continuous_batch_size = None
 
     result = rollout.generate(req, sampling)
 
@@ -486,8 +685,36 @@ def test_generate_accepts_zero_pad_token_id():
     req = MagicMock()
     req.prompt_ids = torch.tensor([[10, 11]])
     req.prompt_attention_mask = torch.ones(1, 2, dtype=torch.long)
-    sampling = MagicMock(temperature=0, n_samples_per_prompt=1, max_new_tokens=2, top_p=1.0)
+    sampling = MagicMock(temperature=0,
+                         n_samples_per_prompt=1,
+                         max_new_tokens=2,
+                         top_p=1.0,
+                         continuous_batch_size=None)
 
     rollout.generate(req, sampling)
 
     assert engine.module.generate.call_args.kwargs['pad_token_id'] == 0
+
+
+def _cache_config(head_dim=None):
+    config = SimpleNamespace(num_hidden_layers=2, hidden_size=64, num_attention_heads=4, num_key_value_heads=2)
+    if head_dim is not None:
+        config.head_dim = head_dim
+    return config
+
+
+def test_static_cache_preallocates_with_config_head_dim():
+    cache = DeepSpeedStaticCache(_cache_config(head_dim=32),
+                                 batch_size=1,
+                                 max_cache_len=8,
+                                 device="cpu",
+                                 dtype=torch.float32)
+
+    assert tuple(cache.layers[0].keys.shape) == (1, 2, 8, 32)
+    assert tuple(cache.layers[0].values.shape) == (1, 2, 8, 32)
+
+
+def test_static_cache_falls_back_to_derived_head_dim():
+    cache = DeepSpeedStaticCache(_cache_config(), batch_size=1, max_cache_len=8, device="cpu", dtype=torch.float32)
+
+    assert tuple(cache.layers[0].keys.shape) == (1, 2, 8, 16)
