@@ -14,4 +14,3 @@ FusedAdam (GPU)
 FusedLamb (GPU)
 ----------------------------
 .. autoclass:: deepspeed.ops.lamb.FusedLamb
-

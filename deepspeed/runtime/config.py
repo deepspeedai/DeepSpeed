@@ -77,8 +77,8 @@ LION_OPTIMIZER = 'lion'
 MUON_OPTIMIZER = 'muon'
 
 DEEPSPEED_OPTIMIZERS = [
-    ADAGRAD_OPTIMIZER, ADAM_OPTIMIZER, ADAMW_OPTIMIZER, LAMB_OPTIMIZER, MUADAM_OPTIMIZER,
-    MUADAMW_OPTIMIZER, MUSGD_OPTIMIZER, LION_OPTIMIZER, MUON_OPTIMIZER
+    ADAGRAD_OPTIMIZER, ADAM_OPTIMIZER, ADAMW_OPTIMIZER, LAMB_OPTIMIZER, MUADAM_OPTIMIZER, MUADAMW_OPTIMIZER,
+    MUSGD_OPTIMIZER, LION_OPTIMIZER, MUON_OPTIMIZER
 ]
 
 # extra optimizer parameters for adam/adamw
@@ -787,8 +787,6 @@ class DeepSpeedConfig(object):
         self.sparse_gradients_enabled = get_sparse_gradients_enabled(param_dict)
 
         self.zero_config = get_zero_config(param_dict)
-        self.mics_shard_size = self.zero_config.mics_shard_size
-        self.mics_hierarchial_params_gather = self.zero_config.mics_hierarchical_params_gather
         self.zero_optimization_stage = self.zero_config.stage
         self.zero_enabled = self.zero_optimization_stage > 0
 

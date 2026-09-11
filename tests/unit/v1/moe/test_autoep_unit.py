@@ -491,24 +491,6 @@ class TestAutoEPConfig:
         with pytest.raises(AssertionError, match="zero_quantized_gradients"):
             engine._validate_zero3_moe_compatibility()
 
-    def test_zero3_compatibility_gate_rejects_mics(self):
-        model = MockMoETransformer(num_layers=1)
-        replace_autoep_layers(model, "mixtral")
-        engine = object.__new__(DeepSpeedEngine)
-        engine.__dict__["module"] = model
-        engine.has_moe_layers = True
-        engine.sequence_parallel_size = 1
-        engine.zero_quantized_gradients = lambda: False
-        engine._config = SimpleNamespace(
-            mics_shard_size=2,
-            zero_config=SimpleNamespace(zero_hpz_partition_size=1),
-            tensor_parallel_config=SimpleNamespace(autotp_size=1),
-            expert_parallel_config=AutoEPConfig(enabled=True, autoep_size=1),
-        )
-
-        with pytest.raises(AssertionError, match="MiCS"):
-            engine._validate_zero3_moe_compatibility()
-
     def test_zero3_compatibility_gate_rejects_hpzero(self):
         model = MockMoETransformer(num_layers=1)
         replace_autoep_layers(model, "mixtral")
@@ -518,7 +500,6 @@ class TestAutoEPConfig:
         engine.sequence_parallel_size = 1
         engine.zero_quantized_gradients = lambda: False
         engine._config = SimpleNamespace(
-            mics_shard_size=0,
             zero_config=SimpleNamespace(zero_hpz_partition_size=2),
             tensor_parallel_config=SimpleNamespace(autotp_size=1),
             expert_parallel_config=AutoEPConfig(enabled=True, autoep_size=1),

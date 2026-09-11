@@ -354,10 +354,6 @@ class DeepSpeedZeroConfig(DeepSpeedConfigModel):
     See LoCo paper for more details: (https://arxiv.org/abs/2407.04480).
     """
 
-    mics_shard_size: int = Field(-1, json_schema_extra={"new_param": "mics_shard_size"})
-
-    mics_hierarchical_params_gather: bool = False
-
     memory_efficient_linear: bool = True
     """
     Use memory efficient linear implementation, for Stage 3.
