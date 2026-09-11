@@ -28,7 +28,8 @@ from deepspeed.module_inject.auto_ep_comm import (DEEPEP_BACKEND, DeepEPExchange
 from deepspeed.moe.ep_router import TokenChoiceTopKRouter
 from deepspeed.moe.ep_count import count_tokens_per_expert
 from deepspeed.moe.ep_experts import GroupedExperts
-from deepspeed.moe.ep_repack import _gather_source_zero_params, repack_expert_requires_grad_flags, repack_expert_weights
+from deepspeed.moe.ep_repack import (_gather_source_zero_params, repack_expert_requires_grad_flags,
+                                     repack_expert_source_params, repack_expert_weights)
 
 # ---------------------------------------------------------------------------
 # Named tuples
@@ -83,6 +84,33 @@ def _copy_parameter_data(target: nn.Parameter, source: torch.Tensor) -> None:
                 or target.data.device != source_data.device):
             target.data = torch.empty(full_shape, dtype=source_data.dtype, device=source_data.device)
         target.data.copy_(source_data)
+
+
+def _copy_e_score_correction_bias(
+    target_router: nn.Module,
+    source_owner: nn.Module,
+    source_bias,
+    source_path: str,
+) -> None:
+    if isinstance(source_bias, nn.Parameter):
+        target_router.e_score_correction_bias = nn.Parameter(source_bias.data.clone(),
+                                                             requires_grad=source_bias.requires_grad)
+    elif (torch.is_tensor(source_bias) and source_owner._buffers.get("e_score_correction_bias") is source_bias):
+        copied_bias = source_bias.detach().clone()
+        copied_bias.requires_grad_(source_bias.requires_grad)
+        if hasattr(target_router, "e_score_correction_bias"):
+            delattr(target_router, "e_score_correction_bias")
+        persistent = "e_score_correction_bias" not in source_owner._non_persistent_buffers_set
+        target_router.register_buffer("e_score_correction_bias", copied_bias, persistent=persistent)
+    else:
+        logger.warning(
+            "AutoEP: cannot copy e_score_correction_bias from source module path '%s': expected "
+            "an nn.Parameter or registered buffer, got %s.", source_path or "<root>",
+            type(source_bias).__name__)
+        return
+
+    logger.info("AutoEP: copied e_score_correction_bias from source module path '%s' (shape=%s)", source_path
+                or "<root>", source_bias.shape)
 
 
 def apply_scores_before_experts_if_enabled(
@@ -398,7 +426,14 @@ class AutoEPMoELayer(nn.Module):
         # Router: copy gate weights from source
         source_gate = getattr(source_module, spec.router_name)
         source_gate_bias = getattr(source_gate, 'bias', None)
-        source_ecb = getattr(source_gate, 'e_score_correction_bias', None)
+        source_ecb_path = spec.e_score_correction_bias_path
+        if source_ecb_path is None:
+            source_ecb_owner = source_gate
+            source_ecb_path = spec.router_name
+        else:
+            source_ecb_owner = (source_module
+                                if source_ecb_path == "" else source_module.get_submodule(source_ecb_path))
+        source_ecb = getattr(source_ecb_owner, "e_score_correction_bias", None)
         unsupported_router_biases = [
             getattr(source_gate, bias_name, None) for bias_name in spec.unsupported_router_bias_names
         ]
@@ -434,11 +469,8 @@ class AutoEPMoELayer(nn.Module):
                 self.router.gate.bias.requires_grad_(source_gate_bias.requires_grad)
 
             # Copy pre-trained score correction bias (DeepSeek-V3/Moonlight noaux_tc routing)
-            if source_ecb is not None and isinstance(source_ecb, nn.Parameter):
-                self.router.e_score_correction_bias = nn.Parameter(source_ecb.data.clone(),
-                                                                   requires_grad=source_ecb.requires_grad)
-                logger.info('AutoEP: copied e_score_correction_bias from source gate '
-                            '(shape=%s)', source_ecb.shape)
+            if source_ecb is not None:
+                _copy_e_score_correction_bias(self.router, source_ecb_owner, source_ecb, source_ecb_path)
 
         # Alias router under the name OutputRecorder expects (layer_name if provided),
         # but only when OutputRecorder captures from the router child and the alias is safe.
@@ -609,8 +641,12 @@ class AutoEPMoELayer(nn.Module):
         assert_dtype_supported(tokens.dtype)
 
         # The configured worst-case capacity is identical across ranks, so
-        # buffer construction needs no rank-local decision or synchronization.
+        # buffer construction needs no rank-local resize decision.
         if self._deepep_exchange is None:
+            # An externally initialized process group may still have a lazy
+            # NCCL communicator. DeepEP needs it before constructing its team;
+            # the removed split-count collective used to initialize it for us.
+            dist.barrier(group=self.ep_group, device_ids=[tokens.device.index])
             self._deepep_exchange = DeepEPExchange(
                 ep_group=self.ep_group,
                 num_experts=self.num_experts,
@@ -664,6 +700,34 @@ class AutoEPMoELayer(nn.Module):
 
         return deepep_combine(exchange, expert_output, handle)
 
+    def _finalize_output(self, output: torch.Tensor, x: torch.Tensor, hidden_states: torch.Tensor,
+                         hdim: int) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        """Apply the model-specific output tail shared by every communication backend."""
+        if self.moe_output_shape == "flat":
+            output = output.reshape(-1, hdim)
+            shared_expert_input = x
+        elif self.shared_experts_gate is not None:
+            shared_expert_input = x
+        else:
+            shared_expert_input = hidden_states
+
+        if self.shared_experts is not None:
+            shared_expert_output = self.shared_experts(shared_expert_input)
+            if self.shared_experts_gate is not None:
+                shared_expert_gate = torch.sigmoid(self.shared_experts_gate(shared_expert_input))
+                shared_expert_output = shared_expert_gate * shared_expert_output
+            if shared_expert_output.shape != output.shape:
+                shared_expert_output = shared_expert_output.reshape_as(output)
+            output = output + shared_expert_output
+
+        if self.return_router_logits:
+            logits = self._cached_router_logits
+            self._cached_router_logits = None
+            return output, logits
+
+        self._cached_router_logits = None
+        return output
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -692,15 +756,16 @@ class AutoEPMoELayer(nn.Module):
         with torch.no_grad():
             self.tokens_per_expert.add_(ro.num_tokens_per_expert)
 
+        if self.ep_size > 1 and self.comm_backend == DEEPEP_BACKEND:
+            output = self._deepep_route(x, ro).reshape(bsz, seqlen, hdim)
+            return self._finalize_output(output, x, hidden_states, hdim)
+
         # Reorder tokens into expert-contiguous order.
         token_indices_sorted = torch.argsort(ro.selected_experts.view(-1), stable=True)
         top_scores_sorted = ro.top_scores.view(-1)[token_indices_sorted]
         expert_indices_sorted = ro.selected_experts.reshape(-1).index_select(0, token_indices_sorted)
 
         folded_tp = self.folding_group_handles is not None and self.folding_group_handles.spec.tp_size > 1
-        # Set only where DeepEP's combine actually produced the output, since
-        # that decides whether the reduction below has already happened.
-        deepep_combined = False
         restore_ctx = None
         if folded_tp:
             from deepspeed.moe.ep_tp_dispatch import (
@@ -778,18 +843,14 @@ class AutoEPMoELayer(nn.Module):
                     num_tokens_per_expert=ro.num_tokens_per_expert,
                 )
 
-            if self.comm_backend == DEEPEP_BACKEND:
-                expert_output = self._deepep_route(x, ro)
-                deepep_combined = True
-            else:
-                routed_input = _AllToAllV.apply(self.ep_group, routed_input, plan.input_splits, plan.output_splits)
+            routed_input = _AllToAllV.apply(self.ep_group, routed_input, plan.input_splits, plan.output_splits)
 
-                routed_input, perm_indices, aligned_counts, n_tokens = permute_by_local_expert(
-                    routed_input, plan.local_counts_by_source)
-                expert_output = self.experts(routed_input, aligned_counts)
-                expert_output = unpermute_by_local_expert(expert_output, perm_indices, n_tokens)
+            routed_input, perm_indices, aligned_counts, n_tokens = permute_by_local_expert(
+                routed_input, plan.local_counts_by_source)
+            expert_output = self.experts(routed_input, aligned_counts)
+            expert_output = unpermute_by_local_expert(expert_output, perm_indices, n_tokens)
 
-                expert_output = _AllToAllV.apply(self.ep_group, expert_output, plan.output_splits, plan.input_splits)
+            expert_output = _AllToAllV.apply(self.ep_group, expert_output, plan.output_splits, plan.input_splits)
 
         if folded_tp:
             output = restore_combined(expert_output,
@@ -797,12 +858,6 @@ class AutoEPMoELayer(nn.Module):
                                       tp_group=self.tp_group,
                                       validate_coverage=self.validate_folding_routing).reshape(bsz, seqlen, hdim)
             self._last_folding_dispatch_counters = dispatch_counters(restore_ctx)
-        elif deepep_combined:
-            # DeepEP's combine already reduced over top-k and restored token
-            # order. This is keyed on the route having run rather than on the
-            # backend being selected: with ep_size == 1 the local path runs
-            # instead and still has one row per assignment to reduce.
-            output = expert_output.reshape(bsz, seqlen, hdim)
         elif self.combine_impl == "fused_weighted_sum":
             output = fused_token_ops.fused_weighted_restore(
                 expert_output,
@@ -822,27 +877,76 @@ class AutoEPMoELayer(nn.Module):
                 shape=(bsz, seqlen, hdim),
             )
 
-        if self.moe_output_shape == "flat":
-            output = output.reshape(-1, hdim)
-            shared_expert_input = x
-        elif self.shared_experts_gate is not None:
-            shared_expert_input = x
-        else:
-            shared_expert_input = hidden_states
+        return self._finalize_output(output, x, hidden_states, hdim)
 
-        if self.shared_experts is not None:
-            shared_expert_output = self.shared_experts(shared_expert_input)
-            if self.shared_experts_gate is not None:
-                shared_expert_gate = torch.sigmoid(self.shared_experts_gate(shared_expert_input))
-                shared_expert_output = shared_expert_gate * shared_expert_output
-            if shared_expert_output.shape != output.shape:
-                shared_expert_output = shared_expert_output.reshape_as(output)
-            output = output + shared_expert_output
 
-        if self.return_router_logits:
-            logits = self._cached_router_logits
-            self._cached_router_logits = None
-            return output, logits
+class ReplacementSourceMap:
+    """What a module replacement did, in the terms the client-optimizer remap needs.
 
-        self._cached_router_logits = None
-        return output
+    ``sources`` maps each replacement parameter to the source parameters it was built from, keyed
+    by ``id()``, so a replacement can rejoin the param group its sources were in.
+
+    ``discarded`` holds the ``id()`` of every parameter the replacement detached from the module
+    tree, including the experts belonging to other ranks, which ``sources`` never names. It is what
+    lets the remap remove exactly the parameters the replacement invalidated instead of everything
+    it cannot find in the model, which would also remove a caller's unrelated external parameters.
+
+    Storing identities rather than the parameters themselves is safe here: any discarded parameter
+    the optimizer still holds is kept alive by that optimizer, so its identity cannot be reused
+    while the remap is looking at it.
+    """
+
+    def __init__(self):
+        self.sources: dict[int, list[nn.Parameter]] = {}
+        self.discarded: set[int] = set()
+
+    def update(self, other: "ReplacementSourceMap") -> None:
+        self.sources.update(other.sources)
+        self.discarded.update(other.discarded)
+
+    def __bool__(self) -> bool:
+        return bool(self.sources)
+
+
+def collect_replacement_sources(source_module, replacement, spec, ep_size, ep_rank):
+    """Return the ``ReplacementSourceMap`` describing what this replacement did.
+
+    A caller-supplied optimizer has already sorted the sources into param groups, so this is what
+    lets the engine put each replacement back into the group its sources came from, and remove
+    exactly the parameters the replacement invalidated.
+
+    Built by the caller rather than stashed on the layer: the values are the discarded pre-shard
+    expert weights, and an attribute on a long-lived module would keep them alive for the whole
+    run, defeating the sharding AutoEP exists to do.
+    """
+    source_gate = getattr(source_module, spec.router_name)
+    w1_sources, w2_sources, w3_sources = repack_expert_source_params(
+        experts_source=getattr(source_module, spec.experts_name),
+        spec=spec,
+        ep_rank=ep_rank,
+        ep_size=ep_size,
+    )
+    collected = ReplacementSourceMap()
+    # Every parameter the source module owned is about to leave the tree. The ones the replacement
+    # keeps (shared experts) are still reachable from the model, and the remap filters on that.
+    collected.discarded = {id(param) for param in source_module.parameters()}
+    sources = collected.sources
+    sources.update({
+        id(replacement.experts.w1): list(w1_sources),
+        id(replacement.experts.w2): list(w2_sources),
+        id(replacement.experts.w3): list(w3_sources),
+        id(replacement.router.gate.weight): [source_gate.weight],
+    })
+    source_gate_bias = getattr(source_gate, 'bias', None)
+    if spec.gate_bias and source_gate_bias is not None:
+        sources[id(replacement.router.gate.bias)] = [source_gate_bias]
+    source_ecb = getattr(source_gate, 'e_score_correction_bias', None)
+    if isinstance(source_ecb, nn.Parameter):
+        sources[id(replacement.router.e_score_correction_bias)] = [source_ecb]
+    # Anything else the router or the grouped experts allocated has no counterpart in the source
+    # module, so tie it to this block's gate weight: it carries no pretrained value of its own,
+    # but it still belongs with the rest of this block's parameters.
+    for fresh_module in (replacement.router, replacement.experts):
+        for param in fresh_module.parameters():
+            sources.setdefault(id(param), [source_gate.weight])
+    return collected
