@@ -34,6 +34,7 @@ from ..module_inject.auto_tp_model_utils import (build_bloom_alibi_tensor, build
                                                  install_head_sharded_helper)
 from ..ops.transformer.inference.ds_attention import DeepSpeedSelfAttention
 from ..model_implementations.transformers.ds_transformer import DeepSpeedTransformerInference
+from ..model_implementations.features.cuda_graph import refresh_static_tensors
 
 DS_INFERENCE_ENABLED = False
 from torch import nn
@@ -545,12 +546,11 @@ class InferenceEngine(Module):
         self.cuda_graph_created = True
 
     def _graph_replay(self, *inputs, **kwargs):
-        for i in range(len(inputs)):
-            if torch.is_tensor(inputs[i]):
-                self.static_inputs[i].copy_(inputs[i])
-        for k in kwargs:
-            if torch.is_tensor(kwargs[k]):
-                self.static_kwargs[k].copy_(kwargs[k])
+        for captured, latest in zip(self.static_inputs, inputs):
+            refresh_static_tensors(captured, latest)
+        for key, captured in self.static_kwargs.items():
+            if key in kwargs:
+                refresh_static_tensors(captured, kwargs[key])
         get_accelerator().replay_graph(self._cuda_graphs)
         return self.static_output
 

@@ -5,7 +5,7 @@
 
 import torch
 from deepspeed.accelerator import get_accelerator
-from ..features.cuda_graph import CUDAGraph
+from ..features.cuda_graph import CUDAGraph, refresh_static_tensors
 
 
 class DSClipEncoder(CUDAGraph, torch.nn.Module):
@@ -32,12 +32,11 @@ class DSClipEncoder(CUDAGraph, torch.nn.Module):
         return mask
 
     def _graph_replay(self, *inputs, **kwargs):
-        for i in range(len(inputs)):
-            if torch.is_tensor(inputs[i]):
-                self.static_inputs[self.iter][i].copy_(inputs[i])
-        for k in kwargs:
-            if torch.is_tensor(kwargs[k]):
-                self.static_kwargs[self.iter][k].copy_(kwargs[k])
+        for captured, latest in zip(self.static_inputs[self.iter], inputs):
+            refresh_static_tensors(captured, latest)
+        for key, captured in self.static_kwargs[self.iter].items():
+            if key in kwargs:
+                refresh_static_tensors(captured, kwargs[key])
         get_accelerator().replay_graph(self._cuda_graphs[self.iter])
         return self.static_output[self.iter]
 

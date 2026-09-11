@@ -5,7 +5,7 @@
 
 import torch
 from deepspeed.accelerator import get_accelerator
-from ..features.cuda_graph import CUDAGraph
+from ..features.cuda_graph import CUDAGraph, refresh_static_tensors
 
 
 class DSUNet(CUDAGraph, torch.nn.Module):
@@ -24,12 +24,11 @@ class DSUNet(CUDAGraph, torch.nn.Module):
         self.cuda_graph_created = False
 
     def _graph_replay(self, *inputs, **kwargs):
-        for i in range(len(inputs)):
-            if torch.is_tensor(inputs[i]):
-                self.static_inputs[i].copy_(inputs[i])
-        for k in kwargs:
-            if torch.is_tensor(kwargs[k]):
-                self.static_kwargs[k].copy_(kwargs[k])
+        for captured, latest in zip(self.static_inputs, inputs):
+            refresh_static_tensors(captured, latest)
+        for key, captured in self.static_kwargs.items():
+            if key in kwargs:
+                refresh_static_tensors(captured, kwargs[key])
         get_accelerator().replay_graph(self._cuda_graphs)
         return self.static_output
 
