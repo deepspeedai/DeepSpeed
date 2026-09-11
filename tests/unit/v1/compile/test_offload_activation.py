@@ -660,6 +660,27 @@ def test_a_saved_view_is_charged_for_the_allocation_it_holds_not_its_own_bytes()
             for node, copied, resident in eligible] == [("sliced", LARGE_SIZE // 4, LARGE_SIZE)]
 
 
+def test_saved_view_minimum_size_uses_the_allocation_it_releases():
+    """A cheap view copy can release an allocation above the offload floor."""
+    _ensure_dc_ops()
+    eighth = LARGE_NUMEL // 8
+    graph = torch.fx.Graph()
+    x = graph.placeholder("x")
+    x.meta["val"] = _meta_tensor(16)
+    base = _add_node(graph, torch.relu, (x, ), "base", LARGE_NUMEL)
+    sliced = graph.create_node('call_function', torch.ops.aten.slice.Tensor, (base, 0, 0, eighth), {}, name="sliced")
+    # The 4MB view is below the 5MB floor, but it is the only value keeping the 32MB base alive.
+    sliced.meta["val"] = torch.empty(LARGE_NUMEL, device="meta")[:eighth]
+    out = _add_node(graph, torch.sum, (sliced, ), "out", 1)
+    graph.output((out, sliced))
+
+    eligible = offload_pass._eligible_activations(graph, 0, 1, {})
+
+    assert [(node.name, copied, resident)
+            for node, copied, resident in eligible] == [("sliced", LARGE_SIZE // 8, LARGE_SIZE)]
+    assert offload_pass._skipped["too_small"] == 0
+
+
 def test_fwd_skips_values_already_on_the_host(forced_budget):
     _ensure_dc_ops()
     graph = _make_fwd_graph()

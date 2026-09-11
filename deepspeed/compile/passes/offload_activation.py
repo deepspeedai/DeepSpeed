@@ -468,14 +468,21 @@ def _eligible_activations(graph: Graph, graph_id: int, num_fwd_outputs, param_ma
             _skipped["not_float"] += _skip_bytes(node)
             continue
         size = _static_tensor_size(node)
-        if size is None or size < min_size:
-            _skipped["too_small" if size is not None else "no_static_size"] += _skip_bytes(node)
+        if size is None:
+            _skipped["no_static_size"] += _skip_bytes(node)
             continue
         # Keeping this value resident holds its whole allocation, which for a view is the base's.
         # The alias rule above guarantees this view is the only saved value pointing there, so no
         # two entries ever charge the planner for the same bytes.
         resident = _static_tensor_size(root) if root is not node else size
-        candidates.append((node, size, resident if resident is not None else size))
+        resident = resident if resident is not None else size
+        # The floor filters transfers that cost more than the memory they return. A small view can
+        # be the sole keeper of a much larger allocation, so apply it to released resident bytes,
+        # not the bytes copied for the view itself.
+        if resident < min_size:
+            _skipped["too_small"] += _skip_bytes(node)
+            continue
+        candidates.append((node, size, resident))
 
     if _skipped:
         breakdown = " ".join(f"{k}={v}" for k, v in sorted(_skipped.items()))
