@@ -117,3 +117,45 @@ class TestMuonCheckpointRoundTrip(DistributedTest):
 
         for straight, restored in zip(straight_through, after_resume):
             assert straight == pytest.approx(restored, abs=1e-4)
+
+
+# Stage 1 with this combination selects `BF16_Optimizer`, which refuses Muon for a
+# different reason (#8461): it hands `step` flat partitions and never orthogonalizes
+# them. Stage 2 is where the separate accumulation dtype actually reaches Muon.
+@pytest.mark.parametrize("zero_stage", [2])
+class TestMuonSeparateGradAccumDtype(DistributedTest):
+    """bf16 with `grad_accum_dtype: fp32` is a supported combination that Muon could not run.
+
+    The momentum buffer was allocated in the configured accumulation dtype, but the
+    gradients only arrive in it while `use_grad_accum_attribute` is on. That is off at
+    stage 2, where `partition_gradients` is true, so `get_param_gradient_attribute`
+    returns `param.grad` in the parameter dtype and `muon_update`'s
+    `momentum.lerp_(grad)` was handed fp32 against bf16:
+
+        RuntimeError: expected dtype torch.float32 for `end`, but got dtype torch.bfloat16
+
+    This is the same reconciliation #8433 added, which reached only one of the two
+    copies of the buffer setup; the unpadded path never got it.
+    """
+
+    world_size = 2
+
+    def test_bf16_with_fp32_accumulation_trains(self, zero_stage):
+        config = _config(zero_stage, "bf16")
+        config["data_types"] = {"grad_accum_dtype": "fp32"}
+
+        model = SimpleModel(hidden_dim=64, nlayers=2)
+        engine, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config)
+
+        before = [p.detach().float().cpu().clone() for p in engine.module.parameters()]
+        for _ in range(2):
+            batch = torch.randn(2, 64, device=engine.device, dtype=torch.bfloat16)
+            label = torch.randn(2, 64, device=engine.device, dtype=torch.bfloat16)
+            engine.backward(engine(batch, label))
+            engine.step()
+
+        after = [p.detach().float().cpu() for p in engine.module.parameters()]
+        moved = sum(1 for b, a in zip(before, after) if not torch.equal(b, a))
+        assert moved > 0, "no parameter moved, so Muon never applied an update"
+        assert _momentum_norm(engine) > 0.0, "the momentum buffer stayed empty"
+
