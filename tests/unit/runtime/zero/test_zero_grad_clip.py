@@ -10,6 +10,7 @@ from deepspeed.runtime.zero.stage3 import DeepSpeedZeroOptimizer_Stage3
 from deepspeed.utils import safe_get_local_grad, safe_set_local_grad
 from deepspeed.accelerator import get_accelerator
 from unit.simple_model import SimpleModel
+from unit.common import DistributedTest
 import os
 
 
@@ -46,6 +47,38 @@ def get_config(precision, clip_value, offload_device="cpu"):
         }
 
     return config
+
+
+@pytest.mark.parametrize("zero_stage", [1, 2, 3])
+@pytest.mark.parametrize("norm_type", [1, 2, 3])
+class TestZeroGradNormPNorm(DistributedTest):
+    world_size = 1
+
+    def test_matches_flat_norm(self, zero_stage, norm_type):
+        # get_grad_norm_direct returns the norm of the gradients viewed as a single vector,
+        # so on one rank with no model parallelism it must equal the p-norm of the
+        # concatenation. norm_type 2 is the control: it is right on both sides.
+        config = {
+            "train_batch_size": 1,
+            "optimizer": {
+                "type": "Adam",
+                "params": {
+                    "lr": 1e-4
+                }
+            },
+            "zero_optimization": {
+                "stage": zero_stage
+            },
+        }
+        model = SimpleModel(hidden_dim=4, nlayers=2)
+        engine, optimizer, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config)
+
+        gradients = [torch.Tensor([3.0, -4.0]), torch.Tensor([2.0])]
+        params = list(model.parameters())[:len(gradients)]
+        expected = torch.cat([g.reshape(-1) for g in gradients]).norm(float(norm_type))
+
+        actual = optimizer.get_grad_norm_direct(gradients, params, norm_type=norm_type)
+        assert torch.allclose(torch.as_tensor(actual).float().cpu(), expected.float().cpu())
 
 
 @pytest.mark.parametrize("precision,clip_value,offload_device", [

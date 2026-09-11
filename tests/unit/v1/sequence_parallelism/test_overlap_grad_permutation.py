@@ -44,7 +44,6 @@ def test_overlap_backward_preserves_shape_changing_producers(monkeypatch):
 
     monkeypatch.setattr("deepspeed.sequence.layer.dist.get_world_size", lambda group: 2)
     monkeypatch.setattr("deepspeed.sequence.layer.dist.all_to_all_single", all_to_all_single)
-    monkeypatch.setattr("deepspeed.sequence.layer.get_num_kv_heads", lambda: None)
     monkeypatch.setattr("deepspeed.sequence.layer.get_accelerator", FakeAccelerator)
 
     base_sources = tuple(

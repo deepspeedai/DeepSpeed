@@ -120,6 +120,28 @@ class TestZeroGatheredParametersFree(DistributedTest):
         assert model.l1.weight.numel() == 0, "outside of GatheredParameters the param should go back to be 0-sized"
 
 
+class TestPartitionWithoutFreeingData(DistributedTest):
+    world_size = 1
+
+    def test(self):
+        with deepspeed.zero.Init():
+            l = torch.nn.Linear(6, 3, bias=False)
+
+        full_numel = l.in_features * l.out_features
+        l.weight.all_gather()
+        assert l.weight.numel() == full_numel
+
+        # The leaf-module fast-sharding path releases the buffer itself once the whole
+        # submodule is done, so partition() has to leave param.data alone when asked to.
+        l.weight.partition(free_data=False)
+        assert l.weight.ds_status == ZeroParamStatus.NOT_AVAILABLE
+        assert l.weight.numel() == full_numel, "partition(free_data=False) should not free param.data"
+
+        l.weight.all_gather()
+        l.weight.partition()
+        assert l.weight.numel() == 0, "partition() should free param.data by default"
+
+
 class TestMiCSGatheredParametersFree(DistributedTest):
     world_size = 1
 

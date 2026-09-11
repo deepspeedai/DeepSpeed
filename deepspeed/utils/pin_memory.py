@@ -39,12 +39,26 @@ class NativePinnedMemory(object):
                 "DS_PIN_MEMORY_BACKEND=native requires the pin_memory op, which failed to build/load.") from e
 
     def pin(self, tensor, make_copy=True, match_shape=True):
-        numel = tensor.numel()
+        out_shape = tensor.shape if match_shape else (tensor.numel(), )
+        locked = self._new_locked(tensor, out_shape)
+        if make_copy:
+            locked.copy_(tensor.reshape(out_shape))
+        return locked
+
+    def pin_empty(self, example, shape):
+        # ``example`` is dtype-only. ``pin()`` sizes the allocation from
+        # ``example.numel()``, so a 0-element template cannot be passed through.
+        return self._new_locked(example, shape)
+
+    def _new_locked(self, example, out_shape):
+        numel = 1
+        for dim in out_shape:
+            numel *= int(dim)
         # ``base`` is the allocation root and the view root for everything derived
         # from it. Every slice/view of the returned tensor keeps ``base`` alive via
         # ``._base``, so the allocation is freed only after the returned tensor and
         # all of its aliases are gone (a live view can never outlive the free).
-        base = self._handle.new_cpu_locked_tensor(numel, tensor)
+        base = self._handle.new_cpu_locked_tensor(numel, example)
         begin = base.data_ptr()
         locked = base[:numel]
         if base.nbytes and self._device_registration_enabled():
@@ -55,11 +69,8 @@ class NativePinnedMemory(object):
             except Exception as e:
                 logger.warning_once(
                     f"Native pinned-memory device registration failed; continuing with mlock only: {e}")
-        if make_copy:
-            locked.copy_(tensor.reshape(-1))
-        if match_shape:
-            locked = locked.view(tensor.shape)
-        self._ranges[begin] = begin + numel * tensor.element_size()
+        locked = locked.view(out_shape)
+        self._ranges[begin] = begin + numel * example.element_size()
         locked.ds_pinned = True
         # Remember the owning allocation address so an explicit unpin() frees the
         # original region even if the tensor's ``.data`` is later redirected (e.g.
