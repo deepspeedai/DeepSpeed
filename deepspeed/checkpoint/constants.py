@@ -18,6 +18,7 @@ BASE_OPTIMIZER_STATE_STEP = 'base_optimizer_state_step'
 SINGLE_PARTITION_OF_FP32_GROUPS = "single_partition_of_fp32_groups"
 PARAM_GROUPS = 'param_groups'
 GROUP_PADDINGS = 'group_paddings'
+PARAM_ALIGNMENT_PADDINGS = 'param_alignment_paddings'
 PARTITION_COUNT = 'partition_count'
 ZERO_STAGE = 'zero_stage'
 CLIP_GRAD = 'clip_grad'

@@ -1723,6 +1723,9 @@ class DeepSpeedEngine(Module):
     def zero_round_robin_gradients(self):
         return self._config.zero_config.round_robin_gradients
 
+    def zero_parameter_alignment(self):
+        return self._config.zero_config.parameter_alignment
+
     def zero_hpz_partition_size(self):
         return self._config.zero_config.zero_hpz_partition_size
 
@@ -2741,6 +2744,7 @@ class DeepSpeedEngine(Module):
                 ignore_unused_parameters=self.zero_ignore_unused_parameters(),
                 partition_grads=zero_stage == ZeroStageEnum.gradients,
                 round_robin_gradients=round_robin_gradients,
+                parameter_alignment=self.zero_parameter_alignment(),
                 has_moe_layers=self.has_moe_layers,
                 fp16_master_weights_and_gradients=self.fp16_master_weights_and_gradients(),
                 bf16_master_weights_and_gradients=self.bf16_master_weights_and_gradients(),

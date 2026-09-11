@@ -481,6 +481,7 @@ Enabling and configuring ZeRO memory optimizations
     "stage3_gather_16bit_weights_on_model_save": [true|false],
     "ignore_unused_parameters": [true|false],
     "round_robin_gradients": [true|false],
+    "parameter_alignment": [true|false],
     "zero_hpz_partition_size": 1,
     "zero_quantized_weights": [true|false],
     "zero_quantized_gradients": [true|false],
@@ -553,6 +554,12 @@ Enabling and configuring ZeRO memory optimizations
 | Description                                                                                                                                                                                                                                                                         | Default |
 | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
 | Stage 1 and 2 optimization for CPU offloading that parallelizes gradient copying to CPU memory among ranks by fine-grained gradient partitioning. Performance benefit grows with gradient accumulation steps (more copying between optimizer steps) or GPU count (increased parallelism). | `False` |
+
+***parameter_alignment***: [boolean]
+
+| Description | Default |
+| ----------- | ------- |
+| Pad ZeRO Stage 1 and 2 flat buffers between parameters so every parameter starts at a 16-byte-aligned address. Enable this for operations such as grouped matrix multiplication that require aligned parameters. Padding increases flat-buffer and optimizer-state memory usage. Optimizer checkpoints must be resumed with a compatible effective padding layout; module-only warm starts may use either setting. | `False` |
 
 ***offload_param***: [dictionary]
 
