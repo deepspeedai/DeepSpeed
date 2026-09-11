@@ -51,6 +51,16 @@ class MultiNodeRunner(ABC):
     def validate_args(self):
         """Validate self.args"""
 
+    @classmethod
+    def validate_active_resources(cls, active_resources):
+        """Check a resolved --include/--exclude filter against what this backend can express.
+
+        runner.main() calls this before it picks between a local and a multi-node launch. A
+        filter can narrow the pool to one host, which takes the local path and never builds a
+        backend, so a backend that cannot honor the filter has to say so from here or the
+        launcher the user asked for is dropped without a word.
+        """
+
 
 class PDSHRunner(MultiNodeRunner):
 
@@ -355,8 +365,8 @@ class SlurmRunner(MultiNodeRunner):
     def name(self):
         return 'slurm'
 
-    @staticmethod
-    def _assert_expressible_in_srun(active_resources):
+    @classmethod
+    def validate_active_resources(cls, active_resources):
         """srun places tasks by count, not by device id.
 
         It can run N tasks on a named set of hosts, but it cannot pin them to
@@ -377,7 +387,7 @@ class SlurmRunner(MultiNodeRunner):
     def get_cmd(self, environment, active_resources):
         assert not getattr(self.args, 'detect_nvlink_pairs',
                            False), "slurm backend does not support remapping visible devices"
-        self._assert_expressible_in_srun(active_resources)
+        self.validate_active_resources(active_resources)
         # --include/--exclude are already resolved into active_resources, so counting the
         # whole pool would ask srun for slots the user filtered out.
         total_process_count = sum(len(slots) for slots in active_resources.values())

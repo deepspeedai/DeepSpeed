@@ -5,6 +5,7 @@
 
 from copy import deepcopy
 from deepspeed.launcher import multinode_runner as mnrunner
+from deepspeed.launcher import runner as ds_runner
 from deepspeed.launcher.runner import (encode_world_info, parse_args, parse_inclusion_exclusion,
                                        apply_num_nodes_and_gpus)
 import os
@@ -87,10 +88,9 @@ def test_slurm_runner_resource_filter(runner_info, resource_filter, expected_hos
     assert cmd[cmd.index('-n') + 1] == expected_process_count
 
 
-@pytest.mark.parametrize('resource_filter, expected_error',
-                         [(['--include', 'worker-1:0,2'], 'specific device ids'),
-                          (['--exclude', 'worker-1:0'], 'specific device ids'),
-                          (['--exclude', 'worker-1:1,2,3'], 'same slot count')])
+@pytest.mark.parametrize('resource_filter, expected_error', [(['--include', 'worker-1:0,2'], 'specific device ids'),
+                                                             (['--exclude', 'worker-1:0'], 'specific device ids'),
+                                                             (['--exclude', 'worker-1:1,2,3'], 'same slot count')])
 def test_slurm_runner_rejects_unsupported_filter(runner_info, resource_filter, expected_error):
     # srun cannot pin tasks to device ids or vary the count per host, so these filters have
     # to fail loudly instead of launching a job that ignores them.
@@ -119,6 +119,33 @@ def test_slurm_runner_num_nodes_and_gpus(runner_info, resource_flag, expected_sr
     assert cmd.count(expected_srun_flag[0]) == 1
     assert cmd[cmd.index(expected_srun_flag[0]) + 1] == expected_srun_flag[1]
     assert cmd[cmd.index('-n') + 1] == expected_process_count
+
+
+@pytest.mark.parametrize('force_multi', [[], ['--force_multi']])
+def test_runner_main_rejects_unsupported_filter(tmp_path, monkeypatch, force_multi):
+    # --include worker-1:0,2 leaves one host, so without --force_multi main() takes the
+    # local-launch path and never builds SlurmRunner. srun still cannot honor that filter, so
+    # the launcher the user asked for must not be dropped silently: main() rejects it either way.
+    # Popen is blocked so a regression shows up as this assertion rather than as a real launch.
+    monkeypatch.setattr(ds_runner.subprocess, 'Popen',
+                        lambda *a, **kw: pytest.fail(f'main() launched instead of rejecting: {a[0]}'))
+    hostfile = tmp_path / 'hostfile'
+    hostfile.write_text('worker-0 slots=4\nworker-1 slots=4\n')
+    argv = force_multi + [
+        '--hostfile',
+        str(hostfile), '--no_ssh_check', '--master_addr', '127.0.0.1', '--launcher', 'slurm', '--include',
+        'worker-1:0,2', 'test_launcher.py'
+    ]
+    with pytest.raises(ValueError, match='specific device ids'):
+        ds_runner.main(argv)
+
+
+def test_validate_active_resources_default_is_a_no_op():
+    # Only the slurm backend constrains which filters it can express. The others place tasks
+    # per device id themselves, so the hook stays a no-op for them and main() lets them through.
+    for cls in (mnrunner.PDSHRunner, mnrunner.OpenMPIRunner, mnrunner.MPICHRunner, mnrunner.IMPIRunner,
+                mnrunner.MVAPICHRunner):
+        cls.validate_active_resources({'worker-0': [0, 2], 'worker-1': [1]})
 
 
 def test_mvapich_runner(runner_info):

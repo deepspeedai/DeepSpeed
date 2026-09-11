@@ -457,6 +457,16 @@ def parse_num_nodes(str_num_nodes: str, elastic_training: bool):
     return min_nodes, max_nodes
 
 
+LAUNCHER_CLASSES = {
+    PDSH_LAUNCHER: PDSHRunner,
+    OPENMPI_LAUNCHER: OpenMPIRunner,
+    MPICH_LAUNCHER: MPICHRunner,
+    IMPI_LAUNCHER: IMPIRunner,
+    MVAPICH_LAUNCHER: MVAPICHRunner,
+    SLURM_LAUNCHER: SlurmRunner,
+}
+
+
 def main(args=None):
     args = parse_args(args)
 
@@ -543,6 +553,13 @@ def main(args=None):
         return
 
     active_resources = apply_num_nodes_and_gpus(active_resources, args.num_nodes, args.num_gpus)
+
+    # A filter can leave a single host, which takes the local-launch path below and never
+    # builds the backend, so ask the requested launcher about the filter while both paths
+    # are still on the table. Backends that can express any filter do nothing here.
+    launcher_cls = LAUNCHER_CLASSES.get(args.launcher.lower())
+    if launcher_cls is not None:
+        launcher_cls.validate_active_resources(active_resources)
 
     if args.elastic_training:
         assert not args.no_local_rank, "--no_local_rank argument is not supported in Elastic training"
