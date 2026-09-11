@@ -93,6 +93,39 @@ class DeepSpeedConfigError(Exception):
     pass
 
 
+_REMOVED_FEATURES_ISSUE = "https://github.com/deepspeedai/DeepSpeed/issues/8489"
+_REMOVED_TOP_LEVEL_CONFIG_KEYS = {
+    "nebula":
+    "Nebula checkpointing has been removed. A leftover 'nebula' block would be ignored and "
+    f"checkpoints would silently fall back to local torch.save. See {_REMOVED_FEATURES_ISSUE}.",
+    "compression_training":
+    "The DeepSpeed compression library has been removed. A leftover 'compression_training' "
+    f"block would be ignored and the model would train unquantized. See {_REMOVED_FEATURES_ISSUE}.",
+    "quantize_training":
+    "Mixture-of-Quantization (MoQ) / 'quantize_training' has been removed. See "
+    f"{_REMOVED_FEATURES_ISSUE}.",
+}
+_REMOVED_ZERO_CONFIG_KEYS = {
+    "mics_shard_size":
+    "MiCS ZeRO-3 sharding has been removed; 'zero_optimization.mics_shard_size' is no longer "
+    f"supported. See {_REMOVED_FEATURES_ISSUE}.",
+    "mics_hierarchical_params_gather":
+    "MiCS ZeRO-3 sharding has been removed; 'zero_optimization.mics_hierarchical_params_gather' "
+    f"is no longer supported. See {_REMOVED_FEATURES_ISSUE}.",
+}
+
+
+def _reject_removed_config_keys(param_dict):
+    for key, message in _REMOVED_TOP_LEVEL_CONFIG_KEYS.items():
+        if key in param_dict:
+            raise DeepSpeedConfigError(message)
+    zero_config = param_dict.get("zero_optimization")
+    if isinstance(zero_config, dict):
+        for key, message in _REMOVED_ZERO_CONFIG_KEYS.items():
+            if key in zero_config:
+                raise DeepSpeedConfigError(message)
+
+
 class DtypeEnum(Enum):
     # The torch dtype must always be the first value (so we return torch.dtype)
     fp16 = torch.float16, "torch.float16", "fp16", "float16", "half"
@@ -674,6 +707,8 @@ class DeepSpeedConfig(object):
                 raise ValueError(
                     f"Expected a string path to an existing deepspeed config, or a dictionary or a valid base64. Received: {config}"
                 )
+
+        _reject_removed_config_keys(self._param_dict)
 
         try:
             self.global_rank = dist.get_rank()

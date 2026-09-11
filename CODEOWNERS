@@ -52,7 +52,6 @@
 /deepspeed/runtime/data_pipeline/ @tjruwase
 /deepspeed/runtime/domino/ @guanhuawang @hwchen2017
 /deepspeed/runtime/fp16/ @tjruwase @tohtana
-/deepspeed/runtime/fp16/onebit/ @tjruwase
 /deepspeed/runtime/pipe/ @loadams @tohtana
 /deepspeed/runtime/swap_tensor/ @tjruwase @jomayeri
 /deepspeed/runtime/zero/ @tjruwase @tohtana

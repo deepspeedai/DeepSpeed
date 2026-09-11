@@ -21,3 +21,4 @@ from .z3_leaf_module import set_z3_leaf_modules, unset_z3_leaf_modules, get_z3_l
 from .mixed_precision_linkage import link_hp_params, lazy_init_hp_params_optimizer_state
 from deepspeed.runtime.dataloader import RepeatingLoader
 from .numa import get_numactl_cmd
+from .module_utils import recursive_getattr, recursive_setattr
