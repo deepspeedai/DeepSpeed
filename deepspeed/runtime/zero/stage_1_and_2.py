@@ -39,8 +39,8 @@ from deepspeed.accelerator import get_accelerator
 from deepspeed.runtime.zero.muon.original_muon import muon_update
 from deepspeed.module_inject.auto_ep_folding import apply_folding_correction_to_grad_buffer
 from deepspeed.runtime.zero.muon.muon_optimizer import MuonWithAuxAdam
-from deepspeed.checkpoint.constants import (DS_VERSION, GROUP_PADDINGS, PARTITION_COUNT, LOSS_SCALER,
-                                            SINGLE_PARTITION_OF_FP32_GROUPS, BASE_OPTIMIZER_STATE,
+from deepspeed.checkpoint.constants import (DS_VERSION, GROUP_PADDINGS, PARAM_ALIGNMENT_PADDINGS, PARTITION_COUNT,
+                                            LOSS_SCALER, SINGLE_PARTITION_OF_FP32_GROUPS, BASE_OPTIMIZER_STATE,
                                             BASE_OPTIMIZER_STATE_STEP, CLIP_GRAD, ZERO_STAGE, PARAM_SLICE_MAPPINGS)
 from deepspeed.utils import link_hp_params, lazy_init_hp_params_optimizer_state
 from deepspeed.checkpoint import enable_universal_checkpoint
@@ -176,14 +176,24 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                  ignore_unused_parameters=True,
                  partition_grads=True,
                  round_robin_gradients=False,
+                 parameter_alignment=False,
                  has_moe_layers=False,
                  fp16_master_weights_and_gradients=False,
                  bf16_master_weights_and_gradients=False,
                  bf16_optimizer_states=False,
                  elastic_checkpoint=False,
-                 check_grad_overflow=True):
+                 check_grad_overflow=True,
+                 compute_grad_norm=True):
 
         super().__init__()
+
+        if not compute_grad_norm and clip_grad > 0.0:
+            raise ValueError("zero_optimization.compute_grad_norm=false requires gradient_clipping=0")
+        if not compute_grad_norm and zenflow_config is not None:
+            raise ValueError("zero_optimization.compute_grad_norm=false does not support ZenFlow")
+        if (not compute_grad_norm and offload_optimizer_config is not None
+                and offload_optimizer_config.device != OffloadDeviceEnum.none):
+            raise ValueError("zero_optimization.compute_grad_norm=false does not support optimizer offload")
 
         if offload_optimizer_config is not None and offload_optimizer_config.device != OffloadDeviceEnum.none:
             self.cpu_offload = True
@@ -205,7 +215,9 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         # 2. keep common stuff here in case we need to add ne552w fused optimizer later
 
         self.elastic_checkpoint = elastic_checkpoint
+        self.parameter_alignment = parameter_alignment
         self.check_grad_overflow = check_grad_overflow
+        self.compute_grad_norm = compute_grad_norm
         self.param_names = param_names
         self.mpu = mpu
         # differences from apex.fp16_utils:
@@ -368,6 +380,8 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         self.round_robin_bit16_groups = []
         self.round_robin_bit16_indices = []
         self.round_robin_bit16_meta = []
+        self.round_robin_bit16_padding = []
+        self.round_robin_bit16_offsets = []
 
         # Use different parallel to do all_to_all_reduce related things
         # padding on each partition for alignment purposes
@@ -392,9 +406,11 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             # Compute group size for memory check (need 2x model size on accelerator to flatten in place: params + flat copy)
             orig_group_numel = sum(param.numel() for param in self.bit16_groups[i])
             alignment = self.nccl_start_alignment_factor * dist.get_world_size(group=self.real_dp_process_group[i])
-            aligned_numel = int(math.ceil(orig_group_numel / alignment)) * alignment
             param_dtype = self.bit16_groups[i][0].dtype
             element_size = torch.tensor([], dtype=param_dtype).element_size()
+            param_alignment = 16 // math.gcd(16, element_size) if self.parameter_alignment else 1
+            max_param_padding = sum((-param.numel()) % param_alignment for param in self.bit16_groups[i])
+            aligned_numel = int(math.ceil((orig_group_numel + max_param_padding) / alignment)) * alignment
             flat_buffer_bytes = aligned_numel * element_size
 
             empty_cache()
@@ -427,7 +443,9 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             self.round_robin_bit16_groups.append(round_robin_tensors)
             self.round_robin_bit16_indices.append(round_robin_indices)
 
-            # Create meta tensors list, ordered according to round_robin_tensors
+            # Keep shape/numel metadata independent of param.data. Dynamic state
+            # offload temporarily replaces model parameter storage with empty
+            # tensors, so reconstructing padded views cannot rely on p.numel().
             meta_tensors = []
             for param in round_robin_tensors:
                 if flatten_on_accelerator:
@@ -436,11 +454,25 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                     meta_tensors.append(torch.zeros_like(param.cpu_data, device="meta"))
             self.round_robin_bit16_meta.append(meta_tensors)
 
+            param_padding = []
+            param_offsets = []
+            current_offset = 0
+            for param_index, meta in enumerate(meta_tensors):
+                param_offsets.append(current_offset)
+                current_offset += meta.numel()
+                padding = 0 if param_index == len(meta_tensors) - 1 else (-current_offset) % param_alignment
+                param_padding.append(padding)
+                current_offset += padding
+            padded_group_numel = current_offset
+            self.round_robin_bit16_padding.append(param_padding)
+            self.round_robin_bit16_offsets.append(param_offsets)
+
             if flatten_on_accelerator:
                 logger.info(f"Flattening param group {i} on {accelerator.device_name()} (sufficient memory)")
                 flattened_buffer = self.flatten_dense_tensors_aligned(self.round_robin_bit16_groups[i],
                                                                       alignment,
-                                                                      use_cpu_data=False).detach()
+                                                                      use_cpu_data=False,
+                                                                      param_padding=param_padding).detach()
                 self.bit16_groups_flat.append(flattened_buffer)
                 see_memory_usage(f"After flattening param group {i} on {accelerator.device_name()}", force=False)
             else:
@@ -448,7 +480,8 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
 
                 flattened_buffer = self.flatten_dense_tensors_aligned(self.round_robin_bit16_groups[i],
                                                                       alignment,
-                                                                      use_cpu_data=True)
+                                                                      use_cpu_data=True,
+                                                                      param_padding=param_padding)
 
                 # free temp CPU params
                 for param in self.bit16_groups[i]:
@@ -476,10 +509,10 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             left_boundary = sum([t.numel() for t in data_parallel_partitions[:partition_id]])
             curr_partition_size = data_parallel_partitions[partition_id].numel()
 
-            if orig_group_numel <= left_boundary:
+            if padded_group_numel <= left_boundary:
                 padding = curr_partition_size
-            elif orig_group_numel < left_boundary + curr_partition_size:
-                padding = left_boundary + curr_partition_size - orig_group_numel
+            elif padded_group_numel < left_boundary + curr_partition_size:
+                padding = left_boundary + curr_partition_size - padded_group_numel
             else:
                 padding = 0
             self.groups_padding.append(padding)
@@ -517,9 +550,9 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                 i].requires_grad = True  # keep this in case internal optimizer uses it
             param_group['params'] = [self.single_partition_of_fp32_groups[i]]
 
-            partition_size = len(self.bit16_groups_flat[i]) / dist.get_world_size(group=self.real_dp_process_group[i])
+            partition_size = len(self.bit16_groups_flat[i]) // dist.get_world_size(group=self.real_dp_process_group[i])
             params_in_partition, params_not_in_partition, first_offset = self.get_partition_info(
-                self.round_robin_bit16_groups[i], partition_size, partition_id)
+                self.round_robin_bit16_groups[i], partition_size, partition_id, self.round_robin_bit16_padding[i])
 
             self.partition_size.append(partition_size)
             self.params_in_partition.append(params_in_partition)
@@ -755,6 +788,13 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             partition_size = self.bit16_groups_flat[i].numel() // dist.get_world_size(
                 group=self.real_dp_process_group[i])
             flat_hp_partition = self.single_partition_of_fp32_groups[i]
+            param_offsets = None
+            if any(self.round_robin_bit16_padding[i]):
+                offset_by_param = {
+                    id(param): offset
+                    for param, offset in zip(self.round_robin_bit16_groups[i], self.round_robin_bit16_offsets[i])
+                }
+                param_offsets = [offset_by_param[id(param)] for param in self.bit16_groups[i]]
             link_hp_params(lp_param_list=self.bit16_groups[i],
                            flat_hp_partition=flat_hp_partition,
                            gradient_dict=self.averaged_gradients,
@@ -763,7 +803,8 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                            param_group_index=i,
                            partition_start=partition_id * partition_size,
                            partition_size=partition_size,
-                           dp_group=self.real_dp_process_group[i])
+                           dp_group=self.real_dp_process_group[i],
+                           param_offsets=param_offsets)
 
     def _lazy_init_hp_params_optimizer_state(self):
         if not self._hp_optimizer_states_linked:
@@ -803,9 +844,11 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         assert self.ep_process_group is not None, "Expert parallel group should be configured with MoE"
 
     def _update_model_bit16_weights(self, group_index):
-        updated_params = self.unflatten(self.bit16_groups_flat[group_index], self.round_robin_bit16_meta[group_index])
-        for p, q in zip(self.round_robin_bit16_groups[group_index], updated_params):
-            p.data = q.data
+        flat_group = self.bit16_groups_flat[group_index]
+        for p, meta, offset in zip(self.round_robin_bit16_groups[group_index],
+                                   self.round_robin_bit16_meta[group_index],
+                                   self.round_robin_bit16_offsets[group_index]):
+            p.data = flat_group.narrow(0, offset, meta.numel()).view(meta.shape).data
 
         # set model fp16 weight to slices of reordered flattened buffer
         for param_index, param in enumerate(self.bit16_groups[group_index]):
@@ -1078,7 +1121,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         current_index = 0
         first_offset = 0
 
-        for param in param_group:
+        for param, padding in zip(param_group, self.round_robin_bit16_padding[i]):
 
             param_size = param.numel()
             param_id = self.get_param_id(param)
@@ -1105,7 +1148,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                 self.grad_partition_insertion_offset[i][partition_id][param_id] = 0
                 self.grad_start_offset[i][partition_id][param_id] = first_offset
 
-            current_index = current_index + param_size
+            current_index = current_index + param_size + padding
 
     def overlapping_partition_gradients_reduce_epilogue(self):
         self.independent_gradient_partition_epilogue()
@@ -1195,8 +1238,15 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         return self.param_id[unique_id]
 
     # create a flat tensor aligned at the alignment boundary
-    def flatten_dense_tensors_aligned(self, tensor_list, alignment, use_cpu_data=False):
+    def flatten_dense_tensors_aligned(self, tensor_list, alignment, use_cpu_data=False, param_padding=None):
         tensor_list = [param.cpu_data for param in tensor_list] if use_cpu_data else tensor_list
+        if param_padding is not None:
+            padded_tensor_list = []
+            for tensor, padding in zip(tensor_list, param_padding):
+                padded_tensor_list.append(tensor)
+                if padding:
+                    padded_tensor_list.append(torch.zeros(padding, dtype=tensor.dtype, device=tensor.device))
+            tensor_list = padded_tensor_list
         return self.flatten(align_dense_tensors(tensor_list, alignment))
 
     ############### Independent Partition Gradient ########################
@@ -1481,29 +1531,55 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
     ############################# CPU Offload Methods#############################
     ##############################################################################
     def get_grad_position(self, group_id, tensor_list, first_offset, partition_size):
-        current_offset = 0
+        if not any(self.round_robin_bit16_padding[group_id]):
+            current_offset = 0
 
-        for i, tensor in enumerate(tensor_list):
+            for i, tensor in enumerate(tensor_list):
+                param_id = self.get_param_id(tensor)
+                param_start_offset = 0
+
+                num_elements = tensor.numel()
+
+                if i == 0 and first_offset > 0:
+                    tensor_offset = first_offset
+                    num_elements = num_elements - tensor_offset
+                    param_start_offset = first_offset
+
+                if num_elements > (partition_size - current_offset):
+                    num_elements = partition_size - current_offset
+
+                self.grad_position[param_id] = [
+                    int(group_id), int(param_start_offset),
+                    int(current_offset),
+                    int(num_elements)
+                ]
+                current_offset += num_elements
+            return
+
+        partition_id = dist.get_rank(group=self.real_dp_process_group[group_id])
+        partition_start = partition_id * partition_size
+        partition_end = partition_start + partition_size
+        offset_by_param = {
+            id(param): offset
+            for param, offset in zip(self.round_robin_bit16_groups[group_id], self.round_robin_bit16_offsets[group_id])
+        }
+
+        for tensor in tensor_list:
             param_id = self.get_param_id(tensor)
-            param_start_offset = 0
+            param_start = offset_by_param[id(tensor)]
+            param_end = param_start + tensor.numel()
+            overlap_start = max(param_start, partition_start)
+            overlap_end = min(param_end, partition_end)
+            assert overlap_start < overlap_end
 
-            num_elements = tensor.numel()
-
-            # we need to offset to get to the right element
-            if i == 0 and first_offset > 0:
-                tensor_offset = first_offset
-                num_elements = num_elements - tensor_offset
-                param_start_offset = first_offset
-
-            # we dont need all elements of the tensor
-            if num_elements > (partition_size - current_offset):
-                num_elements = partition_size - current_offset
+            param_start_offset = overlap_start - param_start
+            dest_offset = overlap_start - partition_start
+            num_elements = overlap_end - overlap_start
 
             self.grad_position[param_id] = [
                 int(group_id), int(param_start_offset),
-                int(current_offset), int(num_elements)
+                int(dest_offset), int(num_elements)
             ]
-            current_offset += num_elements
 
     def update_offload_overflow_tracker(self, grad):
         if grad is not None and self._has_inf_or_nan(grad.data):
@@ -1993,7 +2069,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             start = start + partition_size
         return partitions
 
-    def get_partition_info(self, tensor_list, partition_size, partition_id):
+    def get_partition_info(self, tensor_list, partition_size, partition_id, param_padding=None):
         params_in_partition = []
         params_not_in_partition = []
 
@@ -2003,7 +2079,10 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         current_index = 0
         first_offset = 0
 
-        for tensor in tensor_list:
+        if param_padding is None:
+            param_padding = [0] * len(tensor_list)
+
+        for tensor, padding in zip(tensor_list, param_padding):
 
             tensor_size = tensor.numel()
 
@@ -2020,7 +2099,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             else:
                 params_not_in_partition.append(tensor)
 
-            current_index = current_index + tensor_size
+            current_index = current_index + tensor_size + padding
 
         return params_in_partition, params_not_in_partition, first_offset
 
@@ -2090,7 +2169,8 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         else:
             # if dist.get_rank() == 0:
             #    logger.info(f"Total Norm beginning {total_norm}")
-            for g, p in zip(gradients, params):
+            param_gradients = (g for g in gradients if not getattr(g, "_zero_padding", False))
+            for g, p in zip(param_gradients, params):
                 # Pipeline parallelism may replicate parameters. Avoid multi-counting.
                 if hasattr(p, PIPE_REPLICATED) and p.ds_pipe_replicated:
                     continue
@@ -2135,12 +2215,17 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                            device,
                            param_group_idx,
                            return_tensor_list=False):
+        partition_size = int(partition_size)
         if len(tensor_list) == 0:
             # This condition can fire when we have small parameteters and many ranks.
             zero_buffer = torch.zeros(int(partition_size), dtype=dtype, device=device)
             if return_tensor_list:
                 return [zero_buffer]
             return zero_buffer
+
+        if not any(self.round_robin_bit16_padding[param_group_idx]):
+            return self._get_flat_partition_unpadded(tensor_list, first_offset, partition_size, dtype, device,
+                                                     param_group_idx, return_tensor_list)
 
         flat_tensor_list = []
         current_size = 0
@@ -2149,9 +2234,86 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         if (not self.optimizer.state[flatten_copy]) and getattr(
                 tensor_list[0], 'use_muon', False) and 'muon' in self.optimizer.__class__.__name__.lower():
             self.optimizer.state[flatten_copy] = {}
+        if getattr(tensor_list[0], 'use_muon', False) and 'muon' in self.optimizer.__class__.__name__.lower():
+            momentum_buffer = self.optimizer.state[flatten_copy].get("momentum_buffer")
+            if momentum_buffer is None:
+                # need to check the total # of elements in the parameters in this group and this partition
+                total_size = sum([t.numel() for t in tensor_list])
+                flatten_bf_list = [torch.zeros([total_size], dtype=dtype, device=device)]
+                self.optimizer.state[flatten_copy]["momentum_buffer"] = self.flatten(flatten_bf_list)
+            elif momentum_buffer.dtype != dtype:
+                # A restored buffer arrives in the dtype the checkpoint holds optimizer state
+                # in, which is fp32, while the gradients it is combined with are in the
+                # gradient accumulation dtype. muon_update does momentum.lerp_(grad), which
+                # requires both to match, so resuming a bf16 run raised:
+                #   RuntimeError: expected dtype torch.float32 for `end`, but got dtype
+                #   torch.bfloat16
+                # Convert rather than reallocate: the momentum a resume just restored is the
+                # reason the checkpoint carries it.
+                self.optimizer.state[flatten_copy]["momentum_buffer"] = momentum_buffer.to(dtype=dtype, device=device)
+
+        partition_id = dist.get_rank(group=self.real_dp_process_group[param_group_idx])
+        buffer_idx = 0
+        for i, tensor in enumerate(tensor_list):
+            grad_accum = self.all_grad_tensors[param_group_idx][i]
+            if getattr(tensor, 'use_muon', False) and 'muon' in self.optimizer.__class__.__name__.lower():
+                assert tensor.ndim > 1, f"if use muon, then tensor dim > 1, got {tensor.size()}"
+                buffer = torch.narrow(self.optimizer.state[flatten_copy]["momentum_buffer"], 0, buffer_idx,
+                                      tensor.numel()).view(tensor.size())
+                ns_method = self.optimizer.param_groups[param_group_idx].get('ns_method', 'gram')
+                grad_accum = muon_update(grad_accum,
+                                         buffer,
+                                         self.optimizer.param_groups[param_group_idx]['momentum'],
+                                         ns_method=ns_method,
+                                         is_expert_group=getattr(tensor, 'is_expert_group', False))
+            tensor = grad_accum
+            buffer_idx += tensor.numel()
+            param_id = self.get_param_id(tensor_list[i])
+            tensor_offset = self.grad_start_offset[param_group_idx][partition_id][param_id]
+            dest_offset = self.grad_partition_insertion_offset[param_group_idx][partition_id][param_id]
+            num_elements = min(tensor.numel() - tensor_offset, partition_size - dest_offset)
+
+            if dest_offset > current_size:
+                pad = torch.zeros(dest_offset - current_size, dtype=dtype, device=device)
+                pad._zero_padding = True
+                flat_tensor_list.append(pad)
+
+            # we need a narrow view of the tensor based on the tensor offset and number of elements that
+            # we need from this tensor
+            if tensor_offset > 0 or num_elements < tensor.numel():
+                flat_tensor_list.append(tensor.contiguous().view(-1).narrow(0, int(tensor_offset), int(num_elements)))
+            else:
+                flat_tensor_list.append(tensor)
+
+            current_size = dest_offset + num_elements
+
+        # this means its the last partition and does not align with the dp boundary. We need to pad before flattening
+        if current_size < partition_size:
+            pad = torch.zeros(int(partition_size - current_size), dtype=dtype, device=device)
+            pad._zero_padding = True
+            flat_tensor_list.append(pad)
+
+        if return_tensor_list:
+            return flat_tensor_list
+
+        return self.flatten(flat_tensor_list)
+
+    def _get_flat_partition_unpadded(self,
+                                     tensor_list,
+                                     first_offset,
+                                     partition_size,
+                                     dtype,
+                                     device,
+                                     param_group_idx,
+                                     return_tensor_list=False):
+        flat_tensor_list = []
+        current_size = 0
+        flatten_copy = self.optimizer.param_groups[param_group_idx]['params'][0]
+        if (not self.optimizer.state[flatten_copy]) and getattr(
+                tensor_list[0], 'use_muon', False) and 'muon' in self.optimizer.__class__.__name__.lower():
+            self.optimizer.state[flatten_copy] = {}
         if "momentum_buffer" not in self.optimizer.state[flatten_copy] and getattr(
                 tensor_list[0], 'use_muon', False) and 'muon' in self.optimizer.__class__.__name__.lower():
-            # need to check the total # of elements in the parameters in this group and this partition
             total_size = sum([t.numel() for t in tensor_list])
             flatten_bf_list = [torch.zeros([total_size], dtype=dtype, device=device)]
             self.optimizer.state[flatten_copy]["momentum_buffer"] = self.flatten(flatten_bf_list)
@@ -2174,17 +2336,13 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             buffer_idx += num_elements
             tensor_offset = 0
 
-            # we need to offset to get to the right element
             if i == 0 and first_offset > 0:
                 tensor_offset = first_offset
                 num_elements = num_elements - tensor_offset
 
-            # we dont need all elements of the tensor
             if num_elements > (partition_size - current_size):
                 num_elements = partition_size - current_size
 
-            # we need a narrow view of the tensor based on the tensor offset and number of elements that
-            # we need from this tensor
             if tensor_offset > 0 or num_elements < tensor.numel():
                 flat_tensor_list.append(tensor.contiguous().view(-1).narrow(0, int(tensor_offset), int(num_elements)))
             else:
@@ -2192,7 +2350,6 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
 
             current_size = current_size + num_elements
 
-        # this means its the last partition and does not align with the dp boundary. We need to pad before flattening
         if current_size < partition_size:
             flat_tensor_list.append(torch.zeros(int(partition_size - current_size), dtype=dtype, device=device))
 
@@ -2296,6 +2453,9 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         if self.cpu_offload:
             self._offload_accumulated_param_ids = set()
 
+        if not self.compute_grad_norm:
+            self._global_grad_norm = None
+
         see_memory_usage("In step before checking overflow")
 
         # First compute norm for all group so we know if there is overflow
@@ -2322,11 +2482,12 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                 self.timers(timer).stop()
             return
 
-        # Step 1:- Calculate gradient norm using bit-16 grads
-        see_memory_usage('Before norm calculation')
-        scaled_global_grad_norm = self.scaled_global_norm()
-        self._global_grad_norm = scaled_global_grad_norm / prev_scale
-        see_memory_usage('After norm before optimizer')
+        scaled_global_grad_norm = None
+        if self.compute_grad_norm:
+            see_memory_usage('Before norm calculation')
+            scaled_global_grad_norm = self.scaled_global_norm()
+            self._global_grad_norm = scaled_global_grad_norm / prev_scale
+            see_memory_usage('After norm before optimizer')
 
         # Step 2:- run optimizer and upscaling simultaneously
         for i, group in enumerate(self.bit16_groups):
@@ -2444,6 +2605,9 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                 norm_groups[i] = scaled_norm_tensor.to(self.device)
 
     def unscale_and_clip_grads(self, grad_groups_flat, total_norm):
+        if self.clip_grad == 0.0 and self.loss_scale == 1.0:
+            return
+
         # compute combined scale factor for this group
         combined_scale = self.loss_scale
         if self.clip_grad > 0.:
@@ -2634,6 +2798,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         state_dict[
             ZERO_STAGE] = ZeroStageEnum.gradients if self.partition_gradients else ZeroStageEnum.optimizer_states
         state_dict[GROUP_PADDINGS] = self.groups_padding
+        state_dict[PARAM_ALIGNMENT_PADDINGS] = self.round_robin_bit16_padding
         state_dict[PARTITION_COUNT] = self.partition_count
 
         state_dict[DS_VERSION] = version
@@ -2645,22 +2810,141 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
 
         return state_dict
 
+    def _checkpoint_group_state_dicts(self, all_state_dict, group_id):
+        group_state_dicts = all_state_dict
+        if self.is_moe_group(self.optimizer.param_groups[group_id]):
+            ranks = self.get_ep_ranks(group_name=self.optimizer.param_groups[group_id]['name'])
+            group_state_dicts = [all_state_dict[rank] for rank in ranks]
+        return group_state_dicts
+
+    def _expand_unpadded_flat_group(self, compact_group, group_id):
+        compact_group = compact_group.view(-1)
+        pieces = []
+        offset = 0
+        for param, padding in zip(self.round_robin_bit16_groups[group_id], self.round_robin_bit16_padding[group_id]):
+            numel = param.numel()
+            pieces.append(compact_group.narrow(0, offset, numel))
+            offset += numel
+            if padding:
+                pieces.append(torch.zeros(padding, dtype=compact_group.dtype, device=compact_group.device))
+
+        assert offset == sum(param.numel() for param in self.round_robin_bit16_groups[group_id])
+        padded_group = self.flatten(pieces)
+        target_numel = self.bit16_groups_flat[group_id].numel()
+        if padded_group.numel() < target_numel:
+            padded_group = self.flatten([
+                padded_group,
+                torch.zeros(target_numel - padded_group.numel(), dtype=padded_group.dtype, device=padded_group.device)
+            ])
+        assert padded_group.numel() == target_numel
+        return padded_group
+
+    def _redistribute_unpadded_partition(self, local_partition, group_id):
+        process_group = self.real_dp_process_group[group_id]
+        rank = dist.get_rank(group=process_group)
+        world_size = dist.get_world_size(group=process_group)
+        old_partition_size = local_partition.numel()
+        new_partition_size = self.bit16_groups_flat[group_id].numel() // world_size
+
+        send_layout = [[] for _ in range(world_size)]
+        recv_layout = [[] for _ in range(world_size)]
+        old_param_offset = 0
+        for param, new_param_offset in zip(self.round_robin_bit16_groups[group_id],
+                                           self.round_robin_bit16_offsets[group_id]):
+            param_offset = 0
+            while param_offset < param.numel():
+                old_global_offset = old_param_offset + param_offset
+                new_global_offset = new_param_offset + param_offset
+                src_rank = old_global_offset // old_partition_size
+                dst_rank = new_global_offset // new_partition_size
+                count = min(param.numel() - param_offset, (src_rank + 1) * old_partition_size - old_global_offset,
+                            (dst_rank + 1) * new_partition_size - new_global_offset)
+
+                if src_rank == rank:
+                    send_layout[dst_rank].append((old_global_offset - rank * old_partition_size, count))
+                if dst_rank == rank:
+                    recv_layout[src_rank].append((new_global_offset - rank * new_partition_size, count))
+                param_offset += count
+            old_param_offset += param.numel()
+
+        source = local_partition.view(-1).to(get_accelerator().current_device_name())
+        send_parts = [source.narrow(0, offset, count) for rank_layout in send_layout for offset, count in rank_layout]
+        send_buffer = self.flatten(send_parts) if send_parts else source.new_empty(0)
+        input_split_sizes = [sum(count for _, count in rank_layout) for rank_layout in send_layout]
+        output_split_sizes = [sum(count for _, count in rank_layout) for rank_layout in recv_layout]
+        recv_buffer = source.new_empty(sum(output_split_sizes))
+        dist.all_to_all_single(recv_buffer,
+                               send_buffer,
+                               output_split_sizes=output_split_sizes,
+                               input_split_sizes=input_split_sizes,
+                               group=process_group)
+
+        output = source.new_zeros(new_partition_size)
+        recv_offset = 0
+        for rank_layout in recv_layout:
+            for output_offset, count in rank_layout:
+                output.narrow(0, output_offset, count).copy_(recv_buffer.narrow(0, recv_offset, count))
+                recv_offset += count
+        assert recv_offset == recv_buffer.numel()
+        return output.to(local_partition.device)
+
+    def _restore_from_unpadded_local_fp32_weights(self, current_rank_sd):
+        for i, current in enumerate(self.single_partition_of_fp32_groups):
+            saved = current_rank_sd[SINGLE_PARTITION_OF_FP32_GROUPS][i]
+            padding = current_rank_sd[GROUP_PADDINGS][i]
+            old_partition = _pad_tensor_by_size(saved, padding, saved.dtype, saved.device)
+            current.data.copy_(self._redistribute_unpadded_partition(old_partition, i).data)
+
+    def _restore_from_unpadded_fp32_weights(self, all_state_dict):
+        for i, current in enumerate(self.single_partition_of_fp32_groups):
+            group_state_dicts = self._checkpoint_group_state_dicts(all_state_dict, i)
+            compact_group = self.flatten([sd[SINGLE_PARTITION_OF_FP32_GROUPS][i] for sd in group_state_dicts])
+            padded_group = self._expand_unpadded_flat_group(compact_group, i)
+            partition_id = dist.get_rank(group=self.real_dp_process_group[i])
+            current.data.copy_(self.get_data_parallel_partitions(padded_group, i)[partition_id].data)
+
+    def _convert_unpadded_rigid_optimizer_state(self, current_rank_sd):
+        saved_optimizer_state = current_rank_sd[BASE_OPTIMIZER_STATE]
+        converted_state = {
+            'state': {},
+            'param_groups': [{
+                **group, 'params': list(group['params'])
+            } for group in saved_optimizer_state['param_groups']]
+        }
+
+        for i, param_group in enumerate(saved_optimizer_state['param_groups']):
+            param_id = param_group['params'][0]
+            saved_state = saved_optimizer_state['state'].get(param_id, {})
+            converted_param_state = {}
+            saved_partition = current_rank_sd[SINGLE_PARTITION_OF_FP32_GROUPS][i]
+            saved_partition_size = saved_partition.numel() + current_rank_sd[GROUP_PADDINGS][i]
+
+            for key, value in saved_state.items():
+                if torch.is_tensor(value) and value.shape == torch.Size([saved_partition_size]):
+                    converted_param_state[key] = self._redistribute_unpadded_partition(value, i)
+                else:
+                    converted_param_state[key] = value
+            converted_state['state'][param_id] = converted_param_state
+
+        return converted_state
+
     # Restore base optimizer fp32 weights from elastic checkpoint by:
     # 1) Merging fp32 weights from checkpoints of all partitions
     # 2) Extracting fp32 weights for current partition from merged weights
     # 3) Using extracted weights to update base optimizer weights directly.
-    def _restore_from_elastic_fp32_weights(self, all_state_dict):
+    def _restore_from_elastic_fp32_weights(self, all_state_dict, unpadded_layout=False):
         merged_single_partition_of_fp32_groups = []
 
         for i in range(len(self.single_partition_of_fp32_groups)):
             partition_id = dist.get_rank(group=self.real_dp_process_group[i])
-            merged_partitions = [sd[SINGLE_PARTITION_OF_FP32_GROUPS][i] for sd in all_state_dict]
-            if self.is_moe_group(self.optimizer.param_groups[i]):
-                ranks = self.get_ep_ranks(group_name=self.optimizer.param_groups[i]['name'])
-                merged_partitions = [merged_partitions[i] for i in ranks]
-            flat_merged_partitions = self.flatten_dense_tensors_aligned(
-                merged_partitions,
-                self.nccl_start_alignment_factor * dist.get_world_size(group=self.real_dp_process_group[i]))
+            group_state_dicts = self._checkpoint_group_state_dicts(all_state_dict, i)
+            merged_partitions = [sd[SINGLE_PARTITION_OF_FP32_GROUPS][i] for sd in group_state_dicts]
+            if unpadded_layout:
+                flat_merged_partitions = self._expand_unpadded_flat_group(self.flatten(merged_partitions), i)
+            else:
+                flat_merged_partitions = self.flatten_dense_tensors_aligned(
+                    merged_partitions,
+                    self.nccl_start_alignment_factor * dist.get_world_size(group=self.real_dp_process_group[i]))
             dp_partitions = self.get_data_parallel_partitions(flat_merged_partitions, i)
             merged_single_partition_of_fp32_groups.append(dp_partitions[partition_id])
 
@@ -2679,11 +2963,21 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         self._restore_from_bit16_weights()
 
     # Extract optimizer state for current partition from merged states of all partitions
-    def _partition_base_optimizer_state(self, state_key, all_partition_states, group_id):
+    def _partition_base_optimizer_state(self,
+                                        state_key,
+                                        all_partition_states,
+                                        group_id,
+                                        unpadded_layout=False,
+                                        is_partition_state=True):
         partition_id = dist.get_rank(group=self.real_dp_process_group[group_id])
         alignment = self.nccl_start_alignment_factor * dist.get_world_size(group=self.real_dp_process_group[group_id])
         if torch.is_tensor(all_partition_states[0]):
-            flat_merged_partitions = self.flatten_dense_tensors_aligned(all_partition_states, alignment)
+            if not is_partition_state:
+                return all_partition_states[0]
+            if unpadded_layout:
+                flat_merged_partitions = self._expand_unpadded_flat_group(self.flatten(all_partition_states), group_id)
+            else:
+                flat_merged_partitions = self.flatten_dense_tensors_aligned(all_partition_states, alignment)
             dp_partitions = self.get_data_parallel_partitions(flat_merged_partitions, group_id)
             return dp_partitions[partition_id]
         else:
@@ -2735,19 +3029,28 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
     # 1) Merging optimizer state from checkpoints of all partitions
     # 2) Extracting optimizer state for current partition from the merged state
     # 3) Using the extracted value to directly update the base optimizer.
-    def _restore_elastic_base_optimizer_state(self, all_state_dict):
+    def _restore_elastic_base_optimizer_state(self, all_state_dict, unpadded_layout=False):
         base_optimizer_group_states = []
         for i in range(len(self.optimizer.param_groups)):
             partition_states = {}
-            all_partition_group_states = [sd[BASE_OPTIMIZER_STATE][i] for sd in all_state_dict]
+            group_state_dicts = all_state_dict
 
             if self.is_moe_group(self.optimizer.param_groups[i]):
                 ranks = self.get_ep_ranks(group_name=self.optimizer.param_groups[i]['name'])
-                all_partition_group_states = [all_partition_group_states[i] for i in ranks]
+                group_state_dicts = [all_state_dict[rank] for rank in ranks]
+
+            all_partition_group_states = [sd[BASE_OPTIMIZER_STATE][i] for sd in group_state_dicts]
 
             for key in all_partition_group_states[0].keys():
                 all_partition_states = [all_states[key] for all_states in all_partition_group_states]
-                partition_states[key] = self._partition_base_optimizer_state(key, all_partition_states, i)
+                is_partition_state = all(
+                    torch.is_tensor(state) and state.shape == sd[SINGLE_PARTITION_OF_FP32_GROUPS][i].shape
+                    for state, sd in zip(all_partition_states, group_state_dicts))
+                partition_states[key] = self._partition_base_optimizer_state(key,
+                                                                             all_partition_states,
+                                                                             i,
+                                                                             unpadded_layout=unpadded_layout,
+                                                                             is_partition_state=is_partition_state)
             base_optimizer_group_states.append(partition_states)
 
         self._restore_base_optimizer_state(base_optimizer_group_states,
@@ -2772,7 +3075,11 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         self.loss_scaler = sd.get(LOSS_SCALER, self.loss_scaler)
         self.dynamic_loss_scale = sd.get('dynamic_loss_scale', self.dynamic_loss_scale)
         self.overflow = sd.get('overflow', self.overflow)
-        self.clip_grad = sd.get(CLIP_GRAD, self.clip_grad)
+        checkpoint_clip_grad = sd.get(CLIP_GRAD, self.clip_grad)
+        if not self.compute_grad_norm and checkpoint_clip_grad > 0.0:
+            raise ValueError("Cannot load a checkpoint with gradient clipping into "
+                             "zero_optimization.compute_grad_norm=false")
+        self.clip_grad = checkpoint_clip_grad
 
         ckpt_version = sd.get(DS_VERSION, False)
         assert ckpt_version, "Empty ds_version in checkpoint, not clear how to proceed"
@@ -2819,6 +3126,15 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         self._load_global_state(current_rank_sd)
 
         ckpt_is_rigid = isinstance(current_rank_sd[BASE_OPTIMIZER_STATE], dict)
+        has_param_alignment_layout = PARAM_ALIGNMENT_PADDINGS in current_rank_sd
+        unpadded_layout = (not has_param_alignment_layout
+                           and any(any(group_padding) for group_padding in self.round_robin_bit16_padding))
+        incompatible_param_layout = (has_param_alignment_layout
+                                     and current_rank_sd[PARAM_ALIGNMENT_PADDINGS] != self.round_robin_bit16_padding)
+        if incompatible_param_layout and (load_optimizer_states or load_from_fp32_weights):
+            raise RuntimeError("The ZeRO checkpoint parameter-alignment layout does not match the current "
+                               "zero_optimization.parameter_alignment setting. Load with the setting used to save "
+                               "the checkpoint, or disable optimizer-state loading for a module-only warm start.")
 
         # padding is always at the last rank/partition
         # if DP=1024 and param-group elems=16 -> padding will be 1024-16 across all but one rank
@@ -2833,16 +3149,19 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         if load_optimizer_states:
             if ckpt_is_rigid:
                 # loading rigid ckpt into either rigid or elastic exec
-                self.optimizer.load_state_dict(current_rank_sd[BASE_OPTIMIZER_STATE])
+                optimizer_state = (self._convert_unpadded_rigid_optimizer_state(current_rank_sd)
+                                   if unpadded_layout else current_rank_sd[BASE_OPTIMIZER_STATE])
+                self.optimizer.load_state_dict(optimizer_state)
+            elif unpadded_layout:
+                self._restore_elastic_base_optimizer_state(state_dict_list, unpadded_layout=True)
+            elif self.elastic_checkpoint:
+                # loading elastic into elastic exec
+                self._restore_elastic_base_optimizer_state(state_dict_list)
             else:
-                if self.elastic_checkpoint:
-                    # loading elastic into elastic exec
-                    self._restore_elastic_base_optimizer_state(state_dict_list)
-                else:
-                    # loading an elastic checkpoint into rigid exec
-                    self._restore_base_optimizer_state(current_rank_sd[BASE_OPTIMIZER_STATE],
-                                                       current_rank_sd[BASE_OPTIMIZER_STATE_STEP],
-                                                       current_rank_sd[GROUP_PADDINGS])
+                # loading an elastic checkpoint into rigid exec
+                self._restore_base_optimizer_state(current_rank_sd[BASE_OPTIMIZER_STATE],
+                                                   current_rank_sd[BASE_OPTIMIZER_STATE_STEP],
+                                                   current_rank_sd[GROUP_PADDINGS])
 
         # At this point, the optimizer's references to the model's fp32 parameters are up to date.
         # The optimizer's hyperparameters and internal buffers are also up to date.
@@ -2861,7 +3180,11 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
 
         if load_from_fp32_weights:
             # option 2 from above
-            if self.elastic_checkpoint and not ckpt_is_rigid:
+            if unpadded_layout and ckpt_is_rigid:
+                self._restore_from_unpadded_local_fp32_weights(current_rank_sd)
+            elif unpadded_layout:
+                self._restore_from_unpadded_fp32_weights(state_dict_list)
+            elif self.elastic_checkpoint and not ckpt_is_rigid:
                 self._restore_from_elastic_fp32_weights(state_dict_list)
             else:
                 # For non-elastic checkpoint, simply copying from saved weights of current rank is sufficient.

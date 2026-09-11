@@ -216,6 +216,30 @@ def make_autoep_config(zero_stage=0, ep_size=1, load_balance_coeff=UNSET, mixed_
     return config
 
 
+def make_autoep_client_optimizer_config(zero_stage=3, ep_size=2):
+    """AutoEP config with NO ``optimizer`` block, so the caller's own optimizer is the one used.
+
+    bf16 deliberately, not the shared fp16 helper: fp16 carries a loss scaler that skips the first
+    optimizer step(s) on overflow, so no parameter would move and an "did this parameter update"
+    test could not tell "frozen because of the bug" from "frozen because the step was skipped".
+    """
+    return {
+        "bf16": {
+            "enabled": True
+        },
+        "train_micro_batch_size_per_gpu": 1,
+        "zero_optimization": {
+            "stage": zero_stage
+        },
+        "expert_parallel": {
+            "enabled": True,
+            "autoep_size": ep_size,
+            "preset_model": "mixtral",
+            "use_grouped_mm": False,
+        },
+    }
+
+
 def make_autoep_integration_config(zero_stage=0, ep_size=2):
     return make_autoep_config(zero_stage=zero_stage, ep_size=ep_size, mixed_precision=False)
 
