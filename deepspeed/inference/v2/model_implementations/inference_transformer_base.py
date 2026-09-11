@@ -45,6 +45,29 @@ except ImportError:
         return property(func)
 
 
+# `RotateHalfConfig` carries `use_trained_freqs`, `theta_base` and `rotate_dim`, so a config
+# asking for a scaled rotary variant cannot be honoured here. These spellings mean "no scaling".
+_UNSCALED_ROPE_TYPES = (None, "default")
+
+
+def _rope_types(config) -> set:
+    """Every rotary variant a config asks for, across both layouts and per-layer entries.
+
+    transformers 5.x keeps these in ``rope_parameters``, 4.x in ``rope_scaling``, and a
+    per-layer-type config nests one dict per layer type inside either of them. Both
+    spellings of the key are in use, so both are read.
+    """
+    rope_types = set()
+    for source in (getattr(config, "rope_parameters", None), getattr(config, "rope_scaling", None)):
+        if not isinstance(source, dict):
+            continue
+        for candidate in (source, *(value for value in source.values() if isinstance(value, dict))):
+            rope_type = candidate.get("rope_type", candidate.get("type"))
+            if rope_type is not None:
+                rope_types.add(rope_type)
+    return rope_types
+
+
 class DSTransformerModelBase(DSInferenceModelBase):
     """
     Dimensioning properties
@@ -180,7 +203,21 @@ class DSTransformerModelBase(DSInferenceModelBase):
         caller of this property feeds a single ``RotateHalfConfig.theta_base`` for the
         whole model, so distinct per-layer bases cannot be represented and are refused
         rather than silently resolved to one of them.
+
+        A scaled variant is refused for the same reason, matching what #8341 does for
+        kernel injection: every caller builds ``RotateHalfConfig(theta_base=...)``, and
+        that config carries ``use_trained_freqs``, ``theta_base`` and ``rotate_dim`` and
+        nothing else, so the scaling parameters have nowhere to go. Returning the base
+        alone would run the model with unscaled positions and no error.
         """
+        scaled = sorted(rope_type for rope_type in _rope_types(self._config)
+                        if rope_type not in _UNSCALED_ROPE_TYPES)
+        if scaled:
+            raise ValueError(f"Inference V2 cannot serve rope_type={scaled[0]!r} "
+                             f"({type(self._config).__name__}). The rotary embedding is built from "
+                             "theta_base alone, so the scaling parameters this configuration carries "
+                             "would be dropped and the model would run with unscaled positions.")
+
         theta = getattr(self._config, "rope_theta", None)
         if theta is not None:
             return theta

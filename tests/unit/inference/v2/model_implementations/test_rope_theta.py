@@ -126,3 +126,69 @@ def test_resolves_against_the_installed_transformers_configs(module_name, config
         pytest.skip(f"{config_name} is not available in the installed transformers")
 
     assert _Model(config).rope_theta > 0
+
+
+# --- scaled variants -------------------------------------------------------------
+#
+# Every caller builds `RotateHalfConfig(theta_base=self.rope_theta)`, and that config
+# carries `use_trained_freqs`, `theta_base` and `rotate_dim` and nothing else. A config
+# asking for a scaled rotary has nowhere to put its scaling parameters, so returning the
+# base alone would run the model with unscaled positions and no error. #8341 made kernel
+# injection refuse the same thing; this is the Inference V2 half.
+
+
+@pytest.mark.parametrize("rope_type", ["llama3", "linear", "dynamic", "yarn", "longrope"])
+def test_rejects_a_scaled_variant_in_rope_parameters(rope_type):
+    config = SimpleNamespace(rope_parameters={"rope_theta": 500000.0, "rope_type": rope_type})
+
+    with pytest.raises(ValueError, match=rope_type):
+        _Model(config).rope_theta
+
+
+@pytest.mark.parametrize("key", ["rope_type", "type"])
+def test_rejects_a_scaled_variant_in_legacy_rope_scaling(key):
+    """transformers 4.x keeps this in `rope_scaling`, and both spellings of the key are in use."""
+    config = SimpleNamespace(rope_theta=500000.0, rope_scaling={key: "llama3", "factor": 8.0})
+
+    with pytest.raises(ValueError, match="llama3"):
+        _Model(config).rope_theta
+
+
+def test_rejects_a_scaled_variant_nested_per_layer_type():
+    config = SimpleNamespace(
+        rope_parameters={
+            "sliding_attention": {
+                "rope_theta": 1000000.0,
+                "rope_type": "default"
+            },
+            "full_attention": {
+                "rope_theta": 1000000.0,
+                "rope_type": "yarn",
+                "factor": 4.0
+            },
+            "rope_theta": 10000.0,
+            "rope_type": "default",
+        })
+
+    with pytest.raises(ValueError, match="yarn"):
+        _Model(config).rope_theta
+
+
+def test_a_scaled_variant_is_refused_even_when_the_attribute_carries_the_base():
+    """The attribute read comes first, so the check has to precede it to be reachable."""
+    config = SimpleNamespace(rope_theta=500000.0, rope_parameters={"rope_type": "llama3", "factor": 8.0})
+
+    with pytest.raises(ValueError, match="llama3"):
+        _Model(config).rope_theta
+
+
+@pytest.mark.parametrize("rope_type", [None, "default"])
+def test_unscaled_configurations_still_resolve(rope_type):
+    """The two spellings that mean "no scaling" must keep working, in both layouts."""
+    parameters = {"rope_theta": 500000.0}
+    if rope_type is not None:
+        parameters["rope_type"] = rope_type
+
+    assert _Model(SimpleNamespace(rope_parameters=dict(parameters))).rope_theta == 500000.0
+    assert _Model(SimpleNamespace(rope_scaling=dict(parameters))).rope_theta == 500000.0
+
