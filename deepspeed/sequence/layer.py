@@ -364,7 +364,7 @@ class _SeqAllToAll(torch.autograd.Function):
         else:
             # overlap communication path
             if not is_fwd and type == 'o':
-                assert ctx.stream != None
+                assert ctx.stream is not None
                 res = single_all_to_all(input,
                                         scatter_idx,
                                         gather_idx,
@@ -491,16 +491,14 @@ class DistributedAttention(torch.nn.Module):
 
         def bwd_hook(layer_type):
 
-            def pre_hook_fun(grad):
+            def hook_fun(grad):
                 type = 'd' + layer_type
                 self.overlap_handles[type + '_work'].wait()
                 self.sp_stream.wait_stream(self.default_stream)
                 all2all_output = self.overlap_handles[type + '_grad']
-                grad = list(grad)
-                grad[0] = self.overlap_handles[type + '_post_all2all_func'](all2all_output)
-                grad = tuple(grad)
+                return self.overlap_handles[type + '_post_all2all_func'](all2all_output)
 
-            return pre_hook_fun
+            return hook_fun
 
         # The partition follows KV groups, so the count comes off the key tensor: under GQA a
         # query head has to land on the rank holding its KV head, and splitting on the query
@@ -525,10 +523,8 @@ class DistributedAttention(torch.nn.Module):
             # Place this logic after the q, k, v all-to-all operation to
             # improve interpreter speed to
             # call and launch of the forward all-to-all communication.
-            grad_fn_q = query.grad_fn.next_functions[0][0]
-            grad_fn_q.register_prehook(bwd_hook(layer_type='q'))
-            grad_fn_k = key.grad_fn.next_functions[0][0]
-            grad_fn_k.register_prehook(bwd_hook(layer_type='k'))
+            query.register_hook(bwd_hook(layer_type='q'))
+            key.register_hook(bwd_hook(layer_type='k'))
 
         #out shape : e.g., [s:h/p:]
         if rotary_pos_emb is not None:
