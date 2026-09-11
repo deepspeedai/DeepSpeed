@@ -387,32 +387,62 @@ def clip_grad_norm_(parameters, max_norm, norm_type=2, mpu=None):
     """
     if isinstance(parameters, torch.Tensor):
         parameters = [parameters]
-    parameters = list(filter(lambda p: p.grad is not None, parameters))
+    parameters = list(parameters)
     norm_type = float(norm_type)
 
     # Expert parameters are not replicated across the data parallel group, so the
     # rank-averaging below cannot reconstruct a global norm from them: each rank's
     # norm covers a different set of experts. Combine those the way the bf16 and
     # fp16 optimizers already do, over the expert parallel group.
+    #
+    # Read ownership from the parameters, before dropping the ones with no gradient.
+    # The two branches below issue different collectives, so this decision has to
+    # come out the same on every rank -- and a rank whose experts received no tokens
+    # this step has expert parameters but no expert gradients.
+    # A rank can legitimately own no expert at all -- under pipeline parallelism, say --
+    # so reading ownership locally is not enough to guarantee the same choice everywhere.
+    # One scalar settles it. The second slot carries "an expert here has no group name",
+    # which has no expert parallel group to reduce over, so such a call stays on the
+    # original path rather than guessing which group the parameter belongs to.
+    vote = torch.tensor(
+        [
+            float(any(is_moe_param(p) and getattr(p, "group_name", None) is not None for p in parameters)),
+            float(any(is_moe_param(p) and getattr(p, "group_name", None) is None for p in parameters)),
+        ],
+        device=get_accelerator().current_device_name(),
+        dtype=torch.float)
+    dist.all_reduce(vote, group=groups._get_data_parallel_group())
+    if vote[0].item() > 0 and vote[1].item() == 0:
+        # The registry is built identically on every rank, so these names agree without
+        # a second collective even where the local parameters do not.
+        expert_group_names = sorted(getattr(groups, "_EXPERT_PARALLEL_GROUP", None) or {})
+    else:
+        expert_group_names = []
+
+    parameters = list(filter(lambda p: p.grad is not None, parameters))
+
     expert_tensors: Dict[str, List[torch.Tensor]] = {}
-    for p in parameters:
-        if not is_moe_param(p):
-            continue
-        # An expert parameter built by hand may carry no group name, and without one
-        # there is no expert parallel group to reduce over. Leave every such call on
-        # the original path rather than guessing which group it belongs to.
-        group_name = getattr(p, "group_name", None)
-        if group_name is None:
-            expert_tensors = {}
-            break
-        expert_tensors.setdefault(group_name, []).append(p.grad.data)
+    if expert_group_names:
+        for p in parameters:
+            if is_moe_param(p):
+                expert_tensors.setdefault(p.group_name, []).append(p.grad.data)
+        # Every rank has to reduce over every group, whether or not its own experts
+        # were used this step; a zero contributes nothing to the sum of p-th powers
+        # and nothing to a max over absolute values.
+        zero = torch.zeros(1, device=get_accelerator().current_device_name())
+        for group_name in expert_group_names:
+            expert_tensors.setdefault(group_name, [zero])
+
     norm_parameters = [p for p in parameters if not is_moe_param(p)] if expert_tensors else parameters
 
     all_norms = []
     if norm_type == inf:
         for p in norm_parameters:
             all_norms.append(p.grad.data.abs().max().float())
-        total_norm = torch.stack(all_norms).max()
+        # Everything may be an expert, leaving nothing replicated to take a max over.
+        # Zero is the identity here: these are absolute values.
+        total_norm = torch.stack(all_norms).max() if all_norms \
+            else torch.zeros((), device=get_accelerator().current_device_name())
         total_norm = total_norm.to(get_accelerator().current_device_name())
         # Take max across all GPUs.
         if mpu is not None:
