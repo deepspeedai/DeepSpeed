@@ -791,7 +791,7 @@ def _addmm_flops_compute(input, mat1, mat2, *, beta=1, alpha=1, out=None):
     macs = _prod(mat1.shape) * mat2.shape[-1]
     # `input` is added to every output element, so a broadcast bias still costs one flop per
     # output element, not one per element of its own shape.
-    return 2 * macs + mat1.shape[0] * mat2.shape[-1], macs
+    return 2 * macs + _prod(mat1.shape[:-1]) * mat2.shape[-1], macs
 
 
 def _einsum_flops_compute(equation, *operands):
@@ -844,8 +844,10 @@ def _tensor_addmm_flops_compute(self, mat1, mat2, *, beta=1, alpha=1, out=None):
     Count flops for the tensor addmm operation.
     """
     macs = _prod(mat1.shape) * mat2.shape[-1]
-    # Same as `_addmm_flops_compute`: the added tensor covers the whole output.
-    return 2 * macs + mat1.shape[0] * mat2.shape[-1], macs
+    # Same as `_addmm_flops_compute`: the added tensor covers the whole output. This counter is
+    # also registered for `torch.baddbmm`, whose output carries a leading batch dimension, so
+    # take every dimension of `mat1` except the contracted one rather than just the first.
+    return 2 * macs + _prod(mat1.shape[:-1]) * mat2.shape[-1], macs
 
 
 def _mul_flops_compute(input, other, *, out=None):

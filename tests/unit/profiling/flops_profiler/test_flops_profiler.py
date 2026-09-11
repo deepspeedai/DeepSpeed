@@ -386,3 +386,28 @@ def test_addmm_broadcast_bias_flops(bias_shape):
 
     assert macs == 4 * 8 * 5
     assert flops == 2 * macs + result.numel()
+
+
+@pytest.mark.parametrize("bias_shape", [(2, 4, 5), (5, ), (1, 1, 5), (4, 5)])
+def test_baddbmm_broadcast_bias_flops(bias_shape):
+    """baddbmm shares the addmm counter, and its output carries a batch dimension the
+    two-dimensional form does not, so the bias covers B * M * N elements and not B * N."""
+
+    class Baddbmm(torch.nn.Module):
+
+        def forward(self, bias, batch1, batch2):
+            return torch.baddbmm(bias, batch1, batch2)
+
+    model = Baddbmm()
+    bias = torch.randn(*bias_shape)
+    batch1, batch2 = torch.randn(2, 4, 8), torch.randn(2, 8, 5)
+
+    prof = FlopsProfiler(model)
+    prof.start_profile()
+    result = model(bias, batch1, batch2)
+    prof.stop_profile()
+    flops, macs = prof.get_total_flops(), prof.get_total_macs()
+    prof.end_profile()
+
+    assert macs == 2 * 4 * 8 * 5
+    assert flops == 2 * macs + result.numel()
