@@ -101,7 +101,7 @@ python ci/tests_fetcher.py --base origin/master --explain
 > `pull_request`-triggered run or the `modal` CLI.
 
 ### Model Tests
-To execute model tests, first [install DeepSpeed](#installation). The
+To execute model tests, first [install DeepSpeed](README.md#installation). The
 [DeepSpeedExamples](https://github.com/deepspeedai/DeepSpeedExamples/) repository is cloned
 as part of this process. Next, execute the model test driver:
 ```bash
