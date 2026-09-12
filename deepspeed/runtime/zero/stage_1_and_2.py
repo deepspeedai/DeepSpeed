@@ -2465,6 +2465,10 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         prev_scale = self.loss_scale
         self._update_scale(self.overflow)
         if self.overflow:
+            logger.warning(
+                f"[ZeRO] Gradient overflow detected. Skipping optimizer step. "
+                f"Loss scale: {self.loss_scale}. "
+                f"Total skipped steps so far: {self.skipped_steps + 1}.")
             see_memory_usage('After overflow before clearing gradients')
             self.zero_grad(set_to_none=True)
             self._release_preflattened_grad_buffers()
