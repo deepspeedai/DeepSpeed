@@ -56,6 +56,7 @@ def test_config_defaults():
     assert cfg.use_graph_capture is False
     assert cfg.enable_profiling is False
     assert cfg.use_shared_prefill is False
+    assert cfg.align_decode_fronts is False
 
 
 # -- constructor --------------------------------------------------------
@@ -64,11 +65,12 @@ def test_config_defaults():
 def test_constructor_stores_config():
     engine = _make_engine()
     tok = _make_tokenizer()
-    cfg = HybridEngineRolloutConfig(use_graph_capture=True, enable_profiling=True)
+    cfg = HybridEngineRolloutConfig(use_graph_capture=True, enable_profiling=True, align_decode_fronts=True)
     rollout = HybridEngineRollout(engine, tok, cfg=cfg)
     assert rollout.use_graph_capture is True
     assert rollout.enable_profiling is True
     assert rollout.use_shared_prefill is False
+    assert rollout.align_decode_fronts is True
     assert rollout.engine is engine
     assert rollout.tokenizer is tok
 
@@ -78,6 +80,7 @@ def test_constructor_defaults_without_cfg():
     assert rollout.use_graph_capture is False
     assert rollout.enable_profiling is False
     assert rollout.use_shared_prefill is False
+    assert rollout.align_decode_fronts is False
 
 
 def test_continuous_generation_rejects_unsupported_inputs():
@@ -203,6 +206,79 @@ def test_continuous_generation_covers_modern_static_cache_path():
     assert output.response_start_idx.tolist() == [3, 3, 3]
     assert model.calls[0] == (2, 3)
     assert (1, 3) in model.calls
+
+
+def test_aligned_continuous_generation_supports_mixed_effective_prompt_lengths():
+    class CacheConfig(SimpleNamespace):
+
+        def get_text_config(self, **_kwargs):
+            return self
+
+    class CacheClassModel(torch.nn.Module):
+        _supports_cache_class = True
+
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.zeros(1))
+            self.prefill_lengths = []
+            self.decode_positions = []
+            self.config = CacheConfig(
+                max_position_embeddings=32,
+                num_hidden_layers=1,
+                num_attention_heads=1,
+                num_key_value_heads=1,
+                hidden_size=1,
+                head_dim=1,
+            )
+
+        def forward(self, input_ids, attention_mask, past_key_values=None, use_cache=True, **kwargs):
+            if input_ids.shape[1] > 1:
+                self.prefill_lengths.append(input_ids.shape[1])
+            else:
+                write_position = getattr(past_key_values, "_write_position", None)
+                if write_position is not None:
+                    self.decode_positions.append(int(write_position[0].item()))
+            states = input_ids[:, None, :, None].to(dtype=torch.float32)
+            _, values = past_key_values.update(states, states, layer_idx=0, **kwargs)
+            cache_sums = values[:, 0].sum(dim=(1, 2))
+            next_tokens = torch.where(cache_sums == 6, 2, 7).long()
+            logits = torch.zeros((input_ids.shape[0], input_ids.shape[1], 16))
+            logits.scatter_(2, next_tokens[:, None, None].expand(-1, input_ids.shape[1], 1), 1)
+            return SimpleNamespace(logits=logits, past_key_values=past_key_values)
+
+    model = CacheClassModel()
+    rollout = HybridEngineRollout(
+        SimpleNamespace(module=model),
+        SimpleNamespace(pad_token_id=0, eos_token_id=2),
+        cfg=HybridEngineRolloutConfig(align_decode_fronts=True),
+    )
+    request = RolloutRequest(
+        torch.tensor([[0, 1, 2, 3], [1, 2, 3, 4], [0, 0, 1, 2]]),
+        torch.tensor([[0, 1, 1, 1], [1, 1, 1, 1], [0, 0, 1, 1]]),
+    )
+
+    output = rollout.generate(request, SamplingConfig(max_new_tokens=2, temperature=0, continuous_batch_size=2))
+
+    assert output.input_ids.tolist() == [
+        [0, 1, 2, 3, 2, 0],
+        [1, 2, 3, 4, 7, 7],
+        [0, 0, 1, 2, 7, 7],
+    ]
+    assert output.attention_mask.tolist() == [
+        [0, 1, 1, 1, 1, 0],
+        [1, 1, 1, 1, 1, 1],
+        [0, 0, 1, 1, 1, 1],
+    ]
+    assert model.prefill_lengths == [4, 3, 2]
+    assert model.decode_positions == [4, 3]
+    stats = rollout.get_last_continuous_stats()
+    assert stats["cache_capacity"] == 6
+    assert stats["peak_cache_length"] == 5
+    assert stats["trim_count"] == 1
+    assert stats["trimmed_columns"] == 2
+    assert stats["trim_frequency"] == pytest.approx(0.5)
+    assert stats["trim_bytes_moved"] > 0
+    assert stats["end_to_end_ms"] is None
 
 
 def test_continuous_generation_trims_cache_after_staggered_eos():

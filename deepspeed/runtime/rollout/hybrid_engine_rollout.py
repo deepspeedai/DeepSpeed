@@ -80,6 +80,7 @@ class HybridEngineRolloutConfig:
     use_graph_capture: bool = False
     enable_profiling: bool = False
     use_shared_prefill: bool = False
+    align_decode_fronts: bool = False
 
 
 class HybridEngineRollout(RolloutEngine):
@@ -97,7 +98,9 @@ class HybridEngineRollout(RolloutEngine):
         self.use_graph_capture = getattr(cfg, 'use_graph_capture', False) if cfg else False
         self.enable_profiling = getattr(cfg, 'enable_profiling', False) if cfg else False
         self.use_shared_prefill = getattr(cfg, 'use_shared_prefill', False) if cfg else False
+        self.align_decode_fronts = getattr(cfg, 'align_decode_fronts', False) if cfg else False
         self._last_profile = None
+        self._last_continuous_stats = None
 
     @torch.no_grad()
     def generate(self, request: RolloutRequest, sampling: SamplingConfig) -> RolloutBatch:
@@ -259,17 +262,23 @@ class HybridEngineRollout(RolloutEngine):
         self._validate_continuous_inputs(requests, sampling, max_batch_size)
 
         module = self.engine.module
-        prompt_len = requests[0].prompt_ids.shape[1]
+        profile_accelerator = get_accelerator() if self.enable_profiling else None
+        if profile_accelerator is not None:
+            profile_accelerator.synchronize()
+        profile_start = time.perf_counter() if profile_accelerator is not None else None
+        prompt_lengths = {
+            request_id: (int(request.prompt_attention_mask.sum().item()) if self.align_decode_fronts else
+                         request.prompt_ids.shape[1])
+            for request_id, request in enumerate(requests)
+        }
+        prompt_len = max(prompt_lengths.values())
         max_positions = getattr(module.config, "max_position_embeddings", None)
         if max_positions is not None:
-            logical_length = prompt_len + sampling.max_new_tokens
-            if logical_length > max_positions:
+            if any(length + sampling.max_new_tokens > max_positions for length in prompt_lengths.values()):
                 raise ValueError("continuous batching request exceeds the model maximum position embeddings")
-        max_cache_len = self._estimate_continuous_cache_len(
-            prompt_len,
-            [sampling.max_new_tokens] * len(requests),
-            max_batch_size,
-        )
+        max_cache_len = (prompt_len + sampling.max_new_tokens if self.align_decode_fronts else
+                         self._estimate_continuous_cache_len(prompt_len, [sampling.max_new_tokens] * len(requests),
+                                                             max_batch_size))
         if max_positions is not None and max_cache_len > max_positions:
             raise ValueError("continuous batching cache exceeds the model maximum position embeddings")
         if not getattr(module, "_supports_cache_class", False):
@@ -285,7 +294,10 @@ class HybridEngineRollout(RolloutEngine):
         scheduler = ContinuousBatchScheduler(max_batch_size, sampling.max_new_tokens)
         request_by_id = {}
         responses = {}
-        for request_id, request in enumerate(requests):
+        request_order = (sorted(range(len(requests)), key=lambda request_id: -prompt_lengths[request_id])
+                         if self.align_decode_fronts else range(len(requests)))
+        for request_id in request_order:
+            request = requests[request_id]
             scheduler.submit(ContinuousBatchRequest(request_id))
             request_by_id[request_id] = request
             responses[request_id] = []
@@ -300,10 +312,30 @@ class HybridEngineRollout(RolloutEngine):
         write_positions = torch.full((max_batch_size, ), -1, dtype=torch.long, device=device)
         cache.set_write_position(write_positions)
         attention_mask = torch.zeros((max_batch_size, max_cache_len), dtype=torch.long, device=device)
+        stats = {
+            "cache_capacity": max_cache_len,
+            "peak_cache_length": prompt_len,
+            "cache_memory_bytes": sum(layer.keys.numel() * layer.keys.element_size() +
+                                       layer.values.numel() * layer.values.element_size()
+                                       for layer in cache.layers) +
+            attention_mask.numel() * attention_mask.element_size() + write_positions.numel() *
+            write_positions.element_size(),
+            "trim_count": 0,
+            "trimmed_columns": 0,
+            "trim_latency_ms": 0.0,
+            "decode_steps": 0,
+        }
         next_tokens = {}
+        logical_positions = dict(prompt_lengths)
         cache_position = prompt_len
-        trim_threshold = max(1, prompt_len)
-        update = scheduler.schedule()
+        span_starts = [0] * max_batch_size
+
+        def can_admit(pending_request):
+            if not self.align_decode_fronts:
+                return True
+            return prompt_lengths[pending_request.request_id] <= cache_position
+
+        update = scheduler.schedule(admit_if=can_admit)
 
         while update.active:
             keep_slots = torch.tensor(update.keep_slots, dtype=torch.long, device=device)
@@ -316,22 +348,48 @@ class HybridEngineRollout(RolloutEngine):
                         survivor_attention = attention_mask.index_select(0, keep_slots).clone()
                         attention_mask[:survivor_count].copy_(survivor_attention)
                     attention_mask[survivor_count:].zero_()
+                    if self.align_decode_fronts:
+                        span_starts[:survivor_count] = [span_starts[index] for index in update.keep_slots]
+                        span_starts[survivor_count:] = [0] * (max_batch_size - survivor_count)
 
-                if update.retired or cache_position >= max_cache_len - trim_threshold:
+                if self.align_decode_fronts:
+                    dead_prefix = min(span_starts[:survivor_count])
+                    if update.admitted:
+                        longest_admitted = max(prompt_lengths[request.request_id] for request in update.admitted)
+                        dead_prefix = min(dead_prefix, max(0, cache_position - longest_admitted))
+                else:
+                    trim_threshold = max(1, prompt_len)
                     dead_prefix = self._continuous_dead_prefix(attention_mask, survivor_count)
-                    if dead_prefix >= trim_threshold or cache_position >= max_cache_len:
-                        if dead_prefix == 0:
-                            raise ValueError("continuous batching cache exhausted before active requests retired")
-                        cache.trim_left(dead_prefix)
-                        attention_mask[:, :-dead_prefix].copy_(attention_mask[:, dead_prefix:].clone())
-                        attention_mask[:, -dead_prefix:].zero_()
-                        write_positions[:survivor_count].sub_(dead_prefix)
-                        cache_position -= dead_prefix
+                    if dead_prefix < trim_threshold and cache_position < max_cache_len - trim_threshold:
+                        dead_prefix = 0
+                if dead_prefix:
+                    trim_start = None
+                    if profile_accelerator is not None:
+                        profile_accelerator.synchronize()
+                        trim_start = time.perf_counter()
+                    moved_bytes = sum((layer.keys[:, :, dead_prefix:, :].numel() * layer.keys.element_size() +
+                                       layer.values[:, :, dead_prefix:, :].numel() * layer.values.element_size())
+                                      for layer in cache.layers)
+                    moved_bytes += attention_mask[:, dead_prefix:].numel() * attention_mask.element_size()
+                    cache.trim_left(dead_prefix)
+                    attention_mask[:, :-dead_prefix].copy_(attention_mask[:, dead_prefix:].clone())
+                    attention_mask[:, -dead_prefix:].zero_()
+                    write_positions[:survivor_count].sub_(dead_prefix)
+                    cache_position -= dead_prefix
+                    stats["trim_count"] += 1
+                    stats["trimmed_columns"] += dead_prefix
+                    stats["trim_bytes_moved"] = stats.get("trim_bytes_moved", 0) + moved_bytes
+                    if profile_accelerator is not None:
+                        profile_accelerator.synchronize()
+                        stats["trim_latency_ms"] += (time.perf_counter() - trim_start) * 1000.0
+                    if self.align_decode_fronts:
+                        span_starts[:survivor_count] = [start - dead_prefix for start in span_starts[:survivor_count]]
             else:
                 cache.reset()
                 write_positions.fill_(-1)
                 attention_mask.zero_()
                 cache_position = prompt_len
+                span_starts = [0] * max_batch_size
 
             admitted_tokens = self._continuous_prefill(
                 module,
@@ -342,17 +400,28 @@ class HybridEngineRollout(RolloutEngine):
                 attention_mask,
                 write_positions,
                 cache_position,
-                prompt_len,
+                prompt_lengths,
                 model_dtype,
                 device,
+                self.align_decode_fronts,
             )
+            if self.align_decode_fronts:
+                for admitted, target_row in zip(update.admitted, update.admitted_slots):
+                    span_starts[target_row] = cache_position - prompt_lengths[admitted.request_id]
 
             decoded_tokens = {}
             if survivor_count:
                 survivor_ids = update.active_ids[:survivor_count]
                 decode_input = torch.cat([next_tokens[request_id] for request_id in survivor_ids], dim=0)
+                if cache_position >= max_cache_len:
+                    raise ValueError("continuous batching cache exhausted before active requests retired")
                 write_positions[:survivor_count].fill_(cache_position)
-                position_ids = attention_mask[:survivor_count, :cache_position].sum(dim=1, keepdim=True)
+                if self.align_decode_fronts:
+                    position_ids = torch.tensor([logical_positions[request_id] for request_id in survivor_ids],
+                                                dtype=torch.long,
+                                                device=device).unsqueeze(1)
+                else:
+                    position_ids = attention_mask[:survivor_count, :cache_position].sum(dim=1, keepdim=True)
                 attention_mask[:survivor_count, cache_position] = 1
                 output = self._call_model(
                     module,
@@ -364,7 +433,10 @@ class HybridEngineRollout(RolloutEngine):
                     position_ids=position_ids,
                 )
                 decoded = output.logits[:, -1, :].argmax(dim=-1, keepdim=True)
+                stats["decode_steps"] += 1
                 decoded_tokens = dict(zip(survivor_ids, decoded.split(1, dim=0)))
+                for request_id in survivor_ids:
+                    logical_positions[request_id] += 1
 
             next_tokens = decoded_tokens | admitted_tokens
             finished_ids = []
@@ -374,11 +446,26 @@ class HybridEngineRollout(RolloutEngine):
                 if self._is_eos(token):
                     finished_ids.append(request_id)
 
-            update = scheduler.advance(finished_ids)
             if survivor_count:
                 cache_position += 1
+            stats["peak_cache_length"] = max(stats["peak_cache_length"], cache_position)
+            update = scheduler.advance(finished_ids, admit_if=can_admit)
 
-        return self._build_continuous_batch(original_request, responses)
+        output = self._build_continuous_batch(original_request, responses)
+        if profile_accelerator is not None:
+            profile_accelerator.synchronize()
+            total_ms = (time.perf_counter() - profile_start) * 1000.0
+            generated_tokens = sum(len(response) for response in responses.values())
+            stats["end_to_end_ms"] = total_ms
+            stats["tokens_per_second"] = generated_tokens / (total_ms / 1000.0) if total_ms > 0.0 else 0.0
+        else:
+            stats["end_to_end_ms"] = None
+            stats["tokens_per_second"] = None
+        stats.setdefault("trim_bytes_moved", 0)
+        stats["trim_frequency"] = (stats["trim_count"] / stats["decode_steps"]
+                                    if stats["decode_steps"] else 0.0)
+        self._last_continuous_stats = stats
+        return output
 
     @staticmethod
     def _estimate_continuous_cache_len(prompt_len, max_new_tokens, max_batch_size):
@@ -435,9 +522,11 @@ class HybridEngineRollout(RolloutEngine):
             if request.prompt_ids.shape[0] != 1:
                 raise ValueError("continuous batching requires one prompt row per request")
             if request.prompt_ids.shape[1] != prompt_len:
-                raise ValueError("continuous batching currently requires equal prompt widths")
+                raise ValueError("continuous batching currently requires equal padded prompt widths")
             if request.prompt_ids.device != device:
                 raise ValueError("continuous batching requests must use the same device")
+            if not request.prompt_attention_mask.any():
+                raise ValueError("continuous batching requires at least one prompt token per request")
 
     @staticmethod
     def _continuous_dead_prefix(attention_mask, active_count):
@@ -449,35 +538,69 @@ class HybridEngineRollout(RolloutEngine):
         return int(occupied.to(dtype=torch.int32).argmax().item())
 
     def _continuous_prefill(self, module, static_cache_type, cache, update, request_by_id, attention_mask,
-                            write_positions, cache_position, prompt_len, model_dtype, device):
+                            write_positions, cache_position, prompt_lengths, model_dtype, device,
+                            align_decode_fronts=False):
         if not update.admitted:
             return {}
 
-        admitted_ids = tuple(request.request_id for request in update.admitted)
-        prompt_ids = torch.cat([request_by_id[request_id].prompt_ids for request_id in admitted_ids], dim=0)
-        prompt_attention = torch.cat([request_by_id[request_id].prompt_attention_mask for request_id in admitted_ids],
-                                     dim=0)
-        prefill_cache = self._create_static_cache(static_cache_type, module.config, len(admitted_ids), prompt_len,
-                                                  device, model_dtype)
-        prefill_output = self._call_model(
-            module,
-            prompt_ids,
-            attention_mask=prompt_attention,
-            past_key_values=prefill_cache,
-            use_cache=True,
-            cache_position=torch.arange(prompt_len, device=device),
-        )
-        prefill_tokens = prefill_output.logits[:, -1, :].argmax(dim=-1, keepdim=True)
-        cache_start = cache_position - prompt_len
-        for layer_idx, prefill_layer in enumerate(prefill_cache.layers):
-            target_layer = cache.layers[layer_idx]
+        if not align_decode_fronts:
+            admitted_ids = tuple(request.request_id for request in update.admitted)
+            prompt_ids = torch.cat([request_by_id[request_id].prompt_ids for request_id in admitted_ids], dim=0)
+            prompt_attention = torch.cat(
+                [request_by_id[request_id].prompt_attention_mask for request_id in admitted_ids], dim=0)
+            prompt_len = prompt_ids.shape[1]
+            prefill_cache = self._create_static_cache(static_cache_type, module.config, len(admitted_ids), prompt_len,
+                                                      device, model_dtype)
+            prefill_output = self._call_model(
+                module,
+                prompt_ids,
+                attention_mask=prompt_attention,
+                past_key_values=prefill_cache,
+                use_cache=True,
+                cache_position=torch.arange(prompt_len, device=device),
+            )
+            prefill_tokens = prefill_output.logits[:, -1, :].argmax(dim=-1, keepdim=True)
+            cache_start = cache_position - prompt_len
+            for layer_idx, prefill_layer in enumerate(prefill_cache.layers):
+                target_layer = cache.layers[layer_idx]
+                for source_row, target_row in enumerate(update.admitted_slots):
+                    target_layer.keys[target_row, :, cache_start:cache_position].copy_(prefill_layer.keys[source_row])
+                    target_layer.values[target_row, :, cache_start:cache_position].copy_(
+                        prefill_layer.values[source_row])
             for source_row, target_row in enumerate(update.admitted_slots):
-                target_layer.keys[target_row, :, cache_start:cache_position].copy_(prefill_layer.keys[source_row])
-                target_layer.values[target_row, :, cache_start:cache_position].copy_(prefill_layer.values[source_row])
-        for source_row, target_row in enumerate(update.admitted_slots):
-            attention_mask[target_row, cache_start:cache_position].copy_(prompt_attention[source_row])
+                attention_mask[target_row, cache_start:cache_position].copy_(prompt_attention[source_row])
+                write_positions[target_row] = cache_position
+            return dict(zip(admitted_ids, prefill_tokens.split(1, dim=0)))
+
+        admitted_tokens = {}
+        for admitted, target_row in zip(update.admitted, update.admitted_slots):
+            request_id = admitted.request_id
+            request = request_by_id[request_id]
+            prompt_len = prompt_lengths[request_id]
+            valid = request.prompt_attention_mask[0].bool()
+            prompt_ids = request.prompt_ids[:, valid]
+            prompt_attention = torch.ones_like(prompt_ids)
+            prefill_cache = self._create_static_cache(static_cache_type, module.config, 1, prompt_len, device,
+                                                      model_dtype)
+            prefill_output = self._call_model(
+                module,
+                prompt_ids,
+                attention_mask=prompt_attention,
+                past_key_values=prefill_cache,
+                use_cache=True,
+                cache_position=torch.arange(prompt_len, device=device),
+            )
+            admitted_tokens[request_id] = prefill_output.logits[:, -1, :].argmax(dim=-1, keepdim=True)
+            cache_start = cache_position - prompt_len
+            if cache_start < 0:
+                raise ValueError("continuous batching prompt does not fit behind the decode front")
+            for layer_idx, prefill_layer in enumerate(prefill_cache.layers):
+                target_layer = cache.layers[layer_idx]
+                target_layer.keys[target_row, :, cache_start:cache_position].copy_(prefill_layer.keys[0])
+                target_layer.values[target_row, :, cache_start:cache_position].copy_(prefill_layer.values[0])
+            attention_mask[target_row, cache_start:cache_position].fill_(1)
             write_positions[target_row] = cache_position
-        return dict(zip(admitted_ids, prefill_tokens.split(1, dim=0)))
+        return admitted_tokens
 
     def _is_eos(self, token):
         eos_token_id = self.tokenizer.eos_token_id
@@ -560,6 +683,10 @@ class HybridEngineRollout(RolloutEngine):
     def get_last_profile(self):
         """Return the most recent profiling snapshot for this rollout instance."""
         return self._last_profile
+
+    def get_last_continuous_stats(self):
+        """Return cache and throughput statistics from the most recent continuous rollout."""
+        return self._last_continuous_stats
 
     def _register_shared_prefill_hooks(self, module, batch_size, repeats):
         state = {"pending": True, "reduced": False}
