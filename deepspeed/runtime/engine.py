@@ -4496,7 +4496,11 @@ class DeepSpeedEngine(Module):
                                                          custom_load_fn=custom_load_fn)
 
         load_zero_checkpoint = load_path is not None and self.zero_optimization()
-        if load_zero_checkpoint and not self.zero_nvme_offload_optimizer():
+        # A universal checkpoint holds no rank-specific swap files to copy back, so even with NVMe
+        # offload it goes through the regular ZeRO loader, which writes the restored tensors into
+        # the swapper layout of the current run.
+        restore_nvme_from_swap_files = self.zero_nvme_offload_optimizer() and not self.load_universal_checkpoint()
+        if load_zero_checkpoint and not restore_nvme_from_swap_files:
             autoep_zero3_partition_native_load = self.has_moe_layers and self.zero_optimization_partition_weights()
             if ((load_optimizer_states and not load_module_only) or self.load_universal_checkpoint()
                     or autoep_zero3_partition_native_load):
@@ -4509,7 +4513,7 @@ class DeepSpeedEngine(Module):
             if not success:
                 self.optimizer._restore_from_bit16_weights()
 
-        if self.zero_nvme_offload_optimizer():
+        if restore_nvme_from_swap_files:
             from shutil import copytree, disk_usage
             rank = self.local_rank if self.use_node_local_storage() else self.global_rank
             rank_dir = "rank" + dp_index_to_str(rank)
@@ -4523,6 +4527,8 @@ class DeepSpeedEngine(Module):
             _, _, free = disk_usage(offload_dir)
             logger.info(f"Copying complete! {free / 1e9:,.2f} GB free on target filesystem")
             self.optimizer.reset_swap_buffers()
+            if load_optimizer_states and not load_module_only:
+                self._load_resident_optimizer_states(load_dir, tag)
 
         if self._optimizer_has_ckpt_event_epilogue():
             self.optimizer.checkpoint_event_epilogue()
@@ -4783,6 +4789,22 @@ class DeepSpeedEngine(Module):
             client_state['optimizer'] = optim_checkpoint['optimizer']
 
         return load_path, client_state
+
+    def _load_resident_optimizer_states(self, load_dir, tag):
+        """Restore optimizer state that NVMe offload keeps in memory instead of in swap files.
+
+        The NVMe restore path above only copies the swap files back, so any state the optimizer
+        deliberately pins in memory has to come from the regular ZeRO optimizer checkpoint.
+        """
+        if not hasattr(self.optimizer, 'restore_resident_optimizer_states'):
+            return
+
+        zero_sd_list = self._get_all_zero_checkpoints(load_dir, tag)
+        if zero_sd_list is None:
+            return
+
+        rank = dist.get_rank(group=self.optimizer.dp_process_group)
+        self.optimizer.restore_resident_optimizer_states(zero_sd_list[rank])
 
     def _load_zero_checkpoint(self, load_dir, tag, load_optimizer_states=True):
 

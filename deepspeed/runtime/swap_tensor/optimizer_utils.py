@@ -207,10 +207,26 @@ class OptimizerSwapper(object):
         for swap_info in self.swap_params_info.values():
             swap_info.tensors = [swap_info.tensors[0]]
             swap_info.has_state_tensors = False
+            swap_info.release_unswapped_gradients()
+
+    def _writeback_gradients(self, swap_info, parameter, aio_handle):
+        """Persist a parameter's gradient partitions, whichever way they are stored."""
+        if swap_info.swapped_gradients:
+            param_gradients = swap_info.swapped_gradients.values()
+            swap_buffers = [parameter.grad.narrow(0, grad.offset, grad.length) for grad in param_gradients]
+            swap_paths = [grad.path for grad in param_gradients]
+            swap_out_tensors(aio_handle, swap_buffers, swap_paths)
+            assert len(swap_buffers) == aio_handle.wait()
+        if swap_info.unswapped_gradients:
+            swap_info.write_unswapped_gradients(src_buffer=parameter.grad)
 
     def is_swappable_tensor(self, tensor=None, numel=None):
         assert tensor is not None or numel is not None, "Either tensor or numel must be provided"
         if tensor is not None:
+            # Callers can pin an optimizer state in memory (e.g. the Muon momentum buffer under
+            # save_muon_momentum_buffer_in_memory) by tagging the tensor, which excludes it from swapping.
+            if not getattr(tensor, "swappable", True) or getattr(tensor, "is_resident", False):
+                return False
             return self.min_aio_bytes <= (tensor.numel() * self.swap_element_size)
         return self.min_aio_bytes <= (numel * self.swap_element_size)
 
@@ -466,9 +482,6 @@ class OptimizerSwapper(object):
         num_elem_count = swap_info.read_unswapped_gradients(dest_buffer)
         self._stop_timer(UNSWAPPED_READ_GRADIENTS)
         self._log_timers([UNSWAPPED_READ_GRADIENTS])
-
-        # It should be safe to discard unswapped gradient partitions
-        swap_info.release_unswapped_gradients()
 
         if SWAPPER_DEBUG_MODE:
             logger.info(
