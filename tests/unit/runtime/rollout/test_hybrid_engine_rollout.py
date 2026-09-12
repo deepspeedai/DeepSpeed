@@ -267,6 +267,59 @@ def test_continuous_generation_trims_cache_after_staggered_eos():
 
 @patch("deepspeed.runtime.rollout.hybrid_engine_rollout.time.perf_counter")
 @patch("deepspeed.runtime.rollout.hybrid_engine_rollout.get_accelerator")
+def test_continuous_generation_records_profile(mock_get_accelerator, mock_perf_counter):
+
+    class CacheConfig(SimpleNamespace):
+
+        def get_text_config(self, **_kwargs):
+            return self
+
+    class CacheClassModel(torch.nn.Module):
+        _supports_cache_class = True
+
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.zeros(1))
+            self.config = CacheConfig(
+                max_position_embeddings=32,
+                num_hidden_layers=1,
+                num_attention_heads=1,
+                num_key_value_heads=1,
+                hidden_size=1,
+                head_dim=1,
+            )
+
+        def forward(self, input_ids, attention_mask, past_key_values=None, use_cache=True, **kwargs):
+            states = input_ids[:, None, :, None].to(dtype=torch.float32)
+            _, values = past_key_values.update(states, states, layer_idx=0, **kwargs)
+            logits = torch.zeros((input_ids.shape[0], input_ids.shape[1], 16))
+            logits[..., 7] = 1
+            return SimpleNamespace(logits=logits, past_key_values=past_key_values)
+
+    model = CacheClassModel()
+    rollout = HybridEngineRollout(
+        SimpleNamespace(module=model),
+        SimpleNamespace(pad_token_id=0, eos_token_id=2),
+        cfg=HybridEngineRolloutConfig(enable_profiling=True),
+    )
+    request = RolloutRequest(torch.tensor([[1, 2, 3], [1, 2, 4]]), torch.ones((2, 3), dtype=torch.long))
+    mock_perf_counter.side_effect = iter(float(index) / 1000 for index in range(100))
+
+    output = rollout.generate(request, SamplingConfig(max_new_tokens=2, temperature=0, continuous_batch_size=1))
+
+    profile = rollout.get_last_profile()
+    assert output.input_ids.tolist() == [[1, 2, 3, 7, 7], [1, 2, 4, 7, 7]]
+    assert profile["num_prefill_forwards"] == 2
+    assert profile["num_decode_forwards"] == 2
+    assert profile["num_generated_tokens"] == 4
+    assert profile["active_batch_size"] == 1
+    assert profile["continuous_batch_size"] == 1
+    assert profile["prefill_forward_ms"] > 0
+    assert profile["decode_forward_ms"] > 0
+
+
+@patch("deepspeed.runtime.rollout.hybrid_engine_rollout.time.perf_counter")
+@patch("deepspeed.runtime.rollout.hybrid_engine_rollout.get_accelerator")
 def test_generate_records_profile_when_enabled(mock_get_accelerator, mock_perf_counter):
     engine = _make_engine()
     tok = _make_tokenizer()
