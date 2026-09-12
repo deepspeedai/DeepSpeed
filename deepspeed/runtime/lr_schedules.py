@@ -41,6 +41,7 @@ CYCLE_MIN_LR = 'cycle_min_lr'
 CYCLE_MAX_LR = 'cycle_max_lr'
 DECAY_LR_RATE = 'decay_lr_rate'
 
+CYCLE_MOMENTUM = 'cycle_momentum'
 CYCLE_MIN_MOM = 'cycle_min_mom'
 CYCLE_MAX_MOM = 'cycle_max_mom'
 DECAY_MOM_RATE = 'decay_mom_rate'
@@ -80,16 +81,16 @@ def add_tuning_arguments(parser):
                        help='size of first step of 1Cycle schedule (training steps).')
     group.add_argument("--cycle_first_stair_count",
                        type=int,
-                       default=-1,
+                       default=None,
                        help='first stair count for 1Cycle schedule.')
     group.add_argument("--cycle_second_step_size",
                        type=int,
-                       default=-1,
+                       default=None,
                        help='size of second step of 1Cycle schedule (default first_step_size).')
     group.add_argument("--cycle_second_stair_count",
                        type=int,
-                       default=-1,
-                       help='second stair count for 1Cycle schedule.')
+                       default=None,
+                       help='second stair count for 1Cycle schedule (default first stair count).')
     group.add_argument("--decay_step_size",
                        type=int,
                        default=1000,
@@ -171,6 +172,9 @@ def override_1cycle_params(args, params):
         params[DECAY_LR_RATE] = args.decay_lr_rate
 
     # 1Cycle MOM params
+    if hasattr(args, CYCLE_MOMENTUM):
+        params[CYCLE_MOMENTUM] = args.cycle_momentum
+
     if hasattr(args, CYCLE_MIN_MOM) and args.cycle_min_mom is not None:
         params[CYCLE_MIN_MOM] = args.cycle_min_mom
 
