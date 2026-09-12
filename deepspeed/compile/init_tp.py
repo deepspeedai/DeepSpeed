@@ -9,7 +9,7 @@ from torch.fx import GraphModule
 
 from deepspeed.utils.torch import required_torch_version
 
-from .passes.tp_compile import apply_autotp, defer_collectives_to_compiler
+from .passes.tp_compile import apply_autotp, defer_collectives_to_compiler, DEFERRED_NAMES_ATTR
 
 AUTOTP_MIN_TORCH_VERSION = 2.6
 BROKEN_TRANSFORMERS_MOE_VERSIONS = ("5.8.0", "5.10.1")
@@ -53,9 +53,10 @@ def init_autotp(model):
     """
     _check_autotp_compatibility(model)
     defer_collectives_to_compiler(model)
+    deferred_names = getattr(model, DEFERRED_NAMES_ATTR, None)
 
     def backend_fn(gm: GraphModule, real_inputs):
-        apply_autotp(gm, real_inputs)
+        apply_autotp(gm, real_inputs, deferred_names=deferred_names)
         return torch._inductor.compile(gm, real_inputs)
 
     return backend_fn

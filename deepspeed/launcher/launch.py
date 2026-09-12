@@ -24,7 +24,6 @@ from typing import Dict
 from argparse import ArgumentParser, REMAINDER
 from ..constants import TORCH_DISTRIBUTED_DEFAULT_PORT, CROSS_RANK, CROSS_SIZE
 from deepspeed.accelerator import get_accelerator
-from ..nebula.constants import DLTS_POD_ENV_PATH
 from ..utils import logger, get_numactl_cmd, set_log_level_from_string
 from ..elasticity import is_torch_elastic_compatible
 from .constants import ELASTIC_TRAINING_ID_DEFAULT
@@ -207,16 +206,6 @@ def main():
             logger.info("Disabling elastic training support as \
                     PyTorch version should be greater than 1.11.x")
             args.enable_elastic_training = False
-
-    if os.path.exists(DLTS_POD_ENV_PATH):
-        with open(DLTS_POD_ENV_PATH) as file:
-            lines = file.readlines()
-            lines = [line.rstrip() for line in lines]
-            for line in lines:
-                if line.startswith('export FC_TASKROLE_NAME') or line.startswith('export FC_TASK_INDEX'):
-                    key_val = line.split()[1]
-                    key, val = key_val.split('=')
-                    current_env[key] = val
 
     processes = []
     cmd = []

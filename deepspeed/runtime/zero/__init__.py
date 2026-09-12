@@ -14,6 +14,4 @@ from .partition_parameters import DeepSpeedTensorOverride
 from .tiling import TiledLinear
 from .tiling import TiledLinearReturnBias
 
-from .mics import MiCS_Init
-
 from .stage3 import unwrap_model_for_generation
