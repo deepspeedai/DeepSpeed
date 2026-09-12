@@ -258,6 +258,18 @@ def test_nebula_config_is_rejected():
         DeepSpeedConfig(config_dict)
 
 
+def test_sparse_attention_config_is_rejected():
+    config_dict = {
+        "train_micro_batch_size_per_gpu": 1,
+        "sparse_attention": {
+            "mode": "fixed",
+        },
+    }
+
+    with pytest.raises(DeepSpeedConfigError, match="Sparse Attention"):
+        DeepSpeedConfig(config_dict)
+
+
 def test_mics_zero_config_is_rejected():
     config_dict = {
         "train_micro_batch_size_per_gpu": 1,

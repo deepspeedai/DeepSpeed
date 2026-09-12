@@ -102,10 +102,6 @@ Pipeline parallelism of DeepSpeed reduce communication volume during distributed
 ## Data efficiency
 DeepSpeed Data Efficiency Library provides efficient data sampling via curriculum learning and efficient data routing via random layerwise token dropping. The composed solution enables up to 2x data and 2x time saving during GPT-3/BERT pretraining and GPT/ViT finetuning, or further improve model quality under the same data/time. See more in [the tutorial](/tutorials/data-efficiency).
 
-## Supporting long sequence length
-DeepSpeed offers sparse attention kernels—an instrumental technology to support long sequences of model inputs, whether for text, image, or sound. Compared with the classic dense Transformers, it powers **an order-of-magnitude longer input sequence** and obtains up to 6x faster execution with comparable accuracy. It also outperforms state-of-the-art sparse implementations with 1.5–3x faster execution. Furthermore, our sparse kernels support efficient execution of flexible sparse format and empower users to innovate on their custom sparse structures.  [Read more here](https://www.deepspeed.ai/2020/09/08/sparse-attention.html).
-
-
 ## Fast convergence for effectiveness
 DeepSpeed supports advanced hyperparameter tuning and large batch size
 optimizers such as [LAMB](https://arxiv.org/abs/1904.00962). These improve the
@@ -140,10 +136,6 @@ Below we provide a brief feature list, see our detailed [feature overview](https
   * Leverage both CPU/GPU memory for model training
   * Support 10B model training on a single GPU
 * [Ultra-fast dense transformer kernels](https://www.deepspeed.ai/2020/05/18/bert-record.html)
-* [Sparse attention](https://www.deepspeed.ai/2020/09/08/sparse-attention-news.html)
-  * Memory- and compute-efficient sparse kernels
-  * Support 10x long sequences than dense
-  * Flexible support to different sparse structures
 * [Additional Memory and Bandwidth Optimizations](https://www.deepspeed.ai/features/#additional-memory-and-bandwidth-optimizations)
   * Smart Gradient Accumulation
   * Communication/Computation Overlap
@@ -538,26 +530,6 @@ DeepSpeed provides logging of all communication operations launched within `deep
 ```
 
 Client codes can then print a summary with a call to `deepspeed.comm.log_summary()`. For more details and example usage, see the [Communication Logging](/tutorials/comms-logging) tutorial.
-
-## Sparse Attention
-DeepSpeed offers sparse attention to support long sequences. Please refer to the [Sparse Attention](/tutorials/sparse-attention/) tutorial.
-
-```bash
---deepspeed_sparse_attention
-```
-
-```json
-"sparse_attention": {
-    "mode": "fixed",
-    "block": 16,
-    "different_layout_per_head": true,
-    "num_local_blocks": 4,
-    "num_global_blocks": 1,
-    "attention": "bidirectional",
-    "horizontal_global_attention": false,
-    "num_different_global_patterns": 4
-}
-```
 
 ## Mixture of Experts (MoE)
 To learn more about training Mixture of Experts (MoE) models with DeepSpeed, see our [tutorial](https://www.deepspeed.ai/tutorials/mixture-of-experts/) for more details.
