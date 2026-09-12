@@ -541,6 +541,15 @@ def create_shard_offsets(gm: GraphModule, s0_node: Node) -> Tuple[Node, Node]:
     sp_size: int = sp_dp_registry.sp_size()
     sp_rank: int = dist.get_rank() % sp_dp_registry.sp_size()
     with gm.graph.inserting_after(s0_node):
+        remainder_node = gm.graph.call_function(operator.mod, args=(s0_node, sp_size))
+    with gm.graph.inserting_after(remainder_node):
+        divisible_node = gm.graph.call_function(operator.eq, args=(remainder_node, 0))
+    with gm.graph.inserting_after(divisible_node):
+        assert_node = gm.graph.call_function(
+            torch._assert,
+            args=(divisible_node, f"AutoSP sequence length must be divisible by sequence_parallel_size={sp_size}"),
+        )
+    with gm.graph.inserting_after(assert_node):
         chunk_size_node = gm.graph.call_function(operator.floordiv, args=(s0_node, sp_size))
     with gm.graph.inserting_after(chunk_size_node):
         start_node = gm.graph.call_function(operator.mul, args=(sp_rank, chunk_size_node))
@@ -593,22 +602,48 @@ def create_symbolic_slice_indices(
     return slice_all, slice_range
 
 
-def shard_tensor_node(gm: GraphModule, tensor_node: Node):
-    from .fx import find_node_by_name, get_node_shape_meta, replace_node_users
+def get_autosp_seq_dim(tensor_node: Node) -> int:
+    tensor_dict = tensor_node.meta.get("tensor_dict", {})
+    tag = tensor_dict.get("tag")
+    if isinstance(tag, tuple):
+        _, seq_dim = tag
+        return seq_dim
+    return 1
+
+
+def find_symbolic_shape_node(gm: GraphModule, symbolic_dim: torch.SymInt) -> Optional[Node]:
+    from .fx import find_node_by_name
+    node = find_node_by_name(gm, str(symbolic_dim))
+    if node is not None:
+        return node
+
+    for candidate in gm.graph.nodes:
+        candidate_value = candidate.meta.get("val", candidate.meta.get("example_value"))
+        if candidate.op == "placeholder" and str(candidate_value) == str(symbolic_dim):
+            return candidate
+    return None
+
+
+def shard_tensor_node(gm: GraphModule,
+                      tensor_node: Node,
+                      seq_dim: Optional[int] = None,
+                      make_contiguous: bool = False) -> Node:
+    from .fx import get_node_shape_meta, replace_node_users
     val = get_node_shape_meta(tensor_node)
     assert val is not None, f"Node {tensor_node.name} has no shape metadata"
 
-    seq_len = val.shape[1]
+    seq_dim = get_autosp_seq_dim(tensor_node) if seq_dim is None else seq_dim
+    seq_len = val.shape[seq_dim]
 
     assert isinstance(
         seq_len,
         torch.SymInt), (f"Expected sequence dimension to be {torch.SymInt!r} but instead found {type(seq_len)!r}")
 
-    symb_seq_int_node = find_node_by_name(gm, str(seq_len))
+    symb_seq_int_node = find_symbolic_shape_node(gm, seq_len)
     assert symb_seq_int_node, f"Unable to find symbolic placeholder for {seq_len}"
 
     slice_all, slice_range = create_symbolic_slice_indices(gm, symb_seq_int_node)
-    indices = (slice_all, slice_range)
+    indices = tuple(slice_range if dim == seq_dim else slice_all for dim in range(val.ndim))
 
     positions = {node: i for i, node in enumerate(gm.graph.nodes)}
     # Insert after the later dependency so the new getitem does not appear
@@ -622,3 +657,9 @@ def shard_tensor_node(gm: GraphModule, tensor_node: Node):
         )
 
     replace_node_users(tensor_node, sliced_node, exclude=[sliced_node])
+    if make_contiguous:
+        with gm.graph.inserting_after(sliced_node):
+            contiguous_node = gm.graph.call_method("contiguous", args=(sliced_node, ))
+        replace_node_users(sliced_node, contiguous_node, exclude=[contiguous_node])
+        return contiguous_node
+    return sliced_node

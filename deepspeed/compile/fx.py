@@ -172,7 +172,8 @@ def find_node_by_name(gm: GraphModule, name: str) -> Optional[Node]:
 
 
 def get_node_shape_meta(node: Node) -> Optional[torch.Tensor]:
-    return node.meta.get("val") or node.meta.get("example_value")
+    value = node.meta.get("val")
+    return value if value is not None else node.meta.get("example_value")
 
 
 def find_node_by_tag(gm: GraphModule, tag: str) -> Optional[Node]:
@@ -180,7 +181,8 @@ def find_node_by_tag(gm: GraphModule, tag: str) -> Optional[Node]:
     for node in gm.graph.nodes:
         # https://github.com/pytorch/pytorch/blob/085b71eab05cbc7d474a173884269c62d2778f77/torch/_dynamo/utils.py#L5048
         tensor_dict = node.meta.get('tensor_dict')
-        if tensor_dict and tensor_dict.get('tag') == tag:
+        node_tag = tensor_dict.get('tag') if tensor_dict else None
+        if node_tag == tag or (isinstance(node_tag, tuple) and len(node_tag) == 2 and node_tag[0] == tag):
             input_id_node = node
             break
     return input_id_node

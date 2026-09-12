@@ -3,10 +3,11 @@
 
 # DeepSpeed Team
 
-from .all_to_all import all_to_all
+from .all_to_all import all_gather_sequence, all_to_all, aggregate_loss
 from .tp_collectives import copy_to_tp_region, gather_from_tp_region, reduce_from_tp_region
 from . import sp_dp_registry
 
 __all__ = [
-    "all_to_all", "copy_to_tp_region", "gather_from_tp_region", "reduce_from_tp_region", "sp_dp_registry", "sp_compat"
+    "all_gather_sequence", "all_to_all", "aggregate_loss", "copy_to_tp_region", "gather_from_tp_region",
+    "reduce_from_tp_region", "sp_dp_registry", "sp_compat"
 ]
