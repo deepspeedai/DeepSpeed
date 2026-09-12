@@ -310,6 +310,12 @@ class DeepSpeedInferenceConfig(DeepSpeedConfigModel):
             return field_value
         raise TypeError(f"Invalid type for dtype: {type(field_value)}")
 
+    @field_validator("max_out_tokens")
+    def validate_max_out_tokens(cls, field_value, values):
+        if field_value <= 0:
+            raise ValueError(f"max_out_tokens must be a positive integer, got {field_value}")
+        return field_value
+
     @field_validator("moe")
     def moe_backward_compat(cls, field_value, values):
         if isinstance(field_value, bool):
