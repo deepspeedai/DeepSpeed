@@ -821,6 +821,7 @@ class SequenceTiledCompute(torch.autograd.Function):
 
         with torch.no_grad():
             shard_step = math.ceil(seqlen / shards)
+            ctx.shard_step = shard_step
             output_shards = []
 
             for i in range(shards):
@@ -877,8 +878,6 @@ class SequenceTiledCompute(torch.autograd.Function):
         else:
             grad_requiring_tensor_grad = torch.empty_like(grad_requiring_tensor)
 
-        kwargs_to_shard_shards = {k: list(torch.chunk(v, chunks=shards, dim=1)) for k, v in kwargs_to_shard.items()}
-
         for i in range(shards):
             # when fn involves one or more model weights deepspeed will normally push a grad to
             # reduce per sub-module call, so since we only want it to add a grad for the last
@@ -894,14 +893,18 @@ class SequenceTiledCompute(torch.autograd.Function):
                     for param in compute_params:
                         param.ds_grad_is_ready = True
 
-            kwargs_to_shard_shard = {k: v[i] for k, v in kwargs_to_shard_shards.items()}
+            # Match forward's empty trailing slices, with offsets that remain valid for narrow().
+            shard_offset = min(i * ctx.shard_step, ctx.seqlen)
+            kwargs_to_shard_shard = {
+                k: v[:, shard_offset:shard_offset + ctx.shard_step]
+                for k, v in kwargs_to_shard.items()
+            }
             grad_requiring_tensor_shard = kwargs_to_shard_shard[grad_requiring_tensor_key]
 
             grad_requiring_tensor_shard.requires_grad_(grad_requiring_tensor_requires_grad)
 
             # if seqlen is not exactly divisible by shards the last step will be shorter than shard_step
-            shard_step = kwargs_to_shard_shards[grad_requiring_tensor_key][i].shape[1]
-            shard_offset = i * kwargs_to_shard_shards[grad_requiring_tensor_key][0].shape[1]
+            shard_step = grad_requiring_tensor_shard.shape[1]
 
             if grad_requiring_tensor.shape[0] == 1:
                 # on narrow the shard's stride is unaffected with dim0==1 (bs) so we use the most efficient `narrow` alias:
