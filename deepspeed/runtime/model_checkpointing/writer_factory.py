@@ -19,10 +19,7 @@ class CheckpointWriterFactory(object):
         self._io_buffer_double = writer_config[CHECKPOINT_IO_BUFFER_DOUBLE]
         self._data_parallel_writer = dp_writer_config
         self._io_multiplier = writer_config[CHECKPOINT_IO_MULTIPLIER]
-        if self._data_parallel_writer.pure_dp:
-            self._show_statistics = writer_config[CHECKPOINT_IO_STATISTICS] and self._data_parallel_writer is not None
-        else:
-            self._show_statistics = writer_config[CHECKPOINT_IO_STATISTICS] and self._data_parallel_writer is not None
+        self._show_statistics = writer_config[CHECKPOINT_IO_STATISTICS] and self._data_parallel_writer is not None
         self._io_buffer = None
         self._dnvme_handle = None
         self._writer = None
@@ -34,9 +31,6 @@ class CheckpointWriterFactory(object):
                 self._setup_for_gds(aio_config)
             else:
                 self._setup_for_aio(aio_config)
-        print(
-            f'WriterFactory: self._data_parallel_writer={self._data_parallel_writer} self._show_statistics={self._show_statistics}'
-        )
 
     def create_writer(self, file_path, optimize_dp_state):
         assert self._writer is None, \
