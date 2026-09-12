@@ -7,7 +7,6 @@ from . import adam
 from . import adagrad
 from . import lamb
 from . import lion
-from . import sparse_attention
 from . import transformer
 from . import fp_quantizer
 from .transformer import DeepSpeedTransformerLayer, DeepSpeedTransformerConfig
