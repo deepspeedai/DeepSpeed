@@ -198,8 +198,6 @@ class DeepSpeedHybridEngine(DeepSpeedEngine):
             raise RuntimeError("Shared prefill does not support inference tensor parallelism")
         if hybrid_config.release_inference_cache:
             raise RuntimeError("Shared prefill does not support release_inference_cache")
-        if hybrid_config.enable_cuda_graph:
-            raise RuntimeError("Shared prefill does not support CUDA graph capture")
         if len(self._inference_containers) == 0:
             raise RuntimeError("Shared prefill requires HybridEngine inference containers")
 

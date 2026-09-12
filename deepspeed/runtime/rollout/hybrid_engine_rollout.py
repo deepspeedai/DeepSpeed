@@ -74,6 +74,54 @@ class _ForwardProfiler:
         return start.elapsed_time(end)
 
 
+class _ForwardProfiler:
+    """Measure top-level model forwards without synchronizing each call."""
+
+    def __init__(self, accelerator):
+        self.event_type = accelerator.Event
+        self.use_host_timer = accelerator.use_host_timers()
+        # Host intervals are only reliable when there is no asynchronous device
+        # work, as on CPU. MPS exposes events but cannot time them, so its host
+        # intervals would measure enqueue latency rather than model execution.
+        self.is_available = not self.use_host_timer or self.event_type is None
+        self.active_start = None
+        self.measurements = []
+
+    def register(self, module):
+        if not self.is_available:
+            return ()
+        pre_handle = module.register_forward_pre_hook(self._start_forward)
+        post_handle = module.register_forward_hook(self._end_forward)
+        return pre_handle, post_handle
+
+    def get_stage_times(self):
+        if not self.measurements:
+            return None, None, 0
+
+        durations = [self._elapsed_time(start, end) for start, end in self.measurements]
+        return durations[0], sum(durations[1:]), len(durations) - 1
+
+    def _start_forward(self, _module, _args):
+        self.active_start = self._record_time()
+
+    def _end_forward(self, _module, _args, _output):
+        end = self._record_time()
+        self.measurements.append((self.active_start, end))
+        self.active_start = None
+
+    def _record_time(self):
+        if self.use_host_timer:
+            return time.perf_counter()
+        event = self.event_type(enable_timing=True)
+        event.record()
+        return event
+
+    def _elapsed_time(self, start, end):
+        if self.use_host_timer:
+            return (end - start) * 1000.0
+        return start.elapsed_time(end)
+
+
 @dataclass
 class HybridEngineRolloutConfig:
     """Configuration for HybridEngineRollout."""
@@ -160,6 +208,7 @@ class HybridEngineRollout(RolloutEngine):
                     prompt_ids,
                     attention_mask=prompt_attn,
                     max_new_tokens=max_new_tokens,
+                    min_new_tokens=max_new_tokens,
                     # ZeRO-3 gathers parameters during each decode forward, so every
                     # data-parallel rank must execute the same number of iterations.
                     eos_token_id=None,
