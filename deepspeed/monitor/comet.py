@@ -70,6 +70,10 @@ class CometMonitor(Monitor):
                     step=engine_global_samples,
                 )
 
+    def update_config(self, config_dict):
+        if self._experiment is not None:
+            self._experiment.log_parameters(config_dict)
+
 
 class EventsLogScheduler:
 

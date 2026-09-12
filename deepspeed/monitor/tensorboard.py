@@ -5,6 +5,7 @@
 
 from .utils import check_tb_availability
 from .monitor import Monitor
+import json
 import os
 
 import deepspeed.comm as dist
@@ -54,3 +55,7 @@ class TensorBoardMonitor(Monitor):
     def flush(self):
         if self.enabled and self.summary_writer is not None and dist.get_rank() == 0:
             self.summary_writer.flush()
+
+    def update_config(self, config_dict):
+        if self.summary_writer is not None:
+            self.summary_writer.add_text("DeepSpeed/config", json.dumps(config_dict, indent=2), global_step=0)
