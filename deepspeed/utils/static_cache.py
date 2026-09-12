@@ -212,6 +212,11 @@ class DeepSpeedStaticCache:
             return 0
         return self._layers[layer_idx].get_seq_length()
 
+    def get_query_offset(self, layer_idx: int = 0) -> int:
+        # transformers >= 5 cache protocol: the query offset equals the cached
+        # sequence length for non-MTP layers (see HF cache_utils).
+        return self.get_seq_length(layer_idx=layer_idx)
+
     def get_max_cache_shape(self, layer_idx: int = 0) -> int:
         if layer_idx >= len(self._layers):
             return self._max_cache_len

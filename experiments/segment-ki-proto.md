@@ -180,3 +180,63 @@ kernel；segKI 委托误调模块级 `m5.torch_recurrent_gated_delta_rule`
 正确性：分叉位 [0,75] 与 GLU 时代 ULP 分叉完全同位（非结构性）。
 layout 修复（strided gates + 显式 qkv repack + stride(-2) 越界修复）
 同轮落地。
+
+## Graph capture 实验 + GDN 静态化方案 (2026-09-10/11)
+
+### 实验结果（Qwen2.5-0.5B-Instruct，HybridEngineRollout use_graph_capture）
+
+| 配置 | tok/s | 说明 |
+|---|---|---|
+| eager | ~50 | golden 基线 |
+| + graph capture | **182-193（3.7×）** | 文本正确 |
+| + segKI + graph | 164-176（**-9%**） | ULP 分叉 |
+
+三个发现：
+1. **收益重叠关系实锤**：graph replay 吃掉 CPU dispatch 后，segKI 的
+   CPU 收益（~7%）归零，其残余 device 开销（切片链）转为净负担——
+   graph 与 segKI 收割同一池开销，是替代不是叠加。
+2. **graph capture 对 GDN 混合架构崩**：`_generate_graph` 的 KV 拷贝循环
+   假设每层 cache 槽都有 keys/values（`LinearAttentionLayer has no
+   attribute 'keys'`）——DeepSpeedStaticCache 的 KV-only 世界观 vs GDN 的
+   异构槽（recurrent_states + conv_states）。**非 GDN 固有缺陷**：GDN 状态
+   天生固定形状（比增长 seq 的 KV 更 graph 友好）；vLLM/SGLang 已让
+   hybrid GDN 模型（Qwen3-Next/3.5/3.6-27B）跑在 CUDA graph 上（独立
+   状态 allocator + 原位更新）。
+3. **存量 API 失效**：transformers 5.x cache 协议新增 `get_query_offset`，
+   DeepSpeedStaticCache 未实现导致 graph 路径整体静默不可用（±segKI 均
+   崩，模型无关）——已修复（转发 get_seq_length），0.5B graph 复活 3.7×。
+
+### GDN graph capture 修复方案（预估 3-4 天）
+
+Step 1 槽型感知（~1d）：DeepSpeedStaticCache 增加 DSStaticGDNLayer
+（recurrent_states [b,vh,kd,vd] fp32 + conv_states [b,conv_dim,k-1] 环形），
+拷贝循环按槽型分派；实现 HF Cache 的 GDN 协议方法
+（has_previous_state/update_recurrent_state/update_conv_state——接口
+清单复用 segKI GDN 委托的 kwargs 白名单战利品）。
+
+Step 2 捕获安全（~1d，关键点）：HF 的 update_recurrent_state 是重绑定
+（每次 replay 产生新 tensor，graph 必坏）→ 改为原位
+`buffer.copy_(state)`；conv 已原位（causal_conv1d_update，vLLM 血统）；
+FLA fused_recurrent 纯 GPU 固定形状，捕获兼容风险低（vLLM 先例）。
+
+Step 3 捕获循环 + 门禁（~1d）：现有 static token/mask/position 骨架不动
+（GDN 层递归路径无需 mask）；门禁沿用 greedy vs golden（ULP 容忍）+
+跨序列状态 reset + 重放确定性。
+
+风险：MTP 层（Qwen3.5 有 1 层，MtpCache 有 query offset 偏移语义）——
+第一版排除于捕获外（rollout 不需要 MTP）。
+
+收益账：0.5B graph=3.7×；4B 拿一半即 ~40+ tok/s 级，碾压一切融合手段；
+且 DecodeGraphCache 是 engine 级，同时服务两条 KI 线。
+
+### 修复后的重测项
+
+graph 通了后 segKI 重定位：CPU 收益被 replay 吃掉，但 kernel 数影响
+replay 时长——切片开销清零后的 segKI 在 graph 内应转正（少 ~250
+kernel/replay）。这是 graph 修复后的第一个实验。
+
+### 战略图景（最终版）
+
+1. graph capture：3.7×（0.5B）——对 GDN 混合架构待修（本方案）
+2. segKI 段融合：+10.3%（4B）——graph 不可用场景的过渡与补充
+3. native scan kernel：device 侧 2× 台阶——与 1/2 正交（真打带宽）
