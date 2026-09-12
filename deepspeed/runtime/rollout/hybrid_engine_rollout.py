@@ -397,7 +397,7 @@ class HybridEngineRollout(RolloutEngine):
         generation_end = self._profile_start(profile)
         post_processing_start = generation_end
         output = self._build_continuous_batch(original_request, responses)
-        post_processing_end = self._profile_end(profile, None, post_processing_start, synchronize=False)
+        post_processing_end = self._profile_end(profile, None, post_processing_start)
         if profile is not None:
             self._finish_continuous_profile(profile, original_request, responses, max_batch_size, prompt_len,
                                             generation_end, post_processing_end)

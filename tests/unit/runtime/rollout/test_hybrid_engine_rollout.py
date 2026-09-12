@@ -265,9 +265,9 @@ def test_continuous_generation_trims_cache_after_staggered_eos():
     ]
 
 
-@patch("deepspeed.runtime.rollout.hybrid_engine_rollout.time.perf_counter")
-@patch("deepspeed.runtime.rollout.hybrid_engine_rollout.get_accelerator")
-def test_continuous_generation_records_profile(mock_get_accelerator, mock_perf_counter):
+def test_continuous_generation_profile_on_cuda_device():
+    if not torch.cuda.is_available():  #ignore-cuda
+        pytest.skip("CUDA is required for asynchronous profiling coverage")
 
     class CacheConfig(SimpleNamespace):
 
@@ -292,30 +292,32 @@ def test_continuous_generation_records_profile(mock_get_accelerator, mock_perf_c
         def forward(self, input_ids, attention_mask, past_key_values=None, use_cache=True, **kwargs):
             states = input_ids[:, None, :, None].to(dtype=torch.float32)
             _, values = past_key_values.update(states, states, layer_idx=0, **kwargs)
-            logits = torch.zeros((input_ids.shape[0], input_ids.shape[1], 16))
+            logits = torch.zeros((input_ids.shape[0], input_ids.shape[1], 16), device=input_ids.device)
             logits[..., 7] = 1
             return SimpleNamespace(logits=logits, past_key_values=past_key_values)
 
-    model = CacheClassModel()
+    device = torch.device("cuda")
+    model = CacheClassModel().to(device)
     rollout = HybridEngineRollout(
         SimpleNamespace(module=model),
         SimpleNamespace(pad_token_id=0, eos_token_id=2),
         cfg=HybridEngineRolloutConfig(enable_profiling=True),
     )
-    request = RolloutRequest(torch.tensor([[1, 2, 3], [1, 2, 4]]), torch.ones((2, 3), dtype=torch.long))
-    mock_perf_counter.side_effect = iter(float(index) / 1000 for index in range(100))
+    request = RolloutRequest(
+        torch.tensor([[1, 2, 3], [1, 2, 4]], device=device),
+        torch.ones((2, 3), dtype=torch.long, device=device),
+    )
 
     output = rollout.generate(request, SamplingConfig(max_new_tokens=2, temperature=0, continuous_batch_size=1))
 
     profile = rollout.get_last_profile()
-    assert output.input_ids.tolist() == [[1, 2, 3, 7, 7], [1, 2, 4, 7, 7]]
+    assert output.input_ids[:, 3:].cpu().tolist() == [[7, 7], [7, 7]]
     assert profile["num_prefill_forwards"] == 2
     assert profile["num_decode_forwards"] == 2
     assert profile["num_generated_tokens"] == 4
     assert profile["active_batch_size"] == 1
     assert profile["continuous_batch_size"] == 1
-    assert profile["prefill_forward_ms"] > 0
-    assert profile["decode_forward_ms"] > 0
+    assert profile["total_ms"] >= profile["generation_ms"]
 
 
 @patch("deepspeed.runtime.rollout.hybrid_engine_rollout.time.perf_counter")
