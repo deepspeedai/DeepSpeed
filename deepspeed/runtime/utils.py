@@ -387,10 +387,34 @@ def clip_grad_norm_(parameters, max_norm, norm_type=2, mpu=None):
     """
     if isinstance(parameters, torch.Tensor):
         parameters = [parameters]
-    parameters = list(filter(lambda p: p.grad is not None, parameters))
+    parameters = list(parameters)
     norm_type = float(norm_type)
+    # Inspect ownership before filtering gradients: an unused expert on one rank
+    # must not make that rank choose a different collective from the others.
+    autoep_global_l2 = (norm_type == 2.0 and mpu is None
+                        and any(getattr(p, "ds_zero_placement_family", None) == "autoep_expert" for p in parameters))
+    parameters = list(filter(lambda p: p.grad is not None, parameters))
+    pg = groups._get_data_parallel_group()
     all_norms = []
-    if norm_type == inf:
+    if autoep_global_l2:
+        # Mesh DP groups can contain only replicas of one expert shard. With no
+        # MPU, include both DP and SP ranks so every expert contributes to the norm.
+        pg = groups._clone_world_group()
+        norm_world_size = dist.get_world_size(group=pg)
+        total_norm = torch.zeros((), device=get_accelerator().current_device_name(), dtype=torch.float32)
+        for p in parameters:
+            weight = 1.0 / norm_world_size
+            if getattr(p, "ds_zero_placement_family", None) == "autoep_expert":
+                ep_size = getattr(p, "ds_autoep_ep_size", None)
+                if not isinstance(ep_size, int) or ep_size <= 0 or norm_world_size % ep_size != 0:
+                    raise RuntimeError("AutoEP expert parameter has invalid EP ownership metadata")
+                weight = ep_size / norm_world_size
+            total_norm += p.grad.detach().float().square().sum() * weight
+        # Sum ownership-weighted squares before taking the root. Averaging
+        # rank-local norms does not recover the norm of the unique parameters.
+        dist.all_reduce(total_norm, op=dist.ReduceOp.SUM, group=pg)
+        total_norm = total_norm.sqrt()
+    elif norm_type == inf:
         for p in parameters:
             all_norms.append(p.grad.data.abs().max().float())
         total_norm = torch.stack(all_norms).max()
@@ -421,14 +445,13 @@ def clip_grad_norm_(parameters, max_norm, norm_type=2, mpu=None):
             dist.all_reduce(total_norm, op=dist.ReduceOp.SUM, group=mpu.get_model_parallel_group())
         total_norm = total_norm.pow(1. / norm_type)
 
-    # Need to average total_norm across different GPUs due to the presence of moe params
-    pg = groups._get_data_parallel_group()
-    scaled_norm = total_norm * 1.0 / float(dist.get_world_size(group=pg))
-    scaled_norm_tensor = scaled_norm
-
-    dist.all_reduce(scaled_norm_tensor, group=pg)
-    total_norm = scaled_norm_tensor
-    total_norm = total_norm.to(parameters[0].device)
+    if not autoep_global_l2:
+        # Legacy reduction for other parameter layouts and norm modes.
+        scaled_norm_tensor = total_norm * 1.0 / float(dist.get_world_size(group=pg))
+        dist.all_reduce(scaled_norm_tensor, group=pg)
+        total_norm = scaled_norm_tensor
+    if parameters:
+        total_norm = total_norm.to(parameters[0].device)
 
     max_norm = torch.tensor([float(max_norm)], device=total_norm.device)
     clip_coef = max_norm / (total_norm + 1e-6)

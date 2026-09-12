@@ -515,6 +515,7 @@ class TestAutoEPConfig:
 
         for param in autoep_layer.experts.parameters():
             assert param.ds_zero_placement_family == "autoep_expert"
+            assert param.ds_autoep_ep_size == autoep_layer.ep_size
             assert param.ds_zero_partition_group_name == autoep_layer.ep_group_name
 
         for param in autoep_layer.router.parameters():
