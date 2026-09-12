@@ -13,9 +13,11 @@ The guard is per tensor, and the loss scaler's decision is global: `has_overflow
 `_has_inf_or_nan` over every partitioned gradient and `step()` discards the whole step on
 that one flag. So a tensor whose own gradient was finite still advances its momentum on a
 step discarded because some *other* tensor overflowed, and that update is thrown away.
-`test_a_finite_tensor_still_absorbs_a_step_discarded_for_another` pins that, measured
-rather than assumed; making it exact needs the momentum write deferred until the step is
-known to survive, which costs a second buffer the size of the momentum.
+`test_a_discarded_step_leaves_every_momentum_where_it_was` pins the whole invariant:
+the momentum write is staged while the partition is filled and committed only once the
+overflow check has passed, so a discarded step leaves every momentum bit-identical --
+including a tensor whose own gradient was finite. That costs one buffer the size of the
+momentum per group.
 """
 
 import pytest
@@ -115,14 +117,14 @@ class TestMuonSurvivesLossScaleBackoff(DistributedTest):
 class TestMuonMixedOverflow(DistributedTest):
     world_size = 1
 
-    def test_a_finite_tensor_still_absorbs_a_step_discarded_for_another(self):
-        """The scope of the guard, recorded rather than implied.
+    def test_a_discarded_step_leaves_every_momentum_where_it_was(self):
+        """The invariant in full, including the half a per-tensor guard cannot deliver.
 
         Two 2-D parameters in one group; only `boom` is fed an input that overflows in
-        fp16. The step is discarded for the whole model, so neither parameter moves --
-        but `calm`'s gradient was finite, so its momentum advances anyway, for an update
-        that is thrown away. Making that exact needs the momentum write deferred until
-        the step is known to survive; this pins today's behaviour so the gap is visible.
+        fp16. The step is discarded for the whole model. `boom`'s own guard keeps the
+        overflow out of its momentum, and `calm` -- whose gradient was perfectly finite --
+        must not advance either, because the update it was advancing towards is thrown
+        away. That half comes from staging the write and committing it in `step()`.
         """
         if torch.half not in get_accelerator().supported_dtypes():
             pytest.skip("fp16 not supported")
@@ -182,21 +184,24 @@ class TestMuonMixedOverflow(DistributedTest):
 
         # Step 0 establishes a momentum for both; step 1 overflows only through `boom`.
         for step in range(2):
-            # muon_update runs while the partition is filled, i.e. inside backward, so the
-            # momentum has to be read on either side of that rather than around step().
+            # `muon_update` stages the new momentum while the partition is filled, and
+            # `step()` commits it, so the committed buffer is read around the whole step.
             calm_before, boom_before = momentum_halves()
             params_before = [p.detach().float().norm().item() for p in model.parameters()]
             engine.backward(engine(calm_x, overflowing_x if step == 1 else finite_x))
-            calm_after, boom_after = momentum_halves()
             engine.step()
+            calm_after, boom_after = momentum_halves()
             params_after = [p.detach().float().norm().item() for p in model.parameters()]
 
-            if step == 1:
+            if step == 0:
+                assert not engine.optimizer.overflow, "step 0 was meant to survive"
+                assert calm_before != calm_after and boom_before != boom_after, \
+                    "a surviving step still has to move both momenta, or the guard is global"
+            else:
                 assert engine.optimizer.overflow, "step 1 was meant to overflow"
                 assert params_before == params_after, "an overflowed step must not move parameters"
                 assert boom_before == boom_after, \
                     "the tensor whose own gradient overflowed must not absorb it"
-                assert calm_before != calm_after, (
-                    "a tensor whose gradient was finite does advance its momentum on a step "
-                    "discarded for another tensor -- if this starts failing, the guard has "
-                    "become global and the module docstring should say so")
+                assert calm_before == calm_after, (
+                    "a tensor whose gradient was finite must not advance its momentum on a step "
+                    "the loss scaler discards -- the update it advances towards is thrown away")
