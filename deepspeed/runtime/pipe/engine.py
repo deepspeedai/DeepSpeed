@@ -1259,7 +1259,7 @@ class PipelineEngine(DeepSpeedEngine):
         if self.wall_clock_breakdown():
             self.timers(STEP_MICRO_TIMER).stop()
             self.timers(STEP_GLOBAL_TIMER).stop()
-            if self.global_steps % self.steps_per_print() == 0:
+            if self.steps_per_print() is not None and self.global_steps % self.steps_per_print() == 0:
                 self.timers.log([
                     BATCH_INPUT_TIMER,
                     FORWARD_MICRO_TIMER,
@@ -1268,7 +1268,7 @@ class PipelineEngine(DeepSpeedEngine):
                     BACKWARD_REDUCE_MICRO_TIMER,
                     STEP_MICRO_TIMER,
                 ])
-            if self.global_steps % self.steps_per_print() == 0:
+            if self.steps_per_print() is not None and self.global_steps % self.steps_per_print() == 0:
                 self.timers.log([
                     FORWARD_GLOBAL_TIMER,
                     BACKWARD_GLOBAL_TIMER,
