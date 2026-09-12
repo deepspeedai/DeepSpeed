@@ -82,3 +82,62 @@ class TestInferenceConfig(DistributedTest):
             config = DeepSpeedInferenceConfig(moe=value)
             assert isinstance(config.moe, DeepSpeedMoEConfig)
             assert config.moe.enabled == value
+
+
+@pytest.mark.inference
+class TestInferenceOutTokenBounds:
+    """Config-only checks: no engine, no distributed state."""
+
+    def test_out_token_limits_reject_non_positive(self):
+        # Regression test for https://github.com/deepspeedai/DeepSpeed/issues/8339
+        #
+        # `max_out_tokens` was unbounded, so a negative survived config parsing and
+        # inverted the guard in `InferenceEngine._generate`, where
+        # `tensor_length > max_out_tokens` is true for every input:
+        #     RuntimeError: Input with size 6 exceeds maximum length of -1.
+        # Both limits are also handed to `allocate_workspace`, whose C++ parameters
+        # are `unsigned`, so the value that arrives there is not the one that was set.
+        from pydantic import ValidationError
+
+        from deepspeed.inference.config import DeepSpeedInferenceConfig
+
+        for field in ("max_out_tokens", "min_out_tokens"):
+            for value in (-1, 0):
+                with pytest.raises(ValidationError):
+                    DeepSpeedInferenceConfig(**{field: value})
+
+        # The aliases are the documented spelling and take the same path.
+        for alias in ("max_tokens", "min_tokens"):
+            with pytest.raises(ValidationError):
+                DeepSpeedInferenceConfig(**{alias: -1})
+
+    def test_out_token_limits_accept_positive(self):
+        from deepspeed.inference.config import DeepSpeedInferenceConfig
+
+        config = DeepSpeedInferenceConfig(max_out_tokens=2048, min_out_tokens=8)
+        assert config.max_out_tokens == 2048
+        assert config.min_out_tokens == 8
+
+        defaults = DeepSpeedInferenceConfig()
+        assert defaults.max_out_tokens == 1024
+        assert defaults.min_out_tokens == 1
+
+
+@pytest.mark.inference
+class TestHybridEngineOutTokens:
+
+    def test_max_out_tokens_rejects_non_positive(self):
+        # The same setting's other face: `HybridEngineConfig.max_out_tokens` reaches
+        # the same `allocate_workspace` binding through `hybrid_engine.py`, and was
+        # unbounded while the inference config's copy is now not.
+        from pydantic import ValidationError
+
+        from deepspeed.runtime.config import HybridEngineConfig
+
+        for value in (-1, 0):
+            with pytest.raises(ValidationError):
+                HybridEngineConfig(max_out_tokens=value)
+
+        assert HybridEngineConfig().max_out_tokens == 512
+        assert HybridEngineConfig(max_out_tokens=4096).max_out_tokens == 4096
+

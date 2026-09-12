@@ -9,6 +9,7 @@ from enum import Enum
 
 import torch
 import json
+from pydantic import Field
 import hjson
 import copy
 import base64
@@ -542,7 +543,9 @@ def get_memory_breakdown(param_dict):
 
 class HybridEngineConfig(DeepSpeedConfigModel):
     enabled: bool = False
-    max_out_tokens: int = 512
+    # Reaches the same `allocate_workspace` binding as the inference config's
+    # `max_out_tokens`, whose C++ parameter is `unsigned`.
+    max_out_tokens: int = Field(512, gt=0)
     inference_tp_size: int = 1
     release_inference_cache: bool = False
     pin_parameters: bool = True
