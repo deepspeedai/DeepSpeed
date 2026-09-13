@@ -653,6 +653,12 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         # will store the averaged gradients required by this partition
         self.averaged_gradients = {}
         self.all_grad_tensors = {}
+        # Muon folds the gradient into its momentum while the partition is filled, which is
+        # before the overflow check decides whether the step survives. The new momentum is
+        # staged here and committed in `step()` once that is known, so a discarded step
+        # leaves the momentum exactly as it was rather than approximately. Kept off
+        # `optimizer.state` so it does not travel into checkpoints.
+        self._muon_pending_momentum = {}
         # For cpu_offload, will store the averaged gradients required by this partition
         self.offload_gradient_dict = {}
 
@@ -2258,7 +2264,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             grad_accum = self.all_grad_tensors[param_group_idx][i]
             if getattr(tensor, 'use_muon', False) and 'muon' in self.optimizer.__class__.__name__.lower():
                 assert tensor.ndim > 1, f"if use muon, then tensor dim > 1, got {tensor.size()}"
-                buffer = torch.narrow(self.optimizer.state[flatten_copy]["momentum_buffer"], 0, buffer_idx,
+                buffer = torch.narrow(self._muon_staging_momentum(flatten_copy, param_group_idx), 0, buffer_idx,
                                       tensor.numel()).view(tensor.size())
                 ns_method = self.optimizer.param_groups[param_group_idx].get('ns_method', 'gram')
                 grad_accum = muon_update(grad_accum,
@@ -2323,7 +2329,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             grad_accum = self.all_grad_tensors[param_group_idx][i]
             if getattr(tensor, 'use_muon', False) and 'muon' in self.optimizer.__class__.__name__.lower():
                 assert tensor.ndim > 1, f"if use muon, then tensor dim > 1, got {tensor.size()}"
-                buffer = torch.narrow(self.optimizer.state[flatten_copy]["momentum_buffer"], 0, buffer_idx,
+                buffer = torch.narrow(self._muon_staging_momentum(flatten_copy, param_group_idx), 0, buffer_idx,
                                       tensor.numel()).view(tensor.size())
                 ns_method = self.optimizer.param_groups[param_group_idx].get('ns_method', 'gram')
                 grad_accum = muon_update(grad_accum,
@@ -2445,6 +2451,30 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         # We need to link optimizer state after the first step() call
         self._lazy_init_hp_params_optimizer_state()
 
+    def _muon_staging_momentum(self, flatten_copy, param_group_idx):
+        """The buffer `muon_update` writes this step's momentum into.
+
+        It starts as a copy of the committed momentum, so a step that is later discarded
+        simply never reaches `_commit_muon_momentum` and the next step starts from the
+        same place. One flat tensor per Muon group, reused across steps.
+        """
+        committed = self.optimizer.state[flatten_copy]["momentum_buffer"]
+        entry = self._muon_pending_momentum.get(param_group_idx)
+        staged = entry[0] if entry is not None else None
+        if staged is None or staged.shape != committed.shape or staged.dtype != committed.dtype:
+            staged = torch.empty_like(committed)
+        self._muon_pending_momentum[param_group_idx] = (staged, flatten_copy)
+        staged.copy_(committed)
+        return staged
+
+    def _commit_muon_momentum(self):
+        """Move this step's momentum into the optimizer state, now that the step survived."""
+        for staged, flatten_copy in self._muon_pending_momentum.values():
+            self.optimizer.state[flatten_copy]["momentum_buffer"].copy_(staged)
+        # The buffers are kept rather than dropped: staging re-copies from the committed
+        # momentum every step, so a stale one cannot be committed, and reusing them keeps
+        # this off the allocator's path on every step.
+
     def step(self, closure=None):
         """
         Not supporting closure.
@@ -2464,6 +2494,8 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
 
         prev_scale = self.loss_scale
         self._update_scale(self.overflow)
+        if not self.overflow:
+            self._commit_muon_momentum()
         if self.overflow:
             see_memory_usage('After overflow before clearing gradients')
             self.zero_grad(set_to_none=True)
