@@ -226,6 +226,25 @@ class DeepSpeedZeroConfig(DeepSpeedConfigModel):
     ZeRO3-Offload, ZeRO-Infinity, and ZeRO-Inference.
     """
 
+    adaptive_prefetch_bucket_size: bool = Field(False, alias="stage3_adaptive_prefetch_bucket_size")
+    """
+    Dynamically adjust the prefetch bucket size at runtime based on observed fetch-wait and compute
+    times. When enabled, ``prefetch_bucket_size`` is used as the starting point and is clamped
+    between ``adaptive_prefetch_min_size`` and ``adaptive_prefetch_max_size``. Disabled by default.
+    """
+
+    adaptive_prefetch_min_size: int = Field(pp_int(1e7), ge=0, alias="stage3_adaptive_prefetch_min_size")
+    """
+    Lower bound for the adaptive prefetch bucket size (in parameter elements). Only used when
+    ``adaptive_prefetch_bucket_size`` is enabled.
+    """
+
+    adaptive_prefetch_max_size: int = Field(pp_int(5e8), ge=0, alias="stage3_adaptive_prefetch_max_size")
+    """
+    Upper bound for the adaptive prefetch bucket size (in parameter elements). Only used when
+    ``adaptive_prefetch_bucket_size`` is enabled.
+    """
+
     param_persistence_threshold: int = Field(pp_int(1e5), ge=0, alias="stage3_param_persistence_threshold")
     """
     Do not partition parameters smaller than this threshold. Smaller values use
