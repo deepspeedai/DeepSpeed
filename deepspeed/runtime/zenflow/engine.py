@@ -6,6 +6,7 @@
 from deepspeed import comm as dist
 from typing import TYPE_CHECKING
 from deepspeed.utils.torch import required_torch_version
+from deepspeed.utils import logger
 
 if TYPE_CHECKING:
     from deepspeed.runtime.engine import DeepSpeedEngine
@@ -36,9 +37,9 @@ def configure_zenflow(engine: "DeepSpeedEngine") -> None:
     if select_strategy == 'auto':
         select_strategy = "epoch"
         if isinstance(zenflow_config.select_interval, int):
-            raise Warning(
-                "If use auto select strategy, select_interval will be set to 1 and select_strategy will be set to epoch, thus select_interval would be overwritten."
-            )
+            logger.warning(
+                "ZenFlow: select_strategy is 'auto', so select_interval is one epoch and the "
+                "configured value %s is ignored.", zenflow_config.select_interval)
         engine.select_interval = 1
     else:
         if isinstance(zenflow_config.select_interval, str):
@@ -53,10 +54,27 @@ def configure_zenflow(engine: "DeepSpeedEngine") -> None:
         engine.update_interval = int(zenflow_config.update_interval)
 
     if select_strategy == 'epoch':
-        if engine.training_dataloader is not None:
-            zenflow_config.steps_per_epoch = len(engine.training_dataloader)
-            engine.select_interval = engine.select_interval * len(engine.training_dataloader)
+        # `steps_per_epoch` may already be set by the user; otherwise it can only
+        # come from a dataloader DeepSpeed owns.
+        if not zenflow_config.steps_per_epoch and engine.training_dataloader is not None:
+            # An empty dataloader would assign 0, which the config validator now
+            # rejects on assignment -- and a crash is the wrong answer for a
+            # degenerate-but-legal dataloader. Fall through to the warning.
+            epoch_steps = len(engine.training_dataloader)
+            if epoch_steps > 0:
+                zenflow_config.steps_per_epoch = epoch_steps
+        if zenflow_config.steps_per_epoch:
+            engine.select_interval = engine.select_interval * zenflow_config.steps_per_epoch
         else:
+            # is_zenflow_select_boundary() treats 0 as "never again", so this
+            # leaves the columns chosen at the first step in place for the whole
+            # run. Say so rather than degrading in silence.
+            logger.warning("ZenFlow: select_strategy resolves to 'epoch', but the number of steps in an epoch "
+                           "is unknown -- DeepSpeed reads it from a dataloader it owns, and none was given to "
+                           "deepspeed.initialize(). Important columns will be selected once and never "
+                           "re-selected. Set \"steps_per_epoch\" in the zenflow config, or pass training_data= "
+                           "to deepspeed.initialize(), or use \"select_strategy\": \"step\" with an explicit "
+                           "\"select_interval\".")
             engine.select_interval = 0
 
     if not engine.auto_update and engine.select_interval != 0 and engine.select_interval < engine.update_interval:
