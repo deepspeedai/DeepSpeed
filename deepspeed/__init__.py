@@ -80,6 +80,206 @@ __git_branch__ = git_branch
 # Set to torch's distributed package or deepspeed.comm based inside DeepSpeedEngine init
 dist = None
 
+# Projections whose *output* dimension is blocked by heads, because the per-head split is on
+# dim 0 of the weight. Standard attention blocks Q/K/V as `[num_heads * head_dim, hidden]`. MLA
+# blocks its two up-projections instead: `q_b_proj` is `[num_heads * (qk_nope + qk_rope), rank]`
+# and `kv_b_proj` is `[num_heads * (qk_nope + v_head_dim), rank]`, which is the split GLM-5's
+# "Muon Split" applies. The output projection is deliberately absent everywhere: its head
+# structure is on the input dimension, so splitting dim 0 would cut across the wrong axis, and
+# with the usual hidden == num_heads * head_dim it still divides evenly, i.e. silently wrong.
+_QUERY_HEAD_LEAVES = ("q_proj", "query", "wq")
+_KV_HEAD_LEAVES = ("k_proj", "key", "wk", "v_proj", "value", "wv")
+# MLA up-projections. Without a q_lora_rank there is no q_a/q_b pair and the query
+# up-projection is a plain `q_proj` (DeepSeek-V2-Lite), so `q_proj` can be either kind and
+# is resolved by shape rather than by which config fields happen to exist.
+_MLA_Q_LEAVES = ("q_b_proj", )
+_MLA_KV_LEAVES = ("kv_b_proj", )
+# A single matrix holding Q, K and V, or an MLA down-projection that mixes latent and rope
+# components. Neither splits into uniform heads, so leave them on the full-matrix path.
+_FUSED_QKV_LEAVES = ("qkv_proj", "query_key_value", "c_attn", "in_proj_qkv", "wqkv")
+_MLA_DOWN_LEAVES = ("q_a_proj", "kv_a_proj", "kv_a_proj_with_mqa")
+
+QUERY, KV, MLA_Q, MLA_KV, NOT_HEAD_BLOCKED = "query", "kv", "mla_q", "mla_kv", "not-head-blocked"
+
+
+def _layer_shape(param: torch.Tensor):
+    """The parameter's shape as a layer, rather than as a ZeRO-3 partition.
+
+    Under ``deepspeed.zero.Init`` a partitioned parameter's data is a flat placeholder -
+    ``torch.Size([0])`` on the ranks that do not hold it - and the shape it has as a layer is
+    recorded as ``ds_shape``. Reading ``param.shape`` there sees a 1-D tensor for every
+    parameter in the model.
+    """
+    ds_shape = getattr(param, "ds_shape", None)
+    return tuple(param.shape) if ds_shape is None else tuple(ds_shape)
+
+
+def _per_head_muon_meta(model: torch.nn.Module):
+    """The head-count reader and the config the widths come from, built once per model.
+
+    AutoTPMeta.from_model_config is the repo's single source of truth for these counts: it
+    descends into text_config and probes the several spellings models use (num_heads, n_head,
+    attention_heads, ...) rather than assuming one attribute name. It is loop-invariant, so it
+    is built here rather than per parameter.
+    """
+    model_config = getattr(model, "config", None)
+    if model_config is None:
+        return None, None
+
+    from .module_inject.tp_shard import AutoTPMeta
+
+    meta = AutoTPMeta.from_model_config(model_config)
+    if meta.num_attention_heads is None:
+        return None, None
+    return meta, getattr(model_config, "text_config", model_config)
+
+
+def _leaf_module_name(param_name: str) -> str:
+    """`model.layers.0.self_attn.q_proj.weight` -> `q_proj`.
+
+    Matching the leaf rather than the whole path keeps generic names from matching by accident:
+    `dense` appears in both `attention.output.dense` and `intermediate.dense`, and an MLP matrix
+    tagged with a head count would be split on a dimension that has no heads in it.
+    """
+    parts = param_name.split(".")
+    return parts[-2].lower() if len(parts) >= 2 else parts[-1].lower()
+
+
+def _classify_leaf(leaf: str):
+    """Which kind of attention matrix this leaf name claims to be, or None if it claims none.
+
+    A name is a claim, not a layout. What the leaf resolves to is decided later, by the shape.
+    """
+    if any(leaf.startswith(k) for k in _FUSED_QKV_LEAVES) or any(leaf.startswith(k) for k in _MLA_DOWN_LEAVES):
+        return NOT_HEAD_BLOCKED
+    if any(leaf.startswith(k) for k in _MLA_Q_LEAVES):
+        return MLA_Q
+    if any(leaf.startswith(k) for k in _MLA_KV_LEAVES):
+        return MLA_KV
+    if any(leaf.startswith(k) for k in _KV_HEAD_LEAVES):
+        return KV
+    if any(leaf.startswith(k) for k in _QUERY_HEAD_LEAVES):
+        return QUERY
+    return None
+
+
+def _standard_head_dim(text_config, num_attention_heads: int):
+    """`head_dim`, or the value it is defined as when a config leaves it out."""
+    head_dim = getattr(text_config, "head_dim", None)
+    if head_dim is not None:
+        return head_dim
+    hidden_size = getattr(text_config, "hidden_size", None)
+    if hidden_size is not None and num_attention_heads:
+        quotient, remainder = divmod(hidden_size, num_attention_heads)
+        if remainder == 0:
+            return quotient
+    return None
+
+
+def _geometry_candidates(kind, meta, text_config):
+    """Every (heads, per-head width) this leaf could plausibly have, each labelled.
+
+    Candidates are collected rather than chosen. `q_proj` is the case that matters: on an MLA
+    model without a q_lora_rank it is the query up-projection, and on an ordinary model it is
+    the standard query projection, and a config can carry the fields for both. Deciding by the
+    order the branches are written makes the outcome depend on which fields happen to exist;
+    collecting both and letting the shape confirm one makes it depend on the model.
+    """
+    num_attention_heads = meta.num_attention_heads
+    num_kv_heads = meta.num_kv_heads or num_attention_heads
+    head_dim = _standard_head_dim(text_config, num_attention_heads)
+    qk_nope = getattr(text_config, "qk_nope_head_dim", None)
+    qk_rope = getattr(text_config, "qk_rope_head_dim", None)
+    v_head_dim = getattr(text_config, "v_head_dim", None)
+
+    candidates = []
+    if kind in (QUERY, MLA_Q) and qk_nope is not None and qk_rope is not None:
+        candidates.append((num_attention_heads, qk_nope + qk_rope, "mla-q"))
+    if kind == MLA_KV and qk_nope is not None and v_head_dim is not None:
+        candidates.append((num_attention_heads, qk_nope + v_head_dim, "mla-kv"))
+    if kind == QUERY and head_dim is not None:
+        candidates.append((num_attention_heads, head_dim, "head-dim"))
+    if kind == KV and head_dim is not None:
+        candidates.append((num_kv_heads, head_dim, "head-dim"))
+    return [c for c in candidates if c[0] and c[0] >= 1 and c[1] and c[1] >= 1]
+
+
+def _confirm(param: torch.Tensor, candidates):
+    """Resolve candidates against the shape. Returns (num_heads or None, reason).
+
+    Only an exact `rows == heads * width` confirms a candidate. Several candidates can confirm
+    at once; that is only an ambiguity if they disagree on the head count, which is the whole
+    output, so agreeing candidates are not a conflict.
+    """
+    shape = _layer_shape(param)
+    if len(shape) != 2:
+        return None, "not-2d"
+    if not candidates:
+        return None, "no-candidate-geometry"
+
+    rows = shape[0]
+    exact = [c for c in candidates if rows == c[0] * c[1]]
+    if not exact:
+        return None, "width-mismatch"
+
+    head_counts = {c[0] for c in exact}
+    if len(head_counts) > 1:
+        return None, "ambiguous:" + "/".join(f"{c[2]}={c[0]}" for c in sorted(exact, key=lambda c: c[2]))
+    return exact[0][0], exact[0][2]
+
+
+def _attention_head_count(param_name: str, param: torch.Tensor, model: torch.nn.Module):
+    """Heads this projection splits into on dim 0, or None to leave it on the full-matrix path.
+
+    Takes the model for callers holding one parameter. `set_optimizer_flags` builds the reader
+    once and calls `_resolve_attention_head_count` directly, since it is loop-invariant.
+    """
+    meta, text_config = _per_head_muon_meta(model)
+    if meta is None:
+        return None
+    num_heads, _ = _resolve_attention_head_count(param_name, param, meta, text_config)
+    return num_heads
+
+
+def _resolve_attention_head_count(param_name: str, param: torch.Tensor, meta, text_config):
+    """As above, with the reason, so callers can report why a parameter was not tagged."""
+    kind = _classify_leaf(_leaf_module_name(param_name))
+    if kind is None:
+        return None, "not-attention"
+    if kind == NOT_HEAD_BLOCKED:
+        return None, NOT_HEAD_BLOCKED
+    return _confirm(param, _geometry_candidates(kind, meta, text_config))
+
+
+def _report_per_head_tagging(tagged: dict, skipped: dict) -> None:
+    """Report what an explicit `per_head_muon: true` actually did.
+
+    An opt-in that silently does nothing is the failure this guards. The systemic case is
+    tensor parallelism: the config describes the whole model while each rank holds a shard, so
+    every projection fails its width check and the feature is off model-wide while the user
+    believes it is on. That is an error rather than a warning, because there is no partial
+    result to keep.
+    """
+    if not tagged:
+        raise ValueError("per_head_muon is enabled but no attention projection could be tagged. Per-head "
+                         "Newton-Schulz is therefore inactive for every parameter. Likely causes: the model "
+                         "arrives already sharded by an external tensor-parallel implementation, so each "
+                         "rank holds a shard whose width no longer matches the config; the architecture's "
+                         "attention layout is not recognized; or the model has no attention projections. "
+                         "AutoTP is not one of the causes - it partitions after this runs, and the counts "
+                         "are re-resolved against the shards afterwards. Unset per_head_muon to train "
+                         f"without it. Leaves examined: {dict(sorted(skipped.items())) or 'none'}")
+
+    unrecognized = {
+        leaf: reason
+        for leaf, reason in skipped.items() if reason not in (NOT_HEAD_BLOCKED, "not-attention")
+    }
+    if unrecognized:
+        logger.warning(
+            "per_head_muon: %s matched an attention name but no candidate geometry confirmed them; "
+            "they stay on the full-matrix path", dict(sorted(unrecognized.items())))
+    logger.info("per_head_muon: tagged %s", dict(sorted(tagged.items())))
+
 
 def _layer_shape(param: torch.Tensor):
     """The parameter's shape as a layer, rather than as a ZeRO-3 partition.
@@ -95,6 +295,11 @@ def _layer_shape(param: torch.Tensor):
 
 def set_optimizer_flags(config_class: DeepSpeedConfig, model: torch.nn.Module) -> None:
     if config_class.optimizer_name == MUON_OPTIMIZER:
+        per_head = bool((config_class.optimizer_params or {}).get("per_head_muon", False))
+        meta, text_config = _per_head_muon_meta(model) if per_head else (None, None)
+        tagged: dict = {}
+        skipped: dict = {}
+
         for name, p in model.named_parameters():
             # Muon is defined on matrices, so the test is on the layer's shape. `zero.Init`
             # makes every parameter report as 1-D, which would switch Muon off for the whole
@@ -103,6 +308,64 @@ def set_optimizer_flags(config_class: DeepSpeedConfig, model: torch.nn.Module) -
                 setattr(p, "use_muon", True)
             else:
                 setattr(p, "use_muon", False)
+
+            num_heads = None
+            if per_head and p.use_muon and meta is not None:
+                num_heads, reason = _resolve_attention_head_count(name, p, meta, text_config)
+                leaf = _leaf_module_name(name)
+                if num_heads is not None:
+                    tagged[leaf] = f"{num_heads} heads of {_layer_shape(p)[0] // num_heads} ({reason})"
+                else:
+                    skipped[leaf] = reason
+            setattr(p, "muon_num_heads", num_heads)
+            # The width, not the count, is what survives a column-parallel split; see
+            # `resolve_per_head_muon_after_sharding`.
+            setattr(p, "muon_head_dim", _layer_shape(p)[0] // num_heads if num_heads else None)
+
+        if per_head:
+            _report_per_head_tagging(tagged, skipped)
+
+
+def resolve_per_head_muon_after_sharding(model: torch.nn.Module) -> None:
+    """Re-derive head counts from the shapes the parameters actually have.
+
+    `set_optimizer_flags` runs before the engine partitions the model, so the count it records
+    is the model's, not the rank's. Column-parallel tensor parallelism splits an attention
+    projection on dim 0, which is the axis the heads are on, so after the split the per-head
+    width is unchanged and the head count is not. Nothing catches that on its own: with tp=2 a
+    tag of 8 heads lands on a shard holding 4 heads' worth of rows, `out_features % num_heads`
+    still divides, and Newton-Schulz runs on half of each head.
+
+    Re-deriving the count from the width is not just a repair. A column-parallel shard holds
+    whole heads, so per-head Newton-Schulz on the shard is exactly the corresponding blocks of
+    per-head Newton-Schulz on the whole matrix - the split is along the same axis the batch is
+    taken over. A shard whose rows are not a multiple of the width does not hold whole heads,
+    and is dropped rather than guessed at.
+    """
+    tagged, dropped = {}, {}
+    for name, p in model.named_parameters():
+        head_dim = getattr(p, "muon_head_dim", None)
+        if head_dim is None:
+            continue
+        leaf = _leaf_module_name(name)
+        rows = _layer_shape(p)[0]
+        if rows % head_dim:
+            setattr(p, "muon_num_heads", None)
+            dropped[leaf] = f"{rows} rows do not divide into heads of {head_dim}"
+            continue
+        setattr(p, "muon_num_heads", rows // head_dim)
+        tagged[leaf] = f"{rows // head_dim} heads of {head_dim}"
+
+    if not tagged and not dropped:
+        return
+    if dropped:
+        logger.warning("per_head_muon: %s are sharded across head boundaries and stay on the full-matrix "
+                       "path", dict(sorted(dropped.items())))
+    if not tagged:
+        raise ValueError("per_head_muon is enabled but every tagged projection is sharded across head "
+                         "boundaries, so per-head Newton-Schulz is inactive for all of them. Unset "
+                         f"per_head_muon to train without it. Parameters examined: {dict(sorted(dropped.items()))}")
+    logger.info("per_head_muon: after sharding, tagged %s", dict(sorted(tagged.items())))
 
 
 def initialize(
