@@ -399,25 +399,33 @@ def clip_grad_norm_(parameters, max_norm, norm_type=2, mpu=None):
     # The two branches below issue different collectives, so this decision has to
     # come out the same on every rank -- and a rank whose experts received no tokens
     # this step has expert parameters but no expert gradients.
-    # A rank can legitimately own no expert at all -- under pipeline parallelism, say --
-    # so reading ownership locally is not enough to guarantee the same choice everywhere.
-    # One scalar settles it. The second slot carries "an expert here has no group name",
-    # which has no expert parallel group to reduce over, so such a call stays on the
-    # original path rather than guessing which group the parameter belongs to.
-    vote = torch.tensor(
-        [
-            float(any(is_moe_param(p) and getattr(p, "group_name", None) is not None for p in parameters)),
-            float(any(is_moe_param(p) and getattr(p, "group_name", None) is None for p in parameters)),
-        ],
-        device=get_accelerator().current_device_name(),
-        dtype=torch.float)
-    dist.all_reduce(vote, group=groups._get_data_parallel_group())
-    if vote[0].item() > 0 and vote[1].item() == 0:
-        # The registry is built identically on every rank, so these names agree without
-        # a second collective even where the local parameters do not.
-        expert_group_names = sorted(getattr(groups, "_EXPERT_PARALLEL_GROUP", None) or {})
-    else:
-        expert_group_names = []
+    # The registry of expert groups is built identically on every rank, so an empty one
+    # means no MoE is configured anywhere and the choice is already made: take the
+    # original path, with no collective and no host sync. This is a per-step call from
+    # `_take_model_step`, so the common case must not pay for the MoE one.
+    registry = sorted(getattr(groups, "_EXPERT_PARALLEL_GROUP", None) or {})
+    expert_group_names = []
+    if registry:
+        # A rank can legitimately own no expert at all -- under pipeline parallelism, a
+        # stage holding only dense layers -- so reading ownership locally cannot guarantee
+        # the same choice everywhere. One scalar settles it, and it has to be reduced over
+        # the world rather than the data parallel group: under pipeline parallelism that
+        # group is one stage wide (`PipelineParallelGrid.get_data_parallel_group`), while
+        # the expert norm below reduces over the pipeline group, which spans stages. A
+        # per-stage vote let an expert stage and a dense stage issue different collectives
+        # on that group. The second slot carries "an expert here has no group name", which
+        # has no expert parallel group to reduce over, so such a call stays on the
+        # original path rather than guessing which group the parameter belongs to.
+        vote = torch.tensor(
+            [
+                float(any(is_moe_param(p) and getattr(p, "group_name", None) is not None for p in parameters)),
+                float(any(is_moe_param(p) and getattr(p, "group_name", None) is None for p in parameters)),
+            ],
+            device=get_accelerator().current_device_name(),
+            dtype=torch.float)
+        dist.all_reduce(vote, group=groups._clone_world_group())
+        if vote[0].item() > 0 and vote[1].item() == 0:
+            expert_group_names = registry
 
     parameters = list(filter(lambda p: p.grad is not None, parameters))
 
