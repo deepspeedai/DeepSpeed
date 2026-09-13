@@ -4637,7 +4637,7 @@ class DeepSpeedEngine(Module):
         autoep_partitioned_experts = False
         allowed_missing_keys = None
         if self.zero_optimization_partition_weights() and not load_optimizer_states and not self.has_moe_layers:
-            checkpoint['module'] = get_fp32_state_dict_from_zero_checkpoint(load_dir)
+            checkpoint['module'] = get_fp32_state_dict_from_zero_checkpoint(load_dir, tag=tag)
             fetch_z3_params = True
 
         if is_pipe_parallel:
