@@ -240,3 +240,203 @@ kernel/replay）。这是 graph 修复后的第一个实验。
 1. graph capture：3.7×（0.5B）——对 GDN 混合架构待修（本方案）
 2. segKI 段融合：+10.3%（4B）——graph 不可用场景的过渡与补充
 3. native scan kernel：device 侧 2× 台阶——与 1/2 正交（真打带宽）
+
+## GDN graph capture Phase A (2026-09-11, CPU 验证通过)
+
+实现（比 design note 预估更小——HF 的 LinearAttentionLayer 本身已
+cudagraph-safe：copy_ 原位 + mark_static_address，注释明说为 cudagraphs
+设计；DeepSpeed 侧只需透传而非重写）：
+- `DSStaticGDNSlot`：GDN 槽透传 wrapper（bind 引用 prefill cache 的 HF 槽，
+  __getattr__ 转发完整 HF 槽 API，零拷贝）
+- `DeepSpeedStaticCache`：按 layer_types 混合建槽；协议方法族补齐
+  （has_previous_state / update_recurrent_state / update_conv_state，
+  各自槽型分派）；head_dim 解耦修复（cache 侧的 gap #1 翻版：
+  early_init 曾用 hidden/heads=128，Qwen3.5 实际 256）
+- `_generate_graph` 拷贝循环槽型分派（GDN 槽 bind，KV 槽照旧拷贝）
+
+CPU 门禁（0.8B，复刻 _generate_graph 至 capture 前的全部逻辑 +
+eager decode 走 DS 混合 cache）：**BIT_EXACT True**，槽型对齐
+6 KV + 18 GDN 双向吻合。
+
+Phase B（GPU 待做）：真 capture（FLA kernel 兼容性是主要剩余风险）、
+4B 门禁、3.7× 级性能验证、graph 内 segKI 重测。
+
+## GDN graph capture Phase B 进展 (2026-09-11, GPU)
+
+已越过两站（每站都是 masking_utils × 混合槽的真实语义交互）：
+1. **0 长 mask 崩溃修复**：transformers 的 mask 构建按 layer 采样
+   get_mask_sizes。DSStaticGDNSlot 必须精确对齐 HF CacheLayer 基类公式
+   ——GDN 槽无 seq 维 → `(query_length, 0)`。(0,0) 产生 0 长 mask 崩
+   SDPA；(max_cache_len,0) 破坏 GDN 自身 padding 语义（第 1 token 就
+   分叉）。`(query_length, 0)` 两边全对：CPU 0.8B **BIT_EXACT True**，
+   GPU 越过崩溃。
+2. 4B GPU 单步/3 步 eager decode 走 DS 混合 cache 全部通过
+   （hooks 清空与否均过——排除 hook 假设）。
+
+当前障碍（队列下一项）：warmup/capture 段 `(*bias): last dimension
+must be contiguous`——性质未明（position_bias/conv bias 嫌疑），待
+定位。附带发现：mask 尺寸的 layer 采样存在 max_len−2 类的偏移谜题
+（[1,16,1,max_len−2] target），修复 mask 长度后不再触发，但机理
+值得在修 bias 时一并厘清。
+
+## Phase B 深挖检查点 (2026-09-11 深夜, bias contiguous 之谜解开)
+
+`(*bias): last dimension must be contiguous` 是**误导性错误**——SDPA 内部
+mask 形状不匹配走的检查路径。真实机制（in-source 插桩实证，SDPALOG）：
+
+崩溃调用的实际形状：
+  q=[1,16,1,256]  k=[1,16,69,256]（repeat 后）  mask=(1,1,1,1) stride 全 1
+  → mask 长度 1（正是 GDN 槽 `(query_length,0)` 语义）被 full-attn 层
+    拿到，与 kv=69 不匹配 → SDPA 报 bias contiguous。
+
+即：**transformers 5.14 的 mask 构建共享 per layer_type，取样时可能拿到
+GDN 槽语义**。HF 自己的约定（cache_utils ~597 行注释）：alternating cache
+的容器级长度查询"must use attention layer idx"——但我们尝试的三种
+GDN 槽/容器语义组合：(0,0) 崩 SDPA、(max,0) 第 1 token 分叉、
+(attn_seq+q,0) mask=max−2 错位（21 vs 7 @ max 23——**max−2 代数**与
+69=71−2 同模式，来源未定位，疑与 q_offset/MTP 相关）。
+
+已知好状态（本 checkpoint 保留）：GDN 槽 `(query_length,0)` + 容器直转
+——CPU BIT_EXACT True，GPU 越过 0 长 mask 崩溃，warmup 崩于此。
+
+下个窗口的精确起点：
+1. 读 masking_utils 的 mask 组装代数（kv_length/q_offset 如何组合出
+   max−2），确定 GDN 槽被取样时该回答什么
+2. 对照 HF DynamicCache 混合模型在 5.14 上为何正常（其容器
+   get_seq_length/get_mask_sizes 的 alternating 特判）——这是权威模板
+3. 注意：远端 transformers 的 sdpa_attention.py 曾插桩已恢复原样
+
+## GDN graph capture 攻克 (2026-09-12, 4B capture 成功 2.3×, replay 数值待修)
+
+mask 语义的完整解（多轮实证后）：
+- HF StaticLayer.get_mask_sizes 返回**全宽 (max_cache_len, 0)**（非
+  DynamicLayer 的 position 公式——早前对齐基类公式是误读）
+- 容器对 GDN 槽查询重定向到第一个 attention 槽（HF alternating 约定）
+- 容器补 is_compileable=True（HF StaticCache 属性）
+- 教训两则：a) 插桩 print CUDA tensor 值 = host 同步 = capture 非法
+  （自噬假线索）；b) prefill(HF cache) 答 69 与 decode(DS cache) 答 7
+  的不一致即全宽 vs 位置公式的矛盾证据
+
+结果：4B warmup ✓ → capture ✓ → **52.7-54.2 tok/s（vs eager 22.5，
+2.3×）**。但输出退化（"Paris Paris..."，greedy 坍缩）——replay 数值
+问题，嫌疑：KV 写入位置在 replay 未正确推进（write_position 静态
+tensor 应被 replay 重读——需验证 DeepSpeedStaticLayer.update 的
+arange+write_position 在 capture 内的行为）或 GDN 状态更新未进图。
+
+下个窗口：对比 replay vs eager 单步 logits 定位（方法已验证）。
+
+## Replay 退化定位：conv state 冻结 (2026-09-12)
+
+反转证据链：
+1. graph replay 本身无错：REPLAY0 vs EAGER0 maxdiff 2.09（bf16 级），
+   argmax 一致——退化不是 capture/replay 问题
+2. **eager DS-cache 路径在 GPU 上同样退化**（bf16/fp32 × sdpa/eager
+   六配置全退化）——与 CPU bit-exact 的唯一差异 = GDN kernel 路径
+   （FLA fused vs torch 回退）
+3. 状态推进三分离：recurrent_state ✓ 推进、KV ✓ 推进、
+   **conv_state 129.255→129.255 冻结** ← 真凶
+
+机制：decode 步 GDN 走 `causal_conv1d_update`（FLA 原位 kernel，
+不经过 cache.update_conv_state）——GPU 上该调用对 conv_state 的原位
+写入静默失效（CPU torch 回退正常）。嫌疑：FLA kernel 对非连续输入
+（in_proj 输出的 transpose 视图）的静默行为 / conv_state 布局与
+kernel 期望不符 / HF 槽 state_idx 约定。
+
+下个窗口（按性价比排序）：
+1. 关键对照：纯 HF StaticCache（无 DS cache）GPU decode 是否也退化
+   ——若退化则根因在 transformers 5.14 StaticCache×FLA，非我们的
+   bind 设计（修复责任转移，材料价值反而更高）
+2. 若 HF 原生正常：单层直调 causal_conv1d_update 复现冻结，查
+   FLA kernel 的输入约束（contiguous/state 形状）
+
+## conv 冻结根因追踪（三重反转, 2026-09-12/13）
+
+1. HF 原生 generate（dynamic & static 均）完全正常；StaticCache 构造
+   实证（spy_init）——问题不在 transformers、不在 StaticCache
+2. **HF cache 本尊（pc）在我们 probe 的调用模式下同样退化**——问题
+   在调用模式（2D/None/截断 mask 三种全试，全部退化）
+3. **generate static 模式的真实 kwargs（forward pre-hook 实证）**：
+   decode 步 `attention_mask = {'full_attention': (1,1,1,cur_len 增长),
+   'linear_attention': None}`（**per-type 4D mask dict，GDN 得 None**），
+   cache_position=None——与我 probe 的 2D mask 完全不同物种
+   → 2D mask 的内部转换路径给 GDN 生成了非 None mask → 弄坏 conv 更新
+   （与 conv_state sum 不变、首 token 对、逐步坍缩全部吻合）
+4. 直喂 dict-mask（增长宽）→ sdpa 失配：mask(6) vs 全宽 K(29)——
+   generate 内部在层前还有 K/mask 对齐处理未对齐
+
+**下窗口精确起点**：sdpa 层入口抓 generate vs probe 的 K/mask 实际
+形状各一组（一个 hook），补上最后这层对齐；随后静态全宽 mask 版进
+graph。附带收获：GDN 的正确 decode 语义 = attention mask 为 None
+（递归路径不吃 attention mask），2D→GDN mask 的内部转换是
+transformers 5.15-dev 混合模型的疑似 bug（值得单独报 upstream）。
+
+## conv 冻结：mask 理论否决，收窄到 GDN conv 分支 (2026-09-13)
+
+本轮排除链（每项都有实验）：
+- generate static 的 K=20 之谜解开：generation_config.max_length 默认
+  20 = cache 全宽——generate 就是**全宽 K + 全宽 mask**（非增长截断）
+- 全宽因果 dict-mask（GDN=None）+ 完全复刻 generate kwargs
+  （cache_position=None）→ **cs_sum 仍 129.2547 一位不差冻结**
+  → 2D-mask→GDN 转换理论、mask 形状理论、kwargs 理论全部否决
+- 剩余唯一未检差异：GDN forward 的 conv 分支选择
+  （use_precomputed_states/has_previous_state 容器语义）在 generate
+  vs 手动 prefill+decode 下的不同——generate 的 prefill 细节
+  （logits_to_keep 等）可能影响槽内状态初始化
+
+下窗口终极一步（机械）：GDN forward conv 分支处插桩，打印
+use_precomputed_states / 分支走向 / conv_state.data_ptr，
+generate 与 probe 各跑一遍对照——一次钉死。
+
+## conv 冻结根因钉死 + 残余单点 (2026-09-13 深夜)
+
+终极插桩（GDN conv 分支对照）：
+- generate：use_prev=True 分支，cs_sum 每步变化 ✓
+- probe：**同分支同指针**，cs_sum 恒 129.255 ✗
+- 关键洞察：cs_sum 恒定 = 每步写入相同值 = 症状可能是果不是因；
+  两边 conv_state **初值**就不同（-354 vs 129）→ 分叉在 **prefill**
+
+**根因实锤**：generate 的 prefill 传 `{'full_attention': None,
+'linear_attention': None}`（dict 全 None）+ 无 cache_position；我传
+2D ones mask + cache_position=arange → GDN prefill 的 conv_state
+初始化错误。修复 prefill 为 generate 式 kwargs 后：
+- **conv 每步更新 ✓，且前两步 cs_sum 与 generate 逐位一致**
+  （-354.254 / -289.809）—— conv 问题关闭
+
+残余单点：输出仍从第 2 步起分叉（我们 ' Paris'×N，generate
+' Paris. \\n\\n The capital of...'）——第一步 token 正确（两边都是
+Paris），第 2 步起不同。嫌疑收窄到 full-attn 侧：decode 循环我们仍
+显式传 cache_position=[p]/position_ids=[[p]]（generate 传 None），
+或 KV 写读位置。下一步：decode 也完全去掉显式位置参数对齐 generate，
+若仍分叉则插桩 full-attn KV 读回。
+
+## 追加（同夜最后）：位置参数也排除
+
+decode 完全去掉 cache_position/position_ids（generate 式）→ 仍第 2 步
+分叉。位置参数理论排除。残余单点更新：第 1 token 正确（prompt KV 读
+取正确）→ 第 2 步错 = **step1 写入的 KV@pos5 被错误读回**。下窗口：
+sdpa 层入口打印 K[:, :, 5, :4] 的值（generate vs probe 第 2 步），
+直接对比写入内容与 rope 位置是否一致。conv 侧已完全关闭。
+
+## 🎉 全绿达成 (2026-09-14, Qwen3.5-4B graph capture 端到端正确)
+
+最后三个串联 bug（全部插桩实证）：
+1. **prefill 2D mask 损坏 GDN 初始化**（前夜已修：dict 全 None）
+2. **write_position off-by-one**：DS get_seq_length 曾返回 wp+1，模型据此
+   推导 decode position → rope 全错位（KV5 maxdiff 2.52）；修为返回
+   wp 本身（HF cumulative_length 语义：写入索引=已缓存计数）
+3. **warmup 污染 GDN 状态**：capture 前 3 次 warmup 前向把 conv/
+   recurrent 状态推进了 3 步 → 每个 replay 从污染态启动；修复：
+   prefill 后快照 GDN 状态，warmup 后 capture 前 copy_ 恢复
+
+最终数字（Qwen3.5-4B-Base, bf16, b1, 128 tok, 单卡）：
+| 路径 | tok/s | 输出 |
+|---|---|---|
+| HF eager | 22.5 | ✅ golden |
+| **graph capture（本修复）** | **30.4（+35%）** | **✅ 与 golden 逐 token 一致** |
+| graph + segKI | 31.4（+3% vs graph） | ULP 分叉 @~68 tok（连贯，已知特性） |
+
+64-token 口径 graph 曾达 54.8 tok/s（2.4×）——长上下文 decode 变慢是
+GDN 状态与 KV 增长的正常代价。
+
+修复总量回顾（GDN graph 支持从零到全绿）：6 处 mask/cache 协议对齐 +
+prefill/位置/warmup 三 bug ≈ 80 行 Python，零 csrc 改动。

@@ -164,19 +164,22 @@ class HybridEngineRollout(RolloutEngine):
             device=device,
             dtype=model_dtype,
         )
-        prefill_attn = torch.ones(batch_size, prompt_len, dtype=torch.long, device=device)
-        prefill_attn[:, :prompt_len] = prompt_attn
+        # Mirror generate's hybrid-model kwargs exactly: a per-type mask dict
+        # (GDN must see None) and no explicit cache_position. A 2D mask here
+        # corrupts the GDN conv-state initialization and collapses decode.
         prefill_out = module(
             prompt_ids,
-            attention_mask=prefill_attn,
+            attention_mask={
+                "full_attention": None,
+                "linear_attention": None
+            },
             past_key_values=prefill_cache,
             use_cache=True,
-            cache_position=torch.arange(prompt_len, device=device),
         )
         next_token = prefill_out.logits[:, -1, :].argmax(dim=-1, keepdim=True)
 
         # --- Copy prefill KV into DeepSpeedStaticCache ---
-        write_pos = torch.tensor(prompt_len - 1, dtype=torch.long, device=device)
+        write_pos = torch.tensor(prompt_len, dtype=torch.long, device=device)
         ds_cache = DeepSpeedStaticCache(
             module.config,
             batch_size=batch_size,
@@ -185,10 +188,17 @@ class HybridEngineRollout(RolloutEngine):
             dtype=model_dtype,
         )
         ds_cache.set_write_position(write_pos)
-        # Trigger lazy init then copy real data
+        # Trigger lazy init then copy real data. Hybrid models carry
+        # linear-attention (GDN) slots alongside KV slots; the GDN slots are
+        # bound by reference to the prefill cache's HF slot objects, whose
+        # state management is already cudagraph-safe by construction.
+        from deepspeed.utils.static_cache import DSStaticGDNSlot
         for layer_idx in range(len(ds_cache.layers)):
             ds_layer = ds_cache.layers[layer_idx]
             hf_layer = prefill_cache.layers[layer_idx]
+            if isinstance(ds_layer, DSStaticGDNSlot):
+                ds_layer.bind(hf_layer)
+                continue
             if not ds_layer.is_initialized:
                 ds_layer.lazy_initialization(hf_layer.keys, hf_layer.values)
             ds_layer.keys[:, :, :prompt_len, :].copy_(hf_layer.keys[:, :, :prompt_len, :])
@@ -198,14 +208,29 @@ class HybridEngineRollout(RolloutEngine):
 
         # --- Static buffers for graph capture ---
         static_token = torch.zeros(batch_size, 1, dtype=torch.long, device=device)
-        static_attn = torch.zeros(batch_size, max_len, dtype=torch.long, device=device)
-        static_attn[:, :prompt_len] = prompt_attn
-        static_attn[:, prompt_len] = 1  # first decode position
-        static_pos = torch.tensor(prompt_len, dtype=torch.long, device=device)
-        static_cache_pos = static_pos.unsqueeze(0)  # [1] for cache_position
-        static_pos_ids = static_pos.reshape(1, 1).expand(batch_size, 1)  # [batch, 1]
+        # Full-width static causal mask for the full-attention layers; revealed
+        # one position per decode step by in-place writes (graph-replay safe).
+        # GDN layers must receive None: their recurrence ignores attention masks
+        # and a non-None value corrupts the conv-state updates.
+        static_attn = torch.zeros(batch_size, 1, 1, max_len, dtype=torch.bool, device=device)
+        static_attn[:, :, :, :prompt_len] = prompt_attn.unsqueeze(1).unsqueeze(1).bool()
+        static_attn[:, :, :, prompt_len] = True
 
         write_pos.fill_(prompt_len)
+
+        # Snapshot the GDN states right after prefill: the warmup forwards
+        # advance conv/recurrent states by extra steps, so they must be
+        # restored before capture or every replay starts from corrupted state.
+        gdn_snapshot = []
+        for ds_layer in ds_cache.layers:
+            if type(ds_layer).__name__ == "DSStaticGDNSlot":
+                cs, rs = ds_layer.conv_states[0], ds_layer.recurrent_states[0]
+                gdn_snapshot.append((cs, rs, cs.clone(), rs.clone()))
+
+        def restore_gdn_states():
+            for cs, rs, cs0, rs0 in gdn_snapshot:
+                cs.copy_(cs0)
+                rs.copy_(rs0)
 
         # Remove forward hooks (they synchronize — illegal during graph capture)
         saved_pre = dict(module._forward_pre_hooks)
@@ -222,24 +247,27 @@ class HybridEngineRollout(RolloutEngine):
                 for _ in range(3):
                     out = module(
                         static_token,
-                        attention_mask=static_attn,
+                        attention_mask={
+                            "full_attention": static_attn,
+                            "linear_attention": None
+                        },
                         past_key_values=ds_cache,
                         use_cache=True,
-                        cache_position=static_cache_pos,
-                        position_ids=static_pos_ids,
                     )
             get_accelerator().current_stream().wait_stream(s)
+            restore_gdn_states()
 
             # Capture
             graph = get_accelerator().create_graph()
             with get_accelerator().capture_to_graph(graph):
                 out = module(
                     static_token,
-                    attention_mask=static_attn,
+                    attention_mask={
+                        "full_attention": static_attn,
+                        "linear_attention": None
+                    },
                     past_key_values=ds_cache,
                     use_cache=True,
-                    cache_position=static_cache_pos,
-                    position_ids=static_pos_ids,
                 )
             static_logits = out.logits
         finally:
@@ -257,9 +285,7 @@ class HybridEngineRollout(RolloutEngine):
             static_token.copy_(next_token)
             pos = prompt_len + step
             write_pos.fill_(pos)
-            static_cache_pos.fill_(pos)
-            static_pos_ids.fill_(pos)
-            static_attn[:, pos] = 1
+            static_attn[:, :, :, pos + 1] = True
 
             # Replay
             get_accelerator().replay_graph(graph)
