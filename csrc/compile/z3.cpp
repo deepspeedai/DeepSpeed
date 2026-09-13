@@ -191,6 +191,7 @@ public:
                 }
             }
             auto target_dtype = dtype ? dtype.value() : ds_tensor.scalar_type();
+            at::cuda::CUDAStreamGuard guard(ag_stream_);
             output_bufs[ds_id] =
                 torch::empty({padded_numel}, ds_tensor.options().dtype(target_dtype));
         }
