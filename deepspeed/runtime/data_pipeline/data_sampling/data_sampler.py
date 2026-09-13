@@ -313,6 +313,22 @@ class DeepSpeedDataSampler(object):
                 self.consumed_samples += len(current_batch)
                 current_batch = []
 
+    def _load_np_rng_state(self, rng_state):
+        """Restore `self.np_rng`, tolerating checkpoints written before this was fixed.
+
+        Older checkpoints hold the tuple `np.random.get_state()` returns for the
+        legacy global RandomState. There is no sampler stream recorded in it, so the
+        best that can be done is to leave `self.np_rng` on its fresh seed -- the same
+        position those checkpoints already resumed at -- rather than fail to load.
+        """
+        if isinstance(rng_state, dict):
+            self.np_rng.bit_generator.state = rng_state
+            return
+        if self.global_rank == 0:
+            logger.warning("Curriculum learning checkpoint stores the legacy global numpy RNG state, "
+                           "which does not describe this sampler's own stream. Resuming its sampling "
+                           "from the configured seed.")
+
     def state_dict(self):
         return {
             CURRICULUM_LEARNING_BATCH: self.batch,
@@ -321,7 +337,13 @@ class DeepSpeedDataSampler(object):
             CURRICULUM_LEARNING_CURRENT_DIFFICULTIES: self.current_difficulties,
             CURRICULUM_LEARNING_DATA_CLUSTER_PATHS: self.data_cluster_paths,
             CURRICULUM_LEARNING_DATA_CLUSTER_CURRENT_POSITION: self.data_cluster_current_position,
-            CURRICULUM_LEARNING_NP_RNG_STATE: np.random.get_state()
+            # `self.np_rng` is what every draw in this class goes through
+            # (sample_from_clusters, get_new_cluster, reshuffle_clusters), so its
+            # bit generator's state is the one worth saving. `np.random.get_state()`
+            # returns the process-wide legacy RandomState, which this sampler never
+            # touches: it reads the same whether the sampler has drawn nothing or a
+            # thousand batches.
+            CURRICULUM_LEARNING_NP_RNG_STATE: self.np_rng.bit_generator.state
         }
 
     def load_state_dict(self, state_dict):
@@ -331,7 +353,7 @@ class DeepSpeedDataSampler(object):
         self.current_difficulties = state_dict[CURRICULUM_LEARNING_CURRENT_DIFFICULTIES]
         self.data_cluster_paths = state_dict[CURRICULUM_LEARNING_DATA_CLUSTER_PATHS]
         self.data_cluster_current_position = state_dict[CURRICULUM_LEARNING_DATA_CLUSTER_CURRENT_POSITION]
-        np.random.set_state(state_dict[CURRICULUM_LEARNING_NP_RNG_STATE])
+        self._load_np_rng_state(state_dict[CURRICULUM_LEARNING_NP_RNG_STATE])
         cluster_root_path = self.data_efficiency_config[DATA_SAMPLING][CURRICULUM_LEARNING][
             CURRICULUM_LEARNING_CLUSTER_PATH]
         # Backward compatibility: previously data_cluster_paths were stored as
