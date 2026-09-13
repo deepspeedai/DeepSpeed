@@ -715,7 +715,7 @@ class LocalSlidingWindowSparsityConfig(SparsityConfig):
         Arguments:
              seq_len: required: an integer determining number of attention heads of the layer.
         Return:
-             layout: a tensor of dimension (num_heads, num_blocks, num_blocks) containing `BigBird` sparsity layout of all head
+             layout: a tensor of dimension (num_heads, num_blocks, num_blocks) containing `Local Sliding Window` sparsity layout of all head
         """
 
         layout = self.setup_layout(seq_len)
