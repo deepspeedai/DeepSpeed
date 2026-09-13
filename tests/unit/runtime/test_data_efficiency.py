@@ -5,12 +5,16 @@
 
 import torch
 import os
+import numpy as np
 import deepspeed
 from deepspeed.accelerator import get_accelerator
 import pytest
 from unit.common import DistributedTest
 from unit.simple_model import Curriculum_SimpleModel, SimpleModel, random_dataloader, random_dataset
+from deepspeed.runtime.data_pipeline.config import get_data_efficiency_config
+from deepspeed.runtime.data_pipeline.constants import CURRICULUM_LEARNING_NP_RNG_STATE
 from deepspeed.runtime.data_pipeline.curriculum_scheduler import CurriculumScheduler
+from deepspeed.runtime.data_pipeline.data_sampling.data_sampler import DeepSpeedDataSampler
 
 
 class MPU():
@@ -97,6 +101,74 @@ def test_curriculum_tops_out_at_the_configured_max():
     # the ramp at the configured value, and this change does not touch that end.
     scheduler = _curriculum_scheduler(16, 1000, 16)
     assert scheduler.get_difficulty(200) == 1000
+
+
+def _curriculum_data_sampler(cluster_path):
+    param_dict = {
+        "data_efficiency": {
+            "enabled": True,
+            "seed": 1234,
+            "data_sampling": {
+                "enabled": True,
+                "curriculum_learning": {
+                    "enabled": True,
+                    "data_cluster_path": str(cluster_path),
+                    "curriculum_metrics": {
+                        "dummy": {
+                            "index_to_sample_path": "dummy",
+                            "index_to_metric_path": "dummy",
+                            "difficulty_type": "value",
+                            "clustering_type": "single_cluster",
+                            "min_difficulty": 8,
+                            "max_difficulty": 80,
+                            "schedule_type": "fixed_linear",
+                            "schedule_config": {
+                                "total_curriculum_step": 100,
+                                "difficulty_step": 8
+                            },
+                        }
+                    },
+                },
+            },
+        }
+    }
+    sampler = DeepSpeedDataSampler(data_efficiency_config=get_data_efficiency_config(param_dict),
+                                   one_epoch_total_samples=100,
+                                   micro_batch_size=8,
+                                   data_parallel_rank=0,
+                                   data_parallel_size=1,
+                                   data_parallel_group=None,
+                                   gradient_accumulation_steps=1,
+                                   global_rank=0)
+    # clusters of known size, so sample_from_clusters draws without any cluster file
+    sampler.data_clusters = [None] * 4
+    sampler.data_cluster_sizes = [10, 20, 30, 40]
+    return sampler
+
+
+def test_curriculum_sampler_checkpoints_its_own_rng(tmp_path):
+    sampler = _curriculum_data_sampler(tmp_path)
+    for _ in range(3):
+        sampler.sample_from_clusters()
+    assert sampler.state_dict()[CURRICULUM_LEARNING_NP_RNG_STATE] == sampler.np_rng.bit_generator.state
+
+
+def test_curriculum_sampler_resumes_its_rng_stream(tmp_path):
+    saved = _curriculum_data_sampler(tmp_path)
+    first_draws = [saved.sample_from_clusters().tolist() for _ in range(3)]
+
+    resumed = _curriculum_data_sampler(tmp_path)
+    resumed.load_state_dict(saved.state_dict())
+    next_draws = [resumed.sample_from_clusters().tolist() for _ in range(3)]
+    assert next_draws == [saved.sample_from_clusters().tolist() for _ in range(3)]
+    assert next_draws != first_draws
+
+
+def test_curriculum_sampler_loads_legacy_rng_state(tmp_path):
+    sampler = _curriculum_data_sampler(tmp_path)
+    state_dict = sampler.state_dict()
+    state_dict[CURRICULUM_LEARNING_NP_RNG_STATE] = np.random.get_state()
+    sampler.load_state_dict(state_dict)
 
 
 @pytest.mark.parametrize('dtype', [torch.bfloat16, torch.float16])
