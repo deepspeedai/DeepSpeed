@@ -81,6 +81,16 @@ jobs:
     runs-on: ubuntu-24.04
 
     env:
+      # The runner is single-socket, so CPU_Accelerator.device_count() reports 1
+      # NUMA node and the per-device gate in tests/unit/common.py skips every
+      # multi-rank test. CPU ranks are plain processes over gloo, so advertise 4
+      # local devices to let world_size<=4 tests run. The test harness re-sets
+      # LOCAL_SIZE per worker, so this value only affects the launch gate.
+      LOCAL_SIZE: '4'
+      # Multi-rank tests churn mp pools for hours; reused pools eventually hang in
+      # cleanup and stall workers until the 6h job limit. Fresh pools per test are
+      # slower but let the suite finish (knob documented in tests/unit/common.py).
+      DS_DISABLE_REUSE_DIST_ENV: '1'
       DEFAULT_TORCH_PRESET: '2.10.0-cpu'
       DEFAULT_TRANSFORMERS_SOURCE: 'git'
       # Manual PyPI fallback only; scheduled and default manual runs use Git.
@@ -274,5 +284,12 @@ jobs:
         run: |
           unset TORCH_CUDA_ARCH_LIST # only jit compile for current arch
           cd tests
-          HF_HOME=/tmp/hf_home/ pytest $PYTEST_OPTS --forked -n 4 unit/ --torch_ver="$TORCH_TEST_VERSION"
-          HF_HOME=/tmp/hf_home/ pytest $PYTEST_OPTS --forked -m 'sequential' unit/ --torch_ver="$TORCH_TEST_VERSION"
+          # The suite is split so each half gets fresh xdist workers: multi-rank pool
+          # teardown eventually wedges a worker, and one 3400-test process never
+          # reaches its summary inside the 6h job limit. maxfail is raised so every
+          # failure is listed, and timeout caps each half.
+          overall=0
+          timeout 150m pytest $PYTEST_OPTS --maxfail=100000 --forked -n 4 unit/ --ignore=unit/v1 --torch_ver="$TORCH_TEST_VERSION" || overall=$?
+          timeout 150m pytest $PYTEST_OPTS --maxfail=100000 --forked -n 4 unit/v1 --torch_ver="$TORCH_TEST_VERSION" || overall=$?
+          HF_HOME=/tmp/hf_home/ pytest $PYTEST_OPTS --forked -m 'sequential' unit/ --torch_ver="$TORCH_TEST_VERSION" || overall=$?
+          exit $overall
