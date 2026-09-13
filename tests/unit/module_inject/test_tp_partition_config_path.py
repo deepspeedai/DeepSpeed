@@ -10,10 +10,13 @@ because the name was just ``0.self_attn.q_proj``.
 
 import pytest
 import torch.nn as nn
+from transformers import PreTrainedModel, PretrainedConfig
 
 from deepspeed.module_inject.auto_tp import AutoTP, AutoTPConfig, PartitionType, TPLayerSpec
-from deepspeed.module_inject.layers import LinearAllreduce, LinearLayer, LmHeadLinearAllreduce, set_autotp_mode
+from deepspeed.module_inject.layers import (LinearAllreduce, LinearLayer, LmHeadLinearAllreduce, VocabParallelLinear,
+                                            set_autotp_mode)
 from deepspeed.module_inject.tp_plan_converter import TPPlanConverter
+from deepspeed.sequence.cross_entropy import VocabParallelCausalLMLoss, configure_vocab_parallel_loss
 
 
 class SubAttn(nn.Module):
@@ -52,6 +55,15 @@ class OutputModel(nn.Module):
         self.lm_head = nn.Linear(32, 100, bias=False)
         if tied:
             self.lm_head.weight = self.embed_tokens.weight
+
+
+class HFOutputModel(PreTrainedModel):
+    config_class = PretrainedConfig
+
+    def __init__(self):
+        super().__init__(PretrainedConfig())
+        self.embed_tokens = nn.Embedding(100, 32)
+        self.lm_head = nn.Linear(32, 100, bias=False)
 
 
 def _build_config():
@@ -160,6 +172,25 @@ def _build_gathered_lm_head_autotp(model, mp_size=1):
     return autotp
 
 
+def _build_local_lm_head_autotp(model, vocab_parallel_lm_head=True):
+    config = AutoTPConfig(layer_specs=[
+        TPLayerSpec(patterns=[r".*lm_head\.weight$"], partition_type=PartitionType.COLUMN),
+    ])
+    autotp = AutoTP(
+        module=model,
+        all_reduce_linears=[],
+        prefix="",
+        state_dict=None,
+        linear_layer_setting=None,
+        orig_layer_impl=None,
+        partition_config=config,
+        vocab_parallel_lm_head=vocab_parallel_lm_head,
+    )
+    autotp.set_tensor_parallel_config(1, None)
+    autotp.update_linear_policies()
+    return autotp
+
+
 def _build_legacy_lm_head_autotp(model, training_mode=False):
     autotp = AutoTP(
         module=model,
@@ -247,6 +278,107 @@ def test_gathered_lm_head_uses_column_parallel_layer_when_output_dim_is_uneven()
     assert model.lm_head.gather_output
 
 
+def test_vocab_parallel_linear_exposes_vocab_metadata():
+    layer = VocabParallelLinear(nn.Linear(32, 101, bias=False), mp_group=None, name="lm_head")
+
+    assert layer.vocab_size == 101
+    assert layer.vocab_start_index == 0
+    assert layer.vocab_end_index == 101
+    assert not layer.gather_output
+
+
+def test_plain_colwise_lm_head_uses_vocab_parallel_layer():
+    model = OutputModel(tied=False)
+
+    _build_local_lm_head_autotp(model, vocab_parallel_lm_head=True)._replace_module(model)
+
+    assert isinstance(model.lm_head, VocabParallelLinear)
+
+
+def test_plain_colwise_lm_head_without_flag_keeps_local_logits():
+    model = OutputModel(tied=False)
+
+    _build_local_lm_head_autotp(model, vocab_parallel_lm_head=False)._replace_module(model)
+
+    assert isinstance(model.lm_head, LinearLayer)
+    assert not isinstance(model.lm_head, VocabParallelLinear)
+    assert not model.lm_head.gather_output
+
+
+@pytest.mark.parametrize("name,expected", [
+    ("lm_head", True),
+    ("embed_out", True),
+    ("model.lm_head", True),
+    ("lm_head_proj", False),
+    ("model.lm_head_proj.weight", False),
+    ("inner_lm_head.block", False),
+])
+def test_lm_head_name_matching_ignores_projections(name, expected):
+    assert AutoTP._is_lm_head_name(name) is expected
+
+
+def test_plain_colwise_lm_head_rejects_tied_weights():
+    model = OutputModel(tied=True)
+
+    with pytest.raises(ValueError, match="requires untied"):
+        _build_local_lm_head_autotp(model)._replace_module(model)
+
+
+def test_plain_colwise_lm_head_rejects_tie_before_embedding_is_sliced():
+    model = OutputModel(tied=True)
+    specs = TPPlanConverter.convert({
+        "embed_tokens": "embedding_rowwise",
+        "lm_head": "colwise",
+    })
+    autotp = AutoTP(
+        module=model,
+        all_reduce_linears=[],
+        prefix="",
+        state_dict=None,
+        linear_layer_setting=None,
+        orig_layer_impl=None,
+        partition_config=AutoTPConfig(layer_specs=specs),
+        vocab_parallel_lm_head=True,
+    )
+    autotp.set_tensor_parallel_config(2, None)
+    autotp.update_linear_policies()
+
+    with pytest.raises(ValueError, match="requires untied"):
+        autotp._replace_module(model)
+
+
+def test_configure_vocab_parallel_loss_installs_and_preserves_hook():
+    model = OutputModel(tied=False)
+    model.loss_function = nn.CrossEntropyLoss()
+    original_loss_function = model.loss_function
+    _build_local_lm_head_autotp(model)._replace_module(model)
+
+    configure_vocab_parallel_loss(model, model.lm_head)
+
+    assert isinstance(model.loss_function, VocabParallelCausalLMLoss)
+    assert model._deepspeed_original_loss_function is original_loss_function
+
+
+def test_configure_vocab_parallel_loss_installs_on_huggingface_model():
+    model = HFOutputModel()
+    original_loss_function = model.loss_function
+    _build_local_lm_head_autotp(model)._replace_module(model)
+
+    configure_vocab_parallel_loss(model, model.lm_head)
+
+    assert isinstance(model.loss_function, VocabParallelCausalLMLoss)
+    assert not isinstance(model.loss_function, nn.Module)
+    assert model._deepspeed_original_loss_function is original_loss_function
+
+
+def test_configure_vocab_parallel_loss_requires_hook():
+    model = OutputModel(tied=False)
+    _build_local_lm_head_autotp(model)._replace_module(model)
+
+    with pytest.raises(ValueError, match="requires a writable loss_function"):
+        configure_vocab_parallel_loss(model, model.lm_head)
+
+
 @pytest.mark.parametrize("head", ["lm_head", "embed_out"])
 def test_legacy_output_head_defaults_to_column_parallel_during_training(head):
     model = OutputModel(tied=False)
@@ -289,6 +421,37 @@ def test_legacy_tied_lm_head_stays_replicated_during_training():
     assert isinstance(model.lm_head, nn.Linear)
     assert model.embed_tokens.weight is tied_weight
     assert model.lm_head.weight is tied_weight
+
+
+def test_vocab_parallel_flag_preserves_nonstandard_tied_output_fallback():
+    model = OutputModel(tied=False)
+    model.output_proj = model.lm_head
+    model.output_proj.weight = model.embed_tokens.weight
+    del model.lm_head
+    tied_weight = model.embed_tokens.weight
+    specs = TPPlanConverter.convert({
+        "embed_tokens": "embedding_rowwise",
+        "output_proj": "colwise_gather_output",
+    })
+    autotp = AutoTP(
+        module=model,
+        all_reduce_linears=[],
+        prefix="",
+        state_dict=None,
+        linear_layer_setting=None,
+        orig_layer_impl=None,
+        partition_config=AutoTPConfig(layer_specs=specs),
+        vocab_parallel_lm_head=True,
+    )
+    autotp.set_tensor_parallel_config(2, None)
+    autotp.update_linear_policies()
+
+    autotp._replace_module(model)
+
+    assert isinstance(model.embed_tokens, nn.Embedding)
+    assert isinstance(model.output_proj, nn.Linear)
+    assert model.embed_tokens.weight is tied_weight
+    assert model.output_proj.weight is tied_weight
 
 
 def test_explicit_row_parallel_lm_head_is_not_overridden_by_its_name():
