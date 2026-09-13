@@ -51,6 +51,98 @@ class TestClipGradNorm(DistributedTest):
 
         assert gathered_norm[0] == gathered_norm[1], "norm at rank 0 does not match the norm at rank 1"
 
+    def test_sharded_experts_count_once(self):
+        """The global norm must not depend on how experts are spread over ranks.
+
+        Rank-averaging the per-rank norms only reconstructs a global norm when every
+        rank holds the same parameters. Under expert parallelism they do not, so the
+        four experts below gave sqrt(20) and sqrt(100) averaged to 7.236 instead of
+        the sqrt(120) = 10.954 that counting each expert once produces (#8469).
+        """
+        groups._create_expert_and_data_parallel(2)
+        rank = dist.get_rank()
+        device = get_accelerator().device_name(rank)
+
+        experts = [torch.full((4, ), float(v)) for v in (1.0, 2.0, 3.0, 4.0)]
+        expected = torch.cat(experts).norm(2).item()
+
+        owned = experts[:2] if rank == 0 else experts[2:]
+        params = []
+        for grad in owned:
+            param = torch.nn.Parameter(torch.zeros(4, device=device))
+            param.grad = grad.clone().to(device)
+            param.allreduce = False
+            param.group_name = "ep_size_2"
+            params.append(param)
+
+        # A max_norm far above the norm leaves the gradients alone, so this reads the
+        # computed norm rather than the clipped result.
+        norm = ds_utils.clip_grad_norm_(params, max_norm=1e9)
+
+        assert abs(float(norm) - expected) < 1e-4, (
+            f"global norm {float(norm)} should be {expected} regardless of expert placement")
+
+    def _expert(self, value, device, with_grad=True):
+        param = torch.nn.Parameter(torch.zeros(4, device=device))
+        if with_grad:
+            param.grad = torch.full((4, ), value, device=device)
+        param.allreduce = False
+        param.group_name = "ep_size_2"
+        return param
+
+    def _plain(self, value, device):
+        param = torch.nn.Parameter(torch.zeros(4, device=device))
+        param.grad = torch.full((4, ), value, device=device)
+        return param
+
+    def test_experts_idle_on_one_rank_do_not_deadlock(self):
+        """A rank whose experts got no tokens must take the same collectives (#8469).
+
+        Ownership has to be read from the parameters, not the gradients: `p.grad is
+        not None` filtering drops an unused expert, and branching on what is left made
+        one rank reduce over the expert group while its peer reduced over the data
+        parallel group. They then waited on each other.
+        """
+        groups._create_expert_and_data_parallel(2)
+        rank = dist.get_rank()
+        device = get_accelerator().device_name(rank)
+
+        expert = self._expert(2.0, device, with_grad=(rank == 0))
+        norm = ds_utils.clip_grad_norm_([self._plain(1.0, device), expert], max_norm=1e9)
+
+        # non-expert 2.0 replicated, one expert of norm 4.0 owned by rank 0:
+        # sqrt(2**2 + 4**2).
+        assert abs(float(norm) - 20**0.5) < 1e-4
+
+    def test_a_rank_owning_no_expert_does_not_deadlock(self):
+        """Under pipeline parallelism a rank can hold no expert at all.
+
+        Local ownership then differs in kind rather than in degree, so the branch is
+        settled by one all-reduced flag instead of by what this rank happens to hold.
+        """
+        groups._create_expert_and_data_parallel(2)
+        rank = dist.get_rank()
+        device = get_accelerator().device_name(rank)
+
+        params = [self._plain(1.0, device)]
+        if rank == 0:
+            params.append(self._expert(2.0, device))
+
+        norm = ds_utils.clip_grad_norm_(params, max_norm=1e9)
+        assert abs(float(norm) - 20**0.5) < 1e-4
+
+    def test_expert_only_inf_norm(self):
+        """Nothing replicated leaves no tensor to take a max over; zero is the identity."""
+        groups._create_expert_and_data_parallel(2)
+        rank = dist.get_rank()
+        device = get_accelerator().device_name(rank)
+
+        norm = ds_utils.clip_grad_norm_([self._expert(float(rank + 1), device)],
+                                        max_norm=1e9,
+                                        norm_type=float('inf'))
+
+        assert abs(float(norm) - 2.0) < 1e-4
+
     def test_clipped_val(self):
         max_norm = 0.1
 
