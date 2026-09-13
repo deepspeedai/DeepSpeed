@@ -1692,7 +1692,11 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                     param = params[base_i + rank]
                     g = param.grad
                     m = gathered_momentums_pad[base_i + rank]
-                    update = muon_update(g, m, beta=self.muon_beta, ns_method=getattr(self, 'muon_ns_method', 'gram'))
+                    update = muon_update(g,
+                                         m,
+                                         beta=self.muon_beta,
+                                         ns_method=getattr(self, 'muon_ns_method', 'gram'),
+                                         num_heads=getattr(param, 'muon_num_heads', None))
                     g.data.copy_(update, non_blocking=False)
                 grad_handle = dist.all_gather(grads_pad[base_i:base_i + world_sz],
                                               grads_pad[base_i + rank],
