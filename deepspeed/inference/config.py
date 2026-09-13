@@ -265,7 +265,7 @@ class DeepSpeedInferenceConfig(DeepSpeedConfigModel):
     to the required token-length required for your use-case.
     """
 
-    min_out_tokens: int = Field(1, alias="min_tokens")
+    min_out_tokens: int = Field(1, alias="min_tokens", gt=0)
     """
     This argument communicates to the runtime the minimum number of tokens you
     expect you will need to generate. This will cause the runtime to error
