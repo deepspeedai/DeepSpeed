@@ -85,7 +85,7 @@ from deepspeed.checkpoint.autoep_zero3_metadata import (
     is_autoep_zero3_partitioned_entry,
     validate_autoep_zero3_partitioned_metadata,
 )
-from deepspeed.checkpoint.utils import clone_tensors_for_torch_save
+from deepspeed.checkpoint.utils import clone_tensors_for_torch_save, natural_keys
 from deepspeed.checkpoint.ds_to_universal import dp_index_to_str
 from deepspeed.runtime.sparse_tensor import SparseTensor
 
@@ -4432,7 +4432,8 @@ class DeepSpeedEngine(Module):
         import glob
 
         ckpt_files = glob.glob(ckpt_file_pattern)
-        ckpt_files.sort()
+        # Callers index this list by model-parallel rank, so it must be ordered numerically.
+        ckpt_files.sort(key=natural_keys)
         return ckpt_files
 
     def load_checkpoint(self,
