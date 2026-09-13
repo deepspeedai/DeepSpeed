@@ -284,7 +284,7 @@ class ZenFlowSelectiveAdamW_stage3(torch.optim.AdamW):
     @torch.no_grad()
     def temp_copy_param(self, paramlist):
         for param in paramlist:
-            if getattr(param, "selected_grad", None) is not None:
+            if hasattr(param, "selected_grad"):
                 swapped_in = self._swap_in_if_offloaded(param)
                 num_column, num_row = param.ds_shape if len(param.ds_shape) != 1 else (param.ds_shape[0], 1)
 
@@ -320,10 +320,9 @@ class ZenFlowSelectiveAdamW_stage3(torch.optim.AdamW):
     @torch.no_grad()
     def _step_without_offload(self):
         for group in self.param_groups:
-            params = [p for p in group["params"] if getattr(p, "selected_grad", None) is not None]
 
-            if any(hasattr(p, "selected_grad") and self._is_partition_offloaded(p) for p in params):
-                self._group_step_offloaded(params, group)
+            if any(hasattr(p, "selected_grad") and self._is_partition_offloaded(p) for p in group["params"]):
+                self._group_step_offloaded(group["params"], group)
                 continue
 
             params_with_grad: List[Tensor] = []
@@ -334,8 +333,8 @@ class ZenFlowSelectiveAdamW_stage3(torch.optim.AdamW):
             state_steps: List[Tensor] = []
             amsgrad: bool = group["amsgrad"]
             beta1, beta2 = cast(Tuple[float, float], group["betas"])
-            for param in params:
-                if getattr(param, "selected_grad", None) is not None:
+            for param in group["params"]:
+                if hasattr(param, "selected_grad"):
                     num_column, num_row = param.ds_shape if len(param.ds_shape) != 1 else (param.ds_shape[0], 1)
                     if num_row != 1:
                         param_2d = param.ds_tensor.data.narrow(0, param.complete_column_offset,
@@ -377,8 +376,8 @@ class ZenFlowSelectiveAdamW_stage3(torch.optim.AdamW):
                 eps=group["eps"],
                 maximize=False,
             )
-            for i, param in enumerate(params):
-                if getattr(param, "selected_grad", None) is not None:
+            for i, param in enumerate(group["params"]):
+                if hasattr(param, "selected_grad"):
                     num_column, num_row = param.ds_shape if len(param.ds_shape) != 1 else (param.ds_shape[0], 1)
                     if num_row != 1:
                         param_2d = param.ds_tensor.data.narrow(0, param.complete_column_offset,
@@ -386,7 +385,7 @@ class ZenFlowSelectiveAdamW_stage3(torch.optim.AdamW):
                                                                    param.complete_numel // num_row, num_row)
                         param_2d[param.selected_indices, :] = params_with_grad[i]
 
-            for param in params:
+            for param in group["params"]:
                 if hasattr(param, "temp_selected_param"):
                     param.temp_selected_param = None
                     param.selected_grad = None
@@ -513,7 +512,7 @@ class ZenFlowSelectiveAdamW_stage3(torch.optim.AdamW):
         partition is resident and the swapper buffer pool is never exhausted.
         """
         for param in params:
-            if getattr(param, "selected_grad", None) is None:
+            if not hasattr(param, "selected_grad"):
                 continue
             swapped_in = self._swap_in_if_offloaded(param)
             if self.offload:
@@ -531,8 +530,6 @@ class ZenFlowSelectiveAdamW_stage3(torch.optim.AdamW):
 
         group_to_paramlist = {}
         for param in paramlist:
-            if getattr(param, "selected_grad", None) is None:
-                continue
             group_id = param.group_id
             if group_id not in group_to_paramlist:
                 group_to_paramlist[group_id] = []
@@ -560,7 +557,7 @@ class ZenFlowSelectiveAdamW_stage3(torch.optim.AdamW):
             beta1, beta2 = cast(Tuple[float, float], group["betas"])
 
             for param in params:
-                if getattr(param, "selected_grad", None) is not None:
+                if hasattr(param, "selected_grad"):
                     num_column, num_row = param.ds_shape if len(param.ds_shape) != 1 else (param.ds_shape[0], 1)
 
                     if num_row != 1:
@@ -612,7 +609,7 @@ class ZenFlowSelectiveAdamW_stage3(torch.optim.AdamW):
             )
 
             for i, param in enumerate(params):
-                if getattr(param, "selected_grad", None) is not None:
+                if hasattr(param, "selected_grad"):
                     num_column, num_row = param.ds_shape if len(param.ds_shape) != 1 else (param.ds_shape[0], 1)
                     if num_row != 1:
                         param_2d = param.ds_tensor.data.narrow(0, param.complete_column_offset,
@@ -666,7 +663,7 @@ class ZenFlowSelectiveAdamW_stage3(torch.optim.AdamW):
                 bucket.clear()
 
             for param in params:
-                if getattr(param, "selected_grad", None) is not None:
+                if hasattr(param, "selected_grad"):
                     bucket.append(param)
                     bucket_numel += param.numel()
                     if bucket_numel >= self.bucket_size:
