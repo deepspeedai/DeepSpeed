@@ -4,6 +4,7 @@
 # DeepSpeed Team
 
 import pytest
+import torch
 import deepspeed.comm as dist
 from deepspeed.accelerator import get_accelerator
 from deepspeed.runtime.zenflow.zenflow_stage_1_and_2 import _num_selected_columns
@@ -11,6 +12,73 @@ from deepspeed.runtime.zenflow.zenflow_stage_1_and_2 import _num_selected_column
 from unit.common import DistributedTest
 from unit.simple_model import SimpleModel, random_dataloader
 import deepspeed
+from deepspeed.ops.adam.zenflow_torch_adam import ZenFlowSelectiveAdamW, ZenFlowSelectiveAdamW_stage3
+
+
+@pytest.mark.parametrize("stage3", [False, True])
+@pytest.mark.parametrize("offload", [False, True])
+@pytest.mark.parametrize("group_step", [False, True])
+@pytest.mark.parametrize("cleared_gradient", [False, True])
+def test_selective_optimizer_skips_unused_parameters(stage3, offload, group_step, cleared_gradient):
+    model = torch.nn.Linear(3, 2, bias=False)
+    unused = torch.nn.Parameter(torch.ones(2, 3))
+    if cleared_gradient:
+        unused.selected_grad = None
+    param = model.weight
+    initial = param.detach().clone()
+    indices = torch.tensor([0])
+    param.selected_indices = indices
+    params = [unused, param]
+    if stage3:
+        for p in params:
+            p.ds_shape = p.shape
+            p.ds_tensor = p.detach().flatten()
+            p.complete_column_offset = 0
+            p.complete_numel = p.numel()
+            p.group_id = 0
+        optimizer_class = ZenFlowSelectiveAdamW_stage3
+        selected = lambda tensor: tensor[indices, :]
+    else:
+        optimizer_class = ZenFlowSelectiveAdamW
+        selected = lambda tensor: tensor[:, indices]
+    reference = torch.nn.Parameter(selected(initial).clone())
+    optimizer = optimizer_class(params, lr=0.01, weight_decay=0.1, offload=offload, bucket_size=1)
+    reference_optimizer = torch.optim.AdamW([reference], lr=0.01, weight_decay=0.1)
+    if offload:
+        param.exp_avg_cpu_data = torch.zeros_like(reference)
+        param.exp_avg_sq_cpu_data = torch.zeros_like(reference)
+
+    def step():
+        if not group_step:
+            optimizer.step()
+        elif stage3:
+            optimizer.group_step(params)
+        else:
+            optimizer.group_step({0: params})
+
+    for _ in range(3):
+        optimizer.zero_grad()
+        model(torch.tensor([[1.0, 2.0, 3.0]])).square().sum().backward()
+        param.selected_grad = selected(param.grad).clone()
+        optimizer.temp_copy_param(params if stage3 else {0: params})
+        reference.grad = param.selected_grad.clone()
+        reference_optimizer.step()
+        step()
+        expected = initial.clone()
+        if stage3:
+            expected[indices, :] = reference.detach()
+        else:
+            expected[:, indices] = reference.detach()
+        torch.testing.assert_close(param, expected)
+        torch.testing.assert_close(unused, torch.ones_like(unused))
+        assert unused not in optimizer.state
+
+    # Cleared gradients remain as attributes between selective updates.
+    param.selected_grad = None
+    optimizer.temp_copy_param(params if stage3 else {0: params})
+    step()
+    torch.testing.assert_close(param, expected)
+    assert optimizer.state[param]["step"].item() == 3
 
 
 @pytest.mark.parametrize("num_columns,topk_ratio,expected", [
