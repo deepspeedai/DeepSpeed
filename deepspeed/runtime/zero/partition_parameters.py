@@ -780,8 +780,18 @@ class AllGatherCoalescedHandle:
                     part_to_copy = self.partitions[rank].narrow(0, param_offset,
                                                                 min(param.ds_numel - param_start, ds_tensor_numel))
                     partitions.append(part_to_copy)
-            # Note that dtypes of param and partitions can be different (currently for torch.autocast support)
-            param.data = instrument_w_nvtx(torch.cat)(partitions).view(param.ds_shape).to(param.ds_tensor.dtype)
+            if not partitions:
+                # No rank holds a slice of a zero-element parameter, so the loop above
+                # appended nothing and there is nothing to concatenate. The gather still has
+                # to leave the parameter AVAILABLE in its own shape, and at the dtype the
+                # sized parameters of this bucket end up with: the partition's dtype
+                # normally, and the parameter's own under quantization, where the partition
+                # is stored as int8 and the sized params are dequantized on the way out.
+                empty_dtype = param.dtype if self.quantization else param.ds_tensor.dtype
+                param.data = torch.empty(param.ds_shape, dtype=empty_dtype, device=param.device)
+            else:
+                # Note that dtypes of param and partitions can be different (currently for torch.autocast support)
+                param.data = instrument_w_nvtx(torch.cat)(partitions).view(param.ds_shape).to(param.ds_tensor.dtype)
             param.ds_status = ZeroParamStatus.AVAILABLE
             if not get_accelerator().is_synchronized_device() and handle_dependency:
                 for part_to_copy in partitions:
@@ -854,6 +864,14 @@ class CUDAQuantizer:
             CUDAQuantizer.quantizer_cuda_module = deepspeed.ops.op_builder.QuantizerBuilder().load()
 
     def quantize(self, param, groups=None):
+        if param.numel() == 0:
+            # Nothing to quantize, and the group-size search below derives its divisor from
+            # numel: `groups` comes out 0 and the very next `numel % (8 * groups * 2)` raises
+            # ZeroDivisionError. Return the empty pair the callers expect, so `ds_quant_scale`
+            # is still set on a zero-element partition and dequantize round-trips it.
+            device = get_accelerator().device_name()
+            return (torch.empty(0, dtype=torch.int8,
+                                device=device), torch.empty((0, 1), dtype=torch.float32, device=device))
         if groups is None:
             try:
                 groups = self.group_size_cache[param.numel()]
@@ -883,6 +901,9 @@ class CUDAQuantizer:
         return self.quantizer_cuda_module.quantize(param, groups, 8, self.quantizer_cuda_module.Symmetric)
 
     def dequantize(self, quantized_param, scale, dtype=None):
+        if quantized_param.numel() == 0:
+            # Mirror of the guard in quantize(): the kernel is given a zero group count here.
+            return torch.empty(0, dtype=dtype or torch.half, device=quantized_param.device)
         dequantized = self.quantizer_cuda_module.dequantize(quantized_param, scale, scale.numel(), 8,
                                                             self.quantizer_cuda_module.Symmetric)
         if dtype is not None and dequantized.dtype != dtype:
