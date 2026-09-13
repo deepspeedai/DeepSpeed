@@ -45,6 +45,29 @@ except ImportError:
         return property(func)
 
 
+# `RotateHalfConfig` carries `use_trained_freqs`, `theta_base` and `rotate_dim`, so a config
+# asking for a scaled rotary variant cannot be honoured here. These spellings mean "no scaling".
+_UNSCALED_ROPE_TYPES = (None, "default")
+
+
+def _rope_types(config) -> set:
+    """Every rotary variant a config asks for, across both layouts and per-layer entries.
+
+    transformers 5.x keeps these in ``rope_parameters``, 4.x in ``rope_scaling``, and a
+    per-layer-type config nests one dict per layer type inside either of them. Both
+    spellings of the key are in use, so both are read.
+    """
+    rope_types = set()
+    for source in (getattr(config, "rope_parameters", None), getattr(config, "rope_scaling", None)):
+        if not isinstance(source, dict):
+            continue
+        for candidate in (source, *(value for value in source.values() if isinstance(value, dict))):
+            rope_type = candidate.get("rope_type", candidate.get("type"))
+            if rope_type is not None:
+                rope_types.add(rope_type)
+    return rope_types
+
+
 class DSTransformerModelBase(DSInferenceModelBase):
     """
     Dimensioning properties
@@ -164,6 +187,61 @@ class DSTransformerModelBase(DSInferenceModelBase):
     """
     Derived helpers
     """
+
+    @property
+    def rope_theta(self) -> float:
+        """The rotary base, read from wherever the installed transformers keeps it.
+
+        transformers 5.0 folded the rotary settings into ``config.rope_parameters`` and
+        dropped the ``rope_theta`` attribute, so reading the attribute alone raises
+        against a stock config on 5.x.
+
+        A config that sets RoPE per layer type gets nested one level deeper, keyed by
+        the layer type, and ``standardize_rope_params`` leaves the class default at the
+        top level of the same dict. Reading the top level there returns that default
+        rather than anything the checkpoint asked for, so the nested entries win. Every
+        caller of this property feeds a single ``RotateHalfConfig.theta_base`` for the
+        whole model, so distinct per-layer bases cannot be represented and are refused
+        rather than silently resolved to one of them.
+
+        A scaled variant is refused for the same reason, matching what #8341 does for
+        kernel injection: every caller builds ``RotateHalfConfig(theta_base=...)``, and
+        that config carries ``use_trained_freqs``, ``theta_base`` and ``rotate_dim`` and
+        nothing else, so the scaling parameters have nowhere to go. Returning the base
+        alone would run the model with unscaled positions and no error.
+        """
+        scaled = sorted(rope_type for rope_type in _rope_types(self._config)
+                        if rope_type not in _UNSCALED_ROPE_TYPES)
+        if scaled:
+            raise ValueError(f"Inference V2 cannot serve rope_type={scaled[0]!r} "
+                             f"({type(self._config).__name__}). The rotary embedding is built from "
+                             "theta_base alone, so the scaling parameters this configuration carries "
+                             "would be dropped and the model would run with unscaled positions.")
+
+        theta = getattr(self._config, "rope_theta", None)
+        if theta is not None:
+            return theta
+
+        rope_parameters = getattr(self._config, "rope_parameters", None) or getattr(self._config, "rope_scaling", None)
+        if isinstance(rope_parameters, dict):
+            per_layer = {
+                layer_type: parameters["rope_theta"]
+                for layer_type, parameters in rope_parameters.items()
+                if isinstance(parameters, dict) and parameters.get("rope_theta") is not None
+            }
+            if per_layer:
+                distinct = set(per_layer.values())
+                if len(distinct) > 1:
+                    raise ValueError(f"{type(self._config).__name__} sets a different rope_theta per "
+                                     f"layer type ({per_layer}); Inference V2 applies one rotary base "
+                                     "to every layer and cannot represent this config.")
+                return distinct.pop()
+
+            if rope_parameters.get("rope_theta") is not None:
+                return rope_parameters["rope_theta"]
+
+        raise ValueError(f"{type(self._config).__name__} carries no rope_theta, either as an "
+                         "attribute or in rope_parameters/rope_scaling.")
 
     @cached_property
     def n_heads_q_local(self) -> int:

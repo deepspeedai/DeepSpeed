@@ -100,7 +100,7 @@ class Qwen2InferenceModel(DSTransformerModelBase):
 
     @property
     def positional_embedding_config(self) -> Optional[RotateHalfConfig]:
-        return RotateHalfConfig(theta_base=self._config.rope_theta)
+        return RotateHalfConfig(theta_base=self.rope_theta)
 
     def make_norm_layer(self) -> None:
         """

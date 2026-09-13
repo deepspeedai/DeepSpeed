@@ -94,8 +94,7 @@ class Exaone4InferenceModel(DSTransformerModelBase):
 
     @property
     def positional_embedding_config(self) -> Optional[RotateHalfConfig]:
-        rope_theta = getattr(self._config, "rope_theta", 1000000.0)
-        return RotateHalfConfig(theta_base=rope_theta)
+        return RotateHalfConfig(theta_base=self.rope_theta)
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
