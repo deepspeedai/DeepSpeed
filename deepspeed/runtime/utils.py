@@ -1024,6 +1024,130 @@ def all_gather_into_tensor_dp_groups(groups_flat, partitioned_param_groups, dp_p
         dist.all_gather_into_tensor(group_flat, partitioned_params[partition_id], dp_process_group[group_id])
 
 
+QUANTIZED_WEIGHT_ALLGATHER_CHUNK_SIZE = 50_000_000
+QUANTIZED_WEIGHT_ALLGATHER_GROUP_SIZE = 64
+QUANTIZED_WEIGHT_PRESERVE_PARAM_NUMEL = 65_536
+
+
+def _partition_preserved_ranges(preserved_ranges, partition_size, dp_world_size):
+    """Map global flat-buffer ranges into compact per-partition side-channel layouts."""
+    layouts = []
+    max_count = 0
+    previous_end = 0
+    group_numel = partition_size * dp_world_size
+    for start, end in preserved_ranges:
+        if not (isinstance(start, int) and isinstance(end, int) and previous_end <= start < end <= group_numel):
+            raise ValueError("preserved parameter ranges must be sorted, disjoint, and inside the flat group")
+        previous_end = end
+    for source_rank in range(dp_world_size):
+        partition_start = source_rank * partition_size
+        partition_end = partition_start + partition_size
+        packed_offset = 0
+        pieces = []
+        for start, end in preserved_ranges:
+            intersection_start = max(start, partition_start)
+            intersection_end = min(end, partition_end)
+            if intersection_start < intersection_end:
+                count = intersection_end - intersection_start
+                pieces.append((intersection_start - partition_start, count, packed_offset))
+                packed_offset += count
+        layouts.append(pieces)
+        max_count = max(max_count, packed_offset)
+    return layouts, max_count
+
+
+def all_gather_quantized_dp_groups(groups_flat,
+                                   partitioned_param_groups,
+                                   dp_process_group,
+                                   allgather_bucket_size,
+                                   quantizer,
+                                   quantization_group_size=QUANTIZED_WEIGHT_ALLGATHER_GROUP_SIZE,
+                                   preserved_param_ranges=None):
+    """All-gather ZeRO-1/2 weight partitions through bounded int8 buffers.
+
+    The CUDA quantizer requires equally sized groups. Each communication chunk is therefore padded independently,
+    while only the original elements are copied back into the persistent flat weight buffer. Dequantizing one source
+    rank at a time also keeps the kernel element count below ``INT_MAX`` for large models. Parameters selected by
+    ``preserved_param_ranges`` are packed before quantization, gathered once in their original dtype, and restored
+    afterward so small, scale-sensitive tensors do not share an int8 scale with unrelated flat-buffer neighbors.
+    """
+    if quantization_group_size <= 0 or quantization_group_size % 8 != 0:
+        raise ValueError("quantization_group_size must be a positive multiple of 8")
+    if allgather_bucket_size <= 0:
+        raise ValueError("allgather_bucket_size must be positive")
+    if preserved_param_ranges is not None and len(preserved_param_ranges) != len(groups_flat):
+        raise ValueError("preserved_param_ranges must have one entry per flat group")
+
+    for group_id, (_group_flat, partitioned_params) in enumerate(zip(groups_flat, partitioned_param_groups)):
+        process_group = dp_process_group[group_id]
+        partition_id = dist.get_rank(group=process_group)
+        dp_world_size = dist.get_world_size(group=process_group)
+        if dp_world_size == 1:
+            continue
+        local_partition = partitioned_params[partition_id]
+        if local_partition.dtype not in (torch.float16, torch.bfloat16):
+            raise TypeError("quantized weight all-gather supports only fp16 and bf16 weights")
+
+        preserved_ranges = [] if preserved_param_ranges is None else preserved_param_ranges[group_id]
+        preserved_layouts, max_preserved_count = _partition_preserved_ranges(preserved_ranges, local_partition.numel(),
+                                                                             dp_world_size)
+        if max_preserved_count:
+            local_preserved = torch.zeros(max_preserved_count,
+                                          dtype=local_partition.dtype,
+                                          device=local_partition.device)
+            for local_offset, count, packed_offset in preserved_layouts[partition_id]:
+                local_preserved.narrow(0, packed_offset, count).copy_(local_partition.narrow(0, local_offset, count))
+            gathered_preserved = torch.empty(dp_world_size * max_preserved_count,
+                                             dtype=local_partition.dtype,
+                                             device=local_partition.device)
+
+        # Keep the opt-in path bounded even when the legacy all-gather bucket retains its multi-billion default.
+        chunk_elements = min(local_partition.numel(), allgather_bucket_size, QUANTIZED_WEIGHT_ALLGATHER_CHUNK_SIZE)
+        max_padded_elements = (
+            (chunk_elements + quantization_group_size - 1) // quantization_group_size) * quantization_group_size
+        max_groups = max_padded_elements // quantization_group_size
+        padded = torch.empty(max_padded_elements, dtype=torch.float16, device=local_partition.device)
+        gathered_quantized_buffer = torch.empty(dp_world_size * max_padded_elements,
+                                                dtype=torch.int8,
+                                                device=local_partition.device)
+        gathered_scale_buffer = torch.empty((dp_world_size * max_groups, 1),
+                                            dtype=torch.float32,
+                                            device=local_partition.device)
+
+        for offset in range(0, local_partition.numel(), chunk_elements):
+            count = min(chunk_elements, local_partition.numel() - offset)
+            padded_elements = (
+                (count + quantization_group_size - 1) // quantization_group_size) * quantization_group_size
+            groups = padded_elements // quantization_group_size
+            padded[:count].copy_(local_partition.narrow(0, offset, count))
+            padded[count:padded_elements].zero_()
+            quantized, scales = quantizer.quantize(padded[:padded_elements], groups=groups)
+            gathered_quantized = gathered_quantized_buffer[:dp_world_size * padded_elements]
+            gathered_scales = gathered_scale_buffer[:dp_world_size * groups]
+            dist.all_gather_into_tensor(gathered_quantized, quantized, group=process_group)
+            dist.all_gather_into_tensor(gathered_scales, scales, group=process_group)
+
+            for source_rank in range(dp_world_size):
+                quantized_start = source_rank * padded_elements
+                scale_start = source_rank * groups
+                dequantized = quantizer.dequantize(
+                    gathered_quantized.narrow(0, quantized_start, padded_elements),
+                    gathered_scales.narrow(0, scale_start, groups),
+                )
+                partitioned_params[source_rank].narrow(0, offset, count).copy_(dequantized[:count])
+                del dequantized
+            del quantized, scales
+
+        if max_preserved_count:
+            dist.all_gather_into_tensor(gathered_preserved, local_preserved, group=process_group)
+            for source_rank, pieces in enumerate(preserved_layouts):
+                source_preserved = gathered_preserved.narrow(0, source_rank * max_preserved_count, max_preserved_count)
+                for local_offset, count, packed_offset in pieces:
+                    partitioned_params[source_rank].narrow(0, local_offset, count).copy_(
+                        source_preserved.narrow(0, packed_offset, count))
+            del local_preserved, gathered_preserved
+
+
 def all_gather_dp_groups(groups_flat, partitioned_param_groups, dp_process_group, start_alignment_factor,
                          allgather_bucket_size):
     if dist.has_all_gather_into_tensor():

@@ -2681,7 +2681,8 @@ class DeepSpeedEngine(Module):
                 communication_data_type=self.communication_data_type,
                 elastic_checkpoint=self.zero_elastic_checkpoint(),
                 check_grad_overflow=check_grad_overflow,
-                compute_grad_norm=self.zero_compute_grad_norm())
+                compute_grad_norm=self.zero_compute_grad_norm(),
+                zero_quantized_weights=self.zero_quantized_weights())
 
         elif zero_stage == ZeroStageEnum.weights:
             self._validate_zero3_moe_compatibility()

@@ -22,9 +22,11 @@ from deepspeed.runtime.base_optimizer import ZeROOptimizer
 from deepspeed.runtime.fp16.loss_scaler import CreateLossScaler
 from deepspeed.runtime.torch_autocast import get_autocast_dtype, get_all_comm_dtypes, is_autocast_initialized, sort_dtypes
 from deepspeed.runtime.utils import (empty_cache, see_memory_usage, has_inf_or_nan, inf, is_model_parallel_parameter,
-                                     align_dense_tensors, all_gather_dp_groups, mask_nan_or_inf_with_val_inplace,
-                                     count_used_parameters_in_backward)
+                                     align_dense_tensors, all_gather_dp_groups, all_gather_quantized_dp_groups,
+                                     mask_nan_or_inf_with_val_inplace, count_used_parameters_in_backward,
+                                     QUANTIZED_WEIGHT_PRESERVE_PARAM_NUMEL)
 from deepspeed.runtime.zero.config import ZeroStageEnum
+from deepspeed.runtime.zero.partition_parameters import CUDAQuantizer
 from deepspeed.runtime.zero.utils import get_norm_dtype
 from deepspeed.runtime.zero.offload_config import OffloadDeviceEnum, OffloadStateTypeEnum
 from deepspeed.ops.adam import DeepSpeedCPUAdam
@@ -183,7 +185,8 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                  bf16_optimizer_states=False,
                  elastic_checkpoint=False,
                  check_grad_overflow=True,
-                 compute_grad_norm=True):
+                 compute_grad_norm=True,
+                 zero_quantized_weights=False):
 
         super().__init__()
 
@@ -216,6 +219,8 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
 
         self.elastic_checkpoint = elastic_checkpoint
         self.parameter_alignment = parameter_alignment
+        self.zero_quantized_weights = zero_quantized_weights
+        self.weight_quantizer = CUDAQuantizer() if zero_quantized_weights else None
         self.check_grad_overflow = check_grad_overflow
         self.compute_grad_norm = compute_grad_norm
         self.param_names = param_names
@@ -382,6 +387,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         self.round_robin_bit16_meta = []
         self.round_robin_bit16_padding = []
         self.round_robin_bit16_offsets = []
+        self.quantized_weight_preserved_ranges = []
 
         # Use different parallel to do all_to_all_reduce related things
         # padding on each partition for alignment purposes
@@ -466,6 +472,10 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             padded_group_numel = current_offset
             self.round_robin_bit16_padding.append(param_padding)
             self.round_robin_bit16_offsets.append(param_offsets)
+            self.quantized_weight_preserved_ranges.append([(offset, offset + meta.numel())
+                                                           for offset, meta in zip(param_offsets, meta_tensors)
+                                                           if 0 < meta.numel() <= QUANTIZED_WEIGHT_PRESERVE_PARAM_NUMEL
+                                                           ])
 
             if flatten_on_accelerator:
                 logger.info(f"Flattening param group {i} on {accelerator.device_name()} (sufficient memory)")
@@ -2598,11 +2608,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         self.timers(OPTIMIZER_ALLGATHER_TIMER).start()
         # Gather the updated weights from everyone.
         # Then all partitions of the model parameters are updated and ready for next round forward.
-        all_gather_dp_groups(groups_flat=self.bit16_groups_flat,
-                             partitioned_param_groups=self.parallel_partitioned_bit16_groups,
-                             dp_process_group=self.real_dp_process_group,
-                             start_alignment_factor=self.nccl_start_alignment_factor,
-                             allgather_bucket_size=self.allgather_bucket_size)
+        self._all_gather_weights()
         self.timers(OPTIMIZER_ALLGATHER_TIMER).stop()
 
         # TODO: we probably don't need this? just to be safe
@@ -2621,11 +2627,22 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             partition_id = dist.get_rank(group=self.real_dp_process_group[i])
             bit16_partitions[partition_id].data.copy_(fp32_partition.data)
 
-        all_gather_dp_groups(groups_flat=self.bit16_groups_flat,
-                             partitioned_param_groups=self.parallel_partitioned_bit16_groups,
-                             dp_process_group=self.real_dp_process_group,
-                             start_alignment_factor=self.nccl_start_alignment_factor,
-                             allgather_bucket_size=self.allgather_bucket_size)
+        self._all_gather_weights()
+
+    def _all_gather_weights(self):
+        if self.zero_quantized_weights:
+            all_gather_quantized_dp_groups(groups_flat=self.bit16_groups_flat,
+                                           partitioned_param_groups=self.parallel_partitioned_bit16_groups,
+                                           dp_process_group=self.real_dp_process_group,
+                                           allgather_bucket_size=self.allgather_bucket_size,
+                                           quantizer=self.weight_quantizer,
+                                           preserved_param_ranges=self.quantized_weight_preserved_ranges)
+        else:
+            all_gather_dp_groups(groups_flat=self.bit16_groups_flat,
+                                 partitioned_param_groups=self.parallel_partitioned_bit16_groups,
+                                 dp_process_group=self.real_dp_process_group,
+                                 start_alignment_factor=self.nccl_start_alignment_factor,
+                                 allgather_bucket_size=self.allgather_bucket_size)
 
     def _average_expert_grad_norms(self, norm_groups):
         for i, norm in enumerate(norm_groups):
