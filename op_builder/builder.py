@@ -512,6 +512,10 @@ class OpBuilder(ABC):
                 return '-D__AVX256__'
         elif (cpu_info['arch'] or '').startswith('ARM') and 'sve' in cpu_info['flags']:
             return '-D__SVE__'
+        elif cpu_info['arch'] == 'ARM_8':
+            # NEON is baseline on AArch64; vdivq/vsqrtq used by simd.h are A64-only,
+            # so do not advertise it for 32-bit ARM.
+            return '-D__NEON__'
         return '-D__SCALAR__'
 
     def command_exists(self, cmd):
