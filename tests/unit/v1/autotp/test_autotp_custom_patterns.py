@@ -1050,3 +1050,18 @@ def test_is_load_module_still_refuses_what_it_refused_before():
 
     assert not Loading.is_load_module(_NormWithExtraParam())
 
+
+def test_admitted_norm_absent_from_the_state_dict_still_gets_its_buffers_off_meta():
+    """A sharded checkpoint hands `_replace_module` one file at a time, so an admitted norm's
+    prefix can be missing. BatchNorm is admitted by shape now; its buffers must still leave meta."""
+    from deepspeed.module_inject.replace_module import _replace_module
+
+    with torch.device("meta"):
+        model = nn.Sequential()
+        model.add_module("norm", nn.BatchNorm1d(8))
+    state_dict = {"other.weight": torch.ones(8)}
+
+    _replace_module(model, policies={}, state_dict=state_dict)
+
+    assert not model.norm.running_mean.is_meta
+    assert not model.norm.running_var.is_meta
