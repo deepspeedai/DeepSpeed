@@ -7,7 +7,7 @@
 import deepspeed
 import deepspeed.comm as dist
 import torch
-from deepspeed.utils import safe_get_full_grad
+from deepspeed.utils import groups, safe_get_full_grad
 from unit.common import DistributedTest
 from unit.v1.moe.autoep_test_utils import (
     MockMoETransformer,
@@ -149,6 +149,75 @@ def _assert_grad_maps_close(actual, expected, *, lhs_name, rhs_name):
                                         f"max_diff={diff.max().item()} "
                                         f"actual_norm={actual[name].norm().item()} "
                                         f"expected_norm={expected[name].norm().item()}"))
+
+
+class TestAutoEPFP32Clipping(DistributedTest):
+    world_size = [2, 4]
+
+    def test_clipping_counts_each_unique_parameter_once(self):
+        self._check_clipping()
+
+    def test_clipping_includes_expert_shards_across_mesh_sp_ranks(self):
+        # The mesh DP group contains replicas of one shard, not all experts.
+        # Check against the same complete gradient vector as the non-mesh run.
+        previous_mesh = groups.mesh_device
+        try:
+            self._check_clipping(mesh_param=(dist.get_world_size() // 2, 2))
+        finally:
+            groups.mesh_device = previous_mesh
+
+    def _check_clipping(self, mesh_param=None):
+
+        class Model(torch.nn.Module):
+
+            def __init__(self, local_experts):
+                super().__init__()
+                self.expert = torch.nn.Parameter(torch.zeros(local_experts))
+                self.dense = torch.nn.Parameter(torch.zeros(1))
+
+        for ep_size in (1, 2):
+            for dense_gradient in (0.0, 12.0):
+                for unused_expert in (False, True):
+                    model = Model(4 // ep_size)
+                    model.expert.ds_zero_placement_family = "autoep_expert"
+                    model.expert.ds_autoep_ep_size = ep_size
+                    engine, _, _, _ = deepspeed.initialize(model=model,
+                                                           mesh_param=mesh_param,
+                                                           config={
+                                                               "train_micro_batch_size_per_gpu": 1,
+                                                               "gradient_accumulation_steps": 1,
+                                                               "gradient_clipping": 1.0,
+                                                               "optimizer": {
+                                                                   "type": "SGD",
+                                                                   "params": {
+                                                                       "lr": 0.05
+                                                                   }
+                                                               },
+                                                               "zero_optimization": {
+                                                                   "stage": 0
+                                                               },
+                                                           })
+                    # The same four unique expert gradients are replicated or owner-sharded.
+                    full = torch.tensor([0.0, 0.0, 3.0, 4.0], device=engine.device)
+                    start = (dist.get_rank() % ep_size) * (4 // ep_size)
+                    local = full[start:start + 4 // ep_size]
+                    skip_expert = unused_expert and ep_size == 2 and dist.get_rank() == 0
+                    if not skip_expert:
+                        model.expert.grad = local.clone()
+                    if dense_gradient:
+                        model.dense.grad = torch.tensor([dense_gradient], device=engine.device)
+
+                    # Direct norm of the unique gradient vector, independent of rank placement.
+                    unique = torch.cat((full, full.new_tensor([dense_gradient])))
+                    coefficient = 1.0 / (torch.linalg.vector_norm(unique) + 1e-6)
+                    engine.clip_fp32_gradients()
+                    if not skip_expert:
+                        torch.testing.assert_close(model.expert.grad, local * coefficient)
+                    if dense_gradient:
+                        torch.testing.assert_close(model.dense.grad, dense_gradient * coefficient.reshape(1))
+                    engine.optimizer.step()
+                    torch.testing.assert_close(model.expert, -0.05 * local * coefficient)
+                    torch.testing.assert_close(model.dense, -0.05 * dense_gradient * coefficient.reshape(1))
 
 
 class TestAutoEPGradParity(DistributedTest):

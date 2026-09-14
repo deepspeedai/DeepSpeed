@@ -518,6 +518,7 @@ class AutoEPMoELayer(nn.Module):
             param.allreduce = False
             param.group_name = self.ep_group_name
             param.ds_zero_placement_family = "autoep_expert"
+            param.ds_autoep_ep_size = ep_size
             param.ds_zero_partition_group_name = self.ep_group_name
 
         # Mark shared expert and router params for global DP reduction.
