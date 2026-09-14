@@ -102,18 +102,6 @@ _MLA_DOWN_LEAVES = ("q_a_proj", "kv_a_proj", "kv_a_proj_with_mqa")
 QUERY, KV, MLA_Q, MLA_KV, NOT_HEAD_BLOCKED = "query", "kv", "mla_q", "mla_kv", "not-head-blocked"
 
 
-def _layer_shape(param: torch.Tensor):
-    """The parameter's shape as a layer, rather than as a ZeRO-3 partition.
-
-    Under ``deepspeed.zero.Init`` a partitioned parameter's data is a flat placeholder -
-    ``torch.Size([0])`` on the ranks that do not hold it - and the shape it has as a layer is
-    recorded as ``ds_shape``. Reading ``param.shape`` there sees a 1-D tensor for every
-    parameter in the model.
-    """
-    ds_shape = getattr(param, "ds_shape", None)
-    return tuple(param.shape) if ds_shape is None else tuple(ds_shape)
-
-
 def _per_head_muon_meta(model: torch.nn.Module):
     """The head-count reader and the config the widths come from, built once per model.
 
