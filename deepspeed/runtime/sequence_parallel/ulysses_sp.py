@@ -1145,10 +1145,12 @@ class TiledFusedLogitsLoss(torch.autograd.Function):
         bs, seqlen = x.shape[:2]
 
         # flatten bs+seqlen to avoid having stride issues when narrowing into seqlen w/ bs>1
-        x = x.view(-1, *x.shape[2:])
-        y = y.view(-1, *y.shape[2:])
+        # reshape rather than view: a caller may pass a non-contiguous x, y or mask (a transposed or
+        # channel-sliced activation), for which view cannot produce the flattened shape
+        x = x.reshape(-1, *x.shape[2:])
+        y = y.reshape(-1, *y.shape[2:])
         if mask is not None:
-            mask = mask.view(-1)
+            mask = mask.reshape(-1)
         incoming_grad = torch.tensor(1.0, dtype=x.dtype, device=x.device)
 
         # we are faking the incoming gradient, and since we perform a reduction outside of `autograd.backward` below we need to pre-adjust the incoming gradient. in the case of "sum" the gradient is 1.0, in the case of "mean" it's 1.0/num_elements, which in this case is 1/shards.

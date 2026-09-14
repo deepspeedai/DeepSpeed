@@ -26,13 +26,12 @@
 /deepspeed/autotuning/ @loadams
 /deepspeed/checkpoint/ @tjruwase
 /deepspeed/comm/ @guanhuawang
-/deepspeed/compression/ @tjruwase
+
 /deepspeed/elasticity/ @tjruwase
 /deepspeed/launcher/ @loadams
 /deepspeed/module_inject/ @hwchen2017 @loadams
 /deepspeed/moe/ @tohtana
 /deepspeed/monitor/ @tjruwase
-/deepspeed/nebula/ @tjruwase
 /deepspeed/nvme/ @tjruwase @jomayeri
 /deepspeed/ops/ @tohtana
 /deepspeed/pipe/ @tohtana @loadams
@@ -53,7 +52,6 @@
 /deepspeed/runtime/data_pipeline/ @tjruwase
 /deepspeed/runtime/domino/ @guanhuawang @hwchen2017
 /deepspeed/runtime/fp16/ @tjruwase @tohtana
-/deepspeed/runtime/fp16/onebit/ @tjruwase
 /deepspeed/runtime/pipe/ @loadams @tohtana
 /deepspeed/runtime/swap_tensor/ @tjruwase @jomayeri
 /deepspeed/runtime/zero/ @tjruwase @tohtana

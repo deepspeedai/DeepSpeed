@@ -35,7 +35,7 @@ from deepspeed.checkpoint.constants import (DS_VERSION, OPTIMIZER_STATE_DICT, SI
                                             FP32_FLAT_GROUPS, ZERO_STAGE, PARTITION_COUNT, PARAM_SHAPES, BUFFER_NAMES,
                                             FROZEN_PARAM_SHAPES, FROZEN_PARAM_FRAGMENTS, AUTOEP_LAYERS_KEY,
                                             AUTOEP_LAYERS_KEY_LEGACY, AUTOEP_ZERO3_EXPERT_STATE_FORMAT_KEY,
-                                            AUTOEP_ZERO3_PARTITIONED_EXPERT_STATE_FORMAT)
+                                            AUTOEP_ZERO3_PARTITIONED_EXPERT_STATE_FORMAT, PARAM_ALIGNMENT_PADDINGS)
 
 
 @dataclass
@@ -231,7 +231,8 @@ def parse_optim_states(files, ds_checkpoint_dir):
         raise ValueError(f"unknown zero stage {zero_stage}")
 
     fp32_flat_groups = [state_dicts[i][OPTIMIZER_STATE_DICT][fp32_groups_key] for i in range(len(state_dicts))]
-    return zero_stage, world_size, fp32_flat_groups
+    param_alignment_paddings = state_dicts[0][OPTIMIZER_STATE_DICT].get(PARAM_ALIGNMENT_PADDINGS)
+    return zero_stage, world_size, fp32_flat_groups, param_alignment_paddings
 
 
 def _get_fp32_state_dict_from_zero_checkpoint(ds_checkpoint_dir, exclude_frozen_parameters):
@@ -251,12 +252,13 @@ def _get_fp32_state_dict_from_zero_checkpoint(ds_checkpoint_dir, exclude_frozen_
     print(f'Parsing checkpoint created by deepspeed=={zero_model_states[0].ds_version}')
 
     optim_files = get_optim_files(ds_checkpoint_dir)
-    zero_stage, world_size, fp32_flat_groups = parse_optim_states(optim_files, ds_checkpoint_dir)
+    zero_stage, world_size, fp32_flat_groups, param_alignment_paddings = parse_optim_states(
+        optim_files, ds_checkpoint_dir)
     print(f"Detected checkpoint of type zero stage {zero_stage}, world_size: {world_size}")
 
     if zero_stage <= 2:
         return _get_fp32_state_dict_from_zero2_checkpoint(world_size, fp32_flat_groups, zero_model_states,
-                                                          exclude_frozen_parameters)
+                                                          exclude_frozen_parameters, param_alignment_paddings)
     elif zero_stage == 3:
         return _get_fp32_state_dict_from_zero3_checkpoint(world_size, fp32_flat_groups, zero_model_states,
                                                           exclude_frozen_parameters)
@@ -299,7 +301,11 @@ def _has_callable(obj, fn):
     return callable(attr)
 
 
-def _zero2_merge_trainable_params(state_dict, world_size, fp32_flat_groups, zero_model_states):
+def _zero2_merge_trainable_params(state_dict,
+                                  world_size,
+                                  fp32_flat_groups,
+                                  zero_model_states,
+                                  param_alignment_paddings=None):
     param_shapes = zero_model_states[0].param_shapes
 
     # Reconstruction protocol:
@@ -333,10 +339,18 @@ def _zero2_merge_trainable_params(state_dict, world_size, fp32_flat_groups, zero
     # out-of-core computing solution
     total_numel = 0
     total_params = 0
-    for shapes, full_single_fp32_vector in zip(param_shapes, merged_single_partition_of_fp32_groups):
+    for group_idx, (shapes,
+                    full_single_fp32_vector) in enumerate(zip(param_shapes, merged_single_partition_of_fp32_groups)):
         offset = 0
         avail_numel = full_single_fp32_vector.numel()
-        for name, shape in shapes.items():
+        group_alignment_paddings = None
+        if param_alignment_paddings is not None:
+            group_alignment_paddings = param_alignment_paddings[group_idx]
+            if len(group_alignment_paddings) != len(shapes):
+                raise ValueError(f"Expected {len(shapes)} parameter alignment paddings for group {group_idx}, "
+                                 f"but found {len(group_alignment_paddings)}")
+
+        for param_idx, (name, shape) in enumerate(shapes.items()):
 
             unpartitioned_numel = shape.numel() if _has_callable(shape, 'numel') else math.prod(shape)
             total_numel += unpartitioned_numel
@@ -346,6 +360,8 @@ def _zero2_merge_trainable_params(state_dict, world_size, fp32_flat_groups, zero
                 print(f"{name} full shape: {shape} unpartitioned numel {unpartitioned_numel} ")
             state_dict[name] = full_single_fp32_vector.narrow(0, offset, unpartitioned_numel).view(shape)
             offset += unpartitioned_numel
+            if group_alignment_paddings is not None:
+                offset += group_alignment_paddings[param_idx]
 
         # Z2 started to align to 2*world_size to improve nccl performance. Therefore both offset and
         # avail_numel can differ by anywhere between 0..2*world_size. Due to two unrelated complex
@@ -372,8 +388,11 @@ def _zero2_merge_trainable_params(state_dict, world_size, fp32_flat_groups, zero
     print(f"Reconstructed fp32 state dict with {total_params} params {total_numel} elements")
 
 
-def _get_fp32_state_dict_from_zero2_checkpoint(world_size, fp32_flat_groups, zero_model_states,
-                                               exclude_frozen_parameters):
+def _get_fp32_state_dict_from_zero2_checkpoint(world_size,
+                                               fp32_flat_groups,
+                                               zero_model_states,
+                                               exclude_frozen_parameters,
+                                               param_alignment_paddings=None):
     state_dict = OrderedDict()
 
     # buffers
@@ -385,7 +404,8 @@ def _get_fp32_state_dict_from_zero2_checkpoint(world_size, fp32_flat_groups, zer
     if not exclude_frozen_parameters:
         _zero2_merge_frozen_params(state_dict, zero_model_states)
 
-    _zero2_merge_trainable_params(state_dict, world_size, fp32_flat_groups, zero_model_states)
+    _zero2_merge_trainable_params(state_dict, world_size, fp32_flat_groups, zero_model_states,
+                                  param_alignment_paddings)
 
     # recover shared parameters
     for pair in zero_model_states[0].shared_params:
