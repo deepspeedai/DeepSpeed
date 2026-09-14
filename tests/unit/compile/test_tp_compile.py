@@ -523,3 +523,258 @@ class TestAutoTPCompileRejectsUnsupportedCombinations(DistributedTest):
         engine, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config)
         with pytest.raises(NotImplementedError, match="cannot yet be combined"):
             engine.compile()
+
+
+class ACMLPModel(torch.nn.Module):
+    """Same model as MLPModel, but each block runs under activation checkpointing.
+
+    use_reentrant=False is what HuggingFace's gradient_checkpointing_enable defaults to, and it is
+    the variant Dynamo captures into a tag_activation_checkpoint subgraph rather than graph-breaking
+    on. That subgraph is the failure mode this exercises: a pass that walks only the top-level graph
+    never sees the parallel matmuls inside it, while their module-level collectives have already
+    been switched off.
+    """
+
+    def __init__(self, nlayers=2):
+        super().__init__()
+        self.layers = torch.nn.ModuleList([MLPBlock() for _ in range(nlayers)])
+        self.head = torch.nn.Linear(HIDDEN_DIM, HIDDEN_DIM, bias=False)
+
+    def forward(self, x):
+        import torch.utils.checkpoint as ckpt
+        for layer in self.layers:
+            x = ckpt.checkpoint(layer, x, use_reentrant=False)
+        return self.head(x)
+
+
+def build_ac_engine(tp_size, use_compile_pass):
+    torch.manual_seed(42)
+    model = ACMLPModel()
+    engine, _, _, _ = deepspeed.initialize(model=model,
+                                           model_parameters=model.parameters(),
+                                           config=build_config(tp_size, use_compile_pass))
+    if use_compile_pass:
+        engine.compile()
+    return engine
+
+
+class TestAutoTPCompileActivationCheckpointing(DistributedTest):
+    """Layers inside a checkpointed block must still get their collectives.
+
+    Dynamo lifts a checkpointed region into a child GraphModule. Walking only the top-level graph
+    left those layers with neither a module-level collective nor a graph-level one, which is not a
+    missed optimization: the row-parallel outputs stay partial sums, so the forward and the
+    gradients are both wrong and nothing raises.
+    """
+
+    world_size = 2
+    non_daemonic_procs = True
+
+    @pytest.mark.sequential
+    def test_checkpointed_layers_match_module_injection(self):
+        if get_accelerator().device_name() == "cpu":
+            pytest.skip("CPU does not support this test yet")
+
+        device = torch.device(get_accelerator().current_device_name())
+        reference_engine = build_ac_engine(self.world_size, use_compile_pass=False)
+        compiled_engine = build_ac_engine(self.world_size, use_compile_pass=True)
+
+        torch.manual_seed(1234)
+        x = torch.randn(1, 8, HIDDEN_DIM, device=device, dtype=torch.float32, requires_grad=True)
+        compiled_x = x.detach().clone().requires_grad_(True)
+
+        reference_out = reference_engine(x)
+        compiled_out = compiled_engine(compiled_x)
+        assert torch.allclose(reference_out, compiled_out, atol=1e-5), \
+            "a dropped row-parallel all-reduce leaves the forward a partial sum"
+
+        reference_engine.backward(reference_out.sum())
+        compiled_engine.backward(compiled_out.sum())
+
+        for (name, reference_param), (_, compiled_param) in zip(reference_engine.module.named_parameters(),
+                                                                compiled_engine.module.named_parameters()):
+            assert torch.allclose(reference_param.grad, compiled_param.grad, atol=1e-5), \
+                f"AutoTP compile pass changed the gradient of {name}"
+
+
+def test_unhandled_parallel_layer_raises():
+    """A layer reached in the graph but given no collective must stop the compile, not run wrong.
+
+    The pass switches the module-level collectives off before it rewrites anything, so a layer it
+    fails to recognize does not merely stay unoptimized -- it stops communicating, and both the
+    forward and the gradients go quietly wrong.
+    """
+    from deepspeed.compile.passes import tp_compile
+    from deepspeed.module_inject.layers import LinearAllreduce
+
+    graph = torch.fx.Graph()
+    x = graph.placeholder("x")
+    matmul = graph.call_function(torch.matmul, args=(x, x))
+    matmul.meta["nn_module_stack"] = {"key": ("layers.0.down_proj", LinearAllreduce)}
+    graph.output(matmul)
+    gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+
+    original_targets = set(tp_compile._MATMUL_TARGETS)
+    try:
+        # Stand in for a matmul that traced to an op the pass does not know about.
+        tp_compile._MATMUL_TARGETS.clear()
+        with pytest.raises(RuntimeError, match="without inserting a collective"):
+            tp_compile.pass_insert_tp_collectives(gm, (), deferred_names={"layers.0.down_proj"})
+    finally:
+        tp_compile._MATMUL_TARGETS.clear()
+        tp_compile._MATMUL_TARGETS.update(original_targets)
+
+    # With the target restored the same graph is rewritten cleanly.
+    tp_compile.pass_insert_tp_collectives(gm, (), deferred_names={"layers.0.down_proj"})
+    assert any(n.target is tp_compile.ROW_PARALLEL_OP for n in gm.graph.nodes)
+
+
+def test_deferred_layer_run_eagerly_raises():
+    """Running a deferred layer outside a compiled region must raise rather than skip the collective."""
+    from deepspeed.module_inject.layers import LinearAllreduce
+
+    layer = _make_tp_layer(LinearAllreduce)
+    layer.defer_collectives_to_compiler = True
+    layer.weight = torch.nn.Parameter(torch.randn(4, 4))
+    layer.bias = None
+
+    with pytest.raises(RuntimeError, match="running eagerly"):
+        layer(torch.randn(2, 4))
+
+
+@pytest.mark.parametrize(
+    "raw, expected",
+    [
+        ("L['self']._modules['layers']._modules['0'].down_proj", "layers.0.down_proj"),
+        ("L['self']._modules['layers']._modules['0']", "layers.0"),
+        ("L['self'].head", "head"),
+        ("L['self']._modules['model']._modules['layers']._modules['0']._modules['self_attn']._modules['q_proj']",
+         "model.layers.0.self_attn.q_proj"),
+        ("self.head", "head"),
+        ("layers.0.down_proj", "layers.0.down_proj"),
+        # The root-prefix strip must be anchored: these start with "self" but the module is not the root.
+        ("self_attn.q_proj", "self_attn.q_proj"),
+        ("selfie.q_proj", "selfie.q_proj"),
+    ])
+def test_normalize_fqn_on_real_dynamo_strings(raw, expected):
+    """The deferred-layer comparison is only as good as this function.
+
+    An unanchored prefix strip turns 'self_attn.q_proj' into '_attn.q_proj', which then fails to
+    match deferred_names -- and because the check intersects with that set, the miss is erased
+    rather than reported. Silent, and in the unsafe direction.
+    """
+    from deepspeed.compile.passes.tp_compile import _normalize_fqn
+    assert _normalize_fqn(raw) == expected
+
+
+def test_iter_graphs_finds_a_graphmodule_under_a_plain_module():
+    """A GraphModule can be nested under a plain nn.Module, which a GraphModule-only recursion misses."""
+    from deepspeed.compile.passes.tp_compile import iter_graphs
+
+    inner = torch.fx.symbolic_trace(torch.nn.Linear(4, 4))
+    wrapper = torch.nn.Module()
+    wrapper.sub = inner  # GraphModule under a plain Module
+    root = torch.fx.symbolic_trace(torch.nn.Linear(4, 4))
+    root.wrapper = wrapper
+
+    assert len(list(iter_graphs(root))) == 2, "iter_graphs did not descend past the plain nn.Module"
+
+
+def test_collective_is_inserted_inside_a_checkpointed_subgraph():
+    """CPU-only cover for the traversal fix, so it is not gated behind a 2-GPU run.
+
+    Also pins the coverage check: with the walk restricted to the top-level graph, the layers inside
+    the checkpointed block are reached (their lifted weights appear as placeholders there) but never
+    handled, so the pass must raise rather than silently emit nothing.
+    """
+    import torch.utils.checkpoint as ckpt
+    from deepspeed.compile.passes import tp_compile
+    from deepspeed.module_inject.layers import LinearAllreduce, LinearLayer
+
+    def make(cls, out_features, in_features):
+        layer = _make_tp_layer(cls)
+        layer.defer_collectives_to_compiler = True
+        layer.gather_output = False
+        layer.support_training = True
+        layer.weight = torch.nn.Parameter(torch.randn(out_features, in_features) * 0.1)
+        layer.bias = None
+        return layer
+
+    class Block(torch.nn.Module):
+
+        def __init__(self):
+            super().__init__()
+            self.gate_proj = make(LinearLayer, 64, 32)
+            self.down_proj = make(LinearAllreduce, 32, 64)
+
+        def forward(self, x):
+            return x + self.down_proj(torch.nn.functional.silu(self.gate_proj(x)))
+
+    class Model(torch.nn.Module):
+
+        def __init__(self):
+            super().__init__()
+            self.layers = torch.nn.ModuleList([Block()])
+
+        def forward(self, x):
+            for layer in self.layers:
+                x = ckpt.checkpoint(layer, x, use_reentrant=False)
+            return x
+
+    deferred = {"layers.0.gate_proj", "layers.0.down_proj"}
+    seen = {}
+
+    def backend(gm, example_inputs):
+        tp_compile.pass_insert_tp_collectives(gm, example_inputs, deferred_names=deferred)
+        seen["inserted"] = sum(1 for graph in tp_compile.iter_graphs(gm) for node in graph.nodes
+                               if node.op == "call_function" and "autotp" in str(node.target))
+        seen["top_level"] = sum(1 for node in gm.graph.nodes
+                                if node.op == "call_function" and "autotp" in str(node.target))
+
+        original = tp_compile.iter_graphs
+        tp_compile.iter_graphs = lambda module: iter([module.graph])
+        try:
+            tp_compile.pass_insert_tp_collectives(gm, example_inputs, deferred_names=deferred)
+            seen["raised_without_recursion"] = False
+        except RuntimeError:
+            seen["raised_without_recursion"] = True
+        finally:
+            tp_compile.iter_graphs = original
+        # Only the rewrite is under test. Returning a stub avoids executing the collectives, which
+        # would need a real process group and turn this into a distributed test.
+        return lambda *args, **kwargs: [torch.zeros(2, 4, 32)]
+
+    torch._dynamo.reset()
+    torch.compile(Model(), backend=backend, fullgraph=True)(torch.randn(2, 4, 32))
+
+    assert seen["inserted"] > 0, "no collective was inserted into the checkpointed subgraph"
+    assert seen["top_level"] == 0, "the collectives should be inside the subgraph, not the root graph"
+    assert seen["raised_without_recursion"], \
+        "restricted to the top-level graph the pass inserted nothing and did not raise"
+
+
+def test_apply_autotp_preserves_the_two_argument_pass_contract():
+    """`passes` is an extension point; its contract is (gm, real_inputs).
+
+    Threading extra context to every pass unconditionally raises TypeError on any pass written
+    against that contract, before the pass even runs.
+    """
+    from deepspeed.compile.passes.tp_compile import apply_autotp
+
+    gm = torch.fx.symbolic_trace(torch.nn.Linear(4, 4))
+    seen = []
+
+    def two_argument_pass(gm, real_inputs):
+        seen.append("two")
+
+    def context_aware_pass(gm, real_inputs, deferred_names=None):
+        seen.append(("context", deferred_names))
+
+    def var_keyword_pass(gm, real_inputs, **kwargs):
+        seen.append(("kwargs", kwargs.get("deferred_names")))
+
+    apply_autotp(gm, (),
+                 passes=[two_argument_pass, context_aware_pass, var_keyword_pass],
+                 deferred_names={"layers.0.down_proj"})
+
+    assert seen == ["two", ("context", {"layers.0.down_proj"}), ("kwargs", {"layers.0.down_proj"})]

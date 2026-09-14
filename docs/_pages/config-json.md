@@ -43,7 +43,7 @@ toc_label: "Contents"
 
 | Fields | Value                                                                                                                                                                                                                                                                                                        | Example                      |
 | ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------- |
-| type   | The optimizer name. DeepSpeed natively supports **Adam**, **AdamW**, **OneBitAdam**, **Lamb**, **OneBitLamb**, and **Muon** optimizers (See [here](https://deepspeed.readthedocs.io/en/latest/optimizers.html) for details) and will import other optimizers from [torch](https://pytorch.org/docs/stable/optim.html). | `"Adam"`                     |
+| type   | The optimizer name. DeepSpeed natively supports **Adam**, **AdamW**, **Lamb**, and **Muon** optimizers (See [here](https://deepspeed.readthedocs.io/en/latest/optimizers.html) for details) and will import other optimizers from [torch](https://pytorch.org/docs/stable/optim.html). | `"Adam"`                     |
 | params | Dictionary of parameters to instantiate optimizer. The parameter names must match the optimizer constructor signature (e.g., for [Adam](https://pytorch.org/docs/stable/optim.html#torch.optim.Adam)).                                                                                                       | `{"lr": 0.001, "eps": 1e-8}` |
 
 Muon optimizer is supported with ZeRO Stage 1, 2, and 3. To use Muon, set the optimizer name to `Muon`. The parameters applied for Muon are automatically determined by the matrix shape and name. For ZeRO Stage 3 with NVMe offloading, set `save_muon_momentum_buffer_in_memory` to `true` under `zero_optimization` to keep the Muon momentum buffer in GPU/CPU memory instead of swapping to NVMe.
@@ -104,98 +104,6 @@ If not set, muon_lr will default to lr.
     "save_muon_momentum_buffer_in_memory": true
   }
 ```
-
-Another example of <i>**optimizer**</i> with 1-bit Adam specific parameters is as follows.
-
-```json
-"optimizer": {
-    "type": "OneBitAdam",
-    "params": {
-      "lr": 0.001,
-      "betas": [
-        0.8,
-        0.999
-      ],
-      "eps": 1e-8,
-      "weight_decay": 3e-7,
-      "freeze_step": 400,
-      "cuda_aware": false,
-      "comm_backend_name": "nccl"
-    }
-  }
-```
-
-The 1-bit Adam optimizer supports the following three params keys/values in addition to the standard Adam (learn more in our [tutorial](/tutorials/onebit-adam/)):
-
-| "params" key        | Description                                                                        | Default |
-| ------------------- | ---------------------------------------------------------------------------------- | ------- |
-| freeze\_step        | Number of warm up steps before 1-bit compression gets applied to the communication | 100000  |
-| cuda\_aware         | To indicate that the underlying MPI library supports CUDA-Aware communication      | false   |
-| comm\_backend\_name | To indicate which backend implementation to use                                    | "nccl"  |
-
-A variant ***optimizer*** for 1-bit Adam is 0/1 Adam, which further optimizes 1-bit Adam via adaptive variance freezing and 1-bit synchronization over optimizer states.
-```json
-"optimizer": {
-    "type": "ZeroOneAdam",
-    "params": {
-      "lr": 1e-3,
-      "weight_decay": 0.01,
-      "bias_correction": false,
-      "var_freeze_step": 1000,
-      "var_update_scaler": 16,
-      "local_step_scaler": 1000,
-      "local_step_clipper": 16,
-      "cuda_aware": false,
-      "comm_backend_name": "nccl"
-    }
-  }
-```
-0/1 Adam supports  the following params key/values in addition to standard Adam (learn more in our [tutorial](/tutorial/zero-one-adam/).)
-
-| "params" key        | Description                                                                        | Default |
-| ------------------- | ---------------------------------------------------------------------------------- | ------- |
-| var\_freeze\_step   | The latest step to update the variance                                             | 100000  |
-| var\_update\_scaler | The interval to update the variance                                                | 16  |
-| local\_step\_scaler | The interval to scale the local steps interval according to the learning rate policy   | 32678  |
-| local\_step\_clipper | The largest interval for local steps with learning rate policy                     | 16  |
-| cuda\_aware         | To indicate that the underlying MPI library supports CUDA-Aware communication      | false   |
-| comm\_backend\_name | To indicate which backend implementation to use                                    | "nccl"  |
-
-Another example of ***optimizer*** with 1-bit LAMB
-
-```json
-"optimizer": {
-    "type": "OneBitLamb",
-    "params": {
-      "lr": 11e-3,
-      "weight_decay": 0.01,
-      "bias_correction": false,
-      "max_coeff": 0.3,
-      "min_coeff": 0.01,
-      "freeze_step": 1000,
-      "cuda_aware": false,
-      "comm_backend_name": "nccl",
-      "coeff_beta": 0.9,
-      "factor_max": 4.0,
-      "factor_min": 0.5,
-      "factor_threshold": 0.1
-    }
-  }
-```
-
-The 1-bit LAMB optimizer supports the following params keys/values in addition to the standard LAMB (learn more in our [tutorial](/tutorials/onebit-lamb/)):
-
-| "params" key        | Description                                                                               | Default |
-| ------------------- | ----------------------------------------------------------------------------------------- | ------- |
-| max\_coeff          | Scaling coefficient upper bound for original LAMB algorithm and 1-bit LAMB's warmup stage | 10.0    |
-| min\_coeff          | Scaling coefficient lower bound for original LAMB algorithm and 1-bit LAMB's warmup stage | 0.01    |
-| freeze\_step        | Number of warm up steps before 1-bit compression gets applied to the communication        | 100000  |
-| cuda\_aware         | To indicate that the underlying MPI library supports CUDA-Aware communication             | false   |
-| comm\_backend\_name | To indicate which backend implementation to use                                           | "nccl"  |
-| coeff\_beta         | Coefficient used for computing running averages of lamb coefficient                       | 0.9     |
-| factor\_max         | Maximum value of scaling factor to the frozen lamb coefficient during compression stage   | 4.0     |
-| factor\_min         | Minimum value of scaling factor to the frozen lamb coefficient during compression stage   | 0.5     |
-| factor\_threshold   | Threshold of how much the scaling factor can fluctuate between steps                      | 0.1     |
 
 ### Scheduler Parameters
 
@@ -461,6 +369,7 @@ Enabling and configuring ZeRO memory optimizations
     "stage": [0|1|2|3],
     "allgather_partitions": [true|false],
     "allgather_bucket_size": 5e8,
+    "compute_grad_norm": [true|false],
     "overlap_comm": false,
     "reduce_scatter": [true|false],
     "reduce_bucket_size": 5e8,
@@ -480,6 +389,7 @@ Enabling and configuring ZeRO memory optimizations
     "stage3_gather_16bit_weights_on_model_save": [true|false],
     "ignore_unused_parameters": [true|false],
     "round_robin_gradients": [true|false],
+    "parameter_alignment": [true|false],
     "zero_hpz_partition_size": 1,
     "zero_quantized_weights": [true|false],
     "zero_quantized_gradients": [true|false],
@@ -510,6 +420,12 @@ Enabling and configuring ZeRO memory optimizations
 | Description                                                                                                  | Default |
 | ------------------------------------------------------------------------------------------------------------ | ------- |
 | Number of elements allgathered at a time. Limits the memory required for the allgather for large model sizes | `5e8`   |
+
+***compute_grad_norm***: [boolean]
+
+| Description                                                                                                                                                                                                                     | Default |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
+| Compute and retain the global gradient norm during ZeRO Stage 1/2 optimizer steps. Set to `false` only with a GPU optimizer, without ZenFlow, gradient clipping, or ZeRO Stage 1 BF16 parameters with FP32 gradient accumulation, and when callers do not use `get_global_grad_norm()`; finite/overflow checking is unchanged. | `true`  |
 
 <i>**overlap_comm**</i>: [boolean]
 
@@ -546,6 +462,12 @@ Enabling and configuring ZeRO memory optimizations
 | Description                                                                                                                                                                                                                                                                         | Default |
 | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
 | Stage 1 and 2 optimization for CPU offloading that parallelizes gradient copying to CPU memory among ranks by fine-grained gradient partitioning. Performance benefit grows with gradient accumulation steps (more copying between optimizer steps) or GPU count (increased parallelism). | `False` |
+
+***parameter_alignment***: [boolean]
+
+| Description | Default |
+| ----------- | ------- |
+| Pad ZeRO Stage 1 and 2 flat buffers between parameters so every parameter starts at a 16-byte-aligned address. Enable this for operations such as grouped matrix multiplication that require aligned parameters. Padding increases flat-buffer and optimizer-state memory usage. Optimizer checkpoints must be resumed with a compatible effective padding layout; module-only warm starts may use either setting. | `False` |
 
 ***offload_param***: [dictionary]
 
@@ -1132,7 +1054,7 @@ Use a built-in preset but override specific naming/weight fields for a fine-tune
 **Constraints:**
 - `autoep_size` must divide `num_experts` for all detected MoE layers
 - AutoEP currently cannot be combined with AutoTP (`tensor_parallel.autotp_size > 1`); support is planned as follow-up work
-- AutoEP with ZeRO Stage 3 is supported only without AutoTP, sequence parallelism, MiCS, hpZeRO secondary tensor groups, non-1 `expert_tensor_parallel_size`, or quantized gradients
+- AutoEP with ZeRO Stage 3 is supported only without AutoTP, sequence parallelism, hpZeRO secondary tensor groups, non-1 `expert_tensor_parallel_size`, or quantized gradients
 - ZeRO Stage 3 saves AutoEP checkpoints partition-natively and supports same-topology save/load, module-only loads, optimizer-state-skipping loads, and universal checkpoint conversion. Universal loads can resume at a different data-parallel world size, a different `autoep_size`, or both (when the target `autoep_size` divides the expert count), including weights-only/module-only loads from the converted `fp32.pt` parameter files
 
 ### Logging
@@ -1798,378 +1720,6 @@ Example of <i>**comms_logger**</i> configuration for logging specific operations
   "prof_ops": ["all_reduce", "all_gather"]
 }
 ```
-### Compression
-**Note:** <i>**Compression**</i> has seven different components, including layer reduction, weight quantization, activation quantization, sparse pruning, row pruning, head pruning, and channel pruning. We explain them one by one with simple json examples. Read more about how to use the DeepSpeed Compression library in our [tutorial](/tutorials/model-compression/).
-
-#### Layer Reduction
-**Note:** Layer reduction works much better when using knowledage distillation (learn more in our [tutorial](/tutorials/model-compression/)):
-
-```json
-"compression_training": {
-    "layer_reduction": {
-      "enabled": true,
-      "keep_number_layer": 5,
-      "module_name_prefix": "bert.encoder.layer",
-      "teacher_layer": [
-        2,
-        4,
-        6,
-        8,
-        10
-      ],
-      "other_module_name": [
-        "bert.pooler",
-        "bert.embeddings",
-        "classifier"
-      ]
-    }
-  }
-```
-
-<i>**layer_reduction**</i>: [dictionary]
-
-| Fields | Value | Default |
-| ----- | ----- | ----- |
-| <i>**enabled**</i>: [boolean] | Enable layer reduction or not. | `false` |
-| <i>**keep_number_layer**</i>: [list] | The number of layer in the model to be kept. | N/A |
-| <i>**module_name_prefix**</i>: [str] | The (uniform) name prefix of the model's modules of which the associated weight parameters are to be reinitialized. | N/A |
-| <i>**teacher_layer**</i>: [list] | The layer of the weight parameters are to be reinitialized. The length of the list equals to 'keep_number_layer'. | N/A |
-| <i>**other_module_name**</i>: [list] | The name of modules of which the associated weight parameters are to be reinitialized. It is an complemenatory or alternative of module_name_prefix. For instance,  "other_module_name": ["bert.encoder.layer.2","bert.encoder.layer.4"] equals to "module_name_prefix":"bert.encoder.layer" and  "teacher_layer": [2,4]. | N/A |
-
-#### Weight Quantization
-```json
-  "compression_training": {
-  "weight_quantization": {
-    "shared_parameters":{
-      "enabled": true,
-      "quantizer_kernel": false,
-      "schedule_offset": 0,
-      "quantize_groups": 1,
-      "quantize_verbose": false,
-      "quantization_type": "symmetric",
-      "rounding": "nearest",
-      "quantize_weight_in_forward": false,
-      "fp16_mixed_quantize":{
-        "enabled": false,
-        "quantize_change_ratio": 0.001
-      }
-    },
-    "different_groups":{
-      "wq1": {
-        "params": {
-            "start_bits": 8,
-            "target_bits": 8,
-            "quantization_period": 50
-        },
-        "modules": [
-          "attention.self",
-          "intermediate"
-        ]
-      },
-      "wq2": {
-        "params": {
-            "start_bits": 4,
-            "target_bits": 4,
-            "quantization_period": 50
-        },
-        "modules": [
-          "attention.output"
-        ]
-      }
-    }
-  }
-  }
-```
-
-<i>**shared_parameters**</i>: [dictionary]
-
-Shared parameters for all weight quantization groups.
-
-| Fields | Value | Default |
-| ----- | ----- | ----- |
-| <i>**enabled**</i>: [boolean] | Enable weight quantization or not. | `false` |
-| <i>**quantizer_kernel**</i>: [boolean] | Use DeepSpeed quantization kernel for >=4 bit quantization. This can only be enabled when using DeepSpeed FP16 optimizer. | `false` |
-| <i>**schedule_offset**</i>: [integer] | Enable weight quantization after scheduled steps (can be treated as warmup steps). | `0` |
-| <i>**quantize_groups**</i>: [integer] | Split the weight matrix into different number of groups, and each of them has its own scaling factor. | `1` |
-| <i>**quantize_verbose**</i>: [boolean] | Print the quantization related logs. | `false` |
-| <i>**quantization_type**</i>: [string] | Choose the quantization algorithm, symmetric or asymmetric. | `"symmetric"` |
-| <i>**rounding**</i>: [string] | Rounding algorithm associated with quantization, nearest or stochastic. | `"nearest"` |
-| <i>**quantize_weight_in_forward**</i>: [boolean] | Quantize weight in optimizer or forward step, must set to be true for FP32 optimizer training. | `false` |
-| <i>**fp16_mixed_quantize**</i>: [dictionary] | Using the value mixed by FP16 value and the quantized value. | N/A |
-| <i>&emsp;&emsp;**enabled**</i>: [boolean] | Whether fp16 mixed quantization is enabled. | `false` |
-| <i>&emsp;&emsp;**quantize_change_ratio**</i>: [float] | Initial quantize value ratio, will gradually increase to 1. | `0.001` |
-
-<i>**different_groups**</i>: [dictionary]
-
-Different quantization sets, this is used for different quantization parameters. In this example, we give two different sets. In practice, you can choose the number of sets based on your requirements.
-
-| Fields | Value | Default |
-| ----- | ----- | ----- |
-| <i>**params**</i>: [dictionary] | | |
-| <i>&emsp;&emsp;**start_bits**</i>: [integer] | Quantization starting bits, will gradaully reduce to target bits. | `8` |
-| <i>&emsp;&emsp;**target_bits**</i>: [integer] | Quantization target bits, need to be <= start_bits. | `8` |
-| <i>&emsp;&emsp;**quantization_period**</i>: [integer] | For every n steps, the quantization bits will be reduce by 1. | `1` |
-| <i>**modules**</i>: [list] | Scope of weight parameters associated to the params setting. | `"All Linear and CONV2D layers"` |
-
-#### Activation Quantization
-```json
-"compression_training": {
-  "activation_quantization": {
-    "shared_parameters":{
-      "enabled": true,
-      "quantization_type": "asymmetric",
-      "range_calibration": "dynamic",
-      "schedule_offset": 50
-    },
-    "different_groups":{
-      "aq1": {
-        "params": {
-            "bits": 8
-        },
-        "modules": [
-          "attention.output"
-        ]
-      }
-    }
-  }
-```
-
-<i>**shared_parameters**</i>: [dictionary]
-
-Shared parameters for all activation quantization groups.
-
-| Fields | Value | Default |
-| ----- | ----- | ----- |
-| <i>**enabled**</i>: [boolean] | Enable activation quantization or not. | `false` |
-| <i>**quantization_type**</i>: [string] | Choose the quantization algorithm, symmetric or asymmetric. | `"symmetric"` |
-| <i>**range_calibration**</i>: [string] | Using dynamic (per token or per image) or static (fixed min/max using momentum) for inference. | `"static"` |
-| <i>**schedule_offset**</i>: [integer] | Enable activation quantization after scheduled steps (can be treated as warmup steps). | `0` |
-
-<i>**different_groups**</i>: [dictionary]
-
-Different quantization sets, this is used for different quantization parameters. In this example, we give one set. In practice, you can choose the number of sets based on your requirements.
-
-| Fields | Value | Default |
-| ----- | ----- | ----- |
-| <i>**params**</i>: [dictionary] | | |
-| <i>&emsp;&emsp;**bits**</i>: [integer] | Number of bits used for activation target bits, need to be >= 4. | `8` |
-| <i>**modules**</i>: [list] | Scope of weight parameters associated to the params setting. | `"All Linear and CONV2D layers"` |
-
-#### Sparse Pruning
-```json
-"compression_training": {
-  "sparse_pruning":{
-    "shared_parameters":{
-      "enabled": true,
-      "schedule_offset": 30,
-      "method": "l1"
-    },
-    "different_groups":{
-      "sp1": {
-        "params": {
-            "dense_ratio": 0.5
-        },
-        "modules": [
-          "attention.self"
-        ]
-      }
-    }
-  }
-}
-```
-
-```json
-"compression_training": {
-  "sparse_pruning":{
-    "shared_parameters":{
-      "enabled": true,
-      "schedule_offset": 30,
-      "schedule_offset_end": 90,
-      "schedule_offset_stride": 15,
-      "method": "snip_momentum",
-      "block_pattern": "4x1",
-      "dense_ratio": 0.4,
-      "excluded_modules": ['classifier', 'pooler']
-    },
-    "different_groups":{
-    }
-  }
-}
-```
-
-<i>**shared_parameters**</i>: [dictionary]
-
-Shared parameters for all sparse pruning groups.
-
-| Fields | Value | Default |
-| ----- | ----- | ----- |
-| <i>**enabled**</i>: [boolean] | Enable sparse pruning or not. | `false` |
-| <i>**schedule_offset**</i>: [integer] | Enable sparse pruning after scheduled steps (can be treated as warmup steps). | `0` |
-| <i>**schedule_offset_end**</i>: [integer] | Disable sparse pruning after scheduled steps, mandotory for `snip_momentum`. | `0` |
-| <i>**schedule_offset_stride**</i>: [integer] | The stride of pruning on training steps, mandotory for `snip_momentum`. | `"1"` |
-| <i>**method**</i>: [string] | Choose different pruning methods, l1 (static, magnitude based), topk (dynamic, learnable) or snip_momentum (structured pruning). | `"l1"` |
-| <i>**block_pattern**</i>: [string] | Choose different structured pruning block patterns, NxM or N:M (N and M are integers). For instance, "4x1" or "2:4" are common block patterns, mandotory for `snip_momentum`. | `"4x1"` |
-| <i>**dense_ratio**</i>: [float] | Used to get the targeted global sparsity ratio, mandotory for `snip_momentum`. | `"0.1"` |
-| <i>**excluded_modules**</i>: [list] | Excluded pruning scope on some special modules like output layer. | `[]` |
-
-<i>**different_groups**</i>: [dictionary]
-
-Different pruning sets, this is used for different pruning parameters. In this example, we give one set. In practice, you can choose the number of sets based on your requirements.
-Note for `snip_momentum` method, you can leave it as empty.
-
-| Fields | Value | Default |
-| ----- | ----- | ----- |
-| <i>**params**</i>: [dictionary] | | |
-| <i>&emsp;&emsp;**dense_ratio**</i>: [float] | The percentage of weights to keep after pruning. | `0.5` |
-| <i>**modules**</i>: [list] | Scope of weight parameters associated to the params setting. | `"All Linear and CONV2D layers"` |
-
-#### Row Pruning
-**Note:** <i>**Row Pruning**</i> is a feature designed for two back-to-back linear layers (e.g., Feed Forward Network in Transformers). As such, we suggested use row pruning for the first linear layer (i.e., the `intermediate.dense` layer for BERT). Reducing the row dimension of this matrix can help reducing the column of the follow-up matrix (i.e., `layer.\\w+.output.dense` layer for BERT). It should also work for other linear layers as well.
-```json
-"compression_training": {
-  "row_pruning":{
-    "shared_parameters":{
-      "enabled": true,
-      "schedule_offset": 20,
-      "method": "topk"
-    },
-    "different_groups":{
-      "rp1": {
-        "params": {
-            "dense_ratio": 0.5
-        },
-        "modules": [
-          "intermediate.dense"
-        ],
-        "related_modules":[
-          ["layer.\\w+.output.dense"]
-        ]
-      }
-    }
-  }
-}
-```
-
-<i>**shared_parameters**</i>: [dictionary]
-
-Shared parameters for all row pruning groups.
-
-| Fields | Value | Default |
-| ----- | ----- | ----- |
-| <i>**enabled**</i>: [boolean] | Enable row pruning or not. | `false` |
-| <i>**schedule_offset**</i>: [integer] | Enable row pruning after scheduled steps (can be treated as warmup steps). | `0` |
-| <i>**method**</i>: [string] | Choose different pruning methods, l1 (static, magnitude based) or topk (dynamic, learnable). | `"l1"` |
-
-<i>**different_groups**</i>: [dictionary]
-
-Different pruning sets, this is used for different pruning parameters. In this example, we give one set. In practice, you can choose the number of sets based on your requirements.
-
-| Fields | Value | Default |
-| ----- | ----- | ----- |
-| <i>**params**</i>: [dictionary] | | |
-| <i>&emsp;&emsp;**dense_ratio**</i>: [float] | The percentage of weights to keep after pruning. | `0.5` |
-| <i>**modules**</i>: [list] | Scope of weight parameters associated to the params setting. | `"All Linear and CONV2D layers"` |
-| <i>**related_modules**</i>: [list[list]] | Related module to the row pruned module, which can be performed column pruning. | `None` |
-
-#### Head Pruning
-**Note:** <i>**Head Pruning**</i> is a feature designed for two attention layers (e.g., Multi Head Attention in Transformers). For now, it can only be applied to output matrix of the Transformer (i.e., `attention.output.dense` in BERT). Pruning the output matrix can lead to the pruning of Query/Key/Value matrix as well.
-```json
-"compression_training": {
-  "head_pruning":{
-    "shared_parameters":{
-      "enabled": true,
-      "schedule_offset": 10,
-      "method": "topk",
-      "num_heads": 12
-    },
-    "different_groups":{
-      "rp1": {
-        "params": {
-            "dense_ratio": 0.5
-        },
-        "modules": [
-          "attention.output.dense"
-        ],
-        "related_modules":[
-          ["self.query", "self.key", "self.value"]
-        ]
-      }
-    }
-  }
-}
-
-```
-
-<i>**shared_parameters**</i>: [dictionary]
-
-Shared parameters for all head pruning groups.
-
-| Fields | Value | Default |
-| ----- | ----- | ----- |
-| <i>**enabled**</i>: [boolean] | Enable head pruning or not. | `false` |
-| <i>**schedule_offset**</i>: [integer] | Enable head pruning after scheduled steps (can be treated as warmup steps). | `0` |
-| <i>**method**</i>: [string] | Choose different pruning methods. For now, we only support topk (dynamic, learnable). | `"topk"` |
-| <i>**num_heads**</i>: [int] | Number of heads (must be provided by user). | N/A |
-
-<i>**different_groups**</i>: [dictionary]
-
-Different pruning sets, this is used for different pruning parameters. In this example, we give one set. In practice, you can choose the number of sets based on your requirements.
-
-| Fields | Value | Default |
-| ----- | ----- | ----- |
-| <i>**params**</i>: [dictionary] | | |
-| <i>&emsp;&emsp;**dense_ratio**</i>: [float] | The percentage of weights to keep after pruning. | `0.5` |
-| <i>**modules**</i>: [list] | Scope of weight parameters associated to the params setting. | `"All Linear and CONV2D layers"` |
-| <i>**related_modules**</i>: [list[list]] | Related module (Usually Q/K/V) to the head pruned module (i.e., the output matrix). For now, this feature only works for BERT. | `None` |
-
-#### Channel Pruning
-**Note:** <i>**Channel Pruning**</i> is a feature designed for two back-to-back CONV2d layers (e.g., residual connection in ResNet). As such, we suggested use channel pruning for the first CONV2d layer. Reducing the number of output channels of this layer can help reducing the number of input channels the follow-up layer. It should also work for other CONV2d layers as well.
-```json
-"compression_training": {
-"channel_pruning":{
-      "shared_parameters":{
-        "enabled": true,
-        "schedule_offset": 0,
-        "method": "topk"
-      },
-      "different_groups":{
-        "cp1": {
-          "params": {
-              "dense_ratio": 0.5
-          },
-          "modules": [
-            "layer....conv1"
-          ],
-          "related_modules": [
-            ["layer....conv2", "layer....bn1"]
-          ]
-        }
-      }
-    }
-}
-```
-
-<i>**shared_parameters**</i>: [dictionary]
-
-Shared parameters for all channel pruning groups.
-
-| Fields | Value | Default |
-| ----- | ----- | ----- |
-| <i>**enabled**</i>: [boolean] | Enable channel pruning or not. | `false` |
-| <i>**schedule_offset**</i>: [integer] | Enable channel pruning after scheduled steps (can be treated as warmup steps). | `0` |
-| <i>**method**</i>: [string] | Choose different pruning methods, l1 (static, magnitude based) or topk (dynamic, learnable). | `"l1"` |
-
-<i>**different_groups**</i>: [dictionary]
-
-Different pruning sets, this is used for different pruning parameters. In this example, we give one set. In practice, you can choose the number of sets based on your requirements.
-
-| Fields | Value | Default |
-| ----- | ----- | ----- |
-| <i>**params**</i>: [dictionary] | | |
-| <i>&emsp;&emsp;**dense_ratio**</i>: [float] | The percentage of weights to keep after pruning. | `0.5` |
-| <i>**modules**</i>: [list] | Scope of weight parameters associated to the params setting. | `"All CONV2D layers"` |
-| <i>**related_modules**</i>: [list[list]] | Related module to the channel pruned module. | `None` |
-
 ### Checkpoint options
 
 ```json

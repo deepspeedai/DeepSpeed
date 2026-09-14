@@ -14,6 +14,8 @@ from deepspeed import comm as dist
 from deepspeed.moe.layer import MoE
 from unit.v1.moe.autoep_test_utils import (
     MockMoETransformer,
+    engine_input_dtype as _engine_input_dtype,
+    make_autoep_client_optimizer_config as _make_client_optimizer_config,
     make_autoep_integration_config as _make_autoep_config,
     run_training_steps as _run_training_steps,
     seed_everything as _seed_everything,
@@ -276,3 +278,135 @@ class TestAutoEPZero3ReplicaGroups8GPU(DistributedTest):
 
         losses, _ = _run_training_steps(engine, num_steps=1)
         assert torch.isfinite(torch.tensor(losses[0]))
+
+
+# ---------------------------------------------------------------------------
+# Test class: AutoEP with a caller-supplied optimizer (world_size=2)
+# ---------------------------------------------------------------------------
+
+
+def _local_shard(param):
+    """Local ZeRO-3 shard when partitioned, else the tensor itself."""
+    tensor = getattr(param, "ds_tensor", None)
+    return (tensor if tensor is not None else param.data).detach().float().clone()
+
+
+class TestAutoEPClientOptimizer(DistributedTest):
+    """AutoEP replaces every MoE module in ``_configure_expert_parallel`` (engine.py), which runs
+    before ``_configure_optimizer``. ``torch.optim.Optimizer.__init__`` materialises its argument
+    eagerly (``param_groups = list(params)``), so an optimizer the caller built from
+    ``model.parameters()`` -- what HF Trainer and Accelerate do when the DeepSpeed config declares
+    no ``optimizer`` block -- holds the discarded expert tensors while the live ``GroupedExperts``
+    weights belong to no param group.
+
+    Without the remap the symptoms are:
+      * with ``zero.Init``: silent -- every expert and router is frozen, loss still falls because
+        attention, shared experts and norms train normally;
+      * without ``zero.Init``: ``AttributeError: 'Parameter' object has no attribute
+        'partition_numel'`` from ``_create_fp16_sub_groups``.
+
+    Every other AutoEP test supplies the optimizer through ds_config, so this path is otherwise
+    uncovered.
+
+    Scope: ZeRO-3 only. A caller-supplied optimizer on ZeRO-1/2 with MoE layers additionally
+    requires param groups marked ``{"moe": True}`` (``stage_1_and_2.py``, ``bf16_optimizer.py``);
+    that is a separate pre-existing requirement and is not addressed here.
+    """
+
+    world_size = 2
+
+    def test_client_optimizer_covers_replacement_parameters(self):
+        """Every trainable parameter of the replaced module must be optimized."""
+        _seed_everything(1234)
+        model = MockMoETransformer()
+        client_optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
+
+        engine, _, _, _ = deepspeed.initialize(model=model,
+                                               optimizer=client_optimizer,
+                                               config=_make_client_optimizer_config())
+
+        owned = {id(p) for group in engine.optimizer.fp16_groups for p in group}
+        trainable = [(name, param) for name, param in engine.module.named_parameters() if param.requires_grad]
+
+        orphans = [name for name, param in trainable if id(param) not in owned]
+        assert not orphans, f"parameters in the model but in no optimizer param group: {orphans}"
+
+        # The replacement really did happen, so the assertion above is meaningful.
+        expert_names = [name for name, _ in engine.module.named_parameters() if ".experts." in name]
+        assert expert_names, "AutoEP did not replace any MoE layer"
+        assert all(name.endswith((".w1", ".w2", ".w3")) for name in expert_names), expert_names
+
+        # And nothing detached from the module is being optimized in their place.
+        live = {id(p) for _, p in engine.module.named_parameters()}
+        ghosts = [p for group in engine.optimizer.fp16_groups for p in group if id(p) not in live]
+        assert not ghosts, f"{len(ghosts)} optimized parameters are not part of the model"
+
+    def test_client_optimizer_updates_expert_weights(self):
+        """A step must move the expert weights, not leave them frozen.
+
+        ``weight_decay`` is 0.1 rather than AdamW's 1e-2 default so that the check does not depend
+        on which experts the router happened to pick. An expert that receives no token still has a
+        gradient under ZeRO-3, but it is zero, so decoupled weight decay is the only thing acting
+        on it: the parameter is scaled by ``1 - lr*weight_decay``. At the default that is 0.999, a
+        0.100% move, and bf16's half-spacing is 0.195%-0.391%, so the value rounds straight back
+        and ``torch.equal`` would report a correctly stepped parameter as frozen. At 0.1 the move
+        is 1%, above that bound at every magnitude.
+        """
+        _seed_everything(1234)
+        model = MockMoETransformer()
+        client_optimizer = torch.optim.AdamW(model.parameters(), lr=0.1, weight_decay=0.1)
+
+        engine, _, _, _ = deepspeed.initialize(model=model,
+                                               optimizer=client_optimizer,
+                                               config=_make_client_optimizer_config())
+
+        before = {name: _local_shard(param) for name, param in engine.module.named_parameters()}
+
+        hidden = engine.module.config.hidden_size
+        inputs = torch.randn(1, 8, hidden, device=engine.device, dtype=_engine_input_dtype(engine))
+        loss = engine(inputs).float().pow(2).mean()
+        engine.backward(loss)
+        engine.step()
+
+        frozen = [
+            name for name, param in engine.module.named_parameters()
+            if param.requires_grad and torch.equal(_local_shard(param), before[name])
+        ]
+        assert not frozen, f"parameters unchanged after an optimizer step: {frozen}"
+
+    def test_client_optimizer_preserves_param_group_hyperparameters(self):
+        """Both param groups must survive initialize with their hyper-parameters intact.
+
+        The expert weights live in the decayed group, which is listed second here so the remap has
+        to target a group other than 0. Which group they actually land in is asserted by
+        ``TestClientOptimizerRemap`` in test_autoep_unit.py -- ZeRO-3 empties the client
+        optimizer's param groups during init, so it cannot be checked from here.
+        """
+        _seed_everything(1234)
+        model = MockMoETransformer()
+        decayed = [p for n, p in model.named_parameters() if not n.endswith("bias")]
+        no_decay = [p for n, p in model.named_parameters() if n.endswith("bias")]
+        client_optimizer = torch.optim.AdamW(
+            [
+                {
+                    "params": no_decay,
+                    "weight_decay": 0.0
+                },
+                {
+                    "params": decayed,
+                    "weight_decay": 0.1
+                },
+            ],
+            lr=1e-3,
+        )
+
+        engine, _, _, _ = deepspeed.initialize(model=model,
+                                               optimizer=client_optimizer,
+                                               config=_make_client_optimizer_config())
+
+        owned = {id(p) for group in engine.optimizer.fp16_groups for p in group}
+        orphans = [n for n, p in engine.module.named_parameters() if p.requires_grad and id(p) not in owned]
+        assert not orphans, f"parameters in the model but in no optimizer param group: {orphans}"
+
+        weight_decays = {group.get("weight_decay") for group in engine.optimizer.param_groups}
+        assert weight_decays == {0.1, 0.0}, f"param-group hyper-parameters were not preserved: {weight_decays}"

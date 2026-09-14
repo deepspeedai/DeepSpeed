@@ -25,8 +25,9 @@ one config — see [Adding a workflow](#adding-a-new-workflow).
   the import graph from your changed files to the impacted tests, and writes the
   list to `ci/.test_selection/test_list.txt`.
 - The trusted controller validates that list, then fetches, installs, and tests
-  the exact candidate SHA inside a no-secret Modal Sandbox. `push` to `master`
-  and manual runs always run everything.
+  the exact candidate SHA inside a no-secret Modal Sandbox. The Sandbox runs
+  only for merge queue entries, `push` to `master` (always the full suite), and
+  manual runs — a plain PR event never spends Modal quota.
 - It is **fail-safe**: anything it can't reason about safely → run the *full* suite.
   It never silently runs *fewer* tests than reality.
 - Preview locally:
@@ -63,12 +64,12 @@ The design is a small, self-contained take on HuggingFace `transformers`'
 ### Job flow
 
 ```
-                pull_request_target / push / workflow_dispatch
+           pull_request_target / merge_group / push / workflow_dispatch
                                   │
                     ┌─────────────┴─────────────┐
                     │        collect-tests       │   (no secrets)
                     │  checkout exact base SHA   │
-                    │  public-fetch exact PR SHA │
+                    │ public-fetch exact head SHA│
                     │  self-test the fetcher     │
                     │  parse candidate as data   │
                     │   → mode (all|subset|none) │
@@ -83,7 +84,7 @@ The design is a small, self-contained take on HuggingFace `transformers`'
                     │  validate mode/list + SHA   │
                     │  create one L40S:2 Sandbox  │
                     │    no secrets or mounts     │
-                    │    fetch exact PR SHA       │
+                    │    fetch exact head SHA      │
                     │    install + run pytest     │
                     │  terminate/observe Sandbox  │
                     └────────────────────────────┘
@@ -95,6 +96,14 @@ The design is a small, self-contained take on HuggingFace `transformers`'
   skipped dependent job counts as success here).
 - **`subset`** → `deploy` runs pytest on exactly the impacted files.
 - **`all`** → `deploy` runs the whole scope (`tests/unit/v1`).
+
+Independent of `mode`, `deploy` is also skipped on `pull_request_target` runs,
+so pushing to a PR never spends Modal quota — the `collect-tests` summary still
+previews what the queue will run. The Sandbox actually executes on
+`merge_group` (the merged tree, gating the merge), `push` to `master`, and
+`workflow_dispatch`. On `merge_group` the candidate is the merge-group commit
+in the base repository, diffed against the queue's base SHA, so the selection
+covers exactly what the entry would introduce.
 
 
 ## How a decision is made
@@ -280,6 +289,17 @@ context and the `deploy` controller authenticates to Modal. The trust boundary i
   mitigation, **not** the trust boundary. Exact trusted base code plus Sandbox
   isolation is the primary protection.
 
+**`merge_group` runs are a separate trust context.** GitHub runs a queued
+entry's workflows from the merge-group commit — the PR's merged tree — so the
+workflow YAML itself is candidate-controlled. The jobs restore the repo's
+invariant by resolving every GitHub-side checkout to the trusted base revision
+(`merge_group.base_sha`): the selector, the controller, and the accelerate
+launcher all come from master there, and the merged candidate enters only as
+validated git data (fetched by exact SHA into a separate root) or inside the
+no-secret Modal Sandbox. The residual exposure — a queued PR rewriting the
+workflow YAML itself to echo secrets — is inherent to GitHub's merge queue;
+review PRs that touch `.github/workflows/*` with that in mind.
+
 > **Consequence:** changes to `ci/*` (including `tests_fetcher.py` itself) take
 > effect under `pull_request_target` only after they're **merged**. A PR that
 > changes this launcher cannot prove its new PR-triggered end-to-end path by
@@ -339,4 +359,6 @@ are still publicly reachable. Do not replace this with a moving branch fallback.
 **Why didn't this PR exercise its new `pull_request_target` controller?**
 GitHub intentionally runs that event's workflow from the trusted base. The new
 controller becomes the trusted code only after merge; before then, rely on the
-focused static/unit evidence described in the security model.
+focused static/unit evidence described in the security model. (The merge-queue
+run *does* use the PR's merged controller, so `ci/*` changes are first
+exercised live there.)

@@ -11,6 +11,7 @@ import torch.nn as nn
 import deepspeed.runtime.engine as ds_engine
 from deepspeed import set_optimizer_flags
 from deepspeed.module_inject.auto_ep import AutoEP
+from deepspeed.module_inject.auto_ep_layer import ReplacementSourceMap
 from deepspeed.moe.utils import split_params_into_different_moe_groups_for_optimizer
 from deepspeed.runtime.engine import DeepSpeedEngine
 
@@ -50,15 +51,23 @@ def test_autoep_zero3_partitions_each_replacement_before_next_allocation(monkeyp
     auto_ep = object.__new__(AutoEP)
     events = []
     replacements = []
+    source_maps = []
 
-    def construct(spec, ep_size, ep_rank):
+    def construct(spec, ep_size, ep_rank, collect_sources=False):
+        assert collect_sources
         layer_index = len(replacements)
         if layer_index:
-            assert events[-1] == ("converted", layer_index - 1)
+            assert events[-1] == ("collected", layer_index - 1)
         events.append(("construct", layer_index))
         replacement = _Replacement(layer_index)
         replacements.append(replacement)
-        return replacement
+        source = nn.Parameter(torch.full((2, 2), float(layer_index + 10)))
+        sources = ReplacementSourceMap()
+        sources.sources[id(replacement.router.weight)] = [source]
+        sources.discarded.add(id(source))
+        source_maps.append(sources)
+        events.append(("sources", layer_index))
+        return replacement, sources
 
     auto_ep._replace_moe_layer_without_retarget = construct
     auto_ep._retarget_transformers_output_recorders = lambda spec, replacement: events.append(
@@ -88,22 +97,37 @@ def test_autoep_zero3_partitions_each_replacement_before_next_allocation(monkeyp
         events.append(("converted", layer_index))
 
     monkeypatch.setattr(ds_engine.groups, "_get_expert_data_parallel_group", resolve_group)
+    monkeypatch.setattr(ds_engine.gc, "collect", lambda: events.append(("collected", len(converted_batches) - 1)))
 
     def on_moe_layer_replaced(replacement):
         events.append(("callback", replacement.layer_index))
         DeepSpeedEngine._partition_autoep_zero3_experts(replacement, convert_to_zero_parameters)
 
-    auto_ep.replace_moe_layers([_spec(0), _spec(1)], ep_size=2, ep_rank=0, on_moe_layer_replaced=on_moe_layer_replaced)
+    combined_sources = auto_ep.replace_moe_layers([_spec(0), _spec(1)],
+                                                  ep_size=2,
+                                                  ep_rank=0,
+                                                  collect_sources=True,
+                                                  on_moe_layer_replaced=on_moe_layer_replaced)
 
     assert events == [
         ("construct", 0),
+        ("sources", 0),
         ("callback", 0),
         ("converted", 0),
+        ("collected", 0),
         ("construct", 1),
+        ("sources", 1),
         ("callback", 1),
         ("converted", 1),
+        ("collected", 1),
         ("retarget", 0),
     ]
+    assert combined_sources.sources == {
+        key: value
+        for source_map in source_maps
+        for key, value in source_map.sources.items()
+    }
+    assert combined_sources.discarded == set().union(*(source_map.discarded for source_map in source_maps))
     converted_ids = {id(param) for batch in converted_batches for param in batch}
     expected_ids = {id(param) for replacement in replacements for param in replacement.experts.parameters()}
     excluded_ids = {
@@ -150,7 +174,7 @@ def test_autoep_zero3_partitioned_experts_keep_muon_assignment(monkeypatch):
     set_optimizer_flags(SimpleNamespace(optimizer_name="muon"), replacement)
 
     assert all(param.use_muon for param in replacement.experts.parameters())
-    assert not replacement.ordinary_partition.use_muon
+    assert replacement.ordinary_partition.use_muon
 
 
 def test_autoep_zero3_partitioned_experts_keep_optimizer_grouping():
