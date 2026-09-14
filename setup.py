@@ -90,7 +90,7 @@ extras_require = {
     'sparse': fetch_requirements('requirements/requirements-sparse_pruning.txt'),
     'inf': fetch_requirements('requirements/requirements-inf.txt'),
     'sd': fetch_requirements('requirements/requirements-sd.txt'),
-    'triton': fetch_requirements('requirements/requirements-triton.txt'),
+    'triton': [],  # Retained for backward compatibility; PyTorch owns Triton.
     'deepcompile': fetch_requirements('requirements/requirements-deepcompile.txt'),
     'torchembed': fetch_requirements('requirements/requirements-torchembed.txt'),
 }
