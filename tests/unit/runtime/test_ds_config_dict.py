@@ -20,7 +20,7 @@ import deepspeed.comm as dist
 
 # A test on its own
 import deepspeed
-from deepspeed.runtime.config import DeepSpeedConfig
+from deepspeed.runtime.config import DeepSpeedConfig, DeepSpeedConfigError
 from deepspeed.runtime.precision_config import get_bfloat16_config
 
 
@@ -216,15 +216,14 @@ def test_get_bfloat16_enabled(bf16_key):
     assert get_bfloat16_config(cfg).enabled == True
 
 
-def test_quantized_eigenvalue_config_parses():
+def test_quantized_eigenvalue_config_is_rejected():
     ds_config_path = get_test_path('../model/BingBertSquad/deepspeed_bsz24_fp16_eigenvalue_quantize_config.json')
 
-    ds_config = DeepSpeedConfig(ds_config_path)
+    with pytest.raises(DeepSpeedConfigError, match="quantize_training"):
+        DeepSpeedConfig(ds_config_path)
 
-    assert ds_config._param_dict["quantize_training"]["quantize_eigenvalue"] is True
 
-
-def test_compression_training_without_legacy_quantize_training_uses_defaults():
+def test_compression_training_config_is_rejected():
     config_dict = {
         "train_micro_batch_size_per_gpu": 1,
         "optimizer": {
@@ -243,10 +242,43 @@ def test_compression_training_without_legacy_quantize_training_uses_defaults():
         },
     }
 
-    ds_config = DeepSpeedConfig(config_dict)
+    with pytest.raises(DeepSpeedConfigError, match="compression_training"):
+        DeepSpeedConfig(config_dict)
 
-    assert ds_config.eigenvalue_enabled is False
-    assert ds_config.eigenvalue_verbose is False
+
+def test_nebula_config_is_rejected():
+    config_dict = {
+        "train_micro_batch_size_per_gpu": 1,
+        "nebula": {
+            "enabled": True,
+        },
+    }
+
+    with pytest.raises(DeepSpeedConfigError, match="Nebula"):
+        DeepSpeedConfig(config_dict)
+
+
+def test_mics_zero_config_is_rejected():
+    config_dict = {
+        "train_micro_batch_size_per_gpu": 1,
+        "zero_optimization": {
+            "stage": 3,
+            "mics_shard_size": 2,
+        },
+    }
+
+    with pytest.raises(DeepSpeedConfigError, match="MiCS"):
+        DeepSpeedConfig(config_dict)
+
+
+def test_compression_helper_shim_reexports_module_utils():
+    with pytest.warns(FutureWarning, match="deepspeed.compression.helper"):
+        from deepspeed.compression.helper import recursive_getattr, recursive_setattr
+    from deepspeed.utils.module_utils import recursive_getattr as rg
+    from deepspeed.utils.module_utils import recursive_setattr as rs
+
+    assert recursive_getattr is rg
+    assert recursive_setattr is rs
 
 
 def test_max_grad_norm_leaves_caller_config_untouched():

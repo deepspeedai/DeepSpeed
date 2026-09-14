@@ -41,6 +41,7 @@ ZeRO optimization should be enabled as:
     "offload_optimizer": {...},
     "ignore_unused_parameters": [true|false],
     "round_robin_gradients": [true|false],
+    "parameter_alignment": [true|false],
     "zero_hpz_partition_size": 1,
     "zero_quantized_weights": [true|false],
     "zero_quantized_nontrainable_weights": [true|false],
@@ -138,6 +139,13 @@ class DeepSpeedZeroConfig(DeepSpeedConfigModel):
     overlap_comm: Optional[bool] = None  # None for dynamic default value (see validator `overlap_comm_valid` below)
     """
     Attempts to overlap the reduction of the gradients with backward computation
+    """
+
+    compute_grad_norm: bool = True
+    """
+    Compute and retain the global gradient norm during ZeRO Stage 1/2 optimizer steps.
+    Disable only when gradient clipping is off, the dedicated ZeRO-1 BF16 optimizer is not selected,
+    and callers do not use ``get_global_grad_norm()``.
     """
 
     load_from_fp32_weights: bool = True
@@ -306,6 +314,14 @@ class DeepSpeedZeroConfig(DeepSpeedConfigModel):
     Performance benefit grows with gradient accumulation steps (more copying
     between optimizer steps) or GPU count (increased parallelism).
     """
+
+    parameter_alignment: bool = False
+    """
+    Pad ZeRO Stage 1 and 2 flat buffers between parameters so each parameter
+    starts at a 16-byte-aligned address. This is disabled by default because
+    the padding increases flat-buffer and optimizer-state memory usage.
+    """
+
     zero_hpz_partition_size: int = Field(1, ge=0)
     """
     Number of ranks in zero parameters partitioning secondary group
@@ -337,10 +353,6 @@ class DeepSpeedZeroConfig(DeepSpeedConfigModel):
     "zeropp_loco_param": { "err_beta": 0.8, "reset_T": 1024 }.
     See LoCo paper for more details: (https://arxiv.org/abs/2407.04480).
     """
-
-    mics_shard_size: int = Field(-1, json_schema_extra={"new_param": "mics_shard_size"})
-
-    mics_hierarchical_params_gather: bool = False
 
     memory_efficient_linear: bool = True
     """
@@ -383,6 +395,12 @@ class DeepSpeedZeroConfig(DeepSpeedConfigModel):
     def overlap_comm_valid(self):
         if self.overlap_comm is None:
             self.overlap_comm = self.stage == ZeroStageEnum.weights
+        return self
+
+    @model_validator(mode="after")
+    def compute_grad_norm_valid(self):
+        if not self.compute_grad_norm and self.stage not in (ZeroStageEnum.optimizer_states, ZeroStageEnum.gradients):
+            raise ValueError("compute_grad_norm=false is supported only with ZeRO Stage 1 or 2")
         return self
 
     @model_validator(mode="after")

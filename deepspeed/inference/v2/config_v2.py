@@ -24,7 +24,6 @@ class QuantizationConfig(DeepSpeedConfigModel):
     """ The quantization mode in string format. The supported modes are as follows:
         - 'wf6af16', weight-only quantization with FP6 weight and FP16 activation.
     """
-    # TODO: may reuse the constants in deepspeed/compression/constants.py
 
 
 class RaggedInferenceEngineConfig(DeepSpeedConfigModel):

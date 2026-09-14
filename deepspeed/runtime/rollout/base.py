@@ -10,6 +10,7 @@ ABC. This keeps engine-specific concerns out of the trainer loop.
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from typing import Optional
 
 import torch
 
@@ -32,6 +33,7 @@ class SamplingConfig:
     top_p: float = 1.0
     top_k: int = -1
     n_samples_per_prompt: int = 1
+    continuous_batch_size: Optional[int] = None
 
 
 @dataclass
