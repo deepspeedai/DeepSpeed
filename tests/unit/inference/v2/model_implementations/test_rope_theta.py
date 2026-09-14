@@ -191,4 +191,3 @@ def test_unscaled_configurations_still_resolve(rope_type):
 
     assert _Model(SimpleNamespace(rope_parameters=dict(parameters))).rope_theta == 500000.0
     assert _Model(SimpleNamespace(rope_scaling=dict(parameters))).rope_theta == 500000.0
-
