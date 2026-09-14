@@ -765,8 +765,9 @@ class AutoTP():
                 if any(checking_key in item for item in self.state_dict):
                     Loading.load(child, self.state_dict, checking_key, self.mp_group)
                 else:
-                    # Not in this shard; still take buffers (e.g. BatchNorm stats) off meta.
-                    if len(child._buffers) != 0:
+                    # Not in this shard; still take persistent buffers (e.g. BatchNorm stats) off
+                    # meta. Non-persistent ones (rotary inv_freq) are in no shard, so leave them.
+                    if any(name not in child._non_persistent_buffers_set for name in child._buffers):
                         Loading.load_buffer(child, self.state_dict, checking_key)
                     continue
             if len(child._buffers) != 0 and self.state_dict is not None:

@@ -1065,3 +1065,24 @@ def test_admitted_norm_absent_from_the_state_dict_still_gets_its_buffers_off_met
 
     assert not model.norm.running_mean.is_meta
     assert not model.norm.running_var.is_meta
+
+
+def test_non_persistent_buffers_of_an_absent_module_stay_on_meta():
+    """A non-persistent buffer is in no shard, so there is nothing to copy into it. Materializing
+    it would leave uninitialized memory where a meta tensor used to fail loudly on first use."""
+    from deepspeed.module_inject.replace_module import _replace_module
+
+    class Phi3RotaryEmbedding(nn.Module):
+
+        def __init__(self):
+            super().__init__()
+            self.register_buffer("inv_freq", torch.arange(1, 5, dtype=torch.float32), persistent=False)
+
+    with torch.device("meta"):
+        model = nn.Sequential()
+        model.add_module("rotary", Phi3RotaryEmbedding())
+    state_dict = {"other.weight": torch.ones(8)}
+
+    _replace_module(model, policies={}, state_dict=state_dict)
+
+    assert model.rotary.inv_freq.is_meta
