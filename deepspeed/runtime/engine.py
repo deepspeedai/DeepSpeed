@@ -1806,6 +1806,11 @@ class DeepSpeedEngine(Module):
             )
 
         if zero_stage <= ZeroStageEnum.gradients:
+            zero_config = self._config.zero_config
+            if isinstance(self.module, PipelineModule) and (
+                    zero_config.copy_oversized_gradients or zero_config.track_gradient_streams
+                    or zero_config.check_offload_gradients or zero_config.accumulate_offload_gradients):
+                raise ValueError("ZeRO-2 gradient safety options do not support pipeline parallelism")
             overlap_comm = self.zero_overlap_comm()
             contiguous_gradients = self.zero_contiguous_gradients()
             round_robin_gradients = self.zero_round_robin_gradients()
@@ -1854,7 +1859,11 @@ class DeepSpeedEngine(Module):
                 gradient_accumulation_dtype=gradient_accumulation_dtype,
                 communication_data_type=self.communication_data_type,
                 elastic_checkpoint=self.zero_elastic_checkpoint(),
-                check_grad_overflow=check_grad_overflow)
+                check_grad_overflow=check_grad_overflow,
+                copy_oversized_gradients=self._config.zero_config.copy_oversized_gradients,
+                track_gradient_streams=self._config.zero_config.track_gradient_streams,
+                check_offload_gradients=self._config.zero_config.check_offload_gradients,
+                accumulate_offload_gradients=self._config.zero_config.accumulate_offload_gradients)
 
         elif zero_stage == ZeroStageEnum.weights:
             assert not self.has_moe_layers, "MoE not supported with Stage 3"
@@ -4265,6 +4274,10 @@ class DeepSpeedEngine(Module):
         logger.info(f"Compiling deepcompile={self.is_deepcompile_enabled()} backend={backend}")
 
         enable_deepcompile = self.is_deepcompile_enabled()
+        zero_config = self._config.zero_config
+        if enable_deepcompile and (zero_config.copy_oversized_gradients or zero_config.track_gradient_streams
+                                   or zero_config.check_offload_gradients or zero_config.accumulate_offload_gradients):
+            raise ValueError("ZeRO-2 gradient safety options do not support DeepCompile")
         if enable_deepcompile and self.zero_optimization_stage() != ZeroStageEnum.optimizer_states \
                 and self.zero_optimization_stage() != ZeroStageEnum.weights \
                 and self.zero_optimization_stage() != ZeroStageEnum.gradients:

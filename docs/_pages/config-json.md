@@ -480,6 +480,33 @@ Enabling and configuring ZeRO memory optimizations
 | ------------------------------------------------------------------------------------------------------------------- | ------- |
 | Number of elements reduced/allreduced at a time. Limits the memory required for the allgather for large model sizes | `5e8`   |
 
+***ZeRO-2 gradient safety options***: [boolean]
+
+These experimental options default to `false` and can be varied independently.
+They require contiguous ZeRO-2 gradients (CPU offload enforces contiguity).
+ZeRO-1/3, ZenFlow, pipeline parallelism, and DeepCompile are not supported.
+
+| Option | Behavior |
+| ------ | -------- |
+| `copy_oversized_gradients` | Clone gradients larger than `reduce_bucket_size` before reduction, without changing the threshold or communication dtype. Adds a gradient-sized allocation. |
+| `track_gradient_streams` | Track producer readiness, buffer reuse, and consumer storage lifetimes, including oversized gradients with `overlap_comm=false`. Wait for tracked CPU offload copies before CPU consumption. |
+| `check_offload_gradients` | With CPU optimizer offload, wait for copies and scan the actual optimizer-input gradients. Reject invalid group norms before the update. Forces globally coordinated overflow checking even if disabled in BF16 configuration. |
+| `accumulate_offload_gradients` | With CPU optimizer offload, retain every backward contribution until optimizer step/reset, even with GAS=1 or multiple boundary-marked backwards. Additional CPU gradient storage and transfer synchronization are required. |
+
+The accumulation option preserves the existing accumulation dtype and loss
+scaling. It does not make the engine call `step()` when the engine's boundary
+flag is false. Successful or skipped optimizer steps and optimizer checkpoint
+loads reset its pending contributions. `optimizer.zero_grad()` is also used
+internally between backwards, so it does not reset this accumulation window;
+external code discarding a pending window must call
+`optimizer.reset_cpu_buffers()`. Code replacing model weights directly, bypassing
+optimizer checkpoint loading, must likewise reset before resuming training.
+
+These options are diagnostic changes, not a demonstrated fix for every source
+of non-finite gradients. Test storage and ordering changes separately from
+accumulation semantics, and distinguish an applied update from an overflow skip.
+See `docs/zero2-gradient-safety.md` for the validation matrix.
+
 <i>**contiguous_gradients**</i>: [boolean]
 
 | Description                                                                                                         | Default |
