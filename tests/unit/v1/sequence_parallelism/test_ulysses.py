@@ -1,0 +1,551 @@
+# Copyright (c) Microsoft Corporation.
+# SPDX-License-Identifier: Apache-2.0
+
+# DeepSpeed Team
+
+import pytest
+import torch
+import torch.nn.functional as F
+import deepspeed.comm as dist
+from deepspeed.accelerator import get_accelerator
+from deepspeed import initialize
+import deepspeed.runtime.sequence_parallel.parallel_state_sp as sp_mpu
+from transformers import AutoModel
+from unit.common import DistributedTest
+from deepspeed.sequence.layer import (DistributedAttention, _SeqAllToAll, _generate_layout_params, post_all2all,
+                                      pre_all2all_fun, single_all_to_all)
+from deepspeed.sequence.fpdt_layer import _FPDTGPUOffloadingAttentionImpl_, FPDT_InputConstruct
+from unit.util import skip_on_arch
+from unit.simple_model import *
+from deepspeed.utils import groups
+from deepspeed.module_inject.tp_shard import AutoTPMeta, get_shard_size_list
+#Use mesh device to create data and sequence parallel group
+
+
+class TestUlyssesCheckpointLoad(DistributedTest):
+    world_size = 2
+
+    def test_load_non_sequence_parallel_checkpoint(self, tmpdir):
+        config = {
+            "train_batch_size": self.world_size,
+            "optimizer": {
+                "type": "Adam",
+                "params": {
+                    "lr": 1e-3
+                }
+            },
+            "zero_optimization": {
+                "stage": 1
+            }
+        }
+        hidden_dim = 4
+        source_model = SimpleModel(hidden_dim)
+        with torch.no_grad():
+            for parameter in source_model.parameters():
+                parameter.fill_(1.5)
+        expected = {name: tensor.detach().cpu().clone() for name, tensor in source_model.state_dict().items()}
+        source_engine, _, _, _ = initialize(model=source_model,
+                                            model_parameters=source_model.parameters(),
+                                            config=config)
+
+        checkpoint_dir = str(tmpdir)
+        tag = "no_sp"
+        source_engine.save_checkpoint(checkpoint_dir, tag=tag)
+        dist.barrier()
+
+        sp_mpu.initialize_sequence_parallel(self.world_size)
+        target_model = SimpleModel(hidden_dim)
+        target_engine, _, _, _ = initialize(model=target_model,
+                                            model_parameters=target_model.parameters(),
+                                            config=config,
+                                            mpu=sp_mpu)
+        assert target_engine.mp_world_size == 1
+        assert target_engine.checkpoint_mp_rank == 0
+        assert sp_mpu.get_model_parallel_rank() == dist.get_rank()
+
+        target_engine.load_checkpoint(checkpoint_dir,
+                                      tag=tag,
+                                      load_module_only=True,
+                                      load_optimizer_states=False,
+                                      load_lr_scheduler_states=False)
+
+        for name, tensor in target_engine.module.state_dict().items():
+            assert torch.equal(tensor.detach().cpu(), expected[name])
+
+        sp_tag = "with_sp"
+        target_engine.save_checkpoint(checkpoint_dir, tag=sp_tag)
+        dist.barrier()
+
+        resumed_model = SimpleModel(hidden_dim)
+        resumed_engine, _, _, _ = initialize(model=resumed_model,
+                                             model_parameters=resumed_model.parameters(),
+                                             config=config,
+                                             mpu=sp_mpu)
+        resumed_engine.load_checkpoint(checkpoint_dir, tag=sp_tag)
+
+        for name, tensor in resumed_engine.module.state_dict().items():
+            assert torch.equal(tensor.detach().cpu(), expected[name])
+
+
+class TestUlyssesUtils(DistributedTest):
+    world_size = 4
+
+    def test_mesh_device_creation(self) -> None:
+        skip_on_arch(min_arch=8)
+        model = AutoModel.from_pretrained('bert-base-uncased')
+        sp_size = 2
+        dp_size = 2
+        ds_engine, _, _, _ = initialize(
+            model=model,
+            config_params={
+                "train_batch_size": 8,
+                "data_parallel_size": dp_size,
+                "sequence_parallel_size": sp_size
+            },
+        )
+        assert ds_engine.seq_parallel_group is not None
+        assert ds_engine.data_parallel_group is not None
+        assert dist.get_world_size(group=ds_engine.seq_parallel_group) == sp_size
+        assert dist.get_world_size(group=ds_engine.data_parallel_group) == dp_size
+        assert dist.get_world_size() == sp_size * dp_size
+
+
+#Sweep b,s,h,d to test all2all consistency
+@pytest.mark.parametrize("d0", [2, 4])  #batch or sequence dimension
+@pytest.mark.parametrize("d1", [4, 8])  #batch or sequence dimension
+@pytest.mark.parametrize("num_heads", [4, 8])
+@pytest.mark.parametrize("head_dim", [16, 32])
+class TestUlyssesAll2All(DistributedTest):
+    world_size = 4
+
+    def test_alltoall_output_consistency(self, d0: int, d1: int, head_dim: int, num_heads: int) -> None:
+        skip_on_arch(min_arch=8)
+        model = AutoModel.from_pretrained('bert-base-uncased')
+        ds_engine, _, _, _ = initialize(model=model, config_params={"train_batch_size": 8}, mesh_param=(2, 2))
+        #4D tensor : b,s,h,d or s,b,h,d
+        input_tensor = torch.randn(d0, d1, num_heads, head_dim, device=ds_engine.device)
+        scatter_idx = 2
+        batch_dim_idx = 0
+        outputs = []
+        seq_dims = [0]  #seq first API
+        #TODO: Add support for batch first (that seq_dims=[0,1]) after PR for bs>1 issue with batch first is fixed
+        ## See discussion in : https://github.com/deepspeedai/DeepSpeed/issues/5808
+        for seq_dim in seq_dims:
+            gather_idx = seq_dim
+            #first all2all: sequence parallel to head parallel
+            s2h_tensor = _SeqAllToAll.apply(ds_engine.seq_parallel_group, input_tensor, scatter_idx, gather_idx,
+                                            batch_dim_idx)
+
+            #No op
+            # second all2all: head parallel to sequence parallel
+            h2s_tensor = _SeqAllToAll.apply(ds_engine.seq_parallel_group, s2h_tensor, gather_idx, scatter_idx,
+                                            batch_dim_idx)
+            print(
+                f'[{dist.get_rank()}] s={seq_dim} input: {input_tensor.shape} s2h: {s2h_tensor.shape} h2s_tensor: {h2s_tensor.shape}'
+            )
+            outputs.append(h2s_tensor)
+
+        # Check outputs are the same as input
+        for i in range(1, len(outputs)):
+            assert torch.allclose(input_tensor, outputs[i]), f"Outputs differ for sequence dim {seq_dims[i]}"
+
+
+def _emulate_all_to_all(shards):
+    """CPU stand-in for dist.all_to_all_single: rank i sends chunk j of dim 0 to rank j."""
+    seq_world_size = len(shards)
+    return [
+        torch.cat([shards[src][dst:dst + 1] for src in range(seq_world_size)], dim=0) for dst in range(seq_world_size)
+    ]
+
+
+def _run_layout_all_to_all(scatter_idx, batch_dim_idx, seq_world_size, shards):
+    """single_all_to_all's layout math, driven by the emulated all2all above."""
+    pre_permute_idx, pre_inp_shape, post_permute_idx, post_res_shape = _generate_layout_params(
+        scatter_idx, batch_dim_idx, seq_world_size, shards[0])
+    sent = [pre_all2all_fun(pre_permute_idx, pre_inp_shape, shard) for shard in shards]
+    post_fun = post_all2all(post_permute_idx, post_res_shape)
+    return [post_fun(received) for received in _emulate_all_to_all(sent)]
+
+
+@pytest.mark.parametrize("batch_dim_idx", [0, 1])
+@pytest.mark.parametrize("seq_world_size", [2, 4])
+class TestUlyssesAll2AllLayout:
+    """_generate_layout_params is a pure function, so the shapes it hands to reshape can be
+    checked on CPU without a process group. TestUlyssesAll2All above only runs batch_dim_idx=0
+    and TestUlyssesAll2All_odd takes the uneven-head path, so the seq-first (s, b, n, h) layout
+    is otherwise never exercised."""
+
+    def _shards(self, batch_dim_idx, seq_world_size):
+        local_seq_len, bs, local_num_heads, head_dim = 3, 2, 2, 4
+        seq_len = local_seq_len * seq_world_size
+        num_heads = local_num_heads * seq_world_size
+        seq_dim = 1 if batch_dim_idx == 0 else 0
+        full = torch.arange(seq_len * bs * num_heads * head_dim, dtype=torch.float32)
+        full = full.reshape(seq_len, bs, num_heads, head_dim)
+        if batch_dim_idx == 0:
+            full = full.transpose(0, 1).contiguous()
+        # sequence parallel: every head, a slice of the sequence.
+        seq_parallel = [
+            full.narrow(seq_dim, r * local_seq_len, local_seq_len).contiguous() for r in range(seq_world_size)
+        ]
+        # head parallel: every position, a slice of the heads.
+        head_parallel = [
+            full.narrow(2, r * local_num_heads, local_num_heads).contiguous() for r in range(seq_world_size)
+        ]
+        return seq_dim, seq_parallel, head_parallel
+
+    def test_seq_to_head_parallel(self, batch_dim_idx, seq_world_size):
+        _, seq_parallel, head_parallel = self._shards(batch_dim_idx, seq_world_size)
+        got = _run_layout_all_to_all(2, batch_dim_idx, seq_world_size, seq_parallel)
+        for rank, (actual, expected) in enumerate(zip(got, head_parallel)):
+            assert torch.equal(actual, expected), f"rank {rank} got {actual.shape}, expected {expected.shape}"
+
+    def test_head_to_seq_parallel(self, batch_dim_idx, seq_world_size):
+        seq_dim, seq_parallel, head_parallel = self._shards(batch_dim_idx, seq_world_size)
+        got = _run_layout_all_to_all(seq_dim, batch_dim_idx, seq_world_size, head_parallel)
+        for rank, (actual, expected) in enumerate(zip(got, seq_parallel)):
+            assert torch.equal(actual, expected), f"rank {rank} got {actual.shape}, expected {expected.shape}"
+
+
+@pytest.mark.parametrize("d0", [2, 4])  #batch or sequence dimension
+@pytest.mark.parametrize("d1", [4, 8])  #batch or sequence dimension
+@pytest.mark.parametrize("num_heads", [3, 7])
+@pytest.mark.parametrize("head_dim", [16])
+class TestUlyssesAll2All_odd(DistributedTest):
+    world_size = 4
+
+    def test_alltoall_output_consistency(self, d0: int, d1: int, head_dim: int, num_heads: int) -> None:
+
+        data_parallel_size = 2
+        seq_parallel_size = self.world_size // data_parallel_size
+        skip_on_arch(min_arch=8)
+
+        def seq_batch_heads_hash(d0, d1, h, offset_d0=0, offset_d1=0, offset_h=0):
+            d0 += offset_d0
+            d1 += offset_d1
+            h += offset_h
+            return d0 * 10 + h + d1 * 0.1
+
+        hidden_dim = 10
+        model = SimpleModel(hidden_dim)
+        ds_engine, _, _, _ = initialize(model=model,
+                                        config_params={"train_batch_size": 8},
+                                        mesh_param=(data_parallel_size, seq_parallel_size))
+
+        scatter_idx = 2
+        outputs = []
+        inputs = []
+        batch_dims = [0, 1]
+        seq_dims = [1, 0]
+
+        for idx, seq_dim in enumerate(seq_dims):
+            gather_idx = seq_dim
+            batch_dim_idx = batch_dims[idx]
+
+            #4D tensor : b,s,h,d or s,b,h,d
+            #create a hash tensor from pos_id, head_id, and batch_id
+            d0_indices = torch.arange(d0).reshape(-1, 1, 1, 1)
+            d1_indices = torch.arange(d1).reshape(1, -1, 1, 1)
+            h_indices = torch.arange(num_heads).reshape(1, 1, -1, 1)
+            input_tensor = torch.randn(d0, d1, num_heads, head_dim, device=ds_engine.device)
+            if batch_dim_idx == 1:  #seq_len_dim : 0(d0)
+                input_tensor[:] = seq_batch_heads_hash(d0_indices, d1_indices, h_indices,
+                                                       d0 * groups._get_sequence_parallel_rank(), 0)
+            elif batch_dim_idx == 0:  #seq_len_dim : 1(d1)
+                input_tensor[:] = seq_batch_heads_hash(d0_indices, d1_indices, h_indices, 0,
+                                                       d1 * groups._get_sequence_parallel_rank())
+            inputs.append(input_tensor)
+
+            ### first all2all: sequence parallel to head parallel
+            s2h_tensor = _SeqAllToAll.apply(ds_engine.seq_parallel_group, input_tensor, scatter_idx, gather_idx,
+                                            batch_dim_idx, None, None, None, True, num_heads)
+
+            # s2h_tensor check for the first all2all: compare with the expected ground truth
+            d0_indices = torch.arange(s2h_tensor.shape[0]).reshape(-1, 1, 1, 1)
+            d1_indices = torch.arange(s2h_tensor.shape[1]).reshape(1, -1, 1, 1)
+            h_indices = torch.arange(s2h_tensor.shape[2]).reshape(1, 1, -1, 1)
+            shard_list = get_shard_size_list(num_heads, groups._get_sequence_parallel_world_size(), AutoTPMeta())
+            head_offset = sum(shard_list[:groups._get_sequence_parallel_rank()])
+            s2h_truth = torch.zeros_like(s2h_tensor)
+            s2h_truth[:] = seq_batch_heads_hash(d0_indices, d1_indices, h_indices, 0, 0, head_offset)
+
+            assert torch.allclose(s2h_truth,
+                                  s2h_tensor), f"s2h_tensor differs from the expected for sequence dim: {seq_dim}"
+            #No op
+            ### second all2all: head parallel to sequence parallel
+            # The gather direction cannot read an uneven count off an already-sharded tensor,
+            # so this call site supplies it too.
+            h2s_tensor = _SeqAllToAll.apply(ds_engine.seq_parallel_group, s2h_tensor, gather_idx, scatter_idx,
+                                            batch_dim_idx, None, None, None, True, num_heads)
+            print(
+                f'[{dist.get_rank()}] s={seq_dim} input: {input_tensor.shape} s2h: {s2h_tensor.shape} h2s_tensor: {h2s_tensor.shape}'
+            )
+            outputs.append(h2s_tensor)
+
+        # Check outputs for the second all2all
+        for i in range(0, len(outputs)):
+            assert torch.allclose(inputs[i],
+                                  outputs[i]), f"[{dist.get_rank()}]Outputs differ for sequence dim {seq_dims[i]}"
+
+
+@pytest.mark.parametrize("d0", [4, 1])  #batch dimension
+@pytest.mark.parametrize("d1", [2048, 8192])  #sequence dimension
+@pytest.mark.parametrize("chunk_size", [128, 256])  #size of chunk
+@pytest.mark.parametrize("num_heads", [8, 4])
+@pytest.mark.parametrize("head_dim", [32])
+class TestFPDTAttention(DistributedTest):
+
+    def test_FPDT_attention_offloading_output_consistency(self, d0: int, d1: int, chunk_size: int, head_dim: int,
+                                                          num_heads: int) -> None:
+        skip_on_arch(min_arch=8)
+        world_size = 2
+
+        try:
+            from flash_attn.flash_attn_interface import _flash_attn_forward, _flash_attn_backward
+        except ImportError:
+            _flash_attn_forward = None
+            _flash_attn_backward = None
+
+        if _flash_attn_forward is None or _flash_attn_backward is None:
+            pytest.skip("Flash Attention is not available.")
+
+        model = AutoModel.from_pretrained('bert-base-uncased')
+        ds_engine, _, _, _ = initialize(
+            model=model,
+            config_params={
+                "train_batch_size": 8,
+                "data_parallel_size": 1,
+                "sequence_parallel_size": world_size
+            },
+        )
+        #3D tensor : l, b, d
+        dim = head_dim * num_heads
+
+        seed = 42
+        torch.manual_seed(seed)
+        get_accelerator().manual_seed_all(seed)
+
+        input_tensor = torch.randn(d1, d0, dim, device=ds_engine.device, dtype=torch.half)  # l, b, d
+        spg = ds_engine.seq_parallel_group
+
+        dist.broadcast(input_tensor, src=0, group=spg)
+
+        class args:
+
+            def __init__(self):
+                self.ds_sequence_parallel_fpdt_chunk_size = chunk_size
+
+        fpdt_input_tensor = FPDT_InputConstruct(input_tensor.permute(1, 0, 2), None, None, None, None, args(),
+                                                world_size, dist.get_rank()).generate()[0].permute(1, 0, 2)
+
+        if dist.get_rank() == 0:
+            qkv_linear_weight = torch.nn.Parameter(
+                torch.empty(dim + 2 * dim, dim, device=dist.get_rank(), dtype=torch.half))
+            torch.nn.init.normal_(qkv_linear_weight, mean=0.0, std=0.02)
+
+            qkv_linear_bias = torch.nn.Parameter(torch.empty(dim + 2 * dim, device=dist.get_rank(), dtype=torch.half))
+            torch.nn.init.normal_(qkv_linear_bias, mean=0.0, std=0.02)
+        else:
+            qkv_linear_weight = torch.nn.Parameter(
+                torch.empty(dim + 2 * dim, dim, device=dist.get_rank(), dtype=torch.half))
+            qkv_linear_bias = torch.nn.Parameter(torch.empty(dim + 2 * dim, device=dist.get_rank(), dtype=torch.half))
+
+        dist.broadcast(qkv_linear_weight, src=0, group=spg)
+        dist.broadcast(qkv_linear_bias, src=0, group=spg)
+
+        num_chunks_attn = fpdt_input_tensor.shape[0] * dist.get_world_size(spg) // chunk_size
+        fpdt_output = _FPDTGPUOffloadingAttentionImpl_.apply(fpdt_input_tensor, None, None, None, spg, 2, 0, dim, dim,
+                                                             head_dim, dim, qkv_linear_weight, qkv_linear_bias, 0,
+                                                             num_chunks_attn, True)
+
+        # baseline
+        qkv = torch.matmul(input_tensor, qkv_linear_weight.t()) + qkv_linear_bias
+        q = qkv[:, :, :dim].contiguous().reshape(qkv.shape[0], qkv.shape[1], -1, head_dim).permute(1, 2, 0,
+                                                                                                   3).contiguous()
+        k = qkv[:, :, dim:dim * 2].contiguous().reshape(qkv.shape[0], qkv.shape[1], -1,
+                                                        head_dim).permute(1, 2, 0, 3).contiguous()
+        v = qkv[:, :, dim * 2:dim * 3].contiguous().reshape(qkv.shape[0], qkv.shape[1], -1,
+                                                            head_dim).permute(1, 2, 0,
+                                                                              3).contiguous()  # b, nhead, l, d
+
+        scores = torch.matmul(q, k.transpose(-2, -1)) / torch.sqrt(torch.tensor(dim, dtype=torch.half))
+
+        causal_mask = torch.triu(torch.ones(d1, d1, device=ds_engine.device), diagonal=1).bool()
+        causal_mask = causal_mask.unsqueeze(0).unsqueeze(0)
+        scores = scores.masked_fill(causal_mask, float('-inf'))
+        attn_weights = F.softmax(scores, dim=-1)
+        output = torch.matmul(attn_weights, v).permute(0, 2, 1, 3)
+
+        baseline_output_shuffled = FPDT_InputConstruct(output, None, None, None, None, args(), world_size,
+                                                       dist.get_rank()).generate()[0]  # b, l, n, d
+
+        assert torch.allclose(
+            fpdt_output, baseline_output_shuffled, rtol=0.01, atol=0.1
+        ), f"rank {dist.get_rank()}, sp size: {dist.get_world_size(spg)}, input_tensor: {input_tensor.shape}, fpdt_input_tensor: {fpdt_input_tensor.shape}, fpdt_output: {fpdt_output.shape},            baseline_output_shuffled: {baseline_output_shuffled.shape},{torch.max(torch.abs(fpdt_output - baseline_output_shuffled))}"
+
+
+@pytest.mark.parametrize("sp_size", [2])
+class TestUlyssesLossBackward(DistributedTest):
+    world_size = 4
+
+    def test_sp_loss_backward_stability(self, sp_size: int) -> None:
+        """
+        Regression test for Issue #7672.
+        Verifies that using all_reduce for loss aggregation is stable
+        when sequence_parallel_size < world_size, preventing IndexError.
+        """
+        skip_on_arch(min_arch=8)
+
+        # Setup
+        dp_size = self.world_size // sp_size
+        model = SimpleModel(4)
+        ds_engine, _, _, _ = initialize(
+            model=model,
+            config_params={
+                "train_batch_size": 8,
+                "data_parallel_size": dp_size,
+                "sequence_parallel_size": sp_size
+            },
+        )
+
+        sp_group = ds_engine.seq_parallel_group
+
+        # Simulate Loss on each rank
+        rank = dist.get_rank()
+        local_loss = torch.tensor(float(rank + 1), device=ds_engine.device, requires_grad=True)
+        local_weight = torch.tensor(1.0, device=ds_engine.device)
+
+        # Numerator: Weighted Loss summation
+        weighted_loss = local_loss * local_weight
+        dist.all_reduce(weighted_loss, op=dist.ReduceOp.SUM, group=sp_group)
+
+        # B. Denominator: Sum of total weights
+        total_weight = local_weight.clone()
+        dist.all_reduce(total_weight, op=dist.ReduceOp.SUM, group=sp_group)
+
+        # C. Calculate the final loss
+        dist_loss = weighted_loss / total_weight
+
+        # Backward Pass verification
+        try:
+            dist_loss.backward()
+        except IndexError as e:
+            pytest.fail(f"Backward crashed with IndexError: {e}")
+
+        # Verify Gradients
+        # Loss = (L1*1 + L2*1) / 2 = 0.5*L1 + 0.5*L2
+        expected_grad = 0.5
+        assert torch.allclose(local_loss.grad, torch.tensor(expected_grad, device=ds_engine.device)), \
+            f"Gradient mismatch! Expected {expected_grad}, got {local_loss.grad}"
+
+
+class _RecordingAttention(torch.nn.Module):
+    """Stands in for the local attention and records the head shard it was handed."""
+
+    def __init__(self):
+        super().__init__()
+        self.head_ids = None
+
+    def forward(self, query, key, value, *args, **kwargs):
+        # Each head carries its own global index, so the shard is readable off the tensor.
+        self.head_ids = sorted({int(v) for v in query[0, 0, :, 0].tolist()})
+        # Fold the query heads onto the kv width the way GQA groups them, so the output is the
+        # shape the reverse all-to-all expects and all three inputs carry a gradient.
+        group_size = query.shape[2] // value.shape[2]
+        grouped_query = query.view(*query.shape[:2], value.shape[2], group_size, query.shape[3]).mean(dim=3)
+        return grouped_query + key + value
+
+
+class TestUlyssesKVHeadCount(DistributedTest):
+    """The count the uneven all-to-all splits against is threaded per call (#8291).
+
+    It used to sit in a process-wide slot memoized on the first uneven all-to-all, so the first
+    model to take that path decided how every later one was sharded.
+    """
+    world_size = 2
+    LOCAL_SEQ = 4
+    HEAD_DIM = 8
+
+    def _sequence_parallel_group(self):
+        groups.mesh_device = dist.initialize_mesh_device((1, self.world_size), ("data_parallel", "sequence_parallel"))
+        return groups.mesh_device.get_group(mesh_dim="sequence_parallel")
+
+    def _tagged(self, num_heads, batch_dim_idx=0):
+        device = get_accelerator().current_device_name()
+        shape = (1, self.LOCAL_SEQ) if batch_dim_idx == 0 else (self.LOCAL_SEQ, 1)
+        tensor = torch.zeros(*shape, num_heads, self.HEAD_DIM, device=device, requires_grad=True)
+        with torch.no_grad():
+            tensor[:] = torch.arange(num_heads, device=device).view(1, 1, -1, 1).float()
+        return tensor
+
+    def _run(self, attn, num_heads, num_kv_heads=None):
+        """One forward + backward; returns the query head ids this rank received."""
+        query = self._tagged(num_heads)
+        key = self._tagged(num_kv_heads if num_kv_heads is not None else num_heads)
+        output = attn(query, key, key.clone(), 0)
+        output.sum().backward()
+        return attn.local_attn.head_ids
+
+    def test_second_model_does_not_reshard_the_first(self):
+        # 3 heads over 2 ranks is uneven ([2, 1]) and so is 5 ([3, 2]). The two splits are
+        # distinguishable, so a shared count shows up as one model taking the other's.
+        sp_group = self._sequence_parallel_group()
+        rank = dist.get_rank(group=sp_group)
+
+        teacher = DistributedAttention(_RecordingAttention(), sp_group, scatter_idx=2, gather_idx=1)
+        student = DistributedAttention(_RecordingAttention(), sp_group, scatter_idx=2, gather_idx=1)
+        expected_teacher = [[0, 1], [2]][rank]
+
+        assert self._run(teacher, 3) == expected_teacher
+        assert self._run(student, 5) == [[0, 1, 2], [3, 4]][rank]
+        assert self._run(teacher, 3) == expected_teacher
+
+    @pytest.mark.parametrize("batch_dim_idx", [0, 1])
+    def test_gqa_partitions_by_kv_groups(self, batch_dim_idx):
+        # Q=6 / KV=3 over 2 ranks. 6 divides evenly, but a query head has to stay on the rank
+        # holding its KV head, so the split follows the KV groups [2, 1] and Q becomes [4, 2].
+        sp_group = self._sequence_parallel_group()
+        rank = dist.get_rank(group=sp_group)
+
+        gather_idx = 1 if batch_dim_idx == 0 else 0
+        attn = DistributedAttention(_RecordingAttention(), sp_group, scatter_idx=2, gather_idx=gather_idx)
+        query = self._tagged(6, batch_dim_idx)
+        key = self._tagged(3, batch_dim_idx)
+        value = self._tagged(3, batch_dim_idx)
+
+        output = attn(query, key, value, batch_dim_idx)
+        output.sum().backward()
+
+        assert attn.local_attn.head_ids == [[0, 1, 2, 3], [4, 5]][rank]
+        for tensor in (query, key, value):
+            assert tensor.grad is not None and torch.isfinite(tensor.grad).all()
+
+    def test_fewer_kv_heads_than_ranks_is_rejected_before_the_collective(self):
+        # 1 KV head over 2 ranks leaves rank 1 with nothing to attend over. Both ranks have to
+        # reject it together: one of them raising inside the all-to-all hangs the other.
+        sp_group = self._sequence_parallel_group()
+
+        attn = DistributedAttention(_RecordingAttention(), sp_group, scatter_idx=2, gather_idx=1)
+        query = self._tagged(2)
+        key = self._tagged(1)
+
+        with pytest.raises(AssertionError, match="at least the sequence parallel size"):
+            attn(query, key, key.clone(), 0)
+
+    def test_even_count_keeps_the_fast_path_and_its_async_op(self):
+        # An explicit count that divides the world size must not be routed to the uneven
+        # implementation, which rejects async_op and so would disable the overlapped q/k path.
+        sp_group = self._sequence_parallel_group()
+        handle = {}
+
+        output = single_all_to_all(self._tagged(4), 2, 1, 0, sp_group, True, handle, 'dq', num_kv_heads=4)
+
+        assert output.shape[2] == 4 // self.world_size
+
+    def test_uneven_count_still_takes_the_uneven_path(self):
+        sp_group = self._sequence_parallel_group()
+        rank = dist.get_rank(group=sp_group)
+
+        output = single_all_to_all(self._tagged(3), 2, 1, 0, sp_group, num_kv_heads=3)
+
+        assert output.shape[2] == [2, 1][rank]

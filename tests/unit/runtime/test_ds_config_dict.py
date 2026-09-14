@@ -20,7 +20,7 @@ import deepspeed.comm as dist
 
 # A test on its own
 import deepspeed
-from deepspeed.runtime.config import DeepSpeedConfig
+from deepspeed.runtime.config import DeepSpeedConfig, DeepSpeedConfigError
 from deepspeed.runtime.precision_config import get_bfloat16_config
 
 
@@ -216,15 +216,14 @@ def test_get_bfloat16_enabled(bf16_key):
     assert get_bfloat16_config(cfg).enabled == True
 
 
-def test_quantized_eigenvalue_config_parses():
+def test_quantized_eigenvalue_config_is_rejected():
     ds_config_path = get_test_path('../model/BingBertSquad/deepspeed_bsz24_fp16_eigenvalue_quantize_config.json')
 
-    ds_config = DeepSpeedConfig(ds_config_path)
+    with pytest.raises(DeepSpeedConfigError, match="quantize_training"):
+        DeepSpeedConfig(ds_config_path)
 
-    assert ds_config._param_dict["quantize_training"]["quantize_eigenvalue"] is True
 
-
-def test_compression_training_without_legacy_quantize_training_uses_defaults():
+def test_compression_training_config_is_rejected():
     config_dict = {
         "train_micro_batch_size_per_gpu": 1,
         "optimizer": {
@@ -243,10 +242,43 @@ def test_compression_training_without_legacy_quantize_training_uses_defaults():
         },
     }
 
-    ds_config = DeepSpeedConfig(config_dict)
+    with pytest.raises(DeepSpeedConfigError, match="compression_training"):
+        DeepSpeedConfig(config_dict)
 
-    assert ds_config.eigenvalue_enabled is False
-    assert ds_config.eigenvalue_verbose is False
+
+def test_nebula_config_is_rejected():
+    config_dict = {
+        "train_micro_batch_size_per_gpu": 1,
+        "nebula": {
+            "enabled": True,
+        },
+    }
+
+    with pytest.raises(DeepSpeedConfigError, match="Nebula"):
+        DeepSpeedConfig(config_dict)
+
+
+def test_mics_zero_config_is_rejected():
+    config_dict = {
+        "train_micro_batch_size_per_gpu": 1,
+        "zero_optimization": {
+            "stage": 3,
+            "mics_shard_size": 2,
+        },
+    }
+
+    with pytest.raises(DeepSpeedConfigError, match="MiCS"):
+        DeepSpeedConfig(config_dict)
+
+
+def test_compression_helper_shim_reexports_module_utils():
+    with pytest.warns(FutureWarning, match="deepspeed.compression.helper"):
+        from deepspeed.compression.helper import recursive_getattr, recursive_setattr
+    from deepspeed.utils.module_utils import recursive_getattr as rg
+    from deepspeed.utils.module_utils import recursive_setattr as rs
+
+    assert recursive_getattr is rg
+    assert recursive_setattr is rs
 
 
 def test_max_grad_norm_leaves_caller_config_untouched():
@@ -266,6 +298,44 @@ def test_max_grad_norm_leaves_caller_config_untouched():
     DeepSpeedConfig(config_dict)
 
     assert config_dict["optimizer"]["params"]["max_grad_norm"] == 1.0
+
+
+def test_elasticity_leaves_caller_config_untouched():
+    # Same contract as above on the elasticity path: the resolved batch sizes belong in
+    # the copy handed to _initialize_params, not in the caller's dict.
+    #
+    # ignore_non_elastic_batch_info is deliberately left out. With it on, the batch-key
+    # guard is skipped and the second parse below cannot fail, so the test would pass
+    # whether or not the write-back is there.
+    config_dict = {
+        "elasticity": {
+            "enabled": True,
+            "max_train_batch_size": 4,
+            "micro_batch_sizes": [1, 2],
+            "min_gpus": 1,
+            "max_gpus": 4,
+            "min_time": 0,
+            "version": 0.1,
+        }
+    }
+    keys_before = set(config_dict)
+
+    ds_config = DeepSpeedConfig(config_dict)
+
+    assert set(config_dict) == keys_before
+    # The resolved values still reach the parsed config.
+    assert ds_config.train_batch_size == 4
+    assert ds_config.train_micro_batch_size_per_gpu == 2
+    assert ds_config.gradient_accumulation_steps == 2
+
+    # The write-back made the same dict unparsable a second time: the injected keys
+    # trip the guard that rejects batch parameters under elasticity, and its message
+    # names three keys the caller never wrote.
+    second = DeepSpeedConfig(config_dict)
+
+    assert second.train_batch_size == ds_config.train_batch_size
+    assert second.train_micro_batch_size_per_gpu == ds_config.train_micro_batch_size_per_gpu
+    assert second.gradient_accumulation_steps == ds_config.gradient_accumulation_steps
 
 
 class TestConfigLoad(DistributedTest):

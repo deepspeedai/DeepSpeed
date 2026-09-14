@@ -47,6 +47,15 @@ def test_pin_flags(native_pins):
     assert tuple(flat.shape) == (tensor.numel(), )
 
 
+def test_pin_empty_uses_example_dtype_only(native_pins):
+    example = torch.empty(0, dtype=torch.float16)
+    pinned = native_pins.pin_empty(example, (4, 8))
+    assert tuple(pinned.shape) == (4, 8)
+    assert pinned.dtype == torch.float16
+    assert native_pins.is_pinned(pinned)
+    assert native_pins.unpin(pinned) is True
+
+
 def test_unpin_frees_range(native_pins):
     tensor = torch.arange(32, dtype=torch.float32).reshape(4, 8)
     pinned = native_pins.pin(tensor)

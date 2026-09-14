@@ -32,7 +32,7 @@ from deepspeed.runtime.zero.stage_1_and_2 import DeepSpeedZeroOptimizer
 from deepspeed.utils import RepeatingLoader, groups
 from deepspeed.module_inject.tp_shard import get_shard_size_list
 
-from unit.common import DistributedTest
+from unit.common import DistributedTest, DistributedFixture
 
 
 class _DummyAddress:
@@ -1105,7 +1105,7 @@ class TestUnevenColumnUniversalCheckpoint(DistributedTest):
 
         tp_group = groups.get_tensor_model_parallel_group()
         tp_rank = groups.get_tensor_model_parallel_rank()
-        shard_sizes = get_shard_size_list(vocab_size, self.world_size, "lm_head")
+        shard_sizes = list(engine.module.lm_head._partition_sizes)
         assert shard_sizes == [51, 50], shard_sizes
         assert engine.module.lm_head.weight.shape[0] == shard_sizes[tp_rank]
 
@@ -1194,7 +1194,7 @@ class TestUnevenRowUniversalCheckpoint(DistributedTest):
         # Column and row parallelism must shard the same dimension identically.
         assert attn.q_proj.weight.shape[0] == attn.o_proj.weight.shape[1]
         head_dim = hidden_dim // num_heads
-        head_shards = get_shard_size_list(num_heads, self.world_size, attn.q_proj.name)
+        head_shards = get_shard_size_list(num_heads, self.world_size, attn.q_proj.tp_meta, attn.q_proj.name)
         assert head_shards == [2, 2, 1, 1], head_shards
         dim_shards = [h * head_dim for h in head_shards]
         assert attn.q_proj.weight.shape[0] == dim_shards[tp_rank], (attn.q_proj.weight.shape, dim_shards)
@@ -1383,7 +1383,7 @@ class TestUnevenTp3TrainingAndUniversalCheckpoint(DistributedTest):
 
         tp_group = groups.get_tensor_model_parallel_group()
         tp_rank = groups.get_tensor_model_parallel_rank()
-        shard_sizes = get_shard_size_list(vocab_size, self.world_size, "lm_head")
+        shard_sizes = list(engine.module.lm_head._partition_sizes)
         assert sum(shard_sizes) == vocab_size, shard_sizes
         assert shard_sizes == [4, 3, 3], shard_sizes
         assert engine.module.lm_head.weight.shape[0] == shard_sizes[tp_rank]
@@ -1506,7 +1506,7 @@ class TestUnevenTp3RowParallelGQA(DistributedTest):
         assert attn.q_proj.weight.shape[0] == attn.o_proj.weight.shape[1], (attn.q_proj.weight.shape,
                                                                             attn.o_proj.weight.shape)
         head_dim = hidden_dim // num_heads
-        head_shards = get_shard_size_list(num_heads, self.world_size, attn.q_proj.name)
+        head_shards = get_shard_size_list(num_heads, self.world_size, attn.q_proj.tp_meta, attn.q_proj.name)
         assert head_shards == [2, 1, 1], head_shards
         dim_shards = [h * head_dim for h in head_shards]
         assert attn.q_proj.weight.shape[0] == dim_shards[tp_rank], (attn.q_proj.weight.shape, dim_shards)
@@ -1567,3 +1567,181 @@ class TestUnevenTp3RowParallelGQA(DistributedTest):
 
         # 2c: optimizer state usable.
         _train_steps(restored_engine, hidden_dim, steps=1)
+
+
+class AffineResumeModel(torch.nn.Module):
+    """A column/row pair with a replicated, post-reduction row bias."""
+
+    def __init__(self):
+        super().__init__()
+        self.fc1 = torch.nn.Linear(16, 16)
+        self.fc2 = torch.nn.Linear(16, 16)
+
+    def forward(self, x):
+        return self.fc2(torch.tanh(self.fc1(x)))
+
+
+def _affine_resume_engine(tp_size, load_universal=False):
+    torch.manual_seed(1234)
+    model = AffineResumeModel()
+    config = {
+        "train_micro_batch_size_per_gpu": 2,
+        "zero_optimization": {
+            "stage": 1
+        },
+        "zero_allow_untested_optimizer": True,
+        "checkpoint": {
+            "load_universal": load_universal
+        },
+    }
+    if tp_size > 1:
+        config["tensor_parallel"] = {
+            "autotp_size": tp_size,
+            "partition_config": {
+                "use_default_specs":
+                False,
+                "layer_specs": [
+                    {
+                        "patterns": [r".*fc1\.weight$"],
+                        "partition_type": "column"
+                    },
+                    {
+                        "patterns": [r".*fc2\.weight$"],
+                        "partition_type": "row"
+                    },
+                ],
+            },
+        }
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3, betas=(0.8, 0.95), eps=1e-6)
+    engine, _, _, _ = deepspeed.initialize(model=model, optimizer=optimizer, config=config)
+    return engine
+
+
+def _affine_resume_batch(engine, step):
+    generator = torch.Generator().manual_seed(9000 + step)
+    x = torch.randn(2, 16, generator=generator).to(engine.device)
+    target = torch.randn(2, 16, generator=generator).to(engine.device)
+    return x, target
+
+
+def _affine_resume_full_tensor(name, value, tp_size):
+    if tp_size == 1:
+        return value.detach().cpu().clone()
+    shards = [torch.empty_like(value) for _ in range(tp_size)]
+    dist.all_gather(shards, value.contiguous(), group=groups.get_tensor_model_parallel_group())
+    if name == "fc2.bias":
+        for shard in shards[1:]:
+            torch.testing.assert_close(shard, shards[0])
+        full = shards[0]
+    else:
+        full = torch.cat(shards, dim=1 if name == "fc2.weight" else 0)
+    return full.detach().cpu().clone()
+
+
+def _affine_resume_state(engine, tp_size, gradients=False):
+    from deepspeed.utils import safe_get_full_fp32_param, safe_get_full_grad, safe_get_full_optimizer_state
+
+    result = {}
+    for name, param in engine.module.named_parameters():
+        if gradients:
+            values = {"grad": safe_get_full_grad(param)}
+        else:
+            values = {
+                "fp32": safe_get_full_fp32_param(param),
+                "exp_avg": safe_get_full_optimizer_state(param, "exp_avg"),
+                "exp_avg_sq": safe_get_full_optimizer_state(param, "exp_avg_sq"),
+            }
+        for key, value in values.items():
+            assert value is not None, (name, key)
+            result[f"{name}/{key}"] = _affine_resume_full_tensor(name, value, tp_size)
+    result["global_steps"] = engine.global_steps
+    if not gradients:
+        steps = [state["step"].item() for state in engine.optimizer.optimizer.state.values()]
+        assert steps and all(step == engine.global_steps for step in steps)
+        result["optimizer_step"] = steps[0]
+    return result
+
+
+def _affine_resume_step(engine, tp_size, step):
+    x, target = _affine_resume_batch(engine, step)
+    logits = engine(x)
+    loss = torch.nn.functional.mse_loss(logits, target)
+    engine.backward(loss)
+    result = _affine_resume_state(engine, tp_size, gradients=True)
+    result["logits"] = logits.detach().cpu().clone()
+    result["loss"] = loss.detach().cpu().clone()
+    engine.step()
+    result.update(_affine_resume_state(engine, tp_size))
+    return result
+
+
+class affine_resume_checkpoint(DistributedFixture):
+    world_size = 2
+
+    def run(self, tmpdir, affine_layout):
+        from deepspeed.checkpoint.affine import (AFFINE_MAP_FORMAT_VERSION, contiguous_split_map, replicated_map)
+        from deepspeed.checkpoint.constants import AFFINE_MAP, AFFINE_MAP_PARAMS, AFFINE_MAP_VERSION
+
+        engine = _affine_resume_engine(self.world_size)
+        for step in range(4):
+            _affine_resume_step(engine, self.world_size, step)
+
+        # Phase 1 does not yet emit AutoTP affine metadata. Supply the known fixture
+        # layout through the checkpoint API; all weights and moments come from training.
+        # LinearAllreduce adds this bias AFTER reduction, so its real scale is one.
+        maps = {
+            r"^fc1\.weight$": contiguous_split_map((16, 16), [8, 8], 0),
+            r"^fc1\.bias$": contiguous_split_map((16, ), [8, 8], 0),
+            r"^fc2\.weight$": contiguous_split_map((16, 16), [8, 8], 1),
+            r"^fc2\.bias$": replicated_map((16, ), self.world_size),
+        }
+        uc_info = {
+            UNIVERSAL_CHECKPOINT_VERSION_KEY: UNIVERSAL_CHECKPOINT_VERSION_VALUE,
+            AFFINE_MAP: {
+                AFFINE_MAP_VERSION: AFFINE_MAP_FORMAT_VERSION,
+                AFFINE_MAP_PARAMS: {
+                    name: layout.to_dict()
+                    for name, layout in maps.items()
+                },
+            },
+        }
+        engine.save_checkpoint(tmpdir,
+                               tag="affine_resume",
+                               client_state={UNIVERSAL_CHECKPOINT_INFO: uc_info} if affine_layout else {})
+        dist.barrier()
+        if dist.get_rank() == 0:
+            _convert_to_universal(os.path.join(tmpdir, "affine_resume"), os.path.join(tmpdir, "affine_universal"))
+        dist.barrier()
+        reference = [_affine_resume_state(engine, self.world_size)]
+        for step in range(4, 8):
+            reference.append(_affine_resume_step(engine, self.world_size, step))
+        if dist.get_rank() == 0:
+            torch.save(reference, os.path.join(tmpdir, "affine_reference.pt"))
+        dist.barrier()
+        engine.destroy()
+
+
+@pytest.mark.parametrize("affine_layout", [False, True], ids=["legacy", "affine"])
+@pytest.mark.parametrize("world_size", [1, 2], ids=["tp1", "tp2"])
+class TestAffineUniversalCheckpointResume(DistributedTest):
+
+    def test_resume_matches_uninterrupted_training(self, affine_resume_checkpoint, tmpdir, affine_layout, world_size):
+        tp_size = dist.get_world_size()
+        reference = torch.load(os.path.join(tmpdir, "affine_reference.pt"), weights_only=False)
+        engine = _affine_resume_engine(tp_size, load_universal=True)
+        load_path, _ = engine.load_checkpoint(tmpdir, tag="affine_universal", load_optimizer_states=True)
+        assert load_path is not None
+        actual = [_affine_resume_state(engine, tp_size)]
+        for step in range(4, 8):
+            actual.append(_affine_resume_step(engine, tp_size, step))
+        # The uninterrupted job is independent of converter/loader geometry. Resetting
+        # moments, losing the row bias, or slicing along the wrong axis changes this trace.
+        for index, (restored, expected) in enumerate(zip(actual, reference)):
+            assert restored.keys() == expected.keys()
+            for name in expected:
+                torch.testing.assert_close(restored[name],
+                                           expected[name],
+                                           atol=2e-6,
+                                           rtol=2e-5,
+                                           msg=lambda message: f"snapshot {index}, {name}: {message}")
+        engine.destroy()

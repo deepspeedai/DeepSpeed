@@ -56,7 +56,8 @@ class SuperOffloadOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
         cpuadam_cores_perc = kwargs.get("cpuadam_cores_perc", 0.8)
         self.superoffload_cpu_optimizer = SuperOffloadCPUOptimizer(optimizer_config=optimizer_configs,
                                                                    cpuadam_cores_perc=cpuadam_cores_perc,
-                                                                   max_grad_numel=self.max_grad_numel)
+                                                                   max_grad_numel=self.max_grad_numel,
+                                                                   pin_memory=self.offload_optimizer_pin_memory)
 
     def _create_fp16_sub_groups(self, params_group):
 

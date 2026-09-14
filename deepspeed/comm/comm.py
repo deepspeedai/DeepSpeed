@@ -23,6 +23,7 @@
 
 import torch
 from torch.distributed import GradBucket  # noqa: F401
+import inspect
 import os
 from typing import Any, Optional, TYPE_CHECKING
 
@@ -104,16 +105,23 @@ def configure(
 
 # Logging wrapper for timing ops
 def timed_op(func):
+    default_log_name = get_default_args(func).get('log_name', func.__name__)
+    # Cache the signature to avoid inspecting it on every communication call.
+    func_signature = inspect.signature(func)
 
     def log_wrapper(*args, **kwargs):
+        should_profile = False
         # Add enabled flag so that overhead to each comm op is two if conditions at most
         if comms_logger.enabled:
-            if ('prof' in kwargs
-                    and kwargs['prof']) or comms_logger.prof_all or ('log_name' in kwargs
-                                                                     and kwargs['log_name'] in comms_logger.prof_ops):
-                # Need func args for their defaults
-                func_args = get_default_args(func)
-                func_args.update(kwargs)
+            bound_args = func_signature.bind_partial(*args, **kwargs)
+            bound_args.apply_defaults()
+            func_args = bound_args.arguments
+            selected_log_name = func_args.get('log_name', default_log_name)
+            should_profile = (func_args.get('prof', False) or comms_logger.prof_all
+                              or selected_log_name in comms_logger.prof_ops)
+            if should_profile:
+                # Ops that do not declare a log_name are logged under their own name
+                func_args['log_name'] = selected_log_name
                 msg_size = get_msg_size_from_args(func, *args, **kwargs)
                 log_name = get_debug_log_name(func_args, comms_logger.debug)
                 timers(log_name).start()
@@ -127,8 +135,7 @@ def timed_op(func):
                 # If we're using MPI, we can't simply sync the stream
                 if cdb.using_mpi:
                     cdb.barrier()
-                if ('prof' in kwargs and kwargs['prof']) or comms_logger.prof_all or (
-                        'log_name' in kwargs and kwargs['log_name'] in comms_logger.prof_ops):
+                if should_profile:
                     log_name = get_debug_log_name(func_args, comms_logger.debug)
                     raw_name = func.__name__
                     timers(log_name).stop()
@@ -230,7 +237,13 @@ def broadcast(tensor, src, group=None, async_op=False, prof=False, log_name='bro
 
 
 @timed_op
-def broadcast_object_list(object_list, src, group=None, device=None):
+def broadcast_object_list(object_list,
+                          src,
+                          group=None,
+                          device=None,
+                          prof=False,
+                          log_name='broadcast_object_list',
+                          debug=get_caller_func()):
     global cdb
     return cdb.broadcast_object_list(object_list=object_list, src=src, group=group, device=device)
 
@@ -364,7 +377,13 @@ def all_to_all_single(output,
 
 
 @timed_op
-def all_to_all(output_tensor_list, input_tensor_list, group=None, async_op=False):
+def all_to_all(output_tensor_list,
+               input_tensor_list,
+               group=None,
+               async_op=False,
+               prof=False,
+               log_name='all_to_all',
+               debug=get_caller_func()):
     global cdb
     return cdb.all_to_all(output_tensor_list, input_tensor_list, group=group, async_op=async_op)
 
@@ -422,7 +441,7 @@ def scatter(tensor,
 @timed_op
 def barrier(group=None, async_op=False, device_ids=None, prof=False, log_name='barrier', debug=get_caller_func()):
     global cdb
-    return cdb.barrier(group=group, async_op=async_op)
+    return cdb.barrier(group=group, async_op=async_op, device_ids=device_ids)
 
 
 @timed_op
