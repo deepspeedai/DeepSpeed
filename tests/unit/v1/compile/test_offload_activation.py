@@ -3,16 +3,20 @@
 
 # DeepSpeed Team
 
+import json
 import os
 from collections import OrderedDict
 from copy import deepcopy
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 import torch
 
+import deepspeed
 import deepspeed.compile.passes.offload_activation as offload_pass
 from deepspeed.accelerator import get_accelerator
+from deepspeed.runtime.zero import GatheredParameters
 from deepspeed.utils.torch import required_torch_version
 
 from unit.common import DistributedTest
@@ -704,6 +708,194 @@ def test_rejects_other_offload_targets():
 
         with pytest.raises(ValueError, match="offload_activation"):
             init_z3(engine, "inductor", compile_config, {})
+
+
+class _ReleaseWrappedSavedTensorModel(torch.nn.Module):
+
+    def __init__(self, hidden_dim):
+        super().__init__()
+        self.linear = torch.nn.Linear(hidden_dim, hidden_dim)
+
+    def forward(self, x, target):
+        return torch.nn.functional.mse_loss(torch.sin(self.linear(x)), target)
+
+
+def _run_release_wrapped_saved_tensor_training(config, initial_state, batches):
+    seed = 123
+    torch.manual_seed(seed)
+    get_accelerator().manual_seed(seed)
+    get_accelerator().manual_seed_all(seed)
+
+    hidden_dim = batches[0][0].shape[-1]
+    with deepspeed.zero.Init(config_dict_or_path=config):
+        model = _ReleaseWrappedSavedTensorModel(hidden_dim)
+    parameters = list(model.parameters())
+    with GatheredParameters(parameters, modifier_rank=0):
+        model.load_state_dict(initial_state)
+
+    engine = None
+    try:
+        engine, _, _, _ = deepspeed.initialize(config=config, model=model, model_parameters=parameters)
+        engine.compile()
+        device = torch.device(get_accelerator().current_device_name())
+        losses = []
+        for x, target in batches:
+            loss = engine(x.to(device), target.to(device))
+            losses.append(loss.detach().float().item())
+            engine.backward(loss)
+            engine.step()
+
+        get_accelerator().synchronize()
+        named_parameters = list(engine.module.named_parameters())
+        with GatheredParameters([parameter for _, parameter in named_parameters]):
+            final_parameters = {name: parameter.detach().float().cpu().clone() for name, parameter in named_parameters}
+        return losses, final_parameters
+    finally:
+        if engine is not None:
+            engine.destroy()
+
+
+def _record_release_offload_graph(gm, graph_id, observations, phase, bwd):
+    if bwd:
+        reloaded = set()
+        for node in gm.graph.nodes:
+            if node.target != torch.ops.dc.reload_tensor.default:
+                continue
+            placeholder = node.args[0]
+            if isinstance(placeholder, torch.fx.Node) and placeholder.op == "placeholder":
+                reloaded.add((node.args[1], placeholder.name, node.args[2]))
+        observations.setdefault(f"{phase}_reloads", {})[graph_id] = reloaded
+        return
+
+    offloaded = set()
+    for node in gm.graph.nodes:
+        if node.target != torch.ops.dc.offload_tensor.default:
+            continue
+        release = node.args[0]
+        if not isinstance(release, torch.fx.Node) or release.target != torch.ops.dc.release_param.default:
+            continue
+        original_name = release.meta.get("original_output_name")
+        producer = release.args[0]
+        while isinstance(producer, torch.fx.Node) and producer.target == torch.ops.dc.release_param.default:
+            if producer.meta.get("original_output_name") != original_name:
+                break
+            producer = producer.args[0]
+        if not isinstance(producer, torch.fx.Node) or producer.target != torch.ops.aten.addmm.default:
+            continue
+        offloaded.add((node.args[1], original_name, node.args[2], producer.name))
+    observations.setdefault(f"{phase}_offloads", {})[graph_id] = offloaded
+
+
+class TestReleaseWrappedSavedTensor(DistributedTest):
+    world_size = 1
+    non_daemonic_procs = True
+
+    def test_release_wrapped_saved_tensor_actual_device(self):
+        from deepspeed.compile.util import is_deepcompile_supported
+
+        if get_accelerator().device_name() == "cpu":
+            pytest.skip("CPU does not support this test yet")
+        if not is_deepcompile_supported():
+            pytest.skip("DeepCompile is not supported in this environment")
+
+        hidden_dim = 32
+        batch_size = 2
+        iterations = 8
+        torch.manual_seed(123)
+        generator = torch.Generator().manual_seed(123)
+        initial_model = _ReleaseWrappedSavedTensorModel(hidden_dim)
+        initial_state = deepcopy(initial_model.state_dict())
+        batches = [(torch.randn(batch_size, hidden_dim,
+                                generator=generator), torch.randn(batch_size, hidden_dim, generator=generator))
+                   for _ in range(iterations)]
+
+        config = {
+            "train_micro_batch_size_per_gpu": batch_size,
+            "gradient_accumulation_steps": 1,
+            "steps_per_print": 1,
+            "optimizer": {
+                "type": "Adam",
+                "params": {
+                    "lr": 0.00015
+                }
+            },
+            "zero_optimization": {
+                "stage": 3
+            },
+            "compile": {
+                "deepcompile": True,
+                "offload_activation": False
+            }
+        }
+
+        losses_no_offload, parameters_no_offload = _run_release_wrapped_saved_tensor_training(
+            config, initial_state, batches)
+
+        observations = {}
+        real_floor = offload_pass.offload_activation_floor
+        real_plan = offload_pass.offload_activation
+
+        def observing_floor(gm, graph_id, graph_order, profiling_results, create_inputs_fn, mem_budget, param_manager,
+                            bwd):
+            result = real_floor(gm, graph_id, graph_order, profiling_results, create_inputs_fn, mem_budget,
+                                param_manager, bwd)
+            _record_release_offload_graph(gm, graph_id, observations, "floor", bwd)
+            return result
+
+        def observing_plan(gm, graph_id, graph_order, profiling_results, create_inputs_fn, mem_budget, param_manager,
+                           bwd):
+            result = real_plan(gm, graph_id, graph_order, profiling_results, create_inputs_fn, mem_budget,
+                               param_manager, bwd)
+            _record_release_offload_graph(gm, graph_id, observations, "final", bwd)
+            return result
+
+        config_offload = deepcopy(config)
+        config_offload["compile"]["offload_activation"] = True
+        offload_pass.reset_offload_activation_stats()
+        with patch.dict(os.environ, {
+                "DS_DC_OFFLOAD_ACT_BUDGET_GB": "0.000001",
+                "DS_DC_OFFLOAD_ACT_MIN_SIZE_MB": "0"
+        }), patch.object(offload_pass, "offload_activation_floor", observing_floor), \
+                patch.object(offload_pass, "offload_activation", observing_plan):
+            losses_offload, parameters_offload = _run_release_wrapped_saved_tensor_training(
+                config_offload, initial_state, batches)
+
+        final_offloads = set().union(*observations.get("final_offloads", {}).values())
+        final_reloads = set().union(*observations.get("final_reloads", {}).values())
+        matched = {(graph_id, original_name, value_id)
+                   for graph_id, original_name, value_id, producer_name in final_offloads
+                   if original_name == producer_name}
+        assert matched, "no saved addmm passed through release_param into the final offload plan"
+        assert matched <= final_reloads, "the release-wrapped saved addmm was not reloaded by matching name/value id"
+
+        stats = offload_pass.get_offload_activation_stats()
+        assert stats["offload_nodes"] > 0, "no activation was offloaded"
+        assert stats["planned_offloads"] > 0, "the post-warmup plan left nothing offloaded"
+        assert stats["reload_nodes"] > 0, "offloaded activations were never reloaded"
+
+        assert len(losses_no_offload) == len(losses_offload) == iterations
+        loss_differences = []
+        for step, (expected, actual) in enumerate(zip(losses_no_offload, losses_offload)):
+            loss_differences.append(abs(expected - actual))
+            assert actual == pytest.approx(expected, rel=1e-5, abs=1e-6), \
+                f"offloading changed the loss at step {step}: {expected} vs {actual}"
+
+        assert parameters_no_offload.keys() == parameters_offload.keys()
+        parameter_differences = {}
+        for name in parameters_no_offload:
+            parameter_differences[name] = (parameters_offload[name] - parameters_no_offload[name]).abs().max().item()
+            torch.testing.assert_close(parameters_offload[name], parameters_no_offload[name], rtol=1e-5, atol=1e-6)
+        assert any(not torch.equal(parameters_no_offload[name], initial_state[name]) for name in initial_state), \
+            "the comparison did not cover updated parameters"
+        print("release-wrapped activation offload evidence: " + json.dumps(
+            {
+                "iterations": iterations,
+                "matched_release_offload_reload": sorted(matched),
+                "max_loss_abs_diff": max(loss_differences),
+                "max_parameter_abs_diff": max(parameter_differences.values()),
+                "stats": stats,
+            },
+            sort_keys=True))
 
 
 class TestOffloadActivation(DistributedTest):

@@ -57,9 +57,8 @@ _ACTIVATION_OFFLOAD_OPS = ("offload_tensor", "wait_offload", "reload_tensor", "w
 
 _activation_ops_lib = None
 
-# Activations chosen while rewriting each forward graph, keyed by graph id and then by node name.
-# The backward graph receives those tensors as placeholders carrying the same names, which is how
-# the two halves of the pass find each other.
+# Activations chosen while rewriting each forward graph, keyed by graph id and then by the saved
+# output name. Release wrappers retain that name so the forward and backward halves find each other.
 _offload_plans: Dict[int, "OrderedDict[str, Tuple[int, int]]"] = {}
 
 # Value ids identify a host buffer inside the C++ executor. They never repeat, so a buffer holding
@@ -410,13 +409,15 @@ def _offload_everything_fwd(gm: GraphModule, graph_id: int, profiling_results, p
     output_node = get_output_node(graph)
     for node, size in selected:
         value_id = _new_value_id()
+        # A release wrapper has a different FX name than its backward placeholder.
+        name = node.meta.get("original_output_name", node.name)
         # The graph is re-read for every tensor because each insertion changes it.
         insert_before = _insertion_point_after_last_use(list(graph.nodes), node)
 
         with graph.inserting_before(insert_before):
             offload_node = graph.create_node('call_function',
                                              torch.ops.dc.offload_tensor.default, (node, graph_id, value_id), {},
-                                             name=f"offload_{node.name}")
+                                             name=f"offload_{name}")
         _copy_tensor_meta(node, offload_node)
 
         # Waiting here makes the copy synchronous and costs the overlap, but it is the only
@@ -426,11 +427,11 @@ def _offload_everything_fwd(gm: GraphModule, graph_id: int, profiling_results, p
         with graph.inserting_after(offload_node):
             wait_node = graph.create_node('call_function',
                                           torch.ops.dc.wait_offload.default, (offload_node, graph_id, value_id), {},
-                                          name=f"wait_offload_{node.name}")
+                                          name=f"wait_offload_{name}")
         _copy_tensor_meta(node, wait_node)
 
         output_node.replace_input_with(node, wait_node)
-        _offload_plans[graph_id][node.name] = (value_id, size)
+        _offload_plans[graph_id][name] = (value_id, size)
         _stats["offload_nodes"] += 1
 
     graph.lint()
@@ -444,10 +445,12 @@ def _offload_everything_fwd(gm: GraphModule, graph_id: int, profiling_results, p
 def _bring_back(graph: Graph, name: str) -> None:
     """Undo one activation's move: the graph keeps it resident again."""
     by_name = {node.name: node for node in graph.nodes}
-    original = by_name.get(name)
     offload_node = by_name.get(f"offload_{name}")
     wait_node = by_name.get(f"wait_offload_{name}")
-    if original is None or offload_node is None or wait_node is None:
+    if offload_node is None or wait_node is None:
+        return
+    original = offload_node.args[0]
+    if not isinstance(original, Node):
         return
 
     # Whoever reads the host buffer goes back to reading the tensor itself, and the two copy nodes

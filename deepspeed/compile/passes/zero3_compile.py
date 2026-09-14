@@ -319,7 +319,8 @@ def add_release(graph_id: int, graph: Graph, node: Node, release_node: Node, ds_
                                extra_args=[graph_id, ds_id, n_users],
                                name=f"release_ds_param_{release_node.target}_{node.name}_{ds_id}",
                                meta=_make_node_meta(node, ds_id, False))
-    new_node.meta["val"] = None
+    new_node.meta["val"] = node.meta["val"]
+    new_node.meta["original_output_name"] = node.meta.get("original_output_name", node.name)
 
 
 def add_reduce(graph_id: int, graph: Graph, grad_node: Node, param_name: str, ds_id: int):
