@@ -3,7 +3,10 @@ name: modal-torch-latest
 # This Required workflow selects tests on a no-secret GitHub runner, then tests
 # the exact candidate SHA inside a no-secret Modal Sandbox. Under
 # pull_request_target, every GitHub-side checkout and Python entrypoint comes
-# from the trusted base commit. See .github/workflows/TEST_SELECTION.md.
+# from the trusted base commit; merge queue runs resolve that trusted base from
+# merge_group.base_sha. The Sandbox only runs for merge queue entries, pushes to
+# master, and manual runs, so plain PR events never spend Modal quota. See
+# .github/workflows/TEST_SELECTION.md.
 
 on:
   workflow_dispatch:
@@ -42,6 +45,14 @@ on:
     branches:
       - master
 
+  # Required checks must also trigger on merge queue entries, otherwise the
+  # merge fails waiting for a status that is never reported. This is the only
+  # PR-related event that spends Modal quota.
+  merge_group:
+    types: [checks_requested]
+    branches:
+      - master
+
 permissions:
   contents: read
 
@@ -63,19 +74,21 @@ jobs:
       - name: Checkout trusted workflow code
         uses: actions/checkout@v7
         with:
-          ref: ${{ github.event.pull_request.base.sha || github.sha }}
+          # Trusted base revision for every event: the merge-group commit must
+          # never control the selector that runs on this GitHub runner.
+          ref: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.sha }}
           fetch-depth: 1
           persist-credentials: false
           lfs: false
           submodules: false
 
       - name: Fetch candidate tree as data
-        if: github.event_name == 'pull_request_target'
+        if: github.event_name == 'pull_request_target' || github.event_name == 'merge_group'
         env:
-          HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          BASE_REPOSITORY: ${{ github.event.pull_request.base.repo.full_name }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          BASE_REPOSITORY: ${{ github.event.pull_request.base.repo.full_name || github.repository }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
           CANDIDATE_ROOT: ${{ runner.temp }}/deepspeed-candidate
         run: |
           python3 ci/torch_latest.py checkout-candidate \
@@ -94,7 +107,7 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           CANDIDATE_ROOT: ${{ runner.temp }}/deepspeed-candidate
         run: |
-          if [ "$EVENT_NAME" = "pull_request_target" ]; then
+          if [ "$EVENT_NAME" = "pull_request_target" ] || [ "$EVENT_NAME" = "merge_group" ]; then
             python3 ci/tests_fetcher.py \
               --workflow modal-torch-latest \
               --repo-root "$CANDIDATE_ROOT" \
@@ -132,7 +145,10 @@ jobs:
 
     # Preserve the Required check on failures and no-test selections. A selector
     # failure enters this job and fails explicitly; mode=none skips the Sandbox.
-    if: ${{ !cancelled() && (needs.collect-tests.result != 'success' || needs.collect-tests.outputs.mode != 'none') }}
+    # pull_request_target runs skip the Sandbox entirely (a skipped dependent
+    # job still satisfies the Required check), so the tests gate the merge queue
+    # entry instead of every PR update.
+    if: ${{ !cancelled() && (needs.collect-tests.result != 'success' || (needs.collect-tests.outputs.mode != 'none' && github.event_name != 'pull_request_target')) }}
     steps:
       - name: Fail if test selection failed
         if: needs.collect-tests.result != 'success'
@@ -141,7 +157,9 @@ jobs:
       - name: Checkout trusted controller code
         uses: actions/checkout@v7
         with:
-          ref: ${{ github.event.pull_request.base.sha || github.sha }}
+          # Trusted base revision for every event: the merge-group commit is
+          # only ever fetched by exact SHA inside the no-secret Sandbox.
+          ref: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.sha }}
           fetch-depth: 1
           persist-credentials: false
           lfs: false

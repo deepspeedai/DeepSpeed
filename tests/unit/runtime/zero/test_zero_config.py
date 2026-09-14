@@ -15,6 +15,12 @@ def test_zero_config_reduce_bucket_size():
         DeepSpeedZeroConfig(reduce_bucket_size=0)
 
 
+def test_zero_config_parameter_alignment():
+    assert DeepSpeedZeroConfig().parameter_alignment is False
+    assert DeepSpeedZeroConfig(parameter_alignment=False).parameter_alignment is False
+    assert DeepSpeedZeroConfig(parameter_alignment=True).parameter_alignment is True
+
+
 def test_zero_config_deprecatedfields():
     config = DeepSpeedZeroConfig(**{"cpu_offload_param": True})
     assert isinstance(config.offload_param, DeepSpeedZeroOffloadParamConfig)
@@ -53,6 +59,15 @@ def test_zero_config_overlapcomm():
 
     config = DeepSpeedZeroConfig(**{"stage": 3})
     assert config.overlap_comm == True
+
+
+def test_zero_config_compute_grad_norm():
+    assert DeepSpeedZeroConfig(stage=1).compute_grad_norm is True
+    assert DeepSpeedZeroConfig(stage=1, compute_grad_norm=False).compute_grad_norm is False
+
+    for stage in (0, 3):
+        with pytest.raises(ValueError, match="only with ZeRO Stage 1 or 2"):
+            DeepSpeedZeroConfig(stage=stage, compute_grad_norm=False)
 
 
 def test_zero_config_offload_configs():

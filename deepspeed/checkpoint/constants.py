@@ -18,6 +18,7 @@ BASE_OPTIMIZER_STATE_STEP = 'base_optimizer_state_step'
 SINGLE_PARTITION_OF_FP32_GROUPS = "single_partition_of_fp32_groups"
 PARAM_GROUPS = 'param_groups'
 GROUP_PADDINGS = 'group_paddings'
+PARAM_ALIGNMENT_PADDINGS = 'param_alignment_paddings'
 PARTITION_COUNT = 'partition_count'
 ZERO_STAGE = 'zero_stage'
 CLIP_GRAD = 'clip_grad'
@@ -62,6 +63,12 @@ UNIVERSAL_CHECKPOINT_VERSION_VALUE = 0.4
 # Attribute name used to store AutoTP universal-checkpoint metadata on torch Parameters.
 DS_AUTOTP_UC_META = "ds_autotp_universal_checkpoint_meta"
 AUTOTP_UNSUPPORTED_PARAMETER_PATTERNS = "autotp_unsupported_parameter_patterns"
+# Geometric description of how each parameter is sharded, keyed by parameter pattern.
+# Written alongside the pattern lists below rather than replacing them, so a converter
+# that predates it simply does not see the key. See checkpoint/affine_ir_spec.md.
+AFFINE_MAP = 'affine_map'
+AFFINE_MAP_VERSION = 'version'
+AFFINE_MAP_PARAMS = 'params'
 
 # Vocabulary padding
 VOCAB_TENSOR = 'vocab_tensor'
