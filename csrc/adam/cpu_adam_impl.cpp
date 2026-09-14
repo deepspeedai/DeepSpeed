@@ -129,6 +129,8 @@ int create_adam_optimizer(int optimizer_id,
         vectorization = "AVX2";
 #elif defined(__SVE__) && defined(__ARM_FEATURE_SVE)
         vectorization = "SVE";
+#elif defined(__NEON__)
+        vectorization = "NEON";
 #else
         vectorization = "scalar";
 #endif
