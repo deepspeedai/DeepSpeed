@@ -403,3 +403,229 @@ class TestDynamicOffloadStatesZero3(DistributedTest):
         offloaded_states = None if included_state is None else [included_state]
         run_model_zero3(model, param_groups, config_dict, hidden_dim, torch.bfloat16, offloaded_states, pin_memory,
                         non_blocking)
+
+
+class _InferenceOffloadModel(torch.nn.Module):
+
+    def __init__(self, hidden_dim=1025):
+        super().__init__()
+        self.first = torch.nn.Linear(hidden_dim, hidden_dim)
+        self.middle = torch.nn.Linear(hidden_dim, hidden_dim)
+        self.last = torch.nn.Linear(hidden_dim, hidden_dim)
+        self.last.weight = self.first.weight
+
+    def forward(self, inputs):
+        return self.last(torch.relu(self.middle(torch.relu(self.first(inputs)))))
+
+
+def _init_inference_offload_model(dtype, persistent_parameters, zero_config=None):
+    accelerator = get_accelerator()
+    if accelerator.device_name() == "cpu":
+        pytest.skip("Dynamic offload needs a separate accelerator and CPU device")
+    if dtype == torch.bfloat16 and not accelerator.is_bf16_supported():
+        pytest.skip("bf16 is not supported on this accelerator")
+    if dtype == torch.float16 and not accelerator.is_fp16_supported():
+        pytest.skip("fp16 is not supported on this accelerator")
+
+    torch.manual_seed(1234)
+    model = _InferenceOffloadModel().requires_grad_(False).eval()
+    model = model.to(device=accelerator.current_device_name(), dtype=dtype)
+    inputs = torch.linspace(-1, 1, 2050, device=accelerator.current_device_name(), dtype=dtype).reshape(2, 1025)
+    parameter_snapshots = {name: param.detach().cpu().clone() for name, param in model.named_parameters()}
+    with torch.no_grad():
+        reference_output = model(inputs).cpu()
+
+    config = {
+        "train_micro_batch_size_per_gpu": 2,
+        "zero_optimization": {
+            "stage": 3,
+            "stage3_param_persistence_threshold": 10_000_000 if persistent_parameters else 0,
+        },
+    }
+    if zero_config is not None:
+        config["zero_optimization"].update(zero_config)
+    if dtype == torch.bfloat16:
+        config["bf16"] = {"enabled": True}
+    elif dtype == torch.float16:
+        config["fp16"] = {"enabled": True}
+
+    if config["zero_optimization"].get("zero_hpz_partition_size", 1) > 1:
+        deepspeed.zero.Init(module=model, config_dict_or_path=config)
+
+    engine, _, _, _ = deepspeed.initialize(model=model, config=config)
+    engine.eval()
+    return engine, inputs, reference_output, parameter_snapshots
+
+
+def _assert_inference_offload_parameters(engine, parameter_snapshots):
+    # The public gather context also covers a shared parameter used by two different modules.
+    with deepspeed.zero.GatheredParameters(list(engine.module.parameters())):
+        for name, param in engine.module.named_parameters():
+            torch.testing.assert_close(param.detach().cpu(), parameter_snapshots[name], rtol=0, atol=0)
+
+
+class TestDynamicOffloadStatesZero3Inference(DistributedTest):
+    world_size = [1, 2]
+
+    @pytest.mark.parametrize("dtype,pin_memory,non_blocking,persistent_parameters,included_state", [
+        pytest.param(torch.bfloat16, False, False, False, None, id="bf16-pageable-sync-partitioned-all"),
+        pytest.param(torch.bfloat16,
+                     False,
+                     True,
+                     False,
+                     OffloadStateTypeEnum.lp_params,
+                     id="bf16-pageable-async-partitioned-lp"),
+        pytest.param(
+            torch.bfloat16, True, False, False, OffloadStateTypeEnum.lp_params, id="bf16-pinned-sync-partitioned-lp"),
+        pytest.param(torch.bfloat16, True, True, False, None, id="bf16-pinned-async-partitioned-all"),
+        pytest.param(
+            torch.bfloat16, False, False, True, OffloadStateTypeEnum.lp_params, id="bf16-pageable-sync-persistent-lp"),
+        pytest.param(torch.bfloat16, False, True, True, None, id="bf16-pageable-async-persistent-all"),
+        pytest.param(torch.bfloat16, True, False, True, None, id="bf16-pinned-sync-persistent-all"),
+        pytest.param(
+            torch.bfloat16, True, True, True, OffloadStateTypeEnum.lp_params, id="bf16-pinned-async-persistent-lp"),
+        pytest.param(torch.float32, True, True, True, None, id="fp32-pinned-async-persistent-all"),
+        pytest.param(
+            torch.float16, True, True, False, OffloadStateTypeEnum.lp_params, id="fp16-pinned-async-partitioned-lp"),
+    ])
+    def test_inference_offload_reload(self, dtype, pin_memory, non_blocking, persistent_parameters, included_state):
+        """Frozen, optimizer-free inference must free accelerator memory and resume without changing the model."""
+        engine, inputs, reference_output, parameter_snapshots = _init_inference_offload_model(
+            dtype, persistent_parameters)
+        accelerator = get_accelerator()
+        accelerator_device = torch.device(accelerator.current_device_name())
+        include = None if included_state is None else [included_state]
+        try:
+            with torch.no_grad():
+                initial_output = engine(inputs).cpu()
+                torch.testing.assert_close(initial_output, reference_output)
+
+                for _ in range(3):
+                    accelerator.synchronize()
+                    allocated_before = accelerator.memory_allocated()
+                    engine.offload_states(include=include,
+                                          device=OffloadDeviceEnum.cpu,
+                                          pin_memory=pin_memory,
+                                          non_blocking=non_blocking)
+                    accelerator.synchronize()
+                    allocated_offloaded = accelerator.memory_allocated()
+                    assert get_state_devices(engine, OffloadStateTypeEnum.lp_params) == {torch.device("cpu")}
+                    assert allocated_offloaded < allocated_before, "Inference parameters must release accelerator memory"
+
+                    engine.offload_states(include=include,
+                                          device=OffloadDeviceEnum.cpu,
+                                          pin_memory=pin_memory,
+                                          non_blocking=non_blocking)
+                    accelerator.synchronize()
+                    assert get_state_devices(engine, OffloadStateTypeEnum.lp_params) == {torch.device("cpu")}
+                    assert accelerator.memory_allocated() == allocated_offloaded
+
+                    engine.reload_states(non_blocking=non_blocking)
+                    accelerator.synchronize()
+                    allocated_reloaded = accelerator.memory_allocated()
+                    assert get_state_devices(engine, OffloadStateTypeEnum.lp_params) == {accelerator_device}
+                    assert allocated_reloaded > allocated_offloaded, "Reload must restore accelerator parameter storage"
+
+                    engine.reload_states(non_blocking=non_blocking)
+                    accelerator.synchronize()
+                    assert accelerator.memory_allocated() == allocated_reloaded
+                    torch.testing.assert_close(engine(inputs).cpu(), initial_output, rtol=0, atol=0)
+                    _assert_inference_offload_parameters(engine, parameter_snapshots)
+        finally:
+            engine.destroy()
+
+    @pytest.mark.parametrize("included_states", [
+        pytest.param([], id="empty"),
+        pytest.param([OffloadStateTypeEnum.hp_params], id="hp-params"),
+        pytest.param([OffloadStateTypeEnum.optim_states], id="optimizer-states"),
+        pytest.param([OffloadStateTypeEnum.lp_grads], id="lp-grads"),
+    ])
+    def test_unselected_inference_states_are_noop(self, included_states):
+        """Absent training states and an empty selection must leave inference parameters available."""
+        engine, inputs, reference_output, parameter_snapshots = _init_inference_offload_model(torch.bfloat16, True)
+        accelerator = get_accelerator()
+        accelerator_device = torch.device(accelerator.current_device_name())
+        try:
+            with torch.no_grad():
+                initial_output = engine(inputs).cpu()
+                torch.testing.assert_close(initial_output, reference_output)
+                accelerator.synchronize()
+                allocated_before = accelerator.memory_allocated()
+                # Reloading before the first offload must also leave the inference model untouched.
+                engine.reload_states(non_blocking=True)
+                accelerator.synchronize()
+                assert accelerator.memory_allocated() == allocated_before
+                engine.offload_states(include=included_states, pin_memory=True, non_blocking=True)
+                accelerator.synchronize()
+                assert get_state_devices(engine, OffloadStateTypeEnum.lp_params) == {accelerator_device}
+                assert accelerator.memory_allocated() == allocated_before
+                engine.reload_states(non_blocking=True)
+                accelerator.synchronize()
+                assert accelerator.memory_allocated() == allocated_before
+                torch.testing.assert_close(engine(inputs).cpu(), initial_output, rtol=0, atol=0)
+                _assert_inference_offload_parameters(engine, parameter_snapshots)
+        finally:
+            engine.destroy()
+
+
+class TestDynamicInferenceOffloadLifecycle(DistributedTest):
+    world_size = 1
+
+    def test_destroy_while_offloaded_preserves_module_weights(self):
+        """Destroying the engine must not leave retained module weights pointing to freed native host memory."""
+        engine, inputs, reference_output, _ = _init_inference_offload_model(torch.bfloat16, True)
+        module = engine.module
+        destroyed = False
+        try:
+            with torch.no_grad():
+                torch.testing.assert_close(engine(inputs).cpu(), reference_output)
+            engine.offload_states(pin_memory=True, non_blocking=True)
+            get_accelerator().synchronize()
+            assert get_state_devices(engine, OffloadStateTypeEnum.lp_params) == {torch.device("cpu")}
+            # Parameter views are empty while sharded. Their local weight tensors must remain readable
+            # after destroy, even when a native pinned allocation previously owned their storage.
+            expected_shards = {name: param.ds_tensor.detach().clone() for name, param in module.named_parameters()}
+            engine.destroy()
+            destroyed = True
+            for name, param in module.named_parameters():
+                assert param.ds_tensor.device == torch.device("cpu")
+                torch.testing.assert_close(param.ds_tensor.detach().clone(), expected_shards[name], rtol=0, atol=0)
+        finally:
+            if not destroyed:
+                engine.destroy()
+
+    def test_static_parameter_offload_rejects_dynamic_offload(self):
+        """Static parameter offload remains a separate mode and must reject dynamic offload without mutation."""
+        engine, inputs, reference_output, _ = _init_inference_offload_model(
+            torch.bfloat16, False, zero_config={"offload_param": {
+                "device": "cpu",
+                "pin_memory": False
+            }})
+        try:
+            with torch.no_grad():
+                initial_output = engine(inputs).cpu()
+                torch.testing.assert_close(initial_output, reference_output)
+                with pytest.raises(AssertionError, match="offloaded parameters"):
+                    engine.offload_states()
+                assert get_state_devices(engine, OffloadStateTypeEnum.lp_params) == {torch.device("cpu")}
+                torch.testing.assert_close(engine(inputs).cpu(), initial_output, rtol=0, atol=0)
+        finally:
+            engine.destroy()
+
+    @pytest.mark.world_size(2)
+    def test_hpzero_rejects_dynamic_offload(self):
+        """An unsupported secondary partition layout must fail before offloading any weights."""
+        engine, inputs, reference_output, parameter_snapshots = _init_inference_offload_model(
+            torch.bfloat16, False, zero_config={"zero_hpz_partition_size": 2})
+        accelerator_device = torch.device(get_accelerator().current_device_name())
+        try:
+            with torch.no_grad():
+                initial_output = engine(inputs).cpu()
+                torch.testing.assert_close(initial_output, reference_output)
+                with pytest.raises(NotImplementedError, match="hpZeRO"):
+                    engine.offload_states()
+                assert get_state_devices(engine, OffloadStateTypeEnum.lp_params) == {accelerator_device}
+                torch.testing.assert_close(engine(inputs).cpu(), initial_output, rtol=0, atol=0)
+                _assert_inference_offload_parameters(engine, parameter_snapshots)
+        finally:
+            engine.destroy()
