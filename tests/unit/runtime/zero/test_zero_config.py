@@ -21,6 +21,18 @@ def test_zero_config_parameter_alignment():
     assert DeepSpeedZeroConfig(parameter_alignment=True).parameter_alignment is True
 
 
+def test_zero_quantized_weights_group_size():
+    assert DeepSpeedZeroConfig().zero_quantized_weights_group_size == 64
+    assert DeepSpeedZeroConfig(zero_quantized_weights_group_size=8192).zero_quantized_weights_group_size == 8192
+
+    for invalid in (0, 7, 65):
+        with pytest.raises(ValueError):
+            DeepSpeedZeroConfig(zero_quantized_weights_group_size=invalid)
+
+    with pytest.raises(ValueError, match="only with ZeRO Stage 1 or 2"):
+        DeepSpeedZeroConfig(stage=3, zero_quantized_weights_group_size=8192)
+
+
 def test_zero_config_deprecatedfields():
     config = DeepSpeedZeroConfig(**{"cpu_offload_param": True})
     assert isinstance(config.offload_param, DeepSpeedZeroOffloadParamConfig)

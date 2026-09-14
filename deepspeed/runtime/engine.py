@@ -1692,6 +1692,9 @@ class DeepSpeedEngine(Module):
     def zero_quantized_weights(self):
         return self._config.zero_config.zero_quantized_weights
 
+    def zero_quantized_weights_group_size(self):
+        return self._config.zero_config.zero_quantized_weights_group_size
+
     def zero_quantized_nontrainable_weights(self):
         return self._config.zero_config.zero_quantized_nontrainable_weights
 
@@ -2682,7 +2685,8 @@ class DeepSpeedEngine(Module):
                 elastic_checkpoint=self.zero_elastic_checkpoint(),
                 check_grad_overflow=check_grad_overflow,
                 compute_grad_norm=self.zero_compute_grad_norm(),
-                zero_quantized_weights=self.zero_quantized_weights())
+                zero_quantized_weights=self.zero_quantized_weights(),
+                zero_quantized_weights_group_size=self.zero_quantized_weights_group_size())
 
         elif zero_stage == ZeroStageEnum.weights:
             self._validate_zero3_moe_compatibility()

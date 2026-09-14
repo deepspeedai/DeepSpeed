@@ -44,6 +44,7 @@ ZeRO optimization should be enabled as:
     "parameter_alignment": [true|false],
     "zero_hpz_partition_size": 1,
     "zero_quantized_weights": [true|false],
+    "zero_quantized_weights_group_size": 64,
     "zero_quantized_nontrainable_weights": [true|false],
     "zero_quantized_gradients": [true|false],
     "memory_efficient_linear": [true|false],
@@ -333,6 +334,12 @@ class DeepSpeedZeroConfig(DeepSpeedConfigModel):
     gathering them for computation. The ZeRO-1/2 path preserves small parameters in their original dtype to avoid
     mixing scale-sensitive tensors with unrelated flat-buffer neighbors.
     """
+    zero_quantized_weights_group_size: int = Field(64, ge=8, multiple_of=8)
+    """
+    Number of contiguous parameter elements represented by one INT8 scale when ZeRO-1/2 communicates updated
+    weights with ``zero_quantized_weights``. Larger groups reduce scale communication and may reduce collective
+    overhead, at the cost of quantization precision. This setting does not change the ZeRO-3 quantization path.
+    """
     zero_quantized_nontrainable_weights: bool = False
     """
     Boolean indicating whether to quantize non-trainable zero parameters (weights)
@@ -403,6 +410,12 @@ class DeepSpeedZeroConfig(DeepSpeedConfigModel):
     def compute_grad_norm_valid(self):
         if not self.compute_grad_norm and self.stage not in (ZeroStageEnum.optimizer_states, ZeroStageEnum.gradients):
             raise ValueError("compute_grad_norm=false is supported only with ZeRO Stage 1 or 2")
+        return self
+
+    @model_validator(mode="after")
+    def quantized_weight_group_size_valid(self):
+        if self.stage == ZeroStageEnum.weights and self.zero_quantized_weights_group_size != 64:
+            raise ValueError("zero_quantized_weights_group_size is configurable only with ZeRO Stage 1 or 2")
         return self
 
     @model_validator(mode="after")

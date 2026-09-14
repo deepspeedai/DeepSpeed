@@ -9,6 +9,7 @@ import torch
 import deepspeed
 from deepspeed.accelerator import get_accelerator
 from deepspeed.runtime import utils
+from deepspeed.runtime.zero import stage_1_and_2
 from unit.common import DistributedTest
 from unit.simple_model import SimpleModel, random_dataloader
 
@@ -193,3 +194,21 @@ class TestQuantizedWeightAllGatherTraining(DistributedTest):
             assert all(torch.isfinite(parameter).all() for parameter in model.parameters())
 
         model.destroy()
+
+
+def test_zero_optimizer_forwards_quantized_weight_group_size(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(stage_1_and_2, "all_gather_quantized_dp_groups", lambda **kwargs: captured.update(kwargs))
+    optimizer = object.__new__(stage_1_and_2.DeepSpeedZeroOptimizer)
+    optimizer.zero_quantized_weights = True
+    optimizer.zero_quantized_weights_group_size = 8192
+    optimizer.bit16_groups_flat = []
+    optimizer.parallel_partitioned_bit16_groups = []
+    optimizer.real_dp_process_group = []
+    optimizer.allgather_bucket_size = 50_000_000
+    optimizer.weight_quantizer = object()
+    optimizer.quantized_weight_preserved_ranges = []
+
+    optimizer._all_gather_weights()
+
+    assert captured["quantization_group_size"] == 8192

@@ -186,7 +186,8 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                  elastic_checkpoint=False,
                  check_grad_overflow=True,
                  compute_grad_norm=True,
-                 zero_quantized_weights=False):
+                 zero_quantized_weights=False,
+                 zero_quantized_weights_group_size=64):
 
         super().__init__()
 
@@ -220,6 +221,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         self.elastic_checkpoint = elastic_checkpoint
         self.parameter_alignment = parameter_alignment
         self.zero_quantized_weights = zero_quantized_weights
+        self.zero_quantized_weights_group_size = zero_quantized_weights_group_size
         self.weight_quantizer = CUDAQuantizer() if zero_quantized_weights else None
         self.check_grad_overflow = check_grad_overflow
         self.compute_grad_norm = compute_grad_norm
@@ -2636,7 +2638,8 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                                            dp_process_group=self.real_dp_process_group,
                                            allgather_bucket_size=self.allgather_bucket_size,
                                            quantizer=self.weight_quantizer,
-                                           preserved_param_ranges=self.quantized_weight_preserved_ranges)
+                                           preserved_param_ranges=self.quantized_weight_preserved_ranges,
+                                           quantization_group_size=self.zero_quantized_weights_group_size)
         else:
             all_gather_dp_groups(groups_flat=self.bit16_groups_flat,
                                  partitioned_param_groups=self.parallel_partitioned_bit16_groups,
