@@ -3,19 +3,26 @@
 
 # DeepSpeed Team
 
+import pytest
 import torch
 
+import deepspeed
+from deepspeed.accelerator import get_accelerator
 from deepspeed.runtime import utils
+from unit.common import DistributedTest
+from unit.simple_model import SimpleModel, random_dataloader
 
 
 class FakeQuantizer:
 
     def __init__(self):
         self.quantize_calls = []
+        self.quantize_inputs = []
         self.dequantize_calls = []
 
     def quantize(self, tensor, groups=None):
         self.quantize_calls.append((tensor.numel(), groups))
+        self.quantize_inputs.append(tensor.clone())
         return tensor.to(torch.int8), torch.ones((groups, 1), dtype=torch.float32)
 
     def dequantize(self, tensor, scales):
@@ -108,3 +115,81 @@ def test_quantized_weight_allgather_repairs_preserved_ranges(monkeypatch):
     assert torch.equal(partitions[0][2:4], torch.tensor([2, 3], dtype=torch.float16))
     assert torch.equal(partitions[1][2:4], torch.tensor([102, 103], dtype=torch.float16))
     assert torch.count_nonzero(partitions[0][:2]) == 0
+    assert torch.equal(quantizer.quantize_inputs[0], torch.tensor([0, 1, 0, 0, 4, 5, 6, 7], dtype=torch.float16))
+    assert torch.equal(quantizer.quantize_inputs[1], torch.tensor([8, 9, 0, 0, 0, 0, 0, 0], dtype=torch.float16))
+
+
+def test_quantized_weight_allgather_bounds_preserved_side_channel(monkeypatch):
+    group_flat = torch.arange(32, dtype=torch.float16)
+    partitions = [group_flat[:16], group_flat[16:]]
+    quantizer = FakeQuantizer()
+    preserved_collective_sizes = []
+    monkeypatch.setattr(utils.dist, "get_rank", lambda group=None: 0)
+    monkeypatch.setattr(utils.dist, "get_world_size", lambda group=None: 2)
+
+    def fake_all_gather(output, source, group=None):
+        if source.dtype == torch.float16:
+            preserved_collective_sizes.append(source.numel())
+        output[:source.numel()].copy_(source)
+        output[source.numel():2 * source.numel()].copy_(source)
+
+    monkeypatch.setattr(utils.dist, "all_gather_into_tensor", fake_all_gather)
+    utils.all_gather_quantized_dp_groups([group_flat], [partitions], [object()],
+                                         8,
+                                         quantizer,
+                                         8,
+                                         preserved_param_ranges=[[(0, 32)]])
+
+    assert preserved_collective_sizes == [8, 8]
+    assert all(torch.count_nonzero(quantize_input) == 0 for quantize_input in quantizer.quantize_inputs)
+    assert torch.equal(partitions[0], torch.arange(16, dtype=torch.float16))
+    assert torch.equal(partitions[1], torch.arange(16, dtype=torch.float16))
+
+
+@pytest.mark.parametrize("zero_stage", [1, 2])
+class TestQuantizedWeightAllGatherTraining(DistributedTest):
+    world_size = 2
+
+    def test(self, zero_stage):
+        if not get_accelerator().is_available():
+            pytest.skip("test requires an accelerator")
+
+        hidden_dim = 16
+        config = {
+            "train_micro_batch_size_per_gpu": 1,
+            "steps_per_print": 1,
+            "zero_optimization": {
+                "stage": zero_stage,
+                "zero_quantized_weights": True,
+                "allgather_bucket_size": 64,
+            },
+            "optimizer": {
+                "type": "Adam",
+                "params": {
+                    "lr": 1e-3,
+                    "torch_adam": True,
+                },
+            },
+            "fp16": {
+                "enabled": True,
+                "loss_scale": 1.0,
+            },
+        }
+
+        torch.manual_seed(42)
+        model = SimpleModel(hidden_dim, nlayers=2)
+        model, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config)
+        data_loader = random_dataloader(model=model,
+                                        total_samples=2,
+                                        hidden_dim=hidden_dim,
+                                        device=model.device,
+                                        dtype=torch.float16)
+
+        for batch in data_loader:
+            loss = model(batch[0], batch[1])
+            assert torch.isfinite(loss)
+            model.backward(loss)
+            model.step()
+            assert all(torch.isfinite(parameter).all() for parameter in model.parameters())
+
+        model.destroy()

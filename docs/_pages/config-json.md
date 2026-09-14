@@ -529,7 +529,7 @@ Enabling and configuring ZeRO memory optimizations
 
 | Description                                                                                                                         | Default |
 | ----------------------------------------------------------------------------------------------------------------------------------- | ------- |
-|Boolean indicating whether to enable communication efficient quantized weights of ZeRO++. | `False`   |
+| Boolean indicating whether to quantize weights during all-gather communication. ZeRO stages 1 and 2 use bounded-memory INT8 synchronization after each optimizer step and preserve small parameters in their original dtype; ZeRO stage 3 quantizes parameters while gathering them for computation. This lossy optimization is disabled by default. | `False` |
 
 ***zero_quantized_gradients***: [boolean]
 
