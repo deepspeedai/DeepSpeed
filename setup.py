@@ -155,7 +155,8 @@ BUILD_OP_DEFAULT = int(get_env_if_set('DS_BUILD_OPS', BUILD_OP_PLATFORM))
 print(f"DS_BUILD_OPS={BUILD_OP_DEFAULT}")
 
 if BUILD_OP_DEFAULT:
-    assert torch_available, "Unable to pre-compile ops without torch installed. Please install torch before attempting to pre-compile ops."
+    assert torch_available, ("Unable to pre-compile ops because torch is not available in the build environment. "
+                             "Install torch first, then run pip install --no-build-isolation deepspeed.")
 
 
 def command_exists(cmd):
