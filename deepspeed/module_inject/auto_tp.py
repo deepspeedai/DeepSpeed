@@ -765,6 +765,9 @@ class AutoTP():
                 if any(checking_key in item for item in self.state_dict):
                     Loading.load(child, self.state_dict, checking_key, self.mp_group)
                 else:
+                    # Not in this shard; still take buffers (e.g. BatchNorm stats) off meta.
+                    if len(child._buffers) != 0:
+                        Loading.load_buffer(child, self.state_dict, checking_key)
                     continue
             if len(child._buffers) != 0 and self.state_dict is not None:
                 Loading.load_buffer(child, self.state_dict, checking_key)

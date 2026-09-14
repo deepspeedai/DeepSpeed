@@ -700,6 +700,9 @@ def _replace_module(model, policies, prefix='', layer_id=0, level_id=0, state_di
                         checking_key,
                     )
                 else:
+                    # Not in this shard; still take buffers (e.g. BatchNorm stats) off meta.
+                    if len(child._buffers) != 0:
+                        Loading.load_buffer(child, state_dict, checking_key)
                     continue
             if len(child._buffers) != 0 and state_dict is not None:
                 Loading.load_buffer(child, state_dict, checking_key)
