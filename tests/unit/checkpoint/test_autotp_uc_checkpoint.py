@@ -1679,32 +1679,16 @@ class affine_resume_checkpoint(DistributedFixture):
     world_size = 2
 
     def run(self, tmpdir, affine_layout):
-        from deepspeed.checkpoint.affine import (AFFINE_MAP_FORMAT_VERSION, contiguous_split_map, replicated_map)
-        from deepspeed.checkpoint.constants import AFFINE_MAP, AFFINE_MAP_PARAMS, AFFINE_MAP_VERSION
+        from deepspeed.module_inject.layers import collect_autotp_universal_checkpoint_info
 
         engine = _affine_resume_engine(self.world_size)
         for step in range(4):
             _affine_resume_step(engine, self.world_size, step)
 
-        # Phase 1 does not yet emit AutoTP affine metadata. Supply the known fixture
-        # layout through the checkpoint API; all weights and moments come from training.
-        # LinearAllreduce adds this bias AFTER reduction, so its real scale is one.
-        maps = {
-            r"^fc1\.weight$": contiguous_split_map((16, 16), [8, 8], 0),
-            r"^fc1\.bias$": contiguous_split_map((16, ), [8, 8], 0),
-            r"^fc2\.weight$": contiguous_split_map((16, 16), [8, 8], 1),
-            r"^fc2\.bias$": replicated_map((16, ), self.world_size),
-        }
-        uc_info = {
-            UNIVERSAL_CHECKPOINT_VERSION_KEY: UNIVERSAL_CHECKPOINT_VERSION_VALUE,
-            AFFINE_MAP: {
-                AFFINE_MAP_VERSION: AFFINE_MAP_FORMAT_VERSION,
-                AFFINE_MAP_PARAMS: {
-                    name: layout.to_dict()
-                    for name, layout in maps.items()
-                },
-            },
-        }
+        # The affine layout comes from the producer rather than from the test, so this
+        # exercises the metadata a real job would write. All weights and moments come
+        # from training. LinearAllreduce adds fc2's bias AFTER reduction, so its scale is one.
+        uc_info = collect_autotp_universal_checkpoint_info(engine.module)
         engine.save_checkpoint(tmpdir,
                                tag="affine_resume",
                                client_state={UNIVERSAL_CHECKPOINT_INFO: uc_info} if affine_layout else {})
@@ -1744,4 +1728,37 @@ class TestAffineUniversalCheckpointResume(DistributedTest):
                                            atol=2e-6,
                                            rtol=2e-5,
                                            msg=lambda message: f"snapshot {index}, {name}: {message}")
+        engine.destroy()
+
+
+class TestAffineMapProducer(DistributedTest):
+    """The producer must emit the layout that `affine_resume_checkpoint` supplies by hand.
+
+    That fixture's maps are not a guess: a full train -> save -> convert -> resume cycle
+    reproduces uninterrupted training through them. Requiring the producer to match them
+    exactly is what makes emitted metadata trustworthy without re-running the whole cycle.
+    """
+
+    world_size = 2
+
+    def test_producer_matches_the_verified_fixture_layout(self):
+        from deepspeed.checkpoint.affine import contiguous_split_map, replicated_map
+        from deepspeed.checkpoint.constants import AFFINE_MAP, AFFINE_MAP_PARAMS
+        from deepspeed.module_inject.layers import collect_autotp_universal_checkpoint_info
+
+        engine = _affine_resume_engine(self.world_size)
+        emitted = collect_autotp_universal_checkpoint_info(engine.module)
+        maps = emitted.get(AFFINE_MAP, {}).get(AFFINE_MAP_PARAMS, {})
+
+        expected = {
+            r"^fc1\.weight$": contiguous_split_map((16, 16), [8, 8], 0).to_dict(),
+            r"^fc1\.bias$": contiguous_split_map((16, ), [8, 8], 0).to_dict(),
+            r"^fc2\.weight$": contiguous_split_map((16, 16), [8, 8], 1).to_dict(),
+            r"^fc2\.bias$": replicated_map((16, ), self.world_size).to_dict(),
+        }
+
+        for pattern, want in expected.items():
+            assert pattern in maps, f"producer emitted no affine map for {pattern}"
+            assert maps[pattern] == want, (f"emitted map for {pattern} differs from the layout the resume "
+                                           f"fixture verifies:\n  emitted  {maps[pattern]}\n  expected {want}")
         engine.destroy()

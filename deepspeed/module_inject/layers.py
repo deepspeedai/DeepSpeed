@@ -39,6 +39,41 @@ def _normalize_uc_shape(value):
     return tuple(value) if value is not None else None
 
 
+def _derive_affine_map(*, tp_world_size, logical_shape, partition_dim, partition_sizes, sub_param_shard_widths,
+                       replicated, unsupported_reason):
+    """Describe this parameter's layout geometrically, from what the layer already knows.
+
+    The layer is the only place the per-rank extents exist: `_freeze_partition_sizes` resolves
+    them while the layer is built, and they are not recoverable later from a shape alone. So a
+    map is derived here rather than where the model-level metadata is collected.
+
+    Returns None when the layout is not describable yet, in which case conversion falls back to
+    the pattern categories.
+    """
+    from deepspeed.checkpoint.affine import replicated_map, contiguous_split_map, sub_param_map
+
+    if unsupported_reason or not logical_shape or not tp_world_size:
+        return None
+
+    if replicated:
+        return replicated_map(logical_shape, tp_world_size)
+
+    if partition_dim is None:
+        return None
+
+    if sub_param_shard_widths:
+        widths = [list(w) for w in sub_param_shard_widths]
+        return sub_param_map(shape=logical_shape,
+                             sub_dim_sizes=[sum(w) for w in widths],
+                             shard_widths=widths,
+                             partition_dim=partition_dim)
+
+    if partition_sizes:
+        return contiguous_split_map(logical_shape, list(partition_sizes), partition_dim)
+
+    return None
+
+
 def _build_param_uc_conversion_meta(*,
                                     partition_type,
                                     partition_dim=None,
@@ -47,6 +82,7 @@ def _build_param_uc_conversion_meta(*,
                                     original_shape=None,
                                     is_bias=False,
                                     replicated=False,
+                                    affine_map=None,
                                     unsupported_reason=None):
     """Build the conversion-facing subset of parameter UC metadata.
 
@@ -61,6 +97,7 @@ def _build_param_uc_conversion_meta(*,
         'original_shape': _normalize_uc_shape(original_shape),
         'is_bias': is_bias,
         'replicated': replicated,
+        'affine_map': affine_map,
         'unsupported_reason': unsupported_reason,
     }
 
@@ -78,6 +115,7 @@ def _build_param_uc_restore_meta(*,
                                  original_shape=None,
                                  is_bias=False,
                                  replicated=False,
+                                 affine_map=None,
                                  unsupported_reason=None):
     """Build the restore-facing parameter UC metadata.
 
@@ -119,6 +157,7 @@ def _build_param_uc_restore_meta(*,
                                         original_shape=original_shape,
                                         is_bias=is_bias,
                                         replicated=replicated,
+                                        affine_map=affine_map,
                                         unsupported_reason=unsupported_reason),
     }
 
@@ -462,6 +501,13 @@ class TensorParallel_Layer(nn.Module, ABC):
                            unsupported_reason=None):
         if param is None:
             return
+        affine_map = _derive_affine_map(tp_world_size=getattr(self, 'tp_world_size', None),
+                                        logical_shape=logical_shape or original_shape,
+                                        partition_dim=partition_dim,
+                                        partition_sizes=partition_sizes,
+                                        sub_param_shard_widths=sub_param_shard_widths,
+                                        replicated=replicated,
+                                        unsupported_reason=unsupported_reason)
         setattr(
             param, DS_AUTOTP_UC_META,
             _build_param_uc_restore_meta(partition_type=partition_type,
@@ -476,6 +522,7 @@ class TensorParallel_Layer(nn.Module, ABC):
                                          original_shape=original_shape,
                                          is_bias=is_bias,
                                          replicated=replicated,
+                                         affine_map=affine_map,
                                          unsupported_reason=unsupported_reason))
 
     def _mark_uc_metadata(self):
@@ -614,7 +661,9 @@ def collect_autotp_universal_checkpoint_info(model: nn.Module) -> Dict[str, Any]
     restore-time per-parameter details such as `sub_param_sizes` or
     `target_partition_shape`, which stay on the parameter metadata object.
     """
-    from deepspeed.checkpoint.constants import (AUTOTP_UNSUPPORTED_PARAMETER_PATTERNS, ORIGINAL_VOCAB_SIZE,
+    from deepspeed.checkpoint.affine import AFFINE_MAP_FORMAT_VERSION
+    from deepspeed.checkpoint.constants import (AFFINE_MAP, AFFINE_MAP_PARAMS, AFFINE_MAP_VERSION,
+                                                AUTOTP_UNSUPPORTED_PARAMETER_PATTERNS, ORIGINAL_VOCAB_SIZE,
                                                 PARAMETER_WITH_ROW_PARALLELISM_PATTERNS, PARAMETER_WITH_SUB_PARAMS,
                                                 SUB_PARAM_SHARD_WIDTHS, TP_REPLICATED_PARAMETER_PATTERNS,
                                                 UNIVERSAL_CHECKPOINT_VERSION_KEY, UNIVERSAL_CHECKPOINT_VERSION_VALUE,
@@ -626,6 +675,7 @@ def collect_autotp_universal_checkpoint_info(model: nn.Module) -> Dict[str, Any]
     vocabulary_patterns = []
     parameter_with_sub_params = []
     unsupported_parameter_patterns = {}
+    affine_maps = {}
     original_vocab_size = None
 
     # Tied parameters are reachable under several module attributes, but the optimizer -- and
@@ -657,6 +707,10 @@ def collect_autotp_universal_checkpoint_info(model: nn.Module) -> Dict[str, Any]
             if unsupported_reason:
                 unsupported_parameter_patterns[pattern] = unsupported_reason
                 continue
+
+            affine_map = conversion_meta.get('affine_map')
+            if affine_map is not None:
+                affine_maps[pattern] = affine_map.to_dict()
 
             if conversion_meta.get('replicated'):
                 replicated_patterns.append(pattern)
@@ -703,6 +757,13 @@ def collect_autotp_universal_checkpoint_info(model: nn.Module) -> Dict[str, Any]
         uc_info[SUB_PARAM_SHARD_WIDTHS] = sub_param_shard_widths
     if original_vocab_size is not None:
         uc_info[ORIGINAL_VOCAB_SIZE] = original_vocab_size
+    if affine_maps:
+        # Published alongside the pattern lists rather than instead of them, so a converter
+        # that predates the map simply does not see the key and takes the categories.
+        uc_info[AFFINE_MAP] = {
+            AFFINE_MAP_VERSION: AFFINE_MAP_FORMAT_VERSION,
+            AFFINE_MAP_PARAMS: affine_maps,
+        }
     return uc_info
 
 
