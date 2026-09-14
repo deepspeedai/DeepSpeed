@@ -4,12 +4,49 @@
 # DeepSpeed Team
 
 from deepspeed.utils import RepeatingLoader
+import pickle
+import numpy as np
 import torch
 import pytest
 import deepspeed
 from deepspeed.accelerator import get_accelerator
 from unit.common import DistributedTest
 from unit.simple_model import SimpleModel, random_dataset
+from deepspeed.runtime.data_pipeline.data_sampling.indexed_dataset import MMapIndexedDataset, MMapIndexedDatasetBuilder
+
+
+@pytest.mark.parametrize("dtype", [np.int32, np.uint16])
+def test_mmap_dataset_pickle_round_trip(tmp_path, dtype):
+    path = str(tmp_path / "dataset")
+    builder = MMapIndexedDatasetBuilder(path + ".bin", dtype=dtype)
+    for i in range(3):
+        builder.add_item_numpy(np.arange(i + 1, dtype=dtype))
+    builder.end_document()
+    builder.finalize(path + ".idx")
+    dataset = MMapIndexedDataset(path, skip_warmup=True)
+
+    restored = pickle.loads(pickle.dumps(dataset))
+
+    assert len(restored) == len(dataset)
+    assert restored.dtype == dataset.dtype
+    np.testing.assert_array_equal(restored.sizes, dataset.sizes)
+    np.testing.assert_array_equal(restored.doc_idx, dataset.doc_idx)
+    for i in range(len(dataset)):
+        np.testing.assert_array_equal(restored[i], dataset[i])
+
+
+def test_mmap_dataset_spawn_dataloader(tmp_path):
+    path = str(tmp_path / "dataset")
+    expected = torch.arange(12).reshape(4, 3)
+    builder = MMapIndexedDatasetBuilder(path + ".bin")
+    for row in expected:
+        builder.add_item(row)
+    builder.end_document()
+    builder.finalize(path + ".idx")
+    dataset = MMapIndexedDataset(path, skip_warmup=True)
+    loader = torch.utils.data.DataLoader(dataset, batch_size=2, num_workers=1, multiprocessing_context="spawn")
+
+    torch.testing.assert_close(torch.cat(list(loader)), expected)
 
 
 def test_repeating_loader():
