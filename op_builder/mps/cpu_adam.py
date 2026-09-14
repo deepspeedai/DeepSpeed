@@ -46,9 +46,10 @@ class CPUAdamBuilder(MPSOpBuilder):
             return None
 
     def cxx_args(self):
-        # No -std flag: torch.utils.cpp_extension supplies the standard its own headers need
-        # (c++20 on current torch), and a hardcoded value here would override it.
-        args = ['-O3', '-g', '-Wno-reorder', '-D__NEON__']
+        import torch
+        torch_major, torch_minor = (int(x) for x in torch.__version__.split('.')[:2])
+        cpp_standard = '-std=c++20' if (torch_major, torch_minor) >= (2, 12) else '-std=c++17'
+        args = ['-O3', cpp_standard, '-g', '-Wno-reorder', '-D__NEON__']
         libomp = self._libomp_prefix()
         if libomp is not None:
             args += ['-Xpreprocessor', '-fopenmp', f'-I{libomp}/include']
