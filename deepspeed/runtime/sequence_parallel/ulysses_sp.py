@@ -31,7 +31,7 @@ https://github.com/snowflakedb/ArcticTraining/blob/main/projects/sequence-parall
 
 from collections import defaultdict, deque
 from deepspeed.runtime.utils import see_memory_usage
-from deepspeed.sequence.layer import _DimZeroAllToAll
+from deepspeed.sequence.layer import _dim_zero_all_to_all
 from deepspeed.utils.logging import logger
 from einops import rearrange
 from packaging import version
@@ -189,7 +189,7 @@ class UlyssesSPAttentionHF(torch.nn.Module):
 
             input = rearrange(input, "sl_l bs ws hc_l hs -> ws sl_l bs hc_l hs").contiguous()
 
-            output = _DimZeroAllToAll.apply(self.process_group, input)
+            output = _dim_zero_all_to_all(self.process_group, input)
 
             # [ws sl_l bs hc_l hs] -> [sl bs hc_l hs]
             output = output.reshape([self.global_seq_length, *output.shape[2:]]).contiguous()
@@ -217,7 +217,7 @@ class UlyssesSPAttentionHF(torch.nn.Module):
             self.attn_head_size * self.attn_head_count // self.world_size,
         ]).contiguous()
 
-        output = _DimZeroAllToAll.apply(self.process_group, input)
+        output = _dim_zero_all_to_all(self.process_group, input)
         output = rearrange(output, "ws sl_l bs em_l -> sl_l bs ws em_l")
 
         # [sl_l bs ws em_l] -> [sl_l bs em]

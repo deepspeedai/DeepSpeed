@@ -10,6 +10,8 @@ from torch.nn import Module
 
 from einops import rearrange
 
+import torch.distributed.nn.functional as dist_nn
+
 import deepspeed.comm as dist
 from deepspeed.accelerator import get_accelerator
 from deepspeed.module_inject.tp_shard import AutoTPMeta, get_shard_size_list
@@ -307,24 +309,24 @@ def single_all_to_all(input,
     return res
 
 
-class _DimZeroAllToAll(torch.autograd.Function):
-    """Differentiable All2All across dimension 0."""
+def _dim_zero_all_to_all(group: dist.ProcessGroup, input: Tensor) -> Tensor:
+    """Differentiable All2All across dimension 0.
 
-    @staticmethod
-    def forward(ctx: Any, group: dist.ProcessGroup, input: Tensor) -> Tensor:
-        world_size = dist.get_world_size(group)
-        assert input.shape[0] == world_size, f"Dim 0 {input.shape[0]} is not world size"
+    The collective has to return the exchanged tensor rather than fill a buffer the caller allocated. The
+    difference is invisible in eager mode and decisive under ``torch.compile``: a collective that writes into
+    an output argument leaves the traced graph holding an output with no data dependence on the input, so the
+    generated backward produces a zero gradient while the forward stays numerically correct, and training
+    silently stops updating everything upstream of the exchange.
 
-        ctx.group = group
+    Wrapping the buffer-filling form in a ``torch.autograd.Function`` does not protect it. The tracer inlines
+    the function body instead of treating the call as opaque, and differentiates what it traced, so the
+    hand-written backward never runs.
+    """
+    world_size = dist.get_world_size(group)
+    assert input.shape[0] == world_size, f"Dim 0 {input.shape[0]} is not world size"
 
-        output = torch.empty_like(input).contiguous()
-        # torch.distributed.nn.functional.all_to_all_single(output, input.contiguous(), group=group)
-        dist.all_to_all_single(output, input.contiguous(), group=group)
-        return output
-
-    @staticmethod
-    def backward(ctx: Any, *grad_output: Tensor) -> Tuple[None, Tensor]:
-        return (None, _DimZeroAllToAll.apply(ctx.group, *grad_output))
+    input = input.contiguous()
+    return dist_nn.all_to_all_single(torch.empty_like(input), input, group=group)
 
 
 class _SeqAllToAll(torch.autograd.Function):
