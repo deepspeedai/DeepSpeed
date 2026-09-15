@@ -4493,6 +4493,7 @@ class DeepSpeedEngine(Module):
 
         if checkpoint.get(FROZEN_PARAM_FRAGMENTS, None) is not None:
             saved_frozen_params = checkpoint[FROZEN_PARAM_FRAGMENTS]
+            restored_experts = DeepSpeedEngine._autoep_expert_parameter_names(None, self.module)
             for param in self.module.parameters():
                 if param.requires_grad:
                     continue
@@ -4501,6 +4502,10 @@ class DeepSpeedEngine(Module):
                 name = self.param_names[param]
                 if hasattr(param, 'ds_id'):
                     param.ds_tensor.data.copy_(saved_frozen_params[name].data)
+                elif name in restored_experts and name in module_state_dict:
+                    # AutoEP already loaded this rank's expert files above. The
+                    # shared checkpoint's frozen fragments belong to EP rank 0.
+                    continue
                 else:
                     param.data.copy_(saved_frozen_params[name].data)
 

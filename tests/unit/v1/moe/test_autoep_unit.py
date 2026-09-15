@@ -660,6 +660,34 @@ class TestAutoEPConfig:
         with pytest.raises(RuntimeError, match="outside AutoEP expert"):
             engine.load_module_state_dict(checkpoint, strict=True, allowed_missing_keys=["weight"])
 
+    @pytest.mark.parametrize("ep_rank", [1, 2, 3])
+    def test_autoep_resume_keeps_rank_local_frozen_experts(self, ep_rank):
+        # The shared model checkpoint contains rank-0 frozen fragments. Those
+        # must not overwrite expert tensors restored from this rank's files.
+        layer = object.__new__(AutoEPMoELayer)
+        nn.Module.__init__(layer)
+        layer.experts = GroupedExperts(4, 8, 2, use_grouped_mm=False)
+        model = nn.ModuleDict({"moe": layer, "dense": nn.Linear(4, 4, bias=False)})
+        model.requires_grad_(False)
+        engine = object.__new__(DeepSpeedEngine)
+        object.__setattr__(engine, "module", model)
+        object.__setattr__(engine, "param_names", {p: name for name, p in model.named_parameters()})
+        checkpoint = {
+            "module": {
+                name: torch.full_like(p, ep_rank + 1)
+                for name, p in model.named_parameters()
+            },
+            ds_engine.FROZEN_PARAM_FRAGMENTS: {
+                name: torch.ones_like(p)
+                for name, p in model.named_parameters()
+            },
+        }
+        engine.load_module_state_dict(checkpoint)
+        for parameter in layer.experts.parameters():
+            torch.testing.assert_close(parameter, torch.full_like(parameter, ep_rank + 1))
+        # Non-expert frozen-fragment restoration retains its existing behavior.
+        torch.testing.assert_close(model["dense"].weight, torch.ones_like(model["dense"].weight))
+
     def test_resolve_zero3_param_placement_rejects_pre_partitioned_expert_on_wrong_group(self, monkeypatch):
         engine = object.__new__(DeepSpeedEngine)
         model = nn.Linear(2, 2, bias=False)
