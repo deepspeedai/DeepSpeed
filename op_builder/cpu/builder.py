@@ -4,6 +4,7 @@
 # DeepSpeed Team
 
 import os
+import sys
 
 try:
     # is op_builder from deepspeed or a 3p version? this should only succeed if it's deepspeed
@@ -30,6 +31,8 @@ class CPUOpBuilder(OpBuilder):
         return cpp_ext
 
     def cxx_args(self):
+        if sys.platform == "win32":
+            return ['/O2', '/openmp', '/EHsc', '/W3', '/std:c++20']
         args = ['-O3', '-g', '-Wno-reorder']
         CPU_ARCH = self.cpu_arch()
         SIMD_WIDTH = self.simd_width()
