@@ -113,6 +113,17 @@ def test_conflict_with_uncontracted_pass(clean_registry):
     validate_schedule([(0, ["a"]), (10, ["custom"])])
 
 
+def test_selective_gather_and_prefetch_require_separate_compile_steps(clean_registry):
+    register_pass_contract(zero3_compile.NAME, zero3_compile.CONTRACT)
+    register_pass_contract(selective_gather.NAME, selective_gather.CONTRACT)
+    register_pass_contract(prefetch.NAME, prefetch.CONTRACT)
+
+    with pytest.raises(PassContractError, match="conflicts"):
+        validate_schedule([(5, [zero3_compile.NAME, selective_gather.NAME, prefetch.NAME])])
+
+    validate_schedule([(5, [zero3_compile.NAME, selective_gather.NAME]), (6, [zero3_compile.NAME, prefetch.NAME])])
+
+
 def test_uncontracted_passes_are_unconstrained(clean_registry):
     _register_zero3_and_prefetch()
     # An ad-hoc pass with no registered contract must not break validation of the rest.
@@ -156,8 +167,8 @@ def test_builtin_default_schedules_validate(builtin_registry):
     # The schedules init_z1_and_2 and init_z3 build when the user supplies none.
     validate_schedule([(0, [zero_1_and_2_compile.NAME_Z1])], builtin_registry)
     validate_schedule([(0, [zero_1_and_2_compile.NAME_Z2])], builtin_registry)
-    validate_schedule([(0, [zero3_compile.NAME]), (5, [zero3_compile.NAME, prefetch.NAME, selective_gather.NAME])],
-                      builtin_registry)
+    validate_schedule([(0, [zero3_compile.NAME]), (5, [zero3_compile.NAME, selective_gather.NAME]),
+                       (6, [zero3_compile.NAME, prefetch.NAME])], builtin_registry)
     validate_schedule([(0, [zero3_compile.NAME, offload_parameters.NAME])], builtin_registry)
     validate_schedule([(0, [zero3_compile.NAME]),
                        (1, [offload_adam_states.NAME_FOR_INIT, zero3_compile.NAME, offload_adam_states.NAME])],

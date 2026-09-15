@@ -193,6 +193,11 @@ void start_backward(bool update)
     for (auto& it : executors) { it.second->startBackward(update); }
 }
 
+void end_backward_phase()
+{
+    for (auto& it : executors) { it.second->endBackwardPhase(); }
+}
+
 void end_backward(const c10::IValue& deps, long graph_id, bool release_reduce_buckets)
 {
     auto executor = getExecutor<CustomOpExecutor>(graph_id, executors);

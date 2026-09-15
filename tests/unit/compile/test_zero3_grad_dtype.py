@@ -3,19 +3,26 @@
 
 # DeepSpeed Team
 
+from contextlib import nullcontext
 from types import SimpleNamespace
 
 import pytest
 import torch
 
 from deepspeed.compile import backend as backend_mod
+from deepspeed.compile import util as compile_util
 import deepspeed.compile.patch_fake_tensor as patch_fake_tensor_mod
-from deepspeed.compile.init_z3 import _allow_dynamo_dynamic_parameter_shapes_for_z3, _resolve_expected_grad_dtype
+from deepspeed.compile.init_z3 import (DEFAULT_Z3_OPTIMIZATION_PASSES, DEFAULT_Z3_PERSISTENCE_PASSES,
+                                       DEFAULT_Z3_SCHEDULE, WARMUP, _allow_dynamo_dynamic_parameter_shapes_for_z3,
+                                       _resolve_expected_grad_dtype)
 from deepspeed.compile.patch_fake_tensor import _resolve_zero3_guarded_value, patch_fake_tensor
+from deepspeed.compile.passes import prefetch, selective_gather, zero3_compile
 from deepspeed.compile.patch_compiled_func import (get_backward_inputs, pop_backward_input, register_backward_frame)
+import deepspeed.runtime.engine as engine_mod
 from deepspeed.runtime.engine import DeepSpeedEngine
 from deepspeed.runtime.zero.parameter_offload import ZeROOrderedDict
 from deepspeed.runtime.zero.partition_parameters import ZeroParamStatus
+import deepspeed.utils.nvtx as nvtx_mod
 from deepspeed.utils.torch import required_torch_version
 
 
@@ -39,6 +46,72 @@ def test_explicit_grad_dtype_is_preserved():
     param.grad_dtype = torch.float32
 
     assert _resolve_expected_grad_dtype(param) is torch.float32
+
+
+def test_default_z3_schedule_selects_persistence_before_prefetch():
+    assert WARMUP == 5
+    assert DEFAULT_Z3_PERSISTENCE_PASSES == (zero3_compile.add_z3_gather_release, selective_gather.selective_gather)
+    assert DEFAULT_Z3_OPTIMIZATION_PASSES == (zero3_compile.add_z3_gather_release, prefetch.schedule_prefetch)
+    assert DEFAULT_Z3_SCHEDULE == (
+        (0, (zero3_compile.add_z3_gather_release, )),
+        (WARMUP, (zero3_compile.add_z3_gather_release, selective_gather.selective_gather)),
+        (WARMUP + 1, (zero3_compile.add_z3_gather_release, prefetch.schedule_prefetch)),
+    )
+
+
+def test_deepcompile_forward_uses_native_phase_lifecycle(monkeypatch):
+    events = []
+
+    class FakeNative:
+
+        def start_forward(self):
+            events.append("start_forward")
+
+        def end_forward(self):
+            events.append("end_forward")
+
+    class FakeModule(torch.nn.Module):
+
+        def forward(self):
+            events.append("module")
+            return torch.tensor(1.0)
+
+    engine = object.__new__(DeepSpeedEngine)
+    torch.nn.Module.__init__(engine)
+    engine.optimizer = object()
+    engine.__dict__["module"] = FakeModule()
+    engine._is_compiled = True
+    engine.is_deepcompile_enabled = lambda: True
+    engine.is_deepcompile_active = lambda: True
+    engine.autotuning_profile_model_info = lambda: False
+
+    monkeypatch.setattr(nvtx_mod, "enable_nvtx", False)
+    monkeypatch.setattr(engine_mod, "get_deepcompile_handle", lambda: FakeNative())
+    monkeypatch.setattr(engine_mod, "deepcompile_z3_forward_context", lambda _engine: nullcontext(None))
+    monkeypatch.setattr(engine_mod, "autocast_if_enabled", lambda _engine: nullcontext())
+    monkeypatch.setattr(engine_mod, "register_output_backward_hooks",
+                        lambda *_args, **_kwargs: SimpleNamespace(hook_handles=[]))
+
+    output = engine.forward()
+
+    assert output.item() == 1.0
+    assert events == ["start_forward", "module", "end_forward"]
+
+
+def test_deepcompile_backward_epilogue_ends_native_phase(monkeypatch):
+    events = []
+
+    class FakeNative:
+
+        def end_backward_phase(self):
+            events.append("end_backward_phase")
+
+    monkeypatch.setattr(compile_util, "post_backward_hooks", [lambda: events.append("post_backward_hook")])
+    monkeypatch.setattr(compile_util, "get_deepcompile_handle", lambda: FakeNative())
+
+    compile_util.deepcompile_backward_epilogue()
+
+    assert events == ["post_backward_hook", "end_backward_phase"]
 
 
 def test_zero3_allows_dynamo_dynamic_parameter_shapes(monkeypatch):

@@ -500,6 +500,8 @@ public:
         at::cuda::stream_synchronize(rs_stream_);
     }
 
+    virtual void endBackwardPhase() {}
+
     virtual at::Tensor reduceGrad(at::Tensor grad_tensor, long ds_id)
     {
         int world_size = process_group_->getSize();
@@ -641,5 +643,6 @@ void cleanup();
 void start_forward();
 void end_forward();
 void start_backward(bool update);
+void end_backward_phase();
 
 }  // namespace dc
