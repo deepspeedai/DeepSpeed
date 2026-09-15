@@ -11,6 +11,7 @@ import pytest
 from unit.common import DistributedTest
 from unit.simple_model import Curriculum_SimpleModel, SimpleModel, random_dataloader, random_dataset
 from deepspeed.runtime.data_pipeline.curriculum_scheduler import CurriculumScheduler
+from deepspeed.runtime.data_pipeline.data_routing.scheduler import RandomLTDScheduler
 
 
 class MPU():
@@ -286,3 +287,81 @@ class TestLegacyCurriculumScheduler(DistributedTest):
             if n + 1 in ground_truths:
                 true_seqlen = ground_truths[n + 1]
                 assert seqlen == true_seqlen, "Incorrect curriculum schedule"
+
+
+@pytest.mark.parametrize("minimum, increment, expected", [(8, 16, 16), (10, 8, 16), (16, 8, 16)])
+def test_random_ltd_respects_minimum_sequence_length(minimum, increment, expected):
+    scheduler = RandomLTDScheduler({
+        "total_layer_num": 4,
+        "random_ltd_layer_num": 2,
+        "global_batch_size": 2,
+        "layer_token_lr_schedule": {
+            "enabled": False
+        },
+        "random_ltd_schedule": {
+            "min_value": minimum,
+            "max_value": 64,
+            "schedule_type": "fixed_linear",
+            "schedule_config": {
+                "require_steps": 100,
+                "seq_per_step": increment
+            },
+        },
+    })
+    scheduler.update_seq(0)
+    assert scheduler.get_current_seq() == expected
+    assert scheduler.state_dict()["consumed_layer_tokens"] == 2 * (2 * expected + 2 * 64)
+    values = []
+    for step in range(101):
+        scheduler.update_seq(step)
+        values.append(scheduler.get_current_seq())
+    assert min(values) >= minimum
+    assert all(value % increment == 0 for value in values)
+    assert values[-1] == 64
+
+
+def test_random_ltd_minimum_in_training_loop(tmpdir, monkeypatch):
+    monkeypatch.setenv("LOCAL_RANK", "0")
+    deepspeed.comm.init_distributed(get_accelerator().communication_backend_name(),
+                                    auto_mpi_discovery=False,
+                                    init_method=f"file://{tmpdir}/random_ltd_rdzv",
+                                    rank=0,
+                                    world_size=1)
+    try:
+        model = SimpleModel(4)
+        optimizer = torch.optim.SGD(model.parameters(), lr=0.01)
+        engine, _, _, _ = deepspeed.initialize(model=model,
+                                               optimizer=optimizer,
+                                               config={
+                                                   "train_batch_size": 2,
+                                                   "data_efficiency": {
+                                                       "enabled": True,
+                                                       "data_routing": {
+                                                           "enabled": True,
+                                                           "random_ltd": {
+                                                               "enabled": True,
+                                                               "total_layer_num": 4,
+                                                               "random_ltd_layer_num": 2,
+                                                               "random_ltd_schedule": {
+                                                                   "min_value": 8,
+                                                                   "max_value": 64,
+                                                                   "schedule_type": "fixed_linear",
+                                                                   "schedule_config": {
+                                                                       "require_steps": 100,
+                                                                       "seq_per_step": 16,
+                                                                   },
+                                                               },
+                                                           },
+                                                       },
+                                                   },
+                                               })
+        for _ in range(3):
+            inputs = torch.ones(2, 4, device=engine.device)
+            labels = torch.zeros(2, dtype=torch.long, device=engine.device)
+            loss = engine(inputs, labels)
+            assert engine.random_ltd_scheduler.get_current_seq() == 16
+            engine.backward(loss)
+            engine.step()
+        assert engine.random_ltd_scheduler.state_dict()["consumed_layer_tokens"] == 3 * 2 * (2 * 16 + 2 * 64)
+    finally:
+        deepspeed.comm.destroy_process_group()
