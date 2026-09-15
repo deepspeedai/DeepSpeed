@@ -862,7 +862,24 @@ def init_distributed(dist_backend: Optional[str] = None,
             elif in_aws_sm():
                 patch_aws_sm_env_for_torch_nccl_backend(verbose=verbose)
             else:
-                mpi_discovery(distributed_port=distributed_port, verbose=verbose)
+                try:
+                    mpi_discovery(distributed_port=distributed_port, verbose=verbose)
+                except ImportError as err:
+                    launcher_world_size = mpi_world_size_from_env()
+                    if launcher_world_size is not None and launcher_world_size > 1:
+                        raise ImportError(
+                            f"A launcher reports a world size of {launcher_world_size} but mpi4py is not "
+                            "installed, so "
+                            "the rank cannot be discovered from it. Install mpi4py, or set RANK, WORLD_SIZE, "
+                            "LOCAL_RANK, MASTER_ADDR and MASTER_PORT yourself.") from err
+                    if launcher_world_size is None and launched_by_mpi():
+                        raise ImportError(
+                            "A launcher started this process but does not report a world size in the "
+                            "environment - PMIx launched directly, prterun or prun, sets a rank and no size - "
+                            "so whether this is one rank of several cannot be determined without mpi4py. "
+                            "Install mpi4py, or set RANK, WORLD_SIZE, LOCAL_RANK, MASTER_ADDR and MASTER_PORT "
+                            "yourself.") from err
+                    single_process_discovery(distributed_port=distributed_port, verbose=verbose)
 
         if cdb is not None and cdb.is_initialized():
             if int(os.getenv('RANK', '0')) == 0:
@@ -875,6 +892,60 @@ def init_distributed(dist_backend: Optional[str] = None,
                 utils.logger.info('Initializing TorchBackend in DeepSpeed with backend {}'.format(dist_backend))
             # Create a torch backend object, initialize torch distributed, and assign to cdb
             cdb = TorchBackend(dist_backend, timeout, init_method, rank, world_size)
+
+
+# World sizes the launchers export. The size rather than the rank, because a rank only says a
+# launcher is present: `srun -n1` sets SLURM_PROCID for a single-task step, which is one process
+# on one device and wants the fallback below rather than an error about mpi4py.
+MPI_WORLD_SIZE_ENV_VARS = ("OMPI_COMM_WORLD_SIZE", "PMI_SIZE", "MV2_COMM_WORLD_SIZE", "SLURM_NTASKS")
+
+# Ranks the launchers export, used only to tell "no launcher" from "a launcher that reports no
+# size". PMIx launched directly - prterun, prun - is the case that needs it: it sets PMIX_RANK
+# and PMIX_NAMESPACE and no size at all, so the world cannot be read from the environment.
+MPI_RANK_ENV_VARS = ("OMPI_COMM_WORLD_RANK", "PMI_RANK", "PMIX_RANK", "MV2_COMM_WORLD_RANK", "SLURM_PROCID")
+
+
+def mpi_world_size_from_env():
+    """The launcher's world size, or None when no launcher reports one."""
+    for var in MPI_WORLD_SIZE_ENV_VARS:
+        try:
+            return int(os.environ[var])
+        except (KeyError, ValueError):
+            continue
+    return None
+
+
+def launched_by_mpi():
+    """Whether a launcher started this process, whatever world size it reports."""
+    return any(var in os.environ for var in MPI_RANK_ENV_VARS)
+
+
+def single_process_discovery(distributed_port=TORCH_DISTRIBUTED_DEFAULT_PORT, verbose=True):
+    """Fill in the distributed environment for one process on one device.
+
+    Reached when no launcher set the variables and no MPI job is running - `python train.py` on
+    a single-accelerator machine, which is how DeepSpeed is used on a laptop. `mpi_discovery`
+    cannot serve that case: it imports mpi4py, so without that package the run ends at
+    `ModuleNotFoundError: No module named 'mpi4py'` before `deepspeed.initialize` returns.
+
+    `comm/utils.py` already reads a missing launcher as rank 0 of a world of 1; this puts the
+    same reading in the environment the backend is initialized from.
+    """
+    defaults = {
+        "RANK": "0",
+        "WORLD_SIZE": "1",
+        "LOCAL_RANK": "0",
+        "MASTER_ADDR": "127.0.0.1",
+        "MASTER_PORT": str(distributed_port),
+    }
+    for name, value in defaults.items():
+        os.environ.setdefault(name, value)
+
+    if verbose:
+        utils.logger.info("No launcher and no MPI job detected; running as a single process with world_rank={}, "
+                          "local_rank={}, world_size={}, master_addr={}, master_port={}".format(
+                              os.environ["RANK"], os.environ["LOCAL_RANK"], os.environ["WORLD_SIZE"],
+                              os.environ["MASTER_ADDR"], os.environ["MASTER_PORT"]))
 
 
 def mpi_discovery(distributed_port=TORCH_DISTRIBUTED_DEFAULT_PORT, verbose=True):
