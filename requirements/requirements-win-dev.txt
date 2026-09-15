@@ -1,0 +1,8 @@
+accelerate
+mup
+pre-commit>=3.2.0
+pytest>=7.2.0,<8.4.0
+pytest-forked
+pytest-randomly
+pytest-xdist
+transformers>=4.51.3

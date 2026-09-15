@@ -84,6 +84,7 @@ extras_require = {
     '1bit_mpi': fetch_requirements('requirements/requirements-1bit-mpi.txt'),
     'readthedocs': fetch_requirements('requirements/requirements-readthedocs.txt'),
     'dev': fetch_requirements('requirements/requirements-dev.txt'),
+    'win-dev': fetch_requirements('requirements/requirements-win-dev.txt'),
     'autotuning': fetch_requirements('requirements/requirements-autotuning.txt'),
     'autotuning_ml': fetch_requirements('requirements/requirements-autotuning-ml.txt'),
     'sparse': fetch_requirements('requirements/requirements-sparse_pruning.txt'),
