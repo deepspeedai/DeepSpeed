@@ -700,6 +700,10 @@ def _replace_module(model, policies, prefix='', layer_id=0, level_id=0, state_di
                         checking_key,
                     )
                 else:
+                    # Not in this shard; still take persistent buffers (e.g. BatchNorm stats) off
+                    # meta. Non-persistent ones (rotary inv_freq) are in no shard, so leave them.
+                    if any(name not in child._non_persistent_buffers_set for name in child._buffers):
+                        Loading.load_buffer(child, state_dict, checking_key)
                     continue
             if len(child._buffers) != 0 and state_dict is not None:
                 Loading.load_buffer(child, state_dict, checking_key)
