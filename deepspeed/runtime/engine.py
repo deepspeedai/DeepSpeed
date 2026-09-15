@@ -2053,6 +2053,10 @@ class DeepSpeedEngine(Module):
                                f"patterns={list(patterns)}, min_numel={min_numel}")
 
         eligible_names = selected_names + [name for name, _ in selected_experts]
+        expected_count = config.get("expected_module_count")
+        if expected_count is not None and len(eligible_names) != expected_count:
+            raise RuntimeError(
+                f"HiFloat8 expected_module_count={expected_count}, selected {len(eligible_names)} modules")
         unmatched = [pattern for pattern in patterns if not any(fnmatchcase(name, pattern) for name in eligible_names)]
         if unmatched:
             raise RuntimeError(f"HiFloat8 patterns matched no eligible modules: {unmatched}")

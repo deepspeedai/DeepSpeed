@@ -29,6 +29,7 @@ def test_hifloat8_config_defaults_disabled():
         "enabled": False,
         "module_name_patterns": (),
         "min_numel": 0,
+        "expected_module_count": None,
     }
 
 
@@ -79,6 +80,18 @@ def test_hifloat8_config_defaults_disabled():
 def test_hifloat8_config_rejects_invalid_values(config):
     with pytest.raises(DeepSpeedConfigError):
         get_hifloat8_config(config)
+
+
+@pytest.mark.parametrize("count", [0, -1, True, 1.5, "84"])
+def test_hifloat8_config_rejects_invalid_expected_count(count):
+    with pytest.raises(DeepSpeedConfigError):
+        get_hifloat8_config({"hifloat8": {"expected_module_count": count}})
+
+
+def test_hifloat8_config_accepts_dense_selection_contract():
+    # Existing Swift Dense configurations require exactly 28 * 3 projections.
+    config = get_hifloat8_config({"hifloat8": {"expected_module_count": 84}})
+    assert config["expected_module_count"] == 84
 
 
 class _ToyModel(nn.Module):
@@ -155,6 +168,7 @@ def test_engine_converts_only_selected_modules_and_preserves_parameters(monkeypa
         lambda **kwargs: probe_calls.append(kwargs),
     )
     engine = _make_engine(model, ["*.mlp.gate_proj", "*.mlp.up_proj", "*.mlp.down_proj"])
+    engine._config.hifloat8_config["expected_module_count"] = 3
     engine._configure_hifloat8()
 
     assert probe_calls == [{"probe_kernel": True, "device": torch.device("cpu")}]
@@ -184,6 +198,22 @@ def test_engine_rejects_partially_unmatched_patterns_before_conversion():
     model = _ToyModel()
     engine = _make_engine(model, ["*.mlp.gate_proj", "*.missing_projection"])
     with pytest.raises(RuntimeError, match="patterns matched no eligible modules"):
+        engine._configure_hifloat8()
+    assert type(model.model.mlp["gate_proj"]) is nn.Linear
+
+
+def test_engine_rejects_wrong_module_count_before_kernel_probe(monkeypatch):
+    # A partially selected model must fail before native initialization or mutation.
+    import deepspeed.runtime.hifloat8 as bridge
+
+    def unexpected_probe(**_kwargs):
+        pytest.fail("module-count mismatch must fail before probing kernels")
+
+    monkeypatch.setattr(bridge, "assert_hifloat8_training_available", unexpected_probe)
+    model = _ToyModel()
+    engine = _make_engine(model, ["*.mlp.gate_proj"])
+    engine._config.hifloat8_config["expected_module_count"] = 3
+    with pytest.raises(RuntimeError, match="expected_module_count"):
         engine._configure_hifloat8()
     assert type(model.model.mlp["gate_proj"]) is nn.Linear
 

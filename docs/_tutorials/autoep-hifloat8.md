@@ -36,6 +36,10 @@ Patterns match the model **after AutoEP replacement**. For `GroupedExperts`,
 dimension. Router and shared-expert gates are deliberately not selected.
 Expert parameters, trainability and checkpoint keys are unchanged by HiFloat8
 selection; AutoEP's normal repacking and expert sharding still apply.
+Optional `expected_module_count` requires an exact positive count of selected
+Linear and GroupedExperts modules before any kernel probe or conversion. Dense
+Qwen3-0.6B uses `84` for its 28 gate/up/down projection triplets; unset or `null`
+keeps count validation disabled.
 
 The Qwen3.5 preset covers both the text backbone and the language-model path
 of its ConditionalGeneration wrapper. Vision and attention are not replaced.

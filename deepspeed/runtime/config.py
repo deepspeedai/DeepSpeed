@@ -562,6 +562,7 @@ HIFLOAT8_DEFAULT = {
     "enabled": False,
     "module_name_patterns": (),
     "min_numel": 0,
+    "expected_module_count": None,
 }
 
 
@@ -587,6 +588,10 @@ def get_hifloat8_config(param_dict):
     min_numel = result["min_numel"]
     if isinstance(min_numel, bool) or not isinstance(min_numel, int) or min_numel < 0:
         raise DeepSpeedConfigError("'hifloat8.min_numel' must be a non-negative integer")
+    expected_count = result["expected_module_count"]
+    if expected_count is not None and (isinstance(expected_count, bool) or not isinstance(expected_count, int)
+                                       or expected_count <= 0):
+        raise DeepSpeedConfigError("'hifloat8.expected_module_count' must be a positive integer or null")
     result["module_name_patterns"] = tuple(patterns)
     return result
 
