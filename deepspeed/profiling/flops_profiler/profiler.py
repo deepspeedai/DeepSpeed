@@ -1068,8 +1068,14 @@ def _rnn_forward_hook(rnn_module, input, output):
     flops = 0
     # input is a tuple containing a sequence to process and (optionally) hidden state
     inp = input[0]
-    batch_size = inp.shape[0]
-    seq_length = inp.shape[1]
+    if isinstance(inp, nn.utils.rnn.PackedSequence):
+        # data holds one row per cell step the module actually runs, which is the
+        # batch_size * seq_length product the count below wants
+        batch_size = inp.data.shape[0]
+        seq_length = 1
+    else:
+        batch_size = inp.shape[0]
+        seq_length = inp.shape[1]
     num_layers = rnn_module.num_layers
 
     for i in range(num_layers):
