@@ -306,8 +306,11 @@ def _format_param(optimizer, param_value, param_name):
         if len(param_value) != len(optimizer.param_groups):
             raise ValueError("expected {} value for {}, got {}".format(len(optimizer.param_groups), param_name,
                                                                        len(param_value)))
-        return list(param_value)
-    return [param_value] * len(optimizer.param_groups)
+        values = list(param_value)
+    else:
+        values = [param_value] * len(optimizer.param_groups)
+    # Optimizer LR tensors are updated in place; schedule bounds must stay fixed.
+    return [value.clone() if is_tensor(value) else value for value in values]
 
 
 class LRRangeTest(object):
@@ -366,6 +369,8 @@ class LRRangeTest(object):
             self.min_lr = list(lr_range_test_min_lr)
         else:
             self.min_lr = [lr_range_test_min_lr] * len(self.optimizer.param_groups)
+
+        self.min_lr = [lr.clone() if is_tensor(lr) else lr for lr in self.min_lr]
 
         if not isinstance(lr_range_test_step_size, int) or lr_range_test_step_size <= 0:
             raise ValueError(f"lr_range_test_step_size must be a positive integer, got {lr_range_test_step_size}")
