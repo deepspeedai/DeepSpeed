@@ -1847,3 +1847,89 @@ class TestAffineMapCoverage(DistributedTest):
         assert not missing, (f"these parameters are placed by a name category but carry no affine map, "
                              f"so conversion still depends on the category: {sorted(missing)}")
         engine.destroy()
+
+
+def _uneven_vocab_engine(tp_size, load_universal=False):
+    """A vocabulary head split 101 ways over `tp_size` ranks, so the shards are uneven."""
+    torch.manual_seed(42)
+    model = UnevenVocabLmHeadModel(12, 101)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+    config = {
+        "train_micro_batch_size_per_gpu": 1,
+        "zero_allow_untested_optimizer": True,
+        "zero_optimization": {
+            "stage": 1
+        },
+        "checkpoint": {
+            "load_universal": load_universal
+        },
+    }
+    if tp_size > 1:
+        config["tensor_parallel"] = {
+            "autotp_size": tp_size,
+            "partition_config": {
+                "use_default_specs":
+                False,
+                "layer_specs": [{
+                    "patterns": [r".*lm_head\.weight$"],
+                    "partition_type": "column",
+                    "gather_output": True,
+                }],
+            },
+        }
+    engine, _, _, _ = deepspeed.initialize(model=model, optimizer=optimizer, config=config)
+    return engine
+
+
+class uneven_vocab_checkpoint(DistributedFixture):
+    world_size = 2
+
+    def run(self, tmpdir):
+        from deepspeed.checkpoint.constants import AFFINE_MAP, AFFINE_MAP_PARAMS
+        from deepspeed.module_inject.layers import collect_autotp_universal_checkpoint_info
+
+        engine = _uneven_vocab_engine(self.world_size)
+        _train_steps(engine, hidden_dim=12)
+
+        # Pin that the checkpoint below is converted through the map rather than the
+        # vocabulary category, and that the map carries the real 51/50 split.
+        maps = collect_autotp_universal_checkpoint_info(engine.module)[AFFINE_MAP][AFFINE_MAP_PARAMS]
+        head = maps[r"^lm_head\.weight$"]
+        assert [head["ranks"][rank]["shard_shape"][0] for rank in sorted(head["ranks"])] == [51, 50]
+
+        tp_group = groups.get_tensor_model_parallel_group()
+        weight = _all_gather_cat_dim0(engine.module.lm_head.weight.detach(), tp_group).cpu()
+        bias = _all_gather_cat_dim0(engine.module.lm_head.bias.detach().view(-1, 1), tp_group).view(-1).cpu()
+        if dist.get_rank() == 0:
+            torch.save({"weight": weight, "bias": bias}, os.path.join(tmpdir, "uneven_vocab_reference.pt"))
+
+        _save_and_convert(engine, tmpdir)
+        engine.destroy()
+
+
+@pytest.mark.parametrize("world_size", [1, 2], ids=["tp1", "tp2"])
+class TestUnevenVocabCrossTpResume(DistributedTest):
+    """A vocabulary head saved at TP2 must restore at a different TP degree.
+
+    101 rows over two ranks gives shards of 51 and 50, so the map has to carry the per-rank
+    extents rather than assume an even split. Restoring at TP1 then merges two unequal
+    shards into one tensor, which is where an even-split assumption would show up.
+    """
+
+    def test_resume_from_tp2(self, uneven_vocab_checkpoint, tmpdir, world_size):
+        tp_size = dist.get_world_size()
+        engine = _uneven_vocab_engine(tp_size, load_universal=True)
+        engine.load_checkpoint(tmpdir, tag=UNIVERSAL_TAG, load_module_only=True)
+
+        reference = torch.load(os.path.join(tmpdir, "uneven_vocab_reference.pt"))
+        if tp_size > 1:
+            tp_group = groups.get_tensor_model_parallel_group()
+            weight = _all_gather_cat_dim0(engine.module.lm_head.weight.detach(), tp_group).cpu()
+            bias = _all_gather_cat_dim0(engine.module.lm_head.bias.detach().view(-1, 1), tp_group).view(-1).cpu()
+        else:
+            weight = engine.module.lm_head.weight.detach().cpu()
+            bias = engine.module.lm_head.bias.detach().cpu()
+
+        torch.testing.assert_close(weight, reference["weight"])
+        torch.testing.assert_close(bias, reference["bias"])
+        engine.destroy()
