@@ -105,6 +105,11 @@ _REMOVED_TOP_LEVEL_CONFIG_KEYS = {
     "quantize_training":
     "Mixture-of-Quantization (MoQ) / 'quantize_training' has been removed. See "
     f"{_REMOVED_FEATURES_ISSUE}.",
+    "sparse_gradients":
+    "Sparse compression of dense torch.nn.Embedding gradients has been removed. A leftover "
+    "'sparse_gradients' flag would be ignored and those gradients would be reduced dense. "
+    "Gradients from an embedding constructed with sparse=True are still reduced sparsely and "
+    f"need no config flag. See {_REMOVED_FEATURES_ISSUE}.",
     "sparse_attention":
     "DeepSpeed Sparse Attention has been removed; the 'sparse_attention' configuration block is no longer "
     f"supported. See {_REMOVED_FEATURES_ISSUE}.",
@@ -232,10 +237,6 @@ def get_gradient_accumulation_steps(param_dict):
 
 def get_managed_gradient_accumulation(param_dict):
     return get_scalar_param(param_dict, MANAGED_GRADIENT_ACCUMULATION, MANAGED_GRADIENT_ACCUMULATION_DEFAULT)
-
-
-def get_sparse_gradients_enabled(param_dict):
-    return get_scalar_param(param_dict, SPARSE_GRADIENTS, SPARSE_GRADIENTS_DEFAULT)
 
 
 def get_communication_data_type(param_dict,
@@ -660,7 +661,6 @@ class DeepSpeedConfig(object):
         self.prescale_gradients = get_prescale_gradients(param_dict)
         self.gradient_predivide_factor = get_gradient_predivide_factor(param_dict)
         self.gradient_allreduce_op = get_gradient_allreduce_op(param_dict)
-        self.sparse_gradients_enabled = get_sparse_gradients_enabled(param_dict)
 
         self.zero_config = get_zero_config(param_dict)
         self.zero_optimization_stage = self.zero_config.stage

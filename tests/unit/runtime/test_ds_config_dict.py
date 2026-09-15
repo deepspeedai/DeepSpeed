@@ -283,6 +283,16 @@ def test_mics_zero_config_is_rejected():
         DeepSpeedConfig(config_dict)
 
 
+def test_sparse_gradients_config_is_rejected():
+    config_dict = {
+        "train_micro_batch_size_per_gpu": 1,
+        "sparse_gradients": True,
+    }
+
+    with pytest.raises(DeepSpeedConfigError, match="sparse_gradients"):
+        DeepSpeedConfig(config_dict)
+
+
 def test_compression_helper_shim_reexports_module_utils():
     with pytest.warns(FutureWarning, match="deepspeed.compression.helper"):
         from deepspeed.compression.helper import recursive_getattr, recursive_setattr
