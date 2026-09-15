@@ -52,6 +52,8 @@ class MoEModelPreset:
     min_transformers_version: str | None = None
     validated_transformers_versions: str = ""
     docs_support_notes: str = ""
+    router_topk_sorted: bool = False
+    router_scores_in_input_dtype: bool = False
 
 
 @dataclass
@@ -91,6 +93,8 @@ class MoELayerSpec:
     router_logits_capture_mode: Literal["raw", "post_score"] = "post_score"
     moe_output_shape: Literal["batched", "flat"] = "batched"
     e_score_correction_bias_path: str | None = None
+    router_topk_sorted: bool = False
+    router_scores_in_input_dtype: bool = False
 
 
 @dataclass

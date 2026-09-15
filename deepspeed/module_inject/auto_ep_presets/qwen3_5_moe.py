@@ -20,7 +20,7 @@ from deepspeed.module_inject.auto_ep_presets.base import (
 PRESET_NAME = "qwen3_5_moe"
 
 PRESET = MoEModelPreset(
-    moe_layer_pattern=r"model\.layers\.\d+\.mlp",
+    moe_layer_pattern=r"model\.(?:language_model\.)?layers\.\d+\.mlp",
     router_pattern="gate",
     experts_pattern="experts",
     expert_storage="fused_3d",
@@ -37,13 +37,11 @@ PRESET = MoEModelPreset(
     shared_experts_pattern="shared_expert",
     shared_experts_gate_pattern="shared_expert_gate",
     preset_adapter="qwen3_5_moe",
-    hf_model_types=("qwen3_5_moe_text", ),
-    unsupported_hf_model_type_notes={
-        "qwen3_5_moe": ("AutoEP supports the Qwen3.5 text backbone preset path; pass the "
-                        "text-backbone model/config with model_type='qwen3_5_moe_text'.")
-    },
+    hf_model_types=("qwen3_5_moe_text", "qwen3_5_moe"),
     min_transformers_version="5.2.0",
-    docs_support_notes="Requires the Qwen3.5 text-backbone qwen3_5_moe_text model type.",
+    docs_support_notes="Text backbone and the language-model path of the Qwen3.5 MoE wrapper.",
+    router_topk_sorted=True,
+    router_scores_in_input_dtype=True,
 )
 
 
@@ -61,6 +59,7 @@ class Qwen35MoePresetAdapter(AutoEPPresetAdapter):
             return_router_logits=True,
             capture_target="router",
             capture_index=1,
+            router_logits_capture_mode="raw",
         )
 
     def retarget_transformers_output_recorders(

@@ -38,9 +38,7 @@ from deepspeed.module_inject.auto_ep_layer import (
 )
 from deepspeed.module_inject.auto_ep_preset_adapters import get_preset_adapter
 from deepspeed.module_inject.auto_ep_presets.registry import (
-    preset_name_for_hf_model_type,
-    unsupported_preset_for_hf_model_type,
-)
+    preset_name_for_hf_model_type, )
 from deepspeed.moe.layer import MoE
 from deepspeed.moe.ep_experts import GroupedExperts
 from deepspeed.moe.ep_repack import repack_expert_weights
@@ -833,9 +831,7 @@ class TestAutoEPConfig:
         assert preset_name_for_hf_model_type("qwen2_moe") == "qwen3_moe"
         assert preset_name_for_hf_model_type("llama4_text") is None
 
-        qwen35 = unsupported_preset_for_hf_model_type("qwen3_5_moe")
-        assert qwen35 is not None
-        assert "qwen3_5_moe_text" in qwen35[1].unsupported_hf_model_type_notes["qwen3_5_moe"]
+        assert preset_name_for_hf_model_type("qwen3_5_moe") == "qwen3_5_moe"
         assert PRESET_MODELS["deepseek_v2"].supports_expert_bias is False
         assert PRESET_MODELS["deepseek_v3"].unsupported_router_bias_names == ()
 
@@ -1286,8 +1282,9 @@ class TestModelDetectionAndReplacement:
         assert specs[0].model_family == "qwen3_moe"
 
         model.config.model_type = "qwen3_5_moe"
-        with pytest.raises(ValueError, match="qwen3_5_moe_text"):
-            AutoEP(model, _runtime_config(enabled=True, autoep_size=1))._resolve_presets()
+        monkeypatch.setattr(get_preset_adapter("qwen3_5_moe"), "_installed_transformers_version", lambda: "5.16.1")
+        specs = AutoEP(model, _runtime_config(enabled=True, autoep_size=1)).ep_parser()
+        assert specs[0].model_family == "qwen3_5_moe"
 
     def test_deepseek_v3_detection_and_score_correction_bias_copy(self, monkeypatch):
         FakeGatheredParameters.calls = []

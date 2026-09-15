@@ -179,6 +179,63 @@ def _run_experts_triton_grouped_mm(
 # ---------------------------------------------------------------------------
 
 
+class _NPUGroupedMatmul(torch.autograd.Function):
+    """Native BF16 grouped GEMM, whose public operator lacks list-input autograd."""
+
+    @staticmethod
+    def _mm(x, weight, offsets, group_type=0):
+        import torch_npu
+
+        return torch_npu.npu_grouped_matmul([x], [weight],
+                                            group_list=offsets,
+                                            group_type=group_type,
+                                            group_list_type=0,
+                                            split_item=3,
+                                            output_dtype=x.dtype)[0]
+
+    @staticmethod
+    def forward(ctx, x, weight, offsets):
+        ctx.save_for_backward(x, weight, offsets)
+        return _NPUGroupedMatmul._mm(x, weight, offsets)
+
+    @staticmethod
+    def backward(ctx, grad):
+        x, weight, offsets = ctx.saved_tensors
+        grad = grad.contiguous()
+        dx = dw = None
+        if ctx.needs_input_grad[0]:
+            dx = _NPUGroupedMatmul._mm(grad, weight.transpose(-2, -1), offsets)
+        if ctx.needs_input_grad[1]:
+            dw = _NPUGroupedMatmul._mm(x.transpose(0, 1), grad, offsets, group_type=2)
+        return dx, dw, None
+
+
+def _run_experts_npu(w1, w2, w3, x, num_tokens_per_expert, *, hifloat8):
+    """Keep EP layout and BF16 parameters; select only the expert GEMM precision."""
+    offsets = num_tokens_per_expert.cumsum(0).to(torch.int64)
+    # AutoEP reserves extra rows for permutation padding beyond the last group.
+    rows = int(offsets[-1].item())
+    if rows < 0 or rows > x.shape[0]:
+        raise ValueError("Expert token counts exceed the available rows")
+    if rows == 0:
+        # An empty rank still needs zero gradients for every expert parameter.
+        zero = sum(weight.sum(dtype=torch.float32) for weight in (w1, w2, w3)) * 0
+        return x * 0 + zero.to(x.dtype)
+    inputs = x[:rows]
+    if hifloat8:
+        from torch_npu.utils.hifloat8_train import hifloat8_grouped_mm
+
+        def mm(lhs, weight):
+            return hifloat8_grouped_mm(lhs, weight.to(x.dtype).transpose(-2, -1), offsets)
+    else:
+
+        def mm(lhs, weight):
+            return _NPUGroupedMatmul.apply(lhs, weight.to(x.dtype).transpose(-2, -1), offsets)
+
+    output = mm(F.silu(mm(inputs, w1)) * mm(inputs, w3), w2)
+    return torch.cat((output, output.new_zeros((x.shape[0] - rows, output.shape[-1]))))
+
+
 class GroupedExperts(nn.Module):
     """Grouped expert computation for MoE layers.
 
@@ -223,6 +280,7 @@ class GroupedExperts(nn.Module):
         self.w3.is_expert_group = True
         self.use_triton_grouped_mm = False
         self.use_grouped_mm = use_grouped_mm
+        self.hifloat8_enabled = False
 
         # Resolve the Triton path. The device-specific decision is delegated to
         # the accelerator backend (e.g. the CUDA backend prefers Triton on
@@ -258,6 +316,12 @@ class GroupedExperts(nn.Module):
             Output tensor of shape ``(T, dim)``.
         """
 
+        if self.hifloat8_enabled:
+            if x.device.type != "npu" or x.dtype != torch.bfloat16:
+                raise RuntimeError("HiFloat8 experts require BF16 NPU inputs")
+            return _run_experts_npu(self.w1, self.w2, self.w3, x, num_tokens_per_expert, hifloat8=True)
+        if x.device.type == "npu" and self.use_grouped_mm:
+            return _run_experts_npu(self.w1, self.w2, self.w3, x, num_tokens_per_expert, hifloat8=False)
         if self.use_triton_grouped_mm:
             return _run_experts_triton_grouped_mm(self.w1, self.w2, self.w3, x, num_tokens_per_expert)
         elif self.use_grouped_mm:

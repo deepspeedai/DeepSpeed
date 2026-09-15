@@ -125,11 +125,13 @@ def _has_3d_expert_params(module: nn.Module, preset: MoEModelPreset) -> bool:
 
 def _get_num_experts_from_config(model_config, preset: MoEModelPreset) -> int | None:
     """Extract num_experts from model.config using the preset's attribute name."""
+    model_config = getattr(model_config, "text_config", model_config)
     return getattr(model_config, preset.num_experts_attr, None)
 
 
 def _get_top_k_from_config(model_config, preset: MoEModelPreset) -> int | None:
     """Extract top_k from model.config using the preset's attribute name."""
+    model_config = getattr(model_config, "text_config", model_config)
     return getattr(model_config, preset.top_k_attr, None)
 
 
@@ -490,6 +492,8 @@ class AutoEP:
                     router_logits_capture_mode=forward_contract.router_logits_capture_mode,
                     moe_output_shape=forward_contract.moe_output_shape,
                     e_score_correction_bias_path=e_score_correction_bias_path,
+                    router_topk_sorted=preset.router_topk_sorted,
+                    router_scores_in_input_dtype=preset.router_scores_in_input_dtype,
                 )
                 specs.append(spec)
                 logger.debug(f"Detected MoE layer: {module_name} (family={preset_name}, "
