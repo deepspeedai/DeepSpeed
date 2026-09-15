@@ -1763,3 +1763,87 @@ class TestAffineMapProducer(DistributedTest):
             assert maps[pattern] == want, (f"emitted map for {pattern} differs from the layout the resume "
                                            f"fixture verifies:\n  emitted  {maps[pattern]}\n  expected {want}")
         engine.destroy()
+
+
+class AffineCoverageModel(torch.nn.Module):
+    """Covers each conversion category: column split, row split, replicated, untouched."""
+
+    def __init__(self, hidden_dim=16, vocab_size=26):
+        super().__init__()
+        self.embed = torch.nn.Embedding(vocab_size, hidden_dim)  # AutoTP leaves this alone
+        self.norm = torch.nn.LayerNorm(hidden_dim)  # untouched, and not 2-D
+        self.fc1 = torch.nn.Linear(hidden_dim, hidden_dim)  # column
+        self.fc2 = torch.nn.Linear(hidden_dim, hidden_dim)  # row
+        self.lm_head = torch.nn.Linear(hidden_dim, vocab_size)  # vocabulary
+
+    def forward(self, x):
+        h = self.norm(self.embed(x))
+        return self.lm_head(self.fc2(self.fc1(h))).sum()
+
+
+class TestAffineMapCoverage(DistributedTest):
+    """Every parameter the converter can place must carry an affine map.
+
+    A parameter with no map falls back to its name category, which is the behaviour the IR
+    exists to replace. The only parameters allowed to have no map are the ones AutoTP itself
+    refuses to describe, which conversion rejects anyway.
+    """
+
+    world_size = 2
+
+    def test_every_convertible_parameter_has_a_map(self):
+        from deepspeed.checkpoint.constants import (AFFINE_MAP, AFFINE_MAP_PARAMS,
+                                                    AUTOTP_UNSUPPORTED_PARAMETER_PATTERNS,
+                                                    PARAMETER_WITH_ROW_PARALLELISM_PATTERNS, PARAMETER_WITH_SUB_PARAMS,
+                                                    TP_REPLICATED_PARAMETER_PATTERNS, VOCABULARY_PARAMETER_PATTERNS)
+        from deepspeed.module_inject.layers import collect_autotp_universal_checkpoint_info
+
+        config = {
+            "train_micro_batch_size_per_gpu": 1,
+            "zero_allow_untested_optimizer": True,
+            "zero_optimization": {
+                "stage": 1
+            },
+            "tensor_parallel": {
+                "autotp_size": self.world_size,
+                "partition_config": {
+                    "use_default_specs":
+                    False,
+                    "layer_specs": [
+                        {
+                            "patterns": [r".*fc1\.weight$"],
+                            "partition_type": "column"
+                        },
+                        {
+                            "patterns": [r".*fc2\.weight$"],
+                            "partition_type": "row"
+                        },
+                        {
+                            "patterns": [r".*lm_head\.weight$"],
+                            "partition_type": "column",
+                            "gather_output": True
+                        },
+                    ],
+                },
+            },
+        }
+        model = AffineCoverageModel()
+        optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+        engine, _, _, _ = deepspeed.initialize(model=model, optimizer=optimizer, config=config)
+        info = collect_autotp_universal_checkpoint_info(engine.module)
+
+        mapped = set(info.get(AFFINE_MAP, {}).get(AFFINE_MAP_PARAMS, {}))
+        unsupported = set(info.get(AUTOTP_UNSUPPORTED_PARAMETER_PATTERNS, {}))
+
+        categorised = set()
+        for key in (TP_REPLICATED_PARAMETER_PATTERNS, PARAMETER_WITH_ROW_PARALLELISM_PATTERNS,
+                    VOCABULARY_PARAMETER_PATTERNS):
+            categorised.update(info.get(key, []))
+        for entry in info.get(PARAMETER_WITH_SUB_PARAMS, []):
+            categorised.update(entry["patterns"])
+
+        assert categorised, "model exercised no conversion category, so this proves nothing"
+        missing = categorised - mapped - unsupported
+        assert not missing, (f"these parameters are placed by a name category but carry no affine map, "
+                             f"so conversion still depends on the category: {sorted(missing)}")
+        engine.destroy()

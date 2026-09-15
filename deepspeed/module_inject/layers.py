@@ -665,7 +665,7 @@ def collect_autotp_universal_checkpoint_info(model: nn.Module) -> Dict[str, Any]
     restore-time per-parameter details such as `sub_param_sizes` or
     `target_partition_shape`, which stay on the parameter metadata object.
     """
-    from deepspeed.checkpoint.affine import AFFINE_MAP_FORMAT_VERSION
+    from deepspeed.checkpoint.affine import AFFINE_MAP_FORMAT_VERSION, replicated_map
     from deepspeed.checkpoint.constants import (AFFINE_MAP, AFFINE_MAP_PARAMS, AFFINE_MAP_VERSION,
                                                 AUTOTP_UNSUPPORTED_PARAMETER_PATTERNS, ORIGINAL_VOCAB_SIZE,
                                                 PARAMETER_WITH_ROW_PARALLELISM_PATTERNS, PARAMETER_WITH_SUB_PARAMS,
@@ -680,6 +680,8 @@ def collect_autotp_universal_checkpoint_info(model: nn.Module) -> Dict[str, Any]
     parameter_with_sub_params = []
     unsupported_parameter_patterns = {}
     affine_maps = {}
+    untouched_shapes = {}
+    tp_world_size = None
     original_vocab_size = None
 
     # Tied parameters are reachable under several module attributes, but the optimizer -- and
@@ -691,6 +693,8 @@ def collect_autotp_universal_checkpoint_info(model: nn.Module) -> Dict[str, Any]
         marker = getattr(module, "_mark_uc_metadata", None)
         if marker is not None:
             marker()
+        if tp_world_size is None:
+            tp_world_size = getattr(module, 'tp_world_size', None)
 
         for param_name, param in module.named_parameters(recurse=False):
             full_name = f"{module_name}.{param_name}" if module_name else param_name
@@ -704,7 +708,12 @@ def collect_autotp_universal_checkpoint_info(model: nn.Module) -> Dict[str, Any]
                 # ranks. Classify it as TP-replicated; otherwise it falls through to
                 # the converter's default dim-0 concat and is wrongly expanded (e.g.
                 # LayerNorm/RMSNorm weights [H] -> [H * tp_degree]).
+                #
+                # Such a parameter is describable -- one piece held by every rank -- but the
+                # map needs the tp degree, which only the partitioned layers carry. Record
+                # the shape and build the map once the loop has seen one of them.
                 replicated_patterns.append(pattern)
+                untouched_shapes[pattern] = tuple(param.shape)
                 continue
 
             unsupported_reason = conversion_meta.get('unsupported_reason')
@@ -761,6 +770,10 @@ def collect_autotp_universal_checkpoint_info(model: nn.Module) -> Dict[str, Any]
         uc_info[SUB_PARAM_SHARD_WIDTHS] = sub_param_shard_widths
     if original_vocab_size is not None:
         uc_info[ORIGINAL_VOCAB_SIZE] = original_vocab_size
+    if tp_world_size:
+        for pattern, shape in untouched_shapes.items():
+            affine_maps[pattern] = replicated_map(shape, tp_world_size).to_dict()
+
     if affine_maps:
         # Published alongside the pattern lists rather than instead of them, so a converter
         # that predates the map simply does not see the key and takes the categories.
