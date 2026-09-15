@@ -150,6 +150,24 @@ from deepspeed.compile.init_tp import init_autotp
 
 MEMORY_OPT_ALLREDUCE_SIZE = 500000000
 
+# torch reports FP8/MX/NVFP4 as floating point, but casting them discards the quantized
+# encoding, and NVFP4 has no copy_ at all.
+CASTABLE_DTYPES = (torch.float16, torch.bfloat16, torch.float32, torch.float64)
+
+
+def _broadcast_tensor(tensor, src, group):
+    """Broadcast ``tensor``, sending narrow floating dtypes as a uint8 view.
+
+    Gloo rejects FP8/MX/NVFP4 (``Invalid scalar type``). NCCL rejects e8m0.
+    The uint8 view shares storage, so rank 0's replica still wins without the
+    backend knowing the storage dtype.
+    """
+    if tensor.dtype in CASTABLE_DTYPES or not tensor.is_floating_point():
+        dist.broadcast(tensor, src, group=group)
+        return
+    dist.broadcast(tensor.view(torch.uint8), src, group=group)
+
+
 DeepSpeedOptimizerCallable = \
     Callable[[Union[Iterable[Parameter], Dict[str, Iterable]]], Optimizer]
 DeepSpeedSchedulerCallable = Callable[[Optimizer], _LRScheduler]
@@ -1820,13 +1838,13 @@ class DeepSpeedEngine(Module):
         # the per-parameter cast applies only in the non-zero-init path.
         if param_dtype is not None and not is_zero_init_model:
             for p in self.module.parameters(recurse=True):
-                if p.is_floating_point() and p.dtype != param_dtype:
+                if p.dtype in CASTABLE_DTYPES and p.dtype != param_dtype:
                     p.data = p.data.to(param_dtype)
 
         # Buffers are never ZeRO-partitioned.
         if buffer_dtype is not None:
             for b in self.module.buffers(recurse=True):
-                if b.is_floating_point() and b.dtype != buffer_dtype:
+                if b.dtype in CASTABLE_DTYPES and b.dtype != buffer_dtype:
                     b.data = b.data.to(buffer_dtype)
 
     def _optimizer_has_ckpt_event_prologue(self):
@@ -2008,12 +2026,11 @@ class DeepSpeedEngine(Module):
             # Broadcast the model for different parameters
             if is_moe_param(p):
                 if torch.is_tensor(p) and is_replicated(p):
-                    dist.broadcast(p.data,
-                                   groups._get_expert_broadcast_src_rank(p.group_name),
-                                   group=self.expert_data_parallel_group[p.group_name])
+                    _broadcast_tensor(p.data, groups._get_expert_broadcast_src_rank(p.group_name),
+                                      self.expert_data_parallel_group[p.group_name])
             else:
                 if torch.is_tensor(p) and is_replicated(p):
-                    dist.broadcast(p.data, groups._get_broadcast_src_rank(), group=self.seq_data_parallel_group)
+                    _broadcast_tensor(p.data, groups._get_broadcast_src_rank(), self.seq_data_parallel_group)
 
     @staticmethod
     def __check_params(model: Module, dtype: torch.dtype) -> None:

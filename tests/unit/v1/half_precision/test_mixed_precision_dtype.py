@@ -9,6 +9,7 @@ import torch
 import pytest
 
 import deepspeed
+import deepspeed.comm as dist
 from deepspeed.runtime.engine import DeepSpeedEngine
 from deepspeed.accelerator import get_accelerator
 from unit.common import DistributedTest
@@ -18,6 +19,26 @@ def _module_with_fp32_buffer(hidden_dim=8):
     """Linear layer plus an fp32 buffer that mimics the rotary inv_freq."""
     module = torch.nn.Sequential(torch.nn.Linear(hidden_dim, hidden_dim))
     module.register_buffer("inv_freq", torch.ones(hidden_dim, dtype=torch.float32))
+    return module
+
+
+NARROW_DTYPES = [
+    getattr(torch, name) for name in ("float8_e4m3fn", "float8_e5m2", "float8_e4m3fnuz", "float8_e5m2fnuz")
+    if hasattr(torch, name)
+]
+
+HELPER_ONLY_DTYPES = [getattr(torch, name) for name in ("float8_e8m0fnu", "float4_e2m1fn_x2") if hasattr(torch, name)]
+
+
+def _module_with_narrow_param(dtype, hidden_dim=8):
+    """Linear layer plus a submodule holding a frozen quantized weight and its scale."""
+    quantized = torch.nn.Module()
+    quantized.weight = torch.nn.Parameter(torch.zeros(hidden_dim, hidden_dim, dtype=dtype), requires_grad=False)
+    quantized.register_buffer("scale", torch.zeros(hidden_dim, dtype=dtype))
+
+    module = torch.nn.Module()
+    module.linear = torch.nn.Linear(hidden_dim, hidden_dim)
+    module.quantized = quantized
     return module
 
 
@@ -94,6 +115,14 @@ class TestCastModuleMixedPrecision:
         assert all(p.dtype == torch.float32 for p in module.parameters())
         assert module.inv_freq.dtype == torch.bfloat16
 
+    @pytest.mark.parametrize("dtype", HELPER_ONLY_DTYPES, ids=lambda d: str(d).rsplit(".", 1)[-1])
+    def test_narrow_dtypes_preserved(self, dtype):
+        module = _module_with_narrow_param(dtype)
+        DeepSpeedEngine._cast_module_mixed_precision(self._engine(module), torch.bfloat16, torch.bfloat16, False)
+        assert module.quantized.weight.dtype == dtype
+        assert module.quantized.scale.dtype == dtype
+        assert module.linear.weight.dtype == torch.bfloat16
+
 
 @pytest.mark.skipif(torch.bfloat16 not in get_accelerator().supported_dtypes(), reason="bf16 not supported")
 @pytest.mark.parametrize("zero_stage", [0, 3])
@@ -144,3 +173,53 @@ class TestMixedPrecisionDtypeEndToEnd(DistributedTest):
                                                model=model,
                                                model_parameters=model.parameters())
         assert engine.module.inv_freq.dtype == torch.bfloat16
+
+    @pytest.mark.parametrize("dtype", NARROW_DTYPES, ids=lambda d: str(d).rsplit(".", 1)[-1])
+    def test_narrow_dtypes_preserved(self, zero_stage, dtype):
+        model = _module_with_narrow_param(dtype, 1024)
+        engine, _, _, _ = deepspeed.initialize(config=self._config(zero_stage),
+                                               model=model,
+                                               model_parameters=[p for p in model.parameters() if p.requires_grad])
+        assert engine.module.quantized.weight.dtype == dtype
+        assert engine.module.quantized.scale.dtype == dtype
+        assert engine.module.linear.weight.dtype == torch.bfloat16
+
+
+@pytest.mark.skipif(torch.bfloat16 not in get_accelerator().supported_dtypes(), reason="bf16 not supported")
+class TestNarrowDtypeBroadcast(DistributedTest):
+    world_size = 2
+
+    def _config(self):
+        return {
+            "train_batch_size": 2,
+            "train_micro_batch_size_per_gpu": 1,
+            "optimizer": {
+                "type": "Adam",
+                "params": {
+                    "lr": 1e-3,
+                    "torch_adam": True
+                }
+            },
+            "bf16": {
+                "enabled": True
+            },
+            "zero_optimization": {
+                "stage": 0
+            }
+        }
+
+    @pytest.mark.parametrize("dtype", NARROW_DTYPES, ids=lambda d: str(d).rsplit(".", 1)[-1])
+    def test_initialize_broadcasts_narrow_params(self, dtype):
+        """Rank 0's frozen FP8 payload must replace the other ranks' copy.
+
+        Skipping the broadcast would leave ranks inconsistent; a uint8 view is
+        required because Gloo (and NCCL for e8m0) cannot send the storage dtype.
+        """
+        model = _module_with_narrow_param(dtype, 8)
+        payload = model.quantized.weight.data.view(torch.uint8)
+        payload.fill_(9 if dist.get_rank() == 0 else 0)
+        engine, _, _, _ = deepspeed.initialize(config=self._config(),
+                                               model=model,
+                                               model_parameters=[p for p in model.parameters() if p.requires_grad])
+        assert engine.module.quantized.weight.dtype == dtype
+        assert engine.module.quantized.weight.data.view(torch.uint8).eq(9).all()
