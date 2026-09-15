@@ -136,9 +136,12 @@ def compare_sp_loss(self, config, sp_size, iterations=3):
     # AutoSP's graph pass can therefore find F.scaled_dot_product_attention nodes.
     def _sdpa_inner(q, k, v, attn_mask=None, dropout_p=0.0, is_causal=True, scale=None):
         # DistributedAttention delivers tensors in [b, s, n, h]; SDPA wants [b, n, s, h].
+        if attn_mask is not None and attn_mask.ndim >= 3:
+            attn_mask = torch.ops.autosp.all_gather_sequence.default(attn_mask, -2)
         out = F.scaled_dot_product_attention(q.permute(0, 2, 1, 3),
                                              k.permute(0, 2, 1, 3),
                                              v.permute(0, 2, 1, 3),
+                                             attn_mask=attn_mask,
                                              dropout_p=dropout_p,
                                              is_causal=is_causal,
                                              scale=scale)
@@ -158,7 +161,14 @@ def compare_sp_loss(self, config, sp_size, iterations=3):
         q = query_states.transpose(1, 2).contiguous()
         k = key_states.transpose(1, 2).contiguous()
         v = value_states.transpose(1, 2).contiguous()
-        out = _dist_attn(q, k, v, batch_dim_idx=0, dropout_p=dropout, is_causal=is_causal, scale=scaling)
+        out = _dist_attn(q,
+                         k,
+                         v,
+                         batch_dim_idx=0,
+                         attn_mask=attention_mask,
+                         dropout_p=dropout,
+                         is_causal=is_causal,
+                         scale=scaling)
         return out, None
 
     ALL_ATTENTION_FUNCTIONS["ulyssess"] = _ulysses_attn_forward
@@ -187,26 +197,35 @@ def compare_sp_loss(self, config, sp_size, iterations=3):
     for i in range(iterations):
         torch.manual_seed(42 + i)
         full_ids = torch.randint(0, vocab_size, (1, seq_length), device=device)
+        full_mask = torch.ones_like(full_ids)
+        full_mask[:, -4:] = 0
+        full_labels = full_ids.masked_fill(full_mask == 0, -100)
+        shifted_labels = F.pad(full_labels, (0, 1), value=-100)[..., 1:]
 
         # Ulysses: each rank processes its own shard.
         shard_ids = full_ids[:, sp_rank * chunk:(sp_rank + 1) * chunk]
+        shard_labels = full_labels[:, sp_rank * chunk:(sp_rank + 1) * chunk]
+        shard_shifted_labels = shifted_labels[:, sp_rank * chunk:(sp_rank + 1) * chunk]
         shard_pos = torch.arange(sp_rank * chunk, (sp_rank + 1) * chunk, device=device).unsqueeze(0)
-        shard_mask = torch.ones(1, chunk, device=device, dtype=torch.long)
+        shard_mask = full_mask
         ul_out = ulysses_engine(input_ids=shard_ids,
-                                labels=shard_ids,
+                                labels=shard_labels,
+                                shift_labels=shard_shifted_labels,
                                 position_ids=shard_pos,
                                 attention_mask=shard_mask)
-        # Average per-shard losses across SP ranks to get the full-sequence loss.
-        ul_loss = ul_out.loss.clone()
+        local_valid_tokens = (shard_shifted_labels != -100).sum()
+        total_valid_tokens = local_valid_tokens.clone()
+        dist.all_reduce(total_valid_tokens, group=sp_group)
+        weighted_ul_loss = ul_out.loss * local_valid_tokens / total_valid_tokens.clamp_min(1)
+        ul_loss = weighted_ul_loss.detach().clone()
         dist.all_reduce(ul_loss, group=sp_group)
-        ul_loss = ul_loss / sp_size
 
         # AutoSP: full sequence.  dynamic=True makes all shapes symbolic, so mark_dynamic
         # is not needed; only the tag attributes that the autosp pass uses are set here.
         autosp_ids = full_ids.clone()
-        autosp_lbl = autosp_ids.clone()
+        autosp_lbl = full_labels.clone()
         autosp_pos = torch.arange(seq_length, device=device).unsqueeze(0)
-        autosp_msk = torch.ones(1, seq_length, device=device, dtype=torch.long)
+        autosp_msk = full_mask.clone()
         autosp_ids.tag = autosp_constants.AUTOSP_INPUT_ID_KEY
         autosp_lbl.tag = autosp_constants.AUTOSP_LABEL_ID_KEY
         autosp_pos.tag = autosp_constants.AUTOSP_POSITION_ID_KEY
@@ -216,7 +235,7 @@ def compare_sp_loss(self, config, sp_size, iterations=3):
                                    attention_mask=autosp_msk)
         autosp_loss = autosp_out.loss
 
-        ulysses_engine.backward(ul_out.loss)
+        ulysses_engine.backward(weighted_ul_loss)
         ulysses_engine.step()
         autosp_engine.backward(autosp_loss)
         autosp_engine.step()
