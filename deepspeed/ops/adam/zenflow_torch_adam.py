@@ -42,6 +42,13 @@ if not _ZENFLOW_AVAILABLE:
 
 class ZenFlowSelectiveAdamW(torch.optim.AdamW):
 
+    def __setstate__(self, state):
+        super().__setstate__(state)
+        for param_state in self.state.values():
+            step = param_state.get("step")
+            if torch.is_tensor(step) and step.dtype in (torch.float16, torch.bfloat16):
+                param_state["step"] = step.float()
+
     def __init__(self, *args, offload=False, bucket_size=5e8, **kwargs):
         if not _ZENFLOW_AVAILABLE:
             raise RuntimeError("ZenFlow features are not available with PyTorch < 2.0. "
@@ -115,7 +122,7 @@ class ZenFlowSelectiveAdamW(torch.optim.AdamW):
 
                     state = self.state.setdefault(param, {})
                     if len(state) == 0:
-                        state["step"] = torch.zeros((), dtype=param.dtype, device=selected_param.device)
+                        state["step"] = torch.zeros((), dtype=torch.float32, device=selected_param.device)
                         state["exp_avg"] = torch.zeros_like(selected_param)
                         state["exp_avg_sq"] = torch.zeros_like(selected_param)
                         if amsgrad:
@@ -218,7 +225,7 @@ class ZenFlowSelectiveAdamW(torch.optim.AdamW):
 
                     state = self.state.setdefault(param, {})
                     if len(state) == 0:
-                        state["step"] = torch.zeros((), dtype=param.dtype, device=selected_param.device)
+                        state["step"] = torch.zeros((), dtype=torch.float32, device=selected_param.device)
                         if amsgrad:
                             state["max_exp_avg_sq"] = torch.zeros_like(selected_param)
                         if not self.offload:
@@ -268,6 +275,13 @@ class ZenFlowSelectiveAdamW(torch.optim.AdamW):
 
 
 class ZenFlowSelectiveAdamW_stage3(torch.optim.AdamW):
+
+    def __setstate__(self, state):
+        super().__setstate__(state)
+        for param_state in self.state.values():
+            step = param_state.get("step")
+            if torch.is_tensor(step) and step.dtype in (torch.float16, torch.bfloat16):
+                param_state["step"] = step.float()
 
     def __init__(self, *args, offload=False, bucket_size=5e8, **kwargs):
         super(ZenFlowSelectiveAdamW_stage3, self).__init__(*args, **kwargs)
@@ -346,7 +360,7 @@ class ZenFlowSelectiveAdamW_stage3(torch.optim.AdamW):
 
                     state = self.state.setdefault(param, {})
                     if len(state) == 0:
-                        state["step"] = torch.zeros((), dtype=param.dtype, device=selected_param.device)
+                        state["step"] = torch.zeros((), dtype=torch.float32, device=selected_param.device)
                         state["exp_avg"] = torch.zeros_like(selected_param)
                         state["exp_avg_sq"] = torch.zeros_like(selected_param)
                         if amsgrad:
@@ -463,7 +477,7 @@ class ZenFlowSelectiveAdamW_stage3(torch.optim.AdamW):
 
         state = self.state.setdefault(param, {})
         if len(state) == 0:
-            state["step"] = torch.zeros((), dtype=param.dtype, device=compute_device)
+            state["step"] = torch.zeros((), dtype=torch.float32, device=compute_device)
             if amsgrad:
                 state["max_exp_avg_sq"] = torch.zeros_like(selected_param)
             if not self.offload:
@@ -568,7 +582,7 @@ class ZenFlowSelectiveAdamW_stage3(torch.optim.AdamW):
 
                     state = self.state.setdefault(param, {})
                     if len(state) == 0:
-                        state["step"] = torch.zeros((), dtype=param.dtype, device=selected_param.device)
+                        state["step"] = torch.zeros((), dtype=torch.float32, device=selected_param.device)
                         if amsgrad:
                             state["max_exp_avg_sq"] = torch.zeros_like(selected_param)
                         if not self.offload:
