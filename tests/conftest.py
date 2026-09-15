@@ -18,7 +18,8 @@ os.environ['PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION'] = 'python'
 # allow having multiple repository checkouts and not needing to remember to rerun
 # 'pip install -e .[dev]' when switching between checkouts and running tests.
 git_repo_path = abspath(dirname(dirname(__file__)))
-sys.path.insert(1, git_repo_path)
+if os.environ.get('DS_TEST_USE_INSTALLED_DEEPSPEED', '0') != '1':
+    sys.path.insert(1, git_repo_path)
 
 
 def pytest_configure(config):
