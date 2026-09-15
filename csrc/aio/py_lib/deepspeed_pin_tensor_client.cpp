@@ -16,8 +16,8 @@ RTLD_GLOBAL/dlsym on POSIX, or by scanning loaded modules on Windows.
 #if defined(_WIN32)
 #define NOMINMAX
 #define PSAPI_VERSION 2
-#include <psapi.h>
 #include <windows.h>
+#include <psapi.h>
 #include <vector>
 #else
 #include <dlfcn.h>
