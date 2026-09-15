@@ -823,6 +823,21 @@ def empty_cache():
     get_accelerator().reset_peak_memory_stats()
 
 
+def bind_flat_views(tensors, views):
+    """Point each tensor at its view of a flat buffer, skipping zero-element ones.
+
+    torch's ``unflatten_dense_tensors`` special-cases ``numel == 0`` and returns a
+    freshly allocated 1-D ``zeros({0})`` rather than a view of the requested shape,
+    so assigning it would replace e.g. a ``(0, 8)`` parameter with a ``(0,)`` one and
+    break the owning module's own forward. There is no slice of the flat buffer for
+    such a tensor to point at either, so nothing is left unbound by skipping it.
+    """
+    for tensor, view in zip(tensors, views):
+        if tensor.numel() == 0:
+            continue
+        tensor.data = view.data
+
+
 def see_memory_usage(message, force=False):
     if not force:
         return

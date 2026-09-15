@@ -10,7 +10,8 @@ This file is adapted from FP16_Optimizer in NVIDIA/apex
 import torch
 from torch._utils import _flatten_dense_tensors, _unflatten_dense_tensors
 from deepspeed.runtime.base_optimizer import DeepSpeedOptimizer
-from deepspeed.runtime.utils import get_global_norm, get_flattened_grad_norm, CheckOverflow, get_weight_norm, get_norm_with_moe_layers, is_model_parallel_parameter
+from deepspeed.runtime.utils import (bind_flat_views, get_global_norm, get_flattened_grad_norm, CheckOverflow,
+                                     get_weight_norm, get_norm_with_moe_layers, is_model_parallel_parameter)
 from deepspeed.runtime.fp16.loss_scaler import LossScaleConfig, LossScaleProfile
 from deepspeed.utils import logger, log_dist
 from deepspeed.utils.torch import required_torch_version
@@ -92,8 +93,7 @@ class FP16_Optimizer(DeepSpeedOptimizer):
             self.fp16_groups_flat.append(_flatten_dense_tensors([p.clone().detach() for p in self.fp16_groups[i]]))
             # set model fp16 weight to slices of flattened buffer
             updated_params = _unflatten_dense_tensors(self.fp16_groups_flat[i], self.fp16_groups[i])
-            for p, q in zip(self.fp16_groups[i], updated_params):
-                p.data = q.data
+            bind_flat_views(self.fp16_groups[i], updated_params)
             # init master weight, flattened
             self.fp32_groups_flat.append(self.fp16_groups_flat[i].clone().float().detach())
             # modify optimizer of have flat master weight
@@ -187,8 +187,7 @@ class FP16_Optimizer(DeepSpeedOptimizer):
         # TODO: we probably don't need this? just to be safe
         for i in range(len(norm_groups)):
             updated_params = _unflatten_dense_tensors(self.fp16_groups_flat[i], self.fp16_groups[i])
-            for p, q in zip(self.fp16_groups[i], updated_params):
-                p.data = q.data
+            bind_flat_views(self.fp16_groups[i], updated_params)
         return self.overflow
 
     def set_lr(self, lr):
@@ -354,6 +353,11 @@ class FP16_Optimizer(DeepSpeedOptimizer):
         for i in range(len(self.fp16_groups)):
             updated_params = _unflatten_dense_tensors(self.fp32_groups_flat[i], self.fp16_groups[i])
             for p, q in zip(self.fp16_groups[i], updated_params):
+                if p.numel() == 0:
+                    # See bind_flat_views: `q` is a 1-D zeros({0}) here, not a view of
+                    # `p`'s shape, so this copy would raise on the shape mismatch. There
+                    # are no elements to copy either way.
+                    continue
                 p.data.copy_(q.data)
         self.has_executed_step = True
         if self.timers:
