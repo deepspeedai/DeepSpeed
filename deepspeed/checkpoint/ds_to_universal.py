@@ -252,7 +252,9 @@ def _merge_zero_shards(param_base_path, state, tp_degree, slice_shapes=None):
             empty_tp_indices.append((tp_index, len(slices)))
             continue
 
-        pattern = re.compile(f"{prefix_path}\\.([0-9]+)")
+        # prefix_path is a filesystem path (os.path.join), so on Windows it contains backslashes,
+        # which regex would otherwise treat as escape sequences; re.escape neutralizes them.
+        pattern = re.compile(f"{re.escape(prefix_path)}\\.([0-9]+)")
         dp_indices = set()
         for p in paths:
             m = pattern.match(p)

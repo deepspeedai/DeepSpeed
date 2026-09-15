@@ -370,22 +370,28 @@ class FlopsProfiler(object):
         if self.ds_engine and self.ds_engine.wall_clock_breakdown():
             fwd_latency = self.ds_engine.timers(FORWARD_GLOBAL_TIMER).elapsed(False) / 1000.0
         print(line_fmt.format('fwd latency: ', duration_to_string(fwd_latency)))
+        # fwd_latency can measure as exactly 0 for tiny models on a high-resolution timer, so guard
+        # the FLOPS-per-second division instead of crashing with a ZeroDivisionError.
+        fwd_flops_per_second = total_flops / fwd_latency if fwd_latency > 0 else 0
         print(
             line_fmt.format('fwd FLOPS per GPU = fwd flops per GPU / fwd latency: ',
-                            flops_to_string(total_flops / fwd_latency)))
+                            flops_to_string(fwd_flops_per_second)))
 
         if self.ds_engine and self.ds_engine.wall_clock_breakdown():
             bwd_factor = 2 + self.recompute_fwd_factor
             bwd_latency = self.ds_engine.timers(BACKWARD_GLOBAL_TIMER).elapsed(False) / 1000.0
             step_latency = self.ds_engine.timers(STEP_GLOBAL_TIMER).elapsed(False) / 1000.0
             print(line_fmt.format('bwd latency: ', duration_to_string(bwd_latency)))
+            bwd_flops_per_second = bwd_factor * total_flops / bwd_latency if bwd_latency > 0 else 0
             print(
                 line_fmt.format(f'bwd FLOPS per GPU = {bwd_factor:g} * fwd flops per GPU / bwd latency: ',
-                                flops_to_string(bwd_factor * total_flops / bwd_latency)))
+                                flops_to_string(bwd_flops_per_second)))
+            fwd_bwd_latency = fwd_latency + bwd_latency
+            fwd_bwd_flops_per_second = (bwd_factor + 1) * total_flops / fwd_bwd_latency if fwd_bwd_latency > 0 else 0
             print(
                 line_fmt.format(
                     f'fwd+bwd FLOPS per GPU = {bwd_factor + 1:g} * fwd flops per GPU / (fwd+bwd latency): ',
-                    flops_to_string((bwd_factor + 1) * total_flops / (fwd_latency + bwd_latency))))
+                    flops_to_string(fwd_bwd_flops_per_second)))
 
             print(line_fmt.format('step latency: ', duration_to_string(step_latency)))
 
