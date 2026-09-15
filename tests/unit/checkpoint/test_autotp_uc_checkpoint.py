@@ -1757,8 +1757,9 @@ class TestAffineMapProducer(DistributedTest):
             r"^fc2\.bias$": replicated_map((16, ), self.world_size).to_dict(),
         }
 
+        assert set(maps) == set(expected), (f"producer emitted maps for {sorted(maps)}, expected exactly "
+                                            f"{sorted(expected)}")
         for pattern, want in expected.items():
-            assert pattern in maps, f"producer emitted no affine map for {pattern}"
             assert maps[pattern] == want, (f"emitted map for {pattern} differs from the layout the resume "
                                            f"fixture verifies:\n  emitted  {maps[pattern]}\n  expected {want}")
         engine.destroy()

@@ -89,7 +89,7 @@ def _build_param_uc_conversion_meta(*,
     This is the only schema that should flow into model-level
     `UNIVERSAL_CHECKPOINT_INFO` via `collect_autotp_universal_checkpoint_info()`.
     """
-    return {
+    meta = {
         'partition_type': partition_type,
         'partition_dim': partition_dim,
         'sub_param_shape': _normalize_uc_shape(sub_param_shape),
@@ -97,9 +97,13 @@ def _build_param_uc_conversion_meta(*,
         'original_shape': _normalize_uc_shape(original_shape),
         'is_bias': is_bias,
         'replicated': replicated,
-        'affine_map': affine_map,
         'unsupported_reason': unsupported_reason,
     }
+    if affine_map is not None:
+        # Only present for a layout that can be described, so the schema an existing
+        # layer publishes is unchanged. Stored as plain scalars like every other field.
+        meta['affine_map'] = affine_map.to_dict()
+    return meta
 
 
 def _build_param_uc_restore_meta(*,
@@ -710,7 +714,7 @@ def collect_autotp_universal_checkpoint_info(model: nn.Module) -> Dict[str, Any]
 
             affine_map = conversion_meta.get('affine_map')
             if affine_map is not None:
-                affine_maps[pattern] = affine_map.to_dict()
+                affine_maps[pattern] = affine_map
 
             if conversion_meta.get('replicated'):
                 replicated_patterns.append(pattern)
