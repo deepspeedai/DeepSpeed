@@ -53,6 +53,16 @@ class BF16_Optimizer(ZeROOptimizer):
         see_memory_usage('begin bf16_optimizer', force=True)
         self.timers = timers
         self.optimizer = init_optimizer
+        from deepspeed.runtime.zero.muon.muon_optimizer import MuonWithAuxAdam
+        self._uses_muon = isinstance(init_optimizer, MuonWithAuxAdam)
+        if self._uses_muon:
+            if grad_acc_dtype != torch.float32 or graph_harvesting or has_moe_layers or mpu is not None:
+                raise ValueError("BF16 Muon currently requires FP32 accumulation, dense DP and eager execution")
+            for group in init_optimizer.param_groups:
+                if group.get('use_muon', False):
+                    for param in group['params']:
+                        if param.ndim != 2 or getattr(param, 'is_expert_group', False):
+                            raise ValueError("BF16 Muon currently supports dense two-dimensional matrices only")
         self.param_names = param_names
         self.using_real_optimizer = not isinstance(self.optimizer, DummyOptim)
 
@@ -332,7 +342,10 @@ class BF16_Optimizer(ZeROOptimizer):
             param_partition.grad = grad_partition.to(
                 param_partition.dtype) if grad_partition.dtype != param_partition.dtype else grad_partition
 
+        staged_muon_momenta = self._prepare_muon_updates() if self._uses_muon else []
         self.optimizer.step()
+        for committed, staged in staged_muon_momenta:
+            committed.copy_(staged)
 
         if self.grad_acc_dtype is not torch.float32:
             for param_partition in self.fp32_groups_flat_partition:
@@ -344,6 +357,60 @@ class BF16_Optimizer(ZeROOptimizer):
         self.update_lp_params()
 
         self.clear_hp_grads()
+
+    @torch.no_grad()
+    def _prepare_muon_updates(self):
+        """Orthogonalize whole matrices after reduction and global clipping.
+
+        Persistent momentum has the same partition layout as the master weights.
+        One group's gathered momentum is temporary workspace; it is released
+        before gathering the next group. Only local intersections are committed.
+        """
+        from deepspeed.runtime.zero.muon.original_muon import muon_update
+
+        staged_momenta = []
+        for group_index, group in enumerate(self.optimizer.param_groups):
+            if not group.get('use_muon', False):
+                continue
+            partition = self.fp32_groups_flat_partition[group_index]
+            state = self.optimizer.state[partition]
+            if 'momentum_buffer' not in state:
+                state['momentum_buffer'] = torch.zeros_like(partition)
+            committed = state['momentum_buffer']
+            process_group = self.real_dp_process_group[group_index]
+            world_size = dist.get_world_size(group=process_group)
+            rank = dist.get_rank(group=process_group)
+            partition_size = partition.numel()
+            gathered = torch.empty(world_size * partition_size, dtype=committed.dtype, device=committed.device)
+            if world_size == 1:
+                gathered.copy_(committed)
+            else:
+                dist.all_gather_into_tensor(gathered, committed.contiguous(), group=process_group)
+            staged = committed.clone()
+            start, end = rank * partition_size, (rank + 1) * partition_size
+            offset = 0
+            for param, gradient in zip(self.bf16_groups[group_index], self.fp32_groups_gradients[group_index]):
+                count = param.numel()
+                left, right = max(offset, start), min(offset + count, end)
+                # All ranks gather in the same order, but only owners need NS.
+                if left < right:
+                    momentum = gathered.narrow(0, offset, count).view(param.shape)
+                    update = muon_update(gradient.view(param.shape).clone(),
+                                         momentum,
+                                         beta=group['momentum'],
+                                         ns_method=group.get('ns_method', 'gram'))
+                    local_offset, matrix_offset, length = left - start, left - offset, right - left
+                    partition.grad.narrow(0, local_offset,
+                                          length).copy_(update.reshape(-1).narrow(0, matrix_offset, length))
+                    staged.narrow(0, local_offset, length).copy_(momentum.reshape(-1).narrow(0, matrix_offset, length))
+                offset += count
+            # Alignment padding must never become optimizer state or an update.
+            padding_start = max(0, min(partition_size, offset - start))
+            partition.grad[padding_start:].zero_()
+            staged[padding_start:].zero_()
+            staged_momenta.append((committed, staged))
+            del gathered
+        return staged_momenta
 
     def backward_prologue(self):
         self.clear_lp_grads()
