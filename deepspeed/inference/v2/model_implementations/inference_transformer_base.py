@@ -210,8 +210,7 @@ class DSTransformerModelBase(DSInferenceModelBase):
         nothing else, so the scaling parameters have nowhere to go. Returning the base
         alone would run the model with unscaled positions and no error.
         """
-        scaled = sorted(rope_type for rope_type in _rope_types(self._config)
-                        if rope_type not in _UNSCALED_ROPE_TYPES)
+        scaled = sorted(rope_type for rope_type in _rope_types(self._config) if rope_type not in _UNSCALED_ROPE_TYPES)
         if scaled:
             raise ValueError(f"Inference V2 cannot serve rope_type={scaled[0]!r} "
                              f"({type(self._config).__name__}). The rotary embedding is built from "
