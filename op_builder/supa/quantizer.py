@@ -92,19 +92,6 @@ class SUPAQuantizer:
         return SUPAQuantizer._op('quantized_reduction')(input_vals, input_scales, in_groups, out_groups, num_bits,
                                                         int(quant_type), devices_per_node)
 
-    @staticmethod
-    def loco_swizzle_quant(input_vals, error_feedback, err_beta, groups, num_bits, quant_type, pipeline_size, nodes,
-                           devices_per_node):
-        return SUPAQuantizer._op('loco_swizzle_quant')(input_vals, error_feedback, err_beta, groups, num_bits,
-                                                       int(quant_type), pipeline_size, nodes, devices_per_node)
-
-    @staticmethod
-    def loco_quantized_reduction(input_vals, input_scales, error_feedback, err_beta, in_groups, out_groups, num_bits,
-                                 quant_type, devices_per_node):
-        return SUPAQuantizer._op('loco_quantized_reduction')(input_vals, input_scales,
-                                                             error_feedback, err_beta, in_groups, out_groups, num_bits,
-                                                             int(quant_type), devices_per_node)
-
 
 class QuantizerBuilder(SUPAOpBuilder):
     BUILD_VAR = "DS_BUILD_QUANTIZER"
