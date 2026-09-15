@@ -387,20 +387,77 @@ def clip_grad_norm_(parameters, max_norm, norm_type=2, mpu=None):
     """
     if isinstance(parameters, torch.Tensor):
         parameters = [parameters]
-    parameters = list(filter(lambda p: p.grad is not None, parameters))
+    parameters = list(parameters)
     norm_type = float(norm_type)
+
+    # Expert parameters are not replicated across the data parallel group, so the
+    # rank-averaging below cannot reconstruct a global norm from them: each rank's
+    # norm covers a different set of experts. Combine those the way the bf16 and
+    # fp16 optimizers already do, over the expert parallel group.
+    #
+    # Read ownership from the parameters, before dropping the ones with no gradient.
+    # The two branches below issue different collectives, so this decision has to
+    # come out the same on every rank -- and a rank whose experts received no tokens
+    # this step has expert parameters but no expert gradients.
+    # The registry of expert groups is built identically on every rank, so an empty one
+    # means no MoE is configured anywhere and the choice is already made: take the
+    # original path, with no collective and no host sync. This is a per-step call from
+    # `_take_model_step`, so the common case must not pay for the MoE one.
+    registry = sorted(getattr(groups, "_EXPERT_PARALLEL_GROUP", None) or {})
+    expert_group_names = []
+    if registry:
+        # A rank can legitimately own no expert at all -- under pipeline parallelism, a
+        # stage holding only dense layers -- so reading ownership locally cannot guarantee
+        # the same choice everywhere. One scalar settles it, and it has to be reduced over
+        # the world rather than the data parallel group: under pipeline parallelism that
+        # group is one stage wide (`PipelineParallelGrid.get_data_parallel_group`), while
+        # the expert norm below reduces over the pipeline group, which spans stages. A
+        # per-stage vote let an expert stage and a dense stage issue different collectives
+        # on that group. The second slot carries "an expert here has no group name", which
+        # has no expert parallel group to reduce over, so such a call stays on the
+        # original path rather than guessing which group the parameter belongs to.
+        vote = torch.tensor(
+            [
+                float(any(is_moe_param(p) and getattr(p, "group_name", None) is not None for p in parameters)),
+                float(any(is_moe_param(p) and getattr(p, "group_name", None) is None for p in parameters)),
+            ],
+            device=get_accelerator().current_device_name(),
+            dtype=torch.float)
+        dist.all_reduce(vote, group=groups._clone_world_group())
+        if vote[0].item() > 0 and vote[1].item() == 0:
+            expert_group_names = registry
+
+    parameters = list(filter(lambda p: p.grad is not None, parameters))
+
+    expert_tensors: Dict[str, List[torch.Tensor]] = {}
+    if expert_group_names:
+        for p in parameters:
+            if is_moe_param(p):
+                expert_tensors.setdefault(p.group_name, []).append(p.grad.data)
+        # Every rank has to reduce over every group, whether or not its own experts
+        # were used this step; a zero contributes nothing to the sum of p-th powers
+        # and nothing to a max over absolute values.
+        zero = torch.zeros(1, device=get_accelerator().current_device_name())
+        for group_name in expert_group_names:
+            expert_tensors.setdefault(group_name, [zero])
+
+    norm_parameters = [p for p in parameters if not is_moe_param(p)] if expert_tensors else parameters
+
     all_norms = []
     if norm_type == inf:
-        for p in parameters:
+        for p in norm_parameters:
             all_norms.append(p.grad.data.abs().max().float())
-        total_norm = torch.stack(all_norms).max()
+        # Everything may be an expert, leaving nothing replicated to take a max over.
+        # Zero is the identity here: these are absolute values.
+        total_norm = torch.stack(all_norms).max() if all_norms \
+            else torch.zeros((), device=get_accelerator().current_device_name())
         total_norm = total_norm.to(get_accelerator().current_device_name())
         # Take max across all GPUs.
         if mpu is not None:
             dist.all_reduce(total_norm, op=dist.ReduceOp.MAX, group=mpu.get_model_parallel_group())
     else:
         total_norm = 0
-        for p in parameters:
+        for p in norm_parameters:
             if mpu is not None:
                 if (mpu.get_model_parallel_rank() == 0) or is_model_parallel_parameter(p):
                     param_norm = p.grad.data.detach().float().norm(norm_type)
@@ -421,14 +478,29 @@ def clip_grad_norm_(parameters, max_norm, norm_type=2, mpu=None):
             dist.all_reduce(total_norm, op=dist.ReduceOp.SUM, group=mpu.get_model_parallel_group())
         total_norm = total_norm.pow(1. / norm_type)
 
-    # Need to average total_norm across different GPUs due to the presence of moe params
-    pg = groups._get_data_parallel_group()
-    scaled_norm = total_norm * 1.0 / float(dist.get_world_size(group=pg))
-    scaled_norm_tensor = scaled_norm
+    if expert_tensors:
+        # `total_norm` now covers only the replicated parameters, so it is already the
+        # same on every rank. Fold the experts in over their own group, counting each
+        # expert once, rather than averaging norms that describe different parameters.
+        moe_norm = get_norm_with_moe_layers(total_norm,
+                                            mpu=mpu,
+                                            expert_tensors=expert_tensors,
+                                            norm_type=norm_type)
+        # That helper reports a non-finite norm as -1. Left as-is it would make
+        # `clip_coef` negative and flip the sign of every gradient; inf keeps the
+        # behaviour the averaging path already had, which is to scale them to zero.
+        if moe_norm == -1:
+            moe_norm = float('inf')
+        total_norm = torch.tensor([float(moe_norm)], device=parameters[0].device, dtype=torch.float)
+    else:
+        # Need to average total_norm across different GPUs due to the presence of moe params
+        pg = groups._get_data_parallel_group()
+        scaled_norm = total_norm * 1.0 / float(dist.get_world_size(group=pg))
+        scaled_norm_tensor = scaled_norm
 
-    dist.all_reduce(scaled_norm_tensor, group=pg)
-    total_norm = scaled_norm_tensor
-    total_norm = total_norm.to(parameters[0].device)
+        dist.all_reduce(scaled_norm_tensor, group=pg)
+        total_norm = scaled_norm_tensor
+        total_norm = total_norm.to(parameters[0].device)
 
     max_norm = torch.tensor([float(max_norm)], device=total_norm.device)
     clip_coef = max_norm / (total_norm + 1e-6)
