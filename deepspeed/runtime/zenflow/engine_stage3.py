@@ -189,7 +189,7 @@ def update_selected_channels(optimizer_z3: "DeepSpeedZeroOptimizer_Stage3", para
 
         total_chunk_size += param_max_chunk_size
 
-    optimizer_z3.grad_sum_buffer = torch.zeros(total_chunk_size, dtype=optimizer_z3.dtype, device='cuda')
+    optimizer_z3.grad_sum_buffer = torch.zeros(total_chunk_size, dtype=optimizer_z3.dtype, device=optimizer_z3.device)
 
     for param, grad_partition in zip(params_to_update, grad_partitions):
         contains_real_data = param.partition_numel() * src_rk < param.ds_numel
@@ -245,7 +245,7 @@ def update_selected_channels(optimizer_z3: "DeepSpeedZeroOptimizer_Stage3", para
         _, length, rk_offset = optimizer_z3.param_id_grad_sum_buffer_offset[param.ds_id][src_rk]
         local_indices = [(idx.item() - rk_offset) for idx in global_topk_indices
                          if rk_offset <= idx < rk_offset + length]
-        param.selected_indices = torch.tensor(local_indices, device='cuda')
+        param.selected_indices = torch.tensor(local_indices, device=optimizer_z3.device)
         optimizer_z3.param_id_grad_sum_buffer_offset[param.ds_id] = []
 
     optimizer_z3.grad_sum_buffer = None
@@ -254,10 +254,10 @@ def update_selected_channels(optimizer_z3: "DeepSpeedZeroOptimizer_Stage3", para
 def _process_selected_fp32_groups_grad(optimizer_z3, params_to_update, grad_partitions):
 
     if optimizer_z3.auto_update:
-        optimizer_z3.sum_buffer = torch.zeros(optimizer_z3.num_total_param, dtype=optimizer_z3.dtype, device='cuda')
+        optimizer_z3.sum_buffer = torch.zeros(optimizer_z3.num_total_param, dtype=optimizer_z3.dtype, device=optimizer_z3.device)
         optimizer_z3.critic_sum_buffer = torch.zeros(optimizer_z3.num_total_param,
                                                      dtype=optimizer_z3.dtype,
-                                                     device='cuda')
+                                                     device=optimizer_z3.device)
         curr_buffer_idx = 0
 
     for param, grad_partition in zip(params_to_update, grad_partitions):
