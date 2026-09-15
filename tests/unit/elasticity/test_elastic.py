@@ -153,6 +153,65 @@ def test_model_parallel_v2_valid(ds_config):
     os.environ.pop("WORLD_SIZE")
 
 
+@pytest.mark.parametrize("model_parallel_size, micro_batch_sizes, expected_mbsize", [
+    (1, [4, 8], 4),
+    (2, [4, 8], 8),
+    (4, [4, 8], 8),
+    (2, [8], 8),
+    (4, [8], 8),
+])
+def test_model_parallel_v2_microbatch_is_per_dp_rank(ds_config, model_parallel_size, micro_batch_sizes,
+                                                     expected_mbsize):
+    # A data-parallel rank gets the global batch split across the DP groups, so the micro batch
+    # has to divide batch / (gpus // model_parallel_size). Dividing by every GPU instead is off
+    # by model_parallel_size: it picked a needlessly small micro batch, and returned None when
+    # only the correct one was on offer. model_parallel_size 1 is the control, where the two
+    # divisors are equal.
+    ds_config["elasticity"]["version"] = 0.2
+    ds_config["elasticity"]["model_parallel_size"] = model_parallel_size
+    ds_config["elasticity"]["num_gpus_per_node"] = 8
+    ds_config["elasticity"]["max_train_batch_size"] = 64
+    ds_config["elasticity"]["micro_batch_sizes"] = micro_batch_sizes
+    ds_config["elasticity"]["min_gpus"] = 16
+    ds_config["elasticity"]["max_gpus"] = 16
+
+    os.environ["WORLD_SIZE"] = str(16)
+    try:
+        final_batch_size, valid_gpus, mbsize = deepspeed.elasticity.compute_elastic_config(
+            ds_config=ds_config, target_deepspeed_version=ds_version, return_microbatch=True)
+    finally:
+        os.environ.pop("WORLD_SIZE")
+
+    dp_world_size = 16 // model_parallel_size
+    assert mbsize == expected_mbsize
+    assert final_batch_size // dp_world_size % mbsize == 0
+
+
+@pytest.mark.parametrize('model_parallel_size, expected_mbsize', [(1, 4), (2, 8), (4, 8)])
+def test_model_parallel_v2_runtime_path_uses_dp_world_size(ds_config, model_parallel_size, expected_mbsize):
+    # deepspeed/runtime/config.py calls compute_elastic_config with world_size set and without
+    # return_microbatch, so the world_size > 0 block is the branch every real run takes. For
+    # version 0.2 valid_gpus holds DP world sizes, which is what the log line above it says, so
+    # both the membership check and the micro-batch divisor need world_size reduced the same way.
+    # Comparing the raw world size rejected valid configurations outright. model_parallel_size 1
+    # is the control, where the two are equal.
+    ds_config["elasticity"]["version"] = 0.2
+    ds_config["elasticity"]["model_parallel_size"] = model_parallel_size
+    ds_config["elasticity"]["num_gpus_per_node"] = 8
+    ds_config["elasticity"]["max_train_batch_size"] = 64
+    ds_config["elasticity"]["micro_batch_sizes"] = [4, 8]
+    ds_config["elasticity"]["min_gpus"] = 8
+    ds_config["elasticity"]["max_gpus"] = 16
+
+    final_batch_size, valid_gpus, mbsize = deepspeed.elasticity.compute_elastic_config(
+        ds_config=ds_config, target_deepspeed_version=ds_version, world_size=16)
+
+    dp_world_size = 16 // model_parallel_size
+    assert dp_world_size in valid_gpus
+    assert mbsize == expected_mbsize
+    assert final_batch_size // dp_world_size % mbsize == 0
+
+
 @pytest.mark.parametrize('key, value', [('micro_batch_sizes', [1, 4, -1, 2, -10]), ('min_gpus', -1), ('max_gpus', -1),
                                         ('micro_batch_sizes', 5), ('micro_batch_sizes', ['a', None, 0.5]),
                                         ('micro_batch_sizes', [2, 0.5, 4])])

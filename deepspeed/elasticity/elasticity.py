@@ -148,11 +148,13 @@ def _get_compatible_gpus_v02(micro_batches,
             f"{num_gpus_per_node} should be divisible by " \
             f"model parallel size {model_parallel_size}")
 
-    def get_microbatch(final_batch_size):
+    def get_microbatch(final_batch_size, dp_world_size):
         candidate_microbatch = None
 
         for micro_batch in micro_batches:
-            if final_batch_size // current_num_gpus % micro_batch == 0:
+            # A data-parallel rank sees the global batch split across the DP groups, not
+            # across every GPU: dividing by current_num_gpus is off by model_parallel_size.
+            if final_batch_size // dp_world_size % micro_batch == 0:
                 if candidate_microbatch is None:
                     candidate_microbatch = micro_batch
                 if prefer_larger and candidate_microbatch < micro_batch:
@@ -171,7 +173,7 @@ def _get_compatible_gpus_v02(micro_batches,
     final_batch_size = int(final_batch_size) * dp_size_per_node
     valid_dp_world_size = [i * dp_size_per_node for i in valid_world_size]
     if current_num_gpus // model_parallel_size in valid_dp_world_size:
-        candidate_microbatch = get_microbatch(final_batch_size)
+        candidate_microbatch = get_microbatch(final_batch_size, current_num_gpus // model_parallel_size)
         return final_batch_size, valid_dp_world_size, candidate_microbatch
 
     current_dp_size = (current_num_gpus / num_gpus_per_node) * dp_size_per_node
@@ -188,7 +190,7 @@ def _get_compatible_gpus_v02(micro_batches,
     else:
         candidate_batch_size = min(candidate_batch_sizes)
 
-    candidate_microbatch = get_microbatch(candidate_batch_size)
+    candidate_microbatch = get_microbatch(candidate_batch_size, int(current_dp_size))
 
     return candidate_batch_size, [int(current_dp_size)], candidate_microbatch
 
@@ -350,18 +352,24 @@ def compute_elastic_config(ds_config: dict, target_deepspeed_version: str, world
     logger.info(f"Valid World Size (GPUs / Model Parallel Size): {valid_gpus}")
 
     if world_size > 0:
-        if world_size not in valid_gpus:
+        # `valid_gpus` holds DP world sizes, which is what the log line above says, so a world
+        # size that spans model-parallel groups has to be reduced the same way before it is
+        # compared against the list or used as the divisor. Version 0.1 rejects
+        # model_parallel_size > 1 above, so there this is the arithmetic it already does.
+        dp_world_size = world_size // model_parallel_size
+        if dp_world_size not in valid_gpus:
             raise ElasticityIncompatibleWorldSize(f"World size ({world_size}) is not valid " \
         f"with the current list of valid GPU counts: {valid_gpus}")
 
         # Pick largest valid micro batch size
         micro_batch_size = None
         for mbsz in sorted(list(set(elastic_config.micro_batches)), reverse=True):
-            if final_batch_size // world_size % mbsz == 0:
+            if final_batch_size // dp_world_size % mbsz == 0:
                 micro_batch_size = mbsz
                 break
         assert micro_batch_size is not None, "Unable to find divisible micro batch size" \
-            f" world_size={world_size}, final_batch_size={final_batch_size}, and " \
+            f" world_size={world_size}, dp_world_size={dp_world_size}," \
+            f" final_batch_size={final_batch_size}, and " \
             f" micro_batches={elastic_config.micro_batches}."
         return final_batch_size, valid_gpus, micro_batch_size
 
