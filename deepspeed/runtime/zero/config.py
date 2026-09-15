@@ -328,8 +328,10 @@ class DeepSpeedZeroConfig(DeepSpeedConfigModel):
     """
     zero_quantized_weights: bool = False
     """
-    Boolean indicating whether to quantize zero parameters (weights)
-    for efficient all_gather comm
+    Boolean indicating whether to quantize ZeRO parameters (weights) for efficient all-gather communication. ZeRO-1
+    and ZeRO-2 apply bounded-memory int8 quantization after each optimizer step; ZeRO-3 quantizes parameters while
+    gathering them for computation. The ZeRO-1/2 path preserves small parameters in their original dtype to avoid
+    mixing scale-sensitive tensors with unrelated flat-buffer neighbors.
     """
     zero_quantized_nontrainable_weights: bool = False
     """
