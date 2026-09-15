@@ -13,12 +13,14 @@ Functionality for swapping optimizer tensors to/from (NVMe) storage devices.
 #include <stdlib.h>
 #include <string.h>
 
+#if !defined(_WIN32)
 #include <fcntl.h>
 #include <libaio.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
+#endif
 
 #include <deepspeed_aio_types.h>
 #include <cstring>
@@ -29,13 +31,13 @@ Functionality for swapping optimizer tensors to/from (NVMe) storage devices.
 #include <vector>
 
 struct io_xfer_ctxt {
-    const int _fd;
+    const aio_fd_t _fd;
     const int64_t _file_base_offset;
     const int64_t _buffer_base_offset;
     const void* _mem_buffer;
     const int64_t _num_bytes;
 
-    io_xfer_ctxt(const int fd,
+    io_xfer_ctxt(const aio_fd_t fd,
                  const int64_t file_offset,
                  const int64_t buffer_offset,
                  const int64_t num_bytes,
@@ -46,12 +48,12 @@ struct io_prep_context {
     const bool _read_op;
     const std::unique_ptr<io_xfer_ctxt>& _xfer_ctxt;
     const size_t _block_size;
-    const std::vector<struct iocb*>* _iocbs;
+    const std::vector<io_request_t*>* _iocbs;
 
     io_prep_context(const bool read_op,
                     const std::unique_ptr<io_xfer_ctxt>& xfer_ctxt,
                     const size_t block_size,
-                    const std::vector<struct iocb*>* iocbs);
+                    const std::vector<io_request_t*>* iocbs);
 
     void prep_iocbs(const int n_iocbs,
                     const size_t num_bytes,
@@ -73,8 +75,8 @@ struct io_prep_generator {
                       const std::unique_ptr<io_xfer_ctxt>& xfer_ctxt,
                       const size_t block_size);
 
-    int prep_iocbs(const int n_iocbs, std::vector<struct iocb*>* iocbs);
+    int prep_iocbs(const int n_iocbs, std::vector<io_request_t*>* iocbs);
 };
 
 int64_t get_file_size(const char* filename, int64_t& size);
-int64_t get_fd_file_size(const int fd, int64_t& size);
+int64_t get_fd_file_size(const aio_fd_t fd, int64_t& size);

@@ -11,17 +11,20 @@ Functionality for swapping optimizer tensors to/from (NVMe) storage devices.
 #include <stdlib.h>
 #include <string.h>
 
+#if !defined(_WIN32)
 #include <fcntl.h>
 #include <libaio.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/types.h>
-#include <time.h>
 #include <unistd.h>
+#endif
+#include <time.h>
 
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <fstream>
 #include <iostream>
@@ -40,9 +43,11 @@ using namespace std::chrono;
 
 static const std::string c_library_name = "deepspeed_aio";
 
+#if !defined(_WIN32)
 static void _report_aio_statistics(const char* tag,
                                    const std::vector<std::chrono::duration<double>>& latencies)
     __attribute__((unused));
+#endif
 
 static void _report_aio_statistics(const char* tag,
                                    const std::vector<std::chrono::duration<double>>& latencies)
@@ -68,6 +73,38 @@ static void _get_aio_latencies(std::vector<std::chrono::duration<double>>& raw_l
         std::accumulate(lat_usec.begin(), lat_usec.end(), 0) / lat_usec.size();
 }
 
+#if defined(_WIN32)
+// Windows has no io_submit/io_pgetevents equivalent, so "submit" here actually performs a
+// blocking ReadFile/WriteFile immediately; completion is then a no-op (see _do_io_complete).
+static void _win_submit_one(io_request_t* req)
+{
+    char* buf = static_cast<char*>(req->_buf);
+    int64_t offset = req->_offset;
+    int64_t remaining = req->_nbytes;
+
+    while (remaining > 0) {
+        OVERLAPPED ov = {};
+        ov.Offset = static_cast<DWORD>(offset & 0xffffffff);
+        ov.OffsetHigh = static_cast<DWORD>(offset >> 32);
+        DWORD bytes_transferred = 0;
+        const BOOL ok =
+            req->_read_op
+                ? ReadFile(req->_fd, buf, static_cast<DWORD>(remaining), &bytes_transferred, &ov)
+                : WriteFile(req->_fd, buf, static_cast<DWORD>(remaining), &bytes_transferred, &ov);
+        if (!ok || bytes_transferred == 0) {
+            const auto error_code = GetLastError();
+            report_file_error(
+                "<aio>", req->_read_op ? "ReadFile" : "WriteFile", static_cast<int>(error_code));
+            assert(ok && bytes_transferred > 0);
+            return;
+        }
+        buf += bytes_transferred;
+        offset += bytes_transferred;
+        remaining -= bytes_transferred;
+    }
+}
+#endif
+
 static void _do_io_submit_singles(const int64_t n_iocbs,
                                   const int64_t iocb_index,
                                   std::unique_ptr<aio_context>& aio_ctxt,
@@ -75,9 +112,14 @@ static void _do_io_submit_singles(const int64_t n_iocbs,
 {
     for (auto i = 0; i < n_iocbs; ++i) {
         const auto st = std::chrono::high_resolution_clock::now();
+#if defined(_WIN32)
+        _win_submit_one(aio_ctxt->_iocbs[i]);
+#else
         const auto submit_ret = io_submit(aio_ctxt->_io_ctxt, 1, aio_ctxt->_iocbs.data() + i);
+        assert(submit_ret > 0);
+#endif
         submit_times.push_back(std::chrono::high_resolution_clock::now() - st);
-#if DEBUG_DS_AIO_SUBMIT_PERF
+#if DEBUG_DS_AIO_SUBMIT_PERF && !defined(_WIN32)
         printf("submit(usec) %f io_index=%lld buf=%p len=%lu off=%llu \n",
                submit_times.back().count() * 1e6,
                iocb_index,
@@ -85,7 +127,6 @@ static void _do_io_submit_singles(const int64_t n_iocbs,
                aio_ctxt->_iocbs[i]->u.c.nbytes,
                aio_ctxt->_iocbs[i]->u.c.offset);
 #endif
-        assert(submit_ret > 0);
     }
 }
 
@@ -95,9 +136,14 @@ static void _do_io_submit_block(const int64_t n_iocbs,
                                 std::vector<std::chrono::duration<double>>& submit_times)
 {
     const auto st = std::chrono::high_resolution_clock::now();
+#if defined(_WIN32)
+    for (auto i = 0; i < n_iocbs; ++i) { _win_submit_one(aio_ctxt->_iocbs[i]); }
+#else
     const auto submit_ret = io_submit(aio_ctxt->_io_ctxt, n_iocbs, aio_ctxt->_iocbs.data());
+    assert(submit_ret > 0);
+#endif
     submit_times.push_back(std::chrono::high_resolution_clock::now() - st);
-#if DEBUG_DS_AIO_SUBMIT_PERF
+#if DEBUG_DS_AIO_SUBMIT_PERF && !defined(_WIN32)
     printf("submit(usec) %f io_index=%lld nr=%lld buf=%p len=%lu off=%llu \n",
            submit_times.back().count() * 1e6,
            iocb_index,
@@ -106,7 +152,6 @@ static void _do_io_submit_block(const int64_t n_iocbs,
            aio_ctxt->_iocbs[0]->u.c.nbytes,
            aio_ctxt->_iocbs[0]->u.c.offset);
 #endif
-    assert(submit_ret > 0);
 }
 
 static int _do_io_complete(const int64_t min_completes,
@@ -115,12 +160,18 @@ static int _do_io_complete(const int64_t min_completes,
                            std::vector<std::chrono::duration<double>>& reap_times)
 {
     const auto start_time = std::chrono::high_resolution_clock::now();
+#if defined(_WIN32)
+    // _win_submit_one already blocked until each request finished, so every
+    // request handed in was completed by the time we get here.
+    const int64_t n_completes = max_completes;
+#else
     int64_t n_completes = io_pgetevents(aio_ctxt->_io_ctxt,
                                         min_completes,
                                         max_completes,
                                         aio_ctxt->_io_events.data(),
                                         nullptr,
                                         nullptr);
+#endif
     reap_times.push_back(std::chrono::high_resolution_clock::now() - start_time);
     assert(n_completes >= min_completes);
     return n_completes;
@@ -264,8 +315,23 @@ void report_file_error(const char* filename, const std::string file_op, const in
     std::cerr << c_library_name << ":  " << err_msg << std::endl;
 }
 
-int open_file(const char* filename, const bool read_op)
+aio_fd_t open_file(const char* filename, const bool read_op)
 {
+#if defined(_WIN32)
+    // No FILE_FLAG_NO_BUFFERING (Windows' O_DIRECT analogue): it would force sector-aligned
+    // offsets/sizes/buffers, which the synchronous path in _win_submit_one doesn't guarantee.
+    const DWORD access = read_op ? GENERIC_READ : GENERIC_WRITE;
+    const DWORD disposition = read_op ? OPEN_EXISTING : OPEN_ALWAYS;
+    const auto fd = CreateFileA(
+        filename, access, FILE_SHARE_READ, nullptr, disposition, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (fd == INVALID_HANDLE_VALUE) {
+        const auto error_code = GetLastError();
+        const auto error_msg = read_op ? " open for read " : " open for write ";
+        report_file_error(filename, error_msg, static_cast<int>(error_code));
+        return AIO_INVALID_FD;
+    }
+    return fd;
+#else
     const int flags = read_op ? (O_RDONLY | O_DIRECT) : (O_WRONLY | O_CREAT | O_DIRECT);
 #if defined(__ENABLE_CANN__)
     int* flags_ptr = (int*)&flags;
@@ -280,32 +346,38 @@ int open_file(const char* filename, const bool read_op)
         return -1;
     }
     return fd;
+#endif
+}
+
+void close_file(const aio_fd_t fd)
+{
+#if defined(_WIN32)
+    CloseHandle(fd);
+#else
+    close(fd);
+#endif
 }
 
 int regular_read(const char* filename, std::vector<char>& buffer)
 {
-    const auto fd = open(filename, O_RDONLY, 0600);
-    assert(fd != -1);
-    struct stat fs;
-    const auto result = fstat(fd, &fs);
-    assert(result != -1);
-    int64_t num_bytes = fs.st_size;
+    // Uses the C stdio API (rather than POSIX open/read) so this helper works unchanged on
+    // Windows, which has no open()/read() pair with the same semantics.
+    auto* file = fopen(filename, "rb");
+    assert(file != nullptr);
+    assert(fseek(file, 0, SEEK_END) == 0);
+    const int64_t num_bytes = ftell(file);
+    assert(num_bytes >= 0);
+    assert(fseek(file, 0, SEEK_SET) == 0);
     buffer.resize(num_bytes);
-    int64_t read_bytes = 0;
-    auto r = 0;
-    do {
-        const auto buffer_ptr = buffer.data() + read_bytes;
-        const auto bytes_to_read = num_bytes - read_bytes;
-        r = read(fd, buffer_ptr, bytes_to_read);
-        read_bytes += r;
-    } while (r > 0);
+    const int64_t read_bytes =
+        num_bytes == 0 ? 0 : static_cast<int64_t>(fread(buffer.data(), 1, num_bytes, file));
 
     if (read_bytes != num_bytes) {
-        std::cerr << "read error " << " read_bytes (read) = " << read_bytes
-                  << " num_bytes (fstat) = " << num_bytes << std::endl;
+        std::cerr << "read error " << " read_bytes (fread) = " << read_bytes
+                  << " num_bytes (ftell) = " << num_bytes << std::endl;
     }
     assert(read_bytes == num_bytes);
-    close(fd);
+    fclose(file);
     return 0;
 }
 

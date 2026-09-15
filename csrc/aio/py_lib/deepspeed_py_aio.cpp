@@ -11,11 +11,13 @@ Functionality for swapping optimizer tensors to/from (NVMe) storage devices.
 #include <stdlib.h>
 #include <string.h>
 
+#if !defined(_WIN32)
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
+#endif
 
 #include <cassert>
 #include <chrono>
@@ -49,7 +51,7 @@ int deepspeed_py_aio_write(const torch::Tensor& buffer,
     deepspeed_aio_config_t config(block_size, queue_depth, single_submit, overlap_events, false);
 
     const auto fd = open_file(filename, false);
-    if (fd == -1) { return -1; }
+    if (fd == AIO_INVALID_FD) { return -1; }
     warn_consumer_ssd_writes();
 
     auto write_buffer = (char*)buffer.data_ptr();
@@ -67,7 +69,7 @@ int deepspeed_py_aio_write(const torch::Tensor& buffer,
     const std::chrono::duration<double> aio_time =
         std::chrono::high_resolution_clock::now() - start_time;
 
-    close(fd);
+    close_file(fd);
 
     if (validate) { validate_aio_operation(false, filename, write_buffer, num_write_bytes); }
 
@@ -89,14 +91,18 @@ int deepspeed_py_aio_read(torch::Tensor& buffer,
     const auto start_time = std::chrono::high_resolution_clock::now();
     int64_t num_file_bytes;
     if (-1 == get_file_size(filename, num_file_bytes)) {
+#if defined(_WIN32)
+        const auto error_code = static_cast<int>(GetLastError());
+#else
         const auto error_code = errno;
+#endif
         report_file_error(filename, " fstat for read", error_code);
         return -1;
     }
 
     deepspeed_aio_config_t config(block_size, queue_depth, single_submit, overlap_events, false);
     const auto fd = open_file(filename, true);
-    if (fd == -1) { return -1; }
+    if (fd == AIO_INVALID_FD) { return -1; }
 
     auto read_buffer = (char*)buffer.data_ptr();
     assert(static_cast<int64_t>(buffer.nbytes()) == num_file_bytes);
@@ -113,7 +119,7 @@ int deepspeed_py_aio_read(torch::Tensor& buffer,
     const std::chrono::duration<double> aio_time =
         std::chrono::high_resolution_clock::now() - start_time;
 
-    close(fd);
+    close_file(fd);
 
     if (validate) { validate_aio_operation(true, filename, read_buffer, num_file_bytes); }
 

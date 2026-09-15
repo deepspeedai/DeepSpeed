@@ -46,8 +46,12 @@ static void helper_memcpy_1(float* dest, float* src, size_t param_size)
 #endif
 
     if (param_size > rounded_size) {
+        // MSVC's OpenMP loop index must be signed; GCC/Clang accept either.
+        const auto tail_end = static_cast<int64_t>(param_size);
 #pragma omp parallel for
-        for (size_t k = rounded_size; k < param_size; k++) { dest[k] = src[k]; }
+        for (int64_t k = static_cast<int64_t>(rounded_size); k < tail_end; k++) {
+            dest[k] = src[k];
+        }
     }
 }
 
