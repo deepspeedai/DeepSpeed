@@ -2315,11 +2315,10 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         state = self.optimizer.state[flatten_copy]
         buffer = state.get("momentum_buffer")
         if buffer is None:
-            total_size = sum([t.numel() for t in tensor_list])
-            buffer = self.flatten([torch.zeros([total_size], dtype=momentum_dtype, device=device)])
+            buffer = torch.zeros(sum(t.numel() for t in tensor_list), dtype=momentum_dtype, device=device)
             state["momentum_buffer"] = buffer
-        elif buffer.dtype != momentum_dtype or buffer.device != torch.device(device):
-            buffer = buffer.to(dtype=momentum_dtype, device=device)
+        elif buffer.dtype != momentum_dtype:
+            buffer = buffer.to(dtype=momentum_dtype)
             state["momentum_buffer"] = buffer
         return buffer
 
