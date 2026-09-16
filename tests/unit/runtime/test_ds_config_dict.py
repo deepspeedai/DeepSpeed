@@ -216,11 +216,16 @@ def test_get_bfloat16_enabled(bf16_key):
     assert get_bfloat16_config(cfg).enabled == True
 
 
-def test_quantized_eigenvalue_config_is_rejected():
-    ds_config_path = get_test_path('../model/BingBertSquad/deepspeed_bsz24_fp16_eigenvalue_quantize_config.json')
+@pytest.mark.parametrize("config_key", ["quantize_training", "eigenvalue"])
+@pytest.mark.parametrize("value", [None, {}, False, "auto"])
+def test_moq_config_is_rejected(config_key, value):
+    config_dict = {
+        "train_micro_batch_size_per_gpu": 1,
+        config_key: value,
+    }
 
-    with pytest.raises(DeepSpeedConfigError, match="quantize_training"):
-        DeepSpeedConfig(ds_config_path)
+    with pytest.raises(DeepSpeedConfigError, match=config_key):
+        DeepSpeedConfig(config_dict)
 
 
 def test_compression_training_config_is_rejected():

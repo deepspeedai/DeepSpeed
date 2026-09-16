@@ -103,7 +103,6 @@ from deepspeed.utils.debug import debug_extract_module_and_param_names, debug_cl
 from deepspeed.monitor.monitor import MonitorMaster
 from deepspeed.runtime.progressive_layer_drop import ProgressiveLayerDrop
 from deepspeed.runtime.utils import clip_grad_norm_, compare_tensors_in_structures, maybe_loss_for_backward
-from deepspeed.runtime.eigenvalue import Eigenvalue
 from deepspeed.runtime.data_pipeline.constants import DATA_SAMPLING, \
     DATA_ROUTING, DATA_SAMPLING_ENABLED, CURRICULUM_LEARNING, \
     CURRICULUM_LEARNING_ENABLED, DATA_SAMPLING_NUM_WORKERS, RANDOM_LTD, \
@@ -222,11 +221,6 @@ class EngineTimers(object):
 
     def active_timers(self):
         return self.micro_timers + self.global_timers
-
-
-def _eigenvalue_summary_events(block_eigenvalue, global_samples):
-    return [(f"Train/Eigenvalues/ModelBlockParam_{i}", ev_value[0], global_samples)
-            for i, ev_value in enumerate(block_eigenvalue.values())]
 
 
 def _client_optimizer_needs_remap(optimizer):
@@ -552,9 +546,6 @@ class DeepSpeedEngine(Module):
         self.enable_backward_allreduce = True
         self.inside_no_sync_ctxt = False
         self.progressive_layer_drop = None
-        self.eigenvalue = None
-        self.block_eigenvalue = None
-        self.gas_boundary_ctr = 0
         self.dist_backend = get_accelerator().communication_backend_name()
         self.has_moe_layers = False
         self.num_experts = []
@@ -707,9 +698,6 @@ class DeepSpeedEngine(Module):
         self.save_zero_checkpoint = False
         if not isinstance(self.optimizer, DeepSpeedZeRoOffload):
             self._configure_checkpointing()
-
-        if self.eigenvalue_enabled():
-            self.eigenvalue = self._configure_eigenvalue()
 
         if self.pld_enabled():
             self.progressive_layer_drop = self._configure_progressive_layer_drop()
@@ -1319,30 +1307,6 @@ class DeepSpeedEngine(Module):
 
     def pld_gamma(self):
         return self.pld_params()[PLD_GAMMA]
-
-    def eigenvalue_enabled(self):
-        return self._config.eigenvalue_enabled
-
-    def eigenvalue_verbose(self):
-        return self._config.eigenvalue_verbose
-
-    def eigenvalue_max_iter(self):
-        return self._config.eigenvalue_max_iter
-
-    def eigenvalue_tol(self):
-        return self._config.eigenvalue_tol
-
-    def eigenvalue_stability(self):
-        return self._config.eigenvalue_stability
-
-    def eigenvalue_gas_boundary_resolution(self):
-        return self._config.eigenvalue_gas_boundary_resolution
-
-    def eigenvalue_layer_name(self):
-        return self._config.eigenvalue_layer_name
-
-    def eigenvalue_layer_num(self):
-        return self._config.eigenvalue_layer_num
 
     def curriculum_enabled_legacy(self):
         return self._config.curriculum_enabled_legacy
@@ -2803,19 +2767,6 @@ class DeepSpeedEngine(Module):
 
         return optimizer
 
-    def _configure_eigenvalue(self):
-        eigenvalue = Eigenvalue(
-            verbose=self.eigenvalue_verbose(),
-            max_iter=self.eigenvalue_max_iter(),
-            tol=self.eigenvalue_tol(),
-            stability=self.eigenvalue_stability(),
-            gas_boundary_resolution=self.eigenvalue_gas_boundary_resolution(),
-            layer_name=self.eigenvalue_layer_name(),
-            layer_num=self.eigenvalue_layer_num(),
-        )
-
-        return eigenvalue
-
     def _configure_progressive_layer_drop(self):
         pld = ProgressiveLayerDrop(theta=self.pld_theta(), gamma=self.pld_gamma())
 
@@ -3170,7 +3121,6 @@ class DeepSpeedEngine(Module):
 
         see_memory_usage("Engine before backward", force=self.memory_breakdown())
 
-        assert not self.eigenvalue_enabled(), "Eigenvalue is not supported with non-scalar backward"
         assert not self.amp_enabled(), "Apex AMP is not supported with non-scalar backward"
 
         if self.is_deepcompile_active() and not self.compile_autotp():
@@ -3461,9 +3411,6 @@ class DeepSpeedEngine(Module):
 
             # Set flag to prevent hooks from firing (we'll manually call prologue/epilogue)
             backward_kwargs = {"retain_graph": retain_graph}
-            if self.eigenvalue_enabled():
-                backward_kwargs["create_graph"] = True
-                backward_kwargs["retain_graph"] = True
 
             loss = loss / self.gradient_accumulation_steps() if scale_wrt_gas else loss
             gas_scaled_loss = loss
@@ -3564,7 +3511,7 @@ class DeepSpeedEngine(Module):
     def clip_fp32_gradients(self):
         clip_grad_norm_(parameters=self.module.parameters(), max_norm=self.gradient_clipping(), mpu=self.mpu)
 
-    def _take_model_step(self, lr_kwargs, block_eigenvalue={}):
+    def _take_model_step(self, lr_kwargs):
         if self.gradient_clipping() > 0.0:
             if self.torch_autocast_z0_gradscaler:
                 # Unscale for gradient clipping
@@ -3676,24 +3623,13 @@ class DeepSpeedEngine(Module):
 
         # Update the model when we reach gradient accumulation boundaries
         if self.is_gradient_accumulation_boundary():
-            self.gas_boundary_ctr += 1
-
             if self.checkpoint_engine.is_decoupled():
                 self._commit_decoupled_checkpoint()
-
-            if (self.eigenvalue_enabled()
-                    and (self.gas_boundary_ctr % self.eigenvalue_gas_boundary_resolution() == 0)):
-                log_dist("computing eigenvalue...", ranks=[0])
-                loss_scale = self._get_optimizer_loss_scale() or 1.0
-                self.block_eigenvalue = self.eigenvalue.compute_eigenvalue(self.module, self.device, loss_scale)
 
             if self.progressive_layer_drop:
                 self.progressive_layer_drop.update_state(self.global_steps)
 
-            if (self.eigenvalue_enabled() and not self.gas_boundary_ctr % self.eigenvalue_gas_boundary_resolution()):
-                self._take_model_step(lr_kwargs, self.block_eigenvalue)
-            else:
-                self._take_model_step(lr_kwargs)
+            self._take_model_step(lr_kwargs)
 
             report_progress = self.global_rank == 0 if self.global_rank else True
 
@@ -3718,10 +3654,6 @@ class DeepSpeedEngine(Module):
                             self.global_samples,
                         ))
 
-                    if (self.eigenvalue_enabled()
-                            and not self.gas_boundary_ctr % self.eigenvalue_gas_boundary_resolution()):
-                        self.summary_events.extend(
-                            _eigenvalue_summary_events(self.block_eigenvalue, self.global_samples))
                     self.monitor.write_events(self.summary_events)
 
         # Check flops profiling
