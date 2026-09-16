@@ -156,7 +156,13 @@ def printflock(*msgs):
     """
     global fcntl
     if fcntl is None:
-        import fcntl
+        try:
+            import fcntl
+        except ImportError:
+            # Windows has no fcntl, so there is nothing to lock the print with. Printing
+            # without the interleaving guard beats refusing to print at all.
+            print(*msgs)
+            return
 
     with open(__file__, "r") as fh:
         fcntl.flock(fh, fcntl.LOCK_EX)
