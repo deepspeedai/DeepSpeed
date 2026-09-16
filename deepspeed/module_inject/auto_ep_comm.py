@@ -21,6 +21,8 @@ sized at construction and are expensive to rebuild.
 
 from __future__ import annotations
 
+import itertools
+
 import torch
 
 from deepspeed.utils import logger
@@ -67,48 +69,60 @@ def assert_dtype_supported(dtype: torch.dtype) -> None:
 
 
 # Live shared buffers, keyed by everything that has to match for two layers to
-# use the same one. Holds the process group as part of the key so that two
-# engines on different groups never collide; entries leave when their last
-# holder releases them.
+# use the same one. Entries leave when their last holder releases them.
 _SHARED_EXCHANGES: dict = {}
 
+_SCOPE_COUNTER = itertools.count()
 
-def _exchange_key(ep_group, num_experts: int, top_k: int, hidden_size: int, num_max_tokens_per_rank: int, num_sms: int,
-                  qp_margin: int) -> tuple:
+
+def new_exchange_scope() -> int:
+    """A fresh sharing scope, normally one per model AutoEP converts.
+
+    Layers sharing a scope share a buffer. Two models do not, even on one
+    expert-parallel group with identical geometry: they are driven
+    independently, so one DeepEP communication context between them would
+    couple schedules that nothing forces to agree. Reinforcement learning
+    puts an actor and a frozen reference model in exactly that position. The
+    cost of keeping them apart is one more buffer, against a ceiling of 27.
+
+    Every rank converts the same models in the same order, so a scope number
+    means the same thing on all of them.
+    """
+    return next(_SCOPE_COUNTER)
+
+
+def _exchange_key(scope: int, ep_group, num_experts: int, top_k: int, hidden_size: int, num_max_tokens_per_rank: int,
+                  num_sms: int, qp_margin: int) -> tuple:
     """Everything two layers must agree on to share one buffer.
 
     Capacity, hidden size and top-k size the buffer itself; the queue-pair
     budget is fixed at construction; the group decides the topology; and the
     expert count and SM budget are passed to every dispatch, so a layer that
-    disagreed on either would drive the shared buffer differently.
+    disagreed on either would drive the shared buffer differently. The scope
+    is not about the buffer's shape at all: it is who is allowed to share it.
     """
-    return (ep_group, num_experts, top_k, hidden_size, num_max_tokens_per_rank, num_sms, qp_margin)
+    return (scope, ep_group, num_experts, top_k, hidden_size, num_max_tokens_per_rank, num_sms, qp_margin)
 
 
-def shared_exchange(ep_group,
+def shared_exchange(scope: int,
+                    ep_group,
                     num_experts: int,
                     top_k: int,
                     hidden_size: int,
                     num_max_tokens_per_rank: int,
                     num_sms: int = DEFAULT_COMM_SMS,
                     qp_margin: int = 4) -> "DeepEPExchange":
-    """The buffer for this geometry, building it the first time it is asked for.
+    """The buffer for this scope and geometry, building it on first ask.
 
     Collective on construction, and every rank asks in the same order because
-    they run the same layers, so a hit on one rank is a hit on all of them.
-
-    That ordering is required of the caller and is not new here. Construction
-    is lazy, inside forward, and collective on ``ep_group``, so two engines
-    sharing a group whose layers ran in different orders on different ranks
-    already matched one rank's buffer construction against another's before
-    any buffer was shared. What sharing adds is that such engines then also
-    share the resulting communication context, which is only reachable from a
-    schedule that was already broken.
+    they run the same layers of the same model, so a hit on one rank is a hit
+    on all of them.
     """
-    key = _exchange_key(ep_group, num_experts, top_k, hidden_size, num_max_tokens_per_rank, num_sms, qp_margin)
+    key = _exchange_key(scope, ep_group, num_experts, top_k, hidden_size, num_max_tokens_per_rank, num_sms, qp_margin)
     exchange = _SHARED_EXCHANGES.get(key)
     if exchange is None:
         exchange = DeepEPExchange(
+            scope=scope,
             ep_group=ep_group,
             num_experts=num_experts,
             top_k=top_k,
@@ -127,10 +141,9 @@ def destroy_exchanges(module) -> None:
 
     Collective, and ordered by the module tree, which every rank walks the same
     way. Scoped to one module rather than to the process because several
-    engines can exist at once: each releases only the claims its own layers
-    took, and a buffer two engines share outlives the first teardown. Worth
-    calling at the end of training: the buffers ask DeepEP not to reclaim
-    them, so nothing else will.
+    engines can exist at once, and each holds buffers no other engine shares.
+    Worth calling at the end of training: the buffers ask DeepEP not to
+    reclaim them, so nothing else will.
     """
     for submodule in module.modules():
         exchange = getattr(submodule, "_deepep_exchange", None)
@@ -200,6 +213,7 @@ class DeepEPExchange:
     """
 
     def __init__(self,
+                 scope: int,
                  ep_group,
                  num_experts: int,
                  top_k: int,
@@ -225,7 +239,7 @@ class DeepEPExchange:
             allow_hybrid_mode=True,
             explicitly_destroy=True,
         )
-        self.key = _exchange_key(ep_group, num_experts, top_k, hidden_size, num_max_tokens_per_rank, num_sms,
+        self.key = _exchange_key(scope, ep_group, num_experts, top_k, hidden_size, num_max_tokens_per_rank, num_sms,
                                  qp_margin)
         self.num_sms = num_sms
         self.num_experts = num_experts

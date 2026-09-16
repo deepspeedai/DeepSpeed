@@ -12,7 +12,8 @@ from unittest import mock
 
 from deepspeed.module_inject.auto_ep_comm import (COMM_BACKEND, DEEPEP_BACKEND, SUPPORTED_DTYPES, _conform_rows,
                                                   _DeepEPCombine, _DeepEPDispatch, _import_deep_ep, _qps_for_sms,
-                                                  assert_dtype_supported, destroy_exchanges, shared_exchange)
+                                                  assert_dtype_supported, destroy_exchanges, new_exchange_scope,
+                                                  shared_exchange)
 from deepspeed.module_inject import auto_ep_comm, auto_ep_layer
 from deepspeed.module_inject.auto_ep_config import parse_autoep_config, validate_autoep_config
 
@@ -112,12 +113,13 @@ class TestDtypeGuard(unittest.TestCase):
 
 
 class TestBufferSharing(unittest.TestCase):
-    """One buffer per geometry, not one per layer.
+    """One buffer per model and geometry, not one per layer.
 
     Each buffer reserves fabric resources that nothing reports, and they run
     out: on 32 H100s across four nodes the twenty-eighth construction fails
     inside ncclDevCommCreate, so a 48-layer model cannot start at all. Layers
     of one model agree on every constructor argument, so they can share.
+    Layers of two models do not share, whatever they agree on.
     """
 
     def setUp(self):
@@ -140,6 +142,7 @@ class TestBufferSharing(unittest.TestCase):
     @staticmethod
     def geometry(**overrides):
         arguments = {
+            "scope": 0,
             "ep_group": "group",
             "num_experts": 128,
             "top_k": 8,
@@ -158,12 +161,34 @@ class TestBufferSharing(unittest.TestCase):
         self.assertEqual({id(exchange) for exchange in exchanges}, {id(self.built[0])})
         self.assertEqual(self.built[0].holders, 48)
 
+    def test_each_scope_is_new(self):
+        # Layers get a scope from whoever converted them; a layer built on its
+        # own must not fall into a shared default.
+        self.assertNotEqual(new_exchange_scope(), new_exchange_scope())
+
+    def test_two_models_do_not_share_a_buffer(self):
+        # Identical geometry on one group, so only the scope keeps them apart.
+        # Two engines are driven independently: an actor and a frozen
+        # reference model in a reinforcement-learning loop need not reach
+        # their MoE layers in any fixed order relative to each other, and one
+        # DeepEP communication context between them would make that order
+        # matter.
+        first = shared_exchange(**self.geometry(scope=0))
+        second = shared_exchange(**self.geometry(scope=1))
+
+        self.assertEqual(len(self.built), 2)
+        self.assertIsNot(first, second)
+        self.assertEqual(first.holders, 1)
+        self.assertEqual(second.holders, 1)
+
     def test_a_different_geometry_gets_its_own_buffer(self):
         # Not a micro-optimization: every argument in the key either sizes the
         # buffer or is passed to dispatch, so sharing across a mismatch would
         # drive one buffer two ways.
         for field, value in (("ep_group", "other"), ("num_experts", 64), ("top_k", 4), ("hidden_size", 4096),
                              ("num_max_tokens_per_rank", 2048), ("num_sms", 8), ("qp_margin", 2)):
+            # "scope" is deliberately not in this list: it is not part of the
+            # geometry, and test_two_models_do_not_share_a_buffer covers it.
             with self.subTest(field=field):
                 auto_ep_comm._SHARED_EXCHANGES.clear()
                 self.built.clear()
@@ -519,6 +544,7 @@ class TestBufferLifecycle(unittest.TestCase):
     def test_the_configured_capacity_sizes_the_buffer(self):
         layer = TestDeepEPEarlyRoute.layer()
         layer._deepep_exchange = None
+        layer.deepep_scope = 0
         layer.ep_group = object()
         layer.hidden_size = 8
         layer.comm_max_tokens_per_rank = 4096
@@ -544,6 +570,7 @@ class TestBufferLifecycle(unittest.TestCase):
                     auto_ep_layer.AutoEPMoELayer._deepep_route(layer, tokens, router_output)
 
         self.assertEqual(built.call_args.kwargs["num_max_tokens_per_rank"], 4096)
+        self.assertEqual(built.call_args.kwargs["scope"], 0)
         built.assert_called_once()
         barrier.assert_called_once_with(group=layer.ep_group, device_ids=[tokens.device.index])
 

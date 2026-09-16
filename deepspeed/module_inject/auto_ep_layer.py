@@ -24,7 +24,7 @@ from deepspeed.module_inject.auto_ep_folding import mark_autoep_folding_router_p
 from deepspeed.ops.triton_ops import autoep_fused_token_ops as fused_token_ops
 from deepspeed.utils import logger
 from deepspeed.module_inject.auto_ep_comm import (DEEPEP_BACKEND, assert_dtype_supported, deepep_combine,
-                                                  deepep_dispatch, shared_exchange)
+                                                  deepep_dispatch, new_exchange_scope, shared_exchange)
 from deepspeed.moe.ep_router import TokenChoiceTopKRouter
 from deepspeed.moe.ep_count import count_tokens_per_expert
 from deepspeed.moe.ep_experts import GroupedExperts
@@ -397,8 +397,14 @@ class AutoEPMoELayer(nn.Module):
         ep_size: int,
         ep_rank: int,
         config: AutoEPConfig,
+        deepep_scope: int | None = None,
     ) -> None:
         super().__init__()
+
+        # Layers converted together share a DeepEP buffer; a layer built on
+        # its own shares with nothing, which is what it did before sharing
+        # existed.
+        self.deepep_scope = new_exchange_scope() if deepep_scope is None else deepep_scope
 
         self.model_family = spec.model_family
         self.return_router_logits = spec.return_router_logits
@@ -648,6 +654,7 @@ class AutoEPMoELayer(nn.Module):
             # the removed split-count collective used to initialize it for us.
             dist.barrier(group=self.ep_group, device_ids=[tokens.device.index])
             self._deepep_exchange = shared_exchange(
+                scope=self.deepep_scope,
                 ep_group=self.ep_group,
                 num_experts=self.num_experts,
                 top_k=self.top_k,
