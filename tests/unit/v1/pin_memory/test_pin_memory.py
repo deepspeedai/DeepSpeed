@@ -359,6 +359,12 @@ def test_npu_missing_npurt_is_noop(monkeypatch):
 
 
 def test_npu_host_copy_lookup_gates(monkeypatch):
+    # torch.npu only exists in torch_npu builds; install a stand-in so this
+    # pure-Python gate logic also runs where the NPU backend is absent.
+    class _StubNpu:
+        pass
+
+    monkeypatch.setattr(torch, "npu", _StubNpu(), raising=False)
     # A build lacking npurt must not resolve, with a reason saying so.
     monkeypatch.delattr(torch.npu, "npurt", raising=False)
     funcs, reason = npu_accelerator._npu_host_copy_funcs()
