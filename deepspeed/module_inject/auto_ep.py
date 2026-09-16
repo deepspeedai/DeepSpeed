@@ -13,7 +13,7 @@ from __future__ import annotations
 import math
 import re
 from collections import OrderedDict
-from typing import TYPE_CHECKING, Literal
+from typing import Callable, TYPE_CHECKING, Literal
 
 import torch
 import torch.nn as nn
@@ -570,6 +570,7 @@ class AutoEP:
         ep_size: int,
         ep_rank: int,
         collect_sources: bool = False,
+        on_moe_layer_replaced: Callable[[nn.Module], None] | None = None,
     ) -> "ReplacementSourceMap":
         """Replace multiple MoE modules and batch post-replacement recorder retargeting.
 
@@ -587,8 +588,10 @@ class AutoEP:
         replacement_sources = ReplacementSourceMap()
         for spec in specs:
             replacement, sources = self._replace_moe_layer_without_retarget(spec, ep_size, ep_rank, collect_sources)
-            replacements.append((spec, replacement))
             replacement_sources.update(sources)
+            if on_moe_layer_replaced is not None:
+                on_moe_layer_replaced(replacement)
+            replacements.append((spec, replacement))
             logger.info(f"AutoEP: replaced '{spec.moe_module_name}' with AutoEPMoELayer "
                         f"(ep_size={ep_size}, ep_rank={ep_rank}, "
                         f"local_experts={replacement.num_local_experts})")

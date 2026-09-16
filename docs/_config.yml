@@ -58,7 +58,6 @@ collections:
 
       - pipeline.md
       - progressive_layer_dropping.md
-      - sparse-attention.md
       - transformer_kernel.md
       - zero-offload.md
       - zero.md

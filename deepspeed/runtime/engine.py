@@ -908,6 +908,13 @@ class DeepSpeedEngine(Module):
         replacement_sources = ReplacementSourceMap()
         if specs:
             validate_autoep_post_detection(autoep_config, specs)
+            convert_to_zero_parameters = self._autoep_zero3_param_converter(model)
+            on_moe_layer_replaced = None
+            if convert_to_zero_parameters is not None:
+
+                def on_moe_layer_replaced(replacement):
+                    self._partition_autoep_zero3_experts(replacement, convert_to_zero_parameters)
+
             # The map holds the discarded pre-shard expert weights alive until the remap is
             # done, so only build it when there is a caller-supplied optimizer to remap.
             replacement_sources = auto_ep.replace_moe_layers(
@@ -916,6 +923,7 @@ class DeepSpeedEngine(Module):
                 ep_rank=ep_rank,
                 collect_sources=(_client_optimizer_needs_remap(self.client_optimizer)
                                  if collect_sources is None else collect_sources),
+                on_moe_layer_replaced=on_moe_layer_replaced,
             )
             logger.info(f"AutoEP: replaced {len(specs)} MoE layer(s) with ep_size={ep_size}")
 
@@ -923,6 +931,26 @@ class DeepSpeedEngine(Module):
             from deepspeed import set_optimizer_flags
             set_optimizer_flags(self._config, model)
         return replacement_sources
+
+    def _autoep_zero3_param_converter(self, model):
+        if not self.zero_optimization_partition_weights():
+            return None
+        return next((param.convert_to_zero_parameters
+                     for param in model.parameters() if hasattr(param, "convert_to_zero_parameters")), None)
+
+    @staticmethod
+    def _partition_autoep_zero3_experts(replacement, convert_to_zero_parameters):
+        expert_params = list(replacement.experts.named_parameters())
+        for name, param in expert_params:
+            group_name = getattr(param, "ds_zero_partition_group_name", None)
+            if group_name is None:
+                raise AssertionError(f"AutoEP replacement expert parameter '{name}' is missing a ZeRO partition "
+                                     "group name.")
+            param.ds_zero_partition_process_group = groups._get_expert_data_parallel_group(group_name)
+        convert_to_zero_parameters(param_list=[param for _, param in expert_params])
+        # ZeRO parameters own method closures that form reference cycles. Collect the discarded
+        # source layer now so its full expert weights cannot accumulate before the next replacement.
+        gc.collect()
 
     def _autoep_sequence_parallel_world_size(self):
         if self.mpu is not None and hasattr(self.mpu, 'get_sequence_parallel_world_size'):
@@ -2386,6 +2414,71 @@ class DeepSpeedEngine(Module):
             return None, {}
         return FusedAdam, {'adam_w_mode': adam_w_mode}
 
+    # Which of the optimizer's config keys each half of a Muon param group accepts. Muon takes a
+    # momentum and a Newton-Schulz method; the auxiliary Adam takes betas and eps.
+    _MUON_HALF_KEYS = ("lr", "momentum", "weight_decay", "ns_method")
+    _ADAM_HALF_KEYS = ("lr", "betas", "eps", "weight_decay")
+
+    @staticmethod
+    def _muon_half_defaults(optimizer_parameters, keys, lr_override):
+        """Config-level settings for one half, with muon_lr / adam_lr overriding the shared lr."""
+        defaults = {key: optimizer_parameters[key] for key in keys if key in optimizer_parameters}
+        if lr_override in optimizer_parameters:
+            defaults["lr"] = optimizer_parameters[lr_override]
+        return defaults
+
+    @staticmethod
+    def _muon_param_groups(model_parameters, optimizer_parameters):
+        """Split each incoming param group into its Muon and Adam halves.
+
+        Muon has to build its own groups, because which half a parameter belongs to is a
+        property of the parameter rather than of the config. The incoming groups still have to
+        survive that: every other optimizer here receives `model_parameters` unchanged, so a
+        group's own `lr` or `weight_decay` reaches it. Flattening the groups into one list threw
+        those away, and the no-weight-decay-on-biases-and-norms grouping that most training
+        recipes use was silently ignored - the parameters the user excluded were decayed at the
+        config's rate instead, with nothing reported.
+
+        Settings are resolved most-specific-last: the config's shared value, then `muon_lr` /
+        `adam_lr`, then whatever the group itself sets.
+        """
+        groups, loose = [], []
+        for item in model_parameters:
+            (groups if isinstance(item, dict) else loose).append(item)
+        if loose or not groups:
+            groups.append({"params": loose})
+
+        missing = [p for group in groups for p in group["params"] if not hasattr(p, "use_muon")]
+        if missing:
+            raise ValueError(f"The Muon optimizer needs every parameter tagged with use_muon, and {len(missing)} "
+                             "are not. deepspeed.initialize tags them from the model it is given, so this means "
+                             "model_parameters holds parameters that model does not. Set `param.use_muon = "
+                             "True / False` on them, or pass them as part of the model.")
+
+        muon_keys, adam_keys = DeepSpeedEngine._MUON_HALF_KEYS, DeepSpeedEngine._ADAM_HALF_KEYS
+        halves = (
+            (True, "muon", muon_keys, DeepSpeedEngine._muon_half_defaults(optimizer_parameters, muon_keys, "muon_lr")),
+            (False, "adam", adam_keys, DeepSpeedEngine._muon_half_defaults(optimizer_parameters, adam_keys,
+                                                                           "adam_lr")),
+        )
+
+        param_groups = []
+        for index, group in enumerate(groups):
+            overrides = {key: value for key, value in group.items() if key != "params"}
+            trainable = [p for p in group["params"] if p.requires_grad]
+            for use_muon, label, keys, defaults in halves:
+                half = [p for p in trainable if bool(p.use_muon) is use_muon]
+                if not half:
+                    continue
+                settings = dict(defaults)
+                settings.update({key: value for key, value in overrides.items() if key in keys})
+                # One incoming group is the common case and keeps the historical names; more than
+                # one needs distinct ones, because MoE regrouping keys its buckets by name.
+                prefix = overrides.get("name") or (f"group{index}" if len(groups) > 1 else None)
+                name = f"{prefix}-{label}-params" if prefix else f"{label}-params"
+                param_groups.append(dict(params=half, use_muon=use_muon, name=name, **settings))
+        return param_groups
+
     def _configure_basic_optimizer(self, model_parameters):
         # Copy so the pop() calls below (torch_adam, adam_w_mode, fp32_optimizer_states) do not
         # mutate the shared config dict returned by optimizer_params().
@@ -2445,39 +2538,7 @@ class DeepSpeedEngine(Module):
             adam_optimizer, adam_optimizer_kwargs = self.get_optimizer_configuration(optimizer_parameters,
                                                                                      adam_w_mode,
                                                                                      allow_legacy_fallback=True)
-            # Flatten param group dicts (created by MoE/EP) into a raw parameter list
-            all_params = []
-            for item in model_parameters:
-                if isinstance(item, dict):
-                    all_params.extend(item['params'])
-                else:
-                    all_params.append(item)
-            if not all([hasattr(p, 'use_muon') for p in all_params]):
-                msg = "Muon optimizer is used, but the use_muon attribute is NOT configured for some of the model parameters, " \
-                "please set by `param.use_muon = True / False` for all params"
-                logger.error(msg)
-            muon_params = [p for p in all_params if p.use_muon and p.requires_grad]
-            non_muon_params = [p for p in all_params if (not p.use_muon) and p.requires_grad]
-            param_groups = []
-            if muon_params:
-                accepted_parameters = dict()
-                for key in ["lr", "momentum", "weight_decay", "muon_lr", "ns_method"]:
-                    if key in optimizer_parameters:
-                        if key == "muon_lr":  # muon_lr will override lr
-                            accepted_parameters['lr'] = optimizer_parameters[key]
-                        else:
-                            accepted_parameters[key] = optimizer_parameters[key]
-                param_groups.append(dict(params=muon_params, use_muon=True, name='muon-params', **accepted_parameters))
-            if non_muon_params:
-                accepted_parameters = dict()
-                for key in ["lr", "betas", "eps", "weight_decay", "adam_lr"]:
-                    if key in optimizer_parameters:
-                        if key == "adam_lr":  # adam_lr will override lr
-                            accepted_parameters['lr'] = optimizer_parameters[key]
-                        else:
-                            accepted_parameters[key] = optimizer_parameters[key]
-                param_groups.append(
-                    dict(params=non_muon_params, use_muon=False, name='adam-params', **accepted_parameters))
+            param_groups = self._muon_param_groups(model_parameters, optimizer_parameters)
             if self.has_moe_layers:
                 from deepspeed.moe.utils import split_params_into_different_moe_groups_for_optimizer
                 param_groups = split_params_into_different_moe_groups_for_optimizer(param_groups)
