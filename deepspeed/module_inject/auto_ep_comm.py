@@ -96,6 +96,14 @@ def shared_exchange(ep_group,
 
     Collective on construction, and every rank asks in the same order because
     they run the same layers, so a hit on one rank is a hit on all of them.
+
+    That ordering is required of the caller and is not new here. Construction
+    is lazy, inside forward, and collective on ``ep_group``, so two engines
+    sharing a group whose layers ran in different orders on different ranks
+    already matched one rank's buffer construction against another's before
+    any buffer was shared. What sharing adds is that such engines then also
+    share the resulting communication context, which is only reachable from a
+    schedule that was already broken.
     """
     key = _exchange_key(ep_group, num_experts, top_k, hidden_size, num_max_tokens_per_rank, num_sms, qp_margin)
     exchange = _SHARED_EXCHANGES.get(key)
