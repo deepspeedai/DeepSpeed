@@ -6,7 +6,7 @@ still satisfying Required status checks.
 
 It currently drives **`modal-torch-latest`** (which runs `tests/unit/v1/` on
 [modal.com](https://modal.com) GPUs), but is built to drive more workflows from
-one config — see [Adding a workflow](#adding-a-new-workflow).
+one config — see [Adding a workflow](#add-a-new-workflow).
 
 - [TL;DR](#tldr)
 - [Why](#why)
