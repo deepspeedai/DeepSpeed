@@ -12,8 +12,8 @@ from unittest import mock
 
 from deepspeed.module_inject.auto_ep_comm import (COMM_BACKEND, DEEPEP_BACKEND, SUPPORTED_DTYPES, _conform_rows,
                                                   _DeepEPCombine, _DeepEPDispatch, _import_deep_ep, _qps_for_sms,
-                                                  assert_dtype_supported, destroy_exchanges)
-from deepspeed.module_inject import auto_ep_layer
+                                                  assert_dtype_supported, destroy_exchanges, shared_exchange)
+from deepspeed.module_inject import auto_ep_comm, auto_ep_layer
 from deepspeed.module_inject.auto_ep_config import parse_autoep_config, validate_autoep_config
 
 
@@ -111,6 +111,100 @@ class TestDtypeGuard(unittest.TestCase):
         self.assertEqual(SUPPORTED_DTYPES, (torch.bfloat16, ))
 
 
+class TestBufferSharing(unittest.TestCase):
+    """One buffer per geometry, not one per layer.
+
+    Each buffer reserves fabric resources that nothing reports, and they run
+    out: on 32 H100s across four nodes the twenty-eighth construction fails
+    inside ncclDevCommCreate, so a 48-layer model cannot start at all. Layers
+    of one model agree on every constructor argument, so they can share.
+    """
+
+    def setUp(self):
+        self.built = []
+        # Kept from before the patch below replaces the name: the release tests
+        # need a real instance, and sharing has to be driven through a stub
+        # because a live buffer is collective.
+        self.exchange_class = auto_ep_comm.DeepEPExchange
+        patch = mock.patch.object(auto_ep_comm, "DeepEPExchange", side_effect=self.build)
+        patch.start()
+        self.addCleanup(patch.stop)
+        self.addCleanup(auto_ep_comm._SHARED_EXCHANGES.clear)
+        auto_ep_comm._SHARED_EXCHANGES.clear()
+
+    def build(self, **kwargs):
+        exchange = mock.Mock(holders=0, **{"kwargs": kwargs})
+        self.built.append(exchange)
+        return exchange
+
+    @staticmethod
+    def geometry(**overrides):
+        arguments = {
+            "ep_group": "group",
+            "num_experts": 128,
+            "top_k": 8,
+            "hidden_size": 2048,
+            "num_max_tokens_per_rank": 1024,
+            "num_sms": 12,
+            "qp_margin": 4,
+        }
+        arguments.update(overrides)
+        return arguments
+
+    def test_layers_of_one_model_share_one_buffer(self):
+        exchanges = [shared_exchange(**self.geometry()) for _ in range(48)]
+
+        self.assertEqual(len(self.built), 1)
+        self.assertEqual({id(exchange) for exchange in exchanges}, {id(self.built[0])})
+        self.assertEqual(self.built[0].holders, 48)
+
+    def test_a_different_geometry_gets_its_own_buffer(self):
+        # Not a micro-optimization: every argument in the key either sizes the
+        # buffer or is passed to dispatch, so sharing across a mismatch would
+        # drive one buffer two ways.
+        for field, value in (("ep_group", "other"), ("num_experts", 64), ("top_k", 4), ("hidden_size", 4096),
+                             ("num_max_tokens_per_rank", 2048), ("num_sms", 8), ("qp_margin", 2)):
+            with self.subTest(field=field):
+                auto_ep_comm._SHARED_EXCHANGES.clear()
+                self.built.clear()
+                shared_exchange(**self.geometry())
+                shared_exchange(**self.geometry(**{field: value}))
+                self.assertEqual(len(self.built), 2)
+
+    def test_the_buffer_survives_until_its_last_holder_releases(self):
+        exchange = self.exchange_class.__new__(self.exchange_class)
+        exchange.buffer = mock.Mock()
+        exchange.key = "key"
+        exchange.holders = 3
+        exchange.destroyed = False
+        auto_ep_comm._SHARED_EXCHANGES["key"] = exchange
+
+        exchange.release()
+        exchange.release()
+        exchange.buffer.destroy.assert_not_called()
+
+        exchange.release()
+        exchange.buffer.destroy.assert_called_once_with()
+        self.assertNotIn("key", auto_ep_comm._SHARED_EXCHANGES)
+
+    def test_a_destroyed_buffer_is_not_handed_out_again(self):
+        # destroy() can be called directly, past the holder count. Leaving the
+        # entry behind would hand the next layer a buffer DeepEP has reclaimed.
+        exchange = self.exchange_class.__new__(self.exchange_class)
+        exchange.buffer = mock.Mock()
+        exchange.key = "key"
+        exchange.holders = 5
+        exchange.destroyed = False
+        auto_ep_comm._SHARED_EXCHANGES["key"] = exchange
+
+        exchange.destroy()
+
+        self.assertEqual(exchange.holders, 0)
+        self.assertNotIn("key", auto_ep_comm._SHARED_EXCHANGES)
+        exchange.destroy()
+        exchange.buffer.destroy.assert_called_once_with()
+
+
 class TestTeardownScope(unittest.TestCase):
     """Teardown belongs to one engine's module, not to the whole process."""
 
@@ -125,8 +219,8 @@ class TestTeardownScope(unittest.TestCase):
 
         destroy_exchanges(torch.nn.Sequential(owned))
 
-        mine.destroy.assert_called_once_with()
-        theirs.destroy.assert_not_called()
+        mine.release.assert_called_once_with()
+        theirs.release.assert_not_called()
         self.assertIsNone(owned._deepep_exchange)
         self.assertIs(foreign._deepep_exchange, theirs)
 
@@ -437,7 +531,7 @@ class TestBufferLifecycle(unittest.TestCase):
             return mock.Mock(num_max_tokens_per_rank=4096)
 
         with mock.patch.object(auto_ep_layer.dist, "barrier") as barrier, \
-                mock.patch.object(auto_ep_layer, "DeepEPExchange", side_effect=build_exchange) as built, \
+                mock.patch.object(auto_ep_layer, "shared_exchange", side_effect=build_exchange) as built, \
                 mock.patch.object(auto_ep_layer, "deepep_dispatch", side_effect=RuntimeError("stop here")), \
                 mock.patch.object(auto_ep_layer.dist, "all_reduce", lambda *a, **k: None):
             router_output = auto_ep_layer.RouterOutput(
