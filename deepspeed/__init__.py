@@ -283,7 +283,7 @@ def _layer_shape(param: torch.Tensor):
 
 def set_optimizer_flags(config_class: DeepSpeedConfig, model: torch.nn.Module) -> None:
     if config_class.optimizer_name == MUON_OPTIMIZER:
-        per_head = bool((config_class.optimizer_params or {}).get("per_head_muon", False))
+        per_head = bool((getattr(config_class, "optimizer_params", None) or {}).get("per_head_muon", False))
         meta, text_config = _per_head_muon_meta(model) if per_head else (None, None)
         tagged: dict = {}
         skipped: dict = {}

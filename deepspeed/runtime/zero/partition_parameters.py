@@ -73,11 +73,16 @@ class NoGatherHandle:
             param.data = param.ds_tensor.data.to(device=get_accelerator().current_device_name(),
                                                  non_blocking=True).view(param.ds_shape)
         self.__param = param
+        self.__complete = False
 
     def wait(self, **kwargs) -> None:
+        if self.__complete:
+            return
+
         if not get_accelerator().resolves_data_dependency():
             get_accelerator().current_stream().synchronize()
         self.__param.ds_status = ZeroParamStatus.AVAILABLE
+        self.__complete = True
 
 
 class NoGatherCoalescedHandle:
@@ -705,8 +710,12 @@ class AllGatherHandle:
         self.__quantization = quantization
         self.__param_buffer = param_buffer
         self.__original_dtype = original_dtype
+        self.__complete = False
 
     def wait(self, handle_dependency=True) -> None:
+        if self.__complete:
+            return
+
         instrument_w_nvtx(self.__handle.wait)()
 
         if self.__param_buffer is not None:
@@ -719,6 +728,7 @@ class AllGatherHandle:
                                                                        dtype=self.__param.dtype).to(
                                                                            self.__param.device)
         self.__param.ds_status = ZeroParamStatus.AVAILABLE
+        self.__complete = True
 
 
 class AllGatherCoalescedHandle:
