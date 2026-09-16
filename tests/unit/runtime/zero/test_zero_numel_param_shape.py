@@ -2,18 +2,17 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # DeepSpeed Team
-"""A zero-element parameter must keep its shape when it is bound to a flat buffer.
+"""A zero-element trainable parameter is not owned by any optimizer wrapper.
 
-Every optimizer wrapper that flattens the parameters repoints each one at its slice of
-the flat buffer. torch's `unflatten_dense_tensors` special-cases a zero-element tensor
-and returns a freshly allocated 1-D `zeros({0})` rather than a view of the requested
-shape, so a `(0, 8)` parameter came back as `(0,)` and the module's own forward then
-dispatched `F.linear` to `addmv`:
+Every wrapper that flattens the parameters used to bind them to slices of the flat buffer.
+torch's `unflatten_dense_tensors` special-cases a zero-element tensor and returns a freshly
+allocated 1-D `zeros({0})` rather than a view of the requested shape, so a `(0, 8)` parameter
+came back as `(0,)` and the module's own forward dispatched `F.linear` to `addmv`:
 
     RuntimeError: size mismatch, got input (1), mat (1x8), vec (0)
 
-The parameters are rebuilt on every `step()` as well as at init, so the shape did not
-survive one iteration either.
+Such parameters are now left out of the optimizer groups the way frozen ones are, and
+checkpointing records them with the frozen parameters so they are rebuilt with their shape.
 """
 
 import pytest
@@ -22,6 +21,7 @@ import torch
 from unit.common import DistributedTest
 
 import deepspeed
+from deepspeed.utils.zero_to_fp32 import get_fp32_state_dict_from_zero_checkpoint
 
 HIDDEN = 8
 
@@ -141,3 +141,53 @@ class TestZeroNumelParameterShape(DistributedTest):
         _step(engine, case)
 
         assert engine.global_steps == 2
+
+
+class _BlockWithEmptyParam(torch.nn.Module):
+    """A zero-element parameter next to a sized one in the same module.
+
+    Keeping them together avoids the separate ZeRO-3 gather issue for a module whose only
+    parameters are zero-sized (#8375), so this exercises checkpointing alone.
+    """
+
+    def __init__(self, hidden=HIDDEN):
+        super().__init__()
+        self.weight = torch.nn.Parameter(torch.randn(hidden, hidden))
+        self.extra = torch.nn.Parameter(torch.zeros(0, hidden))
+
+    def forward(self, x):
+        return (x @ self.weight.t()).sum() + (x @ self.extra.t()).sum()
+
+
+@pytest.mark.parametrize("zero_stage", [2, 3])
+class TestZeroNumelParameterCheckpoint(DistributedTest):
+    world_size = 1
+
+    def test_consolidated_state_dict_keeps_the_empty_parameter(self, tmpdir, zero_stage):
+        config = {
+            "train_micro_batch_size_per_gpu": 1,
+            "optimizer": {
+                "type": "Adam",
+                "params": {
+                    "lr": 1e-3
+                }
+            },
+            "bf16": {
+                "enabled": True
+            },
+            "zero_optimization": {
+                "stage": zero_stage
+            },
+        }
+        model = _BlockWithEmptyParam()
+        engine, *_ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config)
+        loss = engine(torch.randn(1, HIDDEN, device=engine.device, dtype=torch.bfloat16))
+        engine.backward(loss)
+        engine.step()
+        engine.save_checkpoint(tmpdir)
+
+        state_dict = get_fp32_state_dict_from_zero_checkpoint(tmpdir)
+
+        assert state_dict["extra"].shape == torch.Size([0, HIDDEN])
+        assert state_dict["weight"].shape == torch.Size([HIDDEN, HIDDEN])
+        _BlockWithEmptyParam().load_state_dict(state_dict, strict=True)
