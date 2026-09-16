@@ -363,21 +363,7 @@ def test_npu_missing_npurt_is_noop(monkeypatch):
 
 
 def test_npu_host_copy_lookup_gates(monkeypatch):
-    # Below the minimum supported torch_npu version the functions must not
-    # resolve, with a reason pointing at the version gap.
-    monkeypatch.setattr(npu_accelerator, "_torch_npu_version", lambda: (2, 8))
-    funcs, reason = npu_accelerator._npu_host_copy_funcs()
-    assert funcs is None
-    assert "older than" in reason
-
-    # A version that cannot be parsed must fail closed with an explanation.
-    monkeypatch.setattr(npu_accelerator, "_torch_npu_version", lambda: None)
-    funcs, reason = npu_accelerator._npu_host_copy_funcs()
-    assert funcs is None
-    assert "unable to determine" in reason
-
-    # A supported version whose build lacks npurt must not resolve either.
-    monkeypatch.setattr(npu_accelerator, "_torch_npu_version", lambda: (2, 9))
+    # A build lacking npurt must not resolve, with a reason saying so.
     monkeypatch.delattr(torch.npu, "npurt", raising=False)
     funcs, reason = npu_accelerator._npu_host_copy_funcs()
     assert funcs is None

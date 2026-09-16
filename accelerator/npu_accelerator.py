@@ -21,17 +21,6 @@ ACL_SUCCESS = 0
 # (64 MiB), while MAPPED keeps full DMA bandwidth (~23 GB/s). MAPPED requires
 # 4K-aligned addresses, which the native allocator guarantees (posix_memalign).
 ACL_HOST_REG_MAPPED = 0x2
-_MIN_TORCH_NPU_REGISTER_VERSION = (2, 9)
-
-
-def _torch_npu_version():
-    """Return the installed torch_npu version as (major, minor), or None."""
-    try:
-        import torch_npu
-        major, minor, *_ = torch_npu.__version__.split("+")[0].split(".")
-        return (int(major), int(minor))
-    except Exception:
-        return None
 
 
 def _npu_host_copy_funcs():
@@ -39,15 +28,8 @@ def _npu_host_copy_funcs():
 
     torch.npu.npurt() returns the runtime-API module exposing
     npuHostRegister/npuHostUnregister; the binding is maintained with
-    torch_npu and initializes the runtime itself. Host registration is
-    gated on torch_npu >= 2.9.0, the minimum supported version.
+    torch_npu and initializes the runtime itself.
     """
-    version = _torch_npu_version()
-    if version is None:
-        return None, "unable to determine the installed torch_npu version"
-    if version < _MIN_TORCH_NPU_REGISTER_VERSION:
-        return None, (f"torch_npu {version[0]}.{version[1]} is older than the minimum supported version "
-                      f"{_MIN_TORCH_NPU_REGISTER_VERSION[0]}.{_MIN_TORCH_NPU_REGISTER_VERSION[1]}")
     if not hasattr(torch, "npu") or not hasattr(torch.npu, "npurt"):
         return None, "torch.npu.npurt is unavailable in this torch_npu build"
     try:
