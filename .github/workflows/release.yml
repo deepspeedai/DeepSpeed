@@ -135,3 +135,7 @@ jobs:
         assignees: ${{ github.actor }}
         title: "Update version.txt after ${{ env.RELEASE_VERSION }} release"
         author: ${{ github.actor }} <${{ github.actor }}@users.noreply.github.com>
+        commit-message: |
+          [create-pull-request] automated change
+
+          Signed-off-by: ${{ github.actor }} <${{ github.actor }}@users.noreply.github.com>

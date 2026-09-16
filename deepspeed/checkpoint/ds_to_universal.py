@@ -348,7 +348,22 @@ def merge_tp_slices(uc_info, dir, slice_dir, tp_degree, name_and_shapes):
         assert len(matched_) <= 1, f'Got more than one matching affine map patterns={matched_} for {name_}'
         return ParamAffineMap.from_dict(affine_params[matched_[0]]) if matched_ else None
 
+    def consume_superseded_patterns(name_):
+        """Mark the category patterns for this parameter as used.
+
+        A checkpoint carrying an affine map also carries the category patterns, so an older
+        converter can still read it. This converter prefers the map and never consults those
+        branches, which would otherwise leave their patterns looking unused and fail the
+        strict check. They are superseded here, not unused.
+        """
+        for patterns_ in (replicated_parameters, parameters_to_average, parameters_with_row_parallelism,
+                          vocabulary_parameters, parameters_with_2_sub_params_cat_dim_0):
+            get_matched_pattern(patterns_, name_)
+        get_matched_sub_params_pattern(name_)
+
     matched_affine_map = get_matched_affine_map(name)
+    if matched_affine_map is not None:
+        consume_superseded_patterns(name)
     matched_sub_params_shape, matched_sub_params_pattern = get_matched_sub_params_pattern(name)
 
     step_merged = _merge_zero_shards(slice_base_path, "step", tp_degree, per_tp_shapes)

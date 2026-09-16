@@ -1680,32 +1680,16 @@ class affine_resume_checkpoint(DistributedFixture):
     world_size = 2
 
     def run(self, tmpdir, affine_layout):
-        from deepspeed.checkpoint.affine import (AFFINE_MAP_FORMAT_VERSION, contiguous_split_map, replicated_map)
-        from deepspeed.checkpoint.constants import AFFINE_MAP, AFFINE_MAP_PARAMS, AFFINE_MAP_VERSION
+        from deepspeed.module_inject.layers import collect_autotp_universal_checkpoint_info
 
         engine = _affine_resume_engine(self.world_size)
         for step in range(4):
             _affine_resume_step(engine, self.world_size, step)
 
-        # Phase 1 does not yet emit AutoTP affine metadata. Supply the known fixture
-        # layout through the checkpoint API; all weights and moments come from training.
-        # LinearAllreduce adds this bias AFTER reduction, so its real scale is one.
-        maps = {
-            r"^fc1\.weight$": contiguous_split_map((16, 16), [8, 8], 0),
-            r"^fc1\.bias$": contiguous_split_map((16, ), [8, 8], 0),
-            r"^fc2\.weight$": contiguous_split_map((16, 16), [8, 8], 1),
-            r"^fc2\.bias$": replicated_map((16, ), self.world_size),
-        }
-        uc_info = {
-            UNIVERSAL_CHECKPOINT_VERSION_KEY: UNIVERSAL_CHECKPOINT_VERSION_VALUE,
-            AFFINE_MAP: {
-                AFFINE_MAP_VERSION: AFFINE_MAP_FORMAT_VERSION,
-                AFFINE_MAP_PARAMS: {
-                    name: layout.to_dict()
-                    for name, layout in maps.items()
-                },
-            },
-        }
+        # The affine layout comes from the producer rather than from the test, so this
+        # exercises the metadata a real job would write. All weights and moments come
+        # from training. LinearAllreduce adds fc2's bias AFTER reduction, so its scale is one.
+        uc_info = collect_autotp_universal_checkpoint_info(engine.module)
         engine.save_checkpoint(tmpdir,
                                tag="affine_resume",
                                client_state={UNIVERSAL_CHECKPOINT_INFO: uc_info} if affine_layout else {})
@@ -1745,4 +1729,208 @@ class TestAffineUniversalCheckpointResume(DistributedTest):
                                            atol=2e-6,
                                            rtol=2e-5,
                                            msg=lambda message: f"snapshot {index}, {name}: {message}")
+        engine.destroy()
+
+
+class TestAffineMapProducer(DistributedTest):
+    """The producer must emit the layout that `affine_resume_checkpoint` supplies by hand.
+
+    That fixture's maps are not a guess: a full train -> save -> convert -> resume cycle
+    reproduces uninterrupted training through them. Requiring the producer to match them
+    exactly is what makes emitted metadata trustworthy without re-running the whole cycle.
+    """
+
+    world_size = 2
+
+    def test_producer_matches_the_verified_fixture_layout(self):
+        from deepspeed.checkpoint.affine import contiguous_split_map, replicated_map
+        from deepspeed.checkpoint.constants import AFFINE_MAP, AFFINE_MAP_PARAMS
+        from deepspeed.module_inject.layers import collect_autotp_universal_checkpoint_info
+
+        engine = _affine_resume_engine(self.world_size)
+        emitted = collect_autotp_universal_checkpoint_info(engine.module)
+        maps = emitted.get(AFFINE_MAP, {}).get(AFFINE_MAP_PARAMS, {})
+
+        expected = {
+            r"^fc1\.weight$": contiguous_split_map((16, 16), [8, 8], 0).to_dict(),
+            r"^fc1\.bias$": contiguous_split_map((16, ), [8, 8], 0).to_dict(),
+            r"^fc2\.weight$": contiguous_split_map((16, 16), [8, 8], 1).to_dict(),
+            r"^fc2\.bias$": replicated_map((16, ), self.world_size).to_dict(),
+        }
+
+        assert set(maps) == set(expected), (f"producer emitted maps for {sorted(maps)}, expected exactly "
+                                            f"{sorted(expected)}")
+        for pattern, want in expected.items():
+            assert maps[pattern] == want, (f"emitted map for {pattern} differs from the layout the resume "
+                                           f"fixture verifies:\n  emitted  {maps[pattern]}\n  expected {want}")
+        engine.destroy()
+
+
+class AffineCoverageModel(torch.nn.Module):
+    """Covers each conversion category: column split, row split, replicated, untouched."""
+
+    def __init__(self, hidden_dim=16, vocab_size=26):
+        super().__init__()
+        self.embed = torch.nn.Embedding(vocab_size, hidden_dim)  # AutoTP leaves this alone
+        self.norm = torch.nn.LayerNorm(hidden_dim)  # untouched, and not 2-D
+        self.fc1 = torch.nn.Linear(hidden_dim, hidden_dim)  # column
+        self.fc2 = torch.nn.Linear(hidden_dim, hidden_dim)  # row
+        self.lm_head = torch.nn.Linear(hidden_dim, vocab_size)  # vocabulary
+
+    def forward(self, x):
+        h = self.norm(self.embed(x))
+        return self.lm_head(self.fc2(self.fc1(h))).sum()
+
+
+class TestAffineMapCoverage(DistributedTest):
+    """Every parameter the converter can place must carry an affine map.
+
+    A parameter with no map falls back to its name category, which is the behaviour the IR
+    exists to replace. The only parameters allowed to have no map are the ones AutoTP itself
+    refuses to describe, which conversion rejects anyway.
+    """
+
+    world_size = 2
+
+    def test_every_convertible_parameter_has_a_map(self):
+        from deepspeed.checkpoint.constants import (AFFINE_MAP, AFFINE_MAP_PARAMS,
+                                                    AUTOTP_UNSUPPORTED_PARAMETER_PATTERNS,
+                                                    PARAMETER_WITH_ROW_PARALLELISM_PATTERNS, PARAMETER_WITH_SUB_PARAMS,
+                                                    TP_REPLICATED_PARAMETER_PATTERNS, VOCABULARY_PARAMETER_PATTERNS)
+        from deepspeed.module_inject.layers import collect_autotp_universal_checkpoint_info
+
+        config = {
+            "train_micro_batch_size_per_gpu": 1,
+            "zero_allow_untested_optimizer": True,
+            "zero_optimization": {
+                "stage": 1
+            },
+            "tensor_parallel": {
+                "autotp_size": self.world_size,
+                "partition_config": {
+                    "use_default_specs":
+                    False,
+                    "layer_specs": [
+                        {
+                            "patterns": [r".*fc1\.weight$"],
+                            "partition_type": "column"
+                        },
+                        {
+                            "patterns": [r".*fc2\.weight$"],
+                            "partition_type": "row"
+                        },
+                        {
+                            "patterns": [r".*lm_head\.weight$"],
+                            "partition_type": "column",
+                            "gather_output": True
+                        },
+                    ],
+                },
+            },
+        }
+        model = AffineCoverageModel()
+        optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+        engine, _, _, _ = deepspeed.initialize(model=model, optimizer=optimizer, config=config)
+        info = collect_autotp_universal_checkpoint_info(engine.module)
+
+        mapped = set(info.get(AFFINE_MAP, {}).get(AFFINE_MAP_PARAMS, {}))
+        unsupported = set(info.get(AUTOTP_UNSUPPORTED_PARAMETER_PATTERNS, {}))
+
+        categorised = set()
+        for key in (TP_REPLICATED_PARAMETER_PATTERNS, PARAMETER_WITH_ROW_PARALLELISM_PATTERNS,
+                    VOCABULARY_PARAMETER_PATTERNS):
+            categorised.update(info.get(key, []))
+        for entry in info.get(PARAMETER_WITH_SUB_PARAMS, []):
+            categorised.update(entry["patterns"])
+
+        assert categorised, "model exercised no conversion category, so this proves nothing"
+        missing = categorised - mapped - unsupported
+        assert not missing, (f"these parameters are placed by a name category but carry no affine map, "
+                             f"so conversion still depends on the category: {sorted(missing)}")
+        engine.destroy()
+
+
+def _uneven_vocab_engine(tp_size, load_universal=False):
+    """A vocabulary head split 101 ways over `tp_size` ranks, so the shards are uneven."""
+    torch.manual_seed(42)
+    model = UnevenVocabLmHeadModel(12, 101)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+    config = {
+        "train_micro_batch_size_per_gpu": 1,
+        "zero_allow_untested_optimizer": True,
+        "zero_optimization": {
+            "stage": 1
+        },
+        "checkpoint": {
+            "load_universal": load_universal
+        },
+    }
+    if tp_size > 1:
+        config["tensor_parallel"] = {
+            "autotp_size": tp_size,
+            "partition_config": {
+                "use_default_specs":
+                False,
+                "layer_specs": [{
+                    "patterns": [r".*lm_head\.weight$"],
+                    "partition_type": "column",
+                    "gather_output": True,
+                }],
+            },
+        }
+    engine, _, _, _ = deepspeed.initialize(model=model, optimizer=optimizer, config=config)
+    return engine
+
+
+class uneven_vocab_checkpoint(DistributedFixture):
+    world_size = 2
+
+    def run(self, tmpdir):
+        from deepspeed.checkpoint.constants import AFFINE_MAP, AFFINE_MAP_PARAMS
+        from deepspeed.module_inject.layers import collect_autotp_universal_checkpoint_info
+
+        engine = _uneven_vocab_engine(self.world_size)
+        _train_steps(engine, hidden_dim=12)
+
+        # Pin that the checkpoint below is converted through the map rather than the
+        # vocabulary category, and that the map carries the real 51/50 split.
+        maps = collect_autotp_universal_checkpoint_info(engine.module)[AFFINE_MAP][AFFINE_MAP_PARAMS]
+        head = maps[r"^lm_head\.weight$"]
+        assert [head["ranks"][rank]["shard_shape"][0] for rank in sorted(head["ranks"])] == [51, 50]
+
+        tp_group = groups.get_tensor_model_parallel_group()
+        weight = _all_gather_cat_dim0(engine.module.lm_head.weight.detach(), tp_group).cpu()
+        bias = _all_gather_cat_dim0(engine.module.lm_head.bias.detach().view(-1, 1), tp_group).view(-1).cpu()
+        if dist.get_rank() == 0:
+            torch.save({"weight": weight, "bias": bias}, os.path.join(tmpdir, "uneven_vocab_reference.pt"))
+
+        _save_and_convert(engine, tmpdir)
+        engine.destroy()
+
+
+@pytest.mark.parametrize("world_size", [1, 2], ids=["tp1", "tp2"])
+class TestUnevenVocabCrossTpResume(DistributedTest):
+    """A vocabulary head saved at TP2 must restore at a different TP degree.
+
+    101 rows over two ranks gives shards of 51 and 50, so the map has to carry the per-rank
+    extents rather than assume an even split. Restoring at TP1 then merges two unequal
+    shards into one tensor, which is where an even-split assumption would show up.
+    """
+
+    def test_resume_from_tp2(self, uneven_vocab_checkpoint, tmpdir, world_size):
+        tp_size = dist.get_world_size()
+        engine = _uneven_vocab_engine(tp_size, load_universal=True)
+        engine.load_checkpoint(tmpdir, tag=UNIVERSAL_TAG, load_module_only=True)
+
+        reference = torch.load(os.path.join(tmpdir, "uneven_vocab_reference.pt"))
+        if tp_size > 1:
+            tp_group = groups.get_tensor_model_parallel_group()
+            weight = _all_gather_cat_dim0(engine.module.lm_head.weight.detach(), tp_group).cpu()
+            bias = _all_gather_cat_dim0(engine.module.lm_head.bias.detach().view(-1, 1), tp_group).view(-1).cpu()
+        else:
+            weight = engine.module.lm_head.weight.detach().cpu()
+            bias = engine.module.lm_head.bias.detach().cpu()
+
+        torch.testing.assert_close(weight, reference["weight"])
+        torch.testing.assert_close(bias, reference["bias"])
         engine.destroy()
