@@ -19,7 +19,9 @@ ACL_SUCCESS = 0
 # chosen over PINNED because measured H2D on this platform falls back to
 # mlock-only speed (~8-9 GB/s) for PINNED-only registrations of larger buffers
 # (64 MiB), while MAPPED keeps full DMA bandwidth (~23 GB/s). MAPPED requires
-# 4K-aligned addresses, which the native allocator guarantees (posix_memalign).
+# 4K-aligned addresses, which the native allocator guarantees (posix_memalign);
+# see the aclrtHostRegisterV2 API reference:
+# https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/latest/API/runtimeapi/aclcppdevg_03_2128.html
 ACL_HOST_REG_MAPPED = 0x2
 
 
@@ -182,13 +184,17 @@ class NPU_Accelerator(DeepSpeedAccelerator):
         # Register natively pinned (posix_memalign + mlock) host memory with the
         # ACL runtime so torch's async copies can use the DMA engine. npurt
         # initializes the runtime itself, so no set_device ordering is needed.
-        if address % 4096:
-            # MAPPED registration requires 4K-aligned addresses and the driver
-            # only reports an opaque internal error otherwise; fail fast here.
-            from deepspeed.utils import logger
-            logger.warning_once(
-                f"Native pinned buffer is not 4K-aligned (address={address:#x}); skipping host-memory registration.")
-            return False
+        # MAPPED registration requires 4K-aligned addresses (per the
+        # aclrtHostRegisterV2 API reference cited on ACL_HOST_REG_MAPPED). The
+        # native allocator always yields aligned addresses; if a caller passes
+        # an unaligned one, extend the range down to the page boundary so
+        # registration still succeeds instead of failing on the driver's opaque
+        # internal error. An already-aligned address passes through unchanged
+        # (offset 0), and unregister_host_memory rounds down identically.
+        offset = address % 4096
+        aligned_address = address - offset
+        # The pad keeps the registered range covering the original request.
+        padded_bytes = num_bytes + offset
         funcs, reason = _npu_host_copy_funcs()
         if funcs is None:
             from deepspeed.utils import logger
@@ -196,7 +202,7 @@ class NPU_Accelerator(DeepSpeedAccelerator):
                                 "native pinned memory stays mlock-only.")
             return False
         register, _ = funcs
-        rc = register(address, num_bytes, ACL_HOST_REG_MAPPED)
+        rc = register(aligned_address, padded_bytes, ACL_HOST_REG_MAPPED)
         if rc != ACL_SUCCESS:
             from deepspeed.utils import logger
             logger.warning_once(f"npuHostRegister failed with rc={rc}; native pinned memory stays mlock-only.")
@@ -208,7 +214,10 @@ class NPU_Accelerator(DeepSpeedAccelerator):
         if funcs is None:
             return None
         _, unregister = funcs
-        rc = unregister(address)
+        # Same page-boundary rounding as register_host_memory, so the driver
+        # releases exactly the range it was given.
+        offset = address % 4096
+        rc = unregister(address - offset)
         if rc != ACL_SUCCESS:
             # Raise so NativePinnedMemory keeps the allocation alive: the driver
             # must never hold a registration for pages later reused by malloc.

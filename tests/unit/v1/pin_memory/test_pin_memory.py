@@ -303,24 +303,35 @@ def test_npu_device_registration_calls_npurt(monkeypatch):
     monkeypatch.setattr(npu_accelerator, "_npu_host_copy_funcs", lambda: ((register, unregister), None))
     accelerator = NPU_Accelerator.__new__(NPU_Accelerator)
 
-    # 4096: the hook requires 4K-aligned addresses for MAPPED registration.
+    # 4096: page-aligned addresses register without any range extension.
     assert accelerator.register_host_memory(4096, 4096) is True
     accelerator.unregister_host_memory(4096)
     assert registered == [(4096, 4096, npu_accelerator.ACL_HOST_REG_MAPPED)]
     assert unregistered == [4096]
 
 
-def test_npu_unaligned_address_is_skipped(monkeypatch):
-    # MAPPED registration requires 4K-aligned addresses and the driver reports
-    # only an opaque internal error; the hook must fail fast without resolving
-    # or calling the npurt functions.
-    def fail_lookup():
-        raise AssertionError("npurt must not be resolved for unaligned addresses")
+def test_npu_unaligned_address_is_extended_to_page_boundary(monkeypatch):
+    # MAPPED registration requires 4K-aligned addresses; unaligned addresses
+    # are extended down to the page boundary with a matching size pad so the
+    # registration still succeeds, and unregister rounds down identically.
+    registered = []
+    unregistered = []
 
-    monkeypatch.setattr(npu_accelerator, "_npu_host_copy_funcs", fail_lookup)
+    def register(address, num_bytes, flag):
+        registered.append((address, num_bytes, flag))
+        return 0
+
+    def unregister(address):
+        unregistered.append(address)
+        return 0
+
+    monkeypatch.setattr(npu_accelerator, "_npu_host_copy_funcs", lambda: ((register, unregister), None))
     accelerator = NPU_Accelerator.__new__(NPU_Accelerator)
 
-    assert accelerator.register_host_memory(1234, 4096) is False
+    assert accelerator.register_host_memory(4096 + 1234, 4096) is True
+    assert registered == [(4096, 4096 + 1234, npu_accelerator.ACL_HOST_REG_MAPPED)]
+    accelerator.unregister_host_memory(4096 + 1234)
+    assert unregistered == [4096]
 
 
 def test_npu_device_registration_failure_returns_false(monkeypatch):
