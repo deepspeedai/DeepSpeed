@@ -982,3 +982,29 @@ def test_tensor_lr_bound_is_not_changed_by_optimizer_updates(scheduler_cls, lr_s
         optimizer.step()
         expected_parameter -= expected_lr
         torch.testing.assert_close(parameter, expected_parameter)
+
+
+@pytest.mark.parametrize("scheduler_cls, kwargs", [
+    (LRRangeTest, dict(lr_range_test_min_lr=0.1, lr_range_test_step_size=2)),
+    (OneCycle, dict(cycle_min_lr=0.1, cycle_max_lr=0.3, cycle_first_step_size=2, cycle_momentum=False)),
+    (WarmupLR, dict(warmup_min_lr=0.1, warmup_max_lr=0.3, warmup_num_steps=2)),
+    (WarmupDecayLR, dict(total_num_steps=4, warmup_min_lr=0.1, warmup_max_lr=0.3, warmup_num_steps=2)),
+    (WarmupCosineLR, dict(total_num_steps=4, warmup_num_steps=2)),
+])
+def test_get_last_lr_returns_tensor_snapshot(scheduler_cls, kwargs):
+    parameter = torch.nn.Parameter(torch.ones(1))
+    lr = torch.tensor(0.1)
+    optimizer = torch.optim.SGD([parameter], lr=lr)
+    scheduler = scheduler_cls(optimizer, **kwargs)
+    scheduler.step(0)
+    captured = scheduler.get_last_lr()
+    expected = captured[0].clone()
+    scheduler.step(1)
+    torch.testing.assert_close(captured[0], expected)
+
+    current = lr.clone()
+    scheduler.get_last_lr()[0].fill_(-1.0)
+    torch.testing.assert_close(lr, current)
+    parameter.sum().backward()
+    optimizer.step()
+    torch.testing.assert_close(parameter, torch.ones(1) - current)

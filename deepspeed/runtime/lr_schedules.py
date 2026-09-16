@@ -280,7 +280,7 @@ def update_lr(param_groups, lrs):
             param_group['lr'].fill_(lr)
         else:
             param_group['lr'] = lr
-    return [group['lr'] for group in param_groups]
+    return [group['lr'].clone() if is_tensor(group['lr']) else group['lr'] for group in param_groups]
 
 
 """
