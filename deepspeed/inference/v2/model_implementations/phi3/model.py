@@ -106,7 +106,7 @@ class Phi3InferenceModel(DSTransformerModelBase):
 
     @property
     def positional_embedding_config(self) -> Optional[RotateHalfConfig]:
-        return RotateHalfConfig(theta_base=self._config.rope_theta)
+        return RotateHalfConfig(theta_base=self.rope_theta)
 
     """
     Forward implementations
