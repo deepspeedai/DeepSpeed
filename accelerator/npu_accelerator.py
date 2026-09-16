@@ -41,6 +41,18 @@ def _npu_host_copy_funcs():
         return None, "torch.npu.npurt() failed to initialize the NPU runtime"
 
 
+def _align_to_page_boundary(address):
+    """Round an address down to the 4K page boundary, returning (aligned address, offset).
+
+    MAPPED registration requires 4K-aligned addresses (per the
+    aclrtHostRegisterV2 API reference cited on ACL_HOST_REG_MAPPED). The
+    returned offset lets callers pad the size so the aligned range still
+    covers the original request.
+    """
+    offset = address % 4096
+    return address - offset, offset
+
+
 class NPU_Accelerator(DeepSpeedAccelerator):
 
     def __init__(self):
@@ -190,9 +202,9 @@ class NPU_Accelerator(DeepSpeedAccelerator):
         # an unaligned one, extend the range down to the page boundary so
         # registration still succeeds instead of failing on the driver's opaque
         # internal error. An already-aligned address passes through unchanged
-        # (offset 0), and unregister_host_memory rounds down identically.
-        offset = address % 4096
-        aligned_address = address - offset
+        # (offset 0), and unregister_host_memory rounds down via the same
+        # helper.
+        aligned_address, offset = _align_to_page_boundary(address)
         # The pad keeps the registered range covering the original request.
         padded_bytes = num_bytes + offset
         funcs, reason = _npu_host_copy_funcs()
@@ -216,8 +228,8 @@ class NPU_Accelerator(DeepSpeedAccelerator):
         _, unregister = funcs
         # Same page-boundary rounding as register_host_memory, so the driver
         # releases exactly the range it was given.
-        offset = address % 4096
-        rc = unregister(address - offset)
+        aligned_address, _ = _align_to_page_boundary(address)
+        rc = unregister(aligned_address)
         if rc != ACL_SUCCESS:
             # Raise so NativePinnedMemory keeps the allocation alive: the driver
             # must never hold a registration for pages later reused by malloc.

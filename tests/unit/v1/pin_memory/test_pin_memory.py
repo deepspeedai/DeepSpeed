@@ -288,50 +288,35 @@ def test_unpin_keeps_allocation_when_unregister_fails(monkeypatch, native_pins):
     assert begin not in native_pins._device_registered
 
 
-def test_npu_device_registration_calls_npurt(monkeypatch):
+@pytest.mark.parametrize(
+    "address, expected_address, expected_bytes",
+    [
+        (4096, 4096, 4096),  # page-aligned: registers unchanged
+        (4096 + 1234, 4096, 4096 + 1234),  # unaligned: extended down with a matching size pad
+    ])
+def test_npu_register_aligns_to_page_boundary(monkeypatch, address, expected_address, expected_bytes):
+    # MAPPED registration requires 4K-aligned addresses; the hook rounds the
+    # address down to the page boundary and pads the size so the registered
+    # range still covers the original request. An already-aligned address
+    # passes through unchanged, and unregister rounds down identically.
     registered = []
     unregistered = []
 
-    def register(address, num_bytes, flag):
-        registered.append((address, num_bytes, flag))
+    def register(addr, num_bytes, flag):
+        registered.append((addr, num_bytes, flag))
         return 0
 
-    def unregister(address):
-        unregistered.append(address)
+    def unregister(addr):
+        unregistered.append(addr)
         return 0
 
     monkeypatch.setattr(npu_accelerator, "_npu_host_copy_funcs", lambda: ((register, unregister), None))
     accelerator = NPU_Accelerator.__new__(NPU_Accelerator)
 
-    # 4096: page-aligned addresses register without any range extension.
-    assert accelerator.register_host_memory(4096, 4096) is True
-    accelerator.unregister_host_memory(4096)
-    assert registered == [(4096, 4096, npu_accelerator.ACL_HOST_REG_MAPPED)]
-    assert unregistered == [4096]
-
-
-def test_npu_unaligned_address_is_extended_to_page_boundary(monkeypatch):
-    # MAPPED registration requires 4K-aligned addresses; unaligned addresses
-    # are extended down to the page boundary with a matching size pad so the
-    # registration still succeeds, and unregister rounds down identically.
-    registered = []
-    unregistered = []
-
-    def register(address, num_bytes, flag):
-        registered.append((address, num_bytes, flag))
-        return 0
-
-    def unregister(address):
-        unregistered.append(address)
-        return 0
-
-    monkeypatch.setattr(npu_accelerator, "_npu_host_copy_funcs", lambda: ((register, unregister), None))
-    accelerator = NPU_Accelerator.__new__(NPU_Accelerator)
-
-    assert accelerator.register_host_memory(4096 + 1234, 4096) is True
-    assert registered == [(4096, 4096 + 1234, npu_accelerator.ACL_HOST_REG_MAPPED)]
-    accelerator.unregister_host_memory(4096 + 1234)
-    assert unregistered == [4096]
+    assert accelerator.register_host_memory(address, 4096) is True
+    assert registered == [(expected_address, expected_bytes, npu_accelerator.ACL_HOST_REG_MAPPED)]
+    accelerator.unregister_host_memory(address)
+    assert unregistered == [expected_address]
 
 
 def test_npu_device_registration_failure_returns_false(monkeypatch):
