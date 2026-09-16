@@ -926,6 +926,13 @@ class DeepSpeedEngine(Module):
         replacement_sources = ReplacementSourceMap()
         if specs:
             validate_autoep_post_detection(autoep_config, specs)
+            convert_to_zero_parameters = self._autoep_zero3_param_converter(model)
+            on_moe_layer_replaced = None
+            if convert_to_zero_parameters is not None:
+
+                def on_moe_layer_replaced(replacement):
+                    self._partition_autoep_zero3_experts(replacement, convert_to_zero_parameters)
+
             # The map holds the discarded pre-shard expert weights alive until the remap is
             # done, so only build it when there is a caller-supplied optimizer to remap.
             replacement_sources = auto_ep.replace_moe_layers(
@@ -934,6 +941,7 @@ class DeepSpeedEngine(Module):
                 ep_rank=ep_rank,
                 collect_sources=(_client_optimizer_needs_remap(self.client_optimizer)
                                  if collect_sources is None else collect_sources),
+                on_moe_layer_replaced=on_moe_layer_replaced,
             )
             logger.info(f"AutoEP: replaced {len(specs)} MoE layer(s) with ep_size={ep_size}")
 
@@ -941,6 +949,26 @@ class DeepSpeedEngine(Module):
             from deepspeed import set_optimizer_flags
             set_optimizer_flags(self._config, model)
         return replacement_sources
+
+    def _autoep_zero3_param_converter(self, model):
+        if not self.zero_optimization_partition_weights():
+            return None
+        return next((param.convert_to_zero_parameters
+                     for param in model.parameters() if hasattr(param, "convert_to_zero_parameters")), None)
+
+    @staticmethod
+    def _partition_autoep_zero3_experts(replacement, convert_to_zero_parameters):
+        expert_params = list(replacement.experts.named_parameters())
+        for name, param in expert_params:
+            group_name = getattr(param, "ds_zero_partition_group_name", None)
+            if group_name is None:
+                raise AssertionError(f"AutoEP replacement expert parameter '{name}' is missing a ZeRO partition "
+                                     "group name.")
+            param.ds_zero_partition_process_group = groups._get_expert_data_parallel_group(group_name)
+        convert_to_zero_parameters(param_list=[param for _, param in expert_params])
+        # ZeRO parameters own method closures that form reference cycles. Collect the discarded
+        # source layer now so its full expert weights cannot accumulate before the next replacement.
+        gc.collect()
 
     def _autoep_sequence_parallel_world_size(self):
         if self.mpu is not None and hasattr(self.mpu, 'get_sequence_parallel_world_size'):
