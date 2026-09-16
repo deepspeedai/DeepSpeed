@@ -212,6 +212,7 @@ def _start_async_split_plan_from_expert_counts(
     ep_group: dist.ProcessGroup | None,
     host_splits: torch.Tensor,
     ready_event,
+    dependency_event,
 ) -> _PendingSplitPlan:
     """Prepare counts on the caller stream, then start a pinned-memory D2H copy."""
     if num_tokens_per_expert.device.type != "cuda":
@@ -229,19 +230,19 @@ def _start_async_split_plan_from_expert_counts(
     )
     received_counts = received_counts_flat.view(ep_size, num_local_experts)
     local_counts = received_counts.sum(dim=0)
-    # Match the pinned destination dtype here so the copy stream does not
-    # launch a conversion kernel alongside token packing.
     device_splits = torch.stack((
         count_matrix.sum(dim=1),
         received_counts.sum(dim=1),
-    )).to(dtype=host_splits.dtype)
+    ))
 
     device_index = num_tokens_per_expert.device.index
     if device_index is None:
         device_index = get_accelerator().current_device()
     copy_stream = _get_async_split_plan_stream(device_index)
     current_stream = get_accelerator().current_stream(num_tokens_per_expert.device)
-    copy_stream.wait_stream(current_stream)
+    # Reuse the layer event instead of allocating one through wait_stream.
+    dependency_event.record(current_stream)
+    copy_stream.wait_event(dependency_event)
     device_splits.record_stream(copy_stream)
 
     with get_accelerator().stream(copy_stream):
@@ -518,6 +519,7 @@ class AutoEPMoELayer(nn.Module):
         self.async_split_plan = resolved_config.async_split_plan
         self._async_split_plan_host_splits = None
         self._async_split_plan_ready_event = None
+        self._async_split_plan_dependency_event = None
         self._async_split_plan_device_index = None
         self._async_split_plan_pending = None
 
@@ -672,11 +674,13 @@ class AutoEPMoELayer(nn.Module):
             device_index = get_accelerator().current_device()
         if self._async_split_plan_device_index != device_index:
             self._async_split_plan_ready_event = get_accelerator().Event()
+            self._async_split_plan_dependency_event = get_accelerator().Event()
             self._async_split_plan_device_index = device_index
-        if (self._async_split_plan_host_splits is None
-                or self._async_split_plan_host_splits.dtype != num_tokens_per_expert.dtype):
+        if self._async_split_plan_host_splits is None:
+            # Integer reductions produce int64 splits; matching that dtype
+            # avoids a conversion kernel before the metadata transfer.
             self._async_split_plan_host_splits = get_accelerator().pin_memory(
-                torch.empty((2, self.ep_size), dtype=num_tokens_per_expert.dtype, device="cpu"))
+                torch.empty((2, self.ep_size), dtype=torch.int64, device="cpu"))
 
         pending = _start_async_split_plan_from_expert_counts(
             num_tokens_per_expert=num_tokens_per_expert,
@@ -685,6 +689,7 @@ class AutoEPMoELayer(nn.Module):
             ep_group=self.ep_group,
             host_splits=self._async_split_plan_host_splits,
             ready_event=self._async_split_plan_ready_event,
+            dependency_event=self._async_split_plan_dependency_event,
         )
         self._async_split_plan_pending = pending
         return pending

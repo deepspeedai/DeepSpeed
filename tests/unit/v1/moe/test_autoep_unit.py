@@ -1132,19 +1132,32 @@ def async_split_layer(monkeypatch):
                            ep_size=2,
                            ep_rank=0,
                            config=_runtime_config(enabled=True, autoep_size=2, async_split_plan=True))
-    activity = {"buffers": [], "waits": [], "records": [], "timeline": [], "stream": "caller"}
+    activity = {"buffers": [], "events": [], "waits": [], "records": [], "timeline": [], "stream": "caller"}
 
     def synchronize():
         activity["waits"].append("ready")
         activity["timeline"].append(("synchronize", activity["stream"]))
 
-    def record(stream):
-        activity["records"].append("submitted")
-        activity["timeline"].append(("record", stream.name))
+    def record(event, stream):
+        stream_name = stream.name if hasattr(stream, "name") else stream
+        event.recorded_stream = stream_name
+        if stream_name == "copy":
+            activity["records"].append("submitted")
+        activity["timeline"].append(("record", stream_name))
 
-    event = SimpleNamespace(synchronize=synchronize, record=record)
-    stream = SimpleNamespace(name="copy",
-                             wait_stream=lambda source: activity["timeline"].append(("wait_stream", source)))
+    event = SimpleNamespace(synchronize=synchronize)
+
+    def create_event():
+        created = event if not activity["events"] else SimpleNamespace(synchronize=synchronize)
+        created.record = lambda stream: record(created, stream)
+        activity["events"].append(created)
+        return created
+
+    def wait_event(event):
+        assert event.recorded_stream == "caller"
+        activity["timeline"].append(("wait_event", "copy"))
+
+    stream = SimpleNamespace(name="copy", wait_event=wait_event)
 
     @contextmanager
     def copy_stream(stream):
@@ -1182,7 +1195,7 @@ def async_split_layer(monkeypatch):
 
     accelerator = SimpleNamespace(current_device=lambda: 0,
                                   current_stream=lambda device: activity["stream"],
-                                  Event=lambda: event,
+                                  Event=create_event,
                                   Stream=lambda device: stream,
                                   stream=copy_stream,
                                   pin_memory=pin_memory)
@@ -1231,14 +1244,17 @@ class TestAsyncSplitPlanLifecycle:
             if operation in ("counts", "reduce", "sort", "payload", "synchronize"):
                 assert stream == "caller"
         assert timeline.count(("counts", "caller")) == 1
-        assert timeline.count(("wait_stream", "caller")) == 1
+        assert timeline.count(("record", "caller")) == 1
+        assert timeline.count(("wait_event", "copy")) == 1
         assert timeline.count(("copy", "copy")) == 1
         assert timeline.count(("record", "copy")) == 1
         operations = [operation for operation, _ in timeline]
-        assert operations.index("counts") < operations.index("wait_stream") < operations.index("copy")
-        assert all(index < operations.index("wait_stream") for index, operation in enumerate(operations)
+        assert operations.index("counts") < timeline.index(("record", "caller")) < operations.index("wait_event")
+        assert all(index < timeline.index(("record", "caller")) for index, operation in enumerate(operations)
                    if operation == "reduce")
-        assert operations.index("copy") < operations.index("record") < operations.index("sort")
+        assert operations.index("wait_event") < operations.index("copy") < timeline.index(("record", "copy"))
+        assert timeline.index(("record", "copy")) < operations.index("sort")
+        assert activity["buffers"][0].dtype == torch.int64
         assert operations.index("sort") < operations.index("synchronize") < operations.index("payload")
 
     def test_packing_failure_drains_pending_and_allows_retry(self, monkeypatch, async_split_layer):
@@ -1265,6 +1281,9 @@ class TestAsyncSplitPlanLifecycle:
         assert activity["waits"] == ["ready", "ready"]
         assert activity["records"] == ["submitted", "submitted"]
         assert len(activity["buffers"]) == 1
+        # Reuse the dependency event as well as the ready event after draining
+        # a failed forward, without allocating events in the per-layer hot path.
+        assert len(activity["events"]) == 2
         assert layer._async_split_plan_pending is None
 
     def test_drain_failure_preserves_original_error_and_pending_buffers(self, monkeypatch, async_split_layer):
@@ -1340,6 +1359,7 @@ class TestAsyncSplitPlanLifecycle:
             assert layer._async_split_plan_pending is None
         assert layer._async_split_plan_host_splits is None
         assert layer._async_split_plan_ready_event is None
+        assert layer._async_split_plan_dependency_event is None
 
 
 class TestModelDetectionAndReplacement:
