@@ -4,13 +4,11 @@
 # DeepSpeed Team
 import torch
 
-from typing import Any, Tuple
+from typing import Any, Dict, Tuple
 from torch import Tensor
 from torch.nn import Module
 
 from einops import rearrange
-
-import torch.distributed.nn.functional as dist_nn
 
 import deepspeed.comm as dist
 from deepspeed.accelerator import get_accelerator
@@ -309,24 +307,65 @@ def single_all_to_all(input,
     return res
 
 
+# A process group cannot appear in an operator schema, so the exchange addresses its group by name and
+# resolves the name back to the group when it runs. The registry is written once, when the attention module
+# is built: a write issued from inside a compiled region does not land before the operator reads it.
+_all_to_all_groups: Dict[str, dist.ProcessGroup] = {}
+
+
+def register_all_to_all_group(group: dist.ProcessGroup) -> str:
+    """Make ``group`` reachable by name from inside the exchange operator, and return that name.
+
+    Call this outside any compiled region, before the first exchange on ``group``.
+    """
+    name = group.group_name
+    _all_to_all_groups[name] = group
+    return name
+
+
+@torch.library.custom_op("deepspeed::dim_zero_all_to_all", mutates_args=())
+def _dim_zero_all_to_all_op(input: Tensor, group_name: str) -> Tensor:
+    output = torch.empty_like(input)
+    dist.all_to_all_single(output, input, group=_all_to_all_groups[group_name])
+    return output
+
+
+@torch.library.register_fake("deepspeed::dim_zero_all_to_all")
+def _dim_zero_all_to_all_fake(input: Tensor, group_name: str) -> Tensor:
+    return torch.empty_like(input)
+
+
+def _dim_zero_all_to_all_backward_setup(ctx: Any, inputs: Tuple[Any, ...], output: Tensor) -> None:
+    ctx.group_name = inputs[1]
+
+
+def _dim_zero_all_to_all_backward(ctx: Any, grad: Tensor) -> Tuple[Tensor, None]:
+    return (_dim_zero_all_to_all_op(grad.contiguous(), ctx.group_name), None)
+
+
+torch.library.register_autograd("deepspeed::dim_zero_all_to_all",
+                                _dim_zero_all_to_all_backward,
+                                setup_context=_dim_zero_all_to_all_backward_setup)
+
+
 def _dim_zero_all_to_all(group: dist.ProcessGroup, input: Tensor) -> Tensor:
     """Differentiable All2All across dimension 0.
 
-    The collective has to return the exchanged tensor rather than fill a buffer the caller allocated. The
-    difference is invisible in eager mode and decisive under ``torch.compile``: a collective that writes into
-    an output argument leaves the traced graph holding an output with no data dependence on the input, so the
-    generated backward produces a zero gradient while the forward stays numerically correct, and training
-    silently stops updating everything upstream of the exchange.
+    The gradient of this exchange has to be something the tracer knows about. An autograd function that fills
+    a caller-allocated buffer with a collective is not: ``torch.compile`` inlines the forward body rather than
+    treating the call as opaque, and the traced body allocates an empty tensor and mutates it through an
+    operation that does not register as producing data, so the graph holds an output with no dependence on the
+    input. Differentiating that yields a zero gradient and the hand-written backward never runs, while the
+    forward stays numerically correct -- a training job silently stops updating everything upstream of the
+    exchange.
 
-    Wrapping the buffer-filling form in a ``torch.autograd.Function`` does not protect it. The tracer inlines
-    the function body instead of treating the call as opaque, and differentiates what it traced, so the
-    hand-written backward never runs.
+    Registering the exchange as an operator with a declared backward gives the tracer a derivative instead of
+    a body to inline, and keeps the collective on ``deepspeed.comm`` so the configured backend dispatches it.
     """
     world_size = dist.get_world_size(group)
     assert input.shape[0] == world_size, f"Dim 0 {input.shape[0]} is not world size"
 
-    input = input.contiguous()
-    return dist_nn.all_to_all_single(torch.empty_like(input), input, group=group)
+    return _dim_zero_all_to_all_op(input.contiguous(), group.group_name)
 
 
 class _SeqAllToAll(torch.autograd.Function):

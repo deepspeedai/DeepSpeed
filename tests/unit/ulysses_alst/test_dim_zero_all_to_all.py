@@ -7,7 +7,7 @@ UlyssesPlus: the dimension-zero all-to-all that trades sequence shards for head 
 """
 
 from deepspeed.accelerator import get_accelerator
-from deepspeed.sequence.layer import _dim_zero_all_to_all
+from deepspeed.sequence.layer import _dim_zero_all_to_all, register_all_to_all_group
 from unit.common import DistributedTest
 from unit.util import torch_assert_close, torch_assert_equal
 import deepspeed.comm as dist
@@ -26,6 +26,7 @@ class TestDimZeroAllToAll(DistributedTest):
         the call is inside a compiled region, because the traced graph has no data dependence to differentiate.
         """
         group = dist.new_group(ranks=list(range(self.world_size)))
+        register_all_to_all_group(group)
         device = get_accelerator().current_device_name()
 
         torch.manual_seed(1234)
@@ -43,6 +44,7 @@ class TestDimZeroAllToAll(DistributedTest):
     def test_forward_moves_the_expected_slices(self, compile_exchange):
         """Slot ``i`` of this rank's output holds the slot this rank owns in rank ``i``'s input."""
         group = dist.new_group(ranks=list(range(self.world_size)))
+        register_all_to_all_group(group)
         device = get_accelerator().current_device_name()
         rank = dist.get_rank(group)
 

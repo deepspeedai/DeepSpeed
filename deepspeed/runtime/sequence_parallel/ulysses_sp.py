@@ -31,7 +31,7 @@ https://github.com/snowflakedb/ArcticTraining/blob/main/projects/sequence-parall
 
 from collections import defaultdict, deque
 from deepspeed.runtime.utils import see_memory_usage
-from deepspeed.sequence.layer import _dim_zero_all_to_all
+from deepspeed.sequence.layer import _dim_zero_all_to_all, register_all_to_all_group
 from deepspeed.utils.logging import logger
 from einops import rearrange
 from packaging import version
@@ -105,6 +105,9 @@ class UlyssesSPAttentionHF(torch.nn.Module):
         super().__init__()
         self.attn = attn
         self.process_group = process_group
+        # the exchange operator resolves its group by name, and the registry has to be written here
+        # rather than at call time, which may be inside a compiled region
+        register_all_to_all_group(process_group)
         self.world_size = dist.get_world_size(process_group)
         self.sp_rank = dist.get_rank(process_group)
 
