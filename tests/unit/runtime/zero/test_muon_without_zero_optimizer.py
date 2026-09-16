@@ -54,6 +54,10 @@ def _model():
     return torch.nn.Sequential(torch.nn.Linear(32, 32, bias=False), torch.nn.Linear(32, 32, bias=False))
 
 
+def _irregular_model():
+    return torch.nn.Sequential(torch.nn.Linear(13, 17, bias=False), torch.nn.Linear(17, 9, bias=False))
+
+
 def _config(stage, dtype="fp32"):
     config = {
         "train_micro_batch_size_per_gpu": 2,
@@ -154,32 +158,59 @@ class TestMuonBF16Optimizer(DistributedTest):
     @pytest.mark.parametrize("ns_method", ["standard", "gram"])
     def test_bf16_optimizer_runs_muon_after_accumulation(self, ns_method):
         _skip_if_unsupported("bf16")
-        model = _model()
+        model = _irregular_model()
         config = _config(1, "bf16")
         config["data_types"] = {"grad_accum_dtype": "fp32"}
         config["gradient_accumulation_steps"] = 2
         config["optimizer"]["params"]["ns_method"] = ns_method
+        config["optimizer"]["params"]["weight_decay"] = 0.0
         engine, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config)
-        original = [p.detach().clone() for p in engine.module.parameters()]
-        with counting_newton_schulz() as calls:
-            x = torch.ones(2, 32, device=engine.device, dtype=torch.bfloat16)
-            engine.backward(engine(x).square().sum())
-            engine.step()
-            assert not calls
-            for param, before in zip(engine.module.parameters(), original):
-                torch.testing.assert_close(param, before, rtol=0, atol=0)
-            engine.backward(engine(x).square().sum())
-            engine.step()
-            # These equal matrices land on exact DP partition boundaries.
-            assert len(calls) == 2 // deepspeed.comm.get_world_size()
-        assert any(not torch.equal(p, old) for p, old in zip(engine.module.parameters(), original))
-        for group in engine.optimizer.optimizer.param_groups:
-            if group['use_muon']:
-                partition = group['params'][0]
-                momentum = engine.optimizer.optimizer.state[partition]['momentum_buffer']
-                assert momentum.shape == partition.shape
-                assert momentum.dtype == torch.float32
-                assert torch.isfinite(momentum).all() and torch.count_nonzero(momentum)
+        original = [param.detach().float().clone() for param in engine.module.parameters()]
+        x = torch.ones(2, 13, device=engine.device, dtype=torch.bfloat16)
+        engine.backward(engine(x).square().sum())
+        engine.step()
+        for param, before in zip(engine.module.parameters(), original):
+            torch.testing.assert_close(param, before.to(torch.bfloat16), rtol=0, atol=0)
+
+        engine.backward(engine(x).square().sum())
+        gradients = [gradient.detach().clone() for gradient in engine.optimizer.fp32_groups_gradients[0]]
+        group = engine.optimizer.optimizer.param_groups[0]
+        reference_momenta = [
+            torch.zeros_like(gradient).view(param.shape)
+            for param, gradient in zip(engine.module.parameters(), gradients)
+        ]
+        reference_updates = [
+            original_muon.muon_update(gradient.view(param.shape).clone(),
+                                      momentum,
+                                      beta=group['momentum'],
+                                      ns_method=ns_method)
+            for param, gradient, momentum in zip(engine.module.parameters(), gradients, reference_momenta)
+        ]
+        engine.step()
+
+        for param, before, update in zip(engine.module.parameters(), original, reference_updates):
+            expected = before.add(update, alpha=-group['lr']).to(torch.bfloat16)
+            torch.testing.assert_close(param, expected, rtol=0, atol=0)
+
+        partition = group['params'][0]
+        local_momentum = engine.optimizer.optimizer.state[partition]['momentum_buffer']
+        world_size = deepspeed.comm.get_world_size()
+        gathered_momentum = torch.empty(world_size * local_momentum.numel(),
+                                        dtype=local_momentum.dtype,
+                                        device=local_momentum.device)
+        deepspeed.comm.all_gather_into_tensor(gathered_momentum, local_momentum)
+        reference_momentum = torch.cat([momentum.reshape(-1) for momentum in reference_momenta])
+        torch.testing.assert_close(gathered_momentum[:reference_momentum.numel()], reference_momentum, rtol=0, atol=0)
+        torch.testing.assert_close(gathered_momentum[reference_momentum.numel():],
+                                   torch.zeros_like(gathered_momentum[reference_momentum.numel():]),
+                                   rtol=0,
+                                   atol=0)
+
+        layout = engine.optimizer._muon_exchange_layouts[0]
+        if world_size == 2:
+            # The 17x13 matrix crosses the DP boundary; only its remote piece is exchanged.
+            assert layout['has_split_matrix']
+            assert sum(layout['input_split_sizes']) < sum(param.numel() for param in engine.module.parameters())
 
     def test_the_same_config_without_grad_accum_dtype_still_runs_muon(self):
         """The existing BF16-gradient wrapper remains supported."""

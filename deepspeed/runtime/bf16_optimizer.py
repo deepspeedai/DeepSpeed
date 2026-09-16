@@ -115,6 +115,7 @@ class BF16_Optimizer(ZeROOptimizer):
         self.fp32_groups_has_gradients = []
 
         self.group_paddings = []
+        self._muon_exchange_layouts = []
         self.graph_harvesting = graph_harvesting
         if self.using_real_optimizer:
             self._setup_for_real_optimizer()
@@ -181,6 +182,9 @@ class BF16_Optimizer(ZeROOptimizer):
             self.fp32_groups_flat_partition[i].requires_grad = True
 
             num_elem_list = [t.numel() for t in self.bf16_groups[i]]
+            self._muon_exchange_layouts.append(
+                self._build_muon_exchange_layout(num_elem_list, partition_size, real_dp_world_size, partition_id
+                                                 ) if param_group.get('use_muon', False) else None)
 
             # create fp32 gradients
             fp32_flat_buffer = torch.zeros_like(self.bf16_groups_flat[i], dtype=self.grad_acc_dtype)
@@ -230,6 +234,69 @@ class BF16_Optimizer(ZeROOptimizer):
         self._hp_optimizer_states_linked = False
         self._enable_universal_checkpoint()
         self._param_slice_mappings = self._create_param_mapping()
+
+    @staticmethod
+    def _build_muon_exchange_layout(num_elem_list, partition_size, world_size, rank):
+        """Precompute the slices needed to reconstruct locally-owned split matrices."""
+        matrix_ranges = []
+        offset = 0
+        for count in num_elem_list:
+            matrix_ranges.append((offset, offset + count))
+            offset += count
+
+        partition_start = rank * partition_size
+        partition_end = partition_start + partition_size
+        local_matrices = []
+        has_split_matrix = any(matrix_start // partition_size != (matrix_end - 1) // partition_size
+                               for matrix_start, matrix_end in matrix_ranges)
+        for param_index, (matrix_start, matrix_end) in enumerate(matrix_ranges):
+            left = max(matrix_start, partition_start)
+            right = min(matrix_end, partition_end)
+            if left < right:
+                first_owner = matrix_start // partition_size
+                last_owner = (matrix_end - 1) // partition_size
+                is_split = first_owner != last_owner
+                local_matrices.append(
+                    (param_index, left - partition_start, left - matrix_start, right - left, is_split))
+
+        input_split_sizes = [0] * world_size
+        send_ranges = []
+        for destination in range(world_size):
+            destination_start = destination * partition_size
+            destination_end = destination_start + partition_size
+            for matrix_start, matrix_end in matrix_ranges:
+                if destination == rank or max(matrix_start, destination_start) >= min(matrix_end, destination_end):
+                    continue
+                left = max(matrix_start, partition_start)
+                right = min(matrix_end, partition_end)
+                if left < right:
+                    send_ranges.append((left - partition_start, right - left))
+                    input_split_sizes[destination] += right - left
+
+        output_split_sizes = [0] * world_size
+        recv_ranges = []
+        recv_offset = 0
+        for source in range(world_size):
+            source_start = source * partition_size
+            source_end = source_start + partition_size
+            for param_index, (matrix_start, matrix_end) in enumerate(matrix_ranges):
+                if source == rank or max(matrix_start, partition_start) >= min(matrix_end, partition_end):
+                    continue
+                left = max(matrix_start, source_start)
+                right = min(matrix_end, source_end)
+                if left < right:
+                    recv_ranges.append((recv_offset, param_index, left - matrix_start, right - left))
+                    recv_offset += right - left
+                    output_split_sizes[source] += right - left
+
+        return {
+            'has_split_matrix': has_split_matrix,
+            'input_split_sizes': input_split_sizes,
+            'output_split_sizes': output_split_sizes,
+            'send_ranges': send_ranges,
+            'recv_ranges': recv_ranges,
+            'local_matrices': local_matrices,
+        }
 
     def configure_autoep_folding_tp_gradient_reduction(self, folding_spec):
         if folding_spec is None or folding_spec.tp_size <= 1:
@@ -342,10 +409,9 @@ class BF16_Optimizer(ZeROOptimizer):
             param_partition.grad = grad_partition.to(
                 param_partition.dtype) if grad_partition.dtype != param_partition.dtype else grad_partition
 
-        staged_muon_momenta = self._prepare_muon_updates() if self._uses_muon else []
+        if self._uses_muon:
+            self._prepare_muon_updates()
         self.optimizer.step()
-        for committed, staged in staged_muon_momenta:
-            committed.copy_(staged)
 
         if self.grad_acc_dtype is not torch.float32:
             for param_partition in self.fp32_groups_flat_partition:
@@ -363,12 +429,12 @@ class BF16_Optimizer(ZeROOptimizer):
         """Orthogonalize whole matrices after reduction and global clipping.
 
         Persistent momentum has the same partition layout as the master weights.
-        One group's gathered momentum is temporary workspace; it is released
-        before gathering the next group. Only local intersections are committed.
+        One all-to-all exchanges only the pieces of split matrices needed by
+        another owner. Full-matrix workspace is then allocated one matrix at a
+        time, and only the local intersection is committed.
         """
         from deepspeed.runtime.zero.muon.original_muon import muon_update
 
-        staged_momenta = []
         for group_index, group in enumerate(self.optimizer.param_groups):
             if not group.get('use_muon', False):
                 continue
@@ -378,39 +444,50 @@ class BF16_Optimizer(ZeROOptimizer):
                 state['momentum_buffer'] = torch.zeros_like(partition)
             committed = state['momentum_buffer']
             process_group = self.real_dp_process_group[group_index]
-            world_size = dist.get_world_size(group=process_group)
-            rank = dist.get_rank(group=process_group)
             partition_size = partition.numel()
-            gathered = torch.empty(world_size * partition_size, dtype=committed.dtype, device=committed.device)
-            if world_size == 1:
-                gathered.copy_(committed)
-            else:
-                dist.all_gather_into_tensor(gathered, committed.contiguous(), group=process_group)
-            staged = committed.clone()
-            start, end = rank * partition_size, (rank + 1) * partition_size
-            offset = 0
-            for param, gradient in zip(self.bf16_groups[group_index], self.fp32_groups_gradients[group_index]):
-                count = param.numel()
-                left, right = max(offset, start), min(offset + count, end)
-                # All ranks gather in the same order, but only owners need NS.
-                if left < right:
-                    momentum = gathered.narrow(0, offset, count).view(param.shape)
-                    update = muon_update(gradient.view(param.shape).clone(),
-                                         momentum,
-                                         beta=group['momentum'],
-                                         ns_method=group.get('ns_method', 'gram'))
-                    local_offset, matrix_offset, length = left - start, left - offset, right - left
-                    partition.grad.narrow(0, local_offset,
-                                          length).copy_(update.reshape(-1).narrow(0, matrix_offset, length))
-                    staged.narrow(0, local_offset, length).copy_(momentum.reshape(-1).narrow(0, matrix_offset, length))
-                offset += count
+            layout = self._muon_exchange_layouts[group_index]
+            received = committed.new_empty(sum(layout['output_split_sizes']))
+            if layout['has_split_matrix']:
+                send = committed.new_empty(sum(layout['input_split_sizes']))
+                send_offset = 0
+                for local_offset, length in layout['send_ranges']:
+                    send.narrow(0, send_offset, length).copy_(committed.narrow(0, local_offset, length))
+                    send_offset += length
+                dist.all_to_all_single(received,
+                                       send,
+                                       output_split_sizes=layout['output_split_sizes'],
+                                       input_split_sizes=layout['input_split_sizes'],
+                                       group=process_group)
+
+            received_by_matrix = {}
+            for recv_offset, param_index, matrix_offset, length in layout['recv_ranges']:
+                received_by_matrix.setdefault(param_index, []).append((recv_offset, matrix_offset, length))
+
+            params = self.bf16_groups[group_index]
+            gradients = self.fp32_groups_gradients[group_index]
+            for param_index, local_offset, matrix_offset, length, is_split in layout['local_matrices']:
+                param = params[param_index]
+                if is_split:
+                    momentum = committed.new_empty(param.numel())
+                    momentum.narrow(0, matrix_offset, length).copy_(committed.narrow(0, local_offset, length))
+                    for recv_offset, remote_matrix_offset, remote_length in received_by_matrix[param_index]:
+                        momentum.narrow(0, remote_matrix_offset,
+                                        remote_length).copy_(received.narrow(0, recv_offset, remote_length))
+                else:
+                    momentum = committed.narrow(0, local_offset, length)
+                update = muon_update(gradients[param_index].view(param.shape).clone(),
+                                     momentum.view(param.shape),
+                                     beta=group['momentum'],
+                                     ns_method=group.get('ns_method', 'gram'))
+                partition.grad.narrow(0, local_offset,
+                                      length).copy_(update.reshape(-1).narrow(0, matrix_offset, length))
+                committed.narrow(0, local_offset, length).copy_(momentum.narrow(0, matrix_offset, length))
             # Alignment padding must never become optimizer state or an update.
-            padding_start = max(0, min(partition_size, offset - start))
+            total_numel = sum(param.numel() for param in params)
+            rank = dist.get_rank(group=process_group)
+            padding_start = max(0, min(partition_size, total_numel - rank * partition_size))
             partition.grad[padding_start:].zero_()
-            staged[padding_start:].zero_()
-            staged_momenta.append((committed, staged))
-            del gathered
-        return staged_momenta
+            committed[padding_start:].zero_()
 
     def backward_prologue(self):
         self.clear_lp_grads()
