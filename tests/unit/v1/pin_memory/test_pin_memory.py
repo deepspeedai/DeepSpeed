@@ -5,8 +5,10 @@
 import pytest
 import torch
 
+from deepspeed.accelerator import npu_accelerator
 from deepspeed.accelerator.cpu_accelerator import CPU_Accelerator
 from deepspeed.accelerator.cuda_accelerator import CUDA_Accelerator
+from deepspeed.accelerator.npu_accelerator import NPU_Accelerator
 from deepspeed.utils.pin_memory import NativePinnedMemory
 
 
@@ -284,3 +286,118 @@ def test_unpin_keeps_allocation_when_unregister_fails(monkeypatch, native_pins):
     assert native_pins.unpin(pinned) is True
     assert accelerator.unregistered == [begin]
     assert begin not in native_pins._device_registered
+
+
+def test_npu_device_registration_calls_npurt(monkeypatch):
+    registered = []
+    unregistered = []
+
+    def register(address, num_bytes, flag):
+        registered.append((address, num_bytes, flag))
+        return 0
+
+    def unregister(address):
+        unregistered.append(address)
+        return 0
+
+    monkeypatch.setattr(npu_accelerator, "_npu_host_copy_funcs", lambda: ((register, unregister), None))
+    accelerator = NPU_Accelerator.__new__(NPU_Accelerator)
+
+    # 4096: the hook requires 4K-aligned addresses for MAPPED registration.
+    assert accelerator.register_host_memory(4096, 4096) is True
+    accelerator.unregister_host_memory(4096)
+    assert registered == [(4096, 4096, npu_accelerator.ACL_HOST_REG_MAPPED)]
+    assert unregistered == [4096]
+
+
+def test_npu_unaligned_address_is_skipped(monkeypatch):
+    # MAPPED registration requires 4K-aligned addresses and the driver reports
+    # only an opaque internal error; the hook must fail fast without resolving
+    # or calling the npurt functions.
+    def fail_lookup():
+        raise AssertionError("npurt must not be resolved for unaligned addresses")
+
+    monkeypatch.setattr(npu_accelerator, "_npu_host_copy_funcs", fail_lookup)
+    accelerator = NPU_Accelerator.__new__(NPU_Accelerator)
+
+    assert accelerator.register_host_memory(1234, 4096) is False
+
+
+def test_npu_device_registration_failure_returns_false(monkeypatch):
+    # A non-zero npuHostRegister return code must degrade to mlock-only, not
+    # raise: the NativePinnedMemory caller only tracks the address on True.
+    def register(address, num_bytes, flag):
+        return 107000
+
+    def unregister(address):
+        raise AssertionError("unregister must not run when register failed")
+
+    monkeypatch.setattr(npu_accelerator, "_npu_host_copy_funcs", lambda: ((register, unregister), None))
+    accelerator = NPU_Accelerator.__new__(NPU_Accelerator)
+
+    assert accelerator.register_host_memory(4096, 4096) is False
+
+
+def test_npu_unregister_failure_raises(monkeypatch):
+    # Raising keeps the allocation alive in NativePinnedMemory so the driver
+    # never holds a registration for pages later reused by malloc.
+    def register(address, num_bytes, flag):
+        return 0
+
+    def unregister(address):
+        return 107000
+
+    monkeypatch.setattr(npu_accelerator, "_npu_host_copy_funcs", lambda: ((register, unregister), None))
+    accelerator = NPU_Accelerator.__new__(NPU_Accelerator)
+
+    with pytest.raises(RuntimeError, match="npuHostUnregister"):
+        accelerator.unregister_host_memory(4096)
+
+
+def test_npu_missing_npurt_is_noop(monkeypatch):
+    monkeypatch.setattr(npu_accelerator, "_npu_host_copy_funcs", lambda: (None, "test"))
+    accelerator = NPU_Accelerator.__new__(NPU_Accelerator)
+
+    assert accelerator.register_host_memory(4096, 4096) is False
+    assert accelerator.unregister_host_memory(4096) is None
+
+
+def test_npu_host_copy_lookup_gates(monkeypatch):
+    # Below the minimum supported torch_npu version the functions must not
+    # resolve, with a reason pointing at the version gap.
+    monkeypatch.setattr(npu_accelerator, "_torch_npu_version", lambda: (2, 8))
+    funcs, reason = npu_accelerator._npu_host_copy_funcs()
+    assert funcs is None
+    assert "older than" in reason
+
+    # A version that cannot be parsed must fail closed with an explanation.
+    monkeypatch.setattr(npu_accelerator, "_torch_npu_version", lambda: None)
+    funcs, reason = npu_accelerator._npu_host_copy_funcs()
+    assert funcs is None
+    assert "unable to determine" in reason
+
+    # A supported version whose build lacks npurt must not resolve either.
+    monkeypatch.setattr(npu_accelerator, "_torch_npu_version", lambda: (2, 9))
+    monkeypatch.delattr(torch.npu, "npurt", raising=False)
+    funcs, reason = npu_accelerator._npu_host_copy_funcs()
+    assert funcs is None
+    assert "npurt is unavailable" in reason
+
+    # npurt() failing to initialize the runtime resolves to None with a reason.
+    def fail_npurt():
+        raise RuntimeError("init failed")
+
+    monkeypatch.setattr(torch.npu, "npurt", fail_npurt, raising=False)
+    funcs, reason = npu_accelerator._npu_host_copy_funcs()
+    assert funcs is None
+    assert "initialize" in reason
+
+    # A working npurt module resolves to its host copy functions.
+    class _Npurt:
+        npuHostRegister = "register"
+        npuHostUnregister = "unregister"
+
+    monkeypatch.setattr(torch.npu, "npurt", lambda: _Npurt(), raising=False)
+    funcs, reason = npu_accelerator._npu_host_copy_funcs()
+    assert funcs == ("register", "unregister")
+    assert reason is None

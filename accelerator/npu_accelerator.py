@@ -13,6 +13,49 @@ try:
 except ImportError:
     pass
 
+ACL_SUCCESS = 0
+# The host-registration flag is an ACL_HOST_REG_* bitmask. MAPPED page-locks the
+# range and adds a device mapping (which DeepSpeed never reads through); it is
+# chosen over PINNED because measured H2D on this platform falls back to
+# mlock-only speed (~8-9 GB/s) for PINNED-only registrations of larger buffers
+# (64 MiB), while MAPPED keeps full DMA bandwidth (~23 GB/s). MAPPED requires
+# 4K-aligned addresses, which the native allocator guarantees (posix_memalign).
+ACL_HOST_REG_MAPPED = 0x2
+_MIN_TORCH_NPU_REGISTER_VERSION = (2, 9)
+
+
+def _torch_npu_version():
+    """Return the installed torch_npu version as (major, minor), or None."""
+    try:
+        import torch_npu
+        major, minor, *_ = torch_npu.__version__.split("+")[0].split(".")
+        return (int(major), int(minor))
+    except Exception:
+        return None
+
+
+def _npu_host_copy_funcs():
+    """Resolve the npurt host-registration functions, or (None, reason).
+
+    torch.npu.npurt() returns the runtime-API module exposing
+    npuHostRegister/npuHostUnregister; the binding is maintained with
+    torch_npu and initializes the runtime itself. Host registration is
+    gated on torch_npu >= 2.9.0, the minimum supported version.
+    """
+    version = _torch_npu_version()
+    if version is None:
+        return None, "unable to determine the installed torch_npu version"
+    if version < _MIN_TORCH_NPU_REGISTER_VERSION:
+        return None, (f"torch_npu {version[0]}.{version[1]} is older than the minimum supported version "
+                      f"{_MIN_TORCH_NPU_REGISTER_VERSION[0]}.{_MIN_TORCH_NPU_REGISTER_VERSION[1]}")
+    if not hasattr(torch, "npu") or not hasattr(torch.npu, "npurt"):
+        return None, "torch.npu.npurt is unavailable in this torch_npu build"
+    try:
+        npurt = torch.npu.npurt()
+        return (npurt.npuHostRegister, npurt.npuHostUnregister), None
+    except RuntimeError:
+        return None, "torch.npu.npurt() failed to initialize the NPU runtime"
+
 
 class NPU_Accelerator(DeepSpeedAccelerator):
 
@@ -151,6 +194,43 @@ class NPU_Accelerator(DeepSpeedAccelerator):
 
     def available_memory(self, device_index=None):
         return self.total_memory(device_index) - self.memory_allocated(device_index)
+
+    # Host memory registration
+    def register_host_memory(self, address, num_bytes):
+        # Register natively pinned (posix_memalign + mlock) host memory with the
+        # ACL runtime so torch's async copies can use the DMA engine. npurt
+        # initializes the runtime itself, so no set_device ordering is needed.
+        if address % 4096:
+            # MAPPED registration requires 4K-aligned addresses and the driver
+            # only reports an opaque internal error otherwise; fail fast here.
+            from deepspeed.utils import logger
+            logger.warning_once(
+                f"Native pinned buffer is not 4K-aligned (address={address:#x}); skipping host-memory registration.")
+            return False
+        funcs, reason = _npu_host_copy_funcs()
+        if funcs is None:
+            from deepspeed.utils import logger
+            logger.warning_once(f"Host-memory registration is unavailable ({reason}); "
+                                "native pinned memory stays mlock-only.")
+            return False
+        register, _ = funcs
+        rc = register(address, num_bytes, ACL_HOST_REG_MAPPED)
+        if rc != ACL_SUCCESS:
+            from deepspeed.utils import logger
+            logger.warning_once(f"npuHostRegister failed with rc={rc}; native pinned memory stays mlock-only.")
+            return False
+        return True
+
+    def unregister_host_memory(self, address):
+        funcs, _ = _npu_host_copy_funcs()
+        if funcs is None:
+            return None
+        _, unregister = funcs
+        rc = unregister(address)
+        if rc != ACL_SUCCESS:
+            # Raise so NativePinnedMemory keeps the allocation alive: the driver
+            # must never hold a registration for pages later reused by malloc.
+            raise RuntimeError(f"npuHostUnregister failed with rc={rc}")
 
     # Data types
     def is_bf16_supported(self):

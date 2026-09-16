@@ -413,8 +413,10 @@ Native device registration
 
 Native allocations are device-independent ``mlock`` buffers. On CUDA systems,
 DeepSpeed additionally calls ``cudaHostRegister`` so PyTorch can use them for
-asynchronous H2D/D2H DMA. Device registration is enabled by default and can be
-disabled for comparison or debugging:
+asynchronous H2D/D2H DMA. On Ascend NPU systems, DeepSpeed additionally calls
+``aclrtHostRegisterV2`` / ``aclrtHostUnregister`` for the same purpose. Device
+registration is enabled by default and can be disabled for comparison or
+debugging:
 
 .. code-block:: bash
 
