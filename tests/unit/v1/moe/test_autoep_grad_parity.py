@@ -453,10 +453,13 @@ def test_async_master_snapshot_requires_real_fp32_parameters():
 
 
 class TestAutoEPAsyncSplitPlanParity(DistributedTest):
+    """Four GPU cases: checkpoint on/off crossed with default/non-default stream."""
+
     world_size = 2
 
     @pytest.mark.parametrize("checkpoint_activations", [False, True])
-    def test_async_split_plan_matches_synchronous_step(self, checkpoint_activations):
+    @pytest.mark.parametrize("non_default_stream", [False, True])
+    def test_async_split_plan_matches_synchronous_step(self, checkpoint_activations, non_default_stream):
         accelerator = get_accelerator()
         if not accelerator.is_available() or not accelerator.device_name().startswith("cuda"):
             pytest.skip("async split-plan parity requires CUDA")
@@ -470,19 +473,33 @@ class TestAutoEPAsyncSplitPlanParity(DistributedTest):
         if checkpoint_activations:
             _checkpoint_autoep_layers(sync_engine)
         sequence_lengths = (16, 7, 23)
-        expected = [
-            _async_split_step(sync_engine, seed + step, seq_len) for step, seq_len in enumerate(sequence_lengths)
-        ]
+        caller_stream = accelerator.current_stream(sync_engine.device)
+        training_stream = accelerator.Stream(device=sync_engine.device) if non_default_stream else caller_stream
+        # Initialization writes parameters on the caller stream. Keep them alive
+        # until training has finished before handing their storage back to it.
+        training_stream.wait_stream(caller_stream)
+        try:
+            with accelerator.stream(training_stream):
+                expected = [
+                    _async_split_step(sync_engine, seed + step, seq_len)
+                    for step, seq_len in enumerate(sequence_lengths)
+                ]
+            caller_stream.wait_stream(training_stream)
 
-        async_model = _make_async_split_model()
-        async_model.load_state_dict(reference_state)
-        async_engine, _, _, _ = deepspeed.initialize(model=async_model, config=_async_split_config(True))
-        assert all(module.async_split_plan for module in async_engine.module.modules()
-                   if isinstance(module, AutoEPMoELayer))
-        if checkpoint_activations:
-            _checkpoint_autoep_layers(async_engine)
-        for step, seq_len in enumerate(sequence_lengths):
-            actual = _async_split_step(async_engine, seed + step, seq_len)
-            _assert_async_split_step_matches(actual, expected[step])
-            assert all(module._async_split_plan_pending is None for module in async_engine.module.modules()
+            async_model = _make_async_split_model()
+            async_model.load_state_dict(reference_state)
+            async_engine, _, _, _ = deepspeed.initialize(model=async_model, config=_async_split_config(True))
+            assert all(module.async_split_plan for module in async_engine.module.modules()
                        if isinstance(module, AutoEPMoELayer))
+            if checkpoint_activations:
+                _checkpoint_autoep_layers(async_engine)
+            training_stream.wait_stream(caller_stream)
+            with accelerator.stream(training_stream):
+                for step, seq_len in enumerate(sequence_lengths):
+                    actual = _async_split_step(async_engine, seed + step, seq_len)
+                    _assert_async_split_step_matches(actual, expected[step])
+                    assert all(module._async_split_plan_pending is None for module in async_engine.module.modules()
+                               if isinstance(module, AutoEPMoELayer))
+        finally:
+            caller_stream.wait_stream(training_stream)
+            training_stream.synchronize()

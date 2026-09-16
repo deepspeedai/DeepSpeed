@@ -1007,7 +1007,7 @@ def _legacy_split_plan(num_tokens_per_expert):
     auto_ep_layer.dist.all_to_all_single(received_flat, expert_counts, group=None)
     received_counts = received_flat.view(SPLIT_PLAN_EP_SIZE, SPLIT_PLAN_LOCAL_EXPERTS)
 
-    return SplitPlan(input_splits, output_splits, received_counts.sum(dim=0), received_counts)
+    return SplitPlan(input_splits, output_splits, received_counts)
 
 
 class TestSplitPlan:
@@ -1059,7 +1059,6 @@ class TestSplitPlan:
         mine = all_counts[ep_rank].view(SPLIT_PLAN_EP_SIZE, SPLIT_PLAN_LOCAL_EXPERTS)
         assert plan.input_splits == mine.sum(dim=1).tolist()
         assert plan.output_splits == received.sum(dim=1).tolist()
-        assert torch.equal(plan.local_counts, received.sum(dim=0))
         assert torch.equal(plan.local_counts_by_source, received)
         assert sum(plan.output_splits) == int(received.sum())
 
@@ -1084,7 +1083,6 @@ class TestSplitPlan:
         assert len(sent) == 1
         assert plan.input_splits == expected.input_splits
         assert plan.output_splits == expected.output_splits
-        assert torch.equal(plan.local_counts, expected.local_counts)
         assert torch.equal(plan.local_counts_by_source, expected.local_counts_by_source)
 
     @pytest.mark.parametrize("scenario", sorted(SPLIT_PLAN_SCENARIOS))
@@ -1102,7 +1100,6 @@ class TestSplitPlan:
 
         assert derived.input_splits == folded.input_splits
         assert derived.output_splits == folded.output_splits
-        assert torch.equal(derived.local_counts, folded.local_counts)
         assert torch.equal(derived.local_counts_by_source, folded.local_counts_by_source)
 
     def test_ep_size_one_needs_no_exchange(self, monkeypatch):
@@ -1120,7 +1117,6 @@ class TestSplitPlan:
         assert sent == []
         assert plan.input_splits == [9]
         assert plan.output_splits == [9]
-        assert torch.equal(plan.local_counts, counts)
         assert torch.equal(plan.local_counts_by_source, counts.view(1, 4))
 
 

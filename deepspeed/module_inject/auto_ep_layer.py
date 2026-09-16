@@ -46,7 +46,6 @@ class RouterOutput(NamedTuple):
 class SplitPlan(NamedTuple):
     input_splits: list[int]  # len=ep_size
     output_splits: list[int]  # len=ep_size
-    local_counts: torch.Tensor  # [E_local]
     local_counts_by_source: torch.Tensor  # [ep_size, E_local]
 
 
@@ -56,13 +55,11 @@ class _PendingSplitPlan:
     def __init__(
         self,
         host_splits: torch.Tensor,
-        local_counts: torch.Tensor,
         local_counts_by_source: torch.Tensor,
         ready_event,
         keepalive: tuple[torch.Tensor, ...],
     ) -> None:
         self._host_splits = host_splits
-        self._local_counts = local_counts
         self._local_counts_by_source = local_counts_by_source
         self._ready_event = ready_event
         self._keepalive = keepalive
@@ -72,13 +69,9 @@ class _PendingSplitPlan:
         if self._plan is None:
             self._ready_event.synchronize()
             input_splits, output_splits = self._host_splits.tolist()
-            consumer_stream = get_accelerator().current_stream(self._local_counts.device)
-            self._local_counts.record_stream(consumer_stream)
-            self._local_counts_by_source.record_stream(consumer_stream)
             self._plan = SplitPlan(
                 input_splits=input_splits,
                 output_splits=output_splits,
-                local_counts=self._local_counts,
                 local_counts_by_source=self._local_counts_by_source,
             )
             self._keepalive = ()
@@ -195,7 +188,6 @@ def _split_plan_from_expert_counts(
     return SplitPlan(
         input_splits=input_splits,
         output_splits=output_splits,
-        local_counts=received_counts.sum(dim=0),  # [E_local]
         local_counts_by_source=received_counts,
     )
 
@@ -229,7 +221,6 @@ def _start_async_split_plan_from_expert_counts(
         group=ep_group,
     )
     received_counts = received_counts_flat.view(ep_size, num_local_experts)
-    local_counts = received_counts.sum(dim=0)
     device_splits = torch.stack((
         count_matrix.sum(dim=1),
         received_counts.sum(dim=1),
@@ -251,7 +242,6 @@ def _start_async_split_plan_from_expert_counts(
 
     return _PendingSplitPlan(
         host_splits=host_splits,
-        local_counts=local_counts,
         local_counts_by_source=received_counts,
         ready_event=ready_event,
         keepalive=(device_splits, ),
@@ -272,8 +262,7 @@ def compute_split_plan(
     histogram already computed by the router; when omitted it is derived from
     ``selected_experts``.
 
-    Returns SplitPlan with input_splits, output_splits, local_counts, and
-    local_counts_by_source.
+    Returns SplitPlan with input_splits, output_splits, and local_counts_by_source.
     """
     if num_tokens_per_expert is None:
         num_tokens_per_expert = count_tokens_per_expert(selected_experts, num_experts)
@@ -284,7 +273,6 @@ def compute_split_plan(
         return SplitPlan(
             input_splits=[T_K],
             output_splits=[T_K],
-            local_counts=num_tokens_per_expert,
             local_counts_by_source=num_tokens_per_expert.view(1, num_local_experts),
         )
 
@@ -301,7 +289,7 @@ def compute_split_plan_from_expert_indices(
     """Compute EP AllToAllV splits for an already partitioned assignment list."""
     counts = count_tokens_per_expert(expert_indices, num_experts)
     if ep_size == 1:
-        return SplitPlan([int(expert_indices.numel())], [int(expert_indices.numel())], counts,
+        return SplitPlan([int(expert_indices.numel())], [int(expert_indices.numel())],
                          counts.view(1, num_local_experts))
 
     return _split_plan_from_expert_counts(counts, ep_size, num_local_experts, ep_group)
