@@ -96,31 +96,6 @@ void launch_dequant_reduce(int8_t* reduced_data,
                            int elems_per_in_group,
                            cudaStream_t stream);
 
-template <typename T>
-void launch_fake_quantize_kernel(T* vals,
-                                 int total_count,
-                                 int group_num,
-                                 int num_bits,
-                                 cudaStream_t stream);
-template <typename T>
-void launch_sr_fake_quantize_kernel(T* vals,
-                                    int total_count,
-                                    int group_num,
-                                    int num_bits,
-                                    cudaStream_t stream);
-template <typename T>
-void launch_fake_quantize_kernel_asym(T* vals,
-                                      int total_count,
-                                      int group_num,
-                                      int num_bits,
-                                      cudaStream_t stream);
-template <typename T>
-void launch_sr_fake_quantize_kernel_asym(T* vals,
-                                         int total_count,
-                                         int group_num,
-                                         int num_bits,
-                                         cudaStream_t stream);
-
 void launch_dequantize_int4_to_half_experimental(uint8_t* data_in,
                                                  half* data_out,
                                                  half* scale_buffer,
