@@ -21,6 +21,7 @@ import torch
 from unit.common import DistributedTest
 
 import deepspeed
+from deepspeed.accelerator import get_accelerator
 from deepspeed.utils.zero_to_fp32 import get_fp32_state_dict_from_zero_checkpoint
 
 HIDDEN = 8
@@ -89,7 +90,9 @@ class EmptyTailModel(torch.nn.Module):
 
 
 def _engine(case):
-    extra, _ = CONFIGS[case]
+    extra, dtype = CONFIGS[case]
+    if dtype not in get_accelerator().supported_dtypes():
+        pytest.skip(f"{dtype} is not supported by {get_accelerator().device_name()}")
     config = {
         "train_micro_batch_size_per_gpu": 1,
         "optimizer": {
@@ -164,6 +167,8 @@ class TestZeroNumelParameterCheckpoint(DistributedTest):
     world_size = 1
 
     def test_consolidated_state_dict_keeps_the_empty_parameter(self, tmpdir, zero_stage):
+        if torch.bfloat16 not in get_accelerator().supported_dtypes():
+            pytest.skip(f"bf16 is not supported by {get_accelerator().device_name()}")
         config = {
             "train_micro_batch_size_per_gpu": 1,
             "optimizer": {
