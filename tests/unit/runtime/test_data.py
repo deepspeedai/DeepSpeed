@@ -12,20 +12,30 @@ import deepspeed
 from deepspeed.accelerator import get_accelerator
 from unit.common import DistributedTest
 from unit.simple_model import SimpleModel, random_dataset
+from deepspeed.runtime.data_pipeline.data_sampling import indexed_dataset
 from deepspeed.runtime.data_pipeline.data_sampling.indexed_dataset import MMapIndexedDataset, MMapIndexedDatasetBuilder
 
 
 @pytest.mark.parametrize("dtype", [np.int32, np.uint16])
-def test_mmap_dataset_pickle_round_trip(tmp_path, dtype):
+@pytest.mark.parametrize("skip_warmup", [False, True])
+def test_mmap_dataset_pickle_round_trip(tmp_path, monkeypatch, dtype, skip_warmup):
     path = str(tmp_path / "dataset")
     builder = MMapIndexedDatasetBuilder(path + ".bin", dtype=dtype)
     for i in range(3):
         builder.add_item_numpy(np.arange(i + 1, dtype=dtype))
     builder.end_document()
     builder.finalize(path + ".idx")
-    dataset = MMapIndexedDataset(path, skip_warmup=True)
+    dataset = MMapIndexedDataset(path, skip_warmup=skip_warmup)
+    warmup_calls = []
+    warmup = indexed_dataset._warmup_mmap_file
 
+    def record_warmup(filename):
+        warmup_calls.append(filename)
+        return warmup(filename)
+
+    monkeypatch.setattr(indexed_dataset, "_warmup_mmap_file", record_warmup)
     restored = pickle.loads(pickle.dumps(dataset))
+    assert warmup_calls == ([] if skip_warmup else [path + ".idx", path + ".bin"])
 
     assert len(restored) == len(dataset)
     assert restored.dtype == dataset.dtype
@@ -33,6 +43,10 @@ def test_mmap_dataset_pickle_round_trip(tmp_path, dtype):
     np.testing.assert_array_equal(restored.doc_idx, dataset.doc_idx)
     for i in range(len(dataset)):
         np.testing.assert_array_equal(restored[i], dataset[i])
+
+    legacy = MMapIndexedDataset.__new__(MMapIndexedDataset)
+    legacy.__setstate__(path)
+    np.testing.assert_array_equal(legacy[0], dataset[0])
 
 
 def test_mmap_dataset_spawn_dataloader(tmp_path):

@@ -486,13 +486,16 @@ class MMapIndexedDataset(torch.utils.data.Dataset):
         self._do_init(path, skip_warmup)
 
     def __getstate__(self):
-        return self._path
+        return self._path, self._skip_warmup
 
     def __setstate__(self, state):
-        self._do_init(state)
+        if isinstance(state, str):
+            state = (state, False)
+        self._do_init(*state)
 
     def _do_init(self, path, skip_warmup=False):
         self._path = path
+        self._skip_warmup = skip_warmup
         self._index = self.Index(index_file_path(self._path), skip_warmup)
 
         if not skip_warmup:
