@@ -51,6 +51,50 @@ You can also run:
 make test
 ```
 
+### Windows source checkouts
+
+The repository tracks `deepspeed/accelerator`, `deepspeed/ops/op_builder`, and
+`deepspeed/ops/csrc` as relative symlinks. With `core.symlinks=false`, Git for Windows
+checks these out as plain text files instead of links, which can cause
+`ModuleNotFoundError` when importing DeepSpeed from the checkout. For native symlinks,
+Git needs `core.symlinks=true` and permission to create them (for example, through
+Windows Developer Mode or an elevated shell).
+
+For an existing checkout with text stubs, directory junctions are a local workaround
+that does not require administrator privileges. Run the following in PowerShell from
+the repository root. The file check avoids replacing existing directories or links:
+
+```powershell
+foreach ($l in "accelerator", "ops/op_builder", "ops/csrc") {
+    $target = Join-Path (Get-Location) ($l | Split-Path -Leaf)
+    $item = Get-Item "deepspeed/$l"
+    if ($item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+        throw "Expected a text stub at deepspeed/$l; refusing to replace a directory or link."
+    }
+    Remove-Item -Force "deepspeed/$l"
+    New-Item -ItemType Junction -Path "deepspeed/$l" -Target $target | Out-Null
+}
+```
+
+Junctions are a local workaround only. Before committing, remove the junctions
+(without deleting their target directories), then restore the tracked text stubs:
+
+```powershell
+foreach ($l in "accelerator", "ops/op_builder", "ops/csrc") {
+    $path = Join-Path (Get-Location) "deepspeed/$l"
+    if ((Get-Item $path).LinkType -ne "Junction") {
+        throw "Expected a junction at $path; refusing to remove it."
+    }
+    cmd /c "rmdir `"$path`""
+    if ($LASTEXITCODE -ne 0) { throw "Could not remove junction at $path" }
+}
+git checkout -- deepspeed/accelerator deepspeed/ops/op_builder deepspeed/ops/csrc
+```
+
+On Windows, omit `--forked` when running individual supported tests: `pytest-forked`
+requires Unix `fork()`. This checkout workaround does not make all tests or operators
+Windows-compatible.
+
 ### Diff-based CI test selection
 Some GPU CI workflows (currently `modal-torch-latest`, which runs `tests/unit/v1/`)
 run their modal tests on the merge queue entry instead of on every PR push, to
