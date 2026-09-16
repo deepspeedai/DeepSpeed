@@ -102,7 +102,7 @@ from deepspeed.utils.timer import NoopTimer, ThroughputTimer, SynchronizedWallCl
 from deepspeed.utils.debug import debug_extract_module_and_param_names, debug_clear_module_and_param_names
 from deepspeed.monitor.monitor import MonitorMaster
 from deepspeed.runtime.progressive_layer_drop import ProgressiveLayerDrop
-from deepspeed.runtime.utils import clip_grad_norm_, compare_tensors_in_structures, maybe_loss_for_backward
+from deepspeed.runtime.utils import clip_grad_norm_, compare_tensors_in_structures, maybe_loss_for_backward, _broadcast_tensor
 from deepspeed.runtime.eigenvalue import Eigenvalue
 from deepspeed.runtime.data_pipeline.constants import DATA_SAMPLING, \
     DATA_ROUTING, DATA_SAMPLING_ENABLED, CURRICULUM_LEARNING, \
@@ -150,23 +150,8 @@ from deepspeed.compile.init_tp import init_autotp
 
 MEMORY_OPT_ALLREDUCE_SIZE = 500000000
 
-# torch reports FP8/MX/NVFP4 as floating point, but casting them discards the quantized
-# encoding, and NVFP4 has no copy_ at all.
+# Quantized storage dtypes are also floating-point; casting them drops the encoding.
 CASTABLE_DTYPES = (torch.float16, torch.bfloat16, torch.float32, torch.float64)
-
-
-def _broadcast_tensor(tensor, src, group):
-    """Broadcast ``tensor``, sending narrow floating dtypes as a uint8 view.
-
-    Gloo rejects FP8/MX/NVFP4 (``Invalid scalar type``). NCCL rejects e8m0.
-    The uint8 view shares storage, so rank 0's replica still wins without the
-    backend knowing the storage dtype.
-    """
-    if tensor.dtype in CASTABLE_DTYPES or not tensor.is_floating_point():
-        dist.broadcast(tensor, src, group=group)
-        return
-    dist.broadcast(tensor.view(torch.uint8), src, group=group)
-
 
 DeepSpeedOptimizerCallable = \
     Callable[[Union[Iterable[Parameter], Dict[str, Iterable]]], Optimizer]

@@ -210,11 +210,6 @@ class TestNarrowDtypeBroadcast(DistributedTest):
 
     @pytest.mark.parametrize("dtype", NARROW_DTYPES, ids=lambda d: str(d).rsplit(".", 1)[-1])
     def test_initialize_broadcasts_narrow_params(self, dtype):
-        """Rank 0's frozen FP8 payload must replace the other ranks' copy.
-
-        Skipping the broadcast would leave ranks inconsistent; a uint8 view is
-        required because Gloo (and NCCL for e8m0) cannot send the storage dtype.
-        """
         model = _module_with_narrow_param(dtype, 8)
         payload = model.quantized.weight.data.view(torch.uint8)
         payload.fill_(9 if dist.get_rank() == 0 else 0)

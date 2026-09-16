@@ -23,7 +23,7 @@ from .linear import zero3_linear_wrap
 
 from deepspeed.utils import groups
 import deepspeed
-from ..utils import see_memory_usage, get_only_unique_item
+from ..utils import see_memory_usage, get_only_unique_item, _broadcast_tensor
 from deepspeed.runtime.zero.config import DeepSpeedZeroConfig
 from deepspeed.runtime.zero.utils import assert_ints_same_as_other_ranks, is_zero_param
 from deepspeed.runtime.zero.offload_config import OffloadDeviceEnum
@@ -467,7 +467,7 @@ class InsertPostInitMethodToModuleSubClasses(object):
                     fn_to_apply(module_to_apply_fn_to)
 
                     for param in params_to_apply_fn_to:
-                        dist.broadcast(param.data, 0, group=param.ds_process_group)
+                        _broadcast_tensor(param.data, 0, param.ds_process_group)
 
                     for param in params_to_apply_fn_to:
                         param.partition(has_been_updated=True)
@@ -1196,10 +1196,8 @@ class Init(InsertPostInitMethodToModuleSubClasses):
     def _zero_init_param(self, param):
         self._convert_to_deepspeed_param(param)
         partition_group = self.get_partition_dp_group(param)
-        if dist.get_world_group() == partition_group:
-            dist.broadcast(param.data, 0, partition_group)
-        else:
-            dist.broadcast(param.data, dist.get_global_rank(partition_group, 0), partition_group)
+        src = 0 if dist.get_world_group() == partition_group else dist.get_global_rank(partition_group, 0)
+        _broadcast_tensor(param.data, src, partition_group)
         param.partition()
 
     def _convert_to_zero_parameters(self, param_list):

@@ -47,6 +47,12 @@ class DummyOptim():
         self.param_groups.append({'params': params})
 
 
+def _broadcast_tensor(tensor, src, group):
+    if tensor.is_floating_point() and tensor.element_size() < 2:
+        tensor = tensor.view(torch.uint8)
+    dist.broadcast(tensor, src, group=group)
+
+
 def filter_empty_parameters(params):
     """Filter out empty parameters (numel == 0) from optimizer params.
 
