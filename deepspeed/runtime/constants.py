@@ -20,42 +20,6 @@ TRAIN_BATCH_SIZE = "train_batch_size"
 TRAIN_BATCH_SIZE_DEFAULT = None
 
 #############################################
-# Sparse attention
-#############################################
-SPARSE_ATTENTION = "sparse_attention"
-SPARSE_DENSE_MODE = "dense"
-SPARSE_FIXED_MODE = "fixed"
-SPARSE_VARIABLE_MODE = "variable"
-SPARSE_BIGBIRD_MODE = "bigbird"
-SPARSE_BSLONGFORMER_MODE = "bslongformer"
-SPARSE_MODE = "mode"
-SPARSE_MODE_DEFAULT = SPARSE_FIXED_MODE
-SPARSE_BLOCK = "block"
-SPARSE_BLOCK_DEFAULT = 16
-SPARSE_DIFFERENT_LAYOUT_PER_HEAD = "different_layout_per_head"
-SPARSE_DIFFERENT_LAYOUT_PER_HEAD_DEFAULT = False
-SPARSE_NUM_LOCAL_BLOCKS = "num_local_blocks"
-SPARSE_NUM_LOCAL_BLOCKS_DEFAULT = 4
-SPARSE_NUM_GLOBAL_BLOCKS = "num_global_blocks"
-SPARSE_NUM_GLOBAL_BLOCKS_DEFAULT = 1
-SPARSE_ATTENTION_TYPE = "attention"
-SPARSE_ATTENTION_TYPE_DEFAULT = "bidirectional"
-SPARSE_HORIZONTAL_GLOBAL_ATTENTION = "horizontal_global_attention"
-SPARSE_HORIZONTAL_GLOBAL_ATTENTION_DEFAULT = False
-SPARSE_NUM_DIFFERENT_GLOBAL_PATTERNS = "num_different_global_patterns"
-SPARSE_NUM_DIFFERENT_GLOBAL_PATTERNS_DEFAULT = 1
-SPARSE_NUM_RANDOM_BLOCKS = "num_random_blocks"
-SPARSE_NUM_RANDOM_BLOCKS_DEFAULT = 0
-SPARSE_LOCAL_WINDOW_BLOCKS = "local_window_blocks"
-SPARSE_LOCAL_WINDOW_BLOCKS_DEFAULT = [4]
-SPARSE_GLOBAL_BLOCK_INDICES = "global_block_indices"
-SPARSE_GLOBAL_BLOCK_INDICES_DEFAULT = [0]
-SPARSE_GLOBAL_BLOCK_END_INDICES = "global_block_end_indices"
-SPARSE_GLOBAL_BLOCK_END_INDICES_DEFAULT = None
-SPARSE_NUM_SLIDING_WINDOW_BLOCKS = "num_sliding_window_blocks"
-SPARSE_NUM_SLIDING_WINDOW_BLOCKS_DEFAULT = 3
-
-#############################################
 # Optimizer and lr scheduler
 #############################################
 OPTIMIZER = "optimizer"
