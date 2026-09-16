@@ -9,7 +9,7 @@ import torch
 import deepspeed.comm as dist
 import deepspeed
 
-from unit.common import DistributedTest, DistributedFixture, get_master_port
+from unit.common import DistributedTest, DistributedFixture, get_master_port, get_start_method_for_platform
 from unit.simple_model import SimpleModel
 from deepspeed.accelerator import get_accelerator
 
@@ -279,7 +279,7 @@ class TestDistIsendIrecv(DistributedTest):
             self.non_daemonic_procs = True
             self.reuse_dist_env = False
             return self._launch_non_daemonic_procs(num_procs, init_method)
-        torch.multiprocessing.set_start_method('forkserver', force=True)
+        torch.multiprocessing.set_start_method(get_start_method_for_platform(), force=True)
         self._launch_daemonic_procs(num_procs, init_method)
 
     def test(self):

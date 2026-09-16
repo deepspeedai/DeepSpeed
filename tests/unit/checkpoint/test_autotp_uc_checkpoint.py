@@ -32,7 +32,7 @@ from deepspeed.runtime.zero.stage_1_and_2 import DeepSpeedZeroOptimizer
 from deepspeed.utils import RepeatingLoader, groups
 from deepspeed.module_inject.tp_shard import get_shard_size_list
 
-from unit.common import DistributedTest, DistributedFixture
+from unit.common import DistributedTest, DistributedFixture, get_start_method_for_platform
 
 
 class _DummyAddress:
@@ -905,7 +905,7 @@ class TestRealCheckpointUniversalConversionTPxPP(DistributedTest):
         # CPU/gloo test: the number of processes is not bound to the accelerator's
         # device_count() (CPU sockets), so bypass the base class's per-device gate
         # that would otherwise skip a 4-process test on a single-socket CPU box.
-        torch.multiprocessing.set_start_method('forkserver', force=True)
+        torch.multiprocessing.set_start_method(get_start_method_for_platform(), force=True)
         self._launch_daemonic_procs(num_procs, init_method)
 
     def test(self, tmpdir):
