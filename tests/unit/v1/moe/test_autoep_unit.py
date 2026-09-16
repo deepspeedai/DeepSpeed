@@ -7,7 +7,7 @@
 import ast
 import inspect
 from collections import OrderedDict
-from contextlib import nullcontext
+from contextlib import contextmanager
 from types import SimpleNamespace
 
 import pytest
@@ -1132,10 +1132,27 @@ def async_split_layer(monkeypatch):
                            ep_size=2,
                            ep_rank=0,
                            config=_runtime_config(enabled=True, autoep_size=2, async_split_plan=True))
-    activity = {"buffers": [], "waits": [], "records": []}
-    event = SimpleNamespace(synchronize=lambda: activity["waits"].append("ready"),
-                            record=lambda stream: activity["records"].append("submitted"))
-    stream = SimpleNamespace(wait_stream=lambda stream: None)
+    activity = {"buffers": [], "waits": [], "records": [], "timeline": [], "stream": "caller"}
+
+    def synchronize():
+        activity["waits"].append("ready")
+        activity["timeline"].append(("synchronize", activity["stream"]))
+
+    def record(stream):
+        activity["records"].append("submitted")
+        activity["timeline"].append(("record", stream.name))
+
+    event = SimpleNamespace(synchronize=synchronize, record=record)
+    stream = SimpleNamespace(name="copy",
+                             wait_stream=lambda source: activity["timeline"].append(("wait_stream", source)))
+
+    @contextmanager
+    def copy_stream(stream):
+        activity["stream"] = "copy"
+        try:
+            yield
+        finally:
+            activity["stream"] = "caller"
 
     class CUDADeviceCounts(torch.Tensor):
 
@@ -1143,15 +1160,31 @@ def async_split_layer(monkeypatch):
         def device(self):
             return torch.device("cuda", 0)
 
+        def sum(self, *args, **kwargs):
+            if not any(operation == "payload" for operation, _ in activity["timeline"]):
+                activity["timeline"].append(("reduce", activity["stream"]))
+            return super().sum(*args, **kwargs)
+
     def pin_memory(tensor):
         activity["buffers"].append(tensor)
         return tensor
 
+    original_copy = torch.Tensor.copy_
+
+    def copy(tensor, source, *args, **kwargs):
+        if any(tensor is buffer for buffer in activity["buffers"]):
+            activity["timeline"].append(("copy", activity["stream"]))
+            assert kwargs.get("non_blocking") is True
+            assert source.dtype == tensor.dtype
+            # Host storage must not inherit the fake CUDA tensor subclass.
+            source = source.as_subclass(torch.Tensor)
+        return original_copy(tensor, source, *args, **kwargs)
+
     accelerator = SimpleNamespace(current_device=lambda: 0,
-                                  current_stream=lambda device: "consumer",
+                                  current_stream=lambda device: activity["stream"],
                                   Event=lambda: event,
                                   Stream=lambda device: stream,
-                                  stream=lambda stream: nullcontext(),
+                                  stream=copy_stream,
                                   pin_memory=pin_memory)
 
     def device_counts(_module, _inputs, output):
@@ -1159,6 +1192,8 @@ def async_split_layer(monkeypatch):
         return scores, selected, counts.as_subclass(CUDADeviceCounts)
 
     def exchange(output, input_, **kwargs):
+        kind = "payload" if "input_split_sizes" in kwargs else "counts"
+        activity["timeline"].append((kind, activity["stream"]))
         output.copy_(input_)
 
     # Counts have CUDA device metadata with host storage so the real planner
@@ -1166,6 +1201,7 @@ def async_split_layer(monkeypatch):
     hook = layer.router.register_forward_hook(device_counts)
     monkeypatch.setattr(auto_ep_layer, "get_accelerator", lambda: accelerator)
     monkeypatch.setattr(auto_ep_layer.dist, "all_to_all_single", exchange)
+    monkeypatch.setattr(torch.Tensor, "copy_", copy)
     monkeypatch.setattr(torch.Tensor, "record_stream", lambda tensor, stream: None)
     auto_ep_layer._get_async_split_plan_stream.cache_clear()
     yield layer, event, activity
@@ -1174,7 +1210,36 @@ def async_split_layer(monkeypatch):
 
 
 class TestAsyncSplitPlanLifecycle:
-    """Pin the pending-buffer reuse bug as well as the public retry behavior."""
+    """Pin stream ordering and pending-buffer reuse through layer forwards."""
+
+    def test_only_metadata_copy_uses_side_stream(self, monkeypatch, async_split_layer):
+        layer, _, activity = async_split_layer
+        original_argsort = torch.argsort
+
+        def sort(*args, **kwargs):
+            result = original_argsort(*args, **kwargs)
+            activity["timeline"].append(("sort", activity["stream"]))
+            return result
+
+        monkeypatch.setattr(torch, "argsort", sort)
+        layer(torch.randn(1, 8, 64))
+
+        # Keep count exchange/reductions on the caller stream so only the
+        # metadata transfer overlaps sorting and packing, not count kernels.
+        timeline = activity["timeline"]
+        for operation, stream in timeline:
+            if operation in ("counts", "reduce", "sort", "payload", "synchronize"):
+                assert stream == "caller"
+        assert timeline.count(("counts", "caller")) == 1
+        assert timeline.count(("wait_stream", "caller")) == 1
+        assert timeline.count(("copy", "copy")) == 1
+        assert timeline.count(("record", "copy")) == 1
+        operations = [operation for operation, _ in timeline]
+        assert operations.index("counts") < operations.index("wait_stream") < operations.index("copy")
+        assert all(index < operations.index("wait_stream") for index, operation in enumerate(operations)
+                   if operation == "reduce")
+        assert operations.index("copy") < operations.index("record") < operations.index("sort")
+        assert operations.index("sort") < operations.index("synchronize") < operations.index("payload")
 
     def test_packing_failure_drains_pending_and_allows_retry(self, monkeypatch, async_split_layer):
         layer, _, activity = async_split_layer

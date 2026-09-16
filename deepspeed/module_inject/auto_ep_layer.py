@@ -213,42 +213,47 @@ def _start_async_split_plan_from_expert_counts(
     host_splits: torch.Tensor,
     ready_event,
 ) -> _PendingSplitPlan:
-    """Start count exchange and pinned-memory D2H without blocking the host."""
+    """Prepare counts on the caller stream, then start a pinned-memory D2H copy."""
     if num_tokens_per_expert.device.type != "cuda":
         raise RuntimeError("expert_parallel.async_split_plan requires CUDA tensors")
+
+    # Keep count communication and reductions ahead of packing so they do not
+    # compete with the packing kernels. Only the metadata copy overlaps them.
+    count_matrix = num_tokens_per_expert.view(ep_size, num_local_experts)
+    send_counts = count_matrix.reshape(-1).contiguous()
+    received_counts_flat = torch.empty_like(send_counts)
+    dist.all_to_all_single(
+        received_counts_flat,
+        send_counts,
+        group=ep_group,
+    )
+    received_counts = received_counts_flat.view(ep_size, num_local_experts)
+    local_counts = received_counts.sum(dim=0)
+    # Match the pinned destination dtype here so the copy stream does not
+    # launch a conversion kernel alongside token packing.
+    device_splits = torch.stack((
+        count_matrix.sum(dim=1),
+        received_counts.sum(dim=1),
+    )).to(dtype=host_splits.dtype)
 
     device_index = num_tokens_per_expert.device.index
     if device_index is None:
         device_index = get_accelerator().current_device()
-    split_stream = _get_async_split_plan_stream(device_index)
+    copy_stream = _get_async_split_plan_stream(device_index)
     current_stream = get_accelerator().current_stream(num_tokens_per_expert.device)
-    split_stream.wait_stream(current_stream)
-    num_tokens_per_expert.record_stream(split_stream)
+    copy_stream.wait_stream(current_stream)
+    device_splits.record_stream(copy_stream)
 
-    with get_accelerator().stream(split_stream):
-        count_matrix = num_tokens_per_expert.view(ep_size, num_local_experts)
-        send_counts = count_matrix.reshape(-1).contiguous()
-        received_counts_flat = torch.empty_like(send_counts)
-        dist.all_to_all_single(
-            received_counts_flat,
-            send_counts,
-            group=ep_group,
-        )
-        received_counts = received_counts_flat.view(ep_size, num_local_experts)
-        local_counts = received_counts.sum(dim=0)
-        device_splits = torch.stack((
-            count_matrix.sum(dim=1),
-            received_counts.sum(dim=1),
-        ))
+    with get_accelerator().stream(copy_stream):
         host_splits.copy_(device_splits, non_blocking=True)
-        ready_event.record(split_stream)
+        ready_event.record(copy_stream)
 
     return _PendingSplitPlan(
         host_splits=host_splits,
         local_counts=local_counts,
         local_counts_by_source=received_counts,
         ready_event=ready_event,
-        keepalive=(num_tokens_per_expert, send_counts, received_counts_flat, device_splits),
+        keepalive=(device_splits, ),
     )
 
 
