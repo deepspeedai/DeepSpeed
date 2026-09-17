@@ -124,6 +124,10 @@ _REMOVED_ZERO_CONFIG_KEYS = {
     "mics_hierarchical_params_gather":
     "MiCS ZeRO-3 sharding has been removed; 'zero_optimization.mics_hierarchical_params_gather' "
     f"is no longer supported. See {_REMOVED_FEATURES_ISSUE}.",
+    "zeropp_loco_param":
+    "LoCo-Zero++ has been removed; 'zero_optimization.zeropp_loco_param' is no longer supported. "
+    "Remove this key to use standard ZeRO++ quantized gradients without LoCo error feedback. "
+    f"See {_REMOVED_FEATURES_ISSUE}.",
 }
 
 
