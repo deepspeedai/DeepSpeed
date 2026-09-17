@@ -360,6 +360,18 @@ void shm_initialize(int size, int rank, char* addr_string, char* port_string)
     struct allreduce_workspace* workspace_buf;
     struct allreduce_workspace* workspace_buf_other;
     workspace_buf = (struct allreduce_workspace*)malloc(sizeof(struct allreduce_workspace));
+    // malloc() can return NULL under memory pressure. Left unchecked, the NULL flows
+    // into shared_create() below as the buffer for write() -- write() then fails with
+    // EFAULT, but its return value (-1) gets reassigned into shared_create()'s size_t
+    // nbytes parameter, silently becoming SIZE_MAX. shared_open() then attempts an
+    // effectively-infinite mmap(), which fails but still gets stored unconditionally
+    // into allreduce_buffer.bytes, so workspace_buf below ends up pointing at
+    // MAP_FAILED and the very next dereference (:371) SIGSEGVs. Same CWE-476 class as
+    // the calloc() guard below; bail the same way before it can propagate.
+    if (!workspace_buf) {
+        printf("shm_initialize: malloc failed to allocate workspace_buf\n");
+        return;
+    }
     snprintf(shm_name, NAME_BUF_SIZE, "%s_%d", shm_name_prefix, rank);
     shared_create(&allreduce_buffer, shm_name, workspace_buf, sizeof(struct allreduce_workspace));
     // shared_create() only reads workspace_buf's contents (via write()) to seed the
