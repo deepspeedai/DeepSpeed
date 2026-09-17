@@ -78,10 +78,6 @@ GRADIENT_ACCUMULATION_STEPS_DEFAULT = None
 MANAGED_GRADIENT_ACCUMULATION = "managed_gradient_accumulation"
 MANAGED_GRADIENT_ACCUMULATION_DEFAULT = True
 
-# DeepSpeed CSR gradient sparsity
-SPARSE_GRADIENTS = "sparse_gradients"
-SPARSE_GRADIENTS_DEFAULT = False
-
 #########################################
 # BFLOAT16 support
 #########################################
@@ -348,48 +344,6 @@ WALL_CLOCK_BREAKDOWN_DEFAULT = False
 
 MEMORY_BREAKDOWN = 'memory_breakdown'
 MEMORY_BREAKDOWN_DEFAULT = False
-
-#########################################
-# Eigenvalue
-#########################################
-# Eigenvalue computation. By default, this feature is not enabled.
-# Users can configure in ds_config.json as below example:
-EIGENVALUE_FORMAT = '''
-Tensorboard can be specified as:
-"eigenvalue": {
-  "enabled": true,
-  "verbose": true,
-  "max_iter": 100,
-  "tol": 1e-2,
-  "stability": 1e-6
-}
-'''
-EIGENVALUE = "eigenvalue"
-
-# Tensorboard enable signal
-EIGENVALUE_ENABLED = "enabled"
-EIGENVALUE_ENABLED_DEFAULT = False
-
-EIGENVALUE_VERBOSE = "verbose"
-EIGENVALUE_VERBOSE_DEFAULT = False
-
-EIGENVALUE_MAX_ITER = "max_iter"
-EIGENVALUE_MAX_ITER_DEFAULT = 100
-
-EIGENVALUE_TOL = "tol"
-EIGENVALUE_TOL_DEFAULT = 1e-2
-
-EIGENVALUE_STABILITY = "stability"
-EIGENVALUE_STABILITY_DEFAULT = 1e-6
-
-EIGENVALUE_GAS_BOUNDARY_RESOLUTION = "gas_boundary_resolution"
-EIGENVALUE_GAS_BOUNDARY_RESOLUTION_DEFAULT = 1
-
-EIGENVALUE_LAYER_NAME = "layer_name"
-EIGENVALUE_LAYER_NAME_DEFAULT = "bert.encoder.layer"
-
-EIGENVALUE_LAYER_NUM = "layer_num"
-EIGENVALUE_LAYER_NUM_DEFAULT = 0
 
 #########################################
 # Progressive Layer Drop (PLD)

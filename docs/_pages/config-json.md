@@ -156,12 +156,6 @@ Example of <i>**scheduler**</i>
 | ------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
 | Before mean gradient allreduce, predivide gradients by a specified factor; this can sometimes help with fp16 stability when scaling to large numbers of GPUs | `1.0`   |
 
-<i>**sparse_gradients**</i>: [boolean]
-
-| Description                                                                                                                                                                                                                                                                                                                                                 | Default |
-| ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
-| Enable sparse compression of [torch.nn.Embedding](https://pytorch.org/docs/stable/nn.html#torch.nn.Embedding) gradients. This feature is essentially deprecated as we don't see use cases for it as much anymore. It should be noted that this feature is not compatible with [torch.sparse](https://pytorch.org/docs/stable/sparse.html) related features. | `false` |
-
 ### FP16 training options
 
 **Note:** this mode cannot be combined with the `amp` mode described below.
@@ -1509,7 +1503,6 @@ Deepspeed's Monitor module can log training details into a [Tensorboard](https:/
 | `Train/Samples/train_loss`   | The training loss. | None |
 | `Train/Samples/lr`           | The learning rate during training. | None |
 | `Train/Samples/loss_scale`   | The loss scale when training using `fp16`. | `fp16` must be enabled. |
-| `Train/Eigenvalues/ModelBlockParam_{i}`   | Eigen values per param block. | `eigenvalue` must be enabled. |
 | `Train/Samples/elapsed_time_ms_forward`   | The global duration of the forward pass. | `flops_profiler.enabled` or `wall_clock_breakdown`. |
 | `Train/Samples/elapsed_time_ms_backward`   | The global duration of the forward pass. | `flops_profiler.enabled` or `wall_clock_breakdown`.  |
 | `Train/Samples/elapsed_time_ms_backward_inner`   | The backward time that does not include the gradient reduction time. Only in cases where the gradient reduction is not overlapped, if it is overlapped then the inner time should be about the same as the entire backward time. | `flops_profiler.enabled` or `wall_clock_breakdown`.  |
