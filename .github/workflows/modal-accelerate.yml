@@ -35,6 +35,7 @@ on:
       - 'docs/**'
       - 'blogs/**'
       - '*.md'
+      - 'version.txt'
       - 'deepspeed/inference/v2/**'
       - 'tests/unit/inference/v2/**'
     types: [review_requested, ready_for_review, synchronize]

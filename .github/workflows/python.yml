@@ -42,6 +42,7 @@ jobs:
               - '!docs/**'
               - '!blogs/**'
               - '!*.md'
+              - '!version.txt'
 
   unit-tests:
     name: python / install smoke (Python ${{ matrix.pyVersion }})
