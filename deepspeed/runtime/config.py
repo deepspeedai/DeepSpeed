@@ -609,7 +609,7 @@ class DeepSpeedConfig(object):
         self.float16_config = get_float16_config(param_dict)
         self.bfloat16_config = get_bfloat16_config(param_dict)
         if self.float16_config.enabled and self.bfloat16_config.enabled:
-            raise ValueError('bfloat16 and fp16 modes cannot be simultaneously enabled')
+            raise AssertionError('bfloat16 and fp16 modes cannot be simultaneously enabled')
 
         self.amp_enabled = get_amp_enabled(param_dict)
         self.amp_params = get_amp_params(param_dict)
@@ -698,20 +698,19 @@ class DeepSpeedConfig(object):
         micro_batch = self.train_micro_batch_size_per_gpu
         grad_acc = self.gradient_accumulation_steps
 
-        if train_batch <= 0:
-            raise ValueError(f"Train batch size: {train_batch} has to be greater than 0")
+        if not (train_batch > 0):
+            raise AssertionError(f"Train batch size: {train_batch} has to be greater than 0")
 
-        if micro_batch <= 0:
-            raise ValueError(f"Micro batch size per gpu: {micro_batch} has to be greater than 0")
+        if not (micro_batch > 0):
+            raise AssertionError(f"Micro batch size per gpu: {micro_batch} has to be greater than 0")
 
-        if grad_acc <= 0:
-            raise ValueError(f"Gradient accumulation steps: {grad_acc} has to be greater than 0")
+        if not (grad_acc > 0):
+            raise AssertionError(f"Gradient accumulation steps: {grad_acc} has to be greater than 0")
 
         if train_batch != micro_batch * grad_acc * self.world_size:
-            raise ValueError(
-                f"Check batch related parameters. train_batch_size is not equal "
-                "to micro_batch_per_gpu * gradient_acc_step * world_size "
-                f"{train_batch} != {micro_batch} * {grad_acc} * {self.world_size}")
+            raise AssertionError(f"Check batch related parameters. train_batch_size is not equal "
+                                 "to micro_batch_per_gpu * gradient_acc_step * world_size "
+                                 f"{train_batch} != {micro_batch} * {grad_acc} * {self.world_size}")
 
     def _set_batch_related_parameters(self):
 
@@ -755,8 +754,7 @@ class DeepSpeedConfig(object):
 
         # either none of the three parameters are provided or just gradient_accumulation_step is provided
         else:
-            raise ValueError(
-                'Either train_batch_size or train_micro_batch_size_per_gpu needs to be provided')
+            raise AssertionError('Either train_batch_size or train_micro_batch_size_per_gpu needs to be provided')
 
         #print(f"final: {self.train_batch_size=} {self.train_micro_batch_size_per_gpu=} {self.gradient_accumulation_steps=}")
 
@@ -790,15 +788,15 @@ class DeepSpeedConfig(object):
 
     def _do_error_check(self):
         if not self.train_micro_batch_size_per_gpu:
-            raise ValueError("DeepSpeedConfig: {} is not defined".format(TRAIN_MICRO_BATCH_SIZE_PER_GPU))
+            raise AssertionError("DeepSpeedConfig: {} is not defined".format(TRAIN_MICRO_BATCH_SIZE_PER_GPU))
 
         if not self.gradient_accumulation_steps:
-            raise ValueError("DeepSpeedConfig: {} is not defined".format(GRADIENT_ACCUMULATION_STEPS))
+            raise AssertionError("DeepSpeedConfig: {} is not defined".format(GRADIENT_ACCUMULATION_STEPS))
 
         if self.zero_enabled:
-            if self.zero_optimization_stage > ZeroStageEnum.max_stage:
-                raise ValueError("DeepSpeedConfig: Maximum supported ZeRO stage is {}".format(
-                        ZeroStageEnum.max_stage))
+            if not (self.zero_optimization_stage <= ZeroStageEnum.max_stage):
+                raise AssertionError("DeepSpeedConfig: Maximum supported ZeRO stage is {}".format(
+                    ZeroStageEnum.max_stage))
 
         if (self.gradient_allreduce_op == GRADIENT_ALLREDUCE_OP_SUM
                 and self.zero_optimization_stage == ZeroStageEnum.weights):
@@ -809,22 +807,19 @@ class DeepSpeedConfig(object):
             raise ValueError(f"{GRADIENT_ALLREDUCE_OP}='sum' is not supported with DeepCompile")
 
         if self.float16_config.fp16_master_weights_and_grads:
-            if not (self.zero_enabled and self.zero_optimization_stage in (
-                ZeroStageEnum.optimizer_states, ZeroStageEnum.gradients,
-                ZeroStageEnum.weights)):
-                raise ValueError("Fp16_master_weights_and_grads is only supported with ZeRO Stage 1, 2, or 3.")
+            if not (self.zero_enabled and self.zero_optimization_stage
+                    in (ZeroStageEnum.optimizer_states, ZeroStageEnum.gradients, ZeroStageEnum.weights)):
+                raise AssertionError("Fp16_master_weights_and_grads is only supported with ZeRO Stage 1, 2, or 3.")
         if self.bfloat16_config.bf16_master_weights_and_grads:
-            if not (self.zero_enabled and self.zero_optimization_stage in (
-                ZeroStageEnum.optimizer_states, ZeroStageEnum.gradients,
-                ZeroStageEnum.weights)):
-                raise ValueError("Bf16_master_weights_and_grads is only supported with ZeRO Stage 1, 2, or 3.")
+            if not (self.zero_enabled and self.zero_optimization_stage
+                    in (ZeroStageEnum.optimizer_states, ZeroStageEnum.gradients, ZeroStageEnum.weights)):
+                raise AssertionError("Bf16_master_weights_and_grads is only supported with ZeRO Stage 1, 2, or 3.")
         if self.bfloat16_config.bf16_optimizer_states:
-            if not (self.zero_enabled and self.zero_optimization_stage in (
-                ZeroStageEnum.optimizer_states, ZeroStageEnum.gradients,
-                ZeroStageEnum.weights)):
-                raise ValueError("bf16_optimizer_states is only supported with ZeRO Stage 1, 2, or 3.")
+            if not (self.zero_enabled and self.zero_optimization_stage
+                    in (ZeroStageEnum.optimizer_states, ZeroStageEnum.gradients, ZeroStageEnum.weights)):
+                raise AssertionError("bf16_optimizer_states is only supported with ZeRO Stage 1, 2, or 3.")
             if not self.bfloat16_config.bf16_master_weights_and_grads:
-                raise ValueError("bf16_optimizer_states requires bf16_master_weights_and_grads to be enabled.")
+                raise AssertionError("bf16_optimizer_states requires bf16_master_weights_and_grads to be enabled.")
 
     def _do_warning_check(self):
         vocabulary_size = self._param_dict.get(VOCABULARY_SIZE, VOCABULARY_SIZE_DEFAULT)

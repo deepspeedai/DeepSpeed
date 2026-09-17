@@ -9,6 +9,8 @@ import pytest
 import json
 import hjson
 import argparse
+import subprocess
+import sys
 import torch
 
 from deepspeed.runtime.zero.config import DeepSpeedZeroConfig
@@ -559,12 +561,23 @@ class TestNoModel(DistributedTest):
         with pytest.raises(AssertionError):
             model, _, _, _ = deepspeed.initialize(model, config=base_config)
 
+
 class TestConfigValidation:
-    def test_invalid_batch_sizes(self):
+
+    @pytest.mark.parametrize("key,message", [
+        ("train_batch_size", "Train batch size"),
+        ("train_micro_batch_size_per_gpu", "Micro batch size per gpu"),
+        ("gradient_accumulation_steps", "Gradient accumulation steps"),
+    ])
+    @pytest.mark.parametrize("value", [0, -1, float("nan")])
+    def test_invalid_batch_sizes(self, key, message, value):
         config_dict = {
-            "train_batch_size": 0,
+            "train_batch_size": 1,
+            "train_micro_batch_size_per_gpu": 1,
+            "gradient_accumulation_steps": 1,
         }
-        with pytest.raises(ValueError, match="Train batch size: 0 has to be greater than 0"):
+        config_dict[key] = value
+        with pytest.raises(AssertionError, match=message + ".*has to be greater than 0"):
             DeepSpeedConfig(config_dict)
 
     def test_invalid_batch_size_mismatch(self):
@@ -574,21 +587,69 @@ class TestConfigValidation:
             "gradient_accumulation_steps": 2,
         }
         # world_size default in tests is usually 1, so 2*2*1 != 16
-        with pytest.raises(ValueError, match="train_batch_size is not equal to micro_batch_per_gpu"):
+        with pytest.raises(AssertionError, match="train_batch_size is not equal to micro_batch_per_gpu"):
             DeepSpeedConfig(config_dict)
 
     def test_fp16_bf16_conflict(self):
         config_dict = {
             "train_batch_size": 8,
-            "fp16": {"enabled": True},
-            "bf16": {"enabled": True},
+            "fp16": {
+                "enabled": True
+            },
+            "bf16": {
+                "enabled": True
+            },
         }
-        with pytest.raises(ValueError, match="bfloat16 and fp16 modes cannot be simultaneously enabled"):
+        with pytest.raises(AssertionError, match="bfloat16 and fp16 modes cannot be simultaneously enabled"):
             DeepSpeedConfig(config_dict)
 
     def test_missing_batch_sizes(self):
         config_dict = {
             # Neither train_batch_size nor train_micro_batch_size_per_gpu provided
         }
-        with pytest.raises(ValueError, match="Either train_batch_size or train_micro_batch_size_per_gpu needs to be provided"):
+        with pytest.raises(AssertionError,
+                           match="Either train_batch_size or train_micro_batch_size_per_gpu needs to be provided"):
             DeepSpeedConfig(config_dict)
+
+    @pytest.mark.parametrize("precision,option", [
+        ("fp16", "fp16_master_weights_and_grads"),
+        ("bf16", "bf16_master_weights_and_grads"),
+        ("bf16", "bf16_optimizer_states"),
+    ])
+    def test_master_weights_require_zero(self, precision, option):
+        with pytest.raises(AssertionError, match="only supported with ZeRO Stage 1, 2, or 3"):
+            DeepSpeedConfig({"train_batch_size": 1, precision: {"enabled": True, option: True}})
+
+    def test_bf16_optimizer_states_require_master_weights(self):
+        with pytest.raises(AssertionError, match="requires bf16_master_weights_and_grads to be enabled"):
+            DeepSpeedConfig({
+                "train_batch_size": 1,
+                "zero_optimization": {
+                    "stage": 1
+                },
+                "bf16": {
+                    "enabled": True,
+                    "bf16_optimizer_states": True
+                },
+            })
+
+
+def test_config_validation_optimized_python():
+    # A normal pytest run must catch validation accidentally reverting to assert.
+    code = """
+from deepspeed.runtime.config import DeepSpeedConfig
+
+try:
+    DeepSpeedConfig({
+        "train_batch_size": 16,
+        "train_micro_batch_size_per_gpu": 2,
+        "gradient_accumulation_steps": 2,
+    })
+except AssertionError as error:
+    if "train_batch_size is not equal" not in str(error):
+        raise
+else:
+    raise RuntimeError("Optimized Python accepted inconsistent batch sizes")
+"""
+    result = subprocess.run([sys.executable, "-O", "-c", code], capture_output=True, text=True, timeout=60)
+    assert result.returncode == 0, result.stdout + result.stderr
