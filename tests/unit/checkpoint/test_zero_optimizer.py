@@ -20,6 +20,69 @@ from unit.checkpoint.common import *
 import pytest
 
 
+class TestZeROCheckpointTag(DistributedTest):
+    world_size = [1, 2]
+
+    @pytest.mark.parametrize('tag,save_latest,load_optimizer_states,load_module_only', [
+        ('earlier', True, False, False),
+        ('earlier', False, False, False),
+        ('earlier', True, False, True),
+        ('earlier', False, False, True),
+        ('earlier', True, True, False),
+        (None, True, False, False),
+    ])
+    def test_load_requested_tag(self, tmpdir, tag, save_latest, load_optimizer_states, load_module_only):
+        config = {
+            'train_micro_batch_size_per_gpu': 1,
+            'zero_allow_untested_optimizer': True,
+            'zero_optimization': {
+                'stage': 3,
+                'reduce_bucket_size': 1000,
+                'stage3_prefetch_bucket_size': 1000,
+            },
+        }
+
+        def make_engine():
+            model = torch.nn.Linear(4, 2)
+            optimizer = torch.optim.Adam(model.parameters(), lr=0.1)
+            return deepspeed.initialize(model=model, optimizer=optimizer, config=config)[0]
+
+        def snapshot(engine):
+            with deepspeed.zero.GatheredParameters(list(engine.module.parameters())):
+                return {name: value.detach().clone() for name, value in engine.module.state_dict().items()}
+
+        source = make_engine()
+        target = None
+        try:
+            snapshots = {}
+            for checkpoint_tag in ('earlier', 'later'):
+                loss = source(torch.ones(1, 4, device=source.device)).square().mean()
+                source.backward(loss)
+                source.step()
+                snapshots[checkpoint_tag] = snapshot(source)
+                source.save_checkpoint(tmpdir,
+                                       tag=checkpoint_tag,
+                                       client_state={'label': checkpoint_tag},
+                                       save_latest=save_latest)
+
+            assert any(not torch.equal(snapshots['earlier'][name], value)
+                       for name, value in snapshots['later'].items())
+            target = make_engine()
+            load_path, client_state = target.load_checkpoint(tmpdir,
+                                                             tag=tag,
+                                                             load_optimizer_states=load_optimizer_states,
+                                                             load_module_only=load_module_only)
+            expected_tag = tag if tag is not None else 'later'
+            assert load_path is not None
+            assert client_state['label'] == expected_tag
+            for name, value in snapshot(target).items():
+                torch.testing.assert_close(value, snapshots[expected_tag][name], rtol=0, atol=0)
+        finally:
+            if target is not None:
+                target.destroy()
+            source.destroy()
+
+
 class TestZeROCheckpoint(DistributedTest):
     world_size = 2
 
