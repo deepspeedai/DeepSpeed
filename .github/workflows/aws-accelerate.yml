@@ -39,6 +39,7 @@ jobs:
               - '**'
               - '!docs/**'
               - '!blogs/**'
+              - '!*.md'
               - '!deepspeed/inference/v2/**'
               - '!tests/unit/inference/v2/**'
 
