@@ -108,6 +108,18 @@ class ModelWithSharedWeights(nn.Module):
         self.layer1.weight = self.layer2.weight
 
 
+class ModelWithSharedSubmodule(nn.Module):
+
+    def __init__(self):
+        super().__init__()
+        self.layer0 = nn.Linear(100, 100)
+        self.layer1 = nn.Linear(200, 200)
+        # layer2 aliases the ENTIRE layer1 submodule instance (weight AND bias), not just
+        # a shared leaf Parameter -- e.g. architectures that reuse a whole child module
+        # under a second attribute name.
+        self.layer2 = self.layer1
+
+
 class TestCheckpointConvert(DistributedTest):
     world_size = 2
 
@@ -163,3 +175,35 @@ class TestCheckpointConvert(DistributedTest):
         fp32_size = (fp32_save_dir / 'pytorch_model.bin').stat().st_size
         bf16_size = (bf16_save_dir / 'pytorch_model.bin').stat().st_size
         assert bf16_size < fp32_size * 0.6
+
+    def test_convert_zero_checkpoint_with_shared_submodule(self, tmpdir):
+        config = {
+            "train_micro_batch_size_per_gpu": 2,
+            "zero_allow_untested_optimizer": True,
+            "zero_optimization": {
+                "stage": 2
+            },
+        }
+        model = ModelWithSharedSubmodule()
+        optimizer = torch.optim.Adam(model.parameters())
+
+        deepspeed_engine, _, _, _ = deepspeed.initialize(
+            config=config,
+            model=model,
+            optimizer=optimizer,
+        )
+        ds_save_dir = tmpdir / "checkpoint_ds"
+        deepspeed_engine.save_checkpoint(ds_save_dir, tag="checkpoint")
+
+        fp32_save_dir = tmpdir / "checkpoint_fp32"
+        convert_zero_checkpoint_to_fp32_state_dict(ds_save_dir, fp32_save_dir)
+        state_dict = torch.load(fp32_save_dir / 'pytorch_model.bin')
+
+        # both the weight AND the bias of the aliased submodule must survive reconstruction
+        assert 'layer2.weight' in state_dict
+        assert 'layer2.bias' in state_dict
+        assert id(state_dict['layer1.weight']) == id(state_dict['layer2.weight'])
+        assert id(state_dict['layer1.bias']) == id(state_dict['layer2.bias'])
+
+        model = ModelWithSharedSubmodule()
+        model.load_state_dict(state_dict, strict=True)
