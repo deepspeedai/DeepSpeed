@@ -42,8 +42,6 @@ lnav:
         url: /docs/config-json/#monitoring-module
       - title: 'Communication Logging'
         url: /docs/config-json/#communication-logging
-      - title: 'Model Compression'
-        url: /docs/config-json/#compression
       - title: 'Data Efficiency'
         url: /docs/config-json/#data-efficiency
   - title: 'Tutorials'
@@ -97,8 +95,6 @@ lnav:
         url: /tutorials/mixture-of-experts-nlg/
       - title: 'MoE Inference'
         url: /tutorials/mixture-of-experts-inference/
-      - title: 'Mixture-of-Quantization'
-        url: /tutorials/MoQ-tutorial/
       - title: 'Monitoring'
         url: /tutorials/monitor
       - title: 'Communication Logging'
