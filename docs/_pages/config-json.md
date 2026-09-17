@@ -378,7 +378,7 @@ Enabling and configuring ZeRO memory optimizations
     "stage3_max_reuse_distance" : 1e9,
     "stage3_prefetch_bucket_size" : 5e8,
     "stage3_param_persistence_threshold" : 1e6,
-    "sub_group_size" : 1e12,
+    "sub_group_size" : 1e9,
     "elastic_checkpoint" : [true|false] (deprecated; use Universal Checkpointing for ZeRO-3),
     "stage3_gather_16bit_weights_on_model_save": [true|false],
     "ignore_unused_parameters": [true|false],
@@ -499,6 +499,18 @@ Enabling and configuring ZeRO memory optimizations
 | Description                                                                                                                                                          | Default |
 | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
 | Do not partition parameters smaller than this threshold. Smaller values use less memory, but can greatly increase communication (especially latency-bound messages). | `1e5`   |
+
+
+***sub_group_size***: [integer]
+
+| Description                                                                                                                                                                                                                                                                                                                                                                                                                                                    | Default |
+| -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
+| Tile size for parameter processing to fit massive models (with trillions of parameters). Parameters are grouped into buckets of `sub_group_size` and each bucket is updated one at a time. When used with NVMe offload in ZeRO-Infinity, `sub_group_size` therefore controls the granularity in which model states are moved in and out of CPU memory from NVMe during the optimizer step. This prevents running out of CPU memory for extremely large models. | `1e9`   |
+
+Most users can leave `sub_group_size` at its default value when not using NVMe offload. Consider changing it in the following cases:
+
+1. Running into OOM during the optimizer step: reduce `sub_group_size` to lower the memory utilization of temporary buffers.
+2. The optimizer step is taking a long time: increase `sub_group_size` to improve bandwidth utilization as a result of the increased data size.
 
 
 ***stage3_gather_16bit_weights_on_model_save***: [boolean]
