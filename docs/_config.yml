@@ -56,7 +56,6 @@ collections:
       - one-cycle.md
 
       - pipeline.md
-      - progressive_layer_dropping.md
       - transformer_kernel.md
       - zero-offload.md
       - zero.md
