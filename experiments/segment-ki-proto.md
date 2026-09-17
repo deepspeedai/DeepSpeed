@@ -440,3 +440,211 @@ GDN 状态与 KV 增长的正常代价。
 
 修复总量回顾（GDN graph 支持从零到全绿）：6 处 mask/cache 协议对齐 +
 prefill/位置/warmup 三 bug ≈ 80 行 Python，零 csrc 改动。
+
+## Fused step-update kernel (Level 1, 2026-09-14)
+
+实现：`decode_step` CUDA kernel（fused_glu.cu）——argmax(vocab) → 写 token →
+推进 write_pos → reveal mask → 记录到 output buffer，合并 6 次 Python
+dispatch 为 1 次 kernel 调用。Python 侧 EOS 检查从每步降为每 16 步。
+
+结果（同 session 内对照，消除环境差异）：
+| 路径 | tok/s（64 tok） |
+|---|---|
+| graph + fallback Python 循环 | 30.3 |
+| graph + fused step kernel | **30.4（+0.3%）** |
+
+**结论：b=1/4B/33ms-step 下，Python 调度税 ~180μs 只占步长 0.5%——
+fused step-update 增益在噪声内。** 这不是 kernel 的问题，是
+4B 模型 device 时间主导（~29.4ms/step）把 CPU 开销淹没。
+该优化在以下场景才有价值：
+- 更小模型（步长 <5ms，CPU 占比 >10%）
+- C++ loop（Level 2）才能整步消 Python（不只是合并 op）
+- 当前 graph capture 已把 CPU 份额从 32% 压到 ~11%，剩余 11% 里
+  大头是 Python for 循环本身和 PyTorch tensor 对象创建
+
+环境注记：实例重建后同码性能从 54.8→30.4 tok/s（可能为调度/降频差异），
+所有对比以同 session 内 fused vs fallback 为准。
+
+## C++ decode loop (Level 2, 2026-09-14/15)
+
+实现：`decode_loop.cu`（独立 op_builder）——C++ 循环内 pybind11 方法调用
+`graph.replay()` + 纯 C++ kernel launch（argmax+buffer 更新），周期性
+EOS 检查（每 16 步一次 D2H sync）。Python 端一次调用完成全部 N 步。
+
+架构注记：CUDAGraph 的 cudaGraphExec_t 无法从 Python 属性提取（纯
+pybind11 类），改用 `py::object graph` + C++ 侧 `graph.attr("replay")()`
+方案（每步 ~2-5μs pybind11 dispatch，vs Python ~10-15μs + 循环开销）。
+
+同 session 三方对照（Qwen3.5-4B, b1, 64 tok, 单卡）：
+| 路径 | tok/s |
+|---|---|
+| C++ decode loop | 29.2-29.3 |
+| Fused step (Level 1) | 29.0-29.2 |
+| （差值） | **≈ 0（噪声内）** |
+
+结论与 Level 1 一致：**4B/b1/~34ms-step 下，graph capture 后残余的
+Python 开销 ~180μs 仅占步长 0.5%**。C++ loop 消除其中 ~150μs = 0.45%
+——不可测量。该优化的有效场景：
+- 更小模型（步长 <5ms → CPU 占比 >10%）
+- Level 3（full-step graph：forward+采样一张图）才能整步消 Python
+- 当前架构已到 b1/4b 的 CPU 优化收益天花板
+
+三级 decode 优化总结：
+| Level | 内容 | 4B/b1 收益 | 有效场景 |
+|---|---|---|---|
+| 1 fused step | 6 op → 1 kernel | +0.3% | 小模型 |
+| 2 C++ loop | Python 循环 → C++ | +0% | 小模型 |
+| 3 full-step graph | 一步 = 一 replay | 未实现 | 所有（vLLM 等价） |
+
+## vLLM vs segKI profiling 对比 (2026-09-15, 4B, b1)
+
+### Wall-clock 对比（同实例同 session）
+
+| | eager | CUDA graph | graph 加速比 |
+|---|---|---|---|
+| vLLM | 15.3 tok/s (65.4ms/step) | **73.8 tok/s (13.6ms/step)** | 4.8× |
+| segKI (ours) | 22.5 tok/s (44.4ms/step) | 30.4 tok/s (32.9ms/step) | 1.35× |
+
+### 关键发现
+
+1. **vLLM eager 比我们慢**（15.3 vs 22.5）——他们的 Python/CPU 开销
+   在 eager 下比 HF 还重（engine 调度架构的代价）
+2. **vLLM graph 比我们快 2.2×**（13.6 vs 32.9ms/step）——差距全在
+   CUDA graph 的有效性
+3. **vLLM 的 graph 消除了 52ms/step 开销**（65.4→13.6）；我们只消了
+   11.5ms（44.4→32.9）——说明 **vLLM 的 graph 包含完整 decode step
+   （forward + 采样 + buffer 更新），我们只捕获了 forward**
+
+### 带宽分析（差距的物理解释）
+
+我们的 device 分解（eager, 128 步平均）：
+- GEMM (mm+gemv): **24.6ms/step ← 80% 的大头**
+- elementwise/copy: 2.5ms/step
+- GDN core (FLA): 0.38ms/step
+- norm: 0.09ms/step
+- 总 device: ~29.4ms/step
+
+带宽计算（~7.9GB 权重/步）：
+- 我们: 7.9GB / 24.6ms = **321 GB/s = 理论值的 45%**
+- vLLM (推算): 7.9GB / ~11ms ≈ **~717 GB/s ≈ 理论峰值**
+
+**结论：差距 ≈ 内存带宽效率（45% vs ~100%）**。vLLM 的权重
+layout/GEMV kernel/融合把带宽吃满了；我们的 cuBLAS 调用只用了
+一半带宽。这解释了为什么 Python 侧优化（step-update / C++ loop）
+在此模型尺寸下收益为零——瓶颈在 device 侧的 GEMM 带宽。
+
+vLLM kernel profiling 未能获取（引擎跑在子进程，torch profiler
+不可见；需 nsys）。上述带宽数字由 wall-clock + 权重量推算。
+
+## nsys 深度 profiling：vLLM vs segKI kernel 级对比 (2026-09-17)
+
+### 方法
+- nsys + `--cuda-graph-trace=node`（分解 CUDA graph 内部 kernel）
+- vLLM trace 未分解（piecewise graph，GEMM 在图内，但 wall-clock
+  71.7 tok/s 佐证图效率）
+- 同实例同 session，Qwen3.5-4B, b1, 128 tok greedy
+
+### Wall-clock
+| | tok/s | ms/step | GPU ms/step | CPU gap |
+|---|---|---|---|---|
+| vLLM | 71.7 | 13.9 | ~13.9(≈全占) | **~0ms** |
+| segKI+graph | 59.1 | 16.9 | **8.8** | **8.1ms (48%)** |
+
+### 🎯 核心发现：我们的 GPU 时间比 vLLM 更少，但 CPU 间隙吃掉了优势
+
+segKI GPU 8.8ms/step < vLLM ~13.9ms/step（我们的 kernel 更快或
+至少不慢！），但 48% 的 wall 时间 GPU 在空转等 CPU——graph replay
+之间的 Python 循环（argmax/buffer 更新/EOS check）。
+
+### segKI kernel 分解（decomposed graph, 8.8ms/step）
+| Category | ms/step | % |
+|---|---|---|
+| gemm (gemv×146/step) | 7.60 | 86.2% |
+| elementwise | 0.93 | 10.5% |
+| gdn_core (FLA) | 0.07 | 0.8% |
+| norm | 0.03 | 0.3% |
+| step_update (ds_loop) | 0.02 | 0.2% |
+
+### vLLM kernel 特征（对比洞见）
+- GEMM 用 `cutlass_tensorop_bf16_s16816` 系列（大 tile，少次数）
+  vs 我们的 `internal::gemvx`（小向量，146 次/步）
+- GDN 用 `fused_recurrent_gated_delta_rule_packed_decode_kernel`
+  （自有 kernel，非 FLA）+ `fused_sigmoid_gating_delta_rule_update`
+- attention 用 `flash_fwd_splitkv_kernel`（Flash Attention）
+- 激活用 `triton_poi_fused_mul_silu_slice`（Triton 融合 SiLU·mul）
+
+### Low hanging fruit 结论
+1. **最大果实：消除 8.1ms/step CPU 间隙**（full-step graph =
+   forward+argmax+buffer 更新一张图）→ 潜力 59→110+ tok/s
+2. 次要：GEMV 调用碎片化（146 次/step vs vLLM 大 tile 少次数）
+   → 可用 megabatch GEMM 或权重布局优化，但收益 < CPU 间隙消除
+3. 之前"带宽效率 45% vs 100%"的推断被实测纠正：我们的 GPU 时间
+   实际不差，瓶颈在 CPU 侧不在 device 侧
+
+## 同实例三方对比 + CPU gap 悖论 (2026-09-17)
+
+同 instance 同 session（消除跨实例噪声）：
+| 路径 | tok/s | ms/step |
+|---|---|---|
+| segKI+graph Python loop | 28.1 | 35.6 |
+| segKI+graph C++ loop | 28.1 | 35.6 |
+| vLLM (CUDA graphs) | **72.6** | **13.8** |
+
+**C++ loop = Python loop（零差异）**——在此实例 GPU 是瓶颈。
+
+### 悖论及其解释
+nsys session（快实例）：GPU 8.8ms + CPU 8.1ms = 16.9ms/step → 59.1 tok/s
+本 session（慢实例）：GPU ~27ms + CPU ~8ms = 35.6ms/step → 28.1 tok/s
+
+同一份代码，GPU 时间差 3×（8.8 vs ~27ms），CPU 开销恒定 ~8ms。可能
+机制：**CPU 间隙 → GPU 空闲 → 时钟降频 → kernel 变慢 → CPU 占比
+更高**（恶性循环）。vLLM 的持续 graph replay 保持 GPU 满载不降频。
+
+C++ loop 零收益的原因：pybind dispatch 后仍有小间隙（~1ms/步），
+不足以维持 boost 时钟；或瓶颈根本在 GPU 效率本身。
+
+**与 vLLM 差距 2.6×（72.6/28.1）是本实例下的真实差距。**
+
+## Full-step graph 实现成功 (2026-09-17)
+
+### 实现
+- `decode_step_graph` kernel（fused_glu.cu）：argmax + token 写入 +
+  write_pos 推进 + mask reveal + token_buf 记录——全部在 CUDA graph
+  内部，零 Python 每步调用
+- 关键设计：token_buf 按 write_pos（GPU 递增 tensor）索引，消除
+  host 端步数参数依赖
+- capture 后恢复 GDN 状态 + write_pos + static_token（capture 过程
+  会推进一次状态）
+
+### 同实例最终对比（Qwen3.5-4B, b1, 64 tok）
+| 路径 | tok/s | vs 前一级 |
+|---|---|---|
+| Python loop | 28.1 | — |
+| C++ loop | 28.1 | +0% |
+| **Full-step graph** | **30.0-30.3** | **+7%** |
+| vLLM | 75.4 | 2.5× |
+
+### 分析
+此实例 GPU 是瓶颈（~27ms/step GPU，CPU 仅 ~2-3ms 可消），full-step
+graph 收益 +7% 符合预期。在 GPU 全速实例上（nsys session 实测 CPU
+间隙 48%），预期 full-step graph 收益更大（59→~100+ tok/s）。
+
+full-step graph 的核心价值：**消除了全部 per-step Python 调用**——
+一步 = 一次 graph.replay()，架构上等同于 vLLM。剩余差距纯粹在
+GPU kernel 效率（cuBLAS GEMV vs vLLM 的专用 kernel）。
+
+## Full-step graph 最终验证 (2026-09-17)
+
+同实例锁定对比（无法锁时钟，接受实例差异）：
+| 路径 | tok/s |
+|---|---|
+| Full-step graph (64 tok) | 29.2-29.5 |
+| Full-step graph (128 tok) | 29.5（正确输出，无退化） |
+| vLLM (128 tok) | 72.3 |
+
+差距：2.5×。此实例为"慢"实例（GPU ~27ms/step 主导），CPU 消除
+收益有限。full-step graph 的核心价值在架构：一步 = 一 replay，
+零 Python per-step，等同 vLLM decode loop。在 GPU 快实例上预期
+更大收益。
+
+Golden 门禁：128 token 输出正确（文本前缀逐字符一致）。

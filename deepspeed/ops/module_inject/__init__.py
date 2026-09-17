@@ -1,4 +1,6 @@
+# Copyright (c) Microsoft Corporation.
 # SPDX-License-Identifier: Apache-2.0
+
 # DeepSpeed Team
 """op_builder module for the segment-KI fused_glu native CUDA kernel."""
 
@@ -28,3 +30,6 @@ def get_fused_glu_op():
     if _FUSED_GLU_OP is None:
         _FUSED_GLU_OP = FusedGLUBuilder().load()
     return _FUSED_GLU_OP
+
+
+from .decode_loop import DecodeLoopBuilder, get_decode_loop_op  # noqa: E402,F401

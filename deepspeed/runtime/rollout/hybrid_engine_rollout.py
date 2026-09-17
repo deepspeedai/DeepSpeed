@@ -216,6 +216,9 @@ class HybridEngineRollout(RolloutEngine):
         static_attn[:, :, :, :prompt_len] = prompt_attn.unsqueeze(1).unsqueeze(1).bool()
         static_attn[:, :, :, prompt_len] = True
 
+        full_token_buf = torch.zeros(max_len, dtype=torch.long, device=device)
+        full_token_buf[:prompt_len] = prompt_ids.view(-1)
+
         write_pos.fill_(prompt_len)
 
         # Snapshot the GDN states right after prefill: the warmup forwards
@@ -257,7 +260,19 @@ class HybridEngineRollout(RolloutEngine):
             get_accelerator().current_stream().wait_stream(s)
             restore_gdn_states()
 
-            # Capture
+            # Capture: full-step graph (forward + argmax + buffer updates).
+            # The step-update kernel indexes token_buf via write_pos (a GPU
+            # tensor the kernel itself advances), so no host-side step counter
+            # is needed — the graph is fully self-contained for replay.
+            graph_op = None
+            try:
+                from deepspeed.ops.module_inject import get_fused_glu_op
+                candidate = get_fused_glu_op()
+                if hasattr(candidate, "decode_step_graph"):
+                    graph_op = candidate
+            except Exception:
+                graph_op = None
+
             graph = get_accelerator().create_graph()
             with get_accelerator().capture_to_graph(graph):
                 out = module(
@@ -269,30 +284,90 @@ class HybridEngineRollout(RolloutEngine):
                     past_key_values=ds_cache,
                     use_cache=True,
                 )
-            static_logits = out.logits
+                static_logits = out.logits
+                if graph_op is not None:
+                    graph_op.decode_step_graph(static_logits[:, -1, :].contiguous(), static_token.view(batch_size, 1),
+                                               write_pos, static_attn, full_token_buf)
+
+            if graph_op is not None:
+                # The capture run advanced write_pos and mutated buffers;
+                # restore to the pre-decode state before the replay loop.
+                restore_gdn_states()
+                write_pos.fill_(prompt_len)
+                static_token.copy_(next_token)
         finally:
             module._forward_pre_hooks.update(saved_pre)
             module._forward_hooks.update(saved_post)
 
-        # --- Decode loop ---
+        # --- Decode loop: full-step graph > C++ loop > fused step > Python ---
+        if graph_op is not None:
+            # Full-step graph: one replay = forward + argmax + buffer updates.
+            # Python only does replay + periodic EOS check (every 16 steps).
+            eos_check_every = 16
+            for step in range(max_new_tokens - 1):
+                get_accelerator().replay_graph(graph)
+                if step % eos_check_every == eos_check_every - 1:
+                    tok_val = static_token.view(-1)[0].item()
+                    if tok_val == eos_token_id:
+                        full_token_buf[step + 2:] = pad_token_id
+                        break
+            gen_ids = full_token_buf[prompt_len:prompt_len + max_new_tokens].unsqueeze(0)
+            return torch.cat([prompt_ids, gen_ids], dim=1)
+
+        loop_op = None
+        ds_op = None
+        try:
+            from deepspeed.ops.module_inject.decode_loop import get_decode_loop_op
+            loop_op = get_decode_loop_op()
+        except Exception:
+            pass
+        if loop_op is None:
+            try:
+                from deepspeed.ops.module_inject import get_fused_glu_op
+                ds_op = get_fused_glu_op()
+            except Exception:
+                ds_op = None
+
+        static_token.copy_(next_token)
+        token_buf = torch.zeros(max_new_tokens, dtype=torch.long, device=device)
+        token_buf[0] = next_token.squeeze(0)[0] if batch_size == 1 else next_token[0, 0]
+
+        if loop_op is not None and hasattr(loop_op, "decode_loop"):
+            loop_op.decode_loop(graph, static_logits[:,
+                                                     -1, :].contiguous(), static_token.view(1,
+                                                                                            1), write_pos, static_attn,
+                                token_buf, max_new_tokens, eos_token_id if eos_token_id is not None else -1,
+                                pad_token_id if pad_token_id is not None else 0, 16)
+            gen_ids = token_buf.unsqueeze(0)
+            return torch.cat([prompt_ids, gen_ids], dim=1)
+
+        if ds_op is not None and hasattr(ds_op, "decode_step"):
+            eos_check_every = 16
+            for step in range(max_new_tokens - 1):
+                get_accelerator().replay_graph(graph)
+                ds_op.decode_step(static_logits[:, -1, :], static_token.view(batch_size, 1), write_pos, static_attn,
+                                  token_buf, step + 1)
+                if step % eos_check_every == eos_check_every - 1:
+                    tok_val = static_token.view(-1)[0].item()
+                    if tok_val == eos_token_id:
+                        token_buf[step + 2:] = pad_token_id
+                        break
+            gen_ids = token_buf.unsqueeze(0)
+            return torch.cat([prompt_ids, gen_ids], dim=1)
+
         eos_mask = torch.zeros(batch_size, dtype=torch.bool, device=device)
         for step in range(max_new_tokens - 1):
             if eos_mask.all():
                 output_ids.append(torch.full((batch_size, 1), pad_token_id, dtype=torch.long, device=device))
                 continue
-
-            # Update static inputs
             static_token.copy_(next_token)
             pos = prompt_len + step
             write_pos.fill_(pos)
             static_attn[:, :, :, pos + 1] = True
-
-            # Replay
             get_accelerator().replay_graph(graph)
             next_token = static_logits[:, -1, :].argmax(dim=-1, keepdim=True)
             output_ids.append(next_token)
-            eos_mask |= (next_token.squeeze(1) == eos_token_id)
-
+            eos_mask |= (next_token.view(1) == eos_token_id)
         return torch.cat(output_ids, dim=1)
 
     @staticmethod

@@ -138,8 +138,156 @@ std::vector<at::Tensor> gdn_gates(at::Tensor a, at::Tensor b, at::Tensor a_log, 
     return {beta, g};
 }
 
-PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
+// Fused decode step: argmax(logits) -> write token -> advance write_pos ->
+// reveal mask -> record token in output buffer. Eliminates 6 Python->CUDA
+// dispatches per decode step into one kernel call.
+__global__ void decode_step_kernel(const __nv_bfloat16* __restrict__ logits,
+                                   int64_t* __restrict__ token_out,
+                                   int64_t* __restrict__ write_pos,
+                                   bool* __restrict__ mask,
+                                   int64_t* __restrict__ out_buf,
+                                   int step,
+                                   int vocab_size,
+                                   int max_len)
 {
+    __shared__ int s_idx[1024];
+    __shared__ float s_val[1024];
+
+    int tid = threadIdx.x;
+    int local_idx = 0;
+    float local_val = -INFINITY;
+
+    for (int v = tid; v < vocab_size; v += blockDim.x) {
+        float val = __bfloat162float(logits[v]);
+        if (val > local_val) {
+            local_val = val;
+            local_idx = v;
+        }
+    }
+    s_idx[tid] = local_idx;
+    s_val[tid] = local_val;
+    __syncthreads();
+
+    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            if (s_val[tid + stride] > s_val[tid]) {
+                s_val[tid] = s_val[tid + stride];
+                s_idx[tid] = s_idx[tid + stride];
+            }
+        }
+        __syncthreads();
+    }
+
+    if (tid == 0) {
+        int64_t best = (int64_t)s_idx[0];
+        token_out[0] = best;
+        out_buf[step] = best;
+        int64_t new_pos = write_pos[0] + 1;
+        write_pos[0] = new_pos;
+        if (new_pos + 1 < max_len) { mask[new_pos + 1] = true; }
+    }
+}
+
+void decode_step(at::Tensor logits,
+                 at::Tensor token_out,
+                 at::Tensor write_pos,
+                 at::Tensor mask,
+                 at::Tensor out_buf,
+                 int64_t step)
+{
+    TORCH_CHECK(logits.is_cuda() && logits.scalar_type() == at::ScalarType::BFloat16,
+                "logits must be CUDA bf16");
+    TORCH_CHECK(logits.is_contiguous(), "logits must be contiguous");
+    int vocab = (int)logits.numel();
+    int max_len = (int)mask.size(-1);
+    auto stream = at::cuda::getCurrentCUDAStream();
+    decode_step_kernel<<<1, 1024, 0, stream>>>(
+        reinterpret_cast<const __nv_bfloat16*>(logits.data_ptr<at::BFloat16>()),
+        token_out.data_ptr<int64_t>(),
+        write_pos.data_ptr<int64_t>(),
+        mask.data_ptr<bool>(),
+        out_buf.data_ptr<int64_t>(),
+        (int)step,
+        vocab,
+        max_len);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
+// Graph-capturable variant: no host-side step parameter. The token output
+// index is derived from the GPU-resident write_pos, which the kernel itself
+// advances, making the whole step self-contained for CUDA graph replay.
+__global__ void decode_step_graph_kernel(const __nv_bfloat16* __restrict__ logits,
+                                         int64_t* __restrict__ token_out,
+                                         int64_t* __restrict__ write_pos,
+                                         bool* __restrict__ mask,
+                                         int64_t* __restrict__ out_buf,
+                                         int vocab_size,
+                                         int max_len)
+{
+    __shared__ int s_idx[1024];
+    __shared__ float s_val[1024];
+
+    int tid = threadIdx.x;
+    int local_idx = 0;
+    float local_val = -INFINITY;
+
+    for (int v = tid; v < vocab_size; v += blockDim.x) {
+        float val = __bfloat162float(logits[v]);
+        if (val > local_val) {
+            local_val = val;
+            local_idx = v;
+        }
+    }
+    s_idx[tid] = local_idx;
+    s_val[tid] = local_val;
+    __syncthreads();
+
+    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            if (s_val[tid + stride] > s_val[tid]) {
+                s_val[tid] = s_val[tid + stride];
+                s_idx[tid] = s_idx[tid + stride];
+            }
+        }
+        __syncthreads();
+    }
+
+    if (tid == 0) {
+        int64_t best = (int64_t)s_idx[0];
+        token_out[0] = best;
+        int64_t pos = write_pos[0];
+        out_buf[pos] = best;
+        int64_t new_pos = pos + 1;
+        write_pos[0] = new_pos;
+        if (new_pos + 1 < max_len) { mask[new_pos + 1] = true; }
+    }
+}
+
+void decode_step_graph(at::Tensor logits,
+                       at::Tensor token_out,
+                       at::Tensor write_pos,
+                       at::Tensor mask,
+                       at::Tensor out_buf)
+{
+    TORCH_CHECK(logits.is_cuda() && logits.scalar_type() == at::ScalarType::BFloat16,
+                "logits must be CUDA bf16");
+    int vocab = (int)logits.numel();
+    int max_len = (int)mask.size(-1);
+    auto stream = at::cuda::getCurrentCUDAStream();
+    decode_step_graph_kernel<<<1, 1024, 0, stream>>>(
+        reinterpret_cast<const __nv_bfloat16*>(logits.data_ptr<at::BFloat16>()),
+        token_out.data_ptr<int64_t>(),
+        write_pos.data_ptr<int64_t>(),
+        mask.data_ptr<bool>(),
+        out_buf.data_ptr<int64_t>(),
+        vocab,
+        max_len);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+\nPYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
+{
+    m.def("decode_step", &decode_step, "fused decode step update (CUDA)");
+    \n m.def("decode_step_graph", &decode_step_graph, "graph-capturable decode step (CUDA)");
     m.def("gdn_gates", &gdn_gates, "fused GDN beta/g gating (CUDA)");
     m.def("fused_silu_mul_halves",
           &fused_silu_mul_halves,
