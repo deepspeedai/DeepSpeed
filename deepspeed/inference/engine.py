@@ -71,7 +71,7 @@ class InferenceEngine(Module):
         if hasattr(self.module, "config"):
             TransformerPolicy.hf_model_config = self.module.config
 
-        if config.dtype not in get_accelerator().supported_dtypes():
+        if config.dtype not in get_accelerator().supported_dtypes() and config.dtype != torch.int8:
             raise ValueError(
                 f"Data type {config.dtype} is not supported by {get_accelerator().device_name()} accelerator")
 

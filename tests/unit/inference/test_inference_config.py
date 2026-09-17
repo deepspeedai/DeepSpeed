@@ -92,3 +92,13 @@ class TestInferenceConfig(DistributedTest):
             config = DeepSpeedInferenceConfig(moe=value)
             assert isinstance(config.moe, DeepSpeedMoEConfig)
             assert config.moe.enabled == value
+
+    def test_int8_dtype_accepted(self):
+        # Regression test: the dtype gate added in #6528 ("add bfloat16 to inference support
+        # dtypes") replaced a narrow fp16-only check with `get_accelerator().supported_dtypes()`,
+        # whose per-accelerator lists (cpu/cuda/hpu/mlu/xpu) have never included torch.int8. That
+        # unintentionally made every `init_inference(..., dtype=torch.int8)` call raise ValueError
+        # on every accelerator, even though DeepSpeedSelfAttention/DeepSpeedMLP still special-case
+        # torch.int8 weights and the inference tutorial documents int8 as a supported dtype.
+        engine = deepspeed.init_inference(torch.nn.Linear(4, 4), dtype=torch.int8)
+        assert engine._config.dtype == torch.int8
