@@ -2026,11 +2026,6 @@ class DeepSpeedEngine(Module):
 
         from fnmatch import fnmatchcase
         from deepspeed.moe.ep_experts import GroupedExperts
-        from deepspeed.runtime.hifloat8 import (
-            assert_hifloat8_training_available,
-            convert_to_hifloat8_training,
-            get_hifloat8_linear_class,
-        )
 
         config = self._config.hifloat8_config
         patterns = config["module_name_patterns"]
@@ -2067,6 +2062,12 @@ class DeepSpeedEngine(Module):
             total_numel,
         )
         try:
+            from torch_npu.utils.hifloat8_train import (
+                HiFloat8Linear,
+                assert_hifloat8_training_available,
+                convert_to_hifloat8_training,
+            )
+
             if selected_names:
                 assert_hifloat8_training_available(probe_kernel=True, device=self.device)
             if selected_experts:
@@ -2076,7 +2077,6 @@ class DeepSpeedEngine(Module):
             raise RuntimeError(
                 f"HiFloat8 selected {len(selected_names)} Linear modules ({total_numel} matrix elements), "
                 f"but native kernel validation failed before conversion: {error}") from error
-        HiFloat8Linear = get_hifloat8_linear_class()
         parameters_before = dict(self.module.named_parameters())
         requires_grad_before = {name: parameter.requires_grad for name, parameter in parameters_before.items()}
         state_keys_before = tuple(self.module.state_dict())

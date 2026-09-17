@@ -158,12 +158,12 @@ def test_engine_converts_only_selected_modules_and_preserves_parameters(monkeypa
     model = _ToyModel()
     before = dict(model.named_parameters())
     probe_calls = []
-    import deepspeed.runtime.hifloat8 as bridge
+    import torch_npu.utils.hifloat8_train as implementation
 
-    HiFloat8Linear = bridge.get_hifloat8_linear_class()
+    HiFloat8Linear = implementation.HiFloat8Linear
 
     monkeypatch.setattr(
-        bridge,
+        implementation,
         "assert_hifloat8_training_available",
         lambda **kwargs: probe_calls.append(kwargs),
     )
@@ -184,10 +184,7 @@ def test_engine_converts_only_selected_modules_and_preserves_parameters(monkeypa
     assert all(after[name] is parameter for name, parameter in before.items())
 
 
-def test_engine_fails_when_module_selection_is_empty(monkeypatch):
-    import deepspeed.runtime.hifloat8 as bridge
-
-    monkeypatch.setattr(bridge, "assert_hifloat8_training_available", lambda **_kwargs: None)
+def test_engine_fails_when_module_selection_is_empty():
     engine = _make_engine(_ToyModel(), ["*.does_not_exist"])
     with pytest.raises(RuntimeError, match="matched no nn.Linear"):
         engine._configure_hifloat8()
@@ -204,12 +201,16 @@ def test_engine_rejects_partially_unmatched_patterns_before_conversion():
 
 def test_engine_rejects_wrong_module_count_before_kernel_probe(monkeypatch):
     # A partially selected model must fail before native initialization or mutation.
-    import deepspeed.runtime.hifloat8 as bridge
+    import builtins
 
-    def unexpected_probe(**_kwargs):
-        pytest.fail("module-count mismatch must fail before probing kernels")
+    original_import = builtins.__import__
 
-    monkeypatch.setattr(bridge, "assert_hifloat8_training_available", unexpected_probe)
+    def checked_import(name, *args, **kwargs):
+        if name.startswith("torch_npu"):
+            pytest.fail("module-count mismatch must fail before loading the optional backend")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", checked_import)
     model = _ToyModel()
     engine = _make_engine(model, ["*.mlp.gate_proj"])
     engine._config.hifloat8_config["expected_module_count"] = 3
@@ -226,6 +227,28 @@ def test_hifloat8_validation_rejects_autotp():
         engine._validate_hifloat8_configuration()
 
 
+def test_missing_optional_backend_reports_selection_before_model_mutation(monkeypatch):
+    # Direct lazy imports must preserve the diagnostic and parameter contract
+    # when the optional backend is absent, including on a CUDA/CPU installation.
+    import builtins
+
+    original_import = builtins.__import__
+
+    def checked_import(name, *args, **kwargs):
+        if name.startswith("torch_npu"):
+            raise ImportError("torch_npu is not installed")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", checked_import)
+    model = _ToyModel()
+    parameters = dict(model.named_parameters())
+    engine = _make_engine(model, ["*.mlp.gate_proj"])
+    with pytest.raises(RuntimeError, match="native kernel validation failed before conversion"):
+        engine._configure_hifloat8()
+    assert type(model.model.mlp["gate_proj"]) is nn.Linear
+    assert all(dict(model.named_parameters())[name] is parameter for name, parameter in parameters.items())
+
+
 def test_hifloat8_validation_rejects_custom_model_parallel_unit():
     engine = _make_engine(_ToyModel(), ["*"])
     engine.mpu = object()
@@ -234,9 +257,10 @@ def test_hifloat8_validation_rejects_custom_model_parallel_unit():
         engine._validate_hifloat8_configuration()
 
 
+@requires_torch_npu_hifloat8
 @pytest.mark.parametrize("error", [RuntimeError("unsupported device"), ImportError("missing torch_npu helper")])
 def test_engine_kernel_failure_reports_selection_and_does_not_mutate(monkeypatch, error):
-    import deepspeed.runtime.hifloat8 as bridge
+    import torch_npu.utils.hifloat8_train as implementation
 
     model = _ToyModel()
     before = dict(model.named_parameters())
@@ -244,7 +268,7 @@ def test_engine_kernel_failure_reports_selection_and_does_not_mutate(monkeypatch
     def fail_probe(**_kwargs):
         raise error
 
-    monkeypatch.setattr(bridge, "assert_hifloat8_training_available", fail_probe)
+    monkeypatch.setattr(implementation, "assert_hifloat8_training_available", fail_probe)
     engine = _make_engine(model, ["*.mlp.gate_proj"])
 
     with pytest.raises(RuntimeError, match=r"selected 1 Linear modules \(32 matrix elements\).+before conversion"):
