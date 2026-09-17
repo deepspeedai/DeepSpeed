@@ -64,6 +64,19 @@ def get_master_port(base_port=29500, port_range_size=1000):
     raise IOError('no free ports')
 
 
+def get_start_method_for_platform(preferred='forkserver'):
+    """Return a multiprocessing start method that this platform provides.
+
+    ``forkserver`` and ``fork`` only exist on Unix. Asking for a method the platform
+    lacks (``forkserver`` on Windows) raises before any worker process is launched, so
+    fall back to ``spawn``, the method every platform supports.
+    """
+    available_methods = mp.get_all_start_methods()
+    if preferred in available_methods:
+        return preferred
+    return 'spawn'
+
+
 def _get_cpu_socket_count():
     import shlex
     p1 = subprocess.Popen(shlex.split("cat /proc/cpuinfo"), stdout=subprocess.PIPE)
@@ -287,8 +300,8 @@ class DistributedExec(ABC):
         if os.environ.get('DS_DISABLE_REUSE_DIST_ENV', '0') == '1':
             self.reuse_dist_env = False
 
-        # Set start method to `forkserver` (or `fork`)
-        mp.set_start_method('forkserver', force=True)
+        # `forkserver` is Unix-only, so ask for the best method this platform provides.
+        mp.set_start_method(get_start_method_for_platform(), force=True)
 
         if self.non_daemonic_procs:
             self._launch_non_daemonic_procs(num_procs, init_method)

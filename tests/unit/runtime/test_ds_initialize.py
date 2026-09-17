@@ -10,7 +10,7 @@ from torch.optim import Optimizer, Adam, AdamW
 from torch.optim.lr_scheduler import _LRScheduler, LambdaLR
 
 from unit.simple_model import SimpleModel, random_dataloader
-from unit.common import DistributedTest
+from unit.common import DistributedTest, get_start_method_for_platform
 from unit.util import bf16_required_version_check, required_amp_check
 
 import deepspeed
@@ -28,7 +28,23 @@ from deepspeed.ops.op_builder import FusedAdamBuilder
 @pytest.mark.parametrize('method', ['spawn', 'fork', 'forkserver'])
 def test_start_method_safety(method):
     import torch.multiprocessing as mp
+    if method not in mp.get_all_start_methods():
+        pytest.skip(f'{method} is not available on this platform')
     mp.set_start_method(method, force=True)
+
+
+# Regression: the distributed test harness used to hard-code `forkserver`, which does
+# not exist on Windows, so every DistributedTest failed with
+# `ValueError: cannot find context for 'forkserver'` before any worker was launched.
+def test_harness_start_method_is_platform_supported(monkeypatch):
+    import torch.multiprocessing as mp
+
+    assert get_start_method_for_platform() in mp.get_all_start_methods()
+
+    # A platform that only provides `spawn` must not be asked for `forkserver`
+    spawn_only = ['spawn']
+    monkeypatch.setattr(mp, 'get_all_start_methods', lambda: spawn_only)
+    assert get_start_method_for_platform() in spawn_only
 
 
 @pytest.mark.parametrize('zero_stage', [0, 3])
