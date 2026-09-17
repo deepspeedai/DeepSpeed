@@ -48,7 +48,6 @@
 /deepspeed/runtime/activation_checkpointing/ @tjruwase
 /deepspeed/runtime/checkpoint_engine/ @tjruwase
 /deepspeed/runtime/comm/ @guanhuawang
-/deepspeed/runtime/compression/ @tjruwase
 /deepspeed/runtime/data_pipeline/ @tjruwase
 /deepspeed/runtime/domino/ @guanhuawang @hwchen2017
 /deepspeed/runtime/fp16/ @tjruwase @tohtana
