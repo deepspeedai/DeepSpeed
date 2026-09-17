@@ -69,7 +69,12 @@ MODAL_TORCH_PRESETS = {
 }
 PYTORCH_CUDA_128_INDEX_URL = "https://download.pytorch.org/whl/cu128"
 APP_NAME = "deepspeedai-torch-latest-ci"
-SANDBOX_TIMEOUT_SECONDS = 4200
+# The Sandbox clock covers acquisition, the dependency/install chain, and pytest, so this
+# budget must hold the whole recipe. The full tests/unit/v1 suite on two L40S GPUs needs
+# ~70 min of pytest plus ~3 min of setup, which left the old 4200s cap with no margin:
+# runs landed within seconds of the deadline and were SIGKILLed (exit 137) when they did
+# not. 5400s restores headroom while staying inside the 105-minute job timeout.
+SANDBOX_TIMEOUT_SECONDS = 5400
 SANDBOX_ACQUIRE_TIMEOUT_SECONDS = 1800
 MAX_TEST_LIST_BYTES = 64 * 1024
 MAX_TEST_TARGETS = 1024

@@ -414,7 +414,7 @@ def test_remote_plan_is_structural_and_preserves_order_and_scope():
 def test_sandbox_kwargs_are_fixed_and_secret_free():
     kwargs = torch_latest.build_sandbox_kwargs("image")
     assert kwargs["gpu"] == "l40s:2"
-    assert kwargs["timeout"] == 4200
+    assert kwargs["timeout"] == 5400
     assert torch_latest.SANDBOX_ACQUIRE_TIMEOUT_SECONDS == 1800
     assert kwargs["secrets"] == []
     assert kwargs["network_file_systems"] == {}
