@@ -585,3 +585,120 @@ def test_replicated_map_carries_the_scale():
     assert torch.equal(shards[0], full_bias / world_size)
     assert torch.equal(affine_map.rebuild(shards), full_bias)
     assert affine_map.pieces_by_rank[0][0].locations == frozenset(range(world_size))
+
+
+# The layouts below were refused by conversion until the layer could describe them. A layer
+# builds its map analytically from head counts and the tp degree, while the harness above
+# derives one by probing the real partition function. Requiring the two to agree is what
+# keeps the description honest: the analytic form is what ships, the probed form is truth.
+
+
+def test_bigcode_layer_map_matches_the_real_partition():
+    """GPTBigCode shards the query rows and replicates the key/value block to every rank."""
+    from deepspeed.checkpoint.affine import segmented_map
+
+    n_embd, kv_rows, cols, mp_size = 32, 16, 8, 4
+    meta = _meta(4, n_embd=n_embd, num_attention_heads=4)
+    analytic = segmented_map((n_embd + kv_rows, cols), [(n_embd, False), (kv_rows, True)], 0, mp_size)
+    analytic.validate_coverage()
+
+    shard_fn = _fused_qkv_shard_fn('GPTBigCodeBlock', mp_size, meta)
+    torch.manual_seed(0)
+    full_param = torch.randn(n_embd + kv_rows, cols, dtype=torch.float64)
+    for rank in range(mp_size):
+        assert torch.equal(analytic.extract(full_param, rank), shard_fn(full_param.clone(), rank))
+
+    shards = {rank: shard_fn(full_param.clone(), rank) for rank in range(mp_size)}
+    assert torch.equal(analytic.rebuild(shards), full_param)
+
+
+def test_bigcode_kv_block_is_replicated_in_the_map():
+    """The kv piece names every rank, which is what one partition dimension could not say."""
+    from deepspeed.checkpoint.affine import segmented_map
+
+    n_embd, kv_rows, cols, mp_size = 32, 16, 8, 4
+    analytic = segmented_map((n_embd + kv_rows, cols), [(n_embd, False), (kv_rows, True)], 0, mp_size)
+    for rank in range(mp_size):
+        located = sorted(len(piece.locations) for piece in analytic.pieces_by_rank[rank])
+        assert located == [1, mp_size], f"rank {rank} pieces are held by {located} ranks, expected [1, {mp_size}]"
+
+
+@pytest.mark.parametrize('shard_value, rows, cols, axis', [(True, 64, 8, 0), (False, 8, 64, 1)],
+                         ids=['value', 'oproj'])
+def test_yuan_layer_map_matches_the_real_partition(shard_value, rows, cols, axis):
+    """Yuan's value heads sit in two runs, so the map selects blocks rather than a span."""
+    from deepspeed.checkpoint.affine import block_gather_map
+    from deepspeed.module_inject.fusedqkv_utils import shared_qk_value_head_ids
+
+    num_heads, mp_size = 8, 2
+    meta = _meta(num_heads)
+    total = rows if axis == 'row' or axis == 0 else cols
+    block_ids = {rank: shared_qk_value_head_ids(num_heads, mp_size, rank) for rank in range(mp_size)}
+    analytic = block_gather_map((rows, cols), block_ids, total // num_heads, axis)
+    analytic.validate_coverage()
+
+    shard_fn = _shared_qk_shard_fn(shard_value, meta)
+    torch.manual_seed(1)
+    full_param = torch.randn(rows, cols, dtype=torch.float64)
+    for rank in range(mp_size):
+        assert torch.equal(analytic.extract(full_param, rank), shard_fn(full_param.clone(), rank))
+
+    shards = {rank: shard_fn(full_param.clone(), rank) for rank in range(mp_size)}
+    assert torch.equal(analytic.rebuild(shards), full_param)
+
+
+def test_yuan_head_selection_is_shared_with_the_partition():
+    """The map reads the same head selection the partition uses, so they cannot drift."""
+    from deepspeed.module_inject.fusedqkv_utils import shared_qk_value_head_ids
+
+    num_heads, mp_size = 8, 2
+    meta = _meta(num_heads)
+    rows, cols = 64, 8
+    head_dim = rows // num_heads
+    markers = _row_markers(rows, cols)
+    shard_fn = _shared_qk_shard_fn(True, meta)
+
+    for rank in range(mp_size):
+        shard = shard_fn(markers.clone(), rank)
+        # Which head each block of the shard came from, read back off the markers.
+        observed = [int(shard[block * head_dim][0]) // head_dim for block in range(shard.shape[0] // head_dim)]
+        assert observed == shared_qk_value_head_ids(num_heads, mp_size, rank)
+
+
+@pytest.mark.parametrize('layer_name, out_features, axis', [('Yuan_LinearLayer', 64, 0),
+                                                            ('Yuan_LinearAllreduce', 8, 1)],
+                         ids=['value', 'oproj'])
+def test_yuan_weight_is_no_longer_refused_by_conversion(layer_name, out_features, axis):
+    """A layout that can describe itself must stop being published as unsupported.
+
+    `AUTOTP_UNSUPPORTED_PARAMETER_PATTERNS` is what makes conversion refuse a parameter, so
+    a describable layout still listed there would be refused despite having a map.
+    """
+    from deepspeed.checkpoint.constants import (AFFINE_MAP, AFFINE_MAP_PARAMS, AUTOTP_UNSUPPORTED_PARAMETER_PATTERNS)
+    from deepspeed.module_inject import layers as autotp_layers
+    from deepspeed.module_inject.layers import collect_autotp_universal_checkpoint_info
+
+    layer_cls = getattr(autotp_layers, layer_name)
+    layer = layer_cls(torch.nn.Linear(8, out_features, bias=False), mp_group=None, name='proj')
+    layer.tp_world_size = 2
+    layer.tp_meta = AutoTPMeta(num_kv_heads=8)
+
+    model = torch.nn.Module()
+    model.proj = layer
+    info = collect_autotp_universal_checkpoint_info(model)
+
+    assert r"^proj\.weight$" in info.get(AFFINE_MAP, {}).get(AFFINE_MAP_PARAMS, {})
+    assert r"^proj\.weight$" not in info.get(AUTOTP_UNSUPPORTED_PARAMETER_PATTERNS, {})
+
+
+def test_a_layout_without_head_counts_stays_unsupported():
+    """Describing Yuan needs the kv head count, so without it the layout must not be claimed."""
+    from deepspeed.checkpoint.constants import AUTOTP_UNSUPPORTED_PARAMETER_PATTERNS
+    from deepspeed.module_inject.layers import Yuan_LinearLayer, collect_autotp_universal_checkpoint_info
+
+    layer = Yuan_LinearLayer(torch.nn.Linear(8, 8, bias=True), mp_group=None, name='proj')
+    model = torch.nn.Module()
+    model.proj = layer
+    info = collect_autotp_universal_checkpoint_info(model)
+
+    assert "noncontiguous head groups" in info[AUTOTP_UNSUPPORTED_PARAMETER_PATTERNS][r"^proj\.weight$"]
