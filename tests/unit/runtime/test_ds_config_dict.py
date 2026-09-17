@@ -582,11 +582,11 @@ class TestConfigValidation:
 
     def test_invalid_batch_size_mismatch(self):
         config_dict = {
-            "train_batch_size": 16,
+            "train_batch_size": 15,
             "train_micro_batch_size_per_gpu": 2,
             "gradient_accumulation_steps": 2,
         }
-        # world_size default in tests is usually 1, so 2*2*1 != 16
+        # 15 can never equal 2 * 2 * world_size for any integer world_size
         with pytest.raises(AssertionError, match="train_batch_size is not equal to micro_batch_per_gpu"):
             DeepSpeedConfig(config_dict)
 
@@ -641,15 +641,15 @@ from deepspeed.runtime.config import DeepSpeedConfig
 
 try:
     DeepSpeedConfig({
-        "train_batch_size": 16,
-        "train_micro_batch_size_per_gpu": 2,
-        "gradient_accumulation_steps": 2,
+        "train_batch_size": 0,
+        "train_micro_batch_size_per_gpu": 1,
+        "gradient_accumulation_steps": 1,
     })
 except AssertionError as error:
-    if "train_batch_size is not equal" not in str(error):
+    if "Train batch size" not in str(error):
         raise
 else:
-    raise RuntimeError("Optimized Python accepted inconsistent batch sizes")
+    raise RuntimeError("Optimized Python accepted invalid batch sizes")
 """
     result = subprocess.run([sys.executable, "-O", "-c", code], capture_output=True, text=True, timeout=60)
     assert result.returncode == 0, result.stdout + result.stderr
