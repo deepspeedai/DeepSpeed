@@ -377,6 +377,14 @@ void shm_initialize(int size, int rank, char* addr_string, char* port_string)
     symmetric_buffer[1] = (char**)calloc(size, sizeof(char*));
     distributed_buffer[0] = (char**)calloc(size, sizeof(char*));
     distributed_buffer[1] = (char**)calloc(size, sizeof(char*));
+    // all five must succeed before the loop below dereferences any of them --
+    // calloc() can return NULL under memory pressure, and none of these were
+    // checked before this fix.
+    if (!workspace || !symmetric_buffer[0] || !symmetric_buffer[1] || !distributed_buffer[0] ||
+        !distributed_buffer[1]) {
+        printf("shm_initialize: calloc failed to allocate rank workspace\n");
+        return;
+    }
 
     // map shm of all ranks
     for (int i = 0; i < size; i++) {
