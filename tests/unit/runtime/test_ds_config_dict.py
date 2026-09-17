@@ -558,3 +558,37 @@ class TestNoModel(DistributedTest):
 
         with pytest.raises(AssertionError):
             model, _, _, _ = deepspeed.initialize(model, config=base_config)
+
+class TestConfigValidation:
+    def test_invalid_batch_sizes(self):
+        config_dict = {
+            "train_batch_size": 0,
+        }
+        with pytest.raises(ValueError, match="Train batch size: 0 has to be greater than 0"):
+            DeepSpeedConfig(config_dict)
+
+    def test_invalid_batch_size_mismatch(self):
+        config_dict = {
+            "train_batch_size": 16,
+            "train_micro_batch_size_per_gpu": 2,
+            "gradient_accumulation_steps": 2,
+        }
+        # world_size default in tests is usually 1, so 2*2*1 != 16
+        with pytest.raises(ValueError, match="train_batch_size is not equal to micro_batch_per_gpu"):
+            DeepSpeedConfig(config_dict)
+
+    def test_fp16_bf16_conflict(self):
+        config_dict = {
+            "train_batch_size": 8,
+            "fp16": {"enabled": True},
+            "bf16": {"enabled": True},
+        }
+        with pytest.raises(ValueError, match="bfloat16 and fp16 modes cannot be simultaneously enabled"):
+            DeepSpeedConfig(config_dict)
+
+    def test_missing_batch_sizes(self):
+        config_dict = {
+            # Neither train_batch_size nor train_micro_batch_size_per_gpu provided
+        }
+        with pytest.raises(ValueError, match="Either train_batch_size or train_micro_batch_size_per_gpu needs to be provided"):
+            DeepSpeedConfig(config_dict)
