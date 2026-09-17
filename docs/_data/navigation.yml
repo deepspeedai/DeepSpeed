@@ -42,8 +42,6 @@ lnav:
         url: /docs/config-json/#monitoring-module
       - title: 'Communication Logging'
         url: /docs/config-json/#communication-logging
-      - title: 'Model Compression'
-        url: /docs/config-json/#compression
       - title: 'Data Efficiency'
         url: /docs/config-json/#data-efficiency
   - title: 'Tutorials'
@@ -97,8 +95,6 @@ lnav:
         url: /tutorials/mixture-of-experts-nlg/
       - title: 'MoE Inference'
         url: /tutorials/mixture-of-experts-inference/
-      - title: 'Mixture-of-Quantization'
-        url: /tutorials/MoQ-tutorial/
       - title: 'Monitoring'
         url: /tutorials/monitor
       - title: 'Communication Logging'
@@ -109,8 +105,6 @@ lnav:
         url: /tutorials/pipeline/
       - title: 'Progressive Layer Dropping'
         url: /tutorials/progressive_layer_dropping/
-      - title: 'Sparse Attention'
-        url: /tutorials/sparse-attention/
       - title: 'Transformer Kernel'
         url: /tutorials/transformer_kernel/
       - title: 'Arctic Long Sequence Training (ALST) for HF Transformers integration'

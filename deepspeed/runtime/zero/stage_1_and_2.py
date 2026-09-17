@@ -653,6 +653,12 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         # will store the averaged gradients required by this partition
         self.averaged_gradients = {}
         self.all_grad_tensors = {}
+        # Muon folds the gradient into its momentum while the partition is filled, which is
+        # before the overflow check decides whether the step survives. The new momentum is
+        # staged here and committed in `step()` once that is known, so a discarded step
+        # leaves the momentum exactly as it was rather than approximately. Kept off
+        # `optimizer.state` so it does not travel into checkpoints.
+        self._muon_pending_momentum = {}
         # For cpu_offload, will store the averaged gradients required by this partition
         self.offload_gradient_dict = {}
 
@@ -2231,26 +2237,8 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         current_size = 0
         # find the flatten copy in the optimizer's state
         flatten_copy = self.optimizer.param_groups[param_group_idx]['params'][0]
-        if (not self.optimizer.state[flatten_copy]) and getattr(
-                tensor_list[0], 'use_muon', False) and 'muon' in self.optimizer.__class__.__name__.lower():
-            self.optimizer.state[flatten_copy] = {}
-        if getattr(tensor_list[0], 'use_muon', False) and 'muon' in self.optimizer.__class__.__name__.lower():
-            momentum_buffer = self.optimizer.state[flatten_copy].get("momentum_buffer")
-            if momentum_buffer is None:
-                # need to check the total # of elements in the parameters in this group and this partition
-                total_size = sum([t.numel() for t in tensor_list])
-                flatten_bf_list = [torch.zeros([total_size], dtype=dtype, device=device)]
-                self.optimizer.state[flatten_copy]["momentum_buffer"] = self.flatten(flatten_bf_list)
-            elif momentum_buffer.dtype != dtype:
-                # A restored buffer arrives in the dtype the checkpoint holds optimizer state
-                # in, which is fp32, while the gradients it is combined with are in the
-                # gradient accumulation dtype. muon_update does momentum.lerp_(grad), which
-                # requires both to match, so resuming a bf16 run raised:
-                #   RuntimeError: expected dtype torch.float32 for `end`, but got dtype
-                #   torch.bfloat16
-                # Convert rather than reallocate: the momentum a resume just restored is the
-                # reason the checkpoint carries it.
-                self.optimizer.state[flatten_copy]["momentum_buffer"] = momentum_buffer.to(dtype=dtype, device=device)
+        if self._is_muon_group(tensor_list):
+            self._muon_momentum_buffer(tensor_list, param_group_idx, dtype, device)
 
         partition_id = dist.get_rank(group=self.real_dp_process_group[param_group_idx])
         buffer_idx = 0
@@ -2258,7 +2246,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             grad_accum = self.all_grad_tensors[param_group_idx][i]
             if getattr(tensor, 'use_muon', False) and 'muon' in self.optimizer.__class__.__name__.lower():
                 assert tensor.ndim > 1, f"if use muon, then tensor dim > 1, got {tensor.size()}"
-                buffer = torch.narrow(self.optimizer.state[flatten_copy]["momentum_buffer"], 0, buffer_idx,
+                buffer = torch.narrow(self._muon_staging_momentum(flatten_copy, param_group_idx), 0, buffer_idx,
                                       tensor.numel()).view(tensor.size())
                 ns_method = self.optimizer.param_groups[param_group_idx].get('ns_method', 'gram')
                 grad_accum = muon_update(grad_accum,
@@ -2298,6 +2286,42 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
 
         return self.flatten(flat_tensor_list)
 
+    def _is_muon_group(self, tensor_list):
+        return getattr(tensor_list[0], 'use_muon', False) and 'muon' in self.optimizer.__class__.__name__.lower()
+
+    def _muon_momentum_buffer(self, tensor_list, param_group_idx, dtype, device):
+        """The flat momentum buffer for this group, in the dtype `muon_update` needs.
+
+        `muon_update` does `momentum.lerp_(grad)`, which requires both to have the same
+        dtype, so the buffer has to follow the gradient rather than the configured
+        accumulation dtype. Those are not always the same: gradients only arrive in the
+        configured dtype while `use_grad_accum_attribute` is on, and that is off at stage 2
+        where `partition_gradients` is true, so `get_param_gradient_attribute` hands back
+        `param.grad` in the parameter dtype. Sizing by the configured dtype there gave an
+        fp32 buffer against bf16 gradients:
+
+            RuntimeError: expected dtype torch.float32 for `end`, but got dtype torch.bfloat16
+
+        A restored buffer arrives in the dtype the checkpoint holds optimizer state in, which
+        is fp32, and is converted rather than reallocated: the momentum a resume just restored
+        is the reason the checkpoint carries it.
+        """
+        flatten_copy = self.optimizer.param_groups[param_group_idx]['params'][0]
+        if not self.optimizer.state[flatten_copy]:
+            self.optimizer.state[flatten_copy] = {}
+        grads = self.all_grad_tensors.get(param_group_idx)
+        momentum_dtype = grads[0].dtype if grads else dtype
+
+        state = self.optimizer.state[flatten_copy]
+        buffer = state.get("momentum_buffer")
+        if buffer is None:
+            buffer = torch.zeros(sum(t.numel() for t in tensor_list), dtype=momentum_dtype, device=device)
+            state["momentum_buffer"] = buffer
+        elif buffer.dtype != momentum_dtype:
+            buffer = buffer.to(dtype=momentum_dtype)
+            state["momentum_buffer"] = buffer
+        return buffer
+
     def _get_flat_partition_unpadded(self,
                                      tensor_list,
                                      first_offset,
@@ -2309,21 +2333,15 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         flat_tensor_list = []
         current_size = 0
         flatten_copy = self.optimizer.param_groups[param_group_idx]['params'][0]
-        if (not self.optimizer.state[flatten_copy]) and getattr(
-                tensor_list[0], 'use_muon', False) and 'muon' in self.optimizer.__class__.__name__.lower():
-            self.optimizer.state[flatten_copy] = {}
-        if "momentum_buffer" not in self.optimizer.state[flatten_copy] and getattr(
-                tensor_list[0], 'use_muon', False) and 'muon' in self.optimizer.__class__.__name__.lower():
-            total_size = sum([t.numel() for t in tensor_list])
-            flatten_bf_list = [torch.zeros([total_size], dtype=dtype, device=device)]
-            self.optimizer.state[flatten_copy]["momentum_buffer"] = self.flatten(flatten_bf_list)
+        if self._is_muon_group(tensor_list):
+            self._muon_momentum_buffer(tensor_list, param_group_idx, dtype, device)
 
         buffer_idx = 0
         for i, tensor in enumerate(tensor_list):
             grad_accum = self.all_grad_tensors[param_group_idx][i]
             if getattr(tensor, 'use_muon', False) and 'muon' in self.optimizer.__class__.__name__.lower():
                 assert tensor.ndim > 1, f"if use muon, then tensor dim > 1, got {tensor.size()}"
-                buffer = torch.narrow(self.optimizer.state[flatten_copy]["momentum_buffer"], 0, buffer_idx,
+                buffer = torch.narrow(self._muon_staging_momentum(flatten_copy, param_group_idx), 0, buffer_idx,
                                       tensor.numel()).view(tensor.size())
                 ns_method = self.optimizer.param_groups[param_group_idx].get('ns_method', 'gram')
                 grad_accum = muon_update(grad_accum,
@@ -2445,6 +2463,30 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         # We need to link optimizer state after the first step() call
         self._lazy_init_hp_params_optimizer_state()
 
+    def _muon_staging_momentum(self, flatten_copy, param_group_idx):
+        """The buffer `muon_update` writes this step's momentum into.
+
+        It starts as a copy of the committed momentum, so a step that is later discarded
+        simply never reaches `_commit_muon_momentum` and the next step starts from the
+        same place. One flat tensor per Muon group, reused across steps.
+        """
+        committed = self.optimizer.state[flatten_copy]["momentum_buffer"]
+        entry = self._muon_pending_momentum.get(param_group_idx)
+        staged = entry[0] if entry is not None else None
+        if staged is None or staged.shape != committed.shape or staged.dtype != committed.dtype:
+            staged = torch.empty_like(committed)
+        self._muon_pending_momentum[param_group_idx] = (staged, flatten_copy)
+        staged.copy_(committed)
+        return staged
+
+    def _commit_muon_momentum(self):
+        """Move this step's momentum into the optimizer state, now that the step survived."""
+        for staged, flatten_copy in self._muon_pending_momentum.values():
+            self.optimizer.state[flatten_copy]["momentum_buffer"].copy_(staged)
+        # The buffers are kept rather than dropped: staging re-copies from the committed
+        # momentum every step, so a stale one cannot be committed, and reusing them keeps
+        # this off the allocator's path on every step.
+
     def step(self, closure=None):
         """
         Not supporting closure.
@@ -2464,6 +2506,8 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
 
         prev_scale = self.loss_scale
         self._update_scale(self.overflow)
+        if not self.overflow:
+            self._commit_muon_momentum()
         if self.overflow:
             see_memory_usage('After overflow before clearing gradients')
             self.zero_grad(set_to_none=True)

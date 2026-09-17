@@ -12,6 +12,7 @@ import json
 import hjson
 import copy
 import base64
+from pydantic import Field
 
 from .constants import *
 from .config_utils import (
@@ -104,6 +105,12 @@ _REMOVED_TOP_LEVEL_CONFIG_KEYS = {
     "quantize_training":
     "Mixture-of-Quantization (MoQ) / 'quantize_training' has been removed. See "
     f"{_REMOVED_FEATURES_ISSUE}.",
+    "eigenvalue":
+    "Eigenvalue-based Mixture-of-Quantization (MoQ) has been removed; the standalone "
+    f"'eigenvalue' configuration block is no longer supported. See {_REMOVED_FEATURES_ISSUE}.",
+    "sparse_attention":
+    "DeepSpeed Sparse Attention has been removed; the 'sparse_attention' configuration block is no longer "
+    f"supported. See {_REMOVED_FEATURES_ISSUE}.",
 }
 _REMOVED_ZERO_CONFIG_KEYS = {
     "mics_shard_size":
@@ -112,6 +119,10 @@ _REMOVED_ZERO_CONFIG_KEYS = {
     "mics_hierarchical_params_gather":
     "MiCS ZeRO-3 sharding has been removed; 'zero_optimization.mics_hierarchical_params_gather' "
     f"is no longer supported. See {_REMOVED_FEATURES_ISSUE}.",
+    "zeropp_loco_param":
+    "LoCo-Zero++ has been removed; 'zero_optimization.zeropp_loco_param' is no longer supported. "
+    "Remove this key to use standard ZeRO++ quantized gradients without LoCo error feedback. "
+    f"See {_REMOVED_FEATURES_ISSUE}.",
 }
 
 
@@ -290,169 +301,6 @@ def get_graph_harvesting(param_dict):
     return get_scalar_param(param_dict, GRAPH_HARVESTING, GRAPH_HARVESTING_DEFAULT)
 
 
-def get_sparse_attention(param_dict):
-    if SPARSE_ATTENTION in param_dict.keys():
-        sparsity = param_dict[SPARSE_ATTENTION]
-        mode = get_sparse_attention_mode(sparsity)
-
-        if mode == SPARSE_DENSE_MODE:
-            return get_sparse_dense_config(sparsity)
-        elif mode == SPARSE_FIXED_MODE:
-            return get_sparse_fixed_config(sparsity)
-        elif mode == SPARSE_VARIABLE_MODE:
-            return get_sparse_variable_config(sparsity)
-        elif mode == SPARSE_BIGBIRD_MODE:
-            return get_sparse_bigbird_config(sparsity)
-        elif mode == SPARSE_BSLONGFORMER_MODE:
-            return get_sparse_bslongformer_config(sparsity)
-        else:
-            raise NotImplementedError(f"Given sparsity mode, {mode}, has not been implemented yet!")
-
-    else:
-        return None
-
-
-def get_sparse_dense_config(sparsity):
-    block = get_scalar_param(sparsity, SPARSE_BLOCK, SPARSE_BLOCK_DEFAULT)
-    return {SPARSE_MODE: SPARSE_DENSE_MODE, SPARSE_BLOCK: block}
-
-
-def get_sparse_fixed_config(sparsity):
-    block = get_scalar_param(sparsity, SPARSE_BLOCK, SPARSE_BLOCK_DEFAULT)
-    different_layout_per_head = get_scalar_param(
-        sparsity,
-        SPARSE_DIFFERENT_LAYOUT_PER_HEAD,
-        SPARSE_DIFFERENT_LAYOUT_PER_HEAD_DEFAULT,
-    )
-    num_local_blocks = get_scalar_param(sparsity, SPARSE_NUM_LOCAL_BLOCKS, SPARSE_NUM_LOCAL_BLOCKS_DEFAULT)
-    num_global_blocks = get_scalar_param(sparsity, SPARSE_NUM_GLOBAL_BLOCKS, SPARSE_NUM_GLOBAL_BLOCKS_DEFAULT)
-    attention = get_scalar_param(sparsity, SPARSE_ATTENTION_TYPE, SPARSE_ATTENTION_TYPE_DEFAULT)
-    horizontal_global_attention = get_scalar_param(
-        sparsity,
-        SPARSE_HORIZONTAL_GLOBAL_ATTENTION,
-        SPARSE_HORIZONTAL_GLOBAL_ATTENTION_DEFAULT,
-    )
-    num_different_global_patterns = get_scalar_param(
-        sparsity,
-        SPARSE_NUM_DIFFERENT_GLOBAL_PATTERNS,
-        SPARSE_NUM_DIFFERENT_GLOBAL_PATTERNS_DEFAULT,
-    )
-
-    return {
-        SPARSE_MODE: SPARSE_FIXED_MODE,
-        SPARSE_BLOCK: block,
-        SPARSE_DIFFERENT_LAYOUT_PER_HEAD: different_layout_per_head,
-        SPARSE_NUM_LOCAL_BLOCKS: num_local_blocks,
-        SPARSE_NUM_GLOBAL_BLOCKS: num_global_blocks,
-        SPARSE_ATTENTION_TYPE: attention,
-        SPARSE_HORIZONTAL_GLOBAL_ATTENTION: horizontal_global_attention,
-        SPARSE_NUM_DIFFERENT_GLOBAL_PATTERNS: num_different_global_patterns,
-    }
-
-
-def get_sparse_variable_config(sparsity):
-    block = get_scalar_param(sparsity, SPARSE_BLOCK, SPARSE_BLOCK_DEFAULT)
-    different_layout_per_head = get_scalar_param(
-        sparsity,
-        SPARSE_DIFFERENT_LAYOUT_PER_HEAD,
-        SPARSE_DIFFERENT_LAYOUT_PER_HEAD_DEFAULT,
-    )
-    num_random_blocks = get_scalar_param(sparsity, SPARSE_NUM_RANDOM_BLOCKS, SPARSE_NUM_RANDOM_BLOCKS_DEFAULT)
-    local_window_blocks = get_scalar_param(sparsity, SPARSE_LOCAL_WINDOW_BLOCKS, SPARSE_LOCAL_WINDOW_BLOCKS_DEFAULT)
-    global_block_indices = get_scalar_param(sparsity, SPARSE_GLOBAL_BLOCK_INDICES, SPARSE_GLOBAL_BLOCK_INDICES_DEFAULT)
-    global_block_end_indices = get_scalar_param(
-        sparsity,
-        SPARSE_GLOBAL_BLOCK_END_INDICES,
-        SPARSE_GLOBAL_BLOCK_END_INDICES_DEFAULT,
-    )
-    attention = get_scalar_param(sparsity, SPARSE_ATTENTION_TYPE, SPARSE_ATTENTION_TYPE_DEFAULT)
-    horizontal_global_attention = get_scalar_param(
-        sparsity,
-        SPARSE_HORIZONTAL_GLOBAL_ATTENTION,
-        SPARSE_HORIZONTAL_GLOBAL_ATTENTION_DEFAULT,
-    )
-
-    return {
-        SPARSE_MODE: SPARSE_VARIABLE_MODE,
-        SPARSE_BLOCK: block,
-        SPARSE_DIFFERENT_LAYOUT_PER_HEAD: different_layout_per_head,
-        SPARSE_NUM_RANDOM_BLOCKS: num_random_blocks,
-        SPARSE_LOCAL_WINDOW_BLOCKS: local_window_blocks,
-        SPARSE_GLOBAL_BLOCK_INDICES: global_block_indices,
-        SPARSE_GLOBAL_BLOCK_END_INDICES: global_block_end_indices,
-        SPARSE_ATTENTION_TYPE: attention,
-        SPARSE_HORIZONTAL_GLOBAL_ATTENTION: horizontal_global_attention,
-    }
-
-
-def get_sparse_bigbird_config(sparsity):
-    block = get_scalar_param(sparsity, SPARSE_BLOCK, SPARSE_BLOCK_DEFAULT)
-    different_layout_per_head = get_scalar_param(
-        sparsity,
-        SPARSE_DIFFERENT_LAYOUT_PER_HEAD,
-        SPARSE_DIFFERENT_LAYOUT_PER_HEAD_DEFAULT,
-    )
-    num_random_blocks = get_scalar_param(sparsity, SPARSE_NUM_RANDOM_BLOCKS, SPARSE_NUM_RANDOM_BLOCKS_DEFAULT)
-    num_sliding_window_blocks = get_scalar_param(
-        sparsity,
-        SPARSE_NUM_SLIDING_WINDOW_BLOCKS,
-        SPARSE_NUM_SLIDING_WINDOW_BLOCKS_DEFAULT,
-    )
-    num_global_blocks = get_scalar_param(sparsity, SPARSE_NUM_GLOBAL_BLOCKS, SPARSE_NUM_GLOBAL_BLOCKS_DEFAULT)
-
-    return {
-        SPARSE_MODE: SPARSE_BIGBIRD_MODE,
-        SPARSE_BLOCK: block,
-        SPARSE_DIFFERENT_LAYOUT_PER_HEAD: different_layout_per_head,
-        SPARSE_NUM_RANDOM_BLOCKS: num_random_blocks,
-        SPARSE_NUM_SLIDING_WINDOW_BLOCKS: num_sliding_window_blocks,
-        SPARSE_NUM_GLOBAL_BLOCKS: num_global_blocks,
-    }
-
-
-def get_sparse_bslongformer_config(sparsity):
-    block = get_scalar_param(sparsity, SPARSE_BLOCK, SPARSE_BLOCK_DEFAULT)
-    different_layout_per_head = get_scalar_param(
-        sparsity,
-        SPARSE_DIFFERENT_LAYOUT_PER_HEAD,
-        SPARSE_DIFFERENT_LAYOUT_PER_HEAD_DEFAULT,
-    )
-    num_sliding_window_blocks = get_scalar_param(
-        sparsity,
-        SPARSE_NUM_SLIDING_WINDOW_BLOCKS,
-        SPARSE_NUM_SLIDING_WINDOW_BLOCKS_DEFAULT,
-    )
-    global_block_indices = get_scalar_param(sparsity, SPARSE_GLOBAL_BLOCK_INDICES, SPARSE_GLOBAL_BLOCK_INDICES_DEFAULT)
-    global_block_end_indices = get_scalar_param(
-        sparsity,
-        SPARSE_GLOBAL_BLOCK_END_INDICES,
-        SPARSE_GLOBAL_BLOCK_END_INDICES_DEFAULT,
-    )
-
-    return {
-        SPARSE_MODE: SPARSE_BSLONGFORMER_MODE,
-        SPARSE_BLOCK: block,
-        SPARSE_DIFFERENT_LAYOUT_PER_HEAD: different_layout_per_head,
-        SPARSE_NUM_SLIDING_WINDOW_BLOCKS: num_sliding_window_blocks,
-        SPARSE_GLOBAL_BLOCK_INDICES: global_block_indices,
-        SPARSE_GLOBAL_BLOCK_END_INDICES: global_block_end_indices,
-    }
-
-
-def get_sparse_attention_mode(param_dict):
-    if SPARSE_MODE in param_dict.keys():
-        return param_dict[SPARSE_MODE]
-    else:
-        return SPARSE_MODE_DEFAULT
-
-
-def get_sparse_attention_type(param_dict):
-    if SPARSE_ATTENTION_TYPE in param_dict.keys():
-        return param_dict[SPARSE_ATTENTION_TYPE]
-    else:
-        return SPARSE_ATTENTION_TYPE_DEFAULT
-
-
 def get_pipeline_config(param_dict):
     """Parses pipeline engine configuration. """
     default_pipeline = {
@@ -542,7 +390,7 @@ def get_memory_breakdown(param_dict):
 
 class HybridEngineConfig(DeepSpeedConfigModel):
     enabled: bool = False
-    max_out_tokens: int = 512
+    max_out_tokens: int = Field(512, gt=0)
     inference_tp_size: int = 1
     release_inference_cache: bool = False
     pin_parameters: bool = True
@@ -558,79 +406,6 @@ def get_hybrid_engine_config(param_dict):
 
 def get_expert_data_topo_config(param_dict):
     return get_scalar_param(param_dict, USE_DATA_BEFORE_EXPERT_PARALLEL, USE_DATA_BEFORE_EXPERT_PARALLEL_DEFAULT)
-
-
-def get_eigenvalue_config(param_dict):
-    return (
-        EIGENVALUE_ENABLED_DEFAULT,
-        EIGENVALUE_VERBOSE_DEFAULT,
-        EIGENVALUE_MAX_ITER_DEFAULT,
-        EIGENVALUE_TOL_DEFAULT,
-        EIGENVALUE_STABILITY_DEFAULT,
-        EIGENVALUE_GAS_BOUNDARY_RESOLUTION_DEFAULT,
-        EIGENVALUE_LAYER_NAME_DEFAULT,
-        EIGENVALUE_LAYER_NUM_DEFAULT,
-    )
-
-
-def get_eigenvalue_enabled(param_dict):
-    if EIGENVALUE in param_dict.keys():
-        return get_scalar_param(param_dict[EIGENVALUE], EIGENVALUE_ENABLED, EIGENVALUE_ENABLED_DEFAULT)
-    else:
-        return EIGENVALUE_ENABLED_DEFAULT
-
-
-def get_eigenvalue_verbose(param_dict):
-    if EIGENVALUE in param_dict.keys():
-        return get_scalar_param(param_dict[EIGENVALUE], EIGENVALUE_VERBOSE, EIGENVALUE_VERBOSE_DEFAULT)
-    else:
-        return EIGENVALUE_VERBOSE_DEFAULT
-
-
-def get_eigenvalue_max_iter(param_dict):
-    if EIGENVALUE in param_dict.keys():
-        return get_scalar_param(param_dict[EIGENVALUE], EIGENVALUE_MAX_ITER, EIGENVALUE_MAX_ITER_DEFAULT)
-    else:
-        return EIGENVALUE_MAX_ITER_DEFAULT
-
-
-def get_eigenvalue_tol(param_dict):
-    if EIGENVALUE in param_dict.keys():
-        return get_scalar_param(param_dict[EIGENVALUE], EIGENVALUE_TOL, EIGENVALUE_TOL_DEFAULT)
-    else:
-        return EIGENVALUE_TOL_DEFAULT
-
-
-def get_eigenvalue_stability(param_dict):
-    if EIGENVALUE in param_dict.keys():
-        return get_scalar_param(param_dict[EIGENVALUE], EIGENVALUE_STABILITY, EIGENVALUE_STABILITY_DEFAULT)
-    else:
-        return EIGENVALUE_STABILITY_DEFAULT
-
-
-def get_eigenvalue_gas_boundary_resolution(param_dict):
-    if EIGENVALUE in param_dict.keys():
-        return get_scalar_param(
-            param_dict[EIGENVALUE],
-            EIGENVALUE_GAS_BOUNDARY_RESOLUTION,
-            EIGENVALUE_GAS_BOUNDARY_RESOLUTION_DEFAULT,
-        )
-    else:
-        return EIGENVALUE_GAS_BOUNDARY_RESOLUTION_DEFAULT
-
-
-def get_eigenvalue_layer_name(param_dict):
-    if EIGENVALUE in param_dict.keys():
-        return get_scalar_param(param_dict[EIGENVALUE], EIGENVALUE_LAYER_NAME, EIGENVALUE_LAYER_NAME_DEFAULT)
-    else:
-        return EIGENVALUE_LAYER_NAME_DEFAULT
-
-
-def get_eigenvalue_layer_num(param_dict):
-    if EIGENVALUE in param_dict.keys():
-        return get_scalar_param(param_dict[EIGENVALUE], EIGENVALUE_LAYER_NUM, EIGENVALUE_LAYER_NUM_DEFAULT)
-    else:
-        return EIGENVALUE_LAYER_NUM_DEFAULT
 
 
 def get_checkpoint_params(param_dict):
@@ -864,21 +639,9 @@ class DeepSpeedConfig(object):
         self.memory_breakdown = get_memory_breakdown(param_dict)
         self.autotuning_config = DeepSpeedAutotuningConfig(param_dict)
 
-        (
-            self.eigenvalue_enabled,
-            self.eigenvalue_verbose,
-            self.eigenvalue_max_iter,
-            self.eigenvalue_tol,
-            self.eigenvalue_stability,
-            self.eigenvalue_gas_boundary_resolution,
-            self.eigenvalue_layer_name,
-            self.eigenvalue_layer_num,
-        ) = get_eigenvalue_config(param_dict)
-
         self.use_data_before_expert_parallel_ = get_expert_data_topo_config(param_dict)
         self.hybrid_engine = get_hybrid_engine_config(param_dict)
 
-        self.sparse_attention = get_sparse_attention(param_dict)
         self.pipeline = get_pipeline_config(param_dict)
 
         self.pld_enabled = get_pld_enabled(param_dict)

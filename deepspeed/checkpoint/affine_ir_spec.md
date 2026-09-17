@@ -399,8 +399,30 @@ whose name matched a metadata key could never be confused for one.
   and for debugging a checkpoint that will not load.
 - **`locations` is per piece, not per parameter.** This is the field that expresses
   `bigcodetype`, whose kv block is held identically by every rank (§5).
+- **A reader that prefers the map must still account for the categories.** Additivity means
+  both are in the file, so a reader taking the map never consults the category branches —
+  which leaves their patterns looking unused, and a strict conversion rejects them. They are
+  superseded, not unused, and the reader has to say so. This is not cosmetic: it is the
+  difference between a checkpoint that converts and one that aborts.
 
-### 6.4 Size
+### 6.4 Where a map is built
+
+Not where the file is assembled. Collecting model-level metadata sees only the conversion
+schema, which does not carry per-rank extents — those are resolved while a layer is built
+and are not recoverable later from a shape alone. So a map is derived at the point a layer
+records its metadata, and collection gathers what the layers produced.
+
+Two consequences worth stating, because both are easy to get wrong:
+
+- A parameter the tensor-parallel machinery never touches is still describable — one piece
+  held by every rank — but it reaches no layer, so nothing derives its map. It needs the
+  degree of the group, which only the partitioned layers know. Producing a map for it means
+  taking that from elsewhere in the model rather than skipping it: a parameter with no map
+  falls back to its name category, which is what the IR exists to replace.
+- A layout the machinery refuses to describe produces no map, and conversion falls back to
+  the categories. That is the intended escape, not a gap.
+
+### 6.5 Size
 
 Measured on a fused-QKV parameter at TP=8: 96 pieces, 6836 bytes of compact JSON —
 about **71 bytes per piece**. Extrapolated by tensor count:

@@ -4,7 +4,7 @@
 # DeepSpeed Team
 import torch
 
-from typing import Any, Tuple
+from typing import Any, Dict, Tuple
 from torch import Tensor
 from torch.nn import Module
 
@@ -307,24 +307,65 @@ def single_all_to_all(input,
     return res
 
 
-class _DimZeroAllToAll(torch.autograd.Function):
-    """Differentiable All2All across dimension 0."""
+# A process group cannot appear in an operator schema, so the exchange addresses its group by name and
+# resolves the name back to the group when it runs. The registry is written once, when the attention module
+# is built: a write issued from inside a compiled region does not land before the operator reads it.
+_all_to_all_groups: Dict[str, dist.ProcessGroup] = {}
 
-    @staticmethod
-    def forward(ctx: Any, group: dist.ProcessGroup, input: Tensor) -> Tensor:
-        world_size = dist.get_world_size(group)
-        assert input.shape[0] == world_size, f"Dim 0 {input.shape[0]} is not world size"
 
-        ctx.group = group
+def register_all_to_all_group(group: dist.ProcessGroup) -> str:
+    """Make ``group`` reachable by name from inside the exchange operator, and return that name.
 
-        output = torch.empty_like(input).contiguous()
-        # torch.distributed.nn.functional.all_to_all_single(output, input.contiguous(), group=group)
-        dist.all_to_all_single(output, input.contiguous(), group=group)
-        return output
+    Call this outside any compiled region, before the first exchange on ``group``.
+    """
+    name = group.group_name
+    _all_to_all_groups[name] = group
+    return name
 
-    @staticmethod
-    def backward(ctx: Any, *grad_output: Tensor) -> Tuple[None, Tensor]:
-        return (None, _DimZeroAllToAll.apply(ctx.group, *grad_output))
+
+@torch.library.custom_op("deepspeed::dim_zero_all_to_all", mutates_args=())
+def _dim_zero_all_to_all_op(input: Tensor, group_name: str) -> Tensor:
+    output = torch.empty_like(input)
+    dist.all_to_all_single(output, input, group=_all_to_all_groups[group_name])
+    return output
+
+
+@torch.library.register_fake("deepspeed::dim_zero_all_to_all")
+def _dim_zero_all_to_all_fake(input: Tensor, group_name: str) -> Tensor:
+    return torch.empty_like(input)
+
+
+def _dim_zero_all_to_all_backward_setup(ctx: Any, inputs: Tuple[Any, ...], output: Tensor) -> None:
+    ctx.group_name = inputs[1]
+
+
+def _dim_zero_all_to_all_backward(ctx: Any, grad: Tensor) -> Tuple[Tensor, None]:
+    return (_dim_zero_all_to_all_op(grad.contiguous(), ctx.group_name), None)
+
+
+torch.library.register_autograd("deepspeed::dim_zero_all_to_all",
+                                _dim_zero_all_to_all_backward,
+                                setup_context=_dim_zero_all_to_all_backward_setup)
+
+
+def _dim_zero_all_to_all(group: dist.ProcessGroup, input: Tensor) -> Tensor:
+    """Differentiable All2All across dimension 0.
+
+    The gradient of this exchange has to be something the tracer knows about. An autograd function that fills
+    a caller-allocated buffer with a collective is not: ``torch.compile`` inlines the forward body rather than
+    treating the call as opaque, and the traced body allocates an empty tensor and mutates it through an
+    operation that does not register as producing data, so the graph holds an output with no dependence on the
+    input. Differentiating that yields a zero gradient and the hand-written backward never runs, while the
+    forward stays numerically correct -- a training job silently stops updating everything upstream of the
+    exchange.
+
+    Registering the exchange as an operator with a declared backward gives the tracer a derivative instead of
+    a body to inline, and keeps the collective on ``deepspeed.comm`` so the configured backend dispatches it.
+    """
+    world_size = dist.get_world_size(group)
+    assert input.shape[0] == world_size, f"Dim 0 {input.shape[0]} is not world size"
+
+    return _dim_zero_all_to_all_op(input.contiguous(), group.group_name)
 
 
 class _SeqAllToAll(torch.autograd.Function):
@@ -364,7 +405,7 @@ class _SeqAllToAll(torch.autograd.Function):
         else:
             # overlap communication path
             if not is_fwd and type == 'o':
-                assert ctx.stream != None
+                assert ctx.stream is not None
                 res = single_all_to_all(input,
                                         scatter_idx,
                                         gather_idx,
@@ -491,16 +532,14 @@ class DistributedAttention(torch.nn.Module):
 
         def bwd_hook(layer_type):
 
-            def pre_hook_fun(grad):
+            def hook_fun(grad):
                 type = 'd' + layer_type
                 self.overlap_handles[type + '_work'].wait()
                 self.sp_stream.wait_stream(self.default_stream)
                 all2all_output = self.overlap_handles[type + '_grad']
-                grad = list(grad)
-                grad[0] = self.overlap_handles[type + '_post_all2all_func'](all2all_output)
-                grad = tuple(grad)
+                return self.overlap_handles[type + '_post_all2all_func'](all2all_output)
 
-            return pre_hook_fun
+            return hook_fun
 
         # The partition follows KV groups, so the count comes off the key tensor: under GQA a
         # query head has to land on the rank holding its KV head, and splitting on the query
@@ -525,10 +564,8 @@ class DistributedAttention(torch.nn.Module):
             # Place this logic after the q, k, v all-to-all operation to
             # improve interpreter speed to
             # call and launch of the forward all-to-all communication.
-            grad_fn_q = query.grad_fn.next_functions[0][0]
-            grad_fn_q.register_prehook(bwd_hook(layer_type='q'))
-            grad_fn_k = key.grad_fn.next_functions[0][0]
-            grad_fn_k.register_prehook(bwd_hook(layer_type='k'))
+            query.register_hook(bwd_hook(layer_type='q'))
+            key.register_hook(bwd_hook(layer_type='k'))
 
         #out shape : e.g., [s:h/p:]
         if rotary_pos_emb is not None:
