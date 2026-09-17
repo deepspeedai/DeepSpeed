@@ -95,8 +95,10 @@ static void _win_submit_one(io_request_t* req)
             const auto error_code = GetLastError();
             report_file_error(
                 "<aio>", req->_read_op ? "ReadFile" : "WriteFile", static_cast<int>(error_code));
-            assert(ok && bytes_transferred > 0);
-            return;
+            // Do not rely on assert(): NDEBUG builds (the common case for installed wheels)
+            // compile it out, which would let the caller treat this request as completed and
+            // silently checkpoint/offload partial data instead of failing loudly.
+            abort();
         }
         buf += bytes_transferred;
         offset += bytes_transferred;
