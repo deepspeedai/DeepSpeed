@@ -179,14 +179,17 @@ class TestMuonBF16Optimizer(DistributedTest):
             torch.zeros_like(gradient).view(param.shape)
             for param, gradient in zip(engine.module.parameters(), gradients)
         ]
-        reference_updates = [
-            original_muon.muon_update(gradient.view(param.shape).clone(),
-                                      momentum,
-                                      beta=group['momentum'],
-                                      ns_method=ns_method)
-            for param, gradient, momentum in zip(engine.module.parameters(), gradients, reference_momenta)
-        ]
-        engine.step()
+        # Compiler fusion can round BF16 intermediates differently for partition views.
+        # Compare eager kernels exactly against the full-matrix reference.
+        with torch._dynamo.config.patch(disable=True):
+            reference_updates = [
+                original_muon.muon_update(gradient.view(param.shape).clone(),
+                                          momentum,
+                                          beta=group['momentum'],
+                                          ns_method=ns_method)
+                for param, gradient, momentum in zip(engine.module.parameters(), gradients, reference_momenta)
+            ]
+            engine.step()
 
         for param, before, update in zip(engine.module.parameters(), original, reference_updates):
             expected = before.add(update, alpha=-group['lr']).to(torch.bfloat16)
