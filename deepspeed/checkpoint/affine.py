@@ -488,10 +488,14 @@ def _piece_from_dict(entry):
                        scale=entry.get('scale', 1.0))
 
 
-def segmented_map(shape, segments, partition_dim, tp_degree):
+def segmented_map(shape, segments, partition_dim, tp_degree, split_widths=None):
     """A parameter whose blocks are split or replicated independently along one axis.
 
     ``segments`` is an ordered list of ``(size, replicated)`` pairs covering ``partition_dim``.
+    ``split_widths`` gives the per-rank widths of each split segment, in the same order. It is
+    required rather than inferred because the sizes a layer splits to are not always an even
+    division -- they can be aligned to head counts or to a grain size -- and guessing them
+    describes a layout the partition never produced.
     A fused QKV weight that shards its query rows but hands every rank the whole key/value
     block is two segments, and the resulting pieces differ in `locations` rather than in
     kind -- which is what the schema could not say before.
@@ -504,11 +508,27 @@ def segmented_map(shape, segments, partition_dim, tp_degree):
     source_strides = _row_major_strides(shape)
     ranks = list(range(tp_degree))
 
+    split_index = 0
+    widths_for_segment = []
+    for size, replicated in segments:
+        if replicated:
+            widths_for_segment.append(None)
+            continue
+        if split_widths is None:
+            widths_for_segment.append(_even_split_sizes(size, tp_degree))
+        else:
+            widths = list(split_widths[split_index])
+            if len(widths) != tp_degree or sum(widths) != size:
+                raise ValueError(f'Split widths {widths} do not account for a segment of {size} '
+                                 f'elements across {tp_degree} ranks.')
+            widths_for_segment.append(widths)
+        split_index += 1
+
     shard_extents = {}
     for rank in ranks:
         extent = 0
-        for size, replicated in segments:
-            extent += size if replicated else _even_split_sizes(size, tp_degree)[rank]
+        for (size, replicated), widths in zip(segments, widths_for_segment):
+            extent += size if replicated else widths[rank]
         shard_extents[rank] = extent
 
     shard_shapes = {}
@@ -520,8 +540,7 @@ def segmented_map(shape, segments, partition_dim, tp_degree):
     pieces_by_rank = {rank: [] for rank in ranks}
     dest_starts = {rank: 0 for rank in ranks}
     source_start = 0
-    for size, replicated in segments:
-        per_rank = None if replicated else _even_split_sizes(size, tp_degree)
+    for (size, replicated), per_rank in zip(segments, widths_for_segment):
         for rank in ranks:
             extent = size if replicated else per_rank[rank]
             offset = source_start if replicated else source_start + sum(per_rank[:rank])

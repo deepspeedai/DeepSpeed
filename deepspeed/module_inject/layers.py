@@ -1238,7 +1238,14 @@ class fused_LinearLayer(SubParamColumnParallel):
         n_embd = self.tp_meta.n_embd
         if not shape or n_embd is None or n_embd >= shape[0]:
             return None
-        return segmented_map(shape, [(n_embd, False), (shape[0] - n_embd, True)], 0, self.tp_world_size)
+        # The query rows are not split evenly: the widths follow the head count and the grain
+        # size, so they have to come from the same helper the partition calls rather than
+        # from a division here.
+        query_widths = list(get_shard_size_list(n_embd, self.tp_world_size, self.tp_meta))
+        return segmented_map(shape, [(n_embd, False), (shape[0] - n_embd, True)],
+                             0,
+                             self.tp_world_size,
+                             split_widths=[query_widths])
 
     @torch.no_grad()
     def _tp_partition_unsupported_layout(self, params_list):
@@ -1302,6 +1309,12 @@ class Yuan_LinearAllreduce(LinearAllreduce):
             rank: shared_qk_value_head_ids(num_heads, self.tp_world_size, rank)
             for rank in range(self.tp_world_size)
         }
+        # The pairing only partitions the heads when each rank takes an even number of them.
+        # Otherwise ranks share heads, and a piece claiming a single owner would contradict
+        # the rank beside it, so there is no honest description to publish.
+        selected = [head for rank_ids in ids.values() for head in rank_ids]
+        if sorted(selected) != list(range(num_heads)):
+            return None
         return block_gather_map(shape, ids, total // num_heads, 1)
 
     #Yuan2
@@ -1358,6 +1371,12 @@ class Yuan_LinearLayer(LinearLayer):
             rank: shared_qk_value_head_ids(num_heads, self.tp_world_size, rank)
             for rank in range(self.tp_world_size)
         }
+        # The pairing only partitions the heads when each rank takes an even number of them.
+        # Otherwise ranks share heads, and a piece claiming a single owner would contradict
+        # the rank beside it, so there is no honest description to publish.
+        selected = [head for rank_ids in ids.values() for head in rank_ids]
+        if sorted(selected) != list(range(num_heads)):
+            return None
         return block_gather_map(shape, ids, total // num_heads, 0)
 
     #Yuan2

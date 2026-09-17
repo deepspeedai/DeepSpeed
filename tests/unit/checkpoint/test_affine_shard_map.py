@@ -702,3 +702,60 @@ def test_a_layout_without_head_counts_stays_unsupported():
     info = collect_autotp_universal_checkpoint_info(model)
 
     assert "noncontiguous head groups" in info[AUTOTP_UNSUPPORTED_PARAMETER_PATTERNS][r"^proj\.weight$"]
+
+
+def test_bigcode_map_uses_the_widths_the_partition_uses():
+    """The query rows are not divided evenly, so the map cannot assume they are.
+
+    `get_shard_size_list` aligns the split to the head count, giving widths like [8, 8, 4, 4]
+    where an even division would say [6, 6, 6, 6]. A map built on the latter reads the wrong
+    rows while still covering the tensor, so nothing downstream would notice.
+    """
+    from deepspeed.checkpoint.affine import segmented_map
+    from deepspeed.module_inject.tp_shard import get_shard_size_list
+
+    n_embd, kv_rows, cols, mp_size = 24, 12, 8, 4
+    meta = _meta(6, n_embd=n_embd, num_attention_heads=6)
+    query_widths = list(get_shard_size_list(n_embd, mp_size, meta))
+    assert query_widths != [n_embd // mp_size] * mp_size, "pick a config where the split is uneven"
+
+    analytic = segmented_map((n_embd + kv_rows, cols), [(n_embd, False), (kv_rows, True)],
+                             0,
+                             mp_size,
+                             split_widths=[query_widths])
+    analytic.validate_coverage()
+
+    shard_fn = _fused_qkv_shard_fn('GPTBigCodeBlock', mp_size, meta)
+    torch.manual_seed(3)
+    full_param = torch.randn(n_embd + kv_rows, cols, dtype=torch.float64)
+    for rank in range(mp_size):
+        assert torch.equal(analytic.extract(full_param, rank), shard_fn(full_param.clone(), rank))
+
+
+def test_segmented_map_refuses_widths_that_do_not_add_up():
+    """A width list that misses elements would describe a layout nothing produced."""
+    from deepspeed.checkpoint.affine import segmented_map
+
+    with pytest.raises(ValueError, match='do not account for'):
+        segmented_map((10, 4), [(8, False), (2, True)], 0, 2, split_widths=[[3, 3]])
+
+
+@pytest.mark.parametrize('layer_name, shape', [('Yuan_LinearLayer', (96, 8)), ('Yuan_LinearAllreduce', (8, 96))],
+                         ids=['value', 'oproj'])
+def test_yuan_refuses_a_head_count_that_ranks_would_share(layer_name, shape):
+    """With an odd number of heads per rank the pairing hands the same head to two ranks.
+
+    Twelve heads over four ranks gives each rank three, and the pairing then overlaps: heads
+    1, 4, 7 and 10 land on two ranks each. A piece claiming a single owner would contradict
+    the one beside it, so the layer must publish no map rather than an inconsistent one.
+    """
+    from deepspeed.module_inject import layers as autotp_layers
+    from deepspeed.module_inject.fusedqkv_utils import shared_qk_value_head_ids
+
+    selected = [head for rank in range(4) for head in shared_qk_value_head_ids(12, 4, rank)]
+    assert sorted(selected) != list(range(12)), "pick a config where the pairing overlaps"
+
+    layer = getattr(autotp_layers, layer_name).__new__(getattr(autotp_layers, layer_name))
+    layer.tp_world_size = 4
+    layer.tp_meta = AutoTPMeta(num_kv_heads=12)
+    assert layer._shared_qk_affine_map(shape) is None
