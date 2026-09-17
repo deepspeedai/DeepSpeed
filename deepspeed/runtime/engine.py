@@ -155,7 +155,7 @@ DeepSpeedSchedulerCallable = Callable[[Optimizer], _LRScheduler]
 
 try:
     import apex
-    APEX_INSTALLED = True
+    APEX_INSTALLED = hasattr(apex, 'optimizers') and hasattr(apex.optimizers, 'FusedAdam')
 except ImportError:
     APEX_INSTALLED = False
 
