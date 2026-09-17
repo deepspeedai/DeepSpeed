@@ -190,7 +190,15 @@ def muon_update(grad,
     so this is the same path the expert-group branch takes.
     """
     orig_dtype = grad.dtype
-    momentum.lerp_(grad, 1 - beta)
+    # A step whose gradients overflowed is discarded by the loss scaler, but Muon folds the
+    # gradient into its momentum before that decision is made. Left alone, one overflow
+    # leaves the momentum non-finite for the rest of the run: with nesterov the blend is
+    # written back into the gradient in place, so the next step overflows too, and the
+    # scaler backs off until it raises "Current loss scale already at minimum". Keep the
+    # momentum out of it, and let the non-finite gradient through so the overflow is still
+    # seen and the step still skipped. Evaluated on device so this costs no synchronization.
+    grad_is_finite = torch.isfinite(grad).all()
+    momentum.copy_(torch.where(grad_is_finite, momentum.lerp(grad, 1 - beta), momentum))
     update = grad.lerp_(momentum, beta) if nesterov else momentum
     if num_heads is not None:
         return _per_head_orthogonalize(update, num_heads, ns_steps, ns_method).to(orig_dtype)
@@ -208,7 +216,9 @@ def muon_update(grad,
         update *= max(1, grad.size(-2) / grad.size(-1))**0.5
     if update.dtype != orig_dtype:
         update = update.to(orig_dtype)
-    return update
+    # On the non-nesterov path `update` is the (untouched, finite) momentum, so without this
+    # an overflowed step would produce a finite update and be applied instead of skipped.
+    return torch.where(grad_is_finite, update, grad.to(orig_dtype))
 
 
 class Muon(torch.optim.Optimizer):

@@ -15,6 +15,12 @@ def test_zero_config_reduce_bucket_size():
         DeepSpeedZeroConfig(reduce_bucket_size=0)
 
 
+def test_zero_config_parameter_alignment():
+    assert DeepSpeedZeroConfig().parameter_alignment is False
+    assert DeepSpeedZeroConfig(parameter_alignment=False).parameter_alignment is False
+    assert DeepSpeedZeroConfig(parameter_alignment=True).parameter_alignment is True
+
+
 def test_zero_config_deprecatedfields():
     config = DeepSpeedZeroConfig(**{"cpu_offload_param": True})
     assert isinstance(config.offload_param, DeepSpeedZeroOffloadParamConfig)

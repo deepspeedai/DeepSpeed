@@ -50,7 +50,7 @@ Transformers build that exposes the matching config/model classes,
 **ZeRO compatibility:** Stages 0, 1, and 2, plus constrained Stage 3
 support. Stage 3 requires AutoEP-managed MoE layers and does not support native
 DeepSpeed MoE layers, AutoTP, tensor model parallelism from ``mpu``, sequence
-parallelism, MiCS, hpZeRO secondary tensor groups, non-1 expert tensor
+parallelism, hpZeRO secondary tensor groups, non-1 expert tensor
 parallelism, or quantized gradients. Stage 3 AutoEP checkpoints are saved
 partition-natively in the ``zero_pp_rank_*`` shard files and support
 same-topology load, module-only loads (``load_module_only``),
@@ -207,7 +207,7 @@ implementation and itself.
   (``tensor_parallel.autotp_size > 1``) or tensor model parallelism from
   ``mpu``; support is planned as follow-up work.
 - AutoEP with ZeRO Stage 3 is supported only without sequence parallelism,
-  MiCS, hpZeRO secondary tensor groups, non-1 expert tensor parallelism, or
+  hpZeRO secondary tensor groups, non-1 expert tensor parallelism, or
   quantized gradients.
 - Regular checkpoint save/load requires matching ``autoep_size``. To change
   ``autoep_size`` or data-parallel world size across runs for the same

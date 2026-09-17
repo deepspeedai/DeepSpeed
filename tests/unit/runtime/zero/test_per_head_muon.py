@@ -45,14 +45,16 @@ from deepspeed.runtime.zero.muon.original_muon import (
 
 
 def _ns_tolerance(ns_method):
-    """A few ulps of whatever dtype the kernel iterates in.
+    """Some tens of ulps of whatever dtype the kernel iterates in.
 
     `gram` runs in fp16 and `newtonschulz5` in bf16 (fp32 where unsupported), and the iteration
-    amplifies rounding, so batched and unbatched NS agree to a handful of ulps rather than
-    bitwise. Deriving the bound from the dtype keeps it honest instead of tuned to pass.
+    amplifies rounding, so batched and unbatched NS agree to a few tens of ulps rather than
+    bitwise. The batched and per-head matmuls can also take different BLAS kernels: the CPU CI
+    runner measured 12.5 ulps on one element where a local run stayed under 8. Deriving the bound
+    from the dtype keeps it honest instead of tuned to pass.
     """
     eps = torch.finfo(ns_compute_dtype(ns_method)).eps
-    return dict(rtol=8 * eps, atol=8 * eps)
+    return dict(rtol=32 * eps, atol=32 * eps)
 
 
 def _norm_rtol(ns_method):

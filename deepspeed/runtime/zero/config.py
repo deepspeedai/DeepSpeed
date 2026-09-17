@@ -41,6 +41,7 @@ ZeRO optimization should be enabled as:
     "offload_optimizer": {...},
     "ignore_unused_parameters": [true|false],
     "round_robin_gradients": [true|false],
+    "parameter_alignment": [true|false],
     "zero_hpz_partition_size": 1,
     "zero_quantized_weights": [true|false],
     "zero_quantized_nontrainable_weights": [true|false],
@@ -313,6 +314,14 @@ class DeepSpeedZeroConfig(DeepSpeedConfigModel):
     Performance benefit grows with gradient accumulation steps (more copying
     between optimizer steps) or GPU count (increased parallelism).
     """
+
+    parameter_alignment: bool = False
+    """
+    Pad ZeRO Stage 1 and 2 flat buffers between parameters so each parameter
+    starts at a 16-byte-aligned address. This is disabled by default because
+    the padding increases flat-buffer and optimizer-state memory usage.
+    """
+
     zero_hpz_partition_size: int = Field(1, ge=0)
     """
     Number of ranks in zero parameters partitioning secondary group
@@ -344,10 +353,6 @@ class DeepSpeedZeroConfig(DeepSpeedConfigModel):
     "zeropp_loco_param": { "err_beta": 0.8, "reset_T": 1024 }.
     See LoCo paper for more details: (https://arxiv.org/abs/2407.04480).
     """
-
-    mics_shard_size: int = Field(-1, json_schema_extra={"new_param": "mics_shard_size"})
-
-    mics_hierarchical_params_gather: bool = False
 
     memory_efficient_linear: bool = True
     """
