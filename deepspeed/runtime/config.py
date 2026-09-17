@@ -110,6 +110,9 @@ _REMOVED_TOP_LEVEL_CONFIG_KEYS = {
     "'sparse_gradients' flag would be ignored and those gradients would be reduced dense. "
     "Gradients from an embedding constructed with sparse=True are still reduced sparsely and "
     f"need no config flag. See {_REMOVED_FEATURES_ISSUE}.",
+    "eigenvalue":
+    "Eigenvalue-based Mixture-of-Quantization (MoQ) has been removed; the standalone "
+    f"'eigenvalue' configuration block is no longer supported. See {_REMOVED_FEATURES_ISSUE}.",
     "sparse_attention":
     "DeepSpeed Sparse Attention has been removed; the 'sparse_attention' configuration block is no longer "
     f"supported. See {_REMOVED_FEATURES_ISSUE}.",
@@ -402,79 +405,6 @@ def get_expert_data_topo_config(param_dict):
     return get_scalar_param(param_dict, USE_DATA_BEFORE_EXPERT_PARALLEL, USE_DATA_BEFORE_EXPERT_PARALLEL_DEFAULT)
 
 
-def get_eigenvalue_config(param_dict):
-    return (
-        EIGENVALUE_ENABLED_DEFAULT,
-        EIGENVALUE_VERBOSE_DEFAULT,
-        EIGENVALUE_MAX_ITER_DEFAULT,
-        EIGENVALUE_TOL_DEFAULT,
-        EIGENVALUE_STABILITY_DEFAULT,
-        EIGENVALUE_GAS_BOUNDARY_RESOLUTION_DEFAULT,
-        EIGENVALUE_LAYER_NAME_DEFAULT,
-        EIGENVALUE_LAYER_NUM_DEFAULT,
-    )
-
-
-def get_eigenvalue_enabled(param_dict):
-    if EIGENVALUE in param_dict.keys():
-        return get_scalar_param(param_dict[EIGENVALUE], EIGENVALUE_ENABLED, EIGENVALUE_ENABLED_DEFAULT)
-    else:
-        return EIGENVALUE_ENABLED_DEFAULT
-
-
-def get_eigenvalue_verbose(param_dict):
-    if EIGENVALUE in param_dict.keys():
-        return get_scalar_param(param_dict[EIGENVALUE], EIGENVALUE_VERBOSE, EIGENVALUE_VERBOSE_DEFAULT)
-    else:
-        return EIGENVALUE_VERBOSE_DEFAULT
-
-
-def get_eigenvalue_max_iter(param_dict):
-    if EIGENVALUE in param_dict.keys():
-        return get_scalar_param(param_dict[EIGENVALUE], EIGENVALUE_MAX_ITER, EIGENVALUE_MAX_ITER_DEFAULT)
-    else:
-        return EIGENVALUE_MAX_ITER_DEFAULT
-
-
-def get_eigenvalue_tol(param_dict):
-    if EIGENVALUE in param_dict.keys():
-        return get_scalar_param(param_dict[EIGENVALUE], EIGENVALUE_TOL, EIGENVALUE_TOL_DEFAULT)
-    else:
-        return EIGENVALUE_TOL_DEFAULT
-
-
-def get_eigenvalue_stability(param_dict):
-    if EIGENVALUE in param_dict.keys():
-        return get_scalar_param(param_dict[EIGENVALUE], EIGENVALUE_STABILITY, EIGENVALUE_STABILITY_DEFAULT)
-    else:
-        return EIGENVALUE_STABILITY_DEFAULT
-
-
-def get_eigenvalue_gas_boundary_resolution(param_dict):
-    if EIGENVALUE in param_dict.keys():
-        return get_scalar_param(
-            param_dict[EIGENVALUE],
-            EIGENVALUE_GAS_BOUNDARY_RESOLUTION,
-            EIGENVALUE_GAS_BOUNDARY_RESOLUTION_DEFAULT,
-        )
-    else:
-        return EIGENVALUE_GAS_BOUNDARY_RESOLUTION_DEFAULT
-
-
-def get_eigenvalue_layer_name(param_dict):
-    if EIGENVALUE in param_dict.keys():
-        return get_scalar_param(param_dict[EIGENVALUE], EIGENVALUE_LAYER_NAME, EIGENVALUE_LAYER_NAME_DEFAULT)
-    else:
-        return EIGENVALUE_LAYER_NAME_DEFAULT
-
-
-def get_eigenvalue_layer_num(param_dict):
-    if EIGENVALUE in param_dict.keys():
-        return get_scalar_param(param_dict[EIGENVALUE], EIGENVALUE_LAYER_NUM, EIGENVALUE_LAYER_NUM_DEFAULT)
-    else:
-        return EIGENVALUE_LAYER_NUM_DEFAULT
-
-
 def get_checkpoint_params(param_dict):
     return param_dict.get(CHECKPOINT, {})
 
@@ -704,17 +634,6 @@ class DeepSpeedConfig(object):
         self.wall_clock_breakdown = (get_wall_clock_breakdown(param_dict) | self.flops_profiler_config.enabled)
         self.memory_breakdown = get_memory_breakdown(param_dict)
         self.autotuning_config = DeepSpeedAutotuningConfig(param_dict)
-
-        (
-            self.eigenvalue_enabled,
-            self.eigenvalue_verbose,
-            self.eigenvalue_max_iter,
-            self.eigenvalue_tol,
-            self.eigenvalue_stability,
-            self.eigenvalue_gas_boundary_resolution,
-            self.eigenvalue_layer_name,
-            self.eigenvalue_layer_num,
-        ) = get_eigenvalue_config(param_dict)
 
         self.use_data_before_expert_parallel_ = get_expert_data_topo_config(param_dict)
         self.hybrid_engine = get_hybrid_engine_config(param_dict)

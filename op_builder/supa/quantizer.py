@@ -29,38 +29,6 @@ class SUPAQuantizer:
         return getattr(torch.ops.deepspeed, name)
 
     @staticmethod
-    def ds_quantize_fp16(vals, groups, bits):
-        return SUPAQuantizer._op('ds_quantize_fp16')(vals, groups, bits)
-
-    @staticmethod
-    def ds_quantize_fp32(vals, groups, bits):
-        return SUPAQuantizer._op('ds_quantize_fp32')(vals, groups, bits)
-
-    @staticmethod
-    def ds_sr_quantize_fp16(vals, groups, bits):
-        return SUPAQuantizer._op('ds_sr_quantize_fp16')(vals, groups, bits)
-
-    @staticmethod
-    def ds_sr_quantize_fp32(vals, groups, bits):
-        return SUPAQuantizer._op('ds_sr_quantize_fp32')(vals, groups, bits)
-
-    @staticmethod
-    def ds_quantize_asym_fp16(vals, groups, bits):
-        return SUPAQuantizer._op('ds_quantize_asym_fp16')(vals, groups, bits)
-
-    @staticmethod
-    def ds_quantize_asym_fp32(vals, groups, bits):
-        return SUPAQuantizer._op('ds_quantize_asym_fp32')(vals, groups, bits)
-
-    @staticmethod
-    def ds_sr_quantize_asym_fp16(vals, groups, bits):
-        return SUPAQuantizer._op('ds_sr_quantize_asym_fp16')(vals, groups, bits)
-
-    @staticmethod
-    def ds_sr_quantize_asym_fp32(vals, groups, bits):
-        return SUPAQuantizer._op('ds_sr_quantize_asym_fp32')(vals, groups, bits)
-
-    @staticmethod
     def quantize(input_vals, groups, num_bits, quant_type):
         return SUPAQuantizer._op('quantize')(input_vals, groups, num_bits, int(quant_type))
 
@@ -123,4 +91,4 @@ class QuantizerBuilder(SUPAOpBuilder):
         return SUPAQuantizer
 
     def is_compatible(self, verbose=False):
-        return hasattr(torch.ops, 'deepspeed') and hasattr(torch.ops.deepspeed, 'ds_quantize_fp16')
+        return hasattr(torch.ops, 'deepspeed') and hasattr(torch.ops.deepspeed, 'quantize')
