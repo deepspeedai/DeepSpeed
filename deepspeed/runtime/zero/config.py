@@ -4,7 +4,7 @@
 # DeepSpeed Team
 
 import sys
-from typing import Optional, Dict, Any
+from typing import Optional
 from enum import Enum
 from pydantic import Field, model_validator
 from deepspeed.runtime.config_utils import get_scalar_param, pp_int, DeepSpeedConfigModel
@@ -41,13 +41,13 @@ ZeRO optimization should be enabled as:
     "offload_optimizer": {...},
     "ignore_unused_parameters": [true|false],
     "round_robin_gradients": [true|false],
+    "parameter_alignment": [true|false],
     "zero_hpz_partition_size": 1,
     "zero_quantized_weights": [true|false],
     "zero_quantized_nontrainable_weights": [true|false],
     "zero_quantized_gradients": [true|false],
     "memory_efficient_linear": [true|false],
     "override_module_apply": [true|false],
-    "zeropp_loco_param": {...},
     "log_trace_cache_warnings" : [true|false],
     "enable_sanity_checks": [true|false],
     }
@@ -138,6 +138,13 @@ class DeepSpeedZeroConfig(DeepSpeedConfigModel):
     overlap_comm: Optional[bool] = None  # None for dynamic default value (see validator `overlap_comm_valid` below)
     """
     Attempts to overlap the reduction of the gradients with backward computation
+    """
+
+    compute_grad_norm: bool = True
+    """
+    Compute and retain the global gradient norm during ZeRO Stage 1/2 optimizer steps.
+    Disable only when gradient clipping is off, the dedicated ZeRO-1 BF16 optimizer is not selected,
+    and callers do not use ``get_global_grad_norm()``.
     """
 
     load_from_fp32_weights: bool = True
@@ -306,6 +313,14 @@ class DeepSpeedZeroConfig(DeepSpeedConfigModel):
     Performance benefit grows with gradient accumulation steps (more copying
     between optimizer steps) or GPU count (increased parallelism).
     """
+
+    parameter_alignment: bool = False
+    """
+    Pad ZeRO Stage 1 and 2 flat buffers between parameters so each parameter
+    starts at a 16-byte-aligned address. This is disabled by default because
+    the padding increases flat-buffer and optimizer-state memory usage.
+    """
+
     zero_hpz_partition_size: int = Field(1, ge=0)
     """
     Number of ranks in zero parameters partitioning secondary group
@@ -327,20 +342,6 @@ class DeepSpeedZeroConfig(DeepSpeedConfigModel):
     Boolean indicating whether to use quantized zero gradients
     for efficient all_2_all_reduce comm
     """
-    zeropp_loco_param: Optional[Dict[str, Any]] = None
-    """
-    This dictionary contains parameters for using LoCo-Zero++, with two key parameters:
-    - `err_beta`: A coefficient for the moving average of quantization errors before and after gradient computation.
-    It ranges between 0 and 1, with a default value of 0.8.
-    - `reset_T`: The number of steps after which the moving-average error buffer is cleared. The default value is 1024.
-    These parameters can be adjusted based on performance needs. Example configuration in ds config:
-    "zeropp_loco_param": { "err_beta": 0.8, "reset_T": 1024 }.
-    See LoCo paper for more details: (https://arxiv.org/abs/2407.04480).
-    """
-
-    mics_shard_size: int = Field(-1, json_schema_extra={"new_param": "mics_shard_size"})
-
-    mics_hierarchical_params_gather: bool = False
 
     memory_efficient_linear: bool = True
     """
@@ -383,6 +384,12 @@ class DeepSpeedZeroConfig(DeepSpeedConfigModel):
     def overlap_comm_valid(self):
         if self.overlap_comm is None:
             self.overlap_comm = self.stage == ZeroStageEnum.weights
+        return self
+
+    @model_validator(mode="after")
+    def compute_grad_norm_valid(self):
+        if not self.compute_grad_norm and self.stage not in (ZeroStageEnum.optimizer_states, ZeroStageEnum.gradients):
+            raise ValueError("compute_grad_norm=false is supported only with ZeRO Stage 1 or 2")
         return self
 
     @model_validator(mode="after")
