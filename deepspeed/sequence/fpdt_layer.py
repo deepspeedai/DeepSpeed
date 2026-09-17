@@ -358,8 +358,8 @@ class _FPDTGPUAttentionImpl_(torch.autograd.Function):
         del grad_output
 
         dq = [torch.zeros(global_q[0].shape, dtype=torch.float, device=device) for _ in range(num_chunks)]
-        dk = [torch.zeros(global_q[0].shape, dtype=torch.float, device=device) for _ in range(num_chunks)]
-        dv = [torch.zeros(global_q[0].shape, dtype=torch.float, device=device) for _ in range(num_chunks)]
+        dk = [torch.zeros(global_k[0].shape, dtype=torch.float, device=device) for _ in range(num_chunks)]
+        dv = [torch.zeros(global_v[0].shape, dtype=torch.float, device=device) for _ in range(num_chunks)]
 
         grad_qkv_linear_weight = torch.zeros(qkv_linear_weight.shape,
                                              device=qkv_linear_weight.device,

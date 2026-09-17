@@ -719,6 +719,7 @@ config and calling ``prepare_autosp_inputs()`` to prepare inputs before each for
 .. note::
    AutoSP requires ZeRO stage 0 (no ZeRO optimization). Using AutoSP with ZeRO stages 1, 2, or 3 is not currently supported.
    AutoSP also requires ``torch.nn.functional.scaled_dot_product_attention()`` as the attention backend.
+   The sequence length and every SDPA Q/K/V head count must be divisible by ``sequence_parallel_size``.
 
 Input Preparation
 ~~~~~~~~~~~~~~~~~
@@ -740,6 +741,7 @@ automatic sharding:
     )
 
 This serves as a hint to the compiler to know which inputs should be sharded across which dimension.
+``seq_dim`` is preserved in the compiler metadata, so both batch-first and sequence-first input layouts are supported.
 
 Memory Optimization
 ~~~~~~~~~~~~~~~~~~~

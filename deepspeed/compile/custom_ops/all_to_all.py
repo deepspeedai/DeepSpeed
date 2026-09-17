@@ -3,6 +3,8 @@
 
 # DeepSpeed Team
 
+from typing import Tuple
+
 import torch
 import deepspeed.comm as dist
 from torch.utils._sympy.functions import FloorDiv
@@ -31,6 +33,9 @@ def all_to_all(
 
     if scatter_idx == 1:
         N, local_S = dim1, dim2
+        if N % sp_size() != 0:
+            raise ValueError(f"AutoSP requires the Q/K/V head count ({N}) to be divisible by "
+                             f"sequence_parallel_size ({sp_size()})")
         input_t = input.reshape(B, sp_size(), N // sp_size(), local_S, H)
         input_t = input_t.permute(1, 0, 2, 3, 4).contiguous()
 
@@ -90,3 +95,58 @@ def _all_to_all_backward(ctx, grad):
 
 
 torch.library.register_autograd("autosp::all_to_all", _all_to_all_backward, setup_context=_all_to_all_backward_setup)
+
+
+@torch.library.custom_op("autosp::all_gather_sequence", mutates_args=())
+def all_gather_sequence(input: torch.Tensor, dim: int) -> torch.Tensor:
+    """Gather a local attention-mask dimension across the current SP group."""
+    assert is_setup(), 'Incorrect initialization of SP/DP mesh.'
+    gid = dist.get_rank() // sp_size()
+    group = get_group(gid)
+    outputs = [torch.empty_like(input) for _ in range(sp_size())]
+    dist.all_gather(outputs, input, group=group)
+    return torch.cat(outputs, dim=dim)
+
+
+@torch.library.register_fake("autosp::all_gather_sequence")
+def all_gather_sequence_fake(input: torch.Tensor, dim: int):
+    output_shape = list(input.shape)
+    output_shape[dim] *= sp_size()
+    return input.new_empty(output_shape)
+
+
+@torch.library.custom_op("autosp::aggregate_loss", mutates_args=())
+def aggregate_loss(loss: torch.Tensor, valid_tokens: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Return the valid-token-weighted mean loss on every SP rank."""
+    assert is_setup(), 'Incorrect initialization of SP/DP mesh.'
+    gid = dist.get_rank() // sp_size()
+    group = get_group(gid)
+    finite_loss = torch.where(valid_tokens > 0, loss, torch.zeros_like(loss))
+    total = finite_loss * valid_tokens.to(loss.dtype)
+    total_tokens = valid_tokens.clone()
+    dist.all_reduce(total, group=group)
+    dist.all_reduce(total_tokens, group=group)
+    weight = valid_tokens.to(loss.dtype) / total_tokens.clamp_min(1).to(loss.dtype)
+    return total / total_tokens.clamp_min(1).to(loss.dtype), weight
+
+
+@torch.library.register_fake("autosp::aggregate_loss")
+def aggregate_loss_fake(loss: torch.Tensor, valid_tokens: torch.Tensor):
+    return torch.empty_like(loss), torch.empty_like(loss)
+
+
+def _aggregate_loss_backward_setup(ctx, inputs, output):
+    _, weight = output
+    ctx.mark_non_differentiable(weight)
+    ctx.save_for_backward(weight)
+
+
+def _aggregate_loss_backward(ctx, grad_loss, grad_weight):
+    del grad_weight
+    (weight, ) = ctx.saved_tensors
+    return grad_loss * weight, None
+
+
+torch.library.register_autograd("autosp::aggregate_loss",
+                                _aggregate_loss_backward,
+                                setup_context=_aggregate_loss_backward_setup)
