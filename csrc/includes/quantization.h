@@ -52,36 +52,6 @@ void launch_swizzled_quant(int8_t* q_data,
                            int devices_per_node,
                            cudaStream_t stream);
 
-void launch_loco_swizzled_quant(int8_t* quantized_data,
-                                float* quantized_scales,
-                                const __half* uncompressed_data,
-                                __half* error_feedback,
-                                const float err_beta,
-                                int num_bits,
-                                quantize::Type quant_type,
-                                int groups,
-                                int elems_per_group,
-                                int pipelining,
-                                int nodes,
-                                int devices_per_node,
-                                cudaStream_t stream);
-
-void launch_loco_dequant_reduce(int8_t* reduced_data,
-                                float* reduced_scales,
-                                const int8_t* input_data,
-                                const float* input_scales,
-                                int num_gpus,
-                                int num_bits,
-                                quantize::Type quant_type,
-                                int out_groups,
-                                int elems_per_out_group,
-                                int elems_per_in_tensor,
-                                int groups_per_in_tensor,
-                                int elems_per_in_group,
-                                __half2* error_feedback,
-                                const float err_beta,
-                                cudaStream_t stream);
-
 void launch_dequant_reduce(int8_t* reduced_data,
                            float* reduced_scales,
                            const int8_t* input_data,
@@ -95,31 +65,6 @@ void launch_dequant_reduce(int8_t* reduced_data,
                            int groups_per_in_tensor,
                            int elems_per_in_group,
                            cudaStream_t stream);
-
-template <typename T>
-void launch_fake_quantize_kernel(T* vals,
-                                 int total_count,
-                                 int group_num,
-                                 int num_bits,
-                                 cudaStream_t stream);
-template <typename T>
-void launch_sr_fake_quantize_kernel(T* vals,
-                                    int total_count,
-                                    int group_num,
-                                    int num_bits,
-                                    cudaStream_t stream);
-template <typename T>
-void launch_fake_quantize_kernel_asym(T* vals,
-                                      int total_count,
-                                      int group_num,
-                                      int num_bits,
-                                      cudaStream_t stream);
-template <typename T>
-void launch_sr_fake_quantize_kernel_asym(T* vals,
-                                         int total_count,
-                                         int group_num,
-                                         int num_bits,
-                                         cudaStream_t stream);
 
 void launch_dequantize_int4_to_half_experimental(uint8_t* data_in,
                                                  half* data_out,
