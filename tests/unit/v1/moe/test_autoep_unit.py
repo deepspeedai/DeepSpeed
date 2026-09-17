@@ -1,0 +1,1926 @@
+# Copyright (c) DeepSpeed Team.
+# SPDX-License-Identifier: Apache-2.0
+
+# DeepSpeed Team
+"""Compact critical-path tests for AutoEP."""
+
+import ast
+import inspect
+from collections import OrderedDict
+from types import SimpleNamespace
+
+import pytest
+import torch
+import torch.nn as nn
+
+import deepspeed.runtime.engine as ds_engine
+import deepspeed.runtime.zero.stage3 as zero_stage3
+import deepspeed.moe.ep_repack as ep_repack
+import deepspeed.module_inject.auto_ep_layer as auto_ep_layer
+from deepspeed.module_inject.auto_ep import AutoEP, _resolve_route_scale
+from deepspeed.module_inject.auto_ep_config import (
+    AutoEPConfig,
+    MoELayerSpec,
+    PRESET_MODELS,
+    fill_autoep_config_from_hf,
+    parse_autoep_config,
+    validate_autoep_config,
+    validate_autoep_post_detection,
+)
+from deepspeed.module_inject.auto_ep_layer import (
+    AutoEPMoELayer,
+    SplitPlan,
+    apply_scores_before_experts_if_enabled,
+    combine_from_routed,
+    compute_split_plan,
+    compute_split_plan_from_expert_indices,
+    resolve_score_apply_mode,
+)
+from deepspeed.module_inject.auto_ep_preset_adapters import get_preset_adapter
+from deepspeed.module_inject.auto_ep_presets.registry import (
+    preset_name_for_hf_model_type,
+    unsupported_preset_for_hf_model_type,
+)
+from deepspeed.moe.layer import MoE
+from deepspeed.moe.ep_experts import GroupedExperts
+from deepspeed.moe.ep_repack import repack_expert_weights
+from deepspeed.moe.ep_router import TokenChoiceTopKRouter
+from deepspeed.runtime.engine import DeepSpeedEngine
+from deepspeed.runtime.zero.stage3 import DeepSpeedZeroOptimizer_Stage3
+from deepspeed.utils import groups
+from unit.v1.moe.autoep_test_utils import (
+    MockMoEBlock,
+    MockMoETransformer,
+    UNSUPPORTED_LOAD_BALANCE_VALUES,
+    assert_causal_lm_outputs_close,
+    assert_load_balance_coeff_rejection_message,
+    replace_autoep_layers,
+    skip_unless_transformers_has,
+    state_matched_models,
+    tiny_mixtral_config,
+)
+
+
+def _runtime_config(**kwargs):
+    kwargs.setdefault("use_grouped_mm", False)
+    return AutoEPConfig(**kwargs)
+
+
+def _make_spec(**kwargs):
+    defaults = dict(
+        moe_module_name="model.layers.0.mlp",
+        model_family="mixtral",
+        router_name="gate",
+        experts_name="experts",
+        expert_storage="fused_3d",
+        expert_w1_name="gate_up_proj",
+        expert_w2_name="down_proj",
+        expert_w3_name=None,
+        num_experts=4,
+        top_k=2,
+        hidden_size=64,
+        ffn_hidden_size=128,
+        score_func="softmax",
+        score_apply="post",
+        route_norm=True,
+        gate_bias=False,
+        return_router_logits=False,
+        router_logits_capture_target="none",
+        router_logits_capture_index=None,
+        router_logits_capture_layer_name=None,
+        has_shared_experts=False,
+        shared_experts_name="",
+        shared_experts_gate_name="",
+    )
+    defaults.update(kwargs)
+    return MoELayerSpec(**defaults)
+
+
+def _get_expert_weight_for_test(expert, name):
+    return ep_repack._get_expert_weight(expert, name)
+
+
+def _assert_same_dtype_device(actual, expected):
+    assert actual.dtype == expected.dtype
+    assert actual.device == expected.device
+
+
+def _mark_fake_zero_param(param, full_data, partition_data=None, ds_id=0, name="param"):
+    param.ds_id = ds_id
+    param.ds_shape = torch.Size(full_data.shape)
+    param._autoep_test_full_data = full_data.detach().clone()
+    param._autoep_test_name = name
+    if partition_data is None:
+        partition_data = torch.zeros(1, dtype=full_data.dtype, device=full_data.device)
+    param.data = partition_data.detach().clone()
+    return param
+
+
+class FakeGatheredParameters:
+    calls = []
+
+    def __init__(self, params, modifier_rank=None, fwd_module=None, enabled=True):
+        self.params = list(params)
+        self.modifier_rank = modifier_rank
+        self.enabled = enabled
+        self._saved_data = []
+        FakeGatheredParameters.calls.append({
+            "names": [getattr(param, "_autoep_test_name", f"param{param.ds_id}") for param in self.params],
+            "modifier_rank":
+            modifier_rank,
+            "enabled":
+            enabled,
+        })
+
+    def __enter__(self):
+        if not self.enabled:
+            return
+        for param in self.params:
+            self._saved_data.append((param, param.data))
+            param.data = param._autoep_test_full_data.detach().clone()
+
+    def __exit__(self, *exc):
+        if not self.enabled:
+            return
+        for param, data in self._saved_data:
+            param.data = data
+
+
+class MockSharedExpert(nn.Module):
+
+    def __init__(self, hidden_size=64):
+        super().__init__()
+        self.up_proj = nn.Linear(hidden_size, hidden_size, bias=False)
+        self.gate_proj = nn.Linear(hidden_size, hidden_size, bias=False)
+        self.down_proj = nn.Linear(hidden_size, hidden_size, bias=False)
+
+
+class MockDeepSeekV3Config:
+    model_type = "deepseek_v3"
+    n_routed_experts = 8
+    num_experts_per_tok = 2
+    hidden_size = 64
+    moe_intermediate_size = 128
+    n_group = 4
+    topk_group = 2
+    routed_scaling_factor = 2.5
+
+
+class MockDeepSeekV3Expert(nn.Module):
+
+    def __init__(self, hidden_size=64, ffn_hidden=128):
+        super().__init__()
+        self.gate_proj = nn.Linear(hidden_size, ffn_hidden, bias=False)
+        self.up_proj = nn.Linear(hidden_size, ffn_hidden, bias=False)
+        self.down_proj = nn.Linear(ffn_hidden, hidden_size, bias=False)
+
+
+class MockDeepSeekV3MoEBlock(nn.Module):
+
+    def __init__(self, num_experts=8, ffn_hidden=128, hidden_size=64):
+        super().__init__()
+        self.gate = nn.Linear(hidden_size, num_experts, bias=False)
+        self.experts = nn.ModuleList([MockDeepSeekV3Expert(hidden_size, ffn_hidden) for _ in range(num_experts)])
+        self.shared_experts = MockSharedExpert(hidden_size)
+
+
+class MockDeepSeekV3Transformer(nn.Module):
+
+    def __init__(self, num_layers=2, num_experts=8):
+        super().__init__()
+        self.config = MockDeepSeekV3Config()
+        self.config.n_routed_experts = num_experts
+        self.model = nn.Module()
+        self.model.layers = nn.ModuleList([self._make_layer(num_experts) for _ in range(num_layers)])
+
+    @staticmethod
+    def _make_layer(num_experts):
+        layer = nn.Module()
+        layer.mlp = MockDeepSeekV3MoEBlock(num_experts)
+        return layer
+
+
+class TestAutoEPConfig:
+
+    def test_parse_and_validate_enabled_size_contract(self):
+        disabled = parse_autoep_config({})
+        assert disabled.enabled is False
+        assert disabled.autoep_size == 1
+        assert disabled.validate_folding_routing is False
+        assert disabled.load_balance_coeff is None
+        assert disabled._load_balance_coeff_explicit is False
+
+        config = parse_autoep_config({
+            "enabled": True,
+            "autoep_size": 4,
+            "preset_model": "mixtral",
+            "load_balance_coeff": None,
+            "score_apply": "pre",
+            "route_scale": 2.0,
+            "validate_folding_routing": True,
+        })
+
+        assert config.enabled is True
+        assert config.autoep_size == 4
+        assert config.preset_model == "mixtral"
+        assert config.validate_folding_routing is True
+        assert config.load_balance_coeff is None
+        assert config._load_balance_coeff_explicit is True
+        assert config.score_apply == "pre"
+        assert config.route_scale == 2.0
+        validate_autoep_config(config, world_size=4, pp_size=1, tp_size=1, sp_size=1)
+
+    def test_validate_folding_routing_requires_boolean(self):
+        with pytest.raises(ValueError, match="validate_folding_routing"):
+            validate_autoep_config(AutoEPConfig(enabled=True, validate_folding_routing="true"),
+                                   world_size=1,
+                                   pp_size=1,
+                                   tp_size=1,
+                                   sp_size=1)
+
+    def test_combine_impl_rejects_unknown_value(self):
+        config = parse_autoep_config({"enabled": True, "combine_impl": "triton"})
+        with pytest.raises(ValueError, match="combine_impl must be one of"):
+            validate_autoep_config(config, world_size=1, pp_size=1, tp_size=1, sp_size=1)
+
+    def test_fused_combine_rejects_folded_tensor_parallelism(self):
+        config = parse_autoep_config({
+            "enabled": True,
+            "autoep_size": 2,
+            "combine_impl": "fused_weighted_sum",
+        })
+        with pytest.raises(ValueError, match=r"tensor_parallel\.autotp_size=2"):
+            validate_autoep_config(config, world_size=4, pp_size=1, tp_size=2, sp_size=1)
+
+    def test_fused_combine_rejects_expert_tensor_parallelism(self):
+        config = parse_autoep_config({
+            "enabled": True,
+            "autoep_size": 2,
+            "expert_tensor_parallel_size": 2,
+            "combine_impl": "fused_weighted_sum",
+        })
+        with pytest.raises(ValueError, match="requires expert_tensor_parallel_size=1"):
+            validate_autoep_config(config, world_size=4, pp_size=1, tp_size=1, sp_size=1)
+
+    def test_fused_combine_rejects_deepep(self):
+        config = parse_autoep_config({
+            "enabled": True,
+            "autoep_size": 2,
+            "combine_impl": "fused_weighted_sum",
+            "comm_backend": "deepep",
+            "comm_max_tokens_per_rank": 4096,
+        })
+        with pytest.raises(ValueError, match='cannot be used with comm_backend="deepep"'):
+            validate_autoep_config(config, world_size=2, pp_size=1, tp_size=1, sp_size=1)
+
+    @pytest.mark.parametrize("score_apply, spec_score_apply", [("auto", "pre"), ("pre", "post")])
+    def test_fused_combine_requires_post_score_apply(self, score_apply, spec_score_apply):
+        config = parse_autoep_config({
+            "enabled": True,
+            "combine_impl": "fused_weighted_sum",
+            "score_apply": score_apply,
+        })
+        with pytest.raises(ValueError, match='requires score_apply="post"'):
+            validate_autoep_post_detection(config, [_make_spec(score_apply=spec_score_apply)])
+
+    def test_fused_combine_accepts_the_standard_path(self):
+        config = parse_autoep_config({"enabled": True, "autoep_size": 2, "combine_impl": "fused_weighted_sum"})
+        validate_autoep_config(config, world_size=2, pp_size=1, tp_size=1, sp_size=1)
+        validate_autoep_post_detection(config, [_make_spec(num_experts=4, score_apply="post")])
+
+    @pytest.mark.parametrize("value", UNSUPPORTED_LOAD_BALANCE_VALUES)
+    def test_load_balance_coeff_rejected_at_parse(self, value):
+        with pytest.raises(ValueError) as exc_info:
+            parse_autoep_config({"enabled": True, "load_balance_coeff": value})
+        assert_load_balance_coeff_rejection_message(exc_info.value, value)
+
+    @pytest.mark.parametrize("enabled", [True, False])
+    @pytest.mark.parametrize("value", [0.01, False, "0.01"])
+    def test_load_balance_coeff_rejected_by_validate(self, enabled, value):
+        config = AutoEPConfig(enabled=enabled, load_balance_coeff=value)
+
+        with pytest.raises(ValueError) as exc_info:
+            validate_autoep_config(config, world_size=1, pp_size=1, tp_size=1, sp_size=1)
+        assert_load_balance_coeff_rejection_message(exc_info.value, value)
+
+    def test_ep_size_validation_rejects_invalid_topology(self):
+        validate_autoep_config(AutoEPConfig(enabled=True, autoep_size=2),
+                               world_size=8,
+                               pp_size=1,
+                               tp_size=2,
+                               sp_size=1)
+        with pytest.raises(ValueError, match="must divide the stage size"):
+            validate_autoep_config(AutoEPConfig(enabled=True, autoep_size=3),
+                                   world_size=8,
+                                   pp_size=1,
+                                   tp_size=1,
+                                   sp_size=1)
+        with pytest.raises(ValueError, match="exceeds num_experts"):
+            validate_autoep_post_detection(AutoEPConfig(enabled=True, autoep_size=16), [_make_spec(num_experts=8)])
+
+    def test_expert_tensor_parallel_size_is_parsed_but_limited_to_one(self):
+        config = parse_autoep_config({
+            "enabled": True,
+            "autoep_size": 2,
+            "expert_tensor_parallel_size": 1,
+        })
+        assert config.expert_tensor_parallel_size == 1
+
+        config.expert_tensor_parallel_size = 2
+        with pytest.raises(ValueError, match="expert_tensor_parallel_size=1"):
+            validate_autoep_config(config, world_size=4, pp_size=1, tp_size=1, sp_size=1)
+
+    def test_configure_expert_parallel_uses_engine_mpu_sequence_parallel_size(self, monkeypatch):
+
+        class SequenceParallelMPU:
+
+            def get_model_parallel_world_size(self):
+                return 1
+
+            def get_sequence_parallel_world_size(self):
+                return 2
+
+        class EmptyAutoEP:
+
+            def __init__(self, model, config):
+                pass
+
+            def ep_parser(self):
+                return []
+
+        observed = {}
+
+        def record_validate(config, world_size, pp_size, tp_size, sp_size):
+            observed["validate"] = {
+                "world_size": world_size,
+                "pp_size": pp_size,
+                "tp_size": tp_size,
+                "sp_size": sp_size,
+            }
+
+        def record_create(**kwargs):
+            observed["create"] = kwargs
+
+        monkeypatch.setattr(groups, "mpu", None)
+        monkeypatch.setattr(groups, "_get_sequence_parallel_world_size", lambda: 1)
+        monkeypatch.setattr(groups, "_create_expert_and_data_parallel", record_create)
+        monkeypatch.setattr(groups, "_get_expert_parallel_group", lambda name: object())
+        monkeypatch.setattr(ds_engine.dist, "get_world_size", lambda: 4)
+        monkeypatch.setattr(ds_engine.dist, "get_rank", lambda group=None: 0)
+        monkeypatch.setattr("deepspeed.module_inject.auto_ep.AutoEP", EmptyAutoEP)
+        monkeypatch.setattr("deepspeed.module_inject.auto_ep_config.validate_autoep_config", record_validate)
+
+        engine = object.__new__(DeepSpeedEngine)
+        engine.mpu = SequenceParallelMPU()
+        engine._config = SimpleNamespace(
+            expert_parallel_config=AutoEPConfig(enabled=True, autoep_size=2),
+            tensor_parallel_config=SimpleNamespace(autotp_size=1),
+            use_data_before_expert_parallel_=False,
+            zero_config=SimpleNamespace(offload_optimizer=None, offload_param=None),
+            zero_optimization_stage=0,
+        )
+
+        engine._configure_expert_parallel(model=nn.Module())
+
+        assert groups.mpu is None
+        assert observed["validate"]["sp_size"] == 2
+        assert observed["create"]["mp_size"] == 2
+        assert observed["create"]["mp_mode"] == "sp"
+
+    def test_configure_expert_parallel_rejects_bwc_tensor_model_parallel_mpu(self, monkeypatch):
+
+        class TensorParallelMPU:
+
+            def get_tensor_model_parallel_world_size(self):
+                return 2
+
+        monkeypatch.setattr(groups, "_get_sequence_parallel_world_size", lambda: 1)
+
+        engine = object.__new__(DeepSpeedEngine)
+        engine.mpu = TensorParallelMPU()
+        engine._config = SimpleNamespace(
+            expert_parallel_config=AutoEPConfig(enabled=True, autoep_size=2),
+            tensor_parallel_config=SimpleNamespace(autotp_size=1),
+            use_data_before_expert_parallel_=False,
+        )
+
+        with pytest.raises(ValueError, match="bwc_tensor_model_parallel_world_size=2"):
+            engine._configure_expert_parallel(model=nn.Module())
+
+    def test_autoep_sequence_parallel_size_falls_back_to_groups_helper(self, monkeypatch):
+        monkeypatch.setattr(groups, "_get_sequence_parallel_world_size", lambda: 3)
+
+        engine = object.__new__(DeepSpeedEngine)
+        engine.mpu = object()
+
+        assert engine._autoep_sequence_parallel_world_size() == 3
+
+    def test_zero3_compatibility_gate_rejects_native_moe(self):
+        engine = object.__new__(DeepSpeedEngine)
+        engine.__dict__["module"] = nn.Sequential(MoE(hidden_size=4, expert=nn.Linear(4, 4), num_experts=1))
+        engine.has_moe_layers = True
+        engine.sequence_parallel_size = 1
+        engine._config = SimpleNamespace(
+            tensor_parallel_config=SimpleNamespace(autotp_size=1),
+            expert_parallel_config=AutoEPConfig(enabled=True, autoep_size=1),
+        )
+
+        with pytest.raises(AssertionError, match="Native DeepSpeed MoE"):
+            engine._validate_zero3_moe_compatibility()
+
+    def test_zero3_compatibility_gate_allows_constrained_autoep(self):
+        model = MockMoETransformer(num_layers=1)
+        replace_autoep_layers(model, "mixtral")
+        engine = object.__new__(DeepSpeedEngine)
+        engine.__dict__["module"] = model
+        engine.has_moe_layers = True
+        engine.sequence_parallel_size = 1
+        engine.zero_quantized_gradients = lambda: False
+        engine._config = SimpleNamespace(
+            tensor_parallel_config=SimpleNamespace(autotp_size=1),
+            expert_parallel_config=AutoEPConfig(enabled=True, autoep_size=1),
+        )
+
+        engine._validate_zero3_moe_compatibility()
+
+    def test_zero3_compatibility_gate_rejects_sequence_parallel(self):
+        model = MockMoETransformer(num_layers=1)
+        replace_autoep_layers(model, "mixtral")
+        engine = object.__new__(DeepSpeedEngine)
+        engine.__dict__["module"] = model
+        engine.has_moe_layers = True
+        engine.sequence_parallel_size = 2
+        engine.zero_quantized_gradients = lambda: False
+        engine._config = SimpleNamespace(
+            tensor_parallel_config=SimpleNamespace(autotp_size=1),
+            expert_parallel_config=AutoEPConfig(enabled=True, autoep_size=1),
+        )
+
+        with pytest.raises(AssertionError, match="sequence parallelism"):
+            engine._validate_zero3_moe_compatibility()
+
+    def test_zero3_compatibility_gate_rejects_active_autotp(self):
+        model = MockMoETransformer(num_layers=1)
+        replace_autoep_layers(model, "mixtral")
+        engine = object.__new__(DeepSpeedEngine)
+        engine.__dict__["module"] = model
+        engine.has_moe_layers = True
+        engine.sequence_parallel_size = 1
+        engine.zero_quantized_gradients = lambda: False
+        engine._config = SimpleNamespace(
+            tensor_parallel_config=SimpleNamespace(autotp_size=2),
+            expert_parallel_config=AutoEPConfig(enabled=True, autoep_size=1),
+        )
+
+        with pytest.raises(AssertionError, match="AutoTP"):
+            engine._validate_zero3_moe_compatibility()
+
+    def test_zero3_compatibility_gate_rejects_quantized_gradients(self):
+        model = MockMoETransformer(num_layers=1)
+        replace_autoep_layers(model, "mixtral")
+        engine = object.__new__(DeepSpeedEngine)
+        engine.__dict__["module"] = model
+        engine.has_moe_layers = True
+        engine.sequence_parallel_size = 1
+        engine.zero_quantized_gradients = lambda: True
+        engine._config = SimpleNamespace(
+            tensor_parallel_config=SimpleNamespace(autotp_size=1),
+            expert_parallel_config=AutoEPConfig(enabled=True, autoep_size=1),
+        )
+
+        with pytest.raises(AssertionError, match="zero_quantized_gradients"):
+            engine._validate_zero3_moe_compatibility()
+
+    def test_zero3_compatibility_gate_rejects_hpzero(self):
+        model = MockMoETransformer(num_layers=1)
+        replace_autoep_layers(model, "mixtral")
+        engine = object.__new__(DeepSpeedEngine)
+        engine.__dict__["module"] = model
+        engine.has_moe_layers = True
+        engine.sequence_parallel_size = 1
+        engine.zero_quantized_gradients = lambda: False
+        engine._config = SimpleNamespace(
+            zero_config=SimpleNamespace(zero_hpz_partition_size=2),
+            tensor_parallel_config=SimpleNamespace(autotp_size=1),
+            expert_parallel_config=AutoEPConfig(enabled=True, autoep_size=1),
+        )
+
+        with pytest.raises(AssertionError, match="hpZeRO"):
+            engine._validate_zero3_moe_compatibility()
+
+    def test_autoep_layer_marks_zero3_param_placement_families(self):
+        model = MockMoETransformer(num_layers=1)
+        replace_autoep_layers(model, "mixtral")
+        autoep_layer = next(module for module in model.modules() if isinstance(module, AutoEPMoELayer))
+
+        for param in autoep_layer.experts.parameters():
+            assert param.ds_zero_placement_family == "autoep_expert"
+            assert param.ds_zero_partition_group_name == autoep_layer.ep_group_name
+
+        for param in autoep_layer.router.parameters():
+            assert param.ds_zero_placement_family == "replicated"
+
+    def test_zero3_checkpoint_metadata_includes_partition_group_ranks(self):
+        optimizer = object.__new__(DeepSpeedZeroOptimizer_Stage3)
+        param = nn.Parameter(torch.empty(1))
+        param.ds_zero_placement_family = "autoep_expert"
+        param.ds_zero_partition_group_name = "ep_size_2"
+        optimizer.fp16_groups = [[param]]
+        optimizer._get_sub_group_partition_count = lambda _: 2
+        optimizer._get_sub_group_partition_rank = lambda _: 1
+        optimizer._get_sub_group_partition_ranks = lambda _: [1, 3]
+
+        metadata = optimizer._zero3_partition_group_metadata()
+
+        assert metadata == [{
+            "sub_group": 0,
+            "partition_count": 2,
+            "partition_rank": 1,
+            "partition_ranks": [1, 3],
+            "families": ["autoep_expert"],
+            "group_names": ["ep_size_2"],
+        }]
+
+        param.ds_zero_placement_family = "replicated"
+        param.ds_zero_partition_group_name = None
+        assert optimizer._zero3_partition_group_metadata() is None
+
+    def test_zero3_cpu_offload_grad_norm_reduces_autoep_expert_parallel_group(self, monkeypatch):
+        optimizer = object.__new__(DeepSpeedZeroOptimizer_Stage3)
+        param = nn.Parameter(torch.empty(1))
+        param.ds_zero_placement_family = "autoep_expert"
+        param.ds_zero_partition_group_name = "ep_size_2"
+        optimizer.model_parallel_rank = 0
+        optimizer.norm_for_param_grads = {7: 3.0}
+        optimizer.get_param_id = lambda _: 7
+        optimizer._assert_same_partition_group = lambda _: None
+        optimizer._get_param_partition_group = lambda _: "expert_data_parallel"
+        optimizer._model_parallel_all_reduce = lambda tensor, op: None
+        optimizer._autoep_expert_parallel_group = lambda _: "expert_parallel"
+        calls = []
+
+        def fake_all_reduce(tensor, op=None, group=None):
+            calls.append(group)
+
+        class FakeAccelerator:
+
+            def FloatTensor(self, values):
+                return torch.FloatTensor(values)
+
+        monkeypatch.setattr(zero_stage3, "get_accelerator", lambda: FakeAccelerator())
+        monkeypatch.setattr(zero_stage3.dist, "all_reduce", fake_all_reduce)
+
+        norm = optimizer.complete_grad_norm_calculation_for_cpu_offload([param])
+
+        assert calls == ["expert_data_parallel", "expert_parallel"]
+        assert torch.isfinite(norm)
+
+    def test_zero3_autoep_reduce_scatter_grads_average_by_global_dp(self, monkeypatch):
+        optimizer = object.__new__(DeepSpeedZeroOptimizer_Stage3)
+        optimizer.dp_process_group = "global_data_parallel"
+        optimizer.dtype = torch.float32
+        optimizer.gradient_accumulation_dtype = torch.float32
+        optimizer.postscale_gradients = True
+        optimizer.gradient_predivide_factor = 1.0
+        optimizer.all2all_process_group = None
+        optimizer._assert_same_partition_group = lambda _: None
+        optimizer._get_param_partition_group = lambda _: "expert_data_parallel"
+        optimizer._autoep_expert_parallel_group = lambda _: "expert_parallel"
+        param = nn.Parameter(torch.ones(4))
+        param.grad = torch.ones(4)
+
+        class FakeAccelerator:
+
+            def device_count(self):
+                return 4
+
+        def fake_get_world_size(group=None):
+            return 2 if group == "expert_data_parallel" else 4
+
+        def fake_reduce_scatter(grads, process_group):
+            assert process_group == "expert_data_parallel"
+            return [torch.full((2, ), 8.0)]
+
+        monkeypatch.setattr(zero_stage3, "get_accelerator", lambda: FakeAccelerator())
+        monkeypatch.setattr(zero_stage3.dist, "get_world_size", fake_get_world_size)
+        monkeypatch.setattr(zero_stage3, "reduce_scatter_coalesced", fake_reduce_scatter)
+
+        grad_partitions = optimizer._DeepSpeedZeroOptimizer_Stage3__avg_scatter_grads([param], torch.float32)
+
+        torch.testing.assert_close(grad_partitions[0], torch.full((2, ), 4.0))
+
+    def test_zero3_autoep_contiguous_grads_average_by_global_dp(self, monkeypatch):
+        optimizer = object.__new__(DeepSpeedZeroOptimizer_Stage3)
+        optimizer.dp_process_group = "global_data_parallel"
+        optimizer.ipg_buckets = {torch.float32: SimpleNamespace(params=[], process_group="expert_data_parallel")}
+        optimizer.postscale_gradients = True
+        optimizer.gradient_predivide_factor = 1.0
+        optimizer.sequence_parallel_size = 1
+        optimizer.gradient_accumulation_dtype = torch.float32
+        optimizer._assert_same_partition_group = lambda _: None
+        optimizer._autoep_expert_parallel_group = lambda _: "expert_parallel"
+        optimizer._apply_distributed_muon_update = lambda communication_data_type, buffer: None
+        param = nn.Parameter(torch.empty(2))
+        param.grad = torch.zeros(2)
+        param.partition_numel = lambda: 1
+        optimizer.ipg_buckets[torch.float32].params = [param]
+
+        def fake_get_world_size(group=None):
+            return 2 if group == "expert_data_parallel" else 4
+
+        def fake_all_reduce(tensor, group=None):
+            assert group == "expert_data_parallel"
+            tensor.mul_(2)
+
+        monkeypatch.setattr(zero_stage3.dist, "get_world_size", fake_get_world_size)
+        monkeypatch.setattr(zero_stage3.dist, "get_rank", lambda group=None: 0)
+        monkeypatch.setattr(zero_stage3.dist, "all_reduce", fake_all_reduce)
+
+        grad_partitions = optimizer._DeepSpeedZeroOptimizer_Stage3__avg_scatter_contiguous_grads(
+            torch.tensor([4.0, 8.0]), torch.float32)
+
+        torch.testing.assert_close(grad_partitions[0], torch.tensor([2.0]))
+
+    def test_pipeline_load_module_state_dict_accepts_autoep_zero3_fetch_kwarg(self):
+        from deepspeed.runtime.pipe.engine import PipelineEngine
+
+        signature = inspect.signature(PipelineEngine.load_module_state_dict)
+
+        assert "z3_params_to_fetch" in signature.parameters
+        assert "allowed_missing_keys" in signature.parameters
+
+    def test_load_module_state_dict_nonstrict_keeps_nonstrict_semantics_with_allowed_missing_keys(self):
+        engine = object.__new__(DeepSpeedEngine)
+        # bypass nn.Module.__setattr__, which requires Module.__init__
+        object.__setattr__(engine, "module", nn.Linear(2, 2))
+        checkpoint = {"module": {"unexpected_key": torch.zeros(1)}}
+
+        # strict=False must keep the documented non-strict load semantics even
+        # when AutoEP expert keys are allowed to be missing.
+        engine.load_module_state_dict(checkpoint, strict=False, allowed_missing_keys=["weight"])
+
+        with pytest.raises(RuntimeError, match="outside AutoEP expert"):
+            engine.load_module_state_dict(checkpoint, strict=True, allowed_missing_keys=["weight"])
+
+    def test_resolve_zero3_param_placement_rejects_pre_partitioned_expert_on_wrong_group(self, monkeypatch):
+        engine = object.__new__(DeepSpeedEngine)
+        model = nn.Linear(2, 2, bias=False)
+        # bypass nn.Module.__setattr__, which requires Module.__init__
+        object.__setattr__(engine, "module", model)
+
+        expert_group = object()
+        other_group = object()
+        monkeypatch.setattr(ds_engine.groups, "_get_expert_data_parallel_group", lambda name: expert_group)
+        monkeypatch.setattr(ds_engine.dist, "get_rank", lambda group=None: 0)
+        monkeypatch.setattr(ds_engine.dist, "get_world_size", lambda group=None: 1)
+        monkeypatch.setattr(ds_engine.dist,
+                            "get_all_ranks_from_group",
+                            lambda group: [0] if group is expert_group else [0, 1],
+                            raising=False)
+
+        param = model.weight
+        param.ds_zero_placement_family = "autoep_expert"
+        param.ds_zero_partition_group_name = "ep_size_2"
+        param.ds_id = 0
+        param.ds_process_group = other_group
+
+        with pytest.raises(AssertionError, match="already ZeRO-partitioned over a non-expert process group"):
+            engine._resolve_zero3_param_placement()
+
+        # A pre-partitioned expert param over the matching group is accepted
+        # and keeps metadata derived from its actual partition group.
+        param.ds_process_group = expert_group
+        engine._resolve_zero3_param_placement()
+        assert param.ds_zero_partition_process_group is expert_group
+
+    def test_autoep_zero3_16bit_export_guard_directs_to_universal_conversion(self):
+        engine = object.__new__(DeepSpeedEngine)
+        engine.zero_optimization_partition_weights = lambda: True
+        engine._has_autoep_layers = lambda: True
+
+        with pytest.raises(NotImplementedError, match="ds_to_universal.py"):
+            engine._raise_if_autoep_zero3_consolidated_export("save_16bit_model")
+
+    def test_universal_converter_detects_zero3_partitioned_autoep_model_state(self, tmp_path):
+        from deepspeed.checkpoint.constants import (
+            AUTOEP_LAYERS_KEY,
+            AUTOEP_ZERO3_EXPERT_STATE_FORMAT_VERSION,
+            AUTOEP_ZERO3_EXPERT_STATE_FORMAT_VERSION_KEY,
+            AUTOEP_ZERO3_EXPERT_STATE_FORMAT_KEY,
+            AUTOEP_ZERO3_PARTITIONED_EXPERT_STATE_FORMAT,
+        )
+        from deepspeed.checkpoint.ds_to_universal import (
+            _autoep_expert_param_names_by_rank,
+            _get_zero3_model_state_files,
+            _uses_zero3_partitioned_autoep_metadata,
+        )
+
+        zero3_model_file = tmp_path / "zero_pp_rank_0_mp_rank_00_model_states.pt"
+        expert_file = tmp_path / "layer_0_expert_0_mp_rank_00_model_states.pt"
+        metadata = [{
+            "moe_layer_id": 0,
+            "module_path": "model.layers.0.mlp",
+            "num_experts": 4,
+            "num_local_experts": 2,
+            "ep_size": 2,
+            "expert_key_prefix": "model.layers.0.mlp.experts",
+            AUTOEP_ZERO3_EXPERT_STATE_FORMAT_KEY: AUTOEP_ZERO3_PARTITIONED_EXPERT_STATE_FORMAT,
+            AUTOEP_ZERO3_EXPERT_STATE_FORMAT_VERSION_KEY: AUTOEP_ZERO3_EXPERT_STATE_FORMAT_VERSION,
+            "ep_group_name": "ep_size_2",
+            "ep_rank": 0,
+            "expert_data_parallel_rank": 0,
+            "expert_data_parallel_world_size": 1,
+            "global_expert_start": 0,
+            "global_expert_end": 2,
+        }]
+        torch.save({AUTOEP_LAYERS_KEY: metadata}, zero3_model_file)
+        torch.save({"expert": torch.empty(1)}, expert_file)
+
+        model_files = _get_zero3_model_state_files(str(tmp_path))
+        expert_param_names, metadata_by_rank = _autoep_expert_param_names_by_rank(model_files)
+
+        assert model_files == [str(zero3_model_file)]
+        assert expert_param_names == {
+            "model.layers.0.mlp.experts.w1",
+            "model.layers.0.mlp.experts.w2",
+            "model.layers.0.mlp.experts.w3",
+        }
+        assert _uses_zero3_partitioned_autoep_metadata(metadata_by_rank[0])
+
+    def test_universal_stage3_extract_accepts_tuple_param_shapes(self, tmp_path):
+        from deepspeed.checkpoint.constants import OPTIMIZER_STATE_DICT
+        from deepspeed.checkpoint.ds_to_universal import extract_zero_shards_stage3
+
+        optim_file = tmp_path / "zero_pp_rank_0_mp_rank_00_optim_states.pt"
+        torch.save(
+            {
+                OPTIMIZER_STATE_DICT: {
+                    "optimizer_state_dict": {
+                        "state": [{
+                            "exp_avg": torch.arange(6, dtype=torch.float32),
+                            "exp_avg_sq": torch.arange(6, dtype=torch.float32) + 10,
+                        }]
+                    },
+                    "fp32_flat_groups": [torch.arange(6, dtype=torch.float32) + 20],
+                }
+            },
+            optim_file,
+        )
+
+        temp_dir = tmp_path / "tmp"
+        # optim_files_grid[tp][dp] and param_shapes_grid[tp] (= PARAM_SHAPES, a list of
+        # sub-group dicts), work item (tp_index, dp_index).
+        extract_zero_shards_stage3([[str(optim_file)]], [[OrderedDict([("dense.weight", (2, 3))])]], 1, str(temp_dir),
+                                   (0, 0))
+
+        fp32_fragment = torch.load(temp_dir / "dense.weight" / "0" / "fp32.00", weights_only=False)
+        exp_avg_fragment = torch.load(temp_dir / "dense.weight" / "0" / "exp_avg.00", weights_only=False)
+        torch.testing.assert_close(fp32_fragment, torch.arange(6, dtype=torch.float32) + 20)
+        torch.testing.assert_close(exp_avg_fragment, torch.arange(6, dtype=torch.float32))
+
+    def test_zero_to_fp32_rejects_zero3_partitioned_autoep_checkpoint(self, tmp_path):
+        from deepspeed.checkpoint.constants import (
+            AUTOEP_LAYERS_KEY,
+            AUTOEP_ZERO3_EXPERT_STATE_FORMAT_VERSION,
+            AUTOEP_ZERO3_EXPERT_STATE_FORMAT_VERSION_KEY,
+            AUTOEP_ZERO3_EXPERT_STATE_FORMAT_KEY,
+            AUTOEP_ZERO3_PARTITIONED_EXPERT_STATE_FORMAT,
+            BUFFER_NAMES,
+            PARAM_SHAPES,
+        )
+        from deepspeed.utils.zero_to_fp32 import _raise_if_autoep_zero3_partitioned_checkpoint
+
+        model_file = tmp_path / "zero_pp_rank_0_mp_rank_00_model_states.pt"
+        torch.save(
+            {
+                BUFFER_NAMES: [],
+                PARAM_SHAPES: [],
+                "module": {},
+                "shared_params": {},
+                AUTOEP_LAYERS_KEY: [{
+                    "moe_layer_id": 0,
+                    "module_path": "model.layers.0.mlp",
+                    "num_experts": 4,
+                    "num_local_experts": 2,
+                    "ep_size": 2,
+                    "expert_key_prefix": "model.layers.0.mlp.experts",
+                    AUTOEP_ZERO3_EXPERT_STATE_FORMAT_KEY: AUTOEP_ZERO3_PARTITIONED_EXPERT_STATE_FORMAT,
+                    AUTOEP_ZERO3_EXPERT_STATE_FORMAT_VERSION_KEY: AUTOEP_ZERO3_EXPERT_STATE_FORMAT_VERSION,
+                    "ep_group_name": "ep_size_2",
+                    "ep_rank": 0,
+                    "expert_data_parallel_rank": 0,
+                    "expert_data_parallel_world_size": 1,
+                    "global_expert_start": 0,
+                    "global_expert_end": 2,
+                }],
+            },
+            model_file,
+        )
+
+        with pytest.raises(NotImplementedError, match="ds_to_universal.py"):
+            _raise_if_autoep_zero3_partitioned_checkpoint([str(model_file)])
+
+        # parse_model_states is the guard point used by
+        # _get_fp32_state_dict_from_zero_checkpoint, which loads each model
+        # state file only once.
+        from deepspeed.utils.zero_to_fp32 import parse_model_states
+        with pytest.raises(NotImplementedError, match="ds_to_universal.py"):
+            parse_model_states([str(model_file)])
+
+    def test_preset_registry_core_contracts(self):
+        assert set(PRESET_MODELS) == {"mixtral", "qwen3_moe", "qwen3_5_moe", "deepseek_v2", "deepseek_v3"}
+        assert preset_name_for_hf_model_type("mixtral") == "mixtral"
+        assert preset_name_for_hf_model_type("qwen2_moe") == "qwen3_moe"
+        assert preset_name_for_hf_model_type("llama4_text") is None
+
+        qwen35 = unsupported_preset_for_hf_model_type("qwen3_5_moe")
+        assert qwen35 is not None
+        assert "qwen3_5_moe_text" in qwen35[1].unsupported_hf_model_type_notes["qwen3_5_moe"]
+        assert PRESET_MODELS["deepseek_v2"].supports_expert_bias is False
+        assert PRESET_MODELS["deepseek_v3"].unsupported_router_bias_names == ()
+
+    def test_fill_autoep_config_from_hf_defaults(self):
+        config = AutoEPConfig(enabled=True, autoep_size=2)
+
+        fill_autoep_config_from_hf(config, MockDeepSeekV3Config())
+
+        assert config.num_expert_groups == 4
+        assert config.num_limited_groups == 2
+        assert config.route_scale == pytest.approx(2.5)
+
+    def test_fill_autoep_config_from_hf_preserves_explicit_values(self):
+        config = AutoEPConfig(enabled=True,
+                              autoep_size=2,
+                              num_expert_groups=8,
+                              num_limited_groups=1,
+                              routed_scaling_factor=3.0,
+                              route_scale=3.0)
+
+        fill_autoep_config_from_hf(config, MockDeepSeekV3Config())
+
+        assert config.num_expert_groups == 8
+        assert config.num_limited_groups == 1
+        assert config.route_scale == pytest.approx(3.0)
+
+    @pytest.mark.parametrize("value", ["2.5", True, float("nan"), float("inf")])
+    def test_invalid_routed_scaling_factor_rejected(self, value):
+        with pytest.raises(ValueError, match="routed_scaling_factor"):
+            _resolve_route_scale(AutoEPConfig(enabled=True, routed_scaling_factor=value), None)
+
+
+class TestRoutingAndLayerSemantics:
+
+    def test_router_route_scale_and_group_limited_routing(self):
+        base = TokenChoiceTopKRouter(64, 8, 4, 2, 2, "softmax", False, 1.0, False)
+        scaled = TokenChoiceTopKRouter(64, 8, 4, 2, 2, "softmax", False, 2.5, False)
+        scaled.load_state_dict(base.state_dict())
+        x = torch.randn(50, 64)
+
+        base_scores, base_experts, base_counts = base(x)
+        scaled_scores, scaled_experts, scaled_counts = scaled(x)
+
+        assert torch.equal(scaled_experts, base_experts)
+        assert torch.allclose(scaled_scores, base_scores * 2.5, atol=1e-5)
+        assert torch.equal(scaled_counts, base_counts)
+        assert base_counts.shape == (8, )
+
+    def test_grouped_experts(self):
+        experts = GroupedExperts(dim=64, hidden_dim=128, num_experts=4, use_grouped_mm=False)
+        nn.init.normal_(experts.w1, std=0.02)
+        nn.init.normal_(experts.w2, std=0.02)
+        nn.init.normal_(experts.w3, std=0.02)
+        out = experts(torch.randn(8, 64), torch.tensor([2, 2, 2, 2]))
+        assert out.shape == (8, 64)
+        assert not torch.isnan(out).any()
+
+    def test_score_application_and_combine(self):
+        x = torch.randn(4, 8)
+        scores = torch.tensor([0.25, 0.5, 0.75, 1.0])
+        expected = x.float() * scores.reshape(-1, 1)
+        torch.testing.assert_close(apply_scores_before_experts_if_enabled(x, scores, "pre"), expected.to(x.dtype))
+
+        spec = _make_spec(score_apply="post")
+        assert resolve_score_apply_mode(spec, "auto") == "post"
+        expert_output = torch.ones(4, 8)
+        top_scores = torch.tensor([[0.6, 0.4], [0.7, 0.3]])
+        out = combine_from_routed(expert_output, top_scores, torch.arange(4), 2, "post", "weighted_sum", (1, 2, 8))
+        torch.testing.assert_close(out[0, 0], torch.ones(8))
+
+    def test_autoep_layer_forward_and_expert_bias_rejection(self):
+        source = MockMoEBlock(num_experts=4, ffn_hidden=128, hidden_size=64)
+        layer = AutoEPMoELayer(_make_spec(route_scale=2.5),
+                               source,
+                               ep_size=1,
+                               ep_rank=0,
+                               config=_runtime_config(enabled=True, autoep_size=1))
+        out = layer(torch.randn(2, 8, 64))
+        assert layer._is_autoep_layer is True
+        assert layer.num_experts == 4
+        assert layer.router.route_scale == pytest.approx(2.5)
+        assert out.shape == (2, 8, 64)
+        assert not torch.isnan(out).any()
+
+        with pytest.raises(ValueError, match="load_balance_coeff/expert_bias"):
+            AutoEPMoELayer(_make_spec(model_family="no_bias_family", supports_expert_bias=False),
+                           source,
+                           ep_size=1,
+                           ep_rank=0,
+                           config=AutoEPConfig(enabled=True, autoep_size=1, load_balance_coeff=0.02))
+
+
+SPLIT_PLAN_EP_SIZE = 3
+SPLIT_PLAN_LOCAL_EXPERTS = 2
+SPLIT_PLAN_NUM_EXPERTS = SPLIT_PLAN_EP_SIZE * SPLIT_PLAN_LOCAL_EXPERTS
+
+# Each row is one source rank's flat [E_global] histogram over global experts.
+SPLIT_PLAN_SCENARIOS = {
+    "balanced": [[2, 2, 2, 2, 2, 2], [2, 2, 2, 2, 2, 2], [2, 2, 2, 2, 2, 2]],
+    "severe_skew": [[11, 0, 0, 0, 0, 1], [0, 1, 0, 9, 0, 0], [0, 0, 4, 0, 0, 8]],
+    "zero_token_destination": [[3, 1, 0, 0, 4, 0], [2, 2, 0, 0, 0, 5], [1, 1, 0, 0, 2, 2]],
+    "empty_local_expert": [[0, 4, 3, 1, 0, 6], [0, 2, 1, 1, 0, 3], [0, 5, 2, 2, 0, 1]],
+    "silent_source": [[4, 1, 2, 3, 1, 1], [0, 0, 0, 0, 0, 0], [1, 1, 1, 1, 1, 1]],
+}
+
+
+def _split_plan_counts(scenario):
+    return [torch.tensor(row, dtype=torch.int32) for row in SPLIT_PLAN_SCENARIOS[scenario]]
+
+
+def _split_plan_received(all_counts, ep_rank):
+    """Rows of the matrix rank ``ep_rank`` receives from the counts all-to-all."""
+    return torch.stack([counts.view(SPLIT_PLAN_EP_SIZE, SPLIT_PLAN_LOCAL_EXPERTS)[ep_rank]
+                        for counts in all_counts]).to(torch.int32)
+
+
+def _selected_experts_from_counts(counts):
+    """Build a routing assignment list whose histogram is exactly ``counts``."""
+    return torch.repeat_interleave(torch.arange(counts.numel()), counts.to(torch.int64))
+
+
+def _legacy_split_plan(num_tokens_per_expert):
+    """The two-collective planner this change replaces, kept as a reference."""
+    count_matrix = num_tokens_per_expert.to(torch.int32).view(SPLIT_PLAN_EP_SIZE, SPLIT_PLAN_LOCAL_EXPERTS)
+    input_splits = count_matrix.sum(dim=1).cpu().tolist()
+
+    rank_counts = count_matrix.sum(dim=1).clone()
+    remote_rank_counts = torch.zeros_like(rank_counts)
+    auto_ep_layer.dist.all_to_all_single(remote_rank_counts, rank_counts, group=None)
+    output_splits = remote_rank_counts.cpu().tolist()
+
+    expert_counts = count_matrix.reshape(-1).contiguous()
+    received_flat = torch.zeros_like(expert_counts)
+    auto_ep_layer.dist.all_to_all_single(received_flat, expert_counts, group=None)
+    received_counts = received_flat.view(SPLIT_PLAN_EP_SIZE, SPLIT_PLAN_LOCAL_EXPERTS)
+
+    return SplitPlan(input_splits, output_splits, received_counts.sum(dim=0), received_counts)
+
+
+class TestSplitPlan:
+    """Split metadata is exchanged once and rank splits are derived from it."""
+
+    @staticmethod
+    def _patch_counts_exchange(monkeypatch, all_counts, ep_rank):
+        """Emulate the EP metadata all-to-alls seen by rank ``ep_rank``.
+
+        Both the legacy per-rank exchange and the per-(rank, local-expert)
+        exchange are served, each derived independently from ``all_counts``.
+        Payloads are built lazily so callers that never reach a collective
+        (ep_size == 1) do not need a full ``[ep_size, E_local]`` layout.
+        """
+        sent = []
+
+        def fake_all_to_all_single(output, input_, group=None):
+            sent.append(input_.clone())
+            received = _split_plan_received(all_counts, ep_rank)
+            if input_.numel() == len(all_counts):
+                payload = received.sum(dim=1)
+            else:
+                payload = received.reshape(-1)
+            output.copy_(payload.to(output.dtype))
+
+        monkeypatch.setattr(auto_ep_layer.dist, "all_to_all_single", fake_all_to_all_single)
+        return sent
+
+    @pytest.mark.parametrize("scenario", sorted(SPLIT_PLAN_SCENARIOS))
+    @pytest.mark.parametrize("ep_rank", range(SPLIT_PLAN_EP_SIZE))
+    def test_single_exchange_derives_rank_splits(self, monkeypatch, scenario, ep_rank):
+        all_counts = _split_plan_counts(scenario)
+        sent = self._patch_counts_exchange(monkeypatch, all_counts, ep_rank)
+
+        plan = compute_split_plan(
+            selected_experts=_selected_experts_from_counts(all_counts[ep_rank]),
+            num_experts=SPLIT_PLAN_NUM_EXPERTS,
+            ep_size=SPLIT_PLAN_EP_SIZE,
+            num_local_experts=SPLIT_PLAN_LOCAL_EXPERTS,
+            ep_group=None,
+        )
+
+        assert len(sent) == 1
+        assert sent[0].dtype == torch.int32
+        assert sent[0].is_contiguous()
+        assert torch.equal(sent[0], all_counts[ep_rank])
+
+        received = _split_plan_received(all_counts, ep_rank)
+        mine = all_counts[ep_rank].view(SPLIT_PLAN_EP_SIZE, SPLIT_PLAN_LOCAL_EXPERTS)
+        assert plan.input_splits == mine.sum(dim=1).tolist()
+        assert plan.output_splits == received.sum(dim=1).tolist()
+        assert torch.equal(plan.local_counts, received.sum(dim=0))
+        assert torch.equal(plan.local_counts_by_source, received)
+        assert sum(plan.output_splits) == int(received.sum())
+
+    @pytest.mark.parametrize("scenario", sorted(SPLIT_PLAN_SCENARIOS))
+    @pytest.mark.parametrize("ep_rank", range(SPLIT_PLAN_EP_SIZE))
+    def test_matches_legacy_two_collective_planner(self, monkeypatch, scenario, ep_rank):
+        all_counts = _split_plan_counts(scenario)
+        sent = self._patch_counts_exchange(monkeypatch, all_counts, ep_rank)
+
+        expected = _legacy_split_plan(all_counts[ep_rank])
+        assert len(sent) == 2
+        sent.clear()
+
+        plan = compute_split_plan(
+            selected_experts=_selected_experts_from_counts(all_counts[ep_rank]),
+            num_experts=SPLIT_PLAN_NUM_EXPERTS,
+            ep_size=SPLIT_PLAN_EP_SIZE,
+            num_local_experts=SPLIT_PLAN_LOCAL_EXPERTS,
+            ep_group=None,
+        )
+
+        assert len(sent) == 1
+        assert plan.input_splits == expected.input_splits
+        assert plan.output_splits == expected.output_splits
+        assert torch.equal(plan.local_counts, expected.local_counts)
+        assert torch.equal(plan.local_counts_by_source, expected.local_counts_by_source)
+
+    @pytest.mark.parametrize("scenario", sorted(SPLIT_PLAN_SCENARIOS))
+    def test_folded_entry_point_agrees(self, monkeypatch, scenario):
+        all_counts = _split_plan_counts(scenario)
+        selected_experts = _selected_experts_from_counts(all_counts[1])
+        kwargs = dict(num_experts=SPLIT_PLAN_NUM_EXPERTS,
+                      ep_size=SPLIT_PLAN_EP_SIZE,
+                      num_local_experts=SPLIT_PLAN_LOCAL_EXPERTS,
+                      ep_group=None)
+
+        self._patch_counts_exchange(monkeypatch, all_counts, ep_rank=1)
+        derived = compute_split_plan(selected_experts=selected_experts, **kwargs)
+        folded = compute_split_plan_from_expert_indices(expert_indices=selected_experts, **kwargs)
+
+        assert derived.input_splits == folded.input_splits
+        assert derived.output_splits == folded.output_splits
+        assert torch.equal(derived.local_counts, folded.local_counts)
+        assert torch.equal(derived.local_counts_by_source, folded.local_counts_by_source)
+
+    def test_ep_size_one_needs_no_exchange(self, monkeypatch):
+        counts = torch.tensor([3, 0, 5, 1], dtype=torch.int32)
+        sent = self._patch_counts_exchange(monkeypatch, [counts], ep_rank=0)
+
+        plan = compute_split_plan(
+            selected_experts=_selected_experts_from_counts(counts),
+            num_experts=4,
+            ep_size=1,
+            num_local_experts=4,
+            ep_group=None,
+        )
+
+        assert sent == []
+        assert plan.input_splits == [9]
+        assert plan.output_splits == [9]
+        assert torch.equal(plan.local_counts, counts)
+        assert torch.equal(plan.local_counts_by_source, counts.view(1, 4))
+
+
+class TestModelDetectionAndReplacement:
+
+    def test_mixtral_detect_replace_and_mock_forward(self):
+        model = MockMoETransformer(num_layers=2, moe_every_n=1)
+        auto_ep = AutoEP(model, _runtime_config(enabled=True, autoep_size=1, preset_model="mixtral"))
+        specs = auto_ep.ep_parser()
+
+        assert len(specs) == 2
+        assert specs[0].model_family == "mixtral"
+        auto_ep.replace_moe_layer(specs[0], ep_size=1, ep_rank=0)
+        assert isinstance(model.model.layers[0].mlp, AutoEPMoELayer)
+        assert model(torch.randn(1, 4, 64)).shape == (1, 4, 100)
+
+    def test_fused_replacement_preserves_frozen_experts_and_trainable_router(self):
+        model = MockMoETransformer(num_layers=1, num_experts=4, moe_every_n=1).to(dtype=torch.bfloat16)
+        source = model.model.layers[0].mlp
+        source.experts.gate_up_proj.requires_grad_(False)
+        source.experts.down_proj.requires_grad_(False)
+        source.gate.weight.requires_grad_(True)
+
+        auto_ep = AutoEP(model, _runtime_config(enabled=True, autoep_size=1, preset_model="mixtral"))
+        spec = auto_ep.ep_parser()[0]
+        auto_ep.replace_moe_layer(spec, ep_size=1, ep_rank=0)
+
+        replaced = model.model.layers[0].mlp
+        assert isinstance(replaced, AutoEPMoELayer)
+        assert replaced.experts.w1.requires_grad is False
+        assert replaced.experts.w2.requires_grad is False
+        assert replaced.experts.w3.requires_grad is False
+        assert replaced.router.gate.weight.requires_grad is True
+        _assert_same_dtype_device(replaced.router.gate.weight, source.gate.weight)
+        _assert_same_dtype_device(replaced.experts.w1, source.experts.gate_up_proj)
+        _assert_same_dtype_device(replaced.experts.w2, source.experts.down_proj)
+        _assert_same_dtype_device(replaced.experts.w3, source.experts.gate_up_proj)
+
+    def test_zero_init_source_gathered_for_parser_router_and_fused_repack(self, monkeypatch):
+        FakeGatheredParameters.calls = []
+        monkeypatch.setattr(ep_repack, "GatheredParameters", FakeGatheredParameters)
+
+        model = MockMoETransformer(num_layers=1, num_experts=4, moe_every_n=1)
+        source = model.model.layers[0].mlp
+        expected_gate = source.gate.weight.detach().clone()
+        expected_gate_up = source.experts.gate_up_proj.detach().clone()
+        expected_down = source.experts.down_proj.detach().clone()
+
+        _mark_fake_zero_param(source.gate.weight, expected_gate, ds_id=1, name="router.weight")
+        _mark_fake_zero_param(source.experts.gate_up_proj, expected_gate_up, ds_id=2, name="experts.gate_up_proj")
+        _mark_fake_zero_param(source.experts.down_proj, expected_down, ds_id=3, name="experts.down_proj")
+
+        auto_ep = AutoEP(model, _runtime_config(enabled=True, autoep_size=1, preset_model="mixtral"))
+        specs = auto_ep.ep_parser()
+        assert len(specs) == 1
+        assert specs[0].expert_storage == "fused_3d"
+        assert specs[0].num_experts == 4
+        assert specs[0].hidden_size == 64
+
+        auto_ep.replace_moe_layer(specs[0], ep_size=1, ep_rank=0)
+
+        replaced = model.model.layers[0].mlp
+        torch.testing.assert_close(replaced.router.gate.weight, expected_gate)
+        torch.testing.assert_close(replaced.experts.w1, expected_gate_up[:, :128, :])
+        torch.testing.assert_close(replaced.experts.w3, expected_gate_up[:, 128:, :])
+        torch.testing.assert_close(replaced.experts.w2, expected_down)
+        assert [call["names"] for call in FakeGatheredParameters.calls] == [
+            ["router.weight"],
+            ["experts.gate_up_proj", "experts.down_proj"],
+        ]
+        assert all(call["modifier_rank"] is None for call in FakeGatheredParameters.calls)
+
+    def test_module_list_replacement_preserves_frozen_experts_and_trainable_router(self, monkeypatch):
+        monkeypatch.setattr(get_preset_adapter("deepseek_v3"), "_installed_transformers_version", lambda: "5.0.0")
+        model = MockDeepSeekV3Transformer(num_layers=1, num_experts=4).to(dtype=torch.bfloat16)
+        source = model.model.layers[0].mlp
+        for expert in source.experts:
+            for param in expert.parameters():
+                param.requires_grad_(False)
+        source.gate.weight.requires_grad_(True)
+        source.gate.e_score_correction_bias = nn.Parameter(torch.zeros(4,
+                                                                       dtype=source.gate.weight.dtype,
+                                                                       device=source.gate.weight.device),
+                                                           requires_grad=True)
+
+        auto_ep = AutoEP(model, _runtime_config(enabled=True, autoep_size=2))
+        spec = auto_ep.ep_parser()[0]
+        auto_ep.replace_moe_layer(spec, ep_size=2, ep_rank=0)
+
+        replaced = model.model.layers[0].mlp
+        assert isinstance(replaced, AutoEPMoELayer)
+        assert replaced.experts.w1.requires_grad is False
+        assert replaced.experts.w2.requires_grad is False
+        assert replaced.experts.w3.requires_grad is False
+        assert replaced.router.gate.weight.requires_grad is True
+        assert replaced.router.e_score_correction_bias.requires_grad is True
+        _assert_same_dtype_device(replaced.router.gate.weight, source.gate.weight)
+        _assert_same_dtype_device(replaced.router.e_score_correction_bias, source.gate.e_score_correction_bias)
+        _assert_same_dtype_device(replaced.experts.w1, source.experts[0].gate_proj.weight)
+        _assert_same_dtype_device(replaced.experts.w2, source.experts[0].down_proj.weight)
+        _assert_same_dtype_device(replaced.experts.w3, source.experts[0].up_proj.weight)
+
+    def test_module_list_zero_source_gathers_all_experts_in_global_order(self, monkeypatch):
+        FakeGatheredParameters.calls = []
+        monkeypatch.setattr(ep_repack, "GatheredParameters", FakeGatheredParameters)
+        monkeypatch.setattr(get_preset_adapter("deepseek_v3"), "_installed_transformers_version", lambda: "5.0.0")
+
+        model = MockDeepSeekV3Transformer(num_layers=1, num_experts=4)
+        source = model.model.layers[0].mlp
+        for expert_idx, expert in enumerate(source.experts):
+            for offset, (suffix, param) in enumerate((
+                ("w1", expert.gate_proj.weight),
+                ("w2", expert.down_proj.weight),
+                ("w3", expert.up_proj.weight),
+            )):
+                full_data = param.detach().clone()
+                _mark_fake_zero_param(param,
+                                      full_data,
+                                      ds_id=10 + 3 * expert_idx + offset,
+                                      name=f"e{expert_idx}.{suffix}")
+
+        auto_ep = AutoEP(model, _runtime_config(enabled=True, autoep_size=2))
+        spec = auto_ep.ep_parser()[0]
+        w1, w2, w3 = repack_expert_weights(source.experts, spec, ep_rank=1, ep_size=2)
+
+        expected_w1 = torch.stack([
+            source.experts[2].gate_proj.weight._autoep_test_full_data,
+            source.experts[3].gate_proj.weight._autoep_test_full_data
+        ])
+        expected_w2 = torch.stack([
+            source.experts[2].down_proj.weight._autoep_test_full_data,
+            source.experts[3].down_proj.weight._autoep_test_full_data
+        ])
+        expected_w3 = torch.stack([
+            source.experts[2].up_proj.weight._autoep_test_full_data,
+            source.experts[3].up_proj.weight._autoep_test_full_data
+        ])
+
+        torch.testing.assert_close(w1, expected_w1)
+        torch.testing.assert_close(w2, expected_w2)
+        torch.testing.assert_close(w3, expected_w3)
+        assert [call["names"] for call in FakeGatheredParameters.calls] == [
+            ["e0.w1", "e0.w2", "e0.w3"],
+            ["e1.w1", "e1.w2", "e1.w3"],
+            ["e2.w1", "e2.w2", "e2.w3"],
+            ["e3.w1", "e3.w2", "e3.w3"],
+        ]
+
+    def test_module_list_mixed_expert_requires_grad_flags_are_rejected(self, monkeypatch):
+        monkeypatch.setattr(get_preset_adapter("deepseek_v3"), "_installed_transformers_version", lambda: "5.0.0")
+        model = MockDeepSeekV3Transformer(num_layers=1, num_experts=4)
+        source = model.model.layers[0].mlp
+        source.experts[0].gate_proj.weight.requires_grad_(False)
+        source.experts[1].gate_proj.weight.requires_grad_(True)
+
+        auto_ep = AutoEP(model, _runtime_config(enabled=True, autoep_size=2))
+        spec = auto_ep.ep_parser()[0]
+        with pytest.raises(ValueError, match="mixed requires_grad flags"):
+            auto_ep.replace_moe_layer(spec, ep_size=2, ep_rank=0)
+
+        model = MockDeepSeekV3Transformer(num_layers=1, num_experts=4)
+        source = model.model.layers[0].mlp
+        source.experts[1].gate_proj.to(dtype=torch.float64)
+
+        auto_ep = AutoEP(model, _runtime_config(enabled=True, autoep_size=2))
+        spec = auto_ep.ep_parser()[0]
+        with pytest.raises(ValueError, match="mixed dtype/device"):
+            auto_ep.replace_moe_layer(spec, ep_size=2, ep_rank=0)
+
+    def test_hf_mixtral_causal_lm_matches_autoep_with_router_logits(self):
+        transformers = pytest.importorskip("transformers")
+        skip_unless_transformers_has(transformers,
+                                     "MixtralConfig",
+                                     "MixtralForCausalLM",
+                                     min_version="5.0.0",
+                                     reason="Mixtral AutoEP router-logit capture")
+
+        torch.manual_seed(1234)
+        config = tiny_mixtral_config(transformers)
+        native_model, autoep_model = state_matched_models(transformers.MixtralForCausalLM, config)
+        replace_autoep_layers(autoep_model, "mixtral")
+        assert_causal_lm_outputs_close(native_model,
+                                       autoep_model,
+                                       output_router_logits=True,
+                                       compare_router_logits=True,
+                                       compare_aux_loss=True,
+                                       compare_logits=False)
+
+    def test_qwen_adapter_guards(self, monkeypatch):
+        monkeypatch.setattr(get_preset_adapter("qwen3_moe"), "_installed_transformers_version", lambda: "5.0.0")
+        model = MockMoETransformer(num_layers=1, num_experts=4, moe_every_n=1)
+        model.config.model_type = "qwen2_moe"
+        model.config.num_experts = model.config.num_local_experts
+
+        specs = AutoEP(model, _runtime_config(enabled=True, autoep_size=1)).ep_parser()
+
+        assert len(specs) == 1
+        assert specs[0].model_family == "qwen3_moe"
+
+        model.config.model_type = "qwen3_5_moe"
+        with pytest.raises(ValueError, match="qwen3_5_moe_text"):
+            AutoEP(model, _runtime_config(enabled=True, autoep_size=1))._resolve_presets()
+
+    def test_deepseek_v3_detection_and_score_correction_bias_copy(self, monkeypatch):
+        FakeGatheredParameters.calls = []
+        monkeypatch.setattr(ep_repack, "GatheredParameters", FakeGatheredParameters)
+        monkeypatch.setattr(get_preset_adapter("deepseek_v3"), "_installed_transformers_version", lambda: "5.0.0")
+
+        model = MockDeepSeekV3Transformer(num_layers=1, num_experts=8)
+
+        auto_ep = AutoEP(model, _runtime_config(enabled=True, autoep_size=2))
+        specs = auto_ep.ep_parser()
+
+        assert len(specs) == 1
+        assert specs[0].model_family == "deepseek_v3"
+        assert specs[0].expert_storage == "module_list"
+        assert specs[0].expert_w1_name == "gate_proj"
+        assert specs[0].has_shared_experts is True
+        assert specs[0].e_score_correction_bias_path is None
+
+        source_bias = torch.arange(8, dtype=torch.float32)
+        model.model.layers[0].mlp.gate.e_score_correction_bias = nn.Parameter(source_bias.clone())
+        _mark_fake_zero_param(model.model.layers[0].mlp.gate.e_score_correction_bias,
+                              source_bias,
+                              ds_id=100,
+                              name="router.e_score_correction_bias")
+
+        auto_ep.replace_moe_layer(specs[0], ep_size=2, ep_rank=0)
+
+        replaced = model.model.layers[0].mlp
+        assert isinstance(replaced, AutoEPMoELayer)
+        assert replaced.router.e_score_correction_bias is not None
+        torch.testing.assert_close(replaced.router.e_score_correction_bias, source_bias)
+        assert ["router.e_score_correction_bias"] in [call["names"] for call in FakeGatheredParameters.calls]
+
+    @pytest.mark.parametrize(
+        "owner_path,bias_kind,persistent",
+        [
+            ("gate", "buffer", True),
+            ("", "buffer", False),
+            ("router", "buffer", True),
+            ("gate.moe_statics", "parameter", True),
+        ],
+    )
+    def test_score_correction_bias_location_and_registration(self, monkeypatch, owner_path, bias_kind, persistent):
+        monkeypatch.setattr(get_preset_adapter("deepseek_v3"), "_installed_transformers_version", lambda: "5.0.0")
+        model = MockDeepSeekV3Transformer(num_layers=1, num_experts=8)
+        source = model.model.layers[0].mlp
+        owner = source
+        for part in owner_path.split(".") if owner_path else ():
+            if not hasattr(owner, part):
+                owner.add_module(part, nn.Module())
+            owner = getattr(owner, part)
+
+        source_bias = torch.arange(8, dtype=torch.float32)
+        if bias_kind == "parameter":
+            owner.e_score_correction_bias = nn.Parameter(source_bias.clone(), requires_grad=False)
+        else:
+            owner.register_buffer("e_score_correction_bias", source_bias.clone(), persistent=persistent)
+
+        auto_ep = AutoEP(model, _runtime_config(enabled=True, autoep_size=2))
+        spec = auto_ep.ep_parser()[0]
+        assert spec.e_score_correction_bias_path == owner_path
+
+        auto_ep.replace_moe_layer(spec, ep_size=2, ep_rank=0)
+
+        replaced_bias = model.model.layers[0].mlp.router.e_score_correction_bias
+        torch.testing.assert_close(replaced_bias, source_bias)
+        assert replaced_bias.requires_grad is False
+        if bias_kind == "parameter":
+            assert dict(
+                model.model.layers[0].mlp.router.named_parameters())["e_score_correction_bias"] is replaced_bias
+            assert "e_score_correction_bias" not in dict(model.model.layers[0].mlp.router.named_buffers())
+        else:
+            assert dict(model.model.layers[0].mlp.router.named_buffers())["e_score_correction_bias"] is replaced_bias
+            assert "e_score_correction_bias" not in dict(model.model.layers[0].mlp.router.named_parameters())
+            assert ("e_score_correction_bias" in model.model.layers[0].mlp.router.state_dict()) is persistent
+
+    def test_score_correction_bias_multiple_locations_are_rejected(self, monkeypatch):
+        monkeypatch.setattr(get_preset_adapter("deepseek_v3"), "_installed_transformers_version", lambda: "5.0.0")
+        model = MockDeepSeekV3Transformer(num_layers=1, num_experts=8)
+        source = model.model.layers[0].mlp
+        source.register_buffer("e_score_correction_bias", torch.zeros(8))
+        source.gate.register_buffer("e_score_correction_bias", torch.ones(8))
+
+        with pytest.raises(ValueError, match="e_score_correction_bias in multiple locations"):
+            AutoEP(model, _runtime_config(enabled=True, autoep_size=2)).ep_parser()
+
+
+def _eager_pep604_lines(module):
+    """Line numbers where a module evaluates PEP 604 unions at import time."""
+    tree = ast.parse(inspect.getsource(module))
+    defers_annotations = any(
+        isinstance(node, ast.ImportFrom) and node.module == "__future__" and any(alias.name == "annotations"
+                                                                                 for alias in node.names)
+        for node in tree.body)
+    if defers_annotations:
+        return []
+    offending_lines = []
+    for node in ast.walk(tree):
+        annotations = []
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            arguments = node.args
+            for arg in arguments.args + arguments.posonlyargs + arguments.kwonlyargs + [
+                    arguments.vararg, arguments.kwarg
+            ]:
+                if arg is not None and arg.annotation is not None:
+                    annotations.append(arg.annotation)
+            if node.returns is not None:
+                annotations.append(node.returns)
+        elif isinstance(node, ast.AnnAssign):
+            annotations.append(node.annotation)
+        for annotation in annotations:
+            for sub_node in ast.walk(annotation):
+                if isinstance(sub_node, ast.BinOp) and isinstance(sub_node.op, ast.BitOr):
+                    offending_lines.append(sub_node.lineno)
+    return sorted(set(offending_lines))
+
+
+class TestPy39AnnotationSafety:
+
+    def test_autoep_import_chain_defers_pep604_annotations(self):
+        """PEP 604 unions (``int | None``) in def signatures or class-level
+        annotations are evaluated at import time, so on Python 3.9 they raise
+        TypeError while the module is imported; that escapes the engine's
+        ``except ImportError`` guards around AutoEP and breaks every
+        ``deepspeed.initialize()`` (issue #8102). Every module in the AutoEP
+        import chain must defer annotation evaluation with
+        ``from __future__ import annotations``."""
+        import deepspeed.moe.ep_count as ep_count
+        import deepspeed.moe.ep_experts as ep_experts
+        import deepspeed.moe.ep_kernels as ep_kernels
+        import deepspeed.moe.ep_router as ep_router
+        import deepspeed.module_inject.auto_ep as auto_ep
+        import deepspeed.module_inject.auto_ep_config as auto_ep_config
+        import deepspeed.module_inject.auto_ep_layer as auto_ep_layer
+        import deepspeed.module_inject.auto_ep_preset_adapters as preset_adapters
+        import deepspeed.module_inject.auto_ep_presets.base as presets_base
+        import deepspeed.module_inject.auto_ep_presets.registry as presets_registry
+
+        autoep_import_chain = [
+            ep_count, ep_experts, ep_kernels, ep_router, ep_repack, auto_ep, auto_ep_config, auto_ep_layer,
+            preset_adapters, presets_base, presets_registry
+        ]
+        for module in autoep_import_chain:
+            offending_lines = _eager_pep604_lines(module)
+            assert not offending_lines, (
+                f"{module.__name__} evaluates PEP 604 unions at import time (lines {offending_lines}); "
+                f"on Python 3.9 this raises TypeError during import and escapes the engine's "
+                f"except-ImportError guards (issue #8102). Add 'from __future__ import annotations'.")
+
+
+# ---------------------------------------------------------------------------
+# Test helpers + class: client-optimizer remap after module replacement
+# ---------------------------------------------------------------------------
+
+
+def _detach_moe_blocks(model, ep_size=2, layers=None):
+    """Do to the module tree what AutoEP does: every MoE block's parameters become new objects
+    (a fresh router gate plus ``GroupedExperts`` w1/w2/w3), so the originals leave the model.
+
+    Returns the same ``ReplacementSourceMap`` AutoEP hands the engine. The fused ``gate_up_proj``
+    feeds both w1 and w3, matching ``repack_expert_source_params``, and each replacement inherits
+    its source's ``requires_grad``, matching ``AutoEPMoELayer``.
+    """
+    collected = auto_ep_layer.ReplacementSourceMap()
+    replacement_sources = collected.sources
+    for layer_index, layer in enumerate(model.model.layers):
+        if layers is not None and layer_index not in layers:
+            continue
+        source_gate = layer.mlp.gate
+        source_experts = layer.mlp.experts
+        num_experts, twice_ffn, hidden = source_experts.gate_up_proj.shape
+        replacement = nn.Module()
+        replacement.router = nn.Module()
+        replacement.router.gate = nn.Linear(hidden, num_experts, bias=False)
+        replacement.router.gate.weight.requires_grad_(source_gate.weight.requires_grad)
+        replacement.experts = nn.Module()
+        for name, source in (("w1", source_experts.gate_up_proj), ("w2", source_experts.down_proj),
+                             ("w3", source_experts.gate_up_proj)):
+            shard = nn.Parameter(torch.empty(num_experts // ep_size, twice_ffn // 2, hidden))
+            shard.requires_grad_(source.requires_grad)
+            setattr(replacement.experts, name, shard)
+            replacement_sources[id(shard)] = [source]
+        replacement_sources[id(replacement.router.gate.weight)] = [source_gate.weight]
+        collected.discarded.update(id(p) for p in layer.mlp.parameters())
+        layer.mlp = replacement
+    return collected
+
+
+def _remap(optimizer, model, replacement_sources=None):
+    if replacement_sources is None:
+        replacement_sources = auto_ep_layer.ReplacementSourceMap()
+    ds_engine._remap_client_optimizer_after_module_replacement(optimizer, model, replacement_sources)
+
+
+def _owned_ids(optimizer):
+    return {id(p) for group in optimizer.param_groups for p in group["params"]}
+
+
+class TestClientOptimizerRemap:
+    """Re-pointing a caller-supplied optimizer at the parameters AutoEP put in the model.
+
+    The end-to-end path is covered by ``TestAutoEPClientOptimizer`` in test_autoep_integration.py.
+    These exercise the placement rules directly, including the cases a real AutoEP run cannot
+    easily produce.
+    """
+
+    def test_replacements_join_the_group_their_source_was_in(self):
+        """The replacements must follow their source group, not fall back to group 0."""
+        model = MockMoETransformer()
+        named = list(model.named_parameters())
+        no_decay = [p for n, p in named if n.endswith("bias")]
+        decayed = [p for n, p in named if not n.endswith("bias")]
+        # no_decay first: the expert weights belong to group 1, so a fallback to group 0 would fail
+        optimizer = torch.optim.AdamW([{
+            "params": no_decay,
+            "weight_decay": 0.0
+        }, {
+            "params": decayed,
+            "weight_decay": 0.1
+        }],
+                                      lr=1e-3)
+
+        _remap(optimizer, model, _detach_moe_blocks(model))
+
+        replaced = {id(p) for name, p in model.named_parameters() if ".experts." in name or ".router." in name}
+        holders = [
+            gi for gi, group in enumerate(optimizer.param_groups) if replaced & {id(p)
+                                                                                 for p in group["params"]}
+        ]
+        assert holders == [1], f"replacement parameters landed in group(s) {holders}, expected [1]"
+        assert optimizer.param_groups[1]["weight_decay"] == 0.1
+
+    def test_frozen_params_are_not_mistaken_for_replaced_ones(self):
+        """A frozen parameter is still in the model, so it must not look like a replaced one."""
+        model = MockMoETransformer()
+        for name, param in model.named_parameters():
+            if ".mlp." not in name:
+                param.requires_grad_(False)
+        named = list(model.named_parameters())
+        optimizer = torch.optim.AdamW([{
+            "params": [p for n, p in named if not n.endswith("bias")],
+            "weight_decay": 0.1
+        }, {
+            "params": [p for n, p in named if n.endswith("bias")],
+            "weight_decay": 0.0
+        }],
+                                      lr=1e-3)
+
+        _remap(optimizer, model, _detach_moe_blocks(model))
+
+        owned = _owned_ids(optimizer)
+        orphans = [name for name, p in model.named_parameters() if p.requires_grad and id(p) not in owned]
+        assert not orphans, f"trainable parameters left out of the optimizer: {orphans}"
+        dropped = [name for name, p in model.named_parameters() if not p.requires_grad and id(p) not in owned]
+        assert not dropped, f"frozen parameters were removed from the client optimizer: {dropped}"
+
+    def test_frozen_replacements_keep_their_param_group(self):
+        """A replacement inherits its source's requires_grad. A frozen one still has to keep the
+        param group its frozen source held, or a staged fine-tune that unfreezes the experts in
+        phase two would train nothing: the source is gone from the model and the replacement was
+        never added. The ZeRO optimizers filter frozen parameters themselves.
+        """
+        model = MockMoETransformer()
+        for name, param in model.named_parameters():
+            if ".experts." in name:
+                param.requires_grad_(False)
+        optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
+
+        _remap(optimizer, model, _detach_moe_blocks(model))
+
+        owned = _owned_ids(optimizer)
+        stranded = [name for name, p in model.named_parameters() if id(p) not in owned]
+        assert not stranded, f"parameters in the model but in no param group: {stranded}"
+
+        # phase two: unfreezing must be enough to train them
+        for name, param in model.named_parameters():
+            if ".experts." in name:
+                param.requires_grad_(True)
+        still = [name for name, p in model.named_parameters() if p.requires_grad and id(p) not in owned]
+        assert not still, f"unfrozen experts are in no param group: {still}"
+
+    def test_remap_is_a_noop_when_nothing_was_replaced(self):
+        """Without a module replacement the caller's optimizer must be left exactly as it was."""
+        model = MockMoETransformer()
+        for name, param in model.named_parameters():
+            if ".mlp." not in name:
+                param.requires_grad_(False)
+        optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
+        before = [list(group["params"]) for group in optimizer.param_groups]
+
+        _remap(optimizer, model)
+
+        after = [list(group["params"]) for group in optimizer.param_groups]
+        assert after == before, "the optimizer was modified even though no module was replaced"
+
+    def test_populated_optimizer_state_raises_before_remap(self):
+        """Moment tensors cannot be transferred from arbitrary source layouts without an explicit
+        repacking contract. Refuse a resumed optimizer rather than silently resetting its experts.
+        """
+        model = MockMoETransformer()
+        optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
+        stale = model.model.layers[0].mlp.experts.gate_up_proj
+        optimizer.state[stale] = {
+            "step": torch.tensor(1.0),
+            "exp_avg": torch.ones_like(stale),
+            "exp_avg_sq": torch.ones_like(stale),
+        }
+        replacement_sources = _detach_moe_blocks(model)
+        before = [list(group["params"]) for group in optimizer.param_groups]
+
+        with pytest.raises(RuntimeError, match="restore a checkpoint.*after initialization"):
+            _remap(optimizer, model, replacement_sources)
+
+        assert optimizer.state[stale]["step"] == 1
+        assert [list(group["params"]) for group in optimizer.param_groups] == before
+
+    @pytest.mark.parametrize("grouped", [False, True])
+    def test_eager_model_parameters_are_remapped(self, grouped):
+        """Config-built and callable optimizers receive ``model_parameters`` only after AutoEP.
+        An eager flat or grouped list therefore needs the same source-to-replacement mapping as an
+        already-instantiated optimizer.
+        """
+        model = MockMoETransformer()
+        named = list(model.named_parameters())
+        if grouped:
+            model_parameters = [{
+                "params": (p for name, p in named if name.endswith("bias")),
+                "weight_decay": 0.0,
+            }, {
+                "params": (p for name, p in named if not name.endswith("bias")),
+                "weight_decay": 0.1,
+            }]
+        else:
+            model_parameters = [p for _, p in named]
+
+        if grouped:
+            for group in model_parameters:
+                group["params"] = list(group["params"])
+        assert ds_engine._model_parameters_need_remap(model_parameters)
+        replacement_sources = _detach_moe_blocks(model)
+        ds_engine._remap_model_parameters_after_module_replacement(model_parameters, model, replacement_sources)
+
+        groups = model_parameters if grouped else [{"params": model_parameters}]
+        owned = {id(p) for group in groups for p in group["params"]}
+        live = {id(p) for p in model.parameters()}
+        assert not owned - live, "eager model_parameters retained parameters AutoEP detached"
+        assert not live - owned, "eager model_parameters omitted live replacement parameters"
+
+        optimizer = torch.optim.AdamW(model_parameters, lr=1e-3)
+        replacement = next(p for name, p in model.named_parameters() if ".router." in name)
+        before = replacement.detach().clone()
+        replacement.grad = torch.ones_like(replacement)
+        optimizer.step()
+        assert not torch.equal(replacement, before), "a remapped replacement parameter did not update"
+
+    @pytest.mark.parametrize("grouped", [False, True])
+    def test_lazy_model_parameters_stay_lazy_until_after_replacements(self, grouped):
+        """AutoTP runs after AutoEP and may replace more parameter identities. Do not consume a
+        canonical lazy iterable early just to service the AutoEP remap.
+        """
+        model = MockMoETransformer()
+        lazy = model.parameters()
+        model_parameters = [{"params": lazy}] if grouped else lazy
+        assert not ds_engine._model_parameters_need_remap(model_parameters)
+
+        old = model.lm_head.weight
+        model.lm_head = nn.Linear(old.shape[1], old.shape[0], bias=False)
+        current = model.lm_head.weight
+        consumed = list(model_parameters[0]["params"] if grouped else model_parameters)
+        assert any(p is current for p in consumed)
+        assert all(p is not old for p in consumed)
+
+    def test_optimizer_over_a_superset_of_the_model_is_untouched(self):
+        """AutoEP off, and the optimizer holds a parameter that is not in the model.
+
+        "The optimizer holds something the module tree does not" is true here for a reason that
+        has nothing to do with a replacement, so the remap must not treat it as one and strip the
+        parameter -- nor drop its optimizer state, which a resumed run would need.
+        """
+        model = MockMoETransformer()
+        external = nn.Parameter(torch.randn(4, 4))
+        optimizer = torch.optim.AdamW(list(model.parameters()) + [external], lr=1e-3)
+        optimizer.state[external] = {"step": torch.tensor(1.0)}
+
+        _remap(optimizer, model, auto_ep_layer.ReplacementSourceMap())
+
+        assert id(external) in _owned_ids(optimizer), "a parameter outside the model was stripped"
+        assert external in optimizer.state, "optimizer state for a parameter outside the model was dropped"
+
+    def test_held_out_module_is_not_pulled_into_the_optimizer(self):
+        """Only replacement parameters may be added.
+
+        A caller who deliberately keeps a module out of this optimizer -- a second optimizer, a
+        frozen trunk -- must not have it silently added, with whatever learning rate and weight
+        decay the group it landed in happens to carry.
+        """
+        model = MockMoETransformer()
+        held_out = {n for n, _ in model.named_parameters() if ".self_attn." in n}
+        assert held_out, "the mock has no self_attn parameters to hold out"
+        optimizer = torch.optim.AdamW([{
+            "params": [p for n, p in model.named_parameters() if n not in held_out],
+            "lr": 1e-3,
+            "weight_decay": 0.1
+        }])
+
+        _remap(optimizer, model, _detach_moe_blocks(model))
+
+        owned = _owned_ids(optimizer)
+        pulled = sorted(n for n, p in model.named_parameters() if n in held_out and id(p) in owned)
+        assert not pulled, f"held-out parameters were added to a param group: {pulled}"
+
+    def test_per_layer_param_groups_survive_replacement(self):
+        """Layer-wise learning-rate decay gives each layer its own group, so the replacement spans
+        several groups at once. Each layer's replacements must rejoin that layer's group."""
+        model = MockMoETransformer()
+        groups = []
+        for layer_index in range(len(model.model.layers)):
+            prefix = f"model.layers.{layer_index}."
+            groups.append({
+                "params": [p for name, p in model.named_parameters() if name.startswith(prefix)],
+                "lr": 1e-4 * (0.9**layer_index)
+            })
+        groups.append({
+            "params": [p for name, p in model.named_parameters() if not name.startswith("model.layers.")],
+            "lr": 1e-4
+        })
+        optimizer = torch.optim.AdamW(groups)
+
+        _remap(optimizer, model, _detach_moe_blocks(model))
+
+        owned = _owned_ids(optimizer)
+        orphans = [name for name, p in model.named_parameters() if p.requires_grad and id(p) not in owned]
+        assert not orphans, f"trainable parameters left out of the optimizer: {orphans}"
+
+        for layer_index, layer in enumerate(model.model.layers):
+            in_group = {id(p) for p in optimizer.param_groups[layer_index]["params"]}
+            stranded = [name for name, p in layer.mlp.named_parameters() if id(p) not in in_group]
+            assert not stranded, f"layer {layer_index} replacements missed its own param group: {stranded}"
+
+    def test_per_layer_groups_tolerate_a_trainable_parameter_the_caller_left_out(self):
+        """Per-layer groups plus a trainable parameter the caller never gave the optimizer.
+
+        Every replacement here is traceable, so nothing is ambiguous and nothing may raise. The
+        held-out parameter is simply none of the remap's business.
+        """
+        model = MockMoETransformer()
+        optimizer = torch.optim.AdamW([{
+            "params": list(layer.parameters()),
+            "lr": 1e-4 * (0.9**layer_index)
+        } for layer_index, layer in enumerate(model.model.layers)])
+
+        _remap(optimizer, model, _detach_moe_blocks(model))
+
+        assert id(model.lm_head.weight) not in _owned_ids(optimizer), \
+            "a trainable parameter the caller held out was added to a param group"
+
+    def test_replacements_whose_sources_were_not_optimized_are_left_out(self):
+        """A replacement is added only if its own sources were in a param group.
+
+        Layer 0's MoE block is optimized, layer 1's is not. Layer 0's replacements must be added;
+        layer 1's must not, because adding them would start training a block the caller excluded.
+        """
+        model = MockMoETransformer()
+        layer1_moe = {id(p) for p in model.model.layers[1].mlp.parameters()}
+        optimizer = torch.optim.AdamW([p for p in model.parameters() if id(p) not in layer1_moe], lr=1e-3)
+
+        _remap(optimizer, model, _detach_moe_blocks(model))
+
+        owned = _owned_ids(optimizer)
+        layer0 = [n for n, p in model.model.layers[0].mlp.named_parameters() if id(p) not in owned]
+        assert not layer0, f"layer 0 replacements were not added: {layer0}"
+        layer1 = [n for n, p in model.model.layers[1].mlp.named_parameters() if id(p) in owned]
+        assert not layer1, f"layer 1 replacements were added even though its sources were not optimized: {layer1}"
+
+    def test_partially_optimized_packed_sources_raise(self):
+        """``module_list`` storage packs several local experts into one replacement tensor. If the
+        caller optimized only some of them, that tensor can be neither optimized nor skipped:
+        optimizing it trains the experts they excluded, skipping it stops training the ones they
+        included. Neither is what they asked for, so refuse instead of picking one silently.
+        """
+        model = MockMoETransformer()
+        first_layer = model.model.layers[0].mlp
+        packed = [first_layer.experts.gate_up_proj, first_layer.experts.down_proj]
+        # the caller optimizes the first of the two packed sources and not the second
+        optimizer = torch.optim.AdamW([p for _, p in model.named_parameters() if p is not packed[1]], lr=1e-3)
+
+        replacement_sources = _detach_moe_blocks(model)
+        replacement_sources.sources[id(model.model.layers[0].mlp.experts.w1)] = packed
+
+        with pytest.raises(RuntimeError, match="packed several source parameters into one tensor"):
+            _remap(optimizer, model, replacement_sources)
+
+    def test_external_parameter_survives_a_real_replacement(self):
+        """A caller may legitimately optimize something outside the model -- an auxiliary trainable
+        loss term, say -- which is valid at ZeRO stage 0, the default for AutoEP. A replacement
+        elsewhere in the model must not take it, or its optimizer state, away.
+        """
+        model = MockMoETransformer()
+        external = nn.Parameter(torch.randn(4))
+        optimizer = torch.optim.AdamW(list(model.parameters()) + [external], lr=1e-3)
+        optimizer.state[external] = {"step": torch.tensor(7.0)}
+
+        _remap(optimizer, model, _detach_moe_blocks(model))
+
+        owned = _owned_ids(optimizer)
+        assert id(external) in owned, "an unrelated external parameter was removed by the remap"
+        assert external in optimizer.state, "an unrelated external parameter lost its optimizer state"
+        orphans = [name for name, p in model.named_parameters() if p.requires_grad and id(p) not in owned]
+        assert not orphans, f"trainable parameters left out of the optimizer: {orphans}"
+
+    def test_discarded_sources_the_map_does_not_name_are_still_removed(self):
+        """Removal follows what the replacement detached, not what the source map names.
+
+        For ``module_list`` storage the map names only this rank's local experts while the
+        replacement detaches every rank's. Those unnamed parameters must still leave the optimizer,
+        or ZeRO would later be handed a parameter that is no longer part of the model.
+        """
+        model = MockMoETransformer()
+        other_rank_expert = nn.Parameter(torch.randn(4, 4))
+        model.model.layers[0].mlp.other_rank_expert = other_rank_expert
+        optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
+        assert id(other_rank_expert) in _owned_ids(optimizer), "test setup: it should start in the optimizer"
+
+        _remap(optimizer, model, _detach_moe_blocks(model))
+
+        assert id(other_rank_expert) not in _owned_ids(optimizer), \
+            "a parameter the replacement discarded is still in the optimizer"
+
+    def test_sources_split_across_groups_raise(self):
+        """``module_list`` storage packs one grouped tensor from one weight per expert. If the
+        caller put those weights in different param groups the replacement has no unambiguous
+        home."""
+        model = MockMoETransformer()
+        first_layer = model.model.layers[0].mlp
+        source_gate_up = first_layer.experts.gate_up_proj
+        source_down = first_layer.experts.down_proj
+        optimizer = torch.optim.AdamW([{
+            "params": [p for _, p in model.named_parameters() if p is not source_down],
+            "weight_decay": 0.1
+        }, {
+            "params": [source_down],
+            "weight_decay": 0.0
+        }],
+                                      lr=1e-3)
+
+        replacement_sources = _detach_moe_blocks(model)
+        replacement_sources.sources[id(model.model.layers[0].mlp.experts.w1)] = [source_gate_up, source_down]
+
+        with pytest.raises(RuntimeError, match="split across param groups"):
+            _remap(optimizer, model, replacement_sources)
+
+
+class TestReplacementSourceMap:
+    """The map the client-optimizer remap consults.
+
+    ``_remap_client_optimizer_after_module_replacement`` adds only parameters that appear in this
+    map, so a replacement parameter missing from it would be silently left out of the optimizer --
+    the very failure the remap exists to prevent. That makes full coverage of the map an invariant
+    worth asserting directly rather than inferring from an end-to-end run.
+    """
+
+    def _module_list_model(self, monkeypatch):
+        monkeypatch.setattr(get_preset_adapter("deepseek_v3"), "_installed_transformers_version", lambda: "5.0.0")
+        model = MockDeepSeekV3Transformer(num_layers=1, num_experts=4).to(dtype=torch.bfloat16)
+        auto_ep = AutoEP(model, _runtime_config(enabled=True, autoep_size=2))
+        return model, auto_ep, auto_ep.ep_parser()[0]
+
+    def test_map_covers_every_parameter_the_replacement_allocated(self, monkeypatch):
+        model, auto_ep, spec = self._module_list_model(monkeypatch)
+
+        replacement, sources = auto_ep._replace_moe_layer_without_retarget(spec,
+                                                                           ep_size=2,
+                                                                           ep_rank=0,
+                                                                           collect_sources=True)
+
+        # shared_experts are carried over from the source module unchanged, so they never left the
+        # optimizer and need no entry; everything else is newly allocated and must be covered.
+        uncovered = [
+            name for name, param in replacement.named_parameters()
+            if id(param) not in sources.sources and not name.startswith("shared_experts")
+        ]
+        assert not uncovered, f"replacement parameters missing from the source map: {uncovered}"
+        assert all(sources.sources[id(p)] for _, p in replacement.named_parameters()
+                   if id(p) in sources.sources), \
+            "a replacement parameter was mapped to an empty source list"
+
+    def test_no_map_is_built_and_nothing_is_stashed_when_not_requested(self, monkeypatch):
+        """The default path must hold no reference to the discarded pre-shard expert weights."""
+        model, auto_ep, spec = self._module_list_model(monkeypatch)
+
+        replacement, sources = auto_ep._replace_moe_layer_without_retarget(spec, ep_size=2, ep_rank=0)
+
+        assert not sources and sources.sources == {}
+        assert not hasattr(replacement, "_autoep_replacement_sources"), \
+            "the replacement is holding the source weights on an attribute"
+
+    def test_module_list_sources_are_this_ranks_local_experts(self, monkeypatch):
+        model, auto_ep, spec = self._module_list_model(monkeypatch)
+        experts_source = getattr(model.model.layers[0].mlp, spec.experts_name)
+
+        rank0 = ep_repack.repack_expert_source_params(experts_source=experts_source, spec=spec, ep_rank=0, ep_size=2)
+        rank1 = ep_repack.repack_expert_source_params(experts_source=experts_source, spec=spec, ep_rank=1, ep_size=2)
+
+        w1_rank0, _, _ = rank0
+        w1_rank1, _, _ = rank1
+        assert len(w1_rank0) == 2 and len(w1_rank1) == 2, "expected one source per local expert"
+        assert [id(p) for p in w1_rank0
+                ] == [id(_get_expert_weight_for_test(experts_source[i], spec.expert_w1_name)) for i in (0, 1)]
+        assert [id(p) for p in w1_rank1
+                ] == [id(_get_expert_weight_for_test(experts_source[i], spec.expert_w1_name)) for i in (2, 3)]
+
+    def test_module_list_rejects_a_source_it_cannot_index(self):
+        """Matches the assertion the other two module_list repack helpers already make."""
+        spec = _make_spec(expert_storage="module_list",
+                          expert_w1_name="gate_proj",
+                          expert_w2_name="down_proj",
+                          expert_w3_name="up_proj")
+        with pytest.raises(AssertionError, match="Expected nn.ModuleList"):
+            ep_repack.repack_expert_source_params(experts_source=nn.Module(), spec=spec, ep_rank=0, ep_size=1)
+
+    def test_fused_gate_up_source_feeds_both_w1_and_w3(self):
+        """With no separate w3 name the single fused tensor is the source for both."""
+        spec = _make_spec(expert_storage="fused_3d", expert_w3_name=None)
+        experts_source = nn.Module()
+        experts_source.gate_up_proj = nn.Parameter(
+            torch.randn(spec.num_experts, 2 * spec.ffn_hidden_size, spec.hidden_size))
+        experts_source.down_proj = nn.Parameter(torch.randn(spec.num_experts, spec.hidden_size, spec.ffn_hidden_size))
+
+        w1, w2, w3 = ep_repack.repack_expert_source_params(experts_source=experts_source,
+                                                           spec=spec,
+                                                           ep_rank=0,
+                                                           ep_size=1)
+
+        assert [id(p) for p in w1] == [id(experts_source.gate_up_proj)]
+        assert [id(p) for p in w3] == [id(experts_source.gate_up_proj)]
+        assert [id(p) for p in w2] == [id(experts_source.down_proj)]

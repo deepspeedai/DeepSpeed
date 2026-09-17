@@ -15,7 +15,6 @@ from deepspeed.runtime.swap_tensor.constants import *
 from deepspeed.runtime.swap_tensor.utils import swap_in_tensors, swap_out_tensors, \
     MIN_AIO_BYTES, AIO_ALIGNED_BYTES, get_sized_buffers
 from deepspeed.runtime.swap_tensor.utils import SwapBufferManager, SwapBufferPool
-from deepspeed.accelerator import get_accelerator
 
 
 class FlattenedTensorSwapInfo(object):
@@ -44,8 +43,9 @@ class SwapTensorContext(object):
 
 class OptimizerStateSwapInfo(object):
 
-    def __init__(self, parameter, numel, base_folder):
+    def __init__(self, parameter, numel, base_folder, aio_handle):
         self.tensors = []
+        self.aio_handle = aio_handle
         self.param_id = OptimizerSwapper.parameter_id(parameter)
         self.swap_folder = base_folder
         self.swapped_gradients = {}
@@ -93,7 +93,7 @@ class OptimizerStateSwapInfo(object):
     def get_swap_buffers_and_paths(self, pinned):
         swap_buffers = []
         swap_paths = []
-        select_tensors = [t for t in self.tensors if get_accelerator().is_pinned(t.compute_tensor) == pinned]
+        select_tensors = [t for t in self.tensors if self.aio_handle.is_pinned(t.compute_tensor) == pinned]
         for t in select_tensors:
             swap_buffers.append(t.swap_tensor if pinned else t.compute_tensor)
             swap_paths.append(t.swap_path)
@@ -128,7 +128,7 @@ class OptimizerStateSwapInfo(object):
         return [grad.path for grad in self.swapped_gradients.values()]
 
     def get_unpinned_state_tensors(self):
-        return [t.compute_tensor for t in self.tensors if not get_accelerator().is_pinned(t.compute_tensor)]
+        return [t.compute_tensor for t in self.tensors if not self.aio_handle.is_pinned(t.compute_tensor)]
 
     def read_unswapped_gradients(self, dest_buffer):
         num_elem_count = 0
@@ -162,9 +162,11 @@ class OptimizerSwapper(object):
     def parameter_id(param):
         return param.ds_id
 
-    def __init__(self, swap_config, aio_config, base_folder, optimizer, largest_numel, device, dtype, timers):
+    def __init__(self, swap_config, aio_config, base_folder, optimizer, largest_numel, device, dtype, timers,
+                 aio_handle):
         self.swap_config = swap_config
         self.aio_config = aio_config
+        self.aio_handle = aio_handle
 
         # NVMe swap management
         self.swap_params_info = {}
@@ -184,7 +186,8 @@ class OptimizerSwapper(object):
         self.dtype = dtype
         self.swap_buffer_manager = SwapBufferManager(num_elems=self.largest_numel,
                                                      count=swap_config.buffer_count,
-                                                     dtype=dtype)
+                                                     dtype=dtype,
+                                                     aio_handle=aio_handle)
 
         # Timers
         self.timers = timers
@@ -197,6 +200,7 @@ class OptimizerSwapper(object):
             'swap_params_info',
             'timers',
             'timer_names',
+            'aio_handle',
         ]
 
     def purge_state(self):
@@ -272,7 +276,7 @@ class OptimizerSwapper(object):
                                              fp16_pinned_buffers, fp32_parameters):
         assert len(fp32_parameters) == len(fp16_partitions_info)
         assert len(fp32_parameters) == len(fp16_num_elems)
-        assert all([get_accelerator().is_pinned(buffer) for buffer in fp16_pinned_buffers])
+        assert all([aio_handle.is_pinned(buffer) for buffer in fp16_pinned_buffers])
 
         fp32_swap_paths = self._get_swap_paths(parameters=fp32_parameters, num_elems=fp16_num_elems)
 
@@ -282,8 +286,8 @@ class OptimizerSwapper(object):
         assert all([numel >= self.largest_numel for numel in fp16_buffer_numel]), \
         f"numel of fp16 buffers {fp16_buffer_numel} is too small for initializing fp32 params {self.largest_numel}"
 
-        fp32_swap_buffers = SwapBufferPool(fp32_pinned_buffers)
-        fp16_swap_buffers = SwapBufferPool(fp16_pinned_buffers)
+        fp32_swap_buffers = SwapBufferPool(fp32_pinned_buffers, aio_handle=aio_handle)
+        fp16_swap_buffers = SwapBufferPool(fp16_pinned_buffers, aio_handle=aio_handle)
 
         curr_index = 0
         while curr_index < len(fp32_parameters):
@@ -495,7 +499,8 @@ class OptimizerSwapper(object):
 
         self.swap_params_info[param_id] = OptimizerStateSwapInfo(parameter=parameter,
                                                                  numel=numel,
-                                                                 base_folder=self.swap_folder)
+                                                                 base_folder=self.swap_folder,
+                                                                 aio_handle=self.aio_handle)
         swap_info = self.swap_params_info[param_id]
 
         self._update_param_state_info(swap_info, parameter)

@@ -14,7 +14,11 @@ from deepspeed.ops.transformer.inference.ds_attention import DeepSpeedSelfAttent
 from deepspeed.ops.transformer.inference.op_binding.workspace import WorkspaceOp
 from deepspeed.accelerator import get_accelerator
 import deepspeed
-if deepspeed.HAS_TRITON and get_accelerator().is_triton_supported():
+# Import the triton kernels whenever triton is installed. Previously this was also
+# gated on is_triton_supported(), which reads the GPU compute capability at import
+# time and thereby creates a CUDA context, breaking fork()-based multiprocessing
+# (issue #7918). Triton use is gated at runtime via self.config.use_triton below.
+if deepspeed.HAS_TRITON:
     from deepspeed.ops.transformer.inference.triton.mlp import TritonMLP
     from deepspeed.ops.transformer.inference.triton.attention import TritonSelfAttention
 
@@ -22,8 +26,6 @@ if deepspeed.HAS_TRITON and get_accelerator().is_triton_supported():
 class DeepSpeedTransformerInference(nn.Module):
     """Initialize the DeepSpeed Transformer Layer.
         Arguments:
-            layer_id: The layer index starting from 0, e.g. if model has 24 transformer layers,
-                layer_id will be 0,1,2...23 when each layer object is instantiated
             config: An object of DeepSpeedInferenceConfig
             mp_group: Model parallelism group initialized on the modeling side.
             quantize_scales: This argument groups all the layers' scales used for quantization

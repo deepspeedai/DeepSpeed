@@ -27,7 +27,7 @@ __global__ void kv_rotary_pos_kernel(T* kv_cache,
                                      T* q,
                                      T* k,
                                      T* v,
-                                     const T* inv_freq,
+                                     const float* inv_freq,
                                      const int32_t rotary_dim,
                                      const float theta_base,
                                      const BatchWrapperCPP batch_desc,
@@ -98,13 +98,16 @@ __global__ void kv_rotary_pos_kernel(T* kv_cache,
         T* k_row = k + token_idx * qkv_stride + kv_head_idx * headSize;
         T* v_row = v + token_idx * qkv_stride + kv_head_idx * headSize;
 
-        T k_reg[vector_T], v_reg[vector_T], inv_freq_reg[vector_T];
+        T k_reg[vector_T], v_reg[vector_T];
+        float inv_freq_reg[vector_T];
 
         mem_access::load_global<kv_rot::granularity>(q_reg, q_row + base_neuron_idx, valid_thread);
         mem_access::load_global<kv_rot::granularity>(k_reg, k_row + base_neuron_idx, valid_thread);
         mem_access::load_global<kv_rot::granularity>(v_reg, v_row + base_neuron_idx, valid_thread);
-        mem_access::load_global<kv_rot::granularity>(
-            inv_freq_reg, inv_freq + half_idx, load_inv_freq);
+#pragma unroll
+        for (int i = 0; i < vector_T; i++) {
+            inv_freq_reg[i] = load_inv_freq ? inv_freq[half_idx + i] : 0.0f;
+        }
         if constexpr (doRotary) {
 #pragma unroll
             for (int i = 0; i < vector_T; i++) {
@@ -112,7 +115,7 @@ __global__ void kv_rotary_pos_kernel(T* kv_cache,
 
                 float inv_freq_flt;
                 if (inv_freq != nullptr) {
-                    inv_freq_flt = conversion::to<float>(inv_freq_reg[i]) * (float)global_token_idx;
+                    inv_freq_flt = inv_freq_reg[i] * (float)global_token_idx;
                 } else {
                     inv_freq_flt =
                         (float)((head_neuron_idx % half_rotary_size) * 2) / (float)rotary_dim;
@@ -152,11 +155,13 @@ __global__ void kv_rotary_pos_kernel(T* kv_cache,
                 kv_cache + kv_offset + base_neuron_idx + v_offset, v_reg);
         }
     } else {
-        T inv_freq_reg[vector_T];
+        float inv_freq_reg[vector_T];
 
         mem_access::load_global<kv_rot::granularity>(q_reg, q_row + base_neuron_idx, valid_thread);
-        mem_access::load_global<kv_rot::granularity>(
-            inv_freq_reg, inv_freq + half_idx, load_inv_freq);
+#pragma unroll
+        for (int i = 0; i < vector_T; i++) {
+            inv_freq_reg[i] = load_inv_freq ? inv_freq[half_idx + i] : 0.0f;
+        }
 
         if constexpr (doRotary) {
 #pragma unroll
@@ -165,7 +170,7 @@ __global__ void kv_rotary_pos_kernel(T* kv_cache,
 
                 float inv_freq_flt;
                 if (inv_freq != nullptr) {
-                    inv_freq_flt = conversion::to<float>(inv_freq_reg[i]) * (float)global_token_idx;
+                    inv_freq_flt = inv_freq_reg[i] * (float)global_token_idx;
                 } else {
                     inv_freq_flt =
                         (float)((head_neuron_idx % half_rotary_size) * 2) / (float)rotary_dim;
@@ -236,7 +241,7 @@ void launch_kv_rotary_kernel(T* kv_cache,
                              T* q,
                              T* k,
                              T* v,
-                             T* inv_freq,
+                             float* inv_freq,
                              const int32_t rotary_dim,
                              const float theta_base,
                              const BatchWrapperCPP batch_desc,
@@ -280,7 +285,7 @@ void launch_kv_rotary_kernel(T* kv_cache,
                                                 TYPE * q,                         \
                                                 TYPE * k,                         \
                                                 TYPE * v,                         \
-                                                TYPE * inv_freq,                  \
+                                                float* inv_freq,                  \
                                                 const int32_t rotary_dim,         \
                                                 const float theta_base,           \
                                                 const BatchWrapperCPP batch_desc, \

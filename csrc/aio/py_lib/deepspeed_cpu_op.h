@@ -11,9 +11,9 @@ struct cpu_op_desc_t : io_op_desc_t {
     torch::Tensor _cpu_buffer;
     bool _use_bounce_buffer;
     bool _is_managed_bounce_buffer;
-    const std::unique_ptr<struct deepspeed_pin_tensor_t>& _pinned_tensor_mgr;
+    std::shared_ptr<struct deepspeed_pin_tensor_t> _pinned_tensor_mgr;
 
-    cpu_op_desc_t(const std::unique_ptr<struct deepspeed_pin_tensor_t>& pinned_tensor_mgr,
+    cpu_op_desc_t(const std::shared_ptr<struct deepspeed_pin_tensor_t>& pinned_tensor_mgr,
                   const bool read_op,
                   const torch::Tensor& buffer,
                   const int fd,

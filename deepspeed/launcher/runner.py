@@ -27,7 +27,6 @@ import shlex
 from .multinode_runner import PDSHRunner, OpenMPIRunner, MVAPICHRunner, SlurmRunner, MPICHRunner, IMPIRunner
 from .constants import PDSH_LAUNCHER, OPENMPI_LAUNCHER, MVAPICH_LAUNCHER, SLURM_LAUNCHER, MPICH_LAUNCHER, IMPI_LAUNCHER
 from ..constants import TORCH_DISTRIBUTED_DEFAULT_PORT
-from ..nebula.constants import NEBULA_EXPORT_ENVS
 from ..utils import logger, set_log_level_from_string
 
 from ..autotuning import Autotuner
@@ -35,7 +34,6 @@ from deepspeed.accelerator import get_accelerator
 
 DLTS_HOSTFILE = "/job/hostfile"
 EXPORT_ENVS = ['MLFLOW', 'PYTHON', 'MV2', 'UCX']
-EXPORT_ENVS += NEBULA_EXPORT_ENVS
 DEEPSPEED_ENVIRONMENT_NAME = os.getenv("DS_ENV_FILE", ".deepspeed_env")
 DEEPSPEED_ENVIRONMENT_PATHS = [os.path.expanduser("~"), '.']
 PDSH_MAX_FAN_OUT = 1024
@@ -389,13 +387,39 @@ def parse_resource_filter(host_info, include_str="", exclude_str=""):
 
 
 def parse_inclusion_exclusion(resource_pool, inclusion, exclusion):
+    # Hand parse_resource_filter what the machines actually have. Seeding this
+    # from the inclusion string instead made it filter the request against
+    # itself, so a bare hostname resolved to no slots and an out-of-range slot
+    # passed the check it exists to fail.
     active_resources = collections.OrderedDict()
-    node_configs = parse_node_config_list(inclusion)
-
     for hostname, slots in resource_pool.items():
-        active_resources[hostname] = node_configs[hostname] if hostname in node_configs else list(range(slots))
+        active_resources[hostname] = list(range(slots))
 
     return parse_resource_filter(active_resources, include_str=inclusion, exclude_str=exclusion)
+
+
+def apply_num_nodes_and_gpus(active_resources, num_nodes, num_gpus):
+    """Trim resolved resources to the top num_nodes hosts and num_gpus slots per host.
+
+    Split out of main() so the launcher backends can be exercised against the same
+    resource dict main() hands them. Both flags are mutually exclusive with
+    --include/--exclude, which main() enforces before calling this.
+    """
+    if num_nodes > 0:
+        updated_active_resources = collections.OrderedDict()
+        for count, hostname in enumerate(active_resources.keys()):
+            if num_nodes == count:
+                break
+            updated_active_resources[hostname] = active_resources[hostname]
+        active_resources = updated_active_resources
+
+    if num_gpus > 0:
+        updated_active_resources = collections.OrderedDict()
+        for hostname in active_resources.keys():
+            updated_active_resources[hostname] = list(range(num_gpus))
+        active_resources = updated_active_resources
+
+    return active_resources
 
 
 def encode_world_info(world_info):
@@ -431,6 +455,16 @@ def parse_num_nodes(str_num_nodes: str, elastic_training: bool):
         raise RuntimeError("num_nodes {} is not in MIN:MAX format".format(str_num_nodes))
 
     return min_nodes, max_nodes
+
+
+LAUNCHER_CLASSES = {
+    PDSH_LAUNCHER: PDSHRunner,
+    OPENMPI_LAUNCHER: OpenMPIRunner,
+    MPICH_LAUNCHER: MPICHRunner,
+    IMPI_LAUNCHER: IMPIRunner,
+    MVAPICH_LAUNCHER: MVAPICHRunner,
+    SLURM_LAUNCHER: SlurmRunner,
+}
 
 
 def main(args=None):
@@ -518,19 +552,14 @@ def main(args=None):
         run_autotuning(args, active_resources)
         return
 
-    if args.num_nodes > 0:
-        updated_active_resources = collections.OrderedDict()
-        for count, hostname in enumerate(active_resources.keys()):
-            if args.num_nodes == count:
-                break
-            updated_active_resources[hostname] = active_resources[hostname]
-        active_resources = updated_active_resources
+    active_resources = apply_num_nodes_and_gpus(active_resources, args.num_nodes, args.num_gpus)
 
-    if args.num_gpus > 0:
-        updated_active_resources = collections.OrderedDict()
-        for hostname in active_resources.keys():
-            updated_active_resources[hostname] = list(range(args.num_gpus))
-        active_resources = updated_active_resources
+    # A filter can leave a single host, which takes the local-launch path below and never
+    # builds the backend, so ask the requested launcher about the filter while both paths
+    # are still on the table. Backends that can express any filter do nothing here.
+    launcher_cls = LAUNCHER_CLASSES.get(args.launcher.lower())
+    if launcher_cls is not None:
+        launcher_cls.validate_active_resources(active_resources)
 
     if args.elastic_training:
         assert not args.no_local_rank, "--no_local_rank argument is not supported in Elastic training"

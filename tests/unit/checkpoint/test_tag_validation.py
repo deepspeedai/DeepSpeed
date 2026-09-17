@@ -60,3 +60,26 @@ class TestCheckpointValidationTag(DistributedTest):
 
         with pytest.raises(deepspeed.DeepSpeedConfigError):
             model, _, _, _ = deepspeed.initialize(config=config_dict, model=model, model_parameters=model.parameters())
+
+
+class TestSaveCheckpointInvalidDir(DistributedTest):
+    world_size = 2
+
+    @pytest.mark.parametrize('save_dir', [None, ""])
+    def test_save_checkpoint_empty_dir(self, save_dir):
+        config_dict = {
+            "train_batch_size": 2,
+            "steps_per_print": 1,
+            "optimizer": {
+                "type": "Adam",
+                "params": {
+                    "lr": 0.00015
+                }
+            }
+        }
+        hidden_dim = 10
+        model = SimpleModel(hidden_dim)
+
+        model, _, _, _ = deepspeed.initialize(config=config_dict, model=model, model_parameters=model.parameters())
+        with pytest.raises(ValueError):
+            model.save_checkpoint(save_dir=save_dir)

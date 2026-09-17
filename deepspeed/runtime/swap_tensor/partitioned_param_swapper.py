@@ -128,7 +128,7 @@ class AsyncPartitionedParameterSwapper(object):
         if self.use_gds:
             self.aio_read_handle.pin_device_tensor(self.buffers)
         else:
-            self.buffers = get_accelerator().pin_memory(self.buffers, align_bytes=0)
+            self.buffers = self.aio_read_handle.new_cpu_locked_tensor(self.buffers.numel(), self.buffers)
 
         self.swap_out_params = []
 
@@ -326,7 +326,7 @@ class AsyncPartitionedParameterSwapper(object):
     def swap_into_buffer(self, param, dest_buffer):
         assert param.ds_tensor.status == PartitionedParamStatus.NOT_AVAILABLE, f"param {param.ds_id} is already available or inflight"
 
-        require_swap_buffer = not (get_accelerator().is_pinned(dest_buffer)
+        require_swap_buffer = not (self.aio_read_handle.is_pinned(dest_buffer)
                                    and self._is_io_aligned(dest_buffer.numel()))
 
         if require_swap_buffer:
@@ -392,11 +392,10 @@ class AsyncPartitionedParameterSwapper(object):
 
     def reserve_partitioned_swap_space(self, partition_num_elems):
         aligned_numel = sum([self._io_aligned_numel(numel) for numel in partition_num_elems])
-        self.partitioned_swap_buffer = get_accelerator().pin_memory(torch.zeros(aligned_numel,
-                                                                                device='cpu',
-                                                                                dtype=self.dtype),
-                                                                    align_bytes=0)
-        self.partitioned_swap_pool = SwapBufferPool([self.partitioned_swap_buffer])
+        dtype_example = torch.zeros(1, device='cpu', dtype=self.dtype)
+        self.partitioned_swap_buffer = self.aio_write_handle.new_cpu_locked_tensor(aligned_numel,
+                                                                                   dtype_example).zero_()
+        self.partitioned_swap_pool = SwapBufferPool([self.partitioned_swap_buffer], aio_handle=self.aio_write_handle)
 
     def swap_out_partitioned_params(self, dst_fp16_params, src_fp32_params):
         assert self.partitioned_swap_buffer is not None, 'partitioned swap buffers for fp16 params not initialized'

@@ -1,0 +1,421 @@
+################################################################################
+# DeepSpeed CI - AWS L40S GPU Full Tests (PyTorch Latest)
+#
+# Runs the full DeepSpeed unit test suite on AWS self-hosted runners.
+# Prefers 4x NVIDIA L40S GPUs on g6e.12xlarge instances, with AWS-side
+# fallback to 8x A100 nodes when L40S capacity is unavailable.
+#
+# This workflow runs:
+# - Parallel tests with pytest-xdist (-n 8)
+# - Sequential tests marked with @pytest.mark.sequential
+# - Nightly schedule: skips if no new commits since last successful run
+################################################################################
+
+name: aws-torch-latest-full
+
+on:
+  schedule:
+    - cron: '0 8 * * *'   # Daily at 08:00 UTC (midnight PST)
+  workflow_dispatch:
+    inputs:
+      torch_preset:
+        description: PyTorch preset to install for manual runs
+        required: false
+        default: '2.10.0-cu126'
+        type: choice
+        options:
+          - '2.7.1-cu126'
+          - '2.8.0-cu126'
+          - '2.9.1-cu126'
+          - '2.10.0-cu126'
+          - '2.11.0-cu126'
+      # Used only when a manual workflow_dispatch explicitly selects
+      # transformers_source=pypi. Scheduled nightlies and default manual runs
+      # install Transformers from Git and ignore this value.
+      transformers_version:
+        description: Hugging Face Transformers PyPI package version to install
+        required: false
+        default: '4.51.3'
+        type: string
+      transformers_source:
+        description: Hugging Face Transformers source for manual runs
+        required: false
+        default: 'git'
+        type: choice
+        options:
+          - 'pypi'
+          - 'git'
+      transformers_ref:
+        description: Hugging Face Transformers git ref to install when source is git
+        required: false
+        default: 'main'
+        type: string
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check-changes:
+    name: Check for new commits
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule'
+    outputs:
+      has_changes: ${{ steps.check.outputs.has_changes }}
+    steps:
+      - name: Check for commits since last successful run
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          default_branch="${{ github.event.repository.default_branch }}"
+
+          last_sha=$(gh api \
+            "repos/${{ github.repository }}/actions/workflows/aws-torch-latest-full.yml/runs?status=success&event=schedule&branch=${default_branch}&per_page=1" \
+            --jq '.workflow_runs[0].head_sha // empty')
+
+          current_sha="${{ github.sha }}"
+
+          if [ -z "$last_sha" ]; then
+            echo "No previous successful run found - running tests"
+            echo "has_changes=true" >> "$GITHUB_OUTPUT"
+          elif [ "$last_sha" = "$current_sha" ]; then
+            echo "No new commits since last successful run ($last_sha) - skipping"
+            echo "has_changes=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "New commits detected: $last_sha -> $current_sha - running tests"
+            echo "has_changes=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  unit-tests:
+    name: Unit Tests (Full)
+    needs: [check-changes]
+    if: |
+      !cancelled() &&
+      (github.event_name == 'workflow_dispatch' || needs.check-changes.outputs.has_changes == 'true')
+    runs-on: [self-hosted, gpu-ci, gpu-l40s, l40s-4gpu, aws]
+    timeout-minutes: 180
+
+    container:
+      image: nvidia/cuda:12.6.3-devel-ubuntu22.04
+      # Mount /mnt/aio for async I/O tests (O_DIRECT requires native filesystem, not overlayfs)
+      options: --gpus all --shm-size "32G" -v /mnt/aio:/mnt/aio
+
+    env:
+      DEFAULT_TORCH_PRESET: '2.10.0-cu126'
+      DEFAULT_TRANSFORMERS_SOURCE: 'git'
+      # Manual PyPI fallback only; scheduled and default manual runs use Git.
+      DEFAULT_TRANSFORMERS_VERSION: '4.51.3'
+      DEFAULT_TRANSFORMERS_REF: 'main'
+      CUTLASS_PATH: /opt/cutlass
+      # Disable reuse_dist_env to prevent pool worker cleanup hangs in full test runs
+      DS_DISABLE_REUSE_DIST_ENV: '1'
+
+    steps:
+      - name: Install system dependencies
+        run: |
+          apt-get update && apt-get install -y git git-lfs libaio-dev pdsh python3 python3-pip
+          git lfs install
+          ln -sf /usr/bin/python3 /usr/bin/python
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - name: Resolve dependency inputs
+        env:
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          MANUAL_TORCH_PRESET: ${{ github.event.inputs.torch_preset || '' }}
+          MANUAL_TRANSFORMERS_SOURCE: ${{ github.event.inputs.transformers_source || '' }}
+          MANUAL_TRANSFORMERS_VERSION: ${{ github.event.inputs.transformers_version || '' }}
+          MANUAL_TRANSFORMERS_REF: ${{ github.event.inputs.transformers_ref || '' }}
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = 'workflow_dispatch' ] && [ -n "$MANUAL_TORCH_PRESET" ]; then
+            selected_preset="$MANUAL_TORCH_PRESET"
+          else
+            selected_preset="$DEFAULT_TORCH_PRESET"
+          fi
+
+          if [ "$GITHUB_EVENT_NAME" = 'workflow_dispatch' ] && [ -n "$MANUAL_TRANSFORMERS_SOURCE" ]; then
+            transformers_source="$MANUAL_TRANSFORMERS_SOURCE"
+          else
+            transformers_source="$DEFAULT_TRANSFORMERS_SOURCE"
+          fi
+
+          if [ "$GITHUB_EVENT_NAME" = 'workflow_dispatch' ] && [ -n "$MANUAL_TRANSFORMERS_VERSION" ]; then
+            transformers_version="$MANUAL_TRANSFORMERS_VERSION"
+          else
+            transformers_version="$DEFAULT_TRANSFORMERS_VERSION"
+          fi
+
+          if [ "$GITHUB_EVENT_NAME" = 'workflow_dispatch' ] && [ -n "$MANUAL_TRANSFORMERS_REF" ]; then
+            transformers_ref="$MANUAL_TRANSFORMERS_REF"
+          else
+            transformers_ref="$DEFAULT_TRANSFORMERS_REF"
+          fi
+
+          if [ "$transformers_source" = 'git' ] && [ -z "$transformers_ref" ]; then
+            transformers_ref='main'
+          fi
+
+          case "$selected_preset" in
+            '2.7.1-cu126')
+              torch_install_version='2.7.1'
+              torchvision_install_version='0.22.1'
+              torchaudio_install_version='2.7.1'
+              torch_test_version='2.7'
+              cuda_test_version='12.6'
+              pytorch_index_url='https://download.pytorch.org/whl/cu126'
+              ;;
+            '2.8.0-cu126')
+              torch_install_version='2.8.0'
+              torchvision_install_version='0.23.0'
+              torchaudio_install_version='2.8.0'
+              torch_test_version='2.8'
+              cuda_test_version='12.6'
+              pytorch_index_url='https://download.pytorch.org/whl/cu126'
+              ;;
+            '2.9.1-cu126')
+              torch_install_version='2.9.1'
+              torchvision_install_version='0.24.1'
+              torchaudio_install_version='2.9.1'
+              torch_test_version='2.9'
+              cuda_test_version='12.6'
+              pytorch_index_url='https://download.pytorch.org/whl/cu126'
+              ;;
+            '2.10.0-cu126')
+              torch_install_version='2.10.0'
+              torchvision_install_version='0.25.0'
+              torchaudio_install_version='2.10.0'
+              torch_test_version='2.10'
+              cuda_test_version='12.6'
+              pytorch_index_url='https://download.pytorch.org/whl/cu126'
+              ;;
+            '2.11.0-cu126')
+              torch_install_version='2.11.0'
+              torchvision_install_version='0.26.0'
+              torchaudio_install_version='2.11.0'
+              torch_test_version='2.11'
+              cuda_test_version='12.6'
+              pytorch_index_url='https://download.pytorch.org/whl/cu126'
+              ;;
+            *)
+              echo "Unsupported torch_preset: $selected_preset" >&2
+              exit 1
+              ;;
+          esac
+
+          {
+            echo "SELECTED_TORCH_PRESET=$selected_preset"
+            echo "TORCH_INSTALL_VERSION=$torch_install_version"
+            echo "TORCHVISION_INSTALL_VERSION=$torchvision_install_version"
+            echo "TORCHAUDIO_INSTALL_VERSION=$torchaudio_install_version"
+            echo "TORCH_TEST_VERSION=$torch_test_version"
+            echo "CUDA_TEST_VERSION=$cuda_test_version"
+            echo "PYTORCH_INDEX_URL=$pytorch_index_url"
+            echo "TRANSFORMERS_SOURCE=$transformers_source"
+            echo "TRANSFORMERS_VERSION=$transformers_version"
+            echo "TRANSFORMERS_REF=$transformers_ref"
+          } >> "$GITHUB_ENV"
+
+          echo "Selected PyTorch preset: $selected_preset"
+          echo "Resolved install tuple: torch==$torch_install_version torchvision==$torchvision_install_version torchaudio==$torchaudio_install_version"
+          echo "Resolved test expectations: torch=$torch_test_version cuda=$cuda_test_version"
+          echo "Resolved PyTorch index: $pytorch_index_url"
+          echo "Resolved Transformers source: $transformers_source"
+          if [ "$transformers_source" = 'git' ]; then
+            echo "Requested Transformers PyPI version: N/A"
+            echo "Requested Transformers git ref: $transformers_ref"
+          else
+            echo "Requested Transformers PyPI version: $transformers_version"
+            echo "Requested Transformers git ref: N/A"
+          fi
+
+      - name: Install CUTLASS
+        run: |
+          git clone --depth 1 --branch v3.5.1 https://github.com/NVIDIA/cutlass.git /opt/cutlass
+          echo "CUTLASS installed at /opt/cutlass"
+          ls -la /opt/cutlass/include/ | head -10
+
+      - name: Install PyTorch
+        run: |
+          pip install \
+            torch=="$TORCH_INSTALL_VERSION" \
+            torchvision=="$TORCHVISION_INSTALL_VERSION" \
+            torchaudio=="$TORCHAUDIO_INSTALL_VERSION" \
+            --index-url "$PYTORCH_INDEX_URL"
+
+      - name: Install Transformers
+        run: |
+          case "$TRANSFORMERS_SOURCE" in
+            'pypi')
+              pip install "transformers==$TRANSFORMERS_VERSION"
+              echo "TRANSFORMERS_RESOLVED_REF=N/A" >> "$GITHUB_ENV"
+              ;;
+            'git')
+              git clone --filter=blob:none https://github.com/huggingface/transformers /tmp/transformers
+              cd /tmp/transformers
+              git checkout "$TRANSFORMERS_REF"
+              resolved_ref="$(git rev-parse HEAD)"
+              echo "TRANSFORMERS_RESOLVED_REF=$resolved_ref" >> "$GITHUB_ENV"
+              echo "Resolved Transformers git ref: $resolved_ref"
+              pip install .
+              ;;
+            *)
+              echo "Unsupported TRANSFORMERS_SOURCE: $TRANSFORMERS_SOURCE" >&2
+              exit 1
+              ;;
+          esac
+          python -c "import transformers; print('transformers:', transformers.__version__, transformers)"
+
+      - name: Install Python dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements/requirements.txt
+          pip install -r requirements/requirements-dev.txt
+          pip install -r requirements/requirements-deepcompile.txt
+          pip install pytest-timeout pytest-instafail
+
+      - name: Check environment
+        run: |
+          echo "=== Selected PyTorch Preset ==="
+          echo "Preset: $SELECTED_TORCH_PRESET"
+          echo "Install tuple: torch==$TORCH_INSTALL_VERSION torchvision==$TORCHVISION_INSTALL_VERSION torchaudio==$TORCHAUDIO_INSTALL_VERSION"
+          echo "PyTorch index URL: $PYTORCH_INDEX_URL"
+          echo "Expected test versions: torch=$TORCH_TEST_VERSION cuda=$CUDA_TEST_VERSION"
+          echo "Transformers source: $TRANSFORMERS_SOURCE"
+          if [ "$TRANSFORMERS_SOURCE" = 'git' ]; then
+            echo "Requested Transformers PyPI version: N/A"
+            echo "Requested Transformers git ref: $TRANSFORMERS_REF"
+            echo "Resolved Transformers git SHA: $TRANSFORMERS_RESOLVED_REF"
+          else
+            echo "Requested Transformers PyPI version: $TRANSFORMERS_VERSION"
+            echo "Requested Transformers git ref: N/A"
+            echo "Resolved Transformers git SHA: N/A"
+          fi
+          echo ""
+          echo "=== GPU Information ==="
+          nvidia-smi
+          echo ""
+          echo "=== CUDA Version ==="
+          nvcc --version
+          echo ""
+          echo "=== Python/PyTorch Info ==="
+          python --version
+          python -c "import torch; print(f'PyTorch: {torch.__version__}')"
+          python -c "import torch; print(f'CUDA available: {torch.cuda.is_available()}')"
+          python -c "import torch; print(f'CUDA devices: {torch.cuda.device_count()}')"
+          python -c "import torch; print(f'BF16 support: {torch.cuda.is_bf16_supported()}')"
+          echo ""
+          echo "=== CUTLASS ==="
+          echo "CUTLASS_PATH: $CUTLASS_PATH"
+          ls -la "$CUTLASS_PATH"/include/ | head -5
+
+      - name: Detect GPU architecture
+        run: |
+          python - <<'PY'
+          import os
+          import torch
+
+          torch.cuda.init()
+          major, minor = torch.cuda.get_device_capability(0)
+          arch = f"{major}.{minor}"
+          gpu_count = torch.cuda.device_count()
+          gpu_name = torch.cuda.get_device_name(0)
+
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as env_file:
+              env_file.write(f"TORCH_CUDA_ARCH_LIST={arch}\n")
+              env_file.write(f"GPU_COUNT={gpu_count}\n")
+
+          print(f"Detected GPU: {gpu_name}")
+          print(f"Detected compute capability: {arch}")
+          print(f"Detected GPU count: {gpu_count}")
+          PY
+
+      - name: Install DeepSpeed
+        run: |
+          echo "Using TORCH_CUDA_ARCH_LIST=$TORCH_CUDA_ARCH_LIST"
+          # Initialize CUDA before install so setup.py can detect NCCL version
+          python -c "import torch; torch.cuda.init(); print(f'NCCL version: {torch.cuda.nccl.version()}')"
+          # Use --no-build-isolation so setup.py can access pre-installed PyTorch
+          pip install --no-build-isolation .[dev,autotuning,deepcompile]
+          ds_report
+
+      - name: Reinstall selected Transformers
+        run: |
+          case "$TRANSFORMERS_SOURCE" in
+            'pypi')
+              pip install --no-deps --force-reinstall "transformers==$TRANSFORMERS_VERSION"
+              ;;
+            'git')
+              cd /tmp/transformers
+              pip install --no-deps --force-reinstall .
+              ;;
+            *)
+              echo "Unsupported TRANSFORMERS_SOURCE: $TRANSFORMERS_SOURCE" >&2
+              exit 1
+              ;;
+          esac
+          installed_version="$(python -c 'import transformers; print(transformers.__version__)')"
+          if [ "$TRANSFORMERS_SOURCE" = 'git' ]; then
+            requested_version='N/A'
+            requested_ref="$TRANSFORMERS_REF"
+            resolved_ref="$TRANSFORMERS_RESOLVED_REF"
+          else
+            requested_version="$TRANSFORMERS_VERSION"
+            requested_ref='N/A'
+            resolved_ref='N/A'
+          fi
+          {
+            echo "Transformers source: $TRANSFORMERS_SOURCE"
+            echo "Requested Transformers PyPI version: $requested_version"
+            echo "Requested Transformers git ref: $requested_ref"
+            echo "Resolved Transformers git SHA: $resolved_ref"
+            echo "Imported Transformers version: $installed_version"
+          } | tee /dev/stderr
+          {
+            echo "### Transformers provenance"
+            echo ""
+            echo "- Source: \`$TRANSFORMERS_SOURCE\`"
+            echo "- Requested PyPI version: \`$requested_version\`"
+            echo "- Requested git ref: \`$requested_ref\`"
+            echo "- Resolved git SHA: \`$resolved_ref\`"
+            echo "- Imported version: \`$installed_version\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Python environment
+        run: |
+          pip list
+
+      - name: Unit tests (parallel)
+        run: |
+          echo "Running parallel tests with TORCH_CUDA_ARCH_LIST=$TORCH_CUDA_ARCH_LIST on $GPU_COUNT GPUs"
+          cd tests
+          # Skip tests requiring unavailable hardware or known issues:
+          # - nvme checkpointing: no nvme device
+          # - GDS tests: no GPUDirect Storage support
+          # - launcher user_args: pdsh requires SSH server
+          # - zenflow: Stage 3 tests have pre-existing bugs + CUDA/fork issues
+          rm -rf /mnt/aio/pytest
+          pytest --instafail --timeout 600 --forked -n 8 --basetemp=/mnt/aio/pytest unit/ \
+            --ignore=unit/runtime/zero/test_nvme_checkpointing.py \
+            --ignore=unit/v1/nvme/test_gds.py \
+            --ignore=unit/launcher/test_user_args.py \
+            --ignore=unit/runtime/zenflow \
+            --ignore=unit/ops/adam/test_zf_torch_adam.py \
+            --torch_ver="$TORCH_TEST_VERSION" --cuda_ver="$CUDA_TEST_VERSION"
+
+      - name: Unit tests (sequential)
+        run: |
+          echo "Running sequential tests with TORCH_CUDA_ARCH_LIST=$TORCH_CUDA_ARCH_LIST on $GPU_COUNT GPUs"
+          cd tests
+          rm -rf /mnt/aio/pytest
+          pytest --instafail --timeout 600 -m 'sequential' --basetemp=/mnt/aio/pytest unit/ \
+            --ignore=unit/runtime/zero/test_nvme_checkpointing.py \
+            --ignore=unit/v1/nvme/test_gds.py \
+            --ignore=unit/launcher/test_user_args.py \
+            --ignore=unit/runtime/zenflow \
+            --ignore=unit/ops/adam/test_zf_torch_adam.py \
+            --ignore=unit/ops/deepspeed4science/test_DS4Sci_EvoformerAttention.py \
+            --torch_ver="$TORCH_TEST_VERSION" --cuda_ver="$CUDA_TEST_VERSION"

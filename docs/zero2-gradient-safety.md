@@ -1,8 +1,10 @@
-# ZeRO-2 Gradient Safety: Local v0.18.4 Changes
+# ZeRO-2 Gradient Safety: Experimental Changes
 
-These changes are based on v0.18.4 (`b35d9eb01bc04e774cc05dc43713f2a41423da5c`).
-They are local, uncommitted, and experimental. No dependency, submodule
-pointer, or Cortex branch was changed.
+These experimental changes originated on v0.18.4
+(`b35d9eb01bc04e774cc05dc43713f2a41423da5c`). The
+`jeffra/913-fixes-master-sync` branch merges master at `4ea3b47b`, retaining
+upstream accumulation and gradient-stream fixes alongside the opt-in options.
+The all-flags-disabled control now uses master's behavior, not v0.18.4's.
 
 ## Ownership and Ordering
 
@@ -57,17 +59,18 @@ absent from the last backward retains its contribution. Successful/skipped
 steps reset the seen set and zero the master-gradient buffers, preventing
 unused parameters from inheriting a prior window's gradients.
 
-This is separate from the NaN candidate changes. It changes training
-semantics relative to the old overwrite behavior; do not enable it in the
-initial storage/ordering comparison.
+This is separate from the NaN candidate changes. Master already accumulates
+across non-boundary backwards by default. The opt-in option additionally
+tracks each parameter's first contribution and refreshes master gradients
+on every backward; keep it disabled in the initial storage/ordering comparison.
 
 The accumulator retains DeepSpeed's existing low-precision accumulation
 dtype and does not alter engine loss normalization. Optimizer checkpoint
 loading discards the pending window. Gradient accumulation is not included
 in checkpoint state. External model-only weight replacement must explicitly
 discard pending gradients with `optimizer.reset_cpu_buffers()`.
-The engine still requires a true boundary before it dispatches an optimizer
-step; this option does not introduce the newer unmanaged engine API.
+Master's unmanaged accumulation API is retained. Its deferred CPU accumulator
+reloads also wait for tracked offload copies.
 
 ## Initial QA Matrix
 
@@ -123,7 +126,7 @@ python -m pytest \
   tests/unit/runtime/test_ds_config_model.py
 ```
 
-Local verification: **100 passed, 4 skipped**, using Python 3.12.12 and
+Original v0.18.4 verification: **100 passed, 4 skipped**, using Python 3.12.12 and
 PyTorch 2.9.1+cu130 on a CPU-only host. `git diff --check` also passes.
 
 Tests use the actual modified ZeRO methods with small tensor fixtures.
@@ -132,8 +135,8 @@ producer waits and reuse with stream fakes, empty/oversized bucket events,
 cross-stream CPU writes, CPU-copy completion, accumulation/boundary patterns,
 partial ownership, late first use, reset/restore, and real Adam state preservation.
 A two-process Gloo test exercises real overflow consensus for both corrupt
-gradients and invalid norms. It substitutes PyTorch's comm module for
-DeepSpeed's wrapper to avoid building CPU communication extensions.
+gradients and invalid norms through DeepSpeed's communication wrapper, with
+the optional shared-memory communication extension disabled.
 
 Four CUDA cases exercise an oversized gradient produced on a delayed stream
 and consumed on a different stream, with copy and overlap toggles.

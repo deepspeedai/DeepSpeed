@@ -192,18 +192,13 @@ class SDAA_Accelerator(DeepSpeedAccelerator):
         return supported_dtypes
 
     # Misc
-    def amp(self):
-        if hasattr(torch.sdaa, 'amp'):
-            return torch.sdaa.amp
-        return None
-
     def is_available(self):
         return torch.sdaa.is_available()
 
-    def range_push(self, msg):
+    def range_push(self, msg, domain=None, category=None):
         return
 
-    def range_pop(self):
+    def range_pop(self, domain=None):
         return
 
     def lazy_call(self, callback):
@@ -255,12 +250,6 @@ class SDAA_Accelerator(DeepSpeedAccelerator):
     @property
     def LongTensor(self):
         return functools.partial(torch.tensor, dtype=torch.long, device='sdaa')
-
-    def pin_memory(self, tensor, align_bytes=1):
-        return tensor.pin_memory()
-
-    def is_pinned(self, tensor):
-        return tensor.is_pinned()
 
     def on_accelerator(self, tensor):
         device_str = str(tensor.device)

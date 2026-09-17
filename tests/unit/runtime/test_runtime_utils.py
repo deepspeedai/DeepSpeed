@@ -7,6 +7,7 @@ import torch
 from torch._utils import _flatten_dense_tensors
 import deepspeed.comm as dist
 import pytest
+from typing import Dict
 
 import deepspeed.runtime.utils as ds_utils
 import deepspeed.utils.groups as groups
@@ -72,6 +73,34 @@ class TestClipGradNorm(DistributedTest):
         assert torch.equal(params_expected[1].grad, params_actual[1].grad)
 
 
+class TestClipGradNormPNorm(DistributedTest):
+    # world_size 1 so this runs wherever the suite runs; the bug is in the per-rank
+    # recombination of the norms, which is independent of the group size.
+    world_size = 1
+
+    @pytest.mark.parametrize("norm_type", [1, 2, 3])
+    def test_matches_torch(self, norm_type):
+        # The p-norm over all gradients is (sum_i ||g_i||_p ** p) ** (1/p). Squaring the
+        # per-parameter norms computes that only for p == 2, which is the control here.
+        def test_params():
+            param1 = torch.nn.Parameter(torch.zeros(2))
+            param1.grad = torch.Tensor([3.0, -4.0])
+            param2 = torch.nn.Parameter(torch.zeros(1))
+            param2.grad = torch.Tensor([2.0])
+            return [param1, param2]
+
+        max_norm = 1.0
+        params_expected = test_params()
+        expected_norm = torch.nn.utils.clip_grad_norm_(params_expected, max_norm, norm_type=norm_type)
+
+        params_actual = test_params()
+        actual_norm = ds_utils.clip_grad_norm_(params_actual, max_norm=max_norm, norm_type=norm_type)
+
+        assert torch.allclose(actual_norm.float().cpu(), expected_norm.float().cpu())
+        for expected, actual in zip(params_expected, params_actual):
+            assert torch.allclose(actual.grad, expected.grad)
+
+
 @pytest.mark.parametrize("check_using_norm", [(False), (True)])
 class TestCheckOverflow(DistributedTest):
     world_size = 2
@@ -98,3 +127,30 @@ class TestCheckOverflow(DistributedTest):
             overflow_checker = ds_utils.CheckOverflow([parameters])
             overflow = overflow_checker.check()
         assert overflow
+
+
+@pytest.mark.skipif(not hasattr(torch.autograd.graph, "_get_grad_fn_or_grad_acc"),
+                    reason="requires torch.autograd.graph._get_grad_fn_or_grad_acc")
+def test_count_used_parameters_enables_grad_for_grad_acc_lookup(monkeypatch):
+    """count_used_parameters_in_backward should enable grad for grad-acc lookup."""
+    param = torch.nn.Parameter(torch.tensor([1.0], requires_grad=True))
+    seen: Dict[str, int] = {"lookup_calls": 0}
+    original_getter = torch.autograd.graph._get_grad_fn_or_grad_acc
+
+    def _require_grad_enabled(t):
+        seen["lookup_calls"] += 1
+        if not torch.is_grad_enabled():
+            raise RuntimeError("grad mode must be enabled for grad-acc lookup")
+        return original_getter(t)
+
+    monkeypatch.setattr(torch.autograd.graph, "_get_grad_fn_or_grad_acc", _require_grad_enabled)
+
+    def _hook(grad):
+        seen["count"] = ds_utils.count_used_parameters_in_backward([param])
+        return grad
+
+    param.register_hook(_hook)
+    loss = (param * 2.0).sum()
+    loss.backward()
+    assert seen["lookup_calls"] > 0
+    assert "count" in seen

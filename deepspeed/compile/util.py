@@ -9,8 +9,9 @@ from typing import List, Tuple, Dict, Optional
 from collections import defaultdict
 
 import torch
-from torch.fx import Node, Graph
+from torch.fx import Node, Graph, GraphModule
 from torch.fx.node import map_aggregate, Argument, map_arg
+import torch.nn.functional as F
 
 try:
     from torch._subclasses.fake_tensor import unset_fake_temporarily
@@ -22,10 +23,13 @@ import deepspeed.comm as dist
 from deepspeed.accelerator import get_accelerator
 from deepspeed.utils.torch import required_torch_version
 from deepspeed.ops.op_builder.dc import DeepCompileBuilder
+from deepspeed.compile import constants
+
+from .custom_ops import sp_dp_registry
 
 
 def is_deepcompile_supported() -> bool:
-    return required_torch_version(min_version=2.6, max_version=2.9) and get_accelerator().device_name() == "cuda"
+    return required_torch_version(min_version=2.6) and get_accelerator().device_name() == "cuda"
 
 
 dc_handle = None
@@ -56,19 +60,29 @@ def is_backend_inductor(backend):
 
 backward_started = False
 pre_backward_hooks = []
+post_backward_hooks = []
 
 
 def add_pre_backward_hook(hook):
     pre_backward_hooks.append(hook)
 
 
+def add_post_backward_hook(hook):
+    post_backward_hooks.append(hook)
+
+
 def deepcompile_backward_prologue(is_gradient_accumulation_boundary):
 
     for hook in pre_backward_hooks:
-        hook()
+        hook(is_gradient_accumulation_boundary)
 
     dc = get_deepcompile_handle()
     dc.start_backward(is_gradient_accumulation_boundary)
+
+
+def deepcompile_backward_epilogue():
+    for hook in post_backward_hooks:
+        hook()
 
 
 def log_rank0(msg: str, enable: bool = False):
@@ -224,7 +238,7 @@ def materialize_fake(v, device=None):
                                        device=t.device if device is None else device,
                                        layout=t.layout,
                                        requires_grad=t.requires_grad,
-                                       pin_memory=t.is_pinned())
+                                       pin_memory=get_accelerator().is_pinned(t))
                 else:
                     return torch.zeros(t.shape,
                                        dtype=t.dtype,
@@ -248,7 +262,7 @@ def get_last_uses(graph: Graph):
         known_last_use = None
 
         if user.target in no_copy_ops and n in node_to_last_use:
-            last_user = node_to_last_use[user]
+            last_user = node_to_last_use.get(user, user)
             last_use_position = position[last_user]
 
             known_last_use = node_to_last_use[n]
@@ -257,7 +271,7 @@ def get_last_uses(graph: Graph):
 
         if n not in node_to_last_use or update:
             if user.target in no_copy_ops:
-                user = node_to_last_use[user]
+                user = node_to_last_use.get(user, user)
 
             node_to_last_use[n] = user
             user_to_last_uses.setdefault(user, []).append(n)
@@ -521,3 +535,90 @@ def pad_tensors(specs: List[Tuple[torch.Tensor, int, int]]) -> List[torch.Tensor
         padded.append(out)
 
     return padded
+
+
+def create_shard_offsets(gm: GraphModule, s0_node: Node) -> Tuple[Node, Node]:
+    sp_size: int = sp_dp_registry.sp_size()
+    sp_rank: int = dist.get_rank() % sp_dp_registry.sp_size()
+    with gm.graph.inserting_after(s0_node):
+        chunk_size_node = gm.graph.call_function(operator.floordiv, args=(s0_node, sp_size))
+    with gm.graph.inserting_after(chunk_size_node):
+        start_node = gm.graph.call_function(operator.mul, args=(sp_rank, chunk_size_node))
+    with gm.graph.inserting_after(start_node):
+        end_node = gm.graph.call_function(operator.add, args=(start_node, chunk_size_node))
+
+    return start_node, end_node
+
+
+def get_sdpa_nodes(gm: GraphModule) -> List[Node]:
+    return list(gm.graph.find_nodes(
+        op="call_function",
+        target=F.scaled_dot_product_attention,
+    ))
+
+
+def get_input_id_node(gm: GraphModule) -> Node:
+    from .fx import find_node_by_tag
+    node = find_node_by_tag(gm, constants.AUTOSP_INPUT_ID_KEY)
+    if node is None:
+        raise RuntimeError("Failed to find a node for the input sequence.")
+    return node
+
+
+def get_label_id_node(gm: GraphModule) -> Node:
+    from .fx import find_node_by_tag
+    node = find_node_by_tag(gm, constants.AUTOSP_LABEL_ID_KEY)
+    if node is None:
+        raise RuntimeError("Failed to find a node for the label.")
+    return node
+
+
+def get_position_id_node(gm: GraphModule) -> Node:
+    from .fx import find_node_by_tag
+    node = find_node_by_tag(gm, constants.AUTOSP_POSITION_ID_KEY)
+    return node
+
+
+def create_symbolic_slice_indices(
+    gm: GraphModule,
+    sym_seq_dim_node: Node,
+) -> Tuple[Node, Node]:
+    start_node, end_node = create_shard_offsets(gm, sym_seq_dim_node)
+
+    with gm.graph.inserting_after(end_node):
+        slice_all = gm.graph.call_function(slice, args=(None, None, None))
+    with gm.graph.inserting_after(slice_all):
+        slice_range = gm.graph.call_function(slice, args=(start_node, end_node, None))
+
+    return slice_all, slice_range
+
+
+def shard_tensor_node(gm: GraphModule, tensor_node: Node):
+    from .fx import find_node_by_name, get_node_shape_meta, replace_node_users
+    val = get_node_shape_meta(tensor_node)
+    assert val is not None, f"Node {tensor_node.name} has no shape metadata"
+
+    seq_len = val.shape[1]
+
+    assert isinstance(
+        seq_len,
+        torch.SymInt), (f"Expected sequence dimension to be {torch.SymInt!r} but instead found {type(seq_len)!r}")
+
+    symb_seq_int_node = find_node_by_name(gm, str(seq_len))
+    assert symb_seq_int_node, f"Unable to find symbolic placeholder for {seq_len}"
+
+    slice_all, slice_range = create_symbolic_slice_indices(gm, symb_seq_int_node)
+    indices = (slice_all, slice_range)
+
+    positions = {node: i for i, node in enumerate(gm.graph.nodes)}
+    # Insert after the later dependency so the new getitem does not appear
+    # before the symbolic slice nodes in graph order. Torch 2.9 bf16 can place
+    # the SymInt placeholder after the tensor placeholder.
+    anchor_node = slice_range if positions[slice_range] > positions[tensor_node] else tensor_node
+    with gm.graph.inserting_after(anchor_node):
+        sliced_node = gm.graph.call_function(
+            operator.getitem,
+            args=(tensor_node, indices),
+        )
+
+    replace_node_users(tensor_node, sliced_node, exclude=[sliced_node])

@@ -4,7 +4,7 @@
 # DeepSpeed Team
 
 import sys
-from typing import Optional, Dict, Any
+from typing import Optional
 from enum import Enum
 from pydantic import Field, model_validator
 from deepspeed.runtime.config_utils import get_scalar_param, pp_int, DeepSpeedConfigModel
@@ -26,6 +26,7 @@ ZeRO optimization should be enabled as:
     "stage3_module_granularity_threshold": 0,
     "allgather_partitions": [true|false],
     "use_multi_rank_bucket_allreduce": [true|false],
+    "stage3_allgather_sequential": [true|false],
     "allgather_bucket_size": 500000000,
     "reduce_scatter": [true|false],
     "contiguous_gradients" : [true|false]
@@ -40,13 +41,13 @@ ZeRO optimization should be enabled as:
     "offload_optimizer": {...},
     "ignore_unused_parameters": [true|false],
     "round_robin_gradients": [true|false],
+    "parameter_alignment": [true|false],
     "zero_hpz_partition_size": 1,
     "zero_quantized_weights": [true|false],
     "zero_quantized_nontrainable_weights": [true|false],
     "zero_quantized_gradients": [true|false],
     "memory_efficient_linear": [true|false],
     "override_module_apply": [true|false],
-    "zeropp_loco_param": {...},
     "log_trace_cache_warnings" : [true|false],
     "enable_sanity_checks": [true|false],
     }
@@ -109,7 +110,7 @@ class DeepSpeedZeroConfig(DeepSpeedConfigModel):
     Uses reduce or reduce scatter instead of allreduce to average gradients
     """
 
-    reduce_bucket_size: int = Field(pp_int(5e8), ge=0)
+    reduce_bucket_size: int = Field(pp_int(5e8), gt=0)
     """
     Number of elements reduced/allreduced at a time. Limits the memory required
     for the allgather for large model sizes
@@ -155,6 +156,13 @@ class DeepSpeedZeroConfig(DeepSpeedConfigModel):
     Attempts to overlap the reduction of the gradients with backward computation
     """
 
+    compute_grad_norm: bool = True
+    """
+    Compute and retain the global gradient norm during ZeRO Stage 1/2 optimizer steps.
+    Disable only when gradient clipping is off, the dedicated ZeRO-1 BF16 optimizer is not selected,
+    and callers do not use ``get_global_grad_norm()``.
+    """
+
     load_from_fp32_weights: bool = True
     """
     Boolean indicating whether to initialize fp32 master weights from fp32
@@ -165,8 +173,8 @@ class DeepSpeedZeroConfig(DeepSpeedConfigModel):
 
     elastic_checkpoint: bool = False
     """
-    Enable loading checkpoint that was saved by job with different GPU count.
-    No longer supported.
+    Legacy elastic checkpoint support. ZeRO-3 elastic checkpointing is no
+    longer supported; use Universal Checkpointing instead.
     """
 
     offload_param: Optional[DeepSpeedZeroOffloadParamConfig] = None
@@ -284,6 +292,14 @@ class DeepSpeedZeroConfig(DeepSpeedConfigModel):
     the overhead of concatenation and slicing on the host.
     """
 
+    allgather_sequential: bool = Field(default=False, alias="stage3_allgather_sequential")
+    """
+    Performs allgather on individual parameters sequentially, bypassing the standard parameter bucketing
+    mechanism in stage3. This significantly reduces data copy overhead (eliminating copy-to-bucket operations)
+    and lowers peak memory usage by avoiding the allocation of large temporary flattening buffers.
+    Recommended for scenarios with high memory pressure.
+    """
+
     stage3_gather_fp16_weights_on_model_save: bool = Field(False,
                                                            json_schema_extra={
                                                                "deprecated": True,
@@ -313,6 +329,14 @@ class DeepSpeedZeroConfig(DeepSpeedConfigModel):
     Performance benefit grows with gradient accumulation steps (more copying
     between optimizer steps) or GPU count (increased parallelism).
     """
+
+    parameter_alignment: bool = False
+    """
+    Pad ZeRO Stage 1 and 2 flat buffers between parameters so each parameter
+    starts at a 16-byte-aligned address. This is disabled by default because
+    the padding increases flat-buffer and optimizer-state memory usage.
+    """
+
     zero_hpz_partition_size: int = Field(1, ge=0)
     """
     Number of ranks in zero parameters partitioning secondary group
@@ -334,20 +358,6 @@ class DeepSpeedZeroConfig(DeepSpeedConfigModel):
     Boolean indicating whether to use quantized zero gradients
     for efficient all_2_all_reduce comm
     """
-    zeropp_loco_param: Optional[Dict[str, Any]] = None
-    """
-    This dictionary contains parameters for using LoCo-Zero++, with two key parameters:
-    - `err_beta`: A coefficient for the moving average of quantization errors before and after gradient computation.
-    It ranges between 0 and 1, with a default value of 0.8.
-    - `reset_T`: The number of steps after which the moving-average error buffer is cleared. The default value is 1024.
-    These parameters can be adjusted based on performance needs. Example configuration in ds config:
-    "zeropp_loco_param": { "err_beta": 0.8, "reset_T": 1024 }.
-    See LoCo paper for more details: (https://arxiv.org/abs/2407.04480).
-    """
-
-    mics_shard_size: int = Field(-1, json_schema_extra={"new_param": "mics_shard_size"})
-
-    mics_hierarchical_params_gather: bool = False
 
     memory_efficient_linear: bool = True
     """
@@ -371,6 +381,13 @@ class DeepSpeedZeroConfig(DeepSpeedConfigModel):
     enable_sanity_checks: bool = False
     """
     Enable internal sanity checks, which could be useful for debugging
+    """
+
+    save_muon_momentum_buffer_in_memory: bool = False
+    """
+    When using the Muon optimizer with ZeRO Stage 3, keeps the Muon momentum
+    buffer in GPU/CPU memory instead of swapping to NVMe with other optimizer
+    states. Only relevant when using NVMe offloading.
     """
 
     leaf_module: DeepSpeedZeroLeafModuleConfig = Field(default_factory=DeepSpeedZeroLeafModuleConfig)
@@ -401,8 +418,22 @@ class DeepSpeedZeroConfig(DeepSpeedConfigModel):
         return self
 
     @model_validator(mode="after")
+    def compute_grad_norm_valid(self):
+        if not self.compute_grad_norm and self.stage not in (ZeroStageEnum.optimizer_states, ZeroStageEnum.gradients):
+            raise ValueError("compute_grad_norm=false is supported only with ZeRO Stage 1 or 2")
+        return self
+
+    @model_validator(mode="after")
     def offload_ratio_check(self):
         offload_config = self.offload_optimizer
         if offload_config and offload_config.ratio < 1.0:
             assert self.stage == ZeroStageEnum.weights, "Partial offloading only supported for ZeRO Stage 3."
+        return self
+
+    @model_validator(mode="after")
+    def elastic_checkpoint_deprecated(self):
+        if self.stage == ZeroStageEnum.weights and self.elastic_checkpoint:
+            logger.warning(
+                "ZeRO-3 elastic checkpointing is deprecated and no longer supported. Use Universal Checkpointing instead."
+            )
         return self

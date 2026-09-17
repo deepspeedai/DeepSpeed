@@ -8,6 +8,7 @@ from abc import ABC
 
 
 class DeepSpeedAccelerator(ABC):
+    supports_nvtx_domain = False
 
     def __init__(self):
         self._name = None
@@ -173,25 +174,25 @@ class DeepSpeedAccelerator(ABC):
     def is_fp16_supported(self):
         ...
 
+    # Not abstract: nearly every accelerator supports fp64, so only those that do not need to override.
+    def is_fp64_supported(self):
+        return True
+
     @abc.abstractmethod
     def supported_dtypes(self):
         ...
 
     # Misc
     @abc.abstractmethod
-    def amp(self):
-        ...
-
-    @abc.abstractmethod
     def is_available(self):
         ...
 
     @abc.abstractmethod
-    def range_push(self, msg):
+    def range_push(self, msg, domain=None, category=None):
         ...
 
     @abc.abstractmethod
-    def range_pop(self):
+    def range_pop(self, domain=None):
         ...
 
     @abc.abstractmethod
@@ -205,6 +206,14 @@ class DeepSpeedAccelerator(ABC):
     @abc.abstractmethod
     def is_triton_supported(self):
         ...
+
+    # Whether the fused MoE expert path should prefer a Triton grouped-GEMM
+    # kernel over ``torch._grouped_mm`` on this accelerator. Backends override
+    # this to return True when the Triton path is faster than the native op
+    # (e.g. CUDA sm8x, where ``torch._grouped_mm`` falls back to a slow
+    # per-group loop). Defaults to False so backends opt in explicitly.
+    def prefer_triton_grouped_mm(self):
+        return False
 
     # Graph operations
     @abc.abstractmethod
@@ -255,13 +264,107 @@ class DeepSpeedAccelerator(ABC):
     def LongTensor(self):
         ...
 
-    @abc.abstractmethod
-    def pin_memory(self, tensor, align_bytes=1):
-        ...
+    # Memory pinning. The public methods below dispatch between the native
+    # backend (``deepspeed.utils.pin_memory``, selected via ``DS_PIN_MEMORY_BACKEND``)
+    # and the device-specific torch primitives ``_torch_pin_memory``/``_torch_is_pinned``,
+    # which subclasses override as needed. The native utility is backend-only and
+    # never calls back here.
+    def _torch_pin_memory(self, tensor):
+        return tensor.pin_memory()
 
-    @abc.abstractmethod
+    def _torch_empty_pinned(self, tensor, shape):
+        return tensor.new_empty(shape, pin_memory=True)
+
+    def _torch_is_pinned(self, tensor):
+        return tensor.is_pinned()
+
+    def register_host_memory(self, address, num_bytes):
+        """Register page-locked host memory with the active device runtime."""
+        return False
+
+    def unregister_host_memory(self, address):
+        """Unregister host memory previously registered with the device runtime."""
+        return None
+
+    # CPU torch pinning is a historical no-op; subclasses that really page-lock
+    # keep the default True so tracker accounting matches the docs.
+    _torch_pins_host_memory = True
+
+    @staticmethod
+    def _shape_numel(shape):
+        numel = 1
+        for dim in shape:
+            numel *= int(dim)
+        return numel
+
+    @staticmethod
+    def _require_host_device(device):
+        import torch
+        try:
+            dev = torch.device(device)
+        except RuntimeError as err:
+            raise ValueError(f"pin_empty allocates host memory; device must be cpu, got {device!r}") from err
+        if dev.type != "cpu":
+            raise ValueError(f"pin_empty allocates host memory; device must be cpu, got {device!r}")
+
+    def _pin_fresh(self, template, shape):
+        # Shared scratch path for pin_empty and pin_memory(make_copy=False).
+        from deepspeed.utils.pin_memory import get_active_native_pinned_memory
+        pins = get_active_native_pinned_memory()
+        if pins is not None or self._torch_pins_host_memory:
+            from deepspeed.utils.pin_memory_tracker import track_pinned_memory
+            track_pinned_memory(self._shape_numel(shape) * template.element_size())
+        if pins is not None:
+            return pins.pin_empty(template, shape)
+        return self._torch_empty_pinned(template, shape)
+
+    def pin_memory(self, tensor, make_copy=True, match_shape=True):
+        from deepspeed.utils.pin_memory import get_active_native_pinned_memory
+        pins = get_active_native_pinned_memory()
+        if pins is not None:
+            from deepspeed.utils.pin_memory_tracker import track_pinned_memory
+            track_pinned_memory(tensor.nbytes)
+            return pins.pin(tensor, make_copy=make_copy, match_shape=match_shape)
+        if make_copy:
+            if self._torch_pins_host_memory:
+                from deepspeed.utils.pin_memory_tracker import track_pinned_memory
+                track_pinned_memory(tensor.nbytes)
+            return self._torch_pin_memory(tensor)
+        # ``tensor`` is only a shape/dtype template here, so page-lock a fresh
+        # buffer instead of faulting it in and copying it into a second one.
+        shape = tensor.shape if match_shape else (tensor.numel(), )
+        return self._pin_fresh(tensor, shape)
+
+    def pin_empty(self, *size, dtype, device="cpu"):
+        # Scratch destinations: shape/dtype only, no pageable template of ``size``.
+        import torch
+        self._require_host_device(device)
+        if len(size) == 1 and isinstance(size[0], (tuple, list, torch.Size)):
+            shape = tuple(size[0])
+        else:
+            shape = tuple(size)
+        template = torch.empty(0, dtype=dtype, device=device)
+        return self._pin_fresh(template, shape)
+
+    def pin_empty_like(self, tensor, device="cpu", dtype=None):
+        self._require_host_device(device)
+        dtype = tensor.dtype if dtype is None else dtype
+        template = tensor.new_empty((0, ), dtype=dtype, device=device)
+        return self._pin_fresh(template, tuple(tensor.shape))
+
     def is_pinned(self, tensor):
-        ...
+        from deepspeed.utils.pin_memory import get_active_native_pinned_memory
+        pins = get_active_native_pinned_memory()
+        if pins is not None and pins.is_pinned(tensor):
+            return True
+        return self._torch_is_pinned(tensor)
+
+    def unpin_memory(self, tensor):
+        from deepspeed.utils.pin_memory import get_active_native_pinned_memory
+        pins = get_active_native_pinned_memory()
+        if pins is not None:
+            return pins.unpin(tensor)
+        return None
 
     @abc.abstractmethod
     def on_accelerator(self, tensor):

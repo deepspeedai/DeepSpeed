@@ -9,6 +9,8 @@ from typing import Type
 
 import torch
 
+from deepspeed.compat import get_annotations_from_namespace, get_annotations
+
 # Currently have dependency loops for the type hints.
 InferenceModel = Type["InferenceModel"]
 LayerContainer = Type["LayerContainer"]
@@ -62,7 +64,7 @@ class ParameterMetaclass(type):
 
     def __new__(cls, clsname, bases, attrs):
 
-        annotations = attrs.get("__annotations__", {})
+        annotations = get_annotations_from_namespace(attrs)
         dependencies = {
             name: annotation
             for name, annotation in annotations.items() if issubclass(annotation, (torch.Tensor, ParametrizedList))
@@ -91,7 +93,7 @@ class ParameterMetaclass(type):
         setattr(new_obj, "dest_param", None)
 
         # Initialize our dependences to None/empty `ParametrizedList`s
-        for name, annotation in new_obj.__annotations__.items():
+        for name, annotation in get_annotations(new_obj).items():
             if issubclass(annotation, ParametrizedList):
                 #TODO(jeff): update assert with this, model implementation attribute does not align or missing wrt the ParametrizedList attributes
                 assert hasattr(

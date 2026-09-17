@@ -15,11 +15,6 @@ on:
       - master
 
   pull_request:
-    paths-ignore:
-      - 'docs/**'
-      - 'blogs/**'
-      - 'deepspeed/inference/v2/**'
-      - 'tests/unit/inference/v2/**'
     branches:
       - master
 
@@ -28,9 +23,32 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  check-paths:
+    name: aws-torch-latest / check paths
+    runs-on: ubuntu-latest
+    outputs:
+      should_run: ${{ steps.filter.outputs.run_tests }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dorny/paths-filter@v4
+        id: filter
+        with:
+          filters: |
+            run_tests:
+              - '**'
+              - '!docs/**'
+              - '!blogs/**'
+              - '!*.md'
+              - '!version.txt'
+              - '!deepspeed/inference/v2/**'
+              - '!tests/unit/inference/v2/**'
+
   unit-tests:
-    name: Unit Tests (V1)
+    name: aws-torch-latest / unit tests (v1)
+    needs: check-paths
+    if: needs.check-paths.outputs.should_run == 'true'
     runs-on: [self-hosted, gpu-ci, gpu-l40s, l40s-4gpu, aws]
+    timeout-minutes: 60
 
     container:
       image: nvidia/cuda:12.6.3-devel-ubuntu22.04
@@ -90,4 +108,10 @@ jobs:
 
       - name: Run unit tests
         run: |
-          pytest -n 4 --forked --verbose tests/unit/v1/ --torch_ver=${{ env.TORCH_VER }} --cuda_ver=${{ env.CUDA_VER }}
+          # GDS tests require GPUDirect Storage support unavailable on these runners
+          pytest -n 4 --forked --verbose tests/unit/v1/ --ignore=tests/unit/v1/nvme/test_gds.py --torch_ver=${{ env.TORCH_VER }} --cuda_ver=${{ env.CUDA_VER }}
+
+      - name: Run sequential unit tests
+        run: |
+          # GDS tests require GPUDirect Storage support unavailable on these runners
+          pytest --verbose -m 'sequential' tests/unit/v1/ --ignore=tests/unit/v1/nvme/test_gds.py --torch_ver=${{ env.TORCH_VER }} --cuda_ver=${{ env.CUDA_VER }}

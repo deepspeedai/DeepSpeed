@@ -1,0 +1,399 @@
+# Copyright (c) DeepSpeed Team.
+# SPDX-License-Identifier: Apache-2.0
+
+# DeepSpeed Team
+"""AutoEP configuration: config parsing, model presets, and validation."""
+
+from __future__ import annotations
+
+from deepspeed.module_inject.auto_ep_presets.base import (
+    _UNSET,
+    _raise_unsupported_load_balance_coeff,
+    AutoEPConfig,
+    MoELayerSpec,
+    MoEModelPreset,
+)
+from deepspeed.module_inject.auto_ep_presets.registry import (
+    PRESET_MODELS,
+    available_preset_names,
+    resolve_autoep_config_defaults,
+)
+from deepspeed.module_inject.auto_ep_folding import build_folding_spec, validate_folding_global
+from deepspeed.utils import logger
+
+__all__ = [
+    "_UNSET",
+    "AutoEPConfig",
+    "MoELayerSpec",
+    "MoEModelPreset",
+    "PRESET_MODELS",
+    "parse_autoep_config",
+    "resolve_autoep_config_defaults",
+    "validate_autoep_config",
+    "validate_autoep_post_detection",
+]
+
+# ---------------------------------------------------------------------------
+# Config parsing
+# ---------------------------------------------------------------------------
+
+
+def parse_autoep_config(param_dict: dict) -> AutoEPConfig:
+    """Parse the 'expert_parallel' section from DS config JSON."""
+    if not param_dict:
+        return AutoEPConfig()
+
+    config = AutoEPConfig()
+    config.enabled = param_dict.get("enabled", False)
+    config.autoep_size = param_dict.get("autoep_size", 1)
+    config.expert_tensor_parallel_size = param_dict.get("expert_tensor_parallel_size", 1)
+    config.validate_folding_routing = param_dict.get("validate_folding_routing", False)
+    config.preset_model = param_dict.get("preset_model", None)
+    config.moe_layer_pattern = param_dict.get("moe_layer_pattern", None)
+    config.expert_pattern = param_dict.get("expert_pattern", None)
+    config.router_pattern = param_dict.get("router_pattern", None)
+    config.use_grouped_mm = param_dict.get("use_grouped_mm", True)
+    config.disable_triton_grouped_mm = param_dict.get("disable_triton_grouped_mm", False)
+    config.route_norm = param_dict.get("route_norm", None)
+    config.route_scale = param_dict.get("route_scale", 1.0)
+    config.score_apply = param_dict.get("score_apply", "auto")
+    config.combine_impl = param_dict.get("combine_impl", "auto")
+    config.comm_backend = param_dict.get("comm_backend", "comm")
+    config.comm_num_sm = param_dict.get("comm_num_sm", 12)
+    config.comm_qp_margin = param_dict.get("comm_qp_margin", 4)
+    config.comm_max_tokens_per_rank = param_dict.get("comm_max_tokens_per_rank", 0)
+    config.num_expert_groups = param_dict.get("num_expert_groups", None)
+    config.num_limited_groups = param_dict.get("num_limited_groups", None)
+    config.score_func = param_dict.get("score_func", "auto")
+    config.top_k = param_dict.get("top_k", "auto")
+    if "load_balance_coeff" in param_dict:
+        value = param_dict["load_balance_coeff"]
+        if value is not None:
+            _raise_unsupported_load_balance_coeff(value)
+        config.load_balance_coeff = None
+        config._load_balance_coeff_explicit = True
+    else:
+        config.load_balance_coeff = None
+        config._load_balance_coeff_explicit = False
+    config.routed_scaling_factor = param_dict.get("routed_scaling_factor", "auto")
+    config.expert_w1 = param_dict.get("expert_w1", None)
+    config.expert_w2 = param_dict.get("expert_w2", None)
+    # expert_w3: key absent → _UNSET (preset default); key present with null → None (fused); key present with string → custom name
+    if "expert_w3" in param_dict:
+        config.expert_w3 = param_dict["expert_w3"]  # None or string
+    else:
+        config.expert_w3 = _UNSET
+    config.num_experts_attr = param_dict.get("num_experts_attr", None)
+    config.top_k_attr = param_dict.get("top_k_attr", None)
+    config.has_shared_experts = param_dict.get("has_shared_experts", None)
+    config.shared_experts_pattern = param_dict.get("shared_experts_pattern", None)
+    config.shared_experts_gate_pattern = param_dict.get("shared_experts_gate_pattern", None)
+
+    return config
+
+
+# ---------------------------------------------------------------------------
+# Validation helpers
+# ---------------------------------------------------------------------------
+
+
+def validate_autoep_config(
+    config: AutoEPConfig,
+    world_size: int,
+    pp_size: int,
+    tp_size: int,
+    sp_size: int,
+    *,
+    zero_stage: int = 0,
+    deepcompile_enabled: bool = False,
+    tp_preset_model: str | None = None,
+    use_data_before_expert_parallel: bool = False,
+    mpu=None,
+    zero_offload_optimizer: bool = False,
+    zero_offload_param: bool = False,
+) -> None:
+    """Validate config constraints. Raises ValueError on invalid config."""
+    if config.load_balance_coeff is not None:
+        _raise_unsupported_load_balance_coeff(config.load_balance_coeff)
+
+    if not isinstance(config.validate_folding_routing, bool):
+        raise ValueError("expert_parallel.validate_folding_routing must be a boolean")
+
+    if not config.enabled:
+        return
+
+    # Reject configurations that would bypass the requested fused reduction.
+    if config.combine_impl == "fused_weighted_sum":
+        if tp_size > 1:
+            raise ValueError('combine_impl="fused_weighted_sum" does not support folded tensor parallelism '
+                             f"(tensor_parallel.autotp_size={tp_size}), which restores combined tokens from "
+                             "assignment metadata instead of the weighted reduction it implements. Set "
+                             'tensor_parallel.autotp_size to 1, or leave combine_impl unset.')
+        if config.expert_tensor_parallel_size > 1:
+            raise ValueError('combine_impl="fused_weighted_sum" requires expert_tensor_parallel_size=1, but got '
+                             f"{config.expert_tensor_parallel_size}. Set expert_tensor_parallel_size to 1, or leave "
+                             "combine_impl unset.")
+        if config.comm_backend == "deepep" and config.autoep_size > 1:
+            raise ValueError('combine_impl="fused_weighted_sum" cannot be used with comm_backend="deepep" because '
+                             "DeepEP already restores and reduces the routed rows. Set comm_backend to "
+                             '"comm", or leave combine_impl unset.')
+
+    folding_spec = build_folding_spec(
+        world_size=world_size,
+        pp_size=pp_size,
+        tp_size=max(tp_size, 1),
+        ep_size=config.autoep_size,
+        etp_size=config.expert_tensor_parallel_size,
+        mp_mode="tp" if tp_size > 1 else "sp",
+    )
+    validate_folding_global(
+        folding_spec,
+        zero_stage=zero_stage,
+        sp_size=sp_size,
+        deepcompile_enabled=deepcompile_enabled,
+        use_data_before_expert_parallel=use_data_before_expert_parallel,
+        mpu=mpu,
+        autoep_enabled=config.enabled,
+        tp_preset=tp_preset_model,
+        ep_preset=config.preset_model,
+        zero_offload_optimizer=zero_offload_optimizer,
+        zero_offload_param=zero_offload_param,
+    )
+
+    # Validate preset_model if specified
+    if config.preset_model is not None and config.preset_model not in PRESET_MODELS:
+        raise ValueError(f"Unknown preset_model '{config.preset_model}'. "
+                         f"Available presets: {list(available_preset_names())}")
+
+    # Validate score_apply
+    valid_score_apply = ("auto", "pre", "post")
+    if config.score_apply not in valid_score_apply:
+        raise ValueError(f"score_apply must be one of {valid_score_apply}, "
+                         f"got '{config.score_apply}'")
+
+    # Validate combine_impl
+    valid_combine_impl = ("auto", "weighted_sum", "fused_weighted_sum", "legacy_bmm")
+    if config.combine_impl not in valid_combine_impl:
+        raise ValueError(f"combine_impl must be one of {valid_combine_impl}, "
+                         f"got '{config.combine_impl}'")
+
+    # Validate comm_backend
+    valid_comm_backend = ("comm", "deepep")
+    if config.comm_backend not in valid_comm_backend:
+        raise ValueError(f"comm_backend must be one of {valid_comm_backend}, "
+                         f"got '{config.comm_backend}'")
+
+    # A zero budget would hand the whole GPU to the collective, and a negative
+    # one is meaningless; both are worth rejecting where the value is written
+    # rather than inside a buffer constructor.
+    if not isinstance(config.comm_num_sm, int) or config.comm_num_sm < 1:
+        raise ValueError(f"comm_num_sm must be a positive integer, got {config.comm_num_sm!r}")
+    if not isinstance(config.comm_qp_margin, int) or config.comm_qp_margin < 0:
+        raise ValueError(f"comm_qp_margin must be a non-negative integer, got {config.comm_qp_margin!r}")
+    if not isinstance(config.comm_max_tokens_per_rank, int) or config.comm_max_tokens_per_rank < 0:
+        raise ValueError("comm_max_tokens_per_rank must be a non-negative integer, "
+                         f"got {config.comm_max_tokens_per_rank!r}")
+    if config.comm_backend == "deepep" and config.comm_max_tokens_per_rank == 0:
+        raise ValueError("comm_max_tokens_per_rank must be a positive integer when comm_backend='deepep'. "
+                         "Set it to the largest number of tokens one rank can route, normally "
+                         "train_micro_batch_size_per_gpu * maximum padded sequence length.")
+
+    # Validate score_func
+    valid_score_func = ("auto", "softmax", "sigmoid")
+    if config.score_func not in valid_score_func:
+        raise ValueError(f"score_func must be one of {valid_score_func}, "
+                         f"got '{config.score_func}'")
+
+    # Validate group-limited routing constraints
+    if config.num_limited_groups is not None:
+        if config.num_limited_groups < 1:
+            raise ValueError(f"num_limited_groups must be >= 1, got {config.num_limited_groups}")
+
+    if config.num_expert_groups is not None:
+        if config.num_expert_groups < 1:
+            raise ValueError(f"num_expert_groups must be >= 1, got {config.num_expert_groups}")
+        if config.num_limited_groups is not None and config.num_limited_groups > config.num_expert_groups:
+            raise ValueError(f"num_limited_groups ({config.num_limited_groups}) must be <= "
+                             f"num_expert_groups ({config.num_expert_groups})")
+        logger.warning("num_expert_groups is set; interaction with EP topology "
+                       "is not yet optimized.")
+
+    # Warn if autoep_size == 1 (no EP needed)
+    if config.autoep_size == 1:
+        logger.warning("autoep_size=1 means every rank owns all experts with no AllToAll. "
+                       "AutoEP replacement remains enabled, but expert-parallel communication "
+                       "is bypassed because every rank owns all experts.")
+
+    # Helper validators (local to validate_autoep_config)
+    def _validate_attr_name(field_name: str, value, *, allow_dot: bool = False) -> None:
+        if value is None:
+            return
+        if not isinstance(value, str) or value == "":
+            raise ValueError(f"{field_name} must be a non-empty string")
+        if not allow_dot and "." in value:
+            raise ValueError(f"{field_name} must be a direct attribute name (no dots)")
+
+    # Validate expert weight names
+    _validate_attr_name("expert_w1", config.expert_w1)
+    _validate_attr_name("expert_w2", config.expert_w2)
+    if config.expert_w3 is not _UNSET and config.expert_w3 is not None:
+        _validate_attr_name("expert_w3", config.expert_w3)
+
+    # Validate model.config attribute names
+    _validate_attr_name("num_experts_attr", config.num_experts_attr)
+    _validate_attr_name("top_k_attr", config.top_k_attr)
+
+    # Validate child-name fields (direct attribute names, not regex/path)
+    _validate_attr_name("router_pattern", config.router_pattern)
+    _validate_attr_name("expert_pattern", config.expert_pattern)
+    _validate_attr_name("shared_experts_pattern", config.shared_experts_pattern)
+    _validate_attr_name("shared_experts_gate_pattern", config.shared_experts_gate_pattern)
+
+    # Validate has_shared_experts type
+    if config.has_shared_experts is not None and not isinstance(config.has_shared_experts, bool):
+        raise ValueError("has_shared_experts must be a boolean when set")
+
+    # Warn if explicit top_k overrides top_k_attr
+    if isinstance(config.top_k, int) and config.top_k_attr is not None:
+        logger.warning("top_k is explicitly set; top_k_attr will be ignored.")
+
+    if config.routed_scaling_factor != "auto" and not isinstance(config.routed_scaling_factor, (int, float)):
+        raise ValueError("routed_scaling_factor must be a number or 'auto'")
+
+    # Validate shared expert field pairing
+    if config.has_shared_experts is True and not config.shared_experts_pattern:
+        logger.warning("has_shared_experts=True but shared_experts_pattern is not set. "
+                       "Shared expert detection requires both fields.")
+    if config.shared_experts_pattern and config.has_shared_experts is not True:
+        logger.warning(f"shared_experts_pattern='{config.shared_experts_pattern}' is set "
+                       f"but has_shared_experts is not True. Pattern will be ignored.")
+    if config.shared_experts_gate_pattern and config.has_shared_experts is not True:
+        logger.warning(f"shared_experts_gate_pattern='{config.shared_experts_gate_pattern}' is set "
+                       f"but has_shared_experts is not True. Pattern will be ignored.")
+
+    # Warn if custom override fields are set alongside preset_model or auto-detect
+    custom_fields_set = []
+    if config.moe_layer_pattern is not None:
+        custom_fields_set.append("moe_layer_pattern")
+    if config.router_pattern is not None:
+        custom_fields_set.append("router_pattern")
+    if config.expert_pattern is not None:
+        custom_fields_set.append("expert_pattern")
+    if config.expert_w1 is not None:
+        custom_fields_set.append("expert_w1")
+    if config.expert_w2 is not None:
+        custom_fields_set.append("expert_w2")
+    if config.expert_w3 is not _UNSET:
+        custom_fields_set.append("expert_w3")
+    if config.num_experts_attr is not None:
+        custom_fields_set.append("num_experts_attr")
+    if config.top_k_attr is not None:
+        custom_fields_set.append("top_k_attr")
+    if config.has_shared_experts is not None:
+        custom_fields_set.append("has_shared_experts")
+    if config.shared_experts_pattern is not None:
+        custom_fields_set.append("shared_experts_pattern")
+    if config.shared_experts_gate_pattern is not None:
+        custom_fields_set.append("shared_experts_gate_pattern")
+    if custom_fields_set and config.preset_model is not None:
+        logger.warning(f"Custom preset fields {custom_fields_set} are set alongside "
+                       f"preset_model='{config.preset_model}'. Custom fields will override "
+                       f"preset defaults during detection.")
+    if custom_fields_set and config.preset_model is None and config.moe_layer_pattern is None:
+        logger.warning(f"Custom preset fields {custom_fields_set} are set without preset_model or "
+                       f"moe_layer_pattern. Overrides will apply to auto-detected presets or try-all.")
+
+
+def validate_autoep_post_detection(
+    config: AutoEPConfig,
+    specs: list[MoELayerSpec],
+) -> None:
+    """Post-detection validation: ep_size vs num_experts constraints."""
+    if not config.enabled or not specs:
+        return
+
+    for spec in specs:
+        # The fused reduction folds the routing weight into the top-k reduction,
+        # which only exists when scores are applied after the experts.
+        if config.combine_impl == "fused_weighted_sum":
+            resolved_score_apply = config.score_apply if config.score_apply != "auto" else spec.score_apply
+            if resolved_score_apply != "post":
+                raise ValueError(f'combine_impl="fused_weighted_sum" requires score_apply="post", but layer '
+                                 f"'{spec.moe_module_name}' resolved score_apply=\"{resolved_score_apply}\". "
+                                 "Leave combine_impl unset.")
+
+        # ep_size must not exceed num_experts
+        if config.autoep_size > spec.num_experts:
+            valid_divisors = _divisors(spec.num_experts)
+            raise ValueError(f"autoep_size={config.autoep_size} exceeds num_experts="
+                             f"{spec.num_experts} in layer '{spec.moe_module_name}'. "
+                             f"Each rank must own at least one expert. "
+                             f"Valid autoep_size values (divisors of {spec.num_experts}): "
+                             f"{valid_divisors}")
+
+        # num_experts must be divisible by ep_size
+        if spec.num_experts % config.autoep_size != 0:
+            valid_sizes = [d for d in _divisors(spec.num_experts) if d <= spec.num_experts]
+            raise ValueError(f"num_experts={spec.num_experts} in layer "
+                             f"'{spec.moe_module_name}' is not divisible by "
+                             f"autoep_size={config.autoep_size}. "
+                             f"Suggested autoep_size values: {valid_sizes}")
+
+        num_expert_groups = spec.num_expert_groups if spec.num_expert_groups is not None else config.num_expert_groups
+        num_limited_groups = spec.num_limited_groups if spec.num_limited_groups is not None else config.num_limited_groups
+
+        # Validate group-limited routing constraints after layer-specific defaults.
+        if num_limited_groups is not None and num_expert_groups is None:
+            raise ValueError(f"num_limited_groups requires num_expert_groups to be set "
+                             f"in layer '{spec.moe_module_name}'")
+
+        if num_expert_groups is not None:
+            if num_expert_groups < 1:
+                raise ValueError(f"num_expert_groups must be >= 1 in layer '{spec.moe_module_name}', "
+                                 f"got {num_expert_groups}")
+            if spec.num_experts % num_expert_groups != 0:
+                raise ValueError(f"num_expert_groups ({num_expert_groups}) must divide "
+                                 f"num_experts ({spec.num_experts}) in layer "
+                                 f"'{spec.moe_module_name}'")
+            if num_limited_groups is None:
+                raise ValueError(f"num_limited_groups must be set when num_expert_groups is set "
+                                 f"in layer '{spec.moe_module_name}'")
+            if num_limited_groups < 1:
+                raise ValueError(f"num_limited_groups must be >= 1 in layer '{spec.moe_module_name}', "
+                                 f"got {num_limited_groups}")
+            if num_limited_groups > num_expert_groups:
+                raise ValueError(f"num_limited_groups ({num_limited_groups}) must be <= "
+                                 f"num_expert_groups ({num_expert_groups}) in layer "
+                                 f"'{spec.moe_module_name}'")
+
+
+def _divisors(n: int) -> list[int]:
+    """Return sorted list of positive divisors of n."""
+    divs = []
+    for i in range(1, int(n**0.5) + 1):
+        if n % i == 0:
+            divs.append(i)
+            if i != n // i:
+                divs.append(n // i)
+    return sorted(divs)
+
+
+def fill_autoep_config_from_hf(config: AutoEPConfig, model_config) -> None:
+    """Back-fill AutoEPConfig fields from HF model config when user hasn't set them.
+
+    HF field names (e.g. n_group, topk_group, routed_scaling_factor) differ from
+    AutoEP's internal names, so we map them explicitly rather than relying on the
+    user to duplicate these values in the DS config JSON.
+    """
+    if model_config is None:
+        return
+    # n_group / topk_group: DeepSeek-style node-limited routing groups
+    if config.num_expert_groups is None:
+        config.num_expert_groups = getattr(model_config, 'n_group', None)
+    if config.num_limited_groups is None:
+        config.num_limited_groups = getattr(model_config, 'topk_group', None)
+    # routed_scaling_factor: sigmoid score scaling (DeepSeek-V3 / Moonlight)
+    if config.routed_scaling_factor == "auto":
+        hf_scale = getattr(model_config, 'routed_scaling_factor', None)
+        if hf_scale is not None:
+            config.route_scale = float(hf_scale)

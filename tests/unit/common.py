@@ -12,6 +12,7 @@ import subprocess
 from abc import ABC, abstractmethod
 from pathlib import Path
 import random
+import tempfile
 import numpy as np
 from typing import Callable, Any
 
@@ -112,6 +113,12 @@ def set_accelerator_visible():
         elif get_accelerator().device_name() == 'npu':
             npu_smi = subprocess.check_output(['npu-smi', 'info', '-l'])
             num_accelerators = int(npu_smi.decode('utf-8').strip().split('\n')[0].split(':')[1].strip())
+        elif get_accelerator().device_name() == 'supa':
+            br_smi = subprocess.check_output(['brsmi', 'gpu', 'list'])
+            gpu_ids = filter(lambda s: 'GPU' in s, br_smi.decode('utf-8').strip().split('\n'))
+            num_accelerators = len(list(gpu_ids))
+        elif get_accelerator().device_name() == 'mps':
+            num_accelerators = get_accelerator().device_count()
         else:
             assert get_accelerator().device_name() == 'cpu'
             num_accelerators = _get_cpu_socket_count()
@@ -269,8 +276,15 @@ class DistributedExec(ABC):
                 f"Skipping test because not enough GPUs are available: {num_procs} required, {get_accelerator().device_count()} available"
             )
 
-        if get_accelerator().device_name() == 'xpu':
+        # MPS cannot be used from a forked child (Metal's compiler service is lost), so spawn instead.
+        if get_accelerator().device_name() in ['xpu', 'mps']:
             self.non_daemonic_procs = True
+            self.reuse_dist_env = False
+
+        # Allow disabling reuse_dist_env via environment variable.
+        # This is useful for CI full test runs where reusing distributed environment
+        # can cause pool worker cleanup to hang after tests complete.
+        if os.environ.get('DS_DISABLE_REUSE_DIST_ENV', '0') == '1':
             self.reuse_dist_env = False
 
         # Set start method to `forkserver` (or `fork`)
@@ -330,18 +344,13 @@ class DistributedExec(ABC):
 
     def _launch_with_file_store(self, request, world_size):
         tmpdir = request.getfixturevalue("tmpdir")
-        dist_file_store = tmpdir.join("dist_file_store")
-        assert not os.path.exists(dist_file_store)
-        init_method = f"file://{dist_file_store}"
 
         if isinstance(world_size, int):
             world_size = [world_size]
         for procs in world_size:
-            try:
-                self._launch_procs(procs, init_method)
-            finally:
-                if os.path.exists(dist_file_store):
-                    os.remove(dist_file_store)
+            with tempfile.NamedTemporaryFile(delete=False, dir=str(tmpdir), suffix='_filestore') as fp:
+                init_method = f"file://{fp.name}"
+            self._launch_procs(procs, init_method)
             time.sleep(0.5)
 
     def _dist_destroy(self):
@@ -351,7 +360,7 @@ class DistributedExec(ABC):
 
     def _close_pool(self, pool, num_procs, force=False):
         if force or not self.reuse_dist_env:
-            msg = pool.starmap(self._dist_destroy, [() for _ in range(num_procs)])
+            pool.starmap(self._dist_destroy, [() for _ in range(num_procs)])
             pool.close()
             pool.join()
 
@@ -566,8 +575,10 @@ def enable_determinism(seed: int):
 def reduce_boolean_flags(flag: bool, op=all) -> bool:
     if not dist.is_initialized():
         return flag
-    device = get_accelerator().current_device()
-    tensor_flag = torch.tensor(1 if flag else 0, dtype=torch.int, device=device)
+    # current_device() is a rank id on CPU, not a valid torch device; use the device name.
+    device = get_accelerator().current_device_name()
+    # gloo rejects 0-dim inputs to all_gather_into_tensor, so carry the flag in a 1-dim tensor.
+    tensor_flag = torch.tensor([1 if flag else 0], dtype=torch.int, device=device)
     world_size = dist.get_world_size()
     tensor_flag_buf = torch.zeros(world_size, dtype=torch.int, device=device)
     dist.all_gather_into_tensor(tensor_flag_buf, tensor_flag)

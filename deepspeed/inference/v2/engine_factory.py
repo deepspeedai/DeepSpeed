@@ -14,6 +14,8 @@ from .config_v2 import RaggedInferenceEngineConfig
 from .checkpoint import HuggingFaceCheckpointEngine
 from .logging import inference_logger
 from .model_implementations import (
+    Exaone4Policy,
+    Exaone4_5Policy,
     OPTPolicy,
     Llama2Policy,
     MistralPolicy,
@@ -129,6 +131,16 @@ def build_hf_engine(path: str,
             policy = Qwen2Policy(model_config, checkpoint_engine=checkpoint_engine)
         elif model_config.model_type == "qwen2_moe":
             policy = Qwen2MoePolicy(model_config, checkpoint_engine=checkpoint_engine)
+        elif model_config.model_type == "exaone4":
+            import transformers
+            assert version.parse(transformers.__version__) >= version.parse("4.54.0"), \
+                f"EXAONE 4.0 requires transformers >= 4.54.0, you have version {transformers.__version__}"
+            policy = Exaone4Policy(model_config, checkpoint_engine=checkpoint_engine)
+        elif model_config.model_type == "exaone4_5":
+            import transformers
+            assert version.parse(transformers.__version__) >= version.parse("5.3.0"), \
+                f"EXAONE 4.5 requires transformers >= 5.3.0, you have version {transformers.__version__}"
+            policy = Exaone4_5Policy(model_config, checkpoint_engine=checkpoint_engine)
         else:
             raise ValueError(f"Unsupported model type {model_config.model_type}")
 

@@ -2,8 +2,6 @@ name: nv-sd
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "0 0 * * 0"
   pull_request:
     paths:
       - "deepspeed/ops/transformer/inference/diffusers_**"
@@ -25,6 +23,7 @@ permissions:
 
 jobs:
   sd-tests:
+    name: nv-sd / stable diffusion tests
     runs-on: [self-hosted, nvidia, a6000]
     container:
       image: nvcr.io/nvidia/pytorch:24.03-py3
@@ -53,7 +52,7 @@ jobs:
           pip install image-similarity-measures
           python -m pip install opencv-python==4.6.* --force-reinstall
           python -m pip install docutils==0.18.1 jinja2==3.0 urllib3==1.26.11 ninja
-          python -m pip install .[dev,1bit,autotuning,sd]
+          python -m pip install .[dev,autotuning,sd]
           ds_report
       - name: Python environment
         run: |

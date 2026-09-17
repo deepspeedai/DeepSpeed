@@ -59,8 +59,6 @@ class DSStateManager:
         """
         The key
 
-        Parameters:
-            block_size (int): The number of tokens to allocate in each block.
         """
         self._config = config
         self._kv_configs = kv_configs

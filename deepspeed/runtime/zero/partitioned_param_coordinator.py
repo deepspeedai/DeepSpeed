@@ -6,7 +6,8 @@
 from dataclasses import dataclass
 import collections
 from collections import UserDict
-from typing import Deque, Set
+import threading
+from typing import Deque, Dict, Set
 
 from deepspeed import comm as dist
 from deepspeed.utils import z3_leaf_module
@@ -28,6 +29,15 @@ ENABLE_PROFILER = False
 def debug_rank0(message: str) -> None:
     if dist.get_rank() == 0:
         logger.debug(message)
+
+
+@torch.no_grad()
+@instrument_w_nvtx
+@compiler.disable
+def update_recompute_parameters(sub_module: Module, param: Parameter) -> None:
+    sub_module.ds_recompute_parameters.add(param)
+    param.ds_active_sub_modules.add(sub_module.ds_id)
+    print_rank_0(f"update_recompute_parameters  {sub_module.ds_id=} to {param.ds_id=}", force=False)
 
 
 @instrument_w_nvtx
@@ -139,6 +149,16 @@ class PartitionedParameterCoordinator:
         # this will improve fetch speed but will not break down leaf module parameters to alleviate memory pressure.
         self.fast_sharding_for_leaf_module = fast_sharding_for_leaf_module
 
+        # Thread synchronization for leaf module fetches during backward pass.
+        # When autograd executes hooks in multiple threads (e.g., for modules returning multiple tensors),
+        # we need to ensure only one thread fetches parameters for a given leaf module at a time.
+        # This is only needed during backward pass; forward pass is single-threaded.
+        self.__ongoing_fetch_leaf_module_events = collections.defaultdict(threading.Event)
+        self.__leaf_module_lock = threading.Lock()
+        # In-progress backward submodules keyed by ds_id. A dict (not LIFO deque) lets release
+        # remove a specific module, since multi-tensor z3-leaf hooks fire out of reverse order.
+        self.__active_backward_submodules: Dict[int, Module] = {}
+
     """Tracing and Tracking
     TODO. consider performing trace before initializing PartitionedParameterCoordinator
     and passing trace results into constructor. This way all the code in here can
@@ -152,6 +172,9 @@ class PartitionedParameterCoordinator:
         self.__submodule_order = []
         self.__param_order = []
         self.__most_recent_step_id_param_fetched_for = collections.defaultdict(lambda: int(-1e10))
+        # clear the fetch-step deque too; a stale entry here causes record_parameters() to
+        # pop an empty deque (IndexError) after trace invalidation.
+        self.__step_id_module_fetched_for = collections.defaultdict(lambda: collections.deque())
         self.__param_queue = None
 
     def is_complete_trace(self) -> bool:
@@ -263,12 +286,14 @@ class PartitionedParameterCoordinator:
         self.__step_id = 0
         self.__n_available_params = 0
         self.__profiler.reset_events()
+        # Clear leaf module fetch events for clean state
+        self.__ongoing_fetch_leaf_module_events.clear()
 
     def _dump_params(self, tag, sub_module, params, step_id=None):
         if step_id is None:
             step_id = self.__step_id
         param_names = [debug_param2name_id_shape(p) for p in params]
-        print_rank_0(f'{tag} step = {step_id} p_names = {param_names}', force=False)
+        print_rank_0(f'{tag} {sub_module.ds_id=} step = {step_id} p_names = {param_names}', force=False)
 
     def _dump_param_ids(self, tag, mod_id, p_ids, step_id=None):
         if step_id is None:
@@ -288,16 +313,55 @@ class PartitionedParameterCoordinator:
         2. kick off fetch for next few parameters we will need later (prefetch)
         3. block on parameters in immediately required sub module
         """
+        # For leaf modules during backward pass, autograd may trigger hooks from multiple
+        # threads concurrently (e.g., when a module returns multiple tensors). We need to
+        # serialize access to prevent race conditions in parameter state management.
+        # Forward pass is single-threaded, so no synchronization is needed there.
+        is_leaf = z3_leaf_module(current_submodule)
+        needs_sync = is_leaf and not forward
+        if needs_sync:
+            event_to_wait = None
+            with self.__leaf_module_lock:
+                event = self.__ongoing_fetch_leaf_module_events.get(current_submodule.ds_id)
+                if event is not None:
+                    # Another thread is already fetching this leaf module, wait for it
+                    event_to_wait = event
+                else:
+                    # Mark that we're starting a fetch for this leaf module
+                    new_event = threading.Event()
+                    self.__ongoing_fetch_leaf_module_events[current_submodule.ds_id] = new_event
+
+            if event_to_wait is not None:
+                # Wait outside the lock to avoid deadlock
+                event_to_wait.wait()
+                return
+
+        # Record on the fetch-owning thread only; keyed by ds_id so repeated fetches collapse.
+        if not forward:
+            self.__active_backward_submodules[current_submodule.ds_id] = current_submodule
+
+        try:
+            self._fetch_sub_module_impl(current_submodule, forward, is_leaf)
+        finally:
+            if needs_sync:
+                # Signal that we're done fetching this leaf module and remove the event
+                with self.__leaf_module_lock:
+                    event = self.__ongoing_fetch_leaf_module_events.pop(current_submodule.ds_id, None)
+                    if event is not None:
+                        event.set()
+
+    def _fetch_sub_module_impl(self, current_submodule: Module, forward: bool, is_leaf: bool) -> None:
+        """Implementation of fetch_sub_module, separated for thread synchronization."""
         if logger.isEnabledFor(logging.DEBUG):
             debug_rank0(
-                f"{self.__step_id}: M{current_submodule.ds_id}({type(current_submodule).__name__}) P{[p.ds_id for p in iter_params(current_submodule, recurse=z3_leaf_module(current_submodule))]} "
+                f"{self.__step_id}: M{current_submodule.ds_id}({type(current_submodule).__name__}) P{[p.ds_id for p in iter_params(current_submodule, recurse=is_leaf)]} "
                 + str({
                     "avail": f"{self.__n_available_params:.1e}",
                     "queue_sz": f"{len(self.__param_queue or [])}",
                     "inflight": [p.ds_id for p in self.__inflight_param_registry],
                 }))
 
-        params_to_fetch = set(iter_params(current_submodule, recurse=z3_leaf_module(current_submodule)))
+        params_to_fetch = set(iter_params(current_submodule, recurse=is_leaf))
         fetch_numel = sum(
             [p.partition_numel() for p in params_to_fetch if p.ds_status == ZeroParamStatus.NOT_AVAILABLE])
 
@@ -320,10 +384,15 @@ class PartitionedParameterCoordinator:
         wait_numel = 0
         wait_event_name = __class__.FORWARD_FETCH_WAIT if forward else __class__.BACKWARD_FETCH_WAIT
         self.__profiler.start_event(wait_event_name)
-        fast_fetch = self.fast_sharding_for_leaf_module and z3_leaf_module(current_submodule)
+        fast_fetch = self.fast_sharding_for_leaf_module and is_leaf
         # wait for parameters in the immediately needed submodule to become available
+        in_checkpoint_recompute = forward and torch._C._current_graph_task_id() != -1
         for param in params_to_fetch:
             param.ds_active_sub_modules.add(current_submodule.ds_id)
+            # Only frozen params need recompute attribution; trainable ones release via their backward hook.
+            if in_checkpoint_recompute and self.__active_backward_submodules and not param.requires_grad:
+                update_recompute_parameters(next(reversed(self.__active_backward_submodules.values())), param)
+
             if logger.isEnabledFor(logging.DEBUG):
                 debug_rank0(f"-wait: {param.ds_summary()}")
             if param in self.__inflight_param_registry:
@@ -425,16 +494,36 @@ class PartitionedParameterCoordinator:
     def release_sub_module(self, submodule: Module, forward=False) -> None:
         """release the parameters of a sub module, assuming they meet conditions to
         be released."""
-        #print_rank_0(f"release_sub_module {'fwd' if forward else 'bwd'}: {debug_module2name_id(submodule)}", force=False)
+        # print_rank_0(f"release_sub_module {'fwd' if forward else 'bwd'}: {submodule.ds_id=} {debug_module2name_id(submodule)}", force=False)
         params_to_release = (self.__params_to_release(submodule, self.__step_id) if self.is_complete_trace() else set(
             p.ds_id for p in iter_params(submodule, recurse=z3_leaf_module(submodule))))
+
+        if not forward:
+            assert self.__active_backward_submodules, "active_backward_submodules is empty during backward pass"
+            # Persistent params must stay resident even when attributed to a recompute owner.
+            recompute_params = set([p.ds_id for p in submodule.ds_recompute_parameters if not p.ds_persist])
+            params_to_release.update(recompute_params)
+
+        current_bwd_id = next(reversed(
+            self.__active_backward_submodules)) if self.__active_backward_submodules else None
+        print_rank_0(
+            f"release_sub_module {'fwd' if forward else 'bwd'}: {submodule.ds_id=} {current_bwd_id=} {params_to_release=}",
+            force=False)
 
         free_data = not z3_leaf_module(submodule) or not self.fast_sharding_for_leaf_module
         if not free_data:
             # wait for the computation to finish and launch as early as possible.
             empty_buffer = torch.empty(1, device=torch.device(get_accelerator().current_device_name()))
 
-        for param in iter_params(submodule, recurse=z3_leaf_module(submodule)):
+        module_params = set(iter_params(submodule, recurse=z3_leaf_module(submodule)))
+
+        if not forward:
+            module_params.update(submodule.ds_recompute_parameters)
+            submodule.ds_recompute_parameters.clear()
+            # Remove this specific submodule regardless of position (hooks may fire out of reverse-forward order).
+            self.__active_backward_submodules.pop(submodule.ds_id, None)
+
+        for param in module_params:
             param.ds_active_sub_modules.discard(submodule.ds_id)
             if param.ds_id in params_to_release and not param.is_external_param:
                 self.__release_param(param, free_data)
@@ -459,6 +548,22 @@ class PartitionedParameterCoordinator:
         for param in iter_params(module, recurse=True):
             if param.ds_status != ZeroParamStatus.NOT_AVAILABLE:
                 raise RuntimeError(f"{param.ds_summary()} expected to be released")
+
+    @instrument_w_nvtx
+    @torch.no_grad()
+    def release_backward_leftovers(self) -> None:
+        """Release leftover submodules whose post-backward hook never fired (e.g. a no-grad
+        block input): drain the backward stack and release as the missing hook would have,
+        skipping persistent params to match __params_to_release."""
+        while self.__active_backward_submodules:
+            _, submodule = self.__active_backward_submodules.popitem()
+            params = set(iter_params(submodule, recurse=z3_leaf_module(submodule)))
+            params.update(submodule.ds_recompute_parameters)
+            submodule.ds_recompute_parameters.clear()
+            for param in params:
+                param.ds_active_sub_modules.discard(submodule.ds_id)
+                if not param.ds_persist and not param.is_external_param:
+                    self.__release_param(param)
 
     @instrument_w_nvtx
     def __all_gather_params(self, params: Set[Parameter], forward: bool) -> None:

@@ -13,6 +13,7 @@ import pytest
 
 import deepspeed
 from deepspeed.pipe import PipelineModule
+from deepspeed.runtime.activation_checkpointing import checkpointing as ds_checkpointing
 from deepspeed.utils import RepeatingLoader
 from deepspeed.accelerator import get_accelerator
 
@@ -56,6 +57,16 @@ def simple_config():
 @pytest.fixture
 def batch_input():
     return torch.randn(1, HIDDEN_DIM)
+
+
+@pytest.fixture
+def mixed_param_model():
+    # ReLU carries no parameters and Linear does, so _is_checkpointable differs between blocks
+    # and a misaligned result list is visible, not just a wrongly sized one.
+    return torch.nn.Sequential(
+        *[nn.ReLU() for _ in range(LAYERS // 2)],
+        *[nn.Linear(HIDDEN_DIM, HIDDEN_DIM) for _ in range(LAYERS // 2)],
+    )
 
 
 class TestPipeModuleSequential(DistributedTest):
@@ -109,3 +120,79 @@ class TestPipeModuleSequential(DistributedTest):
         pipe_output = pipe_output.to('cpu')
 
         assert torch.allclose(base_output, pipe_output, atol=1e-4)
+
+
+class TestPipeModuleCheckpointInterval(DistributedTest):
+    world_size = 1
+
+    def test_set_checkpoint_interval(self, mixed_param_model):
+        model = PipelineModule(layers=copy.deepcopy(mixed_param_model), num_stages=1, activation_checkpoint_interval=4)
+        model._precompute_checkpointable_values()
+        assert model.is_checkpointable_results == [False, True]
+
+        model.set_checkpoint_interval(1)
+
+        # the setter has to update the interval forward() reads, not a separate attribute
+        assert model.activation_checkpoint_interval == 1
+
+        # and the cached results have to be rebuilt for the new interval rather than appended to,
+        # otherwise forward() zips the layer blocks against results computed for the old interval
+        reference = PipelineModule(layers=copy.deepcopy(mixed_param_model),
+                                   num_stages=1,
+                                   activation_checkpoint_interval=1)
+        reference._precompute_checkpointable_values()
+        assert model.is_checkpointable_results == reference.is_checkpointable_results
+
+    def test_setter_keeps_reentrant_input_grads(self, mixed_param_model, simple_config):
+        # The engine decides whether to mark the first stage's inputs as requiring grad, which
+        # reentrant checkpointing needs, or its first checkpointed segment is cut off from
+        # autograd. Start from a config that disables checkpointing, so the only thing that
+        # turns it on is the setter this PR fixes.
+        config = copy.deepcopy(simple_config)
+        config["pipeline"]["activation_checkpoint_interval"] = 0
+
+        model = PipelineModule(layers=copy.deepcopy(mixed_param_model), num_stages=1)
+        engine, _, _, _ = deepspeed.initialize(config=config,
+                                               model=model,
+                                               model_parameters=[p for p in model.parameters()])
+        assert not engine._reentrant_activation_checkpointing()
+
+        engine.module.set_checkpoint_interval(2)
+
+        # forward() now checkpoints, so the inputs have to require grad to match
+        assert engine._reentrant_activation_checkpointing()
+
+    def test_non_reentrant_checkpointing_does_not_need_input_grads(self, mixed_param_model, simple_config):
+        # use_reentrant=False swaps in non_reentrant_checkpoint, which does not need the inputs
+        # to require grad, so the decision has to track the function and not just the interval.
+        config = copy.deepcopy(simple_config)
+        config["pipeline"]["use_reentrant"] = False
+
+        model = PipelineModule(layers=copy.deepcopy(mixed_param_model), num_stages=1)
+        engine, _, _, _ = deepspeed.initialize(config=config,
+                                               model=model,
+                                               model_parameters=[p for p in model.parameters()])
+        assert engine.module.activation_checkpoint_interval > 0
+        assert not engine._reentrant_activation_checkpointing()
+
+    def test_setter_honors_non_reentrant_when_the_config_disables_checkpointing(self, mixed_param_model,
+                                                                                simple_config):
+        # use_reentrant only reached the module inside the positive-interval branch, so a config
+        # that disables checkpointing left activation_checkpoint_func at the reentrant default.
+        # set_checkpoint_interval() then enabled checkpointing with the wrong function, silently
+        # ignoring use_reentrant=False, and _is_checkpointable() reads the same function.
+        config = copy.deepcopy(simple_config)
+        config["pipeline"]["activation_checkpoint_interval"] = 0
+        config["pipeline"]["use_reentrant"] = False
+
+        model = PipelineModule(layers=copy.deepcopy(mixed_param_model), num_stages=1)
+        engine, _, _, _ = deepspeed.initialize(config=config,
+                                               model=model,
+                                               model_parameters=[p for p in model.parameters()])
+        assert engine.module.activation_checkpoint_interval == 0
+        assert engine.module.activation_checkpoint_func is ds_checkpointing.non_reentrant_checkpoint
+
+        engine.module.set_checkpoint_interval(1)
+
+        assert engine.module.activation_checkpoint_func is ds_checkpointing.non_reentrant_checkpoint
+        assert not engine._reentrant_activation_checkpointing()

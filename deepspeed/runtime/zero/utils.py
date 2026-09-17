@@ -4,17 +4,19 @@
 # DeepSpeed Team
 
 import os
+import gc
 from typing import List, Tuple
 
 import torch
 from deepspeed import comm as dist
 from deepspeed.utils import logger
-from deepspeed.ops.adam import DeepSpeedCPUAdam
+from deepspeed.ops.adam import DeepSpeedCPUAdam, ZenFlowCPUAdam
 from deepspeed.ops.adagrad import DeepSpeedCPUAdagrad
 from deepspeed.ops.adam import FusedAdam
 from deepspeed.ops.lion import DeepSpeedCPULion, FusedLion
 from deepspeed.utils.nvtx import instrument_w_nvtx
 from deepspeed.accelerator import get_accelerator
+from deepspeed.runtime.utils import get_only_unique_item
 
 # ensure we only warn once, otherwise every iteration will trigger a warning
 warned = False
@@ -41,13 +43,13 @@ class ZeRORuntimeException(Exception):
 
 
 ZERO_SUPPORTED_OPTIMIZERS = [
-    torch.optim.Adam, torch.optim.AdamW, FusedAdam, DeepSpeedCPUAdam, torch.optim.Adagrad, DeepSpeedCPUAdagrad,
-    DeepSpeedCPULion, FusedLion
+    torch.optim.Adam, torch.optim.AdamW, FusedAdam, DeepSpeedCPUAdam, ZenFlowCPUAdam, torch.optim.Adagrad,
+    DeepSpeedCPUAdagrad, DeepSpeedCPULion, FusedLion
 ]
 
 # Add MuonWithAuxAdam to supported list if muon is installed
 try:
-    from deepspeed.runtime.muon_optimizer import MuonWithAuxAdam
+    from deepspeed.runtime.zero.muon.muon_optimizer import MuonWithAuxAdam
     ZERO_SUPPORTED_OPTIMIZERS.append(MuonWithAuxAdam)
 except ImportError:
     pass
@@ -59,6 +61,13 @@ try:
         ZERO_SUPPORTED_OPTIMIZERS.append(apex.optimizers.FusedAdam)
 except ImportError:
     pass
+
+
+def get_norm_dtype():
+    """Gradient norms accumulate in fp64 for accuracy, except on devices without fp64 (e.g. MPS)."""
+    if get_accelerator().is_fp64_supported():
+        return torch.double
+    return torch.float
 
 
 def is_zero_supported_optimizer(optimizer):
@@ -148,7 +157,7 @@ def apply_to_tensors_only(function, value, warning_msg_fn=None):
     Apply `function` to every Tensor in `value`.
 
     Args:
-        functional: The function class to apply.
+        function: The function class to apply.
         value (Any): Target object to apply `function` to.
 
     Returns:
@@ -200,3 +209,34 @@ def get_mapping_to_flat_buffer(tensors: List[torch.Tensor]) -> List[Tuple[torch.
         offset += tensor_numel
 
     return tensor_infos
+
+
+def defragment(tensors: List[torch.Tensor]) -> torch.Tensor:
+    """move provided tensors into a contiguous flat buffer, with some additional
+    measures taken to reduce memory fragmentation"""
+    assert len(set(t.dtype for t in tensors)) == 1
+    assert len(set(t.device for t in tensors)) == 1
+
+    cpu_buffer = torch.empty(sum(p.numel() for p in tensors),
+                             dtype=get_only_unique_item(t.dtype for t in tensors),
+                             device="cpu")
+    tensor_infos: List[Tuple[torch.Tensor, int, int]] = get_mapping_to_flat_buffer(tensors)
+    orig_device = get_only_unique_item(t.device for t in tensors)
+
+    offset = 0
+    for tensor, offset, tensor_numel in tensor_infos:
+        # move the tensor from device memory to host memory
+        cpu_buffer.narrow(0, offset, tensor_numel).copy_(tensor)
+        tensor.data = torch.empty(0, dtype=tensor.dtype, device=tensor.device)
+
+    gc.collect()
+    get_accelerator().empty_cache()
+
+    # copy tensors (now flattened and contiguous) back to GPU
+    device_buffer = cpu_buffer.to(orig_device)
+
+    # restore device tensors
+    for tensor, offset, tensor_numel in tensor_infos:
+        tensor.data = device_buffer.narrow(0, offset, tensor_numel)
+
+    return device_buffer

@@ -3,6 +3,7 @@
 
 # DeepSpeed Team
 
+import functools
 import torch
 import time
 import os
@@ -24,10 +25,13 @@ from ..moe.utils import has_moe_layers
 from ..module_inject import LinearAllreduce, LinearLayer, Normalize, ReplaceWithTensorSlicing
 from deepspeed.accelerator import get_accelerator
 from ..module_inject.policy import TransformerPolicy
+from deepspeed.module_inject.tp_shard import AutoTPMeta
 from ..module_inject.auto_tp import AutoTP
 
 from ..module_inject.replace_policy import generic_policies
-from ..module_inject.auto_tp_model_utils import build_bloom_alibi_tensor, build_mpt_atten_bias_tensor, build_mpt_alibi_tensor, get_alibi_mask
+from ..module_inject.auto_tp_model_utils import (build_bloom_alibi_tensor, build_mpt_atten_bias_tensor,
+                                                 build_mpt_alibi_tensor, get_alibi_mask, get_head_shard_sizes,
+                                                 install_head_sharded_helper)
 from ..ops.transformer.inference.ds_attention import DeepSpeedSelfAttention
 from ..model_implementations.transformers.ds_transformer import DeepSpeedTransformerInference
 
@@ -98,12 +102,6 @@ class InferenceEngine(Module):
             # This is a hack to remove the prepare_mask function on HF side for BLOOM architecture
             self.remove_mask_prepare_for_bloom()
 
-        if self.injection_dict or not config.replace_with_kernel_inject:
-            # This is a hack to redefine the alibi func due to TP
-            if config.tensor_parallel.tp_size > 1:
-                self.build_alibi_tensor()
-                self.build_attn_bias()
-
         if get_accelerator().device_name() == 'cuda' and config.enable_cuda_graph:
             assert pkg_version.parse(torch.__version__) >= pkg_version.parse("1.10"), \
                 "If you want to use cuda graph, please upgrade torch to at least v1.10"
@@ -118,6 +116,13 @@ class InferenceEngine(Module):
         elif config.tensor_parallel.tp_size > 1:
             self._create_model_parallel_group(config)
             config.tensor_parallel.tp_group = self.mp_group
+
+        if self.injection_dict or not config.replace_with_kernel_inject:
+            # This is a hack to redefine the alibi func due to TP. It runs after the tensor
+            # parallel group exists, because the helpers slice heads with that group.
+            if config.tensor_parallel.tp_size > 1:
+                self.build_alibi_tensor()
+                self.build_attn_bias()
 
         if isinstance(self.module, torch.nn.Module):
             moe, _ = has_moe_layers(self.module)
@@ -212,20 +217,46 @@ class InferenceEngine(Module):
     def build_alibi_tensor(self):
         if hasattr(self.module, 'transformer'):
             if hasattr(self.module.transformer, 'build_alibi_tensor'):
-                self.module.transformer.build_alibi_tensor = build_bloom_alibi_tensor
+                # The heads must be sliced with the same tensor-parallel group that partitioned
+                # the attention weights, so bind it rather than letting the helper guess.
+                meta = self._autotp_meta(self.module.transformer)
+                shard_sizes = get_head_shard_sizes(meta, self.mp_group)
+                self.module.transformer.build_alibi_tensor = functools.partial(
+                    build_bloom_alibi_tensor,
+                    mp_group=self.mp_group,
+                    head_shard_sizes=shard_sizes,
+                    total_num_heads=meta.num_attention_heads)
             if hasattr(self.module.transformer, 'build_mpt_alibi_tensor'):
-                self.module.transformer.build_mpt_alibi_tensor_orig = self.module.transformer.build_mpt_alibi_tensor
-                self.module.transformer.__class__.build_mpt_alibi_tensor = build_mpt_alibi_tensor
+                meta = self._autotp_meta(self.module.transformer)
+                install_head_sharded_helper(self.module.transformer, 'build_mpt_alibi_tensor', build_mpt_alibi_tensor,
+                                            meta, self.mp_group)
         if hasattr(self.module, 'model'):
             if hasattr(self.module.model, 'get_alibi_mask'):
-                self.module.model.get_alibi_mask_orig = self.module.model.get_alibi_mask
-                self.module.model.__class__.get_alibi_mask = get_alibi_mask
+                meta = self._autotp_meta(self.module.model)
+                install_head_sharded_helper(self.module.model, 'get_alibi_mask', get_alibi_mask, meta, self.mp_group)
 
     def build_attn_bias(self):
         if hasattr(self.module, 'transformer'):
             if hasattr(self.module.transformer, '_attn_bias'):
-                self.module.transformer._attn_bias_orig = self.module.transformer._attn_bias
-                self.module.transformer.__class__._attn_bias = build_mpt_atten_bias_tensor
+                meta = self._autotp_meta(self.module.transformer)
+                install_head_sharded_helper(self.module.transformer, '_attn_bias', build_mpt_atten_bias_tensor, meta,
+                                            self.mp_group)
+
+    def _autotp_meta(self, module):
+        # from_model_config extracts from a single config object, but the head counts may live on
+        # the module, its config, or the top-level model config. Probe each source via the shared
+        # from_model_config and merge per field -- num_attention_heads is mandatory (alibi needs
+        # it), num_kv_heads is None for non-GQA. Subsumes the former
+        # _get_model_head_count / _get_model_kv_head_count pair.
+        metas = [
+            AutoTPMeta.from_model_config(s)
+            for s in (module, getattr(module, "config", None), getattr(self.module, "config", None)) if s is not None
+        ]
+        num_heads = next((m.num_attention_heads for m in metas if m.num_attention_heads is not None), None)
+        if num_heads is None:
+            raise ValueError(f"Cannot determine the attention head count for {module.__class__.__name__}.")
+        num_kv_heads = next((m.num_kv_heads for m in metas if m.num_kv_heads is not None), None)
+        return AutoTPMeta(num_attention_heads=num_heads, num_kv_heads=num_kv_heads)
 
     def _pre_forward_hook(self, module, *inputs, **kwargs):
         if self.use_cuda_events:
@@ -387,7 +418,7 @@ class InferenceEngine(Module):
 
         if isinstance(self.module, torch.nn.Module):
             # config is our DeepSpeedInferenceConfig and self.config is the HF model config
-            replace_transformer_layer(client_module, self.module, checkpoint, config, self.config)
+            replace_transformer_layer(client_module, self.module, checkpoint, config, self.config, training_mode=False)
 
     def _get_all_ckpt_names(self, checkpoints_path, tag):
         ckpt_file_pattern = self._get_ckpt_name(checkpoints_path, tag, mp_placeholder="*")
@@ -464,7 +495,8 @@ class InferenceEngine(Module):
                                                     old_moe_load=old_moe_load,
                                                     model=self.module,
                                                     mpu=self.mpu,
-                                                    checkpoint_engine=self.checkpoint_engine)
+                                                    checkpoint_engine=self.checkpoint_engine,
+                                                    autoep_layers=None)
 
             self.module.load_state_dict(state_dict=checkpoint[self._choose_module_key(checkpoint)],
                                         strict=load_module_strict)

@@ -26,7 +26,7 @@ class RaggedEmbeddingKernel(DSKernelBase):
     def __init__(self, embed_dtype: torch.dtype, token_dtype: torch.dtype, embed_dim: int) -> None:
         """
         Args:
-            fp_dtype (torch.dtype): Data type of the embedding table and output dtype.
+            embed_dtype (torch.dtype): Data type of the embedding table and output dtype.
                 Supported values are torch.float16, torch.bfloat16, and torch.float32.
             token_dtype (torch.dtype): Data type of the token ids. Supported values are
                 torch.int32 and torch.int64.

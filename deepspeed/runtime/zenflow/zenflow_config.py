@@ -12,8 +12,8 @@ from deepspeed.runtime.config_utils import DeepSpeedConfigModel
 class ZenFlowConfig(DeepSpeedConfigModel):
     """Configuration options for ZenFlow optimization module."""
 
-    topk_ratio: float = Field(0.1, ge=0.0, le=1.0)
-    """Ratio of top-k important gradient columns to retain (range: 0.0 to 1.0)."""
+    topk_ratio: float = Field(0.1, gt=0.0, lt=1.0)
+    """Ratio of top-k important gradient columns to retain (must be greater than 0.0 and less than 1.0)."""
 
     select_strategy: str = "auto"
     """Strategy for selecting important gradient indices.
@@ -59,6 +59,9 @@ class ZenFlowConfig(DeepSpeedConfigModel):
 
         if isinstance(self.update_interval, str) and self.update_interval != "auto":
             raise ValueError('If update_interval is a string, it must be "auto"')
+
+        if isinstance(self.update_interval, int) and self.update_interval < 1:
+            raise ValueError("If update_interval is a number, it must be at least 1")
 
         if not isinstance(self.full_warm_up_rounds, int):
             raise ValueError('full_warm_up_rounds must be an integer')

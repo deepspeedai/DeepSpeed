@@ -8,11 +8,12 @@ from types import SimpleNamespace
 import torch
 import pytest
 import deepspeed
-from deepspeed.runtime.zero.partition_parameters import ZeroParamStatus, partitioned_param_data_shape
 import deepspeed.comm as dist
 from deepspeed.accelerator import get_accelerator
+from deepspeed.runtime.zero.partition_parameters import (MultipleAllGatherHandles, ZeroParamStatus,
+                                                         partitioned_param_data_shape)
 
-from unit.common import DistributedTest, preferred_dtype
+from unit.common import DistributedTest, preferred_dtype, reduce_boolean_flags
 from unit.simple_model import SimpleModel
 from utils import setup_serial_env
 
@@ -61,6 +62,41 @@ elif get_accelerator().is_fp16_supported():
     config["fp16"] = {"enabled": True, "loss_scale": 138.}
 
 
+def test_multiple_all_gather_handles_wait_passes_dependency_by_keyword():
+
+    class PositionalWaitHandle:
+
+        def __init__(self):
+            self.handle_dependency = None
+
+        def wait(self, handle_dependency=True):
+            self.handle_dependency = handle_dependency
+
+    class KeywordOnlyWaitHandle:
+
+        def __init__(self):
+            self.handle_dependency = None
+
+        def wait(self, *, handle_dependency=True):
+            self.handle_dependency = handle_dependency
+
+    class KwargsWaitHandle:
+
+        def __init__(self):
+            self.kwargs = None
+
+        def wait(self, **kwargs):
+            self.kwargs = kwargs
+
+    handles = [PositionalWaitHandle(), KeywordOnlyWaitHandle(), KwargsWaitHandle()]
+
+    MultipleAllGatherHandles(handles).wait(handle_dependency=False)
+
+    assert handles[0].handle_dependency is False
+    assert handles[1].handle_dependency is False
+    assert handles[2].kwargs == {"handle_dependency": False}
+
+
 class TestZeroGatheredParametersFree(DistributedTest):
     world_size = 1
 
@@ -84,11 +120,39 @@ class TestZeroGatheredParametersFree(DistributedTest):
         assert model.l1.weight.numel() == 0, "outside of GatheredParameters the param should go back to be 0-sized"
 
 
-class TestMiCSGatheredParametersFree(DistributedTest):
+class TestPartitionWithoutFreeingData(DistributedTest):
     world_size = 1
 
     def test(self):
-        config_dict = {"train_batch_size": 1, "zero_optimization": {"stage": 3, "mics_shard_size": 1}}
+        with deepspeed.zero.Init():
+            l = torch.nn.Linear(6, 3, bias=False)
+
+        full_numel = l.in_features * l.out_features
+        l.weight.all_gather()
+        assert l.weight.numel() == full_numel
+
+        # The leaf-module fast-sharding path releases the buffer itself once the whole
+        # submodule is done, so partition() has to leave param.data alone when asked to.
+        l.weight.partition(free_data=False)
+        assert l.weight.ds_status == ZeroParamStatus.NOT_AVAILABLE
+        assert l.weight.numel() == full_numel, "partition(free_data=False) should not free param.data"
+
+        l.weight.all_gather()
+        l.weight.partition()
+        assert l.weight.numel() == 0, "partition() should free param.data by default"
+
+
+class TestGatheredParametersAllRanksErrorOnModification(DistributedTest):
+    world_size = 2
+
+    def test(self):
+        config_dict = {
+            "train_micro_batch_size_per_gpu": 1,
+            "zero_optimization": {
+                "stage": 3,
+                "enable_sanity_checks": True
+            }
+        }
         hidden_dim = 10
 
         class MyModel(torch.nn.Module):
@@ -96,15 +160,23 @@ class TestMiCSGatheredParametersFree(DistributedTest):
             def __init__(self, hidden_dim):
                 super(MyModel, self).__init__()
                 self.l1 = torch.nn.Linear(hidden_dim, hidden_dim)
+                self.l2 = torch.nn.Linear(hidden_dim, hidden_dim)
 
-        with deepspeed.zero.MiCS_Init(config_dict_or_path=config_dict):
+        with deepspeed.zero.Init(config_dict_or_path=config_dict):
             model = MyModel(hidden_dim)
 
-        with deepspeed.zero.GatheredParameters(list(model.parameters())):
-            assert model.l1.weight.numel() != 0, "GatheredParameters should give a non-0-sized tensor"
+        error_local = False
+        try:
+            with deepspeed.zero.GatheredParameters([model.l1.weight, model.l2.weight], modifier_rank=None):
+                with torch.no_grad():
+                    model.l1.weight.add_(0.0)
+        except RuntimeError as exc:
+            if "in-place modification" in str(exc):
+                error_local = True
 
-        # on exit from `GatheredParameters` the gathered params should be freed and not leak memory
-        assert model.l1.weight.numel() == 0, "outside of GatheredParameters the param should go back to be 0-sized"
+        error_global = reduce_boolean_flags(error_local, all)
+        if not error_global:
+            raise AssertionError("Expected in-place modification error on all ranks.")
 
 
 class TestSerialContext(DistributedTest):

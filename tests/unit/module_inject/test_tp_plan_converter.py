@@ -1,0 +1,179 @@
+# Copyright (c) Microsoft Corporation.
+# SPDX-License-Identifier: Apache-2.0
+
+# DeepSpeed Team
+
+import pytest
+
+from deepspeed.module_inject.tp_plan_converter import TPPlanConverter
+from deepspeed.module_inject.autotp_config import AutoTPConfig, PartitionType
+
+
+class TestTPPlanConverter:
+
+    def test_wildcard_to_regex_basic(self):
+        assert TPPlanConverter._wildcard_to_regex("layers.*.q_proj") == r".*layers\..*\.q_proj"
+        assert TPPlanConverter._wildcard_to_regex("self_attn.*.weight") == r".*self_attn\..*\.weight"
+        assert TPPlanConverter._wildcard_to_regex("layers.*.self_attn.q_proj") == r".*layers\..*\.self_attn\.q_proj"
+
+    def test_wildcard_to_regex_special_chars(self):
+        assert TPPlanConverter._wildcard_to_regex("layers.0.q_proj") == r".*layers\.0\.q_proj"
+        assert TPPlanConverter._wildcard_to_regex("mlp.gate_proj") == r".*mlp\.gate_proj"
+
+    def test_colwise_rowwise_conversion(self):
+        hf_plan = {"layers.*.q_proj": "colwise", "layers.*.o_proj": "rowwise"}
+        specs = TPPlanConverter.convert(hf_plan)
+
+        assert len(specs) == 2
+
+        q_spec = [s for s in specs if "q_proj" in s.patterns[0]][0]
+        o_spec = [s for s in specs if "o_proj" in s.patterns[0]][0]
+
+        assert q_spec.partition_type == PartitionType.COLUMN
+        assert not q_spec.gather_output
+        assert o_spec.partition_type == PartitionType.ROW
+        assert not o_spec.gather_output
+
+    def test_gathered_colwise_conversion(self):
+        hf_plan = {
+            "lm_head": "colwise_gather_output",
+            "legacy_lm_head": "colwise_rep",
+        }
+        specs = TPPlanConverter.convert(hf_plan)
+
+        assert len(specs) == 2
+        assert all(spec.partition_type == PartitionType.COLUMN for spec in specs)
+        assert all(spec.gather_output for spec in specs)
+
+    def test_gather_output_from_config_dict(self):
+        config = AutoTPConfig.from_dict({
+            "layer_specs": [{
+                "patterns": [r".*\.lm_head\.weight$"],
+                "partition_type": "column",
+                "gather_output": True,
+            }]
+        })
+
+        assert config.layer_specs[0].gather_output
+
+    def test_pattern_weight_suffix(self):
+        hf_plan = {"layers.*.q_proj": "colwise"}
+        specs = TPPlanConverter.convert(hf_plan)
+
+        assert len(specs) == 1
+        assert specs[0].patterns[0].endswith(r"\.weight$")
+
+    def test_pattern_weight_suffix_already_present(self):
+        hf_plan = {"layers.*.q_proj.weight": "colwise"}
+        specs = TPPlanConverter.convert(hf_plan)
+
+        assert len(specs) == 1
+        assert specs[0].patterns[0].endswith(r"\.weight$")
+
+    def test_empty_plan(self):
+        """An empty plan has nothing to convert, so the caller should fall back rather than
+        silently partition nothing."""
+        assert TPPlanConverter.convert({}) is None
+
+    def test_multiple_patterns(self):
+        hf_plan = {
+            "layers.*.self_attn.q_proj": "colwise",
+            "layers.*.self_attn.k_proj": "colwise",
+            "layers.*.self_attn.v_proj": "colwise",
+            "layers.*.self_attn.o_proj": "rowwise",
+            "layers.*.mlp.gate_proj": "colwise",
+            "layers.*.mlp.up_proj": "colwise",
+            "layers.*.mlp.down_proj": "rowwise",
+        }
+        specs = TPPlanConverter.convert(hf_plan)
+
+        assert len(specs) == 7
+
+        colwise_count = sum(1 for s in specs if s.partition_type == PartitionType.COLUMN)
+        rowwise_count = sum(1 for s in specs if s.partition_type == PartitionType.ROW)
+
+        assert colwise_count == 5
+        assert rowwise_count == 2
+
+    def test_pattern_matches_param_name(self):
+        import re
+
+        hf_plan = {"layers.*.self_attn.q_proj": "colwise", "layers.*.mlp.down_proj": "rowwise"}
+        specs = TPPlanConverter.convert(hf_plan)
+
+        q_pattern = [s for s in specs if "q_proj" in s.patterns[0]][0]
+        down_pattern = [s for s in specs if "down_proj" in s.patterns[0]][0]
+
+        assert re.match(q_pattern.patterns[0], "model.layers.0.self_attn.q_proj.weight")
+        assert re.match(q_pattern.patterns[0], "model.layers.10.self_attn.q_proj.weight")
+        assert not re.match(q_pattern.patterns[0], "model.layers.0.self_attn.k_proj.weight")
+
+        assert re.match(down_pattern.patterns[0], "model.layers.5.mlp.down_proj.weight")
+
+    def test_unsupported_style_rejects_whole_plan(self):
+        """Any unknown style must reject the plan outright, not skip the entry.
+
+        The converter has no notion of which entries pair with which, so applying the supported
+        subset can shard one half of a column/row pair — here o_proj would be row-sharded while
+        the q_proj feeding it stays whole — and break the model. Failing loudly also keeps the
+        model off the heuristic path, which breaks models like Llama4 by wrapping its MoE router.
+        """
+        hf_plan = {"layers.*.q_proj": "local_colwise", "layers.*.o_proj": "rowwise"}
+        with pytest.raises(ValueError, match="local_colwise"):
+            TPPlanConverter.convert(hf_plan)
+
+        hf_plan = {"layers.*.q_proj": "local_colwise", "layers.*.experts": "moe_tp_experts"}
+        with pytest.raises(ValueError, match="unsupported partition style"):
+            TPPlanConverter.convert(hf_plan)
+
+    def test_tied_embedding_style_converts_to_skip(self):
+        """`embedding_rowwise` is injected for every tied-embedding model, so rejecting it would
+        strand those models on the heuristic path. Tied embeddings stay replicated here, and the
+        entry carries no gradient all-reduce because the parameter is never split."""
+        hf_plan = {
+            "layers.*.self_attn.q_proj": "colwise",
+            "layers.*.self_attn.o_proj": "rowwise",
+            "embed_tokens": "embedding_rowwise",
+            "lm_head": "colwise_gather_output",
+        }
+        specs = TPPlanConverter.convert(hf_plan)
+
+        assert len(specs) == 4
+
+        embed_spec = [s for s in specs if "embed_tokens" in s.patterns[0]][0]
+        lm_head_spec = [s for s in specs if "lm_head" in s.patterns[0]][0]
+
+        assert embed_spec.partition_type == PartitionType.SKIP
+        assert not embed_spec.grad_allreduce
+        assert lm_head_spec.partition_type == PartitionType.COLUMN
+        assert lm_head_spec.gather_output
+
+    def test_alternate_prefixes(self):
+        """Test tp_plan with non-layers prefix"""
+        hf_plan = {
+            "model.layers.*.self_attn.q_proj": "colwise",
+            "transformer.layers.*.self_attn.o_proj": "rowwise",
+        }
+
+        layer_specs = TPPlanConverter.convert(hf_plan)
+        assert len(layer_specs) == 2
+        assert any("model\\.layers" in s.patterns[0] for s in layer_specs)
+        assert any("transformer\\.layers" in s.patterns[0] for s in layer_specs)
+
+    def test_alternate_projection_names(self):
+        """Test tp_plan with qkv and Wq/Wk/Wv style names"""
+        hf_plan = {
+            "layers.*.attn.qkv": "colwise",
+            "layers.*.attn.out_proj": "rowwise",
+            "layers.*.attn.Wq": "colwise",
+            "layers.*.attn.Wk": "colwise",
+            "layers.*.attn.Wv": "colwise",
+        }
+
+        layer_specs = TPPlanConverter.convert(hf_plan)
+        assert len(layer_specs) == 5
+        colwise_count = sum(1 for s in layer_specs if s.partition_type == PartitionType.COLUMN)
+        rowwise_count = sum(1 for s in layer_specs if s.partition_type == PartitionType.ROW)
+
+        assert colwise_count == 4  # qkv + Wq/Wk/Wv
+        assert rowwise_count == 1  # out_proj

@@ -32,7 +32,7 @@ class DeepSpeedCPULion(torch.optim.Optimizer):
             betas (Tuple[float, float], optional): coefficients used for computing
                 running averages of gradient and its square. (default: (0.9, 0.999))
             weight_decay (float, optional): weight decay (L2 penalty) (default: 0)
-            full_precision_optimizer_states: creates momentum and variance in full precision regardless of
+            fp32_optimizer_states: creates momentum and variance in full precision regardless of
                         the precision of the parameters (default: True)
         """
 

@@ -3,10 +3,21 @@
 
 # DeepSpeed Team
 
+import os
+
+# By default, PyTorch's CUDA availability check (cudaGetDeviceCount/cuInit)
+# creates a CUDA context, which poisons fork()-based multiprocessing once
+# DeepSpeed probes op compatibility at import time. Opt into PyTorch's
+# NVML-based availability check so importing DeepSpeed never creates a CUDA
+# context, before importing torch or anything that may query CUDA.
+# setdefault() preserves an explicit user setting. See issue #7918.
+os.environ.setdefault("PYTORCH_NVML_BASED_CUDA_CHECK", "1")
+
+import argparse
 import sys
 import types
 import json
-from typing import Optional, Union
+from typing import Any, Callable, Dict, Optional, Tuple, Union
 import torch
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import _LRScheduler
@@ -29,6 +40,8 @@ from .accelerator import get_accelerator
 from .constants import TORCH_DISTRIBUTED_DEFAULT_PORT
 from .runtime.engine import DeepSpeedEngine, DeepSpeedOptimizerCallable, DeepSpeedSchedulerCallable
 from .runtime.engine import ADAM_OPTIMIZER, LAMB_OPTIMIZER, MUON_OPTIMIZER
+from .runtime.base_optimizer import DeepSpeedOptimizer
+from .runtime.dataloader import DeepSpeedDataLoader
 from .runtime.hybrid_engine import DeepSpeedHybridEngine
 from .runtime.pipe.engine import PipelineEngine
 from .inference.engine import InferenceEngine
@@ -48,6 +61,8 @@ from .runtime.compiler import is_compile_supported
 from .pipe import PipelineModule
 
 from .git_version_info import version, git_hash, git_branch
+from .runtime.tensor_parallel.init_utils import (load_ds_config, merge_tp_model_init_into_config,
+                                                 record_tp_model_init_args)
 
 
 def _parse_version(version_str):
@@ -66,28 +81,45 @@ __git_branch__ = git_branch
 dist = None
 
 
-def set_optimizer_flags(config_class, model):
+def _layer_shape(param: torch.Tensor):
+    """The parameter's shape as a layer, rather than as a ZeRO-3 partition.
+
+    Under ``deepspeed.zero.Init`` a partitioned parameter's data is a flat placeholder -
+    ``torch.Size([0])`` on the ranks that do not hold it - and the shape it has as a layer is
+    recorded as ``ds_shape``. Reading ``param.shape`` there sees a 1-D tensor for every
+    parameter in the model.
+    """
+    ds_shape = getattr(param, "ds_shape", None)
+    return tuple(param.shape) if ds_shape is None else tuple(ds_shape)
+
+
+def set_optimizer_flags(config_class: DeepSpeedConfig, model: torch.nn.Module) -> None:
     if config_class.optimizer_name == MUON_OPTIMIZER:
         for name, p in model.named_parameters():
-            if p.ndim >= 2 and not any(keyword in name.lower() for keyword in ("embed", "lm_head")):
+            # Muon is defined on matrices, so the test is on the layer's shape. `zero.Init`
+            # makes every parameter report as 1-D, which would switch Muon off for the whole
+            # model without anything saying so.
+            if len(_layer_shape(p)) >= 2 and not any(keyword in name.lower() for keyword in ("embed", "lm_head")):
                 setattr(p, "use_muon", True)
             else:
                 setattr(p, "use_muon", False)
 
 
-def initialize(args=None,
-               model: torch.nn.Module = None,
-               optimizer: Optional[Union[Optimizer, DeepSpeedOptimizerCallable]] = None,
-               model_parameters: Optional[torch.nn.Module] = None,
-               training_data: Optional[torch.utils.data.Dataset] = None,
-               lr_scheduler: Optional[Union[_LRScheduler, DeepSpeedSchedulerCallable]] = None,
-               distributed_port: int = TORCH_DISTRIBUTED_DEFAULT_PORT,
-               mpu=None,
-               dist_init_required: Optional[bool] = None,
-               collate_fn=None,
-               config=None,
-               mesh_param=None,
-               config_params=None):
+def initialize(
+    args: Any = None,
+    model: torch.nn.Module = None,
+    optimizer: Optional[Union[Optimizer, DeepSpeedOptimizerCallable]] = None,
+    model_parameters: Optional[torch.nn.Module] = None,
+    training_data: Optional[torch.utils.data.Dataset] = None,
+    lr_scheduler: Optional[Union[_LRScheduler, DeepSpeedSchedulerCallable]] = None,
+    distributed_port: int = TORCH_DISTRIBUTED_DEFAULT_PORT,
+    mpu: Any = None,
+    dist_init_required: Optional[bool] = None,
+    collate_fn: Optional[Callable] = None,
+    config: Optional[Union[str, Dict[str, Any]]] = None,
+    mesh_param: Any = None,
+    config_params: Optional[Union[str, Dict[str, Any]]] = None
+) -> Tuple[DeepSpeedEngine, Optional[Union[Optimizer, DeepSpeedOptimizer]], Optional[DeepSpeedDataLoader], Any]:
     """Initialize the DeepSpeed Engine.
 
     Arguments:
@@ -159,17 +191,6 @@ def initialize(args=None,
     if config is None and config_params is not None:
         config = config_params
 
-    mesh_device = None
-    if mesh_param:
-        logger.info(f"mesh_param to Initialize mesh device: {mesh_param}")
-        mesh_device = dist.initialize_mesh_device(mesh_param, ("data_parallel", "sequence_parallel"))
-    #if config file has sequence parallelize and data parallelize, then use them to initialize mesh device
-    elif config is not None:
-        if "sequence_parallel_size" in config and "data_parallel_size" in config:
-            logger.info(f"config to Initialize mesh device: {config}")
-            mesh_device = dist.initialize_mesh_device((config["data_parallel_size"], config["sequence_parallel_size"]), \
-            ("data_parallel", "sequence_parallel"))
-
     # Check for deepscale_config for backwards compat
     if hasattr(args, "deepscale_config") and args.deepscale_config is not None:
         logger.warning("************ --deepscale_config is deprecated, please use --deepspeed_config ************")
@@ -184,6 +205,26 @@ def initialize(args=None,
         assert config is None, "Not sure how to proceed, we were given deepspeed configs in the deepspeed arguments and deepspeed.initialize() function call"
         config = args.deepspeed_config
     assert config is not None, "DeepSpeed requires --deepspeed_config to specify configuration file"
+
+    if not isinstance(config, dict):
+        config = load_ds_config(config)
+
+    mesh_device = None
+    if mesh_param:
+        logger.info(f"mesh_param to Initialize mesh device: {mesh_param}")
+        mesh_device = dist.initialize_mesh_device(mesh_param, ("data_parallel", "sequence_parallel"))
+    #if config file has sequence parallelize and data parallelize, then use them to initialize mesh device
+    else:
+        if "sequence_parallel_size" in config and "data_parallel_size" in config:
+            logger.info(f"config to Initialize mesh device: {config}")
+            mesh_device = dist.initialize_mesh_device((config["data_parallel_size"], config["sequence_parallel_size"]), \
+            ("data_parallel", "sequence_parallel"))
+
+    merge_tp_model_init_into_config(config, mpu, mesh_param, dist)
+
+    autotp_size = config.get("tensor_parallel", {}).get("autotp_size", 0)
+    if autotp_size and autotp_size > 0:
+        set_autotp_mode(training=True)
     if not isinstance(model, PipelineModule):
         config_class = DeepSpeedConfig(config, mpu, mesh_device=mesh_device)
         set_optimizer_flags(config_class, model)
@@ -276,7 +317,7 @@ def _add_core_arguments(parser):
     return parser
 
 
-def add_config_arguments(parser):
+def add_config_arguments(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     r"""Update the argument parser to enabling parsing of DeepSpeed command line arguments.
         The set of DeepSpeed arguments include the following:
         1) --deepspeed: boolean flag to enable DeepSpeed
@@ -292,14 +333,16 @@ def add_config_arguments(parser):
     return parser
 
 
-def default_inference_config():
+def default_inference_config() -> Dict[str, Any]:
     """
         Return a default DeepSpeed inference configuration dictionary.
     """
     return DeepSpeedInferenceConfig().dict()
 
 
-def init_inference(model, config=None, **kwargs):
+def init_inference(model: torch.nn.Module,
+                   config: Optional[Union[str, Dict[str, Any]]] = None,
+                   **kwargs: Any) -> InferenceEngine:
     """Initialize the DeepSpeed InferenceEngine.
 
     Description: all four cases are valid and supported in DS init_inference() API.
@@ -377,9 +420,55 @@ def init_inference(model, config=None, **kwargs):
     return engine
 
 
-def tp_model_init(model, tp_size, dtype, config=None, **kwargs):
+def tp_model_init(model: torch.nn.Module,
+                  tp_size: int,
+                  dtype: torch.dtype,
+                  config: Optional[Union[str, Dict[str, Any]]] = None,
+                  **kwargs: Any) -> torch.nn.Module:
     """
-    Initialize the model for tensor parallelism.
+    Record tensor-parallel initialization arguments for training.
+
+    Note (compatibility and initialization behavior):
+    AutoTP sharding is applied during ``deepspeed.initialize(...)``. This
+    function exists for backward compatibility and only records TP arguments so
+    they can be validated and merged with the DeepSpeed config at initialization.
+    When you use both (i.e., calling ``set_autotp_mode(training=True)`` and
+    ``deepspeed.tp_model_init`` while also passing the config to
+    ``deepspeed.initialize``), DeepSpeed merges the settings at initialization.
+    Conflicting settings raise an error. The table below summarizes the behavior
+    across input combinations.
+
+    Inputs:
+    - TPI: tp_model_init was called? (Y/N)
+    - TPG: tp_model_init provided tp_group? (Y/N)
+    - CFG: tensor_parallel in DeepSpeed config? (Y/N)
+    - MPU: mpu passed to deepspeed.initialize()? (Y/N)
+
+    | TPI | TPG | CFG | MPU | Outcome                               | Notes |
+    |-----|-----|-----|-----|----------------------------------------|-------|
+    | N   | N   | N   | N   | Error                                  | No TP intent; nothing to initialize |
+    | N   | N   | N   | Y   | No AutoTP                              | mpu may be used for other MP, but TP not enabled |
+    | N   | N   | Y   | N   | Init AutoTP from config                | Use config; need TP group via config-driven init |
+    | N   | N   | Y   | Y   | Init AutoTP from config                | mpu used to build TP group |
+    | Y   | N   | N   | N   | Error                                  | No TP group source |
+    | Y   | N   | N   | Y   | Init AutoTP from tp_model_init         | Use recorded args + mpu for TP group |
+    | Y   | N   | Y   | N   | Init AutoTP from config                | Fill missing from TPI; error on mismatches; need TP group source |
+    | Y   | N   | Y   | Y   | Init AutoTP from config                | Fill missing from TPI; error on mismatches |
+    | Y   | Y   | N   | N   | Init AutoTP from tp_model_init         | Use recorded tp_group; config absent |
+    | Y   | Y   | N   | Y   | Error                                  | tp_group + mpu conflict |
+    | Y   | Y   | Y   | N   | Init AutoTP from config                | Error on mismatches; use tp_group from TPI; reject mpu |
+    | Y   | Y   | Y   | Y   | Error                                  | tp_group + mpu conflict |
+
+    Field-level merge rules when both tp_model_init and config exist:
+    - Canonical source: config
+    - Allowed: fill missing config fields from tp_model_init
+    - Error on mismatch: autotp_size, dtype, tp_group size or identity
+
+    Extra checks:
+    - If tp_group is provided, reject mpu.
+    - If tp_group is not provided, require mpu (or another TP group source).
+    - If tensor_parallel is absent and only tp_model_init was called, require
+      a TP group source (direct tp_group or mpu).
 
     Args:
         model (torch.nn.Module): The model to be initialized.
@@ -387,23 +476,15 @@ def tp_model_init(model, tp_size, dtype, config=None, **kwargs):
         dtype (torch.dtype): The data type to be used for the model.
 
     Returns:
-        torch.nn.Module: The initialized model with tensor parallelism.
+        torch.nn.Module: The original model (no sharding applied here).
     """
-    # avoid re-entry
     if hasattr(model, 'ds_autotp_parsed'):
-        logger.warning("ds_autotp_parsed' attribute already exists in the model, re-entry is not allowed.")
-        return
+        logger.warning("ds_autotp_parsed' attribute already exists in the model; tp_model_init is now record-only.")
 
+    tp_group = kwargs.get("tp_group")
+    record_tp_model_init_args(tp_size=tp_size, dtype=dtype, tp_group=tp_group, dist_module=dist)
+
+    # Keep AutoTP training mode active for backward compatibility.
     set_autotp_mode(training=True)
-
-    from deepspeed.runtime.tensor_parallel import TpTrainingManager
-    # The expected usage here is for it to be invoked by transformers package.
-
-    #TODO: We should provide a custom TP mapping solution without using autoTP
-    #as modifying the autoTP logic may be more difficult for users compared to configuring it
-
-    model = TpTrainingManager(model=model, tp_size=tp_size, dtype=dtype).module
-
-    setattr(model, 'ds_autotp_parsed', True)
 
     return model

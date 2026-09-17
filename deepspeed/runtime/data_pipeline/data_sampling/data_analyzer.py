@@ -3,6 +3,7 @@
 
 # DeepSpeed Team
 
+import glob
 import os
 import sys
 from collections import defaultdict
@@ -72,7 +73,8 @@ class DataAnalyzer(object):
                 sample_to_metric_fname = f"{metric_save_path}/{metric_name}_sample_to_metric"
                 sample_to_metric_builder = create_mmap_dataset_builder(sample_to_metric_fname, metric_dtype)
                 metric_to_sample_fname = f"{metric_save_path}/{metric_name}_metric_to_sample"
-                os.system(f"rm -rf {metric_to_sample_fname}*")
+                for _f in glob.glob(f"{glob.escape(metric_to_sample_fname)}*"):
+                    os.remove(_f)
                 metric_to_sample_dict = defaultdict(list)
                 metric_results.append({
                     "sample_to_metric_fname": sample_to_metric_fname,

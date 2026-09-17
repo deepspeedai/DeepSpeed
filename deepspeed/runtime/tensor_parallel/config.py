@@ -7,7 +7,7 @@ from enum import Enum
 from deepspeed.runtime.config_utils import DeepSpeedConfigModel
 import torch
 from pydantic import Field
-from typing import Optional
+from typing import Optional, Dict, Any
 
 
 class AUTOTP_MODE(Enum):
@@ -57,6 +57,41 @@ class TPTrainingConfig(DeepSpeedConfigModel):
     """
 
     injection_policy_tuple: Optional[tuple] = None
+
+    # New configurable AutoTP settings
+    partition_config: Optional[Dict[str, Any]] = None
+    """
+    Configuration for the new configurable AutoTP API.
+    Allows users to specify custom layer partitioning rules via TPLayerSpec.
+
+    Example:
+        "partition_config": {
+            "use_default_specs": false,
+            "layer_specs": [
+                {
+                    "patterns": [".*\\.o_proj\\.weight$", ".*\\.down_proj\\.weight$"],
+                    "partition_type": "row"
+                },
+                {
+                    "patterns": [".*\\.[qkv]_proj\\.weight$"],
+                    "partition_type": "column"
+                },
+                {
+                    "patterns": [".*\\.gate_up_proj\\.weight$"],
+                    "partition_type": "column",
+                    "shape": [2, -1],
+                    "partition_dim": 0
+                }
+            ]
+        }
+    """
+
+    preset_model: Optional[str] = None
+    """
+    Use a built-in preset for common model architectures.
+    Available presets: "llama", "bloom", "chatglm", "mixtral", "deepseek_v2", "qwen2", "phi3"
+    """
+
     #The following parameters are required by autoTP parser.
     ########################################
     keep_module_on_host: bool = False
@@ -74,7 +109,34 @@ class TPTrainingConfig(DeepSpeedConfigModel):
     linear layers as a tuple:
     `(attention_output projection, transformer output projection)`
     """
+
     ########################################
+
+    def get_partition_config_object(self):
+        """
+        Get the AutoTPConfig object from the configuration.
+        Returns None if no custom config is specified.
+        """
+        from deepspeed.module_inject.autotp_config import AutoTPConfig, AutoTPPresets, merge_autotp_configs
+
+        config = None
+
+        # First check for preset
+        if self.preset_model:
+            config = AutoTPPresets.get_preset(self.preset_model)
+
+        # Then check for custom config
+        if self.partition_config:
+            custom_config = AutoTPConfig.from_dict(self.partition_config)
+            if config and custom_config.use_default_specs:
+                config = merge_autotp_configs(config, custom_config)
+            else:
+                config = custom_config
+
+        if config:
+            config.tp_size = self.autotp_size
+
+        return config
 
 
 def get_tensor_parallel_config(ds_config):
@@ -82,3 +144,31 @@ def get_tensor_parallel_config(ds_config):
     if 'tensor_parallel' in ds_config:
         return TPTrainingConfig(**ds_config['tensor_parallel'])
     return TPTrainingConfig()
+
+
+def _get_hf_tp_plan(model):
+    """Extract tp_plan from HuggingFace model.
+
+    Merge plans from the model config, model class, and runtime instance.
+    HuggingFace may replace the instance plan with an expanded base-model plan,
+    while model-level entries such as lm_head remain only on the model class.
+    """
+    config = getattr(model, 'config', None)
+    base_plan = getattr(config, 'base_model_tp_plan', None) if config else None
+    class_plan = getattr(type(model), '_tp_plan', None)
+    instance_dict = getattr(model, '__dict__', {})
+    runtime_plan = instance_dict.get('_tp_plan')
+
+    merged_plan = {}
+    canonical_patterns = set()
+    for plan in (base_plan, class_plan, runtime_plan):
+        if not isinstance(plan, dict):
+            continue
+        for pattern, style in plan.items():
+            canonical_pattern = pattern[len('model.'):] if pattern.startswith('model.') else pattern
+            if pattern.startswith('model.') and canonical_pattern in canonical_patterns:
+                continue
+            merged_plan[pattern] = style
+            canonical_patterns.add(canonical_pattern)
+
+    return merged_plan or None

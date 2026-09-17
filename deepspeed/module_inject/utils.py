@@ -6,6 +6,10 @@
 from deepspeed.utils import log_dist
 
 
+def transpose(data):
+    return data.transpose(-1, -2).contiguous()
+
+
 # helper function to map between DS policies and DS containers
 def policy_to_ds_container(**kwargs):
     from .containers import HFGPT2LayerPolicy, DS_GPT2Container

@@ -15,8 +15,6 @@ lnav:
     url: /training/
   - title: 'Inference'
     url: /inference/
-  - title: 'Compression'
-    url: /compression/
   - title: 'Science'
     url: /deepspeed4science/
   - title: 'Getting Started'
@@ -44,8 +42,6 @@ lnav:
         url: /docs/config-json/#monitoring-module
       - title: 'Communication Logging'
         url: /docs/config-json/#communication-logging
-      - title: 'Model Compression'
-        url: /docs/config-json/#compression
       - title: 'Data Efficiency'
         url: /docs/config-json/#data-efficiency
   - title: 'Tutorials'
@@ -59,8 +55,10 @@ lnav:
         url: /tutorials/accelerator-abstraction-interface/
       - title: 'Accelerator Setup Guides'
         url: /tutorials/accelerator-setup-guide/
-      - title: 'Automatic Tensor Parallelism'
+      - title: 'Automatic Tensor Parallelism (Inference)'
         url: /tutorials/automatic-tensor-parallelism/
+      - title: 'Automatic Tensor Parallelism (Training)'
+        url: /tutorials/autotp-training/
       - title: 'Autotuning'
         url: /tutorials/autotuning/
       - title: 'BingBertSQuAD Fine-tuning'
@@ -91,34 +89,22 @@ lnav:
         url: /tutorials/lrrt/
       - title: 'Megatron-LM GPT2'
         url: /tutorials/megatron/
-      - title: 'Mixture-of-Experts (MoE)'
+      - title: 'Mixture of Experts (DeepSpeed MoE)'
         url: /tutorials/mixture-of-experts/
       - title: 'MoE for NLG'
         url: /tutorials/mixture-of-experts-nlg/
       - title: 'MoE Inference'
         url: /tutorials/mixture-of-experts-inference/
-      - title: 'Model Compression'
-        url: /tutorials/model-compression/
-      - title: 'Mixture-of-Quantization'
-        url: /tutorials/MoQ-tutorial/
       - title: 'Monitoring'
         url: /tutorials/monitor
       - title: 'Communication Logging'
         url: /tutorials/comms-logging
       - title: 'One-Cycle Schedule'
         url: /tutorials/one-cycle/
-      - title: 'One-Bit Adam'
-        url: /tutorials/onebit-adam/
-      - title: "Zero-One Adam"
-        url: /tutorials/zero-one-adam/
-      - title: "One-Bit LAMB"
-        url: /tutorials/onebit-lamb/
       - title: 'Pipeline Parallelism'
         url: /tutorials/pipeline/
       - title: 'Progressive Layer Dropping'
         url: /tutorials/progressive_layer_dropping/
-      - title: 'Sparse Attention'
-        url: /tutorials/sparse-attention/
       - title: 'Transformer Kernel'
         url: /tutorials/transformer_kernel/
       - title: 'Arctic Long Sequence Training (ALST) for HF Transformers integration'

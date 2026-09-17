@@ -25,17 +25,26 @@ def is_nfs_path(path):
     # Normalize the path to get the absolute path
     path = os.path.abspath(path)
 
-    # Use the 'df' command to find the file system type for the given path
-    try:
-        output = subprocess.check_output(['df', '-T', path], encoding='utf-8')
-    except subprocess.CalledProcessError:
-        return False  # Command failed
+    # Walk up to the nearest existing ancestor so 'df' does not fail
+    # when the target directory has not been created yet (see #7642).
+    while not os.path.exists(path):
+        parent = os.path.dirname(path)
+        if parent == path:
+            break
+        path = parent
 
-    # Process the output of 'df -T' to check for 'nfs' in the filesystem type column
+    # POSIX output keeps long device names from wrapping onto a separate line.
+    try:
+        output = subprocess.check_output(['df', '-PT', path], encoding='utf-8', stderr=subprocess.DEVNULL)
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return False  # Command failed or 'df' not available
+
+    # Process the output of 'df -PT' to check for 'nfs' in the filesystem type column.
     lines = output.strip().split('\n')
     if len(lines) > 1:  # The first line is headers
-        fs_type = lines[1].split()[1].lower()  # File system type is the second column
-        return 'nfs' in fs_type
+        fields = lines[1].split()
+        if len(fields) > 1:
+            return 'nfs' in fields[1].lower()
     return False
 
 
@@ -53,7 +62,8 @@ class TritonCacheDir:
 
     @staticmethod
     def default_cache_dir():
-        tmp_path = os.path.join(Path.home(), ".triton", "autotune")
+        tt_home = os.environ.get('TRITON_HOME') or os.path.join(Path.home(), ".triton")
+        tmp_path = os.path.join(tt_home, "autotune")
         return tmp_path
 
 

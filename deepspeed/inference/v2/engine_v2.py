@@ -165,7 +165,7 @@ class InferenceEngineV2:
             uid (int): The UID of the sequence (as tracked by the scheduling entity). If
                 this is a new sequence (with a UID unknown to the inference engine), then
                 an empty placeholder is created to pass to the occupancy logic.
-            n_tokens (int): The number of tokens to hypothetically send.
+            max_request_tokens (int): The number of tokens to hypothetically send.
 
         Returns:
             Tuple[int, Optional[int]]: Tuple of free kv blocks and the number of blocks
@@ -253,7 +253,7 @@ class InferenceEngineV2:
         Serialize the model to a file.
 
         Arguments:
-            path (str): Path to the file to serialize to.
+            save_path (str): Path to the file to serialize to.
         """
         param_file_name = make_param_filename(save_path, self._model.tp_rank, self._model.tp_size)
         metadata_file_name = make_metadata_filename(save_path, self._model.tp_rank, self._model.tp_size)

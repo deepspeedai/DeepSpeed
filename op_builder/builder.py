@@ -50,13 +50,34 @@ def installed_cuda_version(name=""):
     if cuda_home is None:
         raise MissingCUDAException("CUDA_HOME does not exist, unable to compile CUDA op(s)")
     # Ensure there is not a cuda version mismatch between torch and nvcc compiler
-    output = subprocess.check_output([cuda_home + "/bin/nvcc", "-V"], universal_newlines=True)
+    nvcc = cuda_home + "/bin/nvcc"
+    try:
+        output = subprocess.check_output([nvcc, "-V"], universal_newlines=True)
+    except (OSError, subprocess.SubprocessError) as err:
+        # CUDA_HOME can point at a runtime only install, which has no nvcc to compile with. Report that
+        # the same way as a missing CUDA_HOME so the callers that already fall back can handle it.
+        raise MissingCUDAException(f"Unable to run {nvcc}, unable to compile CUDA op(s): {err}") from err
     output_split = output.split()
     release_idx = output_split.index("release")
     release = output_split[release_idx + 1].replace(',', '').split(".")
     # Ignore patch versions, only look at major + minor
     cuda_major, cuda_minor = release[:2]
     return int(cuda_major), int(cuda_minor)
+
+
+def probe_is_compatible(builder, verbose=False):
+    """Report whether an op can be built, treating a probe that itself fails as "not compatible".
+
+    Compatibility is probed for every op when deepspeed is imported, whether or not the caller will ever
+    build that op. A CUDA op builder on a machine that has a GPU but no CUDA toolkit raises
+    MissingCUDAException from its probe, which would otherwise make importing deepspeed fail outright
+    over an op that was never asked for. See #7452.
+    """
+    try:
+        return builder.is_compatible(verbose)
+    except Exception as err:
+        print(f"{WARNING} {builder.name} compatibility check failed ({err}), treating the op as not compatible")
+        return False
 
 
 def get_default_compute_capabilities():
@@ -208,7 +229,7 @@ class OpBuilder(ABC):
         _is_sycl_enabled = False
         try:
             result = subprocess.run(["c2s", "--version"], capture_output=True)
-        except:
+        except Exception:
             pass
         else:
             _is_sycl_enabled = True
@@ -258,11 +279,12 @@ class OpBuilder(ABC):
         rocm_info = Path("/opt/rocm/bin/rocminfo")
         if (not rocm_info.is_file()):
             rocm_info = Path("rocminfo")
-        rocm_gpu_arch_cmd = str(rocm_info) + " | grep -o -m 1 'gfx.*'"
         try:
-            result = subprocess.check_output(rocm_gpu_arch_cmd, shell=True)
-            rocm_gpu_arch = result.decode('utf-8').strip()
-        except subprocess.CalledProcessError:
+            result = subprocess.check_output([str(rocm_info)], stderr=subprocess.DEVNULL)
+            output = result.decode('utf-8')
+            match = re.search(r'gfx\S+', output)
+            rocm_gpu_arch = match.group(0).strip() if match else ""
+        except (subprocess.CalledProcessError, FileNotFoundError, OSError):
             rocm_gpu_arch = ""
         OpBuilder._rocm_gpu_arch = rocm_gpu_arch
         return OpBuilder._rocm_gpu_arch
@@ -275,12 +297,12 @@ class OpBuilder(ABC):
         rocm_info = Path("/opt/rocm/bin/rocminfo")
         if (not rocm_info.is_file()):
             rocm_info = Path("rocminfo")
-        rocm_wavefront_size_cmd = str(
-            rocm_info) + " | grep -Eo -m1 'Wavefront Size:[[:space:]]+[0-9]+' | grep -Eo '[0-9]+'"
         try:
-            result = subprocess.check_output(rocm_wavefront_size_cmd, shell=True)
-            rocm_wavefront_size = result.decode('utf-8').strip()
-        except subprocess.CalledProcessError:
+            result = subprocess.check_output([str(rocm_info)], stderr=subprocess.DEVNULL)
+            output = result.decode('utf-8')
+            match = re.search(r'Wavefront Size:\s+(\d+)', output)
+            rocm_wavefront_size = match.group(1) if match else "32"
+        except (subprocess.CalledProcessError, FileNotFoundError, OSError):
             rocm_wavefront_size = "32"
         OpBuilder._rocm_wavefront_size = rocm_wavefront_size
         return OpBuilder._rocm_wavefront_size
@@ -380,7 +402,7 @@ class OpBuilder(ABC):
         except LinkError:
             return False
 
-        except:
+        except Exception:
             return False
 
         finally:
@@ -459,6 +481,10 @@ class OpBuilder(ABC):
             cpu_info['arch'] = "PPC_"
         elif 'riscv64' in result:
             cpu_info['arch'] = "riscv64"
+        elif 'aarch64' in result:
+            cpu_info['arch'] = "ARM_8"
+            if ' sve ' in result:
+                cpu_info['flags'] = 'sve'
 
         return cpu_info
 
@@ -484,6 +510,12 @@ class OpBuilder(ABC):
                 return '-D__AVX512__'
             elif 'avx2' in cpu_info['flags']:
                 return '-D__AVX256__'
+        elif (cpu_info['arch'] or '').startswith('ARM') and 'sve' in cpu_info['flags']:
+            return '-D__SVE__'
+        elif cpu_info['arch'] == 'ARM_8':
+            # NEON is baseline on AArch64; vdivq/vsqrtq used by simd.h are A64-only,
+            # so do not advertise it for 32-bit ARM.
+            return '-D__NEON__'
         return '-D__SCALAR__'
 
     def command_exists(self, cmd):
@@ -555,92 +587,137 @@ class OpBuilder(ABC):
         if isinstance(self, CUDAOpBuilder) and not self.is_rocm_pytorch():
             self.build_for_cpu = not torch.cuda.is_available()
 
+        saved_jit_mode = self.jit_mode
         self.jit_mode = True
+        torch_arch_list_present = "TORCH_CUDA_ARCH_LIST" in os.environ
+        torch_arch_list = os.environ.get("TORCH_CUDA_ARCH_LIST")
+        normalized_arch_list = torch_arch_list.strip() if torch_arch_list is not None else None
+        self._jit_arch_list = normalized_arch_list or None
         from torch.utils.cpp_extension import load
 
         start_build = time.time()
         sources = [os.path.abspath(self.deepspeed_src_path(path)) for path in self.sources()]
         extra_include_paths = [os.path.abspath(self.deepspeed_src_path(path)) for path in self.include_paths()]
 
-        # Torch will try and apply whatever CCs are in the arch list at compile time,
-        # we have already set the intended targets ourselves we know that will be
-        # needed at runtime. This prevents CC collisions such as multiple __half
-        # implementations. Stash arch list to reset after build.
-        torch_arch_list = None
-        if "TORCH_CUDA_ARCH_LIST" in os.environ:
-            torch_arch_list = os.environ.get("TORCH_CUDA_ARCH_LIST")
-            os.environ["TORCH_CUDA_ARCH_LIST"] = ""
+        try:
+            nvcc_args = self.strip_empty_entries(self.nvcc_args())
+            cxx_args = self.strip_empty_entries(self.cxx_args())
 
-        nvcc_args = self.strip_empty_entries(self.nvcc_args())
-        cxx_args = self.strip_empty_entries(self.cxx_args())
+            cxx_args.append("-UC10_USE_GLOG")
+            nvcc_args.append("-UC10_USE_GLOG")
+            if isinstance(self, CUDAOpBuilder):
+                if not self.build_for_cpu and self.enable_bf16:
+                    cxx_args.append("-DBF16_AVAILABLE")
+                    nvcc_args.append("-DBF16_AVAILABLE")
+                    nvcc_args.append("-U__CUDA_NO_BFLOAT16_OPERATORS__")
+                    nvcc_args.append("-U__CUDA_NO_BFLOAT162_OPERATORS__")
+                    nvcc_args.append("-U__CUDA_NO_BFLOAT16_CONVERSIONS__")
 
-        cxx_args.append("-UC10_USE_GLOG")
-        nvcc_args.append("-UC10_USE_GLOG")
-        if isinstance(self, CUDAOpBuilder):
-            if not self.build_for_cpu and self.enable_bf16:
-                cxx_args.append("-DBF16_AVAILABLE")
-                nvcc_args.append("-DBF16_AVAILABLE")
-                nvcc_args.append("-U__CUDA_NO_BFLOAT16_OPERATORS__")
-                nvcc_args.append("-U__CUDA_NO_BFLOAT162_OPERATORS__")
-                nvcc_args.append("-U__CUDA_NO_BFLOAT16_CONVERSIONS__")
+            if self.is_rocm_pytorch():
+                cxx_args.append("-D__HIP_PLATFORM_AMD__=1")
+                os.environ["PYTORCH_ROCM_ARCH"] = self.get_rocm_gpu_arch()
+                cxx_args.append('-DROCM_WAVEFRONT_SIZE=%s' % self.get_rocm_wavefront_size())
 
-        if self.is_rocm_pytorch():
-            cxx_args.append("-D__HIP_PLATFORM_AMD__=1")
-            os.environ["PYTORCH_ROCM_ARCH"] = self.get_rocm_gpu_arch()
-            cxx_args.append('-DROCM_WAVEFRONT_SIZE=%s' % self.get_rocm_wavefront_size())
+            op_module = load(name=self.name,
+                             sources=self.strip_empty_entries(sources),
+                             extra_include_paths=self.strip_empty_entries(extra_include_paths),
+                             extra_cflags=cxx_args,
+                             extra_cuda_cflags=nvcc_args,
+                             extra_ldflags=self.strip_empty_entries(self.extra_ldflags()),
+                             with_cuda=True if (isinstance(self, CUDAOpBuilder) and not self.build_for_cpu) else None,
+                             verbose=verbose)
 
-        op_module = load(name=self.name,
-                         sources=self.strip_empty_entries(sources),
-                         extra_include_paths=self.strip_empty_entries(extra_include_paths),
-                         extra_cflags=cxx_args,
-                         extra_cuda_cflags=nvcc_args,
-                         extra_ldflags=self.strip_empty_entries(self.extra_ldflags()),
-                         with_cuda=True if (isinstance(self, CUDAOpBuilder) and not self.build_for_cpu) else None,
-                         verbose=verbose)
+            build_duration = time.time() - start_build
+            if verbose:
+                print(f"Time to load {self.name} op: {build_duration} seconds")
 
-        build_duration = time.time() - start_build
-        if verbose:
-            print(f"Time to load {self.name} op: {build_duration} seconds")
+            __class__._loaded_ops[self.name] = op_module
 
-        # Reset arch list so we are not silently removing it for other possible use cases
-        if torch_arch_list:
-            os.environ["TORCH_CUDA_ARCH_LIST"] = torch_arch_list
-
-        __class__._loaded_ops[self.name] = op_module
-
-        return op_module
+            return op_module
+        finally:
+            if torch_arch_list_present:
+                os.environ["TORCH_CUDA_ARCH_LIST"] = torch_arch_list
+            else:
+                os.environ.pop("TORCH_CUDA_ARCH_LIST", None)
+            self._jit_arch_list = None
+            self.jit_mode = saved_jit_mode
 
 
 class CUDAOpBuilder(OpBuilder):
+
+    def cuda_capability_major(self):
+        """Compute-capability major of CUDA device 0, or ``None`` when it cannot
+        be read without side effects.
+
+        ``torch.cuda.get_device_properties`` calls ``torch.cuda._lazy_init()``,
+        which creates a CUDA context. Doing that merely to check op compatibility
+        at ``import deepspeed`` time would poison ``fork()``-based multiprocessing,
+        because a forked child cannot reuse the parent's context (issue #7918).
+        We therefore probe only when a context already exists and we are not
+        inside such a forked child; otherwise the caller skips the
+        compute-capability check and defers it to build/load time.
+        """
+        if not torch.cuda.is_initialized():
+            return None
+        if hasattr(torch.cuda, '_is_in_bad_fork') and torch.cuda._is_in_bad_fork():
+            return None
+        return torch.cuda.get_device_properties(0).major
 
     def compute_capability_args(self, cross_compile_archs=None):
         """
         Returns nvcc compute capability compile flags.
 
-        1. `TORCH_CUDA_ARCH_LIST` takes priority over `cross_compile_archs`.
-        2. If neither is set default compute capabilities will be used
-        3. Under `jit_mode` compute capabilities of all visible cards will be used plus PTX
+        1. Under ``jit_mode``, the precedence is:
+           a. preserved ``TORCH_CUDA_ARCH_LIST`` captured by ``jit_load()``
+           b. live ``TORCH_CUDA_ARCH_LIST`` from the environment
+           c. runtime device probing when the process is not in a bad-fork context
+           d. an error when no explicit arch list exists in a bad-fork context
+
+           JIT mode auto-adds ``+PTX`` to the highest compute capability when
+           no entry already carries it, then sets ``TORCH_CUDA_ARCH_LIST`` so
+           PyTorch can generate the ``-gencode`` flags itself.
+        2. ``TORCH_CUDA_ARCH_LIST`` takes priority over ``cross_compile_archs``.
+        3. If neither is set default compute capabilities will be used.
 
         Format:
 
-        - `TORCH_CUDA_ARCH_LIST` may use ; or whitespace separators. Examples:
+        - ``TORCH_CUDA_ARCH_LIST`` may use ; or whitespace separators. Examples:
 
         TORCH_CUDA_ARCH_LIST="6.1;7.5;8.6;9.0;10.0" pip install ...
         TORCH_CUDA_ARCH_LIST="6.0 6.1 7.0 7.5 8.0 8.6 9.0 10.0+PTX" pip install ...
 
-        - `cross_compile_archs` uses ; separator.
+        - ``cross_compile_archs`` uses ; separator.
 
         """
         ccs = []
         if self.jit_mode:
-            # Compile for underlying architectures since we know those at runtime
-            for i in range(torch.cuda.device_count()):
-                CC_MAJOR, CC_MINOR = torch.cuda.get_device_capability(i)
-                cc = f"{CC_MAJOR}.{CC_MINOR}"
-                if cc not in ccs:
-                    ccs.append(cc)
-            ccs = sorted(ccs)
-            ccs[-1] += '+PTX'
+            arch_string = getattr(self, '_jit_arch_list', None)
+            if arch_string:
+                arch_string = arch_string.replace(' ', ';')
+                ccs = [cc.strip() for cc in arch_string.split(';') if cc.strip()]
+            else:
+                arch_string = os.environ.get('TORCH_CUDA_ARCH_LIST', '').strip()
+                if arch_string:
+                    arch_string = arch_string.replace(' ', ';')
+                    ccs = [cc.strip() for cc in arch_string.split(';') if cc.strip()]
+                else:
+                    if hasattr(torch.cuda, '_is_in_bad_fork') and torch.cuda._is_in_bad_fork():
+                        raise RuntimeError(
+                            f"DeepSpeed JIT builder for '{self.name}' cannot probe CUDA device capabilities "
+                            "in a forked subprocess where CUDA has already been initialized. Set "
+                            "TORCH_CUDA_ARCH_LIST to specify target architectures explicitly.")
+                    for i in range(torch.cuda.device_count()):
+                        CC_MAJOR, CC_MINOR = torch.cuda.get_device_capability(i)
+                        cc = f"{CC_MAJOR}.{CC_MINOR}"
+                        if cc not in ccs:
+                            ccs.append(cc)
+                    if len(ccs) == 0:
+                        raise RuntimeError(f"DeepSpeed JIT builder for '{self.name}' found no CUDA devices. Set "
+                                           "TORCH_CUDA_ARCH_LIST or make GPUs visible.")
+
+            ccs = sorted(ccs, key=lambda cc: tuple(int(part.split('+')[0]) for part in cc.split('.')))
+            if not any('+PTX' in cc for cc in ccs):
+                ccs[-1] += '+PTX'
         else:
             # Cross-compile mode, compile for various architectures
             # env override takes priority
@@ -661,16 +738,48 @@ class CUDAOpBuilder(OpBuilder):
             raise RuntimeError(
                 f"Unable to load {self.name} op due to no compute capabilities remaining after filtering")
 
-        args = []
-        self.enable_bf16 = True
+        # Canonicalize by numeric (major, minor) so the emitted -gencode
+        # sequence matches PyTorch's own dedupe (see #7871). For mixed inputs
+        # such as "8.0;8.0+PTX" or "8.0+PTX;8.0", PyTorch collapses to one
+        # sm_80 entry plus one compute_80 PTX entry. Track has_PTX per arch
+        # as the OR across all variants of that arch so any +PTX appearance
+        # carries through after dedupe.
+        canonical = {}
         for cc in ccs:
-            num = cc[0] + cc[1].split('+')[0]
-            args.append(f'-gencode=arch=compute_{num},code=sm_{num}')
-            if cc[1].endswith('+PTX'):
-                args.append(f'-gencode=arch=compute_{num},code=compute_{num}')
+            major = int(cc[0])
+            minor_part = cc[1]
+            has_ptx = minor_part.endswith('+PTX')
+            minor = int(minor_part.split('+')[0])
+            key = (major, minor)
+            canonical[key] = canonical.get(key, False) or has_ptx
+        canonical_archs = sorted(canonical.items())
 
-            if int(cc[0]) <= 7:
+        self.enable_bf16 = True
+        for (major, _minor), _has_ptx in canonical_archs:
+            if major <= 7:
                 self.enable_bf16 = False
+
+        # Keep TORCH_CUDA_ARCH_LIST in sync with the filtered arch list so
+        # PyTorch does not re-add archs that filter_ccs() removed. Emit one
+        # token per arch using the X.Y or X.Y+PTX form, matching PyTorch's
+        # canonical parsing where +PTX on an arch token already implies both
+        # the sm and PTX emissions for that arch.
+        arch_tokens = [f"{major}.{minor}{'+PTX' if has_ptx else ''}" for (major, minor), has_ptx in canonical_archs]
+        os.environ["TORCH_CUDA_ARCH_LIST"] = ";".join(arch_tokens)
+
+        if self.jit_mode:
+            # Let PyTorch generate -gencode flags from the env var.
+            return []
+
+        # Non-JIT: return explicit flags per builder for extra_compile_args.
+        # Emit exactly one sm_X line per arch, followed by one compute_X PTX
+        # line when any variant of that arch carried +PTX.
+        args = []
+        for (major, minor), has_ptx in canonical_archs:
+            num = f"{major}{minor}"
+            args.append(f'-gencode=arch=compute_{num},code=sm_{num}')
+            if has_ptx:
+                args.append(f'-gencode=arch=compute_{num},code=compute_{num}')
 
         return args
 
@@ -765,7 +874,8 @@ class CUDAOpBuilder(OpBuilder):
         if sys.platform == "win32":
             return ['-O2']
         else:
-            return ['-O3', '-std=c++17', '-g', '-Wno-reorder']
+            cpp_standard = '-std=c++20' if (TORCH_MAJOR, TORCH_MINOR) >= (2, 12) else '-std=c++17'
+            return ['-O3', cpp_standard, '-g', '-Wno-reorder']
 
     def nvcc_args(self):
         if self.build_for_cpu:
@@ -790,7 +900,7 @@ class CUDAOpBuilder(OpBuilder):
 
             cuda_major, cuda_minor = installed_cuda_version()
             if cuda_major > 10:
-                if cuda_major == 12 and cuda_minor >= 5:
+                if (cuda_major == 12 and cuda_minor >= 5) or cuda_major >= 13:
                     std_lib = '-std=c++20'
                 else:
                     std_lib = '-std=c++17'

@@ -1,0 +1,563 @@
+# Copyright (c) Microsoft Corporation.
+# SPDX-License-Identifier: Apache-2.0
+
+# DeepSpeed Team
+
+import torch
+import deepspeed
+import pytest
+import gc
+import random
+from unit.common import DistributedTest
+from unit.simple_model import SimplePRMoEModel, SimpleMoEModel, sequence_dataloader
+import deepspeed.comm as dist
+import deepspeed.moe.sharded_moe as sharded_moe
+from deepspeed import get_accelerator
+from deepspeed.moe.layer import MoE
+from deepspeed.moe.sharded_moe import (top1gating, top2gating, topkgating, _route_slots, _sparse_encode,
+                                       _sparse_decode)
+from deepspeed.moe.utils import split_params_into_different_moe_groups_for_optimizer, is_moe_param
+from deepspeed.utils.torch import required_torch_version
+
+
+@pytest.mark.parametrize("zero_stage", [0, 1, 2])
+class TestSimpleMoE(DistributedTest):
+    world_size = 2
+
+    @pytest.mark.skipif(not get_accelerator().is_fp16_supported(), reason="fp16 is not supported on this accelerator")
+    def test(self, zero_stage):
+        if not required_torch_version(min_version=1.8):
+            pytest.skip("DeepSpeed MoE tests need torch 1.8 or higher to run correctly")
+
+        config_dict = {
+            "train_micro_batch_size_per_gpu": 1,
+            "steps_per_print": 1,
+            "optimizer": {
+                "type": "Adam",
+                "params": {
+                    "lr": 0.00015
+                }
+            },
+            "fp16": {
+                "enabled": True
+            },
+            "zero_optimization": {
+                "stage": zero_stage
+            }
+        }
+        # should automatically create moe param groups in deepspeed backend
+        hidden_dim = 16
+        model = SimpleMoEModel(hidden_dim=hidden_dim, ep_size=1)
+        model, optimizer, _, _ = deepspeed.initialize(config=config_dict, model=model)
+        data_loader = sequence_dataloader(model=model,
+                                          total_samples=50,
+                                          hidden_dim=hidden_dim,
+                                          device=model.device,
+                                          dtype=torch.float16)
+
+        for n, batch in enumerate(data_loader):
+            loss = model(batch[0], batch[1])
+            model.backward(loss)
+            model.step()
+
+
+@pytest.mark.parametrize("ep_size", [2, 4])
+@pytest.mark.parametrize("zero_stage", [0, 1, 2])
+@pytest.mark.parametrize("use_residual", [True, False])
+class TestMoE(DistributedTest):
+    world_size = 4
+
+    @pytest.mark.skipif(not get_accelerator().is_fp16_supported(), reason="fp16 is not supported on this accelerator")
+    def test(self, ep_size, zero_stage, use_residual):
+        if not required_torch_version(min_version=1.8):
+            pytest.skip("DeepSpeed MoE tests need torch 1.8 or higher to run correctly")
+
+        config_dict = {
+            "train_micro_batch_size_per_gpu": 1,
+            "steps_per_print": 1,
+            "fp16": {
+                "enabled": True
+            },
+            "zero_optimization": {
+                "stage": zero_stage
+            }
+        }
+        hidden_dim = 16
+
+        # E+D -- ep_size = 2
+        # E only -- ep_size = 4
+        model = SimpleMoEModel(hidden_dim, ep_size=ep_size, use_residual=use_residual)
+        param_group = {'params': [p for p in model.parameters()], 'name': 'random-unique-name'}
+        params = split_params_into_different_moe_groups_for_optimizer(param_group)
+        optimizer = torch.optim.AdamW(params=params)
+        model, optimizer, _, _ = deepspeed.initialize(config=config_dict,
+                                                      model=model,
+                                                      optimizer=optimizer,
+                                                      dist_init_required=False)
+        #dist_init_required=False -- parameterize to True/False?
+
+        data_loader = sequence_dataloader(model=model,
+                                          total_samples=50,
+                                          hidden_dim=hidden_dim,
+                                          device=model.device,
+                                          dtype=torch.float16)
+
+        def strict_average_tensor(tensor, communication_data_type: torch.dtype):
+            process_group = optimizer.dp_process_group
+            curr_size = 0
+            pg_offsets = []
+
+            ipg_bucket = optimizer.ipg_buckets[communication_data_type]
+            for i, param_idx, param_id in ipg_bucket.params:
+                param = optimizer.bit16_groups[i][param_idx]
+                process_group = optimizer.dp_process_group
+                if ipg_bucket.has_moe_params:
+                    process_group = optimizer.expert_dp_process_group[param.group_name] if is_moe_param(
+                        param) else optimizer.dp_process_group
+                partition_ids = optimizer.param_to_partition_ids[i][param_id]
+                # Get all partition ids + their offsets
+                partition_offsets = []
+                for partition_id in partition_ids:
+                    offset = optimizer.grad_start_offset[i][partition_id][param_id]
+                    partition_offsets.append(offset)
+                partition_offsets.sort()
+                # Calculate rank and offsets for grad slices
+                for idx, offset in enumerate(partition_offsets):
+                    # Calculate numel for grad slice depending on partition location
+                    if idx == len(partition_offsets) - 1:
+                        # Last partition_id uses its own offset
+                        numel = param.numel() - offset
+                    else:
+                        # Set numel to next partition's offset
+                        numel = partition_offsets[idx + 1] - offset
+                    pg_offsets.append((curr_size, process_group))
+                    curr_size += numel
+
+            def strict_narrow(dim, start, length):
+                lo, hi = 0, len(pg_offsets) - 1
+                while lo < hi:
+                    mi = lo + (hi - lo) // 2
+                    if pg_offsets[mi][0] >= start:
+                        hi = mi
+                    else:
+                        lo = mi + 1
+                curr_slice, reduce_process_group = lo, pg_offsets[lo][1]
+                while curr_slice < len(pg_offsets) and start + length > pg_offsets[curr_slice][0]:
+                    assert reduce_process_group == pg_offsets[curr_slice][
+                        1], "reduce process_group does not match the parameter's process_group"
+                    curr_slice += 1
+                return orig_narrow(dim, start, length)  # real call
+
+            orig_narrow, tensor.narrow = tensor.narrow, strict_narrow
+            type(optimizer).average_tensor(optimizer, tensor, communication_data_type)  # real call
+            tensor.narrow = orig_narrow
+
+        if "average_tensor" in dir(optimizer):
+            optimizer.average_tensor = strict_average_tensor
+
+        for n, batch in enumerate(data_loader):
+            loss = model(batch[0], batch[1])
+            model.backward(loss)
+            model.step()
+            gc.collect()  # Must do this or we get a memory leak in this test
+
+
+@pytest.mark.parametrize("ep_size, use_residual", [(2, True), (2, False)])
+class TestPRMoE(DistributedTest):
+    world_size = 4
+
+    @pytest.mark.skipif(not get_accelerator().is_fp16_supported(), reason="fp16 is not supported on this accelerator")
+    def test(self, ep_size, use_residual):
+        if not required_torch_version(min_version=1.8):
+            pytest.skip("DeepSpeed MoE tests need torch 1.8 or higher to run correctly")
+
+        config_dict = {"train_batch_size": 8, "steps_per_print": 1, "fp16": {"enabled": True}}
+        hidden_dim = 16
+
+        # E+D -- ep_size = 2
+        # E only -- ep_size = 4
+        model = SimplePRMoEModel(hidden_dim, ep_size=ep_size, use_residual=use_residual)
+        optimizer = torch.optim.AdamW(params=model.parameters())
+        model, _, _, _ = deepspeed.initialize(config=config_dict,
+                                              model=model,
+                                              optimizer=optimizer,
+                                              dist_init_required=False)
+
+        data_loader = sequence_dataloader(model=model,
+                                          total_samples=50,
+                                          hidden_dim=hidden_dim,
+                                          device=model.device,
+                                          dtype=torch.float16)
+
+        for n, batch in enumerate(data_loader):
+            loss = model(batch[0], batch[1])
+            model.backward(loss)
+            model.step()
+
+
+class TestTopk(DistributedTest):
+    world_size = 2
+
+    def test(self):
+        device = get_accelerator().current_device_name()
+        if dist.get_rank() == 0:
+            logits = torch.rand(2, 2, device=device)
+        elif dist.get_rank() == 1:
+            logits = torch.rand(10, 2, device=device)
+
+        output = top1gating(logits=logits,
+                            capacity_factor=1,
+                            min_capacity=0,
+                            used_token=None,
+                            noisy_gate_policy=None,
+                            drop_tokens=False,
+                            use_rts=True,
+                            sparse_routes=False)
+
+
+class TestMoESingleton(DistributedTest):
+    world_size = 2
+
+    @pytest.mark.parametrize("ep_size, expected_calls", [(1, 0), (2, 2)], ids=["single", "multi"])
+    def test_all_to_all(self, monkeypatch, ep_size, expected_calls):
+        if not required_torch_version(min_version=1.8):
+            pytest.skip("DeepSpeed MoE tests need torch 1.8 or higher to run correctly")
+
+        config_dict = {"train_micro_batch_size_per_gpu": 1, "steps_per_print": 1}
+        hidden_dim = 8
+        expert = torch.nn.Sequential(torch.nn.Linear(hidden_dim, hidden_dim), torch.nn.Linear(hidden_dim, hidden_dim))
+        model = MoE(hidden_size=hidden_dim, expert=expert, num_experts=2, ep_size=ep_size, k=1, min_capacity=0)
+        optimizer = torch.optim.AdamW(params=model.parameters())
+        model, _, _, _ = deepspeed.initialize(config=config_dict,
+                                              model=model,
+                                              optimizer=optimizer,
+                                              dist_init_required=False)
+
+        all_to_all_calls = []
+
+        def counted_all_to_all(group, input):
+            all_to_all_calls.append((group, input.shape))
+            return input
+
+        monkeypatch.setattr(sharded_moe._AllToAll, "apply", counted_all_to_all)
+
+        x = torch.randn(1, 4, hidden_dim, device=model.device, requires_grad=True)
+        output, l_aux, _ = model(x)
+        assert len(all_to_all_calls) == expected_calls
+
+        loss = output.float().sum() + l_aux.float()
+        model.backward(loss)
+        assert len(all_to_all_calls) == expected_calls
+        assert x.grad is not None
+        assert any(param.grad is not None for param in model.module.parameters())
+
+    @pytest.mark.parametrize("gate_fn, capacity_args", [(top1gating, (1, 0)), (top2gating, (1, 0)),
+                                                        (topkgating, (3, 1, 0))],
+                             ids=["top1", "top2", "topk"])
+    @pytest.mark.parametrize("ep_world_size, expected_calls", [(1, 0), (2, 1)], ids=["single", "multi"])
+    def test_capacity(self, monkeypatch, gate_fn, capacity_args, ep_world_size, expected_calls):
+        if not required_torch_version(min_version=1.8):
+            pytest.skip("DeepSpeed MoE tests need torch 1.8 or higher to run correctly")
+
+        ep_group = None
+        if ep_world_size == 1:
+            for rank in range(dist.get_world_size()):
+                group = dist.new_group([rank])
+                if rank == dist.get_rank():
+                    ep_group = group
+        else:
+            ep_group = dist.new_group(list(range(dist.get_world_size())))
+
+        all_reduce_calls = []
+        original_all_reduce = sharded_moe.dist.all_reduce
+
+        def counted_all_reduce(tensor, op=dist.ReduceOp.SUM, group=None):
+            all_reduce_calls.append((tensor, op, group))
+            return original_all_reduce(tensor, op=op, group=group)
+
+        monkeypatch.setattr(sharded_moe.dist, "all_reduce", counted_all_reduce)
+
+        device = get_accelerator().current_device_name()
+        logits = torch.randn(8, 4, device=device)
+        gate_fn(logits, *capacity_args, drop_tokens=False, ep_group=ep_group)
+
+        assert len(all_reduce_calls) == expected_calls
+        if all_reduce_calls:
+            _, op, group = all_reduce_calls[0]
+            assert op == dist.ReduceOp.MAX
+            assert group is ep_group
+
+    def test_no_ep_group(self, monkeypatch):
+        if not required_torch_version(min_version=1.8):
+            pytest.skip("DeepSpeed MoE tests need torch 1.8 or higher to run correctly")
+
+        def fail_collective(*args, **kwargs):
+            raise AssertionError("ep_group=None should not enter expert-parallel collective code")
+
+        monkeypatch.setattr(sharded_moe.dist, "get_world_size", fail_collective)
+        monkeypatch.setattr(sharded_moe.dist, "all_reduce", fail_collective)
+
+        device = get_accelerator().current_device_name()
+        logits = torch.randn(8, 4, device=device)
+        top2gating(logits, 1, 0, drop_tokens=False, ep_group=None, top2_2nd_expert_sampling=False)
+
+
+class TestTopkGate(DistributedTest):
+
+    @staticmethod
+    def _assert_sparse_routes_match(combine_weights, sparse_output):
+        _, capacity, num_experts, indices_, locations_, gates_, _ = sparse_output
+        reconstructed = torch.zeros_like(combine_weights)
+        for indices_s, locations_s, gates_s in zip(indices_, locations_, gates_):
+            route_mask = indices_s.ge(0)
+            safe_indices = indices_s.clamp_min(0).long()
+            expert_mask = torch.nn.functional.one_hot(safe_indices, num_classes=num_experts)
+            expert_mask *= route_mask.unsqueeze(1)
+            location_mask = torch.nn.functional.one_hot(locations_s.long(), num_classes=int(capacity))
+            reconstructed += torch.einsum("s,se,sc->sec", gates_s, expert_mask, location_mask)
+        torch.testing.assert_close(reconstructed, combine_weights)
+
+    @pytest.mark.parametrize("k", [1, 2, 3])
+    def test_sparse_dispatch_matches_dense(self, k):
+        torch.manual_seed(k)
+        num_tokens, num_experts, d_model = 16, 4, 8
+        logits = torch.randn(num_tokens, num_experts)
+        hidden = torch.randn(num_tokens, d_model)
+
+        if k == 1:
+            dense = top1gating(logits, 1.0, 0, use_rts=False)
+            sparse = top1gating(logits, 1.0, 0, use_rts=False, sparse_routes=True)
+        elif k == 2:
+            dense = top2gating(logits, 1.0, 0, top2_2nd_expert_sampling=False)
+            sparse = top2gating(logits, 1.0, 0, top2_2nd_expert_sampling=False, sparse_routes=True)
+        else:
+            dense = topkgating(logits, k, 1.0, 0)
+            sparse = topkgating(logits, k, 1.0, 0, sparse_routes=True)
+
+        combine_weights, dispatch_mask = dense[1], dense[2]
+        capacity, indices_, locations_, gates_ = int(sparse[1]), sparse[3], sparse[4], sparse[5]
+        slots = _route_slots(indices_, locations_, num_experts, capacity)
+
+        expected = torch.einsum("sec,sm->ecm", dispatch_mask.float(), hidden)
+        torch.testing.assert_close(_sparse_encode(hidden, slots, num_experts, capacity), expected)
+
+        expert_output = torch.randn_like(expected)
+        expected = torch.einsum("sec,ecm->sm", combine_weights, expert_output)
+        actual = _sparse_decode(expert_output.view(num_experts * capacity, d_model), slots, gates_, num_tokens)
+        torch.testing.assert_close(actual, expected)
+
+    def test_sparse_top2_routing(self):
+        logits = torch.tensor([[0.1, 0.9, 0.2], [0.8, 0.1, 0.3], [0.4, 0.6, 0.5], [0.7, 0.2, 0.1]])
+        native_output = top2gating(logits, 0.5, 0, top2_2nd_expert_sampling=False)
+        sparse_output = top2gating(logits, 0.5, 0, top2_2nd_expert_sampling=False, sparse_routes=True)
+
+        assert len(sparse_output[3]) == 2
+        self._assert_sparse_routes_match(native_output[1], sparse_output)
+
+    def test_sparse_topk_routing(self):
+        logits = torch.tensor([[0.1, 0.9, 0.2, 0.3], [0.8, 0.1, 0.3, 0.2], [0.4, 0.6, 0.5, 0.7], [0.7, 0.2, 0.1, 0.8]])
+        native_output = topkgating(logits, 3, 0.5, 0)
+        sparse_output = topkgating(logits, 3, 0.5, 0, sparse_routes=True)
+
+        assert len(sparse_output[3]) == 3
+        self._assert_sparse_routes_match(native_output[1], sparse_output)
+
+    def test(self):
+
+        def check_equal(logits, cap, sparse_truth, res):
+            m, n = logits.shape
+            dispatch_mask_truth = torch.zeros(m, n, cap)
+            i, j, k = sparse_truth.t()
+            dispatch_mask_truth[i, j, k] = 1
+            assert (torch.equal(dispatch_mask_truth, res))
+
+        #s=4   e=4  topk=2   cap=2(s*topk/e)
+        logits = torch.tensor([[0.11, 0.2, 0.1, 0.3], [0.3, 0.4, 0.11, 0.1], [0.11, 0.1, 0.6, 0.5],
+                               [0.1, 0.11, 0.7, 0.8]])
+        logits *= dist.get_rank() + 1
+        probs_dispatch_res = topkgating(logits, 2, 1, min_capacity=1, drop_policy='probs')[2]
+        probs_sec_sparse = torch.tensor([[0, 1, 0], [1, 0, 0], [1, 1, 1], [2, 2, 0], [2, 3, 0], [3, 2, 1], [3, 3, 1]])
+        check_equal(logits, 2, probs_sec_sparse, probs_dispatch_res)
+
+        position_sec_sparse = torch.tensor([[0, 1, 0], [0, 3, 0], [1, 0, 0], [1, 1, 1], [2, 2, 0], [2, 3, 1],
+                                            [3, 2, 1]])
+        position_dispatch_res = topkgating(logits, 2, 1, min_capacity=1, drop_policy='position')[2]
+        check_equal(logits, 2, position_sec_sparse, position_dispatch_res)
+
+        #s=4   e=6  topk=3   cap=2(s*topk/e)
+        logits2 = torch.tensor([[0.5858, 0.4801, 0.6269, 0.5397, 0.9722, 0.7034],
+                                [0.5445, 0.6332, 0.4519, 0.6308, 0.0519, 0.6450],
+                                [0.4874, 0.8110, 0.7467, 0.8474, 0.0277, 0.3068],
+                                [0.8570, 0.6714, 0.5310, 0.3274, 0.4836, 0.9892]])
+        logits2 *= dist.get_rank() + 1
+
+        #top3 full mask     #prob_mask          #postion_mask
+        #0 0 1 0 1 1        #0 0 1 0 1 0        #0 0 1 0 1 1
+        #0 1 0 1 0 1        #0 1 0 1 0 1        #0 1 0 1 0 1
+        #0 1 1 1 0 0        #0 1 1 1 0 0        #0 1 1 1 0 0
+        #1 1 0 0 0 1        #1 0 0 0 0 1        #1 0 0 0 0 0
+        probs_dispatch_res = topkgating(logits2, 3, 1, min_capacity=1, drop_policy='probs')[2]
+        probs_sec_sparse = torch.tensor([[0, 2, 0], [0, 4, 0], [1, 1, 0], [1, 3, 0], [1, 5, 0], [2, 1, 1], [2, 2, 1],
+                                         [2, 3, 1], [3, 0, 0], [3, 5, 1]])
+        check_equal(logits2, 2, probs_sec_sparse, probs_dispatch_res)
+
+        position_sec_sparse = torch.tensor([[0, 2, 0], [0, 4, 0], [0, 5, 0], [1, 1, 0], [1, 3, 0], [1, 5, 1],
+                                            [2, 1, 1], [2, 2, 1], [2, 3, 1], [3, 0, 0]])
+        position_dispatch_res = topkgating(logits2, 3, 1, min_capacity=1, drop_policy='position')[2]
+        check_equal(logits2, 2, position_sec_sparse, position_dispatch_res)
+
+        #s=4   e=4  topk=2   drop_tokens=False
+        logits3 = torch.tensor([[0.95, 0.85, 0.90, 0.80], [0.70, 0.65, 0.75, 0.60], [0.50, 0.55, 0.45, 0.40],
+                                [0.35, 0.30, 0.25, 0.20]])
+        logits3 *= dist.get_rank() + 1
+        dispatch_res = topkgating(logits3, 2, 1, min_capacity=1, drop_tokens=False)[2]
+        sec_sparse = torch.tensor([[0, 0, 0], [0, 2, 0], [1, 0, 1], [1, 2, 1], [2, 0, 2], [2, 1, 0], [3, 0, 3],
+                                   [3, 1, 1]])
+        check_equal(logits3, 4, sec_sparse, dispatch_res)
+
+
+# The drop branches select at most num_tokens rows with torch.topk(..., dim=0), while the
+# configured capacity still sizes the dispatch width.
+def test_topkgating_probs_capacity_exceeds_num_tokens():
+    # s=8, e=2, k=2, capacity_factor=2 -> capacity = ceil(8/2 * (2*2)) = 16 > 8.
+    num_tokens, num_experts, k = 8, 2, 2
+    logits = torch.randn(num_tokens, num_experts)
+    _, _, dispatch_mask, _ = topkgating(logits, k, capacity_factor=2.0, min_capacity=0, drop_policy='probs')
+    assert dispatch_mask.shape[-1] == 16
+    assert int(dispatch_mask.sum()) == num_tokens * k
+
+
+def test_top1gating_drop_capacity_exceeds_num_tokens():
+    # s=8, e=2, capacity_factor=4 -> capacity = ceil(8/2 * 4) = 16 > 8. This is the
+    # top1gating drop branch, which reaches torch.topk via _top_idx.
+    num_tokens, num_experts = 8, 2
+    logits = torch.randn(num_tokens, num_experts)
+    _, _, dispatch_mask, _ = top1gating(logits, capacity_factor=4.0, min_capacity=0, drop_tokens=True, use_rts=False)
+    assert dispatch_mask.shape[-1] == 16
+    assert int(dispatch_mask.sum()) == num_tokens
+
+
+def test_topkgating_position_preserves_min_capacity():
+    # drop_policy='position' never selects over the token dimension, so min_capacity padding stays.
+    num_tokens, num_experts = 4, 2
+    logits = torch.randn(num_tokens, num_experts)
+    _, _, dispatch_mask, _ = topkgating(logits, 1, capacity_factor=1.0, min_capacity=8, drop_policy='position')
+    assert dispatch_mask.shape[-1] == 8
+
+
+def test_top1gating_preserves_tensor_parallel_capacity():
+    # s=3, e=4, capacity_factor=8 -> capacity = 6, which drop_tokens() needs divisible by tp=2.
+    logits = torch.randn(3, 4)
+    _, _, dispatch_mask, _ = top1gating(logits, capacity_factor=8.0, min_capacity=0, drop_tokens=True, use_rts=False)
+    assert dispatch_mask.shape[-1] == 6
+
+
+class TestExpertWeightGradWithZero(DistributedTest):
+    world_size = 2
+
+    @pytest.mark.parametrize("zero_stage", [0, 1, 2])
+    def test(self, zero_stage):
+
+        if not required_torch_version(min_version=1.8):
+            pytest.skip("DeepSpeed MoE tests need torch 1.8 or higher to run correctly")
+
+        def seed_everything(seed=11):
+            random.seed(seed)
+            torch.manual_seed(seed)
+            get_accelerator().manual_seed(seed)
+            get_accelerator().manual_seed_all(seed)
+            torch.backends.cudnn.deterministic = True
+            torch.backends.cudnn.benchmark = False
+
+        def get_state_dict_ep2(state_dict):
+            """
+            convert state_dict from EP=1 to EP=2
+            """
+            rank = int(deepspeed.comm.get_rank())
+            ep_state_dict = dict()
+            dst_sub_key = "deepspeed_moe.experts.deepspeed_experts.0"
+            src_sub_key = f"deepspeed_moe.experts.deepspeed_experts.{rank}"
+            for moe_layer in ["moe_1", "moe_2"]:
+                for mlp_in_moe in [0, 1]:
+                    dst_key = f"{moe_layer}.{dst_sub_key}.{mlp_in_moe}"
+                    src_key = f"{moe_layer}.{src_sub_key}.{mlp_in_moe}"
+                    ep_state_dict[f"{dst_key}.weight"] = state_dict[f"{src_key}.weight"].detach().clone()
+                    ep_state_dict[f"{dst_key}.bias"] = state_dict[f"{src_key}.bias"].detach().clone()
+
+            for key in state_dict.keys():
+                if "deepspeed_moe.experts.deepspeed_experts" not in key:
+                    ep_state_dict[key] = state_dict[key].detach().clone()
+            return ep_state_dict
+
+        def get_models(hidden_dim):
+            model_ep1 = SimpleMoEModel(hidden_dim=hidden_dim, num_experts=2, ep_size=1, use_rts=False)
+            model_ep2 = SimpleMoEModel(hidden_dim=hidden_dim, num_experts=2, ep_size=2, use_rts=False)
+
+            state_dict_ep1 = model_ep1.state_dict()
+            state_dict_ep2 = get_state_dict_ep2(state_dict_ep1)
+            model_ep2.load_state_dict(state_dict_ep2)
+
+            model_ep1, _, _, _ = deepspeed.initialize(config=config_dict, model=model_ep1)
+            model_ep2, _, _, _ = deepspeed.initialize(config=config_dict, model=model_ep2)
+
+            return model_ep1, model_ep2
+
+        def extract_expert_grad(model, expert_id):
+
+            def _get_weight_bias(experts):
+                return ([deepspeed.utils.safe_get_full_grad(expert[0].weight)
+                         for expert in experts][expert_id].detach().clone(),
+                        [deepspeed.utils.safe_get_full_grad(expert[0].bias)
+                         for expert in experts][expert_id].detach().clone(),
+                        [deepspeed.utils.safe_get_full_grad(expert[1].weight)
+                         for expert in experts][expert_id].detach().clone(),
+                        [deepspeed.utils.safe_get_full_grad(expert[1].bias)
+                         for expert in experts][expert_id].detach().clone())
+
+            return (*_get_weight_bias(model.moe_1.deepspeed_moe.experts.deepspeed_experts),
+                    *_get_weight_bias(model.moe_2.deepspeed_moe.experts.deepspeed_experts))
+
+        seed_everything()
+
+        config_dict = {
+            "train_micro_batch_size_per_gpu": 1,
+            "steps_per_print": 1,
+            "optimizer": {
+                "type": "Adam",
+                "params": {
+                    "lr": 0.1,
+                }
+            },
+            "zero_optimization": {
+                "stage": zero_stage
+            }
+        }
+
+        hidden_dim = 4
+        total_samples = 2
+        rank = deepspeed.comm.get_rank()
+        model_ep1, model_ep2 = get_models(hidden_dim)
+
+        data_loader = sequence_dataloader(model=model_ep1,
+                                          total_samples=total_samples,
+                                          hidden_dim=hidden_dim,
+                                          device=model_ep1.device,
+                                          dtype=torch.float32)
+        expert_weight_grad_ep1 = []
+        expert_weight_grad_ep2 = []
+        for batch in data_loader:
+            loss_ep1 = model_ep1(batch[0], batch[1])
+            loss_ep2 = model_ep2(batch[0], batch[1])
+
+            model_ep1.backward(loss_ep1)
+            model_ep2.backward(loss_ep2)
+
+            expert_weight_grad_ep1.extend(extract_expert_grad(model_ep1, rank))
+            expert_weight_grad_ep2.extend(extract_expert_grad(model_ep2, 0))
+
+            model_ep1.step()
+            model_ep2.step()
+
+        assert len(expert_weight_grad_ep1) == len(expert_weight_grad_ep2)
+        for grad_from_ep1, grad_from_ep2 in zip(expert_weight_grad_ep1, expert_weight_grad_ep2):
+            assert torch.allclose(grad_from_ep1, grad_from_ep2, atol=0, rtol=1e-4)

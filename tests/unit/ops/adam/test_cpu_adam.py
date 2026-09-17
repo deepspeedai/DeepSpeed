@@ -3,6 +3,9 @@
 
 # DeepSpeed Team
 
+import math
+import os
+import sys
 import torch
 import numpy as np
 import pytest
@@ -17,7 +20,7 @@ from unit.common import DistributedTest
 if not deepspeed.ops.__compatible_ops__[CPUAdamBuilder.NAME]:
     pytest.skip("cpu-adam is not compatible", allow_module_level=True)
 
-pytest.cpu_vendor = get_cpu_info()["vendor_id_raw"].lower()
+pytest.cpu_vendor = get_cpu_info().get("vendor_id_raw", "").lower()
 
 
 def check_equal(first, second, atol=1e-2, verbose=False):
@@ -41,6 +44,71 @@ def _compare_optimizers(model_size, param1, optimizer1, param2, optimizer2):
 
     tolerance = param1.float().norm().detach().numpy() * 1e-2
     check_equal(param1.float().norm(), param2.float().cpu().norm(), atol=tolerance, verbose=True)
+
+
+def _reference_adam_step(param, grad, exp_avg, exp_avg_sq, step, lr, betas, eps, weight_decay, adamw_mode,
+                         bias_correction):
+    beta1, beta2 = betas
+    adjusted_grad = grad
+    if weight_decay > 0 and not adamw_mode:
+        adjusted_grad = grad.add(param, alpha=weight_decay)
+
+    exp_avg.mul_(beta1).add_(adjusted_grad, alpha=1 - beta1)
+    exp_avg_sq.mul_(beta2).addcmul_(adjusted_grad, adjusted_grad, value=1 - beta2)
+
+    if bias_correction:
+        bias_correction1 = 1 - beta1**step
+        bias_correction2 = 1 / math.sqrt(1 - beta2**step)
+    else:
+        bias_correction1 = 1
+        bias_correction2 = 1
+
+    if weight_decay > 0 and adamw_mode:
+        param.add_(param, alpha=-lr * weight_decay)
+    denominator = exp_avg_sq.sqrt().mul_(bias_correction2).add_(eps)
+    param.addcdiv_(exp_avg, denominator, value=-lr / bias_correction1)
+
+
+@pytest.mark.parametrize('model_size', [3, 4, 5, 15, 16, 17, 511, 512, 513, 524287, 524288, 524289])
+@pytest.mark.parametrize('adamw_mode,weight_decay,bias_correction', [
+    (True, 0.0, True),
+    (True, 0.07, True),
+    (False, 0.07, True),
+    (True, 0.07, False),
+])
+def test_cpu_adam_strict_state_updates(model_size, adamw_mode, weight_decay, bias_correction):
+    from deepspeed.ops.adam import DeepSpeedCPUAdam
+
+    generator = torch.Generator().manual_seed(model_size)
+    initial = torch.rand(model_size, generator=generator).mul_(1.5).sub_(0.75)
+    cpu_param = torch.nn.Parameter(initial.clone())
+    ref_param = initial.clone()
+    ref_exp_avg = torch.zeros_like(ref_param)
+    ref_exp_avg_sq = torch.zeros_like(ref_param)
+    lr = 7e-4
+    betas = (0.85, 0.97)
+    eps = 1e-7
+
+    optimizer = DeepSpeedCPUAdam([cpu_param],
+                                 lr=lr,
+                                 betas=betas,
+                                 eps=eps,
+                                 weight_decay=weight_decay,
+                                 adamw_mode=adamw_mode,
+                                 bias_correction=bias_correction)
+
+    for step in range(1, 6):
+        grad = torch.rand(model_size, generator=generator).mul_(1.5).sub_(0.75)
+        cpu_param.grad = grad
+        optimizer.step()
+        _reference_adam_step(ref_param, grad, ref_exp_avg, ref_exp_avg_sq, step, lr, betas, eps, weight_decay,
+                             adamw_mode, bias_correction)
+
+        state = optimizer.state[cpu_param]
+        assert state['step'] == step
+        torch.testing.assert_close(cpu_param, ref_param, rtol=3e-5, atol=2e-6)
+        torch.testing.assert_close(state['exp_avg'], ref_exp_avg, rtol=3e-5, atol=2e-6)
+        torch.testing.assert_close(state['exp_avg_sq'], ref_exp_avg_sq, rtol=3e-5, atol=2e-6)
 
 
 @pytest.mark.parametrize('dtype', [torch.half, torch.bfloat16, torch.float], ids=["fp16", "bf16", "fp32"])
@@ -118,6 +186,137 @@ class TestCPUAdam(DistributedTest):
                             optimizer1=cpu_optimizer,
                             param2=ref_param,
                             optimizer2=ref_optimizer)
+
+
+class TestCPUAdamBf16OptimizerStates(DistributedTest):
+    world_size = 1
+    reuse_dist_env = True
+    requires_cuda_env = False
+    if not get_accelerator().is_available():
+        init_distributed = False
+        set_dist_env = False
+
+    @pytest.mark.parametrize('model_size', [64, 1024])
+    def test_bf16_optimizer_states_dtype(self, model_size):
+        """fp32_optimizer_states=False keeps the Adam moments in the bf16 parameter precision."""
+        from deepspeed.ops.adam import DeepSpeedCPUAdam
+
+        param = torch.nn.Parameter(torch.randn(model_size, device='cpu', dtype=torch.bfloat16))
+        optimizer = DeepSpeedCPUAdam([param], fp32_optimizer_states=False)
+        param.grad = torch.randn(model_size, device='cpu', dtype=torch.bfloat16)
+        optimizer.step()
+
+        state = optimizer.state[param]
+        assert state['exp_avg'].dtype == torch.bfloat16
+        assert state['exp_avg_sq'].dtype == torch.bfloat16
+        assert state['exp_avg'].device == torch.device('cpu')
+        assert state['exp_avg_sq'].device == torch.device('cpu')
+
+    @pytest.mark.parametrize('model_size', [64, 1024])
+    def test_bf16_optimizer_states_match_fp32(self, model_size):
+        """bf16 moments should track fp32 moments within bf16 tolerance over several steps."""
+        from deepspeed.ops.adam import DeepSpeedCPUAdam
+
+        torch.manual_seed(0)
+        base = torch.randn(model_size, device='cpu', dtype=torch.float32).to(torch.bfloat16)
+        param_fp32_states = torch.nn.Parameter(base.clone())
+        param_bf16_states = torch.nn.Parameter(base.clone())
+
+        opt_fp32_states = DeepSpeedCPUAdam([param_fp32_states], fp32_optimizer_states=True)
+        opt_bf16_states = DeepSpeedCPUAdam([param_bf16_states], fp32_optimizer_states=False)
+
+        for _ in range(10):
+            grad = torch.randn(model_size, device='cpu', dtype=torch.bfloat16)
+            param_fp32_states.grad = grad.clone()
+            param_bf16_states.grad = grad.clone()
+            opt_fp32_states.step()
+            opt_bf16_states.step()
+
+        assert opt_fp32_states.state[param_fp32_states]['exp_avg'].dtype == torch.float32
+        assert opt_bf16_states.state[param_bf16_states]['exp_avg'].dtype == torch.bfloat16
+
+        # bf16 moments round every Adam update to an 8-bit mantissa, so over 10 steps they
+        # diverge from fp32 moments more than the same-precision comparison in _compare_optimizers
+        # (1e-2). A wider 5% band keeps this stable while still catching gross errors; the dtype
+        # assertions above guard the precision itself. Norm comparison follows _compare_optimizers.
+        tolerance = param_fp32_states.float().norm().detach().numpy() * 5e-2
+        check_equal(param_fp32_states.float().norm(), param_bf16_states.float().norm(), atol=tolerance)
+
+
+def _zenflow_adam_proc_worker(param, g0, g1, ea0, ea1, eq0, eq1, stale, ctrl, ready, affinity):
+    op = CPUAdamBuilder().load()
+    op.create_adam(0, 1e-3, 0.9, 0.999, 1e-8, 0.0, True, False)
+    handle = op.zenflow_adam_create(0, affinity)
+    op.zenflow_adam_register_group(handle, param, g0, g1, ea0, ea1, eq0, eq1, stale)
+    ready.set()
+    op.zenflow_adam_run_worker(handle, ctrl.data_ptr())  # blocks until the exit command
+    op.zenflow_adam_destroy(handle)
+    op.destroy_adam(0)
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="cross-process ZenFlowAdam is Linux-only")
+def test_zenflow_adam_cross_process():
+    """The optimizer-process driver (shared-memory semaphore control + native worker, the
+    production path for ZenFlow stage 1/2 overlap) must match a per-parameter adam_update
+    reference bit-for-bit with alternating double buffers. Run as a plain test, not
+    DistributedTest, so the pytest process (non-daemonic) can spawn the optimizer process."""
+    import torch.multiprocessing as mp
+
+    op = CPUAdamBuilder().load()
+    if not hasattr(op, "zenflow_adam_ctrl_size"):
+        pytest.skip("cross-process ZenFlowAdam not available in this build")
+
+    lr, beta1, beta2, eps, wd = 1e-3, 0.9, 0.999, 1e-8, 0.0
+    n = 100003  # non-SIMD-aligned, exercises the scalar tail
+    affinity = list(range(min(4, os.cpu_count() or 1)))
+
+    ctrl = torch.zeros(op.zenflow_adam_ctrl_size(), dtype=torch.uint8).share_memory_()
+    op.zenflow_adam_ctrl_init(ctrl.data_ptr(), 1)
+
+    torch.manual_seed(0)
+    param = torch.randn(n).share_memory_()
+    g = [torch.zeros(n).share_memory_(), torch.zeros(n).share_memory_()]
+    ea = [torch.zeros(n).share_memory_(), torch.zeros(n).share_memory_()]
+    eq = [torch.zeros(n).share_memory_(), torch.zeros(n).share_memory_()]
+    stale = torch.zeros(n).share_memory_()
+
+    op.create_adam(1, lr, beta1, beta2, eps, wd, True, False)
+    p_ref = param.clone()
+    ea_ref = [ea[0].clone(), ea[1].clone()]
+    eq_ref = [eq[0].clone(), eq[1].clone()]
+    st_ref = stale.clone()
+
+    ctx = mp.get_context("spawn")
+    ready = ctx.Event()
+    proc = ctx.Process(target=_zenflow_adam_proc_worker,
+                       args=(param, g[0], g[1], ea[0], ea[1], eq[0], eq[1], stale, ctrl, ready, affinity))
+    proc.start()
+    try:
+        assert ready.wait(timeout=60), "optimizer process did not start"
+        # With no step submitted yet, a bounded wait must time out (return False) rather than
+        # block -- this is what lets the training side notice a dead optimizer process.
+        assert op.zenflow_adam_wait(ctrl.data_ptr(), 0.05) is False, "wait should time out when no step is pending"
+        for step in range(1, 6):
+            now = step & 1
+            grad = torch.randn(n)
+            g[now].copy_(grad)
+            op.zenflow_adam_submit(ctrl.data_ptr(), now, step, [lr], [beta1], [beta2], [eps], [wd], [1])
+            assert op.zenflow_adam_wait(ctrl.data_ptr(), 60.0), f"wait timed out step {step}"
+            # Reference: single-tensor adam_update on the mirror, then snapshot the updated
+            # param into the stale buffer -- exactly what the native worker does per group.
+            op.adam_update(1, step, lr, beta1, beta2, eps, wd, True, p_ref, grad.clone(), ea_ref[now], eq_ref[now])
+            st_ref.copy_(p_ref)
+            assert torch.equal(param, p_ref), f"param mismatch step {step}"
+            assert torch.equal(ea[now], ea_ref[now]), f"exp_avg mismatch step {step}"
+            assert torch.equal(eq[now], eq_ref[now]), f"exp_avg_sq mismatch step {step}"
+            assert torch.equal(stale, st_ref), f"stale mismatch step {step}"
+        op.zenflow_adam_ctrl_exit(ctrl.data_ptr())
+        proc.join(timeout=10)
+    finally:
+        if proc.is_alive():
+            proc.terminate()
+            proc.join(timeout=5)
+        op.destroy_adam(1)
 
 
 class TestCPUAdamGPUError(DistributedTest):
@@ -312,3 +511,59 @@ class TestCPUAdamSubgroup(DistributedTest):
         optimizer.rollback_subgroup(0)
         assert optimizer.state[0]['step'] == 1, "Subgroup 0 step count should be decremented"
         assert optimizer.state[1]['step'] == 1, "Subgroup 1 step count should be unchanged"
+
+    def test_step_subgroup_same_step_idempotent_across_subgroups(self):
+        """Repeated same-step subgroup updates should remain bit-identical."""
+        from deepspeed.ops.adam import DeepSpeedCPUAdam
+
+        model_size = 128
+        steps = 4
+        base = torch.randn(model_size, device='cpu', dtype=torch.float32)
+        param_a = torch.nn.Parameter(base.clone())
+        param_b = torch.nn.Parameter(base.clone())
+
+        optimizer = DeepSpeedCPUAdam([param_a])
+        for logical_step in range(1, steps + 1):
+            grad = torch.randn(model_size, device='cpu', dtype=torch.float32)
+
+            optimizer.param_groups[0]['params'] = [param_a]
+            param_a.grad = grad.clone()
+            optimizer.step_subgroup(0)
+
+            optimizer.param_groups[0]['params'] = [param_b]
+            param_b.grad = grad.clone()
+            optimizer.step_subgroup(1)
+
+            assert optimizer.state[0]['step'] == logical_step
+            assert optimizer.state[1]['step'] == logical_step
+            assert torch.equal(param_a.data, param_b.data)
+            assert torch.equal(optimizer.state[0]['exp_avg'], optimizer.state[1]['exp_avg'])
+            assert torch.equal(optimizer.state[0]['exp_avg_sq'], optimizer.state[1]['exp_avg_sq'])
+
+    def test_step_same_step_idempotent_across_param_keys(self):
+        """Repeated optimizer.step() with swapped param keys should be deterministic."""
+        from deepspeed.ops.adam import DeepSpeedCPUAdam
+
+        model_size = 128
+        steps = 4
+        base = torch.randn(model_size, device='cpu', dtype=torch.float32)
+        param_a = torch.nn.Parameter(base.clone())
+        param_b = torch.nn.Parameter(base.clone())
+
+        optimizer = DeepSpeedCPUAdam([param_a])
+        for logical_step in range(1, steps + 1):
+            grad = torch.randn(model_size, device='cpu', dtype=torch.float32)
+
+            optimizer.param_groups[0]['params'] = [param_a]
+            param_a.grad = grad.clone()
+            optimizer.step()
+
+            optimizer.param_groups[0]['params'] = [param_b]
+            param_b.grad = grad.clone()
+            optimizer.step()
+
+            assert optimizer.state[param_a]['step'] == logical_step
+            assert optimizer.state[param_b]['step'] == logical_step
+            assert torch.equal(param_a.data, param_b.data)
+            assert torch.equal(optimizer.state[param_a]['exp_avg'], optimizer.state[param_b]['exp_avg'])
+            assert torch.equal(optimizer.state[param_a]['exp_avg_sq'], optimizer.state[param_b]['exp_avg_sq'])

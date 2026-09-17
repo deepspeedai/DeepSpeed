@@ -24,8 +24,11 @@ class HuggingFaceCheckpointEngine(CheckpointEngineBase):
         self.model_config = AutoConfig.from_pretrained(self.model_name_or_path, **hf_kwargs)
         # Define this property here so we can use it in the model implementation
         if not hasattr(self.model_config, "max_seq_length"):
+            text_config = getattr(self.model_config, "text_config", None)
             if hasattr(self.model_config, "max_position_embeddings"):
                 self.model_config.max_seq_length = self.model_config.max_position_embeddings
+            elif hasattr(text_config, "max_position_embeddings"):
+                self.model_config.max_seq_length = text_config.max_position_embeddings
             else:
                 generation_config = GenerationConfig.from_pretrained(self.model_name_or_path)
                 self.model_config.max_seq_length = generation_config.max_length

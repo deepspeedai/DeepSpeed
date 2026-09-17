@@ -1,100 +1,197 @@
 name: modal-torch-latest
 
-# This CI is running on modal.com's GPUs.
-#
-# It's set up here on github actions and then the cloned repo is sent to modal and everything
-# happens on their hw - see ci/torch_latest.py  for where the actual vm is loaded, updated and the tests are
-# run.
-#
-# Both files are annotated to what's important and how one might change or update things if needed.
-#
-# Note that since this is a Required job we can't use `on.push.path` file filter - we are using
-# collect-tests job to do the filtering for us so that the job can be skipped and satisfy the
-# Required status for PRs to pass.
-#
-
+# This Required workflow selects tests on a no-secret GitHub runner, then tests
+# the exact candidate SHA inside a no-secret Modal Sandbox. Under
+# pull_request_target, every GitHub-side checkout and Python entrypoint comes
+# from the trusted base commit; merge queue runs resolve that trusted base from
+# merge_group.base_sha. The Sandbox only runs for merge queue entries, pushes to
+# master, and manual runs, so plain PR events never spend Modal quota. See
+# .github/workflows/TEST_SELECTION.md.
 
 on:
   workflow_dispatch:
+    inputs:
+      torch_preset:
+        description: Modal PyTorch/CUDA image preset for manual runs
+        required: false
+        default: '2.10.0-cuda12.8'
+        type: choice
+        options:
+          - '2.7.1-cuda12.8'
+          - '2.8.0-cuda12.8'
+          - '2.9.1-cuda12.8'
+          - '2.10.0-cuda12.8'
+          - '2.11.0-cuda12.8'
+      transformers_source:
+        description: Hugging Face Transformers source for manual runs
+        required: false
+        default: 'git'
+        type: choice
+        options:
+          - 'requirements'
+          - 'git'
+      transformers_ref:
+        description: Hugging Face Transformers git ref to install when source is git
+        required: false
+        default: 'main'
+        type: string
 
   push:
     branches:
       - master
 
   pull_request_target:
-    paths-ignore:
-      - 'docs/**'
-      - 'blogs/**'
-      - 'deepspeed/inference/v2/**'
-      - 'tests/unit/inference/v2/**'
     types: [review_requested, ready_for_review, synchronize]
     branches:
       - master
 
+  # Required checks must also trigger on merge queue entries, otherwise the
+  # merge fails waiting for a status that is never reported. This is the only
+  # PR-related event that spends Modal quota.
+  merge_group:
+    types: [checks_requested]
+    branches:
+      - master
+
+permissions:
+  contents: read
+
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
   collect-tests:
-    name: Collect tests to run
+    name: modal-torch-latest / collect tests
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     permissions:
       contents: read
-      pull-requests: read
     outputs:
-      deepspeed: ${{ steps.filter.outputs.deepspeed }}
+      mode: ${{ steps.select.outputs.mode }}
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - name: Checkout trusted workflow code
+        uses: actions/checkout@v7
         with:
-          lfs: true
+          # Trusted base revision for every event: the merge-group commit must
+          # never control the selector that runs on this GitHub runner.
+          ref: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+          lfs: false
+          submodules: false
 
-      - name: Filter changed files
-        uses: dorny/paths-filter@v2
-        id: filter
+      - name: Fetch candidate tree as data
+        if: github.event_name == 'pull_request_target' || github.event_name == 'merge_group'
+        env:
+          HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          BASE_REPOSITORY: ${{ github.event.pull_request.base.repo.full_name || github.repository }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+          CANDIDATE_ROOT: ${{ runner.temp }}/deepspeed-candidate
+        run: |
+          python3 ci/torch_latest.py checkout-candidate \
+            --head-repository "$HEAD_REPOSITORY" \
+            --head-sha "$HEAD_SHA" \
+            --base-repository "$BASE_REPOSITORY" \
+            --base-sha "$BASE_SHA" \
+            --destination "$CANDIDATE_ROOT"
+
+      - name: Self-test the trusted selector
+        run: python3 ci/test_tests_fetcher.py
+
+      - name: Select impacted tests
+        id: select
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          CANDIDATE_ROOT: ${{ runner.temp }}/deepspeed-candidate
+        run: |
+          if [ "$EVENT_NAME" = "pull_request_target" ] || [ "$EVENT_NAME" = "merge_group" ]; then
+            python3 ci/tests_fetcher.py \
+              --workflow modal-torch-latest \
+              --repo-root "$CANDIDATE_ROOT" \
+              --base refs/ci/base
+          else
+            python3 ci/tests_fetcher.py \
+              --workflow modal-torch-latest \
+              --repo-root "$GITHUB_WORKSPACE" \
+              --base ""
+          fi
+
+      - name: Validate test selection
+        env:
+          SELECTION_MODE: ${{ steps.select.outputs.mode }}
+        run: |
+          python3 ci/torch_latest.py validate-selection \
+            --mode "$SELECTION_MODE" \
+            --path ci/.test_selection/test_list.txt
+
+      - name: Upload test selection
+        uses: actions/upload-artifact@v4
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          filters: |
-            deepspeed:
-              - 'deepspeed/**'
-              - '.github/workflows/modal*.yml'
-              - 'ci/**'
-              - 'tests/unit/**'
-              - 'csrc/**'
+          name: modal-torch-latest-test-selection
+          path: ci/.test_selection/test_list.txt
+          include-hidden-files: true
+          retention-days: 3
 
   deploy:
-    name: DeepSpeedAI CI
+    name: modal-torch-latest / DeepSpeedAI CI
     runs-on: ubuntu-latest
+    timeout-minutes: 105
+    permissions:
+      contents: read
     needs: collect-tests
-    env:
-      # these are created at https://modal.com/settings/deepspeedai/tokens
-      # they are then added to the repo's secrets at https://github.com/deepspeedai/deepspeed/settings/secrets/actions
-      MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
-      MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
-      # this one comes from https://huggingface.co/settings/profile of the bot user
-      # and it too is then updated at https://github.com/deepspeedai/deepspeed/settings/secrets/actions
-      HF_TOKEN: ${{ secrets.HF_TOKEN }}
 
-    if: needs.collect-tests.outputs.deepspeed == 'true'
+    # Preserve the Required check on failures and no-test selections. A selector
+    # failure enters this job and fails explicitly; mode=none skips the Sandbox.
+    # pull_request_target runs skip the Sandbox entirely (a skipped dependent
+    # job still satisfies the Required check), so the tests gate the merge queue
+    # entry instead of every PR update.
+    if: ${{ !cancelled() && (needs.collect-tests.result != 'success' || (needs.collect-tests.outputs.mode != 'none' && github.event_name != 'pull_request_target')) }}
     steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
+      - name: Fail if test selection failed
+        if: needs.collect-tests.result != 'success'
+        run: exit 1
+
+      - name: Checkout trusted controller code
+        uses: actions/checkout@v7
         with:
-          lfs: true
+          # Trusted base revision for every event: the merge-group commit is
+          # only ever fetched by exact SHA inside the no-secret Sandbox.
+          ref: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+          lfs: false
+          submodules: false
 
       - name: Install Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: "3.10"
-          cache: 'pip' # caching pip dependencies
+          cache: 'pip'
 
-      - name: Install build dependencies
-        run: |
-          pip install uv # much faster than pip
-          uv pip install --system modal
+      - name: Download test selection
+        uses: actions/download-artifact@v4
+        with:
+          name: modal-torch-latest-test-selection
+          path: ci/.test_selection
 
-      - name: Run tests
+      - name: Install trusted controller dependency
         run: |
-          modal run -m ci.torch_latest
+          pip install uv
+          uv pip install --system modal==1.2.6
+
+      - name: Run tests in isolated Modal Sandbox
+        env:
+          DS_CI_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+          DS_CI_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          DS_CI_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || '' }}
+          DS_TEST_SELECTION_MODE: ${{ needs.collect-tests.outputs.mode }}
+          DS_TEST_LIST_FILE: ci/.test_selection/test_list.txt
+          MODAL_TORCH_PRESET: ${{ github.event.inputs.torch_preset || '2.10.0-cuda12.8' }}
+          MODAL_TRANSFORMERS_SOURCE: ${{ github.event.inputs.transformers_source || 'git' }}
+          MODAL_TRANSFORMERS_REF: ${{ github.event.inputs.transformers_ref || 'main' }}
+          MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
+          MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
+        run: python3 ci/torch_latest.py controller

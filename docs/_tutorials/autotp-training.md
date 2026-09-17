@@ -1,0 +1,239 @@
+---
+title: "Automatic Tensor Parallelism (Training)"
+tags: training tensor-parallelism
+---
+
+This tutorial covers **Automatic Tensor Parallelism** for combining tensor parallelism with ZeRO optimization during training. For inference-only tensor parallelism, see [Automatic Tensor Parallelism (Inference)](/tutorials/automatic-tensor-parallelism/).
+
+## Contents
+- [Introduction](#introduction)
+- [Quick Start](#quick-start)
+- [HuggingFace tp_plan Support](#huggingface-tp_plan-support)
+- [Custom Layer Specifications](#custom-layer-specifications)
+- [Limitations](#limitations)
+
+## Introduction
+
+The AutoTP Training API enables hybrid parallelism by combining:
+- **Tensor Parallelism (TP)**: Split model weights across GPUs within a node
+- **Data Parallelism (DP)**: Replicate model across GPU groups
+- **ZeRO Optimization**: Memory-efficient optimizer states (Stage 0, 1, or 2)
+
+Tensor parallelism (TP) splits the computations and parameters of large layers
+across multiple GPUs so each rank holds only a shard of the weight matrix. This
+is an efficient way to train large-scale transformer models by reducing per-GPU
+memory pressure while keeping the layer math distributed across the TP group.
+
+
+## Quick Start
+
+### Basic Usage
+
+AutoTP training can be enabled entirely through the DeepSpeed config. When
+`tensor_parallel` is set in the config, `deepspeed.initialize(...)` applies
+AutoTP sharding during engine initialization, so the training loop itself does
+not change.
+
+```python
+import torch
+import deepspeed
+
+# 1. Create your model
+model = AutoModelForCausalLM.from_pretrained("meta-llama/Llama-3.1-8B")
+
+# 2. Define the DeepSpeed config with tensor_parallel settings
+ds_config = {
+    "train_micro_batch_size_per_gpu": 1,
+    "zero_optimization": {"stage": 2},
+    "bf16": {"enabled": True},
+    "tensor_parallel": {"autotp_size": 4},
+}
+
+# 3. Initialize DeepSpeed with AutoTP + ZeRO
+engine, optimizer, _, _ = deepspeed.initialize(
+    model=model,
+    optimizer=optimizer,
+    config=ds_config,
+    mpu=mpu  # Model parallel unit (optional if you provide tp_group elsewhere)
+)
+
+# 4. Train as usual
+for batch in dataloader:
+    outputs = engine(input_ids=batch["input_ids"], labels=batch["labels"])
+    engine.backward(outputs.loss)
+    engine.step()
+```
+
+Compatibility note: For backward compatibility, you can still call
+`set_autotp_mode(training=True)` and `deepspeed.tp_model_init(...)`, but they
+are not required when the DeepSpeed config provides the necessary
+`tensor_parallel` settings.
+
+### Preset-based Sharding
+
+If your model matches a built-in preset, set `tensor_parallel.preset_model` in the DeepSpeed config:
+
+```json
+{
+    "train_batch_size": 8,
+    "train_micro_batch_size_per_gpu": 1,
+    "bf16": { "enabled": true },
+    "zero_optimization": { "stage": 2 },
+    "tensor_parallel": {
+        "autotp_size": 4,
+        "preset_model": "llama"
+    }
+}
+```
+
+For the list of available presets, see [supported models](/code-docs/training#autotp-supported-models).
+
+
+
+## HuggingFace tp_plan Support
+
+Many HuggingFace models (e.g. Llama, Qwen, Gemma2) ship with a built-in
+`base_model_tp_plan` in their model config that describes how each layer
+should be partitioned for tensor parallelism. DeepSpeed can automatically
+detect and use this plan, so you do not need to configure `preset_model` or
+`partition_config` for these models.
+
+When `tensor_parallel` is set in the DeepSpeed config, the initialization
+follows this priority:
+
+1. **Custom `partition_config`** (highest): User-defined regex patterns.
+2. **HuggingFace `tp_plan`**: Automatically extracted from
+   `model._tp_plan` or `model.config.base_model_tp_plan`.
+3. **AutoTP heuristics** (lowest): Built-in parser based on module structure.
+
+For models that define a `tp_plan`, you only need a minimal config:
+
+```json
+{
+    "train_micro_batch_size_per_gpu": 1,
+    "zero_optimization": { "stage": 2 },
+    "bf16": { "enabled": true },
+    "tensor_parallel": { "autotp_size": 4 }
+}
+```
+
+DeepSpeed will read the model's `tp_plan` at initialization and convert it to
+internal partition rules. The supported types are `colwise`, `rowwise`,
+and `colwise_gather_output`(`colwise_rep`). The gathered column styles shard
+the linear weight along its output dimension and AllGather the local output
+shards so every tensor-parallel rank receives the complete output. For untied
+output layers, the output dimension does not need to be divisible by
+`autotp_size`; DeepSpeed uses uneven local shards and gathers back to the
+original logical output size.
+
+Gathered column parallelism currently supports untied output layers. If an
+output layer such as `lm_head` shares the same runtime `Parameter` object with
+an embedding, DeepSpeed leaves both modules replicated and applies tensor
+parallelism to the remaining matched layers. This preserves the tie without
+silently cloning the weight, but does not reduce the embedding or output-layer
+memory footprint. A coupled vocabulary-parallel embedding is required to shard
+the tied weight and is not yet implemented. This fallback uses actual `Parameter`
+identity rather than model configuration metadata such as `tie_word_embeddings`.
+
+Additional HuggingFace types such as `local_colwise` and `local_rowwise` are
+not yet handled and fall back to AutoTP preset-based partitioning.
+
+If you need to override the model's built-in `tp_plan`, provide a
+`partition_config` in the DeepSpeed config -- it takes precedence.
+
+
+## Custom Patterns
+
+If you are training a custom model, define regex-based patterns and partition rules in `tensor_parallel.partition_config`:
+
+```json
+{
+    "tensor_parallel": {
+        "autotp_size": 4,
+        "partition_config": {
+            "use_default_specs": false,
+            "layer_specs": [
+                {
+                    "patterns": [".*\\.o_proj\\.weight$", ".*\\.down_proj\\.weight$"],
+                    "partition_type": "row"
+                },
+                {
+                    "patterns": [".*\\.[qkv]_proj\\.weight$"],
+                    "partition_type": "column"
+                },
+                {
+                    "patterns": [".*\\.gate_up_proj\\.weight$"],
+                    "partition_type": "column",
+                    "shape": [2, -1],
+                    "partition_dim": 0
+                }
+            ]
+        }
+    }
+}
+```
+
+## Custom Layer Specifications
+
+For models not covered by presets, define custom layer specs:
+
+```json
+{
+    "tensor_parallel": {
+        "autotp_size": 4,
+        "partition_config": {
+            "use_default_specs": false,
+            "layer_specs": [
+                {
+                    "patterns": [".*\\.o_proj\\.weight$", ".*\\.down_proj\\.weight$"],
+                    "partition_type": "row"
+                },
+                {
+                    "patterns": [".*\\.[qkv]_proj\\.weight$"],
+                    "partition_type": "column"
+                },
+                {
+                    "patterns": [".*\\.gate_up_proj\\.weight$"],
+                    "partition_type": "column",
+                    "shape": [2, -1],
+                    "partition_dim": 0
+                }
+            ]
+        }
+    }
+}
+```
+
+### Fused Layers with Unequal Sub-parameters (GQA)
+
+For Grouped Query Attention with different Q/K/V sizes:
+
+```json
+{
+    "tensor_parallel": {
+        "partition_config": {
+            "layer_specs": [
+                {
+                    "patterns": [".*\\.qkv_proj\\.weight$"],
+                    "partition_type": "column",
+                    "shape": [[q_size, kv_size, kv_size], -1],
+                    "partition_dim": 0
+                }
+            ]
+        }
+    }
+}
+```
+
+## Limitations
+
+1. **Ranks beyond the key/value head count stay idle**: Attention heads are distributed whole, and the distribution may be uneven -- 6 key/value heads over 4 ranks becomes 2/2/1/1, and a fused QKV weight is cut on the same head boundaries rather than inside a head. With more ranks than key/value heads, for example an 8-head model at `autotp_size=16`, the surplus ranks receive no attention weights at all. The result is still correct, because those ranks contribute zeros to the row-parallel all-reduce, but they do no attention work; AutoTP logs a warning instead of replicating heads to fill them. Hidden and vocabulary dimensions do not need to be divisible by the tensor parallel size: uneven shards are carried through save, conversion and restore via per-TP-rank shapes and widths.
+
+2. **Cross-topology universal restore**: Loading a universal checkpoint back into a topology with a *different* tensor-parallel degree goes through DeepSpeed's Megatron-style model-state loader, which is not AutoTP-aware; prefer same-topology restore when changing world size.
+
+
+## See Also
+
+- [Automatic Tensor Parallelism (Inference)](/tutorials/automatic-tensor-parallelism/)
+- [ZeRO Optimization](/tutorials/zero/)
+- [DeepSpeed Configuration](/docs/config-json/)

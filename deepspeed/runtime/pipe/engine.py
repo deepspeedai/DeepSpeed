@@ -84,7 +84,6 @@ class PipelineEngine(DeepSpeedEngine):
         # BF16 Optimizer is hardcoded for fp32 gradient accumulation
         self.using_bf16_optimizer = type(self.optimizer) == BF16_Optimizer
 
-        # used to disable the pipeline all-reduce when used with 1-bit Adam/1-bit LAMB
         self.pipeline_enable_backward_allreduce = True
 
         if self.elasticity_enabled():
@@ -208,16 +207,20 @@ class PipelineEngine(DeepSpeedEngine):
         self.agg_train_loss = None
         self.agg_additional_losses = None
 
+        # use_reentrant picks the module's checkpoint function, and that choice also feeds
+        # _is_checkpointable(), so resolve it whatever the configured interval is: the module's
+        # set_checkpoint_interval() can enable checkpointing later, and it would otherwise run
+        # with the reentrant default even though the config asked for non-reentrant.
+        # set use_reentrant default to True.
+        if self._config.pipeline.get('use_reentrant') is None:
+            self._config.pipeline['use_reentrant'] = True
+        if self._config.pipeline['use_reentrant'] is False:
+            # set activation_checkpoint_func to non_reentrant_checkpoint func.
+            self.module.activation_checkpoint_func = ds_checkpointing.non_reentrant_checkpoint
+            if self.grid.get_global_rank() == 0:
+                logger.info('CONFIG: activation_checkpoint_func=non_reentrant_checkpoint')
         if self._config.pipeline['activation_checkpoint_interval'] > 0:
             self.module.activation_checkpoint_interval = self._config.pipeline['activation_checkpoint_interval']
-            # set use_reentrant default to True.
-            if self._config.pipeline.get('use_reentrant') is None:
-                self._config.pipeline['use_reentrant'] = True
-            if self._config.pipeline['use_reentrant'] is False:
-                # set activation_checkpoint_func to non_reentrant_checkpoint func.
-                self.module.activation_checkpoint_func = ds_checkpointing.non_reentrant_checkpoint
-                if self.grid.get_global_rank() == 0:
-                    logger.info('CONFIG: activation_checkpoint_func=non_reentrant_checkpoint')
         if self.module.activation_checkpoint_interval > 0:
             self.module._precompute_checkpointable_values()
 
@@ -533,6 +536,12 @@ class PipelineEngine(DeepSpeedEngine):
     def is_last_stage(self):
         """True if this process is in the last stage in the pipeline."""
         return self.stage_id == self.num_stages - 1
+
+    def _backward_prologue_per_tensor(self, grad):
+        # The last stage applies GAS scaling before sending gradients upstream.
+        if self.is_last_stage():
+            return super()._backward_prologue_per_tensor(grad)
+        return grad
 
     def get_pipeline_parallel_rank(self):
         return self.stage_id
@@ -852,13 +861,22 @@ class PipelineEngine(DeepSpeedEngine):
             # manually call because we don't call optimizer.backward()
             self.optimizer.clear_lp_grads()
 
-        # This handles either a single tensor or tuple of tensors.
-        if isinstance(outputs, tuple):
-            out_tensors = [t for t in outputs if t.is_floating_point()]
-            assert len(out_tensors) == len(grad_tensors)
-            torch.autograd.backward(tensors=out_tensors, grad_tensors=grad_tensors)
-        else:
-            torch.autograd.backward(tensors=(outputs, ), grad_tensors=(grad_tensors, ))
+        # Set _running_engine_backward to avoid RuntimeError in post-backward hook
+        # when needs_scaler=True (the hook checks this flag to skip error checking)
+        self._running_engine_backward = True
+        try:
+            # Use tensor.backward(gradient) style which is now supported by DeepSpeed.
+            # This properly integrates with DeepSpeed's hooks and loss scaling.
+            if isinstance(outputs, tuple):
+                out_tensors = [t for t in outputs if t.is_floating_point()]
+                assert len(out_tensors) == len(grad_tensors)
+                # For multiple tensors, use retain_graph for all but the last
+                for i, (out, grad) in enumerate(zip(out_tensors, grad_tensors)):
+                    out.backward(gradient=grad, retain_graph=(i < len(out_tensors) - 1))
+            else:
+                outputs.backward(gradient=grad_tensors)
+        finally:
+            self._running_engine_backward = False
 
         if self.using_bf16_optimizer and not self.is_last_stage():
             # manually call because we don't call optimizer.backward()
@@ -876,6 +894,20 @@ class PipelineEngine(DeepSpeedEngine):
             self.timers(BACKWARD_MICRO_TIMER).stop()
             self.timers(BACKWARD_GLOBAL_TIMER).stop()
 
+    def _reentrant_activation_checkpointing(self):
+        """True when the module checkpoints activations with the reentrant function.
+
+        Reentrant checkpointing needs the first stage's inputs to require grad, or the
+        first checkpointed segment is detached from autograd. Key that off the module,
+        not off ``self._config.pipeline``: the config only seeds the module at __init__,
+        so a module built with its own ``activation_checkpoint_interval``, or one changed
+        later via ``set_checkpoint_interval()``, would leave the config stale. The forward
+        pass already branches on the module attribute, so this keeps the two in agreement.
+        """
+        if self.module.activation_checkpoint_interval <= 0:
+            return False
+        return self.module.activation_checkpoint_func is not ds_checkpointing.non_reentrant_checkpoint
+
     def _exec_load_micro_batch(self, buffer_id):
         if self.wall_clock_breakdown():
             self.timers(BATCH_INPUT_TIMER).start()
@@ -886,8 +918,7 @@ class PipelineEngine(DeepSpeedEngine):
             loaded = None
             if torch.is_tensor(batch[0]):
                 loaded = batch[0].clone().to(self.device).detach()
-                if self._config.pipeline['activation_checkpoint_interval'] > 0 and self._config.pipeline[
-                        'use_reentrant']:
+                if self._reentrant_activation_checkpointing():
                     loaded.requires_grad = loaded.is_floating_point()
             else:
                 assert isinstance(batch[0], (tuple, list))
@@ -896,8 +927,7 @@ class PipelineEngine(DeepSpeedEngine):
                 for x in batch[0]:
                     assert torch.is_tensor(x)
                     mine = x.clone().detach().to(self.device)
-                    if self._config.pipeline['activation_checkpoint_interval'] > 0 and self._config.pipeline[
-                            'use_reentrant']:
+                    if self._reentrant_activation_checkpointing():
                         mine.requires_grad = mine.is_floating_point()
                     loaded.append(mine)
                 loaded = tuple(loaded)
@@ -1221,8 +1251,9 @@ class PipelineEngine(DeepSpeedEngine):
 
         if self.global_rank == 0 and self.monitor.enabled:
             self.summary_events = [('Train/Samples/lr', self.get_lr()[0], self.global_samples)]
-            if self.fp16_enabled() and hasattr(self.optimizer, 'cur_scale'):
-                self.summary_events.append(('Train/Samples/loss_scale', self.optimizer.cur_scale, self.global_samples))
+            loss_scale = self._get_optimizer_loss_scale() if self.fp16_enabled() else None
+            if loss_scale is not None:
+                self.summary_events.append(('Train/Samples/loss_scale', loss_scale, self.global_samples))
             self.monitor.write_events(self.summary_events)
 
         if self.wall_clock_breakdown():
@@ -1315,7 +1346,13 @@ class PipelineEngine(DeepSpeedEngine):
                                     exclude_frozen_params=exclude_frozen_parameters)
         return None
 
-    def load_module_state_dict(self, checkpoint, strict=True, custom_load_fn=None, fetch_z3_params=False):
+    def load_module_state_dict(self,
+                               checkpoint,
+                               strict=True,
+                               custom_load_fn=None,
+                               fetch_z3_params=False,
+                               z3_params_to_fetch=None,
+                               allowed_missing_keys=None):
         """Override hack to instead use a directory path.
 
         This is important because pipeline models checkpoint by layer instead of rank.
@@ -1323,13 +1360,17 @@ class PipelineEngine(DeepSpeedEngine):
         If ``state_dict`` is not ``None`` or a ``str``, we revert to ``super()`` expecting a ``dict``.
 
         Args:
-            state_dict (str, None): unused
+            checkpoint (dict): the checkpoint whose module state is loaded
             strict (bool, optional): Strict state loading. Defaults to True.
         """
         assert custom_load_fn is None, "custom_load_fn not supported w. pipeline parallelism"
         state_dict = checkpoint if self.has_moe_layers else checkpoint['module']
         if (state_dict is not None) and (not isinstance(state_dict, str)):
-            super().load_module_state_dict(state_dict, strict)
+            super().load_module_state_dict(state_dict,
+                                           strict,
+                                           fetch_z3_params=fetch_z3_params,
+                                           z3_params_to_fetch=z3_params_to_fetch,
+                                           allowed_missing_keys=allowed_missing_keys)
             return
 
         self.module.load_state_dir(load_dir=self._curr_ckpt_path,

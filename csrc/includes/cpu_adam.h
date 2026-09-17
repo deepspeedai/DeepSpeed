@@ -11,7 +11,9 @@
 #include <stdio.h>
 #include <torch/extension.h>
 #include <cassert>
+#include <cstdint>
 #include "simd.h"
+#include "sve.h"
 
 #define STEP(SPAN)                                                           \
     template <typename ds_params_precision_t, typename ds_state_precision_t> \
@@ -19,7 +21,8 @@
                      ds_params_precision_t* grads,                           \
                      ds_state_precision_t* _exp_avg,                         \
                      ds_state_precision_t* _exp_avg_sq,                      \
-                     size_t _param_size);
+                     size_t _param_size,                                     \
+                     bool parallel = true);
 
 class Adam_Optimizer {
 public:
@@ -42,14 +45,25 @@ public:
     }
     ~Adam_Optimizer() {}
 
-#if defined(__AVX512__) or defined(__AVX256__)
+#if defined(__AVX512__) or defined(__AVX256__) or defined(__NEON__)
     template <int span, typename ds_params_precision_t, typename ds_state_precision_t>
     void Step_AVX(size_t* rounded_size,
                   ds_params_precision_t* _params,
                   ds_params_precision_t* grads,
                   ds_state_precision_t* _exp_avg,
                   ds_state_precision_t* _exp_avg_sq,
-                  size_t param_size);
+                  size_t param_size,
+                  bool parallel = true);
+#endif
+#if defined(__SVE__) && defined(__ARM_FEATURE_SVE)
+    template <int span, typename ds_params_precision_t, typename ds_state_precision_t>
+    void Step_SVE(size_t* rounded_size,
+                  ds_params_precision_t* _params,
+                  ds_params_precision_t* grads,
+                  ds_state_precision_t* _exp_avg,
+                  ds_state_precision_t* _exp_avg_sq,
+                  size_t param_size,
+                  bool parallel = true);
 #endif
     STEP(1)
     STEP(4)
@@ -63,14 +77,17 @@ public:
             _betta1_t = std::pow(_betta1, step);
             _betta2_t = std::pow(_betta2, step);
         } else {
-            _step++;
-            if (_step != step) {
+            if (step == _step + 1) {  // first optimizer step increase
+                _step++;
+                _betta1_t *= _betta1;
+                _betta2_t *= _betta2;
+            } else if (step ==
+                       _step) {  // no need to update step; beta1_t and beta2_t already updated
+                return;
+            } else {  // support step increase not equal to 1
                 _betta1_t = std::pow(_betta1, step);
                 _betta2_t = std::pow(_betta2, step);
                 _step = step;
-            } else {
-                _betta1_t *= _betta1;
-                _betta2_t *= _betta2;
             }
         }
     }
@@ -105,16 +122,17 @@ private:
     bool _adamw_mode;
 };
 
-#if defined(__AVX512__) or defined(__AVX256__)
+#if defined(__AVX512__) or defined(__AVX256__) or defined(__NEON__)
 template <int span, typename ds_params_precision_t, typename ds_state_precision_t>
 void Adam_Optimizer::Step_AVX(size_t* rounded_size,
                               ds_params_precision_t* _params,
                               ds_params_precision_t* grads,
                               ds_state_precision_t* _exp_avg,
                               ds_state_precision_t* _exp_avg_sq,
-                              size_t _param_size)
+                              size_t _param_size,
+                              bool parallel)
 {
-#if !defined(__AVX512__)
+#if !defined(__AVX512__) && !defined(__NEON__)
     if (std::is_same_v<ds_params_precision_t, c10::BFloat16> ||
         std::is_same_v<ds_state_precision_t, c10::BFloat16>) {
         return;
@@ -153,7 +171,7 @@ void Adam_Optimizer::Step_AVX(size_t* rounded_size,
         size_t copy_size = TILE;
         if ((t + TILE) > new_rounded_size) copy_size = new_rounded_size - t;
         size_t offset = copy_size + t;
-#pragma omp parallel for
+#pragma omp parallel for if (parallel)
         for (size_t i = t; i < offset; i += SIMD_WIDTH * span) {
             AVX_Data grad_4[span];
             simd_load<span>(grad_4, grads + i);
@@ -195,6 +213,37 @@ void Adam_Optimizer::Step_AVX(size_t* rounded_size,
 }
 #endif
 
+#if defined(__SVE__) && defined(__ARM_FEATURE_SVE)
+template <int span, typename ds_params_precision_t, typename ds_state_precision_t>
+void Adam_Optimizer::Step_SVE(size_t* rounded_size,
+                              ds_params_precision_t* _params,
+                              ds_params_precision_t* grads,
+                              ds_state_precision_t* _exp_avg,
+                              ds_state_precision_t* _exp_avg_sq,
+                              size_t _param_size,
+                              bool parallel)
+{
+    if constexpr (std::is_same_v<ds_params_precision_t, float> &&
+                  std::is_same_v<ds_state_precision_t, float>) {
+        sve_adam_update<span>(_params,
+                              grads,
+                              _exp_avg,
+                              _exp_avg_sq,
+                              _param_size,
+                              _betta1,
+                              _betta2,
+                              _bias_correction1,
+                              _bias_correction2,
+                              _eps,
+                              _alpha,
+                              _weight_decay,
+                              _adamw_mode,
+                              parallel);
+        *rounded_size = _param_size;
+    }
+}
+#endif
+
 int create_adam_optimizer(int optimizer_id,
                           float alpha = 1e-3,
                           float betta1 = 0.9,
@@ -231,3 +280,41 @@ int ds_adam_rollback(int optimizer_id,
                      torch::Tensor& exp_avg_sq);
 
 int destroy_adam_optimizer(int optimizer_id);
+
+// ZenFlowAdam: the native CPU Adam backing ZenFlow's overlapped optimizer step. The handle
+// indexes a pinned thread pool; the optimizer runs in a dedicated process (run_worker) and
+// is driven from the main process through the shared-memory control block below.
+int zenflow_adam_create(int optimizer_id, std::vector<int> zf_affinity);
+
+void zenflow_adam_register_group(int handle,
+                                 torch::Tensor param,
+                                 torch::Tensor grad0,
+                                 torch::Tensor grad1,
+                                 torch::Tensor exp_avg0,
+                                 torch::Tensor exp_avg1,
+                                 torch::Tensor exp_avg_sq0,
+                                 torch::Tensor exp_avg_sq1,
+                                 torch::Tensor stale);
+
+void zenflow_adam_destroy(int handle);
+
+#if defined(__linux__)
+// The optimizer runs in a separate process and coordinates with the main process through two
+// process-shared semaphores in a shared-memory control block. ctrl_size/ctrl_init/ctrl_exit
+// set it up and tear it down; the worker process loops in run_worker; the main process drives
+// each step with submit (non-blocking) / wait.
+int64_t zenflow_adam_ctrl_size();
+void zenflow_adam_ctrl_init(uintptr_t control_ptr, int num_groups);
+void zenflow_adam_run_worker(int handle, uintptr_t control_ptr);
+void zenflow_adam_submit(uintptr_t control_ptr,
+                         int now_state,
+                         int64_t step,
+                         std::vector<float> lr,
+                         std::vector<float> beta1,
+                         std::vector<float> beta2,
+                         std::vector<float> eps,
+                         std::vector<float> weight_decay,
+                         std::vector<uint8_t> bias_correction);
+bool zenflow_adam_wait(uintptr_t control_ptr, double timeout_s);
+void zenflow_adam_ctrl_exit(uintptr_t control_ptr);
+#endif

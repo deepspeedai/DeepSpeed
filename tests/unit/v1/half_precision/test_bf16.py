@@ -352,10 +352,13 @@ class TestZeroDtypeCocktail(DistributedTest):
 @pytest.mark.parametrize("bf16_optimizer_states,use_cpu_offload,zero_stage", [
     pytest.param(False, True, 1, id="zero_stage_1_cpu_offload"),
     pytest.param(True, False, 1, id="zero_stage_1_bf16_opt_states_True"),
+    pytest.param(True, True, 1, id="zero_stage_1_bf16_opt_states_cpu_offload"),
     pytest.param(False, True, 2, id="zero_stage_2_cpu_offload"),
     pytest.param(True, False, 2, id="zero_stage_2_bf16_opt_states_True"),
+    pytest.param(True, True, 2, id="zero_stage_2_bf16_opt_states_cpu_offload"),
     pytest.param(False, True, 3, id="zero_stage_3_cpu_offload"),
     pytest.param(True, False, 3, id="zero_stage_3_bf16_opt_states_True"),
+    pytest.param(True, True, 3, id="zero_stage_3_bf16_opt_states_cpu_offload"),
 ])
 class TestBF16MasterWeightsGradients(DistributedTest):
     world_size = 2
@@ -442,4 +445,64 @@ class TestBF16MasterWeightsGradients(DistributedTest):
         optimizer_ddp.zero_grad()
         engine.step()
         engine.zero_grad()
+
+        if bf16_optimizer_states and use_cpu_offload:
+            # With CPU offload the Adam moments must be allocated in bf16 on the host so the
+            # offloaded optimizer-state footprint is smaller than with fp32 moments.
+            cpu_adam_state = engine.optimizer.optimizer.state
+            moment_tensors = []
+            for param_state in cpu_adam_state.values():
+                for moment_key in ("exp_avg", "exp_avg_sq"):
+                    if moment_key in param_state:
+                        moment_tensors.append(param_state[moment_key])
+            assert moment_tensors, "expected Adam moment tensors to be allocated after a step"
+            for moment in moment_tensors:
+                assert moment.dtype == torch.bfloat16, f"expected bf16 moment, got {moment.dtype}"
+                assert moment.device.type == "cpu", f"expected moment on cpu, got {moment.device}"
+
         engine.destroy()
+
+
+@pytest.mark.parametrize("zero_stage", [1, 2, 3])
+class TestBF16OptimizerStatesOffloadValidation(DistributedTest):
+    world_size = 1
+
+    def test_user_cpu_adam_must_enable_bf16_states(self, zero_stage):
+        """A user-provided DeepSpeedCPUAdam must be built with fp32_optimizer_states=False
+        to combine bf16_optimizer_states with ZeRO-Offload, otherwise the moments would
+        silently stay fp32 and the memory benefit would be lost."""
+        if not bf16_required_version_check():
+            pytest.skip(
+                " DeepSpeed BFloat16 tests need torch >= 1.10, NCCL >= 2.10.3, CUDA > =11.0 and HW support for BFloat16 to run correctly"
+            )
+        if not deepspeed.ops.__compatible_ops__[CPUAdamBuilder.NAME]:
+            pytest.skip("cpu-adam is not compatible")
+
+        from deepspeed.ops.adam import DeepSpeedCPUAdam
+
+        hidden_dim = 6
+        model = SimpleModel(hidden_dim, nlayers=2)
+        # fp32_optimizer_states defaults to True, which keeps fp32 moments and is
+        # incompatible with bf16_optimizer_states under ZeRO-Offload.
+        optimizer = DeepSpeedCPUAdam(model.parameters())
+
+        config_dict = {
+            "train_micro_batch_size_per_gpu": 2,
+            "steps_per_print": 1,
+            "bf16": {
+                "enabled": True,
+                "bf16_master_weights_and_grads": True,
+                "bf16_optimizer_states": True,
+            },
+            # offload_optimizer is the current config key for ZeRO optimizer offload
+            # (TestBF16MasterWeightsGradients above still uses the legacy cpu_offload alias).
+            "zero_optimization": {
+                "stage": zero_stage,
+                "offload_optimizer": {
+                    "device": "cpu"
+                },
+            },
+        }
+
+        with pytest.raises(AssertionError, match="fp32_optimizer_states=False"):
+            deepspeed.initialize(config=config_dict, model=model, optimizer=optimizer)

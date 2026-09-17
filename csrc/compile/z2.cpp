@@ -86,8 +86,21 @@ public:
     }
 };
 
-static at::cuda::CUDAStream rs_stream = at::cuda::getStreamFromPool(true);
-static at::cuda::CUDAStream copy_stream = at::cuda::getStreamFromPool(true);
+namespace {
+
+at::cuda::CUDAStream get_rs_stream()
+{
+    static at::cuda::CUDAStream rs_stream = at::cuda::getStreamFromPool(true);
+    return rs_stream;
+}
+
+at::cuda::CUDAStream get_copy_stream()
+{
+    static at::cuda::CUDAStream copy_stream = at::cuda::getStreamFromPool(true);
+    return copy_stream;
+}
+
+}  // namespace
 
 void register_graph_z2(long graph_id, const std::vector<long>& ds_ids)
 {
@@ -96,8 +109,8 @@ void register_graph_z2(long graph_id, const std::vector<long>& ds_ids)
                                                                reduce_buckets,
                                                                ds_ids,
                                                                nccl_comm,
-                                                               rs_stream,
-                                                               copy_stream,
+                                                               get_rs_stream(),
+                                                               get_copy_stream(),
                                                                pre_div_reduce);
 }
 

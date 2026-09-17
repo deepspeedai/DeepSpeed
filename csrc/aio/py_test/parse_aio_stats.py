@@ -50,7 +50,7 @@ def extract_value(key, file):
                 return int(v[0]) * 1024 * 1024
             else:
                 return int(key[2:])
-    except:
+    except Exception:
         print(f"{file}: extract_value fails on {key}")
         return None
 

@@ -38,11 +38,6 @@ class DeepSpeedCPUAdam(torch.optim.Optimizer):
         the overhead of the optimizer's latency on CPU. Please refer to ZeRO-Offload tutorial
         (https://www.deepspeed.ai/tutorials/zero-offload/) for more information on how to enable this technology.
 
-        For calling step function, there are two options available: (1) update optimizer's states and (2) update
-        optimizer's states and copy the parameters back to GPU at the same time. We have seen that the second
-        option can bring 30% higher throughput than the doing the copy separately using option one.
-
-
         .. note::
                 We recommend using our `config
                 <https://www.deepspeed.ai/docs/config-json/#optimizer-parameters>`_
@@ -64,7 +59,9 @@ class DeepSpeedCPUAdam(torch.optim.Optimizer):
                 (default: False) NOT SUPPORTED in DeepSpeed CPUAdam!
             adamw_mode: select between Adam and AdamW implementations (default: AdamW)
             fp32_optimizer_states: creates momentum and variance in full precision regardless of
-                        the precision of the parameters (default: True)
+                        the precision of the parameters. Set to False to keep optimizer states
+                        in the parameter dtype (e.g. bf16), which reduces the optimizer-state
+                        memory footprint at the cost of lower state precision. (default: True)
         """
 
         default_args = dict(lr=lr,
@@ -236,14 +233,12 @@ class DeepSpeedCPUAdam(torch.optim.Optimizer):
                     f"CPUAdam param is on {param.device} and must be 'cpu', "
                     f"make sure you enabled 'offload_optimizer': 'cpu' in your ZeRO config.")
 
-                # Decrement step count
-                subgroup_state['step'] -= 1
-
-                # Extract hyperparameters
                 beta1, beta2 = group['betas']
 
                 self.ds_opt_adam.adam_rollback(self.opt_id, subgroup_state['step'], group['lr'], beta1, beta2,
                                                group['eps'], group['weight_decay'], group['bias_correction'],
                                                param.data, param.grad.data, subgroup_state['exp_avg'],
                                                subgroup_state['exp_avg_sq'])
+
+                subgroup_state['step'] -= 1
         return loss

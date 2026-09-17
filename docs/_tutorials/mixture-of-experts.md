@@ -1,11 +1,13 @@
 ---
-title: "Mixture of Experts"
+title: "Mixture of Experts (DeepSpeed MoE)"
 tags: MoE training
 ---
 
 DeepSpeed v0.5 introduces new support for training Mixture of Experts (MoE) models. MoE models are an emerging class of sparsely activated models that have sublinear compute costs with respect to their parameters. For example, the [Switch Transformer](https://arxiv.org/abs/2101.03961) consists of over 1.6 trillion parameters, while the compute required to train it is approximately equal to that of a 10 billion-parameter dense model. This increase in model size offers tremendous accuracy gains for a constant compute budget.
 
 For more details on results and further discussion, please see our press release: [DeepSpeed powers 8x larger MoE model training with high performance]({{ site.press_release_v5 }}).
+
+This tutorial covers the explicit DeepSpeed MoE layer API. For AutoEP (Automatic Expert Parallelism), which automatically detects and replaces supported Hugging Face MoE layers from DeepSpeed config, see the [AutoEP API docs](https://deepspeed.readthedocs.io/en/latest/autoep.html).
 
 ## Getting started with a simple MoE example
 

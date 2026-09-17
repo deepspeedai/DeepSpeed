@@ -54,7 +54,7 @@ def quantization_test_helper(pre_quant_type: torch.dtype, num_bits: int):
     assert mean_diff < 0.15 and max_diff < 0.5, f'Numeric error exceed threshold, mean diff {mean_diff} (threshold 0.15), max diff {max_diff} (threshold 0.5)'
 
 
-def zero3_post_init_quantization_test_helper(cpu_offload: bool, nvme_offload: bool, bits: int):
+def zero3_post_init_quantization_test_helper(cpu_offload: bool, nvme_offload: bool, bits: int, nvme_path=None):
     import deepspeed
     from transformers.integrations.deepspeed import HfDeepSpeedConfig
 
@@ -131,7 +131,7 @@ def zero3_post_init_quantization_test_helper(cpu_offload: bool, nvme_offload: bo
             ds_config["zero_optimization"]["offload_param"] = dict(
                 device="nvme",
                 pin_memory=True,
-                nvme_path='~/tmp_offload_dir',
+                nvme_path=nvme_path or '~/tmp_offload_dir',
                 buffer_count=5,
                 buffer_size=1 * GB,
             )
@@ -174,7 +174,7 @@ def zero3_post_init_quantization_test_helper(cpu_offload: bool, nvme_offload: bo
     assert mean_diff < 0.4, f'Numeric error exceed threshold, relative error {mean_diff} (threshold 0.4)'
 
 
-def zero3_quantized_initialization_test_helper(cpu_offload: bool, nvme_offload: bool, bits: int):
+def zero3_quantized_initialization_test_helper(cpu_offload: bool, nvme_offload: bool, bits: int, nvme_path=None):
     import deepspeed
     from transformers.integrations.deepspeed import HfDeepSpeedConfig
 
@@ -213,7 +213,7 @@ def zero3_quantized_initialization_test_helper(cpu_offload: bool, nvme_offload: 
             ds_config["zero_optimization"]["offload_param"] = dict(
                 device="nvme",
                 pin_memory=True,
-                nvme_path='~/tmp_offload_dir',
+                nvme_path=nvme_path or '~/tmp_offload_dir',
                 buffer_count=5,
                 buffer_size=1 * GB,
             )
@@ -393,9 +393,12 @@ class TestQuantizedInt(DistributedTest):
         zero3_post_init_quantization_test_helper(cpu_offload=True, nvme_offload=False, bits=quantization_bits)
 
     @pytest.mark.skipif(device == 'cpu', reason='CPU does support FP16 GEMM')
-    def test_zero3_int4_post_init_quant_nvme_offload(self):
+    def test_zero3_int4_post_init_quant_nvme_offload(self, tmpdir):
         reset_random()
-        zero3_post_init_quantization_test_helper(cpu_offload=False, nvme_offload=True, bits=4)
+        zero3_post_init_quantization_test_helper(cpu_offload=False,
+                                                 nvme_offload=True,
+                                                 bits=4,
+                                                 nvme_path=str(tmpdir.join("nvme_offload")))
 
     @pytest.mark.skipif(device == 'cpu', reason='CPU does support FP16 GEMM')
     def test_zero3_int4_quantized_initialization(self, quantization_bits):
@@ -408,6 +411,9 @@ class TestQuantizedInt(DistributedTest):
         zero3_quantized_initialization_test_helper(cpu_offload=True, nvme_offload=False, bits=quantization_bits)
 
     @pytest.mark.skipif(device == 'cpu', reason='CPU does support FP16 GEMM')
-    def test_zero3_int4_quantized_initialization_nvme_offload(self):
+    def test_zero3_int4_quantized_initialization_nvme_offload(self, tmpdir):
         reset_random()
-        zero3_quantized_initialization_test_helper(cpu_offload=False, nvme_offload=True, bits=4)
+        zero3_quantized_initialization_test_helper(cpu_offload=False,
+                                                   nvme_offload=True,
+                                                   bits=4,
+                                                   nvme_path=str(tmpdir.join("nvme_offload")))

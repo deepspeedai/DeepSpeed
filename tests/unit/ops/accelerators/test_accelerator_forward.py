@@ -231,6 +231,8 @@ class TestCUDAForward(DistributedTest):
     world_size = 1
     reuse_dist_env = True
 
+    @pytest.mark.skipif(not deepspeed.ops.__compatible_ops__[TransformerBuilder.NAME],
+                        reason="TransformerBuilder has not been implemented on this system.")
     def test_forward(self, batch_size, hidden_size, seq_len, heads, num_layers, is_preln, use_fp16):
         # Only run fp16 test cases on devices with FP16 capability.
         if not get_accelerator().is_fp16_supported() and use_fp16 is True:
@@ -295,6 +297,8 @@ class TestCUDAForwardSmallBatchSize(DistributedTest):
 class TestCUDAForwardStochastic(DistributedTest):
     world_size = 1
 
+    @pytest.mark.skipif(not deepspeed.ops.__compatible_ops__[TransformerBuilder.NAME],
+                        reason="TransformerBuilder has not been implemented on this system.")
     def test_forward_stochastic(self, batch_size, hidden_size, seq_len, heads, num_layers, is_preln, use_fp16):
         # Only run fp16 test cases on devices with FP16 capability.
         if not get_accelerator().is_fp16_supported() and use_fp16 is True:

@@ -9,7 +9,7 @@
 using namespace std;
 
 cpu_op_desc_t::cpu_op_desc_t(
-    const std::unique_ptr<struct deepspeed_pin_tensor_t>& pinned_tensor_mgr,
+    const std::shared_ptr<struct deepspeed_pin_tensor_t>& pinned_tensor_mgr,
     const bool read_op,
     const torch::Tensor& buffer,
     const int fd,
@@ -45,7 +45,9 @@ void cpu_op_desc_t::finish()
             if (_buffer.is_xpu()) { _buffer.copy_(_cpu_buffer.to(torch::kXPU)); }
             if (_buffer.is_cpu()) { _buffer.copy_(_cpu_buffer); }
 #if defined(__ENABLE_CANN__)
-            if (torch_npu::utils::is_npu(_buffer)) {
+            // `DS_BUILD_OPS=1 install.sh` complains that ‘torch_npu’ has not
+            // been declared, so inline `torch_npu::utils::is_npu`.
+            if (_buffer.is_privateuseone()) {
                 auto device = at::Device("npu:0");
                 _buffer.copy_(_cpu_buffer.to(device));
             }

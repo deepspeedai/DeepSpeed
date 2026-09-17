@@ -9,7 +9,6 @@
         -- use torch.distributed directly if both this package and torch.distributed use the same NCCL version
         -- use custom collectives
             -- can either use torch.dist or ds.ops.comm?
-        Note: the old 1-bit compressed allreduce variants that resided in deepspeed.runtime.comm will be moved here as well.
     deepspeed.comm API
         -- must be kept fully compatible (same signatures) as torch.dist API to ensure backward/cross-framework compatibility.
         -- e.g. if a client code used
@@ -23,7 +22,12 @@
 
 import torch
 from torch.distributed import GradBucket  # noqa: F401
+import inspect
 import os
+from typing import Any, Optional, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from deepspeed.runtime.config import DeepSpeedConfig
 
 from ..constants import TORCH_DISTRIBUTED_DEFAULT_PORT, default_pg_timeout
 from .constants import *
@@ -100,16 +104,23 @@ def configure(
 
 # Logging wrapper for timing ops
 def timed_op(func):
+    default_log_name = get_default_args(func).get('log_name', func.__name__)
+    # Cache the signature to avoid inspecting it on every communication call.
+    func_signature = inspect.signature(func)
 
     def log_wrapper(*args, **kwargs):
+        should_profile = False
         # Add enabled flag so that overhead to each comm op is two if conditions at most
         if comms_logger.enabled:
-            if ('prof' in kwargs
-                    and kwargs['prof']) or comms_logger.prof_all or ('log_name' in kwargs
-                                                                     and kwargs['log_name'] in comms_logger.prof_ops):
-                # Need func args for their defaults
-                func_args = get_default_args(func)
-                func_args.update(kwargs)
+            bound_args = func_signature.bind_partial(*args, **kwargs)
+            bound_args.apply_defaults()
+            func_args = bound_args.arguments
+            selected_log_name = func_args.get('log_name', default_log_name)
+            should_profile = (func_args.get('prof', False) or comms_logger.prof_all
+                              or selected_log_name in comms_logger.prof_ops)
+            if should_profile:
+                # Ops that do not declare a log_name are logged under their own name
+                func_args['log_name'] = selected_log_name
                 msg_size = get_msg_size_from_args(func, *args, **kwargs)
                 log_name = get_debug_log_name(func_args, comms_logger.debug)
                 timers(log_name).start()
@@ -123,8 +134,7 @@ def timed_op(func):
                 # If we're using MPI, we can't simply sync the stream
                 if cdb.using_mpi:
                     cdb.barrier()
-                if ('prof' in kwargs and kwargs['prof']) or comms_logger.prof_all or (
-                        'log_name' in kwargs and kwargs['log_name'] in comms_logger.prof_ops):
+                if should_profile:
                     log_name = get_debug_log_name(func_args, comms_logger.debug)
                     raw_name = func.__name__
                     timers(log_name).stop()
@@ -166,7 +176,7 @@ def init_deepspeed_backend(ds_backend, timeout, init_method):
         utils.logger.debug(f"DeepSpeed does not support {ds_backend} backend")
 
 
-def is_initialized():
+def is_initialized() -> bool:
     #assert cdb is not None, 'DeepSpeed backend not set, please initialize it using init_process_group()'
     if cdb is None:
         return False
@@ -174,7 +184,7 @@ def is_initialized():
         return cdb.is_initialized()
 
 
-def destroy_process_group(group=None):
+def destroy_process_group(group: Optional[Any] = None) -> None:
     global cdb
     return cdb.destroy_process_group(group=group)
 
@@ -226,7 +236,13 @@ def broadcast(tensor, src, group=None, async_op=False, prof=False, log_name='bro
 
 
 @timed_op
-def broadcast_object_list(object_list, src, group=None, device=None):
+def broadcast_object_list(object_list,
+                          src,
+                          group=None,
+                          device=None,
+                          prof=False,
+                          log_name='broadcast_object_list',
+                          debug=get_caller_func()):
     global cdb
     return cdb.broadcast_object_list(object_list=object_list, src=src, group=group, device=device)
 
@@ -360,7 +376,13 @@ def all_to_all_single(output,
 
 
 @timed_op
-def all_to_all(output_tensor_list, input_tensor_list, group=None, async_op=False):
+def all_to_all(output_tensor_list,
+               input_tensor_list,
+               group=None,
+               async_op=False,
+               prof=False,
+               log_name='all_to_all',
+               debug=get_caller_func()):
     global cdb
     return cdb.all_to_all(output_tensor_list, input_tensor_list, group=group, async_op=async_op)
 
@@ -380,13 +402,13 @@ def recv(tensor, src=None, group=None, tag=0, prof=False, log_name='recv', debug
 @timed_op
 def isend(tensor, dst, group=None, tag=0, prof=False, log_name='isend', debug=get_caller_func()):
     global cdb
-    return cdb.send(tensor=tensor, dst=dst, group=group, tag=tag)
+    return cdb.isend(tensor=tensor, dst=dst, group=group, tag=tag)
 
 
 @timed_op
 def irecv(tensor, src=None, group=None, tag=0, prof=False, log_name='irecv', debug=get_caller_func()):
     global cdb
-    return cdb.recv(tensor=tensor, src=src, group=group, tag=tag)
+    return cdb.irecv(tensor=tensor, src=src, group=group, tag=tag)
 
 
 @timed_op
@@ -418,7 +440,7 @@ def scatter(tensor,
 @timed_op
 def barrier(group=None, async_op=False, device_ids=None, prof=False, log_name='barrier', debug=get_caller_func()):
     global cdb
-    return cdb.barrier(group=group, async_op=async_op)
+    return cdb.barrier(group=group, async_op=async_op, device_ids=device_ids)
 
 
 @timed_op
@@ -685,7 +707,7 @@ def get_world_group():
     return cdb.get_world_group()
 
 
-def get_world_size(group=None) -> int:
+def get_world_size(group: Optional[Any] = None) -> int:
     """
     Returns the number of processes in the current process group
     Args:
@@ -702,7 +724,7 @@ def get_world_size(group=None) -> int:
     return cdb.get_world_size(group)
 
 
-def get_rank(group=None):
+def get_rank(group: Optional[Any] = None) -> int:
     """
     Returns the rank of the current process in the provided ``group`` or the
     default group if none was provided.
@@ -722,7 +744,7 @@ def get_rank(group=None):
     return cdb.get_rank(group)
 
 
-def get_local_rank():
+def get_local_rank() -> int:
     """
         Helper function to get local rank after a backend has been set and initialized
         Args:
@@ -736,7 +758,7 @@ def get_local_rank():
     return get_local_rank_from_launcher()
 
 
-def get_global_rank(group=None, group_rank=0):
+def get_global_rank(group: Optional[Any] = None, group_rank: int = 0) -> int:
     global cdb
     assert cdb is not None and cdb.is_initialized(
     ), 'DeepSpeed backend not set, please initialize it using init_process_group()'
@@ -785,16 +807,16 @@ def enable_symm_mem_for_group(group_name: str):
 
 
 # Main DeepSpeed Comms. public API.
-def init_distributed(dist_backend=None,
-                     auto_mpi_discovery=True,
-                     distributed_port=TORCH_DISTRIBUTED_DEFAULT_PORT,
-                     verbose=True,
-                     timeout=default_pg_timeout,
-                     init_method=None,
-                     dist_init_required=None,
-                     config=None,
-                     rank=-1,
-                     world_size=-1):
+def init_distributed(dist_backend: Optional[str] = None,
+                     auto_mpi_discovery: bool = True,
+                     distributed_port: int = TORCH_DISTRIBUTED_DEFAULT_PORT,
+                     verbose: bool = True,
+                     timeout: timedelta = default_pg_timeout,
+                     init_method: Optional[str] = None,
+                     dist_init_required: Optional[bool] = None,
+                     config: Optional["DeepSpeedConfig"] = None,
+                     rank: int = -1,
+                     world_size: int = -1) -> None:
     ''' Initialize dist backend, potentially performing MPI discovery if needed
 
     Arguments:
@@ -802,9 +824,9 @@ def init_distributed(dist_backend=None,
         auto_mpi_discovery Optional (bool). if distributed environment variables are not set, attempt to discover them from MPI
         distributed_port: Optional (int). torch distributed backend port
         verbose: Optional (bool). verbose logging
-        timeout: Optional (timedelta). Timeout for operations executed against the process group. The default value of 30 minutes can be overridden by the environment variable `DEEPSPEED_TIMEOUT`.
+        timeout: Optional (timedelta). Timeout for operations executed against the process group. The default value of 10 minutes can be overridden by the environment variable `DEEPSPEED_TIMEOUT`.
         init_method: Optional (string). Torch distributed, URL specifying how to initialize the process group. Default is "env://" if no init_method or store is specified.
-        config: Optional (dict). DeepSpeed configuration for setting up comms options (e.g. Comms profiling)
+        config: Optional (DeepSpeedConfig). DeepSpeed configuration for setting up comms options (e.g. Comms profiling)
         rank: Optional (int). The current manually specified rank. Some init_method like "tcp://" need the rank and world_size as well (see: https://pytorch.org/docs/stable/distributed.html#tcp-initialization)
         world_size: Optional (int). Desired world_size for the TCP or Shared file-system initialization.
     '''

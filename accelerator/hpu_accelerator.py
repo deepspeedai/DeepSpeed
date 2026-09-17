@@ -173,16 +173,13 @@ class HPU_Accelerator(DeepSpeedAccelerator):
         return supported_dtypes
 
     # Misc
-    def amp(self):
-        return None
-
     def is_available(self):
         return self.hpu.is_available()
 
-    def range_push(self, msg):
+    def range_push(self, msg, domain=None, category=None):
         return
 
-    def range_pop(self):
+    def range_pop(self, domain=None):
         return
 
     def lazy_call(self, callback):
@@ -234,11 +231,13 @@ class HPU_Accelerator(DeepSpeedAccelerator):
     def LongTensor(self):
         return functools.partial(torch.tensor, dtype=torch.long, device='hpu')
 
-    def pin_memory(self, tensor, align_bytes=1):
+    def _torch_pin_memory(self, tensor):
         return tensor.pin_memory(self.device())
 
-    def is_pinned(self, tensor):
-        return tensor.is_pinned()
+    def _torch_empty_pinned(self, tensor, shape):
+        # Pinning on HPU needs an explicit device, which the allocation API
+        # cannot express, so allocate and then pin.
+        return self._torch_pin_memory(tensor.new_empty(shape))
 
     def on_accelerator(self, tensor):
         device_str = str(tensor.device)

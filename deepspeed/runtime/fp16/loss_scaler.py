@@ -22,15 +22,104 @@ Commit: 93ab4bea59dc5cbf97c079d313741866af4deac9
 """
 
 import torch
+from dataclasses import dataclass
+from typing import Optional
+from enum import Enum
 from deepspeed.runtime.config_utils import DeepSpeedConfigObject
 from deepspeed import comm as dist
 from deepspeed.utils import logger
+from deepspeed.runtime.utils import has_inf_or_nan
 
 INITIAL_LOSS_SCALE = 'init_scale'
 SCALE_WINDOW = 'scale_window'
 DELAYED_SHIFT = 'delayed_shift'
 CONSECUTIVE_HYSTERESIS = 'consecutive_hysteresis'
 MIN_LOSS_SCALE = 'min_scale'
+
+
+class LossScaleProfile(str, Enum):
+    FUSED = "fused"
+    UNFUSED = "unfused"
+
+
+@dataclass(frozen=True)
+class LossScaleProfileDefaults:
+    initial_dynamic_scale: float
+    default_scale_window: int
+    default_min_loss_scale: float
+    scale_factor: float
+
+
+LOSS_SCALE_PROFILE_DEFAULTS = {
+    LossScaleProfile.FUSED:
+    LossScaleProfileDefaults(
+        initial_dynamic_scale=2**32,
+        default_scale_window=1000,
+        default_min_loss_scale=1,
+        scale_factor=2.0,
+    ),
+    LossScaleProfile.UNFUSED:
+    LossScaleProfileDefaults(
+        initial_dynamic_scale=1.0 * 2**16,
+        default_scale_window=1000,
+        default_min_loss_scale=0.25,
+        scale_factor=2.0,
+    ),
+}
+
+
+@dataclass
+class LossScaleConfig:
+    use_grad_scaling: bool
+    dynamic_loss_scale: bool
+    cur_iter: int
+    cur_scale: float
+    last_overflow_iter: Optional[int] = None
+    scale_factor: Optional[float] = None
+    scale_window: Optional[int] = None
+    min_loss_scale: Optional[float] = None
+
+    def __init__(self,
+                 low_precision_dtype,
+                 dynamic_loss_scale,
+                 static_loss_scale,
+                 dynamic_loss_args,
+                 *,
+                 profile: LossScaleProfile = LossScaleProfile.FUSED,
+                 initial_dynamic_scale: Optional[float] = None):
+        defaults = LOSS_SCALE_PROFILE_DEFAULTS[profile]
+        use_grad_scaling = low_precision_dtype == torch.float16
+        self.use_grad_scaling = use_grad_scaling
+        self.dynamic_loss_scale = False
+        self.cur_iter = 0
+        self.cur_scale = 1.0
+        self.last_overflow_iter = None
+        self.scale_factor = None
+        self.scale_window = None
+        self.min_loss_scale = None
+
+        if not use_grad_scaling:
+            return
+
+        self.cur_scale = static_loss_scale
+        if not dynamic_loss_scale:
+            return
+
+        if initial_dynamic_scale is None:
+            initial_dynamic_scale = defaults.initial_dynamic_scale
+
+        self.dynamic_loss_scale = True
+        self.last_overflow_iter = -1
+        self.scale_factor = defaults.scale_factor
+        if dynamic_loss_args is None:
+            self.cur_scale = initial_dynamic_scale
+            self.scale_window = defaults.default_scale_window
+            self.min_loss_scale = defaults.default_min_loss_scale
+            return
+
+        self.cur_scale = dynamic_loss_args[INITIAL_LOSS_SCALE]
+        self.scale_window = dynamic_loss_args[SCALE_WINDOW]
+        self.min_loss_scale = dynamic_loss_args[MIN_LOSS_SCALE]
 
 
 # item() is a recent addition, so this helps with backward compatibility.
@@ -118,7 +207,6 @@ class DynamicLossScaler(LossScalerBase):
 
     Args:
         init_scale (float, optional, default=2**32):  Initial loss scale attempted by :class:`DynamicLossScaler.`
-        scale_factor (float, optional, default=2.0):  Factor used when adjusting the loss scale. If an overflow is encountered, the loss scale is readjusted to loss scale/``scale_factor``.  If ``scale_window`` consecutive iterations take place without an overflow, the loss scale is readjusted to loss_scale*``scale_factor``.
         scale_window (int, optional, default=1000):  Number of consecutive iterations without an overflow to wait before increasing the loss scale.
         consecutive_hysteresis (bool, optional, default=False): Whether to refill hysteresis if we reach an iteration that doesn't overflow
     """
@@ -154,24 +242,7 @@ class DynamicLossScaler(LossScalerBase):
 
     # `x` is a torch.Tensor
     def _has_inf_or_nan(x):
-        try:
-            # if x is half, the .float() incurs an additional deep copy, but it's necessary if
-            # Pytorch's .sum() creates a one-element tensor of the same type as x
-            # (which is true for some recent version of pytorch).
-            cpu_sum = float(x.float().sum())
-            # More efficient version that can be used if .sum() returns a Python scalar
-            # cpu_sum = float(x.sum())
-        except RuntimeError as instance:
-            # We want to check if inst is actually an overflow exception.
-            # RuntimeError could come from a different error.
-            # If so, we still want the exception to propagate.
-            if "value cannot be converted" not in instance.args[0]:
-                raise
-            return True
-        else:
-            if cpu_sum in [float('inf'), -float('inf')] or cpu_sum != cpu_sum:
-                return True
-            return False
+        return has_inf_or_nan(x)
 
     # `overflow` is boolean indicating whether the gradient overflowed
     def update_scale(self, overflow):

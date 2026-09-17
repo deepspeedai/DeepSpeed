@@ -20,9 +20,11 @@ from deepspeed.moe.utils import is_moe_param, is_moe_param_group
 from deepspeed.utils.bwc import bwc_tensor_model_parallel_rank
 from deepspeed.utils.torch import register_grad_hook
 from deepspeed.checkpoint import enable_universal_checkpoint
+from deepspeed.checkpoint.constants import UNIVERSAL_CHECKPOINT_INFO
 from deepspeed.checkpoint.constants import (DS_VERSION, PARTITION_COUNT, BASE_OPTIMIZER_STATE,
                                             SINGLE_PARTITION_OF_FP32_GROUPS, CLIP_GRAD, GROUP_PADDINGS,
                                             PARAM_SLICE_MAPPINGS)
+from deepspeed.module_inject.auto_ep_folding import apply_folding_correction_to_grad_buffer
 
 setattr(sys.modules[__name__], 'fragment_address', fragment_address)
 
@@ -59,11 +61,18 @@ class BF16_Optimizer(ZeROOptimizer):
                                   ], f"BF16Optimizer: Unsupported gradient accumulation data type: {grad_acc_dtype}"
         self.grad_acc_dtype = grad_acc_dtype
 
+        # BF16 doesn't use loss scaling, but these attributes are needed for API compatibility
+        self.custom_loss_scaler = False
+        self.external_loss_scale = None
+        self.torch_autocast_gradscaler = None
+
         self.immediate_grad_update = bfloat16_config.immediate_grad_update
 
         self.clip_grad = clip_grad
         self.norm_type = norm_type
         self.mpu = mpu
+        self.autoep_folding_tp_group = None
+        self.autoep_folding_spec = None
         self.allgather_bucket_size = int(allgather_bucket_size)
         self.dp_process_group = dp_process_group
         self.dp_rank = dist.get_rank(group=self.dp_process_group)
@@ -212,9 +221,27 @@ class BF16_Optimizer(ZeROOptimizer):
         self._enable_universal_checkpoint()
         self._param_slice_mappings = self._create_param_mapping()
 
+    def configure_autoep_folding_tp_gradient_reduction(self, folding_spec):
+        if folding_spec is None or folding_spec.tp_size <= 1:
+            self.autoep_folding_tp_group = None
+            self.autoep_folding_spec = None
+            return
+        self.autoep_folding_tp_group = groups.get_tensor_model_parallel_group()
+        self.autoep_folding_spec = folding_spec
+
     def _enable_universal_checkpoint(self):
+        self._universal_checkpoint_info = None
         for lp_param_group in self.bf16_groups:
+            if self._universal_checkpoint_info is None:
+                for param in lp_param_group:
+                    autotp_uc_info = getattr(param, UNIVERSAL_CHECKPOINT_INFO, None)
+                    if autotp_uc_info is not None:
+                        self._universal_checkpoint_info = autotp_uc_info
+                        break
             enable_universal_checkpoint(param_list=lp_param_group)
+
+    def _get_universal_checkpoint_info(self):
+        return getattr(self, '_universal_checkpoint_info', None)
 
     def _create_param_mapping(self):
         param_mapping = []
@@ -329,6 +356,13 @@ class BF16_Optimizer(ZeROOptimizer):
     def _update_hp_grad(self, lp, group_idx, param_idx, clear_lp_grads):
         if lp.grad is None:
             return
+
+        if self.autoep_folding_tp_group is not None and getattr(lp, "ds_grad_is_ready", True):
+            apply_folding_correction_to_grad_buffer(self.autoep_folding_spec,
+                                                    lp,
+                                                    lp.grad,
+                                                    tp_group=self.autoep_folding_tp_group,
+                                                    param_name=self.param_names.get(lp))
 
         hp_grad = self.fp32_groups_gradients[group_idx][param_idx]
         assert hp_grad is not None, \
@@ -467,6 +501,10 @@ class BF16_Optimizer(ZeROOptimizer):
         state_dict[PARTITION_COUNT] = self.partition_count
         state_dict[DS_VERSION] = version
         state_dict[PARAM_SLICE_MAPPINGS] = self._param_slice_mappings
+
+        autotp_uc_info = self._get_universal_checkpoint_info()
+        if autotp_uc_info is not None:
+            state_dict[UNIVERSAL_CHECKPOINT_INFO] = autotp_uc_info
 
         return state_dict
 

@@ -40,7 +40,9 @@ pytest --forked tests/unit/
 ```
 You can also provide the `-v` flag to `pytest` to see additional information about the
 tests. Note that [pytest-forked](https://github.com/pytest-dev/pytest-forked) and the
-`--forked` flag are required to test CUDA functionality in distributed tests.
+`--forked` flag are required to test CUDA functionality in distributed tests. Using
+`--forked` is safe because `import deepspeed` no longer initializes a CUDA context;
+earlier versions probed CUDA at import time, which poisoned `fork()`.
 
 ### Model Tests
 Model tests require four GPUs and training data downloaded for
@@ -57,14 +59,13 @@ Note that the `--forked` flag is not necessary for the model tests.
 
 ## Contributor License Agreement
 This project welcomes contributions and suggestions. Most contributions require you to
-agree to a Contributor License Agreement (CLA) declaring that you have the right to, and
-actually do, grant us the rights to use your contribution. For details, visit
-[https://cla.opensource.microsoft.com](https://cla.opensource.microsoft.com).
+agree to a Developer Certificate of Origin (DCO)[https://wiki.linuxfoundation.org/dco]
+stating that they agree to the terms published at https://developercertificate.org for
+that *particular* contribution.
 
-When you submit a pull request, a CLA bot will automatically determine whether you need
-to provide a CLA and decorate the PR appropriately (e.g., status check, comment). Simply
-follow the instructions provided by the bot. You will only need to do this once across
-all repos using our CLA.
+DCOs are per-commit, so each commit needs to be signed off.  These can be signed in
+the commit by adding the `-s` flag.  DCO enforcement can also be signed off in the PR
+itself by clicking on the DCO enforcement check.
 
 ## Code of Conduct
 This project has adopted the [Microsoft Open Source Code of

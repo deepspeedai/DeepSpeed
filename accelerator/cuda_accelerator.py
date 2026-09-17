@@ -17,16 +17,23 @@ try:
 except ImportError:
     pass
 
+try:
+    import nvtx
+except ImportError:
+    nvtx = None
+
 # Delay import pynvml to avoid import error when CUDA is not available
 pynvml = None
 
 
 class CUDA_Accelerator(DeepSpeedAccelerator):
+    supports_nvtx_domain = True
 
     def __init__(self):
         self._name = 'cuda'
         self._communication_backend_name = 'nccl' if sys.platform != 'win32' else 'gloo'
         self._compile_backend = "inductor"
+        self._nvtx_domains = {}
         if pynvml is None:
             self._init_pynvml()
 
@@ -222,21 +229,31 @@ class CUDA_Accelerator(DeepSpeedAccelerator):
         return supported_dtypes
 
     # Misc
-    def amp(self):
-        if hasattr(torch.cuda, 'amp'):
-            return torch.cuda.amp
-        return None
-
     def is_available(self):
         return torch.cuda.is_available()
 
-    def range_push(self, msg):
-        if hasattr(torch.cuda.nvtx, 'range_push'):
-            return torch.cuda.nvtx.range_push(msg)
+    def _get_nvtx_domain(self, domain):
+        if nvtx is None or domain is None:
+            return None
+        if domain not in self._nvtx_domains:
+            self._nvtx_domains[domain] = nvtx.get_domain(domain)
+        return self._nvtx_domains[domain]
 
-    def range_pop(self):
-        if hasattr(torch.cuda.nvtx, 'range_pop'):
-            return torch.cuda.nvtx.range_pop()
+    def range_push(self, msg, domain=None, category=None):
+        nvtx_domain = self._get_nvtx_domain(domain)
+        if nvtx_domain is not None:
+            return nvtx_domain.push_range(message=msg, category=category)
+        torch_nvtx = getattr(torch.cuda, 'nvtx', None)
+        if torch_nvtx is not None and hasattr(torch_nvtx, 'range_push'):
+            return torch_nvtx.range_push(msg)
+
+    def range_pop(self, domain=None):
+        nvtx_domain = self._get_nvtx_domain(domain)
+        if nvtx_domain is not None:
+            return nvtx_domain.pop_range()
+        torch_nvtx = getattr(torch.cuda, 'nvtx', None)
+        if torch_nvtx is not None and hasattr(torch_nvtx, 'range_pop'):
+            return torch_nvtx.range_pop()
 
     def lazy_call(self, callback):
         return torch.cuda._lazy_call(callback)
@@ -252,6 +269,21 @@ class CUDA_Accelerator(DeepSpeedAccelerator):
             return True
         else:
             return False
+
+    def prefer_triton_grouped_mm(self):
+        # torch._grouped_mm only has a fused grouped-GEMM kernel on Hopper (sm90)
+        # and newer; on sm8x it falls back to a slow per-group loop, so a Triton
+        # grouped-GEMM kernel is preferred there when Triton is available.
+        from deepspeed.ops.triton_ops import is_triton_available as triton_grouped_mm_is_available
+        # not verified on AMD GPU
+        if torch.version.hip is not None or not triton_grouped_mm_is_available():
+            return False
+        if not hasattr(torch, "_grouped_mm"):
+            return True
+        major, _ = torch.cuda.get_device_capability()
+        if major < 7:
+            return False
+        return major < 9
 
     # Graph operations
     def create_graph(self):
@@ -294,18 +326,21 @@ class CUDA_Accelerator(DeepSpeedAccelerator):
     def LongTensor(self):
         return functools.partial(torch.tensor, dtype=torch.long, device='cuda')
 
-    def pin_memory(self, tensor, align_bytes=1):
-        return tensor.pin_memory()
-
-    def is_pinned(self, tensor):
-        return tensor.is_pinned()
-
     def on_accelerator(self, tensor):
         device_str = str(tensor.device)
         if device_str.startswith('cuda:'):
             return True
         else:
             return False
+
+    def register_host_memory(self, address, num_bytes):
+        result = int(torch.cuda.cudart().cudaHostRegister(address, num_bytes, 0))
+        torch.cuda.check_error(result)
+        return True
+
+    def unregister_host_memory(self, address):
+        result = int(torch.cuda.cudart().cudaHostUnregister(address))
+        torch.cuda.check_error(result)
 
     def op_builder_dir(self):
         try:

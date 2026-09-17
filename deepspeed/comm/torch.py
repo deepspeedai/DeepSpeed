@@ -28,9 +28,25 @@ def disable_compiler_collective(func):
     return compiler.disable(func)
 
 
+def known_world_size(world_size):
+    """The world size when it can be determined, otherwise None.
+
+    ``init_distributed`` defaults its ``world_size`` argument to -1, and the value can also be
+    carried in the ``init_method`` URL (``tcp://host:port?world_size=2``), where neither the
+    argument nor ``WORLD_SIZE`` reflects it. Return None rather than a guess so that callers do
+    not act on an assumed size.
+    """
+    if world_size is not None and world_size > 0:
+        return world_size
+    env_world_size = os.environ.get('WORLD_SIZE', '')
+    if env_world_size.isdigit() and int(env_world_size) > 0:
+        return int(env_world_size)
+    return None
+
+
 def build_shm_op():
     builder = get_accelerator().create_op_builder("ShareMemCommBuilder")
-    if builder is None or not deepspeed.ops.__compatible_ops__[builder.NAME]:
+    if builder is None or not deepspeed.ops.__compatible_ops__.get(builder.NAME, False):
         return None
     shm_cpp_module = builder.load()
     print(f'DeepSpeed {builder.absolute_name()} built successfully')
@@ -95,6 +111,88 @@ class Noop:
         return None
 
 
+class StagedWork:
+    """Completes a staged collective after the underlying work's bare ``wait()`` succeeds.
+
+    The narrow signature is deliberate: unsupported timeout and polling APIs must fail loudly.
+    """
+
+    def __init__(self, work, copy_back):
+        self.work = work
+        self.copy_back = copy_back
+
+    def wait(self):
+        result = None
+        if self.work is not None:
+            result = self.work.wait()
+        self.copy_back()
+        return result
+
+
+def _needs_cpu_staging(tensor):
+    # gloo (the only torch backend on macOS) cannot operate on MPS tensors.
+    return isinstance(tensor, torch.Tensor) and tensor.device.type == 'mps'
+
+
+def stage_on_cpu(func=None, *, always_async=False, copy_to_cpu=True, copy_from_cpu=True):
+    """Runs a collective on CPU copies of any MPS tensor arguments, then copies the results back.
+
+    This is what lets DeepSpeed use the gloo backend on Apple Silicon, where device tensors are
+    not supported by any torch.distributed backend. Unified memory keeps the copies cheap.
+
+    always_async is for ops like isend/irecv that are asynchronous by contract but have no
+    async_op parameter: the copy back must wait until the returned work handle completes.
+
+    copy_to_cpu=False allocates an output-only CPU target without reading the device tensor.
+    copy_from_cpu=False retains an input-only CPU snapshot without copying it back.
+    """
+    if func is None:
+        return lambda wrapped_func: stage_on_cpu(
+            wrapped_func,
+            always_async=always_async,
+            copy_to_cpu=copy_to_cpu,
+            copy_from_cpu=copy_from_cpu,
+        )
+
+    def _stage(arg, pairs):
+        if _needs_cpu_staging(arg):
+            cpu_tensor = arg.to('cpu') if copy_to_cpu else torch.empty_like(arg, device='cpu')
+            pairs.append((arg, cpu_tensor))
+            return cpu_tensor
+        if isinstance(arg, list) and any(_needs_cpu_staging(t) for t in arg):
+            return [_stage(t, pairs) for t in arg]
+        return arg
+
+    signature = inspect.signature(func)
+
+    def wrapper(self, *args, **kwargs):
+        pairs = []
+        args = [_stage(arg, pairs) for arg in args]
+        kwargs = {key: _stage(arg, pairs) for key, arg in kwargs.items()}
+        if not pairs:
+            return func(self, *args, **kwargs)
+
+        work = func(self, *args, **kwargs)
+
+        def copy_back():
+            if copy_from_cpu:
+                for device_tensor, cpu_tensor in pairs:
+                    device_tensor.copy_(cpu_tensor)
+
+        # async_op is usually forwarded positionally, so resolve it against the real signature.
+        bound_args = signature.bind(self, *args, **kwargs)
+        if always_async or bound_args.arguments.get('async_op', False):
+            # torch.distributed returns None for ranks outside the requested group. Without a
+            # completion handle, an output-only staging buffer must never be published.
+            if work is None:
+                return None
+            return StagedWork(work, copy_back)
+        copy_back()
+        return work
+
+    return wrapper
+
+
 class TorchBackend(Backend):
     """
         A light-weight wrapper class for torch.distributed API.
@@ -120,6 +218,23 @@ class TorchBackend(Backend):
         self.init_process_group(backend, timeout, init_method, rank, world_size)
         if self.shm_comm_op != None:
             self.shm_comm_op.initialize(self.get_world_size(), self.get_rank())
+        # Best-effort SDMA (mori) backend acquisition.  Stays None on
+        # non-AMD/ROCm or when mori is unavailable; in that case
+        # all_gather_into_tensor below transparently falls through to
+        # torch.distributed.all_gather_into_tensor.
+        self._init_sdma_backend()
+
+    def _init_sdma_backend(self):
+        """Try to enable the mori SDMA path for ``all_gather_into_tensor``.
+
+        Failure (non-AMD, mori not installed, shmem init error) leaves the
+        handle unset and the standard torch.distributed allgather is used.
+        """
+        try:
+            from . import mori as _mori
+            _mori.init()
+        except Exception:
+            pass
 
     @classmethod
     @disable_compiler_collective
@@ -152,7 +267,11 @@ class TorchBackend(Backend):
             # 1. device_id arg was added in torch==2.3
             # 2. setting device_id leads to hanging in 2.6.0<torch<2.7.1 https://github.com/pytorch/pytorch/issues/153960
             # 3. device_id works and is needed for `cuda`, other accelerators may have issues at the moment. Therefore only do it for the `cuda` accelerator.
-            if ('device_id' in inspect.signature(torch.distributed.init_process_group).parameters
+            # 4. binding a device also makes torch build every later new_group() with ncclCommSplit;
+            #    a single-rank job has no peer to reach, so skip it there (#8248). Only skip when the
+            #    world size is actually known, never on an assumed one.
+            if (known_world_size(world_size) != 1
+                    and 'device_id' in inspect.signature(torch.distributed.init_process_group).parameters
                     and not (version.parse("2.6.0") < version.parse(torch.__version__) < version.parse("2.7.1"))
                     and get_accelerator().device_name() == 'cuda'):
                 local_rank = int(os.environ.get('LOCAL_RANK', 0))
@@ -162,18 +281,24 @@ class TorchBackend(Backend):
         self.using_mpi = torch.distributed.get_backend() == 'mpi'
 
     @disable_compiler_collective
+    @stage_on_cpu
     def all_reduce(self, tensor, op=torch.distributed.ReduceOp.SUM, group=None, async_op=False):
         op = self._reduce_op(op)
         return torch.distributed.all_reduce(tensor=tensor, op=op, group=group, async_op=async_op)
 
     def inference_all_reduce(self, tensor, op, group=None):
-        if not hasattr(torch.ops, 'deepspeed') or not hasattr(torch.ops.deepspeed, 'inference_all_reduce_'):
+        use_ds_op = hasattr(torch.ops, 'deepspeed') and hasattr(torch.ops.deepspeed, 'inference_all_reduce_')
+        world_size = torch.distributed.get_world_size(group=group)
+        if world_size <= 1:
+            return tensor
+        if not use_ds_op:
             op = self._reduce_op(op)
             return torch.distributed.all_reduce(tensor=tensor, op=op, group=group, async_op=False)
         else:
             return torch.ops.deepspeed.inference_all_reduce_(tensor)
 
     @disable_compiler_collective
+    @stage_on_cpu
     def all_reduce_coalesced(self, tensors, op=torch.distributed.ReduceOp.SUM, group=None, async_op=False):
         """ proxy func to torch.distributed.all_reduce_coalesced,
         which is included in PyTorch 1.13 and above
@@ -185,6 +310,7 @@ class TorchBackend(Backend):
         return torch.distributed.all_reduce_coalesced(tensors=tensors, op=op, group=group, async_op=async_op)
 
     @disable_compiler_collective
+    @stage_on_cpu
     def reduce(self, tensor, dst, op=ReduceOp.SUM, group=None, async_op=False):
         if DS_COMM_REDUCE_OFF:
             if int(os.getenv('RANK', '0')) == 0:
@@ -193,6 +319,7 @@ class TorchBackend(Backend):
         return torch.distributed.reduce(tensor=tensor, dst=dst, op=self._reduce_op(op), group=group, async_op=async_op)
 
     @disable_compiler_collective
+    @stage_on_cpu
     def reduce_scatter(self, output, input_list, op=ReduceOp.SUM, group=None, async_op=False):
         if DS_COMM_REDUCE_SCATTER_OFF:
             if int(os.getenv('RANK', '0')) == 0:
@@ -206,6 +333,7 @@ class TorchBackend(Backend):
                                                     async_op=async_op)
 
     @disable_compiler_collective
+    @stage_on_cpu
     def broadcast(self, tensor, src, group=None, async_op=False):
         if DS_COMM_BROADCAST_OFF:
             if int(os.getenv('RANK', '0')) == 0:
@@ -219,6 +347,7 @@ class TorchBackend(Backend):
         return torch.distributed.broadcast_object_list(object_list=object_list, src=src, group=group, device=device)
 
     @disable_compiler_collective
+    @stage_on_cpu
     def all_gather(self, tensor_list, tensor, group=None, async_op=False):
         if DS_COMM_ALL_GATHER_OFF:
             if int(os.getenv('RANK', '0')) == 0:
@@ -228,7 +357,17 @@ class TorchBackend(Backend):
             return torch.distributed.all_gather(tensor_list=tensor_list, tensor=tensor, group=group, async_op=async_op)
 
     @disable_compiler_collective
+    @stage_on_cpu
     def all_gather_into_tensor(self, output_tensor, input_tensor, group=None, async_op=False):
+        # Transparent SDMA fast-path on AMD/ROCm: when the mori backend is
+        # available and the call is on the WORLD process group, route
+        # through mori_cpp.AllGatherIntoTensor.  Any condition that makes
+        # SDMA unsafe (non-WORLD group, oversized shard, unsupported dtype,
+        # mori unavailable) yields None and we fall through to RCCL/NCCL.
+        from . import mori as _mori
+        sdma_work = _mori.allgather_into_tensor(input_tensor, output_tensor, group=group)
+        if sdma_work is not None:
+            return sdma_work
         if self.has_all_gather_into_tensor():
             return self.all_gather_function(output_tensor=output_tensor,
                                             input_tensor=input_tensor,
@@ -236,6 +375,7 @@ class TorchBackend(Backend):
                                             async_op=async_op)
 
     @disable_compiler_collective
+    @stage_on_cpu
     def all_gather_base(self, output_tensor, input_tensor, group=None, async_op=False):
         if DS_COMM_ALL_GATHER_OFF:
             if int(os.getenv('RANK', '0')) == 0:
@@ -254,6 +394,7 @@ class TorchBackend(Backend):
                 pass
 
     @disable_compiler_collective
+    @stage_on_cpu
     def all_gather_coalesced(self, output_tensors, input_tensors, group=None, async_op=False):
         """"""
         assert len(output_tensors) == len(input_tensors), ""
@@ -282,6 +423,7 @@ class TorchBackend(Backend):
         return torch.distributed.all_gather_object(object_list=object_list, obj=obj, group=group)
 
     @disable_compiler_collective
+    @stage_on_cpu
     def reduce_scatter_tensor(self, output_tensor, input_tensor, op=ReduceOp.SUM, group=None, async_op=False):
         if self.has_reduce_scatter_tensor():
             return self.reduce_scatter_function(output_tensor,
@@ -296,6 +438,7 @@ class TorchBackend(Backend):
             pass
 
     @disable_compiler_collective
+    @stage_on_cpu
     def all_to_all_single(self,
                           output,
                           input,
@@ -311,26 +454,32 @@ class TorchBackend(Backend):
                                                    async_op=async_op)
 
     @disable_compiler_collective
+    @stage_on_cpu
     def all_to_all(self, output_tensor_list, input_tensor_list, group=None, async_op=False):
         return torch.distributed.all_to_all(output_tensor_list, input_tensor_list, group=group, async_op=async_op)
 
     @disable_compiler_collective
+    @stage_on_cpu
     def send(self, tensor, dst, group=None, tag=0):
         return torch.distributed.send(tensor=tensor, dst=dst, group=group, tag=tag)
 
     @disable_compiler_collective
+    @stage_on_cpu
     def recv(self, tensor, src=None, group=None, tag=0):
         return torch.distributed.recv(tensor=tensor, src=src, group=group, tag=tag)
 
     @disable_compiler_collective
+    @stage_on_cpu(always_async=True, copy_from_cpu=False)
     def isend(self, tensor, dst, group=None, tag=0):
         return torch.distributed.isend(tensor=tensor, dst=dst, group=group, tag=tag)
 
     @disable_compiler_collective
+    @stage_on_cpu(always_async=True, copy_to_cpu=False)
     def irecv(self, tensor, src=None, group=None, tag=0):
         return torch.distributed.irecv(tensor=tensor, src=src, group=group, tag=tag)
 
     @disable_compiler_collective
+    @stage_on_cpu
     def gather(self, tensor, gather_list=None, dst=0, group=None, async_op=False):
         return torch.distributed.gather(tensor=tensor,
                                         gather_list=gather_list,
@@ -339,6 +488,7 @@ class TorchBackend(Backend):
                                         async_op=async_op)
 
     @disable_compiler_collective
+    @stage_on_cpu
     def scatter(self, tensor, scatter_list=None, src=0, group=None, async_op=False):
         return torch.distributed.scatter(tensor=tensor,
                                          scatter_list=scatter_list,

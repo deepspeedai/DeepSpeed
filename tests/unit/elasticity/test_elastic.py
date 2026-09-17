@@ -75,6 +75,30 @@ def test_invalid_world_size(ds_config):
             ds_config=ds_config, target_deepspeed_version=ds_version, world_size=128)
 
 
+def test_return_microbatch_without_world_size(ds_config, monkeypatch):
+    monkeypatch.delenv("WORLD_SIZE", raising=False)
+    with pytest.raises(deepspeed.elasticity.config.ElasticityConfigError):
+        deepspeed.elasticity.compute_elastic_config(ds_config=ds_config,
+                                                    target_deepspeed_version=ds_version,
+                                                    return_microbatch=True)
+
+
+def test_return_microbatch_world_size_from_env(ds_config, monkeypatch):
+    monkeypatch.setenv("WORLD_SIZE", "64")
+    final_batch_size, valid_gpus, mbsize = deepspeed.elasticity.compute_elastic_config(
+        ds_config=ds_config, target_deepspeed_version=ds_version, return_microbatch=True)
+    assert final_batch_size == 9792
+    assert mbsize == 17
+
+
+def test_return_microbatch_invalid_world_size_from_env(ds_config, monkeypatch):
+    monkeypatch.setenv("WORLD_SIZE", "128")
+    with pytest.raises(deepspeed.elasticity.config.ElasticityIncompatibleWorldSize):
+        deepspeed.elasticity.compute_elastic_config(ds_config=ds_config,
+                                                    target_deepspeed_version=ds_version,
+                                                    return_microbatch=True)
+
+
 def test_future_elastic_version(ds_config):
     ds_config['elasticity']['version'] = '0.3'
     with pytest.raises(deepspeed.elasticity.config.ElasticityError):
@@ -142,9 +166,21 @@ def test_proper_mbsz(ds_config):
     ds_config["elasticity"]["max_train_batch_size"] = 32
     ds_config["elasticity"]["micro_batch_sizes"] = [1, 2, 3, 7]
     ds_config["elasticity"]["min_gpus"] = 1
+    # A world size of 7 only used to be valid here because the batch size came
+    # back as 42, over this config's own limit of 32. At 4 the batch per GPU is
+    # 6, so 7 is still ruled out and 3 is still the largest micro batch that fits.
     final_batch_size, valid_gpus, mbsize = deepspeed.elasticity.compute_elastic_config(
-        ds_config=ds_config, target_deepspeed_version=ds_version, world_size=7)
+        ds_config=ds_config, target_deepspeed_version=ds_version, world_size=4)
     assert mbsize == 3
+
+
+def test_batch_size_within_max(ds_config):
+    ds_config["elasticity"]["max_train_batch_size"] = 100
+    ds_config["elasticity"]["micro_batch_sizes"] = [8, 10, 12]
+    ds_config["elasticity"]["min_gpus"] = 1
+    final_batch_size, valid_gpus = deepspeed.elasticity.compute_elastic_config(ds_config=ds_config,
+                                                                               target_deepspeed_version=ds_version)
+    assert final_batch_size <= 100
 
 
 class TestNonElasticBatchParams(DistributedTest):

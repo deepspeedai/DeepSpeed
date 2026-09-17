@@ -9,6 +9,7 @@ from typing import Type
 import torch
 
 from deepspeed.accelerator import get_accelerator
+from deepspeed.compat import get_annotations_from_namespace, get_annotations
 from .parameter_base import ParameterBase, ParametrizedList
 from ..inference_parameter import InferenceParameter
 
@@ -49,13 +50,12 @@ class LayerMetaclass(type):
 
     def __new__(cls, clsname, bases, attrs):
 
-        annotations = attrs.get("__annotations__", {})
+        annotations = get_annotations_from_namespace(attrs)
 
         for base in bases:
             # We'll pick up all annotations on any base classes. This will allow us to
             # to use inheritance to share common parameter groups in base classes.
-            if hasattr(base, "__annotations__"):
-                annotations.update(base.__annotations__)
+            annotations.update(get_annotations(base))
 
             if hasattr(base, MAPPING_KEY):
                 if MAPPING_KEY not in attrs:
@@ -74,7 +74,7 @@ class LayerMetaclass(type):
             all_deps = set()
             for name in all_names:
                 parameter_deps = [
-                    name for name, annotation in annotations[name].__annotations__.items()
+                    name for name, annotation in get_annotations(annotations[name]).items()
                     if issubclass(annotation, (torch.Tensor, ParametrizedList))
                 ]
 
@@ -97,18 +97,19 @@ class LayerMetaclass(type):
                         raise ValueError(
                             "Target parameter \"{}\" not found in this layer. Valid targets are {}".format(
                                 base_dependency, all_names))
-                    if dependency_attr not in annotations[base_dependency].__annotations__:
+                    if dependency_attr not in get_annotations(annotations[base_dependency]):
                         # This check is not universal (see below) if a single dependency is being
                         # mapped to by a single row.
                         raise ValueError(
                             "Target dependency \"{}\" not found on parameter \"{}\". Valid targets are {}".format(
-                                dependency_attr, base_dependency, annotations[base_dependency].__annotations__.keys()))
+                                dependency_attr, base_dependency,
+                                get_annotations(annotations[base_dependency]).keys()))
                     if target_name not in all_deps:
                         raise ValueError(
                             "Target dependency \"{}\" was targeted with multiple mapping rules.".format(target_name))
 
                     # If we've made it this far, the dependency definitely exists.
-                    actual_targets.append(annotations[base_dependency].__annotations__[dependency_attr])
+                    actual_targets.append(get_annotations(annotations[base_dependency])[dependency_attr])
 
                     all_deps.remove(target_name)
 
@@ -150,7 +151,7 @@ class LayerMetaclass(type):
         instance = cls.__new__(cls, *args, **kwargs)
         instance.__init__(*args, **kwargs)
 
-        for name, annotation in instance.__annotations__.items():
+        for name, annotation in get_annotations(instance).items():
             if issubclass(annotation, ParameterBase):
                 # TODO(cmikeh2): Do we want to make this a property
                 # It might also make sense to do this in the base class __init__

@@ -60,6 +60,40 @@ class ChooseModuleByRankModel(torch.nn.Module):
         return x, loss
 
 
+class MultiOutputMoEBlock(nn.Module):
+    """A simplified MoE block that returns multiple tensors.
+
+    This model mimics Qwen3 MoE which returns (hidden_states, router_logits).
+    When used with ZeRO3 leaf modules and autograd multithreading enabled,
+    this pattern previously caused race conditions in fetch_sub_module
+    because backward hooks could be triggered concurrently from multiple threads.
+
+    See: https://github.com/deepspeedai/DeepSpeed/issues/7824
+    """
+
+    def __init__(self, hidden_dim, num_experts=4):
+        super(MultiOutputMoEBlock, self).__init__()
+        self.num_experts = num_experts
+        self.gate = nn.Linear(hidden_dim, num_experts, bias=False)
+        self.experts = nn.ModuleList([nn.Linear(hidden_dim, hidden_dim, bias=False) for _ in range(num_experts)])
+        self.act = nn.ReLU()
+        self.cel = nn.CrossEntropyLoss()
+
+    def forward(self, x, y):
+        # Compute router logits - this tensor will have gradients flowing through it
+        router_logits = self.gate(x)
+
+        # Process through experts
+        for expert in self.experts:
+            x = expert(x)
+        x = self.act(x)
+        loss = self.cel(x, y)
+
+        # Return multiple tensors - this triggers concurrent backward hooks
+        # when autograd multithreading is enabled
+        return x, loss, router_logits
+
+
 class MLPBlock(nn.Module):
 
     def __init__(self, hidden_dim):
@@ -307,6 +341,78 @@ class TestSetZ3LeafModule(DistributedTest):
 
     def test_choose_module_by_rank(self):
         self._test_set_z3_leaf_modules(ChooseModuleByRankModel, True)
+
+    def test_multi_output_leaf_module_thread_safety(self):
+        """Test that leaf modules returning multiple tensors work correctly with autograd multithreading.
+
+        This tests the fix for https://github.com/deepspeedai/DeepSpeed/issues/7824
+        where MoE models (like Qwen3) returning multiple tensors caused race conditions
+        in fetch_sub_module when autograd executed backward hooks from multiple threads.
+        """
+        # Ensure autograd multithreading is enabled (this is the default, but be explicit)
+        torch.autograd.set_multithreading_enabled(True)
+
+        hidden_dim = 128
+        config_dict = self._create_zero_config(hidden_dim)
+
+        model = MultiOutputMoEBlock(hidden_dim, num_experts=4)
+
+        assert not z3_leaf_module(model)
+        set_z3_leaf_modules(model, [MultiOutputMoEBlock])
+        assert z3_leaf_module(model)
+
+        model, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config_dict)
+
+        data_loader = random_dataloader(model=model,
+                                        total_samples=10,
+                                        hidden_dim=hidden_dim,
+                                        device=model.device,
+                                        dtype=preferred_dtype())
+        dist.barrier()
+
+        # Run multiple iterations to increase chance of hitting race conditions
+        for batch in data_loader:
+            batch[0].requires_grad = True
+            # Model returns (output, loss, router_logits)
+            output, loss, router_logits = model(batch[0], batch[1])
+            # Include router_logits in the loss to ensure multiple backward paths
+            total_loss = loss + 0.01 * router_logits.mean()
+            model.backward(total_loss)
+            model.step()
+
+        model.destroy()
+
+    def test_multi_output_non_leaf_module_thread_safety(self):
+        """Ensure non-leaf modules returning multiple tensors remain thread-safe.
+
+        This covers the multi-output autograd multithreading case without marking the
+        module as a ZeRO leaf module.
+        """
+        torch.autograd.set_multithreading_enabled(True)
+
+        hidden_dim = 128
+        config_dict = self._create_zero_config(hidden_dim)
+
+        model = MultiOutputMoEBlock(hidden_dim, num_experts=4)
+        assert not z3_leaf_module(model)
+
+        model, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config_dict)
+
+        data_loader = random_dataloader(model=model,
+                                        total_samples=10,
+                                        hidden_dim=hidden_dim,
+                                        device=model.device,
+                                        dtype=preferred_dtype())
+        dist.barrier()
+
+        for batch in data_loader:
+            batch[0].requires_grad = True
+            output, loss, router_logits = model(batch[0], batch[1])
+            total_loss = loss + 0.01 * router_logits.mean()
+            model.backward(total_loss)
+            model.step()
+
+        model.destroy()
 
     def test_no_grad_input_error(self):
         try:

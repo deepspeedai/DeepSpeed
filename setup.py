@@ -39,13 +39,11 @@ except ImportError:
 
 from op_builder import get_default_compute_capabilities, OpBuilder
 from op_builder.all_ops import ALL_OPS, accelerator_name
-from op_builder.builder import installed_cuda_version
 
 from accelerator import get_accelerator
 
 # Fetch rocm state.
 is_rocm_pytorch = OpBuilder.is_rocm_pytorch()
-rocm_version = OpBuilder.installed_rocm_version()
 
 RED_START = '\033[31m'
 RED_END = '\033[0m'
@@ -80,42 +78,20 @@ def get_env_if_set(key, default: typing.Any = ""):
 
 install_requires = fetch_requirements('requirements/requirements.txt')
 extras_require = {
-    '1bit': [],  # add cupy based on cuda/rocm version
-    '1bit_mpi': fetch_requirements('requirements/requirements-1bit-mpi.txt'),
     'readthedocs': fetch_requirements('requirements/requirements-readthedocs.txt'),
     'dev': fetch_requirements('requirements/requirements-dev.txt'),
     'autotuning': fetch_requirements('requirements/requirements-autotuning.txt'),
     'autotuning_ml': fetch_requirements('requirements/requirements-autotuning-ml.txt'),
-    'sparse_attn': fetch_requirements('requirements/requirements-sparse_attn.txt'),
-    'sparse': fetch_requirements('requirements/requirements-sparse_pruning.txt'),
     'inf': fetch_requirements('requirements/requirements-inf.txt'),
     'sd': fetch_requirements('requirements/requirements-sd.txt'),
-    'triton': fetch_requirements('requirements/requirements-triton.txt'),
+    'triton': [],  # Retained for backward compatibility; PyTorch owns Triton.
     'deepcompile': fetch_requirements('requirements/requirements-deepcompile.txt'),
+    'torchembed': fetch_requirements('requirements/requirements-torchembed.txt'),
 }
 
 # Only install pynvml on nvidia gpus.
 if torch_available and get_accelerator().device_name() == 'cuda' and not is_rocm_pytorch:
     install_requires.append('nvidia-ml-py')
-
-# Add specific cupy version to both onebit extension variants.
-if torch_available and get_accelerator().device_name() == 'cuda':
-    cupy = None
-    if is_rocm_pytorch:
-        rocm_major, rocm_minor = rocm_version
-        # cupy support for rocm>5.0 is not available yet.
-        if (rocm_major == 5 and rocm_minor == 0) or rocm_major <= 4:
-            cupy = f"cupy-rocm-{rocm_major}-{rocm_minor}"
-    else:
-        cuda_major_ver, cuda_minor_ver = installed_cuda_version()
-        if (cuda_major_ver < 11) or ((cuda_major_ver == 11) and (cuda_minor_ver < 3)):
-            cupy = f"cupy-cuda{cuda_major_ver}{cuda_minor_ver}"
-        else:
-            cupy = f"cupy-cuda{cuda_major_ver}x"
-
-    if cupy:
-        extras_require['1bit'].append(cupy)
-        extras_require['1bit_mpi'].append(cupy)
 
 # Make an [all] extra that installs all needed dependencies.
 all_extras = set()
@@ -199,6 +175,21 @@ for op_name, builder in ALL_OPS.items():
         assert torch_available, f"Unable to pre-compile {op_name}, please first install torch"
         install_ops[op_name] = op_enabled(op_name)
         ext_modules.append(builder.builder())
+
+# async_io/gds load the pin_memory op's shared manager at runtime. If they are
+# precompiled but pin_memory is not, deployments without a compiler would hit a
+# runtime JIT build, so precompile pin_memory alongside them.
+pin_memory_dependents = [name for name in ("async_io", "gds") if install_ops.get(name)]
+if pin_memory_dependents and not install_ops.get("pin_memory"):
+    pin_memory_builder = ALL_OPS.get("pin_memory")
+    if pin_memory_builder is not None and pin_memory_builder.is_compatible():
+        assert torch_available, "Unable to pre-compile pin_memory, please first install torch"
+        install_ops["pin_memory"] = 1
+        ext_modules.append(pin_memory_builder.builder())
+    else:
+        raise RuntimeError(
+            f"Cannot pre-compile {', '.join(pin_memory_dependents)} without pin_memory, which is required at "
+            "runtime but is not compatible on this platform.")
 
 print(f'Install Ops={install_ops}')
 

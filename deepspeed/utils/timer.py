@@ -308,6 +308,9 @@ def trim_mean(data, trim_percent):
     # Account for edge case of empty list
     if len(data) == 0:
         return 0
-    data.sort()
+    # sorted(), not data.sort(): CommsLogger passes its stored latency/algbw/busbw
+    # lists straight in, and sorting them in place reorders each independently and
+    # destroys the index correspondence between them.
+    data = sorted(data)
     k = int(round(n * (trim_percent)))
     return mean(data[k:n - k])

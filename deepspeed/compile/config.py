@@ -3,7 +3,10 @@
 
 # DeepSpeed Team
 
+from typing import List, Optional, Literal
 from deepspeed.runtime.config_utils import DeepSpeedConfigModel
+
+PassName = Literal["z1", "z3", "autosp", "autotp"]
 
 
 class CompileConfig(DeepSpeedConfigModel):
@@ -19,10 +22,23 @@ class CompileConfig(DeepSpeedConfigModel):
     """ In free activation mode, activations no less than this threshold (in byte) are eagerly freed """
 
     offload_activation: bool = False
-    """ Turn on/off the activation offloading """
+    """ Move activations that the forward pass saves for the backward pass to pinned host memory,
+    and bring each one back shortly before the backward pass reads it. Only tensors of at least 5MB
+    with a fixed shape are considered, and only as many as the memory budget requires. Runs in place
+    of the prefetch/selective-gather passes and is mutually exclusive with offload_parameters and
+    offload_opt_states. """
+
+    offload_activation_pin_memory: bool = True
+    """ Pin host buffers used for DeepCompile activation offload. Required for
+    full-bandwidth async GPU<->CPU copies. Disable only under tight memlock
+    limits (ulimit -l). Defaults to True to match ZeRO offload pin_memory. """
 
     offload_opt_states: bool = False
-    """ Turn on/off the optimizer states offloading """
+    """ Offload optimizer states (fp32 master parameters and Adam moments) to pinned host memory
+    during forward/backward and reload them for the optimizer step, keeping resident whatever the
+    memory budget allows. Runs in place of the prefetch/selective-gather passes and is mutually
+    exclusive with offload_parameters. Designed for gradient_accumulation_steps=1: the compiled
+    graph runs once per micro-batch, so accumulation repeats the whole offload/reload cycle. """
 
     double_buffer: bool = True
     """ Turn on/off the double buffering """
@@ -53,3 +69,6 @@ class CompileConfig(DeepSpeedConfigModel):
 
     keep_all_input_tensors: bool = False
     """ Keep real values for all input tensors in InputStorage instead of using dummy values """
+
+    passes: Optional[List[PassName]] = None
+    """ Composes different optimizations. """

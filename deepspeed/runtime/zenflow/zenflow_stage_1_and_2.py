@@ -7,7 +7,7 @@ import torch
 from deepspeed import comm as dist
 
 from deepspeed.runtime.zero.stage_1_and_2 import DeepSpeedZeroOptimizer
-from deepspeed.runtime.zenflow.zenflow_utils import start_optimizer_process
+from deepspeed.runtime.zenflow.zenflow_utils import start_optimizer_process, ZENFLOW_OPTIMIZER_WAIT_POLL_SECONDS
 from deepspeed.runtime.utils import (see_memory_usage)
 from deepspeed.ops.adam import ZenFlowSelectiveAdamW
 
@@ -42,6 +42,12 @@ SELECTIVE_OPTIMIZER_TIMERS = [
     SELECTIVE_OPTIMIZER_UPDATE_TIMER, SELECTIVE_OPTIMIZER_PROCESS_TIMER, SELECTIVE_OPTIMIZER_STEP_TIMER,
     SELECTIVE_OPTIMIZER_SYNC_TIMER
 ]
+
+
+def _num_selected_columns(num_columns, topk_ratio):
+    if num_columns == 0:
+        return 0
+    return max(1, int(num_columns * topk_ratio))
 
 
 class ZenFlowZeroOptimizer(DeepSpeedZeroOptimizer):
@@ -84,6 +90,23 @@ class ZenFlowZeroOptimizer(DeepSpeedZeroOptimizer):
             return ZenFlowZeroOptimizerParallel
         else:
             return ZenFlowZeroOptimizerSequential
+
+    def _unpin_offload_buffers(self):
+        super()._unpin_offload_buffers()
+        if not (self.cpu_offload and self.cpu_offload_pin_memory):
+            return
+        # ZenFlow additionally pins per-parameter selective-optimizer state and, for the
+        # parallel variant, per-partition overlap-grad buffers on the host.
+        accelerator = get_accelerator()
+        for group in self.bit16_groups:
+            for param in group:
+                for attr in ('exp_avg_cpu_data', 'exp_avg_sq_cpu_data'):
+                    buffer = getattr(param, attr, None)
+                    if buffer is not None:
+                        accelerator.unpin_memory(buffer)
+        for fp32_partition in self.single_partition_of_fp32_groups:
+            for buffer in getattr(fp32_partition, 'overlap_grad', None) or []:
+                accelerator.unpin_memory(buffer)
 
     def _configure_zenflow(self, zenflow_config):
         """
@@ -194,7 +217,7 @@ class ZenFlowZeroOptimizer(DeepSpeedZeroOptimizer):
                 num_row, num_col = param.shape if len(param.shape) == 2 else (1, param.shape[0])
                 start_column = 0 if not offset else int((offset - 1) / num_row) + 1
                 end_column = int((offset + numel) / num_row)
-                num_select = int(self.topk_ratio * (end_column - start_column))
+                num_select = _num_selected_columns(end_column - start_column, self.topk_ratio)
 
                 if partition_id == rank:
 
@@ -255,9 +278,6 @@ class ZenFlowZeroOptimizer(DeepSpeedZeroOptimizer):
         """
         Process gradients for selected columns in FP32 groups
 
-        Args:
-            param: The parameter to process
-            param_id: ID of the parameter
         """
 
         curr_size = 0
@@ -306,7 +326,10 @@ class ZenFlowZeroOptimizer(DeepSpeedZeroOptimizer):
                 num_row, num_col = param.shape if len(param.shape) == 2 else (1, param.shape[0])
                 start_column = 0 if not offset else int((offset - 1) / num_row) + 1
                 end_column = int((offset + numel) / num_row)
-                num_select = int(self.topk_ratio * (end_column - start_column)) if len(param.shape) == 2 else numel
+                if len(param.shape) == 2:
+                    num_select = _num_selected_columns(end_column - start_column, self.topk_ratio)
+                else:
+                    num_select = numel
                 grad_size = num_select * num_row
 
                 if partition_id == rank:
@@ -411,7 +434,7 @@ class ZenFlowZeroOptimizer(DeepSpeedZeroOptimizer):
 
                 self.param_id_sum_buffer_offset[param_id] = []
 
-        if not self.is_gradient_accumulation_boundary:
+        if not self.is_gradient_accumulation_boundary():
             self.selective_optimizer.group_step(group_to_paramlist)
         else:
             self.selective_optimizer.temp_copy_param(group_to_paramlist)
@@ -468,8 +491,7 @@ class ZenFlowZeroOptimizer(DeepSpeedZeroOptimizer):
                     partition_ids_w_offsets.append((partition_id, offset))
                 partition_ids_w_offsets.sort(key=lambda t: t[1])
 
-                num_row, num_col = param.shape if len(param.shape) == 2 else (1, param.shape[0])
-                curr_column_size += int(num_col * self.topk_ratio) if num_row != 1 else 0
+                num_row, _ = param.shape if len(param.shape) == 2 else (1, param.shape[0])
 
                 # Calculate rank and offsets for grad slices
                 for idx in range(len(partition_ids_w_offsets)):
@@ -483,6 +505,15 @@ class ZenFlowZeroOptimizer(DeepSpeedZeroOptimizer):
                         # Set numel to next partition's offset
                         numel = partition_ids_w_offsets[idx + 1][1] - offset
 
+                    if len(param.shape) == 2:
+                        start_column = 0 if not offset else int((offset - 1) / num_row) + 1
+                        end_column = int((offset + numel) / num_row)
+                        num_select = _num_selected_columns(end_column - start_column, self.topk_ratio)
+                        curr_column_size += num_select
+                        curr_selected_reduce_size += num_select * num_row
+                    else:
+                        curr_selected_reduce_size += numel
+
                     # Merge bucket ranges if they belong to the same rank
                     if partition_id == prev_id and process_group == prev_process_group:
                         prev_pid, prev_size, prev_numel = rank_and_offsets[-1]
@@ -491,7 +522,6 @@ class ZenFlowZeroOptimizer(DeepSpeedZeroOptimizer):
                         rank_and_offsets.append((partition_id, curr_size, numel))
                         real_dp_process_group.append(process_group)
                     curr_size += numel
-                    curr_selected_reduce_size += int(numel * self.topk_ratio) if num_row != 1 else numel
 
                     prev_id, prev_process_group = partition_id, process_group
 
@@ -538,15 +568,15 @@ class ZenFlowZeroOptimizer(DeepSpeedZeroOptimizer):
                 self._process_selected_fp32_groups_grad(tensor, curr_selected_reduce_size, communication_data_type)
                 self.timers(SELECTIVE_OPTIMIZER_PROCESS_TIMER).stop()
 
-    def backward(self, loss, retain_graph=False):
-        """
-        :attr:`backward` performs the following steps:
+    def backward_prologue(self):
+        """Prepare ZenFlow's per-microbatch state before the backward pass.
 
-        1. fp32_loss = loss.float()
-        2. scaled_loss = fp32_loss*loss_scale
-        3. scaled_loss.backward(), which accumulates scaled gradients into the ``.grad`` attributes of the model's fp16 leaves
+        Called by the engine at the start of each backward. Advances the
+        micro-step counter and, on an auto-update step, refreshes the
+        update-interval bookkeeping. At a selection boundary, resyncs the fp32
+        master partition from the bit16 weights and clears the selective
+        optimizer's moments so the next top-k update starts clean.
         """
-        self.backward_prologue()
         self.micro_step += 1
 
         if self.auto_update:
@@ -564,16 +594,6 @@ class ZenFlowZeroOptimizer(DeepSpeedZeroOptimizer):
             self.sync_fp32_param_from_gpu()
             self.selective_optimizer.clear_selected_mv()
             self.timers(SELECTIVE_OPTIMIZER_SYNC_TIMER).stop()
-
-        self.enter_backward()
-        if self.custom_loss_scaler:
-            scaled_loss = self.external_loss_scale * loss
-            scaled_loss.backward(retain_graph=retain_graph)
-        else:
-            self.loss_scaler.backward(loss.float(), retain_graph=retain_graph)
-
-        self.backward_epilogue()
-        self.exit_backward()
 
     def log_selective_optimizer_timers(self):
         self.timers.log(SELECTIVE_OPTIMIZER_TIMERS)
@@ -675,9 +695,23 @@ class ZenFlowZeroOptimizerParallel(ZenFlowZeroOptimizer):
         dest_tensor.copy_(src_tensor, non_blocking=True)
         param.grad = None  #offload only
 
+    def _wait_for_optimizer_process(self):
+        """Block until the optimizer process signals the submitted step is done.
+
+        The wait wakes up periodically to check the optimizer process is still alive: if it died
+        mid-step (e.g. an OOM or assertion in the native worker after it signalled ready), fail
+        loudly here instead of blocking this rank -- and the whole distributed job -- forever on
+        a semaphore the dead process will never post."""
+        while not self.zf_op.zenflow_adam_wait(self.zf_ctrl.data_ptr(), ZENFLOW_OPTIMIZER_WAIT_POLL_SECONDS):
+            proc = getattr(self, 'process', None)
+            if proc is not None and not proc.is_alive():
+                raise RuntimeError("ZenFlow optimizer process exited during a step (likely an error or OOM in "
+                                   "the optimizer process -- check its traceback above) instead of completing "
+                                   "the update. Aborting to avoid hanging distributed training.")
+
     def wait_last_update_and_copy(self):
 
-        if not hasattr(self, 'parent_conn'):
+        if not getattr(self, 'process_optimizer_established', False):
             return
 
         if self.micro_step + 1 > self.full_warm_up_rounds and self.first_update_round_after_warmup:
@@ -685,8 +719,7 @@ class ZenFlowZeroOptimizerParallel(ZenFlowZeroOptimizer):
             return
 
         self.timers(OPTIMIZER_RECV_PARAMS_TIMER).start()
-        msg = self.parent_conn.recv()
-        assert msg["type"] == "done", "Optimizer process did not finish stepping correctly."
+        self._wait_for_optimizer_process()
         self.timers(OPTIMIZER_RECV_PARAMS_TIMER).stop()
 
         for i, group in enumerate(self.bit16_groups):
@@ -694,7 +727,10 @@ class ZenFlowZeroOptimizerParallel(ZenFlowZeroOptimizer):
             bit16_partitions = self.parallel_partitioned_bit16_groups[i]
             fp32_partition = self.optimizer.param_groups[i]['params'][0].stale_param.data
             self.timers(OPTIMIZER_TRANSMIT_TIMER).start()
-            bit16_partitions[partition_id].data.copy_(fp32_partition.to(get_accelerator().current_device_name()).data)
+            # copy_ moves CPU->GPU and casts fp32->bit16 in a single step. Going through an
+            # explicit .to(device) first would materialize the whole fp32 partition on the GPU
+            # (a transient ~2x-bit16 spike, e.g. ~3GB for a 0.75B-param partition) for no benefit.
+            bit16_partitions[partition_id].data.copy_(fp32_partition)
             self.timers(OPTIMIZER_TRANSMIT_TIMER).stop()
 
         see_memory_usage('After optimizer before all-gather')
@@ -725,27 +761,21 @@ class ZenFlowZeroOptimizerParallel(ZenFlowZeroOptimizer):
         if not self.process_optimizer_established:
             self.start_optimizer_process()
 
-        group_infos = []
+        lr, beta1, beta2, eps, weight_decay, bias_correction = [], [], [], [], [], []
         for group_no, group in enumerate(self.bit16_groups):
             single_grad_partition = self.single_partition_of_fp32_groups[group_no].overlap_grad[now_state]
             self.unscale_and_clip_grads([single_grad_partition], scaled_global_grad_norm)
 
-            group_info = {
-                "lr": self.optimizer.param_groups[group_no]["lr"],
-                "betas": self.optimizer.param_groups[group_no]["betas"],
-                "eps": self.optimizer.param_groups[group_no]["eps"],
-                "weight_decay": self.optimizer.param_groups[group_no]["weight_decay"],
-                "bias_correction": self.optimizer.param_groups[group_no]["bias_correction"],
-            }
+            pg = self.optimizer.param_groups[group_no]
+            lr.append(pg["lr"])
+            beta1.append(pg["betas"][0])
+            beta2.append(pg["betas"][1])
+            eps.append(pg["eps"])
+            weight_decay.append(pg["weight_decay"])
+            bias_correction.append(1 if pg["bias_correction"] else 0)
 
-            group_infos.append(group_info)
-
-        self.parent_conn.send({
-            "type": "step",
-            "now_state": now_state,
-            "micro_step": self.micro_step,
-            "group_infos": group_infos
-        })
+        self.zf_op.zenflow_adam_submit(self.zf_ctrl.data_ptr(), now_state, self.micro_step + 1, lr, beta1, beta2, eps,
+                                       weight_decay, bias_correction)
 
     def step(self, closure=None):
         """

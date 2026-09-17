@@ -3,7 +3,7 @@
 
 # DeepSpeed Team
 
-from typing import Tuple, List
+from typing import Dict, Optional, Tuple, List, Set
 
 import torch
 from torch.fx import GraphModule, Graph, Node
@@ -75,20 +75,33 @@ def _recompute_param_aliases(joint_graph: Graph, param_indices: List[Tuple[int, 
             any([(isinstance(a, Node) and (a in ds_param_inputs or a in recomputed_nodes)) for a in node.args]):
             node.meta["recompute"] = CheckpointPolicy.MUST_RECOMPUTE
             recomputed_nodes.add(node)
-        else:
-            # If checkpointing is not enabled for this graph, assume all
-            # activations required by the backward pass should be saved.
-            node.meta.setdefault("recompute", CheckpointPolicy.MUST_SAVE)
+        # Leave non-parameter activations to the default min-cut policy. Forcing
+        # every other node to MUST_SAVE prevents safe activation rematerialization
+        # and can make long-sequence compiled backward graphs OOM.
+
+
+# How many of a forward graph's outputs the caller receives, per dynamo frame. Passes that rewrite
+# the forward output need it to tell those values apart from the ones saved for the backward pass,
+# and the partitioner is the only place that knows the split.
+_num_fwd_outputs_by_frame: Dict[int, int] = {}
+
+
+def get_num_fwd_outputs(frame_id: int) -> Optional[int]:
+    return _num_fwd_outputs_by_frame.get(frame_id)
 
 
 def get_wrapped_partitioner(
     z3_partition: bool,
     param_indices: List[Tuple[int, int, torch.Size]],
     partition_fn,
+    frame_id: int,
+    frames_partitioned: Set[int],
 ):
 
     def partition_recompute_ds_params(joint_module: GraphModule, _joint_inputs, *, num_fwd_outputs,
                                       **kwargs) -> Tuple[GraphModule, GraphModule]:
+        frames_partitioned.add(frame_id)
+        _num_fwd_outputs_by_frame[frame_id] = num_fwd_outputs
         if z3_partition:
             _recompute_param_aliases(joint_module.graph, param_indices)
         return partition_fn(joint_module, _joint_inputs, num_fwd_outputs=num_fwd_outputs, **kwargs)

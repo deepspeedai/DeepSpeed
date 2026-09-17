@@ -30,7 +30,6 @@ class CUDARMSPreNorm(CUDARMSNormBase):
             x_res (torch.Tensor): Input residual.
             y_hid (torch.Tensor): Input hidden states.
             gamma (torch.Tensor): Gamma tensor.
-            beta (torch.Tensor): Beta tensor.
 
         Returns:
             output (torch.Tensor): Output tensor.

@@ -16,11 +16,6 @@ on:
       - master
 
   pull_request:
-    paths-ignore:
-      - 'docs/**'
-      - 'blogs/**'
-      - 'deepspeed/inference/v2/**'
-      - 'tests/unit/inference/v2/**'
     branches:
       - master
 
@@ -29,9 +24,32 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  check-paths:
+    name: aws-accelerate / check paths
+    runs-on: ubuntu-latest
+    outputs:
+      should_run: ${{ steps.filter.outputs.run_tests }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dorny/paths-filter@v4
+        id: filter
+        with:
+          filters: |
+            run_tests:
+              - '**'
+              - '!docs/**'
+              - '!blogs/**'
+              - '!*.md'
+              - '!version.txt'
+              - '!deepspeed/inference/v2/**'
+              - '!tests/unit/inference/v2/**'
+
   accelerate-tests:
-    name: Accelerate Integration Tests
+    name: aws-accelerate / accelerate integration tests
+    needs: check-paths
+    if: needs.check-paths.outputs.should_run == 'true'
     runs-on: [self-hosted, gpu-ci, gpu-l40s, l40s-1gpu, aws]
+    timeout-minutes: 60
 
     container:
       image: nvidia/cuda:12.6.3-devel-ubuntu22.04

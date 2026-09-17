@@ -24,7 +24,7 @@ __global__ void Transpose_Kernel(const T* inp, T* out, int row_width, int col_wi
     int row_stride = rows_trans / ((rows_trans * cols_trans + THREADS - 1) / THREADS);
 
     for (int k = 0; k < rows_trans; k += row_stride)
-        data_block[(k + r) * cols_trans + c] = inp[(i + k) * row_width + j];
+        data_block[(k + r) * (cols_trans + 1) + c] = inp[(i + k) * row_width + j];
 
     __syncthreads();
 
@@ -32,7 +32,7 @@ __global__ void Transpose_Kernel(const T* inp, T* out, int row_width, int col_wi
     j = blockIdx.x / m * cols_trans + c;
 
     for (int k = 0; k < rows_trans; k += row_stride)
-        out[(i + k) * col_width + j] = data_block[c * cols_trans + r + k];
+        out[(i + k) * col_width + j] = data_block[c * (cols_trans + 1) + r + k];
 }
 
 template <>

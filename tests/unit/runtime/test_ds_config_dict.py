@@ -20,7 +20,7 @@ import deepspeed.comm as dist
 
 # A test on its own
 import deepspeed
-from deepspeed.runtime.config import DeepSpeedConfig
+from deepspeed.runtime.config import DeepSpeedConfig, DeepSpeedConfigError
 from deepspeed.runtime.precision_config import get_bfloat16_config
 
 
@@ -135,6 +135,66 @@ def test_temp_config_json(tmpdir):
     assert 'train_batch_size' in config_json
 
 
+@pytest.mark.parametrize("value,expected", [("mean", "mean"), ("SUM", "sum")])
+def test_gradient_allreduce_op(value, expected):
+    config = DeepSpeedConfig({
+        "train_batch_size": 1,
+        "gradient_allreduce_op": value,
+    })
+    assert config.gradient_allreduce_op == expected
+
+
+def test_gradient_allreduce_op_default():
+    config = DeepSpeedConfig({"train_batch_size": 1})
+    assert config.gradient_allreduce_op == "mean"
+
+
+def test_invalid_gradient_allreduce_op():
+    with pytest.raises(ValueError, match="Invalid gradient_allreduce_op"):
+        DeepSpeedConfig({
+            "train_batch_size": 1,
+            "gradient_allreduce_op": "max",
+        })
+
+
+def test_sum_gradient_allreduce_rejects_zero3():
+    with pytest.raises(ValueError, match="not supported with ZeRO stage 3"):
+        DeepSpeedConfig({
+            "train_batch_size": 1,
+            "gradient_allreduce_op": "sum",
+            "zero_optimization": {
+                "stage": 3,
+            },
+        })
+
+
+def test_sum_gradient_allreduce_rejects_zenflow():
+    with pytest.raises(ValueError, match="not supported with ZenFlow"):
+        DeepSpeedConfig({
+            "train_batch_size": 1,
+            "gradient_allreduce_op": "sum",
+            "zero_optimization": {
+                "stage": 2,
+                "zenflow": {},
+            },
+        })
+
+
+@pytest.mark.parametrize("zero_stage", [1, 2])
+def test_sum_gradient_allreduce_rejects_deepcompile(zero_stage):
+    with pytest.raises(ValueError, match="not supported with DeepCompile"):
+        DeepSpeedConfig({
+            "train_batch_size": 1,
+            "gradient_allreduce_op": "sum",
+            "zero_optimization": {
+                "stage": zero_stage,
+            },
+            "compile": {
+                "deepcompile": True,
+            },
+        })
+
+
 @pytest.mark.parametrize("gather_weights_key",
                          ["stage3_gather_16bit_weights_on_model_save", "stage3_gather_fp16_weights_on_model_save"])
 def test_gather_16bit_params_on_model_save(gather_weights_key):
@@ -154,6 +214,208 @@ def test_get_bfloat16_enabled(bf16_key):
         },
     }
     assert get_bfloat16_config(cfg).enabled == True
+
+
+@pytest.mark.parametrize("config_key", ["quantize_training", "eigenvalue"])
+@pytest.mark.parametrize("value", [None, {}, False, "auto"])
+def test_moq_config_is_rejected(config_key, value):
+    config_dict = {
+        "train_micro_batch_size_per_gpu": 1,
+        config_key: value,
+    }
+
+    with pytest.raises(DeepSpeedConfigError, match=config_key):
+        DeepSpeedConfig(config_dict)
+
+
+def test_compression_training_config_is_rejected():
+    config_dict = {
+        "train_micro_batch_size_per_gpu": 1,
+        "optimizer": {
+            "type": "Adam",
+            "params": {
+                "lr": 1e-4,
+            },
+        },
+        "compression_training": {
+            "weight_quantization": {
+                "shared_parameters": {
+                    "enabled": True,
+                },
+                "different_groups": {},
+            }
+        },
+    }
+
+    with pytest.raises(DeepSpeedConfigError, match="compression_training"):
+        DeepSpeedConfig(config_dict)
+
+
+def test_nebula_config_is_rejected():
+    config_dict = {
+        "train_micro_batch_size_per_gpu": 1,
+        "nebula": {
+            "enabled": True,
+        },
+    }
+
+    with pytest.raises(DeepSpeedConfigError, match="Nebula"):
+        DeepSpeedConfig(config_dict)
+
+
+@pytest.mark.parametrize("amp_config",
+                         [None, {}, False, "auto", {
+                             "enabled": False
+                         }, {
+                             "enabled": True,
+                             "opt_level": "O1"
+                         }])
+def test_apex_amp_config_is_rejected(amp_config):
+    config_dict = {
+        "train_micro_batch_size_per_gpu": 1,
+        "amp": amp_config,
+    }
+
+    with pytest.raises(DeepSpeedConfigError, match="Apex AMP"):
+        DeepSpeedConfig(config_dict)
+
+
+def test_sparse_attention_config_is_rejected():
+    config_dict = {
+        "train_micro_batch_size_per_gpu": 1,
+        "sparse_attention": {
+            "mode": "fixed",
+        },
+    }
+
+    with pytest.raises(DeepSpeedConfigError, match="Sparse Attention"):
+        DeepSpeedConfig(config_dict)
+
+
+def test_mics_zero_config_is_rejected():
+    config_dict = {
+        "train_micro_batch_size_per_gpu": 1,
+        "zero_optimization": {
+            "stage": 3,
+            "mics_shard_size": 2,
+        },
+    }
+
+    with pytest.raises(DeepSpeedConfigError, match="MiCS"):
+        DeepSpeedConfig(config_dict)
+
+
+def test_sparse_gradients_config_is_rejected():
+    config_dict = {
+        "train_micro_batch_size_per_gpu": 1,
+        "sparse_gradients": True,
+    }
+
+    with pytest.raises(DeepSpeedConfigError, match="sparse_gradients"):
+        DeepSpeedConfig(config_dict)
+
+
+@pytest.mark.parametrize("zero_stage", [0, 3])
+@pytest.mark.parametrize("loco_config", [None, {}, {"err_beta": 0.8, "reset_T": 1024}, "auto"])
+def test_loco_zero_config_is_rejected(zero_stage, loco_config):
+    config_dict = {
+        "train_micro_batch_size_per_gpu": 1,
+        "zero_optimization": {
+            "stage": zero_stage,
+            "zeropp_loco_param": loco_config,
+        },
+    }
+
+    with pytest.raises(DeepSpeedConfigError, match="zeropp_loco_param"):
+        DeepSpeedConfig(config_dict)
+
+
+class TestLoCoConfigRejected(DistributedTest):
+    world_size = 1
+
+    def test_initialize(self):
+        config_dict = {
+            "train_micro_batch_size_per_gpu": 1,
+            "zero_optimization": {
+                "stage": 3,
+                "zero_quantized_gradients": True,
+                "zeropp_loco_param": {
+                    "err_beta": 0.8,
+                    "reset_T": 1024,
+                },
+            },
+        }
+        model = SimpleModel(8).to(get_accelerator().current_device_name())
+
+        with pytest.raises(DeepSpeedConfigError, match="zeropp_loco_param"):
+            deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config_dict)
+
+
+def test_compression_helper_shim_reexports_module_utils():
+    with pytest.warns(FutureWarning, match="deepspeed.compression.helper"):
+        from deepspeed.compression.helper import recursive_getattr, recursive_setattr
+    from deepspeed.utils.module_utils import recursive_getattr as rg
+    from deepspeed.utils.module_utils import recursive_setattr as rs
+
+    assert recursive_getattr is rg
+    assert recursive_setattr is rs
+
+
+def test_max_grad_norm_leaves_caller_config_untouched():
+    # The dict handed to DeepSpeedConfig belongs to the caller and may be reused after
+    # initialization, so parsing it must not write back into it.
+    config_dict = {
+        "train_micro_batch_size_per_gpu": 1,
+        "optimizer": {
+            "type": "AdamW",
+            "params": {
+                "lr": 1e-3,
+                "max_grad_norm": 1.0,
+            },
+        },
+    }
+
+    DeepSpeedConfig(config_dict)
+
+    assert config_dict["optimizer"]["params"]["max_grad_norm"] == 1.0
+
+
+def test_elasticity_leaves_caller_config_untouched():
+    # Same contract as above on the elasticity path: the resolved batch sizes belong in
+    # the copy handed to _initialize_params, not in the caller's dict.
+    #
+    # ignore_non_elastic_batch_info is deliberately left out. With it on, the batch-key
+    # guard is skipped and the second parse below cannot fail, so the test would pass
+    # whether or not the write-back is there.
+    config_dict = {
+        "elasticity": {
+            "enabled": True,
+            "max_train_batch_size": 4,
+            "micro_batch_sizes": [1, 2],
+            "min_gpus": 1,
+            "max_gpus": 4,
+            "min_time": 0,
+            "version": 0.1,
+        }
+    }
+    keys_before = set(config_dict)
+
+    ds_config = DeepSpeedConfig(config_dict)
+
+    assert set(config_dict) == keys_before
+    # The resolved values still reach the parsed config.
+    assert ds_config.train_batch_size == 4
+    assert ds_config.train_micro_batch_size_per_gpu == 2
+    assert ds_config.gradient_accumulation_steps == 2
+
+    # The write-back made the same dict unparsable a second time: the injected keys
+    # trip the guard that rejects batch parameters under elasticity, and its message
+    # names three keys the caller never wrote.
+    second = DeepSpeedConfig(config_dict)
+
+    assert second.train_batch_size == ds_config.train_batch_size
+    assert second.train_micro_batch_size_per_gpu == ds_config.train_micro_batch_size_per_gpu
+    assert second.gradient_accumulation_steps == ds_config.gradient_accumulation_steps
 
 
 class TestConfigLoad(DistributedTest):

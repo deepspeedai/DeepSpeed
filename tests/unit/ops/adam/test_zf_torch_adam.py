@@ -185,3 +185,99 @@ def test_against_torch_adamw(Opt):
     param = make_param(Opt, (2, 4), torch.arange(4))
     opt = Opt([param], lr=1e-3, offload=False)
     _compare_with_torch_adamw(param, opt)
+
+
+class _FakeNvmeSwapper:
+    """Minimal stand-in for the partitioned-param NVMe swapper.
+
+    It mimics the contract the stage3 selective optimizer relies on: an offloaded
+    partition leaves ``ds_tensor.data`` as a 0-dim placeholder, swap-in restores the
+    stored partition, and swap-out persists it and restores the placeholder. This lets
+    us exercise the swap-in/update/swap-out path (issue #7686) without real NVMe.
+    """
+
+    def __init__(self):
+        self.storage = {}
+        self.swap_in_calls = 0
+        self.swap_out_calls = 0
+
+    def _placeholder(self, param):
+        return torch.tensor(1).to(param.ds_tensor.dtype)
+
+    def offload(self, param):
+        self.storage[param.ds_id] = param.ds_tensor.data.clone()
+        param.ds_tensor.data = self._placeholder(param)
+
+    def swap_in(self, params, async_op=False):
+        for param in params:
+            param.ds_tensor.data = self.storage[param.ds_id]
+        self.swap_in_calls += 1
+
+    def swap_out_and_release(self, params, async_op=False):
+        for param in params:
+            self.storage[param.ds_id] = param.ds_tensor.data.clone()
+            param.ds_tensor.data = self._placeholder(param)
+        self.swap_out_calls += 1
+
+    def remove_partition_and_release_buffers(self, params):
+        for param in params:
+            param.ds_tensor.data = self._placeholder(param)
+
+
+def _offloaded_stage3_param(selected_indices):
+    param = make_param(ZenFlowSelectiveAdamW_stage3, (4, 6), selected_indices)
+    param.ds_id = 0
+    swapper = _FakeNvmeSwapper()
+    param.nvme_swapper = swapper
+    swapper.offload(param)
+    assert param.ds_tensor.data.dim() == 0
+    return param, swapper
+
+
+def test_group_step_nvme_offloaded_partition():
+    # Regression test for issue #7686: group_step must not crash when the partition is
+    # offloaded to NVMe (ds_tensor.data is a 0-dim placeholder).
+    param, swapper = _offloaded_stage3_param(torch.tensor([0, 1, 3]))
+    before = swapper.storage[param.ds_id].clone()
+
+    opt = ZenFlowSelectiveAdamW_stage3([param], lr=1e-3, offload=False)
+    opt.group_step([param])
+
+    assert swapper.swap_in_calls == 1
+    assert swapper.swap_out_calls == 1
+    assert param.ds_tensor.data.dim() == 0, "partition should be re-offloaded after the step"
+    assert param.selected_grad is None
+    after = swapper.storage[param.ds_id]
+    assert (before - after).abs().sum().item() > 1e-5, "offloaded partition was not updated"
+
+
+def test_step_nvme_offloaded_partition():
+    # The full step() entry point must also handle an offloaded partition.
+    param, swapper = _offloaded_stage3_param(torch.tensor([0, 2, 4]))
+    before = swapper.storage[param.ds_id].clone()
+
+    opt = ZenFlowSelectiveAdamW_stage3([param], lr=1e-3, offload=False)
+    opt.step()
+
+    assert swapper.swap_in_calls == 1
+    assert swapper.swap_out_calls == 1
+    assert param.ds_tensor.data.dim() == 0
+    assert param.temp_selected_param is None
+    assert param.selected_grad is None
+    after = swapper.storage[param.ds_id]
+    assert (before - after).abs().sum().item() > 1e-5
+
+
+def test_temp_copy_param_nvme_offloaded_partition():
+    # temp_copy_param only reads the partition, so it must release it without writing back.
+    param, swapper = _offloaded_stage3_param(torch.tensor([1, 2, 5]))
+    stored = swapper.storage[param.ds_id].clone()
+
+    opt = ZenFlowSelectiveAdamW_stage3([param], lr=1e-3, offload=False)
+    opt.temp_copy_param([param])
+
+    assert swapper.swap_in_calls == 1
+    assert swapper.swap_out_calls == 0, "read-only snapshot must not write back to NVMe"
+    assert param.ds_tensor.data.dim() == 0
+    assert param.temp_selected_param is not None
+    assert (stored - swapper.storage[param.ds_id]).abs().sum().item() == 0

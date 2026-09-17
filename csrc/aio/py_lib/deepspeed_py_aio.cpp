@@ -26,6 +26,7 @@ Functionality for swapping optimizer tensors to/from (NVMe) storage devices.
 #include <string>
 #include <vector>
 
+#include "deepspeed_aio_op_desc.h"
 #include "deepspeed_py_aio.h"
 
 using namespace std;
@@ -49,6 +50,7 @@ int deepspeed_py_aio_write(const torch::Tensor& buffer,
 
     const auto fd = open_file(filename, false);
     if (fd == -1) { return -1; }
+    warn_consumer_ssd_writes();
 
     auto write_buffer = (char*)buffer.data_ptr();
     const auto num_write_bytes = static_cast<int64_t>(buffer.nbytes());

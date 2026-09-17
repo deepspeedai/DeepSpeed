@@ -12,8 +12,6 @@
 #include <stdio.h>
 #include <vector>
 
-using namespace std;
-
 void Padding_8_FP6_To_8_Bytes(unsigned char Padded_FP6[],
                               unsigned char* FP6_Array)  // padding 0 to the lowerest bit location
 {
@@ -48,8 +46,8 @@ unsigned char Extract_4_Bits_From_2_PaddedFP6(
 }
 
 // dealing with 4 1*8 blocks of FP6
-void Assign_32_FP6_To_4_Thread(vector<unsigned char> Seg_2bit[],
-                               vector<unsigned char> Seg_4bit[],
+void Assign_32_FP6_To_4_Thread(std::vector<unsigned char> Seg_2bit[],
+                               std::vector<unsigned char> Seg_4bit[],
                                unsigned char* PTR_1,
                                unsigned char* PTR_2,
                                unsigned char* PTR_3,
@@ -154,8 +152,8 @@ void weight_matrix_prepacking(int* FP6Weights, size_t M, size_t K)
     unsigned char* Weight_2bit = Weight_6bit;
     unsigned char* Weight_4bit = Weight_6bit + M * K * 2 / 8;
     //
-    vector<unsigned char> A_Segment_2bit[32];
-    vector<unsigned char> A_Segment_4bit[32];
+    std::vector<unsigned char> A_Segment_2bit[32];
+    std::vector<unsigned char> A_Segment_4bit[32];
     //
     size_t BytesPerRow = K * 6 / 8;
     // Pass-1: (1) 2+4 split; (2) assign weights to 32 threads.

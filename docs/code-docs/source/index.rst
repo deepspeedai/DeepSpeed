@@ -42,11 +42,12 @@ ZeRO API
 
    zero3
 
-Mixture of Experts (MoE)
-------------------------
+Mixture of Experts
+------------------
 .. toctree::
    :maxdepth: 2
 
+   autoep
    moe
 
 Transformer Kernel API

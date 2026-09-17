@@ -76,7 +76,5 @@ struct io_prep_generator {
     int prep_iocbs(const int n_iocbs, std::vector<struct iocb*>* iocbs);
 };
 
-void* ds_page_aligned_alloc(const int64_t size, const bool lock = false);
-
 int64_t get_file_size(const char* filename, int64_t& size);
 int64_t get_fd_file_size(const int fd, int64_t& size);

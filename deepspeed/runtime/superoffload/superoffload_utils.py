@@ -13,6 +13,7 @@ import torch.multiprocessing as mp
 import psutil
 
 from deepspeed.ops.adam import DeepSpeedCPUAdam
+from deepspeed.accelerator import get_accelerator
 from deepspeed.utils import logger
 
 
@@ -22,6 +23,7 @@ class TaskKeys:
     PARAM_GROUP_ID = "param_group_id"
     SUB_GROUP_ID = "sub_group_id"
     ROLLBACK = "rollback"
+    LR = "lr"
 
 
 class ResultKeys:
@@ -34,8 +36,20 @@ class EventTypes:
     ROLLBACK = "rollback"
 
 
-def superoffload_optimizer_worker(param_queue: mp.SimpleQueue, result_queue: mp.SimpleQueue,
-                                  optimizer_config: Dict[str, Any], max_grad_numel: int) -> None:
+def _allocate_worker_grad_buffer(max_grad_numel: int, pin_memory: bool) -> torch.Tensor:
+    # Scratch destination for the GPU->CPU grad copy. Pinning is optional: it
+    # speeds DMA but is not required for correctness, so honor
+    # offload_optimizer.pin_memory rather than always page-locking.
+    if pin_memory:
+        return get_accelerator().pin_empty(max_grad_numel, dtype=torch.float32, device='cpu')
+    return torch.empty(max_grad_numel, dtype=torch.float32, device='cpu')
+
+
+def superoffload_optimizer_worker(param_queue: mp.SimpleQueue,
+                                  result_queue: mp.SimpleQueue,
+                                  optimizer_config: Dict[str, Any],
+                                  max_grad_numel: int,
+                                  pin_memory: bool = True) -> None:
     """
     This function runs in a separate process and continuously processes optimization
     tasks from the parameter queue. It creates a DeepSpeedCPUAdam optimizer and
@@ -47,26 +61,42 @@ def superoffload_optimizer_worker(param_queue: mp.SimpleQueue, result_queue: mp.
         optimizer_config: Configuration dictionary for the optimizer containing
                          lr, betas, eps, weight_decay, and amsgrad parameters
         max_grad_numel: Maximum number of elements expected in gradient tensors
+        pin_memory: Whether to page-lock the reusable grad scratch buffer
     """
-    # Initialize dummy parameter for optimizer creation
     cpu_tensor = torch.randn(1, device="cpu")
     cpu_param = torch.nn.Parameter(cpu_tensor)
 
     try:
+        if isinstance(optimizer_config, list):
+            pg_configs = optimizer_config
+        else:
+            pg_configs = [optimizer_config]
+
+        first_cfg = pg_configs[0]
         optimizer = DeepSpeedCPUAdam([cpu_param],
-                                     lr=optimizer_config["lr"],
-                                     betas=optimizer_config["betas"],
-                                     eps=optimizer_config["eps"],
-                                     weight_decay=optimizer_config["weight_decay"],
-                                     amsgrad=optimizer_config["amsgrad"])
+                                     lr=first_cfg["lr"],
+                                     betas=first_cfg["betas"],
+                                     eps=first_cfg["eps"],
+                                     weight_decay=first_cfg["weight_decay"],
+                                     amsgrad=first_cfg["amsgrad"])
+        for cfg in pg_configs[1:]:
+            dummy = torch.nn.Parameter(torch.randn(1, device="cpu"))
+            optimizer.add_param_group({
+                "params": [dummy],
+                "lr": cfg["lr"],
+                "betas": cfg["betas"],
+                "eps": cfg["eps"],
+                "weight_decay": cfg["weight_decay"],
+                "amsgrad": cfg["amsgrad"],
+            })
     except KeyError as e:
         error_msg = f"Missing required optimizer config key: {e}"
         logger.error(error_msg)
         result_queue.put({"error": error_msg})
         return
 
-    # Pre-allocate reusable pinned memory buffer for gradients
-    pinned_grad_buffer = torch.empty(max_grad_numel, dtype=torch.float32, device='cpu', pin_memory=True)
+    # Pre-allocate reusable host buffer for gradients
+    grad_buffer = _allocate_worker_grad_buffer(max_grad_numel, pin_memory)
 
     while True:
         try:
@@ -81,12 +111,16 @@ def superoffload_optimizer_worker(param_queue: mp.SimpleQueue, result_queue: mp.
             param_group_id = task[TaskKeys.PARAM_GROUP_ID]
             sub_group_id = task[TaskKeys.SUB_GROUP_ID]
             rollback = task.get(TaskKeys.ROLLBACK, False)
+            task_lr = task.get(TaskKeys.LR, None)
 
             logger.debug(f"Processing param_group_id: {param_group_id}, sub_group_id: {sub_group_id}")
 
             del task[TaskKeys.PARAM_DATA]
             del task[TaskKeys.PARAM_GRAD]
             task.clear()
+
+            if task_lr is not None:
+                optimizer.param_groups[param_group_id]['lr'] = task_lr
 
             grad_numel = param_grad.numel()
             if grad_numel > max_grad_numel:
@@ -96,8 +130,8 @@ def superoffload_optimizer_worker(param_queue: mp.SimpleQueue, result_queue: mp.
                 result_queue.put({"error": error_msg})
                 break
 
-            param_grad_cpu = pinned_grad_buffer[:grad_numel].view_as(param_grad)
-            param_grad_cpu.copy_(param_grad, non_blocking=True)
+            param_grad_cpu = grad_buffer[:grad_numel].view_as(param_grad)
+            param_grad_cpu.copy_(param_grad, non_blocking=False)
 
             fp32_param = torch.nn.Parameter(param_data)
             fp32_param.grad = param_grad_cpu
@@ -134,10 +168,13 @@ def superoffload_optimizer_worker(param_queue: mp.SimpleQueue, result_queue: mp.
             result_queue.put({"error": error_msg})
             break
 
-    # Clean up pinned memory buffer
-    if 'pinned_grad_buffer' in locals():
-        del pinned_grad_buffer
-        logger.debug("Cleaned up pinned memory buffer")
+    # Clean up the reusable host buffer. unpin_memory is a no-op on torch and
+    # frees immediately on the native backend.
+    if 'grad_buffer' in locals():
+        if pin_memory:
+            get_accelerator().unpin_memory(grad_buffer)
+        del grad_buffer
+        logger.debug("Cleaned up worker grad buffer")
 
     logger.debug("Worker process terminated")
 
@@ -147,7 +184,8 @@ class SuperOffloadCPUOptimizer:
     def __init__(self,
                  optimizer_config: Dict[str, Any],
                  cpuadam_cores_perc: float = 0.8,
-                 max_grad_numel: int = 1000000) -> None:
+                 max_grad_numel: int = 1000000,
+                 pin_memory: bool = True) -> None:
         if not 0 < cpuadam_cores_perc <= 1:
             raise ValueError("cpuadam_cores_perc must be between 0 and 1")
 
@@ -158,7 +196,7 @@ class SuperOffloadCPUOptimizer:
 
         self.cpuadam_process = self.mp_context.Process(
             target=superoffload_optimizer_worker,
-            args=(self.param_queue, self.result_queue, optimizer_config, max_grad_numel),
+            args=(self.param_queue, self.result_queue, optimizer_config, max_grad_numel, pin_memory),
             daemon=True,
         )
         self.cpuadam_process.start()
@@ -202,20 +240,24 @@ class SuperOffloadCPUOptimizer:
                    sub_group_id: int,
                    fp32_param: torch.Tensor,
                    fp32_grad: torch.Tensor,
-                   rollback: bool = False) -> None:
+                   rollback: bool = False,
+                   lr: float = None) -> None:
         """
         Queue parameter for optimization in the worker process.
         """
         if not self.cpuadam_process.is_alive():
             raise RuntimeError("Worker process is not alive")
 
-        self.param_queue.put({
+        task = {
             TaskKeys.PARAM_DATA: fp32_param,
             TaskKeys.PARAM_GRAD: fp32_grad,
             TaskKeys.PARAM_GROUP_ID: param_group_id,
             TaskKeys.SUB_GROUP_ID: sub_group_id,
             TaskKeys.ROLLBACK: rollback,
-        })
+        }
+        if lr is not None:
+            task[TaskKeys.LR] = lr
+        self.param_queue.put(task)
 
     def get_result(self, expected_event_type: str = None) -> Optional[Dict[str, Any]]:
         """

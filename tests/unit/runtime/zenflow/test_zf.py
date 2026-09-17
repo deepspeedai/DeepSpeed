@@ -6,10 +6,20 @@
 import pytest
 import deepspeed.comm as dist
 from deepspeed.accelerator import get_accelerator
+from deepspeed.runtime.zenflow.zenflow_stage_1_and_2 import _num_selected_columns
 
 from unit.common import DistributedTest
 from unit.simple_model import SimpleModel, random_dataloader
 import deepspeed
+
+
+@pytest.mark.parametrize("num_columns,topk_ratio,expected", [
+    (0, 0.01, 0),
+    (50, 0.01, 1),
+    (200, 0.01, 2),
+])
+def test_num_selected_columns_has_nonzero_floor(num_columns, topk_ratio, expected):
+    assert _num_selected_columns(num_columns, topk_ratio) == expected
 
 
 class BaseZenFlowTest:
@@ -17,8 +27,14 @@ class BaseZenFlowTest:
     batch_size = 4
     grad_acc_steps = 1
 
-    def get_config_dict(self, stage, offload_selective_optimizer, select_strategy, select_interval, update_interval,
-                        full_warm_up_rounds):
+    def get_config_dict(self,
+                        stage,
+                        offload_selective_optimizer,
+                        select_strategy,
+                        select_interval,
+                        update_interval,
+                        full_warm_up_rounds,
+                        topk_ratio=0.2):
         config = {
             "train_batch_size": self.batch_size,
             "gradient_accumulation_steps": self.grad_acc_steps,
@@ -36,7 +52,7 @@ class BaseZenFlowTest:
                 },
                 "overlap_comm": True,
                 "zenflow": {
-                    "topk_ratio": 0.2,
+                    "topk_ratio": topk_ratio,
                     "select_strategy": select_strategy,
                     "select_interval": select_interval,
                     "update_interval": update_interval,
@@ -109,3 +125,38 @@ class TestZenFlowDistributed(DistributedTest, BaseZenFlowTest):
         config_dict = self.get_config_dict(stage, offload_selective_optimizer, select_strategy, select_interval,
                                            update_interval, full_warm_up_rounds)
         self.run_training_distributed(config_dict)
+
+
+@pytest.mark.parametrize("stage", [1, 2])
+class TestZenFlowSmallTopKRatio(DistributedTest, BaseZenFlowTest):
+    world_size = 2
+    hidden_dim = 50
+
+    def test_small_positive_topk_ratio(self, stage):
+        config_dict = self.get_config_dict(stage, False, "step", 1, 1, 0, topk_ratio=0.01)
+        self.run_training_distributed(config_dict)
+
+
+@pytest.mark.parametrize(
+    "cores,perc,expected_zf,expected_pt",
+    [
+        # Normal split: ceil(0.25 * 8) = 2 cores reserved for training.
+        ([0, 1, 2, 3, 4, 5, 6, 7], 0.25, [2, 3, 4, 5, 6, 7], [0, 1]),
+        # Rounds up: ceil(0.1 * 8) = 1.
+        ([0, 1, 2, 3, 4, 5, 6, 7], 0.1, [1, 2, 3, 4, 5, 6, 7], [0]),
+        # Two cores, half each.
+        ([10, 11], 0.5, [11], [10]),
+        # Reserve rounds to 0 -> both sides share the full set.
+        ([0, 1, 2, 3], 0.0, [0, 1, 2, 3], [0, 1, 2, 3]),
+        # Reserve rounds to every core -> both sides share the full set.
+        ([0, 1, 2, 3], 1.0, [0, 1, 2, 3], [0, 1, 2, 3]),
+    ])
+def test_split_affinity(cores, perc, expected_zf, expected_pt):
+    from deepspeed.runtime.zenflow.zenflow_utils import _split_affinity
+    zf, pt = _split_affinity(cores, perc)
+    assert zf == expected_zf
+    assert pt == expected_pt
+    # When the sides are actually isolated they must partition the cores exactly.
+    if zf != pt:
+        assert sorted(zf + pt) == sorted(cores)
+        assert not (set(zf) & set(pt))

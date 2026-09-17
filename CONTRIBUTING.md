@@ -42,12 +42,63 @@ pytest --forked tests/unit/
 ```
 You can also provide the `-v` flag to `pytest` to see additional information about the
 tests. Note that [pytest-forked](https://github.com/pytest-dev/pytest-forked) and the
-`--forked` flag are required to test CUDA functionality in distributed tests.
+`--forked` flag are required to test CUDA functionality in distributed tests. Using
+`--forked` is safe because `import deepspeed` no longer initializes a CUDA context;
+earlier versions probed CUDA at import time, which poisoned `fork()`.
 
 You can also run:
 ```
 make test
 ```
+
+### Diff-based CI test selection
+Some GPU CI workflows (currently `modal-torch-latest`, which runs `tests/unit/v1/`)
+run their modal tests on the merge queue entry instead of on every PR push, to
+conserve Modal GPU quota. `ci/tests_fetcher.py` looks at the files your PR
+changes, builds an import graph over `deepspeed/` and the `unit` test helpers,
+and selects only the tests that could be affected. The selection is previewed on
+the PR by a cheap no-secret job and executed once the PR enters the merge queue
+(`push` to `master` always runs everything). The full design — and
+how to drive and extend it — is in
+[`.github/workflows/TEST_SELECTION.md`](.github/workflows/TEST_SELECTION.md).
+
+How it decides:
+* It diffs your branch against the base branch's merge-base.
+* Each changed Python file is traced *forward* to the tests that import it
+  (directly or transitively); those tests are selected.
+* It **falls back to the full suite** (never to "no tests") whenever it can't
+  safely narrow: a missing base / merge-base, a changed shared fixture, build
+  system, CI script, or core runtime file, a deleted module that something still
+  imports, or any unexpected error in the selector itself.
+
+Escape hatches:
+* **Force the full suite for a push:** put `[test all]` (or `[no filter]`) anywhere
+  in a commit message on the branch.
+* **Run all by touching infra:** changes to the run-all globs (CI config, build
+  system, `deepspeed/__init__.py`, collectives/accelerator, shared fixtures, etc.)
+  always trigger everything. See `COMMON_RUN_ALL_GLOBS` / `extra_run_all_globs` in
+  `ci/tests_fetcher.py`.
+* **Runtime/dynamic deps the import graph can't see** (monkey-patching, plugin
+  registries, JIT ops, `deepspeed.initialize()`-time injection) are wired up via
+  the curated `DYNAMIC_EDGES` map in `ci/tests_fetcher.py` — add an entry there if
+  you find a gap.
+
+Preview/debug locally (pure stdlib, no DeepSpeed install needed):
+```bash
+# What would CI run for your branch?
+python ci/tests_fetcher.py --base origin/master
+cat ci/.test_selection/test_list.txt
+
+# Why was a test (de)selected? Prints the import chains.
+python ci/tests_fetcher.py --base origin/master --explain
+```
+
+> Note: plain PR events never start the modal `deploy` job (it stays skipped to
+> conserve GPU quota), and under `pull_request_target` GitHub runs the base branch's
+> CI scripts anyway. Merge queue runs also use trusted master for the CI scripts —
+> your merged tree is only fetched as the candidate under test — so changes to
+> `ci/*` take effect once **merged**; validate them before that via a
+> `pull_request`-triggered run or the `modal` CLI.
 
 ### Model Tests
 To execute model tests, first [install DeepSpeed](#installation). The

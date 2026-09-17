@@ -1,6 +1,7 @@
 # Copyright (c) DeepSpeed Team.
 # SPDX-License-Identifier: Apache-2.0
 
+# DeepSpeed Team
 """CPU bookkeeping tests and CUDA ordering tests for opt-in ZeRO-2 changes."""
 
 from contextlib import nullcontext
@@ -11,11 +12,13 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+import deepspeed.comm as dist
+from deepspeed.accelerator import get_accelerator
+from deepspeed.ops import __compatible_ops__
 from deepspeed.runtime import engine as engine_module
 from deepspeed.runtime.config import DeepSpeedConfig
 from deepspeed.runtime.zero import stage_1_and_2 as zero
 from deepspeed.runtime.zero.config import DeepSpeedZeroConfig
-
 
 OPTIONS = ("copy_oversized_gradients", "track_gradient_streams", "check_offload_gradients",
            "accumulate_offload_gradients")
@@ -37,8 +40,12 @@ def make_optimizer(dtype=torch.bfloat16, device="cpu", low_precision=False, **op
     opt.overlap_comm = False
     opt.zenflow = False
     opt.has_moe_layers = False
+    opt.autoep_folding_tp_group = None
     opt.gradient_accumulation_steps = 1
-    opt.is_gradient_accumulation_boundary = True
+    opt.set_gradient_accumulation_boundary(True)
+    opt.compute_grad_norm = True
+    opt.averaged_gradients = {}
+    opt._muon_pending_momentum = {}
     opt.micro_step_id = 0
     opt._pending_offload_events = {}
     opt._offload_accumulated_param_ids = set()
@@ -72,7 +79,7 @@ def make_optimizer(dtype=torch.bfloat16, device="cpu", low_precision=False, **op
 def backward_values(opt, param, values, boundaries):
     for index, (value, boundary) in enumerate(zip(values, boundaries, strict=True)):
         opt.micro_step_id = index
-        opt.is_gradient_accumulation_boundary = boundary
+        opt.set_gradient_accumulation_boundary(boundary)
         param.grad = torch.full_like(param, value)
         opt.copy_grads_in_partition(param)
         param.grad = None
@@ -113,8 +120,10 @@ def test_config_rejects_zenflow(name):
 def test_config_requires_effectively_contiguous_gradients():
     with pytest.raises(ValueError, match="contiguous"):
         DeepSpeedZeroConfig(stage=2, contiguous_gradients=False, track_gradient_streams=True)
-    config = DeepSpeedZeroConfig(stage=2, contiguous_gradients=False, track_gradient_streams=True,
-                                offload_optimizer={"device": "cpu"})
+    config = DeepSpeedZeroConfig(stage=2,
+                                 contiguous_gradients=False,
+                                 track_gradient_streams=True,
+                                 offload_optimizer={"device": "cpu"})
     assert config.track_gradient_streams
 
 
@@ -125,11 +134,18 @@ def test_engine_forwards_independent_gradient_safety_options(monkeypatch, enable
     engine.destroy = lambda: None
     engine._config = DeepSpeedConfig({
         "train_batch_size": 1,
-        "bf16": {"enabled": True},
+        "bf16": {
+            "enabled": True
+        },
         "zero_optimization": {
             "stage": 2,
-            "offload_optimizer": {"device": "cpu"},
-            **{name: True for name in enabled},
+            "offload_optimizer": {
+                "device": "cpu"
+            },
+            **{
+                name: True
+                for name in enabled
+            },
         },
     })
     engine._set_client_model(torch.nn.Linear(2, 2))
@@ -138,6 +154,7 @@ def test_engine_forwards_independent_gradient_safety_options(monkeypatch, enable
     engine.seq_data_parallel_group = None
     engine.has_moe_layers = False
     engine.zenflow = False
+    engine.gradient_average = True
     base_optimizer = torch.optim.Adam(engine.module.parameters())
     captured = {}
 
@@ -159,7 +176,7 @@ def test_engine_forwards_independent_gradient_safety_options(monkeypatch, enable
 def test_oversized_copy_is_independent_and_preserves_routing(dtype, copy, bucket_size):
     opt, param, _ = make_optimizer(dtype, copy_oversized_gradients=copy)
     opt.reduce_bucket_size = bucket_size
-    opt.reduce_ipg_grads = lambda: None
+    opt.reduce_ipg_grads = lambda **kwargs: None
     original = torch.arange(8, dtype=dtype)
     param.grad = original
     original_alias = original.view_as(original)
@@ -191,11 +208,10 @@ def test_accumulation_preserves_nonzero_first_contribution(dtype, low_precision,
     assert torch.equal(master.grad, torch.full_like(master, 3))
 
 
-def test_default_offload_keeps_legacy_overwrite_for_control():
+def test_default_offload_accumulates_across_nonboundary_backwards():
     opt, param, master = make_optimizer()
-    backward_values(opt, param, [1, 2, 4], [True, True, True])
-    assert torch.equal(master.grad, torch.full_like(master, 4))
-    assert not opt.accumulated_grads_in_cpu
+    backward_values(opt, param, [1, 2, 4], [False, False, True])
+    assert torch.equal(master.grad, torch.full_like(master, 7))
 
 
 def test_reduction_and_offload_consume_owned_oversized_buffer():
@@ -264,8 +280,10 @@ class FakeStream:
 
 
 def fake_accelerator(current):
-    return SimpleNamespace(resolves_data_dependency=lambda: False, current_stream=lambda: current,
-                           Event=FakeEvent, stream=lambda stream: nullcontext())
+    return SimpleNamespace(resolves_data_dependency=lambda: False,
+                           current_stream=lambda: current,
+                           Event=FakeEvent,
+                           stream=lambda stream: nullcontext())
 
 
 @pytest.mark.parametrize("overlap", [False, True])
@@ -283,8 +301,8 @@ def test_average_waits_all_producers_even_without_overlap(monkeypatch, overlap):
     opt.reduce_scatter = False
     opt._record_gradient_stream = lambda tensor, stream: None
     used = consumer if overlap else current
-    opt.gradient_reduction_w_predivide = lambda *args: pytest.fail("missing producer waits") if len(
-        used.waited) != 2 else None
+    opt.gradient_reduction_w_predivide = lambda *args: pytest.fail("missing producer waits") if len(used.waited
+                                                                                                    ) != 2 else None
     opt.average_tensor(torch.zeros(8), torch.float32)
     assert set(used.waited) == set(bucket.ready_events.values())
     bucket.reuse_events[0] = FakeEvent()
@@ -502,11 +520,16 @@ def test_valid_steps_match_summed_gradient_reference_and_reset(monkeypatch):
 
 def _distributed_rejection(rank, rendezvous):
     # Exercise real CPU collectives without building DeepSpeed's CPU comm extensions.
-    torch.distributed.init_process_group("gloo", init_method=rendezvous, rank=rank, world_size=2,
-                                         timeout=timedelta(seconds=60))
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setitem(__compatible_ops__, "deepspeed_shm_comm", False)
+        dist.init_distributed("gloo",
+                              auto_mpi_discovery=False,
+                              init_method=rendezvous,
+                              rank=rank,
+                              world_size=2,
+                              timeout=timedelta(seconds=60))
     try:
         with pytest.MonkeyPatch.context() as patch:
-            patch.setattr(zero, "dist", torch.distributed)
             for fault in ("cpu_gradient", "norm"):
                 opt, param, master = make_optimizer(check_offload_gradients=True, accumulate_offload_gradients=True)
                 prepare_step(opt, param, master, patch, mock_collectives=False)
@@ -518,8 +541,8 @@ def _distributed_rejection(rank, rendezvous):
                 if fault == "cpu_gradient" and rank == 1:
                     master.grad[0] = float("nan")
                 if fault == "norm":
-                    opt.complete_grad_norm_calculation_for_cpu_offload = lambda params: torch.tensor(
-                        -1.0 if rank == 1 else 1.0)
+                    opt.complete_grad_norm_calculation_for_cpu_offload = lambda params: torch.tensor(-1.0 if rank == 1
+                                                                                                     else 1.0)
                 opt.step()
                 assert opt.overflow
                 assert torch.equal(master, before_param)
@@ -527,7 +550,7 @@ def _distributed_rejection(rank, rendezvous):
                     assert torch.equal(opt.optimizer.state[master][key], value)
                 assert not opt._offload_accumulated_param_ids
     finally:
-        torch.distributed.destroy_process_group()
+        dist.destroy_process_group()
 
 
 def test_two_rank_cpu_overflow_consensus(tmp_path):
@@ -553,24 +576,25 @@ def test_restore_discards_pending_accumulation(checkpoint_folder):
     assert torch.equal(master.grad, torch.full_like(master, 4))
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required for actual stream ordering")
+@pytest.mark.skipif(get_accelerator().device_name() != "cuda" or not get_accelerator().is_available(),
+                    reason="CUDA required for actual stream ordering")
 @pytest.mark.parametrize("copy", [False, True])
 @pytest.mark.parametrize("overlap", [False, True])
 def test_cuda_oversized_producer_handoff(copy, overlap):
     opt, param, _ = make_optimizer(device="cuda", copy_oversized_gradients=copy, track_gradient_streams=True)
-    producer, consumer = torch.cuda.Stream(), torch.cuda.Stream()
+    producer, consumer = get_accelerator().Stream(), get_accelerator().Stream()
     opt.reduction_stream = consumer
     opt.overlap_comm = overlap
-    opt.reduce_ipg_grads = lambda: None
-    producer.wait_stream(torch.cuda.current_stream())
-    with torch.cuda.stream(producer):
-        torch.cuda._sleep(2_000_000)
+    opt.reduce_ipg_grads = lambda **kwargs: None
+    producer.wait_stream(get_accelerator().current_stream())
+    with get_accelerator().stream(producer):
+        torch.cuda._sleep(2_000_000)  #ignore-cuda
         param.grad = torch.full_like(param, 7)
         opt.reduce_independent_p_g_buckets_and_remove_grads(param, 0)
     opt.reduce_scatter = False
     result = []
     opt.gradient_reduction_w_predivide = lambda tensor, dtype: result.append(tensor.clone())
-    with torch.cuda.stream(consumer):
+    with get_accelerator().stream(consumer):
         opt.average_tensor(param.grad.view(-1), torch.float32)
     consumer.synchronize()
-    assert torch.equal(result[0].cpu(), torch.full((8,), 7, dtype=torch.bfloat16))
+    assert torch.equal(result[0].cpu(), torch.full((8, ), 7, dtype=torch.bfloat16))

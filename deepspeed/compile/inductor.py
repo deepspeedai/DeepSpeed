@@ -3,6 +3,9 @@
 
 # DeepSpeed Team
 
+from contextlib import nullcontext
+from typing import Set
+
 import torch
 
 try:
@@ -19,8 +22,69 @@ from .util import get_input_nodes
 from .graph_param import DSGraphParamManager
 from .partitioner import get_wrapped_partitioner
 
+# With PyTorch 2.10, Inductor was observed to generate a mix-order persistent
+# reduction for a DeepCompile ZeRO-3 backward graph, and Triton rejected the
+# kernel for exceeding the hardware's per-kernel resource limit. Setting
+# persistent_reductions=False alone is insufficient because mix-order codegen
+# passes override_persistent_reduction=True. Revisit this ZeRO-3 compile
+# workaround when PyTorch's Inductor reduction heuristics change.
+_DEEP_COMPILE_Z3_INDUCTOR_REDUCTION_CONFIG = {
+    "triton.mix_order_reduction": False,
+    "triton.persistent_reductions": False,
+}
+
+
+def deepcompile_z3_inductor_config_patch(enabled: bool):
+    """Disable reduction heuristics that create oversized kernels for DeepCompile ZeRO-3 graphs."""
+    if not enabled:
+        return nullcontext()
+
+    inductor = getattr(torch, "_inductor", None)
+    config = getattr(inductor, "config", None)
+    if config is None or not hasattr(config, "patch"):
+        return nullcontext()
+
+    triton_config = getattr(config, "triton", None)
+    if triton_config is None:
+        return nullcontext()
+
+    overrides = {
+        config_name: value
+        for config_name, value in _DEEP_COMPILE_Z3_INDUCTOR_REDUCTION_CONFIG.items()
+        if hasattr(triton_config,
+                   config_name.split(".", 1)[1])
+    }
+    if not overrides:
+        return nullcontext()
+
+    return config.patch(overrides)
+
+
+def _get_graphsafe_run_with_rng_state():
+    try:
+        from torch._prims import rng_prims
+    except ImportError:
+        return None
+    return getattr(rng_prims, "graphsafe_run_with_rng_state", None)
+
+
+def _register_graphsafe_rng_state_no_reuse(register_fallback_no_reuse):
+    graphsafe_run_with_rng_state = _get_graphsafe_run_with_rng_state()
+    if graphsafe_run_with_rng_state is None:
+        return False
+
+    register_fallback_no_reuse(graphsafe_run_with_rng_state, never_reuse_output=True)
+    return True
+
+
+def _mark_output_never_reuse(out, *, enabled):
+    if enabled and isinstance(out, IRNode):
+        V.graph.never_reuse_buffers.add(out.get_name())
+    return out
+
 
 def patch_compiler(original_compiler, dc_compiler, z3_partition: bool, graph_id, graph_param_manager, bwd: bool):
+    """Wrap an AOT compiler with DeepCompile rewrites and ZeRO-3 fake-shape repair."""
 
     def wrapped_compiler(gm, fake_inputs):
         mod_graph = dc_compiler(gm, fake_inputs)
@@ -55,72 +119,110 @@ def patch_compiler(original_compiler, dc_compiler, z3_partition: bool, graph_id,
         else:
             patched_inputs = fake_inputs
 
-        return original_compiler(gm, patched_inputs)
+        with deepcompile_z3_inductor_config_patch(z3_partition):
+            return original_compiler(gm, patched_inputs)
 
     return wrapped_compiler
 
 
-def wrap_partition_fn(partition_fn, real_inputs, param_indices):
+def wrap_partition_fn(z3_partition: bool, partition_fn, real_inputs, param_indices, frame_id: int,
+                      frames_partitioned: Set[int]):
 
     def wrapped_partition_fn(*args, **kwargs):
 
-        fn = get_wrapped_partitioner(True, param_indices, partition_fn=partition_fn)
+        fn = get_wrapped_partitioner(z3_partition,
+                                     param_indices,
+                                     partition_fn=partition_fn,
+                                     frame_id=frame_id,
+                                     frames_partitioned=frames_partitioned)
         fw_module, bw_module = fn(*args, **kwargs)
 
-        # get parameter names
-        pm = DSGraphParamManager(fw_module.graph, real_inputs, param_indices)
+        if z3_partition:
+            # get parameter names
+            pm = DSGraphParamManager(fw_module.graph, real_inputs, param_indices)
 
-        def fix_placeholder_meta(graph):
-            for n in graph.nodes:
-                if n.op == "placeholder" and n.name in pm.param_names:
-                    n.meta["val"] = torch.empty([0], dtype=n.meta["val"].dtype, device=n.meta["val"].device)
+            def fix_placeholder_meta(graph):
+                for n in graph.nodes:
+                    if n.op == "placeholder" and n.name in pm.param_names:
+                        n.meta["val"] = torch.empty([0], dtype=n.meta["val"].dtype, device=n.meta["val"].device)
 
-        fix_placeholder_meta(fw_module.graph)
-        fix_placeholder_meta(bw_module.graph)
+            fix_placeholder_meta(fw_module.graph)
+            fix_placeholder_meta(bw_module.graph)
 
         return fw_module, bw_module
 
     return wrapped_partition_fn
 
 
+def _patch_deepcompile_aot_kwargs(kwargs: dict, *, graph_id: int, z3_partition: bool, make_fw_graph, make_bw_graph,
+                                  real_inputs, param_indices, param_manager, frame_id: int,
+                                  frames_partitioned: Set[int]) -> bool:
+    original_fw_compiler = kwargs.get("fw_compiler")
+    original_partition_fn = kwargs.get("partition_fn")
+    if not original_fw_compiler or not original_partition_fn:
+        return False
+
+    original_bw_compiler = kwargs.get("bw_compiler") or original_fw_compiler
+
+    kwargs["fw_compiler"] = patch_compiler(original_fw_compiler,
+                                           make_fw_graph,
+                                           z3_partition,
+                                           graph_id,
+                                           param_manager,
+                                           bwd=False)
+    kwargs["bw_compiler"] = patch_compiler(original_bw_compiler,
+                                           make_bw_graph,
+                                           z3_partition,
+                                           graph_id,
+                                           param_manager,
+                                           bwd=True)
+    kwargs["inference_compiler"] = kwargs["fw_compiler"]
+    kwargs["partition_fn"] = wrap_partition_fn(z3_partition, original_partition_fn, real_inputs, param_indices,
+                                               frame_id, frames_partitioned)
+    return True
+
+
 def patch_create_aot_dispatcher_function(graph_id: int, z3_partition: bool, make_fw_graph, make_bw_graph, real_inputs,
-                                         param_indices, param_manager):
+                                         param_indices, param_manager, frame_id: int, frames_partitioned: Set[int]):
+    """Temporarily install graph-specific AOT compilers and return an idempotent restore callback."""
 
     from torch._dynamo.backends.common import AotAutograd
     import functools
 
-    def patch_aotautograd():
-        # Unpatch if it was already patched
-        if hasattr(AotAutograd, "__original_init"):
-            AotAutograd.__init__ = AotAutograd.__original_init
+    # The constructor patch is process-global. Replace the currently installed
+    # DeepCompile patch before taking ownership for this graph.
+    if hasattr(AotAutograd, "__original_init"):
+        AotAutograd.__init__ = AotAutograd.__original_init
+        delattr(AotAutograd, "__original_init")
 
-        original_init = AotAutograd.__init__
+    original_init = AotAutograd.__init__
 
-        @functools.wraps(original_init)
-        def patched_init(self, **kwargs):
-            kwargs["fw_compiler"] = patch_compiler(kwargs["fw_compiler"],
-                                                   make_fw_graph,
-                                                   z3_partition,
-                                                   graph_id,
-                                                   param_manager,
-                                                   bwd=False)
-            kwargs["bw_compiler"] = patch_compiler(kwargs["bw_compiler"],
-                                                   make_bw_graph,
-                                                   z3_partition,
-                                                   graph_id,
-                                                   param_manager,
-                                                   bwd=True)
-            kwargs["inference_compiler"] = kwargs["fw_compiler"]
+    @functools.wraps(original_init)
+    def patched_init(self, **kwargs):
+        _patch_deepcompile_aot_kwargs(kwargs,
+                                      graph_id=graph_id,
+                                      z3_partition=z3_partition,
+                                      make_fw_graph=make_fw_graph,
+                                      make_bw_graph=make_bw_graph,
+                                      real_inputs=real_inputs,
+                                      param_indices=param_indices,
+                                      param_manager=param_manager,
+                                      frame_id=frame_id,
+                                      frames_partitioned=frames_partitioned)
 
-            if z3_partition:
-                kwargs["partition_fn"] = wrap_partition_fn(kwargs["partition_fn"], real_inputs, param_indices)
+        original_init(self, **kwargs)
 
-            original_init(self, **kwargs)
+    AotAutograd.__original_init = original_init
+    AotAutograd.__init__ = patched_init
 
-        AotAutograd.__original_init = original_init
-        AotAutograd.__init__ = patched_init
+    def restore_aotautograd():
+        """Restore only this invocation's patch without clobbering a newer owner."""
+        if AotAutograd.__init__ is patched_init:
+            AotAutograd.__init__ = original_init
+            if getattr(AotAutograd, "__original_init", None) is original_init:
+                delattr(AotAutograd, "__original_init")
 
-    patch_aotautograd()
+    return restore_aotautograd
 
 
 def register_custom_ops():
@@ -129,6 +231,7 @@ def register_custom_ops():
                                   never_reuse_input,
                                   never_reuse_output,
                                   force_free_input,
+                                  block_input_reuse=False,
                                   add_to_fallback_set=True):
         if add_to_fallback_set:
             fallbacks.add(kernel)
@@ -137,9 +240,7 @@ def register_custom_ops():
 
             def wrap_tensors(x):
                 out = TensorBox.create(x) if isinstance(x, torch._inductor.ir.IRNode) else x
-                if out is not None and never_reuse_output:
-                    V.graph.never_reuse_buffers.add(out.get_name())
-                return out
+                return _mark_output_never_reuse(out, enabled=never_reuse_output)
 
             class CustomDCKernel(FallbackKernel):
 
@@ -151,7 +252,7 @@ def register_custom_ops():
                             assert hasattr(x, "get_name"), f"x doesn't have get_name {x.__class__}"
                             V.graph.never_reuse_buffers.add(x.get_name())
 
-                    if never_reuse_input:
+                    if never_reuse_input or block_input_reuse:
                         pytree.tree_map(add_to_never_reuse, args)
 
                 def get_var_name_for_arg(self, arg: str):
@@ -186,7 +287,7 @@ def register_custom_ops():
 
                     self.codegen_unbacked_symbol_defs(wrapper)
 
-            kernel_cls = CustomDCKernel if force_free_input else FallbackKernel
+            kernel_cls = CustomDCKernel if (force_free_input or block_input_reuse) else FallbackKernel
             return pytree.tree_map(wrap_tensors, kernel_cls.create(kernel, *args, **kwargs))
 
         return handler
@@ -194,13 +295,20 @@ def register_custom_ops():
     def register_fallback_no_reuse(op_overload,
                                    never_reuse_input=False,
                                    never_reuse_output=False,
-                                   force_free_input=False):
+                                   force_free_input=False,
+                                   block_input_reuse=False):
+        # block_input_reuse keeps inductor from planning another buffer into the input's storage
+        # without also freeing the input. An op that reads its input asynchronously needs that:
+        # in-place reuse writes through the allocator's back, so record_stream cannot hold it off.
+        # (never_reuse_input alone has never selected the kernel class that applies it; leaving that
+        # as it is keeps the ops which pass it today running exactly as before.)
         add_needs_realized_inputs(op_overload)
         return register_lowering(op_overload, type_promotion_kind=None)(fallback_handler_no_reuse(
             op_overload,
             never_reuse_input=never_reuse_input,
             never_reuse_output=never_reuse_output,
-            force_free_input=force_free_input))
+            force_free_input=force_free_input,
+            block_input_reuse=block_input_reuse))
 
     # Inductor tries to reuse output buffer when possible. We need to disable this behavior for some custom ops.
     # -> It seems that memory region is still reused in some cases. So we clone the inputs for some ops.
@@ -212,6 +320,15 @@ def register_custom_ops():
                                never_reuse_output=True,
                                force_free_input=True)
     register_fallback_no_reuse(torch.ops.dc.free_tensors.default, never_reuse_input=True, never_reuse_output=True)
+    # The input needs no protection: the pass waits for the copy immediately after this op, so the
+    # buffer is dead by the time inductor may recycle it. Blocking that reuse instead would keep the
+    # buffer alive for the whole forward pass and give back the memory the offload just freed.
+    register_fallback_no_reuse(torch.ops.dc.offload_tensor.default, never_reuse_output=True)
+    register_fallback_no_reuse(torch.ops.dc.wait_offload.default, never_reuse_input=True, never_reuse_output=True)
+    register_fallback_no_reuse(torch.ops.dc.reload_tensor.default, never_reuse_input=True, never_reuse_output=True)
+    register_fallback_no_reuse(torch.ops.dc.wait_reload.default, never_reuse_input=True, never_reuse_output=True)
+    register_fallback_no_reuse(torch.ops.dc.end_backward.default, never_reuse_input=True, never_reuse_output=False)
+    _register_graphsafe_rng_state_no_reuse(register_fallback_no_reuse)
 
     if not hasattr(Scheduler, "is_dc_patched") or not Scheduler.is_dc_patched:
         Scheduler.is_dc_patched = True

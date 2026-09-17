@@ -19,13 +19,25 @@ void multi_tensor_adam(int chunk_size,
                        const int bias_correction,
                        const float weight_decay)
 {
-    static bool initialized = false;
-    if (!initialized) {
-        create_adam_optimizer(0);
-        initialized = true;
+    // ds_adam_step reads lr/betas/eps/weight_decay per call; only AdamW-vs-L2 is fixed at
+    // construction, so keep one optimizer instance per mode (mode 1 == AdamW, as in CUDA).
+    // The constructor hyperparameters are placeholders: update_state overwrites them on every
+    // step, so any value works here.
+    constexpr float kPlaceholderHyperparam = 0.0f;
+    static bool initialized[2] = {false, false};
+    const int optimizer_id = mode;
+    if (!initialized[mode]) {
+        create_adam_optimizer(optimizer_id,
+                              kPlaceholderHyperparam,
+                              kPlaceholderHyperparam,
+                              kPlaceholderHyperparam,
+                              kPlaceholderHyperparam,
+                              kPlaceholderHyperparam,
+                              mode == 1);
+        initialized[mode] = true;
     }
     for (int i = 0; i < tensor_lists[0].size(); i++) {
-        ds_adam_step(0,
+        ds_adam_step(optimizer_id,
                      step,
                      lr,
                      beta1,

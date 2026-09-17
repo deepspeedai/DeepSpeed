@@ -97,16 +97,25 @@ def cifar_trainset(fp16=False):
 
     local_rank = get_accelerator().current_device()
 
+    data_root = os.getenv("TEST_DATA_DIR", "/tmp/")
+    real_cifar_path = os.getenv("CIFAR10_DATASET_PATH")
+    download_real_cifar = os.getenv("DEEPSPEED_UNIT_DOWNLOAD_CIFAR10", "0") == "1"
+    if not real_cifar_path and not download_real_cifar:
+        return torchvision.datasets.FakeData(size=2048,
+                                             image_size=(3, 32, 32),
+                                             num_classes=10,
+                                             transform=transform,
+                                             random_offset=0)
+
     # Only one rank per machine downloads.
     dist.barrier()
     if local_rank != 0:
         dist.barrier()
-    data_root = os.getenv("TEST_DATA_DIR", "/tmp/")
-    if os.getenv("CIFAR10_DATASET_PATH"):
-        data_root = os.getenv("CIFAR10_DATASET_PATH")
+    if real_cifar_path:
+        data_root = real_cifar_path
         download = False
     else:
-        data_root = os.path.join(os.getenv("TEST_DATA_DIR", "/tmp"), "cifar10-data")
+        data_root = os.path.join(data_root, "cifar10-data")
         download = True
     trainset = torchvision.datasets.CIFAR10(root=data_root, train=True, download=download, transform=transform)
     if local_rank == 0:
@@ -119,7 +128,11 @@ def train_cifar(model, config, num_steps=400, average_dp_losses=True, fp16=True,
         fork_kwargs = {"device_type": get_accelerator().device_name()}
     else:
         fork_kwargs = {}
-    with get_accelerator().random().fork_rng(devices=[get_accelerator().current_device_name()], **fork_kwargs):
+    # fork_rng only needs entries for backends with per-device generators: the global
+    # CPU RNG is always saved, and torch.cpu has no get_rng_state to call anyway.
+    device_mod = torch.get_device_module(get_accelerator().device_name())
+    fork_devices = [get_accelerator().current_device_name()] if hasattr(device_mod, 'get_rng_state') else []
+    with get_accelerator().random().fork_rng(devices=fork_devices, **fork_kwargs):
         ds_utils.set_random_seed(seed)
 
         # disable dropout

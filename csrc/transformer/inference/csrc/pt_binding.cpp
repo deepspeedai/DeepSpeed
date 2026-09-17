@@ -478,12 +478,13 @@ std::vector<at::Tensor> ds_softmax_context(at::Tensor& query_key_value,
     auto output = torch::from_blob(workspace + 4 * buf_size, {bsz, seq_len, hidden_dim}, options);
 
     auto query_cont = workspace + 5 * buf_size;
+    unsigned cache_bsz = InferenceContext::Instance().GetBatchSize();
     size_t offset =
-        10 * (hidden_dim * bsz * InferenceContext::Instance().GetMaxTokenLength()) +
-        layer_id * 2 * bsz * InferenceContext::Instance().GetMaxTokenLength() * hidden_dim;
+        10 * (hidden_dim * cache_bsz * InferenceContext::Instance().GetMaxTokenLength()) +
+        layer_id * 2 * cache_bsz * InferenceContext::Instance().GetMaxTokenLength() * hidden_dim;
     unsigned all_tokens = soft_len;
     auto kv_cache = workspace + offset + (hidden_dim / heads) * (is_prompt ? 0 : soft_len - 1);
-    size_t value_offset = bsz * InferenceContext::Instance().GetMaxTokenLength() * hidden_dim;
+    size_t value_offset = cache_bsz * InferenceContext::Instance().GetMaxTokenLength() * hidden_dim;
 
     T* temp_buf = (T*)output.data_ptr() + at::numel(output);
     launch_bias_add_transform_0213<T>((T*)query_cont,
@@ -1944,6 +1945,83 @@ void ds_release_workspace() { InferenceContext::Instance().release_workspace(); 
 bool ds_retake_workspace() { return InferenceContext::Instance().retake_workspace(); }
 
 template <typename T>
+at::ScalarType workspace_scalar_type();
+
+template <>
+at::ScalarType workspace_scalar_type<float>()
+{
+    return torch::kFloat32;
+}
+
+template <>
+at::ScalarType workspace_scalar_type<__half>()
+{
+    return torch::kFloat16;
+}
+
+#ifdef BF16_AVAILABLE
+template <>
+at::ScalarType workspace_scalar_type<__nv_bfloat16>()
+{
+    return torch::kBFloat16;
+}
+#endif
+
+template <typename T>
+std::vector<at::Tensor> repeat_kv_cache(unsigned source_batch_size, unsigned repeats)
+{
+    auto& context = InferenceContext::Instance();
+    const auto target_batch_size = source_batch_size * repeats;
+    if (repeats < 1 || source_batch_size < 1 || target_batch_size != context.GetBatchSize()) {
+        throw std::runtime_error(
+            "KV cache repeat does not match the allocated workspace batch size");
+    }
+
+    const auto num_layers = context.GetNumLayers();
+    const auto num_heads = context.GetNumHeads();
+    const auto max_tokens = context.GetMaxTokenLength();
+    const auto hidden_dim = context.GetHiddenDim();
+    const auto head_dim = hidden_dim / num_heads;
+    const auto current_tokens = context.current_tokens();
+    if (current_tokens <= 1) {
+        throw std::runtime_error("KV cache repeat requires a completed prompt forward");
+    }
+    const auto prompt_tokens = current_tokens - 1;
+    auto options = at::TensorOptions()
+                       .dtype(workspace_scalar_type<T>())
+                       .layout(at::kStrided)
+                       .device(at::kCUDA)
+                       .requires_grad(false);
+    T* workspace = (T*)context.GetWorkSpace();
+    const auto cache_offset = 10 * hidden_dim * target_batch_size * max_tokens;
+    auto cache = torch::from_blob(workspace + cache_offset,
+                                  {(long)num_layers,
+                                   2,
+                                   (long)target_batch_size,
+                                   (long)num_heads,
+                                   (long)max_tokens,
+                                   (long)head_dim},
+                                  options);
+    // Backward copies preserve source rows that overlap the expanded destination range.
+    for (unsigned destination = target_batch_size; destination-- > 0;) {
+        const auto source = destination / repeats;
+        if (source == destination) { continue; }
+        auto destination_cache = cache.select(2, destination).slice(3, 0, prompt_tokens);
+        auto source_cache = cache.select(2, source).slice(3, 0, prompt_tokens);
+        destination_cache.copy_(source_cache);
+    }
+
+    std::vector<at::Tensor> repeated_cache;
+    repeated_cache.reserve(num_layers * 2);
+    for (unsigned layer = 0; layer < num_layers; layer++) {
+        auto layer_cache = cache.select(0, layer);
+        repeated_cache.push_back(layer_cache.select(0, 0).slice(2, 0, prompt_tokens));
+        repeated_cache.push_back(layer_cache.select(0, 1).slice(2, 0, prompt_tokens));
+    }
+    return repeated_cache;
+}
+
+template <typename T>
 at::Tensor ds_dequantize(at::Tensor& weight, at::Tensor& qscale, int groups)
 {
     auto options = at::TensorOptions()
@@ -2032,6 +2110,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
     m.def("allocate_workspace_" #_name,                                                           \
           &allocate_workspace<_dtype>,                                                            \
           "DeepSpeed memory allocation for GPT inference with " #_name " (CUDA)");                \
+    m.def("repeat_kv_cache_" #_name,                                                              \
+          &repeat_kv_cache<_dtype>,                                                               \
+          "Repeat prompt KV cache entries across the inference batch with " #_name " (CUDA)");    \
     m.def("dequantize_" #_name,                                                                   \
           &ds_dequantize<_dtype>,                                                                 \
           "DeepSpeed dequantize with " #_name " (CUDA)");

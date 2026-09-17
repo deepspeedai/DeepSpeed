@@ -14,6 +14,9 @@
 #if defined(__riscv)
 #define TARGET_RISCV 1
 #include "riscv64/shm.h"
+#elif defined(__aarch64__)
+#define TARGET_ARM 1
+#include "arm64/shm.h"
 #else
 #include "x86_64/shm.h"
 #endif
@@ -154,7 +157,10 @@ void reduce_bf16_buffers(int start_elements, int num_elements, char* to_buffer, 
 #if TARGET_RISCV
     size_t vl = __riscv_vsetvl_e16m1(num_elements);
     vector_length_in_bytes = vl * element_size;
-#else
+#elif TARGET_ARM
+    const int vl = full_precision_elements_in_fixed_vector;
+    vector_length_in_bytes = vl * element_size;
+#else  // x86_64
     const int vl = vector_length_in_bytes / element_size;
 #endif
     int main_elements = num_elements - (num_elements % vl);
@@ -214,7 +220,10 @@ void reduce_fp16_buffers(int start_elements, int num_elements, char* to_buffer, 
 #if TARGET_RISCV
     size_t vl = __riscv_vsetvl_e16m1(num_elements);
     vector_length_in_bytes = vl * element_size;
-#else
+#elif TARGET_ARM
+    const int vl = full_precision_elements_in_fixed_vector;
+    vector_length_in_bytes = vl * element_size;
+#else  // x86_64
     const int vl = vector_length_in_bytes / element_size;
 #endif
     int main_elements = num_elements - (num_elements % vl);
@@ -274,7 +283,10 @@ void reduce_fp32_buffers(int start_elements, int num_elements, char* to_buffer, 
 #if TARGET_RISCV
     size_t vl = __riscv_vsetvl_e32m1(num_elements);
     vector_length_in_bytes = vl * element_size;
-#else
+#elif TARGET_ARM
+    const int vl = full_precision_elements_in_fixed_vector;
+    vector_length_in_bytes = vl * element_size;
+#else  // x86_64
     const int vl = vector_length_in_bytes / element_size;
 #endif
     int main_elements = num_elements - (num_elements % vl);
@@ -354,12 +366,12 @@ void shm_initialize(int size, int rank, char* addr_string, char* port_string)
     workspace_buf->states[0] = coll_alt2_allreduce_naive__copy_in_done;
     workspace_buf->states[1] = coll_begin;
 
-    // create the workspace pointer list
-    workspace = (struct allreduce_workspace**)malloc(size * sizeof(struct allreduce_workspace*));
-    symmetric_buffer[0] = (char**)malloc(size * sizeof(char**));
-    symmetric_buffer[1] = (char**)malloc(size * sizeof(char**));
-    distributed_buffer[0] = (char**)malloc(size * sizeof(char**));
-    distributed_buffer[1] = (char**)malloc(size * sizeof(char**));
+    // calloc used for defensive zero-init; the loop below writes every element before any read
+    workspace = (struct allreduce_workspace**)calloc(size, sizeof(struct allreduce_workspace*));
+    symmetric_buffer[0] = (char**)calloc(size, sizeof(char*));
+    symmetric_buffer[1] = (char**)calloc(size, sizeof(char*));
+    distributed_buffer[0] = (char**)calloc(size, sizeof(char*));
+    distributed_buffer[1] = (char**)calloc(size, sizeof(char*));
 
     // map shm of all ranks
     for (int i = 0; i < size; i++) {

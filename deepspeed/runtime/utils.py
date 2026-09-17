@@ -222,6 +222,32 @@ def get_norm_with_moe_layers_fast(all_groups_norm, group):
     return all_groups_norm
 
 
+def has_inf_or_nan(x):
+    """Whether ``x`` contains any NaN or infinity, as a scalar tensor on ``x``'s device.
+
+    Reduces before testing rather than testing elementwise: ``max`` propagates NaN and exposes ``+inf``,
+    ``min`` exposes ``-inf``, so two scalars settle the question and nothing proportional to ``x`` is
+    allocated. Elementwise forms materialize an fp32 copy and boolean masks, which on a large fused weight
+    reaches double-digit GiB of transient device memory.
+
+    The result stays on the device rather than being converted to a Python ``bool`` so that callers
+    accumulating it across many gradients do not pay a host synchronization per tensor. Callers wanting a
+    ``bool`` get one from ordinary truthiness.
+
+    An empty tensor holds no non-finite value, and the guard is required rather than defensive: ``amax``
+    raises on an empty input. A sparse tensor reaches this when the model itself produces natively sparse
+    gradients, where only the stored entries can be non-finite -- the implicit zeros cannot -- so the
+    reduction runs over those.
+    """
+    if x.is_sparse:
+        # ``amax``/``amin`` have no sparse implementation, and the public ``values()`` rejects uncoalesced
+        # tensors, which is the layout ``SparseTensor.to_coo_tensor`` produces.
+        x = x._values()
+    if x.numel() == 0:
+        return torch.tensor(False, device=x.device)
+    return torch.isfinite(x.amax()).logical_and(torch.isfinite(x.amin())).logical_not()
+
+
 class CheckOverflow(object):
     '''Checks for overflow in gradient across parallel process'''
 
@@ -314,24 +340,7 @@ class CheckOverflow(object):
     # `x` is a torch.Tensor
     @staticmethod
     def _has_inf_or_nan(x, i):
-        try:
-            # if x is half, the .float() incurs an additional deep copy, but it's necessary if
-            # Pytorch's .sum() creates a one-element tensor of the same type as x
-            # (which is true for some recent version of pytorch).
-            cpu_sum = float(x.float().sum())
-            # More efficient version that can be used if .sum() returns a Python scalar
-            # cpu_sum = float(x.sum())
-        except RuntimeError as instance:
-            # We want to check if inst is actually an overflow exception.
-            # RuntimeError could come from a different error.
-            # If so, we still want the exception to propagate.
-            if "value cannot be converted" not in instance.args[0]:
-                raise
-            return True
-        else:
-            if cpu_sum == float('inf') or cpu_sum == -float('inf') or cpu_sum != cpu_sum:
-                return True
-            return False
+        return has_inf_or_nan(x)
 
 
 def _handle_overflow(cpu_sum, x, i):
@@ -401,7 +410,10 @@ def clip_grad_norm_(parameters, max_norm, norm_type=2, mpu=None):
                 param_norm = p.grad.data.detach().float().norm(norm_type)
                 all_norms.append(param_norm)
         if len(all_norms) > 0:
-            total_norm = torch.stack(all_norms).square().sum().float()
+            # The p-norm over every gradient is (sum_i ||g_i||_p ** p) ** (1/p), and the
+            # 1/norm_type root is taken below, so each per-parameter norm has to be raised
+            # to norm_type here. Squaring only matches that for norm_type == 2.
+            total_norm = torch.stack(all_norms).pow(norm_type).sum().float()
         else:
             total_norm = get_accelerator().FloatTensor([0.0])
         total_norm = total_norm.to(get_accelerator().current_device_name())
@@ -1121,7 +1133,7 @@ def get_norm_with_moe_layers(non_expert_norm, mpu, expert_tensors, norm_type=2):
     """
 
     def to_tensor(v):
-        return get_accelerator().FloatTensor(float(v)).detach()
+        return get_accelerator().FloatTensor([float(v)]).detach()
 
     group_norms = [non_expert_norm]
     for exp_name, tensors in expert_tensors.items():
@@ -1185,6 +1197,16 @@ def reload_adam_states(optimizer, device, non_blocking: bool = False):
             move_back_key(state, "exp_avg_sq")
 
 
+def is_transformers_cache(obj):
+    """Skip checks for the `transformers` cache class when performing AutoTP tensor comparisons."""
+    try:
+        from transformers.cache_utils import Cache
+    except ImportError:
+        return False
+
+    return isinstance(obj, Cache)
+
+
 def compare_tensors_in_structures(inputs1: Union[List, Dict], inputs2: Union[List, Dict]) -> bool:
     """
     Compare two lists or dictionaries for equality, including any tensors they may contain.
@@ -1203,6 +1225,10 @@ def compare_tensors_in_structures(inputs1: Union[List, Dict], inputs2: Union[Lis
         if len(inputs1) != len(inputs2):
             return False
         for val1, val2 in zip(inputs1, inputs2):
+            if is_transformers_cache(val1) and is_transformers_cache(val2):
+                if type(val1) is not type(val2):
+                    return False
+                continue
             if isinstance(val1, torch.Tensor) and isinstance(val2, torch.Tensor):
                 val1 = val1.to(torch.device(get_accelerator().current_device_name()))
                 val2 = val2.to(torch.device(get_accelerator().current_device_name()))
@@ -1217,6 +1243,10 @@ def compare_tensors_in_structures(inputs1: Union[List, Dict], inputs2: Union[Lis
             return False
         for key in inputs1:
             val1, val2 = inputs1[key], inputs2[key]
+            if is_transformers_cache(val1) and is_transformers_cache(val2):
+                if type(val1) is not type(val2):
+                    return False
+                continue
             if isinstance(val1, torch.Tensor) and isinstance(val2, torch.Tensor):
                 val1 = val1.to(torch.device(get_accelerator().current_device_name()))
                 val2 = val2.to(torch.device(get_accelerator().current_device_name()))
@@ -1455,7 +1485,10 @@ def count_used_parameters_in_backward(parameters: Sequence[torch.nn.Parameter]) 
         if not isinstance(param, torch.Tensor) or not param.requires_grad:
             continue
 
-        grad_fn = _get_grad_fn_or_grad_acc(param)
+        # Backward hooks run with grad mode disabled, but PyTorch <=2.4's
+        # _get_grad_fn_or_grad_acc() requires grad mode for leaf params.
+        with torch.enable_grad():
+            grad_fn = _get_grad_fn_or_grad_acc(param)
         if grad_fn is None:
             continue
 

@@ -98,7 +98,14 @@ class TestTensorFragmentGet(DistributedTest):
     @pytest.mark.parametrize('dtype', [torch.bfloat16, torch.float16, torch.float32])
     @pytest.mark.parametrize('api_type', ['local', 'full'])
     @pytest.mark.parametrize('zero_stage', [1, 2, 3])
-    @pytest.mark.parametrize('offload_device', [OffloadDeviceEnum.none, OffloadDeviceEnum.cpu, OffloadDeviceEnum.nvme])
+    @pytest.mark.parametrize(
+        'offload_device',
+        [
+            OffloadDeviceEnum.none,
+            OffloadDeviceEnum.cpu,
+            pytest.param(OffloadDeviceEnum.nvme, marks=pytest.mark.sequential),
+        ],
+    )
     def test_zero_fragments(self, tmpdir, dtype, api_type, zero_stage, offload_device, frozen_weights):
         if not dtype in get_accelerator().supported_dtypes():
             pytest.skip(f"{get_accelerator()._name} does not support {dtype} data type")
@@ -173,8 +180,13 @@ class TestTensorFragmentGet(DistributedTest):
             "bf16": {
                 "enabled": True
             },
+            # Use fp32 gradient accumulation to ensure BF16_Optimizer is used
+            # (bf16 model + bf16 grad_accum uses FP16_Optimizer which doesn't support tensor fragment APIs)
+            "data_types": {
+                "grad_accum_dtype": "fp32"
+            },
             "zero_optimization": {
-                "stage": 0,
+                "stage": 1,
             }
         }
 

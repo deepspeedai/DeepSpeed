@@ -24,6 +24,9 @@ Using Activation Checkpointing
 ------------------------------
 .. autofunction:: deepspeed.checkpointing.checkpoint
 
+Keyword arguments are forwarded to the checkpointed function. Tensor values passed by
+keyword participate in autograd just like positional tensor arguments.
+
 .. autofunction:: deepspeed.checkpointing.reset
 
 

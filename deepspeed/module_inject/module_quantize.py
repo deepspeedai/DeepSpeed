@@ -16,7 +16,6 @@ def quantize_transformer_layer(orig_layer_impl, model, megatron=False, preln=Fal
         megatron (bool): megatron model-parallel implementation (this is supported for inference only)
         preln (bool): does the original layer implementation do pre or post layer norm?
 
-        Note: For Bert kind of models, we inject based on the DeepSpeed-Example models, if not setting huggingface flag.
 
     Returns:
         Updated nn.module with quantized transformer layers
