@@ -83,11 +83,17 @@ def bf16_required_version_check(accelerator_check=True):
     torch_version_available = TORCH_MAJOR > 1 or (TORCH_MAJOR == 1 and TORCH_MINOR >= 10)
     cuda_version_available = CUDA_MAJOR >= 11
     nccl_version_available = NCCL_MAJOR > 2 or (NCCL_MAJOR == 2 and NCCL_MINOR >= 10)
+    cpu_accelerator = get_accelerator().device_name() == 'cpu'
     npu_available = get_accelerator().device_name() == 'npu'
     hpu_available = get_accelerator().device_name() == 'hpu'
     xpu_available = get_accelerator().device_name() == 'xpu'
 
-    if torch_version_available and cuda_version_available and nccl_version_available and accelerator_pass:
+    # The version floors guard bf16 collectives over NCCL transports. The cpu
+    # accelerator reduces bf16 over gloo/ccl with no such dependency, so only
+    # its own bf16 support matters there; every other accelerator evaluates the
+    # original floors.
+    if (cpu_accelerator and accelerator_pass) or (torch_version_available and cuda_version_available
+                                                  and nccl_version_available and accelerator_pass):
         return True
     elif npu_available:
         return True
