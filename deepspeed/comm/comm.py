@@ -412,6 +412,31 @@ def irecv(tensor, src=None, group=None, tag=0, prof=False, log_name='irecv', deb
     return cdb.irecv(tensor=tensor, src=src, group=group, tag=tag)
 
 
+class P2POp:
+    """A point-to-point operation for :func:`batch_isend_irecv`.
+
+    Args:
+        op: :func:`isend` or :func:`irecv`.
+        tensor: The tensor to send or receive into.
+        peer: Global rank of the destination or source.
+    """
+
+    def __init__(self, op, tensor, peer, group=None, tag=0):
+        assert op in (isend, irecv), "op must be deepspeed.comm.isend or deepspeed.comm.irecv"
+        self.op = 'isend' if op is isend else 'irecv'
+        self.tensor = tensor
+        self.peer = peer
+        self.group = group
+        self.tag = tag
+
+
+def batch_isend_irecv(p2p_op_list):
+    """Launch a list of :class:`P2POp` as one batch and return their requests.
+    """
+    global cdb
+    return cdb.batch_isend_irecv(p2p_op_list)
+
+
 @timed_op
 def gather(tensor,
            gather_list=None,

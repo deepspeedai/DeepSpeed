@@ -44,6 +44,7 @@ from .runtime.base_optimizer import DeepSpeedOptimizer
 from .runtime.dataloader import DeepSpeedDataLoader
 from .runtime.hybrid_engine import DeepSpeedHybridEngine
 from .runtime.pipe.engine import PipelineEngine
+from .runtime.pipe.dualpipev import DualPipeVEngine, DualPipeVModule
 from .inference.engine import InferenceEngine
 from .inference.config import DeepSpeedInferenceConfig
 from .runtime.lr_schedules import add_tuning_arguments
@@ -258,17 +259,18 @@ def initialize(
         mpu = model.mpu()
         config_class = DeepSpeedConfig(config, mpu)
         set_optimizer_flags(config_class, model)
-        engine = PipelineEngine(args=args,
-                                model=model,
-                                optimizer=optimizer,
-                                model_parameters=model_parameters,
-                                training_data=training_data,
-                                lr_scheduler=lr_scheduler,
-                                mpu=mpu,
-                                dist_init_required=dist_init_required,
-                                collate_fn=collate_fn,
-                                config=config,
-                                config_class=config_class)
+        engine_cls = DualPipeVEngine if isinstance(model, DualPipeVModule) else PipelineEngine
+        engine = engine_cls(args=args,
+                            model=model,
+                            optimizer=optimizer,
+                            model_parameters=model_parameters,
+                            training_data=training_data,
+                            lr_scheduler=lr_scheduler,
+                            mpu=mpu,
+                            dist_init_required=dist_init_required,
+                            collate_fn=collate_fn,
+                            config=config,
+                            config_class=config_class)
 
     # Restore zero.Init context if necessary
     zero.partition_parameters.restore_init_context()

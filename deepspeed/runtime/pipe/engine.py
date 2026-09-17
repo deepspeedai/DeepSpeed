@@ -385,9 +385,7 @@ class PipelineEngine(DeepSpeedEngine):
 
         # Do the work
         self.timers(TRAIN_BATCH_TIMER).start()
-        sched = schedule.TrainSchedule(micro_batches=self.micro_batches,
-                                       stages=self.num_stages,
-                                       stage_id=self.stage_id)
+        sched = self._train_schedule()
         self._exec_schedule(sched)
 
         with torch.no_grad():
@@ -486,7 +484,7 @@ class PipelineEngine(DeepSpeedEngine):
         micro_batches = self.micro_batches if num_micro_batches is None else num_micro_batches
 
         # Do the work
-        sched = schedule.InferenceSchedule(micro_batches=micro_batches, stages=self.num_stages, stage_id=self.stage_id)
+        sched = self._inference_schedule(micro_batches)
 
         # prevent dead-lock with multiple evals sequence
         dist.barrier()
@@ -528,6 +526,16 @@ class PipelineEngine(DeepSpeedEngine):
         """
         super().set_train_batch_size(train_batch_size)
         self.micro_batches = self.gradient_accumulation_steps()
+
+    def _train_schedule(self):
+        return schedule.TrainSchedule(micro_batches=self.micro_batches, stages=self.num_stages, stage_id=self.stage_id)
+
+    def _inference_schedule(self, micro_batches):
+        return schedule.InferenceSchedule(micro_batches=micro_batches, stages=self.num_stages, stage_id=self.stage_id)
+
+    def _loss_stage_global_rank(self):
+        """Global rank of the stage that computes the loss."""
+        return self.grid.stage_to_global(self.num_stages - 1)
 
     def is_first_stage(self):
         """True if this process is in the first stage in the pipeline."""
@@ -580,7 +588,7 @@ class PipelineEngine(DeepSpeedEngine):
     def _bcast_pipe_scalar(self, data, src_rank=None, dtype=torch.float32):
         # Default to last stage (e.g., for broadcasting loss)
         if src_rank is None:
-            src_rank = self.grid.stage_to_global(self.num_stages - 1)
+            src_rank = self._loss_stage_global_rank()
         assert src_rank in self.grid.pp_group
 
         if self.global_rank == src_rank:
@@ -641,7 +649,7 @@ class PipelineEngine(DeepSpeedEngine):
                 dist.broadcast(tensor=losses, src=self.global_rank, group=self.mpu.get_pipe_parallel_group())
         else:
             # Get loss from last stage
-            src_rank = self.grid.stage_to_global(self.num_stages - 1)
+            src_rank = self._loss_stage_global_rank()
             assert src_rank in self.grid.pp_group
             # losses to reduce are: dp_group_loss, agg_loss, model additional losses
             # therefore: 2 + n_additional_losses
