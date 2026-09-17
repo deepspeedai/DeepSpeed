@@ -78,10 +78,6 @@ GRADIENT_ACCUMULATION_STEPS_DEFAULT = None
 MANAGED_GRADIENT_ACCUMULATION = "managed_gradient_accumulation"
 MANAGED_GRADIENT_ACCUMULATION_DEFAULT = True
 
-# DeepSpeed CSR gradient sparsity
-SPARSE_GRADIENTS = "sparse_gradients"
-SPARSE_GRADIENTS_DEFAULT = False
-
 #########################################
 # BFLOAT16 support
 #########################################

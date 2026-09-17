@@ -156,12 +156,6 @@ Example of <i>**scheduler**</i>
 | ------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
 | Before mean gradient allreduce, predivide gradients by a specified factor; this can sometimes help with fp16 stability when scaling to large numbers of GPUs | `1.0`   |
 
-<i>**sparse_gradients**</i>: [boolean]
-
-| Description                                                                                                                                                                                                                                                                                                                                                 | Default |
-| ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
-| Enable sparse compression of [torch.nn.Embedding](https://pytorch.org/docs/stable/nn.html#torch.nn.Embedding) gradients. This feature is essentially deprecated as we don't see use cases for it as much anymore. It should be noted that this feature is not compatible with [torch.sparse](https://pytorch.org/docs/stable/sparse.html) related features. | `false` |
-
 ### FP16 training options
 
 **Note:** this mode cannot be combined with the `amp` mode described below.

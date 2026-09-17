@@ -288,6 +288,16 @@ def test_mics_zero_config_is_rejected():
         DeepSpeedConfig(config_dict)
 
 
+def test_sparse_gradients_config_is_rejected():
+    config_dict = {
+        "train_micro_batch_size_per_gpu": 1,
+        "sparse_gradients": True,
+    }
+
+    with pytest.raises(DeepSpeedConfigError, match="sparse_gradients"):
+        DeepSpeedConfig(config_dict)
+
+
 @pytest.mark.parametrize("zero_stage", [0, 3])
 @pytest.mark.parametrize("loco_config", [None, {}, {"err_beta": 0.8, "reset_T": 1024}, "auto"])
 def test_loco_zero_config_is_rejected(zero_stage, loco_config):

@@ -684,14 +684,6 @@ class DeepSpeedEngine(Module):
         elif self.bfloat16_enabled():
             self.optimizer = self._configure_bf16_optimizer(optimizer=None)
 
-        # Bookkeeping for sparse support
-        self.sparse_tensor_module_names = set()
-        # if self.sparse_gradients_enabled():
-        for name, module in self.module.named_modules():
-            if isinstance(module, (torch.nn.Embedding, torch.nn.EmbeddingBag)) and self.sparse_gradients_enabled():
-                self.sparse_tensor_module_names.add(name + ".weight")
-                logger.info("Will convert {} to sparse tensor during training".format(name))
-
         self._optimized_linear_offload_setup()
 
         self.save_non_zero_checkpoint = False
@@ -1431,9 +1423,6 @@ class DeepSpeedEngine(Module):
         return self.autotuning_enabled(
         ) and self._config.autotuning_config.model_info and self._config.autotuning_config.model_info.get(
             "profile", False)
-
-    def sparse_gradients_enabled(self):
-        return self._config.sparse_gradients_enabled
 
     def train_batch_size(self):
         return self._config.train_batch_size
@@ -3862,7 +3851,7 @@ class DeepSpeedEngine(Module):
             for key in self.expert_data_parallel_group.keys():
                 expert_grads[key] = []
 
-        for param_name, param in self.module.named_parameters():
+        for param in self.module.parameters():
             if not param.requires_grad:
                 continue
 
@@ -3880,7 +3869,7 @@ class DeepSpeedEngine(Module):
                 param.grad = torch.zeros(param.size(), dtype=param.dtype, device=param.device)
 
             grad_data = param.grad.data
-            if param_name in self.sparse_tensor_module_names or grad_data.is_sparse:
+            if grad_data.is_sparse:
                 # Call param.grad without data to avoid problem with setting of updated grads
                 grad_data = SparseTensor(param.grad)
 
@@ -3953,12 +3942,9 @@ class DeepSpeedEngine(Module):
 
     def sparse_allreduce_no_retain(self, bucket, dp_group, dp_world_size=None):
         allreduced_sparses = self.sparse_allreduce_bucket(bucket, dp_group, dp_world_size)
-        # Densify sparse tensor and copy back to original location
+        # Copy the reduced sparse tensor back to the original location
         for tensor in allreduced_sparses:
-            if tensor.is_sparse:
-                tensor.orig_dense_tensor.data = tensor.to_coo_tensor()
-            else:
-                tensor.orig_dense_tensor.copy_(tensor.to_dense())
+            tensor.orig_dense_tensor.data = tensor.to_coo_tensor()
 
     def sparse_allreduce_bucket(self, bucket, dp_group, dp_world_size=None):
         sparse_list = []
@@ -4721,41 +4707,13 @@ class DeepSpeedEngine(Module):
             ) and 'data_sampler' in checkpoint:
                 self.training_dataloader.data_sampler.load_state_dict(checkpoint['data_sampler'])
 
-            def get_sparse_tensor_module_names(original_set, loaded_set, original_parameters, loaded_parameters):
-                result = set()
-
-                for name in original_set:
-                    if name in loaded_parameters and name not in loaded_set:
-                        continue  # parameter existed in previous model and was not sparse
-                    result.add(name)
-
-                for name in loaded_set:
-                    if name in original_parameters:
-                        result.add(name)  # parameter exists in both configs and it was sparse
-
-                return result
-
-            if 'sparse_tensor_module_names' in checkpoint:
-                sparse_tensor_module_names = checkpoint['sparse_tensor_module_names']
-            elif 'csr_tensor_module_names' in checkpoint:
-                sparse_tensor_module_names = checkpoint['csr_tensor_module_names']
-            else:
-                sparse_tensor_module_names = None
-            if sparse_tensor_module_names is not None:
-                if load_module_strict:
-                    self.sparse_tensor_module_names = sparse_tensor_module_names
-                else:
-                    self.sparse_tensor_module_names = get_sparse_tensor_module_names(
-                        self.sparse_tensor_module_names, sparse_tensor_module_names,
-                        dict(self.module.named_parameters()), checkpoint["module"])
-
             self.global_steps = checkpoint['global_steps']
             self.global_samples = checkpoint.get('global_samples', self.global_steps * self.train_batch_size())
             self.skipped_steps = checkpoint['skipped_steps']
             self.loaded_checkpoint_mp_world_size = checkpoint['mp_world_size']
             deepspeed_states = [
-                'module', 'sparse_tensor_module_names', 'skipped_steps', 'global_steps', 'dp_world_size',
-                'mp_world_size', 'data_sampler', 'random_ltd'
+                'module', 'skipped_steps', 'global_steps', 'dp_world_size', 'mp_world_size', 'data_sampler',
+                'random_ltd'
             ]
         client_state = {}
 
@@ -5069,7 +5027,6 @@ class DeepSpeedEngine(Module):
                     data_sampler=self.training_dataloader.data_sampler.state_dict() if
                     (self.training_dataloader is not None and self.curriculum_learning_enabled()) else None,
                     random_ltd=self.random_ltd_scheduler.state_dict() if self.random_ltd_enabled() else None,
-                    sparse_tensor_module_names=self.sparse_tensor_module_names,
                     skipped_steps=self.skipped_steps,
                     global_steps=self.global_steps,
                     global_samples=self.global_samples,
