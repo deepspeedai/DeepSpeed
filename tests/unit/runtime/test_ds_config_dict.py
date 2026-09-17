@@ -228,6 +228,17 @@ def test_moq_config_is_rejected(config_key, value):
         DeepSpeedConfig(config_dict)
 
 
+@pytest.mark.parametrize("value", [None, {}, False, "auto"])
+def test_legacy_curriculum_learning_config_is_rejected(value):
+    config_dict = {
+        "train_micro_batch_size_per_gpu": 1,
+        "curriculum_learning": value,
+    }
+
+    with pytest.raises(DeepSpeedConfigError, match="curriculum_learning"):
+        DeepSpeedConfig(config_dict)
+
+
 def test_compression_training_config_is_rejected():
     config_dict = {
         "train_micro_batch_size_per_gpu": 1,

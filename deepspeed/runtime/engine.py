@@ -109,7 +109,6 @@ from deepspeed.runtime.data_pipeline.constants import DATA_SAMPLING, \
     RANDOM_LTD_ENABLED, RANDOM_LTD_LAYER_ID, RANDOM_LTD_LAYER_NUM, \
     RANDOM_LTD_LAYER_TOKEN_LR_SCHEDULE, RANDOM_LTD_LAYER_TOKEN_LR_ENABLED, \
     RANDOM_LTD_GLOBAL_BATCH_SIZE, RANDOM_LTD_MICRO_BATCH_SIZE, DATA_EFFICIENCY
-from deepspeed.runtime.data_pipeline.curriculum_scheduler import CurriculumScheduler
 from deepspeed.runtime.checkpoint_engine import (create_checkpoint_engine, TorchCheckpointEngine, CheckpointCommitInfo)
 
 from deepspeed.runtime.data_pipeline.data_routing.scheduler import RandomLTDScheduler
@@ -693,9 +692,6 @@ class DeepSpeedEngine(Module):
 
         if self.pld_enabled():
             self.progressive_layer_drop = self._configure_progressive_layer_drop()
-
-        if self.curriculum_enabled_legacy():
-            self.curriculum_scheduler_legacy = self._configure_curriculum_scheduler_legacy()
 
         if self.random_ltd_enabled():
             random_ltd_config = self.random_ltd_config()
@@ -1299,12 +1295,6 @@ class DeepSpeedEngine(Module):
 
     def pld_gamma(self):
         return self.pld_params()[PLD_GAMMA]
-
-    def curriculum_enabled_legacy(self):
-        return self._config.curriculum_enabled_legacy
-
-    def curriculum_params_legacy(self):
-        return self._config.curriculum_params_legacy
 
     def data_efficiency_enabled(self):
         return self._config.data_efficiency_enabled
@@ -2755,10 +2745,6 @@ class DeepSpeedEngine(Module):
 
         return pld
 
-    def _configure_curriculum_scheduler_legacy(self):
-        scheduler = CurriculumScheduler(self.curriculum_params_legacy())
-        return scheduler
-
     @staticmethod
     def is_map_style_dataset(obj):
         return hasattr(obj, "__getitem__") and hasattr(obj, "__len__")
@@ -2903,15 +2889,6 @@ class DeepSpeedEngine(Module):
             if self.module.training:
                 if self.progressive_layer_drop:
                     kwargs.update(self.progressive_layer_drop.get_state())
-
-            if self.__class__.__name__ != "PipelineEngine":
-                # TODO: The above if condition is a HACK since for PipelineEngine
-                # it's difficult to inject argument in forward pass.
-                if self.module.training and self.curriculum_enabled_legacy():
-                    self.curriculum_scheduler_legacy.update_difficulty(self.global_steps + 1)
-                    if self.curriculum_params_legacy()["curriculum_type"] == "seqlen":
-                        kwargs.update({"curriculum_seqlen": self.curriculum_scheduler_legacy.get_current_difficulty()})
-                        return_modified = True
 
         if self.module.training and self.random_ltd_enabled():
             self.random_ltd_scheduler.update_seq(self.global_steps)

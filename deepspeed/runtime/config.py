@@ -58,7 +58,7 @@ from .swap_tensor.aio_config import get_aio_config
 from .model_checkpointing.config import get_checkpoint_config
 
 from .tensor_parallel import get_tensor_parallel_config
-from .data_pipeline.config import get_data_efficiency_enabled, get_data_efficiency_config, get_curriculum_enabled_legacy, get_curriculum_params_legacy
+from .data_pipeline.config import get_data_efficiency_enabled, get_data_efficiency_config
 from .data_pipeline.constants import *
 
 from ..utils.config import get_timers_config
@@ -116,6 +116,10 @@ _REMOVED_TOP_LEVEL_CONFIG_KEYS = {
     "sparse_attention":
     "DeepSpeed Sparse Attention has been removed; the 'sparse_attention' configuration block is no longer "
     f"supported. See {_REMOVED_FEATURES_ISSUE}.",
+    "curriculum_learning":
+    "Legacy top-level 'curriculum_learning' has been removed. Use "
+    "'data_efficiency.data_sampling.curriculum_learning' instead. "
+    f"See {_REMOVED_FEATURES_ISSUE}.",
 }
 _REMOVED_ZERO_CONFIG_KEYS = {
     "mics_shard_size":
@@ -646,9 +650,6 @@ class DeepSpeedConfig(object):
 
         self.pld_enabled = get_pld_enabled(param_dict)
         self.pld_params = get_pld_params(param_dict)
-
-        self.curriculum_enabled_legacy = get_curriculum_enabled_legacy(param_dict)
-        self.curriculum_params_legacy = get_curriculum_params_legacy(param_dict)
 
         self.data_efficiency_enabled = get_data_efficiency_enabled(param_dict)
         self.data_efficiency_config = get_data_efficiency_config(param_dict)
