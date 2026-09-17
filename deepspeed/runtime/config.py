@@ -102,6 +102,9 @@ _REMOVED_TOP_LEVEL_CONFIG_KEYS = {
     "compression_training":
     "The DeepSpeed compression library has been removed. A leftover 'compression_training' "
     f"block would be ignored and the model would train unquantized. See {_REMOVED_FEATURES_ISSUE}.",
+    "amp":
+    "NVIDIA Apex AMP integration has been removed. Use DeepSpeed 'fp16', 'bf16', or 'torch_autocast' "
+    f"instead. See {_REMOVED_FEATURES_ISSUE}.",
     "quantize_training":
     "Mixture-of-Quantization (MoQ) / 'quantize_training' has been removed. See "
     f"{_REMOVED_FEATURES_ISSUE}.",
@@ -189,22 +192,6 @@ def get_pld_params(param_dict):
         pld_params = copy.copy(param_dict[PROGRESSIVE_LAYER_DROP])
         pld_params.pop(PLD_ENABLED)
         return pld_params
-    else:
-        return False
-
-
-def get_amp_enabled(param_dict):
-    if AMP in param_dict.keys():
-        return get_scalar_param(param_dict[AMP], AMP_ENABLED, AMP_ENABLED_DEFAULT)
-    else:
-        return False
-
-
-def get_amp_params(param_dict):
-    if AMP in param_dict.keys():
-        amp_params = copy.copy(param_dict[AMP])
-        amp_params.pop(AMP_ENABLED)
-        return amp_params
     else:
         return False
 
@@ -610,9 +597,6 @@ class DeepSpeedConfig(object):
         self.bfloat16_config = get_bfloat16_config(param_dict)
         assert not (self.float16_config.enabled
                     and self.bfloat16_config.enabled), 'bfloat16 and fp16 modes cannot be simultaneously enabled'
-
-        self.amp_enabled = get_amp_enabled(param_dict)
-        self.amp_params = get_amp_params(param_dict)
 
         self.torch_autocast_enabled = get_torch_autocast_enabled(param_dict)
         self.torch_autocast_dtype = get_torch_autocast_dtype(param_dict)

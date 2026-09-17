@@ -99,14 +99,6 @@ def bf16_required_version_check(accelerator_check=True):
         return False
 
 
-def required_amp_check():
-    from importlib.util import find_spec
-    if find_spec('apex') is None:
-        return False
-    else:
-        return True
-
-
 class no_child_process_in_deepspeed_io:
 
     def __enter__(self):

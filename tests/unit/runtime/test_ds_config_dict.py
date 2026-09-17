@@ -263,6 +263,23 @@ def test_nebula_config_is_rejected():
         DeepSpeedConfig(config_dict)
 
 
+@pytest.mark.parametrize("amp_config",
+                         [None, {}, False, "auto", {
+                             "enabled": False
+                         }, {
+                             "enabled": True,
+                             "opt_level": "O1"
+                         }])
+def test_apex_amp_config_is_rejected(amp_config):
+    config_dict = {
+        "train_micro_batch_size_per_gpu": 1,
+        "amp": amp_config,
+    }
+
+    with pytest.raises(DeepSpeedConfigError, match="Apex AMP"):
+        DeepSpeedConfig(config_dict)
+
+
 def test_sparse_attention_config_is_rejected():
     config_dict = {
         "train_micro_batch_size_per_gpu": 1,

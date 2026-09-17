@@ -33,7 +33,7 @@ toc_label: "Contents"
 
 | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              | Default |
 | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
-| Controls how gradient accumulation boundaries are managed. When `true`, DeepSpeed tracks micro-steps and applies the optimizer step only at the accumulation boundary, so `forward`/`backward`/`step` can be called symmetrically on every micro-batch. When `false`, micro-step tracking is disabled and the client is responsible for calling `step()` at the accumulation boundary; each `step()` finalizes the locally-accumulated gradients and applies an optimizer update. The `false` setting supports ZeRO stage 0/1/2/3 (and DDP), including ZeRO optimizer-state and parameter offload (CPU/NVMe). It is incompatible with pipeline parallelism, DeepCompile, and Apex AMP. ZeRO `overlap_comm` is supported only with ZeRO stage 2 (rejected for stage 0/1, where reduction is deferred to `step()`). | `true`  |
+| Controls how gradient accumulation boundaries are managed. When `true`, DeepSpeed tracks micro-steps and applies the optimizer step only at the accumulation boundary, so `forward`/`backward`/`step` can be called symmetrically on every micro-batch. When `false`, micro-step tracking is disabled and the client is responsible for calling `step()` at the accumulation boundary; each `step()` finalizes the locally-accumulated gradients and applies an optimizer update. The `false` setting supports ZeRO stage 0/1/2/3 (and DDP), including ZeRO optimizer-state and parameter offload (CPU/NVMe). It is incompatible with pipeline parallelism and DeepCompile. ZeRO `overlap_comm` is supported only with ZeRO stage 2 (rejected for stage 0/1, where reduction is deferred to `step()`). | `true`  |
 
 
 
@@ -158,14 +158,11 @@ Example of <i>**scheduler**</i>
 
 ### FP16 training options
 
-**Note:** this mode cannot be combined with the `amp` mode described below.
-{: .notice--warning}
-
 <i>**fp16**</i>: [dictionary]
 
-| Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                | Default |
-| ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
-| Configuration for using mixed precision/FP16 training that leverages [NVIDIA's Apex package](https://nvidia.github.io/apex/). An example, including the available dictionary keys is illustrated below. NOTE: this does not use Apex's AMP mode that allows for more flexibility in mixed precision training modes, this mode is similar to AMP's O2 mode. Please see AMP support below if you want to use more complex mixed precision modes. If you want to use ZeRO (currently) you must use this mode. | None    |
+| Description                                                                                                                                        | Default |
+| -------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
+| Configuration for using DeepSpeed mixed precision/FP16 training. An example, including the available dictionary keys, is illustrated below. | None    |
 
 ```json
 "fp16": {
@@ -245,9 +242,6 @@ Example of <i>**scheduler**</i>
 
 ### BFLOAT16 training options
 
-**Note:** this mode cannot be combined with the `amp` mode described below.
-{: .notice--warning}
-
 **Note:** this mode cannot be combined with the `fp16` mode described above.
 {: .notice--warning}
 
@@ -289,38 +283,6 @@ Example of <i>**scheduler**</i>
 | ---------- | --------------------------- | -------------------------- |
 | 0 | Not supported | Not supported |
 | 1/2/3 | Requires ZeRO-Offload + `DeepSpeedCPUAdam` (optimizer states stay fp32 on CPU) | On GPU without offload, or on CPU with `offload_optimizer` + `DeepSpeedCPUAdam`; optimizer states kept in bf16 either way |
-
-### Automatic mixed precision (AMP) training options
-
-**Note:** this mode cannot be combined with the `fp16` mode described above. In addition this mode is not currently compatible with ZeRO.
-{: .notice--warning}
-
-<i>**amp**</i>: [dictionary]
-
-| Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     | Default |
-| ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
-| Configuration for using automatic mixed precision (AMP) training that leverages [NVIDIA's Apex AMP package](https://nvidia.github.io/apex/). An example, including the available dictionary keys is illustrated below. Is not compatible with `fp16` mode above or ZeRO. Any parameters outside of "enabled" will be passed to AMP's initialize call, see the API and descriptions here at the [apex.amp.initialize documentation](https://nvidia.github.io/apex/amp.html#apex.amp.initialize). | None    |
-
-```json
-"amp": {
-    "enabled": true,
-    ...
-    "opt_level": "O1",
-    ...
-}
-```
-
-<i>**amp:enabled**</i>: [boolean]
-
-| Description                                                                                   | Default |
-| --------------------------------------------------------------------------------------------- | ------- |
-| <i>**enabled**</i> is an **amp** parameter indicating whether or not AMP training is enabled. | `false` |
-
-***amp params***: [various]
-
-| Description                                                                                                                                                                                                            | Default |
-| ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
-| Any parameters outside of "enabled" will be passed to AMP's initialize call, see the API and descriptions here at the [apex.amp.initialize documentation](https://nvidia.github.io/apex/amp.html#apex.amp.initialize). | None    |
 
 ### PyTorch Automatic Mixed Precision (torch.autocast) training options
 
