@@ -96,6 +96,21 @@ def test_continuous_generation_rejects_unsupported_inputs():
         rollout.generate(request, SamplingConfig(max_new_tokens=2, temperature=0.5, continuous_batch_size=1))
 
 
+def test_continuous_generation_rejects_shared_prefill():
+    rollout = HybridEngineRollout(
+        _make_engine(),
+        _make_tokenizer(),
+        HybridEngineRolloutConfig(use_shared_prefill=True),
+    )
+    request = RolloutRequest(
+        prompt_ids=torch.tensor([[0, 1, 2]]),
+        prompt_attention_mask=torch.tensor([[0, 1, 1]]),
+    )
+
+    with pytest.raises(ValueError, match="shared prompt prefill"):
+        rollout.generate(request, SamplingConfig(max_new_tokens=2, temperature=0, continuous_batch_size=1))
+
+
 def test_static_cache_constructor_supports_max_batch_keyword():
 
     class MaxBatchStaticCache:
