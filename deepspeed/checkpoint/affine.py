@@ -234,6 +234,8 @@ class ParamAffineMap:
 
         written = {}
         for rank, pieces in self.pieces_by_rank.items():
+            if not pieces:
+                continue
             flat_shard = _flat_buffer(shards[rank])
             for piece in pieces:
                 target = piece.source_view(full_param)

@@ -66,6 +66,9 @@ from deepspeed.runtime.constants import \
     DATA_PARALLEL_GROUP, GLOBAL_RANK, DDP_BFLOAT16, GRADIENT_ALLREDUCE_OP_MEAN
 from deepspeed.runtime.zero.config import ZeroStageEnum
 from deepspeed.checkpoint.constants import (
+    AUTOEP_EXPERT_PLACEMENT,
+    AUTOEP_PLACEMENT_EXPERTS,
+    AUTOEP_PLACEMENT_RANKS,
     AUTOEP_ZERO3_EXPERT_STATE_FORMAT_VERSION,
     AUTOEP_ZERO3_EXPERT_STATE_FORMAT_VERSION_KEY,
     AUTOEP_ZERO3_EXPERT_STATE_FORMAT_KEY,
@@ -4081,24 +4084,9 @@ class DeepSpeedEngine(Module):
         else:
             # Validate AutoEP metadata if present
             if autoep_layers is not None:
-                if not isinstance(autoep_layers, list):
-                    raise RuntimeError(
-                        f"ds_autoep_layers metadata is malformed: expected list, got {type(autoep_layers).__name__}")
-                seen_ids = set()
-                required_fields = {
-                    'moe_layer_id', 'module_path', 'num_experts', 'num_local_experts', 'ep_size', 'expert_key_prefix'
-                }
-                for entry in autoep_layers:
-                    if not isinstance(entry, dict):
-                        raise RuntimeError(
-                            f"ds_autoep_layers entry is malformed: expected dict, got {type(entry).__name__}")
-                    missing = required_fields - entry.keys()
-                    if missing:
-                        raise RuntimeError(f"ds_autoep_layers entry is invalid: missing fields {sorted(missing)}")
-                    lid = entry['moe_layer_id']
-                    if lid in seen_ids:
-                        raise RuntimeError(f"ds_autoep_layers metadata has duplicate moe_layer_id: {lid}")
-                    seen_ids.add(lid)
+                DeepSpeedEngine._validate_autoep_zero3_partitioned_metadata(autoep_layers,
+                                                                            model=model,
+                                                                            require_partitioned=False)
             elif has_autoep_layers:
                 logger.warning("Checkpoint does not contain ds_autoep_layers metadata. "
                                "Loading AutoEP expert weights using best-effort module detection.")
@@ -4410,13 +4398,17 @@ class DeepSpeedEngine(Module):
         return any(is_autoep_zero3_partitioned_entry(entry) for entry in autoep_layers)
 
     @staticmethod
-    def _validate_autoep_zero3_partitioned_metadata(autoep_layers, model=None, require_partitioned=True):
+    def _validate_autoep_zero3_partitioned_metadata(autoep_layers,
+                                                    model=None,
+                                                    require_partitioned=True,
+                                                    validate_runtime_placement=False):
         try:
             from deepspeed.module_inject.auto_ep_layer import AutoEPMoELayer as _AutoEPMoELayer
         except ImportError:
             _AutoEPMoELayer = None
 
         expected_expert_prefixes = None
+        expected_runtime_layers = None
         if _AutoEPMoELayer is not None and model is not None:
             expected_expert_prefixes = {
                 module_name: f"{module_name}.experts" if module_name else "experts"
@@ -4424,10 +4416,23 @@ class DeepSpeedEngine(Module):
             }
             if not expected_expert_prefixes:
                 expected_expert_prefixes = None
+            if validate_runtime_placement:
+                expected_runtime_layers = {}
+                for module_name, module in model.named_modules():
+                    if not isinstance(module, _AutoEPMoELayer):
+                        continue
+                    rank_entry = module.expert_placement_descriptor[AUTOEP_PLACEMENT_RANKS][module.ep_rank]
+                    expected_runtime_layers[module_name] = {
+                        'ep_rank': module.ep_rank,
+                        'local_experts': list(rank_entry[AUTOEP_PLACEMENT_EXPERTS]),
+                    }
+                if not expected_runtime_layers:
+                    expected_runtime_layers = None
 
         validate_autoep_zero3_partitioned_metadata(autoep_layers,
                                                    require_partitioned=require_partitioned,
                                                    expected_expert_prefixes=expected_expert_prefixes,
+                                                   expected_runtime_layers=expected_runtime_layers,
                                                    version_context="This DeepSpeed build")
 
     @staticmethod
@@ -5070,6 +5075,8 @@ class DeepSpeedEngine(Module):
                     num_local_experts,
                     'ep_size':
                     module.ep_size,
+                    AUTOEP_EXPERT_PLACEMENT:
+                    module.expert_placement_descriptor,
                     'expert_key_prefix':
                     f"{module_prefix}experts",
                     AUTOEP_ZERO3_EXPERT_STATE_FORMAT_KEY:
@@ -5133,6 +5140,12 @@ class DeepSpeedEngine(Module):
                             self.checkpoint_engine.save(saveable, moe_save_path)
 
                 moe_layer_id += 1
+
+        if autoep_layer_info:
+            DeepSpeedEngine._validate_autoep_zero3_partitioned_metadata(autoep_layer_info,
+                                                                        model=self.module,
+                                                                        require_partitioned=False,
+                                                                        validate_runtime_placement=True)
 
         self._curr_ckpt_path = os.path.join(save_dir, tag)
 

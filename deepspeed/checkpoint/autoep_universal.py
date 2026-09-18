@@ -16,9 +16,15 @@ from deepspeed.utils import logger
 
 from .constants import (
     AUTOEP_EP_SIZE,
+    AUTOEP_EXPERT_PLACEMENT,
     AUTOEP_EXPERT_KEY_PREFIX,
     AUTOEP_NUM_EXPERTS,
     AUTOEP_NUM_LOCAL_EXPERTS,
+    AUTOEP_PLACEMENT_EP_SIZE,
+    AUTOEP_PLACEMENT_EXPERTS,
+    AUTOEP_PLACEMENT_NUM_EXPERTS,
+    AUTOEP_PLACEMENT_RANK,
+    AUTOEP_PLACEMENT_RANKS,
     AUTOEP_ZERO12_REQUIRED_FIELDS,
     PARAM,
     CAT_DIM,
@@ -40,6 +46,7 @@ from .constants import (
     FOLDING_FAMILY,
     FOLDING_PARAM_FAMILIES,
 )
+from .autoep_affine import autoep_placement_to_affine_map, validate_autoep_placement_descriptor
 
 
 def make_folding_metadata(*,
@@ -229,7 +236,7 @@ def get_autoep_zero12_expert_param_info(autoep_layers_metadata):
         if not isinstance(prefix, str) or not prefix:
             raise RuntimeError("AutoEP expert_key_prefix must be a non-empty string.")
 
-        for field in (AUTOEP_NUM_EXPERTS, AUTOEP_NUM_LOCAL_EXPERTS, AUTOEP_EP_SIZE):
+        for field in (AUTOEP_NUM_EXPERTS, AUTOEP_EP_SIZE):
             value = layer_info[field]
             if isinstance(value, bool) or not isinstance(value, int) or value < 1:
                 raise RuntimeError(f"AutoEP {field} must be a positive integer, got {value!r}.")
@@ -237,7 +244,33 @@ def get_autoep_zero12_expert_param_info(autoep_layers_metadata):
         num_experts = layer_info[AUTOEP_NUM_EXPERTS]
         num_local_experts = layer_info[AUTOEP_NUM_LOCAL_EXPERTS]
         ep_size = layer_info[AUTOEP_EP_SIZE]
-        if num_experts != num_local_experts * ep_size:
+        placement = layer_info.get(AUTOEP_EXPERT_PLACEMENT)
+        if isinstance(num_local_experts, bool) or not isinstance(num_local_experts, int):
+            raise RuntimeError(f"AutoEP {AUTOEP_NUM_LOCAL_EXPERTS} must be an integer, got "
+                               f"{num_local_experts!r}.")
+        minimum_local_experts = 0 if placement is not None else 1
+        if num_local_experts < minimum_local_experts:
+            qualifier = "non-negative" if placement is not None else "positive"
+            raise RuntimeError(f"AutoEP {AUTOEP_NUM_LOCAL_EXPERTS} must be a {qualifier} integer, got "
+                               f"{num_local_experts!r}.")
+        if placement is not None:
+            try:
+                validate_autoep_placement_descriptor(placement)
+            except (TypeError, ValueError) as exc:
+                raise RuntimeError(f"Invalid AutoEP expert placement for {prefix}: {exc}") from exc
+            if (placement[AUTOEP_PLACEMENT_NUM_EXPERTS] != num_experts
+                    or placement[AUTOEP_PLACEMENT_EP_SIZE] != ep_size):
+                raise RuntimeError(f"AutoEP expert placement disagrees with layer metadata for {prefix}.")
+            ep_rank = layer_info.get('ep_rank')
+            if ep_rank is not None:
+                rank_entries = {entry[AUTOEP_PLACEMENT_RANK]: entry for entry in placement[AUTOEP_PLACEMENT_RANKS]}
+                if ep_rank not in rank_entries:
+                    raise RuntimeError(f"AutoEP expert placement does not contain metadata ep_rank {ep_rank}.")
+                expected_local_experts = len(rank_entries[ep_rank][AUTOEP_PLACEMENT_EXPERTS])
+                if num_local_experts != expected_local_experts:
+                    raise RuntimeError("AutoEP num_local_experts disagrees with the placement entry for "
+                                       f"EP rank {ep_rank}: {num_local_experts} != {expected_local_experts}.")
+        elif num_experts != num_local_experts * ep_size:
             raise RuntimeError(f"AutoEP expert count mismatch for {prefix}: num_experts={num_experts}, "
                                f"num_local_experts={num_local_experts}, ep_size={ep_size}.")
 
@@ -245,6 +278,7 @@ def get_autoep_zero12_expert_param_info(autoep_layers_metadata):
             'num_experts': num_experts,
             'num_local_experts': num_local_experts,
             'ep_size': ep_size,
+            'expert_placement': placement,
         }
         for weight_name in ('w1', 'w2', 'w3'):
             param_name = f"{prefix}.{weight_name}"
@@ -288,19 +322,27 @@ def consolidate_autoep_zero12_expert_states(temp_dir, output_dir, expert_param_i
 
         ep_size = metadata['ep_size']
         num_experts = metadata['num_experts']
-        num_local_experts = metadata['num_local_experts']
+        placement = metadata.get('expert_placement')
 
         local_shape = tuple(slice_shapes[param_name])
-        if not local_shape or local_shape[0] != num_local_experts:
+        if not local_shape:
+            raise RuntimeError(f"AutoEP local shape is empty for {param_name}.")
+
+        affine_map = None
+        if placement is not None:
+            logical_shape = (num_experts, ) + local_shape[1:]
+            affine_map = autoep_placement_to_affine_map(placement, logical_shape)
+        elif local_shape[0] != metadata['num_local_experts']:
             raise RuntimeError(f"AutoEP local shape mismatch for {param_name}: shape={local_shape}, "
-                               f"num_local_experts={num_local_experts}.")
+                               f"num_local_experts={metadata['num_local_experts']}.")
 
         param_dir = os.path.join(output_dir, "zero", param_name)
         os.makedirs(param_dir, exist_ok=True)
 
         for state_name in ('fp32', 'exp_avg', 'exp_avg_sq'):
-            ep_tensors = []
+            ep_tensors = {}
             for ep_rank in range(ep_size):
+                expected_shape = affine_map.shard_shapes[ep_rank] if affine_map is not None else local_shape
                 fragments = []
                 dp_ranks = _autoep_zero12_dp_ranks(ep_rank, dp_degree, ep_size, use_data_before_expert_parallel)
                 for dp_rank in dp_ranks:
@@ -315,17 +357,24 @@ def consolidate_autoep_zero12_expert_states(temp_dir, output_dir, expert_param_i
                                            f"in {fragment_path}.")
                     fragments.append(fragment.flatten())
 
+                expected_numel = torch.Size(expected_shape).numel()
+                if not fragments and expected_numel == 0:
+                    local_tensor = torch.empty(expected_shape, dtype=torch.float32)
+                    ep_tensors[ep_rank] = local_tensor
+                    continue
                 if not fragments:
                     raise RuntimeError(f"Missing AutoEP {state_name} fragments for {param_name}, EP rank {ep_rank}.")
 
                 local_tensor = torch.cat(fragments, dim=0)
-                expected_numel = torch.Size(local_shape).numel()
                 if local_tensor.numel() != expected_numel:
                     raise RuntimeError(f"AutoEP {state_name} fragment size mismatch for {param_name}, "
                                        f"EP rank {ep_rank}: got {local_tensor.numel()}, expected {expected_numel}.")
-                ep_tensors.append(local_tensor.reshape(local_shape))
+                ep_tensors[ep_rank] = local_tensor.reshape(expected_shape)
 
-            full_tensor = torch.cat(ep_tensors, dim=0)
+            if affine_map is not None:
+                full_tensor = affine_map.rebuild(ep_tensors)
+            else:
+                full_tensor = torch.cat([ep_tensors[rank] for rank in range(ep_size)], dim=0)
             if full_tensor.shape[0] != num_experts:
                 raise RuntimeError(f"AutoEP consolidated expert count mismatch for {param_name}: "
                                    f"got {full_tensor.shape[0]}, expected {num_experts}.")
@@ -376,6 +425,11 @@ def consolidate_autoep_expert_files(checkpoint_dir, output_dir, autoep_layers_me
         moe_layer_id = layer_info['moe_layer_id']
         num_experts = layer_info['num_experts']
         prefix = layer_info['expert_key_prefix']
+        placement = layer_info.get(AUTOEP_EXPERT_PLACEMENT)
+        if placement is not None:
+            validate_autoep_placement_descriptor(placement)
+            if placement[AUTOEP_NUM_EXPERTS] != num_experts:
+                raise RuntimeError(f"AutoEP expert placement disagrees with num_experts for {prefix}.")
 
         for wname in ('w1', 'w2', 'w3'):
             expert_tensors = []

@@ -568,11 +568,22 @@ and fp16 alike, because dividing by `2^k` only shifts the exponent — so a bias
 bit-exactly at every TP degree in normal use. It is lossy for non-power-of-two `N` (3, 6,
 12), where a converted-and-restored bias may differ in the last bits from the original.
 
-**8.4 ZeRO and offload placement.** delock's extension in #8230 — "a subset of a parameter
-combined with a list of ranks holding this subset" — is what §2.1's `locations` implements.
-ZeRO-1/3 partitions and offload replicas should fall out as pieces whose `locations`
-describe the DP group rather than the TP group, but this spec does not yet work through
-AutoEP's expert placement, where locations are per-expert rather than per-parameter.
+**8.4 AutoEP, ZeRO, and offload placement.** Phase 1 additively introduces a versioned
+AutoEP placement descriptor in EP-local rank coordinates and lowers one logical
+`[num_experts, ...]` tensor through the existing `AffinePiece` / `ParamAffineMap` IR. The
+descriptor records each rank's ordered global expert IDs, including uneven,
+non-contiguous, replicated, and empty placements. It describes placement provenance, not
+a scheduling policy. ZeRO and EDP fragments remain outside the map: callers first
+normalize storage to one logical packed expert tensor per EP rank.
+
+This phase does not change the current runtime's uniform contiguous scheduling, choose an
+arbitrary future expert schedule, or implement direct phase-2 shard-to-shard transfer.
+Those remain follow-on work. Phase 2 may derive a target descriptor from runtime
+scheduling and transfer directly between source and target maps; until then extraction
+from the universal full tensor uses the target map. delock's extension in #8230 — "a
+subset of a parameter combined with a list of ranks holding this subset" — is still what
+§2.1's exact `locations` implements, and the same mechanism can later describe normalized
+ZeRO/offload placement without introducing another geometry IR.
 
 ---
 

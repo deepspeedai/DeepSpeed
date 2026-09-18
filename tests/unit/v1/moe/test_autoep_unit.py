@@ -520,6 +520,92 @@ class TestAutoEPConfig:
         for param in autoep_layer.router.parameters():
             assert param.ds_zero_placement_family == "replicated"
 
+    def test_autoep_layer_emits_uniform_placement_and_param_restore_metadata(self):
+        from deepspeed.checkpoint.constants import (
+            AUTOEP_EXPERT_PLACEMENT,
+            AUTOEP_PARAM_EP_RANK,
+            AUTOEP_PARAM_LOCAL_EXPERTS,
+            AUTOEP_PARAM_LOGICAL_SHAPE,
+            DS_AUTOEP_UC_META,
+        )
+
+        source = MockMoEBlock(num_experts=4, ffn_hidden=128, hidden_size=64)
+        layer = AutoEPMoELayer(_make_spec(),
+                               source,
+                               ep_size=2,
+                               ep_rank=1,
+                               config=_runtime_config(enabled=True, autoep_size=2))
+        peer_layer = AutoEPMoELayer(_make_spec(),
+                                    source,
+                                    ep_size=2,
+                                    ep_rank=0,
+                                    config=_runtime_config(enabled=True, autoep_size=2))
+        expected_placement = {
+            "version": 1,
+            "num_experts": 4,
+            "ep_size": 2,
+            "ranks": [{
+                "rank": 0,
+                "experts": [0, 1]
+            }, {
+                "rank": 1,
+                "experts": [2, 3]
+            }],
+        }
+
+        assert layer.expert_placement_descriptor == expected_placement
+        assert peer_layer.expert_placement_descriptor == expected_placement
+        for param in layer.experts.parameters():
+            restore_metadata = getattr(param, DS_AUTOEP_UC_META)
+            assert restore_metadata[AUTOEP_EXPERT_PLACEMENT] == expected_placement
+            assert restore_metadata[AUTOEP_PARAM_LOGICAL_SHAPE] == [4, *param.shape[1:]]
+            assert restore_metadata[AUTOEP_PARAM_EP_RANK] == 1
+            assert restore_metadata[AUTOEP_PARAM_LOCAL_EXPERTS] == [2, 3]
+
+        for param in layer.router.parameters():
+            assert not hasattr(param, DS_AUTOEP_UC_META)
+
+    def test_checkpoint_source_placement_does_not_need_to_match_target_topology(self):
+        from deepspeed.checkpoint.autoep_affine import make_autoep_placement_descriptor
+        from deepspeed.checkpoint.constants import (
+            AUTOEP_EXPERT_PLACEMENT,
+            AUTOEP_ZERO3_EXPERT_STATE_FORMAT_KEY,
+            AUTOEP_ZERO3_EXPERT_STATE_FORMAT_VERSION,
+            AUTOEP_ZERO3_EXPERT_STATE_FORMAT_VERSION_KEY,
+            AUTOEP_ZERO3_PARTITIONED_EXPERT_STATE_FORMAT,
+        )
+
+        source = MockMoEBlock(num_experts=4, ffn_hidden=128, hidden_size=64)
+        target_layer = AutoEPMoELayer(_make_spec(),
+                                      source,
+                                      ep_size=4,
+                                      ep_rank=0,
+                                      config=_runtime_config(enabled=True, autoep_size=4))
+        target_model = nn.Sequential(target_layer)
+        source_metadata = [{
+            "moe_layer_id": 0,
+            "module_path": "0",
+            "num_experts": 4,
+            "num_local_experts": 2,
+            "ep_size": 2,
+            AUTOEP_EXPERT_PLACEMENT: make_autoep_placement_descriptor(4, [[0, 1], [2, 3]]),
+            "expert_key_prefix": "0.experts",
+            AUTOEP_ZERO3_EXPERT_STATE_FORMAT_KEY: AUTOEP_ZERO3_PARTITIONED_EXPERT_STATE_FORMAT,
+            AUTOEP_ZERO3_EXPERT_STATE_FORMAT_VERSION_KEY: AUTOEP_ZERO3_EXPERT_STATE_FORMAT_VERSION,
+            "ep_group_name": "ep_size_2",
+            "ep_rank": 0,
+            "expert_data_parallel_rank": 0,
+            "expert_data_parallel_world_size": 1,
+            "global_expert_start": 0,
+            "global_expert_end": 2,
+        }]
+
+        DeepSpeedEngine._validate_autoep_zero3_partitioned_metadata(source_metadata, model=target_model)
+        with pytest.raises(RuntimeError, match="expert order"):
+            DeepSpeedEngine._validate_autoep_zero3_partitioned_metadata(source_metadata,
+                                                                        model=target_model,
+                                                                        validate_runtime_placement=True)
+
     def test_zero3_checkpoint_metadata_includes_partition_group_ranks(self):
         optimizer = object.__new__(DeepSpeedZeroOptimizer_Stage3)
         param = nn.Parameter(torch.empty(1))
