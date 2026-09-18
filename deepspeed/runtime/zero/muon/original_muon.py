@@ -213,12 +213,12 @@ def muon_update(grad,
             update = zeropower_via_gram_newtonschulz(update, steps=ns_steps)
         else:
             update = zeropower_via_newtonschulz5(update, steps=ns_steps)
-        update *= max(1, grad.size(-2) / grad.size(-1))**0.5
+        update *= max(1, update.size(-2) / update.size(-1))**0.5
     if update.dtype != orig_dtype:
         update = update.to(orig_dtype)
     # On the non-nesterov path `update` is the (untouched, finite) momentum, so without this
     # an overflowed step would produce a finite update and be applied instead of skipped.
-    return torch.where(grad_is_finite, update, grad.to(orig_dtype))
+    return torch.where(grad_is_finite, update.reshape_as(grad), grad.to(orig_dtype))
 
 
 class Muon(torch.optim.Optimizer):
