@@ -572,16 +572,16 @@ def test_the_head_count_is_read_from_the_layer_shape_under_zero_init():
 #
 # Kimi-K3's linear-attention layers build q/k/v at `linear_attn_config`'s num_heads x head_dim,
 # which no top-level config field describes, so the candidates above decline them. The module
-# that built the projection knows both numbers. Asking it is architecture-agnostic; restricting
-# the question to modules that say they are attention is what keeps GLM-5.2's sparse-attention
-# indexer out, which is where #8420 landed.
+# that built the projection knows both numbers. Only modules on `_LINEAR_ATTENTION_OWNERS` are
+# asked, which keeps GLM-5.2's sparse-attention indexer out, where #8420 landed, and a listed
+# module's own geometry decides even when a config candidate happens to have the same width.
 
 
-class _KimiDeltaAttention(torch.nn.Module):
+class KimiDeltaAttention(torch.nn.Module):
     """The KDA layer of inference-optimization/Kimi-K3-0.40B, attributes and shapes as built.
 
-    Named after the real class because the class name is load-bearing: the owning module is only
-    asked for geometry when it says it is attention.
+    Named after the real class because the class name is load-bearing: only modules on
+    `_LINEAR_ATTENTION_OWNERS` are asked for their geometry.
     """
 
     def __init__(self, hidden=1024, num_heads=8, head_dim=32, head_v_dim=None):
@@ -639,7 +639,7 @@ def test_linear_attention_geometry_comes_from_the_owning_module(leaf):
     The same config that declines these in `test_linear_attention_on_a_config_with_mla_leftovers_is_declined`
     is used here, so the module is the only thing that changed.
     """
-    model = _HybridModel(_KimiDeltaAttention())
+    model = _HybridModel(KimiDeltaAttention())
 
     name = f"layers.0.self_attn.{leaf}.weight"
     param = dict(model.named_parameters())[name]
@@ -651,7 +651,7 @@ def test_linear_attention_geometry_comes_from_the_owning_module(leaf):
 @pytest.mark.parametrize("leaf", ["g_proj", "f_b_proj", "b_proj", "o_proj"])
 def test_the_other_matrices_of_a_linear_attention_layer_stay_whole(leaf):
     """g_proj is the same 256 x 1024 shape as q_proj and must not ride along on the name check."""
-    model = _HybridModel(_KimiDeltaAttention())
+    model = _HybridModel(KimiDeltaAttention())
 
     name = f"layers.0.self_attn.{leaf}.weight"
     assert _attention_head_count(name, dict(model.named_parameters())[name], model) is None
@@ -659,7 +659,7 @@ def test_the_other_matrices_of_a_linear_attention_layer_stay_whole(leaf):
 
 def test_the_value_projection_uses_the_value_width():
     """head_v_dim can differ from head_k_dim; the k width would reject v_proj at 512 rows."""
-    model = _HybridModel(_KimiDeltaAttention(head_dim=32, head_v_dim=64))
+    model = _HybridModel(KimiDeltaAttention(head_dim=32, head_v_dim=64))
     params = dict(model.named_parameters())
 
     assert params["layers.0.self_attn.v_proj.weight"].shape == (512, 1024)
@@ -672,8 +672,8 @@ def test_the_value_projection_uses_the_value_width():
 def test_the_sparse_attention_indexer_is_not_tagged():
     """#8420: Muon Split covers attention, not the indexer that selects the keys it will see.
 
-    `wq_b` confirms on the indexer's own geometry, so this is declined by the module not saying
-    it is attention rather than by the shape.
+    `wq_b` confirms on the indexer's own geometry, so this is declined by the module not being
+    listed rather than by the shape.
     """
     indexer = _GlmMoeDsaIndexer()
     model = _HybridModel(indexer, config=_glm52_mla_config())
@@ -686,28 +686,39 @@ def test_the_sparse_attention_indexer_is_not_tagged():
         assert _attention_head_count(name, params[name], model) is None
 
 
-def test_a_module_that_does_not_say_it_is_attention_is_not_asked():
-    """The gate is the owning module's class name, and this pins its cost.
+@pytest.mark.parametrize("class_name", ["GatedDeltaNet", "SomeOtherLinearAttention"])
+def test_an_unlisted_module_is_not_asked(class_name):
+    """Only listed modules are asked, whatever the class is called or carries.
 
-    Qwen3-Next's linear attention is `Qwen3NextGatedDeltaNet`, which does not say attention, so
-    it keeps the full-matrix path. That is #8384's behaviour rather than a regression: the
-    question is only asked where it is known to be the right one to ask, and widening it is a
-    marker away. The alternative, asking every module and naming the ones to skip, would have
-    tagged the DSA indexer by default.
+    Same attributes and shapes as the Kimi-K3 layer, so the class name is the only difference.
+    Unlisted modules keep #8384's config-derived path, which declines these projections.
     """
-
-    class _GatedDeltaNet(_KimiDeltaAttention):
-        pass
-
-    model = _HybridModel(_GatedDeltaNet())
+    unlisted = type(class_name, (KimiDeltaAttention, ), {})
+    model = _HybridModel(unlisted())
     name = "layers.0.self_attn.q_proj.weight"
 
     assert _attention_head_count(name, dict(model.named_parameters())[name], model) is None
 
 
+@pytest.mark.parametrize("leaf", ["q_proj", "k_proj", "v_proj"])
+def test_a_listed_module_wins_when_the_config_width_collides(leaf):
+    """Config 8 x 32 and module 4 x 64 are both 256 rows; the module built it, so 4 heads.
+
+    With the config consulted first, the exact width match would have split the projection into
+    8 blocks of 32 that cut across the layer's 4 real heads of 64.
+    """
+    config = SimpleNamespace(num_attention_heads=8, num_key_value_heads=8, hidden_size=1024, head_dim=32)
+    model = _HybridModel(KimiDeltaAttention(num_heads=4, head_dim=64), config=config)
+    name = f"layers.0.self_attn.{leaf}.weight"
+    param = dict(model.named_parameters())[name]
+
+    assert param.shape == (256, 1024)
+    assert _attention_head_count(name, param, model) == 4
+
+
 def test_owner_geometry_still_has_to_match_the_shape():
     """The module is another candidate, not an override: #8384's shape confirmation still rules."""
-    attn = _KimiDeltaAttention()
+    attn = KimiDeltaAttention()
     attn.num_heads = attn.num_k_heads = 7  # 7 x 32 = 224, against 256 rows
     model = _HybridModel(attn)
     name = "layers.0.self_attn.q_proj.weight"

@@ -80,15 +80,24 @@ What is tagged, and what deliberately is not:
 | `o_proj` and other output projections | no | the head structure is on the input dimension, so splitting dim 0 would cut across the wrong axis |
 | fused `qkv_proj` / `query_key_value` / `c_attn` / `wqkv` | no | the three sections do not share a head count under GQA |
 | MLA `q_a_proj`, `kv_a_proj_with_mqa` | no | down-projections mixing latent and rope components, with no head structure |
-| linear-attention `q_proj` / `k_proj` / `v_proj` | yes | blocked by the head count the attention module was built with, which for hybrids such as Kimi-K3 is not `num_attention_heads * head_dim` |
-| sparse-attention indexers | no | the indexer selects which keys attention will see; the split is defined on attention itself |
+| linear-attention `q_proj` / `k_proj` / `v_proj` of a supported model (below) | yes | blocked by the head count the attention module was built with, which for hybrids such as Kimi-K3 is not `num_attention_heads * head_dim` |
+| linear attention of any other model | no | not supported yet; see below |
+| sparse-attention indexers (e.g. GLM-5.2's DSA indexer) | no | the indexer selects which keys attention will see; the split is defined on attention itself |
 
-**Where the geometry comes from.** The config first: head counts through `AutoTPMeta`, per-head
-widths from the fields the architecture defines. When no config geometry confirms, the module
-that owns the projection is asked for the counts it was built with, which is how hybrid models
-that keep their linear-attention geometry outside the top-level config fields are covered. Only
-modules that identify as attention are asked, so a module with a head count of its own that is
-not attention keeps the full-matrix path.
+**Where the geometry comes from.** For standard attention and MLA, from the config: head counts
+through `AutoTPMeta`, per-head widths from the fields the architecture defines. Linear attention
+often keeps its geometry outside those fields, so it is supported per module, listed in
+`_LINEAR_ATTENTION_OWNERS` in `deepspeed/__init__.py`. For a listed module, the head counts it was
+built with are used, and the config is not consulted, since a config geometry can match the same
+width by coincidence:
+
+| model | linear-attention module | geometry |
+| --- | --- | --- |
+| Kimi-K3 | `KimiDeltaAttention` | `linear_attn_config` `num_heads` x `head_dim` |
+
+Linear attention in any other model stays on the full-matrix path. To enable it, add the module's
+class name to `_LINEAR_ATTENTION_OWNERS` with the model it was checked on, after confirming the
+module exposes its head count and per-head width as attributes.
 
 **The shape confirms the name.** A leaf name is treated as a claim about the layout, never as
 proof of it. Every geometry the config makes plausible for that name is evaluated, and a

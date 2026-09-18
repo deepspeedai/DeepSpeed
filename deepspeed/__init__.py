@@ -192,17 +192,17 @@ def _geometry_candidates(kind, meta, text_config):
     return [c for c in candidates if c[0] and c[0] >= 1 and c[1] and c[1] >= 1]
 
 
-# Head geometry the config does not describe. Kimi-K3's linear-attention layers keep their
-# counts in `linear_attn_config` and build q/k/v at `num_k_heads * head_k_dim`, which is not the
-# `num_attention_heads * head_dim` the config-derived candidates describe, so those projections
-# were declining a width check rather than being recognized. The module that built the
-# projection holds both numbers as plain attributes, so ask it.
-#
-# Only modules that say they are attention are asked. GLM-5.2's sparse-attention indexer carries
-# an `n_heads`/`head_dim` pair of its own and its `wq_b` is exactly `index_n_heads *
-# index_head_dim`, so an unconditional read would tag it; #8420 settled that Muon Split covers
-# attention, not the indexer that picks which keys attention will see.
-_ATTENTION_OWNER_MARKERS = ("attention", "attn")
+# Linear-attention modules whose q/k/v are head-blocked by geometry the config does not
+# describe, by class name, with the model each entry was checked on. For a listed module its own
+# head counts are the geometry and the config is not consulted: a config candidate can match the
+# same width by coincidence (`num_k_heads * head_k_dim == num_attention_heads * head_dim`) and
+# would then split across the layer's real head boundaries without anything failing. Modules not
+# listed keep the config-derived path, including GLM-5.2's sparse-attention indexer, which #8420
+# settled is not covered. Add an entry, with its model, when another linear-attention
+# architecture needs per-head Muon.
+_LINEAR_ATTENTION_OWNERS = {
+    "KimiDeltaAttention": "Kimi-K3 (inference-optimization/Kimi-K3-0.40B), linear_attn_config num_heads x head_dim",
+}
 _OWNER_Q_COUNTS = ("num_heads", "num_attention_heads", "n_heads")
 _OWNER_K_COUNTS = ("num_k_heads", "num_key_value_heads", "num_kv_heads") + _OWNER_Q_COUNTS
 _OWNER_V_COUNTS = ("num_v_heads", ) + _OWNER_K_COUNTS
@@ -231,10 +231,10 @@ def _owner_module(param_name: str, owners):
 
 
 def _owner_candidate(kind, leaf: str, owner):
-    """The geometry the owning attention module says it built this projection with."""
+    """The geometry a listed linear-attention module says it built this projection with."""
     if owner is None or kind not in (QUERY, KV):
         return []
-    if not any(marker in type(owner).__name__.lower() for marker in _ATTENTION_OWNER_MARKERS):
+    if type(owner).__name__ not in _LINEAR_ATTENTION_OWNERS:
         return []
 
     if kind == QUERY:
@@ -299,9 +299,10 @@ def _resolve_attention_head_count(param_name: str, param: torch.Tensor, meta, te
         return None, "not-attention"
     if kind == NOT_HEAD_BLOCKED:
         return None, NOT_HEAD_BLOCKED
-    candidates = _geometry_candidates(kind, meta, text_config)
-    candidates += _owner_candidate(kind, leaf, _owner_module(param_name, owners))
-    return _confirm(param, candidates)
+    owner_candidates = _owner_candidate(kind, leaf, _owner_module(param_name, owners))
+    if owner_candidates:
+        return _confirm(param, owner_candidates)
+    return _confirm(param, _geometry_candidates(kind, meta, text_config))
 
 
 def _report_per_head_tagging(tagged: dict, skipped: dict) -> None:
