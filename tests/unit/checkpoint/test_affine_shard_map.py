@@ -596,10 +596,14 @@ def test_replicated_map_carries_the_scale():
 def test_bigcode_layer_map_matches_the_real_partition():
     """GPTBigCode shards the query rows and replicates the key/value block to every rank."""
     from deepspeed.checkpoint.affine import segmented_map
+    from deepspeed.module_inject.tp_shard import get_shard_size_list
 
     n_embd, kv_rows, cols, mp_size = 32, 16, 8, 4
     meta = _meta(4, n_embd=n_embd, num_attention_heads=4)
-    analytic = segmented_map((n_embd + kv_rows, cols), [(n_embd, False), (kv_rows, True)], 0, mp_size)
+    analytic = segmented_map((n_embd + kv_rows, cols), [(n_embd, False), (kv_rows, True)],
+                             0,
+                             mp_size,
+                             split_widths=[list(get_shard_size_list(n_embd, mp_size, meta))])
     analytic.validate_coverage()
 
     shard_fn = _fused_qkv_shard_fn('GPTBigCodeBlock', mp_size, meta)
@@ -617,7 +621,10 @@ def test_bigcode_kv_block_is_replicated_in_the_map():
     from deepspeed.checkpoint.affine import segmented_map
 
     n_embd, kv_rows, cols, mp_size = 32, 16, 8, 4
-    analytic = segmented_map((n_embd + kv_rows, cols), [(n_embd, False), (kv_rows, True)], 0, mp_size)
+    analytic = segmented_map((n_embd + kv_rows, cols), [(n_embd, False), (kv_rows, True)],
+                             0,
+                             mp_size,
+                             split_widths=[[n_embd // mp_size] * mp_size])
     for rank in range(mp_size):
         located = sorted(len(piece.locations) for piece in analytic.pieces_by_rank[rank])
         assert located == [1, mp_size], f"rank {rank} pieces are held by {located} ranks, expected [1, {mp_size}]"
@@ -758,4 +765,33 @@ def test_yuan_refuses_a_head_count_that_ranks_would_share(layer_name, shape):
     layer = getattr(autotp_layers, layer_name).__new__(getattr(autotp_layers, layer_name))
     layer.tp_world_size = 4
     layer.tp_meta = AutoTPMeta(num_kv_heads=12)
-    assert layer._shared_qk_affine_map(shape) is None
+    partition_dim = 0 if layer_name == 'Yuan_LinearLayer' else 1
+    assert autotp_layers._shared_qk_affine_map(layer, shape, partition_dim) is None
+
+
+def test_bigcode_weight_is_no_longer_refused_by_conversion():
+    """The layer must actually publish the map, not merely be able to build one.
+
+    The geometry tests cover `segmented_map` itself, so a hook that never fires — a renamed
+    method, or a fused type that reads differently in this context — would leave the layout
+    refused with every other test still green.
+    """
+    from deepspeed.checkpoint.constants import (AFFINE_MAP, AFFINE_MAP_PARAMS, AUTOTP_UNSUPPORTED_PARAMETER_PATTERNS)
+    from deepspeed.module_inject.layers import collect_autotp_universal_checkpoint_info, fused_LinearLayer
+
+    n_embd, kv_rows, mp_size = 32, 16, 4
+    fused_module = _NamedModule('GPTBigCodeBlock')
+    layer = fused_LinearLayer(torch.nn.Linear(8, n_embd + kv_rows, bias=False),
+                              mp_group=None,
+                              name='c_attn',
+                              fused_module=fused_module,
+                              tp_meta=_meta(4, n_embd=n_embd, num_attention_heads=4))
+    layer.tp_world_size = mp_size
+    layer.tp_meta = _meta(4, n_embd=n_embd, num_attention_heads=4)
+
+    model = torch.nn.Module()
+    model.c_attn = layer
+    info = collect_autotp_universal_checkpoint_info(model)
+
+    assert r"^c_attn\.weight$" in info.get(AFFINE_MAP, {}).get(AFFINE_MAP_PARAMS, {})
+    assert r"^c_attn\.weight$" not in info.get(AUTOTP_UNSUPPORTED_PARAMETER_PATTERNS, {})

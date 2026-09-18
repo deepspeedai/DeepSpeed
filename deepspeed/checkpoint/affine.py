@@ -327,12 +327,6 @@ def _scaled(tensor, scale, scale_power):
     return tensor / factor
 
 
-def _even_split_sizes(total, parts):
-    """How a size is divided when the caller supplies no explicit widths."""
-    base, remainder = divmod(total, parts)
-    return [base + (1 if index < remainder else 0) for index in range(parts)]
-
-
 def _flat_buffer(tensor):
     """Flatten ``tensor`` into a buffer whose storage starts at its first element.
 
@@ -488,14 +482,15 @@ def _piece_from_dict(entry):
                        scale=entry.get('scale', 1.0))
 
 
-def segmented_map(shape, segments, partition_dim, tp_degree, split_widths=None):
+def segmented_map(shape, segments, partition_dim, tp_degree, split_widths):
     """A parameter whose blocks are split or replicated independently along one axis.
 
     ``segments`` is an ordered list of ``(size, replicated)`` pairs covering ``partition_dim``.
     ``split_widths`` gives the per-rank widths of each split segment, in the same order. It is
-    required rather than inferred because the sizes a layer splits to are not always an even
-    division -- they can be aligned to head counts or to a grain size -- and guessing them
-    describes a layout the partition never produced.
+    required rather than optional because the sizes a layer splits to are not always an even
+    division -- they can be aligned to head counts or to a grain size -- and a map built by
+    dividing reads the wrong rows while still covering the tensor, so nothing downstream
+    notices. Callers pass the widths the partition itself computed.
     A fused QKV weight that shards its query rows but hands every rank the whole key/value
     block is two segments, and the resulting pieces differ in `locations` rather than in
     kind -- which is what the schema could not say before.
@@ -514,14 +509,11 @@ def segmented_map(shape, segments, partition_dim, tp_degree, split_widths=None):
         if replicated:
             widths_for_segment.append(None)
             continue
-        if split_widths is None:
-            widths_for_segment.append(_even_split_sizes(size, tp_degree))
-        else:
-            widths = list(split_widths[split_index])
-            if len(widths) != tp_degree or sum(widths) != size:
-                raise ValueError(f'Split widths {widths} do not account for a segment of {size} '
-                                 f'elements across {tp_degree} ranks.')
-            widths_for_segment.append(widths)
+        widths = list(split_widths[split_index])
+        if len(widths) != tp_degree or sum(widths) != size:
+            raise ValueError(f'Split widths {widths} do not account for a segment of {size} '
+                             f'elements across {tp_degree} ranks.')
+        widths_for_segment.append(widths)
         split_index += 1
 
     shard_extents = {}

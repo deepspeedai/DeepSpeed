@@ -1289,33 +1289,37 @@ class conv_LinearLayer(LinearLayer):
 
 
 #override the subclasses related to weight splitting.
+def _shared_qk_affine_map(layer, shape, partition_dim):
+    """Describe a shared-QK layout, where a rank's value heads sit in two runs.
+
+    Returns None where the layout cannot be described honestly: without the head count there
+    is nothing to derive from, and when a rank takes an odd number of heads the pairing hands
+    the same head to two ranks, so a piece naming a single owner would contradict the one
+    beside it.
+
+    Shared by both Yuan classes, which differ only in the axis they split.
+    """
+    from deepspeed.checkpoint.affine import block_gather_map
+    from deepspeed.module_inject.fusedqkv_utils import shared_qk_value_head_ids
+
+    num_heads = layer.tp_meta.num_kv_heads
+    if not shape or num_heads is None or len(shape) <= partition_dim:
+        return None
+    total = shape[partition_dim]
+    if total % num_heads:
+        return None
+
+    ids = {rank: shared_qk_value_head_ids(num_heads, layer.tp_world_size, rank) for rank in range(layer.tp_world_size)}
+    selected = [head for rank_ids in ids.values() for head in rank_ids]
+    if sorted(selected) != list(range(num_heads)):
+        return None
+    return block_gather_map(shape, ids, total // num_heads, partition_dim)
+
+
 class Yuan_LinearAllreduce(LinearAllreduce):
 
     _unsupported_uc_reason = ("Yuan shared-QK tensor parallelism selects noncontiguous head groups that universal "
                               "checkpoint conversion cannot currently describe")
-
-    def _shared_qk_affine_map(self, shape):
-        """The value heads this rank holds sit in two runs rather than one span."""
-        from deepspeed.checkpoint.affine import block_gather_map
-        from deepspeed.module_inject.fusedqkv_utils import shared_qk_value_head_ids
-
-        num_heads = self.tp_meta.num_kv_heads
-        if not shape or num_heads is None or len(shape) <= 1:
-            return None
-        total = shape[1]
-        if total % num_heads:
-            return None
-        ids = {
-            rank: shared_qk_value_head_ids(num_heads, self.tp_world_size, rank)
-            for rank in range(self.tp_world_size)
-        }
-        # The pairing only partitions the heads when each rank takes an even number of them.
-        # Otherwise ranks share heads, and a piece claiming a single owner would contradict
-        # the rank beside it, so there is no honest description to publish.
-        selected = [head for rank_ids in ids.values() for head in rank_ids]
-        if sorted(selected) != list(range(num_heads)):
-            return None
-        return block_gather_map(shape, ids, total // num_heads, 1)
 
     #Yuan2
     @torch.no_grad()
@@ -1331,7 +1335,7 @@ class Yuan_LinearAllreduce(LinearAllreduce):
         raise RuntimeError(self._unsupported_uc_reason)
 
     def _mark_uc_metadata(self):
-        weight_map = self._shared_qk_affine_map(self._orig_weight_shape)
+        weight_map = _shared_qk_affine_map(self, self._orig_weight_shape, 1)
         self._set_param_uc_meta(self.weight,
                                 partition_type='row',
                                 partition_dim=1,
@@ -1356,29 +1360,6 @@ class Yuan_LinearLayer(LinearLayer):
     _unsupported_uc_reason = ("Yuan shared-QK tensor parallelism selects noncontiguous head groups that universal "
                               "checkpoint conversion cannot currently describe")
 
-    def _shared_qk_affine_map(self, shape):
-        """The value heads this rank holds sit in two runs rather than one span."""
-        from deepspeed.checkpoint.affine import block_gather_map
-        from deepspeed.module_inject.fusedqkv_utils import shared_qk_value_head_ids
-
-        num_heads = self.tp_meta.num_kv_heads
-        if not shape or num_heads is None or len(shape) <= 0:
-            return None
-        total = shape[0]
-        if total % num_heads:
-            return None
-        ids = {
-            rank: shared_qk_value_head_ids(num_heads, self.tp_world_size, rank)
-            for rank in range(self.tp_world_size)
-        }
-        # The pairing only partitions the heads when each rank takes an even number of them.
-        # Otherwise ranks share heads, and a piece claiming a single owner would contradict
-        # the rank beside it, so there is no honest description to publish.
-        selected = [head for rank_ids in ids.values() for head in rank_ids]
-        if sorted(selected) != list(range(num_heads)):
-            return None
-        return block_gather_map(shape, ids, total // num_heads, 0)
-
     #Yuan2
     @torch.no_grad()
     def _tp_partition(self, params_list):
@@ -1393,7 +1374,7 @@ class Yuan_LinearLayer(LinearLayer):
         raise RuntimeError(self._unsupported_uc_reason)
 
     def _mark_uc_metadata(self):
-        weight_map = self._shared_qk_affine_map(self._orig_weight_shape)
+        weight_map = _shared_qk_affine_map(self, self._orig_weight_shape, 0)
         self._set_param_uc_meta(self.weight,
                                 partition_type='column',
                                 partition_dim=0,
@@ -1402,7 +1383,7 @@ class Yuan_LinearLayer(LinearLayer):
                                 affine_map=weight_map,
                                 unsupported_reason=None if weight_map else self._unsupported_uc_reason)
         if self.bias is not None:
-            bias_map = self._shared_qk_affine_map(self._orig_bias_shape)
+            bias_map = _shared_qk_affine_map(self, self._orig_bias_shape, 0)
             self._set_param_uc_meta(self.bias,
                                     partition_type='column',
                                     partition_dim=0,
