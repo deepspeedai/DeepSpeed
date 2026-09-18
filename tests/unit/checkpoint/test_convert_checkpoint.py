@@ -3,6 +3,8 @@
 
 # DeepSpeed Team
 
+import os
+from pathlib import Path
 import shutil
 import subprocess
 import sys
@@ -163,3 +165,45 @@ class TestCheckpointConvert(DistributedTest):
         fp32_size = (fp32_save_dir / 'pytorch_model.bin').stat().st_size
         bf16_size = (bf16_save_dir / 'pytorch_model.bin').stat().st_size
         assert bf16_size < fp32_size * 0.6
+
+
+def test_debug_export_of_zero3_checkpoint(tmp_path):
+    checkpoint = tmp_path / "checkpoint"
+    checkpoint.mkdir()
+    expected = {"weight": torch.arange(6, dtype=torch.float32).reshape(2, 3), "bias": torch.tensor([7.0, 8.0])}
+    torch.save(
+        {
+            "module": {},
+            "buffer_names": [],
+            "param_shapes": [{
+                "weight": expected["weight"].shape
+            }, {
+                "bias": expected["bias"].shape
+            }],
+            "shared_params": {},
+        }, checkpoint / "mp_rank_00_model_states.pt")
+    torch.save(
+        {
+            "optimizer_state_dict": {
+                "zero_stage": 3,
+                "partition_count": 1,
+                "fp32_flat_groups": [expected["weight"].flatten(), expected["bias"]],
+            }
+        }, checkpoint / "zero_pp_rank_0_mp_rank_00_optim_states.pt")
+    output_dir = tmp_path / "export"
+    result = subprocess.run([
+        sys.executable, "-m", "deepspeed.utils.zero_to_fp32",
+        str(tmp_path),
+        str(output_dir), "--tag", "checkpoint", "--debug"
+    ],
+                            cwd=Path(deepspeed.__file__).resolve().parents[1],
+                            env={
+                                **os.environ, "PYTHONPATH": str(Path(deepspeed.__file__).resolve().parents[1])
+                            },
+                            capture_output=True,
+                            text=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+    actual = torch.load(output_dir / "pytorch_model.bin", weights_only=True)
+    assert actual.keys() == expected.keys()
+    for name, value in expected.items():
+        torch.testing.assert_close(actual[name], value)
