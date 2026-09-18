@@ -1335,6 +1335,7 @@ class TiledLoss(torch.autograd.Function):
             seqlen = shift_labels.shape[1]
             shard_step = math.ceil(seqlen / shards)
             loss_shards = []
+            good_items_per_shard = []
             total_good_items = 0
 
             # since -100s are ignored we have to perform a weighted average on each loss slice as each slice may contribute a different number of non- -100 labels
@@ -1343,6 +1344,7 @@ class TiledLoss(torch.autograd.Function):
                 # XXX: here and everywhere don't make a copy, pass the slice or perhaps narrow/view?
                 shift_labels_shard = shift_labels[:, i * shard_step:(i + 1) * shard_step]
                 if all((shift_labels_shard == -100).squeeze()):
+                    good_items_per_shard.append(0)
                     continue  # ignore this shard
                 loss_shard = loss_fn(
                     logits=logits[:, i * shard_step:(i + 1) * shard_step, :],
@@ -1351,10 +1353,15 @@ class TiledLoss(torch.autograd.Function):
                     shift_labels=shift_labels_shard,
                 )
                 good_items = sum((shift_labels_shard != -100).squeeze())
+                good_items_per_shard.append(good_items)
                 loss_shards.append(loss_shard * good_items)
                 total_good_items += good_items
             total_loss = torch.cat([l.unsqueeze(0) for l in loss_shards], dim=0).sum()
             weighted_loss = total_loss / total_good_items
+
+        # `backward` has to reproduce the same weighted average, so it needs the per-shard weights
+        ctx.good_items_per_shard = good_items_per_shard
+        ctx.total_good_items = total_good_items
 
         return weighted_loss
 
@@ -1364,6 +1371,8 @@ class TiledLoss(torch.autograd.Function):
         loss_fn = ctx.loss_fn
         vocab_size = ctx.vocab_size
         shards = ctx.shards
+        good_items_per_shard = ctx.good_items_per_shard
+        total_good_items = ctx.total_good_items
 
         grad = grads[0]
         logits_grad = torch.zeros_like(logits)
@@ -1376,26 +1385,25 @@ class TiledLoss(torch.autograd.Function):
             logits_shard = logits_shards.pop(0)
             shift_labels_shard = shift_labels_shards.pop(0)
 
+            # `forward` left this shard out of the weighted average, so its grad slice stays all zeros
+            if good_items_per_shard[i] == 0:
+                continue
+
             shard_offset = i * shard_step
             # this will enable gradual population of the pre-allocated `logits_shard.grad` during `torch.autograd.backward` calls
             logits_shard.grad = (logits_grad.narrow(1, shard_offset, shard_step).view_as(logits_shard))
 
             with torch.enable_grad():
-                if all((shift_labels_shard == -100).squeeze()):
-                    # fake loss calculation, since CE will return nan, but grads will be set
-                    # a normal loss_fn upcasts logits to float so match it
-                    loss_shard = (logits_shard.sum() * 0.0).float()
-                else:
-                    loss_shard = loss_fn(
-                        logits=logits_shard.requires_grad_(),
-                        labels=None,
-                        vocab_size=vocab_size,
-                        shift_labels=shift_labels_shard,
-                    )
+                loss_shard = loss_fn(
+                    logits=logits_shard.requires_grad_(),
+                    labels=None,
+                    vocab_size=vocab_size,
+                    shift_labels=shift_labels_shard,
+                )
 
-            torch.autograd.backward(loss_shard, grad)
-
-        logits_grad /= shards
+            # `forward` returns the token weighted average of the per-shard means, so each shard's mean
+            # contributes with the weight of its own share of the non- -100 labels
+            torch.autograd.backward(loss_shard, grad * good_items_per_shard[i] / total_good_items)
 
         # only logits (2nd arg) needs grads
         return None, logits_grad, None, None, None
