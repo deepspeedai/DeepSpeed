@@ -66,17 +66,6 @@ class SimpleFrozenModel(torch.nn.Module):
         return self.cross_entropy_loss(x, y)
 
 
-class Curriculum_SimpleModel(SimpleModel):
-
-    def __init__(self, hidden_dim, empty_grad=False):
-        super(Curriculum_SimpleModel, self).__init__(hidden_dim, empty_grad)
-
-    def forward(self, x, y, **kwargs):
-        seqlen = kwargs.get('curriculum_seqlen', None)
-        loss = super(Curriculum_SimpleModel, self).forward(x, y)
-        return loss, seqlen
-
-
 class SimpleMoEModel(torch.nn.Module):
 
     def __init__(self, hidden_dim, num_experts=4, ep_size=1, use_residual=False, use_rts=True):
