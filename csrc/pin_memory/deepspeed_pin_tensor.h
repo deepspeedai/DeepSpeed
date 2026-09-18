@@ -16,6 +16,15 @@ TODO: Implement a full-featured manager that
 #include <memory>
 #include <mutex>
 
+// Windows only exposes symbols that a DLL explicitly exports, unlike POSIX shared objects which
+// export everything by default; async_io/gds (see deepspeed_pin_tensor_client.cpp) need these
+// visible to find them across the .pyd boundary via GetProcAddress, the Windows analogue of dlsym.
+#if defined(_WIN32)
+#define DS_PIN_TENSOR_EXPORT __declspec(dllexport)
+#else
+#define DS_PIN_TENSOR_EXPORT
+#endif
+
 struct deepspeed_pin_tensor_t {
     std::map<void*, int64_t> _locked_tensors;
     std::mutex _mutex;
@@ -43,4 +52,16 @@ struct deepspeed_pin_tensor_t {
 };
 
 // Exported so async_io/gds can resolve the same manager across .so boundaries.
-extern "C" void* deepspeed_pin_tensor_mgr_holder();
+extern "C" DS_PIN_TENSOR_EXPORT void* deepspeed_pin_tensor_mgr_holder();
+
+#if defined(_WIN32)
+extern "C" DS_PIN_TENSOR_EXPORT torch::Tensor deepspeed_pin_tensor_alloc_by_scalartype(
+    const int64_t num_elem,
+    const at::ScalarType elem_type);
+extern "C" DS_PIN_TENSOR_EXPORT torch::Tensor deepspeed_pin_tensor_alloc_by_options(
+    const int64_t num_elem,
+    const torch::TensorOptions& options);
+extern "C" DS_PIN_TENSOR_EXPORT bool deepspeed_pin_tensor_free_tensor(torch::Tensor& locked_tensor);
+extern "C" DS_PIN_TENSOR_EXPORT bool deepspeed_pin_tensor_check_is_managed(
+    const torch::Tensor& buffer);
+#endif

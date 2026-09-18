@@ -152,6 +152,13 @@ We regularly push releases to [PyPI](https://pypi.org/project/deepspeed/) and en
 pip install deepspeed
 ```
 
+On Windows ARM64, PyPI does not host a matching PyTorch wheel, so install
+PyTorch from PyTorch's own index first:
+
+```bash
+pip install deepspeed --extra-index-url https://download.pytorch.org/whl/cpu
+```
+
 After installation, you can validate your install and see which extensions/ops
 your machine is compatible with via the DeepSpeed environment report.
 

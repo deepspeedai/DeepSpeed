@@ -1,0 +1,49 @@
+name: windows-torch-latest
+
+on:
+  workflow_dispatch:
+  pull_request:
+  merge_group:
+    branches: [ master ]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unit-tests:
+    name: windows-torch-latest / unit tests (${{ matrix.arch }}, py${{ matrix.python-version }})
+    runs-on: ${{ matrix.runs-on }}
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [arm64, x64]
+        python-version: ['3.11', '3.12', '3.13']
+        include:
+          - arch: arm64
+            runs-on: windows-11-arm
+            msvc-arch: arm64
+            torchvision-version: 0.29.0a0
+          - arch: x64
+            runs-on: windows-latest
+            msvc-arch: amd64
+            torchvision-version: 0.29.0
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup virtual environment
+        uses: ./.github/workflows/setup-win-venv
+        with:
+          python-version: ${{ matrix.python-version }}
+          msvc-arch: ${{ matrix.msvc-arch }}
+          torchvision-version: ${{ matrix.torchvision-version }}
+
+      - name: Install deepspeed
+        run: pip install .[win-dev,autotuning] --pre --no-build-isolation
+
+      - name: Unit tests
+        run: |
+          pytest --maxfail=100 --color=yes --durations=0 --verbose -rF -n 4 unit\
+          pytest --maxfail=100 --color=yes --durations=0 --verbose -rF -m sequential unit\
+        working-directory: tests

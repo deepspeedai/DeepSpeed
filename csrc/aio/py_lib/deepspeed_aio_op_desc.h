@@ -14,7 +14,7 @@ void warn_consumer_ssd_writes() noexcept;
 struct io_op_desc_t {
     const bool _read_op;
     torch::Tensor _buffer;
-    int _fd;
+    aio_fd_t _fd;
     std::string _filename;
     const int _intra_op_parallelism;
     const int64_t _num_bytes_per_thread;
@@ -24,7 +24,7 @@ struct io_op_desc_t {
 
     io_op_desc_t(const bool read_op,
                  const torch::Tensor& buffer,
-                 const int fd,
+                 const aio_fd_t fd,
                  const char* filename,
                  const int intra_op_parallelism,
                  const bool validate,

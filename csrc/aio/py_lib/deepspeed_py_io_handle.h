@@ -93,14 +93,14 @@ struct deepspeed_io_handle_t {
     bool _is_valid_parallel_aio_op(const bool read_op, const int64_t num_bytes);
 
     int _pread(const torch::Tensor& buffer,
-               const int fd,
+               const aio_fd_t fd,
                const char* filename,
                const bool validate,
                const bool async,
                const int64_t file_offset);
 
     int _pwrite(const torch::Tensor& buffer,
-                const int fd,
+                const aio_fd_t fd,
                 const char* filename,
                 const bool validate,
                 const bool async,
@@ -108,7 +108,7 @@ struct deepspeed_io_handle_t {
 
     virtual std::shared_ptr<struct io_op_desc_t> _create_io_op_desc(const bool read_op,
                                                                     const torch::Tensor& buffer,
-                                                                    const int fd,
+                                                                    const aio_fd_t fd,
                                                                     const char* filename,
                                                                     const bool validate,
                                                                     const int64_t file_offset);

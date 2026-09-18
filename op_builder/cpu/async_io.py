@@ -5,6 +5,7 @@
 
 import shutil
 import subprocess
+import sys
 
 from .builder import CPUOpBuilder
 
@@ -37,8 +38,10 @@ class AsyncIOBuilder(CPUOpBuilder):
         return ['csrc/aio/py_lib', 'csrc/aio/common', 'csrc/pin_memory']
 
     def cxx_args(self):
-        # -O0 for improved debugging, since performance is bound by I/O
         args = super().cxx_args()
+        if sys.platform == "win32":
+            return args
+        # -O0 for improved debugging, since performance is bound by I/O
         import torch
         TORCH_MAJOR, TORCH_MINOR = map(int, torch.__version__.split('.')[0:2])
         if not (TORCH_MAJOR >= 2 and TORCH_MINOR >= 1):
@@ -48,6 +51,10 @@ class AsyncIOBuilder(CPUOpBuilder):
         return args
 
     def extra_ldflags(self):
+        if sys.platform == "win32":
+            # -laio has no meaning on Windows (no libaio); MSVC OpenMP is enabled via
+            # the /openmp compile flag in cxx_args(), not a linker flag.
+            return []
         return ['-laio', '-fopenmp']
 
     def check_for_libaio_pkg(self):
@@ -79,6 +86,10 @@ class AsyncIOBuilder(CPUOpBuilder):
         return super().load(verbose=verbose)
 
     def is_compatible(self, verbose=False):
+        if sys.platform == "win32":
+            # No libaio on Windows; the op is built on native Win32 file I/O instead.
+            return super().is_compatible(verbose)
+
         # Check for the existence of libaio by using distutils
         # to compile and link a test program that calls io_submit,
         # which is a function provided by libaio that is used in the async_io op.
