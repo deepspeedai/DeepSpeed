@@ -2537,7 +2537,7 @@ class GatheredParameters:
                     f"the accelerator device. If you don't need to broadcast updates, use modifier_rank=None.")
 
         handles = [
-            dist.broadcast(p.data,
+            dist.broadcast(p.data.view(torch.uint8),
                            self.src_rank_by_group[id(p.ds_process_group)],
                            group=p.ds_process_group,
                            async_op=True) for p in self.params
