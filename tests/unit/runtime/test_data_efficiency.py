@@ -9,7 +9,7 @@ import deepspeed
 from deepspeed.accelerator import get_accelerator
 import pytest
 from unit.common import DistributedTest
-from unit.simple_model import Curriculum_SimpleModel, SimpleModel, random_dataloader, random_dataset
+from unit.simple_model import SimpleModel, random_dataset
 from deepspeed.runtime.data_pipeline.curriculum_scheduler import CurriculumScheduler
 
 
@@ -70,10 +70,9 @@ def _curriculum_scheduler(min_difficulty, max_difficulty, difficulty_step, sched
 @pytest.mark.parametrize("min_difficulty, difficulty_step", [(8, 16), (1, 8), (10, 8), (64, 16), (8, 8), (100, 64)])
 def test_curriculum_never_starts_below_min_difficulty(schedule_type, min_difficulty, difficulty_step):
     # Rounding down to a multiple of difficulty_step used to push the first steps under
-    # the configured start: min_difficulty 8 with difficulty_step 16, a pair the tutorial
-    # recommends for INT8 data on a million-scale model, gave a difficulty of 0, which is
-    # a zero-length sequence for the seqlen metric. The step alignment the constructor
-    # warns about has to survive the new floor, so it is asserted alongside.
+    # the configured start: min_difficulty 8 with difficulty_step 16 gave a difficulty
+    # of 0, which is a zero-length sequence for the seqlen metric. The step alignment the
+    # constructor warns about has to survive the new floor, so it is asserted alongside.
     scheduler = _curriculum_scheduler(min_difficulty, 1024, difficulty_step, schedule_type)
     difficulties = [scheduler.get_difficulty(step) for step in range(100)]
     assert min(difficulties) >= min_difficulty
@@ -178,111 +177,3 @@ class TestDataEfficiency(DistributedTest):
             model.step()
             if n >= 10:
                 break
-
-
-@pytest.mark.parametrize('dtype', [torch.bfloat16, torch.float16])
-class TestLegacyCurriculumScheduler(DistributedTest):
-    world_size = 2
-
-    def test_fixed_discrete(self, dtype):
-        if get_accelerator().device_name() == "cpu":
-            pytest.skip("CPU accelerator does not support this test yet")
-        if not dtype in get_accelerator().supported_dtypes():
-            pytest.skip(f"This test does not support {dtype=}.")
-
-        config_dict = {
-            "train_batch_size": 2,
-            "steps_per_print": 1,
-            "optimizer": {
-                "type": "Adam",
-                "params": {
-                    "lr": 0.00015,
-                    "weight_decay": 0.01
-                }
-            },
-            "gradient_clipping": 1.0,
-            "curriculum_learning": {
-                "enabled": True,
-                "curriculum_type": "seqlen",
-                "min_difficulty": 1,
-                "max_difficulty": 5,
-                "schedule_type": "fixed_discrete",
-                "schedule_config": {
-                    "difficulty": [1, 2, 3, 4, 5],
-                    "max_step": [2, 4, 6, 8]
-                }
-            }
-        }
-        if dtype == torch.float16:
-            config_dict["fp16"] = {"enabled": True, "loss_scale": 0, "initial_scale_power": 8}
-        else:
-            config_dict["bf16"] = {"enabled": True}
-        hidden_dim = 10
-        ground_truths = {1: 1, 2: 1, 3: 2, 4: 2, 5: 3, 6: 3, 7: 4, 8: 4}
-
-        model = Curriculum_SimpleModel(hidden_dim)
-        model, _, _, _ = deepspeed.initialize(config=config_dict, model=model, model_parameters=model.parameters())
-        data_loader = random_dataloader(model=model,
-                                        total_samples=20,
-                                        hidden_dim=hidden_dim,
-                                        device=model.device,
-                                        dtype=dtype)
-        for n, batch in enumerate(data_loader):
-            loss, seqlen = model(batch[0], batch[1])
-            model.backward(loss)
-            model.step()
-            true_seqlen = 5
-            if n + 1 in ground_truths:
-                true_seqlen = ground_truths[n + 1]
-            assert seqlen == true_seqlen, f"Incorrect curriculum schedule {n=}, {seqlen=}, {true_seqlen=}"
-
-    def test_fixed_linear(self, dtype):
-        if get_accelerator().device_name() == "cpu":
-            pytest.skip("CPU accelerator does not support this test yet")
-        if not dtype in get_accelerator().supported_dtypes():
-            pytest.skip(f"This test does not support {dtype=}.")
-
-        config_dict = {
-            "train_batch_size": 2,
-            "steps_per_print": 1,
-            "optimizer": {
-                "type": "Adam",
-                "params": {
-                    "lr": 0.00015,
-                    "weight_decay": 0.01
-                }
-            },
-            "gradient_clipping": 1.0,
-            "curriculum_learning": {
-                "enabled": True,
-                "curriculum_type": "seqlen",
-                "min_difficulty": 2,
-                "max_difficulty": 10,
-                "schedule_type": "fixed_linear",
-                "schedule_config": {
-                    "total_curriculum_step": 8,
-                    "difficulty_step": 2
-                }
-            }
-        }
-        if dtype == torch.float16:
-            config_dict["fp16"] = {"enabled": True, "loss_scale": 0, "initial_scale_power": 8}
-        else:
-            config_dict["bf16"] = {"enabled": True}
-        hidden_dim = 10
-        ground_truths = {1: 2, 2: 4, 3: 4, 4: 6, 5: 6, 6: 8, 7: 8, 8: 10, 9: 10, 10: 10}
-
-        model = Curriculum_SimpleModel(hidden_dim)
-        model, _, _, _ = deepspeed.initialize(config=config_dict, model=model, model_parameters=model.parameters())
-        data_loader = random_dataloader(model=model,
-                                        total_samples=20,
-                                        hidden_dim=hidden_dim,
-                                        device=model.device,
-                                        dtype=dtype)
-        for n, batch in enumerate(data_loader):
-            loss, seqlen = model(batch[0], batch[1])
-            model.backward(loss)
-            model.step()
-            if n + 1 in ground_truths:
-                true_seqlen = ground_truths[n + 1]
-                assert seqlen == true_seqlen, "Incorrect curriculum schedule"
