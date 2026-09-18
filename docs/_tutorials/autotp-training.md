@@ -172,14 +172,27 @@ falling back to an ordinary gathered head. When `partition_config` or a
 HuggingFace `tp_plan` also describes that head, `vocab_parallel_lm_head` takes
 precedence and a warning names the superseded partitioning.
 
-This option requires an untied output head and a model with a writable
-`loss_function` hook. Models that share the output weight with the input
-embedding must continue using gathered output until coupled vocabulary-parallel
-embedding support is available. The head's vocabulary must also be at least as
-large as `autotp_size`; smaller vocabularies fail at startup instead of leaving
-TP ranks with empty shards. The flag itself is the only trigger: a `colwise`
-`lm_head` specification with local output keeps the previous behavior of
-returning rank-local logits without installing the distributed loss.
+Models that tie the output head to the input embedding (`tie_word_embeddings`)
+are also supported: DeepSpeed detects the shared `nn.Embedding` and vocabulary-
+shards it jointly with `lm_head`, so both modules keep reading from and
+accumulating gradients into a single physical, per-rank-sharded weight
+`Parameter` instead of falling back to a gathered, replicated head. This also
+covers the HuggingFace `tp_plan` `embedding_rowwise` style that newer
+`transformers` releases inject for tied-embedding models. That style
+automatically enables the same vocabulary-parallel embedding/head path, so no
+separate `vocab_parallel_lm_head` setting is required. Tied models whose plan
+does not contain `embedding_rowwise` retain the previous replicated behavior
+unless the flag is enabled explicitly. A conflicting explicit
+`partition_config` spec on the tied embedding is likewise superseded, with a
+warning.
+
+This option requires a model with a writable `loss_function` hook. The head's
+vocabulary must also be at least as large as `autotp_size`; smaller
+vocabularies fail at startup instead of leaving TP ranks with empty shards. The
+flag or a tied HuggingFace `embedding_rowwise` plan entry triggers this path. A
+plain `colwise` `lm_head` specification with local output keeps the previous
+behavior of returning rank-local logits without installing the distributed
+loss.
 
 The lower-level `vocab_parallel_cross_entropy` API also accepts an explicit
 sequence-parallel group. With `reduction="none"`, callers may return local token
@@ -292,7 +305,7 @@ For Grouped Query Attention with different Q/K/V sizes:
 
 1. **Ranks beyond the key/value head count stay idle**: Attention heads are distributed whole, and the distribution may be uneven -- 6 key/value heads over 4 ranks becomes 2/2/1/1, and a fused QKV weight is cut on the same head boundaries rather than inside a head. With more ranks than key/value heads, for example an 8-head model at `autotp_size=16`, the surplus ranks receive no attention weights at all. The result is still correct, because those ranks contribute zeros to the row-parallel all-reduce, but they do no attention work; AutoTP logs a warning instead of replicating heads to fill them. Hidden and vocabulary dimensions do not need to be divisible by the tensor parallel size: uneven shards are carried through save, conversion and restore via per-TP-rank shapes and widths.
 
-2. **Vocabulary-parallel tied weights**: `vocab_parallel_lm_head` requires an untied output projection and a writable model `loss_function` hook, and a vocabulary at least as large as the tensor-parallel size. Coupled sharding of a tied input embedding and output projection is not yet implemented.
+2. **Vocabulary-parallel LM loss requires a writable `loss_function` hook**: `vocab_parallel_lm_head` requires a model with a writable `loss_function` hook, and a vocabulary at least as large as the tensor-parallel size. Both tied and untied `lm_head`/`embed_out` heads are supported; a tied embedding is jointly vocabulary-sharded with its output head.
 
 3. **Combined TP and SP orchestration**: The vocab-parallel loss supports explicit orthogonal TP and SP groups, but AutoTP does not currently construct a combined TP x SP process mesh automatically.
 

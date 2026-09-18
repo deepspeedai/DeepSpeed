@@ -228,18 +228,22 @@ class AutoTP():
         self.partition_config = partition_config
         self.vocab_parallel_lm_head = vocab_parallel_lm_head
         self.training_mode = training_mode
-        self._originally_tied_vocab_head_ids = set()
         self._vocab_parallel_lm_head_candidate = None
+        # A tied vocab-parallel lm_head shares its embed_tokens/wte weight with a
+        # VocabParallelEmbedding built from the same shard, so the generic embedding-slicing
+        # path (_slice_embedding, which shards a different, hidden dimension) must leave those
+        # specific embedding modules alone; _create_vocab_parallel_layer replaces them instead.
+        self._tied_vocab_parallel_embedding_ids = set()
         if self.vocab_parallel_lm_head:
-            embedding_weights = {
-                id(module.weight)
-                for module in self.module.modules() if isinstance(module, nn.Embedding) and hasattr(module, "weight")
-            }
-            self._originally_tied_vocab_head_ids = {
-                id(module)
-                for name, module in self.module.named_modules()
-                if self._is_vocab_parallel_lm_head(module, name) and id(module.weight) in embedding_weights
-            }
+            embedding_modules_by_weight_id = {}
+            for module in self.module.modules():
+                if isinstance(module, nn.Embedding) and hasattr(module, "weight"):
+                    embedding_modules_by_weight_id.setdefault(id(module.weight), []).append(module)
+            for name, module in self.module.named_modules():
+                if not self._is_vocab_parallel_lm_head(module, name):
+                    continue
+                for tied_embedding in embedding_modules_by_weight_id.get(id(module.weight), []):
+                    self._tied_vocab_parallel_embedding_ids.add(id(tied_embedding))
         self._gathered_column_tie_fallbacks_configured = False
         self._tied_gathered_column_module_names = set()
         TensorParallel_Layer.set_keep_module_on_host(keep_module_on_host)
@@ -551,13 +555,44 @@ class AutoTP():
         return self.vocab_parallel_lm_head and isinstance(child, nn.Linear) and self._is_lm_head_name(name)
 
     def _create_vocab_parallel_layer(self, child, name):
-        self._validate_untied_vocab_head(child)
+        tied_embedding = self._find_tied_embedding_module(child)
         setattr(child, "replaced", True)
-        log_dist(
-            f"AutoTP: vocab_parallel_lm_head keeps '{name}' vocabulary-sharded and installs the "
-            f"distributed causal-LM loss",
-            ranks=[0])
-        return VocabParallelLinear(child, self.mp_group, name=name, tp_meta=self.tp_meta)
+        vocab_parallel_linear = VocabParallelLinear(child, self.mp_group, name=name, tp_meta=self.tp_meta)
+        # Guards re-entry if this instance is later revisited by the same replacement walk,
+        # e.g. when it is a sibling of the tied embedding and gets read again through
+        # named_children() after that embedding's own swap already mutated the parent module.
+        setattr(vocab_parallel_linear, "replaced", True)
+
+        message = f"AutoTP: vocab_parallel_lm_head keeps '{name}'"
+        if tied_embedding is not None:
+            embed_parent, embed_child_name, embed_module, embed_full_name = tied_embedding
+            self._warn_overridden_embedding_spec(embed_full_name)
+            setattr(embed_module, "replaced", True)
+            vocab_parallel_embedding = VocabParallelEmbedding(embed_module,
+                                                              self.mp_group,
+                                                              tied_vocab_parallel_linear=vocab_parallel_linear,
+                                                              name=embed_full_name,
+                                                              tp_meta=self.tp_meta)
+            setattr(vocab_parallel_embedding, "replaced", True)
+            setattr(embed_parent, embed_child_name, vocab_parallel_embedding)
+            message += f" and its tied embedding '{embed_full_name}'"
+        log_dist(f"{message} vocabulary-sharded and installs the distributed causal-LM loss", ranks=[0])
+        return vocab_parallel_linear
+
+    def _find_tied_embedding_module(self, lm_head):
+        """Locate the nn.Embedding module, if any, that shares lm_head's weight Parameter.
+
+        Safe to call at any point during replacement: _slice_embedding refuses to touch a
+        module recorded in _tied_vocab_parallel_embedding_ids (computed from the original,
+        pre-replacement model in __init__), so a tied embedding's weight identity here is
+        exactly what it was when that set was built, regardless of traversal order.
+        """
+        for parent_name, parent in self.module.named_modules():
+            for child_name, child in parent.named_children():
+                if isinstance(child, nn.Embedding) and getattr(child, "weight", None) is lm_head.weight:
+                    full_name = f"{parent_name}.{child_name}" if parent_name else child_name
+                    return parent, child_name, child, full_name
+        return None
 
     def _warn_overridden_lm_head_spec(self, name):
         # A no-gather vocab-parallel head ignores whatever the plan asked for, so say so rather
@@ -572,12 +607,22 @@ class AutoTP():
             ranks=[0],
             level=logging.WARNING)
 
-    def _validate_untied_vocab_head(self, lm_head):
-        if id(lm_head) in self._originally_tied_vocab_head_ids:
-            raise ValueError("A no-gather vocab-parallel LM head requires untied embedding and output weights")
-        for _, module in self.module.named_modules():
-            if isinstance(module, nn.Embedding) and getattr(module, "weight", None) is lm_head.weight:
-                raise ValueError("A no-gather vocab-parallel LM head requires untied embedding and output weights")
+    def _warn_overridden_embedding_spec(self, name):
+        # A tied vocab-parallel head forces its embedding to share the same vocab-dimension
+        # shard, so any explicit spec configured for the embedding itself is ignored; say so
+        # for the same reason _warn_overridden_lm_head_spec does for the head's own spec.
+        if self.partition_config is None:
+            return
+        param_name = name if name.endswith(".weight") else name + ".weight"
+        spec = self.partition_config.find_matching_spec(param_name, self._get_model_type())
+        if spec is None:
+            return
+        log_dist(
+            f"AutoTP: vocab_parallel_lm_head supersedes the configured '{spec.partition_type.value}' "
+            f"partitioning for tied embedding '{name}'; it shares the vocabulary-parallel shard of its "
+            "tied lm_head instead.",
+            ranks=[0],
+            level=logging.WARNING)
 
     def _resolve_vocab_parallel_lm_head(self):
         if self._vocab_parallel_lm_head_candidate is not None:
@@ -596,7 +641,6 @@ class AutoTP():
             names = [full_name for _, _, _, full_name in candidates]
             raise ValueError(f"Unable to choose among multiple vocab-parallel LM heads: {names}")
 
-        self._validate_untied_vocab_head(candidates[0][2])
         self._vocab_parallel_lm_head_candidate = candidates[0]
         return self._vocab_parallel_lm_head_candidate
 
@@ -687,6 +731,12 @@ class AutoTP():
 
     def _slice_embedding(self, child, name, conv_linear_layer):
         if getattr(child, "replaced", False) == True:
+            return
+        if id(child) in self._tied_vocab_parallel_embedding_ids:
+            # This embedding is tied to a vocab_parallel_lm_head and gets replaced by
+            # _create_vocab_parallel_layer's VocabParallelEmbedding instead, sharing that
+            # layer's vocab-dimension shard. Splitting it here on the hidden dimension as well
+            # would leave the module double-partitioned and break the tied weight identity.
             return
 
         mp_replace = ReplaceWithTensorSlicing(mp_group=self.mp_group)

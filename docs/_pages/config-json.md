@@ -756,7 +756,7 @@ When a HuggingFace model provides a built-in `tp_plan` (via `model.config.base_m
 
 | Description                                                                                                                                                  | Default |
 | ------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------- |
-| Keep an untied `lm_head`/`embed_out` output vocabulary sharded and install DeepSpeed's pure-PyTorch vocab-parallel causal-LM loss instead of gathering logits. | `false` |
+| Keep an `lm_head`/`embed_out` output vocabulary sharded and install DeepSpeed's pure-PyTorch vocab-parallel causal-LM loss instead of gathering logits. Tied input embeddings are jointly vocabulary-sharded with the output head. | `false` |
 
 ***partition_config***: [dictionary]
 

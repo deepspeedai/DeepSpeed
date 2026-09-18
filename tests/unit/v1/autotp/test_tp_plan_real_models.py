@@ -144,8 +144,8 @@ class TestTPPlanRealHFModels(DistributedTest):
         outputs = engine(input_ids)
         assert outputs.logits.shape == (1, 16, config.vocab_size)
 
-    def test_qwen2_tied_lm_head_falls_back_to_replicated(self):
-        """Test that an actual Qwen2 Parameter tie remains replicated."""
+    def test_qwen2_tied_lm_head_without_embedding_rowwise_falls_back_to_replicated(self, monkeypatch):
+        """Test that a tied Qwen2 model without the new HF style remains replicated."""
         skip_on_device()
 
         try:
@@ -164,6 +164,18 @@ class TestTPPlanRealHFModels(DistributedTest):
         )
         model = AutoModelForCausalLM.from_config(config)
         assert model.lm_head.weight is model.model.embed_tokens.weight
+
+        import deepspeed.runtime.tensor_parallel.config as tp_config_module
+
+        original_get_hf_tp_plan = tp_config_module._get_hf_tp_plan
+
+        def get_hf_tp_plan_without_embedding_rowwise(model):
+            return {
+                pattern: style
+                for pattern, style in original_get_hf_tp_plan(model).items() if style.lower() != "embedding_rowwise"
+            }
+
+        monkeypatch.setattr(tp_config_module, "_get_hf_tp_plan", get_hf_tp_plan_without_embedding_rowwise)
 
         ds_config = {
             "train_micro_batch_size_per_gpu": 1,
@@ -192,6 +204,77 @@ class TestTPPlanRealHFModels(DistributedTest):
         )
         outputs = engine(input_ids)
         assert outputs.logits.shape == (1, 16, 1000)
+
+    def test_qwen2_tied_lm_head_with_embedding_rowwise_becomes_vocab_parallel(self, monkeypatch):
+        """Test HF's tied-model `embedding_rowwise` tp_plan entry (transformers#47579) drives
+        real vocab-parallel sharding automatically, not just the SKIP-and-fall-back-to-replicated
+        path. See #8290."""
+        skip_on_device()
+
+        try:
+            from transformers import AutoModelForCausalLM, Qwen2Config
+        except ImportError:
+            pytest.skip("transformers not installed")
+
+        from deepspeed.module_inject.layers import VocabParallelLinear, VocabParallelEmbedding
+        import deepspeed.runtime.tensor_parallel.config as tp_config_module
+
+        config = Qwen2Config(
+            vocab_size=1000,
+            hidden_size=128,
+            intermediate_size=256,
+            num_hidden_layers=1,
+            num_attention_heads=4,
+            num_key_value_heads=4,
+            tie_word_embeddings=True,
+        )
+        model = AutoModelForCausalLM.from_config(config)
+        assert model.lm_head.weight is model.model.embed_tokens.weight
+
+        # The installed transformers version may predate #47579, so inject the entry it would
+        # add for a tied-embedding model to exercise the same tp_plan shape as the issue repro.
+        original_get_hf_tp_plan = tp_config_module._get_hf_tp_plan
+
+        def get_hf_tp_plan_with_embedding_rowwise(model):
+            plan = dict(original_get_hf_tp_plan(model))
+            plan["model.embed_tokens"] = "embedding_rowwise"
+            return plan
+
+        monkeypatch.setattr(tp_config_module, "_get_hf_tp_plan", get_hf_tp_plan_with_embedding_rowwise)
+
+        ds_config = {
+            "train_micro_batch_size_per_gpu": 1,
+            "optimizer": {
+                "type": "Adam",
+                "params": {
+                    "lr": 1e-6
+                },
+            },
+            "tensor_parallel": {
+                "autotp_size": 2,
+            },
+            "zero_optimization": {
+                "stage": 0
+            },
+        }
+
+        engine, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=ds_config)
+
+        assert engine.autotp_size() == 2
+        assert isinstance(model.lm_head, VocabParallelLinear)
+        assert isinstance(model.model.embed_tokens, VocabParallelEmbedding)
+        assert model.lm_head.weight is model.model.embed_tokens.weight
+
+        input_ids = torch.randint(0, 1000, (1, 16)).to(get_accelerator().current_device_name())
+        dist.broadcast(
+            input_ids,
+            src=groups.get_tensor_model_parallel_src_rank(),
+            group=groups.get_tensor_model_parallel_group(),
+        )
+        outputs = engine(input_ids, labels=input_ids)
+        assert torch.isfinite(outputs.loss)
+        engine.backward(outputs.loss)
+        assert model.lm_head.weight.grad is not None
 
     def test_custom_model_with_custom_tp_plan(self):
         """Test custom model + custom tp_plan"""

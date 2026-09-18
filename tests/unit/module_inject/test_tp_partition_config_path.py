@@ -16,7 +16,7 @@ from transformers import PreTrainedModel, PretrainedConfig
 
 from deepspeed.module_inject.auto_tp import AutoTP, AutoTPConfig, PartitionType, TPLayerSpec
 from deepspeed.module_inject.layers import (LinearAllreduce, LinearLayer, LmHeadLinearAllreduce, VocabParallelLinear,
-                                            set_autotp_mode)
+                                            VocabParallelEmbedding, set_autotp_mode)
 from deepspeed.module_inject.tp_plan_converter import TPPlanConverter
 from deepspeed.utils import logger as ds_logger
 from deepspeed.sequence.cross_entropy import VocabParallelCausalLMLoss, configure_vocab_parallel_loss
@@ -360,17 +360,21 @@ def test_lm_head_name_matching_uses_configured_patterns():
     assert autotp._is_lm_head_name("model.lm_head") is False
 
 
-def test_plain_colwise_lm_head_rejects_tied_weights():
+def test_plain_colwise_lm_head_supports_tied_weights():
     model = OutputModel(tied=True)
 
-    with pytest.raises(ValueError, match="requires untied"):
-        _build_local_lm_head_autotp(model)._replace_module(model)
+    _build_local_lm_head_autotp(model)._replace_module(model)
+
+    assert isinstance(model.lm_head, VocabParallelLinear)
+    assert isinstance(model.embed_tokens, VocabParallelEmbedding)
+    assert model.lm_head.weight is model.embed_tokens.weight
 
 
-def test_plain_colwise_lm_head_rejects_tie_before_embedding_is_sliced():
+def test_vocab_parallel_lm_head_supersedes_conflicting_embedding_spec(caplog):
     model = OutputModel(tied=True)
-    # A row-partitioned embedding is rebuilt by _slice_embedding with a fresh parameter, so by the
-    # time traversal reaches the head the tie is no longer observable through weight identity.
+    # A tied vocab-parallel head forces its embedding onto the same vocab-dimension shard as
+    # the head, regardless of any spec explicitly configured for the embedding itself; the
+    # embedding's ROW spec here is expected to be overridden rather than applied.
     specs = [
         TPLayerSpec(patterns=[r".*embed_tokens\.weight$"], partition_type=PartitionType.ROW),
         TPLayerSpec(patterns=[r".*lm_head\.weight$"], partition_type=PartitionType.COLUMN),
@@ -388,8 +392,17 @@ def test_plain_colwise_lm_head_rejects_tie_before_embedding_is_sliced():
     autotp.set_tensor_parallel_config(2, None)
     autotp.update_linear_policies()
 
-    with pytest.raises(ValueError, match="requires untied"):
-        autotp._replace_module(model)
+    ds_logger.addHandler(caplog.handler)
+    try:
+        with caplog.at_level(logging.WARNING, logger=ds_logger.name):
+            autotp._replace_module(model)
+    finally:
+        ds_logger.removeHandler(caplog.handler)
+
+    assert isinstance(model.lm_head, VocabParallelLinear)
+    assert isinstance(model.embed_tokens, VocabParallelEmbedding)
+    assert model.lm_head.weight is model.embed_tokens.weight
+    assert any("supersedes" in record.message and "embed_tokens" in record.message for record in caplog.records)
 
 
 def test_configure_vocab_parallel_loss_installs_and_preserves_hook():
