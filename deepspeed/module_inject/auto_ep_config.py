@@ -62,6 +62,7 @@ def parse_autoep_config(param_dict: dict) -> AutoEPConfig:
     config.comm_num_sm = param_dict.get("comm_num_sm", 12)
     config.comm_qp_margin = param_dict.get("comm_qp_margin", 4)
     config.comm_max_tokens_per_rank = param_dict.get("comm_max_tokens_per_rank", 0)
+    config.python_gc_policy = param_dict.get("python_gc_policy", "default")
     config.num_expert_groups = param_dict.get("num_expert_groups", None)
     config.num_limited_groups = param_dict.get("num_limited_groups", None)
     config.score_func = param_dict.get("score_func", "auto")
@@ -118,6 +119,11 @@ def validate_autoep_config(
 
     if not isinstance(config.validate_folding_routing, bool):
         raise ValueError("expert_parallel.validate_folding_routing must be a boolean")
+
+    valid_python_gc_policies = ("default", "disable_during_training")
+    if config.python_gc_policy not in valid_python_gc_policies:
+        raise ValueError(f"python_gc_policy must be one of {valid_python_gc_policies}, "
+                         f"got {config.python_gc_policy!r}")
 
     if not config.enabled:
         return
