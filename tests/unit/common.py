@@ -3,6 +3,7 @@
 
 # DeepSpeed Team
 
+import itertools
 import os
 import re
 import time
@@ -44,11 +45,20 @@ def get_xdist_worker_id():
     return None
 
 
+_master_port_counter = itertools.count()
+
+
 def get_master_port(base_port=29500, port_range_size=1000):
     xdist_worker_id = get_xdist_worker_id()
     if xdist_worker_id is not None:
         # Make xdist workers use different port ranges to avoid race conditions
         base_port += port_range_size * xdist_worker_id
+
+    # The bind-and-release probe below hands every pool the same first-free port
+    # when each test runs in a fresh process (--forked), but this port also keys
+    # the shm allreduce segments, so pools must not share it. Offset the probe
+    # start per process and per pool.
+    base_port += (os.getpid() + next(_master_port_counter)) % (port_range_size - 100)
 
     # Select first open port in range
     port = base_port
@@ -198,6 +208,7 @@ class DistributedExec(ABC):
             master_port = get_master_port()
 
         # Run the test
+        self._master_port = master_port
         args = [(local_rank, num_procs, master_port, init_method) for local_rank in range(num_procs)]
         skip_msgs_async = pool.starmap_async(self._dist_run, args)
 
@@ -222,6 +233,7 @@ class DistributedExec(ABC):
         assert not self.reuse_dist_env, "Cannot reuse distributed environment with non-daemonic processes"
 
         master_port = get_master_port()
+        self._master_port = master_port
         skip_msg = mp.Queue()  # Allows forked processes to share pytest.skip reason
         processes = []
         prev_start_method = mp.get_start_method()
@@ -252,6 +264,7 @@ class DistributedExec(ABC):
         # Wait for all other processes to complete
         for p in processes:
             p.join(self.exec_timeout)
+        self._remove_shm_segments(num_procs)
 
         failed = [(rank, p) for rank, p in enumerate(processes) if p.exitcode != 0]
         for rank, p in failed:
@@ -363,6 +376,22 @@ class DistributedExec(ABC):
             pool.starmap(self._dist_destroy, [() for _ in range(num_procs)])
             pool.close()
             pool.join()
+            self._remove_shm_segments(num_procs)
+
+    def _remove_shm_segments(self, num_procs):
+        # The shm-based allreduce (active when LOCAL_SIZE matches the pool size)
+        # leaves one ~66MB segment per rank under /dev/shm keyed by the master
+        # port. The op never unlinks them, which exhausts /dev/shm over a full
+        # run, so remove them once the pool is gone.
+        master_port = getattr(self, '_master_port', None)
+        if master_port is None or not hasattr(os, 'getuid'):
+            return
+        for rank in range(num_procs):
+            seg = f"/dev/shm/deepspeed_allreduce_buffer_{os.getuid()}_127.0.0.1_{master_port}_{rank}"
+            try:
+                os.remove(seg)
+            except OSError:
+                pass
 
 
 class DistributedFixture(DistributedExec):

@@ -15,6 +15,13 @@ from deepspeed.runtime.zero.offload_config import OffloadDeviceEnum, OffloadStat
 from deepspeed.utils import safe_get_local_fp32_param, safe_get_local_optimizer_state
 from deepspeed.runtime.zero.offload_states import get_state_devices
 
+# Every test in this file drives offload_states()/reload_states(), whose contract
+# presumes two memory tiers: offload frees accelerator-side state and reload
+# restores it. On the cpu accelerator the offload target is the accelerator
+# itself, so the contract is not observable there.
+if get_accelerator().device_name() == 'cpu':
+    pytest.skip("dynamic offload-state tests need a two-tier memory system", allow_module_level=True)
+
 # The strict allocated-memory deltas asserted in this file assume memory_allocated()
 # is allocator bookkeeping (cuda); on cpu it reports process RSS, which does not
 # shrink when tensors are freed.

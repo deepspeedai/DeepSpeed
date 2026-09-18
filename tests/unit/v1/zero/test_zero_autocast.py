@@ -96,7 +96,9 @@ def compare_loss(model_cls,
 
     i = get_accelerator().current_device()
     device = get_accelerator().current_device_name()
-    baseline_model = DDP(deepcopy(model).to(device=device, dtype=torch.float32), device_ids=[i], output_device=i)
+    # Only indexed devices take device_ids/output_device; CPU modules live on one shared device.
+    ddp_kwargs = {'device_ids': [i], 'output_device': i} if torch.device(device).type != 'cpu' else {}
+    baseline_model = DDP(deepcopy(model).to(device=device, dtype=torch.float32), **ddp_kwargs)
     baseline_optimizer = torch.optim.AdamW(baseline_model.parameters(), lr=lr, weight_decay=0.0)
     baseline_scaler = torch.amp.GradScaler()
 
