@@ -139,6 +139,16 @@ identity rather than model configuration metadata such as `tie_word_embeddings`.
 Additional HuggingFace types such as `local_colwise` and `local_rowwise` are
 not yet handled and fall back to AutoTP preset-based partitioning.
 
+For an untied `lm_head` or `embed_out`, an explicit `row` partition rule also
+supports eager training with a replicated input. The head slices the input to
+match its weight shard, reduces the complete output, and reconstructs the full
+input gradient across tensor-parallel ranks. Bias stays replicated; uneven
+hidden dimensions and both flattened and sequence-shaped inputs are supported.
+The default training output-head layout remains column parallel. Explicit row
+training rejects tied weights and reshaped/non-input-dimension shards rather
+than silently breaking a parameter tie. Deferred DeepCompile collectives are
+not supported for this output-head path.
+
 If you need to override the model's built-in `tp_plan`, provide a
 `partition_config` in the DeepSpeed config -- it takes precedence.
 
