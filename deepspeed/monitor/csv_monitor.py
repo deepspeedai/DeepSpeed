@@ -65,3 +65,14 @@ class csvMonitor(Monitor):
                         self.filenames.append(filename)
                         csv_monitor_writer.writerow(['step', header])
                     csv_monitor_writer.writerow([step, value])
+
+    def update_config(self, config_dict):
+        if not self.enabled or dist.get_rank() != 0 or self.log_dir is None:
+            return
+        import csv
+        fname = os.path.join(self.log_dir, 'deepspeed_config.csv')
+        with open(fname, 'w') as csv_monitor_file:
+            csv_monitor_writer = csv.writer(csv_monitor_file)
+            csv_monitor_writer.writerow(['key', 'value'])
+            for key, value in config_dict.items():
+                csv_monitor_writer.writerow([key, value])

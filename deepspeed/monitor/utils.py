@@ -35,3 +35,111 @@ def check_comet_availability():
     except ImportError:
         print('If you want to use comet logging, please `pip install "comet_ml>=3.41.0"`')
         raise
+
+
+def _json_safe_int(value, default):
+    if value is None:
+        return default
+    return int(value)
+
+
+def _parallel_int(getter, default):
+    # TP/DP groups are only created when those parallelisms are configured.
+    try:
+        return _json_safe_int(getter(), default)
+    except (AssertionError, RuntimeError, ValueError, TypeError):
+        return default
+
+
+def _offload_device(offload_cfg):
+    if offload_cfg is None:
+        return None
+    device = getattr(offload_cfg, "device", None)
+    if device is None:
+        return None
+    device_name = device.value if hasattr(device, "value") else str(device)
+    if device_name == 'none':
+        return None
+    return device_name
+
+
+def _is_sequence_only_mpu(mpu):
+    # Ulysses parallel_state_sp aliases MP getters to SP. It is not a TP MPU.
+    return mpu is not None and hasattr(mpu, "initialize_sequence_parallel")
+
+
+def _pipeline_parallel_rank(engine):
+    if not getattr(engine, "pipeline_parallelism", False) and getattr(engine, "mpu", None) is None:
+        return 0
+    mpu = getattr(engine, "mpu", None)
+    if mpu is None:
+        return 0
+    if hasattr(mpu, "get_pipeline_model_parallel_rank"):
+        return int(mpu.get_pipeline_model_parallel_rank())
+    if hasattr(mpu, "get_pipe_parallel_rank"):
+        return int(mpu.get_pipe_parallel_rank())
+    return 0
+
+
+def _data_parallel_world_size(engine, default):
+    mpu = getattr(engine, "mpu", None)
+    if mpu is not None and not _is_sequence_only_mpu(mpu) and hasattr(mpu, "get_data_parallel_world_size"):
+        return int(mpu.get_data_parallel_world_size())
+    from deepspeed.utils import groups
+    size = _parallel_int(groups._get_data_parallel_world_size, default)
+    if size is None:
+        return default
+    return size
+
+
+def _data_parallel_rank(engine, default):
+    mpu = getattr(engine, "mpu", None)
+    if mpu is not None and not _is_sequence_only_mpu(mpu) and hasattr(mpu, "get_data_parallel_rank"):
+        return int(mpu.get_data_parallel_rank())
+    from deepspeed.utils import groups
+    return _parallel_int(groups._get_data_parallel_rank, default)
+
+
+def _tensor_parallel_world_size(engine):
+    mpu = getattr(engine, "mpu", None)
+    if _is_sequence_only_mpu(mpu):
+        return 1
+    from deepspeed.utils.bwc import bwc_tensor_model_parallel_world_size
+    return int(bwc_tensor_model_parallel_world_size(mpu))
+
+
+def _tensor_parallel_rank(engine):
+    mpu = getattr(engine, "mpu", None)
+    if _is_sequence_only_mpu(mpu):
+        return 0
+    from deepspeed.utils.bwc import bwc_tensor_model_parallel_rank
+    return int(bwc_tensor_model_parallel_rank(mpu))
+
+
+def collect_monitor_config(engine):
+    """Build a JSON-safe snapshot of ZeRO / precision / parallelism settings."""
+    from deepspeed.utils import groups
+    from deepspeed.utils.bwc import bwc_pipeline_parallel_world_size
+    import deepspeed.comm as dist
+
+    world_size_default = dist.get_world_size() if dist.is_initialized() else 1
+    rank_default = dist.get_rank() if dist.is_initialized() else 0
+
+    return {
+        'zero_stage': int(engine.zero_optimization_stage()),
+        'offload_optimizer': _offload_device(engine.zero_offload_optimizer()),
+        'offload_param': _offload_device(engine.zero_offload_param()),
+        'fp16': bool(engine.fp16_enabled()),
+        'bf16': bool(engine.bfloat16_enabled()),
+        'train_batch_size': int(engine.train_batch_size()),
+        'train_micro_batch_size_per_gpu': int(engine.train_micro_batch_size_per_gpu()),
+        'gradient_accumulation_steps': int(engine.gradient_accumulation_steps()),
+        'data_parallel_world_size': _data_parallel_world_size(engine, world_size_default),
+        'tensor_parallel_world_size': _tensor_parallel_world_size(engine),
+        'pipeline_parallel_world_size': int(bwc_pipeline_parallel_world_size(engine.mpu)),
+        'sequence_parallel_world_size': int(groups._get_sequence_parallel_world_size()),
+        'data_parallel_rank': _data_parallel_rank(engine, rank_default),
+        'tensor_parallel_rank': _tensor_parallel_rank(engine),
+        'pipeline_parallel_rank': _pipeline_parallel_rank(engine),
+        'sequence_parallel_rank': int(groups._get_sequence_parallel_rank()),
+    }

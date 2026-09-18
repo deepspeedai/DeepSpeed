@@ -42,18 +42,18 @@ When using DeepSpeed for model training, the Monitor can be configured in the De
     "enabled": true,
     "output_path": "output/ds_logs/",
     "job_name": "train_bert"
-  }
+  },
   "wandb": {
     "enabled": true,
     "team": "my_team",
     "group": "my_group",
     "project": "my_project"
-  }
+  },
   "comet": {
     "enabled": true,
     "project": "my_project",
     "experiment_name": "my_experiment"
-  }
+  },
   "csv_monitor": {
     "enabled": true,
     "output_path": "output/ds_logs/",
@@ -62,7 +62,7 @@ When using DeepSpeed for model training, the Monitor can be configured in the De
 }
 ```
 
-DeepSpeed will automatically log to all available and enabled monitoring backends listed in the config, and will generate live monitoring views such as those listed above.
+DeepSpeed will automatically log to all available and enabled monitoring backends listed in the config, and will generate live monitoring views such as those listed above. When the engine is initialized, DeepSpeed also records static parallelism and ZeRO settings such as ZeRO stage, offload devices, precision, and DP/TP/PP/SP sizes on the enabled monitor backends.
 
 ### Custom Monitoring
 
