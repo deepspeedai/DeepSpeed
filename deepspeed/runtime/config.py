@@ -119,6 +119,9 @@ _REMOVED_TOP_LEVEL_CONFIG_KEYS = {
     "sparse_attention":
     "DeepSpeed Sparse Attention has been removed; the 'sparse_attention' configuration block is no longer "
     f"supported. See {_REMOVED_FEATURES_ISSUE}.",
+    "graph_harvesting":
+    "Graph harvesting has been removed; the 'graph_harvesting' configuration option is no longer supported. "
+    f"See {_REMOVED_FEATURES_ISSUE}.",
     "curriculum_learning":
     "Legacy top-level 'curriculum_learning' has been removed. Use "
     "'data_efficiency.data_sampling.curriculum_learning' instead. "
@@ -274,10 +277,6 @@ def get_dump_state(param_dict):
 
 def get_gradient_clipping(param_dict):
     return get_scalar_param(param_dict, GRADIENT_CLIPPING, GRADIENT_CLIPPING_DEFAULT)
-
-
-def get_graph_harvesting(param_dict):
-    return get_scalar_param(param_dict, GRAPH_HARVESTING, GRAPH_HARVESTING_DEFAULT)
 
 
 def get_pipeline_config(param_dict):
@@ -592,8 +591,6 @@ class DeepSpeedConfig(object):
         self.torch_autocast_enabled = get_torch_autocast_enabled(param_dict)
         self.torch_autocast_dtype = get_torch_autocast_dtype(param_dict)
         self.torch_autocast_lower_precision_safe_modules = get_lower_precision_safe_modules(param_dict)
-
-        self.graph_harvesting = get_graph_harvesting(param_dict)
 
         self.optimizer_name = get_optimizer_name(param_dict)
         if (self.optimizer_name is not None and self.optimizer_name.lower() in DEEPSPEED_OPTIMIZERS):

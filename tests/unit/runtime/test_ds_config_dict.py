@@ -239,6 +239,17 @@ def test_legacy_curriculum_learning_config_is_rejected(value):
         DeepSpeedConfig(config_dict)
 
 
+@pytest.mark.parametrize("value", [None, {}, False, True, "auto"])
+def test_graph_harvesting_config_is_rejected(value):
+    config_dict = {
+        "train_micro_batch_size_per_gpu": 1,
+        "graph_harvesting": value,
+    }
+
+    with pytest.raises(DeepSpeedConfigError, match="graph_harvesting"):
+        DeepSpeedConfig(config_dict)
+
+
 def test_compression_training_config_is_rejected():
     config_dict = {
         "train_micro_batch_size_per_gpu": 1,
