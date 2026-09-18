@@ -123,6 +123,9 @@ _REMOVED_TOP_LEVEL_CONFIG_KEYS = {
     "Legacy top-level 'curriculum_learning' has been removed. Use "
     "'data_efficiency.data_sampling.curriculum_learning' instead. "
     f"See {_REMOVED_FEATURES_ISSUE}.",
+    "progressive_layer_drop":
+    "Progressive Layer Dropping has been removed; the 'progressive_layer_drop' configuration block is no longer "
+    f"supported. See {_REMOVED_FEATURES_ISSUE}.",
 }
 _REMOVED_ZERO_CONFIG_KEYS = {
     "mics_shard_size":
@@ -182,22 +185,6 @@ def get_expert_parallel_config(param_dict):
         return parse_autoep_config(param_dict[EXPERT_PARALLEL])
     from deepspeed.module_inject.auto_ep_config import AutoEPConfig
     return AutoEPConfig()
-
-
-def get_pld_enabled(param_dict):
-    if PROGRESSIVE_LAYER_DROP in param_dict.keys():
-        return get_scalar_param(param_dict[PROGRESSIVE_LAYER_DROP], PLD_ENABLED, PLD_ENABLED_DEFAULT)
-    else:
-        return False
-
-
-def get_pld_params(param_dict):
-    if PROGRESSIVE_LAYER_DROP in param_dict.keys():
-        pld_params = copy.copy(param_dict[PROGRESSIVE_LAYER_DROP])
-        pld_params.pop(PLD_ENABLED)
-        return pld_params
-    else:
-        return False
 
 
 def get_torch_autocast_enabled(param_dict):
@@ -631,9 +618,6 @@ class DeepSpeedConfig(object):
         self.hybrid_engine = get_hybrid_engine_config(param_dict)
 
         self.pipeline = get_pipeline_config(param_dict)
-
-        self.pld_enabled = get_pld_enabled(param_dict)
-        self.pld_params = get_pld_params(param_dict)
 
         self.data_efficiency_enabled = get_data_efficiency_enabled(param_dict)
         self.data_efficiency_config = get_data_efficiency_config(param_dict)

@@ -242,18 +242,6 @@ class HybridStateOptimizer(torch.optim.Optimizer):
         return loss
 
 
-class PLD_SimpleModel(SimpleModel):
-
-    def __init__(self, hidden_dim, empty_grad=False):
-        super(PLD_SimpleModel, self).__init__(hidden_dim, empty_grad)
-
-    def forward(self, x, y, **kwargs):
-        pld = kwargs.get('progressive_layer_drop', False)
-        theta = kwargs.get('pld_theta', 1.0)
-        hidden_dim = super(PLD_SimpleModel, self).forward(x, y)
-        return hidden_dim
-
-
 def random_dataset(total_samples, hidden_dim, device, dtype=preferred_dtype()):
     train_data = torch.randn(total_samples, hidden_dim, device=device, dtype=dtype)
     train_label = torch.empty(total_samples, dtype=torch.long, device=device).random_(hidden_dim)

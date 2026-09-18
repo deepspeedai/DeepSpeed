@@ -216,9 +216,9 @@ def test_get_bfloat16_enabled(bf16_key):
     assert get_bfloat16_config(cfg).enabled == True
 
 
-@pytest.mark.parametrize("config_key", ["quantize_training", "eigenvalue"])
+@pytest.mark.parametrize("config_key", ["quantize_training", "eigenvalue", "progressive_layer_drop"])
 @pytest.mark.parametrize("value", [None, {}, False, "auto"])
-def test_moq_config_is_rejected(config_key, value):
+def test_moq_and_pld_config_is_rejected(config_key, value):
     config_dict = {
         "train_micro_batch_size_per_gpu": 1,
         config_key: value,
