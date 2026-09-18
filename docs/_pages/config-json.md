@@ -33,7 +33,7 @@ toc_label: "Contents"
 
 | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              | Default |
 | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
-| Controls how gradient accumulation boundaries are managed. When `true`, DeepSpeed tracks micro-steps and applies the optimizer step only at the accumulation boundary, so `forward`/`backward`/`step` can be called symmetrically on every micro-batch. When `false`, micro-step tracking is disabled and the client is responsible for calling `step()` at the accumulation boundary; each `step()` finalizes the locally-accumulated gradients and applies an optimizer update. The `false` setting supports ZeRO stage 0/1/2/3 (and DDP), including ZeRO optimizer-state and parameter offload (CPU/NVMe). It is incompatible with pipeline parallelism, DeepCompile, and Apex AMP. ZeRO `overlap_comm` is supported only with ZeRO stage 2 (rejected for stage 0/1, where reduction is deferred to `step()`). | `true`  |
+| Controls how gradient accumulation boundaries are managed. When `true`, DeepSpeed tracks micro-steps and applies the optimizer step only at the accumulation boundary, so `forward`/`backward`/`step` can be called symmetrically on every micro-batch. When `false`, micro-step tracking is disabled and the client is responsible for calling `step()` at the accumulation boundary; each `step()` finalizes the locally-accumulated gradients and applies an optimizer update. The `false` setting supports ZeRO stage 0/1/2/3 (and DDP), including ZeRO optimizer-state and parameter offload (CPU/NVMe). It is incompatible with pipeline parallelism and DeepCompile. ZeRO `overlap_comm` is supported only with ZeRO stage 2 (rejected for stage 0/1, where reduction is deferred to `step()`). | `true`  |
 
 
 
@@ -206,22 +206,13 @@ Example of <i>**scheduler**</i>
 | ------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
 | Before mean gradient allreduce, predivide gradients by a specified factor; this can sometimes help with fp16 stability when scaling to large numbers of GPUs | `1.0`   |
 
-<i>**sparse_gradients**</i>: [boolean]
-
-| Description                                                                                                                                                                                                                                                                                                                                                 | Default |
-| ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
-| Enable sparse compression of [torch.nn.Embedding](https://pytorch.org/docs/stable/nn.html#torch.nn.Embedding) gradients. This feature is essentially deprecated as we don't see use cases for it as much anymore. It should be noted that this feature is not compatible with [torch.sparse](https://pytorch.org/docs/stable/sparse.html) related features. | `false` |
-
 ### FP16 training options
-
-**Note:** this mode cannot be combined with the `amp` mode described below.
-{: .notice--warning}
 
 <i>**fp16**</i>: [dictionary]
 
-| Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                | Default |
-| ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
-| Configuration for using mixed precision/FP16 training that leverages [NVIDIA's Apex package](https://nvidia.github.io/apex/). An example, including the available dictionary keys is illustrated below. NOTE: this does not use Apex's AMP mode that allows for more flexibility in mixed precision training modes, this mode is similar to AMP's O2 mode. Please see AMP support below if you want to use more complex mixed precision modes. If you want to use ZeRO (currently) you must use this mode. | None    |
+| Description                                                                                                                                        | Default |
+| -------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
+| Configuration for using DeepSpeed mixed precision/FP16 training. An example, including the available dictionary keys, is illustrated below. | None    |
 
 ```json
 "fp16": {
@@ -301,9 +292,6 @@ Example of <i>**scheduler**</i>
 
 ### BFLOAT16 training options
 
-**Note:** this mode cannot be combined with the `amp` mode described below.
-{: .notice--warning}
-
 **Note:** this mode cannot be combined with the `fp16` mode described above.
 {: .notice--warning}
 
@@ -345,38 +333,6 @@ Example of <i>**scheduler**</i>
 | ---------- | --------------------------- | -------------------------- |
 | 0 | Not supported | Not supported |
 | 1/2/3 | Requires ZeRO-Offload + `DeepSpeedCPUAdam` (optimizer states stay fp32 on CPU) | On GPU without offload, or on CPU with `offload_optimizer` + `DeepSpeedCPUAdam`; optimizer states kept in bf16 either way |
-
-### Automatic mixed precision (AMP) training options
-
-**Note:** this mode cannot be combined with the `fp16` mode described above. In addition this mode is not currently compatible with ZeRO.
-{: .notice--warning}
-
-<i>**amp**</i>: [dictionary]
-
-| Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     | Default |
-| ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
-| Configuration for using automatic mixed precision (AMP) training that leverages [NVIDIA's Apex AMP package](https://nvidia.github.io/apex/). An example, including the available dictionary keys is illustrated below. Is not compatible with `fp16` mode above or ZeRO. Any parameters outside of "enabled" will be passed to AMP's initialize call, see the API and descriptions here at the [apex.amp.initialize documentation](https://nvidia.github.io/apex/amp.html#apex.amp.initialize). | None    |
-
-```json
-"amp": {
-    "enabled": true,
-    ...
-    "opt_level": "O1",
-    ...
-}
-```
-
-<i>**amp:enabled**</i>: [boolean]
-
-| Description                                                                                   | Default |
-| --------------------------------------------------------------------------------------------- | ------- |
-| <i>**enabled**</i> is an **amp** parameter indicating whether or not AMP training is enabled. | `false` |
-
-***amp params***: [various]
-
-| Description                                                                                                                                                                                                            | Default |
-| ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
-| Any parameters outside of "enabled" will be passed to AMP's initialize call, see the API and descriptions here at the [apex.amp.initialize documentation](https://nvidia.github.io/apex/amp.html#apex.amp.initialize). | None    |
 
 ### PyTorch Automatic Mixed Precision (torch.autocast) training options
 
@@ -434,7 +390,7 @@ Enabling and configuring ZeRO memory optimizations
     "stage3_max_reuse_distance" : 1e9,
     "stage3_prefetch_bucket_size" : 5e8,
     "stage3_param_persistence_threshold" : 1e6,
-    "sub_group_size" : 1e12,
+    "sub_group_size" : 1e9,
     "elastic_checkpoint" : [true|false] (deprecated; use Universal Checkpointing for ZeRO-3),
     "stage3_gather_16bit_weights_on_model_save": [true|false],
     "ignore_unused_parameters": [true|false],
@@ -555,6 +511,18 @@ Enabling and configuring ZeRO memory optimizations
 | Description                                                                                                                                                          | Default |
 | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
 | Do not partition parameters smaller than this threshold. Smaller values use less memory, but can greatly increase communication (especially latency-bound messages). | `1e5`   |
+
+
+***sub_group_size***: [integer]
+
+| Description                                                                                                                                                                                                                                                                                                                                                                                                                                                    | Default |
+| -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
+| Tile size for parameter processing to fit massive models (with trillions of parameters). Parameters are grouped into buckets of `sub_group_size` and each bucket is updated one at a time. When used with NVMe offload in ZeRO-Infinity, `sub_group_size` therefore controls the granularity in which model states are moved in and out of CPU memory from NVMe during the optimizer step. This prevents running out of CPU memory for extremely large models. | `1e9`   |
+
+Most users can leave `sub_group_size` at its default value when not using NVMe offload. Consider changing it in the following cases:
+
+1. Running into OOM during the optimizer step: reduce `sub_group_size` to lower the memory utilization of temporary buffers.
+2. The optimizer step is taking a long time: increase `sub_group_size` to improve bandwidth utilization as a result of the increased data size.
 
 
 ***stage3_gather_16bit_weights_on_model_save***: [boolean]
@@ -757,6 +725,7 @@ When a HuggingFace model provides a built-in `tp_plan` (via `model.config.base_m
     "autotp_size": 4,
     "preset_model": "llama",
     "tp_overlap_comm": false,
+    "vocab_parallel_lm_head": false,
     "partition_config": {
       "use_default_specs": false,
       "layer_specs": [
@@ -791,6 +760,12 @@ When a HuggingFace model provides a built-in `tp_plan` (via `model.config.base_m
 | Description                                                                                              | Default |
 | -------------------------------------------------------------------------------------------------------- | ------- |
 | Overlap tensor-parallel allreduce communication with computation (training only).                       | `false` |
+
+***vocab_parallel_lm_head***: [boolean]
+
+| Description                                                                                                                                                  | Default |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------- |
+| Keep an untied `lm_head`/`embed_out` output vocabulary sharded and install DeepSpeed's pure-PyTorch vocab-parallel causal-LM loss instead of gathering logits. | `false` |
 
 ***partition_config***: [dictionary]
 
@@ -1464,85 +1439,6 @@ DeepSpeed Data Efficiency Library includes two techniques: curriculum learning a
 | <i>&emsp;&emsp;&emsp;&emsp;**max_step**</i>: [list] | List of which step to change max accepted difficulty level. Used by `fixed_discrete` schedule. | N/A |
 
 
-### Curriculum Learning
-
-**Note:** On 12/12/2022, we released [DeepSpeed Data Efficiency Library](/tutorials/data-efficiency/) which provides a more general curriculum learning support. This legacy curriculum learning feature below is still supported but we recommend to use the Data Efficiency Library.
-
-```json
-  "curriculum_learning": {
-    "enabled": true,
-    "curriculum_type": "seqlen",
-    "min_difficulty": 8,
-    "max_difficulty": 1024,
-    "schedule_type": "fixed_linear",
-    "schedule_config": {
-      "total_curriculum_step": 40000,
-      "difficulty_step": 8
-    }
-  }
-```
-<i>**enabled**</i>: [boolean]
-
-| Description                               | Default |
-| ----------------------------------------- | ------- |
-| Set to true to enable curriculum learning | `false` |
-
-<i>**curriculum_type**</i>: [string]
-
-| Description                                                       | Default |
-| ----------------------------------------------------------------- | ------- |
-| Type of curriculum difficulty metric. Currently support `seqlen`. | N/A     |
-
-
-<i>**min_difficulty**</i>: [integer]
-
-| Description                   | Default |
-| ----------------------------- | ------- |
-| The starting difficulty level | N/A     |
-
-<i>**max_difficulty**</i>: [integer]
-
-| Description                 | Default |
-| --------------------------- | ------- |
-| The ending difficulty level | N/A     |
-
-<i>**schedule_type**</i>: [string]
-
-| Description                                                                                        | Default |
-| -------------------------------------------------------------------------------------------------- | ------- |
-| Type of curriculum schedule. Currently support `fixed_linear`, `fixed_root`, and `fixed_discrete`. | N/A     |
-
-
-<i>**total_curriculum_step**</i>: [integer]
-
-| Description                                                                                                                                      | Default |
-| ------------------------------------------------------------------------------------------------------------------------------------------------ | ------- |
-| Total number of steps for the curriculum learning. One of the `schedule_config` when the `fixed_linear` and `fixed_root` schedule_type are used. | N/A     |
-
-<i>**difficulty_step**</i>: [integer]
-
-| Description                                                                                                                                                                                                                                                                                          | Default |
-| ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
-| At any time, the curriculum learning difficulty must be multiple of this `difficulty_step`. Set this to multiple of 8 (for FP16 data) or 16 (for INT8 data) to enable NVIDIA Tensor Core acceleration. One of the `schedule_config` when the `fixed_linear` and `fixed_root` schedule_type are used. | N/A     |
-
-<i>**root_degree**</i>: [integer]
-
-| Description                                                                                                                | Default |
-| -------------------------------------------------------------------------------------------------------------------------- | ------- |
-| Root degree of the curriculum schedule function. One of the `schedule_config` when the `fixed_root` schedule_type is used. | N/A     |
-
-<i>**difficulty**</i>: [list of integer]
-
-| Description                                                                                                                         | Default |
-| ----------------------------------------------------------------------------------------------------------------------------------- | ------- |
-| List of difficulty levels to be used during schedule. One of the `schedule_config` when the `fixed_discrete` schedule_type is used. | N/A     |
-
-<i>**max_step**</i>: [list of integer]
-
-| Description                                                                                                                  | Default |
-| ---------------------------------------------------------------------------------------------------------------------------- | ------- |
-| List of which step to change difficulty level. One of the `schedule_config` when the `fixed_discrete` schedule_type is used. | N/A     |
-
 ### Monitoring Module
 
 **Note:** Deepspeed logs to TensorBoard through PyTorch. Logging to TensorBoard requires that the `tensorboard` package is installed (read more in the [PyTorch documentation](https://pytorch.org/docs/1.8.0/tensorboard.html)).
@@ -1559,7 +1455,6 @@ Deepspeed's Monitor module can log training details into a [Tensorboard](https:/
 | `Train/Samples/train_loss`   | The training loss. | None |
 | `Train/Samples/lr`           | The learning rate during training. | None |
 | `Train/Samples/loss_scale`   | The loss scale when training using `fp16`. | `fp16` must be enabled. |
-| `Train/Eigenvalues/ModelBlockParam_{i}`   | Eigen values per param block. | `eigenvalue` must be enabled. |
 | `Train/Samples/elapsed_time_ms_forward`   | The global duration of the forward pass. | `flops_profiler.enabled` or `wall_clock_breakdown`. |
 | `Train/Samples/elapsed_time_ms_backward`   | The global duration of the forward pass. | `flops_profiler.enabled` or `wall_clock_breakdown`.  |
 | `Train/Samples/elapsed_time_ms_backward_inner`   | The backward time that does not include the gradient reduction time. Only in cases where the gradient reduction is not overlapped, if it is overlapped then the inner time should be about the same as the entire backward time. | `flops_profiler.enabled` or `wall_clock_breakdown`.  |

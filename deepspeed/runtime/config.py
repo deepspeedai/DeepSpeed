@@ -58,7 +58,7 @@ from .swap_tensor.aio_config import get_aio_config
 from .model_checkpointing.config import get_checkpoint_config
 
 from .tensor_parallel import get_tensor_parallel_config
-from .data_pipeline.config import get_data_efficiency_enabled, get_data_efficiency_config, get_curriculum_enabled_legacy, get_curriculum_params_legacy
+from .data_pipeline.config import get_data_efficiency_enabled, get_data_efficiency_config
 from .data_pipeline.constants import *
 
 from ..utils.config import get_timers_config
@@ -102,11 +102,29 @@ _REMOVED_TOP_LEVEL_CONFIG_KEYS = {
     "compression_training":
     "The DeepSpeed compression library has been removed. A leftover 'compression_training' "
     f"block would be ignored and the model would train unquantized. See {_REMOVED_FEATURES_ISSUE}.",
+    "amp":
+    "NVIDIA Apex AMP integration has been removed. Use DeepSpeed 'fp16', 'bf16', or 'torch_autocast' "
+    f"instead. See {_REMOVED_FEATURES_ISSUE}.",
     "quantize_training":
     "Mixture-of-Quantization (MoQ) / 'quantize_training' has been removed. See "
     f"{_REMOVED_FEATURES_ISSUE}.",
+    "sparse_gradients":
+    "Sparse compression of dense torch.nn.Embedding gradients has been removed. A leftover "
+    "'sparse_gradients' flag would be ignored and those gradients would be reduced dense. "
+    "Gradients from an embedding constructed with sparse=True are still reduced sparsely and "
+    f"need no config flag. See {_REMOVED_FEATURES_ISSUE}.",
+    "eigenvalue":
+    "Eigenvalue-based Mixture-of-Quantization (MoQ) has been removed; the standalone "
+    f"'eigenvalue' configuration block is no longer supported. See {_REMOVED_FEATURES_ISSUE}.",
     "sparse_attention":
     "DeepSpeed Sparse Attention has been removed; the 'sparse_attention' configuration block is no longer "
+    f"supported. See {_REMOVED_FEATURES_ISSUE}.",
+    "curriculum_learning":
+    "Legacy top-level 'curriculum_learning' has been removed. Use "
+    "'data_efficiency.data_sampling.curriculum_learning' instead. "
+    f"See {_REMOVED_FEATURES_ISSUE}.",
+    "progressive_layer_drop":
+    "Progressive Layer Dropping has been removed; the 'progressive_layer_drop' configuration block is no longer "
     f"supported. See {_REMOVED_FEATURES_ISSUE}.",
 }
 _REMOVED_ZERO_CONFIG_KEYS = {
@@ -116,6 +134,10 @@ _REMOVED_ZERO_CONFIG_KEYS = {
     "mics_hierarchical_params_gather":
     "MiCS ZeRO-3 sharding has been removed; 'zero_optimization.mics_hierarchical_params_gather' "
     f"is no longer supported. See {_REMOVED_FEATURES_ISSUE}.",
+    "zeropp_loco_param":
+    "LoCo-Zero++ has been removed; 'zero_optimization.zeropp_loco_param' is no longer supported. "
+    "Remove this key to use standard ZeRO++ quantized gradients without LoCo error feedback. "
+    f"See {_REMOVED_FEATURES_ISSUE}.",
 }
 
 
@@ -165,38 +187,6 @@ def get_expert_parallel_config(param_dict):
     return AutoEPConfig()
 
 
-def get_pld_enabled(param_dict):
-    if PROGRESSIVE_LAYER_DROP in param_dict.keys():
-        return get_scalar_param(param_dict[PROGRESSIVE_LAYER_DROP], PLD_ENABLED, PLD_ENABLED_DEFAULT)
-    else:
-        return False
-
-
-def get_pld_params(param_dict):
-    if PROGRESSIVE_LAYER_DROP in param_dict.keys():
-        pld_params = copy.copy(param_dict[PROGRESSIVE_LAYER_DROP])
-        pld_params.pop(PLD_ENABLED)
-        return pld_params
-    else:
-        return False
-
-
-def get_amp_enabled(param_dict):
-    if AMP in param_dict.keys():
-        return get_scalar_param(param_dict[AMP], AMP_ENABLED, AMP_ENABLED_DEFAULT)
-    else:
-        return False
-
-
-def get_amp_params(param_dict):
-    if AMP in param_dict.keys():
-        amp_params = copy.copy(param_dict[AMP])
-        amp_params.pop(AMP_ENABLED)
-        return amp_params
-    else:
-        return False
-
-
 def get_torch_autocast_enabled(param_dict):
     if TORCH_AUTOCAST in param_dict.keys():
         return get_scalar_param(param_dict[TORCH_AUTOCAST], TORCH_AUTOCAST_ENABLED, TORCH_AUTOCAST_ENABLED_DEFAULT)
@@ -232,10 +222,6 @@ def get_gradient_accumulation_steps(param_dict):
 
 def get_managed_gradient_accumulation(param_dict):
     return get_scalar_param(param_dict, MANAGED_GRADIENT_ACCUMULATION, MANAGED_GRADIENT_ACCUMULATION_DEFAULT)
-
-
-def get_sparse_gradients_enabled(param_dict):
-    return get_scalar_param(param_dict, SPARSE_GRADIENTS, SPARSE_GRADIENTS_DEFAULT)
 
 
 def get_communication_data_type(param_dict,
@@ -399,79 +385,6 @@ def get_hybrid_engine_config(param_dict):
 
 def get_expert_data_topo_config(param_dict):
     return get_scalar_param(param_dict, USE_DATA_BEFORE_EXPERT_PARALLEL, USE_DATA_BEFORE_EXPERT_PARALLEL_DEFAULT)
-
-
-def get_eigenvalue_config(param_dict):
-    return (
-        EIGENVALUE_ENABLED_DEFAULT,
-        EIGENVALUE_VERBOSE_DEFAULT,
-        EIGENVALUE_MAX_ITER_DEFAULT,
-        EIGENVALUE_TOL_DEFAULT,
-        EIGENVALUE_STABILITY_DEFAULT,
-        EIGENVALUE_GAS_BOUNDARY_RESOLUTION_DEFAULT,
-        EIGENVALUE_LAYER_NAME_DEFAULT,
-        EIGENVALUE_LAYER_NUM_DEFAULT,
-    )
-
-
-def get_eigenvalue_enabled(param_dict):
-    if EIGENVALUE in param_dict.keys():
-        return get_scalar_param(param_dict[EIGENVALUE], EIGENVALUE_ENABLED, EIGENVALUE_ENABLED_DEFAULT)
-    else:
-        return EIGENVALUE_ENABLED_DEFAULT
-
-
-def get_eigenvalue_verbose(param_dict):
-    if EIGENVALUE in param_dict.keys():
-        return get_scalar_param(param_dict[EIGENVALUE], EIGENVALUE_VERBOSE, EIGENVALUE_VERBOSE_DEFAULT)
-    else:
-        return EIGENVALUE_VERBOSE_DEFAULT
-
-
-def get_eigenvalue_max_iter(param_dict):
-    if EIGENVALUE in param_dict.keys():
-        return get_scalar_param(param_dict[EIGENVALUE], EIGENVALUE_MAX_ITER, EIGENVALUE_MAX_ITER_DEFAULT)
-    else:
-        return EIGENVALUE_MAX_ITER_DEFAULT
-
-
-def get_eigenvalue_tol(param_dict):
-    if EIGENVALUE in param_dict.keys():
-        return get_scalar_param(param_dict[EIGENVALUE], EIGENVALUE_TOL, EIGENVALUE_TOL_DEFAULT)
-    else:
-        return EIGENVALUE_TOL_DEFAULT
-
-
-def get_eigenvalue_stability(param_dict):
-    if EIGENVALUE in param_dict.keys():
-        return get_scalar_param(param_dict[EIGENVALUE], EIGENVALUE_STABILITY, EIGENVALUE_STABILITY_DEFAULT)
-    else:
-        return EIGENVALUE_STABILITY_DEFAULT
-
-
-def get_eigenvalue_gas_boundary_resolution(param_dict):
-    if EIGENVALUE in param_dict.keys():
-        return get_scalar_param(
-            param_dict[EIGENVALUE],
-            EIGENVALUE_GAS_BOUNDARY_RESOLUTION,
-            EIGENVALUE_GAS_BOUNDARY_RESOLUTION_DEFAULT,
-        )
-    else:
-        return EIGENVALUE_GAS_BOUNDARY_RESOLUTION_DEFAULT
-
-
-def get_eigenvalue_layer_name(param_dict):
-    if EIGENVALUE in param_dict.keys():
-        return get_scalar_param(param_dict[EIGENVALUE], EIGENVALUE_LAYER_NAME, EIGENVALUE_LAYER_NAME_DEFAULT)
-    else:
-        return EIGENVALUE_LAYER_NAME_DEFAULT
-
-
-def get_eigenvalue_layer_num(param_dict):
-    if EIGENVALUE in param_dict.keys():
-        return get_scalar_param(param_dict[EIGENVALUE], EIGENVALUE_LAYER_NUM, EIGENVALUE_LAYER_NUM_DEFAULT)
-    else:
-        return EIGENVALUE_LAYER_NUM_DEFAULT
 
 
 def get_checkpoint_params(param_dict):
@@ -660,7 +573,6 @@ class DeepSpeedConfig(object):
         self.prescale_gradients = get_prescale_gradients(param_dict)
         self.gradient_predivide_factor = get_gradient_predivide_factor(param_dict)
         self.gradient_allreduce_op = get_gradient_allreduce_op(param_dict)
-        self.sparse_gradients_enabled = get_sparse_gradients_enabled(param_dict)
 
         self.zero_config = get_zero_config(param_dict)
         self.zero_optimization_stage = self.zero_config.stage
@@ -676,9 +588,6 @@ class DeepSpeedConfig(object):
         self.bfloat16_config = get_bfloat16_config(param_dict)
         assert not (self.float16_config.enabled
                     and self.bfloat16_config.enabled), 'bfloat16 and fp16 modes cannot be simultaneously enabled'
-
-        self.amp_enabled = get_amp_enabled(param_dict)
-        self.amp_params = get_amp_params(param_dict)
 
         self.torch_autocast_enabled = get_torch_autocast_enabled(param_dict)
         self.torch_autocast_dtype = get_torch_autocast_dtype(param_dict)
@@ -705,27 +614,10 @@ class DeepSpeedConfig(object):
         self.memory_breakdown = get_memory_breakdown(param_dict)
         self.autotuning_config = DeepSpeedAutotuningConfig(param_dict)
 
-        (
-            self.eigenvalue_enabled,
-            self.eigenvalue_verbose,
-            self.eigenvalue_max_iter,
-            self.eigenvalue_tol,
-            self.eigenvalue_stability,
-            self.eigenvalue_gas_boundary_resolution,
-            self.eigenvalue_layer_name,
-            self.eigenvalue_layer_num,
-        ) = get_eigenvalue_config(param_dict)
-
         self.use_data_before_expert_parallel_ = get_expert_data_topo_config(param_dict)
         self.hybrid_engine = get_hybrid_engine_config(param_dict)
 
         self.pipeline = get_pipeline_config(param_dict)
-
-        self.pld_enabled = get_pld_enabled(param_dict)
-        self.pld_params = get_pld_params(param_dict)
-
-        self.curriculum_enabled_legacy = get_curriculum_enabled_legacy(param_dict)
-        self.curriculum_params_legacy = get_curriculum_params_legacy(param_dict)
 
         self.data_efficiency_enabled = get_data_efficiency_enabled(param_dict)
         self.data_efficiency_config = get_data_efficiency_config(param_dict)

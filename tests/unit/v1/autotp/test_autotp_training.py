@@ -17,7 +17,8 @@ from deepspeed.utils import groups
 from contextlib import contextmanager
 from torch import nn
 from deepspeed.module_inject.auto_tp import AutoTP
-from deepspeed.module_inject.layers import LinearAllreduce, LinearLayer, set_autotp_mode, is_autotp_training_mode
+from deepspeed.module_inject.layers import (LinearAllreduce, LinearLayer, VocabParallelLinear, set_autotp_mode,
+                                            is_autotp_training_mode)
 from deepspeed.module_inject.tp_shard import get_shard_size_list
 from unit.checkpoint.common import compare_lr_scheduler_states, compare_optimizer_states
 import os
@@ -148,6 +149,171 @@ class UnevenVocabOutputModel(torch.nn.Module):
 
     def forward(self, x):
         return self.lm_head(x)
+
+
+@pytest.mark.sequential
+class TestHeuristicVocabParallelLMHead(DistributedTest):
+    world_size = 2
+    reuse_dist_env = False
+
+    def test_training_path_replaces_head_and_uses_distributed_loss(self):
+        transformers = pytest.importorskip("transformers")
+
+        class HeuristicLlamaForCausalLM(transformers.LlamaForCausalLM):
+            _tp_plan = None
+
+        model_config = transformers.LlamaConfig(vocab_size=33,
+                                                hidden_size=32,
+                                                intermediate_size=64,
+                                                num_hidden_layers=1,
+                                                num_attention_heads=4,
+                                                num_key_value_heads=4,
+                                                use_cache=False,
+                                                tie_word_embeddings=False)
+        model_config.base_model_tp_plan = None
+        model = HeuristicLlamaForCausalLM(model_config)
+        ds_config = {
+            "train_micro_batch_size_per_gpu": 1,
+            "optimizer": {
+                "type": "Adam",
+                "params": {
+                    "lr": 1e-6,
+                    "torch_adam": True,
+                },
+            },
+            "tensor_parallel": {
+                "autotp_size": self.world_size,
+                "vocab_parallel_lm_head": True,
+            },
+            "zero_optimization": {
+                "stage": 0,
+            },
+        }
+
+        engine, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=ds_config)
+
+        assert isinstance(engine.module.lm_head, VocabParallelLinear)
+        device = torch.device(get_accelerator().current_device_name())
+        input_ids = torch.randint(0, model_config.vocab_size, (1, 8), device=device)
+        dist.broadcast(input_ids,
+                       src=groups.get_tensor_model_parallel_src_rank(),
+                       group=groups.get_tensor_model_parallel_group())
+        output = engine(input_ids=input_ids, labels=input_ids)
+        assert torch.isfinite(output.loss)
+        engine.backward(output.loss)
+        assert engine.module.lm_head.weight.grad is not None
+
+
+@pytest.mark.sequential
+class TestVocabParallelLMHeadRequiresSupportedHead(DistributedTest):
+    world_size = 2
+    reuse_dist_env = False
+
+    def test_unsupported_head_name_raises_instead_of_downgrading(self):
+
+        class NonStandardHeadModel(torch.nn.Module):
+
+            def __init__(self):
+                super().__init__()
+                self.embed_tokens = torch.nn.Embedding(32, 8)
+                self.output_proj = torch.nn.Linear(8, 32, bias=False)
+
+            def forward(self, x):
+                return self.output_proj(self.embed_tokens(x))
+
+        ds_config = {
+            "train_micro_batch_size_per_gpu": 1,
+            "optimizer": {
+                "type": "Adam",
+                "params": {
+                    "lr": 1e-6,
+                    "torch_adam": True,
+                },
+            },
+            "tensor_parallel": {
+                "autotp_size": self.world_size,
+                "vocab_parallel_lm_head": True,
+                "partition_config": {
+                    "use_default_specs": False,
+                    "layer_specs": [{
+                        "patterns": [".*output_proj\\.weight$"],
+                        "partition_type": "column",
+                    }],
+                },
+            },
+            "zero_optimization": {
+                "stage": 0,
+            },
+        }
+        model = NonStandardHeadModel()
+
+        with pytest.raises(ValueError, match="requires a supported nn.Linear"):
+            deepspeed.initialize(model=model, model_parameters=model.parameters(), config=ds_config)
+
+
+@pytest.mark.sequential
+class TestVocabParallelLMHeadCheckpointParity(DistributedTest):
+    world_size = 2
+    reuse_dist_env = False
+
+    def test_save_load_round_trip_preserves_loss(self, tmpdir):
+        transformers = pytest.importorskip("transformers")
+        vocab_size = 37
+
+        def build_model(seed):
+            torch.manual_seed(seed)
+            model_config = transformers.LlamaConfig(vocab_size=vocab_size,
+                                                    hidden_size=32,
+                                                    intermediate_size=64,
+                                                    num_hidden_layers=1,
+                                                    num_attention_heads=4,
+                                                    num_key_value_heads=4,
+                                                    use_cache=False,
+                                                    tie_word_embeddings=False)
+            model_config.base_model_tp_plan = None
+            return transformers.LlamaForCausalLM(model_config)
+
+        ds_config = {
+            "train_micro_batch_size_per_gpu": 1,
+            "optimizer": {
+                "type": "Adam",
+                "params": {
+                    "lr": 1e-6,
+                    "torch_adam": True,
+                },
+            },
+            "tensor_parallel": {
+                "autotp_size": self.world_size,
+                "vocab_parallel_lm_head": True,
+            },
+            "zero_optimization": {
+                "stage": 0,
+            },
+        }
+
+        saved_engine, _, _, _ = deepspeed.initialize(model=build_model(42), config=ds_config)
+        assert isinstance(saved_engine.module.lm_head, VocabParallelLinear)
+
+        device = torch.device(get_accelerator().current_device_name())
+        input_ids = torch.randint(0, vocab_size, (1, 8), device=device)
+        dist.broadcast(input_ids,
+                       src=groups.get_tensor_model_parallel_src_rank(),
+                       group=groups.get_tensor_model_parallel_group())
+
+        saved_loss = saved_engine(input_ids=input_ids, labels=input_ids).loss.detach().clone()
+        ckpt_path = os.path.join(tmpdir, "vocab_parallel_lm_head")
+        saved_engine.save_checkpoint(ckpt_path)
+
+        loaded_engine, _, _, _ = deepspeed.initialize(model=build_model(7), config=ds_config)
+        # A different initialization keeps the comparison meaningful: a checkpoint that never
+        # reaches the sharded head would leave this diverged loss in place.
+        diverged_loss = loaded_engine(input_ids=input_ids, labels=input_ids).loss.detach().clone()
+        assert not torch.allclose(diverged_loss, saved_loss)
+
+        loaded_engine.load_checkpoint(ckpt_path)
+        restored_loss = loaded_engine(input_ids=input_ids, labels=input_ids).loss
+
+        torch.testing.assert_close(restored_loss, saved_loss)
 
 
 @contextmanager
