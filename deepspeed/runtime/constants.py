@@ -20,42 +20,6 @@ TRAIN_BATCH_SIZE = "train_batch_size"
 TRAIN_BATCH_SIZE_DEFAULT = None
 
 #############################################
-# Sparse attention
-#############################################
-SPARSE_ATTENTION = "sparse_attention"
-SPARSE_DENSE_MODE = "dense"
-SPARSE_FIXED_MODE = "fixed"
-SPARSE_VARIABLE_MODE = "variable"
-SPARSE_BIGBIRD_MODE = "bigbird"
-SPARSE_BSLONGFORMER_MODE = "bslongformer"
-SPARSE_MODE = "mode"
-SPARSE_MODE_DEFAULT = SPARSE_FIXED_MODE
-SPARSE_BLOCK = "block"
-SPARSE_BLOCK_DEFAULT = 16
-SPARSE_DIFFERENT_LAYOUT_PER_HEAD = "different_layout_per_head"
-SPARSE_DIFFERENT_LAYOUT_PER_HEAD_DEFAULT = False
-SPARSE_NUM_LOCAL_BLOCKS = "num_local_blocks"
-SPARSE_NUM_LOCAL_BLOCKS_DEFAULT = 4
-SPARSE_NUM_GLOBAL_BLOCKS = "num_global_blocks"
-SPARSE_NUM_GLOBAL_BLOCKS_DEFAULT = 1
-SPARSE_ATTENTION_TYPE = "attention"
-SPARSE_ATTENTION_TYPE_DEFAULT = "bidirectional"
-SPARSE_HORIZONTAL_GLOBAL_ATTENTION = "horizontal_global_attention"
-SPARSE_HORIZONTAL_GLOBAL_ATTENTION_DEFAULT = False
-SPARSE_NUM_DIFFERENT_GLOBAL_PATTERNS = "num_different_global_patterns"
-SPARSE_NUM_DIFFERENT_GLOBAL_PATTERNS_DEFAULT = 1
-SPARSE_NUM_RANDOM_BLOCKS = "num_random_blocks"
-SPARSE_NUM_RANDOM_BLOCKS_DEFAULT = 0
-SPARSE_LOCAL_WINDOW_BLOCKS = "local_window_blocks"
-SPARSE_LOCAL_WINDOW_BLOCKS_DEFAULT = [4]
-SPARSE_GLOBAL_BLOCK_INDICES = "global_block_indices"
-SPARSE_GLOBAL_BLOCK_INDICES_DEFAULT = [0]
-SPARSE_GLOBAL_BLOCK_END_INDICES = "global_block_end_indices"
-SPARSE_GLOBAL_BLOCK_END_INDICES_DEFAULT = None
-SPARSE_NUM_SLIDING_WINDOW_BLOCKS = "num_sliding_window_blocks"
-SPARSE_NUM_SLIDING_WINDOW_BLOCKS_DEFAULT = 3
-
-#############################################
 # Optimizer and lr scheduler
 #############################################
 OPTIMIZER = "optimizer"
@@ -113,10 +77,6 @@ GRADIENT_ACCUMULATION_STEPS_DEFAULT = None
 # True (default): DeepSpeed tracks micro-steps and steps on the boundary. False: the client owns the boundary and each step() applies an optimizer update.
 MANAGED_GRADIENT_ACCUMULATION = "managed_gradient_accumulation"
 MANAGED_GRADIENT_ACCUMULATION_DEFAULT = True
-
-# DeepSpeed CSR gradient sparsity
-SPARSE_GRADIENTS = "sparse_gradients"
-SPARSE_GRADIENTS_DEFAULT = False
 
 #########################################
 # BFLOAT16 support
@@ -208,24 +168,6 @@ FP16_MIN_LOSS_SCALE_DEFAULT = 1
 # FP16 master and grads
 FP16_MASTER_WEIGHTS_AND_GRADS = "fp16_master_weights_and_grads"
 FP16_MASTER_WEIGHTS_AND_GRADS_DEFAULT = False
-
-#########################################
-# Apex AMP support
-#########################################
-# Use Apex AMP for mixed precision support, all parameters (other than 'enabled') will be passed to
-# amp.initialize(model, optimizer, **amp_params)
-# See apex documentation for supported parameters/features: https://nvidia.github.io/apex/amp.html#apex.amp.initialize
-AMP_FORMAT = '''
-"amp" {
-  "enabled: true,
-  "opt_level": "O1",
-  ...
-}
-'''
-AMP = "amp"
-
-AMP_ENABLED = "enabled"
-AMP_ENABLED_DEFAULT = False
 
 #########################################
 # Torch AMP support
@@ -384,63 +326,6 @@ WALL_CLOCK_BREAKDOWN_DEFAULT = False
 
 MEMORY_BREAKDOWN = 'memory_breakdown'
 MEMORY_BREAKDOWN_DEFAULT = False
-
-#########################################
-# Eigenvalue
-#########################################
-# Eigenvalue computation. By default, this feature is not enabled.
-# Users can configure in ds_config.json as below example:
-EIGENVALUE_FORMAT = '''
-Tensorboard can be specified as:
-"eigenvalue": {
-  "enabled": true,
-  "verbose": true,
-  "max_iter": 100,
-  "tol": 1e-2,
-  "stability": 1e-6
-}
-'''
-EIGENVALUE = "eigenvalue"
-
-# Tensorboard enable signal
-EIGENVALUE_ENABLED = "enabled"
-EIGENVALUE_ENABLED_DEFAULT = False
-
-EIGENVALUE_VERBOSE = "verbose"
-EIGENVALUE_VERBOSE_DEFAULT = False
-
-EIGENVALUE_MAX_ITER = "max_iter"
-EIGENVALUE_MAX_ITER_DEFAULT = 100
-
-EIGENVALUE_TOL = "tol"
-EIGENVALUE_TOL_DEFAULT = 1e-2
-
-EIGENVALUE_STABILITY = "stability"
-EIGENVALUE_STABILITY_DEFAULT = 1e-6
-
-EIGENVALUE_GAS_BOUNDARY_RESOLUTION = "gas_boundary_resolution"
-EIGENVALUE_GAS_BOUNDARY_RESOLUTION_DEFAULT = 1
-
-EIGENVALUE_LAYER_NAME = "layer_name"
-EIGENVALUE_LAYER_NAME_DEFAULT = "bert.encoder.layer"
-
-EIGENVALUE_LAYER_NUM = "layer_num"
-EIGENVALUE_LAYER_NUM_DEFAULT = 0
-
-#########################################
-# Progressive Layer Drop (PLD)
-#########################################
-PROGRESSIVE_LAYER_DROP = "progressive_layer_drop"
-
-# PLD enable signal
-PLD_ENABLED = "enabled"
-PLD_ENABLED_DEFAULT = False
-
-PLD_THETA = "theta"
-PLD_THETA_DEFAULT = 1.0
-
-PLD_GAMMA = "gamma"
-PLD_GAMMA_DEFAULT = 0.001
 
 
 #########################################

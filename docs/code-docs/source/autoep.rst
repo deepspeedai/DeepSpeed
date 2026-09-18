@@ -50,7 +50,7 @@ Transformers build that exposes the matching config/model classes,
 **ZeRO compatibility:** Stages 0, 1, and 2, plus constrained Stage 3
 support. Stage 3 requires AutoEP-managed MoE layers and does not support native
 DeepSpeed MoE layers, AutoTP, tensor model parallelism from ``mpu``, sequence
-parallelism, MiCS, hpZeRO secondary tensor groups, non-1 expert tensor
+parallelism, hpZeRO secondary tensor groups, non-1 expert tensor
 parallelism, or quantized gradients. Stage 3 AutoEP checkpoints are saved
 partition-natively in the ``zero_pp_rank_*`` shard files and support
 same-topology load, module-only loads (``load_module_only``),
@@ -98,7 +98,8 @@ that set nothing keep the existing path unchanged.
         "autoep_size": 8,
         "comm_backend": "deepep",
         "comm_num_sm": 12,
-        "comm_qp_margin": 4
+        "comm_qp_margin": 4,
+        "comm_max_tokens_per_rank": 4096
       }
     }
 
@@ -112,31 +113,13 @@ that set nothing keep the existing path unchanged.
   DeepEP buffer is sized statically and must use the same capacity on every
   rank. A batch that exceeds it is an error.
 
-**Python cyclic GC policy (experimental):**
-
-Large Python model graphs can accumulate cyclic objects during training. A
-generation-2 collection pauses one rank's Python thread, and the pause can then
-be exposed as collective wait time on every expert-parallel rank. AutoEP offers
-an opt-in policy that collects once after engine initialization and disables
-automatic cyclic collection until the engine is destroyed:
-
-.. code-block:: json
-
-    {
-      "expert_parallel": {
-        "enabled": true,
-        "autoep_size": 8,
-        "python_gc_policy": "disable_during_training"
-      }
-    }
-
-The default is ``"default"``, which leaves Python GC unchanged. The policy is
-process-wide and reference-counted across DeepSpeed engines. Applications that
-create cyclic Python objects during training should call
-``engine.collect_python_gc()`` at a safe boundary such as after checkpointing.
-Call ``engine.destroy()`` when the engine is no longer needed to restore the
-process's original automatic-GC state; restoration does not rely on Python
-finalization because disabled cyclic GC cannot reclaim engine reference cycles.
+For ``autoep_size > 1``, DeepEP receives the router output directly, bypassing
+the collective backend's sorting, token expansion, and split-count exchange.
+Shared experts and router-logit outputs retain the same behavior. The EP
+communicator is initialized once before each layer's first DeepEP buffer is
+constructed, including when the caller supplied a lazily initialized process
+group. This initialization does not run on subsequent forwards. The standard
+``comm`` and ``autoep_size=1`` paths are unchanged.
 
 On 16 H100s across two nodes, replaying routing captured from real training,
 DeepEP reduced payload AllToAll time from roughly 100 ms to 48 ms per step. A
@@ -169,6 +152,32 @@ Requirements and limits:
   downgraded.
 - Not compatible with folded tensor parallelism
   (``expert_tensor_parallel_size > 1``), which is rejected at setup.
+
+**Python cyclic GC policy (experimental):**
+
+Large Python model graphs can accumulate cyclic objects during training. A
+generation-2 collection pauses one rank's Python thread, and the pause can then
+be exposed as collective wait time on every expert-parallel rank. AutoEP offers
+an opt-in policy that collects once after engine initialization and disables
+automatic cyclic collection until the engine is destroyed:
+
+.. code-block:: json
+
+    {
+      "expert_parallel": {
+        "enabled": true,
+        "autoep_size": 8,
+        "python_gc_policy": "disable_during_training"
+      }
+    }
+
+The default is ``"default"``, which leaves Python GC unchanged. The policy is
+process-wide and reference-counted across DeepSpeed engines. Applications that
+create cyclic Python objects during training should call
+``engine.collect_python_gc()`` at a safe boundary such as after checkpointing.
+Call ``engine.destroy()`` when the engine is no longer needed to restore the
+process's original automatic-GC state; restoration does not rely on Python
+finalization because disabled cyclic GC cannot reclaim engine reference cycles.
 
 **Fused weighted restore (experimental):**
 
@@ -224,7 +233,7 @@ implementation and itself.
   (``tensor_parallel.autotp_size > 1``) or tensor model parallelism from
   ``mpu``; support is planned as follow-up work.
 - AutoEP with ZeRO Stage 3 is supported only without sequence parallelism,
-  MiCS, hpZeRO secondary tensor groups, non-1 expert tensor parallelism, or
+  hpZeRO secondary tensor groups, non-1 expert tensor parallelism, or
   quantized gradients.
 - Regular checkpoint save/load requires matching ``autoep_size``. To change
   ``autoep_size`` or data-parallel world size across runs for the same

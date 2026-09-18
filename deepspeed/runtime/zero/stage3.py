@@ -21,7 +21,7 @@ from deepspeed.utils.torch import register_grad_hook, required_torch_version
 from deepspeed.utils.pin_memory_tracker import pinned_memory_summary
 from deepspeed.runtime.fp16.loss_scaler import CreateLossScaler
 from deepspeed.runtime.torch_autocast import get_autocast_dtype, get_all_comm_dtypes, is_autocast_initialized, sort_dtypes
-from deepspeed.runtime.comm.coalesced_collectives import reduce_scatter_coalesced, all_to_all_quant_reduce, all_to_all_loco_quant_reduce
+from deepspeed.runtime.comm.coalesced_collectives import reduce_scatter_coalesced, all_to_all_quant_reduce
 from deepspeed.runtime.utils import has_inf_or_nan, inf, is_model_parallel_parameter, mask_nan_or_inf_with_val_inplace, count_used_parameters_in_backward
 from deepspeed.runtime.zero.partition_parameters import *
 from deepspeed.runtime.zero.config import ZeroStageEnum
@@ -202,7 +202,6 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         zero_quantized_weights=False,
         zero_quantized_nontrainable_weights=False,
         zero_module_granularity_threshold=0,
-        zeropp_loco_param=None,
         log_trace_cache_warnings=False,
         enable_sanity_checks=False,
         cpuadam_cores_perc=0.8,
@@ -359,8 +358,6 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         self.zero_quantized_nontrainable_weights = zero_quantized_nontrainable_weights
 
         self.partition_count = dist.get_world_size(group=self.dp_process_group)
-
-        self.zeropp_loco_param = zeropp_loco_param
 
         if mpu is None or hasattr(mpu, 'initialize_sequence_parallel'):
             self.model_parallel_group = None
@@ -1692,7 +1689,11 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                     param = params[base_i + rank]
                     g = param.grad
                     m = gathered_momentums_pad[base_i + rank]
-                    update = muon_update(g, m, beta=self.muon_beta, ns_method=getattr(self, 'muon_ns_method', 'gram'))
+                    update = muon_update(g,
+                                         m,
+                                         beta=self.muon_beta,
+                                         ns_method=getattr(self, 'muon_ns_method', 'gram'),
+                                         num_heads=getattr(param, 'muon_num_heads', None))
                     g.data.copy_(update, non_blocking=False)
                 grad_handle = dist.all_gather(grads_pad[base_i:base_i + world_sz],
                                               grads_pad[base_i + rank],
@@ -1809,10 +1810,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         global_world_size = dist.get_world_size()
         num_nodes = global_world_size // local_world_size
         if self.all2all_process_group is not None and num_nodes > 1:
-            grad_partitions_for_rank = (all_to_all_loco_quant_reduce(params_to_reduce, self.all2all_process_group,
-                                                                     self.zeropp_loco_param)
-                                        if self.zeropp_loco_param is not None else all_to_all_quant_reduce(
-                                            full_grads_for_rank, self.all2all_process_group))
+            grad_partitions_for_rank = all_to_all_quant_reduce(full_grads_for_rank, self.all2all_process_group)
         else:
             grad_partitions_for_rank = reduce_scatter_coalesced(full_grads_for_rank, process_group)
 
@@ -2531,25 +2529,6 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
         see_memory_usage('After overflow after clearing gradients', force=False)
 
-    def _loco_err_buf_update(self, overflow: bool, scale=1.0):
-        """
-        Loco Error Buffer update.
-        """
-        if not overflow and scale == 1.0: return
-        if dist.get_rank() == 0:
-            logger.info(f"update loco-zero++ error buffer with overflow: {overflow}")
-        # FP32 grad should never exist.
-        # For speed, set model fp16 grad to None by default
-        for group in self.fp16_groups:
-            for p in group:
-                if hasattr(p, 'intra_ef_buf'):
-                    if overflow:
-                        del p.intra_ef_buf
-                        del p.inter_ef_buf
-                    else:
-                        p.intra_ef_buf[1] *= scale
-                        p.inter_ef_buf[1] *= scale
-
     @instrument_w_nvtx
     def _overflow_check_and_loss_scale_update(self):
 
@@ -2563,9 +2542,6 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
         if self.overflow:
             self._overflow_clean_up(prev_scale)
-
-        #update loco error buf
-        self._loco_err_buf_update(self.overflow, self.loss_scale / prev_scale)
 
         return self.overflow
 
