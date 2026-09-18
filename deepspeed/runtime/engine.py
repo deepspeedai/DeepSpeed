@@ -62,7 +62,7 @@ from deepspeed.runtime.dataloader import DeepSpeedDataLoader
 from deepspeed.runtime.zero.muon.muon_optimizer import MuonWithAuxAdam
 from deepspeed.runtime.constants import \
     ROUTE_TRAIN, ROUTE_PREDICT, ROUTE_EVAL, \
-    PLD_THETA, PLD_GAMMA, BFLOAT16, FP16, AMP, GRADIENT_ACCUMULATION_STEPS, \
+    BFLOAT16, FP16, GRADIENT_ACCUMULATION_STEPS, \
     DATA_PARALLEL_GROUP, GLOBAL_RANK, DDP_BFLOAT16, GRADIENT_ALLREDUCE_OP_MEAN
 from deepspeed.runtime.zero.config import ZeroStageEnum
 from deepspeed.checkpoint.constants import (
@@ -101,7 +101,6 @@ from deepspeed.utils.timer import NoopTimer, ThroughputTimer, SynchronizedWallCl
     STEP_GLOBAL_TIMER
 from deepspeed.utils.debug import debug_extract_module_and_param_names, debug_clear_module_and_param_names
 from deepspeed.monitor.monitor import MonitorMaster
-from deepspeed.runtime.progressive_layer_drop import ProgressiveLayerDrop
 from deepspeed.runtime.utils import clip_grad_norm_, compare_tensors_in_structures, maybe_loss_for_backward, _broadcast_tensor
 from deepspeed.runtime.data_pipeline.constants import DATA_SAMPLING, \
     DATA_ROUTING, DATA_SAMPLING_ENABLED, CURRICULUM_LEARNING, \
@@ -109,7 +108,6 @@ from deepspeed.runtime.data_pipeline.constants import DATA_SAMPLING, \
     RANDOM_LTD_ENABLED, RANDOM_LTD_LAYER_ID, RANDOM_LTD_LAYER_NUM, \
     RANDOM_LTD_LAYER_TOKEN_LR_SCHEDULE, RANDOM_LTD_LAYER_TOKEN_LR_ENABLED, \
     RANDOM_LTD_GLOBAL_BATCH_SIZE, RANDOM_LTD_MICRO_BATCH_SIZE, DATA_EFFICIENCY
-from deepspeed.runtime.data_pipeline.curriculum_scheduler import CurriculumScheduler
 from deepspeed.runtime.checkpoint_engine import (create_checkpoint_engine, TorchCheckpointEngine, CheckpointCommitInfo)
 
 from deepspeed.runtime.data_pipeline.data_routing.scheduler import RandomLTDScheduler
@@ -158,10 +156,8 @@ DeepSpeedSchedulerCallable = Callable[[Optimizer], _LRScheduler]
 
 try:
     import apex
-    from apex import amp
-    APEX_INSTALLED = True
+    APEX_INSTALLED = hasattr(apex, 'optimizers') and hasattr(apex.optimizers, 'FusedAdam')
 except ImportError:
-    # Fail silently so we don't spam logs unnecessarily if user isn't using amp
     APEX_INSTALLED = False
 
 
@@ -548,7 +544,6 @@ class DeepSpeedEngine(Module):
         self.loaded_checkpoint_dp_world_size = None
         self.enable_backward_allreduce = True
         self.inside_no_sync_ctxt = False
-        self.progressive_layer_drop = None
         self.dist_backend = get_accelerator().communication_backend_name()
         self.has_moe_layers = False
         self.num_experts = []
@@ -595,6 +590,9 @@ class DeepSpeedEngine(Module):
         del autoep_replacement_sources
         if self.autotp_size() > 1:
             self._configure_tensor_parallel(model, self.tensor_parallel_config())
+            # Head counts were recorded against the whole model; the parameters are shards now.
+            from deepspeed import resolve_per_head_muon_after_sharding
+            resolve_per_head_muon_after_sharding(model)
         see_memory_usage("DeepSpeed Engine: After args sanity test", force=self.memory_breakdown())
         if mpu is not None:
             if self.elasticity_enabled():
@@ -687,26 +685,12 @@ class DeepSpeedEngine(Module):
         elif self.bfloat16_enabled():
             self.optimizer = self._configure_bf16_optimizer(optimizer=None)
 
-        # Bookkeeping for sparse support
-        self.sparse_tensor_module_names = set()
-        # if self.sparse_gradients_enabled():
-        for name, module in self.module.named_modules():
-            if isinstance(module, (torch.nn.Embedding, torch.nn.EmbeddingBag)) and self.sparse_gradients_enabled():
-                self.sparse_tensor_module_names.add(name + ".weight")
-                logger.info("Will convert {} to sparse tensor during training".format(name))
-
         self._optimized_linear_offload_setup()
 
         self.save_non_zero_checkpoint = False
         self.save_zero_checkpoint = False
         if not isinstance(self.optimizer, DeepSpeedZeRoOffload):
             self._configure_checkpointing()
-
-        if self.pld_enabled():
-            self.progressive_layer_drop = self._configure_progressive_layer_drop()
-
-        if self.curriculum_enabled_legacy():
-            self.curriculum_scheduler_legacy = self._configure_curriculum_scheduler_legacy()
 
         if self.random_ltd_enabled():
             random_ltd_config = self.random_ltd_config()
@@ -1061,6 +1045,27 @@ class DeepSpeedEngine(Module):
         from deepspeed.runtime.tensor_parallel.config import _get_hf_tp_plan
         hf_tp_plan = _get_hf_tp_plan(model)
 
+        def finalize_autotp(autotp=None, attach_uc_metadata=False):
+            if autotp is not None:
+                autotp.register_replicated_grad_hooks(model)
+
+            from deepspeed.module_inject.layers import VocabParallelLinear
+            vocab_parallel_heads = [module for module in model.modules() if isinstance(module, VocabParallelLinear)]
+            if len(vocab_parallel_heads) > 1:
+                raise ValueError("Unable to choose a loss for multiple no-gather vocab-parallel LM heads")
+            if vocab_parallel_heads:
+                from deepspeed.sequence.cross_entropy import configure_vocab_parallel_loss
+                configure_vocab_parallel_loss(model, vocab_parallel_heads[0])
+            elif tp_config.vocab_parallel_lm_head:
+                # Every partitioning path must agree; otherwise the request degrades into ordinary
+                # AutoTP with a gathered head and no distributed loss, which is easy to miss.
+                raise ValueError(
+                    "vocab_parallel_lm_head requires a supported nn.Linear named 'lm_head' or 'embed_out'")
+
+            if attach_uc_metadata:
+                setattr(model, UNIVERSAL_CHECKPOINT_INFO, collect_autotp_universal_checkpoint_info(model))
+            setattr(model, "ds_autotp_parsed", True)
+
         if partition_config is not None:
             autotp = AutoTP(module=model,
                             all_reduce_linears=(),
@@ -1070,15 +1075,14 @@ class DeepSpeedEngine(Module):
                             orig_layer_impl=None,
                             keep_module_on_host=tp_config.keep_module_on_host,
                             partition_config=partition_config,
+                            vocab_parallel_lm_head=tp_config.vocab_parallel_lm_head,
                             model_config=model_config,
                             tp_grain_size=tp_config.tensor_parallel.tp_grain_size,
                             training_mode=True)
             autotp.set_tensor_parallel_config(tp_size, tp_config.tensor_parallel.tp_group)
             autotp.update_linear_policies()
             autotp._replace_module(model)
-            autotp.register_replicated_grad_hooks(model)
-            setattr(model, UNIVERSAL_CHECKPOINT_INFO, collect_autotp_universal_checkpoint_info(model))
-            setattr(model, "ds_autotp_parsed", True)
+            finalize_autotp(autotp, attach_uc_metadata=True)
             return
 
         if tp_size <= 1:
@@ -1111,6 +1115,7 @@ class DeepSpeedEngine(Module):
                     orig_layer_impl=None,
                     keep_module_on_host=tp_config.keep_module_on_host,
                     partition_config=tp_plan_config,
+                    vocab_parallel_lm_head=tp_config.vocab_parallel_lm_head,
                     model_config=model_config,
                     tp_grain_size=tp_config.tensor_parallel.tp_grain_size,
                     training_mode=True,
@@ -1118,9 +1123,7 @@ class DeepSpeedEngine(Module):
                 autotp.set_tensor_parallel_config(tp_size, tp_config.tensor_parallel.tp_group)
                 autotp.update_linear_policies()
                 autotp._replace_module(model)
-                autotp.register_replicated_grad_hooks(model)
-                setattr(model, UNIVERSAL_CHECKPOINT_INFO, collect_autotp_universal_checkpoint_info(model))
-                setattr(model, "ds_autotp_parsed", True)
+                finalize_autotp(autotp, attach_uc_metadata=True)
                 return
             log_dist(
                 f"AutoTP: effective HuggingFace tp_plan could not be converted; falling back to heuristic AutoTP. "
@@ -1131,13 +1134,30 @@ class DeepSpeedEngine(Module):
             log_dist("AutoTP: no effective HuggingFace tp_plan was found; falling back to heuristic AutoTP.",
                      ranks=[0])
 
+        vocab_head_autotp = None
+        if tp_config.vocab_parallel_lm_head:
+            vocab_head_autotp = AutoTP(module=model,
+                                       all_reduce_linears=(),
+                                       prefix="",
+                                       state_dict=None,
+                                       linear_layer_setting=(torch.nn.Linear, torch.nn.Embedding),
+                                       orig_layer_impl=None,
+                                       keep_module_on_host=tp_config.keep_module_on_host,
+                                       vocab_parallel_lm_head=True,
+                                       model_config=model_config,
+                                       tp_grain_size=tp_config.tensor_parallel.tp_grain_size,
+                                       training_mode=True)
+            vocab_head_autotp.set_tensor_parallel_config(tp_size, tp_config.tensor_parallel.tp_group)
+            vocab_head_autotp._resolve_vocab_parallel_lm_head()
+
         parser_dict = AutoTP.tp_parser(model)
         for client_module, injection_policy in parser_dict:
             tp_config.injection_policy_tuple = injection_policy
             replace_transformer_layer(client_module, model, None, tp_config, model_config, training_mode=True)
 
-        setattr(model, UNIVERSAL_CHECKPOINT_INFO, collect_autotp_universal_checkpoint_info(model))
-        setattr(model, "ds_autotp_parsed", True)
+        if vocab_head_autotp is not None:
+            vocab_head_autotp._replace_vocab_parallel_lm_head()
+        finalize_autotp(attach_uc_metadata=True)
 
     def __del__(self):
         try:
@@ -1299,24 +1319,6 @@ class DeepSpeedEngine(Module):
             else:
                 return False
 
-    def pld_enabled(self):
-        return self._config.pld_enabled
-
-    def pld_params(self):
-        return self._config.pld_params
-
-    def pld_theta(self):
-        return self.pld_params()[PLD_THETA]
-
-    def pld_gamma(self):
-        return self.pld_params()[PLD_GAMMA]
-
-    def curriculum_enabled_legacy(self):
-        return self._config.curriculum_enabled_legacy
-
-    def curriculum_params_legacy(self):
-        return self._config.curriculum_params_legacy
-
     def data_efficiency_enabled(self):
         return self._config.data_efficiency_enabled
 
@@ -1434,9 +1436,6 @@ class DeepSpeedEngine(Module):
         return self.autotuning_enabled(
         ) and self._config.autotuning_config.model_info and self._config.autotuning_config.model_info.get(
             "profile", False)
-
-    def sparse_gradients_enabled(self):
-        return self._config.sparse_gradients_enabled
 
     def train_batch_size(self):
         return self._config.train_batch_size
@@ -1607,12 +1606,6 @@ class DeepSpeedEngine(Module):
 
     def bf16_optimizer_states(self):
         return self._config.bfloat16_config.bf16_optimizer_states
-
-    def amp_enabled(self):
-        return self._config.amp_enabled
-
-    def amp_params(self):
-        return self._config.amp_params
 
     def torch_autocast_enabled(self) -> bool:
         return self._config.torch_autocast_enabled
@@ -1953,8 +1946,6 @@ class DeepSpeedEngine(Module):
                 "managed_gradient_accumulation=False is not supported with pipeline parallelism"
             assert not self.is_deepcompile_enabled(), \
                 "managed_gradient_accumulation=False is not supported with DeepCompile"
-            assert not self.amp_enabled(), \
-                "managed_gradient_accumulation=False is not supported with Apex AMP"
 
     def _broadcast_model(self):
         if self.dist_backend is None:
@@ -2108,7 +2099,7 @@ class DeepSpeedEngine(Module):
             summary += "***********************************************"
             logger.info(summary)
 
-        if not (self.amp_enabled() or is_zero_init_model):
+        if not is_zero_init_model:
             self._broadcast_model()
 
     def _validate_zero3_moe_compatibility(self):
@@ -2215,11 +2206,6 @@ class DeepSpeedEngine(Module):
     def _do_optimizer_sanity_check(self, basic_optimizer):
         model_dtype, grad_accum_dtype = self.get_data_types()
         zero_enabled = self.zero_optimization()
-        amp_enabled = self.amp_enabled()
-        # config based assertions
-        assert (
-            not (amp_enabled and zero_enabled)
-        ), "Amp and ZeRO are not currently compatible, please use (legacy) fp16 mode which performs similar to amp opt_mode=O2"
         if zero_enabled:
             if not is_zero_supported_optimizer(basic_optimizer):
                 assert (
@@ -2235,18 +2221,6 @@ class DeepSpeedEngine(Module):
                                      "BF16 parameters and FP32 gradient accumulation")
                 return BFLOAT16
             return ZERO_OPTIMIZATION
-        elif amp_enabled:
-            if model_dtype != grad_accum_dtype:
-                raise NotImplementedError(
-                    "Model data type and gradient accumulation data type must be equal to use Amp")
-            if model_dtype == torch.bfloat16 or model_dtype == torch.float16:
-                raise NotImplementedError("Cannot enable both amp with (legacy) fp16 or bfloat16 mode")
-            try:
-                logger.info("Initializing Apex amp from: {}".format(amp.__path__))
-            except NameError:
-                # If apex/amp is available it will be imported above
-                raise RuntimeError("Unable to import apex/amp, please make sure it is installed")
-            return AMP
         # data type checks
         elif model_dtype == grad_accum_dtype:
             if model_dtype == torch.float32:
@@ -2292,17 +2266,9 @@ class DeepSpeedEngine(Module):
         log_dist(f"DeepSpeed Basic Optimizer = {basic_optimizer.__class__.__name__}", ranks=[0])
 
         optimizer_wrapper = self._do_optimizer_sanity_check(basic_optimizer)
-        self._check_muon_can_reach_its_parameters(basic_optimizer, optimizer_wrapper)
 
         if optimizer_wrapper == ZERO_OPTIMIZATION:
             self.optimizer = self._configure_zero_optimizer(basic_optimizer)
-        elif optimizer_wrapper == AMP:
-            amp_params = self.amp_params()
-            log_dist(f"Initializing AMP with these params: {amp_params}", ranks=[0])
-            model, self.optimizer = amp.initialize(self.module, basic_optimizer, **amp_params)
-            self._set_client_model(model)
-            self._broadcast_model()
-            # TODO: maybe need to broadcast experts differently?
         elif optimizer_wrapper in [FP16, DDP_BFLOAT16]:
             lp_dtype = torch.float16 if optimizer_wrapper == FP16 else torch.bfloat16
             self.optimizer = self._configure_fp16_optimizer(basic_optimizer, lp_dtype)
@@ -2313,27 +2279,6 @@ class DeepSpeedEngine(Module):
 
         self._configure_autoep_folding_optimizer_gradient_reduction()
         log_dist("DeepSpeed Final Optimizer = {}".format(self.optimizer.__class__.__name__), ranks=[0])
-
-    def _check_muon_can_reach_its_parameters(self, basic_optimizer, optimizer_wrapper):
-        """Refuse the one wrapper that hands Muon flat partitions and does not orthogonalize them.
-
-        `MuonWithAuxAdam.step` tells the two cases apart by shape: a matrix is the weight itself
-        and is orthogonalized there, a 1-D tensor is a ZeRO partition whose update the ZeRO
-        optimizer already applied. `BF16_Optimizer` breaks that reading - it replaces the param
-        groups with flat fp32 partitions (`param_group['params'] = [self.fp32_groups_flat_partition[i]]`)
-        and knows nothing about `use_muon`, so the update is never applied and the step is SGD.
-
-        The original shapes are not recoverable from `step`, so this is a refusal rather than a
-        fix; implementing Muon inside BF16_Optimizer is its own change. Reached by bf16 with
-        `grad_accum_dtype: fp32` at ZeRO stage 1.
-        """
-        if not isinstance(basic_optimizer, MuonWithAuxAdam) or optimizer_wrapper != BFLOAT16:
-            return
-        raise ZeRORuntimeException(
-            "Muon cannot be used with the BF16_Optimizer, which this configuration selects: bf16 "
-            "with grad_accum_dtype fp32 at ZeRO stage 1. That optimizer hands Muon flat fp32 "
-            "partitions and never applies the Newton-Schulz update, so training would silently "
-            "proceed as SGD. Drop grad_accum_dtype, or use ZeRO stage 2 or 3.")
 
     def _configure_autoep_folding_optimizer_gradient_reduction(self):
         configure = getattr(self.optimizer, "configure_autoep_folding_tp_gradient_reduction", None)
@@ -2763,15 +2708,6 @@ class DeepSpeedEngine(Module):
 
         return optimizer
 
-    def _configure_progressive_layer_drop(self):
-        pld = ProgressiveLayerDrop(theta=self.pld_theta(), gamma=self.pld_gamma())
-
-        return pld
-
-    def _configure_curriculum_scheduler_legacy(self):
-        scheduler = CurriculumScheduler(self.curriculum_params_legacy())
-        return scheduler
-
     @staticmethod
     def is_map_style_dataset(obj):
         return hasattr(obj, "__getitem__") and hasattr(obj, "__len__")
@@ -2911,20 +2847,6 @@ class DeepSpeedEngine(Module):
 
         if flops_profiler_active:
             self.flops_profiler.start_profile(ignore_list=None)
-
-        if kwargs is not None:
-            if self.module.training:
-                if self.progressive_layer_drop:
-                    kwargs.update(self.progressive_layer_drop.get_state())
-
-            if self.__class__.__name__ != "PipelineEngine":
-                # TODO: The above if condition is a HACK since for PipelineEngine
-                # it's difficult to inject argument in forward pass.
-                if self.module.training and self.curriculum_enabled_legacy():
-                    self.curriculum_scheduler_legacy.update_difficulty(self.global_steps + 1)
-                    if self.curriculum_params_legacy()["curriculum_type"] == "seqlen":
-                        kwargs.update({"curriculum_seqlen": self.curriculum_scheduler_legacy.get_current_difficulty()})
-                        return_modified = True
 
         if self.module.training and self.random_ltd_enabled():
             self.random_ltd_scheduler.update_seq(self.global_steps)
@@ -3117,8 +3039,6 @@ class DeepSpeedEngine(Module):
 
         see_memory_usage("Engine before backward", force=self.memory_breakdown())
 
-        assert not self.amp_enabled(), "Apex AMP is not supported with non-scalar backward"
-
         if self.is_deepcompile_active() and not self.compile_autotp():
             deepcompile_backward_prologue(self.is_gradient_accumulation_boundary())
 
@@ -3186,8 +3106,6 @@ class DeepSpeedEngine(Module):
                 needs_scaler = self.optimizer.needs_scaler()
             elif self.torch_autocast_z0_gradscaler is not None:
                 needs_scaler = True
-            elif self.amp_enabled():
-                needs_scaler = True
 
             if needs_scaler and not self._manual_backward_expected:
                 # User called backward() directly without using engine.scale() or engine.backward()
@@ -3195,8 +3113,6 @@ class DeepSpeedEngine(Module):
                              "directly without scaling the loss. Please use one of the following:"
                              " 1. engine.backward(loss)"
                              " 2. engine.scale(loss).backward()")
-                if self.amp_enabled():
-                    error_msg += " Note: AMP (NVIDIA Apex) only supports engine.backward(loss)."
                 raise RuntimeError(error_msg)
 
             # Clear the flag for next backward
@@ -3347,9 +3263,6 @@ class DeepSpeedEngine(Module):
             Scaled loss tensor ready for .backward() call
 
         Raises:
-            RuntimeError: If AMP (NVIDIA Apex) is enabled. AMP requires using engine.backward()
-                         directly as it uses a context manager that cannot be separated from
-                         the backward call.
             AssertionError: If loss is not a scalar tensor with grad_fn, or if no optimizer
                            is configured.
         """
@@ -3357,12 +3270,6 @@ class DeepSpeedEngine(Module):
             "must provide optimizer during init in order to use scale"
         assert maybe_loss_for_backward(loss), \
             "loss must be a scalar tensor with grad_fn. For non-scalar tensors, use tensor.backward(grad)"
-
-        # AMP (NVIDIA Apex) uses a context manager that wraps both scaling and backward,
-        # so it cannot be used with manual backward calls
-        if self.amp_enabled():
-            raise RuntimeError("engine.scale() is not compatible with AMP (NVIDIA Apex). "
-                               "When using AMP, you must call engine.backward(loss) instead of manual backward.")
 
         # Apply loss scaler based on optimizer type
         scaled_loss = loss
@@ -3423,14 +3330,7 @@ class DeepSpeedEngine(Module):
                         grad, engine_backward_graph_state))
 
             with compiled_autograd(self._is_compiled_autograd_enabled, self._compile_kwargs):
-                if self.zero_optimization() or not self.amp_enabled():
-                    loss.backward(**backward_kwargs)
-                elif self.amp_enabled():
-                    # AMP requires delaying unscale when inside gradient accumulation boundaries
-                    # https://nvidia.github.io/apex/advanced.html#gradient-accumulation-across-iterations
-                    delay_unscale = not self.is_gradient_accumulation_boundary()
-                    with amp.scale_loss(loss, self.optimizer, delay_unscale=delay_unscale) as scaled_loss:
-                        scaled_loss.backward(**backward_kwargs)
+                loss.backward(**backward_kwargs)
 
                 # backward_epilogue is not called in a hook when self._support_torch_style_backward is False
                 self._backward_epilogue()
@@ -3512,13 +3412,8 @@ class DeepSpeedEngine(Module):
             if self.torch_autocast_z0_gradscaler:
                 # Unscale for gradient clipping
                 self.torch_autocast_z0_gradscaler.unscale_(self.optimizer)
-            if not (self.fp16_enabled() or self.bfloat16_enabled() or self.amp_enabled() or self.zero_optimization()):
+            if not (self.fp16_enabled() or self.bfloat16_enabled() or self.zero_optimization()):
                 self.clip_fp32_gradients()
-            elif self.amp_enabled():
-                # AMP's recommended way of doing clipping
-                # https://nvidia.github.io/apex/advanced.html#gradient-clipping
-                master_params = amp.master_params(self.optimizer)
-                clip_grad_norm_(parameters=master_params, max_norm=self.gradient_clipping(), mpu=self.mpu)
         if self.torch_autocast_z0_gradscaler:
             self.torch_autocast_z0_gradscaler.step(self.optimizer)
             self.torch_autocast_z0_gradscaler.update()
@@ -3536,7 +3431,7 @@ class DeepSpeedEngine(Module):
                 self.optimizer.zero_grad()
             else:
                 self.zero_grad()
-        elif self.zero_optimization() or self.fp16_enabled() or self.amp_enabled():
+        elif self.zero_optimization() or self.fp16_enabled():
             self.optimizer.zero_grad()
         else:
             self.zero_grad()
@@ -3621,9 +3516,6 @@ class DeepSpeedEngine(Module):
         if self.is_gradient_accumulation_boundary():
             if self.checkpoint_engine.is_decoupled():
                 self._commit_decoupled_checkpoint()
-
-            if self.progressive_layer_drop:
-                self.progressive_layer_drop.update_state(self.global_steps)
 
             self._take_model_step(lr_kwargs)
 
@@ -3800,12 +3692,6 @@ class DeepSpeedEngine(Module):
         else:
             return self._get_optimizer_param("betas")
 
-    def get_pld_theta(self):
-        if self.progressive_layer_drop:
-            return self.progressive_layer_drop.get_theta()
-        else:
-            return None
-
     def _report_progress(self, step):
         lr = self.get_lr()
         mom = self.get_mom()
@@ -3864,7 +3750,7 @@ class DeepSpeedEngine(Module):
             for key in self.expert_data_parallel_group.keys():
                 expert_grads[key] = []
 
-        for param_name, param in self.module.named_parameters():
+        for param in self.module.parameters():
             if not param.requires_grad:
                 continue
 
@@ -3882,7 +3768,7 @@ class DeepSpeedEngine(Module):
                 param.grad = torch.zeros(param.size(), dtype=param.dtype, device=param.device)
 
             grad_data = param.grad.data
-            if param_name in self.sparse_tensor_module_names or grad_data.is_sparse:
+            if grad_data.is_sparse:
                 # Call param.grad without data to avoid problem with setting of updated grads
                 grad_data = SparseTensor(param.grad)
 
@@ -3955,12 +3841,9 @@ class DeepSpeedEngine(Module):
 
     def sparse_allreduce_no_retain(self, bucket, dp_group, dp_world_size=None):
         allreduced_sparses = self.sparse_allreduce_bucket(bucket, dp_group, dp_world_size)
-        # Densify sparse tensor and copy back to original location
+        # Copy the reduced sparse tensor back to the original location
         for tensor in allreduced_sparses:
-            if tensor.is_sparse:
-                tensor.orig_dense_tensor.data = tensor.to_coo_tensor()
-            else:
-                tensor.orig_dense_tensor.copy_(tensor.to_dense())
+            tensor.orig_dense_tensor.data = tensor.to_coo_tensor()
 
     def sparse_allreduce_bucket(self, bucket, dp_group, dp_world_size=None):
         sparse_list = []
@@ -4723,41 +4606,13 @@ class DeepSpeedEngine(Module):
             ) and 'data_sampler' in checkpoint:
                 self.training_dataloader.data_sampler.load_state_dict(checkpoint['data_sampler'])
 
-            def get_sparse_tensor_module_names(original_set, loaded_set, original_parameters, loaded_parameters):
-                result = set()
-
-                for name in original_set:
-                    if name in loaded_parameters and name not in loaded_set:
-                        continue  # parameter existed in previous model and was not sparse
-                    result.add(name)
-
-                for name in loaded_set:
-                    if name in original_parameters:
-                        result.add(name)  # parameter exists in both configs and it was sparse
-
-                return result
-
-            if 'sparse_tensor_module_names' in checkpoint:
-                sparse_tensor_module_names = checkpoint['sparse_tensor_module_names']
-            elif 'csr_tensor_module_names' in checkpoint:
-                sparse_tensor_module_names = checkpoint['csr_tensor_module_names']
-            else:
-                sparse_tensor_module_names = None
-            if sparse_tensor_module_names is not None:
-                if load_module_strict:
-                    self.sparse_tensor_module_names = sparse_tensor_module_names
-                else:
-                    self.sparse_tensor_module_names = get_sparse_tensor_module_names(
-                        self.sparse_tensor_module_names, sparse_tensor_module_names,
-                        dict(self.module.named_parameters()), checkpoint["module"])
-
             self.global_steps = checkpoint['global_steps']
             self.global_samples = checkpoint.get('global_samples', self.global_steps * self.train_batch_size())
             self.skipped_steps = checkpoint['skipped_steps']
             self.loaded_checkpoint_mp_world_size = checkpoint['mp_world_size']
             deepspeed_states = [
-                'module', 'sparse_tensor_module_names', 'skipped_steps', 'global_steps', 'dp_world_size',
-                'mp_world_size', 'data_sampler', 'random_ltd'
+                'module', 'skipped_steps', 'global_steps', 'dp_world_size', 'mp_world_size', 'data_sampler',
+                'random_ltd'
             ]
         client_state = {}
 
@@ -5071,7 +4926,6 @@ class DeepSpeedEngine(Module):
                     data_sampler=self.training_dataloader.data_sampler.state_dict() if
                     (self.training_dataloader is not None and self.curriculum_learning_enabled()) else None,
                     random_ltd=self.random_ltd_scheduler.state_dict() if self.random_ltd_enabled() else None,
-                    sparse_tensor_module_names=self.sparse_tensor_module_names,
                     skipped_steps=self.skipped_steps,
                     global_steps=self.global_steps,
                     global_samples=self.global_samples,

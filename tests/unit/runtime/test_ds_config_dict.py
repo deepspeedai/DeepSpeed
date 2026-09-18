@@ -216,15 +216,26 @@ def test_get_bfloat16_enabled(bf16_key):
     assert get_bfloat16_config(cfg).enabled == True
 
 
-@pytest.mark.parametrize("config_key", ["quantize_training", "eigenvalue"])
+@pytest.mark.parametrize("config_key", ["quantize_training", "eigenvalue", "progressive_layer_drop"])
 @pytest.mark.parametrize("value", [None, {}, False, "auto"])
-def test_moq_config_is_rejected(config_key, value):
+def test_moq_and_pld_config_is_rejected(config_key, value):
     config_dict = {
         "train_micro_batch_size_per_gpu": 1,
         config_key: value,
     }
 
     with pytest.raises(DeepSpeedConfigError, match=config_key):
+        DeepSpeedConfig(config_dict)
+
+
+@pytest.mark.parametrize("value", [None, {}, False, "auto"])
+def test_legacy_curriculum_learning_config_is_rejected(value):
+    config_dict = {
+        "train_micro_batch_size_per_gpu": 1,
+        "curriculum_learning": value,
+    }
+
+    with pytest.raises(DeepSpeedConfigError, match="curriculum_learning"):
         DeepSpeedConfig(config_dict)
 
 
@@ -263,6 +274,23 @@ def test_nebula_config_is_rejected():
         DeepSpeedConfig(config_dict)
 
 
+@pytest.mark.parametrize("amp_config",
+                         [None, {}, False, "auto", {
+                             "enabled": False
+                         }, {
+                             "enabled": True,
+                             "opt_level": "O1"
+                         }])
+def test_apex_amp_config_is_rejected(amp_config):
+    config_dict = {
+        "train_micro_batch_size_per_gpu": 1,
+        "amp": amp_config,
+    }
+
+    with pytest.raises(DeepSpeedConfigError, match="Apex AMP"):
+        DeepSpeedConfig(config_dict)
+
+
 def test_sparse_attention_config_is_rejected():
     config_dict = {
         "train_micro_batch_size_per_gpu": 1,
@@ -285,6 +313,16 @@ def test_mics_zero_config_is_rejected():
     }
 
     with pytest.raises(DeepSpeedConfigError, match="MiCS"):
+        DeepSpeedConfig(config_dict)
+
+
+def test_sparse_gradients_config_is_rejected():
+    config_dict = {
+        "train_micro_batch_size_per_gpu": 1,
+        "sparse_gradients": True,
+    }
+
+    with pytest.raises(DeepSpeedConfigError, match="sparse_gradients"):
         DeepSpeedConfig(config_dict)
 
 

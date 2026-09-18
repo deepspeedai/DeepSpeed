@@ -36,7 +36,7 @@ ZeRO optimization should be enabled as:
     "cpu_offload": [true|false] (deprecated),
     "cpu_offload_param" : [true|false] (deprecated),
     "cpu_offload_use_pin_memory": [true|false] (deprecated),
-    "sub_group_size" : 1000000000000,
+    "sub_group_size" : 1000000000,
     "offload_param": {...},
     "offload_optimizer": {...},
     "ignore_unused_parameters": [true|false],
