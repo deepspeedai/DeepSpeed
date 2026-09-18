@@ -101,8 +101,6 @@ lnav:
         url: /tutorials/one-cycle/
       - title: 'Pipeline Parallelism'
         url: /tutorials/pipeline/
-      - title: 'Progressive Layer Dropping'
-        url: /tutorials/progressive_layer_dropping/
       - title: 'Transformer Kernel'
         url: /tutorials/transformer_kernel/
       - title: 'Arctic Long Sequence Training (ALST) for HF Transformers integration'

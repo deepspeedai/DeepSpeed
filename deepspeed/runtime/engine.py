@@ -62,7 +62,7 @@ from deepspeed.runtime.dataloader import DeepSpeedDataLoader
 from deepspeed.runtime.zero.muon.muon_optimizer import MuonWithAuxAdam
 from deepspeed.runtime.constants import \
     ROUTE_TRAIN, ROUTE_PREDICT, ROUTE_EVAL, \
-    PLD_THETA, PLD_GAMMA, BFLOAT16, FP16, GRADIENT_ACCUMULATION_STEPS, \
+    BFLOAT16, FP16, GRADIENT_ACCUMULATION_STEPS, \
     DATA_PARALLEL_GROUP, GLOBAL_RANK, DDP_BFLOAT16, GRADIENT_ALLREDUCE_OP_MEAN
 from deepspeed.runtime.zero.config import ZeroStageEnum
 from deepspeed.checkpoint.constants import (
@@ -101,7 +101,6 @@ from deepspeed.utils.timer import NoopTimer, ThroughputTimer, SynchronizedWallCl
     STEP_GLOBAL_TIMER
 from deepspeed.utils.debug import debug_extract_module_and_param_names, debug_clear_module_and_param_names
 from deepspeed.monitor.monitor import MonitorMaster
-from deepspeed.runtime.progressive_layer_drop import ProgressiveLayerDrop
 from deepspeed.runtime.utils import clip_grad_norm_, compare_tensors_in_structures, maybe_loss_for_backward
 from deepspeed.runtime.data_pipeline.constants import DATA_SAMPLING, \
     DATA_ROUTING, DATA_SAMPLING_ENABLED, CURRICULUM_LEARNING, \
@@ -542,7 +541,6 @@ class DeepSpeedEngine(Module):
         self.loaded_checkpoint_dp_world_size = None
         self.enable_backward_allreduce = True
         self.inside_no_sync_ctxt = False
-        self.progressive_layer_drop = None
         self.dist_backend = get_accelerator().communication_backend_name()
         self.has_moe_layers = False
         self.num_experts = []
@@ -690,9 +688,6 @@ class DeepSpeedEngine(Module):
         self.save_zero_checkpoint = False
         if not isinstance(self.optimizer, DeepSpeedZeRoOffload):
             self._configure_checkpointing()
-
-        if self.pld_enabled():
-            self.progressive_layer_drop = self._configure_progressive_layer_drop()
 
         if self.random_ltd_enabled():
             random_ltd_config = self.random_ltd_config()
@@ -1320,18 +1315,6 @@ class DeepSpeedEngine(Module):
                 return True
             else:
                 return False
-
-    def pld_enabled(self):
-        return self._config.pld_enabled
-
-    def pld_params(self):
-        return self._config.pld_params
-
-    def pld_theta(self):
-        return self.pld_params()[PLD_THETA]
-
-    def pld_gamma(self):
-        return self.pld_params()[PLD_GAMMA]
 
     def data_efficiency_enabled(self):
         return self._config.data_efficiency_enabled
@@ -2281,7 +2264,6 @@ class DeepSpeedEngine(Module):
         log_dist(f"DeepSpeed Basic Optimizer = {basic_optimizer.__class__.__name__}", ranks=[0])
 
         optimizer_wrapper = self._do_optimizer_sanity_check(basic_optimizer)
-        self._check_muon_can_reach_its_parameters(basic_optimizer, optimizer_wrapper)
 
         if optimizer_wrapper == ZERO_OPTIMIZATION:
             self.optimizer = self._configure_zero_optimizer(basic_optimizer)
@@ -2295,27 +2277,6 @@ class DeepSpeedEngine(Module):
 
         self._configure_autoep_folding_optimizer_gradient_reduction()
         log_dist("DeepSpeed Final Optimizer = {}".format(self.optimizer.__class__.__name__), ranks=[0])
-
-    def _check_muon_can_reach_its_parameters(self, basic_optimizer, optimizer_wrapper):
-        """Refuse the one wrapper that hands Muon flat partitions and does not orthogonalize them.
-
-        `MuonWithAuxAdam.step` tells the two cases apart by shape: a matrix is the weight itself
-        and is orthogonalized there, a 1-D tensor is a ZeRO partition whose update the ZeRO
-        optimizer already applied. `BF16_Optimizer` breaks that reading - it replaces the param
-        groups with flat fp32 partitions (`param_group['params'] = [self.fp32_groups_flat_partition[i]]`)
-        and knows nothing about `use_muon`, so the update is never applied and the step is SGD.
-
-        The original shapes are not recoverable from `step`, so this is a refusal rather than a
-        fix; implementing Muon inside BF16_Optimizer is its own change. Reached by bf16 with
-        `grad_accum_dtype: fp32` at ZeRO stage 1.
-        """
-        if not isinstance(basic_optimizer, MuonWithAuxAdam) or optimizer_wrapper != BFLOAT16:
-            return
-        raise ZeRORuntimeException(
-            "Muon cannot be used with the BF16_Optimizer, which this configuration selects: bf16 "
-            "with grad_accum_dtype fp32 at ZeRO stage 1. That optimizer hands Muon flat fp32 "
-            "partitions and never applies the Newton-Schulz update, so training would silently "
-            "proceed as SGD. Drop grad_accum_dtype, or use ZeRO stage 2 or 3.")
 
     def _configure_autoep_folding_optimizer_gradient_reduction(self):
         configure = getattr(self.optimizer, "configure_autoep_folding_tp_gradient_reduction", None)
@@ -2745,11 +2706,6 @@ class DeepSpeedEngine(Module):
 
         return optimizer
 
-    def _configure_progressive_layer_drop(self):
-        pld = ProgressiveLayerDrop(theta=self.pld_theta(), gamma=self.pld_gamma())
-
-        return pld
-
     @staticmethod
     def is_map_style_dataset(obj):
         return hasattr(obj, "__getitem__") and hasattr(obj, "__len__")
@@ -2889,11 +2845,6 @@ class DeepSpeedEngine(Module):
 
         if flops_profiler_active:
             self.flops_profiler.start_profile(ignore_list=None)
-
-        if kwargs is not None:
-            if self.module.training:
-                if self.progressive_layer_drop:
-                    kwargs.update(self.progressive_layer_drop.get_state())
 
         if self.module.training and self.random_ltd_enabled():
             self.random_ltd_scheduler.update_seq(self.global_steps)
@@ -3564,9 +3515,6 @@ class DeepSpeedEngine(Module):
             if self.checkpoint_engine.is_decoupled():
                 self._commit_decoupled_checkpoint()
 
-            if self.progressive_layer_drop:
-                self.progressive_layer_drop.update_state(self.global_steps)
-
             self._take_model_step(lr_kwargs)
 
             report_progress = self.global_rank == 0 if self.global_rank else True
@@ -3741,12 +3689,6 @@ class DeepSpeedEngine(Module):
             return self._get_optimizer_param("momentum")
         else:
             return self._get_optimizer_param("betas")
-
-    def get_pld_theta(self):
-        if self.progressive_layer_drop:
-            return self.progressive_layer_drop.get_theta()
-        else:
-            return None
 
     def _report_progress(self, step):
         lr = self.get_lr()
