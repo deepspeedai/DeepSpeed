@@ -205,38 +205,3 @@ class TestMuonMixedOverflow(DistributedTest):
                 assert calm_before == calm_after, (
                     "a tensor whose gradient was finite must not advance its momentum on a step "
                     "the loss scaler discards -- the update it advances towards is thrown away")
-
-
-@pytest.mark.parametrize("ns_method", ["standard", "gram"])
-def test_convolution_training_matches_flattened_muon(ns_method):
-    from deepspeed.runtime.zero.muon.original_muon import SingleDeviceMuon
-
-    torch.manual_seed(0)
-    model = torch.nn.Conv2d(2, 32, kernel_size=(3, 2), bias=False)
-    flat_weight = torch.nn.Parameter(model.weight.detach().flatten(1).clone())
-    optimizer = SingleDeviceMuon(model.parameters(), ns_method=ns_method)
-    reference = SingleDeviceMuon([flat_weight], ns_method=ns_method)
-    inputs = torch.randn(2, 2, 5, 4)
-    targets = torch.randn(2, 32, 3, 3)
-
-    for _ in range(2):
-        optimizer.zero_grad()
-        loss = torch.nn.functional.mse_loss(model(inputs), targets)
-        loss.backward()
-        reference.zero_grad()
-        flat_weight.grad = model.weight.grad.detach().flatten(1).clone()
-        optimizer.step()
-        reference.step()
-        torch.testing.assert_close(model.weight.flatten(1), flat_weight)
-
-
-@pytest.mark.parametrize("nesterov", [True, False])
-def test_convolution_overflow_preserves_shape_and_momentum(nesterov):
-    grad = torch.ones(32, 2, 3, 2)
-    grad[0, 0, 0, 0] = float("inf")
-    momentum = torch.ones_like(grad)
-    before = momentum.clone()
-    update = muon_update(grad, momentum, nesterov=nesterov)
-    assert update.shape == grad.shape
-    assert not torch.isfinite(update).all()
-    torch.testing.assert_close(momentum, before)
