@@ -101,7 +101,7 @@ from deepspeed.utils.timer import NoopTimer, ThroughputTimer, SynchronizedWallCl
     STEP_GLOBAL_TIMER
 from deepspeed.utils.debug import debug_extract_module_and_param_names, debug_clear_module_and_param_names
 from deepspeed.monitor.monitor import MonitorMaster
-from deepspeed.runtime.utils import clip_grad_norm_, compare_tensors_in_structures, maybe_loss_for_backward, _broadcast_tensor
+from deepspeed.runtime.utils import clip_grad_norm_, compare_tensors_in_structures, maybe_loss_for_backward
 from deepspeed.runtime.data_pipeline.constants import DATA_SAMPLING, \
     DATA_ROUTING, DATA_SAMPLING_ENABLED, CURRICULUM_LEARNING, \
     CURRICULUM_LEARNING_ENABLED, DATA_SAMPLING_NUM_WORKERS, RANDOM_LTD, \
@@ -1963,11 +1963,14 @@ class DeepSpeedEngine(Module):
             # Broadcast the model for different parameters
             if is_moe_param(p):
                 if torch.is_tensor(p) and is_replicated(p):
-                    _broadcast_tensor(p.data, groups._get_expert_broadcast_src_rank(p.group_name),
-                                      self.expert_data_parallel_group[p.group_name])
+                    dist.broadcast(p.data.view(torch.uint8),
+                                   groups._get_expert_broadcast_src_rank(p.group_name),
+                                   group=self.expert_data_parallel_group[p.group_name])
             else:
                 if torch.is_tensor(p) and is_replicated(p):
-                    _broadcast_tensor(p.data, groups._get_broadcast_src_rank(), self.seq_data_parallel_group)
+                    dist.broadcast(p.data.view(torch.uint8),
+                                   groups._get_broadcast_src_rank(),
+                                   group=self.seq_data_parallel_group)
 
     @staticmethod
     def __check_params(model: Module, dtype: torch.dtype) -> None:
