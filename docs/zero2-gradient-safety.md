@@ -1,10 +1,41 @@
-# ZeRO-2 Gradient Safety: Experimental Changes
+# ZeRO-2 Gradient Safety
 
 These experimental changes originated on v0.18.4
 (`b35d9eb01bc04e774cc05dc43713f2a41423da5c`). The
 `jeffra/913-fixes-master-sync` branch merges master at `4ea3b47b`, retaining
 upstream accumulation and gradient-stream fixes alongside the opt-in options.
-The all-flags-disabled control now uses master's behavior, not v0.18.4's.
+The explicitly all-flags-disabled control uses master's behavior, not v0.18.4's.
+
+## Compatibility-Aware Defaults
+
+`copy_oversized_gradients` and `track_gradient_streams` now default to `None`
+(`null` in JSON), meaning automatic. On contiguous ZeRO-2 paths without
+ZenFlow, pipeline parallelism, or configured DeepCompile, both protections
+are enabled unless explicitly disabled. CPU optimizer offload enforces
+contiguity but is not required; `overlap_comm` may be either value.
+
+On excluded paths, including ZeRO-0/1/3, automatic settings resolve to false
+and preserve existing behavior. Explicit true remains an error on an
+incompatible path. Explicit false independently disables a protection;
+finite outputs alone do not establish that doing so is safe.
+`check_offload_gradients` and `accumulate_offload_gradients` still default
+to false and retain their existing restrictions.
+
+Resolution happens before optimizer construction using the model and compile
+configuration. Requested settings are preserved for serialization, and the
+engine logs the effective values and compatibility exclusions on rank zero.
+Direct ZeRO-1/2 optimizer construction resolves the locally known stage,
+contiguity, and ZenFlow restrictions; integrations bypassing the engine must
+resolve their model/compilation exclusions before constructing the optimizer.
+
+Configure DeepCompile before engine initialization. Resolved optimizer
+settings remain fixed across compile success, failure, and eager fallback,
+so pending copies and gradients cannot outlive a change in tracking policy.
+An engine configured for DeepCompile keeps automatic protections disabled
+even if compilation falls back; recreate it without DeepCompile to enable
+automatic protections. Late DeepCompile activation is rejected when the
+optimizer already has protections enabled. Ordinary `torch.compile` is not
+excluded.
 
 ## Ownership and Ordering
 
@@ -77,6 +108,8 @@ reloads also wait for tracked offload copies.
 Keep the model, frames, historical operation sequence, offload settings and
 BF16 overflow guard constant. In the DSS recipe, these flags go under
 `training_config.ds_config.zero_optimization`.
+Set both copy and tracking flags explicitly in ablations: omitting them
+now selects automatic enablement, not the control arm.
 
 | Arm | Bucket | Copy | Track Streams | Check Offload | Accumulate Offload |
 | --- | --- | --- | --- | --- | --- |
@@ -123,8 +156,31 @@ This is a config fragment, not a replacement for the existing training recipe.
 python -m pytest \
   tests/unit/v1/zero/test_zero2_gradient_safety.py \
   tests/unit/runtime/zero/test_zero_config.py \
-  tests/unit/runtime/test_ds_config_model.py
+  tests/unit/runtime/test_ds_config_model.py \
+  tests/unit/compile/test_zero3_grad_dtype.py
 ```
+
+Compatibility-default verification on 2026-09-18: **182 passed, 4 skipped**
+with Python 3.11.6, PyTorch 2.9.1, and `DS_ACCELERATOR=cpu` on macOS arm64.
+The two-rank Gloo integration ran real forward/backward/SGD updates against
+an independent full-batch reference, including oversized and bucketed
+gradients, accumulation, overlap toggles, CPU optimizer offload, explicit
+opt-outs, and ZeRO-1. It also constructed ZeRO optimizers directly.
+The same integration supports two CUDA devices, but that path was not run.
+DeepCompile lifecycle policy tests isolate compiler collaborators; they do
+not substitute for native DeepCompile execution.
+
+The excluded noncontiguous ZeRO-2 path with GAS=2 showed a finite gradient
+and update mismatch against the CPU reference on both the unmodified branch
+and the default-policy patch, with identical error magnitudes. Its integration
+check therefore verifies automatic-versus-explicit-disabled behavior is
+unchanged, not numerical correctness. That pre-existing discrepancy needs
+separate investigation.
+
+GPU/NCCL execution, native DeepCompile/ZenFlow/pipeline integration, accelerator
+coverage, and GPU memory/throughput measurements remain release gates for
+these new defaults. The earlier passing image replay with explicit flags
+does not validate a newly built image with these default-policy changes.
 
 Original v0.18.4 verification: **100 passed, 4 skipped**, using Python 3.12.12 and
 PyTorch 2.9.1+cu130 on a CPU-only host. `git diff --check` also passes.

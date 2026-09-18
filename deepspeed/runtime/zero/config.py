@@ -4,7 +4,7 @@
 # DeepSpeed Team
 
 import sys
-from typing import Optional
+from typing import Optional, Tuple
 from enum import Enum
 from pydantic import Field, model_validator
 from deepspeed.runtime.config_utils import get_scalar_param, pp_int, DeepSpeedConfigModel
@@ -87,6 +87,40 @@ class ZeroStageEnum(int, Enum):
     max_stage = 3
 
 
+def resolve_gradient_safety_options(copy_oversized_gradients: Optional[bool],
+                                    track_gradient_streams: Optional[bool],
+                                    *,
+                                    stage: int,
+                                    contiguous_gradients: bool,
+                                    cpu_offload: bool,
+                                    zenflow: bool = False,
+                                    pipeline_parallel: bool = False,
+                                    deepcompile: bool = False) -> Tuple[bool, bool, str]:
+    """Resolve automatic defaults without modifying the requested configuration."""
+    reasons = []
+    if stage != ZeroStageEnum.gradients:
+        reasons.append("requires ZeRO-2")
+    if not (contiguous_gradients or cpu_offload):
+        reasons.append("requires contiguous gradients")
+    if zenflow:
+        reasons.append("requires ZeRO-2 without ZenFlow")
+    if pipeline_parallel:
+        reasons.append("does not support pipeline parallelism")
+    if deepcompile:
+        reasons.append("does not support DeepCompile")
+    reason = "; ".join(reasons)
+    requests = {
+        "copy_oversized_gradients": copy_oversized_gradients,
+        "track_gradient_streams": track_gradient_streams,
+    }
+    for name, requested in requests.items():
+        if requested is True and reason:
+            raise ValueError(f"zero_optimization.{name}: {reason}")
+    copy = not reasons if copy_oversized_gradients is None else copy_oversized_gradients
+    track = not reasons if track_gradient_streams is None else track_gradient_streams
+    return copy, track, reason
+
+
 class DeepSpeedZeroConfig(DeepSpeedConfigModel):
     """
     Sets parameters for ZeRO optimizations.
@@ -116,13 +150,15 @@ class DeepSpeedZeroConfig(DeepSpeedConfigModel):
     for the allgather for large model sizes
     """
 
-    copy_oversized_gradients: bool = False
-    """ZeRO-2 diagnostic: copy gradients larger than reduce_bucket_size into
-    independently owned storage before reduction. Adds one gradient-sized allocation."""
+    copy_oversized_gradients: Optional[bool] = None
+    """Copy gradients larger than reduce_bucket_size into independent storage.
+    None enables this automatically on compatible ZeRO-2 paths. False opts out.
+    Adds one gradient-sized allocation per oversized gradient copy."""
 
-    track_gradient_streams: bool = False
-    """ZeRO-2 diagnostic: track bucket producer events and consumer storage
-    lifetimes, including oversized gradients and non-overlapped reduction."""
+    track_gradient_streams: Optional[bool] = None
+    """Track producer readiness, consumer storage lifetimes, and buffer reuse.
+    None enables this automatically on compatible ZeRO-2 paths. False opts out.
+    Includes oversized gradients, non-overlapped reduction, and CPU offload."""
 
     check_offload_gradients: bool = False
     """ZeRO-2 CPU offload: check completed optimizer-input gradients and group
@@ -398,13 +434,19 @@ class DeepSpeedZeroConfig(DeepSpeedConfigModel):
     # Validators
     @model_validator(mode="after")
     def gradient_safety_valid(self):
-        enabled = (self.copy_oversized_gradients or self.track_gradient_streams or self.check_offload_gradients
-                   or self.accumulate_offload_gradients)
+        cpu_offload = self.offload_optimizer is not None and self.offload_optimizer.device == OffloadDeviceEnum.cpu
+        # Model type and compilation policy are only available to the engine.
+        resolve_gradient_safety_options(self.copy_oversized_gradients,
+                                        self.track_gradient_streams,
+                                        stage=self.stage,
+                                        contiguous_gradients=self.contiguous_gradients,
+                                        cpu_offload=cpu_offload,
+                                        zenflow=self.zenflow is not None)
+        enabled = self.check_offload_gradients or self.accumulate_offload_gradients
         if not enabled:
             return self
         if self.stage != ZeroStageEnum.gradients or self.zenflow is not None:
             raise ValueError("Gradient safety options require ZeRO-2 without ZenFlow")
-        cpu_offload = self.offload_optimizer is not None and self.offload_optimizer.device == OffloadDeviceEnum.cpu
         if not self.contiguous_gradients and not cpu_offload:
             raise ValueError("Gradient safety options require contiguous gradients")
         if (self.check_offload_gradients or self.accumulate_offload_gradients) and not cpu_offload:

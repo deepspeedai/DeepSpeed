@@ -2,26 +2,30 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # DeepSpeed Team
-"""CPU bookkeeping tests and CUDA ordering tests for opt-in ZeRO-2 changes."""
+"""Compatibility defaults, CPU bookkeeping, and CUDA gradient ordering tests."""
 
 from contextlib import nullcontext
 import copy
+import os
 from datetime import timedelta
 from types import SimpleNamespace
 
 import pytest
 import torch
 
+import deepspeed
 import deepspeed.comm as dist
 from deepspeed.accelerator import get_accelerator
 from deepspeed.ops import __compatible_ops__
 from deepspeed.runtime import engine as engine_module
 from deepspeed.runtime.config import DeepSpeedConfig
 from deepspeed.runtime.zero import stage_1_and_2 as zero
-from deepspeed.runtime.zero.config import DeepSpeedZeroConfig
+from deepspeed.runtime.zero.config import DeepSpeedZeroConfig, resolve_gradient_safety_options
+from deepspeed.utils.timer import NoopTimer
 
 OPTIONS = ("copy_oversized_gradients", "track_gradient_streams", "check_offload_gradients",
            "accumulate_offload_gradients")
+AUTOMATIC_OPTIONS = OPTIONS[:2]
 
 
 def make_optimizer(dtype=torch.bfloat16, device="cpu", low_precision=False, **options):
@@ -88,7 +92,63 @@ def backward_values(opt, param, values, boundaries):
 
 def test_config_defaults():
     config = DeepSpeedZeroConfig()
-    assert all(getattr(config, name) is False for name in OPTIONS)
+    assert all(getattr(config, name) is None for name in AUTOMATIC_OPTIONS)
+    assert not config.check_offload_gradients
+    assert not config.accumulate_offload_gradients
+
+
+@pytest.mark.parametrize("requested", [None, False, True])
+def test_config_roundtrip_preserves_requested_policy(requested):
+    config = DeepSpeedZeroConfig(stage=2, **dict.fromkeys(AUTOMATIC_OPTIONS, requested))
+    restored = DeepSpeedZeroConfig.model_validate_json(config.model_dump_json(exclude_unset=True))
+    resolved = resolve_gradient_safety_options(restored.copy_oversized_gradients,
+                                               restored.track_gradient_streams,
+                                               stage=restored.stage,
+                                               contiguous_gradients=True,
+                                               cpu_offload=False)
+    assert resolved[:2] == ((False, False) if requested is False else (True, True))
+    assert all(getattr(restored, name) is requested for name in AUTOMATIC_OPTIONS)
+
+
+@pytest.mark.parametrize("context,expected", [
+    ({}, True),
+    ({
+        "stage": 0
+    }, False),
+    ({
+        "stage": 1
+    }, False),
+    ({
+        "stage": 3
+    }, False),
+    ({
+        "contiguous_gradients": False
+    }, False),
+    ({
+        "contiguous_gradients": False,
+        "cpu_offload": True
+    }, True),
+    ({
+        "zenflow": True
+    }, False),
+    ({
+        "pipeline_parallel": True
+    }, False),
+    ({
+        "deepcompile": True
+    }, False),
+])
+@pytest.mark.parametrize("requested", [None, False, True])
+def test_gradient_safety_compatibility(context, expected, requested):
+    kwargs = dict(stage=2, contiguous_gradients=True, cpu_offload=False)
+    kwargs.update(context)
+    if requested is True and not expected:
+        with pytest.raises(ValueError):
+            resolve_gradient_safety_options(requested, requested, **kwargs)
+    else:
+        copy_enabled, track_enabled, reason = resolve_gradient_safety_options(requested, requested, **kwargs)
+        assert (copy_enabled, track_enabled) == ((False, False) if requested is False else (expected, expected))
+        assert bool(reason) is not expected
 
 
 @pytest.mark.parametrize("name", OPTIONS)
@@ -127,8 +187,7 @@ def test_config_requires_effectively_contiguous_gradients():
     assert config.track_gradient_streams
 
 
-@pytest.mark.parametrize("enabled", [(), *[(name, ) for name in OPTIONS], OPTIONS])
-def test_engine_forwards_independent_gradient_safety_options(monkeypatch, enabled):
+def make_engine(zero_config, deepcompile=False, pipeline=False):
     engine = engine_module.DeepSpeedEngine.__new__(engine_module.DeepSpeedEngine)
     torch.nn.Module.__init__(engine)
     engine.destroy = lambda: None
@@ -137,24 +196,40 @@ def test_engine_forwards_independent_gradient_safety_options(monkeypatch, enable
         "bf16": {
             "enabled": True
         },
-        "zero_optimization": {
-            "stage": 2,
-            "offload_optimizer": {
-                "device": "cpu"
-            },
-            **{
-                name: True
-                for name in enabled
-            },
+        "zero_optimization": zero_config,
+        "compile": {
+            "deepcompile": deepcompile
         },
     })
-    engine._set_client_model(torch.nn.Linear(2, 2))
+    module = torch.nn.Linear(2, 2)
+    if pipeline:
+        module = engine_module.PipelineModule.__new__(engine_module.PipelineModule)
+        torch.nn.Module.__init__(module)
+        module.add_module("linear", torch.nn.Linear(2, 2))
+    engine._set_client_model(module)
     engine.param_names = {param: name for name, param in engine.module.named_parameters()}
     engine.mpu = None
     engine.seq_data_parallel_group = None
     engine.has_moe_layers = False
-    engine.zenflow = False
+    engine.zenflow = zero_config.get("zenflow") is not None
     engine.gradient_average = True
+    engine._is_compiled = False
+    engine._deepcompile_active = False
+    return engine
+
+
+@pytest.mark.parametrize("enabled", [(), *[(name, ) for name in OPTIONS], OPTIONS])
+def test_engine_forwards_independent_gradient_safety_options(monkeypatch, enabled):
+    engine = make_engine({
+        "stage": 2,
+        "offload_optimizer": {
+            "device": "cpu"
+        },
+        **{
+            name: name in enabled
+            for name in OPTIONS
+        },
+    })
     base_optimizer = torch.optim.Adam(engine.module.parameters())
     captured = {}
 
@@ -168,6 +243,142 @@ def test_engine_forwards_independent_gradient_safety_options(monkeypatch, enable
         assert captured[name] is (name in enabled)
     assert captured["offload_optimizer_config"].device == "cpu"
     assert captured["partition_grads"]
+
+
+@pytest.mark.parametrize("zero_config,deepcompile,pipeline,expected", [
+    ({
+        "stage": 2
+    }, False, False, True),
+    ({
+        "stage": 2,
+        "overlap_comm": True
+    }, False, False, True),
+    ({
+        "stage": 1
+    }, False, False, False),
+    ({
+        "stage": 2,
+        "contiguous_gradients": False
+    }, False, False, False),
+    ({
+        "stage": 2,
+        "contiguous_gradients": False,
+        "offload_optimizer": {
+            "device": "cpu"
+        }
+    }, False, False, True),
+    ({
+        "stage": 2,
+        "zenflow": {}
+    }, False, False, False),
+    ({
+        "stage": 2
+    }, True, False, False),
+    ({
+        "stage": 2
+    }, False, True, False),
+])
+def test_engine_automatic_defaults(monkeypatch, zero_config, deepcompile, pipeline, expected):
+    engine = make_engine(zero_config, deepcompile, pipeline)
+    captured = {}
+
+    def capture_optimizer(optimizer, param_names, **kwargs):
+        captured.update(kwargs)
+        return optimizer
+
+    monkeypatch.setattr(engine_module, "DeepSpeedZeroOptimizer", capture_optimizer)
+    monkeypatch.setattr(engine_module.ZenFlowZeroOptimizer, "create", lambda **kwargs: capture_optimizer)
+    engine._configure_zero_optimizer(torch.optim.Adam(engine.module.parameters()))
+    assert all(captured[name] is expected for name in AUTOMATIC_OPTIONS)
+    assert all(getattr(engine._config.zero_config, name) is None for name in AUTOMATIC_OPTIONS)
+    assert not captured["check_offload_gradients"]
+    assert not captured["accumulate_offload_gradients"]
+
+
+@pytest.mark.parametrize("name", AUTOMATIC_OPTIONS)
+def test_engine_independent_automatic_and_explicit_settings(monkeypatch, name):
+    engine = make_engine({"stage": 2, name: False})
+    captured = {}
+
+    def capture_optimizer(optimizer, param_names, **kwargs):
+        captured.update(kwargs)
+        return optimizer
+
+    monkeypatch.setattr(engine_module, "DeepSpeedZeroOptimizer", capture_optimizer)
+    engine._configure_zero_optimizer(torch.optim.Adam(engine.module.parameters()))
+    assert captured[name] is False
+    other = next(option for option in AUTOMATIC_OPTIONS if option != name)
+    assert captured[other] is True
+
+
+@pytest.mark.parametrize("name", OPTIONS)
+@pytest.mark.parametrize("feature", ["deepcompile", "pipeline"])
+def test_engine_rejects_explicit_unsupported_options_before_construction(monkeypatch, name, feature):
+    engine = make_engine({"stage": 2, "offload_optimizer": {"device": "cpu"}, name: True}, **{feature: True})
+    monkeypatch.setattr(engine_module, "DeepSpeedZeroOptimizer",
+                        lambda *args, **kwargs: pytest.fail("unsupported optimizer was constructed"))
+    with pytest.raises(ValueError, match="DeepCompile|pipeline parallelism"):
+        engine._configure_zero_optimizer(torch.optim.Adam(engine.module.parameters()))
+
+
+@pytest.mark.parametrize("outcome", ["success", "fallback", "failure"])
+def test_deepcompile_does_not_change_resolved_optimizer_policy(monkeypatch, outcome):
+    engine = make_engine({"stage": 2}, deepcompile=True)
+    captured = {}
+
+    def capture_optimizer(optimizer, param_names, **kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(**kwargs)
+
+    monkeypatch.setattr(engine_module, "DeepSpeedZeroOptimizer", capture_optimizer)
+    engine.optimizer = engine._configure_zero_optimizer(torch.optim.Adam(engine.module.parameters()))
+    engine.module_forward_pre_hook = None
+    engine.module_forward_post_hook = None
+    # Isolate the policy regression from native compiler availability. The backend
+    # may succeed, fall back, or fail without toggling a live optimizer's policy.
+    engine.get_deepspeed_compile_backend = lambda *args: (None if outcome == "fallback" else "eager", None)
+
+    def compile_module(**kwargs):
+        if outcome == "failure":
+            raise RuntimeError("compile failed")
+
+    monkeypatch.setattr(engine.module, "compile", compile_module)
+    engine._create_module_forward_pre_hook = lambda: None
+    engine._create_module_forward_post_hook = lambda: None
+    if outcome == "failure":
+        with pytest.raises(RuntimeError, match="compile failed"):
+            engine.compile(backend="eager")
+        assert not engine.is_compiled
+        assert not engine.is_deepcompile_active()
+    else:
+        engine.compile(backend="eager")
+        assert engine.is_compiled
+        assert engine.is_deepcompile_active() is (outcome == "success")
+    assert all(getattr(engine.optimizer, name) is False for name in AUTOMATIC_OPTIONS)
+    assert all(getattr(engine._config.zero_config, name) is None for name in AUTOMATIC_OPTIONS)
+
+
+def test_late_deepcompile_rejects_without_disabling_live_protections():
+    engine = make_engine({"stage": 2})
+    engine.optimizer = SimpleNamespace(copy_oversized_gradients=True, track_gradient_streams=True)
+    engine._config.compile_config.deepcompile = True
+    with pytest.raises(ValueError, match="before initializing"):
+        engine.compile(backend="eager")
+    assert engine.optimizer.copy_oversized_gradients
+    assert engine.optimizer.track_gradient_streams
+    assert not engine.is_compiled
+
+
+def test_ordinary_compile_preserves_protections():
+    engine = make_engine({"stage": 2})
+    engine.optimizer = SimpleNamespace(copy_oversized_gradients=True, track_gradient_streams=True)
+    engine.compile(backend="eager")
+    x = torch.ones(1, 2)
+    torch.testing.assert_close(engine.module(x), torch.nn.functional.linear(x, engine.module.weight,
+                                                                            engine.module.bias))
+    assert engine.optimizer.copy_oversized_gradients
+    assert engine.optimizer.track_gradient_streams
+    assert engine.is_compiled
 
 
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
@@ -556,6 +767,138 @@ def _distributed_rejection(rank, rendezvous):
 def test_two_rank_cpu_overflow_consensus(tmp_path):
     torch.multiprocessing.spawn(_distributed_rejection,
                                 args=(f"file://{tmp_path / 'rendezvous'}", ),
+                                nprocs=2,
+                                join=True)
+
+
+def _distributed_default_training(rank, rendezvous):
+    os.environ["LOCAL_RANK"] = str(rank)
+    accelerator = get_accelerator()
+    accelerator.set_device(rank)
+    device = accelerator.device_name()
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setitem(__compatible_ops__, "deepspeed_shm_comm", False)
+        dist.init_distributed(accelerator.communication_backend_name(),
+                              auto_mpi_discovery=False,
+                              init_method=rendezvous,
+                              rank=rank,
+                              world_size=2,
+                              timeout=timedelta(seconds=60))
+    try:
+        # Direct constructor users get the same local compatibility defaults.
+        for partition_grads, contiguous, expected in [(True, True, True), (False, True, False), (True, False, False)]:
+            model = torch.nn.Linear(4, 4).to(device)
+            opt = zero.DeepSpeedZeroOptimizer(torch.optim.SGD(model.parameters(), lr=0.01), {
+                param: name
+                for name, param in model.named_parameters()
+            },
+                                              NoopTimer(), {},
+                                              partition_grads=partition_grads,
+                                              contiguous_gradients=contiguous,
+                                              reduce_bucket_size=8)
+            assert opt.copy_oversized_gradients is expected
+            assert opt.track_gradient_streams is expected
+            opt.destroy()
+
+        # Use actual two-rank training and an independent full-batch reference.
+        cases = [
+            ({
+                "stage": 2
+            }, True),
+            ({
+                "stage": 2,
+                "overlap_comm": True
+            }, True),
+            ({
+                "stage": 2,
+                "offload_optimizer": {
+                    "device": "cpu"
+                },
+                "contiguous_gradients": False
+            }, True),
+            ({
+                "stage": 2,
+                **dict.fromkeys(AUTOMATIC_OPTIONS, False)
+            }, False),
+            ({
+                "stage": 1
+            }, False),
+            ({
+                "stage": 2,
+                "contiguous_gradients": False
+            }, False),
+            ({
+                "stage": 2,
+                "contiguous_gradients": False,
+                **dict.fromkeys(AUTOMATIC_OPTIONS, False)
+            }, False),
+        ]
+        legacy_updates = []
+        for zero_config, expected in cases:
+            torch.manual_seed(42)
+            model = torch.nn.Linear(4, 4)
+            reference = copy.deepcopy(model)
+            reference_optimizer = torch.optim.SGD(reference.parameters(), lr=0.01)
+            model.to(device)
+            config = {
+                "train_micro_batch_size_per_gpu": 2,
+                "gradient_accumulation_steps": 2,
+                "zero_allow_untested_optimizer": True,
+                "zero_force_ds_cpu_optimizer": False,
+                "zero_optimization": {
+                    "reduce_bucket_size": 8,
+                    **zero_config
+                },
+            }
+            engine, opt, _, _ = deepspeed.initialize(model=model,
+                                                     optimizer=torch.optim.SGD(model.parameters(), lr=0.01),
+                                                     config=config,
+                                                     dist_init_required=False)
+            try:
+                assert opt.copy_oversized_gradients is expected
+                assert opt.track_gradient_streams is expected
+                for step in range(2):
+                    reference_optimizer.zero_grad()
+                    for microstep in range(2):
+                        inputs = (torch.arange(16, dtype=torch.float32).reshape(4, 4) + step + microstep) / 16
+                        target = inputs.flip(-1) / 2
+                        (torch.nn.functional.mse_loss(reference(inputs), target) / 2).backward()
+                        local_inputs = inputs.chunk(2)[rank].to(device)
+                        local_target = target.chunk(2)[rank].to(device)
+                        engine.backward(torch.nn.functional.mse_loss(engine(local_inputs), local_target))
+                        if microstep == 1 and opt.contiguous_gradients:
+                            for param, ref in zip(model.parameters(), reference.parameters()):
+                                torch.testing.assert_close(param.get_full_hp_grad().cpu(),
+                                                           ref.grad,
+                                                           rtol=1e-5,
+                                                           atol=1e-6,
+                                                           msg=f"gradient mismatch: {zero_config}, step={step}")
+                        engine.step()
+                    reference_optimizer.step()
+                    assert engine.global_steps == step + 1
+                    if opt.contiguous_gradients:
+                        for param, ref in zip(model.parameters(), reference.parameters()):
+                            torch.testing.assert_close(param.cpu(), ref, rtol=1e-5, atol=1e-6)
+                    else:
+                        legacy_updates.append([param.detach().cpu().clone() for param in model.parameters()])
+            finally:
+                engine.destroy()
+        # Legacy noncontiguous GAS>1 does not match the CPU full-batch oracle.
+        # This exclusion promises unchanged behavior, not a numerical fix.
+        assert len(legacy_updates) == 4
+        for automatic, disabled in zip(legacy_updates[:2], legacy_updates[2:]):
+            for actual, previous in zip(automatic, disabled):
+                torch.testing.assert_close(actual, previous, rtol=0, atol=0)
+    finally:
+        dist.destroy_process_group()
+
+
+@pytest.mark.skipif(get_accelerator().device_name() not in ("cpu", "cuda")
+                    or (get_accelerator().device_name() == "cuda" and get_accelerator().device_count() < 2),
+                    reason="Requires CPU or two CUDA devices")
+def test_two_rank_default_training_and_legacy_compatibility(tmp_path):
+    torch.multiprocessing.spawn(_distributed_default_training,
+                                args=(f"file://{tmp_path / 'training-rendezvous'}", ),
                                 nprocs=2,
                                 join=True)
 

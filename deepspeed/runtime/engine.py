@@ -64,7 +64,7 @@ from deepspeed.runtime.constants import \
     ROUTE_TRAIN, ROUTE_PREDICT, ROUTE_EVAL, \
     PLD_THETA, PLD_GAMMA, BFLOAT16, FP16, GRADIENT_ACCUMULATION_STEPS, \
     DATA_PARALLEL_GROUP, GLOBAL_RANK, DDP_BFLOAT16, GRADIENT_ALLREDUCE_OP_MEAN
-from deepspeed.runtime.zero.config import ZeroStageEnum
+from deepspeed.runtime.zero.config import ZeroStageEnum, resolve_gradient_safety_options
 from deepspeed.checkpoint.constants import (
     AUTOEP_ZERO3_EXPERT_STATE_FORMAT_VERSION,
     AUTOEP_ZERO3_EXPERT_STATE_FORMAT_VERSION_KEY,
@@ -2549,8 +2549,35 @@ class DeepSpeedEngine(Module):
 
         return optimizer
 
+    def _resolve_zero_gradient_safety_options(self):
+        zero_config = self._config.zero_config
+        pipeline_parallel = isinstance(self.module, PipelineModule)
+        deepcompile = self.is_deepcompile_enabled()
+        if zero_config.check_offload_gradients or zero_config.accumulate_offload_gradients:
+            if pipeline_parallel or deepcompile:
+                raise ValueError("ZeRO-2 offload gradient safety options do not support pipeline parallelism "
+                                 "or DeepCompile")
+        cpu_offload = (zero_config.offload_optimizer is not None
+                       and zero_config.offload_optimizer.device == OffloadDeviceEnum.cpu)
+        return resolve_gradient_safety_options(zero_config.copy_oversized_gradients,
+                                               zero_config.track_gradient_streams,
+                                               stage=zero_config.stage,
+                                               contiguous_gradients=zero_config.contiguous_gradients,
+                                               cpu_offload=cpu_offload,
+                                               zenflow=zero_config.zenflow is not None,
+                                               pipeline_parallel=pipeline_parallel,
+                                               deepcompile=deepcompile)
+
     def _configure_zero_optimizer(self, optimizer):
         zero_stage = self.zero_optimization_stage()
+        copy_oversized, track_streams, exclusion = self._resolve_zero_gradient_safety_options()
+        zero_config = self._config.zero_config
+        log_dist(
+            "ZeRO gradient safety: "
+            f"copy_oversized_gradients={copy_oversized} (requested={zero_config.copy_oversized_gradients}), "
+            f"track_gradient_streams={track_streams} (requested={zero_config.track_gradient_streams}); "
+            f"automatic exclusion={exclusion or 'none'}",
+            ranks=[0])
 
         model_dtype, gradient_accumulation_dtype = self.get_data_types()
 
@@ -2572,12 +2599,6 @@ class DeepSpeedEngine(Module):
             )
 
         if zero_stage <= ZeroStageEnum.gradients:
-            zero_config = self._config.zero_config
-            if isinstance(self.module, PipelineModule) and (zero_config.copy_oversized_gradients
-                                                            or zero_config.track_gradient_streams
-                                                            or zero_config.check_offload_gradients
-                                                            or zero_config.accumulate_offload_gradients):
-                raise ValueError("ZeRO-2 gradient safety options do not support pipeline parallelism")
             overlap_comm = self.zero_overlap_comm()
             contiguous_gradients = self.zero_contiguous_gradients()
             round_robin_gradients = self.zero_round_robin_gradients()
@@ -2629,8 +2650,8 @@ class DeepSpeedEngine(Module):
                 communication_data_type=self.communication_data_type,
                 elastic_checkpoint=self.zero_elastic_checkpoint(),
                 check_grad_overflow=check_grad_overflow,
-                copy_oversized_gradients=self._config.zero_config.copy_oversized_gradients,
-                track_gradient_streams=self._config.zero_config.track_gradient_streams,
+                copy_oversized_gradients=copy_oversized,
+                track_gradient_streams=track_streams,
                 check_offload_gradients=self._config.zero_config.check_offload_gradients,
                 accumulate_offload_gradients=self._config.zero_config.accumulate_offload_gradients,
                 compute_grad_norm=self.zero_compute_grad_norm())
@@ -5798,10 +5819,14 @@ class DeepSpeedEngine(Module):
 
         resolved_backend = None
         if self.is_deepcompile_enabled():
-            zero_config = self._config.zero_config
-            if (zero_config.copy_oversized_gradients or zero_config.track_gradient_streams
-                    or zero_config.check_offload_gradients or zero_config.accumulate_offload_gradients):
-                raise ValueError("ZeRO-2 gradient safety options do not support DeepCompile")
+            self._resolve_zero_gradient_safety_options()
+            # Never disable tracking on a live optimizer: copies may still be pending.
+            if any(
+                    getattr(self.optimizer, name, False)
+                    for name in ("copy_oversized_gradients", "track_gradient_streams", "check_offload_gradients",
+                                 "accumulate_offload_gradients")):
+                raise ValueError("DeepCompile cannot use an optimizer with gradient safety options enabled. "
+                                 "Configure DeepCompile before initializing the engine.")
             resolved_backend, schedule = self.get_deepspeed_compile_backend(backend, compile_kwargs, schedule)
 
         is_deepspeed_compile_backend = resolved_backend is not None

@@ -24,7 +24,7 @@ from deepspeed.runtime.torch_autocast import get_autocast_dtype, get_all_comm_dt
 from deepspeed.runtime.utils import (empty_cache, see_memory_usage, has_inf_or_nan, inf, is_model_parallel_parameter,
                                      align_dense_tensors, all_gather_dp_groups, mask_nan_or_inf_with_val_inplace,
                                      count_used_parameters_in_backward)
-from deepspeed.runtime.zero.config import ZeroStageEnum
+from deepspeed.runtime.zero.config import ZeroStageEnum, resolve_gradient_safety_options
 from deepspeed.runtime.zero.utils import get_norm_dtype
 from deepspeed.runtime.zero.offload_config import OffloadDeviceEnum, OffloadStateTypeEnum
 from deepspeed.ops.adam import DeepSpeedCPUAdam
@@ -186,8 +186,8 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                  bf16_optimizer_states=False,
                  elastic_checkpoint=False,
                  check_grad_overflow=True,
-                 copy_oversized_gradients=False,
-                 track_gradient_streams=False,
+                 copy_oversized_gradients=None,
+                 track_gradient_streams=None,
                  check_offload_gradients=False,
                  accumulate_offload_gradients=False,
                  compute_grad_norm=True):
@@ -212,8 +212,15 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         # TODO: Remove zenflow-specific call from vanilla ZeroOptimizer, try to isolate zenflow-specific code into sub-class zenflow_zero_optimizer
         self.zenflow = True if zenflow_config is not None else False
 
-        safety_enabled = (copy_oversized_gradients or track_gradient_streams or check_offload_gradients
-                          or accumulate_offload_gradients)
+        # Engine callers resolve model/compilation exclusions before construction.
+        copy_oversized_gradients, track_gradient_streams, _ = resolve_gradient_safety_options(
+            copy_oversized_gradients,
+            track_gradient_streams,
+            stage=ZeroStageEnum.gradients if partition_grads else ZeroStageEnum.optimizer_states,
+            contiguous_gradients=contiguous_gradients,
+            cpu_offload=self.cpu_offload,
+            zenflow=self.zenflow)
+        safety_enabled = check_offload_gradients or accumulate_offload_gradients
         if safety_enabled and (not partition_grads or self.zenflow or not (contiguous_gradients or self.cpu_offload)):
             raise ValueError("Gradient safety options require contiguous ZeRO-2 without ZenFlow")
         if (check_offload_gradients or accumulate_offload_gradients) and not self.cpu_offload:
@@ -1325,11 +1332,8 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                 if self.copy_oversized_gradients:
                     # Unlike contiguous(), clone guarantees independent storage.
                     grad_reduc.data = grad_reduc.detach().clone(memory_format=torch.contiguous_format)
-                # Scope note (#8061): extra-large params are reduced directly and
-                # never copied into the contiguous IPG bucket, so no producer stream
-                # is recorded for them. average_tensor falls back to waiting on the
-                # current stream for this path; the producer-stream tracking only
-                # covers the bucketed path below.
+                # Oversized gradients bypass the contiguous buffer. Event tracking
+                # below covers them too; legacy copy_streams only covers buckets.
                 self.extra_large_param_to_reduce[comm_dtype] = param
             else:
                 # keeping the gradients contiguous to prevent memory fragmentation, and avoid flattening

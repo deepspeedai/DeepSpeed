@@ -401,18 +401,40 @@ Enabling and configuring ZeRO memory optimizations
 | ------------------------------------------------------------------------------------------------------------------- | ------- |
 | Number of elements reduced/allreduced at a time. Limits the memory required for the allgather for large model sizes | `5e8`   |
 
-***ZeRO-2 gradient safety options***: [boolean]
+***ZeRO-2 gradient safety options***
 
-These experimental options default to `false` and can be varied independently.
-They require contiguous ZeRO-2 gradients (CPU offload enforces contiguity).
-ZeRO-1/3, ZenFlow, pipeline parallelism, and DeepCompile are not supported.
+`copy_oversized_gradients` and `track_gradient_streams` accept `true`, `false`,
+or `null` (the default). Omitted or `null` settings automatically enable each
+protection on compatible paths: contiguous ZeRO-2 gradients, without ZenFlow,
+pipeline parallelism, or configured DeepCompile. CPU optimizer offload enforces
+contiguity but is not required. Both overlapped and non-overlapped communication
+are supported.
 
-| Option | Behavior |
-| ------ | -------- |
-| `copy_oversized_gradients` | Clone gradients larger than `reduce_bucket_size` before reduction, without changing the threshold or communication dtype. Adds a gradient-sized allocation. |
-| `track_gradient_streams` | Track producer readiness, buffer reuse, and consumer storage lifetimes, including oversized gradients with `overlap_comm=false`. Wait for tracked CPU offload copies before CPU consumption. |
-| `check_offload_gradients` | With CPU optimizer offload, wait for copies and scan the actual optimizer-input gradients. Reject invalid group norms before the update. Forces globally coordinated overflow checking even if disabled in BF16 configuration. |
-| `accumulate_offload_gradients` | With CPU optimizer offload, retain every backward contribution until optimizer step/reset, even with GAS=1 or multiple boundary-marked backwards. Additional CPU gradient storage and transfer synchronization are required. |
+Automatic settings leave excluded paths unchanged, including ZeRO-0/1/3.
+Explicit `true` on an incompatible path raises an error; explicit `false`
+independently opts out of that protection. Disabling a protection is not a
+guarantee of correct gradients, even when losses remain finite. Ordinary
+`torch.compile` is not excluded.
+
+| Option | Default | Behavior |
+| ------ | ------- | -------- |
+| `copy_oversized_gradients` | `null` (automatic) | Clone gradients with more elements than `reduce_bucket_size` before reduction, without changing the threshold or communication dtype. Adds a gradient-sized allocation and copy. |
+| `track_gradient_streams` | `null` (automatic) | Track producer readiness, buffer reuse, and consumer storage lifetimes, including oversized gradients with `overlap_comm=false`. Wait for tracked CPU offload copies before CPU consumption. Adds event and synchronization overhead and may extend storage lifetimes. |
+| `check_offload_gradients` | `false` | With CPU optimizer offload, wait for copies and scan the actual optimizer-input gradients. Reject invalid group norms before the update. Forces globally coordinated overflow checking even if disabled in BF16 configuration. |
+| `accumulate_offload_gradients` | `false` | With CPU optimizer offload, retain every backward contribution until optimizer step/reset, even with GAS=1 or multiple boundary-marked backwards. Additional CPU gradient storage and transfer synchronization are required. |
+
+The last two options remain opt-in and require contiguous ZeRO-2 with CPU
+optimizer offload, without ZenFlow, pipeline parallelism, or DeepCompile.
+
+The engine logs requested and effective protection settings at optimizer
+construction. Configuration serialization preserves `null` rather than
+replacing it with the engine's decision. Configure DeepCompile before engine
+initialization: resolved optimizer settings do not change during compilation,
+compilation failure, or eager fallback. An engine initialized with DeepCompile
+configured therefore keeps automatic protections disabled even on fallback;
+reinitialize without DeepCompile to enable automatic protections. Activating
+DeepCompile later on an optimizer with protections enabled raises an error
+instead of disabling synchronization while gradient work may be pending.
 
 The accumulation option preserves the existing accumulation dtype and loss
 scaling. It does not make the engine call `step()` when the engine's boundary
