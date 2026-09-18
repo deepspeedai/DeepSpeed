@@ -381,13 +381,6 @@ class BF16_Optimizer(ZeROOptimizer):
             for j, lp in enumerate(group):
                 self._update_hp_grad(lp, i, j, clear_lp_grads)
 
-        #cpu op
-        for i, group in enumerate(self.bf16_groups):
-            for j, lp in enumerate(group):
-                if lp.grad is None:
-                    continue
-                self.fp32_groups_has_gradients[i][j] = True
-
     @torch.no_grad()
     def get_grads_for_reduction(self):
         if self.has_moe_layers:

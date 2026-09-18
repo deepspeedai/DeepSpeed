@@ -878,7 +878,7 @@ def get_global_norm_of_tensors(input_tensors, norm_type=2, mpu=None, moe_ep_grou
             infinity norm.
 
     Returns:
-        Total norm of the tensors (viewed as a single vector).
+        Total norm of the tensors (viewed as a single vector), as a detached float32 scalar tensor.
     """
     assert isinstance(input_tensors, Iterable), f'expected Iterable type not {type(input_tensors)}'
     assert all([torch.is_tensor(t) for t in input_tensors]), 'expected list of only tensors'
@@ -905,15 +905,12 @@ def get_global_norm_of_tensors(input_tensors, norm_type=2, mpu=None, moe_ep_grou
         total_norm = device_total_norm.to(input_tensors[0].device)
     else:
 
-        compute_buffer = [
-            torch.empty([], dtype=torch.float, device=get_accelerator().current_device_name()) for t in input_tensors
-        ]
-        for i, tensor in enumerate(input_tensors):
-            compute_buffer[i].data.copy_(tensor.data.float().norm(norm_type)**norm_type)
-            if i != 0:
-                compute_buffer[0].data.add_(compute_buffer[i].data)
-
-        device_total_norm = compute_buffer[0].float().detach()
+        device = get_accelerator().current_device_name()
+        for tensor in input_tensors:
+            tensor_norm = tensor.detach().float().norm(norm_type)
+            all_norms.append(tensor_norm.to(device))
+        norm_powers = torch.stack(all_norms).pow(norm_type)
+        device_total_norm = norm_powers.sum()
 
         # Sum across model parallel
         if mpu is not None:
