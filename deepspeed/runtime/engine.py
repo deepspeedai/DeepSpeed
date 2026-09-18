@@ -1046,12 +1046,16 @@ class DeepSpeedEngine(Module):
                 raise ValueError("Unable to choose a loss for multiple no-gather vocab-parallel LM heads")
             if vocab_parallel_heads:
                 from deepspeed.sequence.cross_entropy import configure_vocab_parallel_loss
-                configure_vocab_parallel_loss(model, vocab_parallel_heads[0])
+                configure_vocab_parallel_loss(model,
+                                              vocab_parallel_heads[0],
+                                              backend=tp_config.vocab_parallel_ce_backend)
             elif tp_config.vocab_parallel_lm_head:
                 # Every partitioning path must agree; otherwise the request degrades into ordinary
                 # AutoTP with a gathered head and no distributed loss, which is easy to miss.
                 raise ValueError(
                     "vocab_parallel_lm_head requires a supported nn.Linear named 'lm_head' or 'embed_out'")
+            elif tp_config.vocab_parallel_ce_backend != "torch":
+                raise ValueError("vocab_parallel_ce_backend='liger' requires a no-gather vocabulary-parallel LM head")
 
             if attach_uc_metadata:
                 setattr(model, UNIVERSAL_CHECKPOINT_INFO, collect_autotp_universal_checkpoint_info(model))
