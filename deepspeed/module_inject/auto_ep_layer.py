@@ -567,8 +567,8 @@ class AutoEPMoELayer(nn.Module):
         self._register_logit_hook()
 
     def _register_logit_hook(self):
-        """Register a forward hook that caches gate logits for OutputRecorder capture."""
-        if self.router_logits_capture_target != "router":
+        """Cache logits only for MoE blocks that return them directly."""
+        if self.router_logits_capture_target != "router" or not self.return_router_logits:
             return
 
         def hook_fn(module, input, output):
@@ -741,6 +741,13 @@ class AutoEPMoELayer(nn.Module):
             [B, S, H] or ([B, S, H], [T, E]) if return_router_logits.
             Some HF MoE contracts return ([T, H], [T, E]) instead.
         """
+        try:
+            return self._forward_impl(hidden_states)
+        finally:
+            # Checkpoint replay can stop before _finalize_output, leaving a graph owned by this cache.
+            self._cached_router_logits = None
+
+    def _forward_impl(self, hidden_states: torch.Tensor) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         bsz, seqlen, hdim = hidden_states.shape
         x = hidden_states.reshape(-1, hdim)  # [T, H]
 

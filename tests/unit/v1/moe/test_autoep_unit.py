@@ -5,13 +5,17 @@
 """Compact critical-path tests for AutoEP."""
 
 import ast
+import copy
+import gc
 import inspect
+import weakref
 from collections import OrderedDict
 from types import SimpleNamespace
 
 import pytest
 import torch
 import torch.nn as nn
+from torch.utils.checkpoint import checkpoint
 
 import deepspeed.runtime.engine as ds_engine
 import deepspeed.runtime.zero.stage3 as zero_stage3
@@ -926,6 +930,105 @@ class TestRoutingAndLayerSemantics:
                            ep_size=1,
                            ep_rank=0,
                            config=AutoEPConfig(enabled=True, autoep_size=1, load_balance_coeff=0.02))
+
+    def test_router_cache_does_not_duplicate_model_level_gate_capture(self):
+        source = MockMoEBlock(num_experts=4, ffn_hidden=128, hidden_size=64)
+        layer = AutoEPMoELayer(_make_spec(router_logits_capture_target="router", router_logits_capture_mode="raw"),
+                               source,
+                               ep_size=1,
+                               ep_rank=0,
+                               config=_runtime_config(enabled=True, autoep_size=1))
+        captured = []
+        handle = layer.router.gate.register_forward_hook(
+            lambda _module, _args, output: captured.append(output.detach()))
+        hidden_states = torch.randn(2, 8, 64)
+        try:
+            layer(hidden_states)
+        finally:
+            handle.remove()
+        # HF model-level recording must see one set of logits per MoE layer, not a second cache projection.
+        assert len(captured) == 1
+        expected = nn.functional.linear(hidden_states.reshape(-1, 64), layer.router.gate.weight)
+        torch.testing.assert_close(captured[0], expected)
+
+    @pytest.mark.parametrize("return_logits", [False, True])
+    @pytest.mark.parametrize("checkpoint_mode", [None, False, True])
+    @pytest.mark.parametrize("device", ["cpu", "cuda"])
+    def test_router_cache_checkpoint_training(self, return_logits, checkpoint_mode, device):
+        from deepspeed.accelerator import get_accelerator
+
+        if device == "cuda" and (get_accelerator().device_name() != "cuda" or not get_accelerator().is_available()):
+            pytest.skip("CUDA regression case requires a CUDA accelerator")
+        torch.manual_seed(1234)
+        source = MockMoEBlock(num_experts=4, ffn_hidden=128, hidden_size=64)
+        spec = _make_spec(return_router_logits=return_logits,
+                          router_logits_capture_target="router",
+                          router_logits_capture_mode="raw")
+        config = _runtime_config(enabled=True, autoep_size=1)
+        reference = AutoEPMoELayer(spec, copy.deepcopy(source), ep_size=1, ep_rank=0, config=config).to(device)
+        candidate = AutoEPMoELayer(spec, copy.deepcopy(source), ep_size=1, ep_rank=0, config=config).to(device)
+        reference_optimizer = torch.optim.SGD(reference.parameters(), lr=1e-4)
+        candidate_optimizer = torch.optim.SGD(candidate.parameters(), lr=1e-4)
+        gate_tensors = []
+        handle = candidate.router.gate.register_forward_hook(
+            lambda _module, _args, output: gate_tensors.append(weakref.ref(output)))
+
+        def train_step(layer, optimizer, inputs, mode):
+            optimizer.zero_grad(set_to_none=True)
+            x = inputs.detach().clone().requires_grad_(True)
+            result = layer(x) if mode is None else checkpoint(layer, x, use_reentrant=mode)
+            output, logits = result if return_logits else (result, None)
+            loss = output.square().mean()
+            if logits is not None:
+                # A nonzero auxiliary term verifies that needed router-logit gradients remain connected.
+                loss = loss + 0.01 * logits.square().mean()
+            loss.backward()
+            grads = {name: parameter.grad.detach().clone() for name, parameter in layer.named_parameters()}
+            optimizer.step()
+            values = (output.detach().clone(), None if logits is None else logits.detach().clone(),
+                      loss.detach().clone(), x.grad.detach().clone())
+            return values, grads
+
+        try:
+            for _step in range(2):
+                inputs = torch.randn(2, 8, 64, device=device)
+                expected_values, expected_grads = train_step(reference, reference_optimizer, inputs, None)
+                actual_values, actual_grads = train_step(candidate, candidate_optimizer, inputs, checkpoint_mode)
+                for actual, expected in zip(actual_values, expected_values):
+                    if expected is None:
+                        assert actual is None
+                    else:
+                        torch.testing.assert_close(actual, expected, rtol=1e-4, atol=1e-5)
+                assert actual_grads.keys() == expected_grads.keys()
+                for name in expected_grads:
+                    torch.testing.assert_close(actual_grads[name], expected_grads[name], rtol=1e-4, atol=1e-5)
+                for actual, expected in zip(candidate.parameters(), reference.parameters()):
+                    torch.testing.assert_close(actual, expected, rtol=1e-4, atol=1e-5)
+                gc.collect()
+                # Weak observers do not themselves retain the replay gate tensors or their autograd graph.
+                assert all(tensor_ref() is None for tensor_ref in gate_tensors)
+                gate_tensors.clear()
+        finally:
+            handle.remove()
+
+    def test_router_cache_is_released_after_expert_failure(self, monkeypatch):
+        source = MockMoEBlock(num_experts=4, ffn_hidden=128, hidden_size=64)
+        layer = AutoEPMoELayer(_make_spec(return_router_logits=True,
+                                          router_logits_capture_target="router",
+                                          router_logits_capture_mode="raw"),
+                               source,
+                               ep_size=1,
+                               ep_rank=0,
+                               config=_runtime_config(enabled=True, autoep_size=1))
+
+        def fail_expert(*_args, **_kwargs):
+            raise RuntimeError("expert failure")
+
+        monkeypatch.setattr(layer.experts, "forward", fail_expert)
+        with pytest.raises(RuntimeError, match="expert failure"):
+            layer(torch.randn(2, 8, 64))
+        # Pin the stale-cache bug on exceptional exits as well as checkpoint early-stop exits.
+        assert layer._cached_router_logits is None
 
 
 SPLIT_PLAN_EP_SIZE = 3
