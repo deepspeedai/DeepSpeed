@@ -496,3 +496,61 @@ def test_configure_with_contiguous_checkpointing_requires_num_checkpoints():
             cp.mpu,
             cp.deepspeed_checkpointing_enabled,
         ) = saved
+
+
+def _partitioned_backward_args(args):
+    """Run an argument list through the save and restore path `partition_activations` uses.
+
+    This mirrors `CheckpointFunction.forward`/`backward` without an accelerator, so it runs on CPU.
+    """
+    cp = deepspeed.checkpointing
+    saved = _snapshot_ckpt_config()
+    saved_mp = (cp.mp_group, cp.mp_size)
+    try:
+        cp.PARTITION_ACTIVATIONS = True
+        cp.CONTIGUOUS_CHECKPOINTING = False
+        cp.mp_group, cp.mp_size = None, 1
+
+        inputs = tuple(a.clone() if torch.is_tensor(a) else a for a in args)
+        new_args = cp.get_partitioned_activations_for_backward(list(args), inputs, False)
+        tensor_args, non_tensor_args, tensor_flags = cp.extract_tensors(all_objects=tuple(new_args))
+
+        for tensor in tensor_args:
+            if tensor is not None and getattr(tensor, 'saved_data', None) is not None:
+                tensor.data = tensor.saved_data.to(tensor.device)
+                tensor.saved_data = None
+
+        gathered = cp.gather_partitioned_activations(tensor_args)
+        return cp.merge_tensors(tensor_objects=gathered, non_tensor_objects=non_tensor_args, tensor_flags=tensor_flags)
+    finally:
+        _restore_ckpt_config(saved)
+        cp.mp_group, cp.mp_size = saved_mp
+
+
+@pytest.mark.parametrize('non_tensor', [None, 2, True, 2.5, (None, 2.5)])
+def test_partitioned_non_tensor_args_survive_the_round_trip(non_tensor):
+    """The recompute must be handed the arguments the forward pass received, not extra `None`s."""
+    tensor = torch.rand(HIDDEN_DIM, requires_grad=True)
+    args = (tensor, non_tensor)
+
+    merged = _partitioned_backward_args(args)
+
+    assert len(merged) == len(args)
+    assert torch.is_tensor(merged[0])
+    if non_tensor is None:
+        assert merged[1] is None
+    else:
+        assert merged[1] == non_tensor
+
+
+def test_partitioned_args_keep_their_order_around_a_non_tensor():
+    """A non-tensor argument must not shift the arguments that follow it."""
+    first = torch.rand(HIDDEN_DIM, requires_grad=True)
+    second = torch.rand(HIDDEN_DIM, requires_grad=True)
+    args = (first, None, True, second)
+
+    merged = _partitioned_backward_args(args)
+
+    assert [torch.is_tensor(item) for item in merged] == [True, False, False, True]
+    assert merged[1] is None
+    assert merged[2] is True
