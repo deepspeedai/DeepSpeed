@@ -99,13 +99,20 @@ def zeropower_via_gram_newtonschulz(G, steps: int):
     assert G.ndim >= 2
     a, b, c = (3.4445, -4.7750, 2.0315)
     compute_dtype = ns_compute_dtype("gram")
-    X = G.to(compute_dtype)
+    X = G
     if G.size(-2) > G.size(-1):
         X = X.mT
 
     n, m = X.size(-2), X.size(-1)
 
-    X = X / (X.norm(dim=(-2, -1), keepdim=True) + 1e-7)
+    # Normalize before the cast, and bound the reduction that normalizes. fp16 tops out at
+    # 65504, so a finite fp32 gradient can reach the iteration as inf, and the norm squares
+    # every element, which overflows at |g| around 1.8e19 even in fp32. Dividing by the
+    # largest magnitude first leaves the direction untouched and keeps both in range. The
+    # epsilon is scaled with the input so the guard it provides is unchanged.
+    scale = X.abs().amax(dim=(-2, -1), keepdim=True).clamp(min=1.0)
+    X = X / scale
+    X = (X / (X.norm(dim=(-2, -1), keepdim=True) + 1e-7 / scale)).to(compute_dtype)
 
     # For square matrices, no FLOP advantage; use standard iteration
     if m <= n:
