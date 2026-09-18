@@ -1,4 +1,3 @@
-# Copyright (c) Microsoft Corporation.
 # SPDX-License-Identifier: Apache-2.0
 
 # DeepSpeed Team
@@ -32,7 +31,7 @@ class DS_QWEN3_5Container(MetaTensorContainer, HybridGatedMLPContainer, HybridSp
 
     1. head_dim != hidden_size // num_attention_heads (27B: 5120/24 is not even
        an integer), which breaks the fused kernel's qkv layout math.
-    2. q_proj packs [query | output_gate] (attn_output_gate=True); the gate
+    2. q_proj packs [query / output_gate] (attn_output_gate=True); the gate
        half has no kernel input and is dropped by the mapping below.
     3. Per-head q_norm/k_norm (RMSNorm over head_dim between projection and
        rope) have no place in the fused attention path.
@@ -198,7 +197,7 @@ class Qwen3_5LayerPolicy(TransformerPolicy):
 
     def attention(self, enable_training=False):
         attn = self.client_module.self_attn
-        # q_proj is 2x-wide: [query | output_gate] along dim0 (attn_output_gate).
+        # q_proj is 2x-wide: [query / output_gate] along dim0 (attn_output_gate).
         # The fused kernel has no gate input, so only the query half is fused;
         # the dropped gate half is kernel-gap #2 in the container docstring.
         q_len = attn.config.num_attention_heads * attn.head_dim

@@ -1,4 +1,3 @@
-# Copyright (c) Microsoft Corporation.
 # SPDX-License-Identifier: Apache-2.0
 
 # DeepSpeed Team
@@ -90,7 +89,7 @@ def find_glu_segments(root: torch.nn.Module) -> List[GLUSegment]:
 
 
 def _fused_glu_forward(self, input):
-    """Replacement forward: one GEMM over the fused gate|up weight, then the
+    """Replacement forward: one GEMM over the fused gate/up weight, then the
     fused SiLU-mul activation (native CUDA op when installed, torch composite
     otherwise), then delegate to the untouched down projection (which keeps
     its own collective). The parent's return contract is unchanged."""
@@ -156,7 +155,7 @@ def _fused_gdn_forward(self, hidden_states, *args, **kwargs):
     batch_size, seq_len, _ = hidden_states.shape
     use_precomputed_states = cache_params is not None and cache_params.has_previous_state(self.layer_idx)
 
-    # Fused [qkv | z | b | a] GEMM replacing the four separate projections.
+    # Fused [qkv / z / b / a] GEMM replacing the four separate projections.
     fused = torch.matmul(hidden_states, self._ki_gdn_fused_weight.transpose(-1, -2))
     key_dim, value_dim = self.key_dim, self.value_dim
     qkv_end = key_dim * 2 + value_dim

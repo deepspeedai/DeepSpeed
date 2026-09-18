@@ -4,7 +4,7 @@
 // DeepSpeed Team
 
 // Native CUDA kernel for the segment-KI fused_glu op: computes
-// out = silu(hidden[:, :k]) * hidden[:, k:2k] on the fused gate|up GEMM
+// out = silu(hidden[:, :k]) * hidden[:, k:2k] on the fused gate/up GEMM
 // output without materializing chunked views. hidden is contiguous
 // [N, 2k]; out is contiguous [N, k]. Activation math runs in fp32 with a
 // single rounding to the storage dtype (torch opmath convention).
@@ -50,7 +50,7 @@ at::Tensor fused_silu_mul_halves(at::Tensor hidden)
 {
     TORCH_CHECK(hidden.is_cuda(), "fused_silu_mul_halves is CUDA-only");
     TORCH_CHECK(hidden.dim() >= 1 && hidden.size(-1) % 2 == 0,
-                "last dim must be even (gate|up layout)");
+                "last dim must be even (gate/up layout)");
     TORCH_CHECK(hidden.is_contiguous(), "hidden must be contiguous");
     auto sizes = hidden.sizes().vec();
     sizes.back() /= 2;
