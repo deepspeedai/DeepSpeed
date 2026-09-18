@@ -1092,8 +1092,11 @@ def all_gather_quantized_dp_groups(groups_flat,
         preserved_layouts, max_preserved_count = _partition_preserved_ranges(preserved_ranges, local_partition.numel(),
                                                                              dp_world_size)
 
-        # Keep the opt-in path bounded even when the legacy all-gather bucket retains its multi-billion default.
-        chunk_elements = min(local_partition.numel(), allgather_bucket_size, QUANTIZED_WEIGHT_ALLGATHER_CHUNK_SIZE)
+        # Bound the gathered buffers across all ranks, with at least one quantization group per rank.
+        # Rounding down avoids exceeding the bucket just to pad the quantizer input.
+        gathered_elements = min(allgather_bucket_size, QUANTIZED_WEIGHT_ALLGATHER_CHUNK_SIZE)
+        groups_per_chunk = max(1, gathered_elements // (dp_world_size * quantization_group_size))
+        chunk_elements = min(local_partition.numel(), groups_per_chunk * quantization_group_size)
         max_padded_elements = (
             (chunk_elements + quantization_group_size - 1) // quantization_group_size) * quantization_group_size
         max_groups = max_padded_elements // quantization_group_size

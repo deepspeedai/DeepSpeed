@@ -531,6 +531,12 @@ Enabling and configuring ZeRO memory optimizations
 | ----------------------------------------------------------------------------------------------------------------------------------- | ------- |
 | Boolean indicating whether to quantize weights during all-gather communication. ZeRO stages 1 and 2 use bounded-memory INT8 synchronization after each optimizer step and preserve small parameters in their original dtype; ZeRO stage 3 quantizes parameters while gathering them for computation. This lossy optimization is disabled by default. | `False` |
 
+ZeRO stages 1 and 2 require FP16 or BF16 weights and do not support ZenFlow with this option. Unsupported combinations
+are rejected during optimizer initialization. Each gathered buffer is bounded across all data-parallel ranks by
+`min(allgather_bucket_size, 50000000)` elements, rounded down to complete quantization groups. Buckets smaller than one
+64-element group per rank use that minimum. Quantized values, scales, and preserved original-dtype values use separate
+buffers within this bound.
+
 ***zero_quantized_gradients***: [boolean]
 
 | Description                                                                                                                         | Default |

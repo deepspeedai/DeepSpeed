@@ -190,6 +190,14 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
 
         super().__init__()
 
+        if zero_quantized_weights:
+            if zenflow_config is not None:
+                raise ValueError("zero_quantized_weights does not support ZenFlow with ZeRO Stage 1 or 2")
+            for param_group in init_optimizer.param_groups:
+                if any(param.requires_grad and param.dtype not in (torch.float16, torch.bfloat16)
+                       for param in param_group['params']):
+                    raise TypeError("zero_quantized_weights requires fp16 or bf16 weights with ZeRO Stage 1 or 2")
+
         if not compute_grad_norm and clip_grad > 0.0:
             raise ValueError("zero_optimization.compute_grad_norm=false requires gradient_clipping=0")
         if not compute_grad_norm and zenflow_config is not None:
