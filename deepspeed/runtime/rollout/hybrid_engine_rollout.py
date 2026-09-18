@@ -26,6 +26,14 @@ class HybridEngineRolloutConfig:
     """Configuration for HybridEngineRollout."""
     use_graph_capture: bool = False
     enable_profiling: bool = False
+    # Apply segment-KI kernel injection to the engine's module at rollout
+    # construction. Fuses comm-free projection+activation segments into
+    # single GEMM+custom-kernel calls (MLP gate|up and GDN input projections).
+    # Note: fused weight copies go stale after optimizer steps; re-create
+    # the rollout (or call sync_segki_weights) after training.
+    use_segki: bool = False
+    segki_kernel: str = "all"  # "all" | "fused_glu" | "fused_gdn"
+    segki_backend: str = "auto"  # "auto" | "cuda" | "composite"
 
 
 class HybridEngineRollout(RolloutEngine):
@@ -43,6 +51,41 @@ class HybridEngineRollout(RolloutEngine):
         self.use_graph_capture = getattr(cfg, 'use_graph_capture', False) if cfg else False
         self.enable_profiling = getattr(cfg, 'enable_profiling', False) if cfg else False
         self._last_profile = None
+
+        if cfg is not None and getattr(cfg, 'use_segki', False):
+            self._segki_report = self._apply_segki(getattr(cfg, 'segki_kernel', 'all'),
+                                                   getattr(cfg, 'segki_backend', 'auto'))
+        else:
+            self._segki_report = None
+
+    def _apply_segki(self, kernel: str, backend: str):
+        """Apply segment-KI kernel injection to the wrapped module.
+
+        Returns the injection report dict, or None if the module is not
+        supported (unsupported architectures pass through silently).
+        """
+        try:
+            from deepspeed.module_inject.segment_ki import apply_segment_ki
+        except ImportError:
+            return None
+        report = apply_segment_ki(self.engine.module, kernel=kernel, backend=backend)
+        if isinstance(report, dict) and report.get('segments_replaced', 0) == 0 \
+                and report.get('segments_found', 0) == 0:
+            # No segments found: model architecture not supported, not an error
+            return report
+        return report
+
+    def sync_segki_weights(self):
+        """Re-apply segment-KI after optimizer steps refreshed the base weights.
+
+        Re-runs weight concat for all fused segments so the fused copies
+        reflect the latest training state. Call this between train steps
+        and rollout generation in an RL loop.
+        """
+        if self._segki_report is None:
+            return
+        from deepspeed.module_inject.segment_ki import refresh_fused_weights
+        refresh_fused_weights(self.engine.module)
 
     @torch.no_grad()
     def generate(self, request: RolloutRequest, sampling: SamplingConfig) -> RolloutBatch:
@@ -218,6 +261,7 @@ class HybridEngineRollout(RolloutEngine):
 
         full_token_buf = torch.zeros(max_len, dtype=torch.long, device=device)
         full_token_buf[:prompt_len] = prompt_ids.view(-1)
+        full_token_buf[prompt_len] = next_token.view(-1)[0]  # first generated token
 
         write_pos.fill_(prompt_len)
 

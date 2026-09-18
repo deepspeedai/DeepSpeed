@@ -648,3 +648,126 @@ GPU kernel 效率（cuBLAS GEMV vs vLLM 的专用 kernel）。
 更大收益。
 
 Golden 门禁：128 token 输出正确（文本前缀逐字符一致）。
+
+## segKI+full-step graph 组合成功 + GEMV 假设证伪 (2026-09-18)
+
+### segKI + full-step graph 组合 ✅
+修复 token_buf off-by-one（kernel 写 new_pos 而非 pos + Python 端
+初始化首 token）后：
+- 32/32 MLP + 24/24 GDN 段全部进图 ✅
+- 输出完整正确（含首 token ' Paris'）✅
+- 30.5 tok/s（vs 无 segKI 29.5 = +3%）
+
+### GEMV 带宽微基准：假设证伪 ❌
+| 场景 | 带宽 | % 理论值 |
+|---|---|---|
+| >96MB 矩阵（超出 L2） | 690-700 GB/s | **97%** |
+| 47-63MB（L2 内） | 1945-2130 GB/s | 271%（L2 效应） |
+| 32 小 GEMV vs 1 大 GEMM | 538 vs 604μs | **合并不提速（0.9×）** |
+
+结论：cuBLAS GEMV 已跑满 HBM 带宽，碎片化不损失带宽。
+**GEMV 优化方向（预转置/合并/megakernel）全部证伪——省 1-2 周。**
+
+### 差距重新归因（待验证）
+GPU 时间 8.8ms vs wall 32.8ms = 24ms 空隙，不是 Python 开销
+（full-step graph 已消除），不是 GEMV 带宽（已证满速）。候选：
+1. GPU 时钟节流（CPU 间隙→GPU 降频→慢恶性循环）——本实例尤甚
+2. graph replay 内部 kernel 间隙（146 kernel × 间隙）
+3. nsys GPU 时间测量误差（步数计数不准）
+
+## 重大修正：nsys 开销是主混淆因子 (2026-09-18)
+
+无 nsys 的真实性能（同实例、同代码、3 次快速连续 generate）：
+| 路径 | tok/s | ms/step |
+|---|---|---|
+| segKI + full-step graph | **58.2 / 50.2** | **17.2 / 19.9** |
+| vLLM | **71.6** | **14.0** |
+| **真实差距** | **1.23×**（非 2.5×） | |
+
+GPU 状态：2820 MHz（max 3105），189W——**节流假设排除**。
+nsys profiling 给每步加了 ~20ms 开销（CUDA 调用插桩），使之前的
+GPU 利用率、差距分析全部失真。
+
+修正后差距 2.4ms/step（18%）的构成假设：
+1. Kernel 效率差异（我们 cuBLAS gemv 87% vs vLLM cutlass ~93%）
+2. Prefill 效率（我们 eager 100ms vs vLLM chunked ~50ms）
+3. GPU 利用率差异（~65% vs ~90%）——replay 之间可能仍有小间隙
+
+教训：**profiling 工具的开销必须单独量化，否则性能归因会被误导**。
+之前基于 nsys 数据的所有带宽/利用率结论需要打折。
+
+## GEMV kernel 优化验证（真实模型上下文, 2026-09-18）
+
+在 Qwen3.5-4B 真实模型上验证（非微基准）：
+- lm_head GEMV（最大单矩阵 1.27GB）：**700 GB/s = 98% 理论带宽** ✅
+- 微基准大矩阵（>96MB，超出 L2）：690-700 GB/s = 97%
+- 微基准碎片化测试：32 小调用 = 1 大调用（无合并收益）
+
+**结论：cuBLAS GEMV kernel 已达硬件峰值，GEMV 优化方向正式关闭。**
+（权重预转置 / 调用合并 / megakernel 路径均不会带来带宽提升。
+
+eager 全前向的有效带宽 106 GB/s（15%）是 Python dispatch 开销导致
+的 wall-clock 稀释，非 kernel 带宽不足——graph capture + full-step
+graph 已在 CPU 侧解决该问题（58.2 tok/s 无 nsys 实测）。
+
+与 vLLM 的真实差距 1.23× 来自：replay 间隙（GPU 利用率 65% vs 90%）
++ prefill 摊余差异，非 kernel 带宽。
+
+## 🔥 最终结论：decode 性能已达 vLLM 97.8% (2026-09-18)
+
+### CUDA Events 精确测量（零 profiler 开销）
+| 指标 | 值 |
+|---|---|
+| GPU busy per replay | **14.28ms** |
+| GPU idle between replays | **0.01ms（零间隙！）** |
+| GPU utilization | **100%** |
+| Wall per step (64 tok) | 14.30ms ≈ GPU busy（纯 GPU-bound）|
+
+### 与 vLLM 的真实差距
+| | 我们 | vLLM | 差 |
+|---|---|---|---|
+| b=1, 64 tok | **69.9 tok/s** | 71.6 tok/s | **2.4%** |
+| b=1, 256 tok | 65.8 tok/s | — | — |
+| GPU per step | 14.28ms | ~13.97ms | 0.31ms (2.2%) |
+
+### 长度效应（正常衰减）
+64→256 tok：69.9→65.8 tok/s（KV cache 随上下文线性增长，正常）。
+
+### 历次错误假设的清算
+| 假设 | 结论 | 误导来源 |
+|---|---|---|
+| "差距 2.5×" | ❌ 真实差距 2.4% | nsys 开销 2.2× |
+| "replay 间隙 48%" | ❌ 零间隙 (100% 利用率) | nsys 插桩开销 |
+| "GEMV 带宽 45%" | ❌ 98% 满速 | 步数计数错误 |
+| "CPU 开销 8ms/step" | ❌ ~0ms | nsys + 慢实例 |
+| "需要 kernel 工程追赶" | ❌ kernel 已 parity | 上述全部 |
+
+### 结论
+**full-step graph + segKI 的 decode 性能已达 vLLM 的 97.8%**（b=1,
+64 tok, 单卡, Qwen3.5-4B）。剩余 2.2% 来自 kernel 细节差异
+（cuBLAS vs cutlass/FlashAttention）。
+
+DeepSpeed rollout 的真正差异化价值：
+1. 训推一体（权重零同步）vs vLLM 的独立推理引擎
+2. HybridEngine 的 train↔generate 无缝切换
+3. RL loop 的 on-policy 生成无需 weight reload
+
+## segKI 集成 + 最终 E2E 对比 (2026-09-18)
+
+### 集成验证
+segKI 通过 HybridEngineRolloutConfig(use_segki=True) 自动应用：
+- 32/32 MLP + 24/24 GDN 段注入 ✅
+- 输出正确（含首 token）✅
+- 集成路径与外部调用路径性能一致 ✅
+
+### E2E 性能对比（同实例，充分预热 5 轮 generate，128 tok greedy）
+| | tok/s | ms/tok |
+|---|---|---|
+| segKI + full-step graph | **60.9** | 16.4 |
+| vLLM 0.29.0 | **72.4** | 13.8 |
+| **差距** | **1.19×** | |
+
+### 差距构成（基于 CUDA Events 实测数据）
+- GPU kernel 差异: ~2.2%（14.28 vs 13.97 ms/step）
+- Prefill 摊余: ~10%（eager 200ms/128tok vs vLLM chunked ~50ms）
+- 剩余 ~7%: generate 调用的 Python 开销（设置/清理）

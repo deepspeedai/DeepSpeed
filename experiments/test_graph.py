@@ -28,11 +28,16 @@ engine, _, _, _ = deepspeed.initialize(model=model,
                                            }
                                        })
 engine.eval()
-if USE_KI:
-    from deepspeed.module_inject.segment_ki import apply_segment_ki
-    print("KI", apply_segment_ki(engine.module, kernel="all", backend="auto"), flush=True)
 
-rollout = HybridEngineRollout(engine=engine, tokenizer=tok, cfg=HybridEngineRolloutConfig(use_graph_capture=True))
+# segKI is now integrated into HybridEngineRolloutConfig — no external call needed
+rollout = HybridEngineRollout(engine=engine,
+                              tokenizer=tok,
+                              cfg=HybridEngineRolloutConfig(use_graph_capture=True,
+                                                            use_segki=USE_KI,
+                                                            segki_kernel="all",
+                                                            segki_backend="auto"))
+if rollout._segki_report is not None:
+    print("KI", rollout._segki_report, flush=True)
 dev = get_accelerator().device_name()
 enc = tok("The capital of France is", return_tensors="pt")
 req = RolloutRequest(prompt_ids=enc.input_ids.to(dev), prompt_attention_mask=enc.attention_mask.to(dev))

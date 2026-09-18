@@ -330,3 +330,30 @@ def apply_segment_ki(model: torch.nn.Module, kernel: str = "all", backend: str =
         report["fused_gdn"] = {"segments_found": len(gdn_segments), "segments_replaced": gdn_replaced}
 
     return report
+
+
+def refresh_fused_weights(model: torch.nn.Module) -> int:
+    """Re-build fused weight copies after optimizer steps changed the originals.
+
+    The fused tensors are updated in-place (``copy_``) so their storage
+    address stays stable — CUDA graphs captured against these buffers
+    remain valid across weight refreshes. Returns the number of segments
+    refreshed.
+    """
+    refreshed = 0
+    for seg in find_glu_segments(model):
+        fused = getattr(seg.parent, "_ki_fused_glu_weight", None)
+        if fused is not None:
+            fused.copy_(torch.cat([seg.gate.weight.data, seg.up.weight.data], dim=0))
+            refreshed += 1
+    for seg in find_gdn_segments(model):
+        fused = getattr(seg.parent, "_ki_gdn_fused_weight", None)
+        if fused is not None:
+            fused.copy_(
+                torch.cat([
+                    seg.in_proj_qkv.weight.data, seg.in_proj_z.weight.data, seg.in_proj_b.weight.data,
+                    seg.in_proj_a.weight.data
+                ],
+                          dim=0))
+            refreshed += 1
+    return refreshed
