@@ -18,7 +18,6 @@ import torch
 import deepspeed
 from deepspeed.accelerator import get_accelerator
 import deepspeed.runtime.zero.muon.original_muon as original_muon
-from deepspeed.runtime.zero.utils import ZeRORuntimeException
 from unit.common import DistributedTest
 
 NS_KERNELS = ("zeropower_via_gram_newtonschulz", "zeropower_via_newtonschulz5")
@@ -53,6 +52,10 @@ def counting_newton_schulz():
 
 def _model():
     return torch.nn.Sequential(torch.nn.Linear(32, 32, bias=False), torch.nn.Linear(32, 32, bias=False))
+
+
+def _irregular_model():
+    return torch.nn.Sequential(torch.nn.Linear(13, 17, bias=False), torch.nn.Linear(17, 9, bias=False))
 
 
 def _config(stage, dtype="fp32"):
@@ -148,27 +151,72 @@ class TestMuonRunsWithoutAZeroOptimizer(DistributedTest):
             f"Newton-Schulz ran {len(calls)} times for two Muon matrices; the step was not Muon"
 
 
-class TestMuonRefusesBF16Optimizer(DistributedTest):
-    """The one wrapper that hands Muon flat partitions without orthogonalizing them.
+class TestMuonBF16Optimizer(DistributedTest):
+    """BF16 accumulation boundaries must run NS before consuming flat updates."""
+    world_size = [1, 2]
 
-    `BF16_Optimizer` replaces the param groups with flat fp32 partitions and knows nothing about
-    `use_muon`, so the shape test in `step` reads them as "ZeRO already did the update" and the
-    step is SGD. The original shapes are not recoverable there, so this is refused rather than
-    fixed. Selected by bf16 with `grad_accum_dtype: fp32` at ZeRO stage 1.
-    """
-    world_size = 1
-
-    def test_bf16_optimizer_with_muon_is_refused(self):
+    @pytest.mark.parametrize("ns_method", ["standard", "gram"])
+    def test_bf16_optimizer_runs_muon_after_accumulation(self, ns_method):
         _skip_if_unsupported("bf16")
-        model = _model()
+        model = _irregular_model()
         config = _config(1, "bf16")
         config["data_types"] = {"grad_accum_dtype": "fp32"}
+        config["gradient_accumulation_steps"] = 2
+        config["optimizer"]["params"]["ns_method"] = ns_method
+        config["optimizer"]["params"]["weight_decay"] = 0.0
+        engine, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config)
+        original = [param.detach().float().clone() for param in engine.module.parameters()]
+        x = torch.ones(2, 13, device=engine.device, dtype=torch.bfloat16)
+        engine.backward(engine(x).square().sum())
+        engine.step()
+        for param, before in zip(engine.module.parameters(), original):
+            torch.testing.assert_close(param, before.to(torch.bfloat16), rtol=0, atol=0)
 
-        with pytest.raises(ZeRORuntimeException, match="BF16_Optimizer"):
-            deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config)
+        engine.backward(engine(x).square().sum())
+        gradients = [gradient.detach().clone() for gradient in engine.optimizer.fp32_groups_gradients[0]]
+        group = engine.optimizer.optimizer.param_groups[0]
+        reference_momenta = [
+            torch.zeros_like(gradient).view(param.shape)
+            for param, gradient in zip(engine.module.parameters(), gradients)
+        ]
+        # Compiler fusion can round BF16 intermediates differently for partition views.
+        # Compare eager kernels exactly against the full-matrix reference.
+        with torch._dynamo.config.patch(disable=True):
+            reference_updates = [
+                original_muon.muon_update(gradient.view(param.shape).clone(),
+                                          momentum,
+                                          beta=group['momentum'],
+                                          ns_method=ns_method)
+                for param, gradient, momentum in zip(engine.module.parameters(), gradients, reference_momenta)
+            ]
+            engine.step()
+
+        for param, before, update in zip(engine.module.parameters(), original, reference_updates):
+            expected = before.add(update, alpha=-group['lr']).to(torch.bfloat16)
+            torch.testing.assert_close(param, expected, rtol=0, atol=0)
+
+        partition = group['params'][0]
+        local_momentum = engine.optimizer.optimizer.state[partition]['momentum_buffer']
+        world_size = deepspeed.comm.get_world_size()
+        gathered_momentum = torch.empty(world_size * local_momentum.numel(),
+                                        dtype=local_momentum.dtype,
+                                        device=local_momentum.device)
+        deepspeed.comm.all_gather_into_tensor(gathered_momentum, local_momentum)
+        reference_momentum = torch.cat([momentum.reshape(-1) for momentum in reference_momenta])
+        torch.testing.assert_close(gathered_momentum[:reference_momentum.numel()], reference_momentum, rtol=0, atol=0)
+        torch.testing.assert_close(gathered_momentum[reference_momentum.numel():],
+                                   torch.zeros_like(gathered_momentum[reference_momentum.numel():]),
+                                   rtol=0,
+                                   atol=0)
+
+        layout = engine.optimizer._muon_exchange_layouts[0]
+        if world_size == 2:
+            # The 17x13 matrix crosses the DP boundary; only its remote piece is exchanged.
+            assert layout['has_split_matrix']
+            assert sum(layout['input_split_sizes']) < sum(param.numel() for param in engine.module.parameters())
 
     def test_the_same_config_without_grad_accum_dtype_still_runs_muon(self):
-        """The neighbouring config, so the refusal is shown to be narrow."""
+        """The existing BF16-gradient wrapper remains supported."""
         _skip_if_unsupported("bf16")
         model = _model()
         engine, _, _, _ = deepspeed.initialize(model=model,
@@ -180,4 +228,4 @@ class TestMuonRefusesBF16Optimizer(DistributedTest):
             engine.backward(engine(x).square().sum())
             engine.step()
 
-        assert len(calls) == 2
+        assert len(calls) == 2 // deepspeed.comm.get_world_size()

@@ -60,6 +60,47 @@ Muon supports the following params:
 | torch\_adam    | Use torch Adam/AdamW for non-Muon parameters instead of the DeepSpeed Adam backend.                                  | false     |
 | adam\_w\_mode | Use AdamW rather than Adam for non-Muon parameters.                                                                  | true      |
 | ns\_method     | Newton-Schulz orthogonalization method: `"gram"` for Gram NS (~2x faster on rectangular matrices), `"standard"` for the original iteration. Use `"standard"` to fall back if you encounter convergence issues. | `"gram"`  |
+| per\_head\_muon | Orthogonalize each attention head separately instead of the whole projection. See below. | false |
+
+#### Per-head Muon
+
+With `per_head_muon: true`, an attention projection shaped `[num_heads * head_dim, in_features]`
+is viewed as `[num_heads, head_dim, in_features]` and Newton-Schulz runs on that batch, so each
+head is orthogonalized against itself rather than sharing one update direction with every other
+head. This is the split described by Kimi K3 ("Per-Head Muon") and GLM-5 ("Muon Split"). Off by
+default; communication volume is unchanged.
+
+What is tagged, and what deliberately is not:
+
+| matrix | per-head | why |
+| --- | --- | --- |
+| `q_proj` / `query` / `wq` | yes | blocked by the query head count |
+| `k_proj` / `v_proj` / `key` / `value` / `wk` / `wv` | yes | blocked by the KV head count, which differs from the query count under GQA |
+| MLA `q_b_proj`, `kv_b_proj` | yes | the two up-projections, whose per-head widths are `qk_nope + qk_rope` and `qk_nope + v_head_dim` rather than `head_dim` |
+| `o_proj` and other output projections | no | the head structure is on the input dimension, so splitting dim 0 would cut across the wrong axis |
+| fused `qkv_proj` / `query_key_value` / `c_attn` / `wqkv` | no | the three sections do not share a head count under GQA |
+| MLA `q_a_proj`, `kv_a_proj_with_mqa` | no | down-projections mixing latent and rope components, with no head structure |
+
+**The shape confirms the name.** A leaf name is treated as a claim about the layout, never as
+proof of it. Every geometry the config makes plausible for that name is evaluated, and a
+parameter is tagged only when its rows equal `num_heads * width` exactly for one of them. Two
+geometries that confirm and agree on the head count are not a conflict; two that confirm and
+disagree are, and the parameter is skipped with a warning.
+
+**Tensor parallelism.** Column-parallel TP splits an attention projection on dim 0, which is
+the axis the heads are on, so a rank holds whole heads and the per-head width is unchanged. That
+makes the per-head split exact under TP: Newton-Schulz on a rank's heads is the same computation
+whether the other ranks' heads are present or not. The head *count* is not invariant, so with
+AutoTP the counts are re-resolved against the shards after partitioning; a shard whose rows are
+not a multiple of the per-head width does not hold whole heads and stays on the full-matrix path.
+A model that arrives already sharded by an external tensor-parallel implementation cannot be
+tagged at all, because the config then describes a width no parameter has.
+
+**The flag reports what it did.** Because it is an explicit opt-in, DeepSpeed raises at
+`deepspeed.initialize` if it is enabled and no attention projection could be tagged, rather than
+training on without it. Parameters that match an attention name but confirm no geometry are
+reported as a warning and stay on the full-matrix path, so a hybrid model still gets per-head on
+its recognized layers.
 
 By default, non-Muon parameters use `FusedAdam`. When optimizer state is offloaded to the CPU, DeepSpeed selects `DeepSpeedCPUAdam`. This is the same backend selection used by the Adam and AdamW optimizer types.
 
@@ -675,6 +716,7 @@ When a HuggingFace model provides a built-in `tp_plan` (via `model.config.base_m
     "autotp_size": 4,
     "preset_model": "llama",
     "tp_overlap_comm": false,
+    "vocab_parallel_lm_head": false,
     "partition_config": {
       "use_default_specs": false,
       "layer_specs": [
@@ -709,6 +751,12 @@ When a HuggingFace model provides a built-in `tp_plan` (via `model.config.base_m
 | Description                                                                                              | Default |
 | -------------------------------------------------------------------------------------------------------- | ------- |
 | Overlap tensor-parallel allreduce communication with computation (training only).                       | `false` |
+
+***vocab_parallel_lm_head***: [boolean]
+
+| Description                                                                                                                                                  | Default |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------- |
+| Keep an untied `lm_head`/`embed_out` output vocabulary sharded and install DeepSpeed's pure-PyTorch vocab-parallel causal-LM loss instead of gathering logits. | `false` |
 
 ***partition_config***: [dictionary]
 
@@ -1381,85 +1429,6 @@ DeepSpeed Data Efficiency Library includes two techniques: curriculum learning a
 | <i>&emsp;&emsp;&emsp;&emsp;**difficulty**</i>: [list] | List of max accepted difficulty levels to be used during schedule. Used by `fixed_discrete` schedule. | N/A |
 | <i>&emsp;&emsp;&emsp;&emsp;**max_step**</i>: [list] | List of which step to change max accepted difficulty level. Used by `fixed_discrete` schedule. | N/A |
 
-
-### Curriculum Learning
-
-**Note:** On 12/12/2022, we released [DeepSpeed Data Efficiency Library](/tutorials/data-efficiency/) which provides a more general curriculum learning support. This legacy curriculum learning feature below is still supported but we recommend to use the Data Efficiency Library.
-
-```json
-  "curriculum_learning": {
-    "enabled": true,
-    "curriculum_type": "seqlen",
-    "min_difficulty": 8,
-    "max_difficulty": 1024,
-    "schedule_type": "fixed_linear",
-    "schedule_config": {
-      "total_curriculum_step": 40000,
-      "difficulty_step": 8
-    }
-  }
-```
-<i>**enabled**</i>: [boolean]
-
-| Description                               | Default |
-| ----------------------------------------- | ------- |
-| Set to true to enable curriculum learning | `false` |
-
-<i>**curriculum_type**</i>: [string]
-
-| Description                                                       | Default |
-| ----------------------------------------------------------------- | ------- |
-| Type of curriculum difficulty metric. Currently support `seqlen`. | N/A     |
-
-
-<i>**min_difficulty**</i>: [integer]
-
-| Description                   | Default |
-| ----------------------------- | ------- |
-| The starting difficulty level | N/A     |
-
-<i>**max_difficulty**</i>: [integer]
-
-| Description                 | Default |
-| --------------------------- | ------- |
-| The ending difficulty level | N/A     |
-
-<i>**schedule_type**</i>: [string]
-
-| Description                                                                                        | Default |
-| -------------------------------------------------------------------------------------------------- | ------- |
-| Type of curriculum schedule. Currently support `fixed_linear`, `fixed_root`, and `fixed_discrete`. | N/A     |
-
-
-<i>**total_curriculum_step**</i>: [integer]
-
-| Description                                                                                                                                      | Default |
-| ------------------------------------------------------------------------------------------------------------------------------------------------ | ------- |
-| Total number of steps for the curriculum learning. One of the `schedule_config` when the `fixed_linear` and `fixed_root` schedule_type are used. | N/A     |
-
-<i>**difficulty_step**</i>: [integer]
-
-| Description                                                                                                                                                                                                                                                                                          | Default |
-| ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
-| At any time, the curriculum learning difficulty must be multiple of this `difficulty_step`. Set this to multiple of 8 (for FP16 data) or 16 (for INT8 data) to enable NVIDIA Tensor Core acceleration. One of the `schedule_config` when the `fixed_linear` and `fixed_root` schedule_type are used. | N/A     |
-
-<i>**root_degree**</i>: [integer]
-
-| Description                                                                                                                | Default |
-| -------------------------------------------------------------------------------------------------------------------------- | ------- |
-| Root degree of the curriculum schedule function. One of the `schedule_config` when the `fixed_root` schedule_type is used. | N/A     |
-
-<i>**difficulty**</i>: [list of integer]
-
-| Description                                                                                                                         | Default |
-| ----------------------------------------------------------------------------------------------------------------------------------- | ------- |
-| List of difficulty levels to be used during schedule. One of the `schedule_config` when the `fixed_discrete` schedule_type is used. | N/A     |
-
-<i>**max_step**</i>: [list of integer]
-
-| Description                                                                                                                  | Default |
-| ---------------------------------------------------------------------------------------------------------------------------- | ------- |
-| List of which step to change difficulty level. One of the `schedule_config` when the `fixed_discrete` schedule_type is used. | N/A     |
 
 ### Monitoring Module
 
