@@ -823,6 +823,46 @@ def _two_group_adam():
     return torch.optim.Adam([{"params": [dense], "lr": 0.1}, {"params": [expert], "lr": 0.2}], betas=(0.9, 0.99))
 
 
+def test_one_cycle_preserves_per_group_beta2():
+    model = torch.nn.Linear(2, 1)
+    reference = torch.nn.Linear(2, 1)
+    reference.load_state_dict(model.state_dict())
+    beta2s = [0.999, 0.95]
+
+    def make_optimizer(module):
+        return torch.optim.Adam([{
+            "params": [param],
+            "betas": (0.9, beta2)
+        } for param, beta2 in zip(module.parameters(), beta2s)],
+                                lr=0.1)
+
+    optimizer = make_optimizer(model)
+    expected_optimizer = make_optimizer(reference)
+    scheduler = OneCycle(optimizer,
+                         cycle_min_lr=0.01,
+                         cycle_max_lr=0.1,
+                         cycle_first_step_size=2,
+                         cycle_second_step_size=2,
+                         decay_step_size=2,
+                         decay_lr_rate=0.1)
+    assert [group["betas"][1] for group in optimizer.param_groups] == beta2s
+
+    inputs = torch.tensor([[1.0, -2.0]])
+    for _ in range(6):
+        for actual_group, expected_group, beta2 in zip(optimizer.param_groups, expected_optimizer.param_groups,
+                                                       beta2s):
+            expected_group["lr"] = actual_group["lr"]
+            expected_group["betas"] = (actual_group["betas"][0], beta2)
+        for module, optim in [(model, optimizer), (reference, expected_optimizer)]:
+            optim.zero_grad()
+            module(inputs).square().sum().backward()
+            optim.step()
+        for actual, expected in zip(model.parameters(), reference.parameters()):
+            torch.testing.assert_close(actual, expected)
+        scheduler.step()
+        assert [group["betas"][1] for group in optimizer.param_groups] == beta2s
+
+
 def test_one_cycle_accepts_per_group_lr_and_momentum_lists():
     # cycle_min_lr, cycle_max_lr, cycle_min_mom and cycle_max_mom are all documented as
     # "float or list ... for each parameter group", but OneCycle only broadcast a scalar,
