@@ -467,7 +467,7 @@ class InsertPostInitMethodToModuleSubClasses(object):
                     fn_to_apply(module_to_apply_fn_to)
 
                     for param in params_to_apply_fn_to:
-                        dist.broadcast(param.data, 0, group=param.ds_process_group)
+                        dist.broadcast(param.data.view(torch.uint8), 0, group=param.ds_process_group)
 
                     for param in params_to_apply_fn_to:
                         param.partition(has_been_updated=True)
@@ -1197,9 +1197,9 @@ class Init(InsertPostInitMethodToModuleSubClasses):
         self._convert_to_deepspeed_param(param)
         partition_group = self.get_partition_dp_group(param)
         if dist.get_world_group() == partition_group:
-            dist.broadcast(param.data, 0, partition_group)
+            dist.broadcast(param.data.view(torch.uint8), 0, partition_group)
         else:
-            dist.broadcast(param.data, dist.get_global_rank(partition_group, 0), partition_group)
+            dist.broadcast(param.data.view(torch.uint8), dist.get_global_rank(partition_group, 0), partition_group)
         param.partition()
 
     def _convert_to_zero_parameters(self, param_list):
@@ -2537,7 +2537,7 @@ class GatheredParameters:
                     f"the accelerator device. If you don't need to broadcast updates, use modifier_rank=None.")
 
         handles = [
-            dist.broadcast(p.data,
+            dist.broadcast(p.data.view(torch.uint8),
                            self.src_rank_by_group[id(p.ds_process_group)],
                            group=p.ds_process_group,
                            async_op=True) for p in self.params
