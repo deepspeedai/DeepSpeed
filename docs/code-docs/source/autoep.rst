@@ -132,6 +132,23 @@ median moved by 0.3% between the two jobs while the collective baseline moved
 by 2.5%. The advantage grows with routing imbalance: at the most skewed
 step measured, the collective path degraded to 116 ms while DeepEP stayed flat.
 
+Within one model, all MoE layers that agree on EP group, expert count, top-k,
+hidden size, capacity, ``comm_num_sm`` and ``comm_qp_margin`` share a single
+DeepEP buffer, which is every layer of a normal model. A buffer reserves fabric
+resources that are not reported as device memory and that run out: measured on
+32 H100s across four nodes, the twenty-eighth buffer per rank fails inside
+``ncclDevCommCreate``, so one buffer per layer put a 27-layer ceiling on the
+backend there. Buffers are also slow to build, about 15 seconds each on 16
+H100s and 22 on 32, so sharing removes minutes of startup as well. The buffer is
+released once the last layer holding it is torn down.
+
+Sharing stops at the model. Two models converted separately get their own
+buffers even on the same EP group with identical geometry, because they are
+driven independently: an actor and a frozen reference model in a reinforcement
+learning loop need not reach their MoE layers in any fixed order relative to
+each other, and a shared DeepEP communication context would make that order
+matter. The cost is one extra buffer per model against a ceiling of 27.
+
 ``comm_num_sm`` matters because communication competes with the expert GEMM for
 SMs. The default of 12 was chosen by measuring whole steps: 8 SMs gave a median
 297.9 ms against 265.4 ms at 12, and larger budgets were slower again.
