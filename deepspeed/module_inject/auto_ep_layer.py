@@ -555,8 +555,6 @@ class AutoEPMoELayer(nn.Module):
             persistent=False,
         )
 
-        # Router-logit cache
-        self._cached_router_logits = None
         # Resolved once per layer: a DeepEP exchange sizes its buffer at
         # construction, so it is built on first use and kept.
         self.comm_backend = config.comm_backend
@@ -564,24 +562,6 @@ class AutoEPMoELayer(nn.Module):
         self.comm_qp_margin = config.comm_qp_margin
         self._deepep_exchange = None
         self.comm_max_tokens_per_rank = config.comm_max_tokens_per_rank
-        self._register_logit_hook()
-
-    def _register_logit_hook(self):
-        """Cache logits only for MoE blocks that return them directly."""
-        if self.router_logits_capture_target != "router" or not self.return_router_logits:
-            return
-
-        def hook_fn(module, input, output):
-            x = input[0]  # [T, H]
-            logits = module.gate(x)  # [T, E_global]
-            if self.router_logits_capture_mode == "post_score":
-                if self.router.score_func == "softmax":
-                    logits = torch.softmax(logits.float(), dim=-1).to(logits.dtype)
-                elif self.router.score_func == "sigmoid":
-                    logits = torch.sigmoid(logits.float()).to(logits.dtype)
-            self._cached_router_logits = logits
-
-        self.router.register_forward_hook(hook_fn)
 
     def set_deepspeed_parallelism(
         self,
@@ -721,11 +701,17 @@ class AutoEPMoELayer(nn.Module):
             output = output + shared_expert_output
 
         if self.return_router_logits:
-            logits = self._cached_router_logits
-            self._cached_router_logits = None
+            logits = None
+            if self.router_logits_capture_target == "router":
+                # Keep logits local so checkpoint early-stop cannot leave a graph owned by the layer.
+                logits = self.router.gate(x)
+                if self.router_logits_capture_mode == "post_score":
+                    if self.router.score_func == "softmax":
+                        logits = torch.softmax(logits.float(), dim=-1).to(logits.dtype)
+                    elif self.router.score_func == "sigmoid":
+                        logits = torch.sigmoid(logits.float()).to(logits.dtype)
             return output, logits
 
-        self._cached_router_logits = None
         return output
 
     def forward(
@@ -741,13 +727,6 @@ class AutoEPMoELayer(nn.Module):
             [B, S, H] or ([B, S, H], [T, E]) if return_router_logits.
             Some HF MoE contracts return ([T, H], [T, E]) instead.
         """
-        try:
-            return self._forward_impl(hidden_states)
-        finally:
-            # Checkpoint replay can stop before _finalize_output, leaving a graph owned by this cache.
-            self._cached_router_logits = None
-
-    def _forward_impl(self, hidden_states: torch.Tensor) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         bsz, seqlen, hdim = hidden_states.shape
         x = hidden_states.reshape(-1, hdim)  # [T, H]
 

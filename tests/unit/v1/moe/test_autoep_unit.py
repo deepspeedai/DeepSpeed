@@ -939,17 +939,39 @@ class TestRoutingAndLayerSemantics:
                                ep_rank=0,
                                config=_runtime_config(enabled=True, autoep_size=1))
         captured = []
-        handle = layer.router.gate.register_forward_hook(
-            lambda _module, _args, output: captured.append(output.detach()))
         hidden_states = torch.randn(2, 8, 64)
-        try:
+        with layer.router.gate.register_forward_hook(lambda _module, _args, output: captured.append(output.detach())):
             layer(hidden_states)
-        finally:
-            handle.remove()
         # HF model-level recording must see one set of logits per MoE layer, not a second cache projection.
         assert len(captured) == 1
         expected = nn.functional.linear(hidden_states.reshape(-1, 64), layer.router.gate.weight)
         torch.testing.assert_close(captured[0], expected)
+
+    @pytest.mark.parametrize("capture_mode,score_func", [("raw", "softmax"), ("post_score", "softmax"),
+                                                         ("post_score", "sigmoid")])
+    def test_router_cache_returned_logits_match_gate(self, capture_mode, score_func):
+        source = MockMoEBlock(num_experts=4, ffn_hidden=128, hidden_size=64)
+        layer = AutoEPMoELayer(_make_spec(return_router_logits=True,
+                                          router_logits_capture_target="router",
+                                          router_logits_capture_mode=capture_mode,
+                                          score_func=score_func),
+                               source,
+                               ep_size=1,
+                               ep_rank=0,
+                               config=_runtime_config(enabled=True, autoep_size=1))
+        inputs = torch.randn(2, 8, 64, requires_grad=True)
+        reference_inputs = inputs.detach().clone().requires_grad_(True)
+
+        _, logits = layer(inputs)
+        expected = source.gate(reference_inputs.reshape(-1, 64))
+        if capture_mode == "post_score":
+            expected = expected.softmax(dim=-1) if score_func == "softmax" else expected.sigmoid()
+
+        torch.testing.assert_close(logits, expected)
+        actual_grads = torch.autograd.grad(logits.square().mean(), (inputs, layer.router.gate.weight))
+        expected_grads = torch.autograd.grad(expected.square().mean(), (reference_inputs, source.gate.weight))
+        for actual_grad, expected_grad in zip(actual_grads, expected_grads):
+            torch.testing.assert_close(actual_grad, expected_grad)
 
     @pytest.mark.parametrize("return_logits", [False, True])
     @pytest.mark.parametrize("checkpoint_mode", [None, False, True])
@@ -970,8 +992,6 @@ class TestRoutingAndLayerSemantics:
         reference_optimizer = torch.optim.SGD(reference.parameters(), lr=1e-4)
         candidate_optimizer = torch.optim.SGD(candidate.parameters(), lr=1e-4)
         gate_tensors = []
-        handle = candidate.router.gate.register_forward_hook(
-            lambda _module, _args, output: gate_tensors.append(weakref.ref(output)))
 
         def train_step(layer, optimizer, inputs, mode):
             optimizer.zero_grad(set_to_none=True)
@@ -989,7 +1009,8 @@ class TestRoutingAndLayerSemantics:
                       loss.detach().clone(), x.grad.detach().clone())
             return values, grads
 
-        try:
+        with candidate.router.gate.register_forward_hook(
+                lambda _module, _args, output: gate_tensors.append(weakref.ref(output))):
             for _step in range(2):
                 inputs = torch.randn(2, 8, 64, device=device)
                 expected_values, expected_grads = train_step(reference, reference_optimizer, inputs, None)
@@ -1008,8 +1029,6 @@ class TestRoutingAndLayerSemantics:
                 # Weak observers do not themselves retain the replay gate tensors or their autograd graph.
                 assert all(tensor_ref() is None for tensor_ref in gate_tensors)
                 gate_tensors.clear()
-        finally:
-            handle.remove()
 
     def test_router_cache_is_released_after_expert_failure(self, monkeypatch):
         source = MockMoEBlock(num_experts=4, ffn_hidden=128, hidden_size=64)
@@ -1025,10 +1044,14 @@ class TestRoutingAndLayerSemantics:
             raise RuntimeError("expert failure")
 
         monkeypatch.setattr(layer.experts, "forward", fail_expert)
-        with pytest.raises(RuntimeError, match="expert failure"):
-            layer(torch.randn(2, 8, 64))
-        # Pin the stale-cache bug on exceptional exits as well as checkpoint early-stop exits.
-        assert layer._cached_router_logits is None
+        gate_tensors = []
+        with layer.router.gate.register_forward_hook(
+                lambda _module, _args, output: gate_tensors.append(weakref.ref(output))):
+            with pytest.raises(RuntimeError, match="expert failure"):
+                layer(torch.randn(2, 8, 64))
+        gc.collect()
+        assert gate_tensors
+        assert all(tensor_ref() is None for tensor_ref in gate_tensors)
 
 
 SPLIT_PLAN_EP_SIZE = 3

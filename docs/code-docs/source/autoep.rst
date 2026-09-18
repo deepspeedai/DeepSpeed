@@ -89,10 +89,10 @@ Weights-only/module-only Universal Checkpoint loads use the converted
 Models using Hugging Face's model-level router-logit recording capture the
 existing gate output; AutoEP does not compute a second projection just to
 populate an unused cache. Models whose MoE blocks return router logits
-directly retain that return contract and its gradients. Temporary router
-logits are cleared on every forward exit, including non-reentrant checkpoint
-replay early-stop and exceptions, so the layer does not keep the replay
-autograd graph alive between training steps.
+directly compute them locally when constructing the return value, preserving
+that return contract and its gradients. No router-logit tensor is stored on
+the layer, so checkpoint replay early-stop and exceptions cannot leave a
+router-logit cache keeping the autograd graph alive between training steps.
 
 **Communication backend (optional):**
 
