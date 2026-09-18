@@ -94,12 +94,19 @@ _KV_HEAD_LEAVES = ("k_proj", "key", "wk", "v_proj", "value", "wv")
 # is resolved by shape rather than by which config fields happen to exist.
 _MLA_Q_LEAVES = ("q_b_proj", )
 _MLA_KV_LEAVES = ("kv_b_proj", )
-# A single matrix holding Q, K and V, or an MLA down-projection that mixes latent and rope
-# components. Neither splits into uniform heads, so leave them on the full-matrix path.
+# A single matrix holding Q, K and V. It does split into uniform heads: every head is head_dim
+# contiguous rows of dim 0 in both layouts that ship - sectioned (`cat([q, k, v])`) and
+# interleaved per KV group (Falcon, GPT-NeoX) - so the head *count* of a section is irrelevant
+# to the split. See `_geometry_candidates`.
 _FUSED_QKV_LEAVES = ("qkv_proj", "query_key_value", "c_attn", "in_proj_qkv", "wqkv")
+# MLA down-projections mix latent and rope components, so they have no head structure at all.
 _MLA_DOWN_LEAVES = ("q_a_proj", "kv_a_proj", "kv_a_proj_with_mqa")
 
 QUERY, KV, MLA_Q, MLA_KV, NOT_HEAD_BLOCKED = "query", "kv", "mla_q", "mla_kv", "not-head-blocked"
+FUSED_QKV = "fused_qkv"
+# A fused projection on a module that owns its head geometry: declined rather than resolved
+# from the config. See `_owner_candidate` and `_LINEAR_ATTENTION_OWNERS`.
+OWNER_FUSED = "owner-fused"
 
 
 def _per_head_muon_meta(model: torch.nn.Module):
@@ -138,7 +145,9 @@ def _classify_leaf(leaf: str):
 
     A name is a claim, not a layout. What the leaf resolves to is decided later, by the shape.
     """
-    if any(leaf.startswith(k) for k in _FUSED_QKV_LEAVES) or any(leaf.startswith(k) for k in _MLA_DOWN_LEAVES):
+    if any(leaf.startswith(k) for k in _FUSED_QKV_LEAVES):
+        return FUSED_QKV
+    if any(leaf.startswith(k) for k in _MLA_DOWN_LEAVES):
         return NOT_HEAD_BLOCKED
     if any(leaf.startswith(k) for k in _MLA_Q_LEAVES):
         return MLA_Q
@@ -189,6 +198,13 @@ def _geometry_candidates(kind, meta, text_config):
         candidates.append((num_attention_heads, head_dim, "head-dim"))
     if kind == KV and head_dim is not None:
         candidates.append((num_kv_heads, head_dim, "head-dim"))
+    if kind == FUSED_QKV and head_dim is not None:
+        # Q, K and V in one matrix. GQA gives K/V fewer heads than Q, so the fused total is not
+        # 3 * num_attention_heads and the sections do not share a head count - but the split is
+        # still uniform, because a head is head_dim contiguous rows of dim 0 either way. Asking
+        # for the exact fused total is also what rejects a transposed Conv1D weight (GPT-2's
+        # `c_attn`), whose dim 0 is the input axis and whose rows are only hidden.
+        candidates.append((num_attention_heads + 2 * num_kv_heads, head_dim, "fused-head-dim"))
     return [c for c in candidates if c[0] and c[0] >= 1 and c[1] and c[1] >= 1]
 
 
@@ -230,11 +246,14 @@ def _owner_module(param_name: str, owners):
     return owners.get(".".join(parts[:-2]))
 
 
+def _is_listed_owner(owner) -> bool:
+    """Whether this module's own head geometry, rather than the config's, decides for it."""
+    return owner is not None and type(owner).__name__ in _LINEAR_ATTENTION_OWNERS
+
+
 def _owner_candidate(kind, leaf: str, owner):
     """The geometry a listed linear-attention module says it built this projection with."""
-    if owner is None or kind not in (QUERY, KV):
-        return []
-    if type(owner).__name__ not in _LINEAR_ATTENTION_OWNERS:
+    if not _is_listed_owner(owner) or kind not in (QUERY, KV):
         return []
 
     if kind == QUERY:
@@ -299,10 +318,26 @@ def _resolve_attention_head_count(param_name: str, param: torch.Tensor, meta, te
         return None, "not-attention"
     if kind == NOT_HEAD_BLOCKED:
         return None, NOT_HEAD_BLOCKED
-    owner_candidates = _owner_candidate(kind, leaf, _owner_module(param_name, owners))
+    owner = _owner_module(param_name, owners)
+    if kind == FUSED_QKV and _is_listed_owner(owner):
+        # A listed owner's head geometry is its own, so the config candidates must not be
+        # consulted for its fused projection - that fallback is the coincidence the whitelist
+        # exists to prevent. The owner path has no fused candidate either: a fused matrix only
+        # splits into uniform blocks when its q, k and v widths agree, which a listed owner does
+        # not promise (KimiDeltaAttention carries head_k_dim and head_v_dim separately). Before
+        # this tagger existed every fused leaf was declined, so this keeps that outcome for the
+        # one architecture whose geometry the config does not describe.
+        return None, OWNER_FUSED
+    owner_candidates = _owner_candidate(kind, leaf, owner)
     if owner_candidates:
         return _confirm(param, owner_candidates)
     return _confirm(param, _geometry_candidates(kind, meta, text_config))
+
+
+# Reasons that are a settled outcome for a leaf rather than a candidate that failed to confirm
+# against the shape. These stay on the full-matrix path by design, so they are not reported as
+# an attention name that went unmatched.
+_SETTLED_REASONS = (NOT_HEAD_BLOCKED, "not-attention", OWNER_FUSED)
 
 
 def _report_per_head_tagging(tagged: dict, skipped: dict) -> None:
@@ -324,10 +359,7 @@ def _report_per_head_tagging(tagged: dict, skipped: dict) -> None:
                          "are re-resolved against the shards afterwards. Unset per_head_muon to train "
                          f"without it. Leaves examined: {dict(sorted(skipped.items())) or 'none'}")
 
-    unrecognized = {
-        leaf: reason
-        for leaf, reason in skipped.items() if reason not in (NOT_HEAD_BLOCKED, "not-attention")
-    }
+    unrecognized = {leaf: reason for leaf, reason in skipped.items() if reason not in _SETTLED_REASONS}
     if unrecognized:
         logger.warning(
             "per_head_muon: %s matched an attention name but no candidate geometry confirmed them; "
