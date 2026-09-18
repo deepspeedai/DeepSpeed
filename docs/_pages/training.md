@@ -158,9 +158,6 @@ Below we provide a brief feature list, see our detailed [feature overview](https
   * Efficient data sampling via curriculum learning and efficient data routing via random layerwise token dropping
   * Up to 2x data and 2x time saving during GPT-3/BERT pretraining and GPT/ViT finetuning
   * Or further improve model quality under the same data/time
-* [Progressive Layer Dropping](https://www.deepspeed.ai/2020/10/28/progressive-layer-dropping-news.html)
-  * Efficient and robust compressed training
-  * Up to 2.5x convergence speedup for pre-training
 * [Performance Analysis and Debugging](https://www.deepspeed.ai/features/#performance-analysis-and-debugging)
 * [Mixture of Experts (DeepSpeed MoE)](https://www.deepspeed.ai/tutorials/mixture-of-experts/)
 
