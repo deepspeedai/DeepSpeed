@@ -142,6 +142,9 @@ class _RegisteringAccelerator:
     def unregister_host_memory(self, address):
         self.unregistered.append(address)
 
+    def pin_memory_alignment(self):
+        return 1
+
 
 def test_native_device_registration_and_unpin(monkeypatch, native_pins):
     accelerator = _RegisteringAccelerator()
@@ -227,6 +230,9 @@ def test_device_registration_failure_keeps_mlock(monkeypatch, native_pins):
         def unregister_host_memory(self, address):
             raise AssertionError("unregister must not run when register failed")
 
+        def pin_memory_alignment(self):
+            return 1
+
     monkeypatch.setattr("deepspeed.accelerator.get_accelerator", lambda: _FailingAccelerator())
     monkeypatch.setenv("DS_PIN_MEMORY_REGISTER_DEVICE", "1")
     pinned = native_pins.pin(torch.empty(32), make_copy=False)
@@ -288,17 +294,66 @@ def test_unpin_keeps_allocation_when_unregister_fails(monkeypatch, native_pins):
     assert begin not in native_pins._device_registered
 
 
-@pytest.mark.parametrize(
-    "address, expected_address, expected_bytes",
-    [
-        (4096, 4096, 4096),  # page-aligned: registers unchanged
-        (4096 + 1234, 4096, 4096 + 1234),  # unaligned: extended down with a matching size pad
-    ])
-def test_npu_register_aligns_to_page_boundary(monkeypatch, address, expected_address, expected_bytes):
-    # MAPPED registration requires 4K-aligned addresses; the hook rounds the
-    # address down to the page boundary and pads the size so the registered
-    # range still covers the original request. An already-aligned address
-    # passes through unchanged, and unregister rounds down identically.
+class _AlignedAccelerator(_RegisteringAccelerator):
+
+    def __init__(self, alignment):
+        super().__init__()
+        self._alignment = alignment
+
+    def pin_memory_alignment(self):
+        return self._alignment
+
+
+class _OffsetHandle:
+    """pin_memory-op stand-in whose buffer base sits at a fixed byte offset."""
+
+    def __init__(self, offset):
+        self._offset = offset
+
+    def new_cpu_locked_tensor(self, numel, example):
+        storage = torch.empty(numel * example.element_size() + self._offset, dtype=torch.uint8)
+        return storage[self._offset:].view(example.dtype)
+
+    def free_cpu_locked_tensor_by_ptr(self, address):
+        return True
+
+
+@pytest.mark.parametrize("alignment, offset", [(1, 64), (2048, 1232), (4096, 64), (4096, 0)])
+def test_device_registration_aligns_to_declared_alignment(native_pins, monkeypatch, alignment, offset):
+    # Accelerators declare the alignment their device runtime requires for
+    # host-memory registration. NativePinnedMemory must round the registered
+    # range down to it, pad the size so the full request is covered, and
+    # unregister the same aligned address. Alignment 1 means no requirement,
+    # so the request passes through unchanged.
+    accelerator = _AlignedAccelerator(alignment)
+    monkeypatch.setattr("deepspeed.accelerator.get_accelerator", lambda: accelerator)
+    monkeypatch.setenv("DS_PIN_MEMORY_REGISTER_DEVICE", "1")
+    monkeypatch.setattr(native_pins, "_handle", _OffsetHandle(offset))
+
+    pinned = native_pins.pin(torch.empty(32), make_copy=False)
+    begin = pinned.data_ptr()
+    registered_address, registered_bytes = accelerator.registered[0]
+    if alignment == 1:
+        assert registered_address == begin
+    else:
+        assert registered_address % alignment == 0
+        assert registered_address <= begin < registered_address + alignment
+    assert registered_bytes == pinned.nbytes + (begin - registered_address)
+
+    assert native_pins.unpin(pinned) is True
+    assert accelerator.unregistered == [registered_address]
+
+
+def test_npu_declares_page_alignment():
+    # MAPPED registration rejects non-4K-aligned addresses; the declared
+    # alignment is what makes NativePinnedMemory round ranges down for NPU.
+    accelerator = NPU_Accelerator.__new__(NPU_Accelerator)
+    assert accelerator.pin_memory_alignment() == 4096
+
+
+def test_npu_register_uses_mapped_flag(monkeypatch):
+    # MAPPED is deliberate: PINNED-only registrations fall back to mlock-speed
+    # copies on this platform (measured ~9 GB/s vs ~23 GB/s for 64 MiB buffers).
     registered = []
     unregistered = []
 
@@ -313,10 +368,10 @@ def test_npu_register_aligns_to_page_boundary(monkeypatch, address, expected_add
     monkeypatch.setattr(npu_accelerator, "_npu_host_copy_funcs", lambda: ((register, unregister), None))
     accelerator = NPU_Accelerator.__new__(NPU_Accelerator)
 
-    assert accelerator.register_host_memory(address, 4096) is True
-    assert registered == [(expected_address, expected_bytes, npu_accelerator.ACL_HOST_REG_MAPPED)]
-    accelerator.unregister_host_memory(address)
-    assert unregistered == [expected_address]
+    assert accelerator.register_host_memory(4096, 4096) is True
+    assert registered == [(4096, 4096, npu_accelerator.ACL_HOST_REG_MAPPED)]
+    accelerator.unregister_host_memory(4096)
+    assert unregistered == [4096]
 
 
 def test_npu_device_registration_failure_returns_false(monkeypatch):
