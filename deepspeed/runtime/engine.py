@@ -62,7 +62,7 @@ from deepspeed.runtime.dataloader import DeepSpeedDataLoader
 from deepspeed.runtime.zero.muon.muon_optimizer import MuonWithAuxAdam
 from deepspeed.runtime.constants import \
     ROUTE_TRAIN, ROUTE_PREDICT, ROUTE_EVAL, \
-    PLD_THETA, PLD_GAMMA, BFLOAT16, FP16, GRADIENT_ACCUMULATION_STEPS, \
+    BFLOAT16, FP16, GRADIENT_ACCUMULATION_STEPS, \
     DATA_PARALLEL_GROUP, GLOBAL_RANK, DDP_BFLOAT16, GRADIENT_ALLREDUCE_OP_MEAN
 from deepspeed.runtime.zero.config import ZeroStageEnum
 from deepspeed.checkpoint.constants import (
@@ -101,7 +101,6 @@ from deepspeed.utils.timer import NoopTimer, ThroughputTimer, SynchronizedWallCl
     STEP_GLOBAL_TIMER
 from deepspeed.utils.debug import debug_extract_module_and_param_names, debug_clear_module_and_param_names
 from deepspeed.monitor.monitor import MonitorMaster
-from deepspeed.runtime.progressive_layer_drop import ProgressiveLayerDrop
 from deepspeed.runtime.utils import clip_grad_norm_, compare_tensors_in_structures, maybe_loss_for_backward
 from deepspeed.runtime.data_pipeline.constants import DATA_SAMPLING, \
     DATA_ROUTING, DATA_SAMPLING_ENABLED, CURRICULUM_LEARNING, \
@@ -109,7 +108,6 @@ from deepspeed.runtime.data_pipeline.constants import DATA_SAMPLING, \
     RANDOM_LTD_ENABLED, RANDOM_LTD_LAYER_ID, RANDOM_LTD_LAYER_NUM, \
     RANDOM_LTD_LAYER_TOKEN_LR_SCHEDULE, RANDOM_LTD_LAYER_TOKEN_LR_ENABLED, \
     RANDOM_LTD_GLOBAL_BATCH_SIZE, RANDOM_LTD_MICRO_BATCH_SIZE, DATA_EFFICIENCY
-from deepspeed.runtime.data_pipeline.curriculum_scheduler import CurriculumScheduler
 from deepspeed.runtime.checkpoint_engine import (create_checkpoint_engine, TorchCheckpointEngine, CheckpointCommitInfo)
 
 from deepspeed.runtime.data_pipeline.data_routing.scheduler import RandomLTDScheduler
@@ -543,7 +541,6 @@ class DeepSpeedEngine(Module):
         self.loaded_checkpoint_dp_world_size = None
         self.enable_backward_allreduce = True
         self.inside_no_sync_ctxt = False
-        self.progressive_layer_drop = None
         self.dist_backend = get_accelerator().communication_backend_name()
         self.has_moe_layers = False
         self.num_experts = []
@@ -590,6 +587,9 @@ class DeepSpeedEngine(Module):
         del autoep_replacement_sources
         if self.autotp_size() > 1:
             self._configure_tensor_parallel(model, self.tensor_parallel_config())
+            # Head counts were recorded against the whole model; the parameters are shards now.
+            from deepspeed import resolve_per_head_muon_after_sharding
+            resolve_per_head_muon_after_sharding(model)
         see_memory_usage("DeepSpeed Engine: After args sanity test", force=self.memory_breakdown())
         if mpu is not None:
             if self.elasticity_enabled():
@@ -688,12 +688,6 @@ class DeepSpeedEngine(Module):
         self.save_zero_checkpoint = False
         if not isinstance(self.optimizer, DeepSpeedZeRoOffload):
             self._configure_checkpointing()
-
-        if self.pld_enabled():
-            self.progressive_layer_drop = self._configure_progressive_layer_drop()
-
-        if self.curriculum_enabled_legacy():
-            self.curriculum_scheduler_legacy = self._configure_curriculum_scheduler_legacy()
 
         if self.random_ltd_enabled():
             random_ltd_config = self.random_ltd_config()
@@ -1048,6 +1042,27 @@ class DeepSpeedEngine(Module):
         from deepspeed.runtime.tensor_parallel.config import _get_hf_tp_plan
         hf_tp_plan = _get_hf_tp_plan(model)
 
+        def finalize_autotp(autotp=None, attach_uc_metadata=False):
+            if autotp is not None:
+                autotp.register_replicated_grad_hooks(model)
+
+            from deepspeed.module_inject.layers import VocabParallelLinear
+            vocab_parallel_heads = [module for module in model.modules() if isinstance(module, VocabParallelLinear)]
+            if len(vocab_parallel_heads) > 1:
+                raise ValueError("Unable to choose a loss for multiple no-gather vocab-parallel LM heads")
+            if vocab_parallel_heads:
+                from deepspeed.sequence.cross_entropy import configure_vocab_parallel_loss
+                configure_vocab_parallel_loss(model, vocab_parallel_heads[0])
+            elif tp_config.vocab_parallel_lm_head:
+                # Every partitioning path must agree; otherwise the request degrades into ordinary
+                # AutoTP with a gathered head and no distributed loss, which is easy to miss.
+                raise ValueError(
+                    "vocab_parallel_lm_head requires a supported nn.Linear named 'lm_head' or 'embed_out'")
+
+            if attach_uc_metadata:
+                setattr(model, UNIVERSAL_CHECKPOINT_INFO, collect_autotp_universal_checkpoint_info(model))
+            setattr(model, "ds_autotp_parsed", True)
+
         if partition_config is not None:
             autotp = AutoTP(module=model,
                             all_reduce_linears=(),
@@ -1057,15 +1072,14 @@ class DeepSpeedEngine(Module):
                             orig_layer_impl=None,
                             keep_module_on_host=tp_config.keep_module_on_host,
                             partition_config=partition_config,
+                            vocab_parallel_lm_head=tp_config.vocab_parallel_lm_head,
                             model_config=model_config,
                             tp_grain_size=tp_config.tensor_parallel.tp_grain_size,
                             training_mode=True)
             autotp.set_tensor_parallel_config(tp_size, tp_config.tensor_parallel.tp_group)
             autotp.update_linear_policies()
             autotp._replace_module(model)
-            autotp.register_replicated_grad_hooks(model)
-            setattr(model, UNIVERSAL_CHECKPOINT_INFO, collect_autotp_universal_checkpoint_info(model))
-            setattr(model, "ds_autotp_parsed", True)
+            finalize_autotp(autotp, attach_uc_metadata=True)
             return
 
         if tp_size <= 1:
@@ -1098,6 +1112,7 @@ class DeepSpeedEngine(Module):
                     orig_layer_impl=None,
                     keep_module_on_host=tp_config.keep_module_on_host,
                     partition_config=tp_plan_config,
+                    vocab_parallel_lm_head=tp_config.vocab_parallel_lm_head,
                     model_config=model_config,
                     tp_grain_size=tp_config.tensor_parallel.tp_grain_size,
                     training_mode=True,
@@ -1105,9 +1120,7 @@ class DeepSpeedEngine(Module):
                 autotp.set_tensor_parallel_config(tp_size, tp_config.tensor_parallel.tp_group)
                 autotp.update_linear_policies()
                 autotp._replace_module(model)
-                autotp.register_replicated_grad_hooks(model)
-                setattr(model, UNIVERSAL_CHECKPOINT_INFO, collect_autotp_universal_checkpoint_info(model))
-                setattr(model, "ds_autotp_parsed", True)
+                finalize_autotp(autotp, attach_uc_metadata=True)
                 return
             log_dist(
                 f"AutoTP: effective HuggingFace tp_plan could not be converted; falling back to heuristic AutoTP. "
@@ -1118,13 +1131,30 @@ class DeepSpeedEngine(Module):
             log_dist("AutoTP: no effective HuggingFace tp_plan was found; falling back to heuristic AutoTP.",
                      ranks=[0])
 
+        vocab_head_autotp = None
+        if tp_config.vocab_parallel_lm_head:
+            vocab_head_autotp = AutoTP(module=model,
+                                       all_reduce_linears=(),
+                                       prefix="",
+                                       state_dict=None,
+                                       linear_layer_setting=(torch.nn.Linear, torch.nn.Embedding),
+                                       orig_layer_impl=None,
+                                       keep_module_on_host=tp_config.keep_module_on_host,
+                                       vocab_parallel_lm_head=True,
+                                       model_config=model_config,
+                                       tp_grain_size=tp_config.tensor_parallel.tp_grain_size,
+                                       training_mode=True)
+            vocab_head_autotp.set_tensor_parallel_config(tp_size, tp_config.tensor_parallel.tp_group)
+            vocab_head_autotp._resolve_vocab_parallel_lm_head()
+
         parser_dict = AutoTP.tp_parser(model)
         for client_module, injection_policy in parser_dict:
             tp_config.injection_policy_tuple = injection_policy
             replace_transformer_layer(client_module, model, None, tp_config, model_config, training_mode=True)
 
-        setattr(model, UNIVERSAL_CHECKPOINT_INFO, collect_autotp_universal_checkpoint_info(model))
-        setattr(model, "ds_autotp_parsed", True)
+        if vocab_head_autotp is not None:
+            vocab_head_autotp._replace_vocab_parallel_lm_head()
+        finalize_autotp(attach_uc_metadata=True)
 
     def __del__(self):
         try:
@@ -1285,24 +1315,6 @@ class DeepSpeedEngine(Module):
                 return True
             else:
                 return False
-
-    def pld_enabled(self):
-        return self._config.pld_enabled
-
-    def pld_params(self):
-        return self._config.pld_params
-
-    def pld_theta(self):
-        return self.pld_params()[PLD_THETA]
-
-    def pld_gamma(self):
-        return self.pld_params()[PLD_GAMMA]
-
-    def curriculum_enabled_legacy(self):
-        return self._config.curriculum_enabled_legacy
-
-    def curriculum_params_legacy(self):
-        return self._config.curriculum_params_legacy
 
     def data_efficiency_enabled(self):
         return self._config.data_efficiency_enabled
@@ -2716,15 +2728,6 @@ class DeepSpeedEngine(Module):
 
         return optimizer
 
-    def _configure_progressive_layer_drop(self):
-        pld = ProgressiveLayerDrop(theta=self.pld_theta(), gamma=self.pld_gamma())
-
-        return pld
-
-    def _configure_curriculum_scheduler_legacy(self):
-        scheduler = CurriculumScheduler(self.curriculum_params_legacy())
-        return scheduler
-
     @staticmethod
     def is_map_style_dataset(obj):
         return hasattr(obj, "__getitem__") and hasattr(obj, "__len__")
@@ -2864,20 +2867,6 @@ class DeepSpeedEngine(Module):
 
         if flops_profiler_active:
             self.flops_profiler.start_profile(ignore_list=None)
-
-        if kwargs is not None:
-            if self.module.training:
-                if self.progressive_layer_drop:
-                    kwargs.update(self.progressive_layer_drop.get_state())
-
-            if self.__class__.__name__ != "PipelineEngine":
-                # TODO: The above if condition is a HACK since for PipelineEngine
-                # it's difficult to inject argument in forward pass.
-                if self.module.training and self.curriculum_enabled_legacy():
-                    self.curriculum_scheduler_legacy.update_difficulty(self.global_steps + 1)
-                    if self.curriculum_params_legacy()["curriculum_type"] == "seqlen":
-                        kwargs.update({"curriculum_seqlen": self.curriculum_scheduler_legacy.get_current_difficulty()})
-                        return_modified = True
 
         if self.module.training and self.random_ltd_enabled():
             self.random_ltd_scheduler.update_seq(self.global_steps)
@@ -3548,9 +3537,6 @@ class DeepSpeedEngine(Module):
             if self.checkpoint_engine.is_decoupled():
                 self._commit_decoupled_checkpoint()
 
-            if self.progressive_layer_drop:
-                self.progressive_layer_drop.update_state(self.global_steps)
-
             self._take_model_step(lr_kwargs)
 
             report_progress = self.global_rank == 0 if self.global_rank else True
@@ -3725,12 +3711,6 @@ class DeepSpeedEngine(Module):
             return self._get_optimizer_param("momentum")
         else:
             return self._get_optimizer_param("betas")
-
-    def get_pld_theta(self):
-        if self.progressive_layer_drop:
-            return self.progressive_layer_drop.get_theta()
-        else:
-            return None
 
     def _report_progress(self, step):
         lr = self.get_lr()
