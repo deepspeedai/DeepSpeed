@@ -122,3 +122,57 @@ def test_checkpoint_writer_discovery_and_consumers_load_model_files_once(tmpdir,
     assert checkpoint.get_checkpoint_info(UNIVERSAL_CHECKPOINT_INFO) == {"source": "writer"}
     assert (checkpoint.pp_degree, checkpoint.tp_degree, checkpoint.dp_degree) == (2, 1, 2)
     assert model_loads == checkpoint.mp_rank_files
+
+
+@pytest.mark.parametrize("num_layers,source_pp,target_pp,layer_counts,final_norm_idx", [
+    (70, 12, 12, [6] * 10 + [5] * 2, -1),
+    (70, 12, 6, [12] * 4 + [11] * 2, -1),
+    (8, 4, 4, [2] * 4, -1),
+    (3, 4, 4, [1, 1, 1, 0], -1),
+    (0, 2, 2, [0, 0], -1),
+    (5, 1, 1, [5], -1),
+    (5, 2, 2, [3, 2], -2),
+])
+@pytest.mark.parametrize("source_tp,target_tp", [(1, 1), (2, 2), (2, 1)])
+def test_pipeline_checkpoint_preserves_transformer_layers(tmpdir, num_layers, source_pp, target_pp, layer_counts,
+                                                          final_norm_idx, source_tp, target_tp):
+    # Small real checkpoint files exercise discovery and loading without training a model.
+    dimensions = {CHECKPOINT_PP_DEGREE: source_pp, CHECKPOINT_TP_DEGREE: source_tp}
+    _write_checkpoint_layout(tmpdir, [dimensions] * (source_pp * source_tp))
+    num_saved_layers = num_layers + 2 + (final_norm_idx == -2)
+    for layer_id in range(num_saved_layers):
+        for tp_rank in range(source_tp):
+            state = {
+                "weight": torch.tensor([[layer_id, tp_rank]], dtype=torch.float32),
+                "input_layernorm.weight": torch.tensor([layer_id], dtype=torch.float32),
+            }
+            torch.save(state, os.path.join(str(tmpdir), f"layer_{layer_id:02d}-model_{tp_rank:02d}-model_states.pt"))
+
+    checkpoint = DeepSpeedCheckpoint(str(tmpdir),
+                                     tp_degree=target_tp,
+                                     pp_degree=target_pp,
+                                     final_layer_norm_idx=final_norm_idx)
+    next_layer_id = 1
+    all_layer_keys = []
+    for pp_rank, count in enumerate(layer_counts):
+        layer_ids = list(range(next_layer_id, next_layer_id + count))
+        layer_keys = checkpoint.get_pp_transformer_map(pp_rank)
+        assert layer_keys == [f"layer_{layer_id:02d}" for layer_id in layer_ids]
+        all_layer_keys.extend(layer_keys)
+        for tp_rank in range(target_tp):
+            states = checkpoint.get_transformer_state(tp_index=tp_rank, pp_index=pp_rank)
+            assert len(states) == count
+            shards_per_rank = source_tp // target_tp
+            source_ranks = range(tp_rank * shards_per_rank, (tp_rank + 1) * shards_per_rank)
+            for layer_id, state in zip(layer_ids, states):
+                expected = torch.tensor([[layer_id, rank] for rank in source_ranks], dtype=torch.float32)
+                torch.testing.assert_close(state["weight"], expected, rtol=0, atol=0)
+                torch.testing.assert_close(state["input_layernorm.weight"],
+                                           torch.tensor([layer_id], dtype=torch.float32),
+                                           rtol=0,
+                                           atol=0)
+        next_layer_id += count
+
+    assert all_layer_keys == [f"layer_{layer_id:02d}" for layer_id in range(1, num_layers + 1)]
+    assert checkpoint.get_embedding_layer_id() == "layer_00"
+    assert checkpoint.get_final_norm_layer_id() == f"layer_{num_layers + 1:02d}"
