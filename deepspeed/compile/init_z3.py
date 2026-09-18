@@ -20,6 +20,10 @@ from .util import add_pre_backward_hook, add_post_backward_hook
 from .z3_eager_fallback import DeepCompileZ3EagerFallback
 
 WARMUP = 5
+DEFAULT_Z3_PERSISTENCE_PASSES = (zero3_compile.add_z3_gather_release, selective_gather.selective_gather)
+DEFAULT_Z3_OPTIMIZATION_PASSES = (zero3_compile.add_z3_gather_release, prefetch.schedule_prefetch)
+DEFAULT_Z3_SCHEDULE = ((0, (zero3_compile.add_z3_gather_release, )), (WARMUP, DEFAULT_Z3_PERSISTENCE_PASSES),
+                       (WARMUP + 1, DEFAULT_Z3_OPTIMIZATION_PASSES))
 
 _MISSING = object()
 _DYNAMO_CONFIG_NAMES = ("force_parameter_static_shapes", "force_nn_module_property_static_shapes")
@@ -178,10 +182,9 @@ def init_z3(engine, backend, compile_config, compile_kwargs, schedule=None):
                 offload_activation.offload_activation
             ]))
         else:
-            schedule.append((0, [zero3_compile.add_z3_gather_release]))
-            schedule.append(
-                (WARMUP,
-                 [zero3_compile.add_z3_gather_release, prefetch.schedule_prefetch, selective_gather.selective_gather]))
+            # Persistence is selected in its own compile generation so the following
+            # prefetch generation rebuilds arena plans from the frozen ds_persist set.
+            schedule.extend((step, list(passes)) for step, passes in DEFAULT_Z3_SCHEDULE)
 
     init_schedule(schedule)
 

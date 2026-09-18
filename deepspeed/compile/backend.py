@@ -162,7 +162,8 @@ def _sync_memory_profile_complete(profile_complete: bool, process_group=None) ->
     if not dist.is_initialized():
         return profile_complete
 
-    complete = torch.tensor([1 if profile_complete else 0], device=torch.device(get_accelerator().current_device()))
+    complete = torch.tensor([1 if profile_complete else 0],
+                            device=torch.device(get_accelerator().current_device_name()))
     if process_group is None:
         dist.all_reduce(complete, dist.ReduceOp.MIN)
     else:

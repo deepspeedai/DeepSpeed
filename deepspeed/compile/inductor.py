@@ -313,6 +313,7 @@ def register_custom_ops():
     # Inductor tries to reuse output buffer when possible. We need to disable this behavior for some custom ops.
     # -> It seems that memory region is still reused in some cases. So we clone the inputs for some ops.
     register_fallback_no_reuse(torch.ops.dc.allgather_param.default, never_reuse_input=False, never_reuse_output=True)
+    register_fallback_no_reuse(torch.ops.dc.prefetch_params_fused.default, never_reuse_output=True)
     register_fallback_no_reuse(torch.ops.dc.wait_allgather.default, never_reuse_input=True, never_reuse_output=True)
     register_fallback_no_reuse(torch.ops.dc.release_param.default, never_reuse_input=True, never_reuse_output=False)
     register_fallback_no_reuse(torch.ops.dc.reduce_grad.default,

@@ -28,6 +28,9 @@ class FakeAccelerator:
         self.event_count = 0
 
     def current_device(self):
+        return 7
+
+    def current_device_name(self):
         return "cpu"
 
     def memory_allocated(self):
