@@ -27,7 +27,6 @@
 /deepspeed/checkpoint/ @tjruwase
 /deepspeed/comm/ @guanhuawang
 
-/deepspeed/elasticity/ @tjruwase
 /deepspeed/launcher/ @loadams
 /deepspeed/module_inject/ @hwchen2017 @loadams
 /deepspeed/moe/ @tohtana

@@ -591,12 +591,6 @@ class DeepSpeedEngine(Module):
             from deepspeed import resolve_per_head_muon_after_sharding
             resolve_per_head_muon_after_sharding(model)
         see_memory_usage("DeepSpeed Engine: After args sanity test", force=self.memory_breakdown())
-        if mpu is not None:
-            if self.elasticity_enabled():
-                if not self.is_elastic_model_parallel_supported():
-                    assert not self.elasticity_enabled(), ("Elasticity is not currently supported"
-                                                           " with model parallelism.")
-
         self._set_distributed_vars(args)
 
         dist.configure(self._config)
@@ -1304,17 +1298,6 @@ class DeepSpeedEngine(Module):
 
     def checkpoint_tag_validation_fail(self):
         return self._config.checkpoint_config[CHECKPOINT_TAG_VALIDATION] == ValidationMode.FAIL
-
-    def elasticity_enabled(self):
-        return self._config.elasticity_enabled
-
-    def is_elastic_model_parallel_supported(self):
-        if self.elasticity_enabled():
-            # Add code for finding number of GPUs per node automatically
-            if self._config.num_gpus_per_node % self._config.elastic_model_parallel_size == 0:
-                return True
-            else:
-                return False
 
     def data_efficiency_enabled(self):
         return self._config.data_efficiency_enabled
@@ -2264,7 +2247,6 @@ class DeepSpeedEngine(Module):
         log_dist(f"DeepSpeed Basic Optimizer = {basic_optimizer.__class__.__name__}", ranks=[0])
 
         optimizer_wrapper = self._do_optimizer_sanity_check(basic_optimizer)
-        self._check_muon_can_reach_its_parameters(basic_optimizer, optimizer_wrapper)
 
         if optimizer_wrapper == ZERO_OPTIMIZATION:
             self.optimizer = self._configure_zero_optimizer(basic_optimizer)
@@ -2278,27 +2260,6 @@ class DeepSpeedEngine(Module):
 
         self._configure_autoep_folding_optimizer_gradient_reduction()
         log_dist("DeepSpeed Final Optimizer = {}".format(self.optimizer.__class__.__name__), ranks=[0])
-
-    def _check_muon_can_reach_its_parameters(self, basic_optimizer, optimizer_wrapper):
-        """Refuse the one wrapper that hands Muon flat partitions and does not orthogonalize them.
-
-        `MuonWithAuxAdam.step` tells the two cases apart by shape: a matrix is the weight itself
-        and is orthogonalized there, a 1-D tensor is a ZeRO partition whose update the ZeRO
-        optimizer already applied. `BF16_Optimizer` breaks that reading - it replaces the param
-        groups with flat fp32 partitions (`param_group['params'] = [self.fp32_groups_flat_partition[i]]`)
-        and knows nothing about `use_muon`, so the update is never applied and the step is SGD.
-
-        The original shapes are not recoverable from `step`, so this is a refusal rather than a
-        fix; implementing Muon inside BF16_Optimizer is its own change. Reached by bf16 with
-        `grad_accum_dtype: fp32` at ZeRO stage 1.
-        """
-        if not isinstance(basic_optimizer, MuonWithAuxAdam) or optimizer_wrapper != BFLOAT16:
-            return
-        raise ZeRORuntimeException(
-            "Muon cannot be used with the BF16_Optimizer, which this configuration selects: bf16 "
-            "with grad_accum_dtype fp32 at ZeRO stage 1. That optimizer hands Muon flat fp32 "
-            "partitions and never applies the Newton-Schulz update, so training would silently "
-            "proceed as SGD. Drop grad_accum_dtype, or use ZeRO stage 2 or 3.")
 
     def _configure_autoep_folding_optimizer_gradient_reduction(self):
         configure = getattr(self.optimizer, "configure_autoep_folding_tp_gradient_reduction", None)
