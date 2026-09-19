@@ -168,8 +168,9 @@ class FP16_Optimizer(DeepSpeedOptimizer):
 
             if self.overflow:
                 if self.verbose:
-                    logger.info("[deepspeed] fp16 dynamic loss scale overflow! Skipping step. Attempted loss "
-                                "scale: {}, reducing to {}".format(prev_scale, self.loss_scale_config.cur_scale))
+                    log_dist("[deepspeed] fp16 dynamic loss scale overflow! Skipping step. Attempted loss "
+                             "scale: {}, reducing to {}".format(prev_scale, self.loss_scale_config.cur_scale),
+                             ranks=[0])
                 return self.overflow
 
         scaled_grad_norm = get_global_norm(norm_list=norm_groups)
@@ -403,21 +404,23 @@ class FP16_Optimizer(DeepSpeedOptimizer):
                     self.loss_scale_config.min_loss_scale)
                 self.loss_scale_config.last_overflow_iter = self.loss_scale_config.cur_iter
                 if self.verbose:
-                    logger.info(f"\nGrad overflow on iteration {self.loss_scale_config.cur_iter}")
-                    logger.info(f"Reducing dynamic loss scale from {prev_scale} to {self.loss_scale_config.cur_scale}")
+                    log_dist(f"\nGrad overflow on iteration {self.loss_scale_config.cur_iter}", ranks=[0])
+                    log_dist(f"Reducing dynamic loss scale from {prev_scale} to {self.loss_scale_config.cur_scale}",
+                             ranks=[0])
             else:
                 # Ensure self.loss_scale_config.scale_window updates since last overflow
                 stable_interval = (self.loss_scale_config.cur_iter - self.loss_scale_config.last_overflow_iter) - 1
                 if (stable_interval > 0) and (stable_interval % self.loss_scale_config.scale_window == 0):
                     self.loss_scale_config.cur_scale *= self.loss_scale_config.scale_factor
                     if self.verbose:
-                        logger.info(f"No Grad overflow for {self.loss_scale_config.scale_window} iterations")
-                        logger.info(
-                            f"Increasing dynamic loss scale from {prev_scale} to {self.loss_scale_config.cur_scale}")
+                        log_dist(f"No Grad overflow for {self.loss_scale_config.scale_window} iterations", ranks=[0])
+                        log_dist(
+                            f"Increasing dynamic loss scale from {prev_scale} to {self.loss_scale_config.cur_scale}",
+                            ranks=[0])
         else:
             if skip:
-                logger.info("Grad overflow on iteration: %s", self.loss_scale_config.cur_iter)
-                logger.info("Using static loss scale of: %s", self.loss_scale_config.cur_scale)
+                log_dist(f"Grad overflow on iteration: {self.loss_scale_config.cur_iter}", ranks=[0])
+                log_dist(f"Using static loss scale of: {self.loss_scale_config.cur_scale}", ranks=[0])
         self.loss_scale_config.cur_iter += 1
         return
 
