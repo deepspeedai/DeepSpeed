@@ -94,12 +94,16 @@ _KV_HEAD_LEAVES = ("k_proj", "key", "wk", "v_proj", "value", "wv")
 # is resolved by shape rather than by which config fields happen to exist.
 _MLA_Q_LEAVES = ("q_b_proj", )
 _MLA_KV_LEAVES = ("kv_b_proj", )
-# A single matrix holding Q, K and V, or an MLA down-projection that mixes latent and rope
-# components. Neither splits into uniform heads, so leave them on the full-matrix path.
+# A single matrix holding Q, K and V. It does split into uniform heads: every head is head_dim
+# contiguous rows of dim 0 in both layouts that ship - sectioned (`cat([q, k, v])`) and
+# interleaved per KV group (Falcon, GPT-NeoX) - so the head *count* of a section is irrelevant
+# to the split. See `_geometry_candidates`.
 _FUSED_QKV_LEAVES = ("qkv_proj", "query_key_value", "c_attn", "in_proj_qkv", "wqkv")
+# MLA down-projections mix latent and rope components, so they have no head structure at all.
 _MLA_DOWN_LEAVES = ("q_a_proj", "kv_a_proj", "kv_a_proj_with_mqa")
 
 QUERY, KV, MLA_Q, MLA_KV, NOT_HEAD_BLOCKED = "query", "kv", "mla_q", "mla_kv", "not-head-blocked"
+FUSED_QKV = "fused_qkv"
 
 
 def _per_head_muon_meta(model: torch.nn.Module):
@@ -138,7 +142,9 @@ def _classify_leaf(leaf: str):
 
     A name is a claim, not a layout. What the leaf resolves to is decided later, by the shape.
     """
-    if any(leaf.startswith(k) for k in _FUSED_QKV_LEAVES) or any(leaf.startswith(k) for k in _MLA_DOWN_LEAVES):
+    if any(leaf.startswith(k) for k in _FUSED_QKV_LEAVES):
+        return FUSED_QKV
+    if any(leaf.startswith(k) for k in _MLA_DOWN_LEAVES):
         return NOT_HEAD_BLOCKED
     if any(leaf.startswith(k) for k in _MLA_Q_LEAVES):
         return MLA_Q
@@ -189,6 +195,13 @@ def _geometry_candidates(kind, meta, text_config):
         candidates.append((num_attention_heads, head_dim, "head-dim"))
     if kind == KV and head_dim is not None:
         candidates.append((num_kv_heads, head_dim, "head-dim"))
+    if kind == FUSED_QKV and head_dim is not None:
+        # Q, K and V in one matrix. GQA gives K/V fewer heads than Q, so the fused total is not
+        # 3 * num_attention_heads and the sections do not share a head count - but the split is
+        # still uniform, because a head is head_dim contiguous rows of dim 0 either way. Asking
+        # for the exact fused total is also what rejects a transposed Conv1D weight (GPT-2's
+        # `c_attn`), whose dim 0 is the input axis and whose rows are only hidden.
+        candidates.append((num_attention_heads + 2 * num_kv_heads, head_dim, "fused-head-dim"))
     return [c for c in candidates if c[0] and c[0] >= 1 and c[1] and c[1] >= 1]
 
 

@@ -78,7 +78,8 @@ What is tagged, and what deliberately is not:
 | `k_proj` / `v_proj` / `key` / `value` / `wk` / `wv` | yes | blocked by the KV head count, which differs from the query count under GQA |
 | MLA `q_b_proj`, `kv_b_proj` | yes | the two up-projections, whose per-head widths are `qk_nope + qk_rope` and `qk_nope + v_head_dim` rather than `head_dim` |
 | `o_proj` and other output projections | no | the head structure is on the input dimension, so splitting dim 0 would cut across the wrong axis |
-| fused `qkv_proj` / `query_key_value` / `c_attn` / `wqkv` | no | the three sections do not share a head count under GQA |
+| fused `qkv_proj` / `query_key_value` / `wqkv` / `in_proj_qkv` | yes | every head is `head_dim` contiguous rows of dim 0 in both the sectioned and the interleaved layout, so the fused matrix splits into uniform head blocks even though GQA gives its sections different head counts |
+| GPT-2 `c_attn` | no | a `Conv1D` weight is `[hidden, 3 * hidden]`, so the head axis is dim 1 and dim 0 is not the fused total |
 | MLA `q_a_proj`, `kv_a_proj_with_mqa` | no | down-projections mixing latent and rope components, with no head structure |
 
 **The shape confirms the name.** A leaf name is treated as a claim about the layout, never as
@@ -86,6 +87,17 @@ proof of it. Every geometry the config makes plausible for that name is evaluate
 parameter is tagged only when its rows equal `num_heads * width` exactly for one of them. Two
 geometries that confirm and agree on the head count are not a conflict; two that confirm and
 disagree are, and the parameter is skipped with a warning.
+
+**Fused QKV.** A weight holding Q, K and V splits into uniform `head_dim` blocks for the
+same reason the split projections do: a head is `head_dim` contiguous rows of dim 0 whether the
+layout concatenates the sections (`cat([q_proj, k_proj, v_proj])`) or interleaves them per KV
+group (Falcon's `view(..., num_kv_heads, num_heads // num_kv_heads + 2, head_dim)`, GPT-NeoX's
+per-head `q, k, v`). The two layouts present the same row partition in a different order, and
+per-head Newton-Schulz is block-wise with the same `max(1, head_dim / in_features)**0.5` scale on
+every block, so the update does not depend on which layout the weight uses and the head-count
+asymmetry between Q and K/V never enters it. The candidate requires the exact fused total
+`(num_attention_heads + 2 * num_kv_heads) * head_dim`, which is also what keeps a transposed
+`Conv1D` weight on the full-matrix path.
 
 **Tensor parallelism.** Column-parallel TP splits an attention projection on dim 0, which is
 the axis the heads are on, so a rank holds whole heads and the per-head width is unchanged. That
