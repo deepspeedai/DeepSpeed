@@ -3,10 +3,14 @@
 
 # DeepSpeed Team
 
+from types import SimpleNamespace
+
 import pytest
+import torch
 import deepspeed.comm as dist
 from deepspeed.accelerator import get_accelerator
-from deepspeed.runtime.zenflow.zenflow_stage_1_and_2 import _num_selected_columns
+from deepspeed.runtime.zero.stage_1_and_2 import DeepSpeedZeroOptimizer
+from deepspeed.runtime.zenflow.zenflow_stage_1_and_2 import ZenFlowZeroOptimizerParallel, _num_selected_columns
 
 from unit.common import DistributedTest
 from unit.simple_model import SimpleModel, random_dataloader
@@ -20,6 +24,45 @@ import deepspeed
 ])
 def test_num_selected_columns_has_nonzero_floor(num_columns, topk_ratio, expected):
     assert _num_selected_columns(num_columns, topk_ratio) == expected
+
+
+def _offload_copy_stub(**overrides):
+    # The smallest object `async_inplace_copy_grad_to_fp32_buffer_from_gpu` reads from. The two
+    # gradient accessors are the real ones so the override is exercised against the base contract.
+    stub = SimpleNamespace(
+        grad_position={0: [0, 0, 0, 4]},
+        single_partition_of_fp32_groups=[SimpleNamespace(overlap_grad=[torch.zeros(4)])],
+        master_weights_and_grads_dtype=torch.float32,
+        get_param_id=lambda param: 0,
+        get_overlap_step_state=lambda: 0,
+        use_grad_accum_attribute=True,
+    )
+    stub.get_param_gradient_attribute = DeepSpeedZeroOptimizer.get_param_gradient_attribute.__get__(stub)
+    stub.clear_grad_attribute = DeepSpeedZeroOptimizer.clear_grad_attribute.__get__(stub)
+    for key, value in overrides.items():
+        setattr(stub, key, value)
+    return stub
+
+
+def test_async_inplace_copy_grad_requires_a_gradient():
+    # The base ZeRO-1/2 copy asserts the gradient attribute is set. The override branched on
+    # `grad_accum is None` and then called `.view()` on the None it had just tested for, so a
+    # missing gradient surfaced as an AttributeError from inside the copy.
+    param = SimpleNamespace(grad=None, grad_accum=None)
+
+    with pytest.raises(AssertionError):
+        ZenFlowZeroOptimizerParallel.async_inplace_copy_grad_to_fp32_buffer_from_gpu(_offload_copy_stub(), param)
+
+
+def test_async_inplace_copy_grad_clears_the_attribute_it_consumed():
+    # With use_grad_accum_attribute the copy reads param.grad_accum, so that is what has to be
+    # cleared. Setting param.grad instead leaves the consumed gradient in place, and the next
+    # micro step's _fill_param_grad_accum_attribute adds onto it.
+    param = SimpleNamespace(grad=None, grad_accum=torch.ones(4))
+
+    ZenFlowZeroOptimizerParallel.async_inplace_copy_grad_to_fp32_buffer_from_gpu(_offload_copy_stub(), param)
+
+    assert param.grad_accum is None
 
 
 class BaseZenFlowTest:
