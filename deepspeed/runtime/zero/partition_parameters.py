@@ -2088,8 +2088,10 @@ class Init(InsertPostInitMethodToModuleSubClasses):
                     launch_quantize_handles.append(quant_handle)
             launch_handles.append(h)
 
-        # Wait ensures the operation is enqueued, but not necessarily complete.
-        launch_handles[-1].wait()
+        # gloo handles are independent and the CPU synchronize() below is a
+        # no-op, so every handle must be waited on, not just the last one.
+        for handle in launch_handles:
+            handle.wait()
         if quantize:
             for quant_handle in launch_quantize_handles:
                 quant_handle.wait()
