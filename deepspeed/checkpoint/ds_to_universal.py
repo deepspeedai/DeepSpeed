@@ -61,6 +61,7 @@ from deepspeed.checkpoint.autoep_zero3_metadata import (
     validate_autoep_zero3_partitioned_metadata,
 )
 from deepspeed.checkpoint.affine import ParamAffineMap, AFFINE_MAP_FORMAT_VERSION
+from deepspeed.checkpoint.utils import natural_keys
 
 
 def parse_arguments():
@@ -91,19 +92,6 @@ def parse_arguments():
     args = parser.parse_args()
     print(f'args = {args}')
     return args
-
-
-def atoi(text):
-    return int(text) if text.isdigit() else text
-
-
-def natural_keys(text):
-    '''
-    alist.sort(key=natural_keys) sorts in human order
-    http://nedbatchelder.com/blog/200712/human_sorting.html
-    (See Toothy's implementation in the comments)
-    '''
-    return [atoi(c) for c in re.split(r'(\d+)', text)]
 
 
 def _create_checkpoint_paths(base_folder, iteration, tp_degree, pp_degree):
