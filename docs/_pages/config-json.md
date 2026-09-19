@@ -875,6 +875,14 @@ Configure AutoEP expert parallelism for MoE models. AutoEP automatically detects
 | -------------------------------------------------------------------------------------------------- | ------- |
 | Reserved for expert tensor parallelism. AutoEP currently accepts only `1`; non-1 values are rejected. | `1`     |
 
+***async_split_plan***: [boolean]
+
+| Description                                                                                                                                                | Default |
+| ---------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
+| Overlap the pinned-memory split metadata transfer (device to host) with token sorting and packing. Expert-count AllToAll and split-size computation stay on the caller stream before packing; only the metadata copy uses a separate stream. The host waits for the metadata only immediately before payload dispatch. Requires CUDA, currently requires `tensor_parallel.autotp_size=1`, and has no effect when `autoep_size=1` or `comm_backend="deepep"`. | `false` |
+
+This option reduces the host synchronization exposed by reading split sizes; it does not hide the expert-count AllToAll. Benchmark it with your target model, token count, EP size, and hardware before enabling it. For small workloads, stream/event overhead can outweigh the overlap benefit.
+
 ***preset_model***: [string]
 
 | Description                                                                                                                            | Default |

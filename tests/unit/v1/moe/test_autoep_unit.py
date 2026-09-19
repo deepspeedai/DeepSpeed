@@ -7,6 +7,7 @@
 import ast
 import inspect
 from collections import OrderedDict
+from contextlib import contextmanager
 from types import SimpleNamespace
 
 import pytest
@@ -207,6 +208,7 @@ class TestAutoEPConfig:
         assert disabled.enabled is False
         assert disabled.autoep_size == 1
         assert disabled.validate_folding_routing is False
+        assert disabled.async_split_plan is False
         assert disabled.load_balance_coeff is None
         assert disabled._load_balance_coeff_explicit is False
 
@@ -218,12 +220,14 @@ class TestAutoEPConfig:
             "score_apply": "pre",
             "route_scale": 2.0,
             "validate_folding_routing": True,
+            "async_split_plan": True,
         })
 
         assert config.enabled is True
         assert config.autoep_size == 4
         assert config.preset_model == "mixtral"
         assert config.validate_folding_routing is True
+        assert config.async_split_plan is True
         assert config.load_balance_coeff is None
         assert config._load_balance_coeff_explicit is True
         assert config.score_apply == "pre"
@@ -236,6 +240,22 @@ class TestAutoEPConfig:
                                    world_size=1,
                                    pp_size=1,
                                    tp_size=1,
+                                   sp_size=1)
+
+    def test_async_split_plan_requires_boolean(self):
+        with pytest.raises(ValueError, match="async_split_plan"):
+            validate_autoep_config(AutoEPConfig(enabled=True, async_split_plan="true"),
+                                   world_size=1,
+                                   pp_size=1,
+                                   tp_size=1,
+                                   sp_size=1)
+
+    def test_async_split_plan_rejects_autotp_folding(self):
+        with pytest.raises(ValueError, match="async_split_plan.*AutoEP\\+AutoTP folding"):
+            validate_autoep_config(AutoEPConfig(enabled=True, autoep_size=2, async_split_plan=True),
+                                   world_size=4,
+                                   pp_size=1,
+                                   tp_size=2,
                                    sp_size=1)
 
     def test_combine_impl_rejects_unknown_value(self):
@@ -972,7 +992,7 @@ def _legacy_split_plan(num_tokens_per_expert):
     auto_ep_layer.dist.all_to_all_single(received_flat, expert_counts, group=None)
     received_counts = received_flat.view(SPLIT_PLAN_EP_SIZE, SPLIT_PLAN_LOCAL_EXPERTS)
 
-    return SplitPlan(input_splits, output_splits, received_counts.sum(dim=0), received_counts)
+    return SplitPlan(input_splits, output_splits, received_counts)
 
 
 class TestSplitPlan:
@@ -1024,7 +1044,6 @@ class TestSplitPlan:
         mine = all_counts[ep_rank].view(SPLIT_PLAN_EP_SIZE, SPLIT_PLAN_LOCAL_EXPERTS)
         assert plan.input_splits == mine.sum(dim=1).tolist()
         assert plan.output_splits == received.sum(dim=1).tolist()
-        assert torch.equal(plan.local_counts, received.sum(dim=0))
         assert torch.equal(plan.local_counts_by_source, received)
         assert sum(plan.output_splits) == int(received.sum())
 
@@ -1049,7 +1068,6 @@ class TestSplitPlan:
         assert len(sent) == 1
         assert plan.input_splits == expected.input_splits
         assert plan.output_splits == expected.output_splits
-        assert torch.equal(plan.local_counts, expected.local_counts)
         assert torch.equal(plan.local_counts_by_source, expected.local_counts_by_source)
 
     @pytest.mark.parametrize("scenario", sorted(SPLIT_PLAN_SCENARIOS))
@@ -1067,7 +1085,6 @@ class TestSplitPlan:
 
         assert derived.input_splits == folded.input_splits
         assert derived.output_splits == folded.output_splits
-        assert torch.equal(derived.local_counts, folded.local_counts)
         assert torch.equal(derived.local_counts_by_source, folded.local_counts_by_source)
 
     def test_ep_size_one_needs_no_exchange(self, monkeypatch):
@@ -1085,8 +1102,245 @@ class TestSplitPlan:
         assert sent == []
         assert plan.input_splits == [9]
         assert plan.output_splits == [9]
-        assert torch.equal(plan.local_counts, counts)
         assert torch.equal(plan.local_counts_by_source, counts.view(1, 4))
+
+
+@pytest.fixture
+def async_split_layer(monkeypatch):
+    source = MockMoEBlock(num_experts=4, ffn_hidden=128, hidden_size=64)
+    layer = AutoEPMoELayer(_make_spec(),
+                           source,
+                           ep_size=2,
+                           ep_rank=0,
+                           config=_runtime_config(enabled=True, autoep_size=2, async_split_plan=True))
+    activity = {"buffers": [], "events": [], "waits": [], "records": [], "timeline": [], "stream": "caller"}
+
+    def synchronize():
+        activity["waits"].append("ready")
+        activity["timeline"].append(("synchronize", activity["stream"]))
+
+    def record(event, stream):
+        stream_name = stream.name if hasattr(stream, "name") else stream
+        event.recorded_stream = stream_name
+        if stream_name == "copy":
+            activity["records"].append("submitted")
+        activity["timeline"].append(("record", stream_name))
+
+    event = SimpleNamespace(synchronize=synchronize)
+
+    def create_event():
+        created = event if not activity["events"] else SimpleNamespace(synchronize=synchronize)
+        created.record = lambda stream: record(created, stream)
+        activity["events"].append(created)
+        return created
+
+    def wait_event(event):
+        assert event.recorded_stream == "caller"
+        activity["timeline"].append(("wait_event", "copy"))
+
+    stream = SimpleNamespace(name="copy", wait_event=wait_event)
+
+    @contextmanager
+    def copy_stream(stream):
+        activity["stream"] = "copy"
+        try:
+            yield
+        finally:
+            activity["stream"] = "caller"
+
+    class CUDADeviceCounts(torch.Tensor):
+
+        @property
+        def device(self):
+            return torch.device("cuda", 0)
+
+        def sum(self, *args, **kwargs):
+            if not any(operation == "payload" for operation, _ in activity["timeline"]):
+                activity["timeline"].append(("reduce", activity["stream"]))
+            return super().sum(*args, **kwargs)
+
+    def pin_memory(tensor):
+        activity["buffers"].append(tensor)
+        return tensor
+
+    original_copy = torch.Tensor.copy_
+
+    def copy(tensor, source, *args, **kwargs):
+        if any(tensor is buffer for buffer in activity["buffers"]):
+            activity["timeline"].append(("copy", activity["stream"]))
+            assert kwargs.get("non_blocking") is True
+            assert source.dtype == tensor.dtype
+            # Host storage must not inherit the fake CUDA tensor subclass.
+            source = source.as_subclass(torch.Tensor)
+        return original_copy(tensor, source, *args, **kwargs)
+
+    accelerator = SimpleNamespace(current_device=lambda: 0,
+                                  current_stream=lambda device: activity["stream"],
+                                  Event=create_event,
+                                  Stream=lambda device: stream,
+                                  stream=copy_stream,
+                                  pin_memory=pin_memory)
+
+    def device_counts(_module, _inputs, output):
+        scores, selected, counts = output
+        return scores, selected, counts.as_subclass(CUDADeviceCounts)
+
+    def exchange(output, input_, **kwargs):
+        kind = "payload" if "input_split_sizes" in kwargs else "counts"
+        activity["timeline"].append((kind, activity["stream"]))
+        output.copy_(input_)
+
+    # Counts have CUDA device metadata with host storage so the real planner
+    # can run against deterministic stream/collective protocol doubles.
+    hook = layer.router.register_forward_hook(device_counts)
+    monkeypatch.setattr(auto_ep_layer, "get_accelerator", lambda: accelerator)
+    monkeypatch.setattr(auto_ep_layer.dist, "all_to_all_single", exchange)
+    monkeypatch.setattr(torch.Tensor, "copy_", copy)
+    monkeypatch.setattr(torch.Tensor, "record_stream", lambda tensor, stream: None)
+    auto_ep_layer._get_async_split_plan_stream.cache_clear()
+    yield layer, event, activity
+    hook.remove()
+    auto_ep_layer._get_async_split_plan_stream.cache_clear()
+
+
+class TestAsyncSplitPlanLifecycle:
+    """Pin stream ordering and pending-buffer reuse through layer forwards."""
+
+    def test_only_metadata_copy_uses_side_stream(self, monkeypatch, async_split_layer):
+        layer, _, activity = async_split_layer
+        original_argsort = torch.argsort
+
+        def sort(*args, **kwargs):
+            result = original_argsort(*args, **kwargs)
+            activity["timeline"].append(("sort", activity["stream"]))
+            return result
+
+        monkeypatch.setattr(torch, "argsort", sort)
+        layer(torch.randn(1, 8, 64))
+
+        # Keep count exchange/reductions on the caller stream so only the
+        # metadata transfer overlaps sorting and packing, not count kernels.
+        timeline = activity["timeline"]
+        for operation, stream in timeline:
+            if operation in ("counts", "reduce", "sort", "payload", "synchronize"):
+                assert stream == "caller"
+        assert timeline.count(("counts", "caller")) == 1
+        assert timeline.count(("record", "caller")) == 1
+        assert timeline.count(("wait_event", "copy")) == 1
+        assert timeline.count(("copy", "copy")) == 1
+        assert timeline.count(("record", "copy")) == 1
+        operations = [operation for operation, _ in timeline]
+        assert operations.index("counts") < timeline.index(("record", "caller")) < operations.index("wait_event")
+        assert all(index < timeline.index(("record", "caller")) for index, operation in enumerate(operations)
+                   if operation == "reduce")
+        assert operations.index("wait_event") < operations.index("copy") < timeline.index(("record", "copy"))
+        assert timeline.index(("record", "copy")) < operations.index("sort")
+        assert activity["buffers"][0].dtype == torch.int64
+        assert operations.index("sort") < operations.index("synchronize") < operations.index("payload")
+
+    def test_packing_failure_drains_pending_and_allows_retry(self, monkeypatch, async_split_layer):
+        layer, _, activity = async_split_layer
+        hidden = torch.randn(1, 8, 64)
+        layer.async_split_plan = False
+        expected = layer(hidden)
+        layer.async_split_plan = True
+        packing_error = RuntimeError("token packing failed")
+
+        def fail_packing(*args, **kwargs):
+            raise packing_error
+
+        with monkeypatch.context() as patch:
+            patch.setattr(torch, "argsort", fail_packing)
+            with pytest.raises(RuntimeError) as raised:
+                layer(hidden)
+
+        assert raised.value is packing_error
+        assert activity["waits"] == ["ready"]
+        assert layer._async_split_plan_pending is None
+        actual = layer(hidden)
+        torch.testing.assert_close(actual, expected)
+        assert activity["waits"] == ["ready", "ready"]
+        assert activity["records"] == ["submitted", "submitted"]
+        assert len(activity["buffers"]) == 1
+        # Reuse the dependency event as well as the ready event after draining
+        # a failed forward, without allocating events in the per-layer hot path.
+        assert len(activity["events"]) == 2
+        assert layer._async_split_plan_pending is None
+
+    def test_drain_failure_preserves_original_error_and_pending_buffers(self, monkeypatch, async_split_layer):
+        layer, event, activity = async_split_layer
+        packing_error = RuntimeError("token packing failed")
+
+        def fail_packing(*args, **kwargs):
+            raise packing_error
+
+        def fail_drain():
+            activity["waits"].append("failed")
+            raise RuntimeError("device failed while draining")
+
+        monkeypatch.setattr(torch, "argsort", fail_packing)
+        event.synchronize = fail_drain
+        hidden = torch.randn(1, 8, 64)
+        with pytest.raises(RuntimeError) as raised:
+            layer(hidden)
+        assert raised.value is packing_error
+        pending = layer._async_split_plan_pending
+        assert pending._host_splits is activity["buffers"][0]
+        assert pending._keepalive
+
+        with pytest.raises(RuntimeError, match="already pending"):
+            layer(hidden)
+        assert layer._async_split_plan_pending is pending
+        assert activity["waits"] == ["failed"]
+        assert activity["records"] == ["submitted"]
+
+    @pytest.mark.parametrize("backend, ep_size", [("comm", 1), ("deepep", 1), ("deepep", 2)])
+    def test_unused_async_planner_is_bypassed(self, monkeypatch, backend, ep_size):
+        source = MockMoEBlock(num_experts=4, ffn_hidden=128, hidden_size=64).to(torch.bfloat16)
+        layer = AutoEPMoELayer(_make_spec(),
+                               source,
+                               ep_size=ep_size,
+                               ep_rank=0,
+                               config=_runtime_config(enabled=True,
+                                                      autoep_size=ep_size,
+                                                      comm_backend=backend,
+                                                      comm_max_tokens_per_rank=16))
+        monkeypatch.setattr(auto_ep_layer.dist, "all_to_all_single",
+                            lambda output, input_, **kwargs: output.copy_(input_))
+        # The loopback exchange must not initialize a real EP communicator.
+        monkeypatch.setattr(auto_ep_layer.dist, "barrier", lambda **kwargs: None)
+
+        class LoopbackExchange:
+
+            def __init__(self, *, num_experts, num_max_tokens_per_rank, **kwargs):
+                self.num_local_experts = num_experts // ep_size
+                self.num_max_tokens_per_rank = num_max_tokens_per_rank
+
+            def dispatch(self, tokens, topk_idx, topk_weights):
+                local_experts = topk_idx.flatten() % self.num_local_experts
+                order = torch.argsort(local_experts, stable=True)
+                token_indices = order // topk_idx.shape[1]
+                counts = torch.bincount(local_experts, minlength=self.num_local_experts)
+                self.last_handle = SimpleNamespace(num_expanded_tokens=order.numel(),
+                                                   psum_num_recv_tokens_per_expert=counts.cumsum(0),
+                                                   token_indices=token_indices,
+                                                   num_tokens=tokens.shape[0])
+                return tokens[token_indices], topk_weights.flatten()[order].float(), self.last_handle
+
+            def combine(self, rows, handle):
+                output = rows.new_zeros((handle.num_tokens, rows.shape[1]))
+                return output.index_add_(0, handle.token_indices, rows)
+
+        monkeypatch.setattr(auto_ep_layer, "DeepEPExchange", LoopbackExchange)
+        hidden = torch.randn(1, 8, 64, dtype=torch.bfloat16)
+        expected = layer(hidden)
+        layer.async_split_plan = True
+        for _ in range(2):
+            torch.testing.assert_close(layer(hidden), expected)
+            assert layer._async_split_plan_pending is None
+        assert layer._async_split_plan_host_splits is None
+        assert layer._async_split_plan_ready_event is None
+        assert layer._async_split_plan_dependency_event is None
 
 
 class TestModelDetectionAndReplacement:
