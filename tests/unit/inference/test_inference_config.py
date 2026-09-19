@@ -44,6 +44,44 @@ def test_generate_rejects_input_plus_max_new_tokens_over_budget():
 
 
 @pytest.mark.inference
+def test_generate_rejects_max_length_over_budget():
+    # max_length is already a total (input + new tokens) budget in its own right,
+    # so an overflow expressed that way must be caught even when max_new_tokens
+    # is never set.
+    class GenerateStub(torch.nn.Module):
+
+        def generate(self, *args, **kwargs):
+            return "reached-generate"
+
+    engine = deepspeed.init_inference(GenerateStub(), config={"max_out_tokens": 100, "dtype": torch.float32})
+
+    with pytest.raises(RuntimeError, match="exceed"):
+        engine.generate(input_ids=torch.zeros((1, 90), dtype=torch.long), max_length=4000)
+
+
+@pytest.mark.inference
+def test_generate_with_generation_config_does_not_crash_and_still_checks_budget():
+    # transformers' GenerationConfig defaults num_beams to None (not 1), so the
+    # pre-existing `getattr(gen_config, "num_beams", 1)` returned None instead of
+    # falling back, and `None > 1` raised TypeError before the length guard below
+    # it ever ran -- silently making the generation_config fallback unreachable.
+    from transformers import GenerationConfig
+
+    class GenerateStub(torch.nn.Module):
+
+        def generate(self, *args, **kwargs):
+            return "reached-generate"
+
+    engine = deepspeed.init_inference(GenerateStub(), config={"max_out_tokens": 100, "dtype": torch.float32})
+
+    gen_config = GenerationConfig(max_new_tokens=20)
+    assert gen_config.num_beams is None
+
+    with pytest.raises(RuntimeError, match="exceed"):
+        engine.generate(input_ids=torch.zeros((1, 90), dtype=torch.long), generation_config=gen_config)
+
+
+@pytest.mark.inference
 @pytest.mark.skipif(not get_accelerator().is_available(), reason="requires accelerator")
 class TestInferenceCudaGraphConfig:
 

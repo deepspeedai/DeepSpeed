@@ -621,7 +621,7 @@ class InferenceEngine(Module):
         num_beams = 1
         if "generation_config" in kwargs:
             gen_config = kwargs["generation_config"]
-            num_beams = getattr(gen_config, "num_beams", 1)
+            num_beams = getattr(gen_config, "num_beams", 1) or 1
         if "num_beams" in kwargs:
             num_beams = kwargs["num_beams"]
 
@@ -631,19 +631,31 @@ class InferenceEngine(Module):
 
         if ("input_ids" in kwargs) and (kwargs["input_ids"].dim() == 2):
             # max_out_tokens bounds the KV-cache workspace for the whole generation
-            # (input + newly generated tokens), so requested new tokens must be
-            # included here too, not just the input length.
+            # (input + newly generated tokens). max_length is already a total
+            # (input + new tokens) budget in its own right, so compare against
+            # whichever of max_new_tokens/max_length the caller actually set.
             max_new_tokens = kwargs.get("max_new_tokens", None)
-            if max_new_tokens is None and "generation_config" in kwargs:
-                max_new_tokens = getattr(kwargs["generation_config"], "max_new_tokens", None)
+            max_length = kwargs.get("max_length", None)
+            if "generation_config" in kwargs:
+                gen_config = kwargs["generation_config"]
+                if max_new_tokens is None:
+                    max_new_tokens = getattr(gen_config, "max_new_tokens", None)
+                if max_length is None:
+                    max_length = getattr(gen_config, "max_length", None)
             for input_tensor in kwargs["input_ids"]:
                 tensor_length = input_tensor.shape[-1]
                 total_length = tensor_length if max_new_tokens is None else tensor_length + max_new_tokens
+                if max_length is not None:
+                    total_length = max(total_length, max_length)
                 if total_length > self._config.max_out_tokens:
+                    if max_new_tokens is None and max_length is None:
+                        raise RuntimeError(f"Input with size {tensor_length} exceeds maximum length of "
+                                           f"{self._config.max_out_tokens}. Please increase max_tokens in the "
+                                           "DeepSpeed Inference Config.")
                     raise RuntimeError(
-                        f"Input with size {tensor_length} and max_new_tokens {max_new_tokens} together exceed "
-                        f"maximum length of {self._config.max_out_tokens}. Please increase max_tokens in the "
-                        "DeepSpeed Inference Config.")
+                        f"Input with size {tensor_length}, max_new_tokens {max_new_tokens}, and max_length "
+                        f"{max_length} together exceed maximum length of {self._config.max_out_tokens}. "
+                        "Please increase max_tokens in the DeepSpeed Inference Config.")
 
         return self.module.generate(*inputs, **kwargs)
 
