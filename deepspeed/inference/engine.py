@@ -630,12 +630,20 @@ class InferenceEngine(Module):
                                       "add your request to: https://github.com/deepspeedai/DeepSpeed/issues/2506")
 
         if ("input_ids" in kwargs) and (kwargs["input_ids"].dim() == 2):
+            # max_out_tokens bounds the KV-cache workspace for the whole generation
+            # (input + newly generated tokens), so requested new tokens must be
+            # included here too, not just the input length.
+            max_new_tokens = kwargs.get("max_new_tokens", None)
+            if max_new_tokens is None and "generation_config" in kwargs:
+                max_new_tokens = getattr(kwargs["generation_config"], "max_new_tokens", None)
             for input_tensor in kwargs["input_ids"]:
                 tensor_length = input_tensor.shape[-1]
-                if tensor_length > self._config.max_out_tokens:
+                total_length = tensor_length if max_new_tokens is None else tensor_length + max_new_tokens
+                if total_length > self._config.max_out_tokens:
                     raise RuntimeError(
-                        f"Input with size {tensor_length} exceeds maximum length of {self._config.max_out_tokens}. Please increase max_tokens in the DeepSpeed Inference Config."
-                    )
+                        f"Input with size {tensor_length} and max_new_tokens {max_new_tokens} together exceed "
+                        f"maximum length of {self._config.max_out_tokens}. Please increase max_tokens in the "
+                        "DeepSpeed Inference Config.")
 
         return self.module.generate(*inputs, **kwargs)
 
