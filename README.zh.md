@@ -1,3 +1,8 @@
+<!--
+# SPDX-License-Identifier: Apache-2.0
+# DeepSpeed Team
+-->
+
 [![License Apache 2.0](https://badgen.net/badge/license/apache2.0/blue)](https://github.com/deepspeedai/DeepSpeed/blob/master/LICENSE)
 [![PyPI version](https://badge.fury.io/py/deepspeed.svg)](https://pypi.org/project/deepspeed/)
 [![Downloads](https://static.pepy.tech/badge/deepspeed)](https://pepy.tech/project/deepspeed)
@@ -28,7 +33,7 @@ DeepSpeed 于每月最后一个星期二美东时间 12:00（北京时间次日�
 
 * [2026/05] [在 DeepSpeed 中使用 Muon 优化器](https://github.com/deepspeedai/DeepSpeed/blob/master/blogs/muon-optimizer/README.md)
 
-* [2026/05] [针对 ZeRO-3 的系统 DMA (SDMA)：将通信算子从 AMD GPU 计算单元卸载，实现更优的通信与计算重叠](https://github.com/deepspeedai/DeepSpeed/blob/master/examples/sdma_allgather/README.md)
+* [2026/05] [针对 ZeRO-3 的系统 DMA (SDMA)：将集合通信算子从 AMD GPU 计算单元卸载，实现更优的通信与计算重叠](https://github.com/deepspeedai/DeepSpeed/blob/master/examples/sdma_allgather/README.md)
 
 * [2026/03] DeepSpeed 团队在 ASPLOS 2026 上开展了题为 [“Building Efficient Large-Scale Model Systems with DeepSpeed: From Open-Source Foundations to Emerging Research”](https://supercomputing-system-ai-lab.github.io/events/asplos2026-llm-tutorial/index.html) 的技术专题研讨
 
@@ -138,7 +143,7 @@ DeepSpeed 已无缝集成至众多主流开源深度学习框架与生态：
 | 英特尔 (Intel)       | Intel(R) Gaudi(R) 2 AI 加速器  | hpu              | 是 (Yes) | 是 (Yes)                |
 | 英特尔 (Intel)       | Intel(R) 至强(R) 处理器 (Xeon Processors)         | cpu              | 是 (Yes) | 是 (Yes)                |
 | 英特尔 (Intel)       | Intel(R) 数据中心 GPU Max 系列 (Data Center GPU Max) | xpu              | 是 (Yes) | 是 (Yes)                |
-| 云天励飞/太行 (Tecorigin)   | 可扩展数据分析加速器 (SDAA) | sdaa             | 是 (Yes) | 否 (No)                 |
+| 太初元碁 (Tecorigin)        | 可扩展数据分析加速器 (SDAA) | sdaa             | 是 (Yes) | 否 (No)                 |
 
 ## PyPI 安装
 我们定期向 [PyPI](https://pypi.org/project/deepspeed/) 发布最新版本，在绝大多数场景下推荐直接从 PyPI 安装：
@@ -189,8 +194,8 @@ DeepSpeed 非常欢迎开源社区的贡献！关于代码格式化规范、单�
   <img src="https://contrib.rocks/image?repo=microsoft/DeepSpeed&r="  width="800px"/>
 </a>
 
-## 开发者原创性承诺 (DCO)
-本项目欢迎任何建议与代码贡献。对于绝大多数贡献，您需要同意[开发者原创性承诺 (DCO)](https://wiki.linuxfoundation.org/dco)，声明您认可发布于 https://developercertificate.org 的对应条款并拥有授予相关贡献权限的合法权利。
+## 开发者原创性声明 (DCO)
+本项目欢迎任何建议与代码贡献。对于绝大多数贡献，您需要同意[开发者原创性声明 (DCO)](https://wiki.linuxfoundation.org/dco)，声明您认可发布于 https://developercertificate.org 的对应条款适用于该次特定贡献，并拥有授予相关贡献权限的合法权利。
 
 DCO 针对每次 Git Commit 生效，因此每个提交都需要附加签署声明（Sign-off）。您只需在提交代码时添加 `-s` 参数即可完成签署（例如 `git commit -s -m "Commit message"`）。在 Pull Request 界面中，也可以直接点击 DCO 检查项完成授权。
 
@@ -258,4 +263,4 @@ DCO 针对每次 Git Commit 生效，因此每个提交都需要附加签署声�
 
 ---
 
-> 💡 **文档维护说明**：本中文文档由社区志愿者（@JasonYeYuhe）翻译维护，最后同步更新于 2026年09月13日。如发现内容与官方英文原版存在差异或新特性滞后，欢迎提交 PR 共同完善！
+> 💡 **文档维护说明**：本中文文档由社区志愿者（@JasonYeYuhe）翻译维护，最后同步更新于 2026年09月19日。如发现内容与官方英文原版存在差异或新特性滞后，欢迎提交 PR 共同完善！
