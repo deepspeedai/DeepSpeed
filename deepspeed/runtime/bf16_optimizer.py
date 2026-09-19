@@ -14,7 +14,7 @@ from packaging import version as pkg_version
 from deepspeed.git_version_info import version
 from deepspeed.runtime.utils import (get_global_norm_of_tensors, clip_tensors_by_global_norm, DummyOptim,
                                      align_dense_tensors, all_gather_dp_groups, is_model_parallel_parameter,
-                                     see_memory_usage, graph_process, get_norm_with_moe_layers)
+                                     see_memory_usage, graph_process, get_norm_with_moe_layers, is_optimized_parameter)
 from deepspeed.utils import link_hp_params, lazy_init_hp_params_optimizer_state, fragment_address, groups
 from deepspeed.moe.utils import is_moe_param, is_moe_param_group
 from deepspeed.utils.bwc import bwc_tensor_model_parallel_rank
@@ -158,7 +158,7 @@ class BF16_Optimizer(ZeROOptimizer):
             partition_id = dist.get_rank(group=self.real_dp_process_group[i])
 
             # grab the original list
-            trainable_parameters = [param for param in param_group['params'] if param.requires_grad]
+            trainable_parameters = [param for param in param_group['params'] if is_optimized_parameter(param)]
             self.bf16_groups.append(trainable_parameters)
 
             # create flat bf16 params

@@ -824,6 +824,19 @@ def empty_cache():
     get_accelerator().reset_peak_memory_stats()
 
 
+def is_optimized_parameter(param):
+    """Whether an optimizer wrapper should own ``param``: trainable, with at least one element.
+
+    Frozen parameters have always been left out of the optimizer groups. A zero-element
+    parameter is left out the same way: it has nothing to optimize, and binding it to a flat
+    buffer loses its shape, because torch's ``unflatten_dense_tensors`` hands back a 1-D
+    ``zeros({0})`` for it. Checkpointing records such parameters with the frozen ones (see
+    ``DeepSpeedEngine._get_zero_frozen_param_attributes``) so they are rebuilt with their shape.
+    """
+    numel = param.ds_numel if hasattr(param, "ds_numel") else param.numel()
+    return param.requires_grad and numel > 0
+
+
 def see_memory_usage(message, force=False):
     if not force:
         return

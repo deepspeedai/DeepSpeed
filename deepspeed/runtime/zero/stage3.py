@@ -22,7 +22,7 @@ from deepspeed.utils.pin_memory_tracker import pinned_memory_summary
 from deepspeed.runtime.fp16.loss_scaler import CreateLossScaler
 from deepspeed.runtime.torch_autocast import get_autocast_dtype, get_all_comm_dtypes, is_autocast_initialized, sort_dtypes
 from deepspeed.runtime.comm.coalesced_collectives import reduce_scatter_coalesced, all_to_all_quant_reduce
-from deepspeed.runtime.utils import has_inf_or_nan, inf, is_model_parallel_parameter, mask_nan_or_inf_with_val_inplace, count_used_parameters_in_backward
+from deepspeed.runtime.utils import has_inf_or_nan, inf, is_model_parallel_parameter, mask_nan_or_inf_with_val_inplace, count_used_parameters_in_backward, is_optimized_parameter
 from deepspeed.runtime.zero.partition_parameters import *
 from deepspeed.runtime.zero.config import ZeroStageEnum
 from deepspeed.runtime.zero.offload_config import OffloadDeviceEnum, OffloadStateTypeEnum
@@ -681,7 +681,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         for source_param_group_id, param_group in enumerate(self.optimizer.param_groups):
             trainable_params_by_group = collections.OrderedDict()
             for param in param_group[PARAMS_KEY]:
-                if not param.requires_grad:
+                if not is_optimized_parameter(param):
                     continue
                 process_group = getattr(param, "ds_process_group", self.dp_process_group)
                 trainable_params_by_group.setdefault(id(process_group), (process_group, []))[1].append(param)

@@ -101,7 +101,7 @@ from deepspeed.utils.timer import NoopTimer, ThroughputTimer, SynchronizedWallCl
     STEP_GLOBAL_TIMER
 from deepspeed.utils.debug import debug_extract_module_and_param_names, debug_clear_module_and_param_names
 from deepspeed.monitor.monitor import MonitorMaster
-from deepspeed.runtime.utils import clip_grad_norm_, compare_tensors_in_structures, maybe_loss_for_backward
+from deepspeed.runtime.utils import clip_grad_norm_, compare_tensors_in_structures, maybe_loss_for_backward, is_optimized_parameter
 from deepspeed.runtime.data_pipeline.constants import DATA_SAMPLING, \
     DATA_ROUTING, DATA_SAMPLING_ENABLED, CURRICULUM_LEARNING, \
     CURRICULUM_LEARNING_ENABLED, DATA_SAMPLING_NUM_WORKERS, RANDOM_LTD, \
@@ -4202,7 +4202,7 @@ class DeepSpeedEngine(Module):
         if checkpoint.get(FROZEN_PARAM_FRAGMENTS, None) is not None:
             saved_frozen_params = checkpoint[FROZEN_PARAM_FRAGMENTS]
             for param in self.module.parameters():
-                if param.requires_grad:
+                if is_optimized_parameter(param):
                     continue
                 if param not in self.param_names:
                     raise ValueError(f"failed to find frozen {param} in named params")
@@ -5293,8 +5293,10 @@ class DeepSpeedEngine(Module):
     def _get_zero_frozen_param_attributes(self, attr_func):
         frozen_param_fragments = OrderedDict()
 
+        # "Frozen" here means "not owned by the optimizer", which also covers zero-element
+        # parameters: they are not in the flat groups, so this is where their shape is saved.
         for param in self.module.parameters():
-            if param.requires_grad:
+            if is_optimized_parameter(param):
                 continue
             if param not in self.param_names:
                 raise ValueError(f"failed to find frozen {param} in named params")
