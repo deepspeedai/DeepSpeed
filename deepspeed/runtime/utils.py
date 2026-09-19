@@ -235,8 +235,9 @@ def has_inf_or_nan(x):
     ``bool`` get one from ordinary truthiness.
 
     An empty tensor holds no non-finite value, and the guard is required rather than defensive: ``amax``
-    raises on an empty input. A sparse tensor reaches this on the ``sparse_gradients`` path, where only the
-    stored entries can be non-finite -- the implicit zeros cannot -- so the reduction runs over those.
+    raises on an empty input. A sparse tensor reaches this when the model itself produces natively sparse
+    gradients, where only the stored entries can be non-finite -- the implicit zeros cannot -- so the
+    reduction runs over those.
     """
     if x.is_sparse:
         # ``amax``/``amin`` have no sparse implementation, and the public ``values()`` rejects uncoalesced
