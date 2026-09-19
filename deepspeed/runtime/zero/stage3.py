@@ -1645,10 +1645,26 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
         # process muon updates per subgroup to avoid holding all parameters and states at once
         for i, group_items in params_by_group.items():
-            params = [param for param, _, _ in group_items]
-            if not params:
+            if not group_items:
                 continue
+            self._muon_update_sub_group(i, [(param, dest_offset, param.grad) for param, dest_offset, _ in group_items],
+                                        communication_data_type)
+            for param, _, params_size_offset in group_items:
+                buffer_to_reduce.narrow(0, params_size_offset, param.grad.numel()).data.copy_(param.grad.view(-1),
+                                                                                              non_blocking=False)
 
+    def _muon_update_sub_group(self, i, group_items, communication_data_type: torch.dtype):
+        """Run Muon in place on full gradients, for part of sub-group `i`.
+
+        `group_items` holds `(param, dest_offset, grad)`: `dest_offset` is the parameter's offset
+        in the sub-group's partitioned momentum and `grad` its full-shape gradient. Each rank
+        orthogonalizes a round-robin share of the parameters, then the updates and momentums are
+        all-gathered, so every rank ends with the full update in `grad` and its own momentum
+        partition written back.
+        """
+        params = [param for param, _, _ in group_items]
+        grads = [grad for _, _, grad in group_items]
+        if params:
             momentum_buffer = []
             if self._swappable_optimizer_subgroup(i) and not self.save_muon_momentum_buffer_in_memory:
                 # swap-in once, keep resident through update + writeback
@@ -1678,16 +1694,14 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             process_group = self._get_sub_group_process_group(i)
             world_sz = dist.get_world_size(process_group)
             rank = dist.get_rank(process_group)
-            grads_pad = [param.grad for param in params] + [torch.empty_like(params[-1].grad)] * (
-                (world_sz - len(params) % world_sz) % world_sz)
+            grads_pad = grads + [torch.empty_like(grads[-1])] * ((world_sz - len(params) % world_sz) % world_sz)
             gathered_momentums_pad = gathered_params_momentums + [torch.empty_like(gathered_params_momentums[-1])] * (
                 (world_sz - len(gathered_params_momentums) % world_sz) % world_sz)
             grad_handles = []
             momentum_handles = []
             for base_i in range(len(params))[::world_sz]:
                 if base_i + rank < len(params):
-                    param = params[base_i + rank]
-                    g = param.grad
+                    g = grads[base_i + rank]
                     m = gathered_momentums_pad[base_i + rank]
                     update = muon_update(g,
                                          m,
@@ -1708,17 +1722,17 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
             for handle in momentum_handles:
                 handle.wait()
-            for idx, (param, dest_offset, _) in enumerate(group_items):
+            for idx, (param, dest_offset, grad) in enumerate(group_items):
                 gathered_momentum = gathered_params_momentums[idx]
-                chunk_sz = math.ceil(param.grad.numel() / world_sz)
+                chunk_sz = math.ceil(grad.numel() / world_sz)
                 start_offset = rank * chunk_sz
                 end_offset = start_offset + chunk_sz
-                if end_offset > param.grad.numel():
+                if end_offset > grad.numel():
                     buffer_to_update = torch.zeros(chunk_sz,
-                                                   device=param.grad.device,
+                                                   device=grad.device,
                                                    dtype=self.gradient_accumulation_dtype)
-                    buffer_to_update[:param.grad.numel() -
-                                     start_offset] = gathered_momentum.view(-1).data[start_offset:param.grad.numel()]
+                    buffer_to_update[:grad.numel() -
+                                     start_offset] = gathered_momentum.view(-1).data[start_offset:grad.numel()]
                 else:
                     buffer_to_update = gathered_momentum.view(-1).data[start_offset:end_offset]
                 if self._swappable_optimizer_subgroup(i) and not self.save_muon_momentum_buffer_in_memory:
@@ -1738,9 +1752,42 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                 self.optimizer_swapper.swap_out_optimizer_state(parameter=self.fp32_partitioned_groups_flat[i])
             for handle in grad_handles:
                 handle.wait()
-            for param, _, params_size_offset in group_items:
-                buffer_to_reduce.narrow(0, params_size_offset, param.grad.numel()).data.copy_(param.grad.view(-1),
-                                                                                              non_blocking=False)
+
+    def _apply_muon_to_accumulated_grads(self):
+        """Orthogonalize each Muon parameter's accumulated gradient once per optimizer step.
+
+        Without optimizer offload the reduce path leaves Muon out, so the partitions hold the
+        gradient summed over every micro-batch of the step, as they do for any other optimizer.
+        Running Muon there instead, once per bucket per micro-batch, advanced the momentum
+        `gradient_accumulation_steps` times per step and orthogonalized partial gradients
+        (#8443). Called after the overflow check, so a step the loss scaler discards leaves the
+        momentum alone, and before the norm, which keeps being taken over the Muon update.
+        """
+        if not self.use_muon or self.offload_optimizer:
+            return
+        for i, group in enumerate(self.fp16_groups):
+            if not self.sub_groups_using_muon[i] or not group:
+                continue
+            rank = dist.get_rank(group=self._get_sub_group_process_group(i))
+            partitions = self.averaged_gradients[i]
+            # Bound what is materialized at once, as the reduce path's buckets did.
+            start = 0
+            while start < len(group):
+                end, numel = start, 0
+                while end < len(group) and (end == start or numel + group[end].ds_numel <= self.reduce_bucket_size):
+                    numel += group[end].ds_numel
+                    end += 1
+                params, chunk = group[start:end], partitions[start:end]
+                full_grads = self._partitioned_buffers_all_gather(params, chunk, chunk[0].dtype)
+                group_items = [(param, self.grad_position[self.get_param_id(param)][1], full_grad)
+                               for param, full_grad in zip(params, full_grads)]
+                self._muon_update_sub_group(i, group_items, chunk[0].dtype)
+                for param, partition, update in zip(params, chunk, full_grads):
+                    offset = rank * param.partition_numel()
+                    num_elements = max(0, min(param.partition_numel(), param.ds_numel - offset))
+                    if num_elements > 0:
+                        partition.narrow(0, 0, num_elements).copy_(update.view(-1).narrow(0, offset, num_elements))
+                start = end
 
     @instrument_w_nvtx
     def __avg_scatter_contiguous_grads(self, buffer_to_reduce: Tensor,
@@ -1770,7 +1817,9 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
         grad_partitions = []
         grad_offset_in_buffer = 0
-        self._apply_distributed_muon_update(communication_data_type, buffer_to_reduce)
+        if self.offload_optimizer:
+            # Offload keeps its per-micro-batch Muon; without offload it runs once at the step.
+            self._apply_distributed_muon_update(communication_data_type, buffer_to_reduce)
         for param in params_in_bucket:
             grad = param.grad
             chunk_sz = math.ceil(grad.numel() / world_sz)
@@ -2596,6 +2645,8 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             if self.swap_optimizer:
                 self.optimizer_swapper.log_timers()
             return
+
+        self._apply_muon_to_accumulated_grads()
 
         norm_groups = self._get_norm_groups()
         scaled_global_grad_norm = torch.linalg.vector_norm(torch.stack(norm_groups))
