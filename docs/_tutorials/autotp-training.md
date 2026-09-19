@@ -87,7 +87,7 @@ If your model matches a built-in preset, set `tensor_parallel.preset_model` in t
 }
 ```
 
-For the list of available presets, see [supported models](/code-docs/training#autotp-supported-models).
+For the list of available presets, see [supported models](https://deepspeed.readthedocs.io/en/latest/training.html#autotp-supported-models).
 
 
 
