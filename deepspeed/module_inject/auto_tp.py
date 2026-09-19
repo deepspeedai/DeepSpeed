@@ -146,7 +146,28 @@ class Loading():
             "Qwen3_5MoeRMSNormGated", "DeepseekV2RMSNorm", "DeepseekV3RMSNorm", "DeepseekV2YarnRotaryEmbedding",
             "DeepseekV3YarnRotaryEmbedding", "MoEGate"
         ]
-        return module.__class__ in load_layers or module._get_name() in load_layer_names
+        if module.__class__ in load_layers or module._get_name() in load_layer_names:
+            return True
+        # Every norm above is on the list by class name, and transformers defines one
+        # norm class per architecture -- 233 of them in 5.16.1, of which this list names
+        # 14. The rest reach `_replace_module` and are skipped, so on the meta-device
+        # path their weights are never materialized and stay on meta.
+        #
+        # Recognise them by shape instead: a leaf module whose sole parameter is a 1-D
+        # `weight` is elementwise-affine, which is what `Loading.load` already knows how
+        # to copy. `nn.Linear` and `nn.Embedding` carry 2-D weights and are matched
+        # above, so this admits norms and nothing that wants a different load path.
+        return Loading._is_elementwise_affine_leaf(module)
+
+    def _is_elementwise_affine_leaf(module):
+        if next(module.children(), None) is not None:
+            return False
+        weight = getattr(module, "weight", None)
+        if not isinstance(weight, torch.nn.Parameter) or weight.dim() != 1:
+            return False
+        # A bias, if any, has to match; anything else means this is not a plain norm.
+        extra = {name for name, _ in module.named_parameters(recurse=False)} - {"weight", "bias"}
+        return not extra
 
     def load_buffer(module, state_dict, prefix):
         for name in module._buffers.keys():
@@ -843,6 +864,10 @@ class AutoTP():
                 if any(checking_key in item for item in self.state_dict):
                     Loading.load(child, self.state_dict, checking_key, self.mp_group)
                 else:
+                    # Not in this shard; still take persistent buffers (e.g. BatchNorm stats) off
+                    # meta. Non-persistent ones (rotary inv_freq) are in no shard, so leave them.
+                    if any(name not in child._non_persistent_buffers_set for name in child._buffers):
+                        Loading.load_buffer(child, self.state_dict, checking_key)
                     continue
             if len(child._buffers) != 0 and self.state_dict is not None:
                 Loading.load_buffer(child, self.state_dict, checking_key)
