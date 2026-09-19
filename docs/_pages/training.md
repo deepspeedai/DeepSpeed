@@ -158,14 +158,6 @@ Below we provide a brief feature list, see our detailed [feature overview](https
   * Efficient data sampling via curriculum learning and efficient data routing via random layerwise token dropping
   * Up to 2x data and 2x time saving during GPT-3/BERT pretraining and GPT/ViT finetuning
   * Or further improve model quality under the same data/time
-* [Curriculum Learning](https://www.deepspeed.ai/tutorials/curriculum-learning/)
-  * A curriculum learning-based data pipeline that presents easier or simpler examples earlier during training
-  * Stable and 3.3x faster GPT-2 pre-training with 8x/4x larger batch size/learning rate while maintaining token-wise convergence speed
-  * Complementary to many other DeepSpeed features
-  * Note that the Data Efficiency Library above provides more general curriculum learning support. This legacy curriculum learning feature is still supported but we recommend to use the Data Efficiency Library.
-* [Progressive Layer Dropping](https://www.deepspeed.ai/2020/10/28/progressive-layer-dropping-news.html)
-  * Efficient and robust compressed training
-  * Up to 2.5x convergence speedup for pre-training
 * [Performance Analysis and Debugging](https://www.deepspeed.ai/features/#performance-analysis-and-debugging)
 * [Mixture of Experts (DeepSpeed MoE)](https://www.deepspeed.ai/tutorials/mixture-of-experts/)
 
@@ -404,9 +396,6 @@ can automatically handle batch creation appropriately.
 
 ## Data Efficiency
 Please refer to the [Data Efficiency](/tutorials/data-efficiency/) tutorial.
-
-## Curriculum Learning
-Please refer to the [Curriculum Learning](/tutorials/curriculum-learning/) tutorial. Note that the Data Efficiency Library above provides more general curriculum learning support. This legacy curriculum learning feature is still supported but we recommend to use the Data Efficiency Library.
 
 ## Performance Analysis and Debugging
 
