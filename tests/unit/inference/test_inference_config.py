@@ -60,6 +60,24 @@ def test_generate_rejects_max_length_over_budget():
 
 
 @pytest.mark.inference
+def test_generate_lets_fitting_call_through_when_both_budgets_set():
+    # transformers gives max_new_tokens precedence over max_length when both are
+    # set (see GenerationMixin._prepare_generated_length), so the guard must
+    # mirror that precedence rather than reject on whichever of the two is
+    # larger: a call whose *effective* total (input + max_new_tokens) fits must
+    # not be rejected just because the unused max_length would not have fit.
+    class GenerateStub(torch.nn.Module):
+
+        def generate(self, *args, **kwargs):
+            return "reached-generate"
+
+    engine = deepspeed.init_inference(GenerateStub(), config={"max_out_tokens": 100, "dtype": torch.float32})
+
+    assert engine.generate(input_ids=torch.zeros((1, 90), dtype=torch.long), max_new_tokens=5,
+                           max_length=4000) == "reached-generate"
+
+
+@pytest.mark.inference
 def test_generate_with_generation_config_does_not_crash_and_still_checks_budget():
     # transformers' GenerationConfig defaults num_beams to None (not 1), so the
     # pre-existing `getattr(gen_config, "num_beams", 1)` returned None instead of

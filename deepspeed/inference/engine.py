@@ -644,9 +644,14 @@ class InferenceEngine(Module):
                     max_length = getattr(gen_config, "max_length", None)
             for input_tensor in kwargs["input_ids"]:
                 tensor_length = input_tensor.shape[-1]
-                total_length = tensor_length if max_new_tokens is None else tensor_length + max_new_tokens
-                if max_length is not None:
-                    total_length = max(total_length, max_length)
+                # transformers gives max_new_tokens precedence over max_length when both
+                # are set, so mirror that instead of taking the larger of the two.
+                if max_new_tokens is not None:
+                    total_length = tensor_length + max_new_tokens
+                elif max_length is not None:
+                    total_length = max_length
+                else:
+                    total_length = tensor_length
                 if total_length > self._config.max_out_tokens:
                     if max_new_tokens is None and max_length is None:
                         raise RuntimeError(f"Input with size {tensor_length} exceeds maximum length of "
