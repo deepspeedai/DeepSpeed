@@ -386,7 +386,7 @@ large batch scaling.
 Please refer to the [Learning Rate Range Test](/tutorials/lrrt/) tutorial.
 
 ### 1Cycle Learning Rate Schedule
-Please refer to the [1Cycle Learning Rate Schedule](/tutorials/1Cycle/) tutorial.
+Please refer to the [1Cycle Learning Rate Schedule](/tutorials/one-cycle/) tutorial.
 
 
 ## Simplified Data Loader
