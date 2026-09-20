@@ -5,8 +5,8 @@
 
 This module deliberately stops at the scheduler/cache boundary. The model
 backend owns prompt prefill and decode; the scheduler reports which old cache
-rows survive, which requests retire, and which pending requests can be
-admitted into the newly free rows.
+rows survive, which requests retire, and which pending requests fill newly
+free rows.
 """
 
 from collections import deque
@@ -52,11 +52,9 @@ class ContinuousBatchScheduler:
     All submitted requests share the scheduler's ``max_new_tokens`` budget;
     requests may still retire earlier when the model emits EOS.
     ``schedule`` performs admission/retirement without advancing tokens.
-    ``admit_if`` can defer the FIFO head until the caller's cache layout can
-    accommodate it. ``advance`` represents one decode step for every active
-    request and also retires requests whose token budget has been consumed. A
-    caller may pass explicit finished IDs when the model emits EOS before that
-    budget.
+    ``advance`` represents one decode step for every active request and also
+    retires requests whose token budget has been consumed. A caller may pass
+    explicit finished IDs when the model emits EOS before that budget.
     """
 
     def __init__(self, max_batch_size: int, max_new_tokens: int):
@@ -87,7 +85,7 @@ class ContinuousBatchScheduler:
         self._known_ids.add(request.request_id)
         self._pending.append(request)
 
-    def schedule(self, finished_ids=(), admit_if=None) -> ContinuousBatchUpdate:
+    def schedule(self, finished_ids=()) -> ContinuousBatchUpdate:
         finished_ids = tuple(finished_ids)
         active_by_id = {request.request_id: slot for slot, (request, _) in enumerate(self._active)}
         unknown = set(finished_ids) - active_by_id.keys()
@@ -106,8 +104,6 @@ class ContinuousBatchScheduler:
         for _ in range(free_slots):
             if not self._pending:
                 break
-            if admit_if is not None and not admit_if(self._pending[0]):
-                break
             request = self._pending.popleft()
             admitted.append(request)
             survivors.append((request, 0))
@@ -119,7 +115,7 @@ class ContinuousBatchScheduler:
             self._known_ids.discard(request_id)
         return ContinuousBatchUpdate(tuple(request for request, _ in survivors), keep_slots, retired, tuple(admitted))
 
-    def advance(self, finished_ids=(), admit_if=None) -> ContinuousBatchUpdate:
+    def advance(self, finished_ids=()) -> ContinuousBatchUpdate:
         explicit_finished = set(finished_ids)
         active_ids = {request.request_id for request, _ in self._active}
         unknown = explicit_finished - active_ids
@@ -134,4 +130,4 @@ class ContinuousBatchScheduler:
                 finished.add(request.request_id)
             updated.append((request, generated))
         self._active = updated
-        return self.schedule(finished, admit_if=admit_if)
+        return self.schedule(finished)

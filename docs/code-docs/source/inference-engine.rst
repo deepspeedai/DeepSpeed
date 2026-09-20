@@ -108,8 +108,8 @@ default ``generate()`` path or upgrade Transformers.
 Set ``HybridEngineRolloutConfig(align_decode_fronts=True)`` to enable the
 follow-up alignment path. It derives each request's effective prompt width from
 its attention mask, orders requests from longest to shortest internally, and
-restores the original row order in the returned batch. Retired-row refill is
-admitted only when the prompt fits behind the current decode front; dead cache
+restores the original row order in the returned batch. Retired rows are refilled
+from that pre-sorted pending queue; dead cache
 columns are periodically trimmed together with attention metadata and write
 positions. This option remains disabled by default while the equal-width path
 serves as the baseline.

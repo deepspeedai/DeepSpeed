@@ -76,7 +76,12 @@ class _ForwardProfiler:
 
 @dataclass
 class HybridEngineRolloutConfig:
-    """Configuration for HybridEngineRollout."""
+    """Configuration for HybridEngineRollout.
+
+    ``align_decode_fronts`` is opt-in. When false, continuous batching keeps
+    the existing equal-width padded prompt layout; when true, it uses each
+    request's effective attention-mask length and aligns decode fronts.
+    """
     use_graph_capture: bool = False
     enable_profiling: bool = False
     use_shared_prefill: bool = False
@@ -330,12 +335,7 @@ class HybridEngineRollout(RolloutEngine):
         cache_position = prompt_len
         span_starts = [0] * max_batch_size
 
-        def can_admit(pending_request):
-            if not self.align_decode_fronts:
-                return True
-            return prompt_lengths[pending_request.request_id] <= cache_position
-
-        update = scheduler.schedule(admit_if=can_admit)
+        update = scheduler.schedule()
 
         while update.active:
             keep_slots = torch.tensor(update.keep_slots, dtype=torch.long, device=device)
@@ -449,7 +449,7 @@ class HybridEngineRollout(RolloutEngine):
             if survivor_count:
                 cache_position += 1
             stats["peak_cache_length"] = max(stats["peak_cache_length"], cache_position)
-            update = scheduler.advance(finished_ids, admit_if=can_admit)
+            update = scheduler.advance(finished_ids)
 
         output = self._build_continuous_batch(original_request, responses)
         if profile_accelerator is not None:
@@ -561,12 +561,13 @@ class HybridEngineRollout(RolloutEngine):
             )
             prefill_tokens = prefill_output.logits[:, -1, :].argmax(dim=-1, keepdim=True)
             cache_start = cache_position - prompt_len
-            for layer_idx, prefill_layer in enumerate(prefill_cache.layers):
+            for layer_idx in range(self._cache_layer_count(prefill_cache)):
+                prefill_keys, prefill_values = self._cache_layer_tensors(prefill_cache, layer_idx)
                 target_layer = cache.layers[layer_idx]
                 for source_row, target_row in enumerate(update.admitted_slots):
-                    target_layer.keys[target_row, :, cache_start:cache_position].copy_(prefill_layer.keys[source_row])
+                    target_layer.keys[target_row, :, cache_start:cache_position].copy_(prefill_keys[source_row])
                     target_layer.values[target_row, :, cache_start:cache_position].copy_(
-                        prefill_layer.values[source_row])
+                        prefill_values[source_row])
             for source_row, target_row in enumerate(update.admitted_slots):
                 attention_mask[target_row, cache_start:cache_position].copy_(prompt_attention[source_row])
                 write_positions[target_row] = cache_position
@@ -594,10 +595,11 @@ class HybridEngineRollout(RolloutEngine):
             cache_start = cache_position - prompt_len
             if cache_start < 0:
                 raise ValueError("continuous batching prompt does not fit behind the decode front")
-            for layer_idx, prefill_layer in enumerate(prefill_cache.layers):
+            for layer_idx in range(self._cache_layer_count(prefill_cache)):
+                prefill_keys, prefill_values = self._cache_layer_tensors(prefill_cache, layer_idx)
                 target_layer = cache.layers[layer_idx]
-                target_layer.keys[target_row, :, cache_start:cache_position].copy_(prefill_layer.keys[0])
-                target_layer.values[target_row, :, cache_start:cache_position].copy_(prefill_layer.values[0])
+                target_layer.keys[target_row, :, cache_start:cache_position].copy_(prefill_keys[0])
+                target_layer.values[target_row, :, cache_start:cache_position].copy_(prefill_values[0])
             attention_mask[target_row, cache_start:cache_position].fill_(1)
             write_positions[target_row] = cache_position
         return admitted_tokens
@@ -637,6 +639,19 @@ class HybridEngineRollout(RolloutEngine):
         elif "max_batch_size" in parameters:
             common_kwargs["max_batch_size"] = batch_size
         return static_cache_type(**common_kwargs)
+
+    @staticmethod
+    def _cache_layer_count(cache):
+        if hasattr(cache, "layers"):
+            return len(cache.layers)
+        return len(cache.key_cache)
+
+    @staticmethod
+    def _cache_layer_tensors(cache, layer_idx):
+        if hasattr(cache, "layers"):
+            layer = cache.layers[layer_idx]
+            return layer.keys, layer.values
+        return cache.key_cache[layer_idx], cache.value_cache[layer_idx]
 
     def _build_continuous_batch(self, request, responses):
         response_ids = [torch.cat(responses[index], dim=1) for index in range(request.prompt_ids.shape[0])]
@@ -787,13 +802,13 @@ class HybridEngineRollout(RolloutEngine):
         )
         ds_cache.set_write_position(write_pos)
         # Trigger lazy init then copy real data
-        for layer_idx in range(len(ds_cache.layers)):
+        for layer_idx in range(self._cache_layer_count(ds_cache)):
             ds_layer = ds_cache.layers[layer_idx]
-            hf_layer = prefill_cache.layers[layer_idx]
+            hf_keys, hf_values = self._cache_layer_tensors(prefill_cache, layer_idx)
             if not ds_layer.is_initialized:
-                ds_layer.lazy_initialization(hf_layer.keys, hf_layer.values)
-            ds_layer.keys[:, :, :prompt_len, :].copy_(hf_layer.keys[:, :, :prompt_len, :])
-            ds_layer.values[:, :, :prompt_len, :].copy_(hf_layer.values[:, :, :prompt_len, :])
+                ds_layer.lazy_initialization(hf_keys, hf_values)
+            ds_layer.keys[:, :, :prompt_len, :].copy_(hf_keys[:, :, :prompt_len, :])
+            ds_layer.values[:, :, :prompt_len, :].copy_(hf_values[:, :, :prompt_len, :])
 
         output_ids = [prompt_ids, next_token]
 
