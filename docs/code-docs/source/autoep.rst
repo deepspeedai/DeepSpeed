@@ -153,31 +153,13 @@ Requirements and limits:
 - Not compatible with folded tensor parallelism
   (``expert_tensor_parallel_size > 1``), which is rejected at setup.
 
-**Python cyclic GC policy (experimental):**
+**Python cyclic GC (experimental):**
 
-Large Python model graphs can accumulate cyclic objects during training. A
-generation-2 collection pauses one rank's Python thread, and the pause can then
-be exposed as collective wait time on every expert-parallel rank. AutoEP offers
-an opt-in policy that collects once after engine initialization and disables
-automatic cyclic collection until the engine is destroyed:
-
-.. code-block:: json
-
-    {
-      "expert_parallel": {
-        "enabled": true,
-        "autoep_size": 8,
-        "python_gc_policy": "disable_during_training"
-      }
-    }
-
-The default is ``"default"``, which leaves Python GC unchanged. The policy is
-process-wide and reference-counted across DeepSpeed engines. Applications that
-create cyclic Python objects during training should call
-``engine.collect_python_gc()`` at a safe boundary such as after checkpointing.
-Call ``engine.destroy()`` when the engine is no longer needed to restore the
-process's original automatic-GC state; restoration does not rely on Python
-finalization because disabled cyclic GC cannot reclaim engine reference cycles.
+Large Python model graphs can accumulate cyclic objects during training, and a
+generation-2 collection pauses one rank's Python thread, which is then exposed
+as collective wait time on every expert-parallel rank. The top-level
+``disable_python_gc`` option addresses this. It is process-wide rather than
+AutoEP-specific, so it is documented with the general configuration options.
 
 **Fused weighted restore (experimental):**
 

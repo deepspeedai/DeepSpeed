@@ -2,6 +2,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # DeepSpeed Team
 
+import gc
+from types import SimpleNamespace
+
+import pytest
+
+from deepspeed.runtime.config import DeepSpeedConfig
+from deepspeed.runtime.engine import DeepSpeedEngine
 from deepspeed.runtime.python_gc import PythonGCManager
 
 
@@ -64,6 +71,60 @@ def test_python_gc_manager_preserves_disabled_state(monkeypatch):
 def test_python_gc_manager_explicit_collection(monkeypatch):
     monkeypatch.setattr("deepspeed.runtime.python_gc.gc.collect", lambda: 11)
     assert PythonGCManager().collect() == 11
+
+
+def test_engine_disable_python_gc_true_acquires_manager_without_autoep(monkeypatch):
+    calls = []
+
+    def acquire():
+        calls.append("acquire")
+        return 3
+
+    monkeypatch.setattr("deepspeed.runtime.python_gc.python_gc_manager.acquire", acquire)
+    engine = SimpleNamespace(
+        _config=DeepSpeedConfig({
+            "train_batch_size": 1,
+            "disable_python_gc": True,
+        }),
+        _python_gc_generation=None,
+    )
+
+    DeepSpeedEngine._configure_python_gc(engine)
+
+    assert calls == ["acquire"]
+    assert engine._python_gc_generation == 3
+
+
+@pytest.mark.parametrize("initial_gc_enabled", [False, True])
+def test_engine_disable_python_gc_false_preserves_existing_state(monkeypatch, initial_gc_enabled):
+    calls = []
+
+    monkeypatch.setattr("deepspeed.runtime.python_gc.python_gc_manager.acquire", lambda: calls.append("acquire"))
+    was_enabled = gc.isenabled()
+    if initial_gc_enabled:
+        gc.enable()
+    else:
+        gc.disable()
+
+    try:
+        engine = SimpleNamespace(
+            _config=DeepSpeedConfig({
+                "train_batch_size": 1,
+                "disable_python_gc": False,
+            }),
+            _python_gc_generation=None,
+        )
+
+        DeepSpeedEngine._configure_python_gc(engine)
+
+        assert calls == []
+        assert gc.isenabled() is initial_gc_enabled
+        assert engine._python_gc_generation is None
+    finally:
+        if was_enabled:
+            gc.enable()
+        else:
+            gc.disable()
 
 
 def test_python_gc_manager_restores_enabled_state_after_fork(monkeypatch):

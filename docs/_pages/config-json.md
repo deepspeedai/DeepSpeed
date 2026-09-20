@@ -1073,6 +1073,14 @@ Use a built-in preset but override specific naming/weight fields for a fine-tune
 - AutoEP with ZeRO Stage 3 is supported only without AutoTP, sequence parallelism, hpZeRO secondary tensor groups, non-1 `expert_tensor_parallel_size`, or quantized gradients
 - ZeRO Stage 3 saves AutoEP checkpoints partition-natively and supports same-topology save/load, module-only loads, optimizer-state-skipping loads, and universal checkpoint conversion. Universal loads can resume at a different data-parallel world size, a different `autoep_size`, or both (when the target `autoep_size` divides the expert count), including weights-only/module-only loads from the converted `fp32.pt` parameter files
 
+### Python cyclic garbage collection
+
+<i>**disable_python_gc**</i>: [boolean]
+
+| Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     | Default |
+| ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
+| Disable automatic Python cyclic garbage collection for the lifetime of a DeepSpeed engine. When `true`, DeepSpeed collects once after engine initialization, disables automatic cyclic GC, and restores the process's original automatic-GC state when the last engine using this option is destroyed. When `false`, DeepSpeed leaves the existing Python GC state unchanged. Applications that create cyclic Python objects during training should call `engine.collect_python_gc()` at a safe boundary such as after checkpointing. | `false` |
+
 ### Logging
 
 <i>**steps_per_print**</i>: [integer]

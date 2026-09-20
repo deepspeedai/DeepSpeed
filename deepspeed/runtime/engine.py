@@ -1193,8 +1193,7 @@ class DeepSpeedEngine(Module):
         return python_gc_manager.collect()
 
     def _configure_python_gc(self):
-        autoep_config = self._config.expert_parallel_config
-        if autoep_config.enabled and autoep_config.python_gc_policy == "disable_during_training":
+        if self._config.disable_python_gc:
             from deepspeed.runtime.python_gc import python_gc_manager
             self._python_gc_generation = python_gc_manager.acquire()
 
