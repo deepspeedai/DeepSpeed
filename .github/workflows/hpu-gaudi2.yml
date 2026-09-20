@@ -53,7 +53,6 @@ jobs:
         test_autotuning.py
         test_compression.py
         test_dist.py
-        test_elastic.py
         test_ds_arguments.py
         test_run.py
         test_multinode_runner.py

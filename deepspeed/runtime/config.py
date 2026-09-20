@@ -31,24 +31,7 @@ from ..compile.config import CompileConfig
 from deepspeed import comm as dist
 from deepspeed.runtime.config_utils import DeepSpeedConfigModel
 
-from ..git_version_info import version as __version__
 from ..utils import logger
-
-from ..elasticity import (
-    elasticity_enabled,
-    compute_elastic_config,
-    ensure_immutable_elastic_config,
-)
-from ..elasticity.config import ElasticityConfigError
-from ..elasticity.constants import (
-    ELASTICITY,
-    IGNORE_NON_ELASTIC_BATCH_INFO,
-    IGNORE_NON_ELASTIC_BATCH_INFO_DEFAULT,
-    MODEL_PARALLEL_SIZE,
-    MODEL_PARALLEL_SIZE_DEFAULT,
-    NUM_GPUS_PER_NODE,
-    NUM_GPUS_PER_NODE_DEFAULT,
-)
 
 from ..profiling.config import DeepSpeedFlopsProfilerConfig
 from ..autotuning.config import DeepSpeedAutotuningConfig
@@ -119,6 +102,10 @@ _REMOVED_TOP_LEVEL_CONFIG_KEYS = {
     "sparse_attention":
     "DeepSpeed Sparse Attention has been removed; the 'sparse_attention' configuration block is no longer "
     f"supported. See {_REMOVED_FEATURES_ISSUE}.",
+    "elasticity":
+    "Elastic training has been removed; the 'elasticity' configuration block is no longer supported. "
+    "Set train_batch_size / train_micro_batch_size_per_gpu / gradient_accumulation_steps directly. "
+    f"See {_REMOVED_FEATURES_ISSUE}.",
     "curriculum_learning":
     "Legacy top-level 'curriculum_learning' has been removed. Use "
     "'data_efficiency.data_sampling.curriculum_learning' instead. "
@@ -484,76 +471,8 @@ class DeepSpeedConfig(object):
             self.global_rank = 0
             self.world_size = 1
         logger.info(f"Config mesh_device {mesh_device} world_size = {self.world_size}")
-        # If elastic-mode enabled, update compute + update _param_dict
-        elastic_batch_params = {}
-        self.elasticity_enabled = elasticity_enabled(self._param_dict)
-        if self.elasticity_enabled:
-            logger.info("DeepSpeed elasticity support enabled")
-            final_batch_size, valid_gpus, micro_batch_size = compute_elastic_config(
-                ds_config=self._param_dict,
-                target_deepspeed_version=__version__,
-                world_size=self.world_size,
-            )
-
-            elastic_dict = self._param_dict[ELASTICITY]
-
-            # Ensure the resource scheduler saw the same elastic config we are using at runtime
-            ensure_immutable_elastic_config(runtime_elastic_config_dict=elastic_dict)
-
-            self.elastic_model_parallel_size = elastic_dict.get(MODEL_PARALLEL_SIZE, MODEL_PARALLEL_SIZE_DEFAULT)
-            if self.elastic_model_parallel_size < 1:
-                raise ElasticityConfigError("Model-Parallel size cannot be less than 1, "
-                                            f"given model-parallel size: {self.elastic_model_parallel_size}")
-
-            self.num_gpus_per_node = elastic_dict.get(NUM_GPUS_PER_NODE, NUM_GPUS_PER_NODE_DEFAULT)
-            if self.num_gpus_per_node < 1:
-                raise ElasticityConfigError("NUmber of GPUs per node cannot be less than 1, "
-                                            f"given number of GPUs per node: {self.num_gpus_per_node}")
-
-            ignore_non_elastic_batch_info = elastic_dict.get(IGNORE_NON_ELASTIC_BATCH_INFO,
-                                                             IGNORE_NON_ELASTIC_BATCH_INFO_DEFAULT)
-
-            if not ignore_non_elastic_batch_info:
-                batch_params = [
-                    TRAIN_BATCH_SIZE,
-                    TRAIN_MICRO_BATCH_SIZE_PER_GPU,
-                    GRADIENT_ACCUMULATION_STEPS,
-                ]
-                if any(map(lambda t: t in self._param_dict, batch_params)):
-                    raise ElasticityConfigError("One or more batch related parameters were found in your " \
-                        f"ds_config ({TRAIN_BATCH_SIZE}, {TRAIN_MICRO_BATCH_SIZE_PER_GPU}, and/or " \
-                        f"{GRADIENT_ACCUMULATION_STEPS}). These parameters *will not be used* since " \
-                        "elastic training is enabled, which takes control of these parameters. " \
-                        "If you want to suppress this error (the parameters will be silently ignored) " \
-                        f"please set {IGNORE_NON_ELASTIC_BATCH_INFO}':true in your elasticity config.")
-
-            # micro_bsz * world_size * gas = total_batch_size
-            # gas = total_batch_size // (micro_bsz * world_size)
-            gradient_accu_steps = final_batch_size // (micro_batch_size * self.world_size)
-
-            if TRAIN_BATCH_SIZE in self._param_dict:
-                logger.warning("[Elasticity] overriding training_batch_size: "
-                               f"{self._param_dict[TRAIN_BATCH_SIZE]} -> {final_batch_size}")
-            if TRAIN_MICRO_BATCH_SIZE_PER_GPU in self._param_dict:
-                logger.warning("[Elasticity] overriding train_micro_batch_size_per_gpu: "
-                               f"{self._param_dict[TRAIN_MICRO_BATCH_SIZE_PER_GPU]} -> {micro_batch_size}")
-            if GRADIENT_ACCUMULATION_STEPS in self._param_dict:
-                logger.warning("[Elasticity] overriding gradient_accumulation_steps: "
-                               f"{self._param_dict[GRADIENT_ACCUMULATION_STEPS]} -> {gradient_accu_steps}")
-
-            logger.info(f"[Elasticity] valid GPU counts: {valid_gpus}")
-
-            elastic_batch_params = {
-                TRAIN_BATCH_SIZE: final_batch_size,
-                TRAIN_MICRO_BATCH_SIZE_PER_GPU: micro_batch_size,
-                GRADIENT_ACCUMULATION_STEPS: gradient_accu_steps,
-            }
-
-        # Pass a copy so that user json is unmodified, e.g. for logging. The elasticity
-        # overrides go into that copy for the same reason -- all three are top-level
-        # keys, so the shallow copy keeps them off the caller's dict.
+        # Pass a copy so that the user json is unmodified, e.g. for logging.
         param_dict = copy.copy(self._param_dict)
-        param_dict.update(elastic_batch_params)
         self._initialize_params(param_dict)
         self._configure_train_batch_size()
         self._do_sanity_check()
