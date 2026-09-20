@@ -23,7 +23,6 @@ class CurriculumScheduler(object):
         self.state[CURRICULUM_LEARNING_MAX_DIFFICULTY] = config[CURRICULUM_LEARNING_MAX_DIFFICULTY]
         self.state[CURRICULUM_LEARNING_CURRENT_DIFFICULTY] = config[CURRICULUM_LEARNING_MIN_DIFFICULTY]
         self.state[CURRICULUM_LEARNING_SCHEDULE_TYPE] = config[CURRICULUM_LEARNING_SCHEDULE_TYPE]
-        self.first_step = True
         if config[CURRICULUM_LEARNING_SCHEDULE_TYPE] == CURRICULUM_LEARNING_SCHEDULE_FIXED_DISCRETE:
             """
             The schedule_config is a list of difficulty and a list of max
@@ -104,20 +103,8 @@ class CurriculumScheduler(object):
         else:
             raise RuntimeError('Unsupported curriculum schedule type')
 
-    def get_current_difficulty(self):
-        return self.state[CURRICULUM_LEARNING_CURRENT_DIFFICULTY]
-
-    def set_current_difficulty(self, difficulty):
-        self.state[CURRICULUM_LEARNING_CURRENT_DIFFICULTY] = difficulty
-
     def set_custom_get_difficulty(self, schedule_function):
         self.custom_get_difficulty = schedule_function
-
-    def get_state(self):
-        return self.state
-
-    def set_state(self, state):
-        self.state = state
 
     def __fixed_discrete_get_difficulty(self, global_steps):
         s_state = self.state[CURRICULUM_LEARNING_SCHEDULE_CONFIG]
@@ -137,9 +124,9 @@ class CurriculumScheduler(object):
             (self.state[CURRICULUM_LEARNING_MAX_DIFFICULTY] - self.state[CURRICULUM_LEARNING_MIN_DIFFICULTY]) +
             self.state[CURRICULUM_LEARNING_MIN_DIFFICULTY])
         next_difficulty -= (next_difficulty % s_state[CURRICULUM_LEARNING_SCHEDULE_DIFFICULTY_STEP])
-        # Flooring to a multiple of difficulty_step can land below the configured start, and
-        # does for pairs the tutorial itself recommends: min_difficulty 8 with difficulty_step
-        # 16 gives 0 on the first step, which is a zero-length sequence for the seqlen metric.
+        # Flooring to a multiple of difficulty_step can land below the configured start:
+        # min_difficulty 8 with difficulty_step 16 gives 0 on the first step, which is a
+        # zero-length sequence for the seqlen metric.
         # Raise the floor to the first multiple of the step at or above min_difficulty rather
         # than to min_difficulty itself: the constructor warns that every difficulty has to be
         # a multiple of the step (8 for FP16, 16 for INT8), and a min_difficulty that is not

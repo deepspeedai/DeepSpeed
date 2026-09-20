@@ -52,7 +52,7 @@ jobs:
           pip install image-similarity-measures
           python -m pip install opencv-python==4.6.* --force-reinstall
           python -m pip install docutils==0.18.1 jinja2==3.0 urllib3==1.26.11 ninja
-          python -m pip install .[dev,1bit,autotuning,sd]
+          python -m pip install .[dev,autotuning,sd]
           ds_report
       - name: Python environment
         run: |
