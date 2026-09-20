@@ -5,8 +5,10 @@ name: modal-torch-latest
 # pull_request_target, every GitHub-side checkout and Python entrypoint comes
 # from the trusted base commit; merge queue runs resolve that trusted base from
 # merge_group.base_sha. The Sandbox only runs for merge queue entries, pushes to
-# master, and manual runs, so plain PR events never spend Modal quota. See
-# .github/workflows/TEST_SELECTION.md.
+# master, and manual runs, so plain PR events never spend Modal quota. Master
+# pushes select the tests their own diff impacted; a nightly scheduled run
+# always executes the full suite and feeds regression triage
+# (.github/workflows/nightly-bisect.yml). See .github/workflows/TEST_SELECTION.md.
 
 on:
   workflow_dispatch:
@@ -40,6 +42,11 @@ on:
     branches:
       - master
 
+  # Nightly full-suite run of master. This is the only event whose failures feed
+  # automated regression triage; see .github/workflows/nightly-bisect.yml.
+  schedule:
+    - cron: '0 10 * * *'
+
   pull_request_target:
     types: [review_requested, ready_for_review, synchronize]
     branches:
@@ -57,7 +64,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -106,12 +113,22 @@ jobs:
         env:
           EVENT_NAME: ${{ github.event_name }}
           CANDIDATE_ROOT: ${{ runner.temp }}/deepspeed-candidate
+          GITHUB_EVENT_BEFORE: ${{ github.event.before }}
         run: |
           if [ "$EVENT_NAME" = "pull_request_target" ] || [ "$EVENT_NAME" = "merge_group" ]; then
             python3 ci/tests_fetcher.py \
               --workflow modal-torch-latest \
               --repo-root "$CANDIDATE_ROOT" \
               --base refs/ci/base
+          elif [ "$EVENT_NAME" = "push" ] && [ "$GITHUB_EVENT_BEFORE" != "0000000000000000000000000000000000000000" ]; then
+            # Diff master against the tip it replaced so a push runs only the tests
+            # its own commits impacted; the fetcher fails safe to the full suite if
+            # the merge-base is unavailable (unresolvable ref, force push, ...).
+            git -c protocol.version=2 fetch --no-tags --depth=100 origin "$GITHUB_EVENT_BEFORE" master
+            python3 ci/tests_fetcher.py \
+              --workflow modal-torch-latest \
+              --repo-root "$GITHUB_WORKSPACE" \
+              --base "$GITHUB_EVENT_BEFORE"
           else
             python3 ci/tests_fetcher.py \
               --workflow modal-torch-latest \

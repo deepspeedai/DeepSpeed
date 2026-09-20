@@ -23,10 +23,13 @@ one config — see [Adding a workflow](#adding-a-new-workflow).
 
 - On a PR, `ci/tests_fetcher.py` diffs your branch against the base branch, traces
   the import graph from your changed files to the impacted tests, and writes the
-  list to `ci/.test_selection/test_list.txt`.
+  list to `ci/.test_selection/test_list.txt`. A `push` to `master` selects the same
+  way, diffed against the tip it replaced; a nightly scheduled run always executes
+  the full suite.
 - The trusted controller validates that list, then fetches, installs, and tests
   the exact candidate SHA inside a no-secret Modal Sandbox. The Sandbox runs
-  only for merge queue entries, `push` to `master` (always the full suite), and
+  only for merge queue entries, `push` to `master` (the push's own impacted
+  tests), the nightly scheduled full run, and
   manual runs — a plain PR event never spends Modal quota.
 - It is **fail-safe**: anything it can't reason about safely → run the *full* suite.
   It never silently runs *fewer* tests than reality.
@@ -100,10 +103,39 @@ The design is a small, self-contained take on HuggingFace `transformers`'
 Independent of `mode`, `deploy` is also skipped on `pull_request_target` runs,
 so pushing to a PR never spends Modal quota — the `collect-tests` summary still
 previews what the queue will run. The Sandbox actually executes on
-`merge_group` (the merged tree, gating the merge), `push` to `master`, and
-`workflow_dispatch`. On `merge_group` the candidate is the merge-group commit
-in the base repository, diffed against the queue's base SHA, so the selection
-covers exactly what the entry would introduce.
+`merge_group` (the merged tree, gating the merge), `push` to `master`,
+`schedule`, and `workflow_dispatch`. On `merge_group` the candidate is the
+merge-group commit in the base repository, diffed against the queue's base SHA,
+so the selection covers exactly what the entry would introduce. On `push` the
+candidate is the pushed `master` tip, diffed against `github.event.before`, so
+each landing change re-verifies its own selection without a second full-suite
+run; an unresolvable merge-base fails safe to the full suite.
+
+### Nightly full-suite runs and regression triage
+
+A scheduled nightly (`cron`, see `modal-torch-latest.yml`) always runs the full
+suite. Its outcome feeds `nightly-bisect.yml`:
+
+- **Green** → the `nightly-last-green` tag moves to the tested SHA. The tag is
+  the good endpoint for any later bisect, so days that fail for operational
+  reasons (no GPU instance, timeout) simply leave the tag in place and widen the
+  next bisect range instead of narrowing it wrongly.
+- **Infra** (the Sandbox never got a GPU instance) → nothing is concluded; no
+  bisect, no tag move.
+- **Timeout** (the Sandbox/job time budget ran out) → an issue is opened; a
+  timeout is not bisectable, because intermediate commits would time out too.
+- **Real test failures** → `git bisect run ci/bisect_nightly.sh` between
+  `nightly-last-green` and the failing SHA, dispatching `modal-torch-latest` at
+  each step; the culprit lands in an issue. An inconclusive intermediate step
+  (infra/timeout/job kill, or a revision predating the failure-class sentinel)
+  aborts the bisect rather than skipping the commit, because a skip silently
+  shrinks the searched range.
+
+The controller (`ci/torch_latest.py`) classifies its own failures for this
+routing: it prints a `DS_CI_FAILURE_CLASS=infra|timeout|test` sentinel line and
+exits with a dedicated code (75 / 124 / 1). A failed run with no sentinel was
+killed before the controller could classify itself, which triage treats as a
+timeout.
 
 
 ## How a decision is made
@@ -111,7 +143,7 @@ covers exactly what the entry would introduce.
 `TestSelector.select()` in `ci/tests_fetcher.py` runs these checks in order; the
 first that matches wins:
 
-1. **No base ref** (push / manual) → `all`.
+1. **No base ref** (nightly / manual) → `all`.
 2. **Base ref unresolvable** → `all`.
 3. **No merge-base** with the base (e.g. shallow clone, unrelated history) → `all`.
    A diff here would be wrong, so we never narrow on it.

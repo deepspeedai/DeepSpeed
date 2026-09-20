@@ -146,12 +146,27 @@ def _fake_modal(
     state = SimpleNamespace(image_calls=[], app_calls=[], create_calls=[])
     sandbox = FakeSandbox(candidate_sha, fail_label, cleanup_failure, wait_failure, never_starts)
 
+    class FakeImage:
+
+        def __init__(self):
+            self.layers = []
+
+        def run_commands(self, *commands):
+            self.layers.append(("run_commands", commands))
+            return self
+
+        def pip_install(self, *packages, index_url=None):
+            self.layers.append(("pip_install", packages, index_url))
+            return self
+
+    image = FakeImage()
+
     class Image:
 
         @staticmethod
-        def from_registry(image, add_python=None):
-            state.image_calls.append((image, add_python))
-            return ("image", image, add_python)
+        def from_registry(registry, add_python=None):
+            state.image_calls.append((registry, add_python))
+            return image
 
     class App:
 
@@ -398,8 +413,7 @@ def test_remote_plan_is_structural_and_preserves_order_and_scope():
         commands = torch_latest.build_remote_commands(inputs)
         assert all(isinstance(command.argv, tuple) for command in commands)
         labels = [command.label for command in commands]
-        assert labels.index("install runtime requirements") < labels.index("reinstall Torch packages")
-        assert labels.index("reinstall Torch packages") < labels.index("install candidate DeepSpeed")
+        assert labels.index("install runtime requirements") < labels.index("install candidate DeepSpeed")
         pytest_command = next(command for command in commands if command.label == "run pytest")
         separator = pytest_command.argv.index("--")
         assert pytest_command.argv[separator + 1:] == ("tests/unit/v1/test_one.py", )
@@ -414,7 +428,7 @@ def test_remote_plan_is_structural_and_preserves_order_and_scope():
 def test_sandbox_kwargs_are_fixed_and_secret_free():
     kwargs = torch_latest.build_sandbox_kwargs("image")
     assert kwargs["gpu"] == "l40s:2"
-    assert kwargs["timeout"] == 4200
+    assert kwargs["timeout"] == 5400
     assert torch_latest.SANDBOX_ACQUIRE_TIMEOUT_SECONDS == 1800
     assert kwargs["secrets"] == []
     assert kwargs["network_file_systems"] == {}
@@ -478,11 +492,35 @@ def test_controller_aborts_without_running_tests_when_sandbox_never_starts():
     try:
         env = _valid_env(path)
         fake, _, sandbox = _fake_modal("a" * 40, never_starts=True)
-        _expect_error(torch_latest.run_controller, env, fake, exception=torch_latest.SandboxStartTimeout)
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            code = torch_latest.run_controller(env, fake)
+        assert code == torch_latest.EXIT_INFRA
+        assert "DS_CI_FAILURE_CLASS=infra" in stdout.getvalue()
         assert sandbox.terminated
         assert not any("pytest" in " ".join(args) for args, _ in sandbox.exec_calls)
     finally:
         torch_latest.SANDBOX_ACQUIRE_TIMEOUT_SECONDS = original
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_controller_reports_sandbox_lifetime_exhaustion_as_timeout():
+    # Catches a lifetime-budget death being misrouted to git-bisect as a candidate regression:
+    # a run that dies at the Sandbox ceiling must classify as a timeout, not a test failure.
+    root, path = _selection_file("tests/unit/v1\n")
+    original = torch_latest.SANDBOX_TIMEOUT_SECONDS
+    torch_latest.SANDBOX_TIMEOUT_SECONDS = 0.05
+    try:
+        env = _valid_env(path)
+        fake, _, sandbox = _fake_modal("a" * 40, fail_label="pytest")
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            code = torch_latest.run_controller(env, fake)
+        assert code == torch_latest.EXIT_TIMEOUT
+        assert "DS_CI_FAILURE_CLASS=timeout" in stdout.getvalue()
+        assert sandbox.terminated
+    finally:
+        torch_latest.SANDBOX_TIMEOUT_SECONDS = original
         shutil.rmtree(root, ignore_errors=True)
 
 
@@ -491,7 +529,10 @@ def test_controller_propagates_command_and_cleanup_failures():
     try:
         env = _valid_env(path)
         fake, _, sandbox = _fake_modal("a" * 40, fail_label="pytest")
-        _expect_error(torch_latest.run_controller, env, fake, exception=RuntimeError)
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            _expect_error(torch_latest.run_controller, env, fake, exception=RuntimeError)
+        assert "DS_CI_FAILURE_CLASS=test" in stdout.getvalue()
         assert sandbox.terminated
 
         fake, _, sandbox = _fake_modal("a" * 40, fail_label="pytest", cleanup_failure=True)
@@ -510,7 +551,7 @@ def test_controller_propagates_command_and_cleanup_failures():
         assert sandbox.wait_calls == [False]
 
         fake, state, sandbox = _fake_modal("a" * 40, create_failure=True)
-        _expect_error(torch_latest.run_controller, env, fake, exception=RuntimeError)
+        assert torch_latest.run_controller(env, fake) == torch_latest.EXIT_INFRA
         assert len(state.create_calls) == 1
         assert not sandbox.terminated
     finally:
@@ -581,7 +622,7 @@ def test_validate_selection_cli_needs_no_modal_install():
 def test_workflow_keeps_github_execution_trusted_and_preserves_modes():
     workflow = Path(torch_latest.__file__).resolve().parents[1] / ".github/workflows/modal-torch-latest.yml"
     text = workflow.read_text(encoding="utf-8")
-    trusted_ref = "ref: ${{ github.event.pull_request.base.sha || github.sha }}"
+    trusted_ref = "ref: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.sha }}"
     assert text.count(trusted_ref) == 2
     assert "ref: ${{ github.event.pull_request.head.sha" not in text
     assert "allow-unsafe-pr-checkout" not in text
