@@ -71,9 +71,20 @@ class InferenceEngine(Module):
         if hasattr(self.module, "config"):
             TransformerPolicy.hf_model_config = self.module.config
 
-        if config.dtype not in get_accelerator().supported_dtypes() and config.dtype != torch.int8:
-            raise ValueError(
-                f"Data type {config.dtype} is not supported by {get_accelerator().device_name()} accelerator")
+        if config.dtype not in get_accelerator().supported_dtypes():
+            if config.dtype != torch.int8:
+                raise ValueError(
+                    f"Data type {config.dtype} is not supported by {get_accelerator().device_name()} accelerator")
+            # torch.int8 is only ever consumed by replace_transformer_layer's quantizer
+            # construction, reached solely through kernel injection, a user injection policy, or
+            # automatic tensor parallelism. Without one of those, _convert_to_dtype has no int8
+            # branch (see its `if False:` guard), so weights would silently stay in their
+            # original dtype while config.dtype claimed int8.
+            if not (config.injection_policy or config.replace_with_kernel_inject
+                    or config.tensor_parallel.tp_size > 1):
+                raise ValueError("Data type torch.int8 requires kernel injection or a replacement policy "
+                                 "(replace_with_kernel_inject=True, injection_policy=..., or "
+                                 "tensor_parallel.tp_size > 1) to actually quantize weights.")
 
         # todo: keep this self.injection_dict because we don't use to change config.injection_policy API
         # todo: this will get changed when Molly's PR on auto injection dict is merged
