@@ -46,7 +46,7 @@ def test_scheduler_admits_pending_request_after_retirement():
     scheduler.submit(_request("short"))
 
     update = scheduler.schedule()
-    assert update.active_ids == ("long",)
+    assert update.active_ids == ("long", )
     assert scheduler.pending == (_request("short"), )
 
     update = scheduler.advance(finished_ids=("long", ))

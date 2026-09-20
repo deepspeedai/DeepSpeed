@@ -272,8 +272,8 @@ class HybridEngineRollout(RolloutEngine):
             profile_accelerator.synchronize()
         profile_start = time.perf_counter() if profile_accelerator is not None else None
         prompt_lengths = {
-            request_id: (int(request.prompt_attention_mask.sum().item()) if self.align_decode_fronts else
-                         request.prompt_ids.shape[1])
+            request_id: (int(request.prompt_attention_mask.sum().item())
+                         if self.align_decode_fronts else request.prompt_ids.shape[1])
             for request_id, request in enumerate(requests)
         }
         prompt_len = max(prompt_lengths.values())
@@ -281,9 +281,9 @@ class HybridEngineRollout(RolloutEngine):
         if max_positions is not None:
             if any(length + sampling.max_new_tokens > max_positions for length in prompt_lengths.values()):
                 raise ValueError("continuous batching request exceeds the model maximum position embeddings")
-        max_cache_len = (prompt_len + sampling.max_new_tokens if self.align_decode_fronts else
-                         self._estimate_continuous_cache_len(prompt_len, [sampling.max_new_tokens] * len(requests),
-                                                             max_batch_size))
+        max_cache_len = (prompt_len +
+                         sampling.max_new_tokens if self.align_decode_fronts else self._estimate_continuous_cache_len(
+                             prompt_len, [sampling.max_new_tokens] * len(requests), max_batch_size))
         if max_positions is not None and max_cache_len > max_positions:
             raise ValueError("continuous batching cache exceeds the model maximum position embeddings")
         if not getattr(module, "_supports_cache_class", False):
@@ -318,17 +318,22 @@ class HybridEngineRollout(RolloutEngine):
         cache.set_write_position(write_positions)
         attention_mask = torch.zeros((max_batch_size, max_cache_len), dtype=torch.long, device=device)
         stats = {
-            "cache_capacity": max_cache_len,
-            "peak_cache_length": prompt_len,
-            "cache_memory_bytes": sum(layer.keys.numel() * layer.keys.element_size() +
-                                       layer.values.numel() * layer.values.element_size()
-                                       for layer in cache.layers) +
-            attention_mask.numel() * attention_mask.element_size() + write_positions.numel() *
-            write_positions.element_size(),
-            "trim_count": 0,
-            "trimmed_columns": 0,
-            "trim_latency_ms": 0.0,
-            "decode_steps": 0,
+            "cache_capacity":
+            max_cache_len,
+            "peak_cache_length":
+            prompt_len,
+            "cache_memory_bytes":
+            sum(layer.keys.numel() * layer.keys.element_size() + layer.values.numel() * layer.values.element_size()
+                for layer in cache.layers) + attention_mask.numel() * attention_mask.element_size() +
+            write_positions.numel() * write_positions.element_size(),
+            "trim_count":
+            0,
+            "trimmed_columns":
+            0,
+            "trim_latency_ms":
+            0.0,
+            "decode_steps":
+            0,
         }
         next_tokens = {}
         logical_positions = dict(prompt_lengths)
@@ -462,8 +467,7 @@ class HybridEngineRollout(RolloutEngine):
             stats["end_to_end_ms"] = None
             stats["tokens_per_second"] = None
         stats.setdefault("trim_bytes_moved", 0)
-        stats["trim_frequency"] = (stats["trim_count"] / stats["decode_steps"]
-                                    if stats["decode_steps"] else 0.0)
+        stats["trim_frequency"] = (stats["trim_count"] / stats["decode_steps"] if stats["decode_steps"] else 0.0)
         self._last_continuous_stats = stats
         return output
 
@@ -537,8 +541,18 @@ class HybridEngineRollout(RolloutEngine):
             return 0
         return int(occupied.to(dtype=torch.int32).argmax().item())
 
-    def _continuous_prefill(self, module, static_cache_type, cache, update, request_by_id, attention_mask,
-                            write_positions, cache_position, prompt_lengths, model_dtype, device,
+    def _continuous_prefill(self,
+                            module,
+                            static_cache_type,
+                            cache,
+                            update,
+                            request_by_id,
+                            attention_mask,
+                            write_positions,
+                            cache_position,
+                            prompt_lengths,
+                            model_dtype,
+                            device,
                             align_decode_fronts=False):
         if not update.admitted:
             return {}
@@ -566,8 +580,7 @@ class HybridEngineRollout(RolloutEngine):
                 target_layer = cache.layers[layer_idx]
                 for source_row, target_row in enumerate(update.admitted_slots):
                     target_layer.keys[target_row, :, cache_start:cache_position].copy_(prefill_keys[source_row])
-                    target_layer.values[target_row, :, cache_start:cache_position].copy_(
-                        prefill_values[source_row])
+                    target_layer.values[target_row, :, cache_start:cache_position].copy_(prefill_values[source_row])
             for source_row, target_row in enumerate(update.admitted_slots):
                 attention_mask[target_row, cache_start:cache_position].copy_(prompt_attention[source_row])
                 write_positions[target_row] = cache_position
