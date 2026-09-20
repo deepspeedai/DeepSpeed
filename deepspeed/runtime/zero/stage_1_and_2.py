@@ -2253,7 +2253,8 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                                          buffer,
                                          self.optimizer.param_groups[param_group_idx]['momentum'],
                                          ns_method=ns_method,
-                                         is_expert_group=getattr(tensor, 'is_expert_group', False))
+                                         is_expert_group=getattr(tensor, 'is_expert_group', False),
+                                         num_heads=getattr(tensor, 'muon_num_heads', None))
             tensor = grad_accum
             buffer_idx += tensor.numel()
             param_id = self.get_param_id(tensor_list[i])

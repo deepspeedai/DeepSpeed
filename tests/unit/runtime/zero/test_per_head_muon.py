@@ -840,3 +840,68 @@ def test_it_raises_when_the_flag_ends_up_doing_nothing():
 
     with pytest.raises(ValueError, match="sharded across head boundaries"):
         resolve_per_head_muon_after_sharding(attn)
+
+
+# ---------------------------------------------------------------------------
+# 4. The call sites
+# ---------------------------------------------------------------------------
+#
+# The head count is tagged on the parameter, so it only reaches Newton-Schulz if the code
+# that calls `muon_update` reads it back off. Three of the six call sites did not, and an
+# update that quietly stays whole-matrix looks exactly like a working one.
+
+
+def _muon_update_call_sites():
+    """Every `muon_update(...)` call under `deepspeed/`, as (file, line, keywords)."""
+    import ast
+    import os
+
+    root = os.path.dirname(os.path.dirname(deepspeed.__file__))
+    for directory, _, names in os.walk(os.path.join(root, "deepspeed")):
+        for name in names:
+            if not name.endswith(".py"):
+                continue
+            path = os.path.join(directory, name)
+            with open(path, encoding="utf-8") as handle:
+                tree = ast.parse(handle.read())
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                function = node.func
+                called = function.attr if isinstance(function, ast.Attribute) else getattr(function, "id", None)
+                if called == "muon_update":
+                    yield os.path.relpath(path, root), node.lineno, {kw.arg for kw in node.keywords}
+
+
+def test_every_muon_update_call_site_forwards_the_head_count():
+    sites = list(_muon_update_call_sites())
+    assert len(sites) >= 5, f"expected the ZeRO and optimizer call sites, found {sites}"
+    missing = [(path, line) for path, line, keywords in sites if "num_heads" not in keywords]
+    assert not missing, ("these call `muon_update` without `num_heads`, so a per-head parameter "
+                         f"is orthogonalized whole there: {missing}")
+
+
+def test_muon_with_aux_adam_orthogonalizes_a_tagged_projection_per_head():
+    """`MuonWithAuxAdam.step` is the path taken with no ZeRO optimizer to do the work."""
+    from deepspeed.runtime.zero.muon.muon_optimizer import MuonWithAuxAdam
+
+    num_heads, head_dim, in_features = 4, 8, 32
+    torch.manual_seed(0)
+    weight = torch.nn.Parameter(torch.randn(num_heads * head_dim, in_features))
+    weight.muon_num_heads = num_heads
+    weight.grad = torch.randn_like(weight)
+
+    lr = 0.02
+    optimizer = MuonWithAuxAdam([dict(params=[weight], lr=lr, momentum=0.95, use_muon=True)])
+    before = weight.detach().clone()
+    grad = weight.grad.detach().clone()
+    optimizer.step()
+    applied = (before - weight.detach()) / lr
+
+    per_head = muon_update(grad.clone(), torch.zeros_like(grad), beta=0.95, num_heads=num_heads)
+    whole = muon_update(grad.clone(), torch.zeros_like(grad), beta=0.95)
+
+    # Which of the two updates was applied, not how closely: the gap between them is four
+    # orders of magnitude wider than the rounding between two runs of the same iteration.
+    assert (applied - per_head).abs().max() < 1e-4
+    assert (applied - whole).abs().max() > 1e-2, "the whole-matrix update is what a dropped tag gives"
