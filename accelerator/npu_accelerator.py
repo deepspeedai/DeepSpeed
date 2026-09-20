@@ -13,6 +13,33 @@ try:
 except ImportError:
     pass
 
+ACL_SUCCESS = 0
+# The host-registration flag is an ACL_HOST_REG_* bitmask. MAPPED page-locks the
+# range and adds a device mapping (which DeepSpeed never reads through); it is
+# chosen over PINNED because measured H2D on this platform falls back to
+# mlock-only speed (~8-9 GB/s) for PINNED-only registrations of larger buffers
+# (64 MiB), while MAPPED keeps full DMA bandwidth (~23 GB/s). MAPPED requires
+# 4K-aligned addresses, which the native allocator guarantees (posix_memalign);
+# see the aclrtHostRegisterV2 API reference:
+# https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/latest/API/runtimeapi/aclcppdevg_03_2128.html
+ACL_HOST_REG_MAPPED = 0x2
+
+
+def _npu_host_copy_funcs():
+    """Resolve the npurt host-registration functions, or (None, reason).
+
+    torch.npu.npurt() returns the runtime-API module exposing
+    npuHostRegister/npuHostUnregister; the binding is maintained with
+    torch_npu and initializes the runtime itself.
+    """
+    if not hasattr(torch, "npu") or not hasattr(torch.npu, "npurt"):
+        return None, "torch.npu.npurt is unavailable in this torch_npu build"
+    try:
+        npurt = torch.npu.npurt()
+        return (npurt.npuHostRegister, npurt.npuHostUnregister), None
+    except RuntimeError:
+        return None, "torch.npu.npurt() failed to initialize the NPU runtime"
+
 
 class NPU_Accelerator(DeepSpeedAccelerator):
 
@@ -151,6 +178,43 @@ class NPU_Accelerator(DeepSpeedAccelerator):
 
     def available_memory(self, device_index=None):
         return self.total_memory(device_index) - self.memory_allocated(device_index)
+
+    # Host memory registration
+    def pin_memory_alignment(self):
+        # MAPPED registration requires 4K-aligned addresses (per the
+        # aclrtHostRegisterV2 API reference cited on ACL_HOST_REG_MAPPED).
+        # NativePinnedMemory rounds the range down to this alignment before
+        # calling register_host_memory/unregister_host_memory.
+        return 4096
+
+    def register_host_memory(self, address, num_bytes):
+        # Register natively pinned (posix_memalign + mlock) host memory with the
+        # ACL runtime so torch's async copies can use the DMA engine. npurt
+        # initializes the runtime itself, so no set_device ordering is needed.
+        funcs, reason = _npu_host_copy_funcs()
+        if funcs is None:
+            from deepspeed.utils import logger
+            logger.warning_once(f"Host-memory registration is unavailable ({reason}); "
+                                "native pinned memory stays mlock-only.")
+            return False
+        register, _ = funcs
+        rc = register(address, num_bytes, ACL_HOST_REG_MAPPED)
+        if rc != ACL_SUCCESS:
+            from deepspeed.utils import logger
+            logger.warning_once(f"npuHostRegister failed with rc={rc}; native pinned memory stays mlock-only.")
+            return False
+        return True
+
+    def unregister_host_memory(self, address):
+        funcs, _ = _npu_host_copy_funcs()
+        if funcs is None:
+            return None
+        _, unregister = funcs
+        rc = unregister(address)
+        if rc != ACL_SUCCESS:
+            # Raise so NativePinnedMemory keeps the allocation alive: the driver
+            # must never hold a registration for pages later reused by malloc.
+            raise RuntimeError(f"npuHostUnregister failed with rc={rc}")
 
     # Data types
     def is_bf16_supported(self):
