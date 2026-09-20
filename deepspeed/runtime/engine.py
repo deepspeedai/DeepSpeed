@@ -591,12 +591,6 @@ class DeepSpeedEngine(Module):
             from deepspeed import resolve_per_head_muon_after_sharding
             resolve_per_head_muon_after_sharding(model)
         see_memory_usage("DeepSpeed Engine: After args sanity test", force=self.memory_breakdown())
-        if mpu is not None:
-            if self.elasticity_enabled():
-                if not self.is_elastic_model_parallel_supported():
-                    assert not self.elasticity_enabled(), ("Elasticity is not currently supported"
-                                                           " with model parallelism.")
-
         self._set_distributed_vars(args)
 
         dist.configure(self._config)
@@ -1304,17 +1298,6 @@ class DeepSpeedEngine(Module):
 
     def checkpoint_tag_validation_fail(self):
         return self._config.checkpoint_config[CHECKPOINT_TAG_VALIDATION] == ValidationMode.FAIL
-
-    def elasticity_enabled(self):
-        return self._config.elasticity_enabled
-
-    def is_elastic_model_parallel_supported(self):
-        if self.elasticity_enabled():
-            # Add code for finding number of GPUs per node automatically
-            if self._config.num_gpus_per_node % self._config.elastic_model_parallel_size == 0:
-                return True
-            else:
-                return False
 
     def data_efficiency_enabled(self):
         return self._config.data_efficiency_enabled
