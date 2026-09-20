@@ -144,6 +144,8 @@ def test_continuous_generation_rejects_legacy_cache_model():
 
     class LegacyModel(torch.nn.Module):
 
+        _supports_cache_class = False
+
         def __init__(self):
             super().__init__()
             self.weight = torch.nn.Parameter(torch.zeros(1))
@@ -183,6 +185,8 @@ def test_continuous_generation_covers_modern_static_cache_path():
 
         def forward(self, input_ids, attention_mask, past_key_values=None, use_cache=True, **kwargs):
             key_states = input_ids[:, None, :, None].to(dtype=torch.float32)
+            kwargs.pop("cache_position", None)
+            kwargs.pop("position_ids", None)
             _, cache_values = past_key_values.update(key_states, key_states, layer_idx=0, **kwargs)
             cache_sums = cache_values[:, 0].sum(dim=(1, 2))
             next_tokens = torch.where(cache_sums == 6, 2, 7).long()
@@ -209,6 +213,7 @@ def test_continuous_generation_covers_modern_static_cache_path():
 
 
 def test_aligned_continuous_generation_supports_mixed_effective_prompt_lengths():
+
     class CacheConfig(SimpleNamespace):
 
         def get_text_config(self, **_kwargs):
@@ -239,6 +244,8 @@ def test_aligned_continuous_generation_supports_mixed_effective_prompt_lengths()
                 if write_position is not None:
                     self.decode_positions.append(int(write_position[0].item()))
             states = input_ids[:, None, :, None].to(dtype=torch.float32)
+            kwargs.pop("cache_position", None)
+            kwargs.pop("position_ids", None)
             _, values = past_key_values.update(states, states, layer_idx=0, **kwargs)
             cache_sums = values[:, 0].sum(dim=(1, 2))
             next_tokens = torch.where(cache_sums == 6, 2, 7).long()
@@ -305,6 +312,8 @@ def test_continuous_generation_trims_cache_after_staggered_eos():
 
         def forward(self, input_ids, attention_mask, past_key_values=None, use_cache=True, **kwargs):
             states = input_ids[:, None, :, None].to(dtype=torch.float32)
+            kwargs.pop("cache_position", None)
+            kwargs.pop("position_ids", None)
             _, values = past_key_values.update(states, states, layer_idx=0, **kwargs)
             cache_sums = values[:, 0].sum(dim=(1, 2))
             eos_rows = (cache_sums == 6) | (cache_sums == 8) | (cache_sums == 10)
@@ -339,6 +348,70 @@ def test_continuous_generation_trims_cache_after_staggered_eos():
         [1, 0, 0, 0],
         [1, 1, 1, 1],
     ]
+
+
+def test_continuous_generation_refills_padded_prompts_after_trim():
+
+    class CacheConfig(SimpleNamespace):
+
+        def get_text_config(self, **_kwargs):
+            return self
+
+    class CacheClassModel(torch.nn.Module):
+        _supports_cache_class = True
+
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.zeros(1))
+            self.config = CacheConfig(
+                max_position_embeddings=32,
+                num_hidden_layers=1,
+                num_attention_heads=1,
+                num_key_value_heads=1,
+                hidden_size=1,
+                head_dim=1,
+            )
+
+        def forward(self, input_ids, attention_mask, past_key_values=None, use_cache=True, **kwargs):
+            states = input_ids[:, None, :, None].to(dtype=torch.float32)
+            kwargs.pop("cache_position", None)
+            kwargs.pop("position_ids", None)
+            _, values = past_key_values.update(states, states, layer_idx=0, **kwargs)
+            cache_sums = values[:, 0].sum(dim=(1, 2))
+            next_tokens = torch.where(cache_sums == 6, 2, 7).long()
+            logits = torch.zeros((input_ids.shape[0], input_ids.shape[1], 16))
+            logits.scatter_(2, next_tokens[:, None, None].expand(-1, input_ids.shape[1], 1), 1)
+            return SimpleNamespace(logits=logits, past_key_values=past_key_values)
+
+    model = CacheClassModel()
+    rollout = HybridEngineRollout(SimpleNamespace(module=model), SimpleNamespace(pad_token_id=0, eos_token_id=2))
+    prompts = torch.tensor([[0, 1, 2, 3], [0, 0, 1, 2]] * 16)
+    attention_mask = torch.tensor([[0, 1, 1, 1], [0, 0, 1, 1]] * 16)
+    request = RolloutRequest(prompts, attention_mask)
+
+    output = rollout.generate(request, SamplingConfig(max_new_tokens=3, temperature=0, continuous_batch_size=8))
+
+    assert output.input_ids.shape == (32, 7)
+    assert output.attention_mask[:, 4:].any(dim=1).all()
+    assert rollout.get_last_continuous_stats()["trim_count"] > 0
+
+
+def test_continuous_generation_applies_repetition_penalty():
+    request = RolloutRequest(torch.tensor([[0]]), torch.ones((1, 1), dtype=torch.long))
+    responses = {0: [torch.tensor([[0]])]}
+    module = SimpleNamespace(generation_config=SimpleNamespace(repetition_penalty=1.5))
+
+    # Pin the real-model regression: a bare argmax would select the repeated
+    # token 0, while Transformers' repetition processor must select token 1.
+    next_tokens = HybridEngineRollout._continuous_next_tokens(
+        torch.tensor([[6.0, 5.0]]),
+        (0, ),
+        {0: request},
+        responses,
+        module,
+    )
+
+    assert next_tokens.tolist() == [[1]]
 
 
 @patch("deepspeed.runtime.rollout.hybrid_engine_rollout.time.perf_counter")

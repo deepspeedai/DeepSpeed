@@ -286,7 +286,7 @@ class HybridEngineRollout(RolloutEngine):
                              prompt_len, [sampling.max_new_tokens] * len(requests), max_batch_size))
         if max_positions is not None and max_cache_len > max_positions:
             raise ValueError("continuous batching cache exceeds the model maximum position embeddings")
-        if not getattr(module, "_supports_cache_class", False):
+        if getattr(module, "_supports_cache_class", None) is False:
             raise ValueError("continuous batching requires a model with cache-class support; use the default "
                              "generate() path or upgrade transformers")
 
@@ -359,14 +359,14 @@ class HybridEngineRollout(RolloutEngine):
 
                 if self.align_decode_fronts:
                     dead_prefix = min(span_starts[:survivor_count])
-                    if update.admitted:
-                        longest_admitted = max(prompt_lengths[request.request_id] for request in update.admitted)
-                        dead_prefix = min(dead_prefix, max(0, cache_position - longest_admitted))
                 else:
                     trim_threshold = max(1, prompt_len)
                     dead_prefix = self._continuous_dead_prefix(attention_mask, survivor_count)
                     if dead_prefix < trim_threshold and cache_position < max_cache_len - trim_threshold:
                         dead_prefix = 0
+                if update.admitted:
+                    longest_admitted = max(prompt_lengths[request.request_id] for request in update.admitted)
+                    dead_prefix = min(dead_prefix, max(0, cache_position - longest_admitted))
                 if dead_prefix:
                     trim_start = None
                     if profile_accelerator is not None:
@@ -437,7 +437,13 @@ class HybridEngineRollout(RolloutEngine):
                     cache_position=torch.tensor([cache_position], dtype=torch.long, device=device),
                     position_ids=position_ids,
                 )
-                decoded = output.logits[:, -1, :].argmax(dim=-1, keepdim=True)
+                decoded = self._continuous_next_tokens(
+                    output.logits[:, -1, :],
+                    survivor_ids,
+                    request_by_id,
+                    responses,
+                    module,
+                )
                 stats["decode_steps"] += 1
                 decoded_tokens = dict(zip(survivor_ids, decoded.split(1, dim=0)))
                 for request_id in survivor_ids:
@@ -563,18 +569,17 @@ class HybridEngineRollout(RolloutEngine):
             prompt_attention = torch.cat(
                 [request_by_id[request_id].prompt_attention_mask for request_id in admitted_ids], dim=0)
             prompt_len = prompt_ids.shape[1]
-            prefill_cache = self._create_static_cache(static_cache_type, module.config, len(admitted_ids), prompt_len,
-                                                      device, model_dtype)
-            prefill_output = self._call_model(
+            prefill_tokens, prefill_cache = self._continuous_prefill_cache(
                 module,
+                static_cache_type,
                 prompt_ids,
-                attention_mask=prompt_attention,
-                past_key_values=prefill_cache,
-                use_cache=True,
-                cache_position=torch.arange(prompt_len, device=device),
+                prompt_attention,
+                model_dtype,
+                device,
             )
-            prefill_tokens = prefill_output.logits[:, -1, :].argmax(dim=-1, keepdim=True)
             cache_start = cache_position - prompt_len
+            if cache_start < 0:
+                raise ValueError("continuous batching prompt does not fit behind the decode front")
             for layer_idx in range(self._cache_layer_count(prefill_cache)):
                 prefill_keys, prefill_values = self._cache_layer_tensors(prefill_cache, layer_idx)
                 target_layer = cache.layers[layer_idx]
@@ -594,17 +599,15 @@ class HybridEngineRollout(RolloutEngine):
             valid = request.prompt_attention_mask[0].bool()
             prompt_ids = request.prompt_ids[:, valid]
             prompt_attention = torch.ones_like(prompt_ids)
-            prefill_cache = self._create_static_cache(static_cache_type, module.config, 1, prompt_len, device,
-                                                      model_dtype)
-            prefill_output = self._call_model(
+            prefill_tokens, prefill_cache = self._continuous_prefill_cache(
                 module,
+                static_cache_type,
                 prompt_ids,
-                attention_mask=prompt_attention,
-                past_key_values=prefill_cache,
-                use_cache=True,
-                cache_position=torch.arange(prompt_len, device=device),
+                prompt_attention,
+                model_dtype,
+                device,
             )
-            admitted_tokens[request_id] = prefill_output.logits[:, -1, :].argmax(dim=-1, keepdim=True)
+            admitted_tokens[request_id] = prefill_tokens
             cache_start = cache_position - prompt_len
             if cache_start < 0:
                 raise ValueError("continuous batching prompt does not fit behind the decode front")
@@ -616,6 +619,59 @@ class HybridEngineRollout(RolloutEngine):
             attention_mask[target_row, cache_start:cache_position].fill_(1)
             write_positions[target_row] = cache_position
         return admitted_tokens
+
+    def _continuous_prefill_cache(self, module, static_cache_type, prompt_ids, prompt_attention, model_dtype, device):
+        position_ids = self._prefill_position_ids(prompt_attention)
+        if getattr(module, "_supports_cache_class", None) is None:
+            pad_token_id = self.tokenizer.pad_token_id
+            if pad_token_id is None:
+                pad_token_id = self.tokenizer.eos_token_id
+            prefill_output = module.generate(
+                prompt_ids,
+                attention_mask=prompt_attention,
+                position_ids=position_ids,
+                max_new_tokens=1,
+                do_sample=False,
+                eos_token_id=None,
+                pad_token_id=pad_token_id,
+                return_dict_in_generate=True,
+            )
+            return prefill_output.sequences[:, -1:], prefill_output.past_key_values
+
+        prompt_len = prompt_ids.shape[1]
+        prefill_cache = self._create_static_cache(static_cache_type, module.config, prompt_ids.shape[0], prompt_len,
+                                                  device, model_dtype)
+        prefill_output = self._call_model(
+            module,
+            prompt_ids,
+            attention_mask=prompt_attention,
+            past_key_values=prefill_cache,
+            use_cache=True,
+            cache_position=torch.arange(prompt_len, device=device),
+            position_ids=position_ids,
+        )
+        return prefill_output.logits[:, -1, :].argmax(dim=-1, keepdim=True), prefill_cache
+
+    @staticmethod
+    def _continuous_next_tokens(logits, request_ids, request_by_id, responses, module):
+        repetition_penalty = getattr(getattr(module, "generation_config", None), "repetition_penalty", 1.0)
+        if repetition_penalty == 1.0:
+            return logits.argmax(dim=-1, keepdim=True)
+
+        next_tokens = []
+        for row, request_id in enumerate(request_ids):
+            input_ids = torch.cat((request_by_id[request_id].prompt_ids, *responses[request_id]), dim=1)
+            row_logits = logits[row:row + 1].clone()
+            scores = row_logits.gather(1, input_ids)
+            scores = torch.where(scores < 0, scores * repetition_penalty, scores / repetition_penalty)
+            row_logits.scatter_(1, input_ids, scores)
+            next_tokens.append(row_logits.argmax(dim=-1, keepdim=True))
+        return torch.cat(next_tokens, dim=0)
+
+    @staticmethod
+    def _prefill_position_ids(attention_mask):
+        position_ids = attention_mask.long().cumsum(dim=-1) - 1
+        return position_ids.masked_fill(attention_mask == 0, 1)
 
     def _is_eos(self, token):
         eos_token_id = self.tokenizer.eos_token_id

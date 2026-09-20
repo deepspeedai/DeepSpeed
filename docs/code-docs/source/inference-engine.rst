@@ -102,8 +102,11 @@ The experimental path intentionally does not implement paged attention or change
 default generation semantics. It currently requires one padded prompt width for
 all rows, a model with cache-class support, greedy decoding, and one sample per
 prompt. CUDA Graph capture is rejected until the scheduling semantics are
-validated on real workloads. Models without cache-class support should use the
-default ``generate()`` path or upgrade Transformers.
+validated on real workloads. Models that explicitly declare no cache-class
+support are rejected; models with unknown support should be validated against
+the default ``generate()`` path before use.
+``align_decode_fronts=False`` is the default equal-width padded-prompt baseline:
+it does not derive or pack requests by their effective prompt lengths.
 
 Set ``HybridEngineRolloutConfig(align_decode_fronts=True)`` to enable the
 follow-up alignment path. It derives each request's effective prompt width from
