@@ -94,6 +94,10 @@ jobs:
     needs: triage
     if: needs.triage.outputs.action == 'bisect'
     runs-on: ubuntu-latest
+    # Each step publishes a temporary bisect/<run>/<sha> tag because the dispatch
+    # API rejects bare commit SHAs ("No ref found").
+    permissions:
+      contents: write
     # Each bisect step dispatches a full modal-torch-latest run (up to ~105 minutes),
     # and hosted jobs are capped at 6 hours, which bounds the bisect range.
     timeout-minutes: 350
@@ -103,7 +107,8 @@ jobs:
         with:
           ref: master
           fetch-depth: 0
-          persist-credentials: false
+          # The bisect steps push (and delete) their temporary dispatch tags.
+          persist-credentials: true
           lfs: false
           submodules: false
 
