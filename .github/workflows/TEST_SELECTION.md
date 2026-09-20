@@ -126,10 +126,15 @@ suite. Its outcome feeds `nightly-bisect.yml`:
   timeout is not bisectable, because intermediate commits would time out too.
 - **Real test failures** → `git bisect run ci/bisect_nightly.sh` between
   `nightly-last-green` and the failing SHA, dispatching `modal-torch-latest` at
-  each step; the culprit lands in an issue. An inconclusive intermediate step
-  (infra/timeout/job kill, or a revision predating the failure-class sentinel)
-  aborts the bisect rather than skipping the commit, because a skip silently
-  shrinks the searched range.
+  each step with only the nightly's failing test files (the dispatch's
+  `test_targets` input, validated like any selected list), which cuts a step
+  from a ~70-minute full run to roughly its install overhead plus the failing
+  tests; the culprit lands in an issue. Targets that do not exist at a step's
+  commit are dropped from that step (a test cannot fail where it does not
+  exist); a step where none survive is good without running. An inconclusive
+  intermediate step (infra/timeout/job kill, or a revision predating the
+  failure-class sentinel) aborts the bisect rather than skipping the commit,
+  because a skip silently shrinks the searched range.
 
 The controller (`ci/torch_latest.py`) classifies its own failures for this
 routing: it prints a `DS_CI_FAILURE_CLASS=infra|timeout|test` sentinel line and

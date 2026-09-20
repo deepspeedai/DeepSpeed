@@ -119,10 +119,28 @@ jobs:
             exit 1
           fi
 
+      - name: Extract the failing test files
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NIGHTLY_RUN_ID: ${{ github.event.workflow_run.id }}
+        run: |
+          # The nightly pytest prints failures as "FAILED unit/v1/..." (its working
+          # directory is tests/), so re-prefix each unique file with tests/. Bisect
+          # steps then re-run only these files instead of the full suite.
+          gh run view "$NIGHTLY_RUN_ID" --log \
+            | grep -o 'FAILED unit/v1/[^ \t]*\.py' | sort -u \
+            | sed 's|^|tests/|' > failing-tests.txt
+          if [ ! -s failing-tests.txt ]; then
+            echo "no FAILED test files found in the nightly log" >&2
+            exit 1
+          fi
+          cat failing-tests.txt
+
       - name: Run git bisect
         env:
           GH_TOKEN: ${{ github.token }}
           GITHUB_REPOSITORY: ${{ github.repository }}
+          BISECT_TEST_TARGETS_FILE: failing-tests.txt
         run: |
           git bisect start "${{ github.event.workflow_run.head_sha }}" nightly-last-green
           set +e

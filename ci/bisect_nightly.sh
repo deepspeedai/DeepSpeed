@@ -12,14 +12,43 @@
 #            workflow aborts the whole bisect instead of skipping, because a
 #            skip silently shrinks the searched range
 #
+# When BISECT_TEST_TARGETS_FILE points at the nightly's failing test files, the
+# dispatch runs only those files (workflow_dispatch test_targets input) instead
+# of the full suite, cutting a step from ~70 to ~15 minutes. Targets that do not
+# exist at the step commit are dropped from the dispatch (they cannot fail where
+# they do not exist); only when none survive is the commit good without running.
+#
 # Requires GH_TOKEN and GITHUB_REPOSITORY in the environment.
 
 set -u
 
 sha=$(git rev-parse HEAD)
 
+targets=()
+if [ -n "${BISECT_TEST_TARGETS_FILE:-}" ]; then
+    while IFS= read -r target; do
+        [ -n "$target" ] || continue
+        # A target that does not exist at this commit cannot fail here; drop it
+        # from the dispatch rather than judging the commit, because a *different*
+        # failing target may still condemn it.
+        if git cat-file -e "$sha:$target" 2>/dev/null; then
+            targets+=("$target")
+        fi
+    done < "$BISECT_TEST_TARGETS_FILE"
+    if [ "${#targets[@]}" -eq 0 ]; then
+        echo "bisect step: $sha is good (none of the failing test files exist there yet)"
+        exit 0
+    fi
+fi
+
 echo "bisect step: dispatching modal-torch-latest at $sha"
-gh workflow run modal-torch-latest.yml --repo "$GITHUB_REPOSITORY" --ref "$sha"
+if [ "${#targets[@]}" -gt 0 ]; then
+    target_list=$(printf '%s\n' "${targets[@]}")
+    gh workflow run modal-torch-latest.yml --repo "$GITHUB_REPOSITORY" --ref "$sha" \
+        -f test_targets="$target_list"
+else
+    gh workflow run modal-torch-latest.yml --repo "$GITHUB_REPOSITORY" --ref "$sha"
+fi
 
 # The dispatch run may take a moment to register; find it by head SHA.
 run_id=""
