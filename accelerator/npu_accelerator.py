@@ -247,14 +247,13 @@ class NPU_Accelerator(DeepSpeedAccelerator):
 
     # Graph operations
     def create_graph(self):
-        return None
+        return torch.npu.NPUGraph()
 
     def capture_to_graph(self, graph, pool=None, stream=None):
-        from deepspeed.runtime.utils import noop_context
-        return noop_context()
+        return torch.npu.graph(graph, pool, stream)
 
     def replay_graph(self, graph):
-        return
+        graph.replay()
 
     # Tensor operations
 
