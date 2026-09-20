@@ -130,6 +130,35 @@ def _save_checkpoint(file_path, chkpt_sd):
     torch.save(chkpt_sd, file_path)
 
 
+# The parameter itself, under the name the loader expects, plus whatever state the optimizer
+# actually keeps. Adam's `exp_avg`/`exp_avg_sq` used to be hard-coded here, which made a
+# checkpoint from any other optimizer unconvertible: Muon keeps `momentum_buffer` and nothing
+# else, so the conversion raised `KeyError: 'exp_avg'` before it wrote anything.
+#
+# A state is taken apart the same way the parameter is, by the fragment each rank owns, so it
+# has to be shaped like the partition. One is not: ZeRO-1/2 give Muon a momentum buffer the
+# size of the whole group, replicated on every rank, because Newton-Schulz needs the whole
+# matrix (`_muon_momentum_buffer` in stage_1_and_2.py). Slicing that by partition offsets would
+# write fragments that look right and hold the wrong rows, so it is refused instead.
+def _flat_state(param_group_id, param_group_state, fp32_flat_group):
+    partition_numel = fp32_flat_group.numel()
+    flat_state = {"fp32": fp32_flat_group}
+    for name, value in param_group_state.items():
+        if name == "step":
+            flat_state["step"] = value
+        elif not torch.is_tensor(value):
+            continue
+        elif value.numel() == partition_numel:
+            flat_state[name] = value
+        else:
+            raise ValueError(f"Optimizer state '{name}' of param group {param_group_id} has "
+                             f"{value.numel()} elements, but the group's ZeRO partition has "
+                             f"{partition_numel}. The universal format stores optimizer state in "
+                             f"the partition's layout, so a state of another shape - a buffer "
+                             f"replicated across ranks, for instance - cannot be placed yet.")
+    return flat_state
+
+
 def extract_zero_shards(dir, ds_checkpoint, indices_3D):
     pp_index, tp_index, dp_index = indices_3D
     sd = ds_checkpoint.get_zero_checkpoint_state(pp_index=pp_index, tp_index=tp_index, dp_index=dp_index)
@@ -150,14 +179,7 @@ def extract_zero_shards(dir, ds_checkpoint, indices_3D):
 
     for param_group_id in range(param_groups_cnt):
 
-        flat_state = dict(
-            exp_avg=state_groups[param_group_id]["exp_avg"],
-            exp_avg_sq=state_groups[param_group_id]["exp_avg_sq"],
-            fp32=fp32_groups[param_group_id],
-        )
-
-        if "step" in state_groups[param_group_id]:
-            flat_state["step"] = state_groups[param_group_id]["step"]
+        flat_state = _flat_state(param_group_id, state_groups[param_group_id], fp32_groups[param_group_id])
 
         for name, fragment_mapping in param_slice_mappings[param_group_id].items():
             if pp_index > 0 and any(re.match(pattern, name) for pattern in pipeline_replicated_params):
@@ -192,11 +214,8 @@ def extract_zero_shards_stage3(optim_files_grid,
     param_shapes = param_shapes_grid[tp_index]
 
     for idx, sub_group_shape in enumerate(param_shapes):
-        flat_state = dict(
-            exp_avg=optim_sd['optimizer_state_dict']['state'][idx]["exp_avg"],
-            exp_avg_sq=optim_sd['optimizer_state_dict']['state'][idx]["exp_avg_sq"],
-            fp32=optim_sd['fp32_flat_groups'][idx],
-        )
+        flat_state = _flat_state(idx, optim_sd['optimizer_state_dict']['state'][idx],
+                                 optim_sd['fp32_flat_groups'][idx])
         partition_metadata = partition_groups[idx] if idx < len(partition_groups) else {}
         partition_count = partition_metadata.get('partition_count', dp_degree)
         partition_rank = partition_metadata.get('partition_rank', dp_index)
@@ -295,6 +314,42 @@ def _merge_zero_shards(param_base_path, state, tp_degree, slice_shapes=None):
     return slices
 
 
+# How a piece's scale applies to each state. Scaling a parameter by `s` scales its gradient by
+# `1 / s`, so a first moment carries the inverse and a second moment the inverse square. Using
+# the parameter's factor for all of them would corrupt the optimizer state and change the
+# trajectory after a resume. Only a tensor-parallel piece is ever scaled, so a state missing
+# from this table is fine until one is, and then the conversion has to say so rather than guess.
+_SCALE_POWERS = {"fp32": 1, "exp_avg": -1, "exp_avg_sq": -2, "momentum_buffer": -1}
+
+
+def _scale_power(state, name):
+    if state not in _SCALE_POWERS:
+        raise ValueError(f"Parameter {name} has a tensor-parallel affine map, and its optimizer state "
+                         f"'{state}' has no known scaling. Add it to _SCALE_POWERS: a gradient-like state "
+                         f"takes -1, a squared-gradient-like state -2.")
+    return _SCALE_POWERS[state]
+
+
+def _states_on_disk(slice_base_path, tp_degree):
+    """The states the extraction wrote for this parameter, `fp32` first and `step` excluded.
+
+    Which states exist is a property of the optimizer, and of the param group within it: a Muon
+    run keeps `momentum_buffer` for the matrices it orthogonalizes and Adam's pair for the rest,
+    in the same checkpoint. Reading them back off disk keeps the merge from having to know.
+    """
+    states = set()
+    for tp_index in range(tp_degree):
+        tp_path = os.path.join(slice_base_path, str(tp_index))
+        if not os.path.isdir(tp_path):
+            continue
+        for fragment in os.listdir(tp_path):
+            state, _, dp_index = fragment.rpartition(".")
+            if state and dp_index.isdigit():
+                states.add(state)
+    states.discard("step")
+    return sorted(states, key=lambda state: (state != "fp32", state))
+
+
 def merge_tp_slices(uc_info, dir, slice_dir, tp_degree, name_and_shapes):
 
     name, per_tp_shapes = name_and_shapes
@@ -373,13 +428,7 @@ def merge_tp_slices(uc_info, dir, slice_dir, tp_degree, name_and_shapes):
     if step_merged:
         _save_checkpoint(os.path.join(param_base_path, "step.pt"), step_merged[0])
 
-    # How a piece's scale applies to each state. Scaling a parameter by `s` scales its
-    # gradient by `1 / s`, so Adam's first moment carries the inverse and its second moment
-    # the inverse square. Using the parameter's factor for all three would corrupt the
-    # optimizer state and change the trajectory after a resume.
-    scale_powers = {"fp32": 1, "exp_avg": -1, "exp_avg_sq": -2}
-
-    for state in ("fp32", "exp_avg", "exp_avg_sq"):
+    for state in _states_on_disk(slice_base_path, tp_degree):
         slices = _merge_zero_shards(slice_base_path, state, tp_degree, per_tp_shapes)
         final_path = os.path.join(param_base_path, f"{state}.pt")
 
@@ -392,7 +441,7 @@ def merge_tp_slices(uc_info, dir, slice_dir, tp_degree, name_and_shapes):
             # writes none of the per-category keys those branches add to `ckpt_dict`,
             # because the geometry is what a restoring job needs and it is not tied to a
             # category.
-            param = matched_affine_map.rebuild(dict(enumerate(slices)), scale_powers[state])
+            param = matched_affine_map.rebuild(dict(enumerate(slices)), _scale_power(state, name))
         elif get_matched_pattern(replicated_parameters, name):
             if len(slices) > 1:
                 assert all([slices[0].equal(other_slice) for other_slice in slices[1:]])
@@ -545,7 +594,7 @@ def merge_zero3_slices(dp_degree, dir, slice_dir, name):
     slice_base_path = os.path.join(slice_dir, name)
     param_base_path = os.path.join(dir, name)
 
-    for state in ("fp32", "exp_avg", "exp_avg_sq"):
+    for state in _states_on_disk(slice_base_path, 1):
         slices = _merge_zero_shards(slice_base_path, state, 1)
         final_path = os.path.join(param_base_path, f"{state}.pt")
         _save_checkpoint(final_path, slices[0])
