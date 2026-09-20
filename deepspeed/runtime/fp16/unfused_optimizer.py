@@ -12,7 +12,7 @@ import torch
 from torch._utils import _flatten_dense_tensors
 
 from deepspeed.runtime.base_optimizer import DeepSpeedOptimizer
-from deepspeed.runtime.utils import get_global_norm, CheckOverflow, get_weight_norm
+from deepspeed.runtime.utils import (get_global_norm, CheckOverflow, get_weight_norm, get_norm_with_moe_layers)
 from deepspeed.runtime.fp16.loss_scaler import LossScaleConfig, LossScaleProfile
 from deepspeed.utils import logger
 from deepspeed.utils.torch import required_torch_version
@@ -39,9 +39,11 @@ class FP16_UnfusedOptimizer(DeepSpeedOptimizer):
                  verbose=True,
                  mpu=None,
                  clip_grad=0.0,
-                 fused_lamb_legacy=False):
+                 fused_lamb_legacy=False,
+                 has_moe_layers=False):
 
         self.fused_lamb_legacy = fused_lamb_legacy
+        self.has_moe_layers = has_moe_layers
         self._global_grad_norm = 0.
 
         if dist.get_rank() == 0:
@@ -130,6 +132,7 @@ class FP16_UnfusedOptimizer(DeepSpeedOptimizer):
         grads_groups = []
         norm_groups = []
         expert_norm_groups = []
+        expert_tensors = {}
         for i, group in enumerate(self.fp16_groups):
             grads = [
                 torch.zeros(p.size(), dtype=p.dtype, device=p.device) if p.grad is None else p.grad for p in group
@@ -145,6 +148,9 @@ class FP16_UnfusedOptimizer(DeepSpeedOptimizer):
             if len(expert_grads_for_norm) > 0:
                 expert_norm_group_value = get_weight_norm(_flatten_dense_tensors(expert_grads_for_norm), mpu=self.mpu)
             expert_norm_groups.append(expert_norm_group_value)
+            if self.has_moe_layers and len(expert_grads_for_norm) > 0:
+                expert_group_name = self.optimizer.param_groups[i]['name']
+                expert_tensors.setdefault(expert_group_name, []).extend(expert_grads_for_norm)
 
         self.overflow = self.overflow_checker.check_using_norm(norm_groups + expert_norm_groups)
         prev_scale = self.loss_scale_config.cur_scale
@@ -156,7 +162,7 @@ class FP16_UnfusedOptimizer(DeepSpeedOptimizer):
                             "scale: {}, reducing to {}".format(prev_scale, self.loss_scale_config.cur_scale))
             return self.overflow
 
-        self._global_grad_norm = get_global_norm(norm_list=norm_groups)
+        self._global_grad_norm = self._norm_with_experts(get_global_norm(norm_list=norm_groups), expert_tensors)
         combined_scale = self.unscale_and_clip_grads(self._global_grad_norm, apply_scale=False)
         self.optimizer.step(grads=grads_groups, output_params=self.fp16_groups, scale=combined_scale)
 
@@ -205,12 +211,16 @@ class FP16_UnfusedOptimizer(DeepSpeedOptimizer):
             return self.overflow
 
         norm_groups = []
+        expert_tensors = {}
         for i, group in enumerate(self.fp16_groups):
-            grads_for_norm, _ = split_params_grads_into_shared_and_expert_params(group)
+            grads_for_norm, expert_grads_for_norm = split_params_grads_into_shared_and_expert_params(group)
             norm_group_value = 0.0
             if len(grads_for_norm) > 0:
                 norm_group_value = get_weight_norm(grads_for_norm, mpu=self.mpu)
             norm_groups.append(norm_group_value)
+            if self.has_moe_layers and len(expert_grads_for_norm) > 0:
+                expert_group_name = self.optimizer.param_groups[i]['name']
+                expert_tensors.setdefault(expert_group_name, []).extend(expert_grads_for_norm)
 
             # copying gradients to fp32 to work with fp32 parameters
             for fp32_param, fp16_param in zip(self.fp32_groups[i], self.fp16_groups[i]):
@@ -219,7 +229,7 @@ class FP16_UnfusedOptimizer(DeepSpeedOptimizer):
                 else:
                     fp32_param.grad = fp16_param.grad.to(fp32_param.dtype)
 
-        self._global_grad_norm = get_global_norm(norm_list=norm_groups)
+        self._global_grad_norm = self._norm_with_experts(get_global_norm(norm_list=norm_groups), expert_tensors)
         self.unscale_and_clip_grads(self._global_grad_norm)
 
         self.optimizer.step()
@@ -234,6 +244,22 @@ class FP16_UnfusedOptimizer(DeepSpeedOptimizer):
                 fp16_param.data.copy_(fp32_param.data)
 
         return self.overflow
+
+    def _norm_with_experts(self, shared_norm, expert_tensors):
+        """Fold the expert gradients into the norm that clipping is decided from.
+
+        Expert parameters are replicated across the expert-parallel group rather than the data-parallel
+        one, so their norm needs a reduction over that group; `get_weight_norm` above cannot do it and
+        the split that separates them here exists for this. Without the fold, the norm is built from the
+        shared parameters only, so the clip coefficient is too large and every gradient, expert ones
+        included, is under-clipped. `FP16_Optimizer` already folds them the same way.
+        """
+        if not expert_tensors:
+            return shared_norm
+        return get_norm_with_moe_layers(shared_norm,
+                                        mpu=self.mpu,
+                                        expert_tensors=expert_tensors,
+                                        norm_type=self.norm_type)
 
     def unscale_and_clip_grads(self, total_norm, apply_scale=True):
         # compute combined scale factor for this group
