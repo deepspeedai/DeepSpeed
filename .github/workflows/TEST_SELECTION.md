@@ -141,6 +141,18 @@ exits with a dedicated code (75 / 124 / 1). A failed run with no sentinel was
 killed before the controller could classify itself, which triage treats as a
 timeout.
 
+Triage reports (timeout, culprit, inconclusive, missing-tag) go through
+`ci/nightly_report.sh`: every report carries the `nightly-triage` label, and a
+recurring outcome comments on its still-open issue instead of filing a new one.
+Dedup keys on the title, so titles are stable across recurrences (per-night
+SHAs live in the body) — except culprit reports, whose title carries the culprit
+SHA because a different culprit is a different regression.
+
+Triage checks out the SHA the nightly actually ran rather than current master,
+so the classifier and the sentinel protocol it parses come from the same
+revision; bisect steps still execute each step's own revision, and a step older
+than the sentinel has no class, which aborts the bisect.
+
 
 ## How a decision is made
 
