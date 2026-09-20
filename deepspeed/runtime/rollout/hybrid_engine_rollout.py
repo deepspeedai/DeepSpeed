@@ -267,10 +267,9 @@ class HybridEngineRollout(RolloutEngine):
         self._validate_continuous_inputs(requests, sampling, max_batch_size)
 
         module = self.engine.module
-        profile_accelerator = get_accelerator() if self.enable_profiling else None
-        if profile_accelerator is not None:
-            profile_accelerator.synchronize()
-        profile_start = time.perf_counter() if profile_accelerator is not None else None
+        profile = self._start_continuous_profile() if self.enable_profiling else None
+        profile_accelerator = profile["accelerator"] if profile is not None else None
+        profile_start = profile["start"] if profile is not None else None
         prompt_lengths = {
             request_id: (int(request.prompt_attention_mask.sum().item())
                          if self.align_decode_fronts else request.prompt_ids.shape[1])
@@ -296,6 +295,7 @@ class HybridEngineRollout(RolloutEngine):
         device = requests[0].prompt_ids.device
         model_dtype = next(module.parameters()).dtype
 
+        scheduler_start = self._profile_start(profile)
         scheduler = ContinuousBatchScheduler(max_batch_size, sampling.max_new_tokens)
         request_by_id = {}
         responses = {}
@@ -306,7 +306,9 @@ class HybridEngineRollout(RolloutEngine):
             scheduler.submit(ContinuousBatchRequest(request_id))
             request_by_id[request_id] = request
             responses[request_id] = []
+        self._profile_end(profile, "scheduler_overhead_ms", scheduler_start)
 
+        cache_start = self._profile_start(profile)
         cache = DeepSpeedStaticCache(
             module.config,
             batch_size=max_batch_size,
@@ -340,9 +342,15 @@ class HybridEngineRollout(RolloutEngine):
         cache_position = prompt_len
         span_starts = [0] * max_batch_size
 
+        self._profile_end(profile, "cache_management_overhead_ms", cache_start)
+        scheduler_start = self._profile_start(profile)
         update = scheduler.schedule()
+        self._profile_end(profile, "scheduler_overhead_ms", scheduler_start)
 
         while update.active:
+            if profile is not None:
+                profile["active_batch_sizes"].append(len(update.active))
+            cache_start = self._profile_start(profile)
             keep_slots = torch.tensor(update.keep_slots, dtype=torch.long, device=device)
             survivor_count = keep_slots.numel()
             if survivor_count:
@@ -396,6 +404,7 @@ class HybridEngineRollout(RolloutEngine):
                 cache_position = prompt_len
                 span_starts = [0] * max_batch_size
 
+            self._profile_end(profile, "cache_management_overhead_ms", cache_start)
             admitted_tokens = self._continuous_prefill(
                 module,
                 StaticCache,
@@ -409,6 +418,7 @@ class HybridEngineRollout(RolloutEngine):
                 model_dtype,
                 device,
                 self.align_decode_fronts,
+                profile,
             )
             if self.align_decode_fronts:
                 for admitted, target_row in zip(update.admitted, update.admitted_slots):
@@ -428,6 +438,7 @@ class HybridEngineRollout(RolloutEngine):
                 else:
                     position_ids = attention_mask[:survivor_count, :cache_position].sum(dim=1, keepdim=True)
                 attention_mask[:survivor_count, cache_position] = 1
+                decode_start = self._profile_start(profile)
                 output = self._call_model(
                     module,
                     decode_input,
@@ -437,6 +448,7 @@ class HybridEngineRollout(RolloutEngine):
                     cache_position=torch.tensor([cache_position], dtype=torch.long, device=device),
                     position_ids=position_ids,
                 )
+                self._profile_end(profile, "decode_forward_ms", decode_start, count="num_decode_forwards")
                 decoded = self._continuous_next_tokens(
                     output.logits[:, -1, :],
                     survivor_ids,
@@ -460,9 +472,14 @@ class HybridEngineRollout(RolloutEngine):
             if survivor_count:
                 cache_position += 1
             stats["peak_cache_length"] = max(stats["peak_cache_length"], cache_position)
+            scheduler_start = self._profile_start(profile)
             update = scheduler.advance(finished_ids)
+            self._profile_end(profile, "scheduler_overhead_ms", scheduler_start)
 
+        generation_end = self._profile_start(profile)
+        post_processing_start = generation_end
         output = self._build_continuous_batch(original_request, responses)
+        post_processing_end = self._profile_end(profile, None, post_processing_start)
         if profile_accelerator is not None:
             profile_accelerator.synchronize()
             total_ms = (time.perf_counter() - profile_start) * 1000.0
@@ -475,6 +492,9 @@ class HybridEngineRollout(RolloutEngine):
         stats.setdefault("trim_bytes_moved", 0)
         stats["trim_frequency"] = (stats["trim_count"] / stats["decode_steps"] if stats["decode_steps"] else 0.0)
         self._last_continuous_stats = stats
+        if profile is not None:
+            self._finish_continuous_profile(profile, original_request, responses, max_batch_size, prompt_len,
+                                            generation_end, post_processing_end)
         return output
 
     @staticmethod
@@ -559,7 +579,8 @@ class HybridEngineRollout(RolloutEngine):
                             prompt_lengths,
                             model_dtype,
                             device,
-                            align_decode_fronts=False):
+                            align_decode_fronts=False,
+                            profile=None):
         if not update.admitted:
             return {}
 
@@ -569,6 +590,7 @@ class HybridEngineRollout(RolloutEngine):
             prompt_attention = torch.cat(
                 [request_by_id[request_id].prompt_attention_mask for request_id in admitted_ids], dim=0)
             prompt_len = prompt_ids.shape[1]
+            prefill_start = self._profile_start(profile)
             prefill_tokens, prefill_cache = self._continuous_prefill_cache(
                 module,
                 static_cache_type,
@@ -577,6 +599,8 @@ class HybridEngineRollout(RolloutEngine):
                 model_dtype,
                 device,
             )
+            self._profile_end(profile, "prefill_forward_ms", prefill_start, count="num_prefill_forwards")
+            cache_copy_start = self._profile_start(profile)
             cache_start = cache_position - prompt_len
             if cache_start < 0:
                 raise ValueError("continuous batching prompt does not fit behind the decode front")
@@ -589,6 +613,7 @@ class HybridEngineRollout(RolloutEngine):
             for source_row, target_row in enumerate(update.admitted_slots):
                 attention_mask[target_row, cache_start:cache_position].copy_(prompt_attention[source_row])
                 write_positions[target_row] = cache_position
+            self._profile_end(profile, "cache_management_overhead_ms", cache_copy_start)
             return dict(zip(admitted_ids, prefill_tokens.split(1, dim=0)))
 
         admitted_tokens = {}
@@ -599,6 +624,7 @@ class HybridEngineRollout(RolloutEngine):
             valid = request.prompt_attention_mask[0].bool()
             prompt_ids = request.prompt_ids[:, valid]
             prompt_attention = torch.ones_like(prompt_ids)
+            prefill_start = self._profile_start(profile)
             prefill_tokens, prefill_cache = self._continuous_prefill_cache(
                 module,
                 static_cache_type,
@@ -607,6 +633,8 @@ class HybridEngineRollout(RolloutEngine):
                 model_dtype,
                 device,
             )
+            self._profile_end(profile, "prefill_forward_ms", prefill_start, count="num_prefill_forwards")
+            cache_copy_start = self._profile_start(profile)
             admitted_tokens[request_id] = prefill_tokens
             cache_start = cache_position - prompt_len
             if cache_start < 0:
@@ -618,7 +646,72 @@ class HybridEngineRollout(RolloutEngine):
                 target_layer.values[target_row, :, cache_start:cache_position].copy_(prefill_values[0])
             attention_mask[target_row, cache_start:cache_position].fill_(1)
             write_positions[target_row] = cache_position
+            self._profile_end(profile, "cache_management_overhead_ms", cache_copy_start)
         return admitted_tokens
+
+    def _start_continuous_profile(self):
+        accelerator = get_accelerator()
+        accelerator.synchronize()
+        return {
+            "accelerator": accelerator,
+            "start": time.perf_counter(),
+            "prefill_forward_ms": 0.0,
+            "decode_forward_ms": 0.0,
+            "scheduler_overhead_ms": 0.0,
+            "cache_management_overhead_ms": 0.0,
+            "num_prefill_forwards": 0,
+            "num_decode_forwards": 0,
+            "active_batch_sizes": [],
+        }
+
+    @staticmethod
+    def _profile_start(profile):
+        if profile is None:
+            return None
+        profile["accelerator"].synchronize()
+        return time.perf_counter()
+
+    @staticmethod
+    def _profile_end(profile, field, start, count=None):
+        if profile is None or start is None:
+            return None
+        profile["accelerator"].synchronize()
+        end = time.perf_counter()
+        if field is not None:
+            profile[field] += (end - start) * 1000.0
+        if count is not None:
+            profile[count] += 1
+        return end
+
+    def _finish_continuous_profile(self, profile, request, responses, max_batch_size, prompt_len, generation_end,
+                                   post_processing_end):
+        total_ms = (post_processing_end - profile["start"]) * 1000.0
+        generation_ms = (generation_end - profile["start"]) * 1000.0
+        prefill_ms = profile["prefill_forward_ms"]
+        decode_ms = profile["decode_forward_ms"]
+        response_lengths = [len(response) for response in responses.values()]
+        num_generated_tokens = sum(response_lengths)
+        self._last_profile = {
+            "prompt_expansion_ms": 0.0,
+            "generation_ms": generation_ms,
+            "prefill_forward_ms": prefill_ms,
+            "decode_forward_ms": decode_ms,
+            "generation_overhead_ms": max(0.0, generation_ms - prefill_ms - decode_ms),
+            "num_prefill_forwards": profile["num_prefill_forwards"],
+            "num_decode_forwards": profile["num_decode_forwards"],
+            "scheduler_overhead_ms": profile["scheduler_overhead_ms"],
+            "cache_management_overhead_ms": profile["cache_management_overhead_ms"],
+            "post_processing_ms": (post_processing_end - generation_end) * 1000.0,
+            "total_ms": total_ms,
+            "num_generated_tokens": num_generated_tokens,
+            "tokens_per_second": num_generated_tokens / (total_ms / 1000.0) if total_ms > 0.0 else 0.0,
+            "batch_size": request.prompt_ids.shape[0],
+            "num_samples_per_prompt": 1,
+            "prompt_length": prompt_len,
+            "response_length": max(response_lengths, default=0),
+            "active_batch_size": max(profile["active_batch_sizes"], default=0),
+            "continuous_batch_size": max_batch_size,
+        }
 
     def _continuous_prefill_cache(self, module, static_cache_type, prompt_ids, prompt_attention, model_dtype, device):
         position_ids = self._prefill_position_ids(prompt_attention)
