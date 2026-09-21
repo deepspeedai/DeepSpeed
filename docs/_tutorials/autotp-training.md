@@ -169,9 +169,11 @@ vocabulary shards are supported.
 For optional fused CE, install `liger-kernel>=0.8.1` and set
 `tensor_parallel.vocab_parallel_ce_backend` to `"liger"` alongside
 `vocab_parallel_lm_head`. The default remains `"torch"`, with no Liger dependency.
-The Liger backend accepts nonempty CUDA logits in FP32, FP16, or BF16 with equal
-vocabulary shards. Uneven shards and unsupported layouts use the PyTorch backend
-on every TP rank. This fuses CE, not the linear projection: local logits are still
+The Liger backend accepts nonempty accelerator logits in FP32, FP16, or BF16 with
+equal vocabulary shards behind an explicit tensor-parallel group, on any accelerator
+whose Triton support the DeepSpeed accelerator reports. Uneven shards, a missing
+tensor-parallel group, and unsupported layouts use the PyTorch backend on every TP
+rank. This fuses CE, not the linear projection: local logits are still
 materialized. Liger supports one first-order backward per forward; retained-graph
 second backward and higher-order gradients raise an error rather than reusing
 its overwritten gradient buffer. Select `"torch"` for those workloads.

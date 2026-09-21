@@ -44,10 +44,15 @@ def _liger_vocab_cross_entropy(logits, target, tp_group, ignore_index):
 
 
 def _liger_can_run(vocab_parallel_logits, target, local_vocab_size, global_vocab_size, tp_group):
-    # Liger's kernel all-gathers fixed-width shards, while the PyTorch path trims uneven
-    # ones, so the kernel stays restricted to equal shards.
-    tp_world_size = dist.get_world_size(tp_group) if tp_group is not None else 1
-    return (get_accelerator().device_name() == "cuda" and get_accelerator().on_accelerator(vocab_parallel_logits)
+    # A ``None`` group is ambiguous to Liger: depending on its version it may resolve to the
+    # default world, which would fold data-parallel replicas into the vocabulary dimension, so
+    # the kernel only runs behind a real tensor-parallel group. Liger's kernel all-gathers
+    # fixed-width shards while the PyTorch path trims uneven ones, so the kernel stays
+    # restricted to equal shards.
+    if tp_group is None:
+        return False
+    tp_world_size = dist.get_world_size(tp_group)
+    return (get_accelerator().is_triton_supported() and get_accelerator().on_accelerator(vocab_parallel_logits)
             and vocab_parallel_logits.dtype in (torch.float32, torch.float16, torch.bfloat16) and target.numel() > 0
             and local_vocab_size * tp_world_size == global_vocab_size)
 
@@ -240,12 +245,13 @@ def vocab_parallel_cross_entropy(vocab_parallel_logits,
         raise ValueError(f"Target is out of range for vocabulary size {global_vocab_size}")
 
     use_liger = backend == "liger" and _liger_can_run(vocab_parallel_logits, target, local_vocab_size,
-                                                       global_vocab_size, tp_group)
+                                                      global_vocab_size, tp_group)
     if use_liger:
         loss = _liger_vocab_cross_entropy(vocab_parallel_logits, target.to(dtype=torch.long), tp_group, ignore_index)
     else:
         if backend == "liger":
-            logger.warning_once("Liger CE requires nonempty CUDA tokens, a supported dtype, and equal vocabulary "
+            logger.warning_once("Liger CE requires an explicit tensor-parallel group, a Triton-supported "
+                                "accelerator, nonempty accelerator tokens, a supported dtype, and equal vocabulary "
                                 "shards; using the PyTorch reference backend for this layout.")
         loss = _VocabParallelCrossEntropy.apply(vocab_parallel_logits, target, tp_group, vocab_start_index,
                                                 vocab_end_index, ignore_index)
@@ -352,12 +358,19 @@ class VocabParallelCausalLMLoss:
     metadata.
     """
 
-    def __init__(self, tp_group=None, sp_group=None, vocab_start_index=None, vocab_end_index=None, ignore_index=-100):
+    def __init__(self,
+                 tp_group=None,
+                 sp_group=None,
+                 vocab_start_index=None,
+                 vocab_end_index=None,
+                 ignore_index=-100,
+                 backend="torch"):
         self.tp_group = tp_group
         self.sp_group = sp_group
         self.vocab_start_index = vocab_start_index
         self.vocab_end_index = vocab_end_index
         self.ignore_index = ignore_index
+        self.backend = backend
         self._resolved_vocab_key = None
         self._resolved_global_vocab_size = None
 
@@ -403,7 +416,8 @@ class VocabParallelCausalLMLoss:
                                             vocab_end_index=self.vocab_end_index,
                                             global_vocab_size=global_vocab_size,
                                             ignore_index=self.ignore_index,
-                                            reduction=reduction)
+                                            reduction=reduction,
+                                            backend=self.backend)
         if num_items_in_batch is not None:
             denominator = torch.as_tensor(num_items_in_batch, device=loss.device, dtype=loss.dtype)
             loss = loss / denominator.clamp_min(1)
