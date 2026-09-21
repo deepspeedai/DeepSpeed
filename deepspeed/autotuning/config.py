@@ -36,9 +36,11 @@ class DeepSpeedAutotuningConfig(DeepSpeedConfigObject):
         self.fast = get_scalar_param(autotuning_dict, AUTOTUNING_FAST, AUTOTUNING_FAST_DEFAULT)
 
         self.results_dir = get_scalar_param(autotuning_dict, AUTOTUNING_RESULTS_DIR, AUTOTUNING_RESULTS_DIR_DEFAULT)
-        assert self.results_dir, "results_dir cannot be empty"
+        if not self.results_dir:
+            raise AssertionError("results_dir cannot be empty")
         self.exps_dir = get_scalar_param(autotuning_dict, AUTOTUNING_EXPS_DIR, AUTOTUNING_EXPS_DIR_DEFAULT)
-        assert self.exps_dir, "exps_dir cannot be empty"
+        if not self.exps_dir:
+            raise AssertionError("exps_dir cannot be empty")
         self.overwrite = get_scalar_param(autotuning_dict, AUTOTUNING_OVERWRITE, AUTOTUNING_OVERWRITE_DEFAULT)
 
         self.start_profile_step = get_scalar_param(autotuning_dict, AUTOTUNING_START_PROFILE_STEP,
