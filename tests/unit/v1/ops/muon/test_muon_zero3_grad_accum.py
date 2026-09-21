@@ -1,4 +1,3 @@
-# Copyright (c) Microsoft Corporation.
 # SPDX-License-Identifier: Apache-2.0
 
 # DeepSpeed Team
@@ -8,6 +7,8 @@ Muon used to run inside the ZeRO-3 gradient reduce, which happens every micro-ba
 `gradient_accumulation_steps: n` the momentum advanced n times per step and Newton-Schulz saw
 partial gradients. ZeRO-1/2 were already correct.
 """
+
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -28,7 +29,30 @@ def _model():
                                                                                             bias=False))
 
 
-def _train(zero_stage, gas, steps):
+class _GQAModel(torch.nn.Module):
+    """Query over 4 heads, key over 2, and an MLP with none.
+
+    A head count read from any parameter but the one being updated either takes per-head away
+    from q and k or gives it to the MLP, and the test below catches both.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.q_proj = torch.nn.Linear(HIDDEN, 4 * 16, bias=False)
+        self.k_proj = torch.nn.Linear(HIDDEN, 2 * 16, bias=False)
+        self.mlp = torch.nn.Linear(HIDDEN, HIDDEN, bias=False)
+        self.config = SimpleNamespace(num_attention_heads=4, num_key_value_heads=2, hidden_size=HIDDEN, head_dim=16)
+
+    def forward(self, x):
+        return self.mlp(x) + self.q_proj(x) + self.k_proj(x).repeat(1, 2)
+
+
+def _gqa_model():
+    torch.manual_seed(0)
+    return _GQAModel()
+
+
+def _train(zero_stage, gas, steps, model_fn=_model, per_head=False):
     """Train on the same SAMPLES_PER_STEP samples per step, split into `gas` micro-batches."""
     micro_batch = SAMPLES_PER_STEP // gas
     config = {
@@ -39,7 +63,8 @@ def _train(zero_stage, gas, steps):
             "params": {
                 "lr": 0.02,
                 "momentum": 0.95,
-                "weight_decay": 0.0
+                "weight_decay": 0.0,
+                "per_head_muon": per_head
             }
         },
         "gradient_clipping": 0.0,
@@ -49,7 +74,7 @@ def _train(zero_stage, gas, steps):
             "reduce_scatter": False
         },
     }
-    model = _model()
+    model = model_fn()
     engine, *_ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config)
     generator = torch.Generator().manual_seed(dist.get_rank() + 1)
     for _ in range(steps):
@@ -98,3 +123,12 @@ class TestZero3MuonOncePerStep(DistributedTest):
                               for a, b in zip(one, four)]).norm() / torch.cat([a.flatten() for a in one]).norm()
         # Measured on 2 GPUs: 3.6e-4 at both stages; stage 3 was 1.3e-1 before this change.
         assert relative.item() < 5e-3
+
+    def test_per_head_moves_exactly_the_head_blocked_matrices(self):
+        """One step from the same start: per-head changes q and k and leaves the untagged MLP alone."""
+        full = _train(3, gas=1, steps=1, model_fn=_gqa_model, per_head=False)
+        per_head = _train(3, gas=1, steps=1, model_fn=_gqa_model, per_head=True)
+
+        q, k, mlp = [(a - b).abs().max().item() for a, b in zip(full, per_head)]
+        assert q > 0 and k > 0, "per-head Muon did not reach the attention projections under ZeRO-3"
+        assert mlp == 0, "an MLP matrix has no heads, so per-head must not touch it"

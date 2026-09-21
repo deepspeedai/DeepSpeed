@@ -1701,6 +1701,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             momentum_handles = []
             for base_i in range(len(params))[::world_sz]:
                 if base_i + rank < len(params):
+                    param = params[base_i + rank]
                     g = grads[base_i + rank]
                     m = gathered_momentums_pad[base_i + rank]
                     update = muon_update(g,
