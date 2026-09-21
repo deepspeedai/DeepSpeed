@@ -113,6 +113,9 @@ _REMOVED_TOP_LEVEL_CONFIG_KEYS = {
     "progressive_layer_drop":
     "Progressive Layer Dropping has been removed; the 'progressive_layer_drop' configuration block is no longer "
     f"supported. See {_REMOVED_FEATURES_ISSUE}.",
+    "graph_harvesting":
+    "Graph harvesting has been removed; the 'graph_harvesting' configuration key is no longer supported. "
+    f"See {_REMOVED_FEATURES_ISSUE}.",
 }
 _REMOVED_ZERO_CONFIG_KEYS = {
     "mics_shard_size":
@@ -265,10 +268,6 @@ def get_disable_python_gc(param_dict):
 
 def get_gradient_clipping(param_dict):
     return get_scalar_param(param_dict, GRADIENT_CLIPPING, GRADIENT_CLIPPING_DEFAULT)
-
-
-def get_graph_harvesting(param_dict):
-    return get_scalar_param(param_dict, GRAPH_HARVESTING, GRAPH_HARVESTING_DEFAULT)
 
 
 def get_pipeline_config(param_dict):
@@ -516,8 +515,6 @@ class DeepSpeedConfig(object):
         self.torch_autocast_enabled = get_torch_autocast_enabled(param_dict)
         self.torch_autocast_dtype = get_torch_autocast_dtype(param_dict)
         self.torch_autocast_lower_precision_safe_modules = get_lower_precision_safe_modules(param_dict)
-
-        self.graph_harvesting = get_graph_harvesting(param_dict)
 
         self.optimizer_name = get_optimizer_name(param_dict)
         if (self.optimizer_name is not None and self.optimizer_name.lower() in DEEPSPEED_OPTIMIZERS):

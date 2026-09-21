@@ -1587,9 +1587,6 @@ class DeepSpeedEngine(Module):
     def autotp_size(self):
         return self._config.tensor_parallel_config.autotp_size
 
-    def graph_harvesting(self):
-        return self._config.graph_harvesting
-
     def fp16_enabled(self):
         return self._config.float16_config.enabled
 
@@ -2535,7 +2532,6 @@ class DeepSpeedEngine(Module):
                                    dp_process_group=self.seq_data_parallel_group,
                                    timers=timers,
                                    grad_acc_dtype=self.get_data_types()[1],
-                                   graph_harvesting=self.graph_harvesting(),
                                    has_moe_layers=self.has_moe_layers)
 
         return optimizer
