@@ -508,3 +508,64 @@ def test_lm_head_forward_uses_frozen_partition_sizes():
     assert layer._partition_sizes == frozen
 
     layer(torch.zeros(1, 1, 101))
+
+
+def test_restore_prefers_the_map_over_the_category_keys():
+    """Restore must read the map, not the per-category keys, when the layer published one.
+
+    The two are given deliberately contradictory geometry: the keys describe a plain dim-0
+    split, so rank 0 would take the first half, while the map hands rank 0 the second half.
+    Whichever rank 0 actually receives says which side of the metadata restore consulted.
+    Without this, removing the map branch leaves the old path quietly producing the same
+    answer for every layout it happens to cover.
+    """
+    from deepspeed.checkpoint.affine import AffinePiece, ParamAffineMap
+
+    full = torch.arange(8, dtype=torch.float32).reshape(4, 2)
+    reversed_map = ParamAffineMap(logical_shape=(4, 2),
+                                  shard_shapes={
+                                      0: (2, 2),
+                                      1: (2, 2)
+                                  },
+                                  pieces_by_rank={
+                                      rank: [
+                                          AffinePiece(shape=(2, 2),
+                                                      source_offset=(1 - rank) * 4,
+                                                      source_strides=(2, 1),
+                                                      dest_offset=0,
+                                                      dest_strides=(2, 1),
+                                                      locations=[rank])
+                                      ]
+                                      for rank in range(2)
+                                  })
+
+    param = torch.nn.Parameter(torch.zeros(2, 2))
+    param.ds_autotp_universal_checkpoint_meta = _build_param_uc_restore_meta(
+        partition_type="column",
+        partition_dim=0,
+        logical_shape=[4, 2],
+        original_shape=[4, 2],
+        partition_sizes=[2, 2],
+        affine_map=reversed_map,
+    )
+
+    restored = _resolve_autotp_partition(param, {}, full.flatten(), tp_rank=0, tp_world_size=2)
+
+    # The map gives rank 0 the second half; the category keys would give it the first.
+    torch.testing.assert_close(restored, full[2:].flatten())
+
+
+def test_restore_falls_back_when_no_map_was_published():
+    """A layout with no map must still restore through the existing keys."""
+    full = torch.arange(8, dtype=torch.float32).reshape(4, 2)
+    param = torch.nn.Parameter(torch.zeros(2, 2))
+    param.ds_autotp_universal_checkpoint_meta = _build_param_uc_restore_meta(
+        partition_type="column",
+        partition_dim=0,
+        logical_shape=[4, 2],
+        original_shape=[4, 2],
+        partition_sizes=[2, 2],
+    )
+
+    restored = _resolve_autotp_partition(param, {}, full.flatten(), tp_rank=0, tp_world_size=2)
+    torch.testing.assert_close(restored, full[:2].flatten())
