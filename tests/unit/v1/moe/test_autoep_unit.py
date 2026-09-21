@@ -50,11 +50,14 @@ from deepspeed.moe.layer import MoE
 from deepspeed.moe.ep_experts import GroupedExperts
 from deepspeed.moe.ep_repack import repack_expert_weights
 from deepspeed.moe.ep_router import TokenChoiceTopKRouter
+from deepspeed.compile.config import CompileConfig
+from deepspeed.runtime.config import DeepSpeedConfig
 from deepspeed.runtime.engine import DeepSpeedEngine
-from deepspeed.runtime.compiler import compile_autoep_non_moe_regions
+from deepspeed.runtime.compiler import compile_autoep_non_moe_regions, is_compiling
 from deepspeed.runtime.zero.offload_config import DeepSpeedZeroOffloadOptimizerConfig, DeepSpeedZeroOffloadParamConfig
 from deepspeed.runtime.zero.stage3 import DeepSpeedZeroOptimizer_Stage3
 from deepspeed.utils import groups
+from unit.simple_model import SimpleModel
 from unit.v1.moe.autoep_test_utils import (
     MockHFConfig,
     MockMoEBlock,
@@ -932,6 +935,92 @@ class TestAutoEPConfig:
 
 class TestAutoEPRegionalCompile:
 
+    @pytest.mark.parametrize("compile_options, expected", [(None, False), ({}, False),
+                                                           ({
+                                                               "autoep_non_moe": False
+                                                           }, False), ({
+                                                               "autoep_non_moe": True
+                                                           }, True)])
+    def test_compile_config(self, compile_options, expected):
+        config = {"train_batch_size": 1}
+        if compile_options is not None:
+            config["compile"] = compile_options
+        assert CompileConfig(**(compile_options or {})).autoep_non_moe is expected
+        assert DeepSpeedConfig(config).compile_config.autoep_non_moe is expected
+
+    @pytest.mark.parametrize("compile_options", [None, {"autoep_non_moe": False}])
+    def test_default_compiles_full_model(self, compile_options):
+        config = {"train_batch_size": 1}
+        if compile_options is not None:
+            config["compile"] = compile_options
+        engine = object.__new__(DeepSpeedEngine)
+        nn.Module.__init__(engine)
+        engine.module = SimpleModel(4)
+        engine._config = DeepSpeedConfig(config)
+        engine._deepcompile_active = False
+        engine._is_compiled = False
+        engine._compile_mode = None
+        engine._is_compiled_autograd_enabled = False
+        inputs = torch.randn(2, 4)
+        labels = torch.tensor([0, 1])
+        expected = engine.module(inputs, labels)
+        torch._dynamo.reset()
+        torch._dynamo.utils.counters.clear()
+
+        try:
+            engine.compile(backend="eager")
+            engine.compile(backend="eager")
+            torch.testing.assert_close(engine.module(inputs, labels), expected)
+            assert engine.is_compiled
+            assert torch._dynamo.utils.counters["stats"]["unique_graphs"] > 0
+        finally:
+            torch._dynamo.reset()
+            torch._dynamo.utils.counters.clear()
+
+    @pytest.mark.parametrize("checkpoint_enabled", [False, True])
+    def test_compiles_model_root_with_direct_autoep_child(self, checkpoint_enabled):
+        eager_model = _replace_callable_autoep_layers(num_layers=1).model.layers[0]
+        compiled_model = copy.deepcopy(eager_model)
+        compiled_inputs = torch.randn(1, 8, 64, requires_grad=True)
+        eager_inputs = compiled_inputs.detach().clone().requires_grad_(True)
+        eager_calls = []
+
+        def observe_router(_module, _inputs, _output):
+            assert not is_compiling(), "AutoEP router must remain eager"
+            eager_calls.append(True)
+
+        handle = compiled_model.mlp.router.register_forward_hook(observe_router)
+        torch._dynamo.reset()
+        torch._dynamo.utils.counters.clear()
+        try:
+            compile_autoep_non_moe_regions(compiled_model, backend="eager", compile_kwargs={})
+            if checkpoint_enabled:
+                expected = checkpoint(eager_model, eager_inputs, use_reentrant=False)
+                actual = checkpoint(compiled_model, compiled_inputs, use_reentrant=False)
+            else:
+                expected = eager_model(eager_inputs)
+                actual = compiled_model(compiled_inputs)
+            expected.square().mean().backward()
+            actual.square().mean().backward()
+
+            torch.testing.assert_close(actual, expected)
+            torch.testing.assert_close(compiled_inputs.grad, eager_inputs.grad)
+            eager_params = dict(eager_model.named_parameters())
+            for name, param in compiled_model.named_parameters():
+                assert param.grad is not None, f"Missing gradient for {name}"
+                torch.testing.assert_close(param.grad, eager_params[name].grad)
+            assert len(eager_calls) == (2 if checkpoint_enabled else 1)
+            assert torch._dynamo.utils.counters["stats"]["unique_graphs"] > 0
+        finally:
+            handle.remove()
+            torch._dynamo.reset()
+            torch._dynamo.utils.counters.clear()
+
+    def test_rejects_bare_autoep_model_root(self):
+        model = _replace_callable_autoep_layers(num_layers=1).model.layers[0].mlp
+        with pytest.raises(ValueError, match="AutoEPMoELayer at the model root"):
+            compile_autoep_non_moe_regions(model, backend="eager", compile_kwargs={})
+
     def test_rejects_model_without_autoep_layers(self):
         with pytest.raises(ValueError, match="requires at least one AutoEPMoELayer"):
             compile_autoep_non_moe_regions(nn.Linear(4, 4), backend="eager", compile_kwargs={})
@@ -1049,7 +1138,7 @@ class TestAutoEPRegionalCompile:
         nn.Module.__init__(engine)
         engine.module = model
         engine._config = SimpleNamespace(
-            compile_config=SimpleNamespace(deepcompile=condition == "deepcompile"),
+            compile_config=CompileConfig(autoep_non_moe=True, deepcompile=condition == "deepcompile"),
             expert_parallel_config=SimpleNamespace(comm_backend="deepep" if condition == "deepep" else "comm"),
         )
         engine._is_compiled = False
@@ -1069,17 +1158,9 @@ class TestAutoEPRegionalCompile:
         with pytest.raises(ValueError, match=match):
             engine.compile(
                 backend="eager",
-                compile_mode="autoep_non_moe",
                 schedule=[] if condition == "schedule" else None,
                 compiled_autograd_enabled=condition == "compiled_autograd",
             )
-
-    def test_engine_rejects_unknown_compile_mode(self):
-        engine = object.__new__(DeepSpeedEngine)
-        nn.Module.__init__(engine)
-        engine._is_compiled = False
-        with pytest.raises(ValueError, match="Unknown compile_mode"):
-            engine.compile(backend="eager", compile_mode="unknown")
 
     @pytest.mark.parametrize("offload_config", [None, {}, {"device": "none"}])
     def test_engine_tracks_regional_compile_mode(self, monkeypatch, offload_config):
@@ -1088,7 +1169,7 @@ class TestAutoEPRegionalCompile:
         nn.Module.__init__(engine)
         engine.module = model
         engine._config = SimpleNamespace(
-            compile_config=SimpleNamespace(deepcompile=False),
+            compile_config=CompileConfig(autoep_non_moe=True),
             expert_parallel_config=SimpleNamespace(comm_backend="comm"),
         )
         engine._is_compiled = False
@@ -1107,12 +1188,13 @@ class TestAutoEPRegionalCompile:
         monkeypatch.setattr(_CallableMoEDecoderLayer, "compile",
                             lambda module, **kwargs: setattr(module, "_compiled_call_impl", object()))
 
-        engine.compile(backend="eager", compile_mode="autoep_non_moe")
-        engine.compile(backend="eager", compile_mode="autoep_non_moe")
+        engine.compile(backend="eager")
+        engine.compile(backend="eager")
 
         assert engine.is_compiled
         assert engine._compile_mode == "autoep_non_moe"
         assert engine._compiled_regions == ["model.layers.0", "model.layers.1"]
+        engine._config.compile_config.autoep_non_moe = False
         with pytest.raises(RuntimeError, match="already compiled"):
             engine.compile(backend="eager")
 

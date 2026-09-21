@@ -198,13 +198,18 @@ class _CompiledDecoderLayer(nn.Module):
 
 class _CompiledAutoEPModel(nn.Module):
 
-    def __init__(self, checkpoint_enabled):
+    def __init__(self, checkpoint_enabled, model_layout="nested"):
         super().__init__()
         self.config = copy.copy(MockHFConfig())
         self.config.hidden_size = 128
         self.config.intermediate_size = 256
-        self.model = nn.Module()
-        self.model.layers = nn.ModuleList([_CompiledDecoderLayer() for _ in range(2)])
+        self.model_layout = model_layout
+        if model_layout == "root":
+            for name, module in _CompiledDecoderLayer().named_children():
+                self.add_module(name, module)
+        else:
+            self.model = nn.Module()
+            self.model.layers = nn.ModuleList([_CompiledDecoderLayer() for _ in range(2)])
         self.output = nn.Linear(128, 64, bias=False)
         self.checkpoint_enabled = checkpoint_enabled
         with torch.no_grad():
@@ -215,11 +220,14 @@ class _CompiledAutoEPModel(nn.Module):
                     param.normal_(mean=0.0, std=0.02)
 
     def forward(self, hidden_states):
-        for layer in self.model.layers:
-            if self.checkpoint_enabled and self.training:
-                hidden_states = checkpoint(layer, hidden_states, use_reentrant=False)
-            else:
-                hidden_states = layer(hidden_states)
+        if self.model_layout == "root":
+            hidden_states = _CompiledDecoderLayer.forward(self, hidden_states)
+        else:
+            for layer in self.model.layers:
+                if self.checkpoint_enabled and self.training:
+                    hidden_states = checkpoint(layer, hidden_states, use_reentrant=False)
+                else:
+                    hidden_states = layer(hidden_states)
         return self.output(hidden_states)
 
 
@@ -255,10 +263,13 @@ def _snapshot_parameter_data(engine):
     return snapshot
 
 
-def _run_compile_step(engine, batch):
+def _run_compile_step(engine, batch, checkpoint_root=False):
     input_tensor = batch.detach().clone().requires_grad_(True)
     params_before = _snapshot_parameter_data(engine)
-    output = engine(input_tensor)
+    if checkpoint_root:
+        output = checkpoint(engine, input_tensor, use_reentrant=False)
+    else:
+        output = engine(input_tensor)
     loss = output.float().square().mean()
     engine.backward(loss)
 
@@ -281,9 +292,12 @@ def _run_compile_step(engine, batch):
     }
 
 
-def _warm_compile_step(engine, batch):
+def _warm_compile_step(engine, batch, checkpoint_root=False):
     input_tensor = batch.detach().clone().requires_grad_(True)
-    output = engine(input_tensor)
+    if checkpoint_root:
+        output = checkpoint(engine, input_tensor, use_reentrant=False)
+    else:
+        output = engine(input_tensor)
     output.float().square().mean().backward()
     engine.zero_grad()
     engine.optimizer.zero_grad()
@@ -469,23 +483,31 @@ class TestAutoEPGradParity(DistributedTest):
 class TestAutoEPRegionalCompileParity(DistributedTest):
     world_size = 2
 
+    @pytest.mark.parametrize("async_split_plan", [False, True])
+    @pytest.mark.parametrize("model_layout", ["nested", "root"])
     @pytest.mark.parametrize("checkpoint_enabled", [True, False])
-    def test_regional_compile_matches_eager(self, checkpoint_enabled):
+    def test_regional_compile_matches_eager(self, checkpoint_enabled, model_layout, async_split_plan):
         seed = 3456
         _seed_everything(seed)
-        reference_model = _CompiledAutoEPModel(checkpoint_enabled)
+        reference_model = _CompiledAutoEPModel(checkpoint_enabled, model_layout)
         reference_state = copy.deepcopy(reference_model.state_dict())
 
-        eager_model = _CompiledAutoEPModel(checkpoint_enabled)
-        compiled_model = _CompiledAutoEPModel(checkpoint_enabled)
+        eager_model = _CompiledAutoEPModel(checkpoint_enabled, model_layout)
+        compiled_model = _CompiledAutoEPModel(checkpoint_enabled, model_layout)
         eager_model.load_state_dict(reference_state)
         compiled_model.load_state_dict(reference_state)
 
-        eager_engine, _, _, _ = deepspeed.initialize(model=eager_model, config=_make_compile_config())
-        compiled_engine, _, _, _ = deepspeed.initialize(model=compiled_model, config=_make_compile_config())
+        eager_config = _make_compile_config()
+        eager_config["expert_parallel"]["async_split_plan"] = async_split_plan
+        if model_layout == "root":
+            eager_config["expert_parallel"]["moe_layer_pattern"] = "mlp"
+        compiled_config = copy.deepcopy(eager_config)
+        compiled_config["compile"] = {"autoep_non_moe": True}
+        eager_engine, _, _, _ = deepspeed.initialize(model=eager_model, config=eager_config)
+        compiled_engine, _, _, _ = deepspeed.initialize(model=compiled_model, config=compiled_config)
         torch._dynamo.reset()
         torch._dynamo.utils.counters.clear()
-        compiled_engine.compile(compile_mode="autoep_non_moe")
+        compiled_engine.compile()
 
         eager_calls, eager_routes, eager_handles = _register_autoep_observers(eager_engine)
         compiled_calls, compiled_routes, compiled_handles = _register_autoep_observers(compiled_engine)
@@ -494,8 +516,10 @@ class TestAutoEPRegionalCompileParity(DistributedTest):
         warmup_batch = torch.randn((1, 16, 128), generator=generator, dtype=dtype).to(eager_engine.device)
         measured_batch = torch.randn((1, 16, 128), generator=generator, dtype=dtype).to(eager_engine.device)
 
-        _warm_compile_step(eager_engine, warmup_batch)
-        _warm_compile_step(compiled_engine, warmup_batch)
+        # A root region has no parent module to own activation checkpointing.
+        checkpoint_root = model_layout == "root" and checkpoint_enabled
+        _warm_compile_step(eager_engine, warmup_batch, checkpoint_root)
+        _warm_compile_step(compiled_engine, warmup_batch, checkpoint_root)
 
         eager_call_start = len(eager_calls)
         compiled_call_start = len(compiled_calls)
@@ -505,8 +529,8 @@ class TestAutoEPRegionalCompileParity(DistributedTest):
         assert dynamo_start.get("unique_graphs", 0) > 0, f"Warmup did not capture graphs: {dynamo_start}"
         assert dynamo_start.get("calls_captured", 0) > 0, f"Warmup did not capture calls: {dynamo_start}"
 
-        measured_eager = _run_compile_step(eager_engine, measured_batch)
-        measured_compiled = _run_compile_step(compiled_engine, measured_batch)
+        measured_eager = _run_compile_step(eager_engine, measured_batch, checkpoint_root)
+        measured_compiled = _run_compile_step(compiled_engine, measured_batch, checkpoint_root)
         _assert_compile_step_close(measured_compiled, measured_eager)
 
         dynamo_end = _snapshot_dynamo_stats()
@@ -535,7 +559,7 @@ class TestAutoEPRegionalCompileParity(DistributedTest):
         grad_names = measured_compiled["grads"]
         assert any(".experts.w1" in name for name in grad_names), "Expert gradients were not checked"
         assert any(".router.gate.weight" in name for name in grad_names), "Router gradients were not checked"
-        assert any(".dense.weight" in name for name in grad_names), "Non-MoE gradients were not checked"
+        assert any(name.endswith("dense.weight") for name in grad_names), "Non-MoE gradients were not checked"
 
         for handle in eager_handles + compiled_handles:
             handle.remove()

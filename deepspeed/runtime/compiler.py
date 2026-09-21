@@ -120,20 +120,20 @@ def compile():
 
 
 def compile_autoep_non_moe_regions(model: nn.Module, backend, compile_kwargs: dict) -> list[str]:
-    """Compile decoder regions around AutoEP layers while keeping AutoEP eager."""
+    """Compile callable parents of AutoEP layers while keeping AutoEP eager."""
     from deepspeed.module_inject.auto_ep_layer import AutoEPMoELayer
 
     named_modules = dict(model.named_modules())
     autoep_modules = [(name, module) for name, module in named_modules.items() if isinstance(module, AutoEPMoELayer)]
     if not autoep_modules:
-        raise ValueError("compile_mode='autoep_non_moe' requires at least one AutoEPMoELayer. "
+        raise ValueError("compile.autoep_non_moe=True requires at least one AutoEPMoELayer. "
                          "Enable expert_parallel and call compile() after deepspeed.initialize().")
 
     if "fullgraph" in compile_kwargs and compile_kwargs["fullgraph"] is not False:
-        raise ValueError("compile_mode='autoep_non_moe' requires fullgraph=False because AutoEP is an eager graph "
+        raise ValueError("compile.autoep_non_moe=True requires fullgraph=False because AutoEP is an eager graph "
                          "break.")
     if "dynamic" in compile_kwargs and compile_kwargs["dynamic"] is not False:
-        raise ValueError("compile_mode='autoep_non_moe' currently requires dynamic=False.")
+        raise ValueError("compile.autoep_non_moe=True currently requires dynamic=False.")
 
     resolved_compile_kwargs = {
         "fullgraph": False,
@@ -143,13 +143,13 @@ def compile_autoep_non_moe_regions(model: nn.Module, backend, compile_kwargs: di
     }
     regions: OrderedDict[str, nn.Module] = OrderedDict()
     for module_name, _ in autoep_modules:
-        parent_name, separator, _ = module_name.rpartition(".")
-        if not separator:
-            raise ValueError("compile_mode='autoep_non_moe' cannot compile an AutoEPMoELayer at the model root.")
+        parent_name, _, _ = module_name.rpartition(".")
+        if not module_name:
+            raise ValueError("compile.autoep_non_moe=True cannot compile an AutoEPMoELayer at the model root.")
         parent = named_modules[parent_name]
         if type(parent).forward is nn.Module.forward:
             raise ValueError(f"AutoEP compile region '{parent_name}' has no forward implementation. "
-                             "The MoE layer must be a direct child of a callable decoder block.")
+                             "The MoE layer must be a direct child of a callable module.")
         if getattr(parent, "_compiled_call_impl", None) is not None:
             raise ValueError(f"AutoEP compile region '{parent_name}' is already compiled.")
         regions.setdefault(parent_name, parent)

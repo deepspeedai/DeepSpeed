@@ -5733,13 +5733,12 @@ class DeepSpeedEngine(Module):
                 backend=get_accelerator().get_compile_backend(),
                 compile_kwargs={},
                 schedule=None,
-                compiled_autograd_enabled=False,
-                compile_mode="model") -> None:
+                compiled_autograd_enabled=False) -> None:
         """Compile the module using the specified backend and kwargs.
 
-        ``compile_mode="model"`` compiles the full module. ``compile_mode="autoep_non_moe"``
-        compiles each decoder block containing an AutoEP layer while keeping the AutoEP
-        router, token movement, expert compute, and collectives eager.
+        With ``compile.autoep_non_moe`` enabled in the DeepSpeed config, compile the
+        callable parents of AutoEP layers while keeping routing, token movement,
+        expert compute, and collectives eager. Otherwise, compile the full module.
         """
         # Avoid graph breaks
         deepspeed.utils.nvtx.enable_nvtx = False
@@ -5747,13 +5746,13 @@ class DeepSpeedEngine(Module):
         if not is_compile_supported():
             raise RuntimeError("compile is not supported in your version of PyTorch.")
 
-        if compile_mode not in ("model", "autoep_non_moe"):
-            raise ValueError(f"Unknown compile_mode={compile_mode!r}; expected 'model' or 'autoep_non_moe'.")
+        compile_mode = "autoep_non_moe" if self._config.compile_config.autoep_non_moe else "model"
 
         if self.is_compiled:
             if self._compile_mode == compile_mode:
                 return
-            raise RuntimeError(f"Engine is already compiled with compile_mode={self._compile_mode!r}.")
+            raise RuntimeError(
+                "Engine is already compiled; compile.autoep_non_moe cannot be changed after compilation.")
 
         if 'backend' in compile_kwargs:
             logger.warning("The `backend` in `compile_kwargs` will be overridden. Use the `backend` argument instead.")
@@ -5762,28 +5761,28 @@ class DeepSpeedEngine(Module):
 
         if compile_mode == "autoep_non_moe":
             if self.is_deepcompile_enabled():
-                raise ValueError("compile_mode='autoep_non_moe' uses vanilla torch.compile and cannot be combined "
+                raise ValueError("compile.autoep_non_moe=True uses vanilla torch.compile and cannot be combined "
                                  "with DeepCompile.")
             autoep_config = getattr(self._config, "expert_parallel_config", None)
             if getattr(autoep_config, "comm_backend", "comm") != "comm":
-                raise ValueError("compile_mode='autoep_non_moe' supports only expert_parallel.comm_backend='comm'.")
+                raise ValueError("compile.autoep_non_moe=True supports only expert_parallel.comm_backend='comm'.")
             if self.autotp_size() > 1:
-                raise ValueError("compile_mode='autoep_non_moe' does not support AutoEP+AutoTP folding yet.")
+                raise ValueError("compile.autoep_non_moe=True does not support AutoEP+AutoTP folding yet.")
             if self._autoep_sequence_parallel_world_size() > 1:
-                raise ValueError("compile_mode='autoep_non_moe' does not support sequence parallelism yet.")
+                raise ValueError("compile.autoep_non_moe=True does not support sequence parallelism yet.")
             folding_spec = getattr(self, "_autoep_folding_spec", None)
             if getattr(self, "pipeline_parallelism", False) or getattr(folding_spec, "pp_size", 1) > 1:
-                raise ValueError("compile_mode='autoep_non_moe' does not support pipeline parallelism yet.")
+                raise ValueError("compile.autoep_non_moe=True does not support pipeline parallelism yet.")
             if self.zero_optimization_partition_weights():
-                raise ValueError("compile_mode='autoep_non_moe' does not support ZeRO Stage 3 yet.")
+                raise ValueError("compile.autoep_non_moe=True does not support ZeRO Stage 3 yet.")
             for offload_config in (self.zero_offload_optimizer(), self.zero_offload_param()):
                 if offload_config is not None and offload_config.device != OffloadDeviceEnum.none:
                     raise ValueError(
-                        "compile_mode='autoep_non_moe' does not support optimizer or parameter offload yet.")
+                        "compile.autoep_non_moe=True does not support optimizer or parameter offload yet.")
             if schedule is not None:
-                raise ValueError("compile_mode='autoep_non_moe' does not support DeepCompile schedules.")
+                raise ValueError("compile.autoep_non_moe=True does not support DeepCompile schedules.")
             if compiled_autograd_enabled:
-                raise ValueError("compile_mode='autoep_non_moe' does not support compiled autograd yet.")
+                raise ValueError("compile.autoep_non_moe=True does not support compiled autograd yet.")
             from .compiler import compile_autoep_non_moe_regions
             self._compiled_regions = compile_autoep_non_moe_regions(self.module, backend, compile_kwargs)
             self._is_compiled = True
