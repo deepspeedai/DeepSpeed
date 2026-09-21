@@ -30,6 +30,11 @@ class TestZeROCheckpointTag(DistributedTest):
         ('earlier', False, False, True),
         ('earlier', True, True, False),
         (None, True, False, False),
+        (1, True, False, False),
+        (1, False, False, False),
+        (1, True, False, True),
+        (1, False, False, True),
+        (1, True, True, False),
     ])
     def test_load_requested_tag(self, tmpdir, tag, save_latest, load_optimizer_states, load_module_only):
         config = {
@@ -55,7 +60,8 @@ class TestZeROCheckpointTag(DistributedTest):
         target = None
         try:
             snapshots = {}
-            for checkpoint_tag in ('earlier', 'later'):
+            requested_tag = tag if tag is not None else 'earlier'
+            for checkpoint_tag in (requested_tag, 'later'):
                 loss = source(torch.ones(1, 4, device=source.device)).square().mean()
                 source.backward(loss)
                 source.step()
@@ -65,7 +71,7 @@ class TestZeROCheckpointTag(DistributedTest):
                                        client_state={'label': checkpoint_tag},
                                        save_latest=save_latest)
 
-            assert any(not torch.equal(snapshots['earlier'][name], value)
+            assert any(not torch.equal(snapshots[requested_tag][name], value)
                        for name, value in snapshots['later'].items())
             target = make_engine()
             load_path, client_state = target.load_checkpoint(tmpdir,
