@@ -569,3 +569,46 @@ def test_restore_falls_back_when_no_map_was_published():
 
     restored = _resolve_autotp_partition(param, {}, full.flatten(), tp_rank=0, tp_world_size=2)
     torch.testing.assert_close(restored, full[:2].flatten())
+
+
+def _scaled_replicated_meta(scale):
+    from deepspeed.checkpoint.affine import replicated_map
+    param = torch.nn.Parameter(torch.zeros(4))
+    param.ds_autotp_universal_checkpoint_meta = _build_param_uc_restore_meta(
+        partition_type="row",
+        logical_shape=[4],
+        original_shape=[4],
+        replicated=True,
+        affine_map=replicated_map((4, ), 2, scale=scale),
+    )
+    return param
+
+
+def test_restore_refuses_a_scaled_optimizer_state():
+    """A moment needs its own power of the scale, so restoring one is refused, not rescaled.
+
+    `_resolve_autotp_partition` runs once per state file, so passing the parameter's power for
+    `exp_avg` would apply the wrong factor with nothing to signal it. The map refuses instead,
+    and this test fails if the state is not threaded through to reach that refusal.
+    """
+    param = _scaled_replicated_meta(0.5)
+    full = torch.arange(4, dtype=torch.float32)
+
+    # The parameter itself restores: a shard holds the value pre-divided, so extracting it
+    # applies the scale the piece records.
+    restored = _resolve_autotp_partition(param, {}, full, 0, 2, state_key="fp32")
+    torch.testing.assert_close(restored, full * 0.5)
+
+    for moment in ("exp_avg", "exp_avg_sq"):
+        with pytest.raises(NotImplementedError, match="source coordinate"):
+            _resolve_autotp_partition(param, {}, full, 0, 2, state_key=moment)
+
+
+def test_restore_moments_are_unaffected_when_nothing_is_scaled():
+    """Every state restores the same way through an unscaled map, which is the common case."""
+    param = _scaled_replicated_meta(1.0)
+    full = torch.arange(4, dtype=torch.float32)
+
+    for state in ("fp32", "exp_avg", "exp_avg_sq"):
+        restored = _resolve_autotp_partition(param, {}, full, 0, 2, state_key=state)
+        torch.testing.assert_close(restored, full)
