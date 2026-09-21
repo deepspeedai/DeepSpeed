@@ -39,6 +39,7 @@ from deepspeed.module_inject.auto_ep_layer import (
     combine_from_routed,
     compute_split_plan,
     compute_split_plan_from_expert_indices,
+    resolve_row_weighting_impl,
     resolve_score_apply_mode,
 )
 from deepspeed.module_inject.auto_ep_preset_adapters import get_preset_adapter
@@ -254,6 +255,7 @@ class TestAutoEPConfig:
         assert disabled.autoep_size == 1
         assert disabled.validate_folding_routing is False
         assert disabled.async_split_plan is False
+        assert disabled.row_weighting_impl == "auto"
         assert disabled.load_balance_coeff is None
         assert disabled._load_balance_coeff_explicit is False
 
@@ -263,6 +265,7 @@ class TestAutoEPConfig:
             "preset_model": "mixtral",
             "load_balance_coeff": None,
             "score_apply": "pre",
+            "row_weighting_impl": "eager",
             "route_scale": 2.0,
             "validate_folding_routing": True,
             "async_split_plan": True,
@@ -276,6 +279,7 @@ class TestAutoEPConfig:
         assert config.load_balance_coeff is None
         assert config._load_balance_coeff_explicit is True
         assert config.score_apply == "pre"
+        assert config.row_weighting_impl == "eager"
         assert config.route_scale == 2.0
         validate_autoep_config(config, world_size=4, pp_size=1, tp_size=1, sp_size=1)
 
@@ -307,6 +311,41 @@ class TestAutoEPConfig:
         config = parse_autoep_config({"enabled": True, "combine_impl": "triton"})
         with pytest.raises(ValueError, match="combine_impl must be one of"):
             validate_autoep_config(config, world_size=1, pp_size=1, tp_size=1, sp_size=1)
+
+    def test_row_weighting_impl_rejects_unknown_value(self):
+        config = parse_autoep_config({"enabled": True, "row_weighting_impl": "triton"})
+        with pytest.raises(ValueError, match="row_weighting_impl must be one of"):
+            validate_autoep_config(config, world_size=1, pp_size=1, tp_size=1, sp_size=1)
+
+    def test_fused_row_weighting_rejects_non_deepep_backend(self):
+        config = parse_autoep_config({
+            "enabled": True,
+            "autoep_size": 2,
+            "row_weighting_impl": "fused",
+        })
+        with pytest.raises(ValueError, match='row_weighting_impl="fused".*comm_backend="comm"'):
+            validate_autoep_config(config, world_size=2, pp_size=1, tp_size=1, sp_size=1)
+
+    def test_fused_row_weighting_rejects_ep_size_one(self):
+        config = parse_autoep_config({
+            "enabled": True,
+            "autoep_size": 1,
+            "row_weighting_impl": "fused",
+            "comm_backend": "deepep",
+            "comm_max_tokens_per_rank": 4096,
+        })
+        with pytest.raises(ValueError, match="autoep_size=1"):
+            validate_autoep_config(config, world_size=1, pp_size=1, tp_size=1, sp_size=1)
+
+    def test_fused_row_weighting_accepts_the_deepep_path(self):
+        config = parse_autoep_config({
+            "enabled": True,
+            "autoep_size": 2,
+            "row_weighting_impl": "fused",
+            "comm_backend": "deepep",
+            "comm_max_tokens_per_rank": 4096,
+        })
+        validate_autoep_config(config, world_size=2, pp_size=1, tp_size=1, sp_size=1)
 
     def test_fused_combine_rejects_folded_tensor_parallelism(self):
         config = parse_autoep_config({
@@ -1232,6 +1271,7 @@ class TestRoutingAndLayerSemantics:
 
         spec = _make_spec(score_apply="post")
         assert resolve_score_apply_mode(spec, "auto") == "post"
+        assert resolve_row_weighting_impl("auto") == "eager"
         expert_output = torch.ones(4, 8)
         top_scores = torch.tensor([[0.6, 0.4], [0.7, 0.3]])
         out = combine_from_routed(expert_output, top_scores, torch.arange(4), 2, "post", "weighted_sum", (1, 2, 8))

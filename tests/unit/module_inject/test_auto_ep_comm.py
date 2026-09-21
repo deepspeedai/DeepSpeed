@@ -343,7 +343,7 @@ class TestRoutingWeightsAreApplied(unittest.TestCase):
     LOCAL_EXPERTS = 4
     WEIGHT = 0.25
 
-    def route(self, score_apply):
+    def route(self, score_apply, row_weighting_impl="eager"):
         """Drive _deepep_route with a stub exchange, recording what each stage saw."""
         prefix = torch.tensor([3, 6, 9, self.ARRIVED_ROWS], dtype=torch.int64)
         handle = mock.Mock(psum_num_recv_tokens_per_expert=prefix, num_expanded_tokens=self.ARRIVED_ROWS)
@@ -370,6 +370,7 @@ class TestRoutingWeightsAreApplied(unittest.TestCase):
             _deepep_exchange=exchange,
             num_local_experts=self.LOCAL_EXPERTS,
             score_apply=score_apply,
+            row_weighting_impl=row_weighting_impl,
             comm_num_sm=12,
             comm_qp_margin=4,
             experts=fake_experts,
@@ -407,6 +408,63 @@ class TestRoutingWeightsAreApplied(unittest.TestCase):
         # Scaling landed before the experts, and is not applied a second time.
         self.assertTrue(torch.allclose(seen["expert_input"].float(), torch.full((1, ), self.WEIGHT)))
         self.assertTrue(torch.allclose(seen["combine_rows"].float(), torch.full((1, ), self.WEIGHT)))
+
+    def test_default_row_weighting_is_the_eager_path(self):
+        seen = self.route("post")
+
+        self.assertTrue(torch.equal(seen["combine_rows"], torch.full_like(seen["combine_rows"], self.WEIGHT)))
+
+    def test_fused_row_weighting_uses_the_same_boundaries(self):
+        for score_apply, expected_stage in (("pre", "expert_input"), ("post", "combine_rows")):
+            with self.subTest(score_apply=score_apply):
+                calls = []
+
+                def fake_fused(rows, weights):
+                    calls.append((rows, weights))
+                    return (rows.float() * weights).to(rows.dtype)
+
+                with mock.patch.object(auto_ep_layer.fused_token_ops, "fused_row_weighting", fake_fused):
+                    seen = self.route(score_apply, row_weighting_impl="fused")
+
+                self.assertEqual(len(calls), 1)
+                self.assertTrue(torch.allclose(seen[expected_stage].float(), torch.full((1, ), self.WEIGHT)))
+
+    def test_weight_gradient_keeps_flowing_through_fused_row_weighting(self):
+        prefix = torch.tensor([2, 4], dtype=torch.int64)
+        handle = mock.Mock(psum_num_recv_tokens_per_expert=prefix, num_expanded_tokens=4)
+        exchange = mock.Mock(last_handle=handle, num_max_tokens_per_rank=1024)
+        received = torch.ones((4, 3), dtype=torch.bfloat16)
+        recv_weights = torch.full((4, ), 0.5, dtype=torch.float32, requires_grad=True)
+
+        def fake_dispatch(_exchange, *_args):
+            return received, recv_weights, exchange
+
+        def fake_fused(rows, weights):
+            return (rows.float() * weights).to(rows.dtype)
+
+        layer = mock.Mock(
+            _deepep_exchange=exchange,
+            num_local_experts=2,
+            score_apply="post",
+            row_weighting_impl="fused",
+            comm_num_sm=12,
+            comm_qp_margin=4,
+            experts=lambda rows, _counts: rows,
+        )
+
+        with mock.patch.object(auto_ep_layer, "deepep_dispatch", fake_dispatch), \
+                mock.patch.object(auto_ep_layer, "deepep_combine", lambda _exchange, rows, _handle: rows), \
+                mock.patch.object(auto_ep_layer.fused_token_ops, "fused_row_weighting", fake_fused):
+            router_output = auto_ep_layer.RouterOutput(
+                top_scores=torch.ones((2, 2), dtype=torch.float32, requires_grad=True),
+                selected_experts=torch.zeros((2, 2), dtype=torch.long),
+                num_tokens_per_expert=torch.zeros(2, dtype=torch.long),
+            )
+            result = auto_ep_layer.AutoEPMoELayer._deepep_route(layer, received, router_output)
+
+        result.float().sum().backward()
+        self.assertIsNotNone(recv_weights.grad)
+        self.assertTrue(torch.equal(recv_weights.grad, torch.full_like(recv_weights, 3.0)))
 
     def test_combine_receives_exactly_the_rows_that_arrived(self):
         # Dispatch returns a worst-case buffer while combine reads the rows the
@@ -452,6 +510,8 @@ class TestDeepEPEarlyRoute(unittest.TestCase):
         layer.register_buffer("tokens_per_expert", torch.zeros_like(counts, dtype=torch.float32))
         layer.combine_impl = "weighted_sum"
         layer._fused_combine_checked = False
+        layer.row_weighting_impl = "eager"
+        layer._fused_row_weighting_checked = False
         layer.ep_size = ep_size
         layer.comm_backend = comm_backend
         # Keep the fixture valid when composed with opt-in async split planning.
@@ -490,6 +550,14 @@ class TestDeepEPEarlyRoute(unittest.TestCase):
         self.assertTrue(torch.equal(tokens, hidden.reshape(2, 4)))
         self.assertTrue(torch.equal(router_output.selected_experts, torch.tensor([[1, 0], [1, 0]])))
         self.assertTrue(torch.equal(layer.tokens_per_expert, torch.tensor([2.0, 2.0])))
+
+    def test_fused_row_weighting_fails_before_the_router_when_unsupported(self):
+        layer = self.layer()
+        layer.row_weighting_impl = "fused"
+
+        with self.assertRaisesRegex(RuntimeError, 'row_weighting_impl="fused"'):
+            auto_ep_layer.AutoEPMoELayer.forward(layer, torch.randn(1, 2, 4))
+        layer._deepep_route.assert_not_called()
 
     def test_standard_comm_and_ep1_keep_the_existing_path(self):
         for ep_size, backend in ((2, COMM_BACKEND), (1, DEEPEP_BACKEND)):

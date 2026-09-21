@@ -224,6 +224,41 @@ SMs. The default of 12 was chosen by measuring whole steps: 8 SMs gave a median
 it is alone on the fabric, which exhausts the queue pairs ZeRO and the
 data-parallel groups have already claimed in a training step.
 
+**DeepEP row weighting implementation (experimental):**
+
+DeepEP dispatch returns one received row per routed assignment and one FP32
+weight per row. ``row_weighting_impl`` selects how AutoEP multiplies those rows
+by their weights at the existing ``score_apply`` boundary:
+
+.. code-block:: json
+
+    {
+      "expert_parallel": {
+        "enabled": true,
+        "autoep_size": 8,
+        "comm_backend": "deepep",
+        "comm_max_tokens_per_rank": 4096,
+        "row_weighting_impl": "fused"
+      }
+    }
+
+``"auto"`` (default) resolves to ``"eager"``, preserving the existing eager
+expression exactly. ``"fused"`` runs a separate Triton pointwise operator for
+``(rows.float() * weights).to(rows.dtype)``. It does not reduce over top-k, does
+not change where BF16/FP16 rounding occurs, and does not replace DeepEP's
+combine; the output remains one weighted row per received row in the same row
+order.
+
+``"fused"`` is rejected, rather than silently ignored, when AutoEP cannot honor
+it:
+
+- ``comm_backend`` is not ``"deepep"`` or ``autoep_size=1``, because the call
+  sites exist only inside the DeepEP route;
+- Triton is unavailable, the device is not CUDA, or the build is ROCm;
+- rows are not bfloat16 or float16;
+- weights are not FP32 ``[N, 1]`` tensors on the same CUDA device;
+- rows or weights are not contiguous, or rows are not shaped ``[N, H]``.
+
 Requirements and limits:
 
 - The ``deep_ep`` package must be installed. It is imported only when this

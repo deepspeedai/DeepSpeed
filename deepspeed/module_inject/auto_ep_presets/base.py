@@ -112,6 +112,7 @@ class AutoEPConfig:
     route_scale: float = 1.0
     score_apply: Literal["auto", "pre", "post"] = "auto"
     combine_impl: Literal["auto", "weighted_sum", "fused_weighted_sum", "legacy_bmm"] = "auto"
+    row_weighting_impl: Literal["auto", "eager", "fused"] = "auto"
     comm_backend: Literal["comm", "deepep"] = "comm"
     comm_num_sm: int = 12
     comm_qp_margin: int = 4

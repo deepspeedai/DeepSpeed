@@ -28,6 +28,7 @@ import deepspeed.comm as dist
 from deepspeed.module_inject import auto_ep_layer
 from deepspeed.module_inject.auto_ep_comm import destroy_exchanges
 from deepspeed.module_inject.auto_ep_layer import AutoEPMoELayer
+from deepspeed.ops.triton_ops import autoep_fused_token_ops as fused_ops
 from deepspeed.utils import safe_get_full_fp32_param
 
 from unit.common import DistributedTest
@@ -51,6 +52,12 @@ def _deepep_available() -> bool:
     except Exception:
         return False
     return True
+
+
+def _skip_unless_fused_row_weighting_enabled(reason):
+    skip_unless_h100_tests_enabled(reason)
+    if not fused_ops.is_available():
+        pytest.skip("fused row weighting needs CUDA and Triton")
 
 
 def _install_legacy_deepep_prep(engine):
@@ -102,10 +109,27 @@ def _install_skewed_routing(engine):
         router.forward = skewed_forward
 
 
-def _checkpoint_autoep_layers(engine):
+def _checkpoint_autoep_layers(engine, *, use_reentrant=False):
     for module in engine.module.modules():
         if isinstance(module, AutoEPMoELayer):
-            module.forward = functools.partial(checkpoint, module.forward, use_reentrant=False)
+            module.forward = functools.partial(checkpoint, module.forward, use_reentrant=use_reentrant)
+
+
+def _count_autoep_layer_forwards(engine):
+    forward_counts = {}
+    for name, module in engine.module.named_modules():
+        if not isinstance(module, AutoEPMoELayer):
+            continue
+        forward_counts[name] = 0
+        original_forward = module.forward
+
+        @functools.wraps(original_forward)
+        def counted_forward(*args, _name=name, _forward=original_forward, **kwargs):
+            forward_counts[_name] += 1
+            return _forward(*args, **kwargs)
+
+        module.forward = counted_forward
+    return forward_counts
 
 
 def _snapshot_fp32_parameters(engine):
@@ -134,7 +158,16 @@ def _snapshot_fp32_parameters(engine):
     return snapshot
 
 
-def _run_one_step(backend, ep_size, seed, *, cleanup=True, activation_checkpointing=False, skewed_routing=False):
+def _run_one_step(backend,
+                  ep_size,
+                  seed,
+                  *,
+                  cleanup=True,
+                  activation_checkpointing=False,
+                  reentrant_checkpointing=False,
+                  skewed_routing=False,
+                  row_weighting_impl="auto",
+                  score_apply=None):
     """Build a model on ``backend``, run one step, return its output and grads."""
     seed_everything(seed)
 
@@ -152,6 +185,10 @@ def _run_one_step(backend, ep_size, seed, *, cleanup=True, activation_checkpoint
     # comment from tohtana). Raised well above that noise floor instead.
     config["optimizer"]["params"]["lr"] = 1e-2
     config["expert_parallel"]["comm_backend"] = backend
+    if row_weighting_impl != "auto":
+        config["expert_parallel"]["row_weighting_impl"] = row_weighting_impl
+    if score_apply is not None:
+        config["expert_parallel"]["score_apply"] = score_apply
     if backend == "deepep":
         # Sized explicitly rather than from the first batch, so both backends
         # see identical shapes whatever that batch turns out to be.
@@ -173,8 +210,9 @@ def _run_one_step(backend, ep_size, seed, *, cleanup=True, activation_checkpoint
         _install_legacy_deepep_prep(engine)
     if skewed_routing:
         _install_skewed_routing(engine)
+    forward_counts = _count_autoep_layer_forwards(engine)
     if activation_checkpointing:
-        _checkpoint_autoep_layers(engine)
+        _checkpoint_autoep_layers(engine, use_reentrant=reentrant_checkpointing)
 
     # Reseeded so the input is identical on every rank and across backends: the
     # comparison is of the transport, so nothing else may differ.
@@ -225,6 +263,7 @@ def _run_one_step(backend, ep_size, seed, *, cleanup=True, activation_checkpoint
         "score_gradients": score_gradients,
         "gradients": gradients,
         "parameter_deltas": parameter_deltas,
+        "forward_counts": forward_counts,
     }
     if backend == "deepep":
         exchanges = [
@@ -351,6 +390,72 @@ class TestDeepEPMatchesCollective(DistributedTest):
         gate_grads = [value for name, value in result["gradients"].items() if "gate" in name]
         assert gate_grads, "the router gate received no gradient at all"
         assert any(value.abs().sum() > 0 for value in gate_grads), "the router gate's gradient was entirely zero"
+
+    def test_fused_row_weighting_keeps_router_score_gradients(self):
+        """The fused row multiply must not detach DeepEP's returned weights."""
+        _skip_unless_fused_row_weighting_enabled("fused DeepEP row weighting needs H100s and a DeepEP build")
+
+        result = _run_one_step("deepep", self.world_size, seed=199, row_weighting_impl="fused")
+
+        assert result["score_gradients"], "routing scores had no retained gradients"
+        assert all(value.abs().sum() > 0 for value in result["score_gradients"].values())
+        gate_grads = [value for name, value in result["gradients"].items() if "gate" in name]
+        assert gate_grads, "the router gate received no gradient at all"
+        assert any(value.abs().sum() > 0 for value in gate_grads), "the router gate's gradient was entirely zero"
+
+    @pytest.mark.parametrize("score_apply", ["pre", "post"])
+    def test_fused_row_weighting_matches_eager_for_each_score_boundary(self, score_apply):
+        _skip_unless_fused_row_weighting_enabled("fused DeepEP row weighting needs H100s and a DeepEP build")
+        seed = 2468
+
+        eager = _run_one_step("deepep", self.world_size, seed, row_weighting_impl="eager", score_apply=score_apply)
+        fused = _run_one_step("deepep", self.world_size, seed, row_weighting_impl="fused", score_apply=score_apply)
+
+        _assert_cleanup_results_close(fused, eager, compare_score_gradients=True)
+
+    def test_fused_row_weighting_supports_reentrant_activation_checkpointing(self):
+        _skip_unless_fused_row_weighting_enabled("fused DeepEP row weighting needs H100s and a DeepEP build")
+        seed = 1357
+
+        eager = _run_one_step("deepep",
+                              self.world_size,
+                              seed,
+                              activation_checkpointing=True,
+                              reentrant_checkpointing=True,
+                              row_weighting_impl="eager")
+        fused = _run_one_step("deepep",
+                              self.world_size,
+                              seed,
+                              activation_checkpointing=True,
+                              reentrant_checkpointing=True,
+                              row_weighting_impl="fused")
+
+        _assert_cleanup_results_close(fused, eager, compare_score_gradients=False)
+        assert fused["forward_counts"], "the test did not exercise any AutoEP layers"
+        assert all(count == 2 for count in fused["forward_counts"].values())
+
+    @pytest.mark.parametrize("score_apply", ["pre", "post"])
+    def test_fused_row_weighting_handles_empty_experts_and_skewed_routing(self, score_apply):
+        _skip_unless_fused_row_weighting_enabled("fused DeepEP row weighting needs H100s and a DeepEP build")
+        seed = 9753
+
+        eager = _run_one_step("deepep",
+                              self.world_size,
+                              seed,
+                              skewed_routing=True,
+                              row_weighting_impl="eager",
+                              score_apply=score_apply)
+        fused = _run_one_step("deepep",
+                              self.world_size,
+                              seed,
+                              skewed_routing=True,
+                              row_weighting_impl="fused",
+                              score_apply=score_apply)
+
+        _assert_cleanup_results_close(fused, eager, compare_score_gradients=True)
+        all_routes = torch.cat([route.flatten() for _, route in fused["routes"]])
+        assert torch.count_nonzero(all_routes == 3) == 0
+        assert torch.count_nonzero(all_routes == 1) > torch.count_nonzero(all_routes == 2)
 
     @pytest.mark.parametrize(
         "activation_checkpointing, skewed_routing",
