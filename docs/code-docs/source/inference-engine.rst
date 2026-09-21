@@ -106,7 +106,10 @@ validated on real workloads. Models that explicitly declare no cache-class
 support are rejected; models with unknown support should be validated against
 the default ``generate()`` path before use.
 ``align_decode_fronts=False`` is the default equal-width padded-prompt baseline:
-it does not derive or pack requests by their effective prompt lengths.
+all requests use the same padded prompt width. Different effective lengths
+encoded by the attention masks retain the legacy staggered logical decode
+positions; physical decode-front alignment and dead-zone trimming are enabled
+only when ``align_decode_fronts=True``.
 
 Set ``HybridEngineRolloutConfig(align_decode_fronts=True)`` to enable the
 follow-up alignment path. It derives each request's effective prompt width from

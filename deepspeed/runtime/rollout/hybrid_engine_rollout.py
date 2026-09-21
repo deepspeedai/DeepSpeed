@@ -79,8 +79,10 @@ class HybridEngineRolloutConfig:
     """Configuration for HybridEngineRollout.
 
     ``align_decode_fronts`` is opt-in. When false, continuous batching keeps
-    the existing equal-width padded prompt layout; when true, it uses each
-    request's effective attention-mask length and aligns decode fronts.
+    the existing equal-width padded layout. Requests may still have different
+    effective lengths in their attention masks, but their physical decode
+    fronts are not right-aligned or compacted. When true, the rollout uses
+    effective prompt lengths to align physical decode fronts.
     """
     use_graph_capture: bool = False
     enable_profiling: bool = False
