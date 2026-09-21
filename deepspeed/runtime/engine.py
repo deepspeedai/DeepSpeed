@@ -560,6 +560,7 @@ class DeepSpeedEngine(Module):
         self.mesh_device = mesh_device
         self._autoep_folding_spec = None
         self._autoep_folding_group_handles = None
+        self._python_gc_generation = None
 
         # Flag to indicate that scale() was called before manual backward pass
         self._manual_backward_expected = False
@@ -1046,12 +1047,16 @@ class DeepSpeedEngine(Module):
                 raise ValueError("Unable to choose a loss for multiple no-gather vocab-parallel LM heads")
             if vocab_parallel_heads:
                 from deepspeed.sequence.cross_entropy import configure_vocab_parallel_loss
-                configure_vocab_parallel_loss(model, vocab_parallel_heads[0])
+                configure_vocab_parallel_loss(model,
+                                              vocab_parallel_heads[0],
+                                              backend=tp_config.vocab_parallel_ce_backend)
             elif tp_config.vocab_parallel_lm_head:
                 # Every partitioning path must agree; otherwise the request degrades into ordinary
                 # AutoTP with a gathered head and no distributed loss, which is easy to miss.
                 raise ValueError(
                     "vocab_parallel_lm_head requires a supported nn.Linear named 'lm_head' or 'embed_out'")
+            elif tp_config.vocab_parallel_ce_backend != "torch":
+                raise ValueError("vocab_parallel_ce_backend='liger' requires a no-gather vocabulary-parallel LM head")
 
             if attach_uc_metadata:
                 setattr(model, UNIVERSAL_CHECKPOINT_INFO, collect_autotp_universal_checkpoint_info(model))
@@ -1158,26 +1163,43 @@ class DeepSpeedEngine(Module):
             logger.debug("DeepSpeedEngine.__del__ cleanup skipped: %s", exc, exc_info=True)
 
     def destroy(self):
-        # DeepEP buffers ask the library not to reclaim them, so they outlive
-        # the engine unless something releases them here. Only this engine's
-        # own buffers: another engine in the same process still needs its own.
-        module = getattr(self, "module", None)
-        if module is not None:
-            from deepspeed.module_inject.auto_ep_comm import destroy_exchanges
-            destroy_exchanges(module)
+        try:
+            # DeepEP buffers ask the library not to reclaim them, so they outlive
+            # the engine unless something releases them here. Only this engine's
+            # own buffers: another engine in the same process still needs its own.
+            module = getattr(self, "module", None)
+            if module is not None:
+                from deepspeed.module_inject.auto_ep_comm import destroy_exchanges
+                destroy_exchanges(module)
 
-        self._release_deepcompile_compiled_backward_state()
-        self._release_deepcompile_dynamo_config()
-        optimizer = getattr(self, "optimizer", None)
-        if optimizer is not None and hasattr(optimizer, 'destroy'):
-            optimizer.destroy()
-        if self.is_deepcompile_active() or getattr(self, "_deepcompile_native_initialized", False):
-            self._deactivate_deepcompile()
-        debug_clear_module_and_param_names()
+            self._release_deepcompile_compiled_backward_state()
+            self._release_deepcompile_dynamo_config()
+            optimizer = getattr(self, "optimizer", None)
+            if optimizer is not None and hasattr(optimizer, 'destroy'):
+                optimizer.destroy()
+            if self.is_deepcompile_active() or getattr(self, "_deepcompile_native_initialized", False):
+                self._deactivate_deepcompile()
+            debug_clear_module_and_param_names()
 
-        checkpoint_engine = getattr(self, "checkpoint_engine", None)
-        if checkpoint_engine is not None and checkpoint_engine.is_decoupled():
-            checkpoint_engine.cleanup()
+            checkpoint_engine = getattr(self, "checkpoint_engine", None)
+            if checkpoint_engine is not None and checkpoint_engine.is_decoupled():
+                checkpoint_engine.cleanup()
+        finally:
+            python_gc_generation = getattr(self, "_python_gc_generation", None)
+            if python_gc_generation is not None:
+                from deepspeed.runtime.python_gc import python_gc_manager
+                python_gc_manager.release(python_gc_generation)
+                self._python_gc_generation = None
+
+    def collect_python_gc(self):
+        """Run Python cyclic GC at an application-selected safe boundary."""
+        from deepspeed.runtime.python_gc import python_gc_manager
+        return python_gc_manager.collect()
+
+    def _configure_python_gc(self):
+        if self._config.disable_python_gc:
+            from deepspeed.runtime.python_gc import python_gc_manager
+            self._python_gc_generation = python_gc_manager.acquire()
 
     def _get_model_parameters(self):
         if self.autotuning_profile_model_info():

@@ -507,12 +507,26 @@ def test_explicit_row_parallel_lm_head_is_not_overridden_by_its_name():
     assert not isinstance(model.lm_head, LmHeadLinearAllreduce)
 
 
-@pytest.mark.parametrize("tied", [False, True])
-def test_explicit_row_parallel_lm_head_training_rejects_tp_greater_than_one(tied):
-    model = OutputModel(tied=tied)
+def test_explicit_row_parallel_lm_head_training_rejects_tied_weight():
+    model = OutputModel(tied=True)
+    weight = model.embed_tokens.weight
 
-    with pytest.raises(NotImplementedError, match="row-parallel output heads"):
+    with pytest.raises(NotImplementedError, match="cannot shard a tied weight"):
         _build_row_output_head_autotp(model, training_mode=True, mp_size=2)._replace_module(model)
+    assert model.lm_head.weight is weight
+    assert model.embed_tokens.weight is weight
+
+
+@pytest.mark.parametrize("head", ["lm_head", "embed_out"])
+def test_explicit_row_parallel_output_head_training_accepts_tp_greater_than_one(head):
+    model = OutputModel(tied=False)
+    if head != "lm_head":
+        model.embed_out = model.lm_head
+        del model.lm_head
+    weight = getattr(model, head).weight
+    _build_row_output_head_autotp(model, head=head, training_mode=True, mp_size=2)._replace_module(model)
+    assert isinstance(getattr(model, head), LinearAllreduce)
+    assert getattr(model, head).weight is weight
 
 
 def test_explicit_row_parallel_lm_head_keeps_inference_specialization():
