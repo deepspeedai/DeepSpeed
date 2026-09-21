@@ -9,6 +9,7 @@ import torch
 import types
 from typing import List, Tuple, Union
 from dataclasses import dataclass
+from .affine import ParamAffineMap
 from .constants import (FP32_WEIGHT_KEY, PARAM, VOCAB_TENSOR, CAT_DIM, PARAM_N_SUB_PARAMS, SUB_PARAM_SHAPE,
                         EP_IS_EXPERT_PARAM, EP_NUM_EXPERTS, DS_AUTOEP_UC_META, DS_AUTOTP_UC_META,
                         AUTOEP_EXPERT_PLACEMENT, AUTOEP_PARAM_EP_RANK, AUTOEP_PARAM_LOCAL_EXPERTS,
@@ -164,6 +165,15 @@ def _resolve_autotp_partition(current_param, ckpt_dict, full_hp_param, tp_rank, 
     unsupported_reason = meta.get('conversion', {}).get('unsupported_reason')
     if unsupported_reason:
         raise RuntimeError(f"Cannot restore a universal checkpoint into this AutoTP parameter: {unsupported_reason}")
+
+    # The layer described its own layout, so take this rank's shard straight from the map.
+    # This is the same piece list conversion used, run in the opposite direction, which is
+    # what keeps the two sides from disagreeing about how a parameter was cut.
+    affine_map = meta.get('conversion', {}).get('affine_map')
+    if affine_map is not None:
+        restored = ParamAffineMap.from_dict(affine_map)
+        if tp_rank in restored.pieces_by_rank and restored.numel == full_hp_param.numel():
+            return restored.extract(full_hp_param, tp_rank).flatten()
 
     if replicated:
         assert partition_dim is None
