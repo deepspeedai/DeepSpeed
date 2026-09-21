@@ -214,9 +214,10 @@ def replace_transformer_layer(orig_layer_impl, model, checkpoint_dict, config, m
 
     def replace_with_policy(child, policy_cls, triangular_masking, inference=False, layer_id=0):
         policy = policy_cls(child, inference=inference)
-        if not policy.cuda_graph_supported:
+        if not policy.cuda_graph_supported and config.enable_cuda_graph:
             # policy says cuda graph is not supported raise an error if set
-            assert not config.enable_cuda_graph, "cuda graph is not supported with this model, please disable"
+            raise ValueError("enable_cuda_graph is not supported with replace_with_kernel_inject for this model. "
+                             "Please set enable_cuda_graph=False or replace_with_kernel_inject=False.")
 
         from deepspeed.moe.layer import MoE
         moe = False
@@ -298,6 +299,7 @@ def replace_transformer_layer(orig_layer_impl, model, checkpoint_dict, config, m
                          orig_layer_impl,
                          config.keep_module_on_host,
                          partition_config=partition_config,
+                         vocab_parallel_lm_head=getattr(config, "vocab_parallel_lm_head", False),
                          model_config=meta_config,
                          tp_grain_size=config.tensor_parallel.tp_grain_size,
                          training_mode=training_mode)

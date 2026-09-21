@@ -30,8 +30,7 @@ https://github.com/snowflakedb/ArcticTraining/blob/main/projects/sequence-parall
 """
 
 from collections import defaultdict, deque
-from deepspeed.runtime.utils import see_memory_usage
-from deepspeed.sequence.layer import _DimZeroAllToAll
+from deepspeed.sequence.layer import _dim_zero_all_to_all, register_all_to_all_group
 from deepspeed.utils.logging import logger
 from einops import rearrange
 from packaging import version
@@ -105,6 +104,9 @@ class UlyssesSPAttentionHF(torch.nn.Module):
         super().__init__()
         self.attn = attn
         self.process_group = process_group
+        # the exchange operator resolves its group by name, and the registry has to be written here
+        # rather than at call time, which may be inside a compiled region
+        register_all_to_all_group(process_group)
         self.world_size = dist.get_world_size(process_group)
         self.sp_rank = dist.get_rank(process_group)
 
@@ -189,7 +191,7 @@ class UlyssesSPAttentionHF(torch.nn.Module):
 
             input = rearrange(input, "sl_l bs ws hc_l hs -> ws sl_l bs hc_l hs").contiguous()
 
-            output = _DimZeroAllToAll.apply(self.process_group, input)
+            output = _dim_zero_all_to_all(self.process_group, input)
 
             # [ws sl_l bs hc_l hs] -> [sl bs hc_l hs]
             output = output.reshape([self.global_seq_length, *output.shape[2:]]).contiguous()
@@ -217,7 +219,7 @@ class UlyssesSPAttentionHF(torch.nn.Module):
             self.attn_head_size * self.attn_head_count // self.world_size,
         ]).contiguous()
 
-        output = _DimZeroAllToAll.apply(self.process_group, input)
+        output = _dim_zero_all_to_all(self.process_group, input)
         output = rearrange(output, "ws sl_l bs em_l -> sl_l bs ws em_l")
 
         # [sl_l bs ws em_l] -> [sl_l bs em]
@@ -1145,10 +1147,12 @@ class TiledFusedLogitsLoss(torch.autograd.Function):
         bs, seqlen = x.shape[:2]
 
         # flatten bs+seqlen to avoid having stride issues when narrowing into seqlen w/ bs>1
-        x = x.view(-1, *x.shape[2:])
-        y = y.view(-1, *y.shape[2:])
+        # reshape rather than view: a caller may pass a non-contiguous x, y or mask (a transposed or
+        # channel-sliced activation), for which view cannot produce the flattened shape
+        x = x.reshape(-1, *x.shape[2:])
+        y = y.reshape(-1, *y.shape[2:])
         if mask is not None:
-            mask = mask.view(-1)
+            mask = mask.reshape(-1)
         incoming_grad = torch.tensor(1.0, dtype=x.dtype, device=x.device)
 
         # we are faking the incoming gradient, and since we perform a reduction outside of `autograd.backward` below we need to pre-adjust the incoming gradient. in the case of "sum" the gradient is 1.0, in the case of "mean" it's 1.0/num_elements, which in this case is 1/shards.
@@ -1261,335 +1265,3 @@ class AutogradComputeMLP(torch.autograd.Function):
 
         torch.autograd.backward(output, grads[0])
         return (None, None, x1.grad, None)
-
-
-###########################################################
-### below are older versions that some might still want ###
-###########################################################
-
-
-class TiledLoss(torch.autograd.Function):
-
-    @staticmethod
-    def forward(ctx, loss_fn, logits, vocab_size, shift_labels, shards) -> torch.Tensor:
-        """
-
-        This is a memory efficient loss autograd function that takes the existing logits and performs loss calculation in shards.
-
-        This one is an SFT-aware version, therefore it takes care of special cases where the whole shard is made of -100 labels and which requires then a special care.
-
-        Note: logits seqlen dimension doesn't have to be divisible by shards, the last shard will be shorter than the rest. The calculating of the number of shards is in the example.
-
-        Here is an example of using it:
-
-        def loss(self, batch) -> torch.Tensor:
-            batch = to_device(batch, self.device)
-            shift_labels = batch.pop("shift_labels")
-            outputs = self.model(**batch, use_cache=False)
-            logits = outputs.logits
-
-            if all((shift_labels == -100).squeeze()):
-                # this is the case where all labels in a micro-batch are -100 (very common for SFT if the seqlen is short) - CE returns `nan` in this case, so we don't want to call loss and instead create a differentiable loss `0` which will also set all the grads to `0` in `backward` - the effect of this is akin to a perfect score where the model needs no adjustment since grads will be all zeros.
-                loss = (logits.sum() * 0.0).float()
-
-            num_shards: Any = "auto"
-            if num_shards == "auto":
-                # parameterize to about 1GB fp32 logits shards
-                slice_size_in_gb = 1
-                size_in_gb = logits.numel() * 4 / 2**30  # fp32
-                # the sp shard's seqlen sp shard can be easily not divisible by the derived number of chunked loss shards, so we use the uppper ceiling and allow the last chunk to be shorter than the rest
-                num_shards = math.ceil(size_in_gb / slice_size_in_gb)
-                # print(f"derived {num_shards} shards for size {size_in_gb}GB")
-            if num_shards > 1:
-                # if shards == 1 this will lead to a higher memory usage then calling the normal loss function, so don't do that.
-                loss = TiledLoss.apply(
-                    self.model_unwrapped.loss_function,
-                    logits,
-                    self.model_unwrapped.config.vocab_size,
-                    shift_labels,
-                    num_shards,
-                )
-            else:
-                loss = self.model_unwrapped.loss_function(
-                    logits=logits,
-                    labels=None,
-                    vocab_size=self.model_unwrapped.config.vocab_size,
-                    shift_labels=shift_labels,
-                )
-
-            return loss
-
-
-        """
-        ctx.save_for_backward(logits, shift_labels)
-        ctx.loss_fn = loss_fn
-        ctx.vocab_size = vocab_size
-        ctx.shards = shards
-
-        with torch.no_grad():
-            seqlen = shift_labels.shape[1]
-            shard_step = math.ceil(seqlen / shards)
-            loss_shards = []
-            total_good_items = 0
-
-            # since -100s are ignored we have to perform a weighted average on each loss slice as each slice may contribute a different number of non- -100 labels
-            # if seqlen / shards != 0 - the last chunk is just shorter than the rest but no data is ignored
-            for i in range(shards):
-                # XXX: here and everywhere don't make a copy, pass the slice or perhaps narrow/view?
-                shift_labels_shard = shift_labels[:, i * shard_step:(i + 1) * shard_step]
-                if all((shift_labels_shard == -100).squeeze()):
-                    continue  # ignore this shard
-                loss_shard = loss_fn(
-                    logits=logits[:, i * shard_step:(i + 1) * shard_step, :],
-                    labels=None,
-                    vocab_size=vocab_size,
-                    shift_labels=shift_labels_shard,
-                )
-                good_items = sum((shift_labels_shard != -100).squeeze())
-                loss_shards.append(loss_shard * good_items)
-                total_good_items += good_items
-            total_loss = torch.cat([l.unsqueeze(0) for l in loss_shards], dim=0).sum()
-            weighted_loss = total_loss / total_good_items
-
-        return weighted_loss
-
-    @staticmethod
-    def backward(ctx, *grads) -> torch.Tensor:
-        logits, shift_labels = ctx.saved_tensors
-        loss_fn = ctx.loss_fn
-        vocab_size = ctx.vocab_size
-        shards = ctx.shards
-
-        grad = grads[0]
-        logits_grad = torch.zeros_like(logits)
-        logits_shards = list(torch.chunk(logits, chunks=shards, dim=1))
-        shift_labels_shards = list(torch.chunk(shift_labels, chunks=shards, dim=1))
-
-        # if seqlen is not exactly divisible by shards the last step will be shorter than shard_step
-        shard_step = logits_shards[0].shape[1]
-        for i in range(shards):
-            logits_shard = logits_shards.pop(0)
-            shift_labels_shard = shift_labels_shards.pop(0)
-
-            shard_offset = i * shard_step
-            # this will enable gradual population of the pre-allocated `logits_shard.grad` during `torch.autograd.backward` calls
-            logits_shard.grad = (logits_grad.narrow(1, shard_offset, shard_step).view_as(logits_shard))
-
-            with torch.enable_grad():
-                if all((shift_labels_shard == -100).squeeze()):
-                    # fake loss calculation, since CE will return nan, but grads will be set
-                    # a normal loss_fn upcasts logits to float so match it
-                    loss_shard = (logits_shard.sum() * 0.0).float()
-                else:
-                    loss_shard = loss_fn(
-                        logits=logits_shard.requires_grad_(),
-                        labels=None,
-                        vocab_size=vocab_size,
-                        shift_labels=shift_labels_shard,
-                    )
-
-            torch.autograd.backward(loss_shard, grad)
-
-        logits_grad /= shards
-
-        # only logits (2nd arg) needs grads
-        return None, logits_grad, None, None, None
-
-
-# This is the original implementation/integration of UlyssesSP into the training loop, which was superseded by using UlyssesSPDataLoaderAdapter which did all the sharding and pull the shards from the DL
-#
-# There are 2 issues with this implementation:
-# - it's complex and difficult to integrate into various training scenarios
-# - it could lead to a huge number of tokens per step - e.g. 32 ranks of 15M seqlen -> 0.5B token step - which is very wasteful
-#
-# Therefore if you want to use UlyssesSP via UlyssesSPFwdLossBwdWithLogits with its fwd/loss/bwd for those don't want to use UlyssesSPDataLoaderAdapter - here is how it should be installed into the sub-trainer class:
-# class SFTTrainer(Trainer):
-# def sp_fwd_loss_bwd(self, batch) -> torch.Tensor:
-#     batch = to_device(batch, self.device)
-#
-#     from arctic_training.trainer.trainer import UlyssesAttentionHFFwdLossBwdWithLogits
-#     ulysses = UlyssesAttentionHFFwdLossBwdWithLogits(
-#         model=self.model,
-#         model_unwrapped=self.model_unwrapped,
-#         device=self.device,
-#         num_loss_logit_shards="auto",
-#     )
-#     return ulysses.sp_fwd_loss_bwd(batch)
-
-
-class UlyssesSPFwdLossBwdWithLogits:
-
-    def __init__(self, model, model_unwrapped, device, num_loss_logit_shards="auto", **kwargs):
-
-        self.model = model
-        self.model_unwrapped = model_unwrapped
-        self.device = device
-        self.num_loss_logit_shards = num_loss_logit_shards
-        self.kwargs = kwargs
-
-        from deepspeed.utils import groups
-
-        self.sp_group = groups._get_sequence_parallel_group()
-        self.sp_world_size = groups._get_sequence_parallel_world_size()
-        self.sp_rank = groups._get_sequence_parallel_rank()
-
-    def sp_fwd_loss_bwd(self, batch) -> torch.Tensor:
-
-        see_memory_usage("entered sp_fwd_loss_bwd", force=True)
-
-        # ensure shapes are correct
-        if not (batch["input_ids"].shape == batch["position_ids"].shape == batch["labels"].shape):
-            raise ValueError(
-                f'Borked batch {batch["input_ids"].shape=} != {batch["position_ids"].shape=} !='
-                f' {batch["labels"].shape=}) in DataLoader->iter->next, cannot continue with Ulysses Sequence'
-                " parallelism")
-
-        # gather DL batches into super-batches
-        # Important: DL doesn't always yield max_length batches. Different ranks may have different seqlen and each could be <= max_length (but always divisible by 256)
-
-        micro_batches: list[Any] = defaultdict(dict)
-        # Efficient gathering of batch inputs across ranks:
-        # The problem is that our DL doesn't guarantee the same seqlen on all ranks and may give, 3x 1024 and 1x 768 on 4 gpus for max_length 1024. so 3 options we have to be able to gather batches are:
-        # 1. use all_gather_object - which allows different shapes - but potentially introducing an undesired overhead - 2x pickle calls
-        # 2. use all_gather and change DL pad to make sure that all ranks always get the same input shape - this creates its own overhead since if we say have ranks with seqlen 512, 768, 1024, 1024 - now we will need to process 4x 1024 seqlens
-        # 3. use all_gather and post gathering truncate tensors to their intended length - another overhead of allocating and truncating tensors
-        # using approach (1) for now but might want to benchmark later the other 2 approaches
-
-        # XXX: if using all_gather_object we can gather the whole batch at once and not per-key! so can drop the loop for that approach
-
-        # we have batches of variable seqlen so in order to do all_gather on batches - we need to know the exact length of each tensor on each rank
-        seqlen = torch.tensor(batch["input_ids"].shape[1], dtype=torch.int64, device=self.device)
-        # print(seqlen)
-        seqlens = [torch.zeros(1, dtype=torch.int64, device=self.device) for _ in range(self.sp_world_size)]
-        dist.all_gather(seqlens, seqlen, group=self.sp_group)
-        seqlens = [x[0].item() for x in seqlens]
-
-        for k in batch.keys():
-            batch[k] = batch[k].to(self.device)
-            with torch.no_grad():
-                tensor_list = [
-                    torch.zeros((batch[k].shape[0], seqlens[i]), dtype=batch[k].dtype, device=batch[k].device)
-                    for i in range(self.sp_world_size)
-                ]
-                dist.all_gather(tensor_list, batch[k], group=self.sp_group)
-
-                # gathering on the data dimension
-                # will be concatenating and later splitting again for the more general case
-                # batch[k] = torch.cat(tensor_list, dim=1)
-                for rank, tensor in enumerate(tensor_list):
-                    micro_batches[rank][k] = tensor
-
-        del tensor_list
-        del batch
-
-        # we need to chunk twice - each time on SP size level
-        # - the first time is because we artificially made the seqlen SP-times longer
-        # - the second time is because of the Ulysses algorithm
-
-        see_memory_usage("after gathering", force=False)
-
-        self.model.set_gradient_accumulation_boundary(False)
-
-        losses = []
-        for sub_step_id in range(self.sp_world_size):
-            batch = micro_batches[sub_step_id]
-            seq_length = len(batch["input_ids"][0])
-
-            if seq_length % self.sp_world_size != 0:
-                raise ValueError(
-                    f"{sub_step_id=}: batch's seqlen={seq_length} isn't divisible by sp-size={self.sp_world_size}")
-            chunk_len = int(seq_length / self.sp_world_size)
-
-            # to enable the correct mean calculation across shards before sharding the micro batch:
-            # 1. count the number of non- `-100`` elements per shard
-            # 2. and subtract one more element because of label shifting
-            non_skipped_items = {}
-            for rank in range(self.sp_world_size):
-                non_skipped = (batch["labels"][:, chunk_len * rank:chunk_len * (rank + 1)] != -100).sum().item()
-                if non_skipped > 1:
-                    non_skipped -= 1
-                non_skipped_items[rank] = non_skipped
-
-            # because we have to gather logits from all sp ranks we have to do the loss function ourselves
-            # therefore remove labels to avoid an attempt to calculate loss by transformers
-            labels = batch.pop("labels")
-            labels = torch.nn.functional.pad(labels, (0, 1), value=-100)
-            batch["shift_labels"] = labels[..., 1:].contiguous()
-            # free up temp memory
-            del labels
-
-            # batch sharding
-            for k in batch.keys():
-                batch[k] = batch[k][:, chunk_len * self.sp_rank:chunk_len * (self.sp_rank + 1)].to(self.device)
-
-            shift_labels = batch.pop("shift_labels")
-
-            outputs = self.forward(batch)
-            loss = self.compute_loss(labels=None, shift_labels=shift_labels)
-
-            # free up temp mem (e.g. outputs.logits are huge)
-            del outputs
-
-            # differentiable loss aggregation across ranks
-            losses_per_rank = torch.distributed.nn.functional.all_gather(loss, group=self.sp_group)
-
-            # since each shard may have a variable number of skipped elemented - need to calculate a weighted mean depending on each rank's contribution - this will also take care of loss=0 when all elements are -100 in a shard
-            # XXX: not expecting a total of 0-non-skipped items for div
-            loss = sum(losses_per_rank[rank] * non_skipped_items[rank]
-                       for rank in range(self.sp_world_size)) / sum(non_skipped_items.values())
-
-            self.backward()
-
-            losses.append(loss.detach().item())
-
-        self.model.set_gradient_accumulation_boundary(True)
-
-        # for per-iteration reporting
-        if len(losses) == 0:
-            loss = float("nan")
-        else:
-            loss = sum(losses) / len(losses)
-
-        return loss
-
-    def forward(self, batch):
-        # critical: the labels shouldn't be in batch
-        outputs = self.model(**batch, use_cache=False)
-        self.logits = outputs.logits
-        return outputs
-
-    def compute_loss(self, labels, shift_labels):
-        if all((shift_labels == -100).squeeze()):
-            # this is the case where all labels in a micro-batch are -100 (very common for SFT) - CE returns `nan` in this case, so we don't want to call loss and instead create a differentiable loss `0` which will also set all the grads to `0` in `backward` - the effect of this is akin to a perfect score where the model needs no adjustment since grads will be all zeros.
-            # XXX: should this be float and not the original dtype?
-            loss = (self.logits.sum() * 0.0).float()
-        else:
-            if self.num_loss_logit_shards == "auto":
-                # parameterize to about 1GB fp32 logits shards
-                slice_size_in_gb = 1  # XXX: make configurable?
-                size_in_gb = self.logits.numel() * 4 / 2**30  # fp32
-                # the sp shard's seqlen sp shard can be easily not divisible by the derived number of chunked loss shards, so we use the uppper ceiling and allow the last chunk to be shorter than the rest
-                self.num_loss_logit_shards = math.ceil(size_in_gb / slice_size_in_gb)
-                # print(f"derived {self.num_loss_logit_shards} shards for size {size_in_gb}GB")
-            if self.num_loss_logit_shards > 1:
-                loss = TiledLoss.apply(
-                    self.model_unwrapped.loss_function,
-                    self.logits,
-                    self.model_unwrapped.config.vocab_size,
-                    shift_labels,
-                    self.num_loss_logit_shards,
-                )
-            else:
-                # XXX: for some reason this fails with zero1
-                loss = self.model_unwrapped.loss_function(
-                    logits=self.logits,
-                    labels=None,
-                    vocab_size=self.model_unwrapped.config.vocab_size,
-                    shift_labels=shift_labels,
-                )
-
-        self.loss = loss
-        return loss
-
-    def backward(self):
-        self.model.backward(self.loss)

@@ -13,6 +13,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -100,11 +101,13 @@ class FakeSandbox:
         fail_label: str | None = None,
         cleanup_failure: bool = False,
         wait_failure: bool = False,
+        never_starts: bool = False,
     ):
         self.candidate_sha = candidate_sha
         self.fail_label = fail_label
         self.cleanup_failure = cleanup_failure
         self.wait_failure = wait_failure
+        self.never_starts = never_starts
         self.exec_calls = []
         self.processes = []
         self.terminated = False
@@ -112,6 +115,9 @@ class FakeSandbox:
 
     def exec(self, *args, **kwargs):
         self.exec_calls.append((args, kwargs))
+        if self.never_starts:
+            # A container that never gets a GPU never returns from its first exec.
+            threading.Event().wait()
         lines = [self.candidate_sha + "\n"] if "rev-parse" in args and "HEAD^{commit}" in args else ["ok\n"]
         label_failure = self.fail_label and self.fail_label in " ".join(args)
         process = FakeProcess(lines, return_code=9 if label_failure else 0)
@@ -135,9 +141,10 @@ def _fake_modal(
     cleanup_failure: bool = False,
     wait_failure: bool = False,
     create_failure: bool = False,
+    never_starts: bool = False,
 ):
     state = SimpleNamespace(image_calls=[], app_calls=[], create_calls=[])
-    sandbox = FakeSandbox(candidate_sha, fail_label, cleanup_failure, wait_failure)
+    sandbox = FakeSandbox(candidate_sha, fail_label, cleanup_failure, wait_failure, never_starts)
 
     class Image:
 
@@ -407,7 +414,8 @@ def test_remote_plan_is_structural_and_preserves_order_and_scope():
 def test_sandbox_kwargs_are_fixed_and_secret_free():
     kwargs = torch_latest.build_sandbox_kwargs("image")
     assert kwargs["gpu"] == "l40s:2"
-    assert kwargs["timeout"] == 3600
+    assert kwargs["timeout"] == 4200
+    assert torch_latest.SANDBOX_ACQUIRE_TIMEOUT_SECONDS == 1800
     assert kwargs["secrets"] == []
     assert kwargs["network_file_systems"] == {}
     assert kwargs["volumes"] == {}
@@ -441,6 +449,40 @@ def test_controller_creates_one_sandbox_without_forwarding_secrets_and_cleans_up
         assert sandbox.wait_calls == [False]
         assert all(process.waited for process in sandbox.processes)
     finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_await_sandbox_start_gives_up_when_the_container_never_runs():
+    # Catches a controller that blocks forever on a GPU reservation that is never satisfied.
+    sandbox = FakeSandbox("a" * 40, never_starts=True)
+    error = _expect_error(
+        torch_latest.await_sandbox_start,
+        sandbox,
+        0.05,
+        exception=torch_latest.SandboxStartTimeout,
+    )
+    assert "no test ran" in str(error)
+
+
+def test_await_sandbox_start_reports_startup_duration():
+    sandbox = FakeSandbox("a" * 40)
+    assert torch_latest.await_sandbox_start(sandbox, 30) >= 0
+
+
+def test_controller_aborts_without_running_tests_when_sandbox_never_starts():
+    # Catches a controller that spends the whole job budget waiting, or that runs commands
+    # against a Sandbox that never started, or that leaks the Sandbox when startup times out.
+    root, path = _selection_file("tests/unit/v1\n")
+    original = torch_latest.SANDBOX_ACQUIRE_TIMEOUT_SECONDS
+    torch_latest.SANDBOX_ACQUIRE_TIMEOUT_SECONDS = 0.05
+    try:
+        env = _valid_env(path)
+        fake, _, sandbox = _fake_modal("a" * 40, never_starts=True)
+        _expect_error(torch_latest.run_controller, env, fake, exception=torch_latest.SandboxStartTimeout)
+        assert sandbox.terminated
+        assert not any("pytest" in " ".join(args) for args, _ in sandbox.exec_calls)
+    finally:
+        torch_latest.SANDBOX_ACQUIRE_TIMEOUT_SECONDS = original
         shutil.rmtree(root, ignore_errors=True)
 
 
@@ -547,7 +589,7 @@ def test_workflow_keeps_github_execution_trusted_and_preserves_modes():
     assert "HF_TOKEN" not in text
     assert "modal==1.2.6" in text
     assert "timeout-minutes: 20" in text
-    assert "timeout-minutes: 75" in text
+    assert "timeout-minutes: 105" in text
     assert text.count("persist-credentials: false") == 2
     assert text.count("lfs: false") == 2
     assert text.count("submodules: false") == 2

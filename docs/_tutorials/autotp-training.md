@@ -9,6 +9,7 @@ This tutorial covers **Automatic Tensor Parallelism** for combining tensor paral
 - [Introduction](#introduction)
 - [Quick Start](#quick-start)
 - [HuggingFace tp_plan Support](#huggingface-tp_plan-support)
+- [Vocabulary-parallel LM Loss](#vocabulary-parallel-lm-loss)
 - [Custom Layer Specifications](#custom-layer-specifications)
 - [Limitations](#limitations)
 
@@ -138,8 +139,92 @@ identity rather than model configuration metadata such as `tie_word_embeddings`.
 Additional HuggingFace types such as `local_colwise` and `local_rowwise` are
 not yet handled and fall back to AutoTP preset-based partitioning.
 
+For an untied `lm_head` or `embed_out`, an explicit `row` partition rule also
+supports eager training with a replicated input. The head slices the input to
+match its weight shard, reduces the complete output, and reconstructs the full
+input gradient across tensor-parallel ranks. Bias stays replicated; uneven
+hidden dimensions and both flattened and sequence-shaped inputs are supported.
+The default training output-head layout remains column parallel. Explicit row
+training rejects tied weights and reshaped/non-input-dimension shards rather
+than silently breaking a parameter tie. Deferred DeepCompile collectives are
+not supported for this output-head path.
+
 If you need to override the model's built-in `tp_plan`, provide a
 `partition_config` in the DeepSpeed config -- it takes precedence.
+
+
+## Vocabulary-parallel LM Loss
+
+Causal language models normally gather the complete `lm_head` output before
+computing cross entropy. To keep an untied output vocabulary sharded, enable
+`vocab_parallel_lm_head`:
+
+```json
+{
+    "train_micro_batch_size_per_gpu": 1,
+    "zero_optimization": { "stage": 2 },
+    "tensor_parallel": {
+        "autotp_size": 4,
+        "vocab_parallel_lm_head": true
+    }
+}
+```
+
+DeepSpeed then keeps `lm_head` (or `embed_out`) local to each TP rank and
+installs a pure-PyTorch distributed causal-LM loss through the model's
+`loss_function` hook. The loss computes a numerically stable distributed
+log-sum-exp and target lookup without gathering vocabulary logits. Uneven
+vocabulary shards are supported.
+
+For optional fused CE, install `liger-kernel>=0.8.1` and set
+`tensor_parallel.vocab_parallel_ce_backend` to `"liger"` alongside
+`vocab_parallel_lm_head`. The default remains `"torch"`, with no Liger dependency.
+The Liger backend accepts nonempty accelerator logits in FP32, FP16, or BF16 with
+equal vocabulary shards behind an explicit tensor-parallel group, on any accelerator
+whose Triton support the DeepSpeed accelerator reports. Uneven shards, a missing
+tensor-parallel group, and unsupported layouts use the PyTorch backend on every TP
+rank. This fuses CE, not the linear projection: local logits are still
+materialized. Liger supports one first-order backward per forward; retained-graph
+second backward and higher-order gradients raise an error rather than reusing
+its overwritten gradient buffer. Select `"torch"` for those workloads.
+
+Only an `nn.Linear` whose final name segment is `lm_head` or `embed_out` is
+supported. If no such head exists, initialization fails instead of quietly
+falling back to an ordinary gathered head. When `partition_config` or a
+HuggingFace `tp_plan` also describes that head, `vocab_parallel_lm_head` takes
+precedence and a warning names the superseded partitioning.
+
+This option requires an untied output head and a model with a writable
+`loss_function` hook. Models that share the output weight with the input
+embedding must continue using gathered output until coupled vocabulary-parallel
+embedding support is available. The head's vocabulary must also be at least as
+large as `autotp_size`; smaller vocabularies fail at startup instead of leaving
+TP ranks with empty shards. The flag itself is the only trigger: a `colwise`
+`lm_head` specification with local output keeps the previous behavior of
+returning rank-local logits without installing the distributed loss.
+
+The lower-level `vocab_parallel_cross_entropy` API also accepts an explicit
+sequence-parallel group. With `reduction="none"`, callers may return local token
+losses or gather them along sequence dimension 0. `sum` and `mean` reduce over
+the supplied SP group. TP and SP may be combined with explicit orthogonal
+process groups, but AutoTP does not currently construct a combined TP x SP mesh
+automatically.
+
+Gathered sequence losses have two backward conventions. The general
+`vocab_parallel_cross_entropy(..., gather_sequence_loss=True)` API sums the
+gradient contributions from every SP rank before returning each rank's local
+slice. The compatibility wrapper `vocab_sequence_parallel_cross_entropy`
+preserves its legacy behavior and returns only the corresponding local slice of
+the gathered loss gradient. New callers that consume or reduce the gathered
+loss on every SP rank should use the general API; existing callers can retain
+the wrapper without changing their gradient scale. Both gathered forms require
+an explicit `sp_group`.
+
+Under DeepSpeed's Ulysses sequence-parallel engine, the installed loss must keep
+its default sequence-parallel settings (no `sp_group`): the engine aggregates
+each shard's mean itself, weighted by the shard's valid-token count, so an
+additional SP reduction would double-count tokens. Pass an `sp_group` only when
+this loss is the sole aggregation over a manually constructed TP x SP mesh.
 
 
 ## Custom Patterns
@@ -229,7 +314,11 @@ For Grouped Query Attention with different Q/K/V sizes:
 
 1. **Ranks beyond the key/value head count stay idle**: Attention heads are distributed whole, and the distribution may be uneven -- 6 key/value heads over 4 ranks becomes 2/2/1/1, and a fused QKV weight is cut on the same head boundaries rather than inside a head. With more ranks than key/value heads, for example an 8-head model at `autotp_size=16`, the surplus ranks receive no attention weights at all. The result is still correct, because those ranks contribute zeros to the row-parallel all-reduce, but they do no attention work; AutoTP logs a warning instead of replicating heads to fill them. Hidden and vocabulary dimensions do not need to be divisible by the tensor parallel size: uneven shards are carried through save, conversion and restore via per-TP-rank shapes and widths.
 
-2. **Cross-topology universal restore**: Loading a universal checkpoint back into a topology with a *different* tensor-parallel degree goes through DeepSpeed's Megatron-style model-state loader, which is not AutoTP-aware; prefer same-topology restore when changing world size.
+2. **Vocabulary-parallel tied weights**: `vocab_parallel_lm_head` requires an untied output projection and a writable model `loss_function` hook, and a vocabulary at least as large as the tensor-parallel size. Coupled sharding of a tied input embedding and output projection is not yet implemented.
+
+3. **Combined TP and SP orchestration**: The vocab-parallel loss supports explicit orthogonal TP and SP groups, but AutoTP does not currently construct a combined TP x SP process mesh automatically.
+
+4. **Cross-topology universal restore**: Loading a universal checkpoint back into a topology with a *different* tensor-parallel degree goes through DeepSpeed's Megatron-style model-state loader, which is not AutoTP-aware; prefer same-topology restore when changing world size.
 
 
 ## See Also

@@ -12,6 +12,7 @@ import json
 import hjson
 import copy
 import base64
+from pydantic import Field
 
 from .constants import *
 from .config_utils import (
@@ -30,37 +31,17 @@ from ..compile.config import CompileConfig
 from deepspeed import comm as dist
 from deepspeed.runtime.config_utils import DeepSpeedConfigModel
 
-from ..git_version_info import version as __version__
 from ..utils import logger
-
-from ..elasticity import (
-    elasticity_enabled,
-    compute_elastic_config,
-    ensure_immutable_elastic_config,
-)
-from ..elasticity.config import ElasticityConfigError
-from ..elasticity.constants import (
-    ELASTICITY,
-    IGNORE_NON_ELASTIC_BATCH_INFO,
-    IGNORE_NON_ELASTIC_BATCH_INFO_DEFAULT,
-    MODEL_PARALLEL_SIZE,
-    MODEL_PARALLEL_SIZE_DEFAULT,
-    NUM_GPUS_PER_NODE,
-    NUM_GPUS_PER_NODE_DEFAULT,
-)
 
 from ..profiling.config import DeepSpeedFlopsProfilerConfig
 from ..autotuning.config import DeepSpeedAutotuningConfig
-from ..nebula.config import DeepSpeedNebulaConfig
 from ..datastates.config import DeepSpeedDataStatesConfig
 
-from ..compression.config import get_compression_config, get_quantize_enabled
-from ..compression.constants import *
 from .swap_tensor.aio_config import get_aio_config
 from .model_checkpointing.config import get_checkpoint_config
 
 from .tensor_parallel import get_tensor_parallel_config
-from .data_pipeline.config import get_data_efficiency_enabled, get_data_efficiency_config, get_curriculum_enabled_legacy, get_curriculum_params_legacy
+from .data_pipeline.config import get_data_efficiency_enabled, get_data_efficiency_config
 from .data_pipeline.constants import *
 
 from ..utils.config import get_timers_config
@@ -72,9 +53,7 @@ ADAGRAD_OPTIMIZER = 'adagrad'
 ADAM_OPTIMIZER = 'adam'
 ADAMW_OPTIMIZER = 'adamw'
 LAMB_OPTIMIZER = 'lamb'
-ONEBIT_ADAM_OPTIMIZER = 'onebitadam'
-ZERO_ONE_ADAM_OPTIMIZER = 'zerooneadam'
-ONEBIT_LAMB_OPTIMIZER = 'onebitlamb'
+
 MUADAM_OPTIMIZER = 'muadam'
 MUADAMW_OPTIMIZER = 'muadamw'
 MUSGD_OPTIMIZER = 'musgd'
@@ -82,8 +61,8 @@ LION_OPTIMIZER = 'lion'
 MUON_OPTIMIZER = 'muon'
 
 DEEPSPEED_OPTIMIZERS = [
-    ADAGRAD_OPTIMIZER, ADAM_OPTIMIZER, ADAMW_OPTIMIZER, LAMB_OPTIMIZER, ONEBIT_ADAM_OPTIMIZER, ONEBIT_LAMB_OPTIMIZER,
-    ZERO_ONE_ADAM_OPTIMIZER, MUADAM_OPTIMIZER, MUADAMW_OPTIMIZER, MUSGD_OPTIMIZER, LION_OPTIMIZER, MUON_OPTIMIZER
+    ADAGRAD_OPTIMIZER, ADAM_OPTIMIZER, ADAMW_OPTIMIZER, LAMB_OPTIMIZER, MUADAM_OPTIMIZER, MUADAMW_OPTIMIZER,
+    MUSGD_OPTIMIZER, LION_OPTIMIZER, MUON_OPTIMIZER
 ]
 
 # extra optimizer parameters for adam/adamw
@@ -96,6 +75,68 @@ ADAM_W_MODE_DEFAULT = True
 
 class DeepSpeedConfigError(Exception):
     pass
+
+
+_REMOVED_FEATURES_ISSUE = "https://github.com/deepspeedai/DeepSpeed/issues/8489"
+_REMOVED_TOP_LEVEL_CONFIG_KEYS = {
+    "nebula":
+    "Nebula checkpointing has been removed. A leftover 'nebula' block would be ignored and "
+    f"checkpoints would silently fall back to local torch.save. See {_REMOVED_FEATURES_ISSUE}.",
+    "compression_training":
+    "The DeepSpeed compression library has been removed. A leftover 'compression_training' "
+    f"block would be ignored and the model would train unquantized. See {_REMOVED_FEATURES_ISSUE}.",
+    "amp":
+    "NVIDIA Apex AMP integration has been removed. Use DeepSpeed 'fp16', 'bf16', or 'torch_autocast' "
+    f"instead. See {_REMOVED_FEATURES_ISSUE}.",
+    "quantize_training":
+    "Mixture-of-Quantization (MoQ) / 'quantize_training' has been removed. See "
+    f"{_REMOVED_FEATURES_ISSUE}.",
+    "sparse_gradients":
+    "Sparse compression of dense torch.nn.Embedding gradients has been removed. A leftover "
+    "'sparse_gradients' flag would be ignored and those gradients would be reduced dense. "
+    "Gradients from an embedding constructed with sparse=True are still reduced sparsely and "
+    f"need no config flag. See {_REMOVED_FEATURES_ISSUE}.",
+    "eigenvalue":
+    "Eigenvalue-based Mixture-of-Quantization (MoQ) has been removed; the standalone "
+    f"'eigenvalue' configuration block is no longer supported. See {_REMOVED_FEATURES_ISSUE}.",
+    "sparse_attention":
+    "DeepSpeed Sparse Attention has been removed; the 'sparse_attention' configuration block is no longer "
+    f"supported. See {_REMOVED_FEATURES_ISSUE}.",
+    "elasticity":
+    "Elastic training has been removed; the 'elasticity' configuration block is no longer supported. "
+    "Set train_batch_size / train_micro_batch_size_per_gpu / gradient_accumulation_steps directly. "
+    f"See {_REMOVED_FEATURES_ISSUE}.",
+    "curriculum_learning":
+    "Legacy top-level 'curriculum_learning' has been removed. Use "
+    "'data_efficiency.data_sampling.curriculum_learning' instead. "
+    f"See {_REMOVED_FEATURES_ISSUE}.",
+    "progressive_layer_drop":
+    "Progressive Layer Dropping has been removed; the 'progressive_layer_drop' configuration block is no longer "
+    f"supported. See {_REMOVED_FEATURES_ISSUE}.",
+}
+_REMOVED_ZERO_CONFIG_KEYS = {
+    "mics_shard_size":
+    "MiCS ZeRO-3 sharding has been removed; 'zero_optimization.mics_shard_size' is no longer "
+    f"supported. See {_REMOVED_FEATURES_ISSUE}.",
+    "mics_hierarchical_params_gather":
+    "MiCS ZeRO-3 sharding has been removed; 'zero_optimization.mics_hierarchical_params_gather' "
+    f"is no longer supported. See {_REMOVED_FEATURES_ISSUE}.",
+    "zeropp_loco_param":
+    "LoCo-Zero++ has been removed; 'zero_optimization.zeropp_loco_param' is no longer supported. "
+    "Remove this key to use standard ZeRO++ quantized gradients without LoCo error feedback. "
+    f"See {_REMOVED_FEATURES_ISSUE}.",
+}
+
+
+def _reject_removed_config_keys(param_dict):
+    for key, message in _REMOVED_TOP_LEVEL_CONFIG_KEYS.items():
+        if key in param_dict:
+            raise DeepSpeedConfigError(message)
+    zero_config = param_dict.get("zero_optimization")
+    if isinstance(zero_config, dict):
+        for key, message in _REMOVED_ZERO_CONFIG_KEYS.items():
+            if key in zero_config:
+                raise DeepSpeedConfigError(message)
 
 
 class DtypeEnum(Enum):
@@ -133,38 +174,6 @@ def get_expert_parallel_config(param_dict):
     return AutoEPConfig()
 
 
-def get_pld_enabled(param_dict):
-    if PROGRESSIVE_LAYER_DROP in param_dict.keys():
-        return get_scalar_param(param_dict[PROGRESSIVE_LAYER_DROP], PLD_ENABLED, PLD_ENABLED_DEFAULT)
-    else:
-        return False
-
-
-def get_pld_params(param_dict):
-    if PROGRESSIVE_LAYER_DROP in param_dict.keys():
-        pld_params = copy.copy(param_dict[PROGRESSIVE_LAYER_DROP])
-        pld_params.pop(PLD_ENABLED)
-        return pld_params
-    else:
-        return False
-
-
-def get_amp_enabled(param_dict):
-    if AMP in param_dict.keys():
-        return get_scalar_param(param_dict[AMP], AMP_ENABLED, AMP_ENABLED_DEFAULT)
-    else:
-        return False
-
-
-def get_amp_params(param_dict):
-    if AMP in param_dict.keys():
-        amp_params = copy.copy(param_dict[AMP])
-        amp_params.pop(AMP_ENABLED)
-        return amp_params
-    else:
-        return False
-
-
 def get_torch_autocast_enabled(param_dict):
     if TORCH_AUTOCAST in param_dict.keys():
         return get_scalar_param(param_dict[TORCH_AUTOCAST], TORCH_AUTOCAST_ENABLED, TORCH_AUTOCAST_ENABLED_DEFAULT)
@@ -200,10 +209,6 @@ def get_gradient_accumulation_steps(param_dict):
 
 def get_managed_gradient_accumulation(param_dict):
     return get_scalar_param(param_dict, MANAGED_GRADIENT_ACCUMULATION, MANAGED_GRADIENT_ACCUMULATION_DEFAULT)
-
-
-def get_sparse_gradients_enabled(param_dict):
-    return get_scalar_param(param_dict, SPARSE_GRADIENTS, SPARSE_GRADIENTS_DEFAULT)
 
 
 def get_communication_data_type(param_dict,
@@ -254,175 +259,16 @@ def get_dump_state(param_dict):
     return get_scalar_param(param_dict, DUMP_STATE, DUMP_STATE_DEFAULT)
 
 
+def get_disable_python_gc(param_dict):
+    return get_scalar_param(param_dict, DISABLE_PYTHON_GC, DISABLE_PYTHON_GC_DEFAULT)
+
+
 def get_gradient_clipping(param_dict):
     return get_scalar_param(param_dict, GRADIENT_CLIPPING, GRADIENT_CLIPPING_DEFAULT)
 
 
 def get_graph_harvesting(param_dict):
     return get_scalar_param(param_dict, GRAPH_HARVESTING, GRAPH_HARVESTING_DEFAULT)
-
-
-def get_sparse_attention(param_dict):
-    if SPARSE_ATTENTION in param_dict.keys():
-        sparsity = param_dict[SPARSE_ATTENTION]
-        mode = get_sparse_attention_mode(sparsity)
-
-        if mode == SPARSE_DENSE_MODE:
-            return get_sparse_dense_config(sparsity)
-        elif mode == SPARSE_FIXED_MODE:
-            return get_sparse_fixed_config(sparsity)
-        elif mode == SPARSE_VARIABLE_MODE:
-            return get_sparse_variable_config(sparsity)
-        elif mode == SPARSE_BIGBIRD_MODE:
-            return get_sparse_bigbird_config(sparsity)
-        elif mode == SPARSE_BSLONGFORMER_MODE:
-            return get_sparse_bslongformer_config(sparsity)
-        else:
-            raise NotImplementedError(f"Given sparsity mode, {mode}, has not been implemented yet!")
-
-    else:
-        return None
-
-
-def get_sparse_dense_config(sparsity):
-    block = get_scalar_param(sparsity, SPARSE_BLOCK, SPARSE_BLOCK_DEFAULT)
-    return {SPARSE_MODE: SPARSE_DENSE_MODE, SPARSE_BLOCK: block}
-
-
-def get_sparse_fixed_config(sparsity):
-    block = get_scalar_param(sparsity, SPARSE_BLOCK, SPARSE_BLOCK_DEFAULT)
-    different_layout_per_head = get_scalar_param(
-        sparsity,
-        SPARSE_DIFFERENT_LAYOUT_PER_HEAD,
-        SPARSE_DIFFERENT_LAYOUT_PER_HEAD_DEFAULT,
-    )
-    num_local_blocks = get_scalar_param(sparsity, SPARSE_NUM_LOCAL_BLOCKS, SPARSE_NUM_LOCAL_BLOCKS_DEFAULT)
-    num_global_blocks = get_scalar_param(sparsity, SPARSE_NUM_GLOBAL_BLOCKS, SPARSE_NUM_GLOBAL_BLOCKS_DEFAULT)
-    attention = get_scalar_param(sparsity, SPARSE_ATTENTION_TYPE, SPARSE_ATTENTION_TYPE_DEFAULT)
-    horizontal_global_attention = get_scalar_param(
-        sparsity,
-        SPARSE_HORIZONTAL_GLOBAL_ATTENTION,
-        SPARSE_HORIZONTAL_GLOBAL_ATTENTION_DEFAULT,
-    )
-    num_different_global_patterns = get_scalar_param(
-        sparsity,
-        SPARSE_NUM_DIFFERENT_GLOBAL_PATTERNS,
-        SPARSE_NUM_DIFFERENT_GLOBAL_PATTERNS_DEFAULT,
-    )
-
-    return {
-        SPARSE_MODE: SPARSE_FIXED_MODE,
-        SPARSE_BLOCK: block,
-        SPARSE_DIFFERENT_LAYOUT_PER_HEAD: different_layout_per_head,
-        SPARSE_NUM_LOCAL_BLOCKS: num_local_blocks,
-        SPARSE_NUM_GLOBAL_BLOCKS: num_global_blocks,
-        SPARSE_ATTENTION_TYPE: attention,
-        SPARSE_HORIZONTAL_GLOBAL_ATTENTION: horizontal_global_attention,
-        SPARSE_NUM_DIFFERENT_GLOBAL_PATTERNS: num_different_global_patterns,
-    }
-
-
-def get_sparse_variable_config(sparsity):
-    block = get_scalar_param(sparsity, SPARSE_BLOCK, SPARSE_BLOCK_DEFAULT)
-    different_layout_per_head = get_scalar_param(
-        sparsity,
-        SPARSE_DIFFERENT_LAYOUT_PER_HEAD,
-        SPARSE_DIFFERENT_LAYOUT_PER_HEAD_DEFAULT,
-    )
-    num_random_blocks = get_scalar_param(sparsity, SPARSE_NUM_RANDOM_BLOCKS, SPARSE_NUM_RANDOM_BLOCKS_DEFAULT)
-    local_window_blocks = get_scalar_param(sparsity, SPARSE_LOCAL_WINDOW_BLOCKS, SPARSE_LOCAL_WINDOW_BLOCKS_DEFAULT)
-    global_block_indices = get_scalar_param(sparsity, SPARSE_GLOBAL_BLOCK_INDICES, SPARSE_GLOBAL_BLOCK_INDICES_DEFAULT)
-    global_block_end_indices = get_scalar_param(
-        sparsity,
-        SPARSE_GLOBAL_BLOCK_END_INDICES,
-        SPARSE_GLOBAL_BLOCK_END_INDICES_DEFAULT,
-    )
-    attention = get_scalar_param(sparsity, SPARSE_ATTENTION_TYPE, SPARSE_ATTENTION_TYPE_DEFAULT)
-    horizontal_global_attention = get_scalar_param(
-        sparsity,
-        SPARSE_HORIZONTAL_GLOBAL_ATTENTION,
-        SPARSE_HORIZONTAL_GLOBAL_ATTENTION_DEFAULT,
-    )
-
-    return {
-        SPARSE_MODE: SPARSE_VARIABLE_MODE,
-        SPARSE_BLOCK: block,
-        SPARSE_DIFFERENT_LAYOUT_PER_HEAD: different_layout_per_head,
-        SPARSE_NUM_RANDOM_BLOCKS: num_random_blocks,
-        SPARSE_LOCAL_WINDOW_BLOCKS: local_window_blocks,
-        SPARSE_GLOBAL_BLOCK_INDICES: global_block_indices,
-        SPARSE_GLOBAL_BLOCK_END_INDICES: global_block_end_indices,
-        SPARSE_ATTENTION_TYPE: attention,
-        SPARSE_HORIZONTAL_GLOBAL_ATTENTION: horizontal_global_attention,
-    }
-
-
-def get_sparse_bigbird_config(sparsity):
-    block = get_scalar_param(sparsity, SPARSE_BLOCK, SPARSE_BLOCK_DEFAULT)
-    different_layout_per_head = get_scalar_param(
-        sparsity,
-        SPARSE_DIFFERENT_LAYOUT_PER_HEAD,
-        SPARSE_DIFFERENT_LAYOUT_PER_HEAD_DEFAULT,
-    )
-    num_random_blocks = get_scalar_param(sparsity, SPARSE_NUM_RANDOM_BLOCKS, SPARSE_NUM_RANDOM_BLOCKS_DEFAULT)
-    num_sliding_window_blocks = get_scalar_param(
-        sparsity,
-        SPARSE_NUM_SLIDING_WINDOW_BLOCKS,
-        SPARSE_NUM_SLIDING_WINDOW_BLOCKS_DEFAULT,
-    )
-    num_global_blocks = get_scalar_param(sparsity, SPARSE_NUM_GLOBAL_BLOCKS, SPARSE_NUM_GLOBAL_BLOCKS_DEFAULT)
-
-    return {
-        SPARSE_MODE: SPARSE_BIGBIRD_MODE,
-        SPARSE_BLOCK: block,
-        SPARSE_DIFFERENT_LAYOUT_PER_HEAD: different_layout_per_head,
-        SPARSE_NUM_RANDOM_BLOCKS: num_random_blocks,
-        SPARSE_NUM_SLIDING_WINDOW_BLOCKS: num_sliding_window_blocks,
-        SPARSE_NUM_GLOBAL_BLOCKS: num_global_blocks,
-    }
-
-
-def get_sparse_bslongformer_config(sparsity):
-    block = get_scalar_param(sparsity, SPARSE_BLOCK, SPARSE_BLOCK_DEFAULT)
-    different_layout_per_head = get_scalar_param(
-        sparsity,
-        SPARSE_DIFFERENT_LAYOUT_PER_HEAD,
-        SPARSE_DIFFERENT_LAYOUT_PER_HEAD_DEFAULT,
-    )
-    num_sliding_window_blocks = get_scalar_param(
-        sparsity,
-        SPARSE_NUM_SLIDING_WINDOW_BLOCKS,
-        SPARSE_NUM_SLIDING_WINDOW_BLOCKS_DEFAULT,
-    )
-    global_block_indices = get_scalar_param(sparsity, SPARSE_GLOBAL_BLOCK_INDICES, SPARSE_GLOBAL_BLOCK_INDICES_DEFAULT)
-    global_block_end_indices = get_scalar_param(
-        sparsity,
-        SPARSE_GLOBAL_BLOCK_END_INDICES,
-        SPARSE_GLOBAL_BLOCK_END_INDICES_DEFAULT,
-    )
-
-    return {
-        SPARSE_MODE: SPARSE_BSLONGFORMER_MODE,
-        SPARSE_BLOCK: block,
-        SPARSE_DIFFERENT_LAYOUT_PER_HEAD: different_layout_per_head,
-        SPARSE_NUM_SLIDING_WINDOW_BLOCKS: num_sliding_window_blocks,
-        SPARSE_GLOBAL_BLOCK_INDICES: global_block_indices,
-        SPARSE_GLOBAL_BLOCK_END_INDICES: global_block_end_indices,
-    }
-
-
-def get_sparse_attention_mode(param_dict):
-    if SPARSE_MODE in param_dict.keys():
-        return param_dict[SPARSE_MODE]
-    else:
-        return SPARSE_MODE_DEFAULT
-
-
-def get_sparse_attention_type(param_dict):
-    if SPARSE_ATTENTION_TYPE in param_dict.keys():
-        return param_dict[SPARSE_ATTENTION_TYPE]
-    else:
-        return SPARSE_ATTENTION_TYPE_DEFAULT
 
 
 def get_pipeline_config(param_dict):
@@ -514,7 +360,7 @@ def get_memory_breakdown(param_dict):
 
 class HybridEngineConfig(DeepSpeedConfigModel):
     enabled: bool = False
-    max_out_tokens: int = 512
+    max_out_tokens: int = Field(512, gt=0)
     inference_tp_size: int = 1
     release_inference_cache: bool = False
     pin_parameters: bool = True
@@ -530,105 +376,6 @@ def get_hybrid_engine_config(param_dict):
 
 def get_expert_data_topo_config(param_dict):
     return get_scalar_param(param_dict, USE_DATA_BEFORE_EXPERT_PARALLEL, USE_DATA_BEFORE_EXPERT_PARALLEL_DEFAULT)
-
-
-def get_eigenvalue_config(param_dict):
-    if get_quantize_enabled(param_dict):
-        quantize_training_params = param_dict.get('quantize_training')
-        if quantize_training_params is None:
-            return (
-                EIGENVALUE_ENABLED_DEFAULT,
-                EIGENVALUE_VERBOSE_DEFAULT,
-                EIGENVALUE_MAX_ITER_DEFAULT,
-                EIGENVALUE_TOL_DEFAULT,
-                EIGENVALUE_STABILITY_DEFAULT,
-                EIGENVALUE_GAS_BOUNDARY_RESOLUTION_DEFAULT,
-                EIGENVALUE_LAYER_NAME_DEFAULT,
-                EIGENVALUE_LAYER_NUM_DEFAULT,
-            )
-
-        assert not get_eigenvalue_enabled(quantize_training_params), "Eigenvalue based MoQ is temporarily disabled"
-        return (
-            get_eigenvalue_enabled(quantize_training_params),
-            get_eigenvalue_verbose(quantize_training_params),
-            get_eigenvalue_max_iter(quantize_training_params),
-            get_eigenvalue_tol(quantize_training_params),
-            get_eigenvalue_stability(quantize_training_params),
-            get_eigenvalue_gas_boundary_resolution(quantize_training_params),
-            get_eigenvalue_layer_name(quantize_training_params),
-            get_eigenvalue_layer_num(quantize_training_params),
-        )
-    else:
-        return (
-            EIGENVALUE_ENABLED_DEFAULT,
-            EIGENVALUE_VERBOSE_DEFAULT,
-            EIGENVALUE_MAX_ITER_DEFAULT,
-            EIGENVALUE_TOL_DEFAULT,
-            EIGENVALUE_STABILITY_DEFAULT,
-            EIGENVALUE_GAS_BOUNDARY_RESOLUTION_DEFAULT,
-            EIGENVALUE_LAYER_NAME_DEFAULT,
-            EIGENVALUE_LAYER_NUM_DEFAULT,
-        )
-
-
-def get_eigenvalue_enabled(param_dict):
-    if EIGENVALUE in param_dict.keys():
-        return get_scalar_param(param_dict[EIGENVALUE], EIGENVALUE_ENABLED, EIGENVALUE_ENABLED_DEFAULT)
-    else:
-        return EIGENVALUE_ENABLED_DEFAULT
-
-
-def get_eigenvalue_verbose(param_dict):
-    if EIGENVALUE in param_dict.keys():
-        return get_scalar_param(param_dict[EIGENVALUE], EIGENVALUE_VERBOSE, EIGENVALUE_VERBOSE_DEFAULT)
-    else:
-        return EIGENVALUE_VERBOSE_DEFAULT
-
-
-def get_eigenvalue_max_iter(param_dict):
-    if EIGENVALUE in param_dict.keys():
-        return get_scalar_param(param_dict[EIGENVALUE], EIGENVALUE_MAX_ITER, EIGENVALUE_MAX_ITER_DEFAULT)
-    else:
-        return EIGENVALUE_MAX_ITER_DEFAULT
-
-
-def get_eigenvalue_tol(param_dict):
-    if EIGENVALUE in param_dict.keys():
-        return get_scalar_param(param_dict[EIGENVALUE], EIGENVALUE_TOL, EIGENVALUE_TOL_DEFAULT)
-    else:
-        return EIGENVALUE_TOL_DEFAULT
-
-
-def get_eigenvalue_stability(param_dict):
-    if EIGENVALUE in param_dict.keys():
-        return get_scalar_param(param_dict[EIGENVALUE], EIGENVALUE_STABILITY, EIGENVALUE_STABILITY_DEFAULT)
-    else:
-        return EIGENVALUE_STABILITY_DEFAULT
-
-
-def get_eigenvalue_gas_boundary_resolution(param_dict):
-    if EIGENVALUE in param_dict.keys():
-        return get_scalar_param(
-            param_dict[EIGENVALUE],
-            EIGENVALUE_GAS_BOUNDARY_RESOLUTION,
-            EIGENVALUE_GAS_BOUNDARY_RESOLUTION_DEFAULT,
-        )
-    else:
-        return EIGENVALUE_GAS_BOUNDARY_RESOLUTION_DEFAULT
-
-
-def get_eigenvalue_layer_name(param_dict):
-    if EIGENVALUE in param_dict.keys():
-        return get_scalar_param(param_dict[EIGENVALUE], EIGENVALUE_LAYER_NAME, EIGENVALUE_LAYER_NAME_DEFAULT)
-    else:
-        return EIGENVALUE_LAYER_NAME_DEFAULT
-
-
-def get_eigenvalue_layer_num(param_dict):
-    if EIGENVALUE in param_dict.keys():
-        return get_scalar_param(param_dict[EIGENVALUE], EIGENVALUE_LAYER_NUM, EIGENVALUE_LAYER_NUM_DEFAULT)
-    else:
-        return EIGENVALUE_LAYER_NUM_DEFAULT
 
 
 def get_checkpoint_params(param_dict):
@@ -706,6 +453,8 @@ class DeepSpeedConfig(object):
                     f"Expected a string path to an existing deepspeed config, or a dictionary or a valid base64. Received: {config}"
                 )
 
+        _reject_removed_config_keys(self._param_dict)
+
         try:
             self.global_rank = dist.get_rank()
             if mpu is not None:
@@ -726,70 +475,9 @@ class DeepSpeedConfig(object):
             self.global_rank = 0
             self.world_size = 1
         logger.info(f"Config mesh_device {mesh_device} world_size = {self.world_size}")
-        # If elastic-mode enabled, update compute + update _param_dict
-        self.elasticity_enabled = elasticity_enabled(self._param_dict)
-        if self.elasticity_enabled:
-            logger.info("DeepSpeed elasticity support enabled")
-            final_batch_size, valid_gpus, micro_batch_size = compute_elastic_config(
-                ds_config=self._param_dict,
-                target_deepspeed_version=__version__,
-                world_size=self.world_size,
-            )
-
-            elastic_dict = self._param_dict[ELASTICITY]
-
-            # Ensure the resource scheduler saw the same elastic config we are using at runtime
-            ensure_immutable_elastic_config(runtime_elastic_config_dict=elastic_dict)
-
-            self.elastic_model_parallel_size = elastic_dict.get(MODEL_PARALLEL_SIZE, MODEL_PARALLEL_SIZE_DEFAULT)
-            if self.elastic_model_parallel_size < 1:
-                raise ElasticityConfigError("Model-Parallel size cannot be less than 1, "
-                                            f"given model-parallel size: {self.elastic_model_parallel_size}")
-
-            self.num_gpus_per_node = elastic_dict.get(NUM_GPUS_PER_NODE, NUM_GPUS_PER_NODE_DEFAULT)
-            if self.num_gpus_per_node < 1:
-                raise ElasticityConfigError("NUmber of GPUs per node cannot be less than 1, "
-                                            f"given number of GPUs per node: {self.num_gpus_per_node}")
-
-            ignore_non_elastic_batch_info = elastic_dict.get(IGNORE_NON_ELASTIC_BATCH_INFO,
-                                                             IGNORE_NON_ELASTIC_BATCH_INFO_DEFAULT)
-
-            if not ignore_non_elastic_batch_info:
-                batch_params = [
-                    TRAIN_BATCH_SIZE,
-                    TRAIN_MICRO_BATCH_SIZE_PER_GPU,
-                    GRADIENT_ACCUMULATION_STEPS,
-                ]
-                if any(map(lambda t: t in self._param_dict, batch_params)):
-                    raise ElasticityConfigError("One or more batch related parameters were found in your " \
-                        f"ds_config ({TRAIN_BATCH_SIZE}, {TRAIN_MICRO_BATCH_SIZE_PER_GPU}, and/or " \
-                        f"{GRADIENT_ACCUMULATION_STEPS}). These parameters *will not be used* since " \
-                        "elastic training is enabled, which takes control of these parameters. " \
-                        "If you want to suppress this error (the parameters will be silently ignored) " \
-                        f"please set {IGNORE_NON_ELASTIC_BATCH_INFO}':true in your elasticity config.")
-
-            # micro_bsz * world_size * gas = total_batch_size
-            # gas = total_batch_size // (micro_bsz * world_size)
-            gradient_accu_steps = final_batch_size // (micro_batch_size * self.world_size)
-
-            if TRAIN_BATCH_SIZE in self._param_dict:
-                logger.warning("[Elasticity] overriding training_batch_size: "
-                               f"{self._param_dict[TRAIN_BATCH_SIZE]} -> {final_batch_size}")
-            if TRAIN_MICRO_BATCH_SIZE_PER_GPU in self._param_dict:
-                logger.warning("[Elasticity] overriding train_micro_batch_size_per_gpu: "
-                               f"{self._param_dict[TRAIN_MICRO_BATCH_SIZE_PER_GPU]} -> {micro_batch_size}")
-            if GRADIENT_ACCUMULATION_STEPS in self._param_dict:
-                logger.warning("[Elasticity] overriding gradient_accumulation_steps: "
-                               f"{self._param_dict[GRADIENT_ACCUMULATION_STEPS]} -> {gradient_accu_steps}")
-
-            logger.info(f"[Elasticity] valid GPU counts: {valid_gpus}")
-
-            self._param_dict[TRAIN_BATCH_SIZE] = final_batch_size
-            self._param_dict[TRAIN_MICRO_BATCH_SIZE_PER_GPU] = micro_batch_size
-            self._param_dict[GRADIENT_ACCUMULATION_STEPS] = gradient_accu_steps
-
-        # Pass a copy so that user json is unmodified, e.g. for logging
-        self._initialize_params(copy.copy(self._param_dict))
+        # Pass a copy so that the user json is unmodified, e.g. for logging.
+        param_dict = copy.copy(self._param_dict)
+        self._initialize_params(param_dict)
         self._configure_train_batch_size()
         self._do_sanity_check()
 
@@ -800,6 +488,7 @@ class DeepSpeedConfig(object):
         self.managed_gradient_accumulation = get_managed_gradient_accumulation(param_dict)
         self.steps_per_print = get_steps_per_print(param_dict)
         self.dump_state = get_dump_state(param_dict)
+        self.disable_python_gc = get_disable_python_gc(param_dict)
 
         self.disable_allgather = get_disable_allgather(param_dict)
         self.communication_data_type = get_communication_data_type(param_dict)
@@ -808,11 +497,8 @@ class DeepSpeedConfig(object):
         self.prescale_gradients = get_prescale_gradients(param_dict)
         self.gradient_predivide_factor = get_gradient_predivide_factor(param_dict)
         self.gradient_allreduce_op = get_gradient_allreduce_op(param_dict)
-        self.sparse_gradients_enabled = get_sparse_gradients_enabled(param_dict)
 
         self.zero_config = get_zero_config(param_dict)
-        self.mics_shard_size = self.zero_config.mics_shard_size
-        self.mics_hierarchial_params_gather = self.zero_config.mics_hierarchical_params_gather
         self.zero_optimization_stage = self.zero_config.stage
         self.zero_enabled = self.zero_optimization_stage > 0
 
@@ -827,14 +513,10 @@ class DeepSpeedConfig(object):
         assert not (self.float16_config.enabled
                     and self.bfloat16_config.enabled), 'bfloat16 and fp16 modes cannot be simultaneously enabled'
 
-        self.amp_enabled = get_amp_enabled(param_dict)
-        self.amp_params = get_amp_params(param_dict)
-
         self.torch_autocast_enabled = get_torch_autocast_enabled(param_dict)
         self.torch_autocast_dtype = get_torch_autocast_dtype(param_dict)
         self.torch_autocast_lower_precision_safe_modules = get_lower_precision_safe_modules(param_dict)
 
-        self.compression_config = get_compression_config(param_dict)
         self.graph_harvesting = get_graph_harvesting(param_dict)
 
         self.optimizer_name = get_optimizer_name(param_dict)
@@ -856,28 +538,10 @@ class DeepSpeedConfig(object):
         self.memory_breakdown = get_memory_breakdown(param_dict)
         self.autotuning_config = DeepSpeedAutotuningConfig(param_dict)
 
-        (
-            self.eigenvalue_enabled,
-            self.eigenvalue_verbose,
-            self.eigenvalue_max_iter,
-            self.eigenvalue_tol,
-            self.eigenvalue_stability,
-            self.eigenvalue_gas_boundary_resolution,
-            self.eigenvalue_layer_name,
-            self.eigenvalue_layer_num,
-        ) = get_eigenvalue_config(param_dict)
-
         self.use_data_before_expert_parallel_ = get_expert_data_topo_config(param_dict)
         self.hybrid_engine = get_hybrid_engine_config(param_dict)
 
-        self.sparse_attention = get_sparse_attention(param_dict)
         self.pipeline = get_pipeline_config(param_dict)
-
-        self.pld_enabled = get_pld_enabled(param_dict)
-        self.pld_params = get_pld_params(param_dict)
-
-        self.curriculum_enabled_legacy = get_curriculum_enabled_legacy(param_dict)
-        self.curriculum_params_legacy = get_curriculum_params_legacy(param_dict)
 
         self.data_efficiency_enabled = get_data_efficiency_enabled(param_dict)
         self.data_efficiency_config = get_data_efficiency_config(param_dict)
@@ -909,7 +573,6 @@ class DeepSpeedConfig(object):
 
         self.log_level = get_log_level(param_dict)
 
-        self.nebula_config = DeepSpeedNebulaConfig(param_dict)
         self.datastates_config = DeepSpeedDataStatesConfig(param_dict)
         self.checkpoint_config = get_checkpoint_config(param_dict)
 

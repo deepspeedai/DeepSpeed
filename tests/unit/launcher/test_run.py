@@ -3,6 +3,8 @@
 
 # DeepSpeed Team
 
+import os
+
 import pytest
 
 from deepspeed.launcher import runner as dsrun
@@ -70,6 +72,138 @@ def test_parser_multinode():
     # exclude part of each node
     ret = dsrun.parse_resource_filter(hosts, exclude_str='worker-0:0,1@worker-1:3')
     assert (ret == {'worker-0': [2, 3], 'worker-1': [0, 1, 2]})
+
+
+def test_parse_inclusion_exclusion():
+    '''parse_inclusion_exclusion() maps a slot-count pool onto parse_resource_filter().
+
+    The pool holds slot counts rather than slot lists, so this is the only place the
+    real slots are known; the tests above all hand parse_resource_filter() a correct
+    dict directly and so never cover this.
+    '''
+    pool = {'worker-0': 4, 'worker-1': 4}
+
+    # no filtering
+    ret = dsrun.parse_inclusion_exclusion(pool, '', '')
+    assert (ret == {'worker-0': [0, 1, 2, 3], 'worker-1': [0, 1, 2, 3]})
+
+    # a bare hostname means every slot on that node, as parse_resource_filter documents
+    ret = dsrun.parse_inclusion_exclusion(pool, 'worker-0', '')
+    assert (ret == {'worker-0': [0, 1, 2, 3]})
+
+    # the example from parse_resource_filter's own docstring
+    ret = dsrun.parse_inclusion_exclusion(pool, 'worker-0@worker-1:0,2', '')
+    assert (ret == {'worker-0': [0, 1, 2, 3], 'worker-1': [0, 2]})
+
+    ret = dsrun.parse_inclusion_exclusion(pool, 'worker-1:0,2', '')
+    assert (ret == {'worker-1': [0, 2]})
+
+    ret = dsrun.parse_inclusion_exclusion(pool, '', 'worker-0:1')
+    assert (ret == {'worker-0': [0, 2, 3], 'worker-1': [0, 1, 2, 3]})
+
+
+def test_parse_inclusion_exclusion_errors():
+    '''An out-of-range slot has to be rejected for --include, not just --exclude.'''
+    pool = {'worker-0': 4}
+
+    for spec in ('worker-0:4', 'worker-0:99', 'worker-0:0,4'):
+        with pytest.raises(ValueError):
+            dsrun.parse_inclusion_exclusion(pool, spec, '')
+        with pytest.raises(ValueError):
+            dsrun.parse_inclusion_exclusion(pool, '', spec)
+
+    with pytest.raises(ValueError):
+        dsrun.parse_inclusion_exclusion(pool, 'jeff', '')
+
+
+class _FakeAccelerator:
+    '''Enough of an accelerator for main()'s VISIBLE_DEVICES branch.
+
+    device_count() records the mask it was called under, because the count is
+    only the physical one if main() has already unset the variable. A fake that
+    just returns a number would keep passing if that order were reversed.
+    '''
+
+    def __init__(self, device_count):
+        self._device_count = device_count
+        self.masks_at_device_count = []
+
+    def visible_devices_envs(self):
+        return ['CUDA_VISIBLE_DEVICES']
+
+    def device_count(self):
+        self.masks_at_device_count.append(os.environ.get('CUDA_VISIBLE_DEVICES'))
+        return self._device_count
+
+
+def _resolve_visible_devices(monkeypatch, visible_devices, device_count):
+    '''Run main() as far as parse_inclusion_exclusion() and return what it was handed.
+
+    Stopping there rather than launching keeps this CPU-only; the resource
+    resolution is the part under test.
+    '''
+    captured = {}
+    real_parse = dsrun.parse_inclusion_exclusion
+    accelerator = _FakeAccelerator(device_count)
+
+    class _Stop(Exception):
+        pass
+
+    def _spy(resource_pool, inclusion, exclusion):
+        captured['resource_pool'] = dict(resource_pool)
+        captured['include'] = inclusion
+        captured['exclude'] = exclusion
+        raise _Stop
+
+    monkeypatch.setattr(dsrun, 'get_accelerator', lambda: accelerator)
+    monkeypatch.setattr(dsrun, 'fetch_hostfile', lambda hostfile: {})
+    monkeypatch.setattr(dsrun, 'parse_inclusion_exclusion', _spy)
+    monkeypatch.setenv('CUDA_VISIBLE_DEVICES', visible_devices)
+
+    with pytest.raises(_Stop):
+        dsrun.main(['dummy.py'])
+
+    # put the real one back so the caller can resolve what main() handed over
+    monkeypatch.setattr(dsrun, 'parse_inclusion_exclusion', real_parse)
+    captured['masks_at_device_count'] = list(accelerator.masks_at_device_count)
+    return captured
+
+
+def test_visible_devices_resolve_to_the_requested_slots(monkeypatch):
+    '''CUDA_VISIBLE_DEVICES=0,2 has to launch on slots 0 and 2.
+
+    main() turns the mask into --include and then unsets it, so the device
+    count it asks for afterwards is the physical one. Guards against the
+    #5818 shape, where the count is still the masked one and slot 2 does not
+    exist as far as the resource pool is concerned.
+    '''
+    captured = _resolve_visible_devices(monkeypatch, '0,2', device_count=4)
+
+    assert captured['include'] == 'localhost:0,2'
+    assert captured['resource_pool'] == {'localhost': 4}
+    # the count has to be asked for after the mask is gone, or it is the masked one
+    assert captured['masks_at_device_count'] == [None]
+
+    ret = dsrun.parse_inclusion_exclusion(captured['resource_pool'], captured['include'], captured['exclude'])
+    assert (ret == {'localhost': [0, 2]})
+
+
+def test_visible_devices_are_rejected_when_the_device_count_is_masked(monkeypatch):
+    '''A masked count now fails loudly instead of launching on the wrong slots.
+
+    If an accelerator ever caches the count while the mask is still set, the
+    pool holds 2 slots while --include names slot 2. That request is now
+    rejected by name rather than silently passed through, which is the
+    trade this filter fix makes.
+    '''
+    captured = _resolve_visible_devices(monkeypatch, '0,2', device_count=2)
+
+    assert captured['include'] == 'localhost:0,2'
+    assert captured['resource_pool'] == {'localhost': 2}
+    assert captured['masks_at_device_count'] == [None]
+
+    with pytest.raises(ValueError, match="No slot '2' specified on host 'localhost'"):
+        dsrun.parse_inclusion_exclusion(captured['resource_pool'], captured['include'], captured['exclude'])
 
 
 def test_parser_errors():

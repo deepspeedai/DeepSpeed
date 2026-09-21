@@ -5,13 +5,18 @@
 """Compact critical-path tests for AutoEP."""
 
 import ast
+import copy
+import gc
 import inspect
+import weakref
 from collections import OrderedDict
+from contextlib import contextmanager
 from types import SimpleNamespace
 
 import pytest
 import torch
 import torch.nn as nn
+from torch.utils.checkpoint import checkpoint
 
 import deepspeed.runtime.engine as ds_engine
 import deepspeed.runtime.zero.stage3 as zero_stage3
@@ -97,6 +102,10 @@ def _make_spec(**kwargs):
     )
     defaults.update(kwargs)
     return MoELayerSpec(**defaults)
+
+
+def _get_expert_weight_for_test(expert, name):
+    return ep_repack._get_expert_weight(expert, name)
 
 
 def _assert_same_dtype_device(actual, expected):
@@ -241,6 +250,7 @@ class TestAutoEPConfig:
         assert disabled.enabled is False
         assert disabled.autoep_size == 1
         assert disabled.validate_folding_routing is False
+        assert disabled.async_split_plan is False
         assert disabled.load_balance_coeff is None
         assert disabled._load_balance_coeff_explicit is False
 
@@ -252,12 +262,14 @@ class TestAutoEPConfig:
             "score_apply": "pre",
             "route_scale": 2.0,
             "validate_folding_routing": True,
+            "async_split_plan": True,
         })
 
         assert config.enabled is True
         assert config.autoep_size == 4
         assert config.preset_model == "mixtral"
         assert config.validate_folding_routing is True
+        assert config.async_split_plan is True
         assert config.load_balance_coeff is None
         assert config._load_balance_coeff_explicit is True
         assert config.score_apply == "pre"
@@ -271,6 +283,72 @@ class TestAutoEPConfig:
                                    pp_size=1,
                                    tp_size=1,
                                    sp_size=1)
+
+    def test_async_split_plan_requires_boolean(self):
+        with pytest.raises(ValueError, match="async_split_plan"):
+            validate_autoep_config(AutoEPConfig(enabled=True, async_split_plan="true"),
+                                   world_size=1,
+                                   pp_size=1,
+                                   tp_size=1,
+                                   sp_size=1)
+
+    def test_async_split_plan_rejects_autotp_folding(self):
+        with pytest.raises(ValueError, match="async_split_plan.*AutoEP\\+AutoTP folding"):
+            validate_autoep_config(AutoEPConfig(enabled=True, autoep_size=2, async_split_plan=True),
+                                   world_size=4,
+                                   pp_size=1,
+                                   tp_size=2,
+                                   sp_size=1)
+
+    def test_combine_impl_rejects_unknown_value(self):
+        config = parse_autoep_config({"enabled": True, "combine_impl": "triton"})
+        with pytest.raises(ValueError, match="combine_impl must be one of"):
+            validate_autoep_config(config, world_size=1, pp_size=1, tp_size=1, sp_size=1)
+
+    def test_fused_combine_rejects_folded_tensor_parallelism(self):
+        config = parse_autoep_config({
+            "enabled": True,
+            "autoep_size": 2,
+            "combine_impl": "fused_weighted_sum",
+        })
+        with pytest.raises(ValueError, match=r"tensor_parallel\.autotp_size=2"):
+            validate_autoep_config(config, world_size=4, pp_size=1, tp_size=2, sp_size=1)
+
+    def test_fused_combine_rejects_expert_tensor_parallelism(self):
+        config = parse_autoep_config({
+            "enabled": True,
+            "autoep_size": 2,
+            "expert_tensor_parallel_size": 2,
+            "combine_impl": "fused_weighted_sum",
+        })
+        with pytest.raises(ValueError, match="requires expert_tensor_parallel_size=1"):
+            validate_autoep_config(config, world_size=4, pp_size=1, tp_size=1, sp_size=1)
+
+    def test_fused_combine_rejects_deepep(self):
+        config = parse_autoep_config({
+            "enabled": True,
+            "autoep_size": 2,
+            "combine_impl": "fused_weighted_sum",
+            "comm_backend": "deepep",
+            "comm_max_tokens_per_rank": 4096,
+        })
+        with pytest.raises(ValueError, match='cannot be used with comm_backend="deepep"'):
+            validate_autoep_config(config, world_size=2, pp_size=1, tp_size=1, sp_size=1)
+
+    @pytest.mark.parametrize("score_apply, spec_score_apply", [("auto", "pre"), ("pre", "post")])
+    def test_fused_combine_requires_post_score_apply(self, score_apply, spec_score_apply):
+        config = parse_autoep_config({
+            "enabled": True,
+            "combine_impl": "fused_weighted_sum",
+            "score_apply": score_apply,
+        })
+        with pytest.raises(ValueError, match='requires score_apply="post"'):
+            validate_autoep_post_detection(config, [_make_spec(score_apply=spec_score_apply)])
+
+    def test_fused_combine_accepts_the_standard_path(self):
+        config = parse_autoep_config({"enabled": True, "autoep_size": 2, "combine_impl": "fused_weighted_sum"})
+        validate_autoep_config(config, world_size=2, pp_size=1, tp_size=1, sp_size=1)
+        validate_autoep_post_detection(config, [_make_spec(num_experts=4, score_apply="post")])
 
     @pytest.mark.parametrize("value", UNSUPPORTED_LOAD_BALANCE_VALUES)
     def test_load_balance_coeff_rejected_at_parse(self, value):
@@ -475,24 +553,6 @@ class TestAutoEPConfig:
         with pytest.raises(AssertionError, match="zero_quantized_gradients"):
             engine._validate_zero3_moe_compatibility()
 
-    def test_zero3_compatibility_gate_rejects_mics(self):
-        model = MockMoETransformer(num_layers=1)
-        replace_autoep_layers(model, "mixtral")
-        engine = object.__new__(DeepSpeedEngine)
-        engine.__dict__["module"] = model
-        engine.has_moe_layers = True
-        engine.sequence_parallel_size = 1
-        engine.zero_quantized_gradients = lambda: False
-        engine._config = SimpleNamespace(
-            mics_shard_size=2,
-            zero_config=SimpleNamespace(zero_hpz_partition_size=1),
-            tensor_parallel_config=SimpleNamespace(autotp_size=1),
-            expert_parallel_config=AutoEPConfig(enabled=True, autoep_size=1),
-        )
-
-        with pytest.raises(AssertionError, match="MiCS"):
-            engine._validate_zero3_moe_compatibility()
-
     def test_zero3_compatibility_gate_rejects_hpzero(self):
         model = MockMoETransformer(num_layers=1)
         replace_autoep_layers(model, "mixtral")
@@ -502,7 +562,6 @@ class TestAutoEPConfig:
         engine.sequence_parallel_size = 1
         engine.zero_quantized_gradients = lambda: False
         engine._config = SimpleNamespace(
-            mics_shard_size=0,
             zero_config=SimpleNamespace(zero_hpz_partition_size=2),
             tensor_parallel_config=SimpleNamespace(autotp_size=1),
             expert_parallel_config=AutoEPConfig(enabled=True, autoep_size=1),
@@ -1117,6 +1176,128 @@ class TestRoutingAndLayerSemantics:
                            ep_rank=0,
                            config=AutoEPConfig(enabled=True, autoep_size=1, load_balance_coeff=0.02))
 
+    def test_router_cache_does_not_duplicate_model_level_gate_capture(self):
+        source = MockMoEBlock(num_experts=4, ffn_hidden=128, hidden_size=64)
+        layer = AutoEPMoELayer(_make_spec(router_logits_capture_target="router", router_logits_capture_mode="raw"),
+                               source,
+                               ep_size=1,
+                               ep_rank=0,
+                               config=_runtime_config(enabled=True, autoep_size=1))
+        captured = []
+        hidden_states = torch.randn(2, 8, 64)
+        with layer.router.gate.register_forward_hook(lambda _module, _args, output: captured.append(output.detach())):
+            layer(hidden_states)
+        # HF model-level recording must see one set of logits per MoE layer, not a second cache projection.
+        assert len(captured) == 1
+        expected = nn.functional.linear(hidden_states.reshape(-1, 64), layer.router.gate.weight)
+        torch.testing.assert_close(captured[0], expected)
+
+    @pytest.mark.parametrize("capture_mode,score_func", [("raw", "softmax"), ("post_score", "softmax"),
+                                                         ("post_score", "sigmoid")])
+    def test_router_cache_returned_logits_match_gate(self, capture_mode, score_func):
+        source = MockMoEBlock(num_experts=4, ffn_hidden=128, hidden_size=64)
+        layer = AutoEPMoELayer(_make_spec(return_router_logits=True,
+                                          router_logits_capture_target="router",
+                                          router_logits_capture_mode=capture_mode,
+                                          score_func=score_func),
+                               source,
+                               ep_size=1,
+                               ep_rank=0,
+                               config=_runtime_config(enabled=True, autoep_size=1))
+        inputs = torch.randn(2, 8, 64, requires_grad=True)
+        reference_inputs = inputs.detach().clone().requires_grad_(True)
+
+        _, logits = layer(inputs)
+        expected = source.gate(reference_inputs.reshape(-1, 64))
+        if capture_mode == "post_score":
+            expected = expected.softmax(dim=-1) if score_func == "softmax" else expected.sigmoid()
+
+        torch.testing.assert_close(logits, expected)
+        actual_grads = torch.autograd.grad(logits.square().mean(), (inputs, layer.router.gate.weight))
+        expected_grads = torch.autograd.grad(expected.square().mean(), (reference_inputs, source.gate.weight))
+        for actual_grad, expected_grad in zip(actual_grads, expected_grads):
+            torch.testing.assert_close(actual_grad, expected_grad)
+
+    @pytest.mark.parametrize("return_logits", [False, True])
+    @pytest.mark.parametrize("checkpoint_mode", [None, False, True])
+    @pytest.mark.parametrize("device", ["cpu", "cuda"])
+    def test_router_cache_checkpoint_training(self, return_logits, checkpoint_mode, device):
+        from deepspeed.accelerator import get_accelerator
+
+        if device == "cuda" and (get_accelerator().device_name() != "cuda" or not get_accelerator().is_available()):
+            pytest.skip("CUDA regression case requires a CUDA accelerator")
+        torch.manual_seed(1234)
+        source = MockMoEBlock(num_experts=4, ffn_hidden=128, hidden_size=64)
+        spec = _make_spec(return_router_logits=return_logits,
+                          router_logits_capture_target="router",
+                          router_logits_capture_mode="raw")
+        config = _runtime_config(enabled=True, autoep_size=1)
+        reference = AutoEPMoELayer(spec, copy.deepcopy(source), ep_size=1, ep_rank=0, config=config).to(device)
+        candidate = AutoEPMoELayer(spec, copy.deepcopy(source), ep_size=1, ep_rank=0, config=config).to(device)
+        reference_optimizer = torch.optim.SGD(reference.parameters(), lr=1e-4)
+        candidate_optimizer = torch.optim.SGD(candidate.parameters(), lr=1e-4)
+        gate_tensors = []
+
+        def train_step(layer, optimizer, inputs, mode):
+            optimizer.zero_grad(set_to_none=True)
+            x = inputs.detach().clone().requires_grad_(True)
+            result = layer(x) if mode is None else checkpoint(layer, x, use_reentrant=mode)
+            output, logits = result if return_logits else (result, None)
+            loss = output.square().mean()
+            if logits is not None:
+                # A nonzero auxiliary term verifies that needed router-logit gradients remain connected.
+                loss = loss + 0.01 * logits.square().mean()
+            loss.backward()
+            grads = {name: parameter.grad.detach().clone() for name, parameter in layer.named_parameters()}
+            optimizer.step()
+            values = (output.detach().clone(), None if logits is None else logits.detach().clone(),
+                      loss.detach().clone(), x.grad.detach().clone())
+            return values, grads
+
+        with candidate.router.gate.register_forward_hook(
+                lambda _module, _args, output: gate_tensors.append(weakref.ref(output))):
+            for _step in range(2):
+                inputs = torch.randn(2, 8, 64, device=device)
+                expected_values, expected_grads = train_step(reference, reference_optimizer, inputs, None)
+                actual_values, actual_grads = train_step(candidate, candidate_optimizer, inputs, checkpoint_mode)
+                for actual, expected in zip(actual_values, expected_values):
+                    if expected is None:
+                        assert actual is None
+                    else:
+                        torch.testing.assert_close(actual, expected, rtol=1e-4, atol=1e-5)
+                assert actual_grads.keys() == expected_grads.keys()
+                for name in expected_grads:
+                    torch.testing.assert_close(actual_grads[name], expected_grads[name], rtol=1e-4, atol=1e-5)
+                for actual, expected in zip(candidate.parameters(), reference.parameters()):
+                    torch.testing.assert_close(actual, expected, rtol=1e-4, atol=1e-5)
+                gc.collect()
+                # Weak observers do not themselves retain the replay gate tensors or their autograd graph.
+                assert all(tensor_ref() is None for tensor_ref in gate_tensors)
+                gate_tensors.clear()
+
+    def test_router_cache_is_released_after_expert_failure(self, monkeypatch):
+        source = MockMoEBlock(num_experts=4, ffn_hidden=128, hidden_size=64)
+        layer = AutoEPMoELayer(_make_spec(return_router_logits=True,
+                                          router_logits_capture_target="router",
+                                          router_logits_capture_mode="raw"),
+                               source,
+                               ep_size=1,
+                               ep_rank=0,
+                               config=_runtime_config(enabled=True, autoep_size=1))
+
+        def fail_expert(*_args, **_kwargs):
+            raise RuntimeError("expert failure")
+
+        monkeypatch.setattr(layer.experts, "forward", fail_expert)
+        gate_tensors = []
+        with layer.router.gate.register_forward_hook(
+                lambda _module, _args, output: gate_tensors.append(weakref.ref(output))):
+            with pytest.raises(RuntimeError, match="expert failure"):
+                layer(torch.randn(2, 8, 64))
+        gc.collect()
+        assert gate_tensors
+        assert all(tensor_ref() is None for tensor_ref in gate_tensors)
+
 
 SPLIT_PLAN_EP_SIZE = 3
 SPLIT_PLAN_LOCAL_EXPERTS = 2
@@ -1162,7 +1343,7 @@ def _legacy_split_plan(num_tokens_per_expert):
     auto_ep_layer.dist.all_to_all_single(received_flat, expert_counts, group=None)
     received_counts = received_flat.view(SPLIT_PLAN_EP_SIZE, SPLIT_PLAN_LOCAL_EXPERTS)
 
-    return SplitPlan(input_splits, output_splits, received_counts.sum(dim=0), received_counts)
+    return SplitPlan(input_splits, output_splits, received_counts)
 
 
 class TestSplitPlan:
@@ -1214,7 +1395,6 @@ class TestSplitPlan:
         mine = all_counts[ep_rank].view(SPLIT_PLAN_EP_SIZE, SPLIT_PLAN_LOCAL_EXPERTS)
         assert plan.input_splits == mine.sum(dim=1).tolist()
         assert plan.output_splits == received.sum(dim=1).tolist()
-        assert torch.equal(plan.local_counts, received.sum(dim=0))
         assert torch.equal(plan.local_counts_by_source, received)
         assert sum(plan.output_splits) == int(received.sum())
 
@@ -1239,7 +1419,6 @@ class TestSplitPlan:
         assert len(sent) == 1
         assert plan.input_splits == expected.input_splits
         assert plan.output_splits == expected.output_splits
-        assert torch.equal(plan.local_counts, expected.local_counts)
         assert torch.equal(plan.local_counts_by_source, expected.local_counts_by_source)
 
     @pytest.mark.parametrize("scenario", sorted(SPLIT_PLAN_SCENARIOS))
@@ -1257,7 +1436,6 @@ class TestSplitPlan:
 
         assert derived.input_splits == folded.input_splits
         assert derived.output_splits == folded.output_splits
-        assert torch.equal(derived.local_counts, folded.local_counts)
         assert torch.equal(derived.local_counts_by_source, folded.local_counts_by_source)
 
     def test_ep_size_one_needs_no_exchange(self, monkeypatch):
@@ -1275,8 +1453,270 @@ class TestSplitPlan:
         assert sent == []
         assert plan.input_splits == [9]
         assert plan.output_splits == [9]
-        assert torch.equal(plan.local_counts, counts)
         assert torch.equal(plan.local_counts_by_source, counts.view(1, 4))
+
+
+@pytest.fixture
+def async_split_layer(monkeypatch):
+    source = MockMoEBlock(num_experts=4, ffn_hidden=128, hidden_size=64)
+    layer = AutoEPMoELayer(_make_spec(),
+                           source,
+                           ep_size=2,
+                           ep_rank=0,
+                           config=_runtime_config(enabled=True, autoep_size=2, async_split_plan=True))
+    activity = {"buffers": [], "events": [], "waits": [], "records": [], "timeline": [], "stream": "caller"}
+
+    def synchronize():
+        activity["waits"].append("ready")
+        activity["timeline"].append(("synchronize", activity["stream"]))
+
+    def record(event, stream):
+        stream_name = stream.name if hasattr(stream, "name") else stream
+        event.recorded_stream = stream_name
+        if stream_name == "copy":
+            activity["records"].append("submitted")
+        activity["timeline"].append(("record", stream_name))
+
+    event = SimpleNamespace(synchronize=synchronize)
+
+    def create_event():
+        created = event if not activity["events"] else SimpleNamespace(synchronize=synchronize)
+        created.record = lambda stream: record(created, stream)
+        activity["events"].append(created)
+        return created
+
+    def wait_event(event):
+        assert event.recorded_stream == "caller"
+        activity["timeline"].append(("wait_event", "copy"))
+
+    stream = SimpleNamespace(name="copy", wait_event=wait_event)
+
+    @contextmanager
+    def copy_stream(stream):
+        activity["stream"] = "copy"
+        try:
+            yield
+        finally:
+            activity["stream"] = "caller"
+
+    class CUDADeviceCounts(torch.Tensor):
+
+        @property
+        def device(self):
+            return torch.device("cuda", 0)
+
+        def sum(self, *args, **kwargs):
+            if not any(operation == "payload" for operation, _ in activity["timeline"]):
+                activity["timeline"].append(("reduce", activity["stream"]))
+            return super().sum(*args, **kwargs)
+
+    def pin_memory(tensor):
+        # Pinning can allocate new storage, so preserve its inference-mode behavior.
+        pinned = tensor.clone()
+        activity["buffers"].append(pinned)
+        return pinned
+
+    original_copy = torch.Tensor.copy_
+
+    def copy(tensor, source, *args, **kwargs):
+        if any(tensor is buffer for buffer in activity["buffers"]):
+            activity["timeline"].append(("copy", activity["stream"]))
+            assert kwargs.get("non_blocking") is True
+            assert source.dtype == tensor.dtype
+            # Host storage must not inherit the fake CUDA tensor subclass.
+            source = source.as_subclass(torch.Tensor)
+        return original_copy(tensor, source, *args, **kwargs)
+
+    accelerator = SimpleNamespace(current_device=lambda: 0,
+                                  current_stream=lambda device: activity["stream"],
+                                  Event=create_event,
+                                  Stream=lambda device: stream,
+                                  stream=copy_stream,
+                                  pin_memory=pin_memory)
+
+    def device_counts(_module, _inputs, output):
+        scores, selected, counts = output
+        return scores, selected, counts.as_subclass(CUDADeviceCounts)
+
+    def exchange(output, input_, **kwargs):
+        kind = "payload" if "input_split_sizes" in kwargs else "counts"
+        activity["timeline"].append((kind, activity["stream"]))
+        output.copy_(input_)
+
+    # Counts have CUDA device metadata with host storage so the real planner
+    # can run against deterministic stream/collective protocol doubles.
+    hook = layer.router.register_forward_hook(device_counts)
+    monkeypatch.setattr(auto_ep_layer, "get_accelerator", lambda: accelerator)
+    monkeypatch.setattr(auto_ep_layer.dist, "all_to_all_single", exchange)
+    monkeypatch.setattr(torch.Tensor, "copy_", copy)
+    monkeypatch.setattr(torch.Tensor, "record_stream", lambda tensor, stream: None)
+    auto_ep_layer._get_async_split_plan_stream.cache_clear()
+    yield layer, event, activity
+    hook.remove()
+    auto_ep_layer._get_async_split_plan_stream.cache_clear()
+
+
+class TestAsyncSplitPlanLifecycle:
+    """Pin stream ordering and pending-buffer reuse through layer forwards."""
+
+    def test_only_metadata_copy_uses_side_stream(self, monkeypatch, async_split_layer):
+        layer, _, activity = async_split_layer
+        original_argsort = torch.argsort
+
+        def sort(*args, **kwargs):
+            result = original_argsort(*args, **kwargs)
+            activity["timeline"].append(("sort", activity["stream"]))
+            return result
+
+        monkeypatch.setattr(torch, "argsort", sort)
+        layer(torch.randn(1, 8, 64))
+
+        # Keep count exchange/reductions on the caller stream so only the
+        # metadata transfer overlaps sorting and packing, not count kernels.
+        timeline = activity["timeline"]
+        for operation, stream in timeline:
+            if operation in ("counts", "reduce", "sort", "payload", "synchronize"):
+                assert stream == "caller"
+        assert timeline.count(("counts", "caller")) == 1
+        assert timeline.count(("record", "caller")) == 1
+        assert timeline.count(("wait_event", "copy")) == 1
+        assert timeline.count(("copy", "copy")) == 1
+        assert timeline.count(("record", "copy")) == 1
+        operations = [operation for operation, _ in timeline]
+        assert operations.index("counts") < timeline.index(("record", "caller")) < operations.index("wait_event")
+        assert all(index < timeline.index(("record", "caller")) for index, operation in enumerate(operations)
+                   if operation == "reduce")
+        assert operations.index("wait_event") < operations.index("copy") < timeline.index(("record", "copy"))
+        assert timeline.index(("record", "copy")) < operations.index("sort")
+        assert activity["buffers"][0].dtype == torch.int64
+        assert operations.index("sort") < operations.index("synchronize") < operations.index("payload")
+
+    @pytest.mark.parametrize("warmup_mode", [torch.no_grad, torch.inference_mode])
+    def test_warmup_allows_subsequent_training(self, async_split_layer, warmup_mode):
+        layer, _, activity = async_split_layer
+        hidden = torch.randn(1, 8, 64, requires_grad=True)
+        layer.async_split_plan = False
+        expected = layer(hidden)
+        expected.square().mean().backward()
+        expected_input_grad = hidden.grad.clone()
+        hidden.grad = None
+        layer.zero_grad(set_to_none=True)
+
+        layer.async_split_plan = True
+        with warmup_mode():
+            warmup_output = layer(hidden)
+        torch.testing.assert_close(warmup_output, expected)
+
+        actual = layer(hidden)
+        actual.square().mean().backward()
+        torch.testing.assert_close(actual, expected)
+        torch.testing.assert_close(hidden.grad, expected_input_grad)
+        assert len(activity["buffers"]) == 1
+        assert layer._async_split_plan_pending is None
+
+    def test_packing_failure_drains_pending_and_allows_retry(self, monkeypatch, async_split_layer):
+        layer, _, activity = async_split_layer
+        hidden = torch.randn(1, 8, 64)
+        layer.async_split_plan = False
+        expected = layer(hidden)
+        layer.async_split_plan = True
+        packing_error = RuntimeError("token packing failed")
+
+        def fail_packing(*args, **kwargs):
+            raise packing_error
+
+        with monkeypatch.context() as patch:
+            patch.setattr(torch, "argsort", fail_packing)
+            with pytest.raises(RuntimeError) as raised:
+                layer(hidden)
+
+        assert raised.value is packing_error
+        assert activity["waits"] == ["ready"]
+        assert layer._async_split_plan_pending is None
+        actual = layer(hidden)
+        torch.testing.assert_close(actual, expected)
+        assert activity["waits"] == ["ready", "ready"]
+        assert activity["records"] == ["submitted", "submitted"]
+        assert len(activity["buffers"]) == 1
+        # Reuse the dependency event as well as the ready event after draining
+        # a failed forward, without allocating events in the per-layer hot path.
+        assert len(activity["events"]) == 2
+        assert layer._async_split_plan_pending is None
+
+    def test_drain_failure_preserves_original_error_and_pending_buffers(self, monkeypatch, async_split_layer):
+        layer, event, activity = async_split_layer
+        packing_error = RuntimeError("token packing failed")
+
+        def fail_packing(*args, **kwargs):
+            raise packing_error
+
+        def fail_drain():
+            activity["waits"].append("failed")
+            raise RuntimeError("device failed while draining")
+
+        monkeypatch.setattr(torch, "argsort", fail_packing)
+        event.synchronize = fail_drain
+        hidden = torch.randn(1, 8, 64)
+        with pytest.raises(RuntimeError) as raised:
+            layer(hidden)
+        assert raised.value is packing_error
+        pending = layer._async_split_plan_pending
+        assert pending._host_splits is activity["buffers"][0]
+        assert pending._keepalive
+
+        with pytest.raises(RuntimeError, match="already pending"):
+            layer(hidden)
+        assert layer._async_split_plan_pending is pending
+        assert activity["waits"] == ["failed"]
+        assert activity["records"] == ["submitted"]
+
+    @pytest.mark.parametrize("backend, ep_size", [("comm", 1), ("deepep", 1), ("deepep", 2)])
+    def test_unused_async_planner_is_bypassed(self, monkeypatch, backend, ep_size):
+        source = MockMoEBlock(num_experts=4, ffn_hidden=128, hidden_size=64).to(torch.bfloat16)
+        layer = AutoEPMoELayer(_make_spec(),
+                               source,
+                               ep_size=ep_size,
+                               ep_rank=0,
+                               config=_runtime_config(enabled=True,
+                                                      autoep_size=ep_size,
+                                                      comm_backend=backend,
+                                                      comm_max_tokens_per_rank=16))
+        monkeypatch.setattr(auto_ep_layer.dist, "all_to_all_single",
+                            lambda output, input_, **kwargs: output.copy_(input_))
+        # The loopback exchange must not initialize a real EP communicator.
+        monkeypatch.setattr(auto_ep_layer.dist, "barrier", lambda **kwargs: None)
+
+        class LoopbackExchange:
+
+            def __init__(self, *, num_experts, num_max_tokens_per_rank, **kwargs):
+                self.num_local_experts = num_experts // ep_size
+                self.num_max_tokens_per_rank = num_max_tokens_per_rank
+
+            def dispatch(self, tokens, topk_idx, topk_weights):
+                local_experts = topk_idx.flatten() % self.num_local_experts
+                order = torch.argsort(local_experts, stable=True)
+                token_indices = order // topk_idx.shape[1]
+                counts = torch.bincount(local_experts, minlength=self.num_local_experts)
+                self.last_handle = SimpleNamespace(num_expanded_tokens=order.numel(),
+                                                   psum_num_recv_tokens_per_expert=counts.cumsum(0),
+                                                   token_indices=token_indices,
+                                                   num_tokens=tokens.shape[0])
+                return tokens[token_indices], topk_weights.flatten()[order].float(), self.last_handle
+
+            def combine(self, rows, handle):
+                output = rows.new_zeros((handle.num_tokens, rows.shape[1]))
+                return output.index_add_(0, handle.token_indices, rows)
+
+        monkeypatch.setattr(auto_ep_layer, "DeepEPExchange", LoopbackExchange)
+        hidden = torch.randn(1, 8, 64, dtype=torch.bfloat16)
+        expected = layer(hidden)
+        layer.async_split_plan = True
+        for _ in range(2):
+            torch.testing.assert_close(layer(hidden), expected)
+            assert layer._async_split_plan_pending is None
+        assert layer._async_split_plan_host_splits is None
+        assert layer._async_split_plan_ready_event is None
+        assert layer._async_split_plan_dependency_event is None
 
 
 class TestModelDetectionAndReplacement:
@@ -1483,7 +1923,9 @@ class TestModelDetectionAndReplacement:
         FakeGatheredParameters.calls = []
         monkeypatch.setattr(ep_repack, "GatheredParameters", FakeGatheredParameters)
         monkeypatch.setattr(get_preset_adapter("deepseek_v3"), "_installed_transformers_version", lambda: "5.0.0")
+
         model = MockDeepSeekV3Transformer(num_layers=1, num_experts=8)
+
         auto_ep = AutoEP(model, _runtime_config(enabled=True, autoep_size=2))
         specs = auto_ep.ep_parser()
 
@@ -1492,6 +1934,7 @@ class TestModelDetectionAndReplacement:
         assert specs[0].expert_storage == "module_list"
         assert specs[0].expert_w1_name == "gate_proj"
         assert specs[0].has_shared_experts is True
+        assert specs[0].e_score_correction_bias_path is None
 
         source_bias = torch.arange(8, dtype=torch.float32)
         model.model.layers[0].mlp.gate.e_score_correction_bias = nn.Parameter(source_bias.clone())
@@ -1507,6 +1950,59 @@ class TestModelDetectionAndReplacement:
         assert replaced.router.e_score_correction_bias is not None
         torch.testing.assert_close(replaced.router.e_score_correction_bias, source_bias)
         assert ["router.e_score_correction_bias"] in [call["names"] for call in FakeGatheredParameters.calls]
+
+    @pytest.mark.parametrize(
+        "owner_path,bias_kind,persistent",
+        [
+            ("gate", "buffer", True),
+            ("", "buffer", False),
+            ("router", "buffer", True),
+            ("gate.moe_statics", "parameter", True),
+        ],
+    )
+    def test_score_correction_bias_location_and_registration(self, monkeypatch, owner_path, bias_kind, persistent):
+        monkeypatch.setattr(get_preset_adapter("deepseek_v3"), "_installed_transformers_version", lambda: "5.0.0")
+        model = MockDeepSeekV3Transformer(num_layers=1, num_experts=8)
+        source = model.model.layers[0].mlp
+        owner = source
+        for part in owner_path.split(".") if owner_path else ():
+            if not hasattr(owner, part):
+                owner.add_module(part, nn.Module())
+            owner = getattr(owner, part)
+
+        source_bias = torch.arange(8, dtype=torch.float32)
+        if bias_kind == "parameter":
+            owner.e_score_correction_bias = nn.Parameter(source_bias.clone(), requires_grad=False)
+        else:
+            owner.register_buffer("e_score_correction_bias", source_bias.clone(), persistent=persistent)
+
+        auto_ep = AutoEP(model, _runtime_config(enabled=True, autoep_size=2))
+        spec = auto_ep.ep_parser()[0]
+        assert spec.e_score_correction_bias_path == owner_path
+
+        auto_ep.replace_moe_layer(spec, ep_size=2, ep_rank=0)
+
+        replaced_bias = model.model.layers[0].mlp.router.e_score_correction_bias
+        torch.testing.assert_close(replaced_bias, source_bias)
+        assert replaced_bias.requires_grad is False
+        if bias_kind == "parameter":
+            assert dict(
+                model.model.layers[0].mlp.router.named_parameters())["e_score_correction_bias"] is replaced_bias
+            assert "e_score_correction_bias" not in dict(model.model.layers[0].mlp.router.named_buffers())
+        else:
+            assert dict(model.model.layers[0].mlp.router.named_buffers())["e_score_correction_bias"] is replaced_bias
+            assert "e_score_correction_bias" not in dict(model.model.layers[0].mlp.router.named_parameters())
+            assert ("e_score_correction_bias" in model.model.layers[0].mlp.router.state_dict()) is persistent
+
+    def test_score_correction_bias_multiple_locations_are_rejected(self, monkeypatch):
+        monkeypatch.setattr(get_preset_adapter("deepseek_v3"), "_installed_transformers_version", lambda: "5.0.0")
+        model = MockDeepSeekV3Transformer(num_layers=1, num_experts=8)
+        source = model.model.layers[0].mlp
+        source.register_buffer("e_score_correction_bias", torch.zeros(8))
+        source.gate.register_buffer("e_score_correction_bias", torch.ones(8))
+
+        with pytest.raises(ValueError, match="e_score_correction_bias in multiple locations"):
+            AutoEP(model, _runtime_config(enabled=True, autoep_size=2)).ep_parser()
 
 
 def _eager_pep604_lines(module):
@@ -1570,3 +2066,491 @@ class TestPy39AnnotationSafety:
                 f"{module.__name__} evaluates PEP 604 unions at import time (lines {offending_lines}); "
                 f"on Python 3.9 this raises TypeError during import and escapes the engine's "
                 f"except-ImportError guards (issue #8102). Add 'from __future__ import annotations'.")
+
+
+# ---------------------------------------------------------------------------
+# Test helpers + class: client-optimizer remap after module replacement
+# ---------------------------------------------------------------------------
+
+
+def _detach_moe_blocks(model, ep_size=2, layers=None):
+    """Do to the module tree what AutoEP does: every MoE block's parameters become new objects
+    (a fresh router gate plus ``GroupedExperts`` w1/w2/w3), so the originals leave the model.
+
+    Returns the same ``ReplacementSourceMap`` AutoEP hands the engine. The fused ``gate_up_proj``
+    feeds both w1 and w3, matching ``repack_expert_source_params``, and each replacement inherits
+    its source's ``requires_grad``, matching ``AutoEPMoELayer``.
+    """
+    collected = auto_ep_layer.ReplacementSourceMap()
+    replacement_sources = collected.sources
+    for layer_index, layer in enumerate(model.model.layers):
+        if layers is not None and layer_index not in layers:
+            continue
+        source_gate = layer.mlp.gate
+        source_experts = layer.mlp.experts
+        num_experts, twice_ffn, hidden = source_experts.gate_up_proj.shape
+        replacement = nn.Module()
+        replacement.router = nn.Module()
+        replacement.router.gate = nn.Linear(hidden, num_experts, bias=False)
+        replacement.router.gate.weight.requires_grad_(source_gate.weight.requires_grad)
+        replacement.experts = nn.Module()
+        for name, source in (("w1", source_experts.gate_up_proj), ("w2", source_experts.down_proj),
+                             ("w3", source_experts.gate_up_proj)):
+            shard = nn.Parameter(torch.empty(num_experts // ep_size, twice_ffn // 2, hidden))
+            shard.requires_grad_(source.requires_grad)
+            setattr(replacement.experts, name, shard)
+            replacement_sources[id(shard)] = [source]
+        replacement_sources[id(replacement.router.gate.weight)] = [source_gate.weight]
+        collected.discarded.update(id(p) for p in layer.mlp.parameters())
+        layer.mlp = replacement
+    return collected
+
+
+def _remap(optimizer, model, replacement_sources=None):
+    if replacement_sources is None:
+        replacement_sources = auto_ep_layer.ReplacementSourceMap()
+    ds_engine._remap_client_optimizer_after_module_replacement(optimizer, model, replacement_sources)
+
+
+def _owned_ids(optimizer):
+    return {id(p) for group in optimizer.param_groups for p in group["params"]}
+
+
+class TestClientOptimizerRemap:
+    """Re-pointing a caller-supplied optimizer at the parameters AutoEP put in the model.
+
+    The end-to-end path is covered by ``TestAutoEPClientOptimizer`` in test_autoep_integration.py.
+    These exercise the placement rules directly, including the cases a real AutoEP run cannot
+    easily produce.
+    """
+
+    def test_replacements_join_the_group_their_source_was_in(self):
+        """The replacements must follow their source group, not fall back to group 0."""
+        model = MockMoETransformer()
+        named = list(model.named_parameters())
+        no_decay = [p for n, p in named if n.endswith("bias")]
+        decayed = [p for n, p in named if not n.endswith("bias")]
+        # no_decay first: the expert weights belong to group 1, so a fallback to group 0 would fail
+        optimizer = torch.optim.AdamW([{
+            "params": no_decay,
+            "weight_decay": 0.0
+        }, {
+            "params": decayed,
+            "weight_decay": 0.1
+        }],
+                                      lr=1e-3)
+
+        _remap(optimizer, model, _detach_moe_blocks(model))
+
+        replaced = {id(p) for name, p in model.named_parameters() if ".experts." in name or ".router." in name}
+        holders = [
+            gi for gi, group in enumerate(optimizer.param_groups) if replaced & {id(p)
+                                                                                 for p in group["params"]}
+        ]
+        assert holders == [1], f"replacement parameters landed in group(s) {holders}, expected [1]"
+        assert optimizer.param_groups[1]["weight_decay"] == 0.1
+
+    def test_frozen_params_are_not_mistaken_for_replaced_ones(self):
+        """A frozen parameter is still in the model, so it must not look like a replaced one."""
+        model = MockMoETransformer()
+        for name, param in model.named_parameters():
+            if ".mlp." not in name:
+                param.requires_grad_(False)
+        named = list(model.named_parameters())
+        optimizer = torch.optim.AdamW([{
+            "params": [p for n, p in named if not n.endswith("bias")],
+            "weight_decay": 0.1
+        }, {
+            "params": [p for n, p in named if n.endswith("bias")],
+            "weight_decay": 0.0
+        }],
+                                      lr=1e-3)
+
+        _remap(optimizer, model, _detach_moe_blocks(model))
+
+        owned = _owned_ids(optimizer)
+        orphans = [name for name, p in model.named_parameters() if p.requires_grad and id(p) not in owned]
+        assert not orphans, f"trainable parameters left out of the optimizer: {orphans}"
+        dropped = [name for name, p in model.named_parameters() if not p.requires_grad and id(p) not in owned]
+        assert not dropped, f"frozen parameters were removed from the client optimizer: {dropped}"
+
+    def test_frozen_replacements_keep_their_param_group(self):
+        """A replacement inherits its source's requires_grad. A frozen one still has to keep the
+        param group its frozen source held, or a staged fine-tune that unfreezes the experts in
+        phase two would train nothing: the source is gone from the model and the replacement was
+        never added. The ZeRO optimizers filter frozen parameters themselves.
+        """
+        model = MockMoETransformer()
+        for name, param in model.named_parameters():
+            if ".experts." in name:
+                param.requires_grad_(False)
+        optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
+
+        _remap(optimizer, model, _detach_moe_blocks(model))
+
+        owned = _owned_ids(optimizer)
+        stranded = [name for name, p in model.named_parameters() if id(p) not in owned]
+        assert not stranded, f"parameters in the model but in no param group: {stranded}"
+
+        # phase two: unfreezing must be enough to train them
+        for name, param in model.named_parameters():
+            if ".experts." in name:
+                param.requires_grad_(True)
+        still = [name for name, p in model.named_parameters() if p.requires_grad and id(p) not in owned]
+        assert not still, f"unfrozen experts are in no param group: {still}"
+
+    def test_remap_is_a_noop_when_nothing_was_replaced(self):
+        """Without a module replacement the caller's optimizer must be left exactly as it was."""
+        model = MockMoETransformer()
+        for name, param in model.named_parameters():
+            if ".mlp." not in name:
+                param.requires_grad_(False)
+        optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
+        before = [list(group["params"]) for group in optimizer.param_groups]
+
+        _remap(optimizer, model)
+
+        after = [list(group["params"]) for group in optimizer.param_groups]
+        assert after == before, "the optimizer was modified even though no module was replaced"
+
+    def test_populated_optimizer_state_raises_before_remap(self):
+        """Moment tensors cannot be transferred from arbitrary source layouts without an explicit
+        repacking contract. Refuse a resumed optimizer rather than silently resetting its experts.
+        """
+        model = MockMoETransformer()
+        optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
+        stale = model.model.layers[0].mlp.experts.gate_up_proj
+        optimizer.state[stale] = {
+            "step": torch.tensor(1.0),
+            "exp_avg": torch.ones_like(stale),
+            "exp_avg_sq": torch.ones_like(stale),
+        }
+        replacement_sources = _detach_moe_blocks(model)
+        before = [list(group["params"]) for group in optimizer.param_groups]
+
+        with pytest.raises(RuntimeError, match="restore a checkpoint.*after initialization"):
+            _remap(optimizer, model, replacement_sources)
+
+        assert optimizer.state[stale]["step"] == 1
+        assert [list(group["params"]) for group in optimizer.param_groups] == before
+
+    @pytest.mark.parametrize("grouped", [False, True])
+    def test_eager_model_parameters_are_remapped(self, grouped):
+        """Config-built and callable optimizers receive ``model_parameters`` only after AutoEP.
+        An eager flat or grouped list therefore needs the same source-to-replacement mapping as an
+        already-instantiated optimizer.
+        """
+        model = MockMoETransformer()
+        named = list(model.named_parameters())
+        if grouped:
+            model_parameters = [{
+                "params": (p for name, p in named if name.endswith("bias")),
+                "weight_decay": 0.0,
+            }, {
+                "params": (p for name, p in named if not name.endswith("bias")),
+                "weight_decay": 0.1,
+            }]
+        else:
+            model_parameters = [p for _, p in named]
+
+        if grouped:
+            for group in model_parameters:
+                group["params"] = list(group["params"])
+        assert ds_engine._model_parameters_need_remap(model_parameters)
+        replacement_sources = _detach_moe_blocks(model)
+        ds_engine._remap_model_parameters_after_module_replacement(model_parameters, model, replacement_sources)
+
+        groups = model_parameters if grouped else [{"params": model_parameters}]
+        owned = {id(p) for group in groups for p in group["params"]}
+        live = {id(p) for p in model.parameters()}
+        assert not owned - live, "eager model_parameters retained parameters AutoEP detached"
+        assert not live - owned, "eager model_parameters omitted live replacement parameters"
+
+        optimizer = torch.optim.AdamW(model_parameters, lr=1e-3)
+        replacement = next(p for name, p in model.named_parameters() if ".router." in name)
+        before = replacement.detach().clone()
+        replacement.grad = torch.ones_like(replacement)
+        optimizer.step()
+        assert not torch.equal(replacement, before), "a remapped replacement parameter did not update"
+
+    @pytest.mark.parametrize("grouped", [False, True])
+    def test_lazy_model_parameters_stay_lazy_until_after_replacements(self, grouped):
+        """AutoTP runs after AutoEP and may replace more parameter identities. Do not consume a
+        canonical lazy iterable early just to service the AutoEP remap.
+        """
+        model = MockMoETransformer()
+        lazy = model.parameters()
+        model_parameters = [{"params": lazy}] if grouped else lazy
+        assert not ds_engine._model_parameters_need_remap(model_parameters)
+
+        old = model.lm_head.weight
+        model.lm_head = nn.Linear(old.shape[1], old.shape[0], bias=False)
+        current = model.lm_head.weight
+        consumed = list(model_parameters[0]["params"] if grouped else model_parameters)
+        assert any(p is current for p in consumed)
+        assert all(p is not old for p in consumed)
+
+    def test_optimizer_over_a_superset_of_the_model_is_untouched(self):
+        """AutoEP off, and the optimizer holds a parameter that is not in the model.
+
+        "The optimizer holds something the module tree does not" is true here for a reason that
+        has nothing to do with a replacement, so the remap must not treat it as one and strip the
+        parameter -- nor drop its optimizer state, which a resumed run would need.
+        """
+        model = MockMoETransformer()
+        external = nn.Parameter(torch.randn(4, 4))
+        optimizer = torch.optim.AdamW(list(model.parameters()) + [external], lr=1e-3)
+        optimizer.state[external] = {"step": torch.tensor(1.0)}
+
+        _remap(optimizer, model, auto_ep_layer.ReplacementSourceMap())
+
+        assert id(external) in _owned_ids(optimizer), "a parameter outside the model was stripped"
+        assert external in optimizer.state, "optimizer state for a parameter outside the model was dropped"
+
+    def test_held_out_module_is_not_pulled_into_the_optimizer(self):
+        """Only replacement parameters may be added.
+
+        A caller who deliberately keeps a module out of this optimizer -- a second optimizer, a
+        frozen trunk -- must not have it silently added, with whatever learning rate and weight
+        decay the group it landed in happens to carry.
+        """
+        model = MockMoETransformer()
+        held_out = {n for n, _ in model.named_parameters() if ".self_attn." in n}
+        assert held_out, "the mock has no self_attn parameters to hold out"
+        optimizer = torch.optim.AdamW([{
+            "params": [p for n, p in model.named_parameters() if n not in held_out],
+            "lr": 1e-3,
+            "weight_decay": 0.1
+        }])
+
+        _remap(optimizer, model, _detach_moe_blocks(model))
+
+        owned = _owned_ids(optimizer)
+        pulled = sorted(n for n, p in model.named_parameters() if n in held_out and id(p) in owned)
+        assert not pulled, f"held-out parameters were added to a param group: {pulled}"
+
+    def test_per_layer_param_groups_survive_replacement(self):
+        """Layer-wise learning-rate decay gives each layer its own group, so the replacement spans
+        several groups at once. Each layer's replacements must rejoin that layer's group."""
+        model = MockMoETransformer()
+        groups = []
+        for layer_index in range(len(model.model.layers)):
+            prefix = f"model.layers.{layer_index}."
+            groups.append({
+                "params": [p for name, p in model.named_parameters() if name.startswith(prefix)],
+                "lr": 1e-4 * (0.9**layer_index)
+            })
+        groups.append({
+            "params": [p for name, p in model.named_parameters() if not name.startswith("model.layers.")],
+            "lr": 1e-4
+        })
+        optimizer = torch.optim.AdamW(groups)
+
+        _remap(optimizer, model, _detach_moe_blocks(model))
+
+        owned = _owned_ids(optimizer)
+        orphans = [name for name, p in model.named_parameters() if p.requires_grad and id(p) not in owned]
+        assert not orphans, f"trainable parameters left out of the optimizer: {orphans}"
+
+        for layer_index, layer in enumerate(model.model.layers):
+            in_group = {id(p) for p in optimizer.param_groups[layer_index]["params"]}
+            stranded = [name for name, p in layer.mlp.named_parameters() if id(p) not in in_group]
+            assert not stranded, f"layer {layer_index} replacements missed its own param group: {stranded}"
+
+    def test_per_layer_groups_tolerate_a_trainable_parameter_the_caller_left_out(self):
+        """Per-layer groups plus a trainable parameter the caller never gave the optimizer.
+
+        Every replacement here is traceable, so nothing is ambiguous and nothing may raise. The
+        held-out parameter is simply none of the remap's business.
+        """
+        model = MockMoETransformer()
+        optimizer = torch.optim.AdamW([{
+            "params": list(layer.parameters()),
+            "lr": 1e-4 * (0.9**layer_index)
+        } for layer_index, layer in enumerate(model.model.layers)])
+
+        _remap(optimizer, model, _detach_moe_blocks(model))
+
+        assert id(model.lm_head.weight) not in _owned_ids(optimizer), \
+            "a trainable parameter the caller held out was added to a param group"
+
+    def test_replacements_whose_sources_were_not_optimized_are_left_out(self):
+        """A replacement is added only if its own sources were in a param group.
+
+        Layer 0's MoE block is optimized, layer 1's is not. Layer 0's replacements must be added;
+        layer 1's must not, because adding them would start training a block the caller excluded.
+        """
+        model = MockMoETransformer()
+        layer1_moe = {id(p) for p in model.model.layers[1].mlp.parameters()}
+        optimizer = torch.optim.AdamW([p for p in model.parameters() if id(p) not in layer1_moe], lr=1e-3)
+
+        _remap(optimizer, model, _detach_moe_blocks(model))
+
+        owned = _owned_ids(optimizer)
+        layer0 = [n for n, p in model.model.layers[0].mlp.named_parameters() if id(p) not in owned]
+        assert not layer0, f"layer 0 replacements were not added: {layer0}"
+        layer1 = [n for n, p in model.model.layers[1].mlp.named_parameters() if id(p) in owned]
+        assert not layer1, f"layer 1 replacements were added even though its sources were not optimized: {layer1}"
+
+    def test_partially_optimized_packed_sources_raise(self):
+        """``module_list`` storage packs several local experts into one replacement tensor. If the
+        caller optimized only some of them, that tensor can be neither optimized nor skipped:
+        optimizing it trains the experts they excluded, skipping it stops training the ones they
+        included. Neither is what they asked for, so refuse instead of picking one silently.
+        """
+        model = MockMoETransformer()
+        first_layer = model.model.layers[0].mlp
+        packed = [first_layer.experts.gate_up_proj, first_layer.experts.down_proj]
+        # the caller optimizes the first of the two packed sources and not the second
+        optimizer = torch.optim.AdamW([p for _, p in model.named_parameters() if p is not packed[1]], lr=1e-3)
+
+        replacement_sources = _detach_moe_blocks(model)
+        replacement_sources.sources[id(model.model.layers[0].mlp.experts.w1)] = packed
+
+        with pytest.raises(RuntimeError, match="packed several source parameters into one tensor"):
+            _remap(optimizer, model, replacement_sources)
+
+    def test_external_parameter_survives_a_real_replacement(self):
+        """A caller may legitimately optimize something outside the model -- an auxiliary trainable
+        loss term, say -- which is valid at ZeRO stage 0, the default for AutoEP. A replacement
+        elsewhere in the model must not take it, or its optimizer state, away.
+        """
+        model = MockMoETransformer()
+        external = nn.Parameter(torch.randn(4))
+        optimizer = torch.optim.AdamW(list(model.parameters()) + [external], lr=1e-3)
+        optimizer.state[external] = {"step": torch.tensor(7.0)}
+
+        _remap(optimizer, model, _detach_moe_blocks(model))
+
+        owned = _owned_ids(optimizer)
+        assert id(external) in owned, "an unrelated external parameter was removed by the remap"
+        assert external in optimizer.state, "an unrelated external parameter lost its optimizer state"
+        orphans = [name for name, p in model.named_parameters() if p.requires_grad and id(p) not in owned]
+        assert not orphans, f"trainable parameters left out of the optimizer: {orphans}"
+
+    def test_discarded_sources_the_map_does_not_name_are_still_removed(self):
+        """Removal follows what the replacement detached, not what the source map names.
+
+        For ``module_list`` storage the map names only this rank's local experts while the
+        replacement detaches every rank's. Those unnamed parameters must still leave the optimizer,
+        or ZeRO would later be handed a parameter that is no longer part of the model.
+        """
+        model = MockMoETransformer()
+        other_rank_expert = nn.Parameter(torch.randn(4, 4))
+        model.model.layers[0].mlp.other_rank_expert = other_rank_expert
+        optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
+        assert id(other_rank_expert) in _owned_ids(optimizer), "test setup: it should start in the optimizer"
+
+        _remap(optimizer, model, _detach_moe_blocks(model))
+
+        assert id(other_rank_expert) not in _owned_ids(optimizer), \
+            "a parameter the replacement discarded is still in the optimizer"
+
+    def test_sources_split_across_groups_raise(self):
+        """``module_list`` storage packs one grouped tensor from one weight per expert. If the
+        caller put those weights in different param groups the replacement has no unambiguous
+        home."""
+        model = MockMoETransformer()
+        first_layer = model.model.layers[0].mlp
+        source_gate_up = first_layer.experts.gate_up_proj
+        source_down = first_layer.experts.down_proj
+        optimizer = torch.optim.AdamW([{
+            "params": [p for _, p in model.named_parameters() if p is not source_down],
+            "weight_decay": 0.1
+        }, {
+            "params": [source_down],
+            "weight_decay": 0.0
+        }],
+                                      lr=1e-3)
+
+        replacement_sources = _detach_moe_blocks(model)
+        replacement_sources.sources[id(model.model.layers[0].mlp.experts.w1)] = [source_gate_up, source_down]
+
+        with pytest.raises(RuntimeError, match="split across param groups"):
+            _remap(optimizer, model, replacement_sources)
+
+
+class TestReplacementSourceMap:
+    """The map the client-optimizer remap consults.
+
+    ``_remap_client_optimizer_after_module_replacement`` adds only parameters that appear in this
+    map, so a replacement parameter missing from it would be silently left out of the optimizer --
+    the very failure the remap exists to prevent. That makes full coverage of the map an invariant
+    worth asserting directly rather than inferring from an end-to-end run.
+    """
+
+    def _module_list_model(self, monkeypatch):
+        monkeypatch.setattr(get_preset_adapter("deepseek_v3"), "_installed_transformers_version", lambda: "5.0.0")
+        model = MockDeepSeekV3Transformer(num_layers=1, num_experts=4).to(dtype=torch.bfloat16)
+        auto_ep = AutoEP(model, _runtime_config(enabled=True, autoep_size=2))
+        return model, auto_ep, auto_ep.ep_parser()[0]
+
+    def test_map_covers_every_parameter_the_replacement_allocated(self, monkeypatch):
+        model, auto_ep, spec = self._module_list_model(monkeypatch)
+
+        replacement, sources = auto_ep._replace_moe_layer_without_retarget(spec,
+                                                                           ep_size=2,
+                                                                           ep_rank=0,
+                                                                           collect_sources=True)
+
+        # shared_experts are carried over from the source module unchanged, so they never left the
+        # optimizer and need no entry; everything else is newly allocated and must be covered.
+        uncovered = [
+            name for name, param in replacement.named_parameters()
+            if id(param) not in sources.sources and not name.startswith("shared_experts")
+        ]
+        assert not uncovered, f"replacement parameters missing from the source map: {uncovered}"
+        assert all(sources.sources[id(p)] for _, p in replacement.named_parameters()
+                   if id(p) in sources.sources), \
+            "a replacement parameter was mapped to an empty source list"
+
+    def test_no_map_is_built_and_nothing_is_stashed_when_not_requested(self, monkeypatch):
+        """The default path must hold no reference to the discarded pre-shard expert weights."""
+        model, auto_ep, spec = self._module_list_model(monkeypatch)
+
+        replacement, sources = auto_ep._replace_moe_layer_without_retarget(spec, ep_size=2, ep_rank=0)
+
+        assert not sources and sources.sources == {}
+        assert not hasattr(replacement, "_autoep_replacement_sources"), \
+            "the replacement is holding the source weights on an attribute"
+
+    def test_module_list_sources_are_this_ranks_local_experts(self, monkeypatch):
+        model, auto_ep, spec = self._module_list_model(monkeypatch)
+        experts_source = getattr(model.model.layers[0].mlp, spec.experts_name)
+
+        rank0 = ep_repack.repack_expert_source_params(experts_source=experts_source, spec=spec, ep_rank=0, ep_size=2)
+        rank1 = ep_repack.repack_expert_source_params(experts_source=experts_source, spec=spec, ep_rank=1, ep_size=2)
+
+        w1_rank0, _, _ = rank0
+        w1_rank1, _, _ = rank1
+        assert len(w1_rank0) == 2 and len(w1_rank1) == 2, "expected one source per local expert"
+        assert [id(p) for p in w1_rank0
+                ] == [id(_get_expert_weight_for_test(experts_source[i], spec.expert_w1_name)) for i in (0, 1)]
+        assert [id(p) for p in w1_rank1
+                ] == [id(_get_expert_weight_for_test(experts_source[i], spec.expert_w1_name)) for i in (2, 3)]
+
+    def test_module_list_rejects_a_source_it_cannot_index(self):
+        """Matches the assertion the other two module_list repack helpers already make."""
+        spec = _make_spec(expert_storage="module_list",
+                          expert_w1_name="gate_proj",
+                          expert_w2_name="down_proj",
+                          expert_w3_name="up_proj")
+        with pytest.raises(AssertionError, match="Expected nn.ModuleList"):
+            ep_repack.repack_expert_source_params(experts_source=nn.Module(), spec=spec, ep_rank=0, ep_size=1)
+
+    def test_fused_gate_up_source_feeds_both_w1_and_w3(self):
+        """With no separate w3 name the single fused tensor is the source for both."""
+        spec = _make_spec(expert_storage="fused_3d", expert_w3_name=None)
+        experts_source = nn.Module()
+        experts_source.gate_up_proj = nn.Parameter(
+            torch.randn(spec.num_experts, 2 * spec.ffn_hidden_size, spec.hidden_size))
+        experts_source.down_proj = nn.Parameter(torch.randn(spec.num_experts, spec.hidden_size, spec.ffn_hidden_size))
+
+        w1, w2, w3 = ep_repack.repack_expert_source_params(experts_source=experts_source,
+                                                           spec=spec,
+                                                           ep_rank=0,
+                                                           ep_size=1)
+
+        assert [id(p) for p in w1] == [id(experts_source.gate_up_proj)]
+        assert [id(p) for p in w3] == [id(experts_source.gate_up_proj)]
+        assert [id(p) for p in w2] == [id(experts_source.down_proj)]

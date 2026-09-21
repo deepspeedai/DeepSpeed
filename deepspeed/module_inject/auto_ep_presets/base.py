@@ -90,6 +90,7 @@ class MoELayerSpec:
     preset_adapter: str = "default"
     router_logits_capture_mode: Literal["raw", "post_score"] = "post_score"
     moe_output_shape: Literal["batched", "flat"] = "batched"
+    e_score_correction_bias_path: str | None = None
 
 
 @dataclass
@@ -100,6 +101,7 @@ class AutoEPConfig:
     autoep_size: int = 1
     expert_tensor_parallel_size: int = 1
     validate_folding_routing: bool = False
+    async_split_plan: bool = False
     preset_model: str | None = None
     moe_layer_pattern: str | None = None
     expert_pattern: str | None = None
@@ -109,7 +111,7 @@ class AutoEPConfig:
     route_norm: bool | None = None
     route_scale: float = 1.0
     score_apply: Literal["auto", "pre", "post"] = "auto"
-    combine_impl: Literal["auto", "weighted_sum", "legacy_bmm"] = "auto"
+    combine_impl: Literal["auto", "weighted_sum", "fused_weighted_sum", "legacy_bmm"] = "auto"
     comm_backend: Literal["comm", "deepep"] = "comm"
     comm_num_sm: int = 12
     comm_qp_margin: int = 4

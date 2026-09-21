@@ -50,7 +50,7 @@ Transformers build that exposes the matching config/model classes,
 **ZeRO compatibility:** Stages 0, 1, and 2, plus constrained Stage 3
 support. Stage 3 requires AutoEP-managed MoE layers and does not support native
 DeepSpeed MoE layers, AutoTP, tensor model parallelism from ``mpu``, sequence
-parallelism, MiCS, hpZeRO secondary tensor groups, non-1 expert tensor
+parallelism, hpZeRO secondary tensor groups, non-1 expert tensor
 parallelism, or quantized gradients. Stage 3 AutoEP checkpoints are saved
 partition-natively in the ``zero_pp_rank_*`` shard files and support
 same-topology load, module-only loads (``load_module_only``),
@@ -116,6 +116,16 @@ value other than ``False`` instead of silently changing the requested behavior.
 4. Expert parameters are marked for expert-data-parallel gradient reduction;
    router and shared-expert parameters use standard data-parallel reduction.
 
+**Router outputs and activation checkpointing:**
+
+Models using Hugging Face's model-level router-logit recording capture the
+existing gate output; AutoEP does not compute a second projection just to
+populate an unused cache. Models whose MoE blocks return router logits
+directly compute them locally when constructing the return value, preserving
+that return contract and its gradients. No router-logit tensor is stored on
+the layer, so checkpoint replay early-stop and exceptions cannot leave a
+router-logit cache keeping the autograd graph alive between training steps.
+
 **Communication backend (optional):**
 
 The expert AllToAll can be carried by `DeepEP <https://github.com/deepseek-ai/DeepEP>`__
@@ -130,7 +140,8 @@ that set nothing keep the existing path unchanged.
         "autoep_size": 8,
         "comm_backend": "deepep",
         "comm_num_sm": 12,
-        "comm_qp_margin": 4
+        "comm_qp_margin": 4,
+        "comm_max_tokens_per_rank": 4096
       }
     }
 
@@ -143,6 +154,14 @@ that set nothing keep the existing path unchanged.
   a fixed length. Required when ``comm_backend`` is ``"deepep"`` because the
   DeepEP buffer is sized statically and must use the same capacity on every
   rank. A batch that exceeds it is an error.
+
+For ``autoep_size > 1``, DeepEP receives the router output directly, bypassing
+the collective backend's sorting, token expansion, and split-count exchange.
+Shared experts and router-logit outputs retain the same behavior. The EP
+communicator is initialized once before each layer's first DeepEP buffer is
+constructed, including when the caller supplied a lazily initialized process
+group. This initialization does not run on subsequent forwards. The standard
+``comm`` and ``autoep_size=1`` paths are unchanged.
 
 On 16 H100s across two nodes, replaying routing captured from real training,
 DeepEP reduced payload AllToAll time from roughly 100 ms to 48 ms per step. A
@@ -176,6 +195,59 @@ Requirements and limits:
 - Not compatible with folded tensor parallelism
   (``expert_tensor_parallel_size > 1``), which is rejected at setup.
 
+**Python cyclic GC (experimental):**
+
+Large Python model graphs can accumulate cyclic objects during training, and a
+generation-2 collection pauses one rank's Python thread, which is then exposed
+as collective wait time on every expert-parallel rank. The top-level
+``disable_python_gc`` option addresses this. It is process-wide rather than
+AutoEP-specific, so it is documented with the general configuration options.
+
+**Fused weighted restore (experimental):**
+
+After the combine all-to-all, AutoEP holds one row per routed assignment and has
+to turn it back into one row per token. ``combine_impl`` selects how:
+
+.. code-block:: json
+
+    {
+        "expert_parallel": {
+            "enabled": true,
+            "autoep_size": 16,
+            "preset_model": "qwen3_moe",
+            "combine_impl": "fused_weighted_sum"
+        }
+    }
+
+``"auto"`` (default) resolves to ``"weighted_sum"``, which scatters the rows into
+a zero-filled ``[tokens * top_k, hidden]`` buffer, widens it to FP32 to apply the
+routing weights, and reduces over top-k. ``"fused_weighted_sum"`` computes the
+same result in a single pass: each program owns one token and one slice of the
+hidden dimension, walks its top-k rows in registers and accumulates in FP32, so
+neither the scattered buffer nor the FP32 intermediate is allocated. At the
+canonical shape the FP32 intermediate alone is 64 MiB per layer.
+
+Routing weights are still accumulated in FP32 and cast once, so the result
+matches the eager reduction to within the order of the top-k summation. Only the
+reduction changes: the collectives, the router, the grouped GEMM and the
+expert-major reorder are untouched.
+
+``"fused_weighted_sum"`` is rejected, rather than quietly ignored, when it would
+have nothing to replace or would change semantics:
+
+- ``tensor_parallel.autotp_size`` greater than 1, which uses folded tensor
+  parallelism and restores combined tokens from assignment metadata instead;
+- ``expert_tensor_parallel_size`` greater than 1;
+- ``comm_backend="deepep"`` with expert parallelism, because DeepEP already
+  restores and reduces its routed rows;
+- a resolved ``score_apply`` other than ``"post"``;
+- activations that are not bfloat16, float16, or float32, a non-CUDA device, or
+  a build without Triton.
+
+Failing fast matters for measurement: a run that asked for the fused reduction
+and silently got the eager one would report the difference between an
+implementation and itself.
+
 **Constraints:**
 
 - ``autoep_size`` must divide ``num_experts`` for all detected MoE layers.
@@ -185,7 +257,7 @@ Requirements and limits:
   (``tensor_parallel.autotp_size > 1``) or tensor model parallelism from
   ``mpu``; support is planned as follow-up work.
 - AutoEP with ZeRO Stage 3 is supported only without sequence parallelism,
-  MiCS, hpZeRO secondary tensor groups, non-1 expert tensor parallelism, or
+  hpZeRO secondary tensor groups, non-1 expert tensor parallelism, or
   quantized gradients.
 - Regular checkpoint save/load requires matching ``autoep_size``. To change
   ``autoep_size`` or data-parallel world size across runs for the same

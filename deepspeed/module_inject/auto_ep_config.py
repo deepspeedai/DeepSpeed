@@ -48,6 +48,7 @@ def parse_autoep_config(param_dict: dict) -> AutoEPConfig:
     config.autoep_size = param_dict.get("autoep_size", 1)
     config.expert_tensor_parallel_size = param_dict.get("expert_tensor_parallel_size", 1)
     config.validate_folding_routing = param_dict.get("validate_folding_routing", False)
+    config.async_split_plan = param_dict.get("async_split_plan", False)
     config.preset_model = param_dict.get("preset_model", None)
     config.moe_layer_pattern = param_dict.get("moe_layer_pattern", None)
     config.expert_pattern = param_dict.get("expert_pattern", None)
@@ -119,8 +120,31 @@ def validate_autoep_config(
     if not isinstance(config.validate_folding_routing, bool):
         raise ValueError("expert_parallel.validate_folding_routing must be a boolean")
 
+    if not isinstance(config.async_split_plan, bool):
+        raise ValueError("expert_parallel.async_split_plan must be a boolean")
+
     if not config.enabled:
         return
+
+    if config.async_split_plan and config.autoep_size > 1 and tp_size > 1:
+        raise ValueError("expert_parallel.async_split_plan does not support AutoEP+AutoTP folding yet. "
+                         "Set tensor_parallel.autotp_size to 1 or disable async_split_plan.")
+
+    # Reject configurations that would bypass the requested fused reduction.
+    if config.combine_impl == "fused_weighted_sum":
+        if tp_size > 1:
+            raise ValueError('combine_impl="fused_weighted_sum" does not support folded tensor parallelism '
+                             f"(tensor_parallel.autotp_size={tp_size}), which restores combined tokens from "
+                             "assignment metadata instead of the weighted reduction it implements. Set "
+                             'tensor_parallel.autotp_size to 1, or leave combine_impl unset.')
+        if config.expert_tensor_parallel_size > 1:
+            raise ValueError('combine_impl="fused_weighted_sum" requires expert_tensor_parallel_size=1, but got '
+                             f"{config.expert_tensor_parallel_size}. Set expert_tensor_parallel_size to 1, or leave "
+                             "combine_impl unset.")
+        if config.comm_backend == "deepep" and config.autoep_size > 1:
+            raise ValueError('combine_impl="fused_weighted_sum" cannot be used with comm_backend="deepep" because '
+                             "DeepEP already restores and reduces the routed rows. Set comm_backend to "
+                             '"comm", or leave combine_impl unset.')
 
     folding_spec = build_folding_spec(
         world_size=world_size,
@@ -156,7 +180,7 @@ def validate_autoep_config(
                          f"got '{config.score_apply}'")
 
     # Validate combine_impl
-    valid_combine_impl = ("auto", "weighted_sum", "legacy_bmm")
+    valid_combine_impl = ("auto", "weighted_sum", "fused_weighted_sum", "legacy_bmm")
     if config.combine_impl not in valid_combine_impl:
         raise ValueError(f"combine_impl must be one of {valid_combine_impl}, "
                          f"got '{config.combine_impl}'")
@@ -297,6 +321,15 @@ def validate_autoep_post_detection(
         return
 
     for spec in specs:
+        # The fused reduction folds the routing weight into the top-k reduction,
+        # which only exists when scores are applied after the experts.
+        if config.combine_impl == "fused_weighted_sum":
+            resolved_score_apply = config.score_apply if config.score_apply != "auto" else spec.score_apply
+            if resolved_score_apply != "post":
+                raise ValueError(f'combine_impl="fused_weighted_sum" requires score_apply="post", but layer '
+                                 f"'{spec.moe_module_name}' resolved score_apply=\"{resolved_score_apply}\". "
+                                 "Leave combine_impl unset.")
+
         # ep_size must not exceed num_experts
         if config.autoep_size > spec.num_experts:
             valid_divisors = _divisors(spec.num_experts)

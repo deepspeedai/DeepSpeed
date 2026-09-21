@@ -3,6 +3,8 @@
 
 # DeepSpeed Team
 
+from typing import List
+
 import torch
 import deepspeed.comm as dist
 from deepspeed.utils import groups
@@ -47,7 +49,7 @@ def reduce_from_tp_region_fake(input: torch.Tensor):
 
 
 @torch.library.custom_op("autotp::gather_from_tp_region", mutates_args=())
-def gather_from_tp_region(input: torch.Tensor, partition_sizes: list[int]) -> torch.Tensor:
+def gather_from_tp_region(input: torch.Tensor, partition_sizes: List[int]) -> torch.Tensor:
     """All-gather the last dimension using the frozen shard widths.
 
     Inserted after a column-parallel matmul whose layer asks for gather_output, so that
@@ -85,7 +87,7 @@ def gather_from_tp_region(input: torch.Tensor, partition_sizes: list[int]) -> to
 
 
 @torch.library.register_fake("autotp::gather_from_tp_region")
-def gather_from_tp_region_fake(input: torch.Tensor, partition_sizes: list[int]):
+def gather_from_tp_region_fake(input: torch.Tensor, partition_sizes: List[int]):
     return input.new_empty((*input.shape[:-1], sum(partition_sizes)))
 
 
