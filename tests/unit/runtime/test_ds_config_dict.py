@@ -634,6 +634,75 @@ class TestConfigValidation:
             })
 
 
+    def test_curriculum_learning_missing_metrics(self):
+        with pytest.raises(AssertionError, match="curriculum_metrics must be specified"):
+            DeepSpeedConfig({
+                "train_batch_size": 1,
+                "data_efficiency": {"data_sampling": {"curriculum_learning": {
+                    "enabled": True
+                }}}
+            })
+
+    def test_dynamic_batching_missing_max_tokens(self):
+        with pytest.raises(AssertionError, match="max_tokens must be specified"):
+            DeepSpeedConfig({
+                "train_batch_size": 1,
+                "data_efficiency": {"data_sampling": {"dynamic_batching": {
+                    "enabled": True
+                }}}
+            })
+
+    def test_zero_partial_offload_outside_stage_3(self):
+        with pytest.raises(AssertionError, match="Partial offloading only supported for ZeRO Stage 3"):
+            try:
+                from pydantic import ValidationError
+                DeepSpeedConfig({
+                    "train_batch_size": 1,
+                    "zero_optimization": {
+                        "stage": 2,
+                        "offload_optimizer": {
+                            "device": "cpu",
+                            "ratio": 0.5
+                        }
+                    }
+                })
+            except Exception as e:
+                if "Partial offloading only supported for ZeRO Stage 3" not in str(e):
+                    raise
+                raise AssertionError("Partial offloading only supported for ZeRO Stage 3")
+
+    def test_autotuning_missing_results_dir(self):
+        with pytest.raises(AssertionError, match="results_dir cannot be empty"):
+            DeepSpeedConfig({
+                "train_batch_size": 1,
+                "autotuning": {
+                    "enabled": True,
+                    "results_dir": ""
+                }
+            })
+
+    def test_autotuning_missing_exps_dir(self):
+        with pytest.raises(AssertionError, match="exps_dir cannot be empty"):
+            DeepSpeedConfig({
+                "train_batch_size": 1,
+                "autotuning": {
+                    "enabled": True,
+                    "exps_dir": ""
+                }
+            })
+
+    def test_checkpointing_invalid_value(self):
+        from deepspeed.runtime.config import DeepSpeedConfigError
+        with pytest.raises(DeepSpeedConfigError, match=".*Checkpoint config contains invalid tag_validation value.*"):
+            DeepSpeedConfig({
+                "train_batch_size": 1,
+                "checkpoint": {
+                    "tag_validation": "invalid_mode"
+                }
+            })
+
+
+
 def test_config_validation_optimized_python():
     # A normal pytest run must catch validation accidentally reverting to assert.
     code = """
@@ -651,5 +720,60 @@ except AssertionError as error:
 else:
     raise RuntimeError("Optimized Python accepted invalid batch sizes")
 """
+    result = subprocess.run([sys.executable, "-O", "-c", code], capture_output=True, text=True, timeout=60)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+def test_config_validation_optimized_python_all_cases():
+    code = """
+import sys
+from deepspeed.runtime.config import DeepSpeedConfig
+from pydantic import ValidationError
+
+def test_case(config, expected_error):
+    try:
+        DeepSpeedConfig(config)
+    except Exception as e:
+        if expected_error not in str(e):
+            print(f"Error {e} does not contain {expected_error}")
+            sys.exit(1)
+    else:
+        print(f"Optimized Python accepted invalid config: {config}")
+        sys.exit(1)
+
+test_case({
+    "train_batch_size": 1,
+    "data_efficiency": {"data_sampling": {"curriculum_learning": {"enabled": True}}}
+}, "curriculum_metrics must be specified")
+
+test_case({
+    "train_batch_size": 1,
+    "data_efficiency": {"data_sampling": {"dynamic_batching": {"enabled": True}}}
+}, "max_tokens must be specified")
+
+test_case({
+    "train_batch_size": 1,
+    "zero_optimization": {
+        "stage": 2,
+        "offload_optimizer": {"device": "cpu", "ratio": 0.5}
+    }
+}, "Partial offloading only supported for ZeRO Stage 3")
+
+test_case({
+    "train_batch_size": 1,
+    "autotuning": {"enabled": True, "results_dir": ""}
+}, "results_dir cannot be empty")
+
+test_case({
+    "train_batch_size": 1,
+    "autotuning": {"enabled": True, "exps_dir": ""}
+}, "exps_dir cannot be empty")
+
+test_case({
+    "train_batch_size": 1,
+    "checkpoint": {"tag_validation": "invalid_mode"}
+}, "Checkpoint config contains invalid tag_validation value")
+"""
+    import subprocess
+    import sys
     result = subprocess.run([sys.executable, "-O", "-c", code], capture_output=True, text=True, timeout=60)
     assert result.returncode == 0, result.stdout + result.stderr
