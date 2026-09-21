@@ -223,6 +223,22 @@ def test_non_jit_branch_canonical_dedupe_mixed_ptx_combinations():
         assert args == expected_args, arch_input
 
 
+def test_cuda_arch_variant_suffixes_are_preserved():
+    assert_jit_uses_explicit_arch_list(make_builder(jit_mode=True, _jit_arch_list="12.0a;9.0a"), "9.0a;12.0a+PTX")
+
+    builder = make_builder(jit_mode=False)
+    with patch.dict(os.environ, {"TORCH_CUDA_ARCH_LIST": "12.0a+PTX;9.0a;9.0a+PTX"}, clear=False):
+        args = builder.compute_capability_args()
+        assert os.environ["TORCH_CUDA_ARCH_LIST"] == "9.0a+PTX;12.0a+PTX"
+
+    assert args == [
+        "-gencode=arch=compute_90a,code=sm_90a",
+        "-gencode=arch=compute_90a,code=compute_90a",
+        "-gencode=arch=compute_120a,code=sm_120a",
+        "-gencode=arch=compute_120a,code=compute_120a",
+    ]
+
+
 def test_cuda_capability_major_skips_probe_when_context_not_initialized():
     # Probing device properties forces a lazy CUDA-context init, which creates a
     # CUDA context. Doing that while checking op compatibility at "import deepspeed"
