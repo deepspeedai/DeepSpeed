@@ -21,14 +21,20 @@ See ``deepspeed/checkpoint/affine_ir_spec.md`` for the full specification.
 import torch
 
 __all__ = [
-    'AffinePiece', 'ParamAffineMap', 'AFFINE_MAP_FORMAT_VERSION', 'replicated_map', 'contiguous_split_map',
-    'sub_param_map', 'segmented_map', 'block_gather_map'
+    'AffinePiece', 'ParamAffineMap', 'AFFINE_MAP_FORMAT_VERSION', 'SCALE_POWER_BY_STATE', 'replicated_map',
+    'contiguous_split_map', 'sub_param_map', 'segmented_map', 'block_gather_map'
 ]
 
 # Encoding version of the stored map, independent of the universal checkpoint version so
 # the two can move separately. A reader refuses a version it predates rather than
 # misreading fields it does not know about.
 AFFINE_MAP_FORMAT_VERSION = 1
+
+# How a piece's scale applies to each thing a checkpoint stores for a parameter. Scaling a
+# parameter by s scales its gradient by 1/s, so Adam's first moment carries the inverse and
+# its second moment the inverse square. Shared by conversion and restore so the two cannot
+# disagree about which power a state needs.
+SCALE_POWER_BY_STATE = {'fp32': 1, 'exp_avg': -1, 'exp_avg_sq': -2}
 
 
 class AffinePiece:
