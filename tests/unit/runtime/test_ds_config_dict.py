@@ -216,15 +216,26 @@ def test_get_bfloat16_enabled(bf16_key):
     assert get_bfloat16_config(cfg).enabled == True
 
 
-@pytest.mark.parametrize("config_key", ["quantize_training", "eigenvalue"])
+@pytest.mark.parametrize("config_key", ["quantize_training", "eigenvalue", "progressive_layer_drop", "elasticity"])
 @pytest.mark.parametrize("value", [None, {}, False, "auto"])
-def test_moq_config_is_rejected(config_key, value):
+def test_moq_and_pld_config_is_rejected(config_key, value):
     config_dict = {
         "train_micro_batch_size_per_gpu": 1,
         config_key: value,
     }
 
     with pytest.raises(DeepSpeedConfigError, match=config_key):
+        DeepSpeedConfig(config_dict)
+
+
+@pytest.mark.parametrize("value", [None, {}, False, "auto"])
+def test_legacy_curriculum_learning_config_is_rejected(value):
+    config_dict = {
+        "train_micro_batch_size_per_gpu": 1,
+        "curriculum_learning": value,
+    }
+
+    with pytest.raises(DeepSpeedConfigError, match="curriculum_learning"):
         DeepSpeedConfig(config_dict)
 
 
@@ -260,6 +271,23 @@ def test_nebula_config_is_rejected():
     }
 
     with pytest.raises(DeepSpeedConfigError, match="Nebula"):
+        DeepSpeedConfig(config_dict)
+
+
+@pytest.mark.parametrize("amp_config",
+                         [None, {}, False, "auto", {
+                             "enabled": False
+                         }, {
+                             "enabled": True,
+                             "opt_level": "O1"
+                         }])
+def test_apex_amp_config_is_rejected(amp_config):
+    config_dict = {
+        "train_micro_batch_size_per_gpu": 1,
+        "amp": amp_config,
+    }
+
+    with pytest.raises(DeepSpeedConfigError, match="Apex AMP"):
         DeepSpeedConfig(config_dict)
 
 
@@ -361,44 +389,6 @@ def test_max_grad_norm_leaves_caller_config_untouched():
     DeepSpeedConfig(config_dict)
 
     assert config_dict["optimizer"]["params"]["max_grad_norm"] == 1.0
-
-
-def test_elasticity_leaves_caller_config_untouched():
-    # Same contract as above on the elasticity path: the resolved batch sizes belong in
-    # the copy handed to _initialize_params, not in the caller's dict.
-    #
-    # ignore_non_elastic_batch_info is deliberately left out. With it on, the batch-key
-    # guard is skipped and the second parse below cannot fail, so the test would pass
-    # whether or not the write-back is there.
-    config_dict = {
-        "elasticity": {
-            "enabled": True,
-            "max_train_batch_size": 4,
-            "micro_batch_sizes": [1, 2],
-            "min_gpus": 1,
-            "max_gpus": 4,
-            "min_time": 0,
-            "version": 0.1,
-        }
-    }
-    keys_before = set(config_dict)
-
-    ds_config = DeepSpeedConfig(config_dict)
-
-    assert set(config_dict) == keys_before
-    # The resolved values still reach the parsed config.
-    assert ds_config.train_batch_size == 4
-    assert ds_config.train_micro_batch_size_per_gpu == 2
-    assert ds_config.gradient_accumulation_steps == 2
-
-    # The write-back made the same dict unparsable a second time: the injected keys
-    # trip the guard that rejects batch parameters under elasticity, and its message
-    # names three keys the caller never wrote.
-    second = DeepSpeedConfig(config_dict)
-
-    assert second.train_batch_size == ds_config.train_batch_size
-    assert second.train_micro_batch_size_per_gpu == ds_config.train_micro_batch_size_per_gpu
-    assert second.gradient_accumulation_steps == ds_config.gradient_accumulation_steps
 
 
 class TestConfigLoad(DistributedTest):

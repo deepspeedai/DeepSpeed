@@ -170,24 +170,6 @@ FP16_MASTER_WEIGHTS_AND_GRADS = "fp16_master_weights_and_grads"
 FP16_MASTER_WEIGHTS_AND_GRADS_DEFAULT = False
 
 #########################################
-# Apex AMP support
-#########################################
-# Use Apex AMP for mixed precision support, all parameters (other than 'enabled') will be passed to
-# amp.initialize(model, optimizer, **amp_params)
-# See apex documentation for supported parameters/features: https://nvidia.github.io/apex/amp.html#apex.amp.initialize
-AMP_FORMAT = '''
-"amp" {
-  "enabled: true,
-  "opt_level": "O1",
-  ...
-}
-'''
-AMP = "amp"
-
-AMP_ENABLED = "enabled"
-AMP_ENABLED_DEFAULT = False
-
-#########################################
 # Torch AMP support
 #########################################
 TORCH_AUTOCAST_FORMAT = '''
@@ -344,21 +326,6 @@ WALL_CLOCK_BREAKDOWN_DEFAULT = False
 
 MEMORY_BREAKDOWN = 'memory_breakdown'
 MEMORY_BREAKDOWN_DEFAULT = False
-
-#########################################
-# Progressive Layer Drop (PLD)
-#########################################
-PROGRESSIVE_LAYER_DROP = "progressive_layer_drop"
-
-# PLD enable signal
-PLD_ENABLED = "enabled"
-PLD_ENABLED_DEFAULT = False
-
-PLD_THETA = "theta"
-PLD_THETA_DEFAULT = 1.0
-
-PLD_GAMMA = "gamma"
-PLD_GAMMA_DEFAULT = 0.001
 
 
 #########################################
