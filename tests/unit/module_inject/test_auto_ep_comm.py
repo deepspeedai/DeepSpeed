@@ -435,6 +435,7 @@ class TestDeepEPEarlyRoute(unittest.TestCase):
         def __init__(self, output):
             super().__init__()
             self.output = output
+            self.gate = torch.nn.Linear(4, 2, bias=False)
 
         def forward(self, *_args):
             return self.output
@@ -465,7 +466,8 @@ class TestDeepEPEarlyRoute(unittest.TestCase):
         layer.shared_experts_gate = None
         layer.moe_output_shape = "batched"
         layer.return_router_logits = return_router_logits
-        layer._cached_router_logits = torch.randn(2, 2) if return_router_logits else None
+        layer.router_logits_capture_target = "router"
+        layer.router_logits_capture_mode = "raw"
         layer._deepep_route = mock.Mock(return_value=torch.ones((2, 4)))
         return layer
 
@@ -500,17 +502,16 @@ class TestDeepEPEarlyRoute(unittest.TestCase):
 
     def test_shared_tail_and_router_logits_are_preserved(self):
         layer = self.layer(return_router_logits=True)
-        expected_logits = layer._cached_router_logits
         layer.moe_output_shape = "flat"
         layer.shared_experts = mock.Mock(side_effect=lambda x: x * 2)
         hidden = torch.arange(8, dtype=torch.float32).reshape(1, 2, 4)
+        expected_logits = torch.nn.functional.linear(hidden.reshape(2, 4), layer.router.gate.weight)
 
         output, logits = auto_ep_layer.AutoEPMoELayer.forward(layer, hidden)
 
         self.assertEqual(tuple(output.shape), (2, 4))
         self.assertTrue(torch.equal(output, torch.ones_like(output) + hidden.reshape(2, 4) * 2))
-        self.assertIs(logits, expected_logits)
-        self.assertIsNone(layer._cached_router_logits)
+        torch.testing.assert_close(logits, expected_logits)
         layer.shared_experts.assert_called_once()
 
 

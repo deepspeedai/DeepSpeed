@@ -893,6 +893,14 @@ Configure AutoEP expert parallelism for MoE models. AutoEP automatically detects
 | -------------------------------------------------------------------------------------------------- | ------- |
 | Reserved for expert tensor parallelism. AutoEP currently accepts only `1`; non-1 values are rejected. | `1`     |
 
+***async_split_plan***: [boolean]
+
+| Description                                                                                                                                                | Default |
+| ---------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
+| Overlap the pinned-memory split metadata transfer (device to host) with token sorting and packing. Expert-count AllToAll and split-size computation stay on the caller stream before packing; only the metadata copy uses a separate stream. The host waits for the metadata only immediately before payload dispatch. Requires CUDA, currently requires `tensor_parallel.autotp_size=1`, and has no effect when `autoep_size=1` or `comm_backend="deepep"`. | `false` |
+
+This option reduces the host synchronization exposed by reading split sizes; it does not hide the expert-count AllToAll. Benchmark it with your target model, token count, EP size, and hardware before enabling it. For small workloads, stream/event overhead can outweigh the overlap benefit.
+
 ***preset_model***: [string]
 
 | Description                                                                                                                            | Default |
@@ -1090,6 +1098,14 @@ Use a built-in preset but override specific naming/weight fields for a fine-tune
 - AutoEP currently cannot be combined with AutoTP (`tensor_parallel.autotp_size > 1`); support is planned as follow-up work
 - AutoEP with ZeRO Stage 3 is supported only without AutoTP, sequence parallelism, hpZeRO secondary tensor groups, non-1 `expert_tensor_parallel_size`, or quantized gradients
 - ZeRO Stage 3 saves AutoEP checkpoints partition-natively and supports same-topology save/load, module-only loads, optimizer-state-skipping loads, and universal checkpoint conversion. Universal loads can resume at a different data-parallel world size, a different `autoep_size`, or both (when the target `autoep_size` divides the expert count), including weights-only/module-only loads from the converted `fp32.pt` parameter files
+
+### Python cyclic garbage collection
+
+<i>**disable_python_gc**</i>: [boolean]
+
+| Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     | Default |
+| ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
+| Disable automatic Python cyclic garbage collection for the lifetime of a DeepSpeed engine. When `true`, DeepSpeed collects once after engine initialization, disables automatic cyclic GC, and restores the process's original automatic-GC state when the last engine using this option is destroyed. When `false`, DeepSpeed leaves the existing Python GC state unchanged. Applications that create cyclic Python objects during training should call `engine.collect_python_gc()` at a safe boundary such as after checkpointing. | `false` |
 
 ### Logging
 
