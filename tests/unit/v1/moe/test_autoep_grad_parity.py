@@ -235,10 +235,12 @@ def _make_compile_config():
     config = make_autoep_config(zero_stage=1, ep_size=2)
     config.pop("fp16", None)
     config["bf16"] = {"enabled": True}
+    # Keep master updates above FP32 rounding near unit-valued LayerNorm weights.
+    # This fixture takes one step after capturing the outputs and gradients.
     config["optimizer"] = {
         "type": "SGD",
         "params": {
-            "lr": 1e-2
+            "lr": 1.0
         },
     }
     config["zero_allow_untested_optimizer"] = True
