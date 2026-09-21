@@ -99,13 +99,19 @@ def zeropower_via_gram_newtonschulz(G, steps: int):
     assert G.ndim >= 2
     a, b, c = (3.4445, -4.7750, 2.0315)
     compute_dtype = ns_compute_dtype("gram")
-    X = G.to(compute_dtype)
+    # Normalize before the cast, in a dtype the input cannot already have left. fp16 stops at
+    # 65504, so a finite fp32 gradient under a loss scale arrives at the iteration as inf and
+    # the whole matrix comes back zero. bf16 and fp32 carry fp32's range, so they normalize as
+    # they are. The iteration itself is unchanged: it still runs in compute_dtype on a matrix
+    # the normalization has already brought into [-1, 1].
+    norm_dtype = torch.float32 if G.dtype == torch.float16 else G.dtype
+    X = G.to(norm_dtype)
     if G.size(-2) > G.size(-1):
         X = X.mT
 
     n, m = X.size(-2), X.size(-1)
 
-    X = X / (X.norm(dim=(-2, -1), keepdim=True) + 1e-7)
+    X = (X / (X.norm(dim=(-2, -1), keepdim=True) + 1e-7)).to(compute_dtype)
 
     # For square matrices, no FLOP advantage; use standard iteration
     if m <= n:

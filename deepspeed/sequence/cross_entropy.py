@@ -5,9 +5,56 @@
 
 import torch
 from torch import nn
+from functools import lru_cache
 
 import deepspeed.comm as dist
+from deepspeed.accelerator import get_accelerator
 from deepspeed.utils.logging import logger
+
+
+@lru_cache(maxsize=1)
+def _load_liger_vocab_ce():
+    try:
+        from liger_kernel.ops.vocab_parallel_cross_entropy import LigerVocabParallelCEFunction
+    except ImportError as error:
+        raise ImportError("Liger vocabulary-parallel CE requires liger-kernel>=0.8.1; "
+                          "install it or select backend='torch'.") from error
+    return LigerVocabParallelCEFunction
+
+
+def _liger_vocab_cross_entropy(logits, target, tp_group, ignore_index):
+    kernel = _load_liger_vocab_ce()
+    loss = kernel.apply(logits.reshape(-1, 1, logits.shape[-1]), target.reshape(-1, 1), tp_group, ignore_index, 0.0,
+                        "pytorch", "global").reshape_as(target)
+    if loss.requires_grad:
+        consumed = False
+
+        def guard_backward(gradient):
+            nonlocal consumed
+            # Liger overwrites its saved exp buffer with the first gradient, so a retained-graph
+            # second backward must fail rather than silently reuse that buffer.
+            if consumed or torch.is_grad_enabled():
+                raise RuntimeError("Liger CE supports one first-order backward per forward; "
+                                   "use backend='torch' for retained-graph or higher-order gradients.")
+            consumed = True
+            return gradient
+
+        loss.register_hook(guard_backward)
+    return loss
+
+
+def _liger_can_run(vocab_parallel_logits, target, local_vocab_size, global_vocab_size, tp_group):
+    # A ``None`` group is ambiguous to Liger: depending on its version it may resolve to the
+    # default world, which would fold data-parallel replicas into the vocabulary dimension, so
+    # the kernel only runs behind a real tensor-parallel group. Liger's kernel all-gathers
+    # fixed-width shards while the PyTorch path trims uneven ones, so the kernel stays
+    # restricted to equal shards.
+    if tp_group is None:
+        return False
+    tp_world_size = dist.get_world_size(tp_group)
+    return (get_accelerator().is_triton_supported() and get_accelerator().on_accelerator(vocab_parallel_logits)
+            and vocab_parallel_logits.dtype in (torch.float32, torch.float16, torch.bfloat16) and target.numel() > 0
+            and local_vocab_size * tp_world_size == global_vocab_size)
 
 
 class _VocabParallelCrossEntropy(torch.autograd.Function):
@@ -156,7 +203,8 @@ def vocab_parallel_cross_entropy(vocab_parallel_logits,
                                  global_vocab_size=None,
                                  ignore_index=-100,
                                  reduction="mean",
-                                 gather_sequence_loss=False):
+                                 gather_sequence_loss=False,
+                                 backend="torch"):
     """Compute cross entropy over vocabulary-sharded logits.
 
     Tensor parallel ranks collectively own the last (vocabulary) dimension. Sequence
@@ -175,6 +223,8 @@ def vocab_parallel_cross_entropy(vocab_parallel_logits,
         raise ValueError("vocab_parallel_logits must contain at least one local vocabulary entry")
     if reduction not in ("none", "sum", "mean"):
         raise ValueError(f"Unsupported reduction: {reduction}")
+    if backend not in ("torch", "liger"):
+        raise ValueError(f"Unsupported vocabulary-parallel CE backend: {backend}")
     if gather_sequence_loss and reduction != "none":
         raise ValueError("gather_sequence_loss is only supported with reduction='none'")
 
@@ -194,8 +244,17 @@ def vocab_parallel_cross_entropy(vocab_parallel_logits,
     if invalid_target.any().item():
         raise ValueError(f"Target is out of range for vocabulary size {global_vocab_size}")
 
-    loss = _VocabParallelCrossEntropy.apply(vocab_parallel_logits, target, tp_group, vocab_start_index,
-                                            vocab_end_index, ignore_index)
+    use_liger = backend == "liger" and _liger_can_run(vocab_parallel_logits, target, local_vocab_size,
+                                                      global_vocab_size, tp_group)
+    if use_liger:
+        loss = _liger_vocab_cross_entropy(vocab_parallel_logits, target.to(dtype=torch.long), tp_group, ignore_index)
+    else:
+        if backend == "liger":
+            logger.warning_once("Liger CE requires an explicit tensor-parallel group, a Triton-supported "
+                                "accelerator, nonempty accelerator tokens, a supported dtype, and equal vocabulary "
+                                "shards; using the PyTorch reference backend for this layout.")
+        loss = _VocabParallelCrossEntropy.apply(vocab_parallel_logits, target, tp_group, vocab_start_index,
+                                                vocab_end_index, ignore_index)
     if reduction == "none":
         if gather_sequence_loss:
             if sp_group is None:
@@ -221,8 +280,11 @@ def vocab_sequence_parallel_cross_entropy(vocab_parallel_logits,
                                           vocab_end_index=None,
                                           ignore_index=-100,
                                           reduction="none",
-                                          gather_sequence_loss=True):
+                                          gather_sequence_loss=True,
+                                          backend="torch"):
     """Sequence-parallel wrapper preserving the legacy local-slice gradient."""
+    if backend not in ("torch", "liger"):
+        raise ValueError(f"Unsupported vocabulary-parallel CE backend: {backend}")
     if gather_sequence_loss and reduction != "none":
         raise ValueError("gather_sequence_loss is only supported with reduction='none'")
     if gather_sequence_loss and sp_group is None:
@@ -235,7 +297,8 @@ def vocab_sequence_parallel_cross_entropy(vocab_parallel_logits,
                                         vocab_start_index=vocab_start_index,
                                         vocab_end_index=vocab_end_index,
                                         ignore_index=ignore_index,
-                                        reduction=reduction)
+                                        reduction=reduction,
+                                        backend=backend)
     if not gather_sequence_loss:
         return loss
     return _GatherSequenceLoss.apply(loss, sp_group, False)
@@ -250,7 +313,8 @@ class VocabParallelCrossEntropyLoss(nn.Module):
                  vocab_end_index=None,
                  ignore_index=-100,
                  reduction="mean",
-                 gather_sequence_loss=False):
+                 gather_sequence_loss=False,
+                 backend="torch"):
         super().__init__()
         self.tp_group = tp_group
         self.sp_group = sp_group
@@ -259,6 +323,7 @@ class VocabParallelCrossEntropyLoss(nn.Module):
         self.ignore_index = ignore_index
         self.reduction = reduction
         self.gather_sequence_loss = gather_sequence_loss
+        self.backend = backend
 
     def forward(self, vocab_parallel_logits, target):
         return vocab_parallel_cross_entropy(vocab_parallel_logits,
@@ -269,7 +334,8 @@ class VocabParallelCrossEntropyLoss(nn.Module):
                                             vocab_end_index=self.vocab_end_index,
                                             ignore_index=self.ignore_index,
                                             reduction=self.reduction,
-                                            gather_sequence_loss=self.gather_sequence_loss)
+                                            gather_sequence_loss=self.gather_sequence_loss,
+                                            backend=self.backend)
 
 
 class VocabParallelCausalLMLoss:
@@ -292,12 +358,19 @@ class VocabParallelCausalLMLoss:
     metadata.
     """
 
-    def __init__(self, tp_group=None, sp_group=None, vocab_start_index=None, vocab_end_index=None, ignore_index=-100):
+    def __init__(self,
+                 tp_group=None,
+                 sp_group=None,
+                 vocab_start_index=None,
+                 vocab_end_index=None,
+                 ignore_index=-100,
+                 backend="torch"):
         self.tp_group = tp_group
         self.sp_group = sp_group
         self.vocab_start_index = vocab_start_index
         self.vocab_end_index = vocab_end_index
         self.ignore_index = ignore_index
+        self.backend = backend
         self._resolved_vocab_key = None
         self._resolved_global_vocab_size = None
 
@@ -343,14 +416,15 @@ class VocabParallelCausalLMLoss:
                                             vocab_end_index=self.vocab_end_index,
                                             global_vocab_size=global_vocab_size,
                                             ignore_index=self.ignore_index,
-                                            reduction=reduction)
+                                            reduction=reduction,
+                                            backend=self.backend)
         if num_items_in_batch is not None:
             denominator = torch.as_tensor(num_items_in_batch, device=loss.device, dtype=loss.dtype)
             loss = loss / denominator.clamp_min(1)
         return loss
 
 
-def configure_vocab_parallel_loss(model, vocab_parallel_head, sp_group=None, ignore_index=-100):
+def configure_vocab_parallel_loss(model, vocab_parallel_head, sp_group=None, ignore_index=-100, backend="torch"):
     """Install the causal-LM loss required by a no-gather vocabulary projection.
 
     Leave ``sp_group`` as ``None`` when running under DeepSpeed's Ulysses
@@ -365,7 +439,8 @@ def configure_vocab_parallel_loss(model, vocab_parallel_head, sp_group=None, ign
                                         sp_group=sp_group,
                                         vocab_start_index=vocab_parallel_head.vocab_start_index,
                                         vocab_end_index=vocab_parallel_head.vocab_end_index,
-                                        ignore_index=ignore_index)
+                                        ignore_index=ignore_index,
+                                        backend=backend)
     original_loss_function = model.loss_function
     registered_loss_module = getattr(model, "_modules", {}).pop("loss_function", None)
 
