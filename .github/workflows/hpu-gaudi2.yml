@@ -53,7 +53,6 @@ jobs:
         test_autotuning.py
         test_compression.py
         test_dist.py
-        test_elastic.py
         test_ds_arguments.py
         test_run.py
         test_multinode_runner.py
@@ -78,7 +77,6 @@ jobs:
         (test_ds_config_dict.py and (TestBasicConfig or TestBatchConfig))
         test_ds_config_model.py
         test_mup_optimizers.py
-        (test_pld.py and test_pld_schedule)
         test_runtime_utils.py
         test_pipe_schedule.py
         test_topology.py

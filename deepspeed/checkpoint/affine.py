@@ -22,7 +22,7 @@ import torch
 
 __all__ = [
     'AffinePiece', 'ParamAffineMap', 'AFFINE_MAP_FORMAT_VERSION', 'replicated_map', 'contiguous_split_map',
-    'sub_param_map'
+    'sub_param_map', 'segmented_map', 'block_gather_map'
 ]
 
 # Encoding version of the stored map, independent of the universal checkpoint version so
@@ -480,3 +480,116 @@ def _piece_from_dict(entry):
                        dest_strides=dest_strides,
                        locations=entry['locations'],
                        scale=entry.get('scale', 1.0))
+
+
+def segmented_map(shape, segments, partition_dim, tp_degree, split_widths):
+    """A parameter whose blocks are split or replicated independently along one axis.
+
+    ``segments`` is an ordered list of ``(size, replicated)`` pairs covering ``partition_dim``.
+    ``split_widths`` gives the per-rank widths of each split segment, in the same order. It is
+    required rather than optional because the sizes a layer splits to are not always an even
+    division -- they can be aligned to head counts or to a grain size -- and a map built by
+    dividing reads the wrong rows while still covering the tensor, so nothing downstream
+    notices. Callers pass the widths the partition itself computed.
+    A fused QKV weight that shards its query rows but hands every rank the whole key/value
+    block is two segments, and the resulting pieces differ in `locations` rather than in
+    kind -- which is what the schema could not say before.
+
+    Each segment becomes its own piece precisely because the pieces must stay homogeneous:
+    a replicated block sitting next to a rank-private one cannot share a `locations`, even
+    where the two happen to be adjacent in the full tensor.
+    """
+    shape = tuple(shape)
+    source_strides = _row_major_strides(shape)
+    ranks = list(range(tp_degree))
+
+    split_index = 0
+    widths_for_segment = []
+    for size, replicated in segments:
+        if replicated:
+            widths_for_segment.append(None)
+            continue
+        widths = list(split_widths[split_index])
+        if len(widths) != tp_degree or sum(widths) != size:
+            raise ValueError(f'Split widths {widths} do not account for a segment of {size} '
+                             f'elements across {tp_degree} ranks.')
+        widths_for_segment.append(widths)
+        split_index += 1
+
+    shard_extents = {}
+    for rank in ranks:
+        extent = 0
+        for (size, replicated), widths in zip(segments, widths_for_segment):
+            extent += size if replicated else widths[rank]
+        shard_extents[rank] = extent
+
+    shard_shapes = {}
+    for rank in ranks:
+        shard_shape = list(shape)
+        shard_shape[partition_dim] = shard_extents[rank]
+        shard_shapes[rank] = tuple(shard_shape)
+
+    pieces_by_rank = {rank: [] for rank in ranks}
+    dest_starts = {rank: 0 for rank in ranks}
+    source_start = 0
+    for (size, replicated), per_rank in zip(segments, widths_for_segment):
+        for rank in ranks:
+            extent = size if replicated else per_rank[rank]
+            offset = source_start if replicated else source_start + sum(per_rank[:rank])
+            piece_shape = list(shape)
+            piece_shape[partition_dim] = extent
+            dest_strides = _row_major_strides(shard_shapes[rank])
+            pieces_by_rank[rank].append(
+                AffinePiece(shape=tuple(piece_shape),
+                            source_offset=offset * source_strides[partition_dim],
+                            source_strides=source_strides,
+                            dest_offset=dest_starts[rank] * dest_strides[partition_dim],
+                            dest_strides=dest_strides,
+                            locations=ranks if replicated else [rank]))
+            dest_starts[rank] += extent
+        source_start += size
+
+    return ParamAffineMap(logical_shape=shape, shard_shapes=shard_shapes, pieces_by_rank=pieces_by_rank)
+
+
+def block_gather_map(shape, block_ids_by_rank, block_size, partition_dim):
+    """Each rank holds a chosen set of equal-sized blocks, not necessarily adjacent ones.
+
+    Yuan's shared-QK attention is the motivating case: a rank takes the value heads that
+    pair with its query heads, and those sit in two separate runs rather than one span.
+    Consecutive ids merge into a single piece, so the count follows the block structure of
+    the selection rather than the number of blocks.
+    """
+    shape = tuple(shape)
+    source_strides = _row_major_strides(shape)
+
+    shard_shapes = {}
+    for rank, block_ids in block_ids_by_rank.items():
+        shard_shape = list(shape)
+        shard_shape[partition_dim] = len(block_ids) * block_size
+        shard_shapes[rank] = tuple(shard_shape)
+
+    pieces_by_rank = {}
+    for rank, block_ids in block_ids_by_rank.items():
+        dest_strides = _row_major_strides(shard_shapes[rank])
+        pieces = []
+        dest_block = 0
+        index = 0
+        while index < len(block_ids):
+            run = 1
+            while index + run < len(block_ids) and block_ids[index + run] == block_ids[index + run - 1] + 1:
+                run += 1
+            piece_shape = list(shape)
+            piece_shape[partition_dim] = run * block_size
+            pieces.append(
+                AffinePiece(shape=tuple(piece_shape),
+                            source_offset=block_ids[index] * block_size * source_strides[partition_dim],
+                            source_strides=source_strides,
+                            dest_offset=dest_block * block_size * dest_strides[partition_dim],
+                            dest_strides=dest_strides,
+                            locations=[rank]))
+            dest_block += run
+            index += run
+        pieces_by_rank[rank] = pieces
+
+    return ParamAffineMap(logical_shape=shape, shard_shapes=shard_shapes, pieces_by_rank=pieces_by_rank)

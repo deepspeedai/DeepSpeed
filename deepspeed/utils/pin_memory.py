@@ -64,7 +64,13 @@ class NativePinnedMemory(object):
         if base.nbytes and self._device_registration_enabled():
             from deepspeed.accelerator import get_accelerator
             try:
-                if get_accelerator().register_host_memory(begin, base.nbytes):
+                accelerator = get_accelerator()
+                # Some device runtimes only register page-aligned ranges; round
+                # the address down to the accelerator-declared alignment and pad
+                # the size so the registered range still covers the request.
+                registered_begin = self._align_host_address(accelerator, begin)
+                padded_bytes = base.nbytes + (begin - registered_begin)
+                if accelerator.register_host_memory(registered_begin, padded_bytes):
                     self._device_registered.add(begin)
             except Exception as e:
                 logger.warning_once(
@@ -132,11 +138,23 @@ class NativePinnedMemory(object):
             pass
 
     @staticmethod
+    def _align_host_address(accelerator, address):
+        # Device runtimes may require page-aligned registration ranges; round
+        # down to the alignment the accelerator declares (1 = no requirement).
+        alignment = accelerator.pin_memory_alignment()
+        if alignment <= 1:
+            return address
+        return address - (address % alignment)
+
+    @staticmethod
     def _unregister_device(begin, device_registered):
         if begin not in device_registered:
             return
         from deepspeed.accelerator import get_accelerator
-        get_accelerator().unregister_host_memory(begin)
+        accelerator = get_accelerator()
+        # Same rounding as at registration time, so the driver releases exactly
+        # the range it was given.
+        accelerator.unregister_host_memory(NativePinnedMemory._align_host_address(accelerator, begin))
         device_registered.discard(begin)
 
     @staticmethod
