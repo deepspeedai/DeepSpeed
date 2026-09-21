@@ -25,9 +25,10 @@ from copy import deepcopy
 from typing import Union
 
 __all__ = [
-    "TensorParallel_Layer", "LinearAllreduce", "LinearLayer", "LmHeadLinearAllreduce", "Yuan_LinearAllreduce",
-    "Yuan_LinearLayer", "GateUpPack_LinearLayer", "Conv_LinearALlreduce", "fused_LinearLayer", "conv_LinearLayer",
-    "SubParamLinearLayer", "SubParamLinearAllreduce", "VocabParallelLinear"
+    "TensorParallel_Layer", "LinearAllreduce", "LinearAllreduceWithReplicatedInput", "LinearLayer",
+    "LmHeadLinearAllreduce", "Yuan_LinearAllreduce", "Yuan_LinearLayer", "GateUpPack_LinearLayer",
+    "Conv_LinearALlreduce", "fused_LinearLayer", "conv_LinearLayer", "SubParamLinearLayer", "SubParamLinearAllreduce",
+    "VocabParallelLinear"
 ]
 
 DEEPSPEED_AUTOTP_MODE = AUTOTP_MODE.INFERENCE
@@ -229,6 +230,28 @@ class RowParallel(torch.autograd.Function):
         Backward pass.
         """
         return None, grad_output, None
+
+
+class ScatterToTensorParallelRegion(torch.autograd.Function):
+    """Slice a replicated input and reconstruct its complete gradient."""
+
+    @staticmethod
+    def forward(ctx, group, input, partition_sizes, tp_index):
+        ctx.group = group
+        ctx.input_shape = input.shape
+        ctx.offset = sum(partition_sizes[:tp_index])
+        ctx.size = partition_sizes[tp_index]
+        return input.narrow(-1, ctx.offset, ctx.size).contiguous()
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        # Each rank owns only one input-gradient slice. Upstream replicated
+        # layers need the sum of all slices, not this rank's padded gradient.
+        grad_input = grad_output.new_zeros(ctx.input_shape)
+        grad_input.narrow(-1, ctx.offset, ctx.size).copy_(grad_output)
+        if ctx.group is not None:
+            dist.all_reduce(grad_input, group=ctx.group)
+        return None, grad_input, None, None
 
 
 class AsyncColumnParallel(torch.autograd.Function):
@@ -928,6 +951,19 @@ class LinearAllreduce(TensorParallel_Layer):
                                     original_shape=bias_shape,
                                     is_bias=True,
                                     replicated=True)
+
+
+class LinearAllreduceWithReplicatedInput(LinearAllreduce):
+    """Row-parallel output head whose preceding layer produces a full input."""
+
+    def forward(self, input):
+        if self.defer_collectives_to_compiler:
+            raise NotImplementedError(
+                "Row-parallel output-head training does not support deferred compiler collectives.")
+        assert sum(self._partition_sizes) == input.shape[-1], (
+            f"Output head expects {sum(self._partition_sizes)} input features, but got {input.shape[-1]}.")
+        local_input = ScatterToTensorParallelRegion.apply(self.mp_group, input, self._partition_sizes, self.tp_index)
+        return super().forward(local_input)
 
 
 #remove kwargs from partition.
