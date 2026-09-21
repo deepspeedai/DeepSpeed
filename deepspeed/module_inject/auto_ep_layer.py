@@ -665,8 +665,10 @@ class AutoEPMoELayer(nn.Module):
         if self._async_split_plan_host_splits is None:
             # Integer reductions produce int64 splits; matching that dtype
             # avoids a conversion kernel before the metadata transfer.
-            self._async_split_plan_host_splits = get_accelerator().pin_memory(
-                torch.empty((2, self.ep_size), dtype=torch.int64, device="cpu"))
+            # The cached buffer must remain writable after inference-mode warmup.
+            with torch.inference_mode(False):
+                self._async_split_plan_host_splits = get_accelerator().pin_memory(
+                    torch.empty((2, self.ep_size), dtype=torch.int64, device="cpu"))
 
         pending = _start_async_split_plan_from_expert_counts(
             num_tokens_per_expert=num_tokens_per_expert,

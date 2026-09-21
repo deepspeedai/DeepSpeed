@@ -1286,8 +1286,10 @@ def async_split_layer(monkeypatch):
             return super().sum(*args, **kwargs)
 
     def pin_memory(tensor):
-        activity["buffers"].append(tensor)
-        return tensor
+        # Pinning can allocate new storage, so preserve its inference-mode behavior.
+        pinned = tensor.clone()
+        activity["buffers"].append(pinned)
+        return pinned
 
     original_copy = torch.Tensor.copy_
 
@@ -1363,6 +1365,29 @@ class TestAsyncSplitPlanLifecycle:
         assert timeline.index(("record", "copy")) < operations.index("sort")
         assert activity["buffers"][0].dtype == torch.int64
         assert operations.index("sort") < operations.index("synchronize") < operations.index("payload")
+
+    @pytest.mark.parametrize("warmup_mode", [torch.no_grad, torch.inference_mode])
+    def test_warmup_allows_subsequent_training(self, async_split_layer, warmup_mode):
+        layer, _, activity = async_split_layer
+        hidden = torch.randn(1, 8, 64, requires_grad=True)
+        layer.async_split_plan = False
+        expected = layer(hidden)
+        expected.square().mean().backward()
+        expected_input_grad = hidden.grad.clone()
+        hidden.grad = None
+        layer.zero_grad(set_to_none=True)
+
+        layer.async_split_plan = True
+        with warmup_mode():
+            warmup_output = layer(hidden)
+        torch.testing.assert_close(warmup_output, expected)
+
+        actual = layer(hidden)
+        actual.square().mean().backward()
+        torch.testing.assert_close(actual, expected)
+        torch.testing.assert_close(hidden.grad, expected_input_grad)
+        assert len(activity["buffers"]) == 1
+        assert layer._async_split_plan_pending is None
 
     def test_packing_failure_drains_pending_and_allows_retry(self, monkeypatch, async_split_layer):
         layer, _, activity = async_split_layer

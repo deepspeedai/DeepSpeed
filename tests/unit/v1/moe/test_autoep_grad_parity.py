@@ -453,7 +453,7 @@ def test_async_master_snapshot_requires_real_fp32_parameters():
 
 
 class TestAutoEPAsyncSplitPlanParity(DistributedTest):
-    """Four GPU cases: checkpoint on/off crossed with default/non-default stream."""
+    """Training after inference warmup across checkpoint and caller-stream modes."""
 
     world_size = 2
 
@@ -480,6 +480,9 @@ class TestAutoEPAsyncSplitPlanParity(DistributedTest):
         training_stream.wait_stream(caller_stream)
         try:
             with accelerator.stream(training_stream):
+                with torch.inference_mode():
+                    sync_engine(
+                        torch.zeros((1, 5, 128), device=sync_engine.device, dtype=_engine_input_dtype(sync_engine)))
                 expected = [
                     _async_split_step(sync_engine, seed + step, seq_len)
                     for step, seq_len in enumerate(sequence_lengths)
@@ -495,6 +498,9 @@ class TestAutoEPAsyncSplitPlanParity(DistributedTest):
                 _checkpoint_autoep_layers(async_engine)
             training_stream.wait_stream(caller_stream)
             with accelerator.stream(training_stream):
+                with torch.inference_mode():
+                    async_engine(
+                        torch.zeros((1, 5, 128), device=async_engine.device, dtype=_engine_input_dtype(async_engine)))
                 for step, seq_len in enumerate(sequence_lengths):
                     actual = _async_split_step(async_engine, seed + step, seq_len)
                     _assert_async_split_step_matches(actual, expected[step])
