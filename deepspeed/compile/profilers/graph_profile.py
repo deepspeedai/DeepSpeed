@@ -212,7 +212,7 @@ class ProfilingInterpreter(Interpreter):
         assert warmup >= 0
         self.iteration = iteration
         self.warmup = warmup
-        self.device = torch.device(get_accelerator().current_device())
+        self.device = torch.device(get_accelerator().current_device_name())
         self.cache: Dict[Tuple, Any] = {}
         self.distributed = dist.is_initialized()
         self.process_group = process_group
@@ -423,7 +423,7 @@ class MemoryProfilingInterpreter(Interpreter):
     def __init__(self, gm: GraphModule, debug_log=False, process_group=None):
         super().__init__(gm)
         self.nz3 = get_deepcompile_handle()
-        self.device = torch.device(get_accelerator().current_device())
+        self.device = torch.device(get_accelerator().current_device_name())
         self.mem_record = []
         self.last_alloc = get_accelerator().memory_allocated()
         self.profile_complete = True

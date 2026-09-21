@@ -2911,8 +2911,15 @@ class DeepSpeedEngine(Module):
             # We can't have this in forward prologue as the compiler compiles hooks including the forward prologue.
             self.launch_compile_passes(self.global_steps)
 
-        with deepcompile_z3_forward_context(self) as z3_eager_fallback, autocast_if_enabled(self):
-            loss = self.module(*inputs, **kwargs)
+        deepcompile_native = get_deepcompile_handle() if self.is_deepcompile_active() else None
+        if deepcompile_native is not None:
+            deepcompile_native.start_forward()
+        try:
+            with deepcompile_z3_forward_context(self) as z3_eager_fallback, autocast_if_enabled(self):
+                loss = self.module(*inputs, **kwargs)
+        finally:
+            if deepcompile_native is not None:
+                deepcompile_native.end_forward()
 
         forward_graph_id = None
 
