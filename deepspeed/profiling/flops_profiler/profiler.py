@@ -623,7 +623,12 @@ def _conv_trans_flops_compute(
 ):
     batch_size = input.shape[0]
     in_channels = input.shape[1]
-    out_channels = weight.shape[1]
+    # A transposed-convolution weight is [in_channels, out_channels // groups, *kernel],
+    # so dim 1 already holds the per-group filter count and must not be divided by groups
+    # a second time. Doing so reports zero macs for a depthwise transposed convolution,
+    # where out_channels // groups is 1.
+    filters_per_channel = weight.shape[1]
+    out_channels = filters_per_channel * groups
     kernel_dims = list(weight.shape[2:])
     input_dims = list(input.shape[2:])
 
@@ -632,19 +637,19 @@ def _conv_trans_flops_compute(
     paddings = padding if type(padding) is tuple else (padding, ) * length
     strides = stride if type(stride) is tuple else (stride, ) * length
     dilations = dilation if type(dilation) is tuple else (dilation, ) * length
+    # `nn.ConvTransposeNd.forward(x, output_size=...)` computes the per-dimension
+    # output_padding as a list, so a tuple check alone would wrap it and the shape
+    # arithmetic below would add a list to an int.
+    output_paddings = output_padding if isinstance(output_padding, (tuple, list)) else (output_padding, ) * length
 
     output_dims = []
     for idx, input_dim in enumerate(input_dims):
-
-        output_dim = (input_dim + 2 * paddings[idx] - (dilations[idx] *
-                                                       (kernel_dims[idx] - 1) + 1)) // strides[idx] + 1
+        # A transposed convolution inverts the forward shape formula, so the output grows
+        # with the stride rather than shrinking by it.
+        output_dim = ((input_dim - 1) * strides[idx] - 2 * paddings[idx] + dilations[idx] * (kernel_dims[idx] - 1) +
+                      output_paddings[idx] + 1)
         output_dims.append(output_dim)
 
-    paddings = padding if type(padding) is tuple else (padding, padding)
-    strides = stride if type(stride) is tuple else (stride, stride)
-    dilations = dilation if type(dilation) is tuple else (dilation, dilation)
-
-    filters_per_channel = out_channels // groups
     conv_per_position_macs = int(_prod(kernel_dims)) * in_channels * filters_per_channel
     active_elements_count = batch_size * int(_prod(input_dims))
     overall_conv_macs = conv_per_position_macs * active_elements_count
@@ -847,20 +852,12 @@ def _elementwise_flops_compute(input, other):
     elif not torch.is_tensor(other):
         return _prod(input.shape), 0
     else:
-        dim_input = len(input.shape)
-        dim_other = len(other.shape)
-        max_dim = max(dim_input, dim_other)
-
-        final_shape = []
-        for i in range(max_dim):
-            in_i = input.shape[i] if i < dim_input else 1
-            ot_i = other.shape[i] if i < dim_other else 1
-            if in_i > ot_i:
-                final_shape.append(in_i)
-            else:
-                final_shape.append(ot_i)
-        flops = _prod(final_shape)
-        return flops, 0
+        # Broadcasting lines the two shapes up from the trailing dimension, so the
+        # shorter one is padded on the left. Walking both from index 0 instead pairs
+        # unrelated dimensions and yields a shape the result never has: multiplying a
+        # [2, 3, 4] activation by a [4] bias was counted over [4, 3, 4], twice the
+        # elements the operation touches.
+        return _prod(torch.broadcast_shapes(input.shape, other.shape)), 0
 
 
 def _attn_flops_compute(q, k, v, *args, **kwargs):

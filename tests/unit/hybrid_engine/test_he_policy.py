@@ -52,3 +52,19 @@ def test_supported_model_registers_auxiliary_policies(monkeypatch):
 
     assert SupportedLayer in engine.inference_policies
     assert engine.inference_policies[nn.Linear][0] is LinearLayer
+
+
+def test_modern_opt_uses_native_fallback():
+    import inspect
+    import pytest
+    from transformers import OPTConfig, OPTForCausalLM
+    from transformers.models.opt.modeling_opt import OPTDecoderLayer
+
+    parameters = inspect.signature(OPTDecoderLayer.forward).parameters
+    if not ({'cache_position', 'past_key_values'} & parameters.keys()):
+        pytest.skip('Installed OPT uses the supported legacy cache contract')
+    model = OPTForCausalLM(
+        OPTConfig(hidden_size=16, ffn_dim=32, num_hidden_layers=1, num_attention_heads=2, vocab_size=32))
+    engine = _make_engine(model)
+    engine.populate_all_inference_policies()
+    assert engine.inference_policies == {}

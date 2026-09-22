@@ -84,13 +84,7 @@ class PipelineEngine(DeepSpeedEngine):
         # BF16 Optimizer is hardcoded for fp32 gradient accumulation
         self.using_bf16_optimizer = type(self.optimizer) == BF16_Optimizer
 
-        # used to disable the pipeline all-reduce when used with 1-bit Adam/1-bit LAMB
         self.pipeline_enable_backward_allreduce = True
-
-        if self.elasticity_enabled():
-            if not self.is_elastic_model_parallel_supported():
-                assert not self.elasticity_enabled(), "Elasticity is not currently supported" \
-                " with pipeline parallelism."
 
         # pipeline step for logging
         self.log_batch_step_id = -1
@@ -365,17 +359,6 @@ class PipelineEngine(DeepSpeedEngine):
         if not torch._C.is_grad_enabled():
             raise RuntimeError('train_batch() requires gradients enabled. Use eval_batch() instead.')
 
-        # Curriculum learning could change activation shape
-        if self.curriculum_enabled_legacy():
-            new_difficulty = self.curriculum_scheduler_legacy.update_difficulty( \
-                self.global_steps + 1)
-            if self.global_steps == 0 or self.curriculum_scheduler_legacy.first_step:
-                self.reset_activation_shape()
-                self.curriculum_scheduler_legacy.first_step = False
-            elif new_difficulty != self.curriculum_scheduler_legacy.get_difficulty( \
-                self.global_steps):
-                self.reset_activation_shape()
-
         if data_iter is not None:
             self.set_dataiterator(data_iter)
 
@@ -463,17 +446,6 @@ class PipelineEngine(DeepSpeedEngine):
         """
         self.eval_return_logits = return_logits
         self.module.eval()
-
-        # Curriculum learning could change activation shape
-        if self.curriculum_enabled_legacy():
-            new_difficulty = self.curriculum_scheduler_legacy.update_difficulty( \
-                self.global_steps + 1)
-            if self.global_steps == 0 or self.curriculum_scheduler_legacy.first_step:
-                self.reset_activation_shape()
-                self.curriculum_scheduler_legacy.first_step = False
-            elif new_difficulty != self.curriculum_scheduler_legacy.get_difficulty( \
-                self.global_steps):
-                self.reset_activation_shape()
 
         eval_output = None
 

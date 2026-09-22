@@ -22,6 +22,8 @@ import re
 import shutil
 import stat
 import subprocess
+import threading
+import time
 from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 from typing import Any, Mapping, Sequence
@@ -67,7 +69,8 @@ MODAL_TORCH_PRESETS = {
 }
 PYTORCH_CUDA_128_INDEX_URL = "https://download.pytorch.org/whl/cu128"
 APP_NAME = "deepspeedai-torch-latest-ci"
-SANDBOX_TIMEOUT_SECONDS = 3600
+SANDBOX_TIMEOUT_SECONDS = 5400
+SANDBOX_ACQUIRE_TIMEOUT_SECONDS = 1800
 MAX_TEST_LIST_BYTES = 64 * 1024
 MAX_TEST_TARGETS = 1024
 MAX_DISPLAY_BYTES_PER_COMMAND = 16 * 1024 * 1024
@@ -96,6 +99,7 @@ class ControllerInputs:
     torch_preset: str
     transformers_source: str
     transformers_ref: str
+    base_sha: str
 
 
 @dataclass(frozen=True)
@@ -113,6 +117,15 @@ class ControllerCleanupError(RuntimeError):
         super().__init__(f"controller failed ({primary}); Sandbox cleanup also failed ({cleanup})")
         self.primary = primary
         self.cleanup = cleanup
+
+
+class SandboxStartTimeout(RuntimeError):
+    """The Sandbox never started, so no test ever ran."""
+
+    def __init__(self, timeout_seconds: float):
+        super().__init__(f"Sandbox did not start within {timeout_seconds:g}s, so no test ran. This is a capacity "
+                         f"problem rather than a test failure: the GPU reservation was never satisfied.")
+        self.timeout_seconds = timeout_seconds
 
 
 def validate_repository(value: str) -> str:
@@ -335,6 +348,10 @@ def resolve_controller_inputs(env: Mapping[str, str]) -> ControllerInputs:
         sha = sha or env.get("GITHUB_SHA", "")
     repository = validate_repository(repository)
     sha = validate_sha(sha)
+    # The base SHA keys the baked requirements layer: merge-group bases move slowly, so the
+    # layer cache stays hot, while the candidate SHA changes every run. Events without a base
+    # (push, dispatch) reuse the candidate SHA, which only lowers the hit rate, never correctness.
+    base_sha = validate_sha(env.get("DS_CI_BASE_SHA", "") or sha)
 
     selection_mode = env.get("DS_TEST_SELECTION_MODE", "")
     selection_file = env.get("DS_TEST_LIST_FILE", "")
@@ -363,6 +380,7 @@ def resolve_controller_inputs(env: Mapping[str, str]) -> ControllerInputs:
         torch_preset=torch_preset,
         transformers_source=transformers_source,
         transformers_ref=transformers_ref,
+        base_sha=base_sha,
     )
 
 
@@ -377,6 +395,27 @@ def build_sandbox_env() -> dict[str, str]:
         "PIP_DISABLE_PIP_VERSION_CHECK": "1",
         "PIP_NO_INPUT": "1",
     }
+
+
+def _build_sandbox_image(modal_module: Any, preset: dict[str, str], inputs: ControllerInputs) -> Any:
+    """Bake the static dependency chain into content-addressed image layers.
+
+    Layers apply in chain order, mirroring the previous runtime sequence: requirements first,
+    then the Torch pin, so a transitive dependency cannot displace the intended CUDA build.
+    Modal caches each layer by its inputs, so a warm run skips both installs entirely; the
+    runtime `pip install -r` commands remain as cheap correctness guards -- they are a no-op
+    unless the candidate branch changed a requirements file, in which case they install the
+    difference. The requirements layer is keyed by the base SHA, which moves far slower than
+    the candidate SHA the controller tests.
+    """
+    requirements_url = f"https://raw.githubusercontent.com/{inputs.repository}/{inputs.base_sha}/requirements"
+    image = modal_module.Image.from_registry(preset["image"], add_python="3.10")
+    image = image.run_commands(
+        f"python -m pip install -r {requirements_url}/requirements.txt "
+        f"-r {requirements_url}/requirements-dev.txt -r {requirements_url}/requirements-deepcompile.txt")
+    return image.pip_install(preset["torch_package"],
+                             preset["torchvision_package"],
+                             index_url=PYTORCH_CUDA_128_INDEX_URL)
 
 
 def build_sandbox_kwargs(image: Any) -> dict[str, Any]:
@@ -445,22 +484,8 @@ def build_remote_commands(inputs: ControllerInputs) -> tuple[RemoteCommand, ...]
             ("python", "-m", "pip", "install", "-r", "requirements/requirements-deepcompile.txt"),
             REMOTE_REPOSITORY,
         ),
-        RemoteCommand(
-            "reinstall Torch packages",
-            (
-                "python",
-                "-m",
-                "pip",
-                "install",
-                "--force-reinstall",
-                "--no-cache-dir",
-                "--index-url",
-                PYTORCH_CUDA_128_INDEX_URL,
-                preset["torch_package"],
-                preset["torchvision_package"],
-            ),
-            REMOTE_REPOSITORY,
-        ),
+        # Torch itself is pinned in the image (see _build_sandbox_image), after the requirements
+        # layers, so a transitive dependency cannot displace the intended CUDA build.
     ]
     if inputs.transformers_source == "git":
         commands.extend([
@@ -582,6 +607,35 @@ def _cleanup_sandbox(sandbox: Any) -> None:
         raise observation_error.with_traceback(observation_error.__traceback__)
 
 
+def await_sandbox_start(sandbox: Any, timeout_seconds: float | None = None) -> float:
+    """Block until the Sandbox container is running, and return how long that took.
+
+    ``Sandbox.create`` returns before the container exists, so the wait for a free GPU surfaces on the first
+    ``exec`` instead. Bounding that wait on its own keeps an unsatisfied reservation from consuming the whole
+    job budget, and keeps the Sandbox lifetime budget available for the tests that follow.
+    """
+    if timeout_seconds is None:
+        timeout_seconds = SANDBOX_ACQUIRE_TIMEOUT_SECONDS
+    started_at = time.monotonic()
+    probe_result: list[BaseException | None] = []
+
+    def probe() -> None:
+        try:
+            sandbox.exec("true").wait()
+            probe_result.append(None)
+        except BaseException as exc:  # surfaced on the calling thread below
+            probe_result.append(exc)
+
+    probe_thread = threading.Thread(target=probe, daemon=True)
+    probe_thread.start()
+    probe_thread.join(timeout_seconds)
+    if probe_thread.is_alive():
+        raise SandboxStartTimeout(timeout_seconds)
+    if probe_result and probe_result[0] is not None:
+        raise probe_result[0]
+    return time.monotonic() - started_at
+
+
 def run_controller(env: Mapping[str, str], modal_module: Any | None = None) -> int:
     inputs = resolve_controller_inputs(env)
     if inputs.selection_mode == "none":
@@ -597,13 +651,15 @@ def run_controller(env: Mapping[str, str], modal_module: Any | None = None) -> i
     if modal_module is None:
         modal_module = importlib.import_module("modal")
     preset = MODAL_TORCH_PRESETS[inputs.torch_preset]
-    image = modal_module.Image.from_registry(preset["image"], add_python="3.10")
+    image = _build_sandbox_image(modal_module, preset, inputs)
     app = modal_module.App.lookup(APP_NAME, create_if_missing=True)
     sandbox = None
     primary_error: BaseException | None = None
     cleanup_error: BaseException | None = None
     try:
         sandbox = modal_module.Sandbox.create(app=app, **build_sandbox_kwargs(image))
+        startup_seconds = await_sandbox_start(sandbox)
+        print(f"Sandbox started after {startup_seconds:.0f}s", flush=True)
         for command in build_remote_commands(inputs):
             run_sandbox_command(sandbox, modal_module, command)
     except BaseException as exc:

@@ -75,3 +75,40 @@ one token. It can be combined with native HybridEngine decode graphs enabled by
 with ``HybridEngineRolloutConfig(use_graph_capture=True)`` or
 ``release_inference_cache``. Sampling still happens independently for every
 response branch after the shared prompt forward.
+
+Continuous batching (experimental)
+-----------------------------------
+
+Continuous batching is enabled through ``SamplingConfig.continuous_batch_size``
+on the regular ``HybridEngineRollout.generate(request, sampling)`` entry point.
+When unset, generation keeps its existing behavior. When set to a positive
+value, at most that many prompt rows are active at once; completed rows retire
+and pending rows are prefetched into the released slots. The returned
+``RolloutBatch`` remains in the original ``RolloutRequest`` row order.
+The experimental path periodically trims unused cache columns from the left
+to keep long-running staggered-EOS workloads within the allocated cache span.
+
+When ``HybridEngineRolloutConfig(enable_profiling=True)`` is enabled, this path
+also records a snapshot in ``get_last_profile()``. In addition to the common
+rollout fields, the snapshot reports ``scheduler_overhead_ms`` for scheduler
+transitions, ``cache_management_overhead_ms`` for cache compaction, trimming,
+reset, and admitted-row copies, and separate ``prefill_forward_ms`` and
+``decode_forward_ms`` totals. ``num_prefill_forwards`` counts each admitted
+prompt batch, while ``num_decode_forwards`` counts decode steps that had
+surviving rows. ``num_generated_tokens`` counts tokens actually produced by
+all requests (padding is excluded), and ``active_batch_size`` is the maximum
+number of simultaneously active rows; ``continuous_batch_size`` is the
+configured capacity.
+
+The experimental path intentionally does not implement paged attention or change the
+default generation semantics. It currently requires one prompt width for all
+rows, a model with cache-class support, greedy decoding, and one sample per
+prompt. CUDA Graph capture and multiple prompt widths are rejected until the
+scheduling semantics are validated on real workloads. Models without
+cache-class support should use the default ``generate()`` path or upgrade
+Transformers.
+
+``DeepSpeedStaticCache`` accepts one write position per row and can compact
+active rows while preserving its static tensor addresses. This mirrors the
+scheduler/cache separation used by systems such as vLLM and SGLang without
+copying their backend-specific kernels.

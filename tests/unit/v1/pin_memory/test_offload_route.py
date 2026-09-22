@@ -39,7 +39,7 @@ def test_offload_helper_pin_pattern_native(monkeypatch):
     accel = get_accelerator()
     # Mirrors offload_optimizer_states: allocate empty host buffer, then copy.
     src = torch.randn(32)
-    pinned_buffer = accel.pin_memory(torch.empty_like(src, device="cpu"), make_copy=False)
+    pinned_buffer = accel.pin_empty_like(src, device="cpu")
     pinned_buffer.copy_(src)
     assert accel.is_pinned(pinned_buffer) is True
     assert accel.unpin_memory(pinned_buffer) is True
@@ -97,7 +97,7 @@ def test_reload_states_holds_pin_buffers_until_sync(monkeypatch):
     device = accel.current_device_name()
 
     hp_param = torch.randn(1024, device=device)
-    pinned = accel.pin_memory(torch.empty_like(hp_param, device="cpu"), make_copy=False)
+    pinned = accel.pin_empty_like(hp_param, device="cpu")
     pinned.copy_(hp_param)
     # Mirrors offload_states(): the hp param now points at the pinned host buffer.
     hp_param.data = pinned

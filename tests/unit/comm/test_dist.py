@@ -3,6 +3,7 @@
 
 # DeepSpeed Team
 
+import importlib
 import os
 import torch
 import deepspeed.comm as dist
@@ -396,3 +397,58 @@ class TestDistInitWithModel(DistributedTest):
                                                   config=config_dict,
                                                   model_parameters=model.parameters(),
                                                   dist_init_required=dist_init_required)
+
+
+# `deepspeed.comm.torch` is shadowed by the real torch module in the `deepspeed.comm` namespace.
+ds_comm_torch = importlib.import_module("deepspeed.comm.torch")
+
+
+@pytest.mark.parametrize("world_size,env,expected", [
+    (2, None, 2),
+    (1, None, 1),
+    (-1, "4", 4),
+    (-1, None, None),
+    (-1, "", None),
+])
+def test_known_world_size(monkeypatch, world_size, env, expected):
+    # -1 with nothing in the environment means the size is genuinely unknown: it may be carried
+    # in the init_method URL. Returning None keeps the caller from skipping the device binding
+    # on an assumed size.
+    monkeypatch.delenv("WORLD_SIZE", raising=False)
+    if env is not None:
+        monkeypatch.setenv("WORLD_SIZE", env)
+    assert ds_comm_torch.known_world_size(world_size) == expected
+
+
+def assert_device_binding(expect_bound):
+    """A device is bound for multi-rank jobs, and not for a single-rank one (#8248)."""
+    if get_accelerator().communication_backend_name() != 'nccl':
+        pytest.skip("device_id is only bound for the nccl backend")
+
+    deepspeed.init_distributed(dist_backend='nccl', auto_mpi_discovery=False)
+    default_pg = torch.distributed.distributed_c10d._get_default_group()
+    assert (default_pg.bound_device_id is not None) == expect_bound
+
+    # The eager split new_group() makes when a device is bound is the call that fails in #8248.
+    device = get_accelerator().device(int(os.environ["LOCAL_RANK"]))
+    default_backend = default_pg._get_backend(device)
+    if hasattr(default_backend, "comm_split_count"):
+        splits_before = default_backend.comm_split_count()
+        torch.distributed.new_group(ranks=list(range(dist.get_world_size())))
+        assert (default_backend.comm_split_count() > splits_before) == expect_bound
+
+
+class TestSingleRankDeviceId(DistributedTest):
+    world_size = 1
+    init_distributed = False
+
+    def test(self):
+        assert_device_binding(expect_bound=False)
+
+
+class TestMultiRankDeviceId(DistributedTest):
+    world_size = 2
+    init_distributed = False
+
+    def test(self):
+        assert_device_binding(expect_bound=True)

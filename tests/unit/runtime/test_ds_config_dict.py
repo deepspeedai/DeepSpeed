@@ -20,7 +20,7 @@ import deepspeed.comm as dist
 
 # A test on its own
 import deepspeed
-from deepspeed.runtime.config import DeepSpeedConfig
+from deepspeed.runtime.config import DeepSpeedConfig, DeepSpeedConfigError
 from deepspeed.runtime.precision_config import get_bfloat16_config
 
 
@@ -149,6 +149,20 @@ def test_gradient_allreduce_op_default():
     assert config.gradient_allreduce_op == "mean"
 
 
+def test_disable_python_gc_config_default():
+    config = DeepSpeedConfig({"train_batch_size": 1})
+    assert config.disable_python_gc is False
+
+
+@pytest.mark.parametrize("value", [False, True])
+def test_disable_python_gc_config(value):
+    config = DeepSpeedConfig({
+        "train_batch_size": 1,
+        "disable_python_gc": value,
+    })
+    assert config.disable_python_gc is value
+
+
 def test_invalid_gradient_allreduce_op():
     with pytest.raises(ValueError, match="Invalid gradient_allreduce_op"):
         DeepSpeedConfig({
@@ -216,15 +230,30 @@ def test_get_bfloat16_enabled(bf16_key):
     assert get_bfloat16_config(cfg).enabled == True
 
 
-def test_quantized_eigenvalue_config_parses():
-    ds_config_path = get_test_path('../model/BingBertSquad/deepspeed_bsz24_fp16_eigenvalue_quantize_config.json')
+@pytest.mark.parametrize("config_key", ["quantize_training", "eigenvalue", "progressive_layer_drop", "elasticity"])
+@pytest.mark.parametrize("value", [None, {}, False, "auto"])
+def test_moq_and_pld_config_is_rejected(config_key, value):
+    config_dict = {
+        "train_micro_batch_size_per_gpu": 1,
+        config_key: value,
+    }
 
-    ds_config = DeepSpeedConfig(ds_config_path)
+    with pytest.raises(DeepSpeedConfigError, match=config_key):
+        DeepSpeedConfig(config_dict)
 
-    assert ds_config._param_dict["quantize_training"]["quantize_eigenvalue"] is True
+
+@pytest.mark.parametrize("value", [None, {}, False, "auto"])
+def test_legacy_curriculum_learning_config_is_rejected(value):
+    config_dict = {
+        "train_micro_batch_size_per_gpu": 1,
+        "curriculum_learning": value,
+    }
+
+    with pytest.raises(DeepSpeedConfigError, match="curriculum_learning"):
+        DeepSpeedConfig(config_dict)
 
 
-def test_compression_training_without_legacy_quantize_training_uses_defaults():
+def test_compression_training_config_is_rejected():
     config_dict = {
         "train_micro_batch_size_per_gpu": 1,
         "optimizer": {
@@ -243,10 +272,118 @@ def test_compression_training_without_legacy_quantize_training_uses_defaults():
         },
     }
 
-    ds_config = DeepSpeedConfig(config_dict)
+    with pytest.raises(DeepSpeedConfigError, match="compression_training"):
+        DeepSpeedConfig(config_dict)
 
-    assert ds_config.eigenvalue_enabled is False
-    assert ds_config.eigenvalue_verbose is False
+
+def test_nebula_config_is_rejected():
+    config_dict = {
+        "train_micro_batch_size_per_gpu": 1,
+        "nebula": {
+            "enabled": True,
+        },
+    }
+
+    with pytest.raises(DeepSpeedConfigError, match="Nebula"):
+        DeepSpeedConfig(config_dict)
+
+
+@pytest.mark.parametrize("amp_config",
+                         [None, {}, False, "auto", {
+                             "enabled": False
+                         }, {
+                             "enabled": True,
+                             "opt_level": "O1"
+                         }])
+def test_apex_amp_config_is_rejected(amp_config):
+    config_dict = {
+        "train_micro_batch_size_per_gpu": 1,
+        "amp": amp_config,
+    }
+
+    with pytest.raises(DeepSpeedConfigError, match="Apex AMP"):
+        DeepSpeedConfig(config_dict)
+
+
+def test_sparse_attention_config_is_rejected():
+    config_dict = {
+        "train_micro_batch_size_per_gpu": 1,
+        "sparse_attention": {
+            "mode": "fixed",
+        },
+    }
+
+    with pytest.raises(DeepSpeedConfigError, match="Sparse Attention"):
+        DeepSpeedConfig(config_dict)
+
+
+def test_mics_zero_config_is_rejected():
+    config_dict = {
+        "train_micro_batch_size_per_gpu": 1,
+        "zero_optimization": {
+            "stage": 3,
+            "mics_shard_size": 2,
+        },
+    }
+
+    with pytest.raises(DeepSpeedConfigError, match="MiCS"):
+        DeepSpeedConfig(config_dict)
+
+
+def test_sparse_gradients_config_is_rejected():
+    config_dict = {
+        "train_micro_batch_size_per_gpu": 1,
+        "sparse_gradients": True,
+    }
+
+    with pytest.raises(DeepSpeedConfigError, match="sparse_gradients"):
+        DeepSpeedConfig(config_dict)
+
+
+@pytest.mark.parametrize("zero_stage", [0, 3])
+@pytest.mark.parametrize("loco_config", [None, {}, {"err_beta": 0.8, "reset_T": 1024}, "auto"])
+def test_loco_zero_config_is_rejected(zero_stage, loco_config):
+    config_dict = {
+        "train_micro_batch_size_per_gpu": 1,
+        "zero_optimization": {
+            "stage": zero_stage,
+            "zeropp_loco_param": loco_config,
+        },
+    }
+
+    with pytest.raises(DeepSpeedConfigError, match="zeropp_loco_param"):
+        DeepSpeedConfig(config_dict)
+
+
+class TestLoCoConfigRejected(DistributedTest):
+    world_size = 1
+
+    def test_initialize(self):
+        config_dict = {
+            "train_micro_batch_size_per_gpu": 1,
+            "zero_optimization": {
+                "stage": 3,
+                "zero_quantized_gradients": True,
+                "zeropp_loco_param": {
+                    "err_beta": 0.8,
+                    "reset_T": 1024,
+                },
+            },
+        }
+        model = SimpleModel(8).to(get_accelerator().current_device_name())
+
+        with pytest.raises(DeepSpeedConfigError, match="zeropp_loco_param"):
+            deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config_dict)
+
+
+def test_compression_helper_shim_reexports_module_utils():
+    with pytest.warns(FutureWarning, match="deepspeed.compression.helper"):
+        from deepspeed.compression.helper import recursive_getattr, recursive_setattr
+    from deepspeed.utils.module_utils import recursive_getattr as rg
+    from deepspeed.utils.module_utils import recursive_setattr as rs
+
+    assert recursive_getattr is rg
+    assert recursive_setattr is rs
 
 
 def test_max_grad_norm_leaves_caller_config_untouched():

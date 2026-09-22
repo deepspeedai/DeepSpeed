@@ -25,6 +25,7 @@ from ..moe.utils import has_moe_layers
 from ..module_inject import LinearAllreduce, LinearLayer, Normalize, ReplaceWithTensorSlicing
 from deepspeed.accelerator import get_accelerator
 from ..module_inject.policy import TransformerPolicy
+from deepspeed.module_inject.tp_shard import AutoTPMeta
 from ..module_inject.auto_tp import AutoTP
 
 from ..module_inject.replace_policy import generic_policies
@@ -218,52 +219,44 @@ class InferenceEngine(Module):
             if hasattr(self.module.transformer, 'build_alibi_tensor'):
                 # The heads must be sliced with the same tensor-parallel group that partitioned
                 # the attention weights, so bind it rather than letting the helper guess.
-                num_heads = self._get_model_head_count(self.module.transformer)
-                num_kv_heads = self._get_model_kv_head_count(self.module.transformer, num_heads)
-                shard_sizes = get_head_shard_sizes(num_heads, self.mp_group, num_kv_heads)
-                self.module.transformer.build_alibi_tensor = functools.partial(build_bloom_alibi_tensor,
-                                                                               mp_group=self.mp_group,
-                                                                               head_shard_sizes=shard_sizes,
-                                                                               total_num_heads=num_heads)
+                meta = self._autotp_meta(self.module.transformer)
+                shard_sizes = get_head_shard_sizes(meta, self.mp_group)
+                self.module.transformer.build_alibi_tensor = functools.partial(
+                    build_bloom_alibi_tensor,
+                    mp_group=self.mp_group,
+                    head_shard_sizes=shard_sizes,
+                    total_num_heads=meta.num_attention_heads)
             if hasattr(self.module.transformer, 'build_mpt_alibi_tensor'):
-                num_heads = self._get_model_head_count(self.module.transformer)
-                num_kv_heads = self._get_model_kv_head_count(self.module.transformer, num_heads)
+                meta = self._autotp_meta(self.module.transformer)
                 install_head_sharded_helper(self.module.transformer, 'build_mpt_alibi_tensor', build_mpt_alibi_tensor,
-                                            self.mp_group, num_heads, num_kv_heads)
+                                            meta, self.mp_group)
         if hasattr(self.module, 'model'):
             if hasattr(self.module.model, 'get_alibi_mask'):
-                num_heads = self._get_model_head_count(self.module.model)
-                num_kv_heads = self._get_model_kv_head_count(self.module.model, num_heads)
-                install_head_sharded_helper(self.module.model, 'get_alibi_mask', get_alibi_mask, self.mp_group,
-                                            num_heads, num_kv_heads)
+                meta = self._autotp_meta(self.module.model)
+                install_head_sharded_helper(self.module.model, 'get_alibi_mask', get_alibi_mask, meta, self.mp_group)
 
     def build_attn_bias(self):
         if hasattr(self.module, 'transformer'):
             if hasattr(self.module.transformer, '_attn_bias'):
-                num_heads = self._get_model_head_count(self.module.transformer)
-                num_kv_heads = self._get_model_kv_head_count(self.module.transformer, num_heads)
-                install_head_sharded_helper(self.module.transformer, '_attn_bias', build_mpt_atten_bias_tensor,
-                                            self.mp_group, num_heads, num_kv_heads)
+                meta = self._autotp_meta(self.module.transformer)
+                install_head_sharded_helper(self.module.transformer, '_attn_bias', build_mpt_atten_bias_tensor, meta,
+                                            self.mp_group)
 
-    def _get_model_head_count(self, module):
-        for source in (module, getattr(module, "config", None), getattr(self.module, "config", None)):
-            if source is None:
-                continue
-            for name in ("num_heads", "n_heads", "n_head", "num_attention_heads"):
-                value = getattr(source, name, None)
-                if value is not None:
-                    return value
-        raise ValueError(f"Cannot determine the attention head count for {module.__class__.__name__}.")
-
-    def _get_model_kv_head_count(self, module, num_heads):
-        for source in (module, getattr(module, "config", None), getattr(self.module, "config", None)):
-            if source is None:
-                continue
-            for name in ("num_key_value_heads", "num_kv_heads", "n_head_kv", "kv_n_heads"):
-                value = getattr(source, name, None)
-                if value is not None:
-                    return value
-        return num_heads
+    def _autotp_meta(self, module):
+        # from_model_config extracts from a single config object, but the head counts may live on
+        # the module, its config, or the top-level model config. Probe each source via the shared
+        # from_model_config and merge per field -- num_attention_heads is mandatory (alibi needs
+        # it), num_kv_heads is None for non-GQA. Subsumes the former
+        # _get_model_head_count / _get_model_kv_head_count pair.
+        metas = [
+            AutoTPMeta.from_model_config(s)
+            for s in (module, getattr(module, "config", None), getattr(self.module, "config", None)) if s is not None
+        ]
+        num_heads = next((m.num_attention_heads for m in metas if m.num_attention_heads is not None), None)
+        if num_heads is None:
+            raise ValueError(f"Cannot determine the attention head count for {module.__class__.__name__}.")
+        num_kv_heads = next((m.num_kv_heads for m in metas if m.num_kv_heads is not None), None)
+        return AutoTPMeta(num_attention_heads=num_heads, num_kv_heads=num_kv_heads)
 
     def _pre_forward_hook(self, module, *inputs, **kwargs):
         if self.use_cuda_events:

@@ -39,27 +39,44 @@ class NativePinnedMemory(object):
                 "DS_PIN_MEMORY_BACKEND=native requires the pin_memory op, which failed to build/load.") from e
 
     def pin(self, tensor, make_copy=True, match_shape=True):
-        numel = tensor.numel()
+        out_shape = tensor.shape if match_shape else (tensor.numel(), )
+        locked = self._new_locked(tensor, out_shape)
+        if make_copy:
+            locked.copy_(tensor.reshape(out_shape))
+        return locked
+
+    def pin_empty(self, example, shape):
+        # ``example`` is dtype-only. ``pin()`` sizes the allocation from
+        # ``example.numel()``, so a 0-element template cannot be passed through.
+        return self._new_locked(example, shape)
+
+    def _new_locked(self, example, out_shape):
+        numel = 1
+        for dim in out_shape:
+            numel *= int(dim)
         # ``base`` is the allocation root and the view root for everything derived
         # from it. Every slice/view of the returned tensor keeps ``base`` alive via
         # ``._base``, so the allocation is freed only after the returned tensor and
         # all of its aliases are gone (a live view can never outlive the free).
-        base = self._handle.new_cpu_locked_tensor(numel, tensor)
+        base = self._handle.new_cpu_locked_tensor(numel, example)
         begin = base.data_ptr()
         locked = base[:numel]
         if base.nbytes and self._device_registration_enabled():
             from deepspeed.accelerator import get_accelerator
             try:
-                if get_accelerator().register_host_memory(begin, base.nbytes):
+                accelerator = get_accelerator()
+                # Some device runtimes only register page-aligned ranges; round
+                # the address down to the accelerator-declared alignment and pad
+                # the size so the registered range still covers the request.
+                registered_begin = self._align_host_address(accelerator, begin)
+                padded_bytes = base.nbytes + (begin - registered_begin)
+                if accelerator.register_host_memory(registered_begin, padded_bytes):
                     self._device_registered.add(begin)
             except Exception as e:
                 logger.warning_once(
                     f"Native pinned-memory device registration failed; continuing with mlock only: {e}")
-        if make_copy:
-            locked.copy_(tensor.reshape(-1))
-        if match_shape:
-            locked = locked.view(tensor.shape)
-        self._ranges[begin] = begin + numel * tensor.element_size()
+        locked = locked.view(out_shape)
+        self._ranges[begin] = begin + numel * example.element_size()
         locked.ds_pinned = True
         # Remember the owning allocation address so an explicit unpin() frees the
         # original region even if the tensor's ``.data`` is later redirected (e.g.
@@ -121,11 +138,23 @@ class NativePinnedMemory(object):
             pass
 
     @staticmethod
+    def _align_host_address(accelerator, address):
+        # Device runtimes may require page-aligned registration ranges; round
+        # down to the alignment the accelerator declares (1 = no requirement).
+        alignment = accelerator.pin_memory_alignment()
+        if alignment <= 1:
+            return address
+        return address - (address % alignment)
+
+    @staticmethod
     def _unregister_device(begin, device_registered):
         if begin not in device_registered:
             return
         from deepspeed.accelerator import get_accelerator
-        get_accelerator().unregister_host_memory(begin)
+        accelerator = get_accelerator()
+        # Same rounding as at registration time, so the driver releases exactly
+        # the range it was given.
+        accelerator.unregister_host_memory(NativePinnedMemory._align_host_address(accelerator, begin))
         device_registered.discard(begin)
 
     @staticmethod

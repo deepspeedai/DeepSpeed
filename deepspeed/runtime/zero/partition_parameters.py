@@ -73,11 +73,16 @@ class NoGatherHandle:
             param.data = param.ds_tensor.data.to(device=get_accelerator().current_device_name(),
                                                  non_blocking=True).view(param.ds_shape)
         self.__param = param
+        self.__complete = False
 
     def wait(self, **kwargs) -> None:
+        if self.__complete:
+            return
+
         if not get_accelerator().resolves_data_dependency():
             get_accelerator().current_stream().synchronize()
         self.__param.ds_status = ZeroParamStatus.AVAILABLE
+        self.__complete = True
 
 
 class NoGatherCoalescedHandle:
@@ -462,7 +467,7 @@ class InsertPostInitMethodToModuleSubClasses(object):
                     fn_to_apply(module_to_apply_fn_to)
 
                     for param in params_to_apply_fn_to:
-                        dist.broadcast(param.data, 0, group=param.ds_process_group)
+                        dist.broadcast(param.data.view(torch.uint8), 0, group=param.ds_process_group)
 
                     for param in params_to_apply_fn_to:
                         param.partition(has_been_updated=True)
@@ -705,8 +710,12 @@ class AllGatherHandle:
         self.__quantization = quantization
         self.__param_buffer = param_buffer
         self.__original_dtype = original_dtype
+        self.__complete = False
 
     def wait(self, handle_dependency=True) -> None:
+        if self.__complete:
+            return
+
         instrument_w_nvtx(self.__handle.wait)()
 
         if self.__param_buffer is not None:
@@ -719,6 +728,7 @@ class AllGatherHandle:
                                                                        dtype=self.__param.dtype).to(
                                                                            self.__param.device)
         self.__param.ds_status = ZeroParamStatus.AVAILABLE
+        self.__complete = True
 
 
 class AllGatherCoalescedHandle:
@@ -1187,9 +1197,9 @@ class Init(InsertPostInitMethodToModuleSubClasses):
         self._convert_to_deepspeed_param(param)
         partition_group = self.get_partition_dp_group(param)
         if dist.get_world_group() == partition_group:
-            dist.broadcast(param.data, 0, partition_group)
+            dist.broadcast(param.data.view(torch.uint8), 0, partition_group)
         else:
-            dist.broadcast(param.data, dist.get_global_rank(partition_group, 0), partition_group)
+            dist.broadcast(param.data.view(torch.uint8), dist.get_global_rank(partition_group, 0), partition_group)
         param.partition()
 
     def _convert_to_zero_parameters(self, param_list):
@@ -1579,7 +1589,7 @@ class Init(InsertPostInitMethodToModuleSubClasses):
                          force=False)
             if param_list is None:
                 param_list = [cls]
-            self._partition(param_list, has_been_updated=has_been_updated, free_data=True)
+            self._partition(param_list, has_been_updated=has_been_updated, free_data=free_data)
 
         def reduce_gradients_at_owner(param_list=None, hierarchy=0):
             cls = param
@@ -1739,7 +1749,7 @@ class Init(InsertPostInitMethodToModuleSubClasses):
             print_rank_0(f"Before Partitioning Param {param.ds_id}", force=False)
             if self.zero_param_process_group is not None:
                 self._partition_param_sec(param, has_been_updated=has_been_updated)
-            self._partition_param(param, has_been_updated=has_been_updated, free_data=True)
+            self._partition_param(param, has_been_updated=has_been_updated, free_data=free_data)
 
             param.ds_status = ZeroParamStatus.NOT_AVAILABLE
             # if param.ds_tensor is not None:
@@ -2078,8 +2088,10 @@ class Init(InsertPostInitMethodToModuleSubClasses):
                     launch_quantize_handles.append(quant_handle)
             launch_handles.append(h)
 
-        # Wait ensures the operation is enqueued, but not necessarily complete.
-        launch_handles[-1].wait()
+        # gloo handles are independent and the CPU synchronize() below is a
+        # no-op, so every handle must be waited on, not just the last one.
+        for handle in launch_handles:
+            handle.wait()
         if quantize:
             for quant_handle in launch_quantize_handles:
                 quant_handle.wait()
@@ -2527,7 +2539,7 @@ class GatheredParameters:
                     f"the accelerator device. If you don't need to broadcast updates, use modifier_rank=None.")
 
         handles = [
-            dist.broadcast(p.data,
+            dist.broadcast(p.data.view(torch.uint8),
                            self.src_rank_by_group[id(p.ds_process_group)],
                            group=p.ds_process_group,
                            async_op=True) for p in self.params

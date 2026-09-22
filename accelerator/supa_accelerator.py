@@ -62,6 +62,15 @@ class SUPA_Accelerator(DeepSpeedAccelerator):
     def random(self):
         return torch.random
 
+    def register_host_memory(self, address, num_bytes):
+        result = int(torch.supa.supart().supaHostRegister(address, num_bytes, 0))
+        torch.supa.check_error(result)
+        return True
+
+    def unregister_host_memory(self, address):
+        result = int(torch.supa.supart().supaHostUnregister(address))
+        torch.supa.check_error(result)
+
     def set_rng_state(self, new_state, device_index=None):
         if device_index is None:
             return torch.supa.set_rng_state(new_state)
