@@ -9,6 +9,7 @@ from .abstract_accelerator import DeepSpeedAccelerator
 # During setup stage torch may not be installed, pass on no torch will
 # allow op builder related API to be executed.
 try:
+    import torch
     import torch.npu
 except ImportError:
     pass
