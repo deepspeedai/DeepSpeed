@@ -1779,10 +1779,10 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                     numel += group[end].ds_numel
                     end += 1
                 params, chunk = group[start:end], partitions[start:end]
-                full_grads = self._partitioned_buffers_all_gather(params, chunk, chunk[0].dtype)
+                full_grads = self._partitioned_buffers_all_gather(params, chunk, self.communication_data_type)
                 group_items = [(param, self.grad_position[self.get_param_id(param)][1], full_grad)
                                for param, full_grad in zip(params, full_grads)]
-                self._muon_update_sub_group(i, group_items, chunk[0].dtype)
+                self._muon_update_sub_group(i, group_items, self.communication_data_type)
                 for param, partition, update in zip(params, chunk, full_grads):
                     offset = rank * param.partition_numel()
                     num_elements = max(0, min(param.partition_numel(), param.ds_numel - offset))
