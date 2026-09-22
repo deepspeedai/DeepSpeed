@@ -149,6 +149,20 @@ def test_gradient_allreduce_op_default():
     assert config.gradient_allreduce_op == "mean"
 
 
+def test_disable_python_gc_config_default():
+    config = DeepSpeedConfig({"train_batch_size": 1})
+    assert config.disable_python_gc is False
+
+
+@pytest.mark.parametrize("value", [False, True])
+def test_disable_python_gc_config(value):
+    config = DeepSpeedConfig({
+        "train_batch_size": 1,
+        "disable_python_gc": value,
+    })
+    assert config.disable_python_gc is value
+
+
 def test_invalid_gradient_allreduce_op():
     with pytest.raises(ValueError, match="Invalid gradient_allreduce_op"):
         DeepSpeedConfig({
