@@ -2239,8 +2239,12 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         current_size = 0
         # find the flatten copy in the optimizer's state
         flatten_copy = self.optimizer.param_groups[param_group_idx]['params'][0]
+        staged_momentum = None
         if self._is_muon_group(tensor_list):
             self._muon_momentum_buffer(tensor_list, param_group_idx, dtype, device)
+            # Staged once for the whole partition: staging copies the committed momentum in, so
+            # doing it per parameter would throw away what the parameters before it just wrote.
+            staged_momentum = self._muon_staging_momentum(flatten_copy, param_group_idx)
 
         partition_id = dist.get_rank(group=self.real_dp_process_group[param_group_idx])
         buffer_idx = 0
@@ -2248,8 +2252,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             grad_accum = self.all_grad_tensors[param_group_idx][i]
             if getattr(tensor, 'use_muon', False) and 'muon' in self.optimizer.__class__.__name__.lower():
                 assert tensor.ndim > 1, f"if use muon, then tensor dim > 1, got {tensor.size()}"
-                buffer = torch.narrow(self._muon_staging_momentum(flatten_copy, param_group_idx), 0, buffer_idx,
-                                      tensor.numel()).view(tensor.size())
+                buffer = torch.narrow(staged_momentum, 0, buffer_idx, tensor.numel()).view(tensor.size())
                 ns_method = self.optimizer.param_groups[param_group_idx].get('ns_method', 'gram')
                 grad_accum = muon_update(grad_accum,
                                          buffer,
@@ -2335,16 +2338,19 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         flat_tensor_list = []
         current_size = 0
         flatten_copy = self.optimizer.param_groups[param_group_idx]['params'][0]
+        staged_momentum = None
         if self._is_muon_group(tensor_list):
             self._muon_momentum_buffer(tensor_list, param_group_idx, dtype, device)
+            # Staged once for the whole partition: staging copies the committed momentum in, so
+            # doing it per parameter would throw away what the parameters before it just wrote.
+            staged_momentum = self._muon_staging_momentum(flatten_copy, param_group_idx)
 
         buffer_idx = 0
         for i, tensor in enumerate(tensor_list):
             grad_accum = self.all_grad_tensors[param_group_idx][i]
             if getattr(tensor, 'use_muon', False) and 'muon' in self.optimizer.__class__.__name__.lower():
                 assert tensor.ndim > 1, f"if use muon, then tensor dim > 1, got {tensor.size()}"
-                buffer = torch.narrow(self._muon_staging_momentum(flatten_copy, param_group_idx), 0, buffer_idx,
-                                      tensor.numel()).view(tensor.size())
+                buffer = torch.narrow(staged_momentum, 0, buffer_idx, tensor.numel()).view(tensor.size())
                 ns_method = self.optimizer.param_groups[param_group_idx].get('ns_method', 'gram')
                 grad_accum = muon_update(grad_accum,
                                          buffer,
