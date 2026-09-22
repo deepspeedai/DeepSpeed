@@ -28,6 +28,7 @@ from deepspeed.checkpoint import (
     PARAM_GROUPS,
     PARAM_SLICE_MAPPINGS,
     PARAM_SHAPES,
+    WHOLE_PARAM_OPTIMIZER_STATES,
     PARAM,
     CAT_DIM,
     PARAM_N_SUB_PARAMS,
@@ -136,27 +137,70 @@ def _save_checkpoint(file_path, chkpt_sd):
 # else, so the conversion raised `KeyError: 'exp_avg'` before it wrote anything.
 #
 # A state is taken apart the same way the parameter is, by the fragment each rank owns, so it
-# has to be shaped like the partition. One is not: ZeRO-1/2 give Muon a momentum buffer the
-# size of the whole group, replicated on every rank, because Newton-Schulz needs the whole
-# matrix (`_muon_momentum_buffer` in stage_1_and_2.py). Slicing that by partition offsets would
-# write fragments that look right and hold the wrong rows, so it is refused instead.
-def _flat_state(param_group_id, param_group_state, fp32_flat_group):
+# has to be shaped like the partition. The exceptions are the states the optimizer records as
+# whole-parameter (see `_whole_param_states`), which are dumped separately.
+def _flat_state(param_group_id, param_group_state, fp32_flat_group, whole_param_states=()):
     partition_numel = fp32_flat_group.numel()
     flat_state = {"fp32": fp32_flat_group}
     for name, value in param_group_state.items():
         if name == "step":
             flat_state["step"] = value
-        elif not torch.is_tensor(value):
+        elif not torch.is_tensor(value) or name in whole_param_states:
             continue
         elif value.numel() == partition_numel:
             flat_state[name] = value
         else:
             raise ValueError(f"Optimizer state '{name}' of param group {param_group_id} has "
                              f"{value.numel()} elements, but the group's ZeRO partition has "
-                             f"{partition_numel}. The universal format stores optimizer state in "
-                             f"the partition's layout, so a state of another shape - a buffer "
-                             f"replicated across ranks, for instance - cannot be placed yet.")
+                             f"{partition_numel}, and the checkpoint does not record it as a "
+                             f"whole-parameter state. There is no layout to take it apart by.")
     return flat_state
+
+
+def _whole_param_states(optim_sd, param_group_id, param_group_state):
+    """The states of this group that hold every parameter of the partition whole.
+
+    ZeRO-1/2 give Muon a momentum buffer that holds, for each parameter the partition touches,
+    that parameter's whole momentum, because Newton-Schulz needs the whole matrix. The optimizer
+    records which states are laid out that way. A checkpoint written before it did cannot be
+    told apart from one shaped like the partition by size alone, so it is refused.
+    """
+    recorded = optim_sd.get(WHOLE_PARAM_OPTIMIZER_STATES)
+    if recorded is not None:
+        return tuple(recorded[param_group_id])
+    param_groups = optim_sd.get(BASE_OPTIMIZER_STATE, {}).get(PARAM_GROUPS, [])
+    is_muon = param_group_id < len(param_groups) and param_groups[param_group_id].get("use_muon", False)
+    if int(optim_sd.get(ZERO_STAGE, 0)) in (1, 2) and is_muon and "momentum_buffer" in param_group_state:
+        raise ValueError(f"Param group {param_group_id} is a ZeRO-1/2 Muon group whose checkpoint predates "
+                         f"'{WHOLE_PARAM_OPTIMIZER_STATES}', so where each parameter's momentum lives in "
+                         f"its buffer is not recorded. Save it again with a newer DeepSpeed to convert it.")
+    return ()
+
+
+# Whole-parameter states go in their own directory: every rank that holds a piece of the
+# parameter writes the same full copy, so the merge compares them instead of concatenating.
+WHOLE_PARAM_STATE_DIR = "whole"
+
+
+def _dump_whole_param_states(dir, tp_index, dp_index, state_name, state_tensor, param_slice_mapping, param_shapes,
+                             skip):
+    """Write each parameter's whole state out of a buffer that holds the partition's parameters whole.
+
+    The buffer lays the parameters out one after another, whole and unpadded, in the order they
+    sit in the partition, which is the order of their fragments' starts.
+    """
+    offset = 0
+    for name, fragment in sorted(param_slice_mapping.items(), key=lambda item: item[1].start):
+        numel = _shape_numel(param_shapes[name])
+        if not skip(name):
+            path = os.path.join(dir, name, str(tp_index), WHOLE_PARAM_STATE_DIR)
+            os.makedirs(path, exist_ok=True)
+            _save_checkpoint(os.path.join(path, f"{state_name}.{dp_index_to_str(dp_index)}"),
+                             state_tensor.narrow(0, offset, numel).clone())
+        offset += numel
+    if offset != state_tensor.numel():
+        raise ValueError(f"'{state_name}' on dp rank {dp_index} has {state_tensor.numel()} elements, but the "
+                         f"parameters of its partition add up to {offset}, so they cannot be read out of it.")
 
 
 def extract_zero_shards(dir, ds_checkpoint, indices_3D):
@@ -177,19 +221,35 @@ def extract_zero_shards(dir, ds_checkpoint, indices_3D):
     fp32_groups = optim_sd[SINGLE_PARTITION_OF_FP32_GROUPS]
     param_groups_cnt = len(state_groups)
 
+    def is_pipeline_replica(name):
+        # Tied weights are replicated in the first and last pp stages; the first stage's copy is kept.
+        return pp_index > 0 and any(re.match(pattern, name) for pattern in pipeline_replicated_params)
+
     for param_group_id in range(param_groups_cnt):
 
-        flat_state = _flat_state(param_group_id, state_groups[param_group_id], fp32_groups[param_group_id])
+        group_state = state_groups[param_group_id]
+        whole_param_states = _whole_param_states(optim_sd, param_group_id, group_state)
+        flat_state = _flat_state(param_group_id, group_state, fp32_groups[param_group_id], whole_param_states)
 
         for name, fragment_mapping in param_slice_mappings[param_group_id].items():
-            if pp_index > 0 and any(re.match(pattern, name) for pattern in pipeline_replicated_params):
-                # Skip tied weights that are replicated in first and last pp stages
+            if is_pipeline_replica(name):
                 continue
 
             # pprint(f"dpt{dp_index}{pp_index}{tp_index} {param_group_id} {name} => {fragment_mapping.start}:{fragment_mapping.numel}")
             for state_key in flat_state.keys():
                 dump_param_fragment(dir, tp_index, dp_index, state_key, flat_state[state_key], name,
                                     fragment_mapping.start, fragment_mapping.numel)
+
+        present = [state_name for state_name in whole_param_states if state_name in group_state]
+        if present:
+            # Model-state files are ordered pp-major, one per (pp, tp) pair.
+            model_state_index = pp_index * ds_checkpoint.tp_degree + tp_index
+            param_shapes = ds_checkpoint.model_state_metadata[model_state_index][1][PARAM_SHAPES]
+            if not isinstance(param_shapes, dict):
+                raise RuntimeError(f"Whole-parameter states need {PARAM_SHAPES} for pp {pp_index}, tp {tp_index}.")
+        for state_name in present:
+            _dump_whole_param_states(dir, tp_index, dp_index, state_name, group_state[state_name],
+                                     param_slice_mappings[param_group_id], param_shapes, is_pipeline_replica)
 
 
 def extract_zero_shards_stage3(optim_files_grid,
@@ -350,6 +410,51 @@ def _states_on_disk(slice_base_path, tp_degree):
     return sorted(states, key=lambda state: (state != "fp32", state))
 
 
+def _whole_param_states_on_disk(slice_base_path, tp_degree):
+    """The whole-parameter states the extraction wrote for this parameter."""
+    states = set()
+    for tp_index in range(tp_degree):
+        whole_path = os.path.join(slice_base_path, str(tp_index), WHOLE_PARAM_STATE_DIR)
+        if not os.path.isdir(whole_path):
+            continue
+        for copy in os.listdir(whole_path):
+            state, _, dp_index = copy.rpartition(".")
+            if state and dp_index.isdigit():
+                states.add(state)
+    return sorted(states)
+
+
+def _merge_whole_param_copies(param_base_path, state, tp_degree, slice_shapes=None):
+    """One slice per tensor-parallel rank, from the copies every data-parallel holder wrote.
+
+    Each data-parallel rank whose partition touches the parameter kept its whole state and wrote
+    it, so the copies are compared rather than concatenated. They are computed from the same
+    reduced gradient and should agree; ranks that drifted apart would otherwise go unnoticed.
+    """
+    slices = []
+    for tp_index in range(tp_degree):
+        paths = sorted(glob.glob(os.path.join(param_base_path, str(tp_index), WHOLE_PARAM_STATE_DIR, f"{state}.*")))
+        shape = slice_shapes[tp_index] if slice_shapes is not None else None
+        if not paths:
+            assert shape is not None and math.prod(shape) == 0, (
+                f"No '{state}' copy for tp rank {tp_index} of {param_base_path}, whose shape is not empty.")
+            slices.append(None)
+            continue
+        copies = [torch.load(path, weights_only=False) for path in paths]
+        # Measured bit-identical; the tolerance only leaves room for kernels that are not bitwise
+        # reproducible across devices, while still catching a copy that never got the update.
+        for path, copy in zip(paths[1:], copies[1:]):
+            if not torch.allclose(copy, copies[0], rtol=1e-4, atol=1e-6):
+                raise ValueError(f"Data-parallel ranks disagree on '{state}' of {param_base_path}: "
+                                 f"{paths[0]} and {path} differ by up to {(copy - copies[0]).abs().max().item():.3e}.")
+        slices.append(copies[0] if shape is None else copies[0].reshape(shape))
+    dtype = next(piece.dtype for piece in slices if piece is not None)
+    return [
+        torch.empty(slice_shapes[tp_index], dtype=dtype) if piece is None else piece
+        for tp_index, piece in enumerate(slices)
+    ]
+
+
 def merge_tp_slices(uc_info, dir, slice_dir, tp_degree, name_and_shapes):
 
     name, per_tp_shapes = name_and_shapes
@@ -428,8 +533,14 @@ def merge_tp_slices(uc_info, dir, slice_dir, tp_degree, name_and_shapes):
     if step_merged:
         _save_checkpoint(os.path.join(param_base_path, "step.pt"), step_merged[0])
 
-    for state in _states_on_disk(slice_base_path, tp_degree):
-        slices = _merge_zero_shards(slice_base_path, state, tp_degree, per_tp_shapes)
+    fragment_states = _states_on_disk(slice_base_path, tp_degree)
+    whole_param_states = _whole_param_states_on_disk(slice_base_path, tp_degree)
+    assert not set(fragment_states) & set(whole_param_states), \
+        f"{name} has states stored both as fragments and whole: {set(fragment_states) & set(whole_param_states)}"
+    merges = [(state, _merge_zero_shards) for state in fragment_states]
+    merges += [(state, _merge_whole_param_copies) for state in whole_param_states]
+    for state, merge in merges:
+        slices = merge(slice_base_path, state, tp_degree, per_tp_shapes)
         final_path = os.path.join(param_base_path, f"{state}.pt")
 
         #print(f"Expected shape: {shape}")

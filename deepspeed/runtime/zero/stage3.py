@@ -3576,9 +3576,15 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                 else:
                     self.optimizer.state[fp32_param][key] = key_tensor
 
-        for param_group in self.optimizer.param_groups:
-            # Generally, the hyperparameters of each parameter should be the same, we can obtain from any parameter.
-            for key, value in optim_sd[OPTIMIZER_STATE_DICT]["param_groups"][0].items():
+        # Each group takes back its own hyperparameters. Muon keeps two groups with different
+        # settings, its own and the Adam half's, and copying the first onto both runs the Adam half
+        # as a Muon group.
+        saved_groups = optim_sd[OPTIMIZER_STATE_DICT]["param_groups"]
+        if len(saved_groups) != len(self.optimizer.param_groups):
+            # No group to match each to, so fall back to copying the first, as before.
+            saved_groups = [saved_groups[0]] * len(self.optimizer.param_groups)
+        for param_group, saved_group in zip(self.optimizer.param_groups, saved_groups):
+            for key, value in saved_group.items():
                 if key == 'params':
                     param_group['params'] = []
                 else:

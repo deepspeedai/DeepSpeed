@@ -26,6 +26,8 @@ class tensor_fragment:
     use_offload: bool
     param_group_index: int
     optim_fragment: Dict = None
+    # Universal-checkpoint states this parameter gets whole rather than as its fragment.
+    whole_param_state: Dict = None
 
     def update_hp(self):
         self.hp_fragment.data.copy_(self.lp_fragment.data)

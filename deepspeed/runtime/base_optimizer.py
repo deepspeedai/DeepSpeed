@@ -329,6 +329,10 @@ class ZeROOptimizer(DeepSpeedOptimizer):
     def _grad_acc_post_hooks(self, value):
         self._backward_hook_state._grad_acc_post_hooks = value
 
+    def _whole_param_optimizer_states(self, group_index):
+        """Optimizer states of this group that a universal checkpoint gives each parameter whole."""
+        return ()
+
     def load_hp_checkpoint_state_from_checkpoint_dir(self, lp_groups_name: str, checkpoint_dir: str) -> None:
         checkpoint_dir = os.path.join(checkpoint_dir, "zero")
         optim_state_path = os.path.join(checkpoint_dir, "optimizer_state.pt")
@@ -362,7 +366,8 @@ class ZeROOptimizer(DeepSpeedOptimizer):
                                                        tp_rank,
                                                        tp_world_size,
                                                        ep_rank=ep_rank,
-                                                       ep_size=ep_size)
+                                                       ep_size=ep_size,
+                                                       whole_param_keys=self._whole_param_optimizer_states(i))
                     for key in lp._hp_mapping.get_optim_state_keys():
                         opt_keys.add(key)
                     steps.append(step)

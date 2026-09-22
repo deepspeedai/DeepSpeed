@@ -219,9 +219,10 @@ def _resolve_autotp_partition(current_param, ckpt_dict, full_hp_param, tp_rank, 
     return slice_tensor.flatten()
 
 
-def load_hp_checkpoint_state(self, folder, tp_rank, tp_world_size, ep_rank=0, ep_size=1):
+def load_hp_checkpoint_state(self, folder, tp_rank, tp_world_size, ep_rank=0, ep_size=1, whole_param_keys=()):
     hp_mapping = self._hp_mapping
     hp_mapping.optim_fragment = {}
+    hp_mapping.whole_param_state = {}
 
     hp_keys = []
     for file in os.listdir(folder):
@@ -359,6 +360,10 @@ def load_hp_checkpoint_state(self, folder, tp_rank, tp_world_size, ep_rank=0, ep
             assert dst_tensor.numel() == lp_frag_address.numel, \
                 f'Load checkpoint {key} dst numel {dst_tensor.numel()} != src numel {lp_frag_address.numel}'
             dst_tensor.data.copy_(tp_hp_fragment.data)
+        elif key in whole_param_keys:
+            # The optimizer keeps this state whole on every rank that holds a piece of the
+            # parameter, so it takes this rank's tensor-parallel slice, not the fragment.
+            hp_mapping.whole_param_state[key] = tp_hp_slice.clone().detach()
         else:
             assert tp_hp_fragment.numel() == lp_frag_address.numel, \
                 f'Load checkpoint {key} dst numel {tp_hp_fragment.numel()} != src numel {lp_frag_address.numel}'
