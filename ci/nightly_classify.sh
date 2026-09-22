@@ -9,10 +9,9 @@
 #   green   the nightly passed; the caller moves the nightly-last-green tag
 #   infra   no GPU instance was provisioned; no candidate information, do nothing
 #   timeout the run died at a time budget; open an issue
+#   unknown no sentinel in the logs: the run died before the controller could
+#           classify itself (checkout, setup, or a job kill); open an issue
 #   report  real test failures; open an issue listing the failing tests
-#
-# A failed run whose logs contain no DS_CI_FAILURE_CLASS sentinel was killed before
-# the controller could classify itself (job timeout), which is a timeout.
 
 set -u
 
@@ -37,11 +36,17 @@ case "${class:-none}" in
         echo "failure_class=infra" >> "$GITHUB_OUTPUT"
         echo "GPU capacity failure; no candidate information"
         ;;
-    timeout | none)
-        # No sentinel means the job was killed before the controller could exit.
+    timeout)
         echo "action=timeout" >> "$GITHUB_OUTPUT"
-        echo "failure_class=${class:-killed}" >> "$GITHUB_OUTPUT"
+        echo "failure_class=timeout" >> "$GITHUB_OUTPUT"
         echo "time budget exhausted"
+        ;;
+    none)
+        # No sentinel can mean anything from a job kill to a pre-controller
+        # failure (checkout, setup), so say so instead of guessing timeout.
+        echo "action=unknown" >> "$GITHUB_OUTPUT"
+        echo "failure_class=unknown" >> "$GITHUB_OUTPUT"
+        echo "no failure class in the logs; the run died unclassified"
         ;;
     *)
         echo "unrecognized DS_CI_FAILURE_CLASS=$class; refusing to route" >&2

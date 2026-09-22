@@ -6,6 +6,8 @@ name: nightly-triage
 #   green  -> move the nightly-last-green tag to the tested SHA
 #   infra  -> do nothing (capacity problem, no candidate information)
 #   timeout-> open an issue (the suite outgrew its Sandbox budget)
+#   unknown-> open an issue (no sentinel: the run died before the controller
+#             could classify itself)
 #   test   -> open an issue listing the failing tests
 # Only scheduled runs of modal-torch-latest are triaged. See
 # .github/workflows/TEST_SELECTION.md.
@@ -33,6 +35,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
+      contents: read
       actions: read
     outputs:
       action: ${{ steps.classify.outputs.action }}
@@ -66,10 +69,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - name: Checkout master
+      # The nightly SHA, not master: master advances during the ~70-minute run,
+      # and the tag must point at the revision the suite actually verified.
+      - name: Checkout the nightly SHA
         uses: actions/checkout@v7
         with:
-          ref: master
+          ref: ${{ github.event.workflow_run.head_sha }}
           fetch-depth: 1
 
       - name: Move the nightly-last-green tag
@@ -84,8 +89,8 @@ jobs:
     needs: triage
     if: needs.triage.outputs.action == 'timeout'
     permissions:
+      contents: read
       issues: write
-      labels: write
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -115,14 +120,51 @@ jobs:
             "nightly timeout: modal-torch-latest full suite exceeded its time budget" \
             issue-body.txt "$NIGHTLY_RUN_URL"
 
+  report-unknown:
+    name: report unclassified nightly failure
+    needs: triage
+    if: needs.triage.outputs.action == 'unknown'
+    permissions:
+      contents: read
+      issues: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout report scripts at the nightly SHA
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          persist-credentials: false
+          lfs: false
+          submodules: false
+
+      - name: Report the unclassified failure
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          NIGHTLY_RUN_URL: ${{ github.event.workflow_run.html_url }}
+          NIGHTLY_SHA: ${{ github.event.workflow_run.head_sha }}
+        # No sentinel means the run died before the controller could classify
+        # itself (checkout, setup, dependency install, or a job kill). That is a
+        # different situation from a time-budget timeout and gets its own issue.
+        run: |
+          {
+            echo "The nightly full-suite run at $NIGHTLY_SHA failed without a DS_CI_FAILURE_CLASS sentinel."
+            echo "The run died before the controller could classify itself (checkout, setup, or a job kill). Triage manually."
+            echo "Run: $NIGHTLY_RUN_URL"
+          } > issue-body.txt
+          bash ci/nightly_report.sh \
+            "nightly failure without a failure class: modal-torch-latest died unclassified" \
+            issue-body.txt "$NIGHTLY_RUN_URL"
+
   report-failures:
     name: report nightly test failures
     needs: triage
     if: needs.triage.outputs.action == 'report'
     permissions:
+      contents: read
       actions: read
       issues: write
-      labels: write
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:

@@ -123,6 +123,10 @@ suite. Its outcome feeds `nightly-triage.yml`:
   report, no tag move.
 - **Timeout** (the Sandbox/job time budget ran out) → an issue is opened; a
   timeout points at an operational problem, not a candidate regression.
+- **Unknown** (no sentinel in the logs) → an issue is opened. A failed run can
+  lack a sentinel for reasons other than a timeout — checkout, setup, or a job
+  kill before the controller could classify itself — so triage reports it as
+  unclassified rather than guessing a class.
 - **Real test failures** → an issue is opened listing the failing test files
   and the run. Triage deliberately stops there: the merge queue already gated
   each entry on its own impacted tests, so a nightly failure is either a
@@ -133,11 +137,10 @@ suite. Its outcome feeds `nightly-triage.yml`:
 
 The controller (`ci/torch_latest.py`) classifies its own failures for this
 routing: it prints a `DS_CI_FAILURE_CLASS=infra|timeout|test` sentinel line and
-exits with a dedicated code (75 / 124 / 1). A failed run with no sentinel was
-killed before the controller could classify itself, which triage treats as a
-timeout.
+exits with a dedicated code (75 / 124 / 1). A failed run with no sentinel
+routes to the unknown class instead of guessing.
 
-Triage reports (timeout, test failures) go through `ci/nightly_report.sh`:
+Triage reports (timeout, unknown, test failures) go through `ci/nightly_report.sh`:
 every report carries the `nightly-triage` label, and a recurring outcome
 comments on its still-open issue instead of filing a new one. Dedup keys on
 the title, so titles are stable across recurrences (per-night SHAs live in

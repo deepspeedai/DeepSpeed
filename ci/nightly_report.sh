@@ -17,7 +17,9 @@
 #
 # Requires GH_TOKEN and GITHUB_REPOSITORY in the environment.
 
-set -u
+# A failed gh call must fail the script: otherwise a lost issue creation ends
+# with a successful echo and the workflow reports green without any report.
+set -euo pipefail
 
 LABEL="nightly-triage"
 
