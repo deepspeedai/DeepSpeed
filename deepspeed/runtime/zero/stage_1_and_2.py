@@ -41,7 +41,8 @@ from deepspeed.module_inject.auto_ep_folding import apply_folding_correction_to_
 from deepspeed.runtime.zero.muon.muon_optimizer import MuonWithAuxAdam
 from deepspeed.checkpoint.constants import (DS_VERSION, GROUP_PADDINGS, PARAM_ALIGNMENT_PADDINGS, PARTITION_COUNT,
                                             LOSS_SCALER, SINGLE_PARTITION_OF_FP32_GROUPS, BASE_OPTIMIZER_STATE,
-                                            BASE_OPTIMIZER_STATE_STEP, CLIP_GRAD, ZERO_STAGE, PARAM_SLICE_MAPPINGS)
+                                            BASE_OPTIMIZER_STATE_STEP, CLIP_GRAD, ZERO_STAGE, PARAM_SLICE_MAPPINGS,
+                                            WHOLE_PARAM_OPTIMIZER_STATES)
 from deepspeed.utils import link_hp_params, lazy_init_hp_params_optimizer_state
 from deepspeed.checkpoint import enable_universal_checkpoint
 from deepspeed.checkpoint.constants import UNIVERSAL_CHECKPOINT_INFO
@@ -3033,6 +3034,9 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
 
         state_dict[DS_VERSION] = version
         state_dict[PARAM_SLICE_MAPPINGS] = self._param_slice_mappings
+        state_dict[WHOLE_PARAM_OPTIMIZER_STATES] = [
+            list(self._whole_param_optimizer_states(i)) for i in range(len(self.bit16_groups))
+        ]
 
         autotp_uc_info = self._get_universal_checkpoint_info()
         if autotp_uc_info is not None:
@@ -3300,6 +3304,44 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
 
     def _load_universal_checkpoint(self, checkpoint_folder, load_optimizer_states, load_from_fp32_weights):
         self.load_hp_checkpoint_state_from_checkpoint_dir("bit16_groups", checkpoint_folder)
+        self._restore_whole_param_optimizer_states()
+
+    def _whole_param_optimizer_states(self, group_index):
+        """Optimizer states of this group that hold every parameter of the partition whole.
+
+        Muon keeps its momentum per parameter, for every parameter the partition touches, because
+        Newton-Schulz needs the whole matrix (see `_muon_momentum_buffer`). A parameter that
+        straddles two partitions is therefore in both ranks' buffers. Every other state is shaped
+        like the partition.
+        """
+        group = self.bit16_groups[group_index]
+        if self.cpu_offload or not group or not self._is_muon_group(group):
+            return ()
+        return ("momentum_buffer", )
+
+    def _restore_whole_param_optimizer_states(self):
+        """Put back together the states a universal checkpoint stores per parameter.
+
+        The universal loader gives each parameter its whole slice of these states, not a fragment,
+        and they are concatenated here in this partition's order, which does not have to be the
+        order they were saved in: a different data-parallel size partitions differently.
+        """
+        for group_index, params in enumerate(self.params_in_partition):
+            for key in self._whole_param_optimizer_states(group_index):
+                pieces = []
+                for param in params:
+                    if param.numel() == 0:
+                        continue
+                    whole = getattr(param._hp_mapping, "whole_param_state", None) or {}
+                    pieces.append(whole.pop(key, None))
+                if all(piece is None for piece in pieces):
+                    # Nothing was saved, e.g. a checkpoint taken before the first step.
+                    continue
+                if any(piece is None for piece in pieces):
+                    raise RuntimeError(f"The universal checkpoint holds '{key}' for only some of the parameters "
+                                       f"in this rank's partition of param group {group_index}.")
+                flatten_copy = self.optimizer.param_groups[group_index]['params'][0]
+                self.optimizer.state[flatten_copy][key] = torch.cat(pieces).to(flatten_copy.device)
 
     def _load_global_state(self, sd):
         self.loss_scaler = sd.get(LOSS_SCALER, self.loss_scaler)
