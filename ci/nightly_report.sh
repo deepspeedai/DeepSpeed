@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # DeepSpeed Team
 # Deduplicating issue reporter for nightly triage
-# (.github/workflows/nightly-bisect.yml).
+# (.github/workflows/nightly-triage.yml).
 #
 # Usage: nightly_report.sh TITLE BODY_FILE [RUN_URL]
 #

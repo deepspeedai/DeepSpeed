@@ -113,27 +113,23 @@ the nightly full suite exists to catch.
 ### Nightly full-suite runs and regression triage
 
 A scheduled nightly (`cron`, see `modal-torch-latest.yml`) always runs the full
-suite. Its outcome feeds `nightly-bisect.yml`:
+suite. Its outcome feeds `nightly-triage.yml`:
 
-- **Green** → the `nightly-last-green` tag moves to the tested SHA. The tag is
-  the good endpoint for any later bisect, so days that fail for operational
-  reasons (no GPU instance, timeout) simply leave the tag in place and widen the
-  next bisect range instead of narrowing it wrongly.
+- **Green** → the `nightly-last-green` tag moves to the tested SHA. The tag
+  anchors the last verified-good master revision (and is exactly the good
+  endpoint a later manual bisect would need), so days that fail for operational
+  reasons (no GPU instance, timeout) simply leave the tag in place.
 - **Infra** (the Sandbox never got a GPU instance) → nothing is concluded; no
-  bisect, no tag move.
+  report, no tag move.
 - **Timeout** (the Sandbox/job time budget ran out) → an issue is opened; a
-  timeout is not bisectable, because intermediate commits would time out too.
-- **Real test failures** → `git bisect run ci/bisect_nightly.sh` between
-  `nightly-last-green` and the failing SHA, dispatching `modal-torch-latest` at
-  each step with only the nightly's failing test files (the dispatch's
-  `test_targets` input, validated like any selected list), which cuts a step
-  from a ~70-minute full run to roughly its install overhead plus the failing
-  tests; the culprit lands in an issue. Targets that do not exist at a step's
-  commit are dropped from that step (a test cannot fail where it does not
-  exist); a step where none survive is good without running. An inconclusive
-  intermediate step (infra/timeout/job kill, or a revision predating the
-  failure-class sentinel) aborts the bisect rather than skipping the commit,
-  because a skip silently shrinks the searched range.
+  timeout points at an operational problem, not a candidate regression.
+- **Real test failures** → an issue is opened listing the failing test files
+  and the run. Triage deliberately stops there: the merge queue already gated
+  each entry on its own impacted tests, so a nightly failure is either a
+  cross-entry interaction (worth human judgment; the issue provides the
+  exposure) or an operational flake. If nightly regressions turn out to be
+  frequent enough to justify automated bisection, the `nightly-last-green` tag
+  is the good endpoint it would start from.
 
 The controller (`ci/torch_latest.py`) classifies its own failures for this
 routing: it prints a `DS_CI_FAILURE_CLASS=infra|timeout|test` sentinel line and
@@ -141,17 +137,15 @@ exits with a dedicated code (75 / 124 / 1). A failed run with no sentinel was
 killed before the controller could classify itself, which triage treats as a
 timeout.
 
-Triage reports (timeout, culprit, inconclusive, missing-tag) go through
-`ci/nightly_report.sh`: every report carries the `nightly-triage` label, and a
-recurring outcome comments on its still-open issue instead of filing a new one.
-Dedup keys on the title, so titles are stable across recurrences (per-night
-SHAs live in the body) — except culprit reports, whose title carries the culprit
-SHA because a different culprit is a different regression.
+Triage reports (timeout, test failures) go through `ci/nightly_report.sh`:
+every report carries the `nightly-triage` label, and a recurring outcome
+comments on its still-open issue instead of filing a new one. Dedup keys on
+the title, so titles are stable across recurrences (per-night SHAs live in
+the body).
 
 Triage checks out the SHA the nightly actually ran rather than current master,
 so the classifier and the sentinel protocol it parses come from the same
-revision; bisect steps still execute each step's own revision, and a step older
-than the sentinel has no class, which aborts the bisect.
+revision.
 
 
 ## How a decision is made

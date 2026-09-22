@@ -1,13 +1,12 @@
-name: nightly-bisect
+name: nightly-triage
 
 # Regression triage for the nightly modal-torch-latest full-suite run. The controller in
 # ci/torch_latest.py classifies failures as infra / timeout / test via a
 # DS_CI_FAILURE_CLASS log sentinel and exit codes; this workflow routes on that class:
 #   green  -> move the nightly-last-green tag to the tested SHA
 #   infra  -> do nothing (capacity problem, no candidate information)
-#   timeout-> open an issue (the suite outgrew its Sandbox budget; not bisectable)
-#   test   -> git-bisect between nightly-last-green and the failing SHA, dispatching
-#             modal-torch-latest at each step, then open an issue with the culprit
+#   timeout-> open an issue (the suite outgrew its Sandbox budget)
+#   test   -> open an issue listing the failing tests
 # Only scheduled runs of modal-torch-latest are triaged. See
 # .github/workflows/TEST_SELECTION.md.
 #
@@ -16,9 +15,7 @@ name: nightly-bisect
 # same regression recurs. All script checkouts are pinned to the SHA the
 # nightly actually ran (github.event.workflow_run.head_sha), so the classifier
 # and the sentinel protocol it parses come from the same revision even if
-# master has moved on by the time triage starts. (The bisect steps' dispatched
-# runs still execute each step's own revision -- older than the sentinel, a
-# step has no class and aborts the bisect.)
+# master has moved on by the time triage starts.
 
 on:
   workflow_run:
@@ -35,6 +32,8 @@ jobs:
       github.event.workflow_run.head_branch == 'master'
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    permissions:
+      actions: read
     outputs:
       action: ${{ steps.classify.outputs.action }}
       failure_class: ${{ steps.classify.outputs.failure_class }}
@@ -109,55 +108,31 @@ jobs:
         # issue that collects a comment per night, not one issue per night.
         run: |
           {
-            echo "The nightly full-suite run died at the Sandbox/job time budget (class: $FAILURE_CLASS) at $NIGHTLY_SHA, so it is not bisectable."
+            echo "The nightly full-suite run died at the Sandbox/job time budget (class: $FAILURE_CLASS) at $NIGHTLY_SHA."
             echo "The suite likely outgrew its budget again; consider shard-splitting or raising it. Run: $NIGHTLY_RUN_URL"
           } > issue-body.txt
           bash ci/nightly_report.sh \
             "nightly timeout: modal-torch-latest full suite exceeded its time budget" \
             issue-body.txt "$NIGHTLY_RUN_URL"
 
-  bisect:
-    name: git-bisect the nightly regression
+  report-failures:
+    name: report nightly test failures
     needs: triage
-    if: needs.triage.outputs.action == 'bisect'
-    runs-on: ubuntu-latest
-    # Each step publishes a temporary bisect/<run>/<sha> tag because the dispatch
-    # API rejects bare commit SHAs ("No ref found").
+    if: needs.triage.outputs.action == 'report'
     permissions:
-      contents: write
+      actions: read
       issues: write
       labels: write
-    # Each bisect step dispatches a full modal-torch-latest run (up to ~105 minutes),
-    # and hosted jobs are capped at 6 hours, which bounds the bisect range.
-    timeout-minutes: 350
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - name: Checkout full history at the nightly SHA
+      - name: Checkout report scripts at the nightly SHA
         uses: actions/checkout@v7
         with:
-          # The nightly SHA is the bisect's bad endpoint; commits master gained
-          # since are outside the searched range by construction.
           ref: ${{ github.event.workflow_run.head_sha }}
-          fetch-depth: 0
-          # The bisect steps push (and delete) their temporary dispatch tags.
-          persist-credentials: true
+          persist-credentials: false
           lfs: false
           submodules: false
-
-      - name: Require a nightly-last-green tag
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GITHUB_REPOSITORY: ${{ github.repository }}
-          NIGHTLY_RUN_URL: ${{ github.event.workflow_run.html_url }}
-          NIGHTLY_SHA: ${{ github.event.workflow_run.head_sha }}
-        run: |
-          if ! git rev-parse --verify -q "nightly-last-green^{commit}" >/dev/null; then
-            {
-              echo "The nightly failed with real test failures at $NIGHTLY_SHA, but the nightly-last-green tag is missing, so the bisect range is unknown."
-              echo "Triage manually: $NIGHTLY_RUN_URL"
-            } > issue-body.txt
-            bash ci/nightly_report.sh "nightly regression but no nightly-last-green tag" issue-body.txt "$NIGHTLY_RUN_URL"
-            exit 1
-          fi
 
       - name: Extract the failing test files
         env:
@@ -165,8 +140,7 @@ jobs:
           NIGHTLY_RUN_ID: ${{ github.event.workflow_run.id }}
         run: |
           # The nightly pytest prints failures as "FAILED unit/v1/..." (its working
-          # directory is tests/), so re-prefix each unique file with tests/. Bisect
-          # steps then re-run only these files instead of the full suite.
+          # directory is tests/), so re-prefix each unique file with tests/.
           gh run view "$NIGHTLY_RUN_ID" --log \
             | grep -o 'FAILED unit/v1/[^ \t]*\.py' | sort -u \
             | sed 's|^|tests/|' > failing-tests.txt
@@ -176,46 +150,23 @@ jobs:
           fi
           cat failing-tests.txt
 
-      - name: Run git bisect
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GITHUB_REPOSITORY: ${{ github.repository }}
-          BISECT_TEST_TARGETS_FILE: failing-tests.txt
-        run: |
-          git bisect start "${{ github.event.workflow_run.head_sha }}" nightly-last-green
-          set +e
-          git bisect run bash ci/bisect_nightly.sh 2>&1 | tee bisect-output.txt
-          status=${PIPESTATUS[0]}
-          set -e
-          git bisect log || true
-          exit $status
-
-      - name: Report the bisect outcome
-        if: always()
+      - name: Report the failures
         env:
           GH_TOKEN: ${{ github.token }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           NIGHTLY_RUN_URL: ${{ github.event.workflow_run.html_url }}
+          NIGHTLY_SHA: ${{ github.event.workflow_run.head_sha }}
+        # Title is deliberately SHA-free (see report-timeout): the same
+        # regression recurring night after night is one tracked issue that
+        # collects a comment per occurrence, not a new issue per night.
         run: |
-          # git bisect run exits 0 when it identified a culprit; anything else is inconclusive.
-          if [ "${{ job.status }}" = "success" ]; then
-            culprit=$(sed -n 's/^\([0-9a-f]\{40\}\) is the first bad commit.*/\1/p' bisect-output.txt | head -1)
-            {
-              echo "First bad commit: \`$culprit\` (https://github.com/$GITHUB_REPOSITORY/commit/$culprit)."
-              echo "Nightly run: $NIGHTLY_RUN_URL. Full bisect log below."
-              cat bisect-output.txt
-            } > issue-body.txt
-            # The culprit SHA stays in the title on purpose: a different culprit
-            # is a different regression, while the same culprit recurring is the
-            # same issue and collects a comment per night.
-            bash ci/nightly_report.sh \
-              "nightly regression introduced by ${culprit:-unknown}" \
-              issue-body.txt "$NIGHTLY_RUN_URL"
-          else
-            {
-              echo "git bisect aborted (an intermediate step was infra/timeout inconclusive, or the job budget ran out)."
-              echo "The good endpoint is the nightly-last-green tag; re-run manually. Nightly run: $NIGHTLY_RUN_URL."
-              cat bisect-output.txt
-            } > issue-body.txt
-            bash ci/nightly_report.sh "nightly bisect inconclusive" issue-body.txt "$NIGHTLY_RUN_URL"
-          fi
+          {
+            echo "The nightly full-suite run at $NIGHTLY_SHA failed with real test failures."
+            echo "Failing test files:"
+            sed 's|^|- |' failing-tests.txt
+            echo
+            echo "Run: $NIGHTLY_RUN_URL"
+          } > issue-body.txt
+          bash ci/nightly_report.sh \
+            "nightly regression: modal-torch-latest full suite failed" \
+            issue-body.txt "$NIGHTLY_RUN_URL"

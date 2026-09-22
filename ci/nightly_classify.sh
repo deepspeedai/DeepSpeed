@@ -8,8 +8,8 @@
 #
 #   green   the nightly passed; the caller moves the nightly-last-green tag
 #   infra   no GPU instance was provisioned; no candidate information, do nothing
-#   timeout the run died at a time budget; open an issue, never bisect
-#   bisect  real test failures; git-bisect between nightly-last-green and the SHA
+#   timeout the run died at a time budget; open an issue
+#   report  real test failures; open an issue listing the failing tests
 #
 # A failed run whose logs contain no DS_CI_FAILURE_CLASS sentinel was killed before
 # the controller could classify itself (job timeout), which is a timeout.
@@ -28,9 +28,9 @@ class=$(gh run view "$NIGHTLY_RUN_ID" --log 2>/dev/null \
 
 case "${class:-none}" in
     test)
-        echo "action=bisect" >> "$GITHUB_OUTPUT"
+        echo "action=report" >> "$GITHUB_OUTPUT"
         echo "failure_class=test" >> "$GITHUB_OUTPUT"
-        echo "real test failures; will bisect"
+        echo "real test failures; will report"
         ;;
     infra)
         echo "action=infra" >> "$GITHUB_OUTPUT"
@@ -41,7 +41,7 @@ case "${class:-none}" in
         # No sentinel means the job was killed before the controller could exit.
         echo "action=timeout" >> "$GITHUB_OUTPUT"
         echo "failure_class=${class:-killed}" >> "$GITHUB_OUTPUT"
-        echo "time budget exhausted; not bisectable"
+        echo "time budget exhausted"
         ;;
     *)
         echo "unrecognized DS_CI_FAILURE_CLASS=$class; refusing to route" >&2

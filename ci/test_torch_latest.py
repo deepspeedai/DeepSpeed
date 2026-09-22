@@ -505,7 +505,7 @@ def test_controller_aborts_without_running_tests_when_sandbox_never_starts():
 
 
 def test_controller_reports_sandbox_lifetime_exhaustion_as_timeout():
-    # Catches a lifetime-budget death being misrouted to git-bisect as a candidate regression:
+    # Catches a lifetime-budget death being misreported as a candidate regression:
     # a run that dies at the Sandbox ceiling must classify as a timeout, not a test failure.
     root, path = _selection_file("tests/unit/v1\n")
     original = torch_latest.SANDBOX_TIMEOUT_SECONDS

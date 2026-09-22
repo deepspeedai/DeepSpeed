@@ -10,7 +10,7 @@ name: modal-torch-latest
 # entry, and each merge_group run already tested the merged tree), so there is
 # no push trigger; cross-entry interaction regressions are covered by the
 # nightly full suite, which feeds regression triage
-# (.github/workflows/nightly-bisect.yml). See .github/workflows/TEST_SELECTION.md.
+# (.github/workflows/nightly-triage.yml). See .github/workflows/TEST_SELECTION.md.
 
 on:
   workflow_dispatch:
@@ -39,17 +39,8 @@ on:
         required: false
         default: 'main'
         type: string
-      test_targets:
-        description: >
-          Newline-separated test files to run instead of selection (used by nightly
-          bisect to re-run only the failing tests). Paths must live under
-          tests/unit/v1 and pass the same validation as a selected list.
-        required: false
-        default: ''
-        type: string
-
   # Nightly full-suite run of master. This is the only event whose failures feed
-  # automated regression triage; see .github/workflows/nightly-bisect.yml.
+  # automated regression triage; see .github/workflows/nightly-triage.yml.
   schedule:
     - cron: '0 10 * * *'
 
@@ -119,16 +110,8 @@ jobs:
         env:
           EVENT_NAME: ${{ github.event_name }}
           CANDIDATE_ROOT: ${{ runner.temp }}/deepspeed-candidate
-          MANUAL_TEST_TARGETS: ${{ github.event.inputs.test_targets }}
         run: |
-          if [ -n "$MANUAL_TEST_TARGETS" ]; then
-            # A dispatch may pin an explicit target list (nightly bisect re-runs only
-            # the failing tests). The regular validation step still enforces the same
-            # allowlisted paths as a graph-selected list.
-            mkdir -p ci/.test_selection
-            printf '%s\n' "$MANUAL_TEST_TARGETS" > ci/.test_selection/test_list.txt
-            echo "mode=subset" >> "$GITHUB_OUTPUT"
-          elif [ "$EVENT_NAME" = "pull_request_target" ] || [ "$EVENT_NAME" = "merge_group" ]; then
+          if [ "$EVENT_NAME" = "pull_request_target" ] || [ "$EVENT_NAME" = "merge_group" ]; then
             python3 ci/tests_fetcher.py \
               --workflow modal-torch-latest \
               --repo-root "$CANDIDATE_ROOT" \
