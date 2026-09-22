@@ -1626,7 +1626,8 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         Returns:
             None
         """
-        if not self.use_muon:
+        # Without optimizer offload Muon runs once per step, in _apply_muon_to_accumulated_grads.
+        if not self.use_muon or not self.offload_optimizer:
             return
 
         params_by_group = {}
@@ -1818,9 +1819,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
         grad_partitions = []
         grad_offset_in_buffer = 0
-        if self.offload_optimizer:
-            # Offload keeps its per-micro-batch Muon; without offload it runs once at the step.
-            self._apply_distributed_muon_update(communication_data_type, buffer_to_reduce)
+        self._apply_distributed_muon_update(communication_data_type, buffer_to_reduce)
         for param in params_in_bucket:
             grad = param.grad
             chunk_sz = math.ceil(grad.numel() / world_sz)
