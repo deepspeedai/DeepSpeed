@@ -383,6 +383,11 @@ class TestAutoEPConfig:
         with pytest.raises(ValueError, match="exceeds num_experts"):
             validate_autoep_post_detection(AutoEPConfig(enabled=True, autoep_size=16), [_make_spec(num_experts=8)])
 
+    def test_grouped_routing_rejects_top_k_beyond_selected_groups(self):
+        spec = _make_spec(num_experts=8, top_k=3, num_expert_groups=4, num_limited_groups=1)
+        with pytest.raises(ValueError, match="experts available"):
+            validate_autoep_post_detection(AutoEPConfig(enabled=True, autoep_size=1), [spec])
+
     def test_expert_tensor_parallel_size_is_parsed_but_limited_to_one(self):
         config = parse_autoep_config({
             "enabled": True,
@@ -1200,6 +1205,35 @@ class TestAutoEPRegionalCompile:
 
 
 class TestRoutingAndLayerSemantics:
+
+    @pytest.mark.parametrize("kwargs, message", [
+        ({
+            "top_k": 0
+        }, "positive integer"),
+        ({
+            "top_k": 9
+        }, "must not exceed"),
+        ({
+            "top_k": 3,
+            "num_expert_groups": 4,
+            "num_limited_groups": 1
+        }, "available"),
+        ({
+            "top_k": 2,
+            "num_limited_groups": 1
+        }, "requires"),
+    ])
+    def test_router_rejects_invalid_grouped_top_k(self, kwargs, message):
+        params = {"num_expert_groups": None, "num_limited_groups": None, "top_k": 2}
+        params.update(kwargs)
+        with pytest.raises(ValueError, match=message):
+            TokenChoiceTopKRouter(64,
+                                  8,
+                                  gate_bias=False,
+                                  score_func="softmax",
+                                  route_norm=True,
+                                  route_scale=1.0,
+                                  **params)
 
     def test_router_route_scale_and_group_limited_routing(self):
         base = TokenChoiceTopKRouter(64, 8, 4, 2, 2, "softmax", False, 1.0, False)
