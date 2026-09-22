@@ -2412,9 +2412,6 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
         self.fp32_partitioned_groups_flat[sub_group_id].grad = single_grad_partition
 
-        # release all the gradient since we have already created a necessary copy in dp_grad_partition
-        self.zero_grad(set_to_none=True)
-
         if not get_accelerator().is_synchronized_device():
             for grad in filter(lambda g: get_accelerator().on_accelerator(g), self.averaged_gradients[sub_group_id]):
                 grad.record_stream(get_accelerator().current_stream())
@@ -2607,6 +2604,11 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
         timer_names.add(OPTIMIZER_STEP_TIMER)
         self.timers(OPTIMIZER_STEP_TIMER).start()
+
+        if not self.offload_optimizer:
+            # The epilogue has copied all gradients into the partition buffers. Clear the
+            # model gradients once, rather than visiting every parameter for each sub-group.
+            self.zero_grad(set_to_none=True)
 
         #update parameters one sub group at a time
         for sub_group_id, group in enumerate(self.fp16_groups):
