@@ -795,3 +795,85 @@ def test_bigcode_weight_is_no_longer_refused_by_conversion():
 
     assert r"^c_attn\.weight$" in info.get(AFFINE_MAP, {}).get(AFFINE_MAP_PARAMS, {})
     assert r"^c_attn\.weight$" not in info.get(AUTOTP_UNSUPPORTED_PARAMETER_PATTERNS, {})
+
+
+# Counting elements is not the same as placing them. Two pieces can both write the head of a shard
+# and leave its tail unwritten while their sizes sum to exactly the shard size, so a check that only
+# adds them up reports nothing and every consumer downstream -- conversion, restore, a transfer plan
+# -- reads a shard that was never fully written.
+
+def _flat_piece(source_offset, dest_offset, length):
+    return AffinePiece(shape=(length, ),
+                       source_offset=source_offset,
+                       source_strides=(1, ),
+                       dest_offset=dest_offset,
+                       dest_strides=(1, ),
+                       locations=[0])
+
+
+def test_double_written_shard_is_refused():
+    """Source coverage complete, piece numels exact, destinations overlapping."""
+    amap = ParamAffineMap(logical_shape=(4, ),
+                          shard_shapes={0: (4, )},
+                          pieces_by_rank={0: [_flat_piece(0, 0, 2), _flat_piece(2, 0, 2)]})
+
+    with pytest.raises(ValueError, match='twice'):
+        amap.validate()
+
+    # The same map read the other way round: nothing about the totals warns, which is exactly why
+    # the destination addresses have to be looked at.
+    assert sum(piece.numel for piece in amap.pieces_by_rank[0]) == 4
+
+
+def test_destination_outside_the_shard_is_refused():
+    amap = ParamAffineMap(logical_shape=(4, ),
+                          shard_shapes={0: (4, )},
+                          pieces_by_rank={0: [_flat_piece(0, 1, 2), _flat_piece(2, 3, 2)]})
+
+    with pytest.raises(ValueError, match='outside the shard'):
+        amap.validate()
+
+
+def _bigcode(shape=(48, 8)):
+    from deepspeed.checkpoint.affine import segmented_map
+    return segmented_map(shape, [(32, False), (16, True)], 0, 4, split_widths=[[8, 8, 8, 8]])
+
+
+def _yuan_oproj(shape=(8, 64)):
+    from deepspeed.checkpoint.affine import block_gather_map
+    return block_gather_map(shape, {0: [0, 1, 4, 5], 1: [2, 3, 6, 7]}, 8, 1)
+
+
+@pytest.mark.parametrize(
+    'build',
+    [
+        lambda: replicated_map((6, 4), 3),
+        lambda: contiguous_split_map((11, ), [4, 4, 3], 0),
+        lambda: contiguous_split_map((6, 7), [3, 2, 2], 1),
+        lambda: sub_param_map((12, 8), (8, 4), [[2, 2, 2, 2], [1, 1, 1, 1]], 0),
+        _bigcode,
+        _yuan_oproj,
+    ],
+    ids=['replicated', 'uneven-row', 'column-split', 'sub-params', 'bigcode-segments', 'yuan-gather'])
+def test_every_builder_still_validates(build):
+    """A guard that rejects a layout the builders produce on purpose is worse than none.
+
+    ``yuan_oproj`` is the case that keeps the check honest: its pieces stride through the shard, so
+    no interval describes them and the guard must stay quiet about them instead of guessing.
+    """
+    build().validate()
+
+
+def test_validate_never_walks_elements(monkeypatch):
+    """The cheap check stays cheap by construction, not by timing.
+
+    A parameter of a billion rows is what separates this from ``validate_coverage``, which is
+    documented as O(numel) and is fine where it is used. Making the per-element walk unreachable
+    proves the boundary; measuring a fast machine would not.
+    """
+
+    def forbid_elements(*args, **kwargs):
+        raise AssertionError('validate() reached the per-element coverage code')
+
+    monkeypatch.setattr(AffinePiece, 'source_offsets', forbid_elements)
+    contiguous_split_map((10**9, 8), [5 * 10**8] * 2, 0).validate()
