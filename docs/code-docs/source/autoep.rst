@@ -246,6 +246,27 @@ as collective wait time on every expert-parallel rank. The top-level
 ``disable_python_gc`` option addresses this. It is process-wide rather than
 AutoEP-specific, so it is documented with the general configuration options.
 
+**Fused RMSNorm (experimental):**
+
+RMSNorm is a model module rather than an AutoEP expert-parallel component, so
+it is not configured under ``expert_parallel``. DeepSpeed provides a small
+model-agnostic installer for Hugging Face-style RMSNorm modules that is fully
+opt-in:
+
+.. code-block:: python
+
+    from deepspeed.ops.triton_ops.fused_rms_norm import replace_rms_norm
+
+    replaced = replace_rms_norm(model)
+
+The installer replaces modules whose class name ends with ``RMSNorm`` and that
+have a 1-D ``weight`` Parameter plus a float ``variance_epsilon`` attribute. It
+keeps each module's own Parameter and epsilon value and returns the number of
+modules replaced. Unsupported devices or dtypes fail fast instead of silently
+falling back to eager execution. The fused kernel follows the Hugging Face
+Qwen order exactly: compute variance and normalization in FP32, cast the
+normalized value back to the input dtype once, then multiply by gamma.
+
 **Fused weighted restore (experimental):**
 
 After the combine all-to-all, AutoEP holds one row per routed assignment and has
