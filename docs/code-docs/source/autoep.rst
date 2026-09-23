@@ -249,6 +249,14 @@ not change where BF16/FP16 rounding occurs, and does not replace DeepEP's
 combine; the output remains one weighted row per received row in the same row
 order.
 
+The forward product and row gradient match eager's rounding. The FP32 gradient
+of the routing weight sums the same products in a different order, so it need
+not be bitwise equal to eager's; neither summation is consistently closer to
+an FP64 reference. Comparisons should use gradient errors relative to the
+gradient norm before the optimizer step. Adam's first update can differ by
+twice the learning rate when a near-zero gradient changes sign, even if the
+overall gradients agree closely.
+
 ``"fused"`` is rejected, rather than silently ignored, when AutoEP cannot honor
 it:
 
@@ -258,6 +266,13 @@ it:
 - rows are not bfloat16 or float16;
 - weights are not FP32 ``[N, 1]`` tensors on the same CUDA device;
 - rows or weights are not contiguous, or rows are not shaped ``[N, H]``.
+
+The operator also accepts FP16 rows, but the current DeepEP dispatch supports
+BF16 rows only. Correct backward replay through DeepEP additionally requires
+preserving the cached dispatch layout; that correction is independent of row
+weighting. The separate FP16 MoE gradient-norm correction affects clipping in
+FP16 training, not the BF16 model-level comparisons for this option. Neither
+correction is part of this opt-in change.
 
 Requirements and limits:
 

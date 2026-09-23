@@ -358,6 +358,22 @@ def _assert_cleanup_results_close(actual, expected, *, compare_score_gradients):
                                    msg=_delta_failure_message(name, actual, expected))
 
 
+def _assert_native_fused_gradient_close(actual, expected, *, name):
+    assert actual.shape == expected.shape, f"{name} gradient shape differs: {actual.shape} vs {expected.shape}"
+    actual = actual.double()
+    expected = expected.double()
+    assert torch.isfinite(actual).all() and torch.isfinite(expected).all(), f"{name} gradient is non-finite"
+    expected_norm = expected.norm().item()
+    assert expected_norm > 0, f"{name} eager gradient is zero"
+    error_norm = (actual - expected).norm().item()
+    relative_l2 = error_norm / expected_norm
+    # Same-seed eager/eager is bit-exact on H100. Across native fused/eager controls,
+    # the largest measured model-gradient relative L2 was 5.6e-3 (reentrant);
+    # 2e-2 leaves room for FP32 summation order without accepting a dropped path.
+    assert relative_l2 <= 2e-2, (f"{name} gradient relative L2={relative_l2:.3e}, "
+                                 f"error_norm={error_norm:.3e}, eager_norm={expected_norm:.3e}")
+
+
 def _delta_failure_message(name, actual, expected):
     """Describe a delta mismatch together with the gradient that produced it.
 
@@ -447,17 +463,42 @@ class TestDeepEPMatchesCollective(DistributedTest):
         assert gate_grads, "the router gate received no gradient at all"
         assert any(value.abs().sum() > 0 for value in gate_grads), "the router gate's gradient was entirely zero"
 
-    def test_fused_row_weighting_keeps_router_score_gradients(self):
-        """The fused row multiply must not detach DeepEP's returned weights."""
+    @pytest.mark.parametrize("score_apply", ["pre", "post"])
+    def test_native_fused_row_weighting_backward_reaches_router(self, score_apply):
+        """A wrong weight gradient must not disappear between DeepEP and the router."""
         _skip_unless_fused_row_weighting_enabled("fused DeepEP row weighting needs H100s and a DeepEP build")
+        seed = 2468
 
-        result = _run_one_step("deepep", self.world_size, seed=199, row_weighting_impl="fused")
+        eager = _run_one_step("deepep", self.world_size, seed, row_weighting_impl="eager", score_apply=score_apply)
+        fused = _run_one_step("deepep", self.world_size, seed, row_weighting_impl="fused", score_apply=score_apply)
 
-        assert result["score_gradients"], "routing scores had no retained gradients"
-        assert all(value.abs().sum() > 0 for value in result["score_gradients"].values())
-        gate_grads = [value for name, value in result["gradients"].items() if "gate" in name]
-        assert gate_grads, "the router gate received no gradient at all"
-        assert any(value.abs().sum() > 0 for value in gate_grads), "the router gate's gradient was entirely zero"
+        torch.testing.assert_close(fused["output"], eager["output"], rtol=2e-3, atol=2e-3)
+        torch.testing.assert_close(fused["loss"], eager["loss"], rtol=2e-3, atol=2e-3)
+        assert len(fused["routes"]) == len(eager["routes"])
+        for (fused_name, fused_route), (eager_name, eager_route) in zip(fused["routes"], eager["routes"]):
+            assert fused_name == eager_name
+            assert torch.equal(fused_route, eager_route)
+
+        assert fused["score_gradients"].keys() == eager["score_gradients"].keys()
+        assert fused["score_gradients"], "no routing-score gradient was retained"
+        for name, eager_gradient in eager["score_gradients"].items():
+            _assert_native_fused_gradient_close(fused["score_gradients"][name],
+                                                eager_gradient,
+                                                name=f"routing scores for {name}")
+
+        assert fused["gradients"].keys() == eager["gradients"].keys()
+        gate_names = [name for name in eager["gradients"] if ".router.gate." in name]
+        assert gate_names and len(gate_names) == len(eager["score_gradients"]), "router gate gradients are missing"
+        for name in gate_names:
+            _assert_native_fused_gradient_close(fused["gradients"][name],
+                                                eager["gradients"][name],
+                                                name=f"router gate {name}")
+
+        names = sorted(eager["gradients"])
+        fused_gradients = torch.cat([fused["gradients"][name].flatten() for name in names])
+        eager_gradients = torch.cat([eager["gradients"][name].flatten() for name in names])
+        _assert_native_fused_gradient_close(fused_gradients, eager_gradients, name="all model parameters")
+        _assert_native_fused_gradient_close(fused["input_gradient"], eager["input_gradient"], name="model input")
 
     @pytest.mark.parametrize("score_apply", ["pre", "post"])
     def test_fused_row_weighting_matches_eager_for_each_score_boundary(self, score_apply):
