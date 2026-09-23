@@ -12,7 +12,7 @@ import torch
 from torch._utils import _flatten_dense_tensors
 
 from deepspeed.runtime.base_optimizer import DeepSpeedOptimizer
-from deepspeed.runtime.utils import get_global_norm, CheckOverflow, get_weight_norm
+from deepspeed.runtime.utils import CheckOverflow, get_global_norm, get_weight_norm, is_invalid_grad_norm
 from deepspeed.runtime.fp16.loss_scaler import LossScaleConfig, LossScaleProfile
 from deepspeed.utils import logger
 from deepspeed.utils.torch import required_torch_version
@@ -121,6 +121,16 @@ class FP16_UnfusedOptimizer(DeepSpeedOptimizer):
                         p.grad.detach_()
                         p.grad.zero_()
 
+    def _skip_invalid_grad_norm(self):
+        self.overflow = True
+        self._global_grad_norm = float("inf")
+        self._update_scale(self.overflow)
+        self.zero_grad(set_to_none=True)
+        for group in self.fp32_groups:
+            for param in group:
+                param.grad = None
+        return self.overflow
+
     def step_fused_lamb(self, closure=None):
         """
         Not supporting closure.
@@ -147,16 +157,13 @@ class FP16_UnfusedOptimizer(DeepSpeedOptimizer):
             expert_norm_groups.append(expert_norm_group_value)
 
         self.overflow = self.overflow_checker.check_using_norm(norm_groups + expert_norm_groups)
-        prev_scale = self.loss_scale_config.cur_scale
-
-        self._update_scale(self.overflow)
         if self.overflow:
-            if self.verbose:
-                logger.info("[deepspeed] fp16 dynamic loss scale overflow! Skipping step. Attempted loss "
-                            "scale: {}, reducing to {}".format(prev_scale, self.loss_scale_config.cur_scale))
-            return self.overflow
+            return self._skip_invalid_grad_norm()
 
         self._global_grad_norm = get_global_norm(norm_list=norm_groups)
+        if is_invalid_grad_norm(self._global_grad_norm):
+            return self._skip_invalid_grad_norm()
+        self._update_scale(False)
         combined_scale = self.unscale_and_clip_grads(self._global_grad_norm, apply_scale=False)
         self.optimizer.step(grads=grads_groups, output_params=self.fp16_groups, scale=combined_scale)
 
@@ -195,14 +202,8 @@ class FP16_UnfusedOptimizer(DeepSpeedOptimizer):
             return self.step_fused_lamb()
 
         self.overflow = self.overflow_checker.check()
-        prev_scale = self.loss_scale_config.cur_scale
-
-        self._update_scale(self.overflow)
         if self.overflow:
-            if self.verbose:
-                logger.info("[deepspeed] fp16 dynamic loss scale overflow! Skipping step. Attempted loss "
-                            "scale: {}, reducing to {}".format(prev_scale, self.loss_scale_config.cur_scale))
-            return self.overflow
+            return self._skip_invalid_grad_norm()
 
         norm_groups = []
         for i, group in enumerate(self.fp16_groups):
@@ -220,6 +221,9 @@ class FP16_UnfusedOptimizer(DeepSpeedOptimizer):
                     fp32_param.grad = fp16_param.grad.to(fp32_param.dtype)
 
         self._global_grad_norm = get_global_norm(norm_list=norm_groups)
+        if is_invalid_grad_norm(self._global_grad_norm):
+            return self._skip_invalid_grad_norm()
+        self._update_scale(False)
         self.unscale_and_clip_grads(self._global_grad_norm)
 
         self.optimizer.step()

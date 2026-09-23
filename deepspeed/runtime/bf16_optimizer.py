@@ -14,7 +14,7 @@ from packaging import version as pkg_version
 from deepspeed.git_version_info import version
 from deepspeed.runtime.utils import (get_global_norm_of_tensors, clip_tensors_by_global_norm, DummyOptim,
                                      align_dense_tensors, all_gather_dp_groups, is_model_parallel_parameter,
-                                     see_memory_usage, graph_process, get_norm_with_moe_layers)
+                                     see_memory_usage, graph_process, get_norm_with_moe_layers, is_invalid_grad_norm)
 from deepspeed.utils import link_hp_params, lazy_init_hp_params_optimizer_state, fragment_address, groups
 from deepspeed.moe.utils import is_moe_param, is_moe_param_group
 from deepspeed.utils.bwc import bwc_tensor_model_parallel_rank
@@ -65,6 +65,7 @@ class BF16_Optimizer(ZeROOptimizer):
         self.custom_loss_scaler = False
         self.external_loss_scale = None
         self.torch_autocast_gradscaler = None
+        self.overflow = False
 
         self.immediate_grad_update = bfloat16_config.immediate_grad_update
 
@@ -304,6 +305,7 @@ class BF16_Optimizer(ZeROOptimizer):
         if closure is not None:
             raise NotImplementedError(f'{self.__class__} does not support closure.')
 
+        self.overflow = False
         non_expert_grads_for_norm, expert_grads_for_norm = self.get_grads_for_norm()
         non_expert_groups_norm = get_global_norm_of_tensors(input_tensors=non_expert_grads_for_norm,
                                                             mpu=self.mpu,
@@ -318,7 +320,12 @@ class BF16_Optimizer(ZeROOptimizer):
 
         self._global_grad_norm = all_groups_norm
 
-        assert all_groups_norm > 0.
+        if is_invalid_grad_norm(all_groups_norm):
+            self.overflow = True
+            self._global_grad_norm = float("inf")
+            self.clear_hp_grads()
+            self.clear_lp_grads()
+            return
         if self.clip_grad > 0.:
             clip_tensors_by_global_norm(input_tensors=self.get_grads_for_norm(for_clipping=True),
                                         max_norm=self.clip_grad,

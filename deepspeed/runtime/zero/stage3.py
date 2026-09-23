@@ -22,7 +22,9 @@ from deepspeed.utils.pin_memory_tracker import pinned_memory_summary
 from deepspeed.runtime.fp16.loss_scaler import CreateLossScaler
 from deepspeed.runtime.torch_autocast import get_autocast_dtype, get_all_comm_dtypes, is_autocast_initialized, sort_dtypes
 from deepspeed.runtime.comm.coalesced_collectives import reduce_scatter_coalesced, all_to_all_quant_reduce, all_to_all_loco_quant_reduce
-from deepspeed.runtime.utils import has_inf_or_nan, inf, is_model_parallel_parameter, mask_nan_or_inf_with_val_inplace, count_used_parameters_in_backward
+from deepspeed.runtime.utils import (combine_grad_norm_groups, count_used_parameters_in_backward, has_inf_or_nan, inf,
+                                     is_invalid_grad_norm, is_model_parallel_parameter,
+                                     mask_nan_or_inf_with_val_inplace)
 from deepspeed.runtime.zero.partition_parameters import *
 from deepspeed.runtime.zero.config import ZeroStageEnum
 from deepspeed.runtime.zero.offload_config import OffloadDeviceEnum, OffloadStateTypeEnum
@@ -2551,17 +2553,25 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                         p.inter_ef_buf[1] *= scale
 
     @instrument_w_nvtx
-    def _overflow_check_and_loss_scale_update(self):
+    def _overflow_check_and_loss_scale_update(self, update_scale=True):
 
         # First compute norm for all group so we know if there is overflow
+        self.overflow = False
         if self.dtype == torch.float16:
             self.check_overflow()
 
+        if not update_scale:
+            return self.overflow
+
+        return self._loss_scale_update_and_overflow_cleanup()
+
+    def _loss_scale_update_and_overflow_cleanup(self):
         #loss scaling related computation
         prev_scale = self.loss_scale
         self._update_scale(self.overflow)
 
         if self.overflow:
+            self._global_grad_norm = float("inf")
             self._overflow_clean_up(prev_scale)
 
         #update loco error buf
@@ -2615,14 +2625,20 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         self._pre_step()
         self._partition_all_parameters()
 
-        #checks for overflow, adjust the loss scale accordingly
-        if self._overflow_check_and_loss_scale_update():
+        # Check raw gradients first, then include the global norm in the same
+        # loss-scale decision so one optimizer step advances the scaler once.
+        self._overflow_check_and_loss_scale_update(update_scale=False)
+        scaled_global_grad_norm = None
+        if not self.overflow:
+            norm_groups = self._get_norm_groups()
+            scaled_global_grad_norm = combine_grad_norm_groups(norm_groups)
+            if is_invalid_grad_norm(scaled_global_grad_norm):
+                self.overflow = True
+
+        if self._loss_scale_update_and_overflow_cleanup():
             if self.swap_optimizer:
                 self.optimizer_swapper.log_timers()
             return
-
-        norm_groups = self._get_norm_groups()
-        scaled_global_grad_norm = torch.linalg.vector_norm(torch.stack(norm_groups))
 
         # Stash unscaled gradient norm
         self._global_grad_norm = scaled_global_grad_norm / self.loss_scale

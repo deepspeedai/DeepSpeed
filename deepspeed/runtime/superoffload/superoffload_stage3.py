@@ -4,12 +4,12 @@
 # DeepSpeed Team
 
 import time
-import torch
 from typing import List
 
 from deepspeed.runtime.superoffload.superoffload_utils import SuperOffloadCPUOptimizer, TaskKeys, ResultKeys, EventTypes
 from deepspeed.runtime.zero.partition_parameters import Parameter, Tensor
 from deepspeed.runtime.zero.stage3 import DeepSpeedZeroOptimizer_Stage3
+from deepspeed.runtime.utils import combine_grad_norm_groups, is_invalid_grad_norm
 from deepspeed.utils.nvtx import instrument_w_nvtx
 from deepspeed.utils import logger
 from deepspeed.accelerator import get_accelerator
@@ -39,6 +39,7 @@ class SuperOffloadOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
 
         self.sub_group_to_param_num = {}
         self.sub_group_grad_partition_counts = {}
+        self._submitted_cpu_sub_groups = set()
         self.async_cpuadam_num = 0
         self.max_grad_numel = 0
 
@@ -176,6 +177,7 @@ class SuperOffloadOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
                                                                fp32_param.data,
                                                                fp32_param.grad.data,
                                                                lr=current_lr)
+                    self._submitted_cpu_sub_groups.add(i)
                     self.async_cpuadam_num += 1
 
                     result = self.superoffload_cpu_optimizer.get_result()
@@ -200,13 +202,22 @@ class SuperOffloadOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
         self._pre_step()
         self._partition_all_parameters()
 
-        if self._overflow_check_and_loss_scale_update():
+        self._overflow_check_and_loss_scale_update(update_scale=False)
+        if self.overflow:
             if not self.clip_grad:
                 self._handle_overflow_rollback()
+            self._loss_scale_update_and_overflow_cleanup()
             return
 
         norm_groups = self._get_norm_groups()
-        scaled_global_grad_norm = torch.linalg.vector_norm(torch.stack(norm_groups))
+        scaled_global_grad_norm = combine_grad_norm_groups(norm_groups)
+        if is_invalid_grad_norm(scaled_global_grad_norm):
+            self.overflow = True
+            if not self.clip_grad:
+                self._handle_overflow_rollback()
+            self._loss_scale_update_and_overflow_cleanup()
+            return
+        self._loss_scale_update_and_overflow_cleanup()
         self._global_grad_norm = scaled_global_grad_norm / self.loss_scale
 
         timer_names = set()
@@ -220,6 +231,10 @@ class SuperOffloadOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
 
         self.timers(OPTIMIZER_STEP_TIMER).stop()
         self._post_step(timer_names)
+
+    def _post_step(self, timer_names):
+        super()._post_step(timer_names)
+        self._submitted_cpu_sub_groups.clear()
 
     def _step_without_clipping(self, scaled_global_grad_norm, timer_names):
         """Fast path: async CPU steps already completed during backward."""
@@ -332,17 +347,15 @@ class SuperOffloadOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
 
     def _handle_overflow_rollback(self):
         """Handle gradient overflow by rolling back CPU optimizer states."""
-        for sub_group_id, _ in enumerate(self.fp16_groups):
-            if self.subgroup_to_device[sub_group_id] == 'cpu':
-                param_group_id = self.sub_group_to_group_id[sub_group_id]
-                fp32_param = self.fp32_partitioned_groups_flat[sub_group_id]
-
-                # Trigger rollback
-                self._sync_cpu_optimizer_step(param_group_id,
-                                              sub_group_id,
-                                              fp32_param.data,
-                                              fp32_param.grad.data,
-                                              rollback=True)
+        for sub_group_id in self._submitted_cpu_sub_groups:
+            param_group_id = self.sub_group_to_group_id[sub_group_id]
+            fp32_param = self.fp32_partitioned_groups_flat[sub_group_id]
+            self._sync_cpu_optimizer_step(param_group_id,
+                                          sub_group_id,
+                                          fp32_param.data,
+                                          fp32_param.grad.data,
+                                          rollback=True)
+        self._submitted_cpu_sub_groups.clear()
 
     def _handle_gradient_clipping(self, scaled_global_grad_norm):
         """Handle gradient clipping with CPU optimizer rollback and re-optimization."""

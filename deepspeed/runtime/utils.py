@@ -12,7 +12,7 @@ from collections.abc import Iterable
 import os
 import psutil
 import gc
-from math import sqrt
+from math import isfinite, sqrt
 
 from numpy import prod
 
@@ -247,6 +247,12 @@ def has_inf_or_nan(x):
     return torch.isfinite(x.amax()).logical_and(torch.isfinite(x.amin())).logical_not()
 
 
+def is_invalid_grad_norm(norm):
+    if torch.is_tensor(norm):
+        return bool((~torch.isfinite(norm) | (norm < 0)).any())
+    return not isfinite(float(norm)) or norm < 0
+
+
 class CheckOverflow(object):
     '''Checks for overflow in gradient across parallel process'''
 
@@ -265,7 +271,7 @@ class CheckOverflow(object):
 
     def check_using_norm(self, norm_group, reduce_overflow=True):
         # TODO: I don't think reduce_overflow is needed if mpu is None
-        overflow = -1 in norm_group
+        overflow = any(is_invalid_grad_norm(norm) for norm in norm_group)
         overflow_gpu = get_accelerator().FloatTensor([overflow])
         if self.has_moe_params:
             # In this case, we need to do an all_reduce across
@@ -357,6 +363,8 @@ def _handle_overflow(cpu_sum, x, i):
 def get_global_norm(norm_list):
     """ Compute total from a list of norms
     """
+    if any(is_invalid_grad_norm(norm) for norm in norm_list):
+        return float("inf")
     total_norm = 0.0
     for norm in norm_list:
         total_norm += norm**2.0
@@ -886,6 +894,24 @@ def mask_nan_or_inf_with_val_inplace(input, device=None, val=-1.):
     input.masked_fill_(inf_or_nan, err)
 
 
+def combine_grad_norm_groups(norm_groups, norm_type=2):
+    """L2-combine per-group gradient norms without laundering the -1 invalid sentinel.
+
+    Several DeepSpeed helpers replace inf/NaN group norms with -1. Combining those
+    with ``vector_norm`` squares the sentinel to 1.0, so clipping treats a failed
+    group as a healthy unit-norm group. Non-finite or negative group norms stay
+    invalid (positive infinity) instead.
+    """
+    norm_groups = list(norm_groups)
+    device = next((norm.device for norm in norm_groups if torch.is_tensor(norm)), None)
+    stacked = torch.stack([
+        norm if torch.is_tensor(norm) else torch.tensor(norm, dtype=torch.float, device=device) for norm in norm_groups
+    ])
+    invalid = (~torch.isfinite(stacked) | (stacked < 0)).any()
+    combined = torch.linalg.vector_norm(stacked, ord=norm_type)
+    return torch.where(invalid, torch.full_like(combined, float("inf")), combined)
+
+
 def get_global_norm_of_tensors(input_tensors, norm_type=2, mpu=None, use_graph=False, moe_ep_group=None):
     """Get norm of an iterable of tensors.
 
@@ -1145,7 +1171,7 @@ def get_norm_with_moe_layers(non_expert_norm, mpu, expert_tensors, norm_type=2):
 
     # check if all norms are valid
     group_norms = torch.stack([to_tensor(norm) for norm in group_norms])
-    if group_norms.eq(-1).any():
+    if is_invalid_grad_norm(group_norms):
         return -1
 
     # combine norms

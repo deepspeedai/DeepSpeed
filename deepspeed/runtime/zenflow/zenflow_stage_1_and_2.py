@@ -8,7 +8,7 @@ from deepspeed import comm as dist
 
 from deepspeed.runtime.zero.stage_1_and_2 import DeepSpeedZeroOptimizer
 from deepspeed.runtime.zenflow.zenflow_utils import start_optimizer_process, ZENFLOW_OPTIMIZER_WAIT_POLL_SECONDS
-from deepspeed.runtime.utils import (see_memory_usage)
+from deepspeed.runtime.utils import is_invalid_grad_norm, see_memory_usage
 from deepspeed.ops.adam import ZenFlowSelectiveAdamW
 
 from deepspeed.moe.utils import is_moe_param
@@ -786,11 +786,21 @@ class ZenFlowZeroOptimizerParallel(ZenFlowZeroOptimizer):
         see_memory_usage(f"In step before checking overflow")
 
         # First compute norm for all group so we know if there is overflow
+        self.overflow = False
         if self.dtype == torch.float16:
             self.check_overflow()
 
+        prev_scale = self.loss_scale
+        scaled_global_grad_norm = None
+        if not self.overflow:
+            see_memory_usage('Before norm calculation')
+            scaled_global_grad_norm = self.scaled_global_norm()
+            if is_invalid_grad_norm(scaled_global_grad_norm):
+                self.overflow = True
+
         self._update_scale(self.overflow)
         if self.overflow:
+            self._global_grad_norm = float("inf")
             see_memory_usage('After overflow before clearing gradients')
             self.zero_grad(set_to_none=True)
             if self.cpu_offload:
@@ -805,10 +815,6 @@ class ZenFlowZeroOptimizerParallel(ZenFlowZeroOptimizer):
                 self.timers(timer).stop()
             return
 
-        prev_scale = self.loss_scale
-        # Step 1:- Calculate gradient norm using bit-16 grads
-        see_memory_usage('Before norm calculation')
-        scaled_global_grad_norm = self.scaled_global_norm()
         self._global_grad_norm = scaled_global_grad_norm / prev_scale
         see_memory_usage('After norm before optimizer')
 

@@ -23,7 +23,7 @@ from deepspeed.runtime.fp16.loss_scaler import CreateLossScaler
 from deepspeed.runtime.torch_autocast import get_autocast_dtype, get_all_comm_dtypes, is_autocast_initialized, sort_dtypes
 from deepspeed.runtime.utils import (empty_cache, see_memory_usage, has_inf_or_nan, inf, is_model_parallel_parameter,
                                      align_dense_tensors, all_gather_dp_groups, mask_nan_or_inf_with_val_inplace,
-                                     count_used_parameters_in_backward)
+                                     combine_grad_norm_groups, count_used_parameters_in_backward, is_invalid_grad_norm)
 from deepspeed.runtime.zero.config import ZeroStageEnum
 from deepspeed.runtime.zero.utils import get_norm_dtype
 from deepspeed.runtime.zero.offload_config import OffloadDeviceEnum, OffloadStateTypeEnum
@@ -2421,8 +2421,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         if self.has_moe_layers:
             self._average_expert_grad_norms(norm_groups)
 
-        # calculating L2 norm
-        return torch.linalg.vector_norm(torch.stack(norm_groups), ord=norm_type)
+        return combine_grad_norm_groups(norm_groups, norm_type=norm_type)
 
     def get_bit16_param_group(self, group_no):
         bit16_partitions = self.parallel_partitioned_bit16_groups[group_no]
@@ -2489,14 +2488,26 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         see_memory_usage("In step before checking overflow")
 
         # First compute norm for all group so we know if there is overflow
+        self.overflow = False
         if self.check_grad_overflow:
             self.check_overflow(partition_gradients=self.partition_gradients)
+
+        scaled_global_grad_norm = None
+        if self.compute_grad_norm and not self.overflow:
+            see_memory_usage('Before norm calculation')
+            scaled_global_grad_norm = self.scaled_global_norm()
+            # Group-norm helpers report inf/NaN as -1; combining that sentinel must
+            # not produce a finite 1.0 and then skip overflow / apply an unclipped step.
+            if is_invalid_grad_norm(scaled_global_grad_norm):
+                self.overflow = True
 
         prev_scale = self.loss_scale
         self._update_scale(self.overflow)
         if not self.overflow:
             self._commit_muon_momentum()
         if self.overflow:
+            if self.compute_grad_norm:
+                self._global_grad_norm = float("inf")
             see_memory_usage('After overflow before clearing gradients')
             self.zero_grad(set_to_none=True)
             self._release_preflattened_grad_buffers()
@@ -2514,10 +2525,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                 self.timers(timer).stop()
             return
 
-        scaled_global_grad_norm = None
-        if self.compute_grad_norm:
-            see_memory_usage('Before norm calculation')
-            scaled_global_grad_norm = self.scaled_global_norm()
+        if scaled_global_grad_norm is not None:
             self._global_grad_norm = scaled_global_grad_norm / prev_scale
             see_memory_usage('After norm before optimizer')
 
@@ -2643,8 +2651,13 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         # compute combined scale factor for this group
         combined_scale = self.loss_scale
         if self.clip_grad > 0.:
+            clip_norm = total_norm
+            # step() rejects invalid norms; keep direct callers from interpreting
+            # the negative sentinel as a finite clipping magnitude.
+            if is_invalid_grad_norm(clip_norm):
+                clip_norm = torch.tensor(float("inf"), dtype=torch.float, device=self.device)
             # norm is in fact norm*scale
-            clip = ((total_norm / self.loss_scale) + 1e-6) / self.clip_grad
+            clip = ((clip_norm / self.loss_scale) + 1e-6) / self.clip_grad
             clip = torch.clamp(clip, min=1.0)
             combined_scale = clip * self.loss_scale
 
