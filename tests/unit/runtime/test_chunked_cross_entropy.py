@@ -155,3 +155,33 @@ def test_install_refuses_a_model_that_does_not_use_the_stock_loss():
     install_chunked_causal_lm_loss(model)
     with pytest.raises(ValueError, match="stock Hugging Face ForCausalLMLoss"):
         install_chunked_causal_lm_loss(model)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="measures CUDA allocator peaks")  #ignore-cuda
+def test_real_vocabulary_backward_peak_drops_by_the_float32_tensors():
+    """At Qwen3's vocabulary, the stock loss holds three FP32 [tokens, vocab] tensors when backward starts."""
+    cuda = torch.cuda  #ignore-cuda
+    tokens, vocab = 8192, 151936
+    generator = torch.Generator(device="cuda").manual_seed(5)
+    logits = (torch.randn(1, tokens, vocab, device="cuda", generator=generator) * 3).to(torch.bfloat16)
+    labels = torch.randint(0, vocab, (1, tokens), device="cuda", generator=generator)
+    float32_logits_bytes = tokens * vocab * 4
+
+    def backward_peak(loss_function):
+        leaf = logits.clone().requires_grad_(True)
+        cuda.synchronize()
+        cuda.reset_peak_memory_stats()
+        before = cuda.memory_allocated()
+        loss = loss_function(leaf, labels, vocab)
+        loss.backward()
+        cuda.synchronize()
+        return loss.detach(), leaf.grad, cuda.max_memory_allocated() - before
+
+    expected_loss, expected_grad, stock_peak = backward_peak(loss_utils.ForCausalLMLoss)
+    loss, grad, chunked_peak = backward_peak(ChunkedCausalLMLoss())
+
+    torch.testing.assert_close(loss, expected_loss, rtol=1e-5, atol=1e-5)
+    distance = (_ordered_bits(grad) - _ordered_bits(expected_grad)).abs()
+    assert distance.max().item() <= 1
+    assert (distance == 0).float().mean().item() >= 0.999
+    assert stock_peak - chunked_peak >= 2 * float32_logits_bytes, (stock_peak, chunked_peak)
