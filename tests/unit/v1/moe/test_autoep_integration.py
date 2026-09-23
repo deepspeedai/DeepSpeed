@@ -12,6 +12,7 @@ import torch.nn as nn
 import deepspeed
 from deepspeed import comm as dist
 from deepspeed.moe.layer import MoE
+from deepspeed.moe.routing_replay import RoutingReplay, attach_routing_replay
 from unit.v1.moe.autoep_test_utils import (
     MockMoETransformer,
     engine_input_dtype as _engine_input_dtype,
@@ -39,6 +40,66 @@ def _assert_global_grad_norm_consistent(engine):
 
 class TestAutoEPOnly(DistributedTest):
     world_size = 2
+
+    def test_zero0_ep_external_route_replay_2gpu(self):
+        """External routes replay through the real two-rank AutoEP dispatch path."""
+        _seed_everything(2468)
+
+        model = MockMoETransformer()
+        config = _make_autoep_config(zero_stage=0, ep_size=2)
+        engine, _, _, _ = deepspeed.initialize(model=model, config=config)
+
+        from deepspeed.module_inject.auto_ep_layer import AutoEPMoELayer
+
+        autoep_layer_entries = [(name, module) for name, module in engine.module.named_modules()
+                                if isinstance(module, AutoEPMoELayer)]
+        assert len(autoep_layer_entries) == 2
+        autoep_layers = [module for _, module in autoep_layer_entries]
+
+        replay = RoutingReplay()
+        assert attach_routing_replay(engine.module, replay) == len(autoep_layers)
+        x = torch.randn(1, 8, 64, device=engine.device)
+
+        # Record a normal forward first, then replace its routes with an
+        # independently supplied rollout buffer below.
+        with torch.no_grad(), replay.recording():
+            engine(x)
+
+        fixed_routes = torch.tensor([[0, 1], [2, 3]] * 4, dtype=torch.int16)
+        for layer_name, _ in autoep_layer_entries:
+            replay.set_replay_data(layer_name, fixed_routes)
+
+        with torch.no_grad(), replay.replaying():
+            replay_output = engine(x)
+
+        # Reusing the same external route buffer must be deterministic before
+        # any parameter update, including the distributed dispatch/combine.
+        for layer_name, _ in autoep_layer_entries:
+            replay.set_replay_data(layer_name, fixed_routes)
+        with torch.no_grad(), replay.replaying():
+            replay_output_again = engine(x)
+        torch.testing.assert_close(replay_output, replay_output_again, rtol=1e-5, atol=1e-6)
+
+        for layer_name, _ in autoep_layer_entries:
+            replay.set_replay_data(layer_name, fixed_routes)
+
+        tracked = []
+        for layer in autoep_layers:
+            tracked.extend((layer.router.gate.weight, layer.experts.w1))
+        before = [param.detach().clone() for param in tracked]
+
+        with replay.replaying():
+            loss = engine(x).float().square().mean()
+        assert torch.isfinite(loss)
+        engine.backward(loss)
+
+        for param in tracked:
+            assert param.grad is not None
+            assert torch.isfinite(param.grad).all()
+            assert param.grad.detach().abs().sum() > 0
+
+        engine.step()
+        assert all(not torch.equal(param.detach(), old) for param, old in zip(tracked, before))
 
     def test_zero2_ep_2gpu(self):
         """EP with ZeRO-2 training.
