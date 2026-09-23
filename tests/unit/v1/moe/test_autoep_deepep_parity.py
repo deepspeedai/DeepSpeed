@@ -67,10 +67,9 @@ def _eager_weight_gradient_summation_order():
 
     Fused and eager form the same FP32 products for the weight gradient and differ only in the order they sum
     them, and neither order is more accurate (test_fused_row_weighting_weight_gradient_is_as_accurate_as_eager
-    checks the fused one against FP64). These comparisons repeat bit-for-bit, and Adam's first update is about
-    lr times the gradient's sign, so an order change that flips a near-zero gradient moves that parameter by
-    twice the learning rate. Matching only that order keeps the fused forward, row gradient, routing and
-    optimizer plumbing under the full comparison.
+    checks the fused one against FP64). These comparisons repeat bit-for-bit, while Adam can amplify a
+    near-zero gradient sign change into a learning-rate-scale update difference. Matching only that order
+    keeps the fused forward, row gradient, routing and optimizer plumbing under the full comparison.
     """
     fused_backward = fused_ops._FusedRowWeighting.backward
 
@@ -201,8 +200,7 @@ def _run_one_step(backend,
     # dtype anyway for the comparison to mean anything.
     config.pop("fp16", None)
     config["bf16"] = {"enabled": True}
-    # At step 1, Adam's bias correction makes every updated parameter's delta
-    # equal to +/-lr regardless of its gradient's magnitude. make_autoep_config's
+    # Adam's first update can be learning-rate-scale even for small gradients. make_autoep_config's
     # default lr=1e-4 is smaller than the parameter_deltas comparison's
     # atol=5e-4 below, so that check could not have told a correct update apart
     # from a missing or wrong-signed one (deepspeedai/DeepSpeed#8423, review
@@ -377,11 +375,10 @@ def _assert_native_fused_gradient_close(actual, expected, *, name):
 def _delta_failure_message(name, actual, expected):
     """Describe a delta mismatch together with the gradient that produced it.
 
-    At step one Adam's bias correction makes every update +/-lr regardless of
-    magnitude, so a sign flip on a near-zero gradient shows up here as a
-    difference of about twice the learning rate. Reporting the gradients and
-    the updates at the worst coordinate is what separates that from a
-    genuinely different update.
+    Adam's first update can be learning-rate-scale even for small gradients,
+    so a near-zero sign flip can show up as a large update difference.
+    Reporting the gradients and updates at the worst coordinate distinguishes
+    that from a genuinely different gradient.
     """
 
     difference = (actual["parameter_deltas"][name] - expected["parameter_deltas"][name]).abs()
@@ -400,8 +397,8 @@ def _delta_failure_message(name, actual, expected):
             f"{expected['parameter_deltas'][name].abs().max().item()} actual="
             f"{actual['parameter_deltas'][name].abs().max().item()}. "
             "Gradient clipping rescales every gradient by one positive factor, so it cannot flip a sign; "
-            "a sign difference here therefore came from the gradient itself, while the update magnitude "
-            "is set by Adam's first step rather than by the gradient")
+            "a sign difference here therefore came from the gradient itself, while Adam's first step "
+            "can amplify the update difference to the scale of the learning rate")
 
 
 @pytest.mark.skipif(not _deepep_available(), reason="deep_ep is not installed")

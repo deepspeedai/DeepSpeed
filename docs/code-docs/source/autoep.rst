@@ -253,9 +253,9 @@ The forward product and row gradient match eager's rounding. The FP32 gradient
 of the routing weight sums the same products in a different order, so it need
 not be bitwise equal to eager's; neither summation is consistently closer to
 an FP64 reference. Comparisons should use gradient errors relative to the
-gradient norm before the optimizer step. Adam's first update can differ by
-twice the learning rate when a near-zero gradient changes sign, even if the
-overall gradients agree closely.
+gradient norm after backward and before optimizer clipping in ``engine.step()``.
+Adam's first update can differ on the scale of the learning rate when a
+near-zero gradient changes sign, even if the overall gradients agree closely.
 
 ``"fused"`` is rejected, rather than silently ignored, when AutoEP cannot honor
 it:
@@ -270,9 +270,12 @@ it:
 The operator also accepts FP16 rows, but the current DeepEP dispatch supports
 BF16 rows only. Correct backward replay through DeepEP additionally requires
 preserving the cached dispatch layout; that correction is independent of row
-weighting. The separate FP16 MoE gradient-norm correction affects clipping in
-FP16 training, not the BF16 model-level comparisons for this option. Neither
-correction is part of this opt-in change.
+weighting. The separate MoE gradient-norm correction affects the
+``FP16_Optimizer`` wrapper, which is also used by some BF16 configurations
+(for example, BF16 with BF16 gradient accumulation without ZeRO).
+The model-level gradient comparison samples gradients before the wrapper
+computes the norm and clips them in ``engine.step()``. GPU validation applies
+both independent corrections; neither is part of this opt-in change.
 
 Requirements and limits:
 
