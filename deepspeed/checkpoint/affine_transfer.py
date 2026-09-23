@@ -27,13 +27,13 @@ and ``_covers_exactly`` states what that argument does and does not buy.
 
 import json
 from dataclasses import dataclass
-from typing import Dict, FrozenSet, List, Optional, Sequence, Tuple
+from typing import Callable, Dict, FrozenSet, List, Optional, Sequence, Tuple
 
 from .affine import AffinePiece, ParamAffineMap
 
 __all__ = [
-    'AffineTransferError', 'InvalidMapError', 'UnsupportedLayoutError', 'PlanBudget', 'PlanStatistics',
-    'TransferSegment', 'TransferPlan', 'plan_transfer'
+    'AffineTransferError', 'InvalidMapError', 'InvalidReplicaPolicyError', 'UnsupportedLayoutError', 'PlanBudget',
+    'PlanStatistics', 'ReplicaCandidate', 'ReplicaSelectionRequest', 'TransferSegment', 'TransferPlan', 'plan_transfer'
 ]
 
 
@@ -55,6 +55,10 @@ class UnsupportedLayoutError(AffineTransferError):
     A caller may rebuild the parameter and re-shard it instead. That is slow, not wrong, and it is
     the honest reading of a layout this file never claimed to cover.
     """
+
+
+class InvalidReplicaPolicyError(AffineTransferError):
+    """A selector chose a rank outside the validated source candidates."""
 
 
 @dataclass(frozen=True)
@@ -108,8 +112,8 @@ class LogicalBox:
         return LogicalBox(low, tuple(max(0, h - l) for h, l in zip(high, low)))
 
     def contains(self, other: 'LogicalBox') -> bool:
-        return all(other_low >= low and other_high <= high for low, high, other_low, other_high in zip(
-            self.origin, self.upper(), other.origin, other.upper()))
+        return all(other_low >= low and other_high <= high
+                   for low, high, other_low, other_high in zip(self.origin, self.upper(), other.origin, other.upper()))
 
     def __repr__(self) -> str:
         return f'Box({self.origin}+{self.extent})'
@@ -128,8 +132,25 @@ class _Frame:
 
     def address(self, box: LogicalBox) -> int:
         """Shard offset of a sub-box of this frame's region, in this shard's own addressing."""
-        return self.offset + sum((low - own) * stride
-                                 for low, own, stride in zip(box.origin, self.box.origin, self.strides))
+        return self.offset + sum(
+            (low - own) * stride for low, own, stride in zip(box.origin, self.box.origin, self.strides))
+
+
+@dataclass(frozen=True)
+class ReplicaCandidate:
+    source_rank: int
+    source_offset: int
+    source_strides: Tuple[int, ...]
+
+
+@dataclass(frozen=True)
+class ReplicaSelectionRequest:
+    target_rank: int
+    logical_origin: Tuple[int, ...]
+    shape: Tuple[int, ...]
+    target_offset: int
+    target_strides: Tuple[int, ...]
+    candidates: Tuple[ReplicaCandidate, ...]
 
 
 @dataclass(frozen=True)
@@ -147,7 +168,6 @@ class TransferSegment:
     target_offset: int
     target_strides: Tuple[int, ...]
     shape: Tuple[int, ...]
-    logical_origin: Tuple[int, ...]
 
     @property
     def numel(self) -> int:
@@ -157,9 +177,10 @@ class TransferSegment:
         """Plain scalars, so a plan can cross a process boundary without these classes."""
         return {
             'shape': list(self.shape),
-            'source': [self.source_rank, self.source_offset, list(self.source_strides)],
-            'target': [self.target_rank, self.target_offset, list(self.target_strides)],
-            'logical_origin': list(self.logical_origin),
+            'source': [self.source_rank, self.source_offset,
+                       list(self.source_strides)],
+            'target': [self.target_rank, self.target_offset,
+                       list(self.target_strides)],
         }
 
     @classmethod
@@ -172,8 +193,7 @@ class TransferSegment:
                    target_rank=int(target_rank),
                    target_offset=int(target_offset),
                    target_strides=tuple(int(stride) for stride in target_strides),
-                   shape=tuple(int(size) for size in entry['shape']),
-                   logical_origin=tuple(int(coordinate) for coordinate in entry['logical_origin']))
+                   shape=tuple(int(size) for size in entry['shape']))
 
 
 @dataclass(frozen=True)
@@ -333,13 +353,12 @@ def _shards_tile(frames: List[_Frame], side: str, limits: PlanBudget) -> None:
                                   'shard elements')
 
 
-def _sources(frames: List[_Frame], limits: PlanBudget) -> List[_Frame]:
-    """Reduce to one frame per region, each with a single holder.
+def _sources(frames: List[_Frame], limits: PlanBudget) -> List[Tuple[LogicalBox, Tuple[_Frame, ...]]]:
+    """Keep the validated holders of each disjoint source region.
 
     Every rank holding a replicated piece lists the same region in its own shard at its own offset,
-    so a region appears once per holder and which one to read is a scheduling question this metadata
-    cannot answer. The lowest rank is taken because it is the same answer on every process; a
-    bandwidth-aware choice belongs in the transport, not here.
+    so a region appears once per holder. Selection happens per target intersection because different
+    targets can use different holders, whose local offsets need not agree.
 
     Two regions that overlap without being equal mean one element has two unrelated owners, which no
     fallback can repair. Establishing that the regions are disjoint is also what lets
@@ -350,11 +369,11 @@ def _sources(frames: List[_Frame], limits: PlanBudget) -> List[_Frame]:
         if not frame.box.is_empty:
             by_box.setdefault(frame.box, []).append(frame)
 
-    regions = sorted(by_box, key=lambda box: box.origin)
+    regions = sorted(by_box, key=lambda box: (box.origin, box.extent))
     if len(regions)**2 > limits.max_pair_checks:
         raise AffineTransferError(f'{len(regions)} source regions would take {len(regions)**2} checks, over '
                                   f'max_pair_checks {limits.max_pair_checks}')
-    chosen = []
+    grouped = []
     for index, box in enumerate(regions):
         holders = by_box[box]
         if len({frozenset(holder.locations) for holder in holders}) > 1:
@@ -364,8 +383,8 @@ def _sources(frames: List[_Frame], limits: PlanBudget) -> List[_Frame]:
             if not box.intersection(other).is_empty:
                 raise InvalidMapError(f'source: {box!r} and {other!r} overlap without agreeing, so part of '
                                       'the parameter has two owners')
-        chosen.append(min(holders, key=lambda frame: frame.rank))
-    return chosen
+        grouped.append((box, tuple(sorted(holders, key=lambda frame: frame.rank))))
+    return grouped
 
 
 def _covers_exactly(region: LogicalBox, parts: Sequence[LogicalBox]) -> bool:
@@ -381,8 +400,11 @@ def _covers_exactly(region: LogicalBox, parts: Sequence[LogicalBox]) -> bool:
     return sum(part.volume for part in parts) == region.volume
 
 
-def plan_transfer(target_map: ParamAffineMap, source_map: ParamAffineMap,
-                  limits: Optional[PlanBudget] = None) -> TransferPlan:
+def plan_transfer(target_map: ParamAffineMap,
+                  source_map: ParamAffineMap,
+                  limits: Optional[PlanBudget] = None,
+                  *,
+                  replica_selector: Optional[Callable[[ReplicaSelectionRequest], int]] = None) -> TransferPlan:
     """Plan copies from shards laid out by ``source_map`` into shards laid out by ``target_map``.
 
     Both maps must describe the same logical parameter. Whether two parameters *are* the same
@@ -402,26 +424,44 @@ def plan_transfer(target_map: ParamAffineMap, source_map: ParamAffineMap,
         raise AffineTransferError(f'{pair_checks} candidate pairs exceeds max_pair_checks '
                                   f'{budget.max_pair_checks}')
 
-    candidates: List[TransferSegment] = []
+    pending: List[Tuple[_Frame, LogicalBox, Tuple[_Frame, ...]]] = []
     for frame in sorted(targets, key=lambda frame: (frame.rank, frame.box.origin, frame.box.extent)):
         filled: List[LogicalBox] = []
-        for source in sources:
-            shared = frame.box.intersection(source.box)
+        for box, holders in sources:
+            shared = frame.box.intersection(box)
             if shared.is_empty:
                 continue
             filled.append(shared)
-            candidates.append(
-                TransferSegment(source_rank=source.rank,
-                                source_offset=source.address(shared),
-                                source_strides=source.strides,
-                                target_rank=frame.rank,
-                                target_offset=frame.address(shared),
-                                target_strides=frame.strides,
-                                shape=shared.extent,
-                                logical_origin=shared.origin))
+            pending.append((frame, shared, holders))
         if not _covers_exactly(frame.box, filled):
             raise InvalidMapError(f'target rank {frame.rank} region {frame.box!r} would receive '
                                   f'{sum(part.volume for part in filled)} of its {frame.box.volume} elements')
+
+    candidates: List[TransferSegment] = []
+    for target, shared, holders in pending:
+        source = holders[0]
+        if replica_selector is not None and len(holders) > 1:
+            request = ReplicaSelectionRequest(target_rank=target.rank,
+                                              logical_origin=shared.origin,
+                                              shape=shared.extent,
+                                              target_offset=target.address(shared),
+                                              target_strides=target.strides,
+                                              candidates=tuple(
+                                                  ReplicaCandidate(holder.rank, holder.address(shared), holder.strides)
+                                                  for holder in holders))
+            rank = replica_selector(request)
+            if type(rank) is not int or rank not in {holder.rank for holder in holders}:
+                raise InvalidReplicaPolicyError(f'selector returned invalid source rank {rank!r} '
+                                                f'for target rank {target.rank}')
+            source = next(holder for holder in holders if holder.rank == rank)
+        candidates.append(
+            TransferSegment(source_rank=source.rank,
+                            source_offset=source.address(shared),
+                            source_strides=source.strides,
+                            target_rank=target.rank,
+                            target_offset=target.address(shared),
+                            target_strides=target.strides,
+                            shape=shared.extent))
 
     segments = _coalesce(candidates, budget)
     if len(segments) > budget.max_segments:
@@ -448,39 +488,28 @@ def _plan_bytes(segments: Tuple[TransferSegment, ...]) -> int:
 
 
 def _merge(one: TransferSegment, other: TransferSegment) -> Optional[TransferSegment]:
-    """Join two segments along the single axis they may differ on, or refuse.
-
-    Logical adjacency is necessary and not sufficient: each side continues only where its own stride
-    carries it, and the two live in different shards. Every other axis must match in position and in
-    extent, so a merge can never widen into ground that neither segment covered.
-    """
+    """Join copies only when both shard address mappings continue along one axis."""
     if (one.source_rank != other.source_rank or one.target_rank != other.target_rank
-            or one.source_strides != other.source_strides or one.target_strides != other.target_strides):
+            or one.source_strides != other.source_strides or one.target_strides != other.target_strides
+            or len(one.shape) != len(other.shape)):
         return None
     for axis in range(len(one.shape)):
-        first, second = sorted((one, other), key=lambda segment: segment.logical_origin[axis])
-        if first.logical_origin[axis] + first.shape[axis] != second.logical_origin[axis]:
+        if one.shape[:axis] + one.shape[axis + 1:] != other.shape[:axis] + other.shape[axis + 1:]:
             continue
-        if first.shape[:axis] + first.shape[axis + 1:] != second.shape[:axis] + second.shape[axis + 1:]:
-            continue
-        if first.logical_origin[:axis] + first.logical_origin[axis + 1:] != \
-                second.logical_origin[:axis] + second.logical_origin[axis + 1:]:
-            continue
-        step = second.logical_origin[axis] - first.logical_origin[axis]
-        if first.source_offset + step * first.source_strides[axis] != second.source_offset:
-            continue
-        if first.target_offset + step * first.target_strides[axis] != second.target_offset:
-            continue
-        shape = list(first.shape)
-        shape[axis] += second.shape[axis]
-        return TransferSegment(source_rank=first.source_rank,
-                               source_offset=first.source_offset,
-                               source_strides=first.source_strides,
-                               target_rank=first.target_rank,
-                               target_offset=first.target_offset,
-                               target_strides=first.target_strides,
-                               shape=tuple(shape),
-                               logical_origin=first.logical_origin)
+        for first, second in ((one, other), (other, one)):
+            if first.source_offset + first.shape[axis] * first.source_strides[axis] != second.source_offset:
+                continue
+            if first.target_offset + first.shape[axis] * first.target_strides[axis] != second.target_offset:
+                continue
+            shape = list(first.shape)
+            shape[axis] += second.shape[axis]
+            return TransferSegment(source_rank=first.source_rank,
+                                   source_offset=first.source_offset,
+                                   source_strides=first.source_strides,
+                                   target_rank=first.target_rank,
+                                   target_offset=first.target_offset,
+                                   target_strides=first.target_strides,
+                                   shape=tuple(shape))
     return None
 
 
@@ -491,23 +520,32 @@ def _coalesce(segments: List[TransferSegment], limits: PlanBudget) -> Tuple[Tran
     It does not claim the fewest segments: a shortest plan needs a search that has no business being
     on this path, and the counts that matter here are bounded by topology either way.
     """
-    merged = sorted(
-        segments, key=lambda segment: (segment.source_rank, segment.target_rank, segment.logical_origin,
-                                       segment.shape, segment.source_offset, segment.target_offset))
-    for _ in range(limits.max_merge_passes):
-        remaining: List[TransferSegment] = []
-        joined = False
-        for segment in merged:
-            for index, held in enumerate(remaining):
-                candidate = _merge(held, segment)
-                if candidate is not None:
-                    remaining[index] = candidate
-                    joined = True
-                    break
-            else:
-                remaining.append(segment)
-        merged = remaining
-        if not joined:
-            break
+    groups: Dict[Tuple[object, ...], List[TransferSegment]] = {}
+    for segment in segments:
+        key = (segment.source_rank, segment.target_rank, segment.source_strides, segment.target_strides,
+               len(segment.shape))
+        groups.setdefault(key, []).append(segment)
+
+    folded = []
+    for group in groups.values():
+        merged = sorted(group, key=lambda segment: (segment.target_offset, segment.source_offset, segment.shape))
+        for _ in range(limits.max_merge_passes):
+            remaining: List[TransferSegment] = []
+            joined = False
+            for segment in merged:
+                for index, held in enumerate(remaining):
+                    candidate = _merge(held, segment)
+                    if candidate is not None:
+                        remaining[index] = candidate
+                        joined = True
+                        break
+                else:
+                    remaining.append(segment)
+            merged = remaining
+            if not joined:
+                break
+        folded.extend(merged)
     return tuple(
-        sorted(merged, key=lambda segment: (segment.target_rank, segment.logical_origin, segment.source_rank)))
+        sorted(folded,
+               key=lambda segment: (segment.target_rank, segment.target_offset, segment.source_rank, segment.
+                                    source_offset, segment.shape, segment.source_strides, segment.target_strides)))
