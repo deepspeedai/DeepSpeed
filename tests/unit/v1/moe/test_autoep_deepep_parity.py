@@ -315,6 +315,9 @@ def _assert_cleanup_results_close(actual, expected, *, compare_score_gradients):
                                    msg=f"routing-score gradient norm for {name}")
     assert actual["gradients"].keys() == expected["gradients"].keys()
     assert actual["parameter_deltas"].keys() == expected["parameter_deltas"].keys()
+    # Every gradient is checked before any update, because the updates are the
+    # sensitive half: interleaving them stops at the first failing update and
+    # leaves the remaining gradients unexamined.
     for name in actual["gradients"]:
         torch.testing.assert_close(
             actual["gradients"][name],
@@ -323,6 +326,7 @@ def _assert_cleanup_results_close(actual, expected, *, compare_score_gradients):
             atol=5e-2,
             msg=(f"gradient for {name}; max_diff="
                  f"{(actual['gradients'][name] - expected['gradients'][name]).abs().max().item()}"))
+    for name in actual["parameter_deltas"]:
         torch.testing.assert_close(actual["parameter_deltas"][name],
                                    expected["parameter_deltas"][name],
                                    rtol=5e-3,
@@ -335,24 +339,29 @@ def _delta_failure_message(name, actual, expected):
 
     At step one Adam's bias correction makes every update +/-lr regardless of
     magnitude, so a sign flip on a near-zero gradient shows up here as a
-    difference of about twice the learning rate. Reporting the reference
-    gradient at the worst coordinate is what separates that from a genuinely
-    different update.
+    difference of about twice the learning rate. Reporting the gradients and
+    the updates at the worst coordinate is what separates that from a
+    genuinely different update.
     """
 
-    def describe():
-        difference = (actual["parameter_deltas"][name] - expected["parameter_deltas"][name]).abs()
-        worst = int(difference.flatten().argmax().item())
-        reference_gradient = expected["gradients"][name].flatten()[worst]
-        actual_gradient = actual["gradients"][name].flatten()[worst]
-        gradient_scale = expected["gradients"][name].abs().max()
-        return (f"optimizer delta for {name}; max_diff={difference.flatten()[worst].item()}; "
-                f"at that coordinate the reference gradient is {reference_gradient.item()} and the actual "
-                f"gradient is {actual_gradient.item()}, against a reference gradient maximum of "
-                f"{gradient_scale.item()}; signs "
-                f"{'differ' if reference_gradient.sign() != actual_gradient.sign() else 'agree'}")
-
-    return describe()
+    difference = (actual["parameter_deltas"][name] - expected["parameter_deltas"][name]).abs()
+    worst = int(difference.flatten().argmax().item())
+    reference_gradient = expected["gradients"][name].flatten()[worst]
+    actual_gradient = actual["gradients"][name].flatten()[worst]
+    reference_delta = expected["parameter_deltas"][name].flatten()[worst]
+    actual_delta = actual["parameter_deltas"][name].flatten()[worst]
+    return (f"optimizer delta for {name}; max_diff={difference.flatten()[worst].item()}; "
+            f"at that coordinate the gradients are reference={reference_gradient.item()} "
+            f"actual={actual_gradient.item()} "
+            f"(signs {'differ' if reference_gradient.sign() != actual_gradient.sign() else 'agree'}), "
+            f"against a reference gradient maximum of {expected['gradients'][name].abs().max().item()}; "
+            f"the updates there are reference={reference_delta.item()} actual={actual_delta.item()}, "
+            f"with update magnitude maxima reference="
+            f"{expected['parameter_deltas'][name].abs().max().item()} actual="
+            f"{actual['parameter_deltas'][name].abs().max().item()}. "
+            "Gradient clipping rescales every gradient by one positive factor, so it cannot flip a sign; "
+            "a sign difference here therefore came from the gradient itself, while the update magnitude "
+            "is set by Adam's first step rather than by the gradient")
 
 
 @pytest.mark.skipif(not _deepep_available(), reason="deep_ep is not installed")
