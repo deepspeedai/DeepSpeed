@@ -3,10 +3,12 @@
 
 # DeepSpeed Team
 
+import torch
+
 from .builder import NPUOpBuilder
 
 try:
-    import torch_npu
+    import torch_npu  # noqa: F401
 except ImportError as e:
     pass
 
@@ -16,10 +18,9 @@ class NPUFusedAdam:
     @staticmethod
     def multi_tensor_adam(chunk_size, noop_flag_buffer, tensor_lists, lr, beta1, beta2, epsilon, step, adam_w_mode,
                           bias_correction, weight_decay, *args):
-        bias_correction1 = beta1**(step - 1)
-        bias_correction2 = beta2**(step - 1)
-
-        # iteration group['params']
+        # torch._fused_adam(w)_ always applies bias correction.
+        # torch_npu's fused adam kernels do not increment step.
+        step_tensor = torch.tensor(step, dtype=torch.int64, device=tensor_lists[1][0].device)
         for i in range(len(tensor_lists[0])):
             grad_flat = tensor_lists[0][i]
             param_flat = tensor_lists[1][i]
@@ -27,31 +28,23 @@ class NPUFusedAdam:
             v_flat = tensor_lists[3][i]
 
             if adam_w_mode:
-                param_flat.data, m_flat, v_flat = torch_npu.npu_apply_adam_w(
-                    bias_correction1,
-                    bias_correction2,
-                    lr,
-                    weight_decay,
-                    beta1,
-                    beta2,
-                    epsilon,
-                    grad_flat,
-                    None,  # max_grad_norm
-                    False,  # amsgrad
-                    False,  # maximize
-                    out=(param_flat.data, m_flat, v_flat))
+                torch._fused_adamw_([param_flat], [grad_flat], [m_flat], [v_flat], [], [step_tensor],
+                                    amsgrad=False,
+                                    lr=lr,
+                                    beta1=beta1,
+                                    beta2=beta2,
+                                    weight_decay=weight_decay,
+                                    eps=epsilon,
+                                    maximize=False)
             else:
-                param_flat.data, m_flat, v_flat = torch_npu.npu_apply_adam(
-                    bias_correction1,
-                    bias_correction2,
-                    lr,
-                    beta1,
-                    beta2,
-                    epsilon,
-                    grad_flat,
-                    False,  # use_locking
-                    False,  # use_nesterov
-                    out=(param_flat.data, m_flat, v_flat))
+                torch._fused_adam_([param_flat], [grad_flat], [m_flat], [v_flat], [], [step_tensor],
+                                   amsgrad=False,
+                                   lr=lr,
+                                   beta1=beta1,
+                                   beta2=beta2,
+                                   weight_decay=weight_decay,
+                                   eps=epsilon,
+                                   maximize=False)
 
 
 class FusedAdamBuilder(NPUOpBuilder):
