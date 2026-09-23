@@ -143,7 +143,7 @@ def test_fused_rms_norm_large_and_tiny_magnitudes(dtype, scale):
     generator = torch.Generator(device=device).manual_seed(20260923)
     hidden = (scale * torch.randn((9, 2048), device=device, dtype=dtype, generator=generator)).requires_grad_(True)
     weight = torch.randn((2048, ), device=device, dtype=dtype, generator=generator).requires_grad_(True)
-    upstream = torch.randn_like(hidden)
+    upstream = torch.randn((9, 2048), device=device, dtype=dtype, generator=generator)
 
     eager_hidden = hidden.detach().clone().requires_grad_(True)
     eager_weight = weight.detach().clone().requires_grad_(True)
