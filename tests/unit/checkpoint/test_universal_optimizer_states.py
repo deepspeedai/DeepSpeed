@@ -5,8 +5,8 @@
 
 Muon keeps `momentum_buffer` for the matrices it orthogonalizes and Adam's `exp_avg` /
 `exp_avg_sq` for the rest, in two param groups of the same run. ZeRO-1/2 keep that momentum
-whole per parameter for every parameter a partition touches, and ZeRO-3 keeps it in the
-partition's layout like any other state.
+whole per parameter for every parameter a partition touches, unless the optimizer is offloaded.
+With offload, and under ZeRO-3, it is in the partition's layout like any other state.
 """
 
 import glob
@@ -44,7 +44,7 @@ class MuonModel(torch.nn.Module):
         return self.norm(x)
 
 
-def _engine(zero_stage, load_universal=False):
+def _engine(zero_stage, offload=False, load_universal=False):
     torch.manual_seed(0)
     model = MuonModel()
     config = {
@@ -64,6 +64,8 @@ def _engine(zero_stage, load_universal=False):
             "reduce_scatter": False,
         },
     }
+    if offload:
+        config["zero_optimization"]["offload_optimizer"] = {"device": "cpu"}
     if load_universal:
         config["checkpoint"] = {"load_universal": True}
     engine, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config)
@@ -122,8 +124,8 @@ class muon_baseline_ws2(DistributedFixture):
 
     world_size = 2
 
-    def run(self, tmpdir, zero_stage):
-        engine = _engine(zero_stage)
+    def run(self, tmpdir, zero_stage, offload):
+        engine = _engine(zero_stage, offload)
         _train(engine, first_step=0, steps=3)
         engine.save_checkpoint(tmpdir, tag=TAG, client_state={UNIVERSAL_CHECKPOINT_INFO: {}})
         dist.barrier()
@@ -136,17 +138,19 @@ class muon_baseline_ws2(DistributedFixture):
         engine.destroy()
 
 
+@pytest.mark.parametrize("offload", [False, True])
 @pytest.mark.parametrize("zero_stage", [1, 2, 3])
 class TestMuonUniversalResume(DistributedTest):
     """A resume from the universal checkpoint takes the same next steps as the run that never stopped.
 
     Only the momentum, Adam's moments and each group's own settings coming back exactly lets it
     do that. The ranks then hold different partitions from the ones that saved, so ZeRO-1/2 have
-    to rebuild each rank's momentum buffer from the parameters its new partition touches.
+    to rebuild each rank's momentum buffer from the parameters its new partition touches, and
+    switching offload on or off moves ZeRO-1/2's momentum between its two layouts.
     """
 
-    def _resume_matches(self, tmpdir, zero_stage):
-        engine = _engine(zero_stage, load_universal=True)
+    def _resume_matches(self, tmpdir, zero_stage, offload):
+        engine = _engine(zero_stage, offload, load_universal=True)
         engine.load_checkpoint(tmpdir, tag=f"{TAG}_universal", load_optimizer_states=True)
         _train(engine, first_step=3, steps=2)
         weights = _weights(engine, zero_stage)
@@ -156,12 +160,16 @@ class TestMuonUniversalResume(DistributedTest):
             assert relative < 1e-5, f"{name} is {relative:.1e} away from the uninterrupted run"
 
     @pytest.mark.world_size(2)
-    def test_resume_on_the_same_ranks(self, muon_baseline_ws2, tmpdir, zero_stage):
-        self._resume_matches(tmpdir, zero_stage)
+    def test_resume_on_the_same_ranks(self, muon_baseline_ws2, tmpdir, zero_stage, offload):
+        self._resume_matches(tmpdir, zero_stage, offload)
 
     @pytest.mark.world_size(4)
-    def test_resume_on_twice_the_ranks(self, muon_baseline_ws2, tmpdir, zero_stage):
-        self._resume_matches(tmpdir, zero_stage)
+    def test_resume_on_twice_the_ranks(self, muon_baseline_ws2, tmpdir, zero_stage, offload):
+        self._resume_matches(tmpdir, zero_stage, offload)
+
+    @pytest.mark.world_size(2)
+    def test_resume_with_offload_switched(self, muon_baseline_ws2, tmpdir, zero_stage, offload):
+        self._resume_matches(tmpdir, zero_stage, not offload)
 
 
 class TestUnrecordedMomentumLayoutIsRefused(DistributedTest):
