@@ -308,6 +308,52 @@ helper_funcs_mapping = {
 }
 
 
+@pytest.mark.parametrize('round_robin_gradients', [False, True])
+@pytest.mark.parametrize('zero_stage', [1, 2])
+class TestTensorFragmentValues(DistributedTest):
+    """The getters return the parameter's own data, not just a tensor of its shape.
+
+    With `round_robin_gradients` the flat buffer is laid out in round-robin order, and a mapping
+    built in parameter order points each parameter at a neighbour's slice. A plain PyTorch copy of
+    the model, fed the same batch, is the reference.
+    """
+    world_size = 2
+
+    def test_full_fp32_param_and_grad(self, zero_stage, round_robin_gradients):
+        widths = [8, 9, 10, 11, 12, 13, 14]
+
+        def build():
+            torch.manual_seed(0)
+            return torch.nn.Sequential(*[torch.nn.Linear(i, o, bias=False) for i, o in zip(widths, widths[1:])])
+
+        reference = build()
+        model = build()
+        config_dict = {
+            "train_micro_batch_size_per_gpu": 2,
+            "optimizer": {
+                "type": "Adam",
+                "params": {
+                    "lr": 1e-3
+                }
+            },
+            "zero_optimization": {
+                "stage": zero_stage,
+                "round_robin_gradients": round_robin_gradients
+            },
+        }
+        engine, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config_dict)
+
+        # The same batch on every rank, so the averaged gradient is the reference's.
+        x = torch.randn(2, widths[0], generator=torch.Generator().manual_seed(1))
+        engine.backward(engine(x.to(engine.device)).square().mean())
+        reference(x).square().mean().backward()
+
+        for (name, param), expected in zip(engine.module.named_parameters(), reference.parameters()):
+            assert torch.equal(safe_get_full_fp32_param(param).cpu(), expected.detach()), name
+            torch.testing.assert_close(safe_get_full_grad(param).cpu(), expected.grad, msg=name)
+        engine.destroy()
+
+
 @pytest.mark.parametrize('dtype', [torch.bfloat16, torch.float16, torch.float32])
 class TestTensorFragmentSet(DistributedTest):
     # Need multiple gpus to test possible hanging
