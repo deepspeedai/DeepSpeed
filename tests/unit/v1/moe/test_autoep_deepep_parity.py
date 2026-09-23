@@ -323,13 +323,36 @@ def _assert_cleanup_results_close(actual, expected, *, compare_score_gradients):
             atol=5e-2,
             msg=(f"gradient for {name}; max_diff="
                  f"{(actual['gradients'][name] - expected['gradients'][name]).abs().max().item()}"))
-        torch.testing.assert_close(
-            actual["parameter_deltas"][name],
-            expected["parameter_deltas"][name],
-            rtol=5e-3,
-            atol=5e-4,
-            msg=(f"optimizer delta for {name}; max_diff="
-                 f"{(actual['parameter_deltas'][name] - expected['parameter_deltas'][name]).abs().max().item()}"))
+        torch.testing.assert_close(actual["parameter_deltas"][name],
+                                   expected["parameter_deltas"][name],
+                                   rtol=5e-3,
+                                   atol=5e-4,
+                                   msg=_delta_failure_message(name, actual, expected))
+
+
+def _delta_failure_message(name, actual, expected):
+    """Describe a delta mismatch together with the gradient that produced it.
+
+    At step one Adam's bias correction makes every update +/-lr regardless of
+    magnitude, so a sign flip on a near-zero gradient shows up here as a
+    difference of about twice the learning rate. Reporting the reference
+    gradient at the worst coordinate is what separates that from a genuinely
+    different update.
+    """
+
+    def describe():
+        difference = (actual["parameter_deltas"][name] - expected["parameter_deltas"][name]).abs()
+        worst = int(difference.flatten().argmax().item())
+        reference_gradient = expected["gradients"][name].flatten()[worst]
+        actual_gradient = actual["gradients"][name].flatten()[worst]
+        gradient_scale = expected["gradients"][name].abs().max()
+        return (f"optimizer delta for {name}; max_diff={difference.flatten()[worst].item()}; "
+                f"at that coordinate the reference gradient is {reference_gradient.item()} and the actual "
+                f"gradient is {actual_gradient.item()}, against a reference gradient maximum of "
+                f"{gradient_scale.item()}; signs "
+                f"{'differ' if reference_gradient.sign() != actual_gradient.sign() else 'agree'}")
+
+    return describe()
 
 
 @pytest.mark.skipif(not _deepep_available(), reason="deep_ep is not installed")
