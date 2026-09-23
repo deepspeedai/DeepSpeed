@@ -17,7 +17,66 @@ from deepspeed.moe.layer import MoE
 from deepspeed.moe.sharded_moe import (top1gating, top2gating, topkgating, _route_slots, _sparse_encode,
                                        _sparse_decode)
 from deepspeed.moe.utils import split_params_into_different_moe_groups_for_optimizer, is_moe_param
+from deepspeed.runtime.fp16.fused_optimizer import FP16_Optimizer
 from deepspeed.utils.torch import required_torch_version
+
+
+def _moe_fp16_zero0_config():
+    return {
+        "train_micro_batch_size_per_gpu": 1,
+        "steps_per_print": 1,
+        "optimizer": {
+            "type": "AdamW",
+            "params": {
+                "lr": 0.0
+            }
+        },
+        "fp16": {
+            "enabled": True,
+            "loss_scale": 1.0
+        },
+        "zero_optimization": {
+            "stage": 0
+        }
+    }
+
+
+def _make_fixed_grad_moe_model(expert_weight_scale):
+    torch.manual_seed(1234)
+    model = SimpleMoEModel(hidden_dim=2, num_experts=1, ep_size=1)
+    scaled_expert_weights = 0
+    with torch.no_grad():
+        for _, parameter in model.named_parameters():
+            if is_moe_param(parameter) and parameter.dim() > 1:
+                parameter.mul_(expert_weight_scale)
+                scaled_expert_weights += 1
+
+    assert scaled_expert_weights > 0, "the test must change at least one expert weight"
+    return model
+
+
+def _as_cpu_float_tensor(value):
+    if torch.is_tensor(value):
+        return value.detach().float().cpu()
+    return torch.tensor(float(value), dtype=torch.float32)
+
+
+def _step_with_fixed_grads_and_read_norm(expert_weight_scale):
+    model = _make_fixed_grad_moe_model(expert_weight_scale)
+    engine, _, _, _ = deepspeed.initialize(config=_moe_fp16_zero0_config(), model=model)
+
+    assert engine.has_moe_layers, "the test must enter the MoE norm branch"
+    assert isinstance(engine.optimizer, FP16_Optimizer), "the regression lives in FP16_Optimizer.step"
+    assert engine.gradient_clipping() == 1.0, "the test relies on DeepSpeed's default clipping threshold"
+
+    for parameter in engine.module.parameters():
+        if parameter.requires_grad:
+            parameter.grad = torch.ones_like(parameter)
+
+    engine.step()
+    norm = engine.get_global_grad_norm()
+    assert norm is not None, "DeepSpeed did not expose the computed gradient norm"
+    return _as_cpu_float_tensor(norm)
 
 
 @pytest.mark.parametrize("zero_stage", [0, 1, 2])
@@ -59,6 +118,21 @@ class TestSimpleMoE(DistributedTest):
             loss = model(batch[0], batch[1])
             model.backward(loss)
             model.step()
+
+
+class TestMoEFP16GradientNorm(DistributedTest):
+    world_size = 1
+
+    @pytest.mark.skipif(not get_accelerator().is_fp16_supported(), reason="fp16 is not supported on this accelerator")
+    def test_expert_weight_values_do_not_affect_gradient_norm(self):
+        if not required_torch_version(min_version=1.8):
+            pytest.skip("DeepSpeed MoE tests need torch 1.8 or higher to run correctly")
+
+        base_norm = _step_with_fixed_grads_and_read_norm(expert_weight_scale=1.0)
+        scaled_norm = _step_with_fixed_grads_and_read_norm(expert_weight_scale=100.0)
+
+        assert base_norm.item() > 1.0, "default gradient clipping must use the computed norm"
+        torch.testing.assert_close(scaled_norm, base_norm, rtol=0.0, atol=0.0)
 
 
 @pytest.mark.parametrize("ep_size", [2, 4])
