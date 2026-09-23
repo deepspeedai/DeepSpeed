@@ -87,6 +87,17 @@ class ZeroStageEnum(int, Enum):
     max_stage = 3
 
 
+def offload_gradient_safety_enabled(*,
+                                    stage: int,
+                                    cpu_offload: bool,
+                                    zenflow: bool = False,
+                                    pipeline_parallel: bool = False,
+                                    deepcompile: bool = False) -> bool:
+    """CPU optimizer offload enforces the contiguity required by these protections."""
+    return (stage == ZeroStageEnum.gradients and cpu_offload and not zenflow and not pipeline_parallel
+            and not deepcompile)
+
+
 class DeepSpeedZeroConfig(DeepSpeedConfigModel):
     """
     Sets parameters for ZeRO optimizations.
@@ -115,6 +126,14 @@ class DeepSpeedZeroConfig(DeepSpeedConfigModel):
     Number of elements reduced/allreduced at a time. Limits the memory required
     for the allgather for large model sizes
     """
+
+    check_offload_gradients: bool = False
+    """ZeRO-2 CPU offload: check completed optimizer-input gradients and group
+    norms before updating. Forces overflow checking even when BF16 disables it."""
+
+    accumulate_offload_gradients: bool = False
+    """ZeRO-2 CPU offload: retain every backward contribution until step/reset,
+    independently of GAS and per-backward boundary flags. Uses extra CPU storage."""
 
     use_multi_rank_bucket_allreduce: bool = True
     """
@@ -380,6 +399,20 @@ class DeepSpeedZeroConfig(DeepSpeedConfigModel):
     """
 
     # Validators
+    @model_validator(mode="after")
+    def gradient_safety_valid(self):
+        cpu_offload = self.offload_optimizer is not None and self.offload_optimizer.device == OffloadDeviceEnum.cpu
+        enabled = self.check_offload_gradients or self.accumulate_offload_gradients
+        if not enabled:
+            return self
+        if self.stage != ZeroStageEnum.gradients or self.zenflow is not None:
+            raise ValueError("Gradient safety options require ZeRO-2 without ZenFlow")
+        if not self.contiguous_gradients and not cpu_offload:
+            raise ValueError("Gradient safety options require contiguous gradients")
+        if (self.check_offload_gradients or self.accumulate_offload_gradients) and not cpu_offload:
+            raise ValueError("Offload gradient safety options require CPU optimizer offload")
+        return self
+
     @model_validator(mode="after")
     def overlap_comm_valid(self):
         if self.overlap_comm is None:
