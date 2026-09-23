@@ -268,8 +268,8 @@ the cast, and ``Olmo2RMSNorm`` moved to that order between Transformers
 releases. The installer therefore replaces only instances of the classes in
 ``SUPPORTED_RMS_NORM_CLASSES``, currently ``Qwen3MoeRMSNorm``, that still run
 that class's own ``forward``. Subclasses and modules whose ``forward`` was
-already patched, by another kernel installer or by an earlier call, are left
-alone. Replaced modules keep their own weight Parameter and
+already patched or wrapped, by another kernel installer or by an earlier call,
+are left alone. Replaced modules keep their own weight Parameter and
 ``variance_epsilon``. The return value is the number of modules replaced: four
 per decoder layer plus the final norm, 193 for Qwen3-30B-A3B.
 ``fused_rms_norm(hidden, weight, eps)`` in the same module applies the kernels

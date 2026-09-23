@@ -3,6 +3,7 @@
 """Compare fused RMSNorm with the HF eager expression."""
 
 import copy
+import functools
 import importlib
 import types
 
@@ -310,16 +311,31 @@ def _qwen3_moe_class_patch(monkeypatch):
     return rms_norm_class(128)
 
 
-@pytest.mark.parametrize(
-    "build", [
-        _name_alike,
-        _hf_name_alike("transformers.models.olmo2.modeling_olmo2.Olmo2RMSNorm"),
-        _hf_name_alike("transformers.models.gpt_oss.modeling_gpt_oss.GptOssRMSNorm"),
-        _qwen3_moe_subclass,
-        _qwen3_moe_instance_patch,
-        _qwen3_moe_class_patch,
-    ],
-    ids=["name-alike", "olmo2", "gpt-oss", "qwen3-moe-subclass", "qwen3-moe-instance-patch", "qwen3-moe-class-patch"])
+def _qwen3_moe_wrapped_class_patch(monkeypatch):
+    rms_norm_class = _hf_class(QWEN3_MOE_RMS_NORM)
+
+    # The wrapper takes the original's module and qualified name, so it cannot be told apart by name.
+    @functools.wraps(rms_norm_class.forward)
+    def wrapped_forward(self, hidden_states):
+        return _gamma_before_cast_forward(self, hidden_states)
+
+    monkeypatch.setattr(rms_norm_class, "forward", wrapped_forward)
+    return rms_norm_class(128)
+
+
+@pytest.mark.parametrize("build", [
+    _name_alike,
+    _hf_name_alike("transformers.models.olmo2.modeling_olmo2.Olmo2RMSNorm"),
+    _hf_name_alike("transformers.models.gpt_oss.modeling_gpt_oss.GptOssRMSNorm"),
+    _qwen3_moe_subclass,
+    _qwen3_moe_instance_patch,
+    _qwen3_moe_class_patch,
+    _qwen3_moe_wrapped_class_patch,
+],
+                         ids=[
+                             "name-alike", "olmo2", "gpt-oss", "qwen3-moe-subclass", "qwen3-moe-instance-patch",
+                             "qwen3-moe-class-patch", "qwen3-moe-wrapped-class-patch"
+                         ])
 def test_replace_rms_norm_leaves_other_forwards_untouched(build, monkeypatch):
     generator = torch.Generator().manual_seed(20260923)
     norm = build(monkeypatch).to(torch.bfloat16)

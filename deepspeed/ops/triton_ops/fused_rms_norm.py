@@ -259,8 +259,11 @@ def _runs_supported_rms_norm_forward(module: torch.nn.Module) -> bool:
     # Kernel installers, including an earlier call of this one, patch forward on the class or on the instance.
     # Only the class's own forward is known to compute the expression the kernels reproduce.
     class_forward_patched = _qualified_name(module_class.forward) != f"{class_name}.forward"
+    # functools.wraps copies the original's module and qualified name onto a wrapper, so a wrapper passes the check
+    # above; the __wrapped__ attribute that functools.wraps also sets gives it away.
+    class_forward_wrapped = hasattr(module_class.forward, "__wrapped__")
     instance_forward_patched = "forward" in vars(module)
-    if class_forward_patched or instance_forward_patched:
+    if class_forward_patched or class_forward_wrapped or instance_forward_patched:
         return False
     weight = getattr(module, "weight", None)
     eps = getattr(module, "variance_epsilon", None)
@@ -276,9 +279,9 @@ def replace_rms_norm(module: torch.nn.Module) -> int:
 
     A module is replaced only if its exact class is listed in
     ``SUPPORTED_RMS_NORM_CLASSES`` and it still runs that class's own forward.
-    Subclasses and modules whose forward was patched, by another installer or
-    by an earlier call, are left untouched. Replaced modules keep their own
-    weight Parameter and ``variance_epsilon``.
+    Subclasses and modules whose forward was patched or wrapped, by another
+    installer or by an earlier call, are left untouched. Replaced modules keep
+    their own weight Parameter and ``variance_epsilon``.
 
     Every supported module is checked before any is replaced: a weight that is
     not a bfloat16 or float16 CUDA tensor, or is wider than the kernels
