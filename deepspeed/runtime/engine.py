@@ -711,6 +711,8 @@ class DeepSpeedEngine(Module):
         self.unflatten = _unflatten_dense_tensors
 
         self._is_compiled = False
+        self._compile_mode = None
+        self._compiled_regions = []
         if is_deepcompile_supported():
             # Predefined compile passes
             self.register_compile_pass(zero_1_and_2_compile.NAME_Z1, zero_1_and_2_compile.add_z1_reduce,
@@ -5738,7 +5740,10 @@ class DeepSpeedEngine(Module):
                 schedule=None,
                 compiled_autograd_enabled=False) -> None:
         """Compile the module using the specified backend and kwargs.
-        If a compiler_fn is set, it will be used instead of torch.compile().
+
+        With ``compile.autoep_non_moe`` enabled in the DeepSpeed config, compile the
+        callable parents of AutoEP layers while keeping routing, token movement,
+        expert compute, and collectives eager. Otherwise, compile the full module.
         """
         # Avoid graph breaks
         deepspeed.utils.nvtx.enable_nvtx = False
@@ -5746,13 +5751,49 @@ class DeepSpeedEngine(Module):
         if not is_compile_supported():
             raise RuntimeError("compile is not supported in your version of PyTorch.")
 
+        compile_mode = "autoep_non_moe" if self._config.compile_config.autoep_non_moe else "model"
+
         if self.is_compiled:
-            return
+            if self._compile_mode == compile_mode:
+                return
+            raise RuntimeError(
+                "Engine is already compiled; compile.autoep_non_moe cannot be changed after compilation.")
 
         if 'backend' in compile_kwargs:
             logger.warning("The `backend` in `compile_kwargs` will be overridden. Use the `backend` argument instead.")
 
-        logger.info(f"Compiling deepcompile={self.is_deepcompile_enabled()} backend={backend}")
+        logger.info(f"Compiling mode={compile_mode} deepcompile={self.is_deepcompile_enabled()} backend={backend}")
+
+        if compile_mode == "autoep_non_moe":
+            if self.is_deepcompile_enabled():
+                raise ValueError("compile.autoep_non_moe=True uses vanilla torch.compile and cannot be combined "
+                                 "with DeepCompile.")
+            autoep_config = getattr(self._config, "expert_parallel_config", None)
+            if getattr(autoep_config, "comm_backend", "comm") != "comm":
+                raise ValueError("compile.autoep_non_moe=True supports only expert_parallel.comm_backend='comm'.")
+            if self.autotp_size() > 1:
+                raise ValueError("compile.autoep_non_moe=True does not support AutoEP+AutoTP folding yet.")
+            if self._autoep_sequence_parallel_world_size() > 1:
+                raise ValueError("compile.autoep_non_moe=True does not support sequence parallelism yet.")
+            folding_spec = getattr(self, "_autoep_folding_spec", None)
+            if getattr(self, "pipeline_parallelism", False) or getattr(folding_spec, "pp_size", 1) > 1:
+                raise ValueError("compile.autoep_non_moe=True does not support pipeline parallelism yet.")
+            if self.zero_optimization_partition_weights():
+                raise ValueError("compile.autoep_non_moe=True does not support ZeRO Stage 3 yet.")
+            for offload_config in (self.zero_offload_optimizer(), self.zero_offload_param()):
+                if offload_config is not None and offload_config.device != OffloadDeviceEnum.none:
+                    raise ValueError(
+                        "compile.autoep_non_moe=True does not support optimizer or parameter offload yet.")
+            if schedule is not None:
+                raise ValueError("compile.autoep_non_moe=True does not support DeepCompile schedules.")
+            if compiled_autograd_enabled:
+                raise ValueError("compile.autoep_non_moe=True does not support compiled autograd yet.")
+            from .compiler import compile_autoep_non_moe_regions
+            self._compiled_regions = compile_autoep_non_moe_regions(self.module, backend, compile_kwargs)
+            self._is_compiled = True
+            self._compile_mode = compile_mode
+            self._compile_kwargs = compile_kwargs
+            return
 
         resolved_backend = None
         if self.is_deepcompile_enabled():
@@ -5776,6 +5817,7 @@ class DeepSpeedEngine(Module):
             raise
 
         self._is_compiled = True
+        self._compile_mode = compile_mode
         self._compile_kwargs = compile_kwargs
         if compiled_autograd_enabled:
             if not self._deepcompile_active:
