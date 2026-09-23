@@ -6,12 +6,101 @@
 import torch
 import pytest
 import deepspeed
+from types import SimpleNamespace
+from deepspeed.runtime.bf16_optimizer import BF16_Optimizer
 from deepspeed.runtime.zero.stage3 import DeepSpeedZeroOptimizer_Stage3
+from deepspeed.runtime.superoffload.superoffload_stage3 import SuperOffloadOptimizer_Stage3
 from deepspeed.utils import safe_get_local_grad, safe_set_local_grad
 from deepspeed.accelerator import get_accelerator
 from unit.simple_model import SimpleModel
 from unit.common import DistributedTest
 import os
+
+
+def test_stage3_rejects_invalid_group_norm_before_optimizer_step():
+    optimizer = object.__new__(DeepSpeedZeroOptimizer_Stage3)
+    optimizer._pre_step = lambda: None
+    optimizer._partition_all_parameters = lambda: None
+    optimizer.overflow = False
+    optimizer._overflow_check_and_loss_scale_update = lambda update_scale: False
+    optimizer._get_norm_groups = lambda: [torch.tensor(-1.0)]
+    cleanup = []
+    optimizer._loss_scale_update_and_overflow_cleanup = lambda: cleanup.append(optimizer.overflow
+                                                                               ) or optimizer.overflow
+    optimizer.swap_optimizer = False
+
+    optimizer.step()
+
+    assert cleanup == [True]
+    assert optimizer.overflow
+
+
+def test_stage3_overflow_state_is_reset_for_next_non_fp16_step():
+    optimizer = object.__new__(DeepSpeedZeroOptimizer_Stage3)
+    optimizer.dtype = torch.bfloat16
+    optimizer.overflow = True
+
+    assert not optimizer._overflow_check_and_loss_scale_update(update_scale=False)
+
+
+def test_stage3_raw_overflow_replaces_stale_global_norm():
+    optimizer = object.__new__(DeepSpeedZeroOptimizer_Stage3)
+    optimizer.overflow = True
+    optimizer._global_grad_norm = torch.tensor(3.0)
+    optimizer.custom_loss_scaler = False
+    optimizer.loss_scaler = SimpleNamespace(cur_scale=4.0)
+    optimizer._update_scale = lambda overflow: setattr(optimizer.loss_scaler, "cur_scale", 2.0)
+    optimizer._overflow_clean_up = lambda prev_scale: None
+    optimizer._loco_err_buf_update = lambda overflow, scale: None
+
+    assert optimizer._loss_scale_update_and_overflow_cleanup()
+    assert optimizer._global_grad_norm == float("inf")
+
+
+def test_bf16_optimizer_reports_invalid_step_and_recovers(monkeypatch):
+    optimizer = object.__new__(BF16_Optimizer)
+    optimizer.has_moe_layers = False
+    optimizer.graph_harvesting = False
+    optimizer.norm_type = 2
+    optimizer.mpu = None
+    optimizer.clip_grad = 0
+    optimizer.grad_acc_dtype = torch.float32
+    optimizer.fp32_groups_flat_partition = []
+    optimizer.fp32_groups_gradient_flat_partition = []
+    optimizer.get_grads_for_norm = lambda: ([], {})
+    optimizer.clear_hp_grads = lambda: None
+    optimizer.clear_lp_grads = lambda: None
+    optimizer._lazy_init_hp_params_optimizer_state = lambda: None
+    optimizer.update_lp_params = lambda: None
+    steps = []
+    optimizer.optimizer = SimpleNamespace(step=lambda: steps.append(True))
+    norms = iter([torch.tensor(-1.0), torch.tensor(1.0)])
+    monkeypatch.setattr("deepspeed.runtime.bf16_optimizer.get_global_norm_of_tensors", lambda **kwargs: next(norms))
+
+    optimizer.step()
+    assert optimizer.overflow
+    assert not torch.isfinite(torch.tensor(optimizer._global_grad_norm))
+    assert steps == []
+
+    optimizer.step()
+    assert not optimizer.overflow
+    assert steps == [True]
+
+
+def test_superoffload_rolls_back_only_subgroups_submitted_this_step():
+    optimizer = object.__new__(SuperOffloadOptimizer_Stage3)
+    optimizer._submitted_cpu_sub_groups = {1}
+    optimizer.sub_group_to_group_id = {0: 10, 1: 11}
+    parameter = SimpleNamespace(data=torch.tensor([1.0]), grad=SimpleNamespace(data=torch.tensor([2.0])))
+    optimizer.fp32_partitioned_groups_flat = [parameter, parameter]
+    rollbacks = []
+    optimizer._sync_cpu_optimizer_step = lambda *args, **kwargs: rollbacks.append((args, kwargs))
+
+    optimizer._handle_overflow_rollback()
+
+    assert [args[1] for args, _ in rollbacks] == [1]
+    assert rollbacks[0][1]["rollback"]
+    assert optimizer._submitted_cpu_sub_groups == set()
 
 
 def get_config(precision, clip_value, offload_device="cpu"):
