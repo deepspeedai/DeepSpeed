@@ -16,6 +16,7 @@ mock-level test still passed; only comparing the two paths' numbers exposes it.
 Requires GPUs and a DeepEP build, so it is opt-in.
 """
 
+import contextlib
 import functools
 from unittest import mock
 
@@ -58,6 +59,29 @@ def _skip_unless_fused_row_weighting_enabled(reason):
     skip_unless_h100_tests_enabled(reason)
     if not fused_ops.is_available():
         pytest.skip("fused row weighting needs CUDA and Triton")
+
+
+@contextlib.contextmanager
+def _eager_weight_gradient_summation_order():
+    """Sum the fused weight gradient in eager's order, leaving the rest of the fused path as it is.
+
+    Fused and eager form the same FP32 products for the weight gradient and differ only in the order they sum
+    them, and neither order is more accurate (test_fused_row_weighting_weight_gradient_is_as_accurate_as_eager
+    checks the fused one against FP64). These comparisons repeat bit-for-bit, and Adam's first update is about
+    lr times the gradient's sign, so an order change that flips a near-zero gradient moves that parameter by
+    twice the learning rate. Matching only that order keeps the fused forward, row gradient, routing and
+    optimizer plumbing under the full comparison.
+    """
+    fused_backward = fused_ops._FusedRowWeighting.backward
+
+    def backward(ctx, grad_output):
+        grad_rows, _ = fused_backward(ctx, grad_output)
+        rows, weights = ctx.saved_tensors
+        grad_weights = (grad_output.float() * rows.float()).sum_to_size(weights.shape)
+        return grad_rows, grad_weights
+
+    with mock.patch.object(fused_ops._FusedRowWeighting, "backward", staticmethod(backward)):
+        yield
 
 
 def _install_legacy_deepep_prep(engine):
@@ -441,7 +465,8 @@ class TestDeepEPMatchesCollective(DistributedTest):
         seed = 2468
 
         eager = _run_one_step("deepep", self.world_size, seed, row_weighting_impl="eager", score_apply=score_apply)
-        fused = _run_one_step("deepep", self.world_size, seed, row_weighting_impl="fused", score_apply=score_apply)
+        with _eager_weight_gradient_summation_order():
+            fused = _run_one_step("deepep", self.world_size, seed, row_weighting_impl="fused", score_apply=score_apply)
 
         _assert_cleanup_results_close(fused, eager, compare_score_gradients=True)
 
@@ -455,12 +480,13 @@ class TestDeepEPMatchesCollective(DistributedTest):
                               activation_checkpointing=True,
                               reentrant_checkpointing=True,
                               row_weighting_impl="eager")
-        fused = _run_one_step("deepep",
-                              self.world_size,
-                              seed,
-                              activation_checkpointing=True,
-                              reentrant_checkpointing=True,
-                              row_weighting_impl="fused")
+        with _eager_weight_gradient_summation_order():
+            fused = _run_one_step("deepep",
+                                  self.world_size,
+                                  seed,
+                                  activation_checkpointing=True,
+                                  reentrant_checkpointing=True,
+                                  row_weighting_impl="fused")
 
         _assert_cleanup_results_close(fused, eager, compare_score_gradients=False)
         assert fused["forward_counts"], "the test did not exercise any AutoEP layers"
@@ -477,12 +503,13 @@ class TestDeepEPMatchesCollective(DistributedTest):
                               skewed_routing=True,
                               row_weighting_impl="eager",
                               score_apply=score_apply)
-        fused = _run_one_step("deepep",
-                              self.world_size,
-                              seed,
-                              skewed_routing=True,
-                              row_weighting_impl="fused",
-                              score_apply=score_apply)
+        with _eager_weight_gradient_summation_order():
+            fused = _run_one_step("deepep",
+                                  self.world_size,
+                                  seed,
+                                  skewed_routing=True,
+                                  row_weighting_impl="fused",
+                                  score_apply=score_apply)
 
         _assert_cleanup_results_close(fused, eager, compare_score_gradients=True)
         all_routes = torch.cat([route.flatten() for _, route in fused["routes"]])

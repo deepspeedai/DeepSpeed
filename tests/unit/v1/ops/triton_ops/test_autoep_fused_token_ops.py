@@ -2,6 +2,8 @@
 # DeepSpeed Team
 """Compare the fused weighted restore with the eager reference."""
 
+import math
+
 import pytest
 import torch
 
@@ -146,6 +148,34 @@ def test_fused_row_weighting_matches_eager_including_gradients(n_rows, hidden, r
     assert fused_weights.grad.shape == weights.shape
     _assert_row_weighting_forward_matches(fused_rows.grad, eager_rows.grad)
     torch.testing.assert_close(fused_weights.grad, eager_weights.grad, rtol=1e-3, atol=1e-2)
+
+
+@pytest.mark.parametrize("n_rows, hidden", [(4096, 2048), (257, 256)])
+@pytest.mark.parametrize("row_dtype", [torch.bfloat16, torch.float16])
+def test_fused_row_weighting_weight_gradient_is_as_accurate_as_eager(n_rows, hidden, row_dtype):
+    """The weight gradient sums the same FP32 products as eager in another order; it must be no less accurate."""
+    device = _device()
+    generator = torch.Generator(device=device).manual_seed(97 + hidden)
+    rows = torch.randn(n_rows, hidden, device=device, generator=generator).to(row_dtype)
+    weights = torch.rand(n_rows, 1, device=device, generator=generator)
+    upstream = torch.randn(n_rows, hidden, device=device, generator=generator).to(row_dtype)
+
+    eager_weights = weights.clone().requires_grad_(True)
+    (rows.float() * eager_weights).to(row_dtype).backward(upstream)
+    fused_weights = weights.clone().requires_grad_(True)
+    fused_ops.fused_row_weighting(rows, fused_weights).backward(upstream)
+
+    products = upstream.double() * rows.double()
+    reference = products.sum(dim=-1, keepdim=True)
+    fused_error = (fused_weights.grad.double() - reference).abs()
+    eager_error = (eager_weights.grad.double() - reference).abs()
+    # A tree of FP32 additions over the hidden dimension, plus the final sum of per-tile partials.
+    depth = math.ceil(math.log2(hidden)) + 2
+    bound = depth * torch.finfo(torch.float32).eps * products.abs().sum(dim=-1, keepdim=True)
+    assert torch.all(fused_error <= bound), f"max error over bound {(fused_error / bound).max().item()}"
+    assert fused_error.max() <= 2 * eager_error.max() + 1e-12, (fused_error.max().item(), eager_error.max().item())
+    assert fused_error.median() <= 2 * eager_error.median() + 1e-12, (fused_error.median().item(),
+                                                                      eager_error.median().item())
 
 
 def test_fused_row_weighting_guards_name_unsupported_inputs():
