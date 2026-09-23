@@ -177,6 +177,13 @@ that folds pieces in N dimensions and groups them by source rank — §8.2 state
 normative, because a composer missing either produces a correct map whose size grows with
 model size.
 
+The phase-2 transfer planner validates logical intersections before choosing concrete
+source holders. Its output is a list of resolved shard-to-shard copies, not another
+homogeneous map. Once endpoints are chosen, copies may be folded when both source
+and target address mappings continue exactly along an axis, even if the copies came
+from different logical regions. A folded copy therefore need not have one valid
+logical origin or one `locations` set. This does not relax P5 for input map pieces.
+
 **P5 — Homogeneity.** Every element a piece covers is held by the same set of ranks, and
 that set is the piece's `locations`. This makes `locations` authoritative: if pieces `P`
 (locations `L`) and `Q` (locations `M`) share an element `e`, then P5 gives
@@ -394,6 +401,8 @@ whose name matched a metadata key could never be confused for one.
   size grows with model size instead of block structure; skipping the homogeneity constraint
   gives a map whose `locations` is wrong, which is worse because it still round-trips
   correctly on a single topology and only misleads a phase-2 planner.
+  Resolved transfer copies use their source and target shard addresses for folding;
+  this rule does not require their logical regions to merge into one map piece.
 - **Plain scalars only.** No tensors, no pickled classes, no `SubparamShape` objects. The
   map should be readable without importing DeepSpeed, which matters for external tooling
   and for debugging a checkpoint that will not load.
@@ -559,6 +568,13 @@ count that grows with model size — which looks like evidence the language is i
 
 Grouping is only legal because a piece carries its own destination offset (§2.1), so pieces
 may be reordered freely.
+
+Map-piece counts here and resolved-copy segment counts are different metrics. For the
+BigCode TP2→TP4 transfer fixture with 48×8 logical elements, the default lowest-holder
+choice yields 7 resolved copies after physical folding; a specified per-target holder
+choice yields 6. Both write 768 target elements because the KV block is replicated.
+These counts describe that fixture and policy, not a general minimum or a measured
+communication speedup.
 
 Measured piece counts are bounded by topology and block structure, not model size: across
 an 8× hidden sweep, codegen 4→8 holds at 40, bigcode 2→4 at 7, Yuan o_proj at 4.
