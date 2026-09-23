@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # DeepSpeed Team
-"""Fused HF-style RMSNorm with the Qwen cast-before-gamma order."""
+"""Fused Hugging Face RMSNorm with the cast-before-gamma order of Llama-style models."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ import torch
 from torch.autograd.function import once_differentiable
 
 from deepspeed.ops.triton_ops._triton import _TRITON_AVAILABLE, triton, tl
+from deepspeed.utils import logger
 
 _IS_ROCM_PYTORCH = getattr(torch.version, "hip", None) is not None
 
@@ -17,7 +18,18 @@ SUPPORTED_DTYPES = (torch.bfloat16, torch.float16)
 # Classes whose forward is confirmed to compute ``weight * normalized.to(input_dtype)`` with FP32 statistics, the
 # expression the kernels reproduce. Hugging Face classes with the same name suffix and attributes, such as
 # GptOssRMSNorm, multiply by the weight before that cast, so a class name and attributes are not enough.
-SUPPORTED_RMS_NORM_CLASSES = ("transformers.models.qwen3_moe.modeling_qwen3_moe.Qwen3MoeRMSNorm", )
+SUPPORTED_RMS_NORM_CLASSES = (
+    "transformers.models.deepseek_v2.modeling_deepseek_v2.DeepseekV2RMSNorm",
+    "transformers.models.deepseek_v3.modeling_deepseek_v3.DeepseekV3RMSNorm",
+    "transformers.models.llama.modeling_llama.LlamaRMSNorm",
+    "transformers.models.mistral.modeling_mistral.MistralRMSNorm",
+    "transformers.models.mixtral.modeling_mixtral.MixtralRMSNorm",
+    "transformers.models.phi3.modeling_phi3.Phi3RMSNorm",
+    "transformers.models.qwen2.modeling_qwen2.Qwen2RMSNorm",
+    "transformers.models.qwen2_moe.modeling_qwen2_moe.Qwen2MoeRMSNorm",
+    "transformers.models.qwen3.modeling_qwen3.Qwen3RMSNorm",
+    "transformers.models.qwen3_moe.modeling_qwen3_moe.Qwen3MoeRMSNorm",
+)
 _MAX_FORWARD_BLOCK = 2048
 _DWEIGHT_BLOCK_M = 16
 _DWEIGHT_BLOCK_N = 256
@@ -221,7 +233,7 @@ class _FusedRMSNorm(torch.autograd.Function):
 
 
 def fused_rms_norm(hidden: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor:
-    """Apply HF Qwen-style RMSNorm with a fused CUDA/Triton implementation.
+    """Apply Hugging Face RMSNorm with fused Triton kernels.
 
     The variance and normalization are computed in FP32, the normalized value is
     rounded once to the input dtype, and the module weight is multiplied after
@@ -235,8 +247,15 @@ def fused_rms_norm(hidden: torch.Tensor, weight: torch.Tensor, eps: float) -> to
     address reconstruction inside the kernels. The output and the gradient
     produced for ``hidden`` are contiguous whatever the input strides.
     Gradients are first order only: differentiating them again raises.
+
+    Unsupported inputs raise. Modules installed by ``replace_rms_norm`` run
+    their eager forward for such inputs instead.
     """
     assert_supported(hidden, weight, eps)
+    return _run_kernels(hidden, weight, eps)
+
+
+def _run_kernels(hidden: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor:
     original_shape = hidden.shape
     if not hidden.is_contiguous():
         hidden = hidden.contiguous()
@@ -271,31 +290,43 @@ def _runs_supported_rms_norm_forward(module: torch.nn.Module) -> bool:
 
 
 def _fused_module_forward(self, hidden_states):
-    return fused_rms_norm(hidden_states, self.weight, self.variance_epsilon)
+    try:
+        assert_supported(hidden_states, self.weight, self.variance_epsilon)
+    except RuntimeError as unsupported:
+        # The class's own forward is the eager computation the kernels stand in for, so the result is exactly eager's.
+        logger.warning_once(f"{unsupported} Running eager {type(self).__name__} instead.")
+        return type(self).forward(self, hidden_states)
+    return _run_kernels(hidden_states, self.weight, self.variance_epsilon)
 
 
 def replace_rms_norm(module: torch.nn.Module) -> int:
-    """Run ``fused_rms_norm`` in place of each supported RMSNorm module's forward.
+    """Run the fused kernels in place of each supported RMSNorm module's eager forward.
 
-    A module is replaced only if its exact class is listed in
-    ``SUPPORTED_RMS_NORM_CLASSES`` and it still runs that class's own forward.
-    Subclasses and modules whose forward was patched or wrapped, by another
-    installer or by an earlier call, are left untouched. Replaced modules keep
-    their own weight Parameter and ``variance_epsilon``.
+    A module is replaced if its exact class is listed in
+    ``SUPPORTED_RMS_NORM_CLASSES``, it still runs that class's own forward, and
+    it is at most 2048 wide. Subclasses, modules whose forward was patched or
+    wrapped, by another installer or by an earlier call, and wider modules are
+    left untouched. Replaced modules keep their own weight Parameter and
+    ``variance_epsilon``.
 
-    Every supported module is checked before any is replaced: a weight that is
-    not a bfloat16 or float16 CUDA tensor, or is wider than the kernels
-    support, raises rather than silently falling back to eager RMSNorm.
+    A replaced module runs the kernels when ``assert_supported`` accepts its
+    input and weight: bfloat16 or float16 CUDA tensors of the same dtype, with
+    Triton available. For any other input it runs its class's own eager
+    forward, so the result is exactly eager's, and logs a warning once. Modules
+    can therefore be replaced before the model moves to the GPU.
 
     Returns the number of modules replaced.
     """
-    supported = [child for child in module.modules() if _runs_supported_rms_norm_forward(child)]
-    for child in supported:
-        name = f"{child.__class__.__name__}.weight"
-        _assert_supported_device_and_dtype(child.weight, name=name)
+    count = 0
+    for child in module.modules():
+        if not _runs_supported_rms_norm_forward(child):
+            continue
+        # The kernels hold a whole row in one block, so wider norms keep their eager forward.
         if child.weight.numel() > _MAX_FORWARD_BLOCK:
-            raise RuntimeError(f"fused RMSNorm supports normalized dimensions up to {_MAX_FORWARD_BLOCK}, "
-                               f"but {name} has {child.weight.numel()} elements.")
-    for child in supported:
+            continue
         child.forward = types.MethodType(_fused_module_forward, child)
-    return len(supported)
+        count += 1
+    if count and not is_available():
+        logger.warning(f"fused RMSNorm replaced {count} modules, but its kernels need Triton on CUDA, not ROCm, "
+                       f"so those modules will run their eager forward.")
+    return count

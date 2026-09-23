@@ -351,19 +351,38 @@ def test_replace_rms_norm_leaves_other_forwards_untouched(build, monkeypatch):
     assert torch.equal(after, before)
 
 
-def test_replace_rms_norm_fails_fast_when_a_supported_module_cannot_run():
-    norm = _hf_class(QWEN3_MOE_RMS_NORM)(128).to(torch.bfloat16)
-    with pytest.raises(RuntimeError, match="fused RMSNorm"):
-        fused_rms_norm.replace_rms_norm(torch.nn.Sequential(norm))
+@pytest.mark.parametrize("qualified_name", fused_rms_norm.SUPPORTED_RMS_NORM_CLASSES)
+def test_replace_rms_norm_runs_the_eager_forward_for_cpu_inputs(qualified_name):
+    generator = torch.Generator().manual_seed(20260923)
+    norm = _hf_class(qualified_name)(128).to(torch.bfloat16)
+    with torch.no_grad():
+        norm.weight.copy_(3 * torch.randn(128, generator=generator))
+    hidden = torch.randn((16, 128), generator=generator).to(torch.bfloat16)
+    with torch.no_grad():
+        before = norm(hidden)
+
+    # Replacing works before the model moves to the GPU, and until then the module computes exactly what it did.
+    assert fused_rms_norm.replace_rms_norm(torch.nn.Sequential(norm)) == 1
+    with torch.no_grad():
+        after = norm(hidden)
+    assert torch.equal(after, before)
+    assert fused_rms_norm.replace_rms_norm(torch.nn.Sequential(norm)) == 0
+
+
+def test_replace_rms_norm_leaves_norms_wider_than_the_kernels_alone():
+    rms_norm_class = _hf_class(QWEN3_MOE_RMS_NORM)
+    assert fused_rms_norm.replace_rms_norm(rms_norm_class(2048)) == 1
+    assert fused_rms_norm.replace_rms_norm(rms_norm_class(2049)) == 0
 
 
 @pytest.mark.skipif(not _fused_engine_available(), reason="fused RMSNorm needs CUDA and Triton")
-def test_replace_rms_norm_fuses_qwen3_moe_norms():
-    rms_norm_class = _hf_class(QWEN3_MOE_RMS_NORM)
+@pytest.mark.parametrize("qualified_name", fused_rms_norm.SUPPORTED_RMS_NORM_CLASSES)
+def test_replace_rms_norm_fuses_supported_norms(qualified_name):
+    rms_norm_class = _hf_class(qualified_name)
     device = _device()
     generator = torch.Generator(device=device).manual_seed(20260923)
-    # A hidden-size norm and a head-dim norm, as each Qwen3-MoE decoder layer has. The hidden norm's epsilon moves
-    # its output by many ULPs, so a forward that ignored the module's own epsilon would fail.
+    # A hidden-size norm and a head-dim norm. The hidden norm's epsilon moves its output by many ULPs, so a forward
+    # that ignored the module's own epsilon would fail.
     eager = torch.nn.ModuleDict({
         "hidden_norm": rms_norm_class(256, eps=1e-2),
         "head_norm": rms_norm_class(128, eps=1e-6),
@@ -405,14 +424,26 @@ def test_replace_rms_norm_fuses_qwen3_moe_norms():
 
 
 @pytest.mark.skipif(not _fused_engine_available(), reason="fused RMSNorm needs CUDA and Triton")
-def test_replace_rms_norm_checks_every_module_before_replacing_any():
-    rms_norm_class = _hf_class(QWEN3_MOE_RMS_NORM)
-    # Qwen3-MoE models with a 4096 hidden size keep 128-wide q/k norms the kernels support.
-    model = torch.nn.ModuleDict({
-        "head_norm": rms_norm_class(128),
-        "hidden_norm": rms_norm_class(4096),
-    }).to(device=_device(), dtype=torch.bfloat16)
-    with pytest.raises(RuntimeError, match="fused RMSNorm"):
-        fused_rms_norm.replace_rms_norm(model)
-    # Nothing was replaced, so a later call without the unsupported norm still finds the supported one.
-    assert fused_rms_norm.replace_rms_norm(model["head_norm"]) == 1
+def test_replace_rms_norm_runs_the_kernels_only_where_they_apply():
+    device = _device()
+    generator = torch.Generator(device=device).manual_seed(20260923)
+    norm = _hf_class(QWEN3_MOE_RMS_NORM)(128).to(device=device, dtype=torch.bfloat16)
+    with torch.no_grad():
+        norm.weight.copy_(torch.randn(128, device=device, generator=generator))
+    # Head-major, as attention lays out q and k. Eager keeps that layout in its output while the kernels return a
+    # contiguous one, so the output's layout shows which path a call took.
+    heads = torch.randn((2, 4, 8, 128), device=device, dtype=torch.bfloat16, generator=generator).transpose(1, 2)
+    with torch.no_grad():
+        eager_out = norm(heads)
+        eager_float_out = norm(heads.float())
+        kernel_out = fused_rms_norm.fused_rms_norm(heads, norm.weight, norm.variance_epsilon)
+    assert not eager_out.is_contiguous()
+
+    assert fused_rms_norm.replace_rms_norm(torch.nn.Sequential(norm)) == 1
+    with torch.no_grad():
+        fused_out = norm(heads)
+        # The kernels take no float32 input, so this one runs the class's eager forward and gets exactly its result.
+        fallback_out = norm(heads.float())
+    assert fused_out.is_contiguous()
+    assert torch.equal(fused_out, kernel_out)
+    assert torch.equal(fallback_out, eager_float_out)
