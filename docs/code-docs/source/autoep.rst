@@ -249,9 +249,9 @@ AutoEP-specific, so it is documented with the general configuration options.
 **Fused RMSNorm (experimental):**
 
 RMSNorm is a model module rather than an AutoEP expert-parallel component, so
-it is not configured under ``expert_parallel``. DeepSpeed provides a small
-model-agnostic installer for Hugging Face-style RMSNorm modules that is fully
-opt-in:
+it is not configured under ``expert_parallel``. For Qwen3-MoE models, DeepSpeed
+provides an opt-in installer that runs each RMSNorm module with fused Triton
+kernels:
 
 .. code-block:: python
 
@@ -259,13 +259,45 @@ opt-in:
 
     replaced = replace_rms_norm(model)
 
-The installer replaces modules whose class name ends with ``RMSNorm`` and that
-have a 1-D ``weight`` Parameter plus a float ``variance_epsilon`` attribute. It
-keeps each module's own Parameter and epsilon value and returns the number of
-modules replaced. Unsupported devices or dtypes fail fast instead of silently
-falling back to eager execution. The fused kernel follows the Hugging Face
-Qwen order exactly: compute variance and normalization in FP32, cast the
-normalized value back to the input dtype once, then multiply by gamma.
+The kernels reproduce the Hugging Face Qwen3-MoE expression: the variance and
+normalization are computed in FP32, the normalized value is cast back to the
+input dtype once, and only then multiplied by the weight (gamma). A class name
+ending in ``RMSNorm`` with a 1-D ``weight`` and a ``variance_epsilon`` does not
+imply that order: ``GptOssRMSNorm``, for one, multiplies by the weight before
+the cast, and ``Olmo2RMSNorm`` moved to that order between Transformers
+releases. The installer therefore replaces only instances of the classes in
+``SUPPORTED_RMS_NORM_CLASSES``, currently ``Qwen3MoeRMSNorm``, that still run
+that class's own ``forward``. Subclasses and modules whose ``forward`` was
+already patched, by another kernel installer or by an earlier call, are left
+alone. Replaced modules keep their own weight Parameter and
+``variance_epsilon``. The return value is the number of modules replaced: four
+per decoder layer plus the final norm, 193 for Qwen3-30B-A3B.
+``fused_rms_norm(hidden, weight, eps)`` in the same module applies the kernels
+directly.
+
+Results are not bitwise identical to eager RMSNorm: the kernels' FP32
+reductions sum in a different order, so a small fraction of outputs and
+gradients differ in their last bits.
+
+Requirements and limits:
+
+- CUDA with Triton. CPU and ROCm are rejected.
+- bfloat16 or float16, with the input and the weight in the same dtype. FP32
+  inputs or weights are rejected, including FP32 weights under autocast.
+- The normalized (last) dimension is at most 2048, which covers the hidden
+  size and head dimension of Qwen3-30B-A3B. Models with a wider hidden size,
+  such as Qwen3-235B-A22B (4096), are rejected.
+- Any leading shape. Non-contiguous inputs and weights are copied before the
+  kernels run. The output and the input gradient the kernels produce are
+  contiguous, whereas eager RMSNorm follows the strides of its input and of
+  the incoming gradient.
+- First-order gradients for the input and the weight; the epsilon is a
+  constant. Differentiating those gradients again (double backward) raises.
+  ``torch.compile`` and ``torch.func`` transforms are not covered.
+
+Unsupported devices, dtypes and widths fail fast rather than silently falling
+back to eager RMSNorm: the installer checks every supported module before it
+replaces any of them, and ``fused_rms_norm`` checks its inputs on every call.
 
 **Fused weighted restore (experimental):**
 

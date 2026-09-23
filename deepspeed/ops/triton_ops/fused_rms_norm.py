@@ -7,12 +7,17 @@ from __future__ import annotations
 import types
 
 import torch
+from torch.autograd.function import once_differentiable
 
 from deepspeed.ops.triton_ops._triton import _TRITON_AVAILABLE, triton, tl
 
 _IS_ROCM_PYTORCH = getattr(torch.version, "hip", None) is not None
 
 SUPPORTED_DTYPES = (torch.bfloat16, torch.float16)
+# Classes whose forward is confirmed to compute ``weight * normalized.to(input_dtype)`` with FP32 statistics, the
+# expression the kernels reproduce. Hugging Face classes with the same name suffix and attributes, such as
+# GptOssRMSNorm, multiply by the weight before that cast, so a class name and attributes are not enough.
+SUPPORTED_RMS_NORM_CLASSES = ("transformers.models.qwen3_moe.modeling_qwen3_moe.Qwen3MoeRMSNorm", )
 _MAX_FORWARD_BLOCK = 2048
 _DWEIGHT_BLOCK_M = 16
 _DWEIGHT_BLOCK_N = 256
@@ -174,7 +179,10 @@ class _FusedRMSNorm(torch.autograd.Function):
             )
         return out
 
+    # Autograd cannot see inside the Triton kernels, so differentiating this backward again would silently drop
+    # the op's second derivative; once_differentiable makes that raise instead.
     @staticmethod
+    @once_differentiable
     def backward(ctx, grad_out):
         hidden, weight, rstd = ctx.saved_tensors
         n_rows, n_cols = hidden.shape
@@ -217,24 +225,46 @@ def fused_rms_norm(hidden: torch.Tensor, weight: torch.Tensor, eps: float) -> to
 
     The variance and normalization are computed in FP32, the normalized value is
     rounded once to the input dtype, and the module weight is multiplied after
-    that rounding. Non-contiguous inputs are copied explicitly before the fused
-    kernels run, so arbitrary leading shapes are handled without relying on
-    strided address reconstruction inside the kernels.
+    that rounding. ``hidden`` and ``weight`` must be bfloat16 or float16 CUDA
+    tensors of the same dtype, and the normalized (last) dimension must be at
+    most 2048.
+
+    The kernels read hidden rows and the weight as dense arrays, so
+    non-contiguous tensors of either kind are copied explicitly before they
+    run, and arbitrary leading shapes are handled without relying on strided
+    address reconstruction inside the kernels. The output and the gradient
+    produced for ``hidden`` are contiguous whatever the input strides.
+    Gradients are first order only: differentiating them again raises.
     """
     assert_supported(hidden, weight, eps)
     original_shape = hidden.shape
     if not hidden.is_contiguous():
         hidden = hidden.contiguous()
+    if not weight.is_contiguous():
+        weight = weight.contiguous()
     hidden_2d = hidden.reshape(-1, original_shape[-1])
     out = _FusedRMSNorm.apply(hidden_2d, weight, eps)
     return out.reshape(original_shape)
 
 
-def _matches_hf_rms_norm_contract(module: torch.nn.Module) -> bool:
+def _qualified_name(obj) -> str:
+    return f"{getattr(obj, '__module__', None)}.{getattr(obj, '__qualname__', None)}"
+
+
+def _runs_supported_rms_norm_forward(module: torch.nn.Module) -> bool:
+    module_class = type(module)
+    class_name = _qualified_name(module_class)
+    if class_name not in SUPPORTED_RMS_NORM_CLASSES:
+        return False
+    # Kernel installers, including an earlier call of this one, patch forward on the class or on the instance.
+    # Only the class's own forward is known to compute the expression the kernels reproduce.
+    class_forward_patched = _qualified_name(module_class.forward) != f"{class_name}.forward"
+    instance_forward_patched = "forward" in vars(module)
+    if class_forward_patched or instance_forward_patched:
+        return False
     weight = getattr(module, "weight", None)
     eps = getattr(module, "variance_epsilon", None)
-    return (module.__class__.__name__.endswith("RMSNorm") and isinstance(weight, torch.nn.Parameter)
-            and weight.dim() == 1 and isinstance(eps, float))
+    return isinstance(weight, torch.nn.Parameter) and weight.dim() == 1 and isinstance(eps, float)
 
 
 def _fused_module_forward(self, hidden_states):
@@ -242,18 +272,27 @@ def _fused_module_forward(self, hidden_states):
 
 
 def replace_rms_norm(module: torch.nn.Module) -> int:
-    """Replace HF-compatible RMSNorm module forwards with ``fused_rms_norm``.
+    """Run ``fused_rms_norm`` in place of each supported RMSNorm module's forward.
 
-    A compatible module has a class name ending in ``RMSNorm``, a 1-D ``weight``
-    Parameter and a float ``variance_epsilon`` attribute. Other modules are left
-    untouched. Matched modules on unsupported devices or dtypes raise a clear
-    error rather than silently falling back to eager RMSNorm.
+    A module is replaced only if its exact class is listed in
+    ``SUPPORTED_RMS_NORM_CLASSES`` and it still runs that class's own forward.
+    Subclasses and modules whose forward was patched, by another installer or
+    by an earlier call, are left untouched. Replaced modules keep their own
+    weight Parameter and ``variance_epsilon``.
+
+    Every supported module is checked before any is replaced: a weight that is
+    not a bfloat16 or float16 CUDA tensor, or is wider than the kernels
+    support, raises rather than silently falling back to eager RMSNorm.
+
+    Returns the number of modules replaced.
     """
-    count = 0
-    for child in module.modules():
-        if not _matches_hf_rms_norm_contract(child):
-            continue
-        _assert_supported_device_and_dtype(child.weight, name=f"{child.__class__.__name__}.weight")
+    supported = [child for child in module.modules() if _runs_supported_rms_norm_forward(child)]
+    for child in supported:
+        name = f"{child.__class__.__name__}.weight"
+        _assert_supported_device_and_dtype(child.weight, name=name)
+        if child.weight.numel() > _MAX_FORWARD_BLOCK:
+            raise RuntimeError(f"fused RMSNorm supports normalized dimensions up to {_MAX_FORWARD_BLOCK}, "
+                               f"but {name} has {child.weight.numel()} elements.")
+    for child in supported:
         child.forward = types.MethodType(_fused_module_forward, child)
-        count += 1
-    return count
+    return len(supported)
