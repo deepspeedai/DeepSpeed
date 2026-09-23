@@ -303,9 +303,13 @@ vocabulary each is about 5 GB, and all of them are live when backward starts,
 which is where AutoEP training memory peaks.
 
 ``install_chunked_causal_lm_loss`` replaces that loss with one that computes
-the same FP32 cross entropy in blocks of rows: forward keeps only the logits
-it was given plus one FP32 value per token, and backward recomputes each
-block's softmax and writes the gradient directly in the logits' dtype. The
+the same FP32 cross entropy without them: forward keeps only the logits it was
+given plus one FP32 value per token, and backward recomputes the softmax and
+writes the gradient directly in the logits' dtype. On CUDA a Triton kernel does
+each pass in a single read of the logits (``backend="triton"``); the PyTorch
+backend (``backend="torch"``) does the same arithmetic in blocks of rows and
+runs anywhere. The default ``"auto"`` picks Triton when it can run; naming a
+backend that cannot run raises. The
 loss, the label shifting, ``ignore_index`` and ``num_items_in_batch``
 normalization follow ``ForCausalLMLoss``; gradients may differ from it by one
 BF16/FP16 rounding step where the FP32 evaluation order lands on a rounding

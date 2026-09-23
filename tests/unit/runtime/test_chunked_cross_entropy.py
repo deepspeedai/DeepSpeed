@@ -6,18 +6,28 @@ import pytest
 import torch
 
 from deepspeed.runtime.chunked_cross_entropy import (ChunkedCausalLMLoss, chunked_cross_entropy,
-                                                     install_chunked_causal_lm_loss)
+                                                     install_chunked_causal_lm_loss, triton_backend_available)
 
 loss_utils = pytest.importorskip("transformers.loss.loss_utils")
 
+_TRITON_ON_CUDA = torch.cuda.is_available() and triton_backend_available()  #ignore-cuda
+# Each backend on the device it runs on; the Triton one only where CUDA and Triton exist.
+BACKEND_DEVICES = [
+    pytest.param("torch", "cpu", id="torch"),
+    pytest.param("triton",
+                 "cuda",
+                 id="triton",
+                 marks=pytest.mark.skipif(not _TRITON_ON_CUDA, reason="the Triton backend needs CUDA and Triton")),
+]
 
-def _inputs(batch, seq, vocab, dtype, seed=0, ignore_every=5):
+
+def _inputs(batch, seq, vocab, dtype, seed=0, ignore_every=5, device="cpu"):
     generator = torch.Generator().manual_seed(seed)
     # A wide logit range exercises the log-sum-exp stabilization.
     logits = (torch.randn(batch, seq, vocab, generator=generator) * 6).to(dtype)
     labels = torch.randint(0, vocab, (batch, seq), generator=generator)
     labels[:, ::ignore_every] = -100
-    return logits, labels
+    return logits.to(device), labels.to(device)
 
 
 def _loss_and_grad(loss_function, logits, labels, vocab, **kwargs):
@@ -33,14 +43,16 @@ def _ordered_bits(tensor):
     return torch.where(bits < 0, -32768 - bits, bits)
 
 
+@pytest.mark.parametrize("backend, device", BACKEND_DEVICES)
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16, torch.float32])
 @pytest.mark.parametrize("block_rows", [None, 7])
-def test_matches_hugging_face_loss_and_gradient(dtype, block_rows):
-    vocab = 257
-    logits, labels = _inputs(2, 33, vocab, dtype)
+def test_matches_hugging_face_loss_and_gradient(backend, device, dtype, block_rows):
+    # A vocabulary larger than one Triton tile, and not a multiple of it, crosses tile boundaries.
+    vocab = 4099 if backend == "triton" else 257
+    logits, labels = _inputs(2, 33, vocab, dtype, device=device)
 
     expected_loss, expected_grad = _loss_and_grad(loss_utils.ForCausalLMLoss, logits, labels, vocab)
-    loss, grad = _loss_and_grad(ChunkedCausalLMLoss(block_rows=block_rows), logits, labels, vocab)
+    loss, grad = _loss_and_grad(ChunkedCausalLMLoss(block_rows=block_rows, backend=backend), logits, labels, vocab)
 
     assert loss.dtype == expected_loss.dtype == torch.float32
     torch.testing.assert_close(loss, expected_loss, rtol=1e-6, atol=1e-6)
@@ -55,9 +67,10 @@ def test_matches_hugging_face_loss_and_gradient(dtype, block_rows):
         assert (distance == 0).float().mean().item() >= 0.99
 
 
-def test_normalizes_by_num_items_in_batch_like_hugging_face():
+@pytest.mark.parametrize("backend, device", BACKEND_DEVICES)
+def test_normalizes_by_num_items_in_batch_like_hugging_face(backend, device):
     vocab = 64
-    logits, labels = _inputs(2, 17, vocab, torch.bfloat16, seed=3)
+    logits, labels = _inputs(2, 17, vocab, torch.bfloat16, seed=3, device=device)
     num_items = torch.tensor(50)
 
     expected_loss, expected_grad = _loss_and_grad(loss_utils.ForCausalLMLoss,
@@ -65,7 +78,11 @@ def test_normalizes_by_num_items_in_batch_like_hugging_face():
                                                   labels,
                                                   vocab,
                                                   num_items_in_batch=num_items)
-    loss, grad = _loss_and_grad(ChunkedCausalLMLoss(), logits, labels, vocab, num_items_in_batch=num_items)
+    loss, grad = _loss_and_grad(ChunkedCausalLMLoss(backend=backend),
+                                logits,
+                                labels,
+                                vocab,
+                                num_items_in_batch=num_items)
 
     torch.testing.assert_close(loss, expected_loss, rtol=1e-6, atol=1e-6)
     distance = (_ordered_bits(grad) - _ordered_bits(expected_grad)).abs()
@@ -88,17 +105,25 @@ def test_uses_given_shift_labels_like_hugging_face():
     torch.testing.assert_close(grad, expected_grad, rtol=1e-5, atol=1e-8)
 
 
-def test_ignored_rows_get_no_gradient_and_all_ignored_is_nan():
-    logits = torch.randn(6, 11, requires_grad=True)
-    target = torch.tensor([3, -100, 5, -100, 0, 10])
+@pytest.mark.parametrize("backend, device", BACKEND_DEVICES)
+def test_ignored_rows_get_no_gradient_and_all_ignored_is_nan(backend, device):
+    logits = torch.randn(6, 11, device=device, requires_grad=True)
+    target = torch.tensor([3, -100, 5, -100, 0, 10], device=device)
 
-    chunked_cross_entropy(logits, target, block_rows=4).backward()
+    chunked_cross_entropy(logits, target, block_rows=4, backend=backend).backward()
     assert torch.all(logits.grad[1] == 0) and torch.all(logits.grad[3] == 0)
     assert torch.all(logits.grad[0] != 0)
 
-    all_ignored = torch.full((6, ), -100)
+    all_ignored = torch.full((6, ), -100, device=device)
     expected = torch.nn.functional.cross_entropy(logits.detach(), all_ignored)
-    assert torch.isnan(expected) and torch.isnan(chunked_cross_entropy(logits.detach(), all_ignored))
+    assert torch.isnan(expected) and torch.isnan(chunked_cross_entropy(logits.detach(), all_ignored, backend=backend))
+
+
+def test_a_named_backend_that_cannot_run_raises_instead_of_substituting():
+    with pytest.raises(RuntimeError, match="needs CUDA logits and Triton"):
+        chunked_cross_entropy(torch.randn(4, 8), torch.tensor([1, 2, 3, 4]), backend="triton")
+    with pytest.raises(ValueError, match="Unsupported chunked cross-entropy backend"):
+        ChunkedCausalLMLoss(backend="fast")
 
 
 def test_saves_no_full_vocabulary_float32_tensor():
@@ -178,7 +203,7 @@ def test_real_vocabulary_backward_peak_drops_by_the_float32_tensors():
         return loss.detach(), leaf.grad, cuda.max_memory_allocated() - before
 
     expected_loss, expected_grad, stock_peak = backward_peak(loss_utils.ForCausalLMLoss)
-    loss, grad, chunked_peak = backward_peak(ChunkedCausalLMLoss())
+    loss, grad, chunked_peak = backward_peak(ChunkedCausalLMLoss(backend="triton" if _TRITON_ON_CUDA else "torch"))
 
     torch.testing.assert_close(loss, expected_loss, rtol=1e-5, atol=1e-5)
     distance = (_ordered_bits(grad) - _ordered_bits(expected_grad)).abs()
