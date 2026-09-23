@@ -291,6 +291,34 @@ Failing fast matters for measurement: a run that asked for the fused reduction
 and silently got the eager one would report the difference between an
 implementation and itself.
 
+Chunked causal-LM loss
+----------------------
+
+Long sequences with large vocabularies spend much of their peak memory on the
+language-model loss rather than on the model. Hugging Face's
+``ForCausalLMLoss`` upcasts the full ``[tokens, vocab]`` logits to FP32 and
+keeps an FP32 log-softmax for backward, and backward allocates two more FP32
+tensors of the same size. At 8,192 tokens and Qwen3's 151,936-token
+vocabulary each is about 5 GB, and all of them are live when backward starts,
+which is where AutoEP training memory peaks.
+
+``install_chunked_causal_lm_loss`` replaces that loss with one that computes
+the same FP32 cross entropy in blocks of rows: forward keeps only the logits
+it was given plus one FP32 value per token, and backward recomputes each
+block's softmax and writes the gradient directly in the logits' dtype. The
+loss, the label shifting, ``ignore_index`` and ``num_items_in_batch``
+normalization follow ``ForCausalLMLoss``; gradients may differ from it by one
+BF16/FP16 rounding step where the FP32 evaluation order lands on a rounding
+boundary. It is opt-in, and it refuses models whose ``loss_function`` is not
+the stock ``ForCausalLMLoss``:
+
+.. code-block:: python
+
+    from deepspeed.runtime.chunked_cross_entropy import install_chunked_causal_lm_loss
+
+    install_chunked_causal_lm_loss(model)
+    engine, optimizer, _, _ = deepspeed.initialize(model=model, config=ds_config)
+
 **Constraints:**
 
 - ``autoep_size`` must divide ``num_experts`` for all detected MoE layers.
