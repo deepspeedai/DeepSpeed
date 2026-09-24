@@ -24,7 +24,7 @@ from deepspeed.runtime.torch_autocast import get_autocast_dtype, get_all_comm_dt
 from deepspeed.runtime.utils import (empty_cache, see_memory_usage, has_inf_or_nan, inf, is_model_parallel_parameter,
                                      align_dense_tensors, all_gather_dp_groups, mask_nan_or_inf_with_val_inplace,
                                      count_used_parameters_in_backward)
-from deepspeed.runtime.zero.config import ZeroStageEnum, offload_gradient_safety_enabled
+from deepspeed.runtime.zero.config import ZeroStageEnum
 from deepspeed.runtime.zero.utils import get_norm_dtype
 from deepspeed.runtime.zero.offload_config import OffloadDeviceEnum, OffloadStateTypeEnum
 from deepspeed.ops.adam import DeepSpeedCPUAdam
@@ -188,11 +188,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                  bf16_optimizer_states=False,
                  elastic_checkpoint=False,
                  check_grad_overflow=True,
-                 compute_grad_norm=True,
-                 check_offload_gradients=False,
-                 accumulate_offload_gradients=False,
-                 pipeline_parallel=False,
-                 deepcompile=False):
+                 compute_grad_norm=True):
 
         super().__init__()
 
@@ -214,28 +210,18 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         # TODO: Remove zenflow-specific call from vanilla ZeroOptimizer, try to isolate zenflow-specific code into sub-class zenflow_zero_optimizer
         self.zenflow = True if zenflow_config is not None else False
 
-        # Model/compilation context comes from the engine; the policy stays fixed
-        # so pending gradient work cannot outlive its synchronization guarantees.
-        self._offload_gradient_safety_enabled = offload_gradient_safety_enabled(
-            partition_grads=partition_grads,
-            offload_optimizer_config=offload_optimizer_config,
-            zenflow=self.zenflow,
-            pipeline_parallel=pipeline_parallel,
-            deepcompile=deepcompile)
-        safety_enabled = check_offload_gradients or accumulate_offload_gradients
-        if safety_enabled and (not partition_grads or self.zenflow or not (contiguous_gradients or self.cpu_offload)):
-            raise ValueError("Gradient safety options require contiguous ZeRO-2 without ZenFlow")
-        if (check_offload_gradients or accumulate_offload_gradients) and not self.cpu_offload:
-            raise ValueError("Offload gradient safety options require CPU optimizer offload")
-        self.check_offload_gradients = check_offload_gradients
-        self.accumulate_offload_gradients = accumulate_offload_gradients
+        # NVMe offload uses the same CPU gradient path. ZenFlow overrides reduction
+        # and offload copies with its own ordering, so these protections do not apply.
+        self._offload_gradient_safety_enabled = partition_grads and self.cpu_offload and not self.zenflow
         self._pending_offload_events = {}
-        self._offload_accumulated_param_ids = set()
 
         if dist.get_rank() == 0:
             logger.info(f"Reduce bucket size {reduce_bucket_size}")
             logger.info(f"Allgather bucket size {allgather_bucket_size}")
             logger.info(f"CPU Offload: {self.cpu_offload}")
+            logger.info(f"ZeRO-2 offload gradient protections: {self._offload_gradient_safety_enabled}")
+            if partition_grads and self.cpu_offload and self.zenflow:
+                logger.warning("ZeRO-2 offload gradient protections are not applied with ZenFlow")
             logger.info(f'Round robin gradient partitioning: {round_robin_gradients}')
         # The fused optimizer does all the work. We need this layer for two reason:
         # 1. maintain same user API from apex.fp16_utils
@@ -243,7 +229,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
 
         self.elastic_checkpoint = elastic_checkpoint
         self.parameter_alignment = parameter_alignment
-        self.check_grad_overflow = check_grad_overflow or check_offload_gradients
+        self.check_grad_overflow = check_grad_overflow
         self.compute_grad_norm = compute_grad_norm
         self.param_names = param_names
         self.mpu = mpu
@@ -1092,7 +1078,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
 
     def _restore_cpu_offload_grad_to_gpu(self, param):
         # Last non-boundary epilogue cleared param.grad; reload accumulated CPU grads for boundary helpers.
-        if self.accumulate_offload_gradients or self._offload_gradient_safety_enabled:
+        if self._offload_gradient_safety_enabled:
             self._wait_for_offload_copies()
         param_id = self.get_param_id(param)
         [_, source_offset, dest_offset, num_elements] = self.grad_position[param_id]
@@ -1599,8 +1585,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
     ############################# CPU Offload Methods#############################
     ##############################################################################
     def _record_offload_copy(self):
-        if (self.check_offload_gradients or self.accumulate_offload_gradients
-                or self._offload_gradient_safety_enabled) and not get_accelerator().resolves_data_dependency():
+        if self._offload_gradient_safety_enabled and not get_accelerator().resolves_data_dependency():
             stream = get_accelerator().current_stream()
             event = get_accelerator().Event()
             event.record(stream)
@@ -1683,7 +1668,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
     def async_accumulate_grad_in_cpu_via_gpu(self, param):
         param_id = self.get_param_id(param)
 
-        if self.accumulate_offload_gradients or self._offload_gradient_safety_enabled:
+        if self._offload_gradient_safety_enabled:
             # A pageable CPU source may be staged before a GPU wait executes.
             self._wait_for_offload_copies()
 
@@ -1726,14 +1711,10 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         if param_id not in self.accumulated_grads_in_cpu:
             self.accumulated_grads_in_cpu[param_id] = buffer_to_accumulate_to_in_cpu()
 
-        already_accumulated = (param_id in self._offload_accumulated_param_ids
-                               if self.accumulate_offload_gradients else self.micro_step_id > 0)
-        if already_accumulated:
+        if self.micro_step_id > 0:
             accumulate_gradients()
         copy_gradients_to_cpu()
         self._record_offload_copy()
-        if self.accumulate_offload_gradients:
-            self._offload_accumulated_param_ids.add(param_id)
 
     def set_norm_for_param_grad(self, param):
         param_id = self.get_param_id(param)
@@ -2007,13 +1988,12 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             # CPU buffer) or more will follow (save to CPU buffer). Skipping only
             # the lone backward of a step preserves the existing fast path for
             # ga_steps=1 + single backward.
-            if (self.accumulate_offload_gradients or self.micro_step_id > 0
-                    or not self.is_gradient_accumulation_boundary()):
+            if self.micro_step_id > 0 or not self.is_gradient_accumulation_boundary():
                 self.async_accumulate_grad_in_cpu_via_gpu(param)
                 # Record active param so unmanaged finalize skips params unused this window.
                 self._offload_accumulated_param_ids.add(self.get_param_id(param))
 
-            if self.accumulate_offload_gradients or self.is_gradient_accumulation_boundary():
+            if self.is_gradient_accumulation_boundary():
                 self.set_norm_for_param_grad_in_gpu(param)
 
                 self.update_offload_overflow_tracker_for_param_grad(param)
@@ -2679,11 +2659,6 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         self._wait_for_offload_copies()
         self.norm_for_param_grads = {}
         self.local_overflow = False
-        if self.accumulate_offload_gradients:
-            self._offload_accumulated_param_ids.clear()
-            for group in self.single_partition_of_fp32_groups:
-                if group.grad is not None:
-                    group.grad.zero_()
 
     def set_lr(self, lr):
         """Set the learning rate."""
@@ -2712,11 +2687,6 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
 
         if self.has_moe_layers:
             self._average_expert_grad_norms(norm_groups)
-
-        if self.check_offload_gradients:
-            for norm in norm_groups:
-                if not bool(torch.isfinite(norm).all()) or bool((norm < 0).any()):
-                    return torch.full_like(norm, float("inf"))
 
         # calculating L2 norm
         return torch.linalg.vector_norm(torch.stack(norm_groups), ord=norm_type)
@@ -2790,12 +2760,6 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         if self.check_grad_overflow:
             self.check_overflow(partition_gradients=self.partition_gradients)
 
-        scaled_global_grad_norm = None
-        if self.check_offload_gradients and not self.overflow:
-            scaled_global_grad_norm = self.scaled_global_norm()
-            invalid_norm = not bool(torch.isfinite(scaled_global_grad_norm).all())
-            self.overflow = self._all_reduce_overflow(invalid_norm)
-
         prev_scale = self.loss_scale
         self._update_scale(self.overflow)
         if not self.overflow:
@@ -2820,15 +2784,12 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
 
         # compute_grad_norm=False and cpu_offload are mutually exclusive (validated in __init__),
         # so the CPU-offload Muon update always runs under the grad-norm branch below.
+        scaled_global_grad_norm = None
         if self.compute_grad_norm:
             see_memory_usage('Before norm calculation')
-            if self.cpu_offload and isinstance(self.optimizer, MuonWithAuxAdam):
+            if self.cpu_offload:
                 self._apply_muon_updates_cpu_offload()
-                # Muon replaces the gradients with orthogonalized updates, so a norm taken
-                # by the offload gradient check above no longer describes them.
-                scaled_global_grad_norm = None
-            if scaled_global_grad_norm is None:
-                scaled_global_grad_norm = self.scaled_global_norm()
+            scaled_global_grad_norm = self.scaled_global_norm()
             self._global_grad_norm = scaled_global_grad_norm / prev_scale
             see_memory_usage('After norm before optimizer')
 
@@ -2988,17 +2949,6 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
 
     def has_overflow(self, partition_gradients=True):
         overflow = self.local_overflow if self.cpu_offload else self.has_overflow_partitioned_grads_serial()
-        if self.check_offload_gradients:
-            self._wait_for_offload_copies()
-            for group in self.single_partition_of_fp32_groups:
-                grad = group.grad
-                if grad is None:
-                    overflow = True
-                elif grad.numel() and not bool(torch.isfinite(grad.amin()) & torch.isfinite(grad.amax())):
-                    overflow = True
-        return self._all_reduce_overflow(overflow)
-
-    def _all_reduce_overflow(self, overflow):
         overflow_gpu = get_accelerator().ByteTensor([overflow]) if self.cpu_offload else overflow.byte().to(
             get_accelerator().current_device_name())
 
@@ -3418,10 +3368,6 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                         load_serial=None,
                         param_shapes=None):
         self._wait_for_offload_copies()
-        if self.accumulate_offload_gradients:
-            self.reset_cpu_buffers()
-            self.micro_step_id = INITIAL_MICRO_STEP_ID
-            self.zero_grad(set_to_none=True)
         if checkpoint_folder:
             self._load_universal_checkpoint(checkpoint_folder, load_optimizer_states, load_from_fp32_weights)
         else:

@@ -2,11 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # DeepSpeed Team
-"""Compatibility defaults, CPU bookkeeping, and CUDA gradient ordering tests."""
+"""ZeRO-2 offload gradient storage ownership and stream ordering tests."""
 
 from contextlib import nullcontext
 import copy
-import inspect
 import os
 from datetime import timedelta
 from types import SimpleNamespace
@@ -18,25 +17,15 @@ import deepspeed
 import deepspeed.comm as dist
 from deepspeed.accelerator import get_accelerator
 from deepspeed.ops import __compatible_ops__
-from deepspeed.runtime import engine as engine_module
-from deepspeed.runtime.config import DeepSpeedConfig
 from deepspeed.runtime.zero import stage_1_and_2 as zero
-from deepspeed.runtime.zero.config import DeepSpeedZeroConfig, offload_gradient_safety_enabled
 from deepspeed.runtime.zero.offload_config import DeepSpeedZeroOffloadOptimizerConfig
 from deepspeed.utils.timer import NoopTimer
 
-OPTIONS = ("check_offload_gradients", "accumulate_offload_gradients")
-REMOVED_OPTIONS = ("copy_oversized_gradients", "track_gradient_streams")
 
-
-def make_optimizer(dtype=torch.bfloat16, device="cpu", low_precision=False, cpu_offload=True, **options):
+def make_optimizer(dtype=torch.bfloat16, device="cpu", low_precision=False, cpu_offload=True):
     opt = zero.DeepSpeedZeroOptimizer.__new__(zero.DeepSpeedZeroOptimizer)
-    for name in OPTIONS:
-        setattr(opt, name, options.get(name, False))
     opt.cpu_offload = cpu_offload
-    offload_config = DeepSpeedZeroOffloadOptimizerConfig(device="cpu") if cpu_offload else None
-    opt._offload_gradient_safety_enabled = offload_gradient_safety_enabled(partition_grads=True,
-                                                                           offload_optimizer_config=offload_config)
+    opt._offload_gradient_safety_enabled = cpu_offload
     opt.cpu_offload_pin_memory = False
     opt.device = "cpu"
     opt.dtype = dtype
@@ -94,304 +83,6 @@ def backward_values(opt, param, values, boundaries):
     opt._wait_for_offload_copies()
 
 
-def test_config_defaults():
-    config = DeepSpeedZeroConfig()
-    assert all(name not in config.model_dump() for name in REMOVED_OPTIONS)
-    assert not config.check_offload_gradients
-    assert not config.accumulate_offload_gradients
-
-
-@pytest.mark.parametrize("compute_grad_norm", [False, True])
-def test_positional_compute_grad_norm_compatibility(compute_grad_norm):
-    # The legacy constructor accepted compute_grad_norm as its 38th positional argument.
-    signature = inspect.signature(zero.DeepSpeedZeroOptimizer)
-    bound = signature.bind(*([None] * 37), compute_grad_norm)
-    bound.apply_defaults()
-    assert bound.arguments["compute_grad_norm"] is compute_grad_norm
-    assert not bound.arguments["check_offload_gradients"]
-    assert not bound.arguments["accumulate_offload_gradients"]
-
-
-@pytest.mark.parametrize("requested", [None, False, True])
-@pytest.mark.parametrize("name", REMOVED_OPTIONS)
-def test_config_rejects_removed_options(name, requested):
-    with pytest.raises(ValueError, match="Extra inputs are not permitted"):
-        DeepSpeedZeroConfig(stage=2, offload_optimizer={"device": "cpu"}, **{name: requested})
-
-
-@pytest.mark.parametrize("context,expected", [
-    ({}, True),
-    ({
-        "partition_grads": False
-    }, False),
-    ({
-        "offload_optimizer_config": None
-    }, False),
-    ({
-        "offload_optimizer_config": DeepSpeedZeroOffloadOptimizerConfig(device="none")
-    }, False),
-    ({
-        "offload_optimizer_config": DeepSpeedZeroOffloadOptimizerConfig(device="nvme")
-    }, False),
-    ({
-        "zenflow": True
-    }, False),
-    ({
-        "pipeline_parallel": True
-    }, False),
-    ({
-        "deepcompile": True
-    }, False),
-])
-def test_gradient_safety_compatibility(context, expected):
-    kwargs = dict(partition_grads=True, offload_optimizer_config=DeepSpeedZeroOffloadOptimizerConfig(device="cpu"))
-    kwargs.update(context)
-    assert offload_gradient_safety_enabled(**kwargs) is expected
-
-
-@pytest.mark.parametrize("name", OPTIONS)
-@pytest.mark.parametrize("stage", [0, 1, 3])
-def test_config_rejects_wrong_stage(name, stage):
-    with pytest.raises(ValueError, match="ZeRO-2"):
-        DeepSpeedZeroConfig(stage=stage, offload_optimizer={"device": "cpu"}, **{name: True})
-
-
-@pytest.mark.parametrize("name", OPTIONS)
-def test_config_accepts_independent_options(name):
-    config = DeepSpeedZeroConfig(stage=2, offload_optimizer={"device": "cpu"}, **{name: True})
-    assert getattr(config, name)
-    assert all(not getattr(config, other) for other in OPTIONS if other != name)
-
-
-@pytest.mark.parametrize("name", ["check_offload_gradients", "accumulate_offload_gradients"])
-def test_config_requires_cpu_offload(name):
-    with pytest.raises(ValueError, match="CPU optimizer offload"):
-        DeepSpeedZeroConfig(stage=2, **{name: True})
-
-
-@pytest.mark.parametrize("name", OPTIONS)
-def test_config_rejects_zenflow(name):
-    with pytest.raises(ValueError, match="without ZenFlow"):
-        DeepSpeedZeroConfig(stage=2, zenflow={}, offload_optimizer={"device": "cpu"}, **{name: True})
-
-
-def make_engine(zero_config, deepcompile=False, pipeline=False):
-    engine = engine_module.DeepSpeedEngine.__new__(engine_module.DeepSpeedEngine)
-    torch.nn.Module.__init__(engine)
-    engine.destroy = lambda: None
-    engine._config = DeepSpeedConfig({
-        "train_batch_size": 1,
-        "bf16": {
-            "enabled": True
-        },
-        "zero_optimization": zero_config,
-        "compile": {
-            "deepcompile": deepcompile
-        },
-    })
-    module = torch.nn.Linear(2, 2)
-    if pipeline:
-        module = engine_module.PipelineModule.__new__(engine_module.PipelineModule)
-        torch.nn.Module.__init__(module)
-        module.add_module("linear", torch.nn.Linear(2, 2))
-    engine._set_client_model(module)
-    engine.param_names = {param: name for name, param in engine.module.named_parameters()}
-    engine.mpu = None
-    engine.seq_data_parallel_group = None
-    engine.has_moe_layers = False
-    engine.zenflow = zero_config.get("zenflow") is not None
-    engine.gradient_average = True
-    engine._is_compiled = False
-    engine._deepcompile_active = False
-    return engine
-
-
-@pytest.mark.parametrize("enabled", [(), *[(name, ) for name in OPTIONS], OPTIONS])
-def test_engine_forwards_independent_gradient_safety_options(monkeypatch, enabled):
-    engine = make_engine({
-        "stage": 2,
-        "offload_optimizer": {
-            "device": "cpu"
-        },
-        **{
-            name: name in enabled
-            for name in OPTIONS
-        },
-    })
-    base_optimizer = torch.optim.Adam(engine.module.parameters())
-    captured = {}
-
-    def capture_optimizer(optimizer, param_names, **kwargs):
-        captured.update(kwargs)
-        return optimizer
-
-    monkeypatch.setattr(engine_module, "DeepSpeedZeroOptimizer", capture_optimizer)
-    assert engine._configure_zero_optimizer(base_optimizer) is base_optimizer
-    for name in OPTIONS:
-        assert captured[name] is (name in enabled)
-    assert captured["offload_optimizer_config"].device == "cpu"
-    assert captured["partition_grads"]
-
-
-@pytest.mark.parametrize("zero_config,deepcompile,pipeline,expected", [
-    ({
-        "stage": 2
-    }, False, False, False),
-    ({
-        "stage": 2,
-        "overlap_comm": True
-    }, False, False, False),
-    ({
-        "stage": 1,
-        "offload_optimizer": {
-            "device": "cpu"
-        }
-    }, False, False, False),
-    ({
-        "stage": 2,
-        "contiguous_gradients": False
-    }, False, False, False),
-    ({
-        "stage": 2,
-        "contiguous_gradients": False,
-        "offload_optimizer": {
-            "device": "cpu"
-        }
-    }, False, False, True),
-    ({
-        "stage": 2,
-        "offload_optimizer": {
-            "device": "none"
-        }
-    }, False, False, False),
-    ({
-        "stage": 2,
-        "offload_optimizer": {
-            "device": "nvme"
-        }
-    }, False, False, False),
-    ({
-        "stage": 2,
-        "offload_optimizer": {
-            "device": "cpu"
-        }
-    }, False, False, True),
-    ({
-        "stage": 2,
-        "offload_optimizer": {
-            "device": "cpu"
-        },
-        "overlap_comm": True
-    }, False, False, True),
-    ({
-        "stage": 2,
-        "zenflow": {},
-        "offload_optimizer": {
-            "device": "cpu"
-        }
-    }, False, False, False),
-    ({
-        "stage": 2,
-        "offload_optimizer": {
-            "device": "cpu"
-        }
-    }, True, False, False),
-    ({
-        "stage": 2,
-        "offload_optimizer": {
-            "device": "cpu"
-        }
-    }, False, True, False),
-])
-def test_engine_automatic_defaults(monkeypatch, zero_config, deepcompile, pipeline, expected):
-    engine = make_engine(zero_config, deepcompile, pipeline)
-    captured = {}
-
-    def capture_optimizer(optimizer, param_names, **kwargs):
-        captured.update(kwargs)
-        return optimizer
-
-    monkeypatch.setattr(engine_module, "DeepSpeedZeroOptimizer", capture_optimizer)
-    monkeypatch.setattr(engine_module.ZenFlowZeroOptimizer, "create", lambda **kwargs: capture_optimizer)
-    engine._configure_zero_optimizer(torch.optim.Adam(engine.module.parameters()))
-    assert captured["pipeline_parallel"] is pipeline
-    assert captured["deepcompile"] is deepcompile
-    assert offload_gradient_safety_enabled(partition_grads=captured["partition_grads"],
-                                           offload_optimizer_config=captured["offload_optimizer_config"],
-                                           zenflow=captured["zenflow_config"] is not None,
-                                           pipeline_parallel=captured["pipeline_parallel"],
-                                           deepcompile=captured["deepcompile"]) is expected
-    assert not captured["check_offload_gradients"]
-    assert not captured["accumulate_offload_gradients"]
-
-
-@pytest.mark.parametrize("name", OPTIONS)
-@pytest.mark.parametrize("feature", ["deepcompile", "pipeline"])
-def test_engine_rejects_explicit_unsupported_options_before_construction(monkeypatch, name, feature):
-    engine = make_engine({"stage": 2, "offload_optimizer": {"device": "cpu"}, name: True}, **{feature: True})
-    monkeypatch.setattr(engine_module, "DeepSpeedZeroOptimizer",
-                        lambda *args, **kwargs: pytest.fail("unsupported optimizer was constructed"))
-    with pytest.raises(ValueError, match="DeepCompile|pipeline parallelism"):
-        engine._configure_zero_optimizer(torch.optim.Adam(engine.module.parameters()))
-
-
-@pytest.mark.parametrize("outcome", ["success", "fallback", "failure"])
-def test_deepcompile_does_not_change_resolved_optimizer_policy(monkeypatch, outcome):
-    engine = make_engine({"stage": 2, "offload_optimizer": {"device": "cpu"}}, deepcompile=True)
-    captured = {}
-
-    def capture_optimizer(optimizer, param_names, **kwargs):
-        captured.update(kwargs)
-        return SimpleNamespace(**kwargs)
-
-    monkeypatch.setattr(engine_module, "DeepSpeedZeroOptimizer", capture_optimizer)
-    engine.optimizer = engine._configure_zero_optimizer(torch.optim.Adam(engine.module.parameters()))
-    engine.module_forward_pre_hook = None
-    engine.module_forward_post_hook = None
-    # Isolate the policy regression from native compiler availability. The backend
-    # may succeed, fall back, or fail without toggling a live optimizer's policy.
-    engine.get_deepspeed_compile_backend = lambda *args: (None if outcome == "fallback" else "eager", None)
-
-    def compile_module(**kwargs):
-        if outcome == "failure":
-            raise RuntimeError("compile failed")
-
-    monkeypatch.setattr(engine.module, "compile", compile_module)
-    engine._create_module_forward_pre_hook = lambda: None
-    engine._create_module_forward_post_hook = lambda: None
-    if outcome == "failure":
-        with pytest.raises(RuntimeError, match="compile failed"):
-            engine.compile(backend="eager")
-        assert not engine.is_compiled
-        assert not engine.is_deepcompile_active()
-    else:
-        engine.compile(backend="eager")
-        assert engine.is_compiled
-        assert engine.is_deepcompile_active() is (outcome == "success")
-    assert engine.optimizer.deepcompile
-
-
-def test_late_deepcompile_rejects_without_disabling_live_protections():
-    engine = make_engine({"stage": 2, "offload_optimizer": {"device": "cpu"}})
-    engine.optimizer = SimpleNamespace(_offload_gradient_safety_enabled=True)
-    engine._config.compile_config.deepcompile = True
-    with pytest.raises(ValueError, match="before initializing"):
-        engine.compile(backend="eager")
-    assert engine.optimizer._offload_gradient_safety_enabled
-    assert not engine.is_compiled
-
-
-def test_ordinary_compile_preserves_protections():
-    engine = make_engine({"stage": 2, "offload_optimizer": {"device": "cpu"}})
-    engine.optimizer = SimpleNamespace(_offload_gradient_safety_enabled=True)
-    engine.compile(backend="eager")
-    x = torch.ones(1, 2)
-    torch.testing.assert_close(engine.module(x), torch.nn.functional.linear(x, engine.module.weight,
-                                                                            engine.module.bias))
-    assert engine.optimizer._offload_gradient_safety_enabled
-    assert engine.is_compiled
-
-
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
 @pytest.mark.parametrize("cpu_offload", [False, True])
 @pytest.mark.parametrize("bucket_size", [4, 8, 16])
@@ -415,21 +106,6 @@ def test_oversized_copy_is_independent_and_preserves_routing(dtype, cpu_offload,
     assert opt.ipg_buckets[torch.float32].params == [(0, 0, 0)]
 
 
-@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
-@pytest.mark.parametrize("low_precision", [False, True])
-@pytest.mark.parametrize("boundaries", [[False, False, True], [True, True, True], [False, False, False]])
-def test_accumulation_preserves_nonzero_first_contribution(dtype, low_precision, boundaries):
-    opt, param, master = make_optimizer(dtype, low_precision=low_precision, accumulate_offload_gradients=True)
-    backward_values(opt, param, [1, 2, 4], boundaries)
-    assert torch.equal(master.grad, torch.full_like(master, 7))
-    assert not opt.local_overflow
-    opt.reset_cpu_buffers()
-    assert not opt._offload_accumulated_param_ids
-    assert torch.count_nonzero(master.grad) == 0
-    backward_values(opt, param, [3], [True])
-    assert torch.equal(master.grad, torch.full_like(master, 3))
-
-
 def test_default_offload_accumulates_across_nonboundary_backwards():
     opt, param, master = make_optimizer()
     backward_values(opt, param, [1, 2, 4], [False, False, True])
@@ -450,31 +126,6 @@ def test_reduction_and_offload_consume_owned_oversized_buffer():
     assert not opt.extra_large_param_to_reduce
     assert not opt.ipg_buckets[torch.float32].params
     assert not opt.local_overflow
-
-
-def test_accumulation_includes_zero_reads_and_gas_greater_than_one():
-    opt, param, master = make_optimizer(accumulate_offload_gradients=True)
-    opt.gradient_accumulation_steps = 4
-    backward_values(opt, param, [1, 0, 2, 4], [False, False, False, True])
-    assert torch.equal(master.grad, torch.full_like(master, 7))
-
-
-def test_late_first_use_does_not_restore_stale_accumulator():
-    opt, param, master = make_optimizer(accumulate_offload_gradients=True)
-    opt.accumulated_grads_in_cpu[0] = torch.full_like(param, 99)
-    opt.micro_step_id = 7
-    param.grad = torch.full_like(param, 3)
-    opt.copy_grads_in_partition(param)
-    assert torch.equal(master.grad, torch.full_like(master, 3))
-
-
-def test_partial_owned_fragment():
-    opt, param, master = make_optimizer(accumulate_offload_gradients=True, low_precision=True)
-    opt.grad_position[0] = [0, 2, 1, 3]
-    backward_values(opt, param, [1, 2, 4], [False, True, True])
-    expected = torch.zeros_like(master)
-    expected[1:4] = 7
-    assert torch.equal(master.grad, expected)
 
 
 class FakeEvent:
@@ -618,47 +269,17 @@ def test_record_stream_is_separate_from_readiness(monkeypatch):
 
 
 def test_cpu_accumulator_waits_before_pageable_source_is_read():
-    opt, param, master = make_optimizer(accumulate_offload_gradients=True)
-    backward_values(opt, param, [1], [True])
+    opt, param, master = make_optimizer()
+    backward_values(opt, param, [1], [False])
+    # The earlier copy into the CPU accumulator only lands once its event completes.
     event = FakeEvent(lambda: opt.accumulated_grads_in_cpu[0].fill_(3))
     opt._pending_offload_events["producer"] = event
-    backward_values(opt, param, [4], [True])
+    opt.micro_step_id = 1
+    opt.set_gradient_accumulation_boundary(True)
+    param.grad = torch.full_like(param, 4)
+    opt.copy_grads_in_partition(param)
     assert event.synced
     assert torch.equal(master.grad, torch.full_like(master, 7))
-
-
-@pytest.mark.parametrize("bad", [float("nan"), float("inf"), -float("inf")])
-def test_offload_guard_scans_after_copy_completion(bad):
-    opt, _, master = make_optimizer(check_offload_gradients=True)
-    event = FakeEvent(lambda: master.grad.fill_(bad))
-    opt._pending_offload_events["producer"] = event
-    opt._all_reduce_overflow = bool
-    assert opt.has_overflow()
-    assert event.synced
-    assert not opt._pending_offload_events
-    assert not opt.local_overflow  # The pre-copy tracker never saw this corruption.
-
-
-def test_offload_guard_allows_finite_zero_gradients():
-    opt, _, _ = make_optimizer(check_offload_gradients=True)
-    opt._all_reduce_overflow = bool
-    assert not opt.has_overflow()
-
-
-def test_global_overflow_includes_remote_rank(monkeypatch):
-    opt, _, _ = make_optimizer(check_offload_gradients=True)
-    calls = []
-    monkeypatch.setattr(zero.dist, "all_reduce", lambda tensor, **kwargs: (calls.append(kwargs), tensor.fill_(1)))
-    opt._model_parallel_all_reduce = lambda **kwargs: calls.append(kwargs)
-    assert opt.has_overflow()
-    assert len(calls) == 2
-
-
-@pytest.mark.parametrize("bad", [-1.0, float("nan"), float("inf")])
-def test_invalid_group_norm_is_not_hidden_by_outer_norm(bad):
-    opt, _, _ = make_optimizer(check_offload_gradients=True)
-    opt.complete_grad_norm_calculation_for_cpu_offload = lambda params: torch.tensor(bad)
-    assert not torch.isfinite(opt.scaled_global_norm())
 
 
 class NoopTimers:
@@ -693,89 +314,36 @@ def prepare_step(opt, param, master, monkeypatch, mock_collectives=True):
     opt._update_model_bit16_weights = lambda index: None
 
 
-@pytest.mark.parametrize("fault", ["cpu_gradient", "norm", "remote"])
-def test_step_rejects_before_any_weight_or_optimizer_mutation(monkeypatch, fault):
-    opt, param, master = make_optimizer(check_offload_gradients=True, accumulate_offload_gradients=True)
-    prepare_step(opt, param, master, monkeypatch)
-    master.grad.fill_(1)
-    opt.optimizer.step()  # Seed real Adam moments and step counter.
-    before_param = master.detach().clone()
-    before_state = copy.deepcopy(opt.optimizer.state[master])
-    backward_values(opt, param, [2, 3], [True, True])
-    if fault == "cpu_gradient":
-        opt._pending_offload_events["copy"] = FakeEvent(lambda: master.grad.fill_(float("nan")))
-    elif fault == "norm":
-        opt.complete_grad_norm_calculation_for_cpu_offload = lambda params: torch.tensor(-1.0)
-    else:
-        monkeypatch.setattr(zero.dist, "all_reduce", lambda tensor, **kwargs: tensor.fill_(1))
-    opt.step()
-    assert opt.overflow
-    assert torch.equal(master, before_param)
-    for key, value in before_state.items():
-        assert torch.equal(opt.optimizer.state[master][key], value)
-    assert not opt._offload_accumulated_param_ids
-    assert not opt._pending_offload_events
-    assert not torch.count_nonzero(master.grad)
-
-
-def test_valid_steps_match_summed_gradient_reference_and_reset(monkeypatch):
-    opt, param, master = make_optimizer(check_offload_gradients=True, accumulate_offload_gradients=True)
+def test_step_consumes_gradients_after_offload_copies_complete(monkeypatch):
+    opt, param, master = make_optimizer()
     prepare_step(opt, param, master, monkeypatch)
     ref = torch.nn.Parameter(master.detach().clone())
     ref_optimizer = torch.optim.Adam([ref], lr=0.01)
-    for values in ([1, 2, 4], [3, 0, 1]):
-        backward_values(opt, param, values, [True] * len(values))
-        opt.step()
-        ref.grad = torch.full_like(ref, sum(values))
-        ref_optimizer.step()
-        assert not opt.overflow
-        assert torch.equal(master, ref)
-        for key in ref_optimizer.state[ref]:
-            assert torch.equal(opt.optimizer.state[master][key], ref_optimizer.state[ref][key])
-        assert not opt._offload_accumulated_param_ids
-        assert not torch.count_nonzero(master.grad)
+    backward_values(opt, param, [2], [True])
+    # Only the completed copy holds the gradient the CPU optimizer must consume.
+    event = FakeEvent(lambda: master.grad.fill_(5))
+    opt._pending_offload_events["producer"] = event
+    opt.step()
+    ref.grad = torch.full_like(ref, 5)
+    ref_optimizer.step()
+    assert event.synced
+    assert not opt.overflow
+    assert torch.equal(master, ref)
 
 
-def _distributed_rejection(rank, rendezvous):
-    # Exercise real CPU collectives without building DeepSpeed's CPU comm extensions.
-    with pytest.MonkeyPatch.context() as patch:
-        patch.setitem(__compatible_ops__, "deepspeed_shm_comm", False)
-        dist.init_distributed("gloo",
-                              auto_mpi_discovery=False,
-                              init_method=rendezvous,
-                              rank=rank,
-                              world_size=2,
-                              timeout=timedelta(seconds=60))
-    try:
-        with pytest.MonkeyPatch.context() as patch:
-            for fault in ("cpu_gradient", "norm"):
-                opt, param, master = make_optimizer(check_offload_gradients=True, accumulate_offload_gradients=True)
-                prepare_step(opt, param, master, patch, mock_collectives=False)
-                master.grad.fill_(1)
-                opt.optimizer.step()
-                before_param = master.detach().clone()
-                before_state = copy.deepcopy(opt.optimizer.state[master])
-                backward_values(opt, param, [2, 3], [True, True])
-                if fault == "cpu_gradient" and rank == 1:
-                    master.grad[0] = float("nan")
-                if fault == "norm":
-                    opt.complete_grad_norm_calculation_for_cpu_offload = lambda params: torch.tensor(-1.0 if rank == 1
-                                                                                                     else 1.0)
-                opt.step()
-                assert opt.overflow
-                assert torch.equal(master, before_param)
-                for key, value in before_state.items():
-                    assert torch.equal(opt.optimizer.state[master][key], value)
-                assert not opt._offload_accumulated_param_ids
-    finally:
-        dist.destroy_process_group()
-
-
-def test_two_rank_cpu_overflow_consensus(tmp_path):
-    torch.multiprocessing.spawn(_distributed_rejection,
-                                args=(f"file://{tmp_path / 'rendezvous'}", ),
-                                nprocs=2,
-                                join=True)
+@pytest.mark.parametrize("operation", ["reset", "legacy_load", "universal_load"])
+def test_cpu_buffer_reuse_waits_for_offload_copies(operation):
+    opt, _, _ = make_optimizer()
+    event = FakeEvent()
+    opt._pending_offload_events["producer"] = event
+    opt._load_legacy_checkpoint = lambda *args: None
+    opt._load_universal_checkpoint = lambda *args: None
+    if operation == "reset":
+        opt.reset_cpu_buffers()
+    else:
+        opt.load_state_dict([], checkpoint_folder="checkpoint" if operation == "universal_load" else None)
+    assert event.synced
+    assert not opt._pending_offload_events
 
 
 def _distributed_default_training(rank, rendezvous):
@@ -792,18 +360,17 @@ def _distributed_default_training(rank, rendezvous):
                               world_size=2,
                               timeout=timedelta(seconds=60))
     try:
-        # Direct construction must honor the same offload and context restrictions.
+        # NVMe offload shares the CPU gradient path, so it must be protected too.
         constructor_cases = [
-            (True, True, None, False, False, False),
-            (True, False, None, False, False, False),
-            (False, True, "cpu", False, False, False),
-            (True, True, "none", False, False, False),
-            (True, True, "cpu", False, False, True),
-            (True, False, "cpu", False, False, True),
-            (True, True, "cpu", True, False, False),
-            (True, True, "cpu", False, True, False),
+            (True, True, None, False),
+            (True, False, None, False),
+            (False, True, "cpu", False),
+            (True, True, "none", False),
+            (True, True, "cpu", True),
+            (True, False, "cpu", True),
+            (True, True, "nvme", True),
         ]
-        for partition_grads, contiguous, offload, pipeline, deepcompile, expected in constructor_cases:
+        for partition_grads, contiguous, offload, expected in constructor_cases:
             model = torch.nn.Linear(4, 4).to(device)
             offload_config = DeepSpeedZeroOffloadOptimizerConfig(device=offload) if offload else None
             opt = zero.DeepSpeedZeroOptimizer(torch.optim.SGD(model.parameters(), lr=0.01), {
@@ -814,8 +381,6 @@ def _distributed_default_training(rank, rendezvous):
                                               partition_grads=partition_grads,
                                               contiguous_gradients=contiguous,
                                               offload_optimizer_config=offload_config,
-                                              pipeline_parallel=pipeline,
-                                              deepcompile=deepcompile,
                                               reduce_bucket_size=8)
             assert opt._offload_gradient_safety_enabled is expected
             opt.destroy()
@@ -916,22 +481,6 @@ def test_two_rank_offload_and_nonoffload_training(tmp_path):
                                 args=(f"file://{tmp_path / 'training-rendezvous'}", ),
                                 nprocs=2,
                                 join=True)
-
-
-@pytest.mark.parametrize("checkpoint_folder", [None, "checkpoint"])
-def test_restore_discards_pending_accumulation(checkpoint_folder):
-    opt, param, master = make_optimizer(accumulate_offload_gradients=True)
-    backward_values(opt, param, [1, 2], [True, True])
-    loaded = []
-    opt._load_legacy_checkpoint = lambda *args: loaded.append("legacy")
-    opt._load_universal_checkpoint = lambda *args: loaded.append("universal")
-    opt.load_state_dict([], checkpoint_folder=checkpoint_folder)
-    assert loaded == ["universal" if checkpoint_folder else "legacy"]
-    assert opt.micro_step_id == -1
-    assert not opt._offload_accumulated_param_ids
-    assert not torch.count_nonzero(master.grad)
-    backward_values(opt, param, [4], [True])
-    assert torch.equal(master.grad, torch.full_like(master, 4))
 
 
 @pytest.mark.skipif(get_accelerator().device_name() != "cuda" or not get_accelerator().is_available(),
