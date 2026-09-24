@@ -339,7 +339,7 @@ jobs:
           # Initialize CUDA before install so setup.py can detect NCCL version
           python -c "import torch; torch.cuda.init(); print(f'NCCL version: {torch.cuda.nccl.version()}')"
           # Use --no-build-isolation so setup.py can access pre-installed PyTorch
-          pip install --no-build-isolation .[dev,1bit,autotuning,deepcompile]
+          pip install --no-build-isolation .[dev,autotuning,deepcompile]
           ds_report
 
       - name: Reinstall selected Transformers
