@@ -717,6 +717,12 @@ class BF16_Optimizer(ZeROOptimizer):
     def accumulate_hp_grads_and_remove_lp(self, lp_param, group_idx, param_idx):
         assert self.immediate_grad_update
         self._update_hp_grad(lp_param, group_idx, param_idx, clear_lp_grads=False)
+        # The high-precision buffer now holds this gradient; reduction, clipping and the step all read it
+        # there. Keeping the low-precision copy until the step leaves every parameter's gradient alive twice
+        # through the end of backward, and zeroing it instead frees nothing. Graph harvesting replays
+        # captured kernels on fixed gradient addresses, so it keeps them.
+        if not self.graph_harvesting:
+            lp_param.grad = None
 
     def create_grad_acc_hooks(self):
         for i, param_group in enumerate(self.bf16_groups):

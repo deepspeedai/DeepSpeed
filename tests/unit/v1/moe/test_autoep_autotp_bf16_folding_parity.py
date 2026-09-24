@@ -19,6 +19,7 @@ def _bf16_optimizer_stub(lp, hp_grad):
     optimizer.param_names = {lp: "model.layers.0.mlp.router.gate.weight"}
     optimizer.fp32_groups_gradients = [[hp_grad]]
     optimizer.fp32_groups_has_gradients = [[False]]
+    optimizer.graph_harvesting = False
     return optimizer
 
 
