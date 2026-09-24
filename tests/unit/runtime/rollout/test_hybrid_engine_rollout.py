@@ -474,6 +474,22 @@ def test_continuous_generation_applies_repetition_penalty():
     assert next_tokens.tolist() == [[1]]
 
 
+def test_continuous_generation_treats_none_repetition_penalty_as_one():
+    request = RolloutRequest(torch.tensor([[0]]), torch.ones((1, 1), dtype=torch.long))
+    responses = {0: [torch.tensor([[0]])]}
+    module = SimpleNamespace(generation_config=SimpleNamespace(repetition_penalty=None))
+
+    next_tokens = HybridEngineRollout._continuous_next_tokens(
+        torch.tensor([[6.0, 5.0]]),
+        (0, ),
+        {0: request},
+        responses,
+        module,
+    )
+
+    assert next_tokens.tolist() == [[0]]
+
+
 @patch("deepspeed.runtime.rollout.hybrid_engine_rollout.time.perf_counter")
 @patch("deepspeed.runtime.rollout.hybrid_engine_rollout.get_accelerator")
 def test_generate_records_profile_when_enabled(mock_get_accelerator, mock_perf_counter):

@@ -83,8 +83,9 @@ When unset, generation keeps its existing behavior. When set to a positive
 value, at most that many prompt rows are active at once; completed rows retire
 and pending rows are prefetched into the released slots. The returned
 ``RolloutBatch`` remains in the original ``RolloutRequest`` row order.
-The experimental path periodically trims unused cache columns from the left
-to keep long-running staggered-EOS workloads within the allocated cache span.
+When ``HybridEngineRolloutConfig(enable_cache_trimming=True)`` is enabled, the
+experimental path periodically trims unused cache columns from the left to
+keep long-running staggered-EOS workloads within the allocated cache span.
 
 When ``HybridEngineRolloutConfig(enable_profiling=True)`` is enabled, this path
 also records a snapshot in ``get_last_profile()``. In addition to the common

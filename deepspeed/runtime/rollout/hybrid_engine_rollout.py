@@ -297,8 +297,8 @@ class HybridEngineRollout(RolloutEngine):
             max_cache_len = self.continuous_cache_capacity
         else:
             max_cache_len = (prompt_len + sampling.max_new_tokens if self.align_decode_fronts else
-                             self._estimate_continuous_cache_len(prompt_len, [sampling.max_new_tokens] * len(requests),
-                                                                 max_batch_size))
+                             self._estimate_continuous_cache_len(
+                                 prompt_len, [sampling.max_new_tokens] * len(requests), max_batch_size))
         if max_positions is not None and max_cache_len > max_positions:
             raise ValueError("continuous batching cache exceeds the model maximum position embeddings")
         if getattr(module, "_supports_cache_class", None) is False:
@@ -775,6 +775,8 @@ class HybridEngineRollout(RolloutEngine):
     @staticmethod
     def _continuous_next_tokens(logits, request_ids, request_by_id, responses, module):
         repetition_penalty = getattr(getattr(module, "generation_config", None), "repetition_penalty", 1.0)
+        if repetition_penalty is None:
+            repetition_penalty = 1.0
         if repetition_penalty == 1.0:
             return logits.argmax(dim=-1, keepdim=True)
 
