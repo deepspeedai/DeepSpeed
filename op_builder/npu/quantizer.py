@@ -56,16 +56,21 @@ class NPUQuantizer:
         quantize, swizzle_quant, and quantized_reduction.
         """
         maxv = xg.abs().max(dim=1).values
-        # scale = 2**num_bits / (2 * max), computed in fp32 like the reference
-        scale = torch.where(maxv == 0, torch.ones_like(maxv), (float(1 << num_bits)) / (2.0 * maxv))
+        # scale = 2**num_bits / (2 * max), computed in fp32 like the reference.
+        # Dividing by zero yields inf for empty groups; the mask below
+        # restores the reference 1.0, so this form agrees bitwise with the
+        # explicit where() (verified on 910B4).
+        scale = (float(1 << num_bits)) / (2.0 * maxv)
+        scale.masked_fill_(maxv == 0, 1.0)
         # The stored/sent value is the reciprocal of the scale; dequantize
         # multiplies it back, so the round trip is q * (1/scale) == q * scale.
-        stored = (1.0 / scale).view(-1)
+        stored = scale.reciprocal().view(-1)
         # Truncate toward zero, then clamp into the representable range.
+        # Chained in-place form: xg is always a fresh float() copy here.
         q_min = -(1 << (num_bits - 1))
         q_max = (1 << (num_bits - 1)) - 1
-        q = (xg * scale.view(-1, 1)).trunc().clamp(q_min, q_max)
-        return q, stored
+        xg.mul_(scale.view(-1, 1)).trunc_().clamp_(q_min, q_max)
+        return xg, stored
 
     @staticmethod
     def _pack_int4(q_flat):
@@ -112,7 +117,7 @@ class NPUQuantizer:
     def _dequantize_fp32(quantized_data, params, groups):
         q = NPUQuantizer._as_groups(quantized_data, groups).float()
         p = params.contiguous().view(-1).float()
-        return (q * p.view(groups, 1)).view(quantized_data.shape)
+        return q.mul_(p.view(groups, 1)).view(quantized_data.shape)
 
     @staticmethod
     def dequantize(quantized_data, params, groups, num_bits, quant_type):
