@@ -6,6 +6,7 @@
 
 from contextlib import nullcontext
 import copy
+import inspect
 import os
 from datetime import timedelta
 from types import SimpleNamespace
@@ -98,6 +99,17 @@ def test_config_defaults():
     assert all(name not in config.model_dump() for name in REMOVED_OPTIONS)
     assert not config.check_offload_gradients
     assert not config.accumulate_offload_gradients
+
+
+@pytest.mark.parametrize("compute_grad_norm", [False, True])
+def test_positional_compute_grad_norm_compatibility(compute_grad_norm):
+    # The legacy constructor accepted compute_grad_norm as its 38th positional argument.
+    signature = inspect.signature(zero.DeepSpeedZeroOptimizer)
+    bound = signature.bind(*([None] * 37), compute_grad_norm)
+    bound.apply_defaults()
+    assert bound.arguments["compute_grad_norm"] is compute_grad_norm
+    assert not bound.arguments["check_offload_gradients"]
+    assert not bound.arguments["accumulate_offload_gradients"]
 
 
 @pytest.mark.parametrize("requested", [None, False, True])

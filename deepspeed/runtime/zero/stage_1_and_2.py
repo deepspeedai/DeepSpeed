@@ -188,9 +188,9 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                  bf16_optimizer_states=False,
                  elastic_checkpoint=False,
                  check_grad_overflow=True,
+                 compute_grad_norm=True,
                  check_offload_gradients=False,
                  accumulate_offload_gradients=False,
-                 compute_grad_norm=True,
                  pipeline_parallel=False,
                  deepcompile=False):
 
