@@ -189,3 +189,22 @@ def test_triton_layer_norm(M, N, dtype, residual, input_bias, eps=1e-5, device='
                                            eps).to(dtype)
     # compare
     assert (allclose(y_tri, y_ref))
+
+
+@pytest.mark.inference_ops
+@pytest.mark.parametrize("shape", [(0, 1, 128), (0, 1, 1024), (1, 0, 1024)])
+@pytest.mark.parametrize("op_name", ["layer_norm", "_layer_norm_residual", "layer_norm_residual_store_pre_ln_res"])
+def test_empty_layer_norm_launchers(shape, op_name):
+    device = get_accelerator().current_device_name()
+    vals = torch.empty(shape, dtype=torch.float16, device=device)
+    weight = torch.ones(shape[-1], dtype=vals.dtype, device=device)
+    bias = torch.zeros_like(weight)
+    module = InferenceBuilder().load()
+    # The residual LayerNormOp helpers use a Python fallback, so call the CUDA bindings directly.
+    if op_name == "layer_norm":
+        outputs = (module.layer_norm(vals, weight, bias, 1e-5), )
+    elif op_name == "_layer_norm_residual":
+        outputs = (module._layer_norm_residual(vals, bias, vals, weight, bias, 1e-5), )
+    else:
+        outputs = module.layer_norm_residual_store_pre_ln_res(vals, bias, vals, weight, bias, 1e-5)
+    assert all(output.shape == vals.shape and output.numel() == 0 for output in outputs)
