@@ -88,14 +88,14 @@ class ZeroStageEnum(int, Enum):
 
 
 def offload_gradient_safety_enabled(*,
-                                    stage: int,
-                                    cpu_offload: bool,
+                                    partition_grads: bool,
+                                    offload_optimizer_config: Optional[DeepSpeedZeroOffloadOptimizerConfig],
                                     zenflow: bool = False,
                                     pipeline_parallel: bool = False,
                                     deepcompile: bool = False) -> bool:
     """CPU optimizer offload enforces the contiguity required by these protections."""
-    return (stage == ZeroStageEnum.gradients and cpu_offload and not zenflow and not pipeline_parallel
-            and not deepcompile)
+    cpu_offload = offload_optimizer_config is not None and offload_optimizer_config.device == OffloadDeviceEnum.cpu
+    return partition_grads and cpu_offload and not zenflow and not pipeline_parallel and not deepcompile
 
 
 class DeepSpeedZeroConfig(DeepSpeedConfigModel):

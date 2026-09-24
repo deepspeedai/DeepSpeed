@@ -2559,10 +2559,8 @@ class DeepSpeedEngine(Module):
             if pipeline_parallel or deepcompile:
                 raise ValueError("ZeRO-2 offload gradient safety options do not support pipeline parallelism "
                                  "or DeepCompile")
-        cpu_offload = (zero_config.offload_optimizer is not None
-                       and zero_config.offload_optimizer.device == OffloadDeviceEnum.cpu)
-        return offload_gradient_safety_enabled(stage=zero_config.stage,
-                                               cpu_offload=cpu_offload,
+        return offload_gradient_safety_enabled(partition_grads=zero_config.stage == ZeroStageEnum.gradients,
+                                               offload_optimizer_config=zero_config.offload_optimizer,
                                                zenflow=zero_config.zenflow is not None,
                                                pipeline_parallel=pipeline_parallel,
                                                deepcompile=deepcompile)

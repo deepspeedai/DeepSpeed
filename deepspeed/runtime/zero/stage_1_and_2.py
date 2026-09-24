@@ -217,8 +217,8 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         # Model/compilation context comes from the engine; the policy stays fixed
         # so pending gradient work cannot outlive its synchronization guarantees.
         self._offload_gradient_safety_enabled = offload_gradient_safety_enabled(
-            stage=ZeroStageEnum.gradients if partition_grads else ZeroStageEnum.optimizer_states,
-            cpu_offload=self.cpu_offload and offload_optimizer_config.device == OffloadDeviceEnum.cpu,
+            partition_grads=partition_grads,
+            offload_optimizer_config=offload_optimizer_config,
             zenflow=self.zenflow,
             pipeline_parallel=pipeline_parallel,
             deepcompile=deepcompile)

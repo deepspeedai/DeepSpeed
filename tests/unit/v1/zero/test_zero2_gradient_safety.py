@@ -33,7 +33,9 @@ def make_optimizer(dtype=torch.bfloat16, device="cpu", low_precision=False, cpu_
     for name in OPTIONS:
         setattr(opt, name, options.get(name, False))
     opt.cpu_offload = cpu_offload
-    opt._offload_gradient_safety_enabled = offload_gradient_safety_enabled(stage=2, cpu_offload=cpu_offload)
+    offload_config = DeepSpeedZeroOffloadOptimizerConfig(device="cpu") if cpu_offload else None
+    opt._offload_gradient_safety_enabled = offload_gradient_safety_enabled(partition_grads=True,
+                                                                           offload_optimizer_config=offload_config)
     opt.cpu_offload_pin_memory = False
     opt.device = "cpu"
     opt.dtype = dtype
@@ -108,16 +110,16 @@ def test_config_rejects_removed_options(name, requested):
 @pytest.mark.parametrize("context,expected", [
     ({}, True),
     ({
-        "stage": 0
+        "partition_grads": False
     }, False),
     ({
-        "stage": 1
+        "offload_optimizer_config": None
     }, False),
     ({
-        "stage": 3
+        "offload_optimizer_config": DeepSpeedZeroOffloadOptimizerConfig(device="none")
     }, False),
     ({
-        "cpu_offload": False
+        "offload_optimizer_config": DeepSpeedZeroOffloadOptimizerConfig(device="nvme")
     }, False),
     ({
         "zenflow": True
@@ -130,7 +132,7 @@ def test_config_rejects_removed_options(name, requested):
     }, False),
 ])
 def test_gradient_safety_compatibility(context, expected):
-    kwargs = dict(stage=2, cpu_offload=True)
+    kwargs = dict(partition_grads=True, offload_optimizer_config=DeepSpeedZeroOffloadOptimizerConfig(device="cpu"))
     kwargs.update(context)
     assert offload_gradient_safety_enabled(**kwargs) is expected
 
@@ -302,9 +304,8 @@ def test_engine_automatic_defaults(monkeypatch, zero_config, deepcompile, pipeli
     engine._configure_zero_optimizer(torch.optim.Adam(engine.module.parameters()))
     assert captured["pipeline_parallel"] is pipeline
     assert captured["deepcompile"] is deepcompile
-    assert offload_gradient_safety_enabled(stage=2 if captured["partition_grads"] else 1,
-                                           cpu_offload=(captured["offload_optimizer_config"] is not None
-                                                        and captured["offload_optimizer_config"].device == "cpu"),
+    assert offload_gradient_safety_enabled(partition_grads=captured["partition_grads"],
+                                           offload_optimizer_config=captured["offload_optimizer_config"],
                                            zenflow=captured["zenflow_config"] is not None,
                                            pipeline_parallel=captured["pipeline_parallel"],
                                            deepcompile=captured["deepcompile"]) is expected
