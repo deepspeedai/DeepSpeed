@@ -291,6 +291,27 @@ Failing fast matters for measurement: a run that asked for the fused reduction
 and silently got the eager one would report the difference between an
 implementation and itself.
 
+**Constraints:**
+
+- ``autoep_size`` must divide ``num_experts`` for all detected MoE layers.
+- ``autoep_size=1`` is valid: all experts remain local (no AllToAll), useful
+  for functional testing on a single GPU.
+- AutoEP currently cannot be combined with AutoTP
+  (``tensor_parallel.autotp_size > 1``) or tensor model parallelism from
+  ``mpu``; support is planned as follow-up work.
+- AutoEP with ZeRO Stage 3 is supported only without sequence parallelism,
+  hpZeRO secondary tensor groups, non-1 expert tensor parallelism, or
+  quantized gradients.
+- Regular checkpoint save/load requires matching ``autoep_size``. To change
+  ``autoep_size`` or data-parallel world size across runs for the same
+  AutoEP-detected model topology, convert the checkpoint to Universal
+  Checkpoint format and load it with ``checkpoint.load_universal``; see the
+  `Universal Checkpointing tutorial </tutorials/universal-checkpointing/>`__
+  for the detailed flow and constraints.
+- DeepSeek-V2 and DeepSeek-V3 AutoEP do not support load-balance expert bias
+  yet. The built-in DeepSeek presets disable it by default; explicit non-null
+  values fail.
+
 Chunked causal-LM loss
 ----------------------
 
@@ -313,7 +334,8 @@ backend that cannot run raises. The
 loss, the label shifting, ``ignore_index`` and ``num_items_in_batch``
 normalization follow ``ForCausalLMLoss``; gradients may differ from it by one
 BF16/FP16 rounding step where the FP32 evaluation order lands on a rounding
-boundary. It is opt-in, and it refuses models whose ``loss_function`` is not
+boundary. It has no second derivative: backward with ``create_graph=True``
+raises. It is opt-in, and it refuses models whose ``loss_function`` is not
 the stock ``ForCausalLMLoss``:
 
 .. code-block:: python
@@ -322,24 +344,3 @@ the stock ``ForCausalLMLoss``:
 
     install_chunked_causal_lm_loss(model)
     engine, optimizer, _, _ = deepspeed.initialize(model=model, config=ds_config)
-
-**Constraints:**
-
-- ``autoep_size`` must divide ``num_experts`` for all detected MoE layers.
-- ``autoep_size=1`` is valid: all experts remain local (no AllToAll), useful
-  for functional testing on a single GPU.
-- AutoEP currently cannot be combined with AutoTP
-  (``tensor_parallel.autotp_size > 1``) or tensor model parallelism from
-  ``mpu``; support is planned as follow-up work.
-- AutoEP with ZeRO Stage 3 is supported only without sequence parallelism,
-  hpZeRO secondary tensor groups, non-1 expert tensor parallelism, or
-  quantized gradients.
-- Regular checkpoint save/load requires matching ``autoep_size``. To change
-  ``autoep_size`` or data-parallel world size across runs for the same
-  AutoEP-detected model topology, convert the checkpoint to Universal
-  Checkpoint format and load it with ``checkpoint.load_universal``; see the
-  `Universal Checkpointing tutorial </tutorials/universal-checkpointing/>`__
-  for the detailed flow and constraints.
-- DeepSeek-V2 and DeepSeek-V3 AutoEP do not support load-balance expert bias
-  yet. The built-in DeepSeek presets disable it by default; explicit non-null
-  values fail.
