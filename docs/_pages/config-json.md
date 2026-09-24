@@ -1732,3 +1732,11 @@ The offload pass is **not** in the default DeepCompile schedule; enable it only 
 | Description                                                                                                   | Default |
 | --------------------------------------------------------------------------------------------------------------| ------- |
 | Specifies the data type in which to do gradient accumulation. If None the default is to match the model type. |  None   |
+
+### Removed Features
+
+The top-level `graph_harvesting` option for BF16 optimizer graph capture has been
+[removed](https://github.com/deepspeedai/DeepSpeed/issues/8489). Delete the key from
+existing configurations, including when its value is `false` or `null`; its presence
+raises `DeepSpeedConfigError`. BF16 optimizer operations now use eager execution.
+Hybrid Engine's `hybrid_engine.enable_cuda_graph` option remains supported.
