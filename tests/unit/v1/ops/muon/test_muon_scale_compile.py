@@ -24,6 +24,7 @@ from deepspeed.runtime.zero.muon.original_muon import muon_update
 CASES = {
     "expert": ([(2, 64, 32), (2, 32, 12), (2, 80, 24), (2, 24, 80)], dict(is_expert_group=True)),
     "per_head": ([(192, 32), (96, 12), (240, 24), (96, 256)], dict(num_heads=3)),
+    "full": ([(64, 32), (32, 12), (80, 24), (24, 80)], dict()),
 }
 
 DEVICES = ["cpu"]

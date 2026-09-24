@@ -227,7 +227,7 @@ def muon_update(grad,
             update = zeropower_via_gram_newtonschulz(update, steps=ns_steps)
         else:
             update = zeropower_via_newtonschulz5(update, steps=ns_steps)
-        update *= max(1, grad.size(-2) / grad.size(-1))**0.5
+        update *= _aspect_ratio_scale(grad.size(-2), grad.size(-1))
     if update.dtype != orig_dtype:
         update = update.to(orig_dtype)
     # On the non-nesterov path `update` is the (untouched, finite) momentum, so without this
