@@ -87,6 +87,14 @@ def _block_rows(vocab_size: int) -> int:
     return max(1, _BLOCK_ELEMENTS // vocab_size)
 
 
+def _refuse_create_graph():
+    # The gradient is computed outside autograd, by the Triton kernel or from a log-sum-exp saved as a constant,
+    # so a graph built through it would silently miss the loss's second derivative.
+    if torch.is_grad_enabled():
+        raise RuntimeError("The chunked cross entropy has no second derivative; backward with create_graph=True is "
+                           "not supported")
+
+
 class _TritonCrossEntropy(torch.autograd.Function):
     """Per-row cross entropy with one read of the logits in forward and one read and write in backward."""
 
@@ -111,6 +119,7 @@ class _TritonCrossEntropy(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_loss):
+        _refuse_create_graph()
         logits, target, log_sum_exp = ctx.saved_tensors
         grad_logits = torch.empty_like(logits)
         n_rows, n_cols = logits.shape
@@ -153,6 +162,7 @@ class _ChunkedCrossEntropy(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_loss):
+        _refuse_create_graph()
         logits, safe_target, valid, log_sum_exp = ctx.saved_tensors
         # d loss_i / d logit_ij = softmax_ij - [j == target_i], scaled by the incoming gradient of row i.
         row_scale = torch.where(valid, grad_loss.float(), torch.zeros_like(log_sum_exp))

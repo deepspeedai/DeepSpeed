@@ -120,6 +120,19 @@ def test_ignored_rows_get_no_gradient_and_all_ignored_is_nan(backend, device):
 
 
 @pytest.mark.parametrize("backend, device", BACKEND_DEVICES)
+def test_double_backward_raises_instead_of_dropping_the_second_derivative(backend, device):
+    logits = torch.randn(4, 16, device=device, requires_grad=True)
+    target = torch.tensor([1, 2, 3, 4], device=device)
+    loss = chunked_cross_entropy(logits, target, backend=backend)
+
+    # A gradient penalty needs the loss's second derivative, which neither backend computes. It must fail rather
+    # than silently leave that term out while the rest of the objective still backpropagates.
+    with pytest.raises(RuntimeError):
+        (grad, ) = torch.autograd.grad(loss, logits, create_graph=True)
+        (loss + grad.pow(2).sum()).backward()
+
+
+@pytest.mark.parametrize("backend, device", BACKEND_DEVICES)
 def test_a_strided_target_is_read_by_row(backend, device):
     logits = torch.randn(9, 13, device=device, requires_grad=True)
     target = torch.randint(0, 13, (9, ), device=device)
