@@ -48,6 +48,10 @@ toc_label: "Contents"
 
 Muon optimizer is supported with ZeRO Stage 1, 2, and 3. To use Muon, set the optimizer name to `Muon`. The parameters applied for Muon are automatically determined by the matrix shape and name. For ZeRO Stage 3 with NVMe offloading, set `save_muon_momentum_buffer_in_memory` to `true` under `zero_optimization` to keep the Muon momentum buffer in GPU/CPU memory instead of swapping to NVMe.
 
+Keeping Muon momentum in memory does not keep gradients resident: swappable ZeRO-3 subgroups still load their gradients from NVMe before computing Muon updates.
+
+With ZeRO Stage 1/2 CPU optimizer offload, Muon gathers only locally owned gradient and momentum slices. Communication is chunked to a 64 MiB combined send/receive scratch budget per rank, independently of the 256 MiB buffer-cache limit. Full gradients and momentum are processed in batches targeting 64 MiB; a matrix exceeding that target is processed alone because Newton-Schulz requires the full matrix. These limits exclude Newton-Schulz workspaces and other training memory.
+
 Muon supports the following params:
 
 | "params" key   | Description                                                                                                          | Default   |
@@ -80,6 +84,24 @@ What is tagged, and what deliberately is not:
 | `o_proj` and other output projections | no | the head structure is on the input dimension, so splitting dim 0 would cut across the wrong axis |
 | fused `qkv_proj` / `query_key_value` / `c_attn` / `wqkv` | no | the three sections do not share a head count under GQA |
 | MLA `q_a_proj`, `kv_a_proj_with_mqa` | no | down-projections mixing latent and rope components, with no head structure |
+| linear-attention `q_proj` / `k_proj` / `v_proj` of a supported model (below) | yes | blocked by the head count the attention module was built with, which for hybrids such as Kimi-K3 is not `num_attention_heads * head_dim` |
+| linear attention of any other model | no | not supported yet; see below |
+| sparse-attention indexers (e.g. GLM-5.2's DSA indexer) | no | the indexer selects which keys attention will see; the split is defined on attention itself |
+
+**Where the geometry comes from.** For standard attention and MLA, from the config: head counts
+through `AutoTPMeta`, per-head widths from the fields the architecture defines. Linear attention
+often keeps its geometry outside those fields, so it is supported per module, listed in
+`_LINEAR_ATTENTION_OWNERS` in `deepspeed/__init__.py`. For a listed module, the head counts it was
+built with are used, and the config is not consulted, since a config geometry can match the same
+width by coincidence:
+
+| model | linear-attention module | geometry |
+| --- | --- | --- |
+| Kimi-K3 | `KimiDeltaAttention` | `linear_attn_config` `num_heads` x `head_dim` |
+
+Linear attention in any other model stays on the full-matrix path. To enable it, add the module's
+class name to `_LINEAR_ATTENTION_OWNERS` with the model it was checked on, after confirming the
+module exposes its head count and per-head width as attributes.
 
 **The shape confirms the name.** A leaf name is treated as a claim about the layout, never as
 proof of it. Every geometry the config makes plausible for that name is evaluated, and a
@@ -875,6 +897,14 @@ Configure AutoEP expert parallelism for MoE models. AutoEP automatically detects
 | -------------------------------------------------------------------------------------------------- | ------- |
 | Reserved for expert tensor parallelism. AutoEP currently accepts only `1`; non-1 values are rejected. | `1`     |
 
+***async_split_plan***: [boolean]
+
+| Description                                                                                                                                                | Default |
+| ---------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
+| Overlap the pinned-memory split metadata transfer (device to host) with token sorting and packing. Expert-count AllToAll and split-size computation stay on the caller stream before packing; only the metadata copy uses a separate stream. The host waits for the metadata only immediately before payload dispatch. Requires CUDA, currently requires `tensor_parallel.autotp_size=1`, and has no effect when `autoep_size=1` or `comm_backend="deepep"`. | `false` |
+
+This option reduces the host synchronization exposed by reading split sizes; it does not hide the expert-count AllToAll. Benchmark it with your target model, token count, EP size, and hardware before enabling it. For small workloads, stream/event overhead can outweigh the overlap benefit.
+
 ***preset_model***: [string]
 
 | Description                                                                                                                            | Default |
@@ -1072,6 +1102,14 @@ Use a built-in preset but override specific naming/weight fields for a fine-tune
 - AutoEP currently cannot be combined with AutoTP (`tensor_parallel.autotp_size > 1`); support is planned as follow-up work
 - AutoEP with ZeRO Stage 3 is supported only without AutoTP, sequence parallelism, hpZeRO secondary tensor groups, non-1 `expert_tensor_parallel_size`, or quantized gradients
 - ZeRO Stage 3 saves AutoEP checkpoints partition-natively and supports same-topology save/load, module-only loads, optimizer-state-skipping loads, and universal checkpoint conversion. Universal loads can resume at a different data-parallel world size, a different `autoep_size`, or both (when the target `autoep_size` divides the expert count), including weights-only/module-only loads from the converted `fp32.pt` parameter files
+
+### Python cyclic garbage collection
+
+<i>**disable_python_gc**</i>: [boolean]
+
+| Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     | Default |
+| ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
+| Disable automatic Python cyclic garbage collection for the lifetime of a DeepSpeed engine. When `true`, DeepSpeed collects once after engine initialization, disables automatic cyclic GC, and restores the process's original automatic-GC state when the last engine using this option is destroyed. When `false`, DeepSpeed leaves the existing Python GC state unchanged. Applications that create cyclic Python objects during training should call `engine.collect_python_gc()` at a safe boundary such as after checkpointing. | `false` |
 
 ### Logging
 

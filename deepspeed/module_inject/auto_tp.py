@@ -488,10 +488,17 @@ class AutoTP():
         if self._is_lm_head_name(name):
             if not self.training_mode:
                 return LmHeadLinearAllreduce(module, self.mp_group, tp_meta=self.tp_meta)
-            if self.mp_size > 1:
+            if spec.shape is not None or spec.get_partition_dim() != 1:
                 raise NotImplementedError(
-                    "Training with explicit row-parallel output heads is not supported for tensor parallel size > 1. "
-                    "Use column-parallel with gather_output=True until a row-parallel autograd path is available.")
+                    "Row-parallel output-head training requires an unreshaped input-dimension shard.")
+            tied = any(weight is module.weight for other in self.module.modules() if other is not module
+                       for name, weight in other.named_parameters(recurse=False) if name == 'weight')
+            if self.mp_size > 1 and tied:
+                raise NotImplementedError(
+                    "Row-parallel output-head training cannot shard a tied weight. "
+                    "Keep the tied embedding and output head replicated until coupled embedding sharding is supported."
+                )
+            return LinearAllreduceWithReplicatedInput(module, self.mp_group, name=name, tp_meta=self.tp_meta)
 
         if spec.shape is not None:
             return SubParamLinearAllreduce(

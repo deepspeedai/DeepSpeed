@@ -215,6 +215,27 @@ def prepare_tp_fused_qkvw(module, src, mp_size, gpu_index, meta: AutoTPMeta):
 # q = [q1,...,q_{n/4}, q_{n/2+1},...,q_{3n/4}, k1,...,k_{n/4}, k_{n/2+1},...,k_{3n/4}]
 # k = [q_{n/4+1},...,q_{n/2}, q_{3n/4+1},...,qn, k_{n/4+1},...,k_{n/2}, k{3n/4+1},...,kn]
 # Avoid modifying the modeling code. We adjust the value and oproj weight to fit this qk type.
+def shared_qk_value_head_ids(num_heads, world_size, rank):
+    """Which value heads a rank holds under shared-QK attention.
+
+    A rank takes the value head paired with each of its query heads, then the matching
+    second-half head for each. The two groups are not adjacent, which is why describing this
+    layout needs a selection of blocks rather than a single span.
+
+    Shared with checkpoint metadata so the partition and its description cannot drift.
+    """
+    head_per_rank = num_heads // world_size
+    q_head_start = rank * head_per_rank
+    v_head_ids = []
+    index = 0
+    while index < head_per_rank:
+        v_head_ids.append(q_head_start // 2)
+        q_head_start += 2
+        index += 2
+    v_head_ids.extend([head + num_heads // 2 for head in v_head_ids])
+    return v_head_ids
+
+
 def shard_value_with_share_qk(
         weight,
         bias,
@@ -233,19 +254,7 @@ def shard_value_with_share_qk(
     assert (num_heads % world_size == 0)
     if world_size > num_heads // 2:
         raise RuntimeError(f"world_size {world_size} is larger than half of num_heads {num_heads}")
-    head_per_rank = num_heads // world_size
-    q_head_start = rank * head_per_rank
-    # mapping q_head to v_head
-    v_head_ids = []
-    i = 0
-    # mapping neighbor q_head to v_head
-    while i < head_per_rank:
-        v_head_ids.append(q_head_start // 2)
-        q_head_start += 2
-        i = i + 2
-
-    # mapping neighbor k_head to v_head
-    v_head_ids.extend([i + num_heads // 2 for i in v_head_ids])
+    v_head_ids = shared_qk_value_head_ids(num_heads, world_size, rank)
     sharded_weight = []
     sharded_bias = []
     for head_id in v_head_ids:

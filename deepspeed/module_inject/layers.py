@@ -25,9 +25,10 @@ from copy import deepcopy
 from typing import Union
 
 __all__ = [
-    "TensorParallel_Layer", "LinearAllreduce", "LinearLayer", "LmHeadLinearAllreduce", "Yuan_LinearAllreduce",
-    "Yuan_LinearLayer", "GateUpPack_LinearLayer", "Conv_LinearALlreduce", "fused_LinearLayer", "conv_LinearLayer",
-    "SubParamLinearLayer", "SubParamLinearAllreduce", "VocabParallelLinear"
+    "TensorParallel_Layer", "LinearAllreduce", "LinearAllreduceWithReplicatedInput", "LinearLayer",
+    "LmHeadLinearAllreduce", "Yuan_LinearAllreduce", "Yuan_LinearLayer", "GateUpPack_LinearLayer",
+    "Conv_LinearALlreduce", "fused_LinearLayer", "conv_LinearLayer", "SubParamLinearLayer", "SubParamLinearAllreduce",
+    "VocabParallelLinear"
 ]
 
 DEEPSPEED_AUTOTP_MODE = AUTOTP_MODE.INFERENCE
@@ -229,6 +230,28 @@ class RowParallel(torch.autograd.Function):
         Backward pass.
         """
         return None, grad_output, None
+
+
+class ScatterToTensorParallelRegion(torch.autograd.Function):
+    """Slice a replicated input and reconstruct its complete gradient."""
+
+    @staticmethod
+    def forward(ctx, group, input, partition_sizes, tp_index):
+        ctx.group = group
+        ctx.input_shape = input.shape
+        ctx.offset = sum(partition_sizes[:tp_index])
+        ctx.size = partition_sizes[tp_index]
+        return input.narrow(-1, ctx.offset, ctx.size).contiguous()
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        # Each rank owns only one input-gradient slice. Upstream replicated
+        # layers need the sum of all slices, not this rank's padded gradient.
+        grad_input = grad_output.new_zeros(ctx.input_shape)
+        grad_input.narrow(-1, ctx.offset, ctx.size).copy_(grad_output)
+        if ctx.group is not None:
+            dist.all_reduce(grad_input, group=ctx.group)
+        return None, grad_input, None, None
 
 
 class AsyncColumnParallel(torch.autograd.Function):
@@ -502,16 +525,19 @@ class TensorParallel_Layer(nn.Module, ABC):
                            original_shape=None,
                            is_bias=False,
                            replicated=False,
+                           affine_map=None,
                            unsupported_reason=None):
         if param is None:
             return
-        affine_map = _derive_affine_map(tp_world_size=getattr(self, 'tp_world_size', None),
-                                        logical_shape=logical_shape or original_shape,
-                                        partition_dim=partition_dim,
-                                        partition_sizes=partition_sizes,
-                                        sub_param_shard_widths=sub_param_shard_widths,
-                                        replicated=replicated,
-                                        unsupported_reason=unsupported_reason)
+        # A layout with no generic rule can still describe itself, so a layer may hand the
+        # map over ready-made rather than leaving the parameter undescribed.
+        affine_map = affine_map or _derive_affine_map(tp_world_size=getattr(self, 'tp_world_size', None),
+                                                      logical_shape=logical_shape or original_shape,
+                                                      partition_dim=partition_dim,
+                                                      partition_sizes=partition_sizes,
+                                                      sub_param_shard_widths=sub_param_shard_widths,
+                                                      replicated=replicated,
+                                                      unsupported_reason=unsupported_reason)
         setattr(
             param, DS_AUTOTP_UC_META,
             _build_param_uc_restore_meta(partition_type=partition_type,
@@ -927,6 +953,19 @@ class LinearAllreduce(TensorParallel_Layer):
                                     replicated=True)
 
 
+class LinearAllreduceWithReplicatedInput(LinearAllreduce):
+    """Row-parallel output head whose preceding layer produces a full input."""
+
+    def forward(self, input):
+        if self.defer_collectives_to_compiler:
+            raise NotImplementedError(
+                "Row-parallel output-head training does not support deferred compiler collectives.")
+        assert sum(self._partition_sizes) == input.shape[-1], (
+            f"Output head expects {sum(self._partition_sizes)} input features, but got {input.shape[-1]}.")
+        local_input = ScatterToTensorParallelRegion.apply(self.mp_group, input, self._partition_sizes, self.tp_index)
+        return super().forward(local_input)
+
+
 #remove kwargs from partition.
 class LinearLayer(TensorParallel_Layer):
 
@@ -1135,25 +1174,37 @@ class SubParamColumnParallel(LinearLayer):
                                                subparam_sizes=self._subparam_sizes)
             params_list[idx].data = full_view.reshape(logical_shape).contiguous()
 
+    def _segmented_affine_map(self, shape):
+        """Describe a layout this class splits into segments rather than per sub-parameter.
+
+        Returns None where no segmentation is known, leaving the parameter undescribed.
+        """
+        return None
+
     def _mark_uc_metadata(self):
         if self._subparam_sizes is None:
-            # Publishing a plain column layout here would make the converter reassemble the
-            # parameter in rank order, which is not how it was split. Record why instead, so
-            # conversion reports it rather than writing a silently wrong checkpoint.
+            # Some of these layouts describe themselves as segments even though they have no
+            # per-sub-parameter split. Where that fails, publishing a plain column layout
+            # would make the converter reassemble the parameter in rank order, which is not
+            # how it was cut, so record why instead of writing a silently wrong checkpoint.
+            weight_map = self._segmented_affine_map(self._orig_weight_shape)
             self._set_param_uc_meta(self.weight,
                                     partition_type='column',
                                     partition_dim=0,
                                     logical_shape=self._orig_weight_shape,
                                     original_shape=self._orig_weight_shape,
-                                    unsupported_reason=self._unsupported_uc_reason)
+                                    affine_map=weight_map,
+                                    unsupported_reason=None if weight_map else self._unsupported_uc_reason)
             if self.bias is not None:
+                bias_map = self._segmented_affine_map(self._orig_bias_shape)
                 self._set_param_uc_meta(self.bias,
                                         partition_type='column',
                                         partition_dim=0,
                                         logical_shape=self._orig_bias_shape,
                                         original_shape=self._orig_bias_shape,
                                         is_bias=True,
-                                        unsupported_reason=self._unsupported_uc_reason)
+                                        affine_map=bias_map,
+                                        unsupported_reason=None if bias_map else self._unsupported_uc_reason)
             return
 
         self._set_param_uc_meta(self.weight,
@@ -1209,6 +1260,29 @@ class fused_LinearLayer(SubParamColumnParallel):
         if self._subparam_shard_widths is not None:
             set_fused_qkv_shard_state(self.fused_module.module, self._subparam_shard_widths, self.tp_index)
 
+    def _segmented_affine_map(self, shape):
+        """GPTBigCode shards the query rows and gives every rank the whole key/value block.
+
+        The two segments differ only in who holds them, which is what a per-piece location
+        set expresses and a single partition dimension cannot.
+        """
+        from deepspeed.checkpoint.affine import segmented_map
+        from deepspeed.module_inject.fusedqkv_utils import get_fused_qkv_type
+
+        if get_fused_qkv_type(self.fused_module.module) != 'bigcodetype':
+            return None
+        n_embd = self.tp_meta.n_embd
+        if not shape or n_embd is None or n_embd >= shape[0]:
+            return None
+        # The query rows are not split evenly: the widths follow the head count and the grain
+        # size, so they have to come from the same helper the partition calls rather than
+        # from a division here.
+        query_widths = list(get_shard_size_list(n_embd, self.tp_world_size, self.tp_meta))
+        return segmented_map(shape, [(n_embd, False), (shape[0] - n_embd, True)],
+                             0,
+                             self.tp_world_size,
+                             split_widths=[query_widths])
+
     @torch.no_grad()
     def _tp_partition_unsupported_layout(self, params_list):
         # These layouts interleave or replicate blocks, so only the original helper knows how
@@ -1251,6 +1325,33 @@ class conv_LinearLayer(LinearLayer):
 
 
 #override the subclasses related to weight splitting.
+def _shared_qk_affine_map(layer, shape, partition_dim):
+    """Describe a shared-QK layout, where a rank's value heads sit in two runs.
+
+    Returns None where the layout cannot be described honestly: without the head count there
+    is nothing to derive from, and when a rank takes an odd number of heads the pairing hands
+    the same head to two ranks, so a piece naming a single owner would contradict the one
+    beside it.
+
+    Shared by both Yuan classes, which differ only in the axis they split.
+    """
+    from deepspeed.checkpoint.affine import block_gather_map
+    from deepspeed.module_inject.fusedqkv_utils import shared_qk_value_head_ids
+
+    num_heads = layer.tp_meta.num_kv_heads
+    if not shape or num_heads is None or len(shape) <= partition_dim:
+        return None
+    total = shape[partition_dim]
+    if total % num_heads:
+        return None
+
+    ids = {rank: shared_qk_value_head_ids(num_heads, layer.tp_world_size, rank) for rank in range(layer.tp_world_size)}
+    selected = [head for rank_ids in ids.values() for head in rank_ids]
+    if sorted(selected) != list(range(num_heads)):
+        return None
+    return block_gather_map(shape, ids, total // num_heads, partition_dim)
+
+
 class Yuan_LinearAllreduce(LinearAllreduce):
 
     _unsupported_uc_reason = ("Yuan shared-QK tensor parallelism selects noncontiguous head groups that universal "
@@ -1270,14 +1371,19 @@ class Yuan_LinearAllreduce(LinearAllreduce):
         raise RuntimeError(self._unsupported_uc_reason)
 
     def _mark_uc_metadata(self):
+        weight_map = _shared_qk_affine_map(self, self._orig_weight_shape, 1)
         self._set_param_uc_meta(self.weight,
                                 partition_type='row',
                                 partition_dim=1,
                                 logical_shape=self._orig_weight_shape,
                                 original_shape=self._orig_weight_shape,
-                                unsupported_reason=self._unsupported_uc_reason)
+                                affine_map=weight_map,
+                                unsupported_reason=None if weight_map else self._unsupported_uc_reason)
         if self.bias is not None:
             bias_shape = tuple(self.bias.shape)
+            # The weight is describable but this bias is not. Its partition pre-divides by the
+            # world size and replicates, which would need a scaled piece -- and that path does
+            # not currently produce a usable bias, so there is no layout to describe yet.
             self._set_param_uc_meta(self.bias,
                                     partition_type='row',
                                     logical_shape=bias_shape,
@@ -1304,20 +1410,24 @@ class Yuan_LinearLayer(LinearLayer):
         raise RuntimeError(self._unsupported_uc_reason)
 
     def _mark_uc_metadata(self):
+        weight_map = _shared_qk_affine_map(self, self._orig_weight_shape, 0)
         self._set_param_uc_meta(self.weight,
                                 partition_type='column',
                                 partition_dim=0,
                                 logical_shape=self._orig_weight_shape,
                                 original_shape=self._orig_weight_shape,
-                                unsupported_reason=self._unsupported_uc_reason)
+                                affine_map=weight_map,
+                                unsupported_reason=None if weight_map else self._unsupported_uc_reason)
         if self.bias is not None:
+            bias_map = _shared_qk_affine_map(self, self._orig_bias_shape, 0)
             self._set_param_uc_meta(self.bias,
                                     partition_type='column',
                                     partition_dim=0,
                                     logical_shape=self._orig_bias_shape,
                                     original_shape=self._orig_bias_shape,
                                     is_bias=True,
-                                    unsupported_reason=self._unsupported_uc_reason)
+                                    affine_map=bias_map,
+                                    unsupported_reason=None if bias_map else self._unsupported_uc_reason)
 
 
 class GateUpPack_LinearLayer(SubParamColumnParallel):

@@ -60,8 +60,14 @@ def _load_universal_file(universal_dir, param_name, key):
 
 
 def _load_universal_dense_state(universal_dir, param_name, key):
+    from deepspeed.checkpoint.constants import PARAM
+
     state = _load_universal_file(universal_dir, param_name, key)
-    assert torch.is_tensor(state), f"expected raw tensor state for dense ZeRO-3 parameter {param_name}/{key}"
+    if isinstance(state, dict):
+        tensor = state.get(PARAM)
+        assert torch.is_tensor(tensor), f"expected tensor payload for dense parameter {param_name}/{key}"
+        return tensor
+    assert torch.is_tensor(state), f"expected tensor state for dense parameter {param_name}/{key}"
     return state
 
 
@@ -212,6 +218,7 @@ def _assert_router_params_match_universal(engine, universal_dir):
     for param_name, param in _router_params(engine):
         restored = _gather_zero_param(param).cpu()
         expected = _load_universal_dense_state(universal_dir, param_name, "fp32").view_as(restored)
+        expected = expected.to(dtype=restored.dtype)
         torch.testing.assert_close(restored, expected, rtol=0, atol=0)
 
 
@@ -219,6 +226,7 @@ def _assert_shared_params_match_universal(engine, universal_dir):
     for param_name, param in _shared_params(engine):
         restored = _gather_zero_param(param).cpu()
         expected = _load_universal_dense_state(universal_dir, param_name, "fp32").view_as(restored)
+        expected = expected.to(dtype=restored.dtype)
         torch.testing.assert_close(restored, expected, rtol=0, atol=0)
 
 
@@ -228,6 +236,7 @@ def _assert_expert_params_match_universal(engine, universal_dir):
         restored = _collect_by_ep_rank(local_experts, module.ep_rank, module.ep_size, engine.device)
         if dist.get_rank() == 0:
             expected = _load_universal_expert_state(universal_dir, param_name, "fp32")
+            expected = expected.to(dtype=restored.dtype)
             torch.testing.assert_close(restored, expected, rtol=0, atol=0)
 
 
@@ -298,6 +307,22 @@ def _run_training_steps_with_engine_input_dtype(engine, num_steps=2, seq_len=8, 
     losses = []
     for _ in range(num_steps):
         x = torch.randn(1, seq_len, hidden_dim, device=engine.device, dtype=engine_input_dtype(engine))
+        loss = engine(x).mean()
+        engine.backward(loss)
+        engine.step()
+        losses.append(loss.item())
+    return losses
+
+
+def _fixed_training_inputs(num_steps, seq_len=8, hidden_dim=64):
+    generator = torch.Generator().manual_seed(29041)
+    return [torch.randn(1, seq_len, hidden_dim, generator=generator) for _ in range(num_steps)]
+
+
+def _run_training_steps_with_inputs(engine, inputs):
+    losses = []
+    for x in inputs:
+        x = x.to(device=engine.device, dtype=engine_input_dtype(engine))
         loss = engine(x).mean()
         engine.backward(loss)
         engine.step()
@@ -462,24 +487,47 @@ class TestAutoEPZero12UniversalCheckpoint(DistributedTest):
     world_size = 4
 
     @pytest.mark.parametrize("zero_stage", [1, 2])
-    def test_round_trip_weights_and_training_step(self, tmpdir, zero_stage):
+    def test_round_trip_loss_parity(self, tmpdir, zero_stage):
         skip_unless_h100_tests_enabled("AutoEP ZeRO-1/2 Universal Checkpoint coverage requires H100")
         seed_everything(8100 + zero_stage)
+        inputs = _fixed_training_inputs(num_steps=4)
         config = make_autoep_config(zero_stage=zero_stage, ep_size=2, mixed_precision=True)
         engine, _, _, _ = deepspeed.initialize(model=MockMoETransformer(), config=config)
-        _run_training_steps_with_engine_input_dtype(engine, num_steps=2)
         save_dir, tag = str(tmpdir), f"autoep-zero{zero_stage}"
+        baseline_losses = _run_training_steps_with_inputs(engine, inputs[:2])
         engine.save_checkpoint(save_dir, tag=tag)
-        universal_dir = _convert_checkpoint_to_universal(save_dir, tag)
+        baseline_losses.extend(_run_training_steps_with_inputs(engine, inputs[2:]))
         engine.destroy()
 
+        universal_dir = _convert_checkpoint_to_universal(save_dir, tag)
+        if dist.get_rank() == 0:
+            _assert_universal_expert_metadata(universal_dir, num_experts=4)
+
+        seed_everything(8100 + zero_stage)
+        native, _, _, _ = deepspeed.initialize(model=MockMoETransformer(), config=config)
+        native.load_checkpoint(save_dir, tag=tag)
+        native_losses = _run_training_steps_with_inputs(native, inputs[2:])
+        native.destroy()
+
+        for actual, expected in zip(native_losses, baseline_losses[2:]):
+            torch.testing.assert_close(torch.tensor(actual), torch.tensor(expected), rtol=1e-4, atol=1e-5)
+
+        seed_everything(8100 + zero_stage)
         load_config = make_autoep_config(zero_stage=zero_stage, ep_size=2, mixed_precision=True)
         load_config["checkpoint"] = {"load_universal": True}
         restored, _, _, _ = deepspeed.initialize(model=MockMoETransformer(), config=load_config)
         restored.load_checkpoint(save_dir, tag=f"{tag}_universal")
         _assert_module_params_match_universal(restored, universal_dir)
-        assert torch.isfinite(torch.tensor(_run_training_steps_with_engine_input_dtype(restored, num_steps=1)[0]))
+        universal_losses = _run_training_steps_with_inputs(restored, inputs[2:])
         restored.destroy()
+
+        for path_name, losses in (("native", native_losses), ("universal", universal_losses)):
+            for step, (actual, expected) in enumerate(zip(losses, baseline_losses[2:]), start=3):
+                torch.testing.assert_close(torch.tensor(actual),
+                                           torch.tensor(expected),
+                                           rtol=1e-4,
+                                           atol=1e-5,
+                                           msg=f"{path_name} resume loss diverged at step {step}.")
 
 
 class TestAutoEPZero3UniversalCheckpoint(DistributedTest):

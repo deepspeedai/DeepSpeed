@@ -236,6 +236,9 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         self.dtype = self.optimizer.param_groups[0]['params'][0].dtype
         self.gradient_accumulation_dtype = gradient_accumulation_dtype
         self._global_grad_norm = 0.
+        self._muon_allgather_buffers = collections.OrderedDict()
+        self._muon_allgather_buffer_bytes = 0
+        self._muon_allgather_max_cached_bytes = 256 * 1024 * 1024
 
         self.custom_loss_scaler = False
         self.external_loss_scale = None
@@ -523,6 +526,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
     def destroy(self):
         self.parameter_offload.destroy()
+        self._clear_muon_allgather_buffers()
         for hook in self._grad_acc_hooks:
             hook.remove()
         for hook in self._leaf_module_hooks:
@@ -1021,13 +1025,14 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                                                         device=self.device,
                                                         dtype=self.communication_data_type)
             unpinned_fp32_buffer_momentum.requires_grad = False
+            if self.save_muon_momentum_buffer_in_memory:
+                unpinned_fp32_buffer_momentum.swappable = False
+                self.muon_momentum_buffer_partitioned_groups_flat[i] = unpinned_fp32_buffer_momentum
+                self.muon_momentum_buffer_partitioned_groups_flat[i].ds_id = ds_id
             if self.fp32_partitioned_groups_flat[i] not in self.optimizer.state:
                 self.optimizer.state[self.fp32_partitioned_groups_flat[i]] = {}
             self.optimizer.state[
                 self.fp32_partitioned_groups_flat[i]]["momentum_buffer"] = unpinned_fp32_buffer_momentum
-            if self.save_muon_momentum_buffer_in_memory:
-                self.muon_momentum_buffer_partitioned_groups_flat[i] = unpinned_fp32_buffer_momentum
-                self.muon_momentum_buffer_partitioned_groups_flat[i].ds_id = ds_id
 
     def _create_fp32_partitions(self):
         cpu_memory_usage = 0
@@ -1199,7 +1204,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
         if self.offload_optimizer:
             cur_device = self.subgroup_to_device[sub_group_id]
-            if cur_device == 'cpu':
+            if cur_device == 'cpu' or (self.use_muon and self.sub_groups_using_muon[sub_group_id]):
                 self.optimizer.param_groups[param_group_id]['params'] = [fp32_param]
                 step_with_gradscaler(self.optimizer)
                 self.optimizer.param_groups[param_group_id]['params'] = []
@@ -1617,38 +1622,18 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                 event.record()
                 self.param_reduce_events.append(event)
 
-    def _apply_distributed_muon_update(self, communication_data_type: torch.dtype, buffer_to_reduce: Tensor):
+    def _muon_update_sub_group(self, i, group_items, communication_data_type: torch.dtype):
+        """Run Muon in place on full gradients, for part of sub-group `i`.
+
+        `group_items` holds `(param, dest_offset, grad)`: `dest_offset` is the parameter's offset
+        in the sub-group's partitioned momentum and `grad` its full-shape gradient. Each rank
+        orthogonalizes a round-robin share of the parameters, then the updates and momentums are
+        all-gathered, so every rank ends with the full update in `grad` and its own momentum
+        partition written back.
         """
-        Update the momentum buffer of the parameters using muon.
-        Args:
-            communication_data_type: torch.dtype
-            buffer_to_reduce: Tensor
-        Returns:
-            None
-        """
-        if not self.use_muon:
-            return
-
-        params_by_group = {}
-        params_size_offset = 0
-        for param in self.ipg_buckets[communication_data_type].params:
-            i, dest_offset, _ = self.grad_position[self.get_param_id(param)]
-            if self.sub_groups_using_muon[i]:
-                # copy the gradients back to the params in the ipg bucket for the muon update
-                param.grad.data.copy_(buffer_to_reduce.narrow(0, params_size_offset,
-                                                              param.grad.numel()).view_as(param.grad),
-                                      non_blocking=False)
-                if i not in params_by_group:
-                    params_by_group[i] = []
-                params_by_group[i].append((param, dest_offset, params_size_offset))
-            params_size_offset += param.grad.numel()
-
-        # process muon updates per subgroup to avoid holding all parameters and states at once
-        for i, group_items in params_by_group.items():
-            params = [param for param, _, _ in group_items]
-            if not params:
-                continue
-
+        params = [param for param, _, _ in group_items]
+        grads = [grad for _, _, grad in group_items]
+        if params:
             momentum_buffer = []
             if self._swappable_optimizer_subgroup(i) and not self.save_muon_momentum_buffer_in_memory:
                 # swap-in once, keep resident through update + writeback
@@ -1678,8 +1663,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             process_group = self._get_sub_group_process_group(i)
             world_sz = dist.get_world_size(process_group)
             rank = dist.get_rank(process_group)
-            grads_pad = [param.grad for param in params] + [torch.empty_like(params[-1].grad)] * (
-                (world_sz - len(params) % world_sz) % world_sz)
+            grads_pad = grads + [torch.empty_like(grads[-1])] * ((world_sz - len(params) % world_sz) % world_sz)
             gathered_momentums_pad = gathered_params_momentums + [torch.empty_like(gathered_params_momentums[-1])] * (
                 (world_sz - len(gathered_params_momentums) % world_sz) % world_sz)
             grad_handles = []
@@ -1687,7 +1671,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             for base_i in range(len(params))[::world_sz]:
                 if base_i + rank < len(params):
                     param = params[base_i + rank]
-                    g = param.grad
+                    g = grads[base_i + rank]
                     m = gathered_momentums_pad[base_i + rank]
                     update = muon_update(g,
                                          m,
@@ -1708,17 +1692,17 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
             for handle in momentum_handles:
                 handle.wait()
-            for idx, (param, dest_offset, _) in enumerate(group_items):
+            for idx, (param, dest_offset, grad) in enumerate(group_items):
                 gathered_momentum = gathered_params_momentums[idx]
-                chunk_sz = math.ceil(param.grad.numel() / world_sz)
+                chunk_sz = math.ceil(grad.numel() / world_sz)
                 start_offset = rank * chunk_sz
                 end_offset = start_offset + chunk_sz
-                if end_offset > param.grad.numel():
+                if end_offset > grad.numel():
                     buffer_to_update = torch.zeros(chunk_sz,
-                                                   device=param.grad.device,
+                                                   device=grad.device,
                                                    dtype=self.gradient_accumulation_dtype)
-                    buffer_to_update[:param.grad.numel() -
-                                     start_offset] = gathered_momentum.view(-1).data[start_offset:param.grad.numel()]
+                    buffer_to_update[:grad.numel() -
+                                     start_offset] = gathered_momentum.view(-1).data[start_offset:grad.numel()]
                 else:
                     buffer_to_update = gathered_momentum.view(-1).data[start_offset:end_offset]
                 if self._swappable_optimizer_subgroup(i) and not self.save_muon_momentum_buffer_in_memory:
@@ -1738,9 +1722,46 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                 self.optimizer_swapper.swap_out_optimizer_state(parameter=self.fp32_partitioned_groups_flat[i])
             for handle in grad_handles:
                 handle.wait()
-            for param, _, params_size_offset in group_items:
-                buffer_to_reduce.narrow(0, params_size_offset, param.grad.numel()).data.copy_(param.grad.view(-1),
-                                                                                              non_blocking=False)
+
+    def _apply_muon_to_accumulated_grads(self):
+        """Orthogonalize each Muon parameter's accumulated gradient once per optimizer step.
+
+        Without optimizer offload the reduce path leaves Muon out, so the partitions hold the
+        gradient summed over every micro-batch of the step, as they do for any other optimizer.
+        Running Muon there instead, once per bucket per micro-batch, advanced the momentum
+        `gradient_accumulation_steps` times per step and orthogonalized partial gradients
+        (#8443). Called after the overflow check, so a step the loss scaler discards leaves the
+        momentum alone, and before the norm, which keeps being taken over the Muon update.
+        CPU/NVMe offload dispatches to its storage-aware update using the same step boundary.
+        """
+        if not self.use_muon:
+            return
+        if self.offload_optimizer:
+            self._apply_muon_updates_cpu_offload()
+            return
+        for i, group in enumerate(self.fp16_groups):
+            if not self.sub_groups_using_muon[i] or not group:
+                continue
+            rank = dist.get_rank(group=self._get_sub_group_process_group(i))
+            partitions = self.averaged_gradients[i]
+            # Bound what is materialized at once, as the reduce path's buckets did.
+            start = 0
+            while start < len(group):
+                end, numel = start, 0
+                while end < len(group) and (end == start or numel + group[end].ds_numel <= self.reduce_bucket_size):
+                    numel += group[end].ds_numel
+                    end += 1
+                params, chunk = group[start:end], partitions[start:end]
+                full_grads = self._partitioned_buffers_all_gather(params, chunk, self.communication_data_type)
+                group_items = [(param, self.grad_position[self.get_param_id(param)][1], full_grad)
+                               for param, full_grad in zip(params, full_grads)]
+                self._muon_update_sub_group(i, group_items, self.communication_data_type)
+                for param, partition, update in zip(params, chunk, full_grads):
+                    offset = rank * param.partition_numel()
+                    num_elements = max(0, min(param.partition_numel(), param.ds_numel - offset))
+                    if num_elements > 0:
+                        partition.narrow(0, 0, num_elements).copy_(update.view(-1).narrow(0, offset, num_elements))
+                start = end
 
     @instrument_w_nvtx
     def __avg_scatter_contiguous_grads(self, buffer_to_reduce: Tensor,
@@ -1770,7 +1791,6 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
         grad_partitions = []
         grad_offset_in_buffer = 0
-        self._apply_distributed_muon_update(communication_data_type, buffer_to_reduce)
         for param in params_in_bucket:
             grad = param.grad
             chunk_sz = math.ceil(grad.numel() / world_sz)
@@ -1935,57 +1955,109 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         self._swap_out_offload_fp32_gradients(offload_fp32_gradients, offload_fp32_offsets)
         return buffers
 
-    def _partitioned_buffers_all_gather(self, params: List[Parameter], buffers_to_allgather: List[Tensor],
-                                        communication_data_type: torch.dtype):
+    def _partitioned_buffers_all_gather(self,
+                                        params: List[Parameter],
+                                        buffers_to_allgather: List[Tensor],
+                                        communication_data_type: torch.dtype,
+                                        additional_buffers_to_allgather: List[Tensor] = None):
         """
         Allgather the partitioned buffers of the parameters to the global buffer.
         Args:
             params: List[Parameter]
             buffers_to_allgather: List[Tensor]
             communication_data_type: torch.dtype
+            additional_buffers_to_allgather: Optional second buffer list to gather in the same collective.
         Returns:
-            List[Tensor]
+            List[Tensor], or one list per buffer list when an additional list is provided.
         """
 
-        assert len(params) == len(buffers_to_allgather), "params and buffers_to_allgather must have the same length"
-        assert all(param.partition_numel() == buffer.numel()
-                   for param,
-                   buffer in zip(params, buffers_to_allgather)), \
+        buffer_lists = [buffers_to_allgather]
+        if additional_buffers_to_allgather is not None:
+            buffer_lists.append(additional_buffers_to_allgather)
+        assert all(len(params) == len(buffers) for buffers in buffer_lists), \
+            "params and buffers_to_allgather must have the same length"
+        assert all(param.partition_numel() == buffer.numel() for buffers in buffer_lists for param, buffer in zip(params,
+                                                                                                                     buffers)), \
             "params and buffers_to_allgather must have the same numel"
         self._assert_same_partition_group(params)
         process_group = self._get_param_partition_group(params[0])
         partition_count = dist.get_world_size(group=process_group)
-        coalesced_buffer = instrument_w_nvtx(torch.cat)(buffers_to_allgather)
-        buffer_numel = coalesced_buffer.numel()
-        reduce_buffer = torch.empty(partition_count * buffer_numel,
-                                    dtype=communication_data_type,
-                                    device=params[0].device)
-        rearrange_buffer = torch.empty(partition_count * buffer_numel,
-                                       dtype=communication_data_type,
-                                       device=params[0].device)
+        if partition_count == 1:
+            outputs = []
+            for buffers in buffer_lists:
+                list_outputs = []
+                for param, buffer in zip(params, buffers):
+                    full_numel = getattr(param, "ds_numel", param.numel())
+                    full_shape = getattr(param, "ds_shape", param.shape)
+                    list_outputs.append(
+                        buffer.to(communication_data_type).view(-1).narrow(0, 0, full_numel).view(full_shape))
+                outputs.append(list_outputs)
+            return outputs[0] if additional_buffers_to_allgather is None else outputs
+
+        buffer_numels = [sum(buffer.numel() for buffer in buffers) for buffers in buffer_lists]
+        local_numel = sum(buffer_numels)
+        output_numel = sum(numel * partition_count for numel in buffer_numels)
+        device = buffers_to_allgather[0].device
+        cache_key = (id(process_group), partition_count, local_numel, output_numel, communication_data_type, device)
+        cache = self._muon_allgather_buffers.pop(cache_key, None)
+        if cache is None:
+            reduce_buffer = torch.empty(partition_count * local_numel, dtype=communication_data_type, device=device)
+            local_buffer = torch.empty(local_numel, dtype=communication_data_type, device=device)
+            cache_bytes = (local_buffer.numel() + reduce_buffer.numel()) * communication_data_type.itemsize
+            if cache_bytes <= self._muon_allgather_max_cached_bytes:
+                while (self._muon_allgather_buffers
+                       and self._muon_allgather_buffer_bytes + cache_bytes > self._muon_allgather_max_cached_bytes):
+                    _, evicted = self._muon_allgather_buffers.popitem(last=False)
+                    self._muon_allgather_buffer_bytes -= evicted[2]
+                self._muon_allgather_buffers[cache_key] = (local_buffer, reduce_buffer, cache_bytes)
+                self._muon_allgather_buffer_bytes += cache_bytes
+        else:
+            local_buffer, reduce_buffer, cache_bytes = cache
+            self._muon_allgather_buffers[cache_key] = cache
+
+        # Returned tensors remain live through the Muon update; don't recycle their storage
+        # as scratch for the next all-gather (e.g. the momentum gather that follows the grad gather).
+        rearrange_buffer = torch.empty(output_numel, dtype=communication_data_type, device=device)
+        buffer_offsets = [0]
+        for buffer_numel in buffer_numels:
+            buffer_offsets.append(buffer_offsets[-1] + buffer_numel)
+        for list_idx, buffers in enumerate(buffer_lists):
+            offset = buffer_offsets[list_idx]
+            copy_offset = offset
+            for buffer in buffers:
+                numel = buffer.numel()
+                local_buffer.narrow(0, copy_offset, numel).copy_(buffer, non_blocking=True)
+                copy_offset += numel
         my_rank = dist.get_rank(group=process_group)
-        partition = reduce_buffer.narrow(0, buffer_numel * my_rank, buffer_numel)
-        partition.data.copy_(coalesced_buffer.data, non_blocking=False)
+        partition = reduce_buffer.narrow(0, local_numel * my_rank, local_numel)
+        partition.copy_(local_buffer, non_blocking=False)
         dist.all_gather_into_tensor(reduce_buffer, partition, group=process_group)
-        param_partition_offsets = [0]
+        outputs = []
         rearranged_offset = 0
-        for idx, param in enumerate(params):
-            param_partition_offsets.append(param_partition_offsets[idx] + param.partition_numel())
-        for idx, param in enumerate(params):
-            num_elements = param.partition_numel()
-            for partition_idx in range(partition_count):
-                sliced = reduce_buffer.narrow(0, buffer_numel * partition_idx + param_partition_offsets[idx],
-                                              num_elements)
-                rearrange_buffer.narrow(0, rearranged_offset, num_elements).copy_(sliced.data, non_blocking=False)
-                rearranged_offset += num_elements
-        param_full_offsets = [0]
-        for idx, param in enumerate(params):
-            # the offset is the sum of the numel of all the partitions of the parameter including padding
-            param_full_offsets.append(param_full_offsets[idx] + buffers_to_allgather[idx].numel() * partition_count)
-        output = []
-        for idx, param in enumerate(params):
-            output.append(rearrange_buffer.narrow(0, param_full_offsets[idx], param.ds_numel).view(param.ds_shape))
-        return output
+        for list_idx, buffers in enumerate(buffer_lists):
+            param_partition_offsets = [0]
+            for buffer in buffers:
+                param_partition_offsets.append(param_partition_offsets[-1] + buffer.numel())
+            list_outputs = []
+            for idx, param in enumerate(params):
+                num_elements = buffers[idx].numel()
+                for partition_idx in range(partition_count):
+                    source_offset = (local_numel * partition_idx + buffer_offsets[list_idx] +
+                                     param_partition_offsets[idx])
+                    sliced = reduce_buffer.narrow(0, source_offset, num_elements)
+                    rearrange_buffer.narrow(0, rearranged_offset, num_elements).copy_(sliced, non_blocking=False)
+                    rearranged_offset += num_elements
+                full_numel = getattr(param, "ds_numel", param.numel())
+                full_shape = getattr(param, "ds_shape", param.shape)
+                list_outputs.append(
+                    rearrange_buffer.narrow(0, rearranged_offset - num_elements * partition_count,
+                                            full_numel).view(full_shape))
+            outputs.append(list_outputs)
+        return outputs[0] if additional_buffers_to_allgather is None else outputs
+
+    def _clear_muon_allgather_buffers(self):
+        self._muon_allgather_buffers.clear()
+        self._muon_allgather_buffer_bytes = 0
 
     def reduce_ready_partitions_and_remove_grads(self, param):
         if self._coalesce_grad_reduction:
@@ -2400,6 +2472,101 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         return norm_groups
 
     @instrument_w_nvtx
+    @torch.no_grad()
+    def _apply_muon_updates_cpu_offload(self):
+        """Orthogonalize full logical gradients before clipping CPU-offloaded updates."""
+        if not self.use_muon:
+            return
+
+        accelerator_device = get_accelerator().current_device_name()
+        for sub_group_id, params in enumerate(self.fp16_groups):
+            muon_params = [param for param in params if getattr(param, "use_muon", False)]
+            if not muon_params:
+                continue
+
+            if self._swappable_optimizer_subgroup(sub_group_id):
+                self._optimizer_states_and_gradient_swap_in(sub_group_id)
+
+            fp32_param = self.fp32_partitioned_groups_flat[sub_group_id]
+            subgroup_numel = int(self.fp16_partitioned_groups_flat_numel[sub_group_id])
+            if self.save_muon_momentum_buffer_in_memory:
+                momentum = self.muon_momentum_buffer_partitioned_groups_flat.get(sub_group_id)
+                momentum_was_created = momentum is None or momentum.numel() != subgroup_numel
+                if momentum_was_created:
+                    self._create_momentum_buffer(subgroup_numel, sub_group_id, fp32_param.ds_id)
+                    momentum = self.muon_momentum_buffer_partitioned_groups_flat[sub_group_id]
+            else:
+                state = self.optimizer.state.setdefault(fp32_param, {})
+                momentum = state.get("momentum_buffer")
+                momentum_was_created = momentum is None or momentum.numel() != subgroup_numel
+                if momentum_was_created:
+                    # A newly allocated state is zero on every rank, so it needs no all-gather.
+                    self._create_momentum_buffer(subgroup_numel, sub_group_id, fp32_param.ds_id)
+                    momentum = state["momentum_buffer"]
+
+            local_grad_parts = []
+            local_momentum_parts = []
+            for param in muon_params:
+                _, dest_offset, _ = self.grad_position[self.get_param_id(param)]
+                numel = param.partition_numel()
+                local_grad_parts.append(fp32_param.grad.narrow(0, dest_offset, numel).to(accelerator_device))
+                if not momentum_was_created:
+                    local_momentum_parts.append(momentum.narrow(0, dest_offset, numel).to(accelerator_device))
+
+            if momentum_was_created:
+                full_grads = self._partitioned_buffers_all_gather(muon_params, local_grad_parts,
+                                                                  self.gradient_accumulation_dtype)
+                full_momentums = [torch.zeros_like(full_grad) for full_grad in full_grads]
+            else:
+                full_grads, full_momentums = self._partitioned_buffers_all_gather(
+                    muon_params,
+                    local_grad_parts,
+                    self.gradient_accumulation_dtype,
+                    additional_buffers_to_allgather=local_momentum_parts)
+
+            # Unscale gathered gradients prior to Newton-Schulz and momentum tracking,
+            # since Newton-Schulz normalizes spectral norm and loses gradient scale.
+            loss_scale = float(self.loss_scale)
+            if loss_scale != 1.0:
+                for grad in full_grads:
+                    grad.div_(loss_scale)
+
+            optimizer_group = self.optimizer.param_groups[self.sub_group_to_group_id[sub_group_id]]
+
+            for param, full_grad, full_momentum in zip(muon_params, full_grads, full_momentums):
+                update = muon_update(full_grad,
+                                     full_momentum,
+                                     beta=optimizer_group["momentum"],
+                                     ns_method=optimizer_group.get("ns_method", "gram"),
+                                     is_expert_group=getattr(param, "is_expert_group", False),
+                                     num_heads=getattr(param, "muon_num_heads", None))
+                partition_numel = param.partition_numel()
+                partition_rank = self._get_param_partition_rank(param)
+                start = partition_rank * partition_numel
+                real_numel = min(partition_numel, max(0, param.ds_numel - start))
+                local_update = torch.zeros(partition_numel, dtype=update.dtype, device=accelerator_device)
+                if real_numel > 0:
+                    local_update[:real_numel].copy_(update.view(-1).narrow(0, start, real_numel))
+                _, dest_offset, _ = self.grad_position[self.get_param_id(param)]
+                # Rescale by loss_scale so downstream unscale_and_clip_grads cancels it cleanly
+                scaled_local_update = local_update * loss_scale if loss_scale != 1.0 else local_update
+                fp32_param.grad.narrow(0, dest_offset,
+                                       partition_numel).copy_(scaled_local_update.to(fp32_param.grad.dtype))
+                local_momentum = torch.zeros(partition_numel, dtype=full_momentum.dtype, device=accelerator_device)
+                if real_numel > 0:
+                    local_momentum[:real_numel].copy_(full_momentum.view(-1).narrow(0, start, real_numel))
+                momentum.narrow(0, dest_offset, partition_numel).copy_(local_momentum.to(momentum.dtype))
+                self.norm_for_param_grads[self.get_param_id(param)] = scaled_local_update.to(get_norm_dtype()).norm(2)
+
+            if self.save_muon_momentum_buffer_in_memory and fp32_param in self.optimizer.state:
+                self.optimizer.state[fp32_param]["momentum_buffer"] = momentum
+
+            if self._swappable_optimizer_subgroup(sub_group_id):
+                self._writeback_swap_state(sub_group_id,
+                                           write_opt_state=not self.save_muon_momentum_buffer_in_memory,
+                                           write_gradients=True)
+
+    @instrument_w_nvtx
     def _prepare_fp32_grad_for_sub_group(self, sub_group_id):
         partition_id = dist.get_rank(group=self._get_sub_group_process_group(sub_group_id))
 
@@ -2411,9 +2578,6 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                 single_grad_partition.numel(), self.fp32_partitioned_groups_flat[sub_group_id].numel(), sub_group_id, partition_id)
 
         self.fp32_partitioned_groups_flat[sub_group_id].grad = single_grad_partition
-
-        # release all the gradient since we have already created a necessary copy in dp_grad_partition
-        self.zero_grad(set_to_none=True)
 
         if not get_accelerator().is_synchronized_device():
             for grad in filter(lambda g: get_accelerator().on_accelerator(g), self.averaged_gradients[sub_group_id]):
@@ -2443,7 +2607,8 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
         self.optimizer_swapper.swap_in_optimizer_state(
             parameter=self.fp32_partitioned_groups_flat[sub_group_id],
-            async_parameter=self.next_swappable_fp32_partitioned_groups[sub_group_id])
+            async_parameter=self.next_swappable_fp32_partitioned_groups[sub_group_id]
+            if timer_names is not None else None)
 
         if timer_names is not None:
             self.timers(OPTIMIZER_SWAP_IN_STATE_TIMER).stop()
@@ -2597,6 +2762,8 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                 self.optimizer_swapper.log_timers()
             return
 
+        self._apply_muon_to_accumulated_grads()
+
         norm_groups = self._get_norm_groups()
         scaled_global_grad_norm = torch.linalg.vector_norm(torch.stack(norm_groups))
 
@@ -2607,6 +2774,11 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
         timer_names.add(OPTIMIZER_STEP_TIMER)
         self.timers(OPTIMIZER_STEP_TIMER).start()
+
+        if not self.offload_optimizer:
+            # The epilogue has copied all gradients into the partition buffers. Clear the
+            # model gradients once, rather than visiting every parameter for each sub-group.
+            self.zero_grad(set_to_none=True)
 
         #update parameters one sub group at a time
         for sub_group_id, group in enumerate(self.fp16_groups):
@@ -3505,11 +3677,17 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
     def _slice_autoep_universal_expert_param(self, checkpoint_state, param):
         full_expert_tensor = checkpoint_state[PARAM]
-        checkpoint_num_experts = checkpoint_state.get(EP_NUM_EXPERTS, full_expert_tensor.shape[0])
         group_name = getattr(param, "ds_zero_partition_group_name", None)
         if group_name is None:
             raise ValueError("AutoEP universal expert checkpoint target parameter is missing its EP group name")
         ep_rank = groups._get_expert_parallel_rank(group_name)
+
+        from deepspeed.checkpoint.universal_checkpoint import _resolve_autoep_partition
+        affine_partition = _resolve_autoep_partition(param, checkpoint_state, full_expert_tensor, ep_rank)
+        if affine_partition is not None:
+            return affine_partition
+
+        checkpoint_num_experts = checkpoint_state.get(EP_NUM_EXPERTS, full_expert_tensor.shape[0])
         ep_world_size = groups._get_expert_parallel_world_size(group_name)
         if checkpoint_num_experts % ep_world_size != 0:
             raise ValueError("AutoEP universal expert checkpoint tensor cannot be evenly split across the target "

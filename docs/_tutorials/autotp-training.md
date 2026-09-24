@@ -139,6 +139,16 @@ identity rather than model configuration metadata such as `tie_word_embeddings`.
 Additional HuggingFace types such as `local_colwise` and `local_rowwise` are
 not yet handled and fall back to AutoTP preset-based partitioning.
 
+For an untied `lm_head` or `embed_out`, an explicit `row` partition rule also
+supports eager training with a replicated input. The head slices the input to
+match its weight shard, reduces the complete output, and reconstructs the full
+input gradient across tensor-parallel ranks. Bias stays replicated; uneven
+hidden dimensions and both flattened and sequence-shaped inputs are supported.
+The default training output-head layout remains column parallel. Explicit row
+training rejects tied weights and reshaped/non-input-dimension shards rather
+than silently breaking a parameter tie. Deferred DeepCompile collectives are
+not supported for this output-head path.
+
 If you need to override the model's built-in `tp_plan`, provide a
 `partition_config` in the DeepSpeed config -- it takes precedence.
 
@@ -165,6 +175,18 @@ installs a pure-PyTorch distributed causal-LM loss through the model's
 `loss_function` hook. The loss computes a numerically stable distributed
 log-sum-exp and target lookup without gathering vocabulary logits. Uneven
 vocabulary shards are supported.
+
+For optional fused CE, install `liger-kernel>=0.8.1` and set
+`tensor_parallel.vocab_parallel_ce_backend` to `"liger"` alongside
+`vocab_parallel_lm_head`. The default remains `"torch"`, with no Liger dependency.
+The Liger backend accepts nonempty accelerator logits in FP32, FP16, or BF16 with
+equal vocabulary shards behind an explicit tensor-parallel group, on any accelerator
+whose Triton support the DeepSpeed accelerator reports. Uneven shards, a missing
+tensor-parallel group, and unsupported layouts use the PyTorch backend on every TP
+rank. This fuses CE, not the linear projection: local logits are still
+materialized. Liger supports one first-order backward per forward; retained-graph
+second backward and higher-order gradients raise an error rather than reusing
+its overwritten gradient buffer. Select `"torch"` for those workloads.
 
 Only an `nn.Linear` whose final name segment is `lm_head` or `embed_out` is
 supported. If no such head exists, initialization fails instead of quietly
