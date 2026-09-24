@@ -14,6 +14,8 @@ gradient to anyway. On CUDA a Triton kernel does each pass in one read of the lo
 backend does the same arithmetic one block of rows at a time and runs anywhere.
 """
 
+from __future__ import annotations
+
 import torch
 
 from deepspeed.ops.triton_ops._triton import _TRITON_AVAILABLE, triton, tl
