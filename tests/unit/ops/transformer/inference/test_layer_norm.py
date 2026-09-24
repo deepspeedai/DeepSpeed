@@ -207,5 +207,6 @@ def test_empty_layer_norm_launchers(shape, op_name):
         outputs = (module._layer_norm_residual(vals, bias, vals, weight, bias, 1e-5), )
     else:
         outputs = module.layer_norm_residual_store_pre_ln_res(vals, bias, vals, weight, bias, 1e-5)
+    get_accelerator().synchronize()
     assert len(outputs) == (2 if op_name == "layer_norm_residual_store_pre_ln_res" else 1)
     assert all(output.shape == vals.shape and output.numel() == 0 for output in outputs)

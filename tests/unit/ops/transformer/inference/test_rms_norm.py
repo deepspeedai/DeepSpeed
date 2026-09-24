@@ -95,5 +95,6 @@ def test_empty_rms_norm_launcher(shape, pre_norm):
         outputs = module.pre_rms_norm(vals, vals, gamma, 1e-5)
     else:
         outputs = (module.rms_norm(vals, gamma, 1e-5), )
+    get_accelerator().synchronize()
     assert len(outputs) == (2 if pre_norm else 1)
     assert all(output.shape == vals.shape and output.numel() == 0 for output in outputs)
