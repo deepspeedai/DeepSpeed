@@ -3675,11 +3675,17 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
     def _slice_autoep_universal_expert_param(self, checkpoint_state, param):
         full_expert_tensor = checkpoint_state[PARAM]
-        checkpoint_num_experts = checkpoint_state.get(EP_NUM_EXPERTS, full_expert_tensor.shape[0])
         group_name = getattr(param, "ds_zero_partition_group_name", None)
         if group_name is None:
             raise ValueError("AutoEP universal expert checkpoint target parameter is missing its EP group name")
         ep_rank = groups._get_expert_parallel_rank(group_name)
+
+        from deepspeed.checkpoint.universal_checkpoint import _resolve_autoep_partition
+        affine_partition = _resolve_autoep_partition(param, checkpoint_state, full_expert_tensor, ep_rank)
+        if affine_partition is not None:
+            return affine_partition
+
+        checkpoint_num_experts = checkpoint_state.get(EP_NUM_EXPERTS, full_expert_tensor.shape[0])
         ep_world_size = groups._get_expert_parallel_world_size(group_name)
         if checkpoint_num_experts % ep_world_size != 0:
             raise ValueError("AutoEP universal expert checkpoint tensor cannot be evenly split across the target "
