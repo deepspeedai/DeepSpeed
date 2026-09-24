@@ -1970,12 +1970,14 @@ class DeepSpeedEngine(Module):
             # Broadcast the model for different parameters
             if is_moe_param(p):
                 if torch.is_tensor(p) and is_replicated(p):
-                    dist.broadcast(p.data.view(torch.uint8),
+                    p_byte_view = (p.data.unsqueeze(0) if p.data.dim() == 0 else p.data).view(torch.uint8)
+                    dist.broadcast(p_byte_view,
                                    groups._get_expert_broadcast_src_rank(p.group_name),
                                    group=self.expert_data_parallel_group[p.group_name])
             else:
                 if torch.is_tensor(p) and is_replicated(p):
-                    dist.broadcast(p.data.view(torch.uint8),
+                    p_byte_view = (p.data.unsqueeze(0) if p.data.dim() == 0 else p.data).view(torch.uint8)
+                    dist.broadcast(p_byte_view,
                                    groups._get_broadcast_src_rank(),
                                    group=self.seq_data_parallel_group)
 
