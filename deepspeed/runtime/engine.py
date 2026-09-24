@@ -66,6 +66,11 @@ from deepspeed.runtime.constants import \
     DATA_PARALLEL_GROUP, GLOBAL_RANK, DDP_BFLOAT16, GRADIENT_ALLREDUCE_OP_MEAN
 from deepspeed.runtime.zero.config import ZeroStageEnum
 from deepspeed.checkpoint.constants import (
+    AFFINE_MAP,
+    AFFINE_MAP_PARAMS,
+    AFFINE_MAP_VERSION,
+    AUTOEP_AFFINE_MAPS,
+    AUTOEP_EXPERT_PLACEMENT,
     AUTOEP_ZERO3_EXPERT_STATE_FORMAT_VERSION,
     AUTOEP_ZERO3_EXPERT_STATE_FORMAT_VERSION_KEY,
     AUTOEP_ZERO3_EXPERT_STATE_FORMAT_KEY,
@@ -80,11 +85,14 @@ from deepspeed.checkpoint.constants import (
     UNIVERSAL_CHECKPOINT_INFO,
     UNIVERSAL_CHECKPOINT_VERSION_KEY,
     UNIVERSAL_CHECKPOINT_VERSION_VALUE,
+    DS_AUTOEP_UC_META,
 )
 from deepspeed.checkpoint.autoep_zero3_metadata import (
     is_autoep_zero3_partitioned_entry,
     validate_autoep_zero3_partitioned_metadata,
 )
+from deepspeed.checkpoint.affine import AFFINE_MAP_FORMAT_VERSION
+from deepspeed.checkpoint.autoep_affine import autoep_experts_for_rank
 from deepspeed.checkpoint.utils import clone_tensors_for_torch_save
 from deepspeed.checkpoint.ds_to_universal import dp_index_to_str
 from deepspeed.runtime.sparse_tensor import SparseTensor
@@ -711,6 +719,8 @@ class DeepSpeedEngine(Module):
         self.unflatten = _unflatten_dense_tensors
 
         self._is_compiled = False
+        self._compile_mode = None
+        self._compiled_regions = []
         if is_deepcompile_supported():
             # Predefined compile passes
             self.register_compile_pass(zero_1_and_2_compile.NAME_Z1, zero_1_and_2_compile.add_z1_reduce,
@@ -4091,24 +4101,9 @@ class DeepSpeedEngine(Module):
         else:
             # Validate AutoEP metadata if present
             if autoep_layers is not None:
-                if not isinstance(autoep_layers, list):
-                    raise RuntimeError(
-                        f"ds_autoep_layers metadata is malformed: expected list, got {type(autoep_layers).__name__}")
-                seen_ids = set()
-                required_fields = {
-                    'moe_layer_id', 'module_path', 'num_experts', 'num_local_experts', 'ep_size', 'expert_key_prefix'
-                }
-                for entry in autoep_layers:
-                    if not isinstance(entry, dict):
-                        raise RuntimeError(
-                            f"ds_autoep_layers entry is malformed: expected dict, got {type(entry).__name__}")
-                    missing = required_fields - entry.keys()
-                    if missing:
-                        raise RuntimeError(f"ds_autoep_layers entry is invalid: missing fields {sorted(missing)}")
-                    lid = entry['moe_layer_id']
-                    if lid in seen_ids:
-                        raise RuntimeError(f"ds_autoep_layers metadata has duplicate moe_layer_id: {lid}")
-                    seen_ids.add(lid)
+                DeepSpeedEngine._validate_autoep_zero3_partitioned_metadata(autoep_layers,
+                                                                            model=model,
+                                                                            require_partitioned=False)
             elif has_autoep_layers:
                 logger.warning("Checkpoint does not contain ds_autoep_layers metadata. "
                                "Loading AutoEP expert weights using best-effort module detection.")
@@ -4420,13 +4415,17 @@ class DeepSpeedEngine(Module):
         return any(is_autoep_zero3_partitioned_entry(entry) for entry in autoep_layers)
 
     @staticmethod
-    def _validate_autoep_zero3_partitioned_metadata(autoep_layers, model=None, require_partitioned=True):
+    def _validate_autoep_zero3_partitioned_metadata(autoep_layers,
+                                                    model=None,
+                                                    require_partitioned=True,
+                                                    validate_runtime_placement=False):
         try:
             from deepspeed.module_inject.auto_ep_layer import AutoEPMoELayer as _AutoEPMoELayer
         except ImportError:
             _AutoEPMoELayer = None
 
         expected_expert_prefixes = None
+        expected_runtime_layers = None
         if _AutoEPMoELayer is not None and model is not None:
             expected_expert_prefixes = {
                 module_name: f"{module_name}.experts" if module_name else "experts"
@@ -4434,10 +4433,23 @@ class DeepSpeedEngine(Module):
             }
             if not expected_expert_prefixes:
                 expected_expert_prefixes = None
+            if validate_runtime_placement:
+                expected_runtime_layers = {}
+                for module_name, module in model.named_modules():
+                    if not isinstance(module, _AutoEPMoELayer):
+                        continue
+                    expected_runtime_layers[module_name] = {
+                        'ep_rank': module.ep_rank,
+                        'local_experts':
+                        list(autoep_experts_for_rank(module.expert_placement_descriptor, module.ep_rank)),
+                    }
+                if not expected_runtime_layers:
+                    expected_runtime_layers = None
 
         validate_autoep_zero3_partitioned_metadata(autoep_layers,
                                                    require_partitioned=require_partitioned,
                                                    expected_expert_prefixes=expected_expert_prefixes,
+                                                   expected_runtime_layers=expected_runtime_layers,
                                                    version_context="This DeepSpeed build")
 
     @staticmethod
@@ -5058,6 +5070,13 @@ class DeepSpeedEngine(Module):
                 exp_dp_rank = groups._get_expert_data_parallel_rank(group_name)
                 module_prefix = f"{n_module}." if n_module else ""
                 expert_params = [getattr(module.experts, wname) for wname in ('w1', 'w2', 'w3')]
+                expert_affine_maps = {}
+                for wname, param in zip(('w1', 'w2', 'w3'), expert_params):
+                    param_metadata = getattr(param, DS_AUTOEP_UC_META, None)
+                    if not isinstance(param_metadata, dict) or AFFINE_MAP not in param_metadata:
+                        raise RuntimeError(f"AutoEP expert parameter {module_prefix}experts.{wname} "
+                                           "is missing save-time affine map metadata.")
+                    expert_affine_maps[f"{module_prefix}experts.{wname}"] = param_metadata[AFFINE_MAP]
                 if self.zero_optimization_partition_weights():
                     frozen_expert_names = [
                         f"{module_prefix}experts.{wname}" for wname, param in zip(('w1', 'w2', 'w3'), expert_params)
@@ -5080,6 +5099,12 @@ class DeepSpeedEngine(Module):
                     num_local_experts,
                     'ep_size':
                     module.ep_size,
+                    AUTOEP_EXPERT_PLACEMENT:
+                    module.expert_placement_descriptor,
+                    AUTOEP_AFFINE_MAPS: {
+                        AFFINE_MAP_VERSION: AFFINE_MAP_FORMAT_VERSION,
+                        AFFINE_MAP_PARAMS: expert_affine_maps,
+                    },
                     'expert_key_prefix':
                     f"{module_prefix}experts",
                     AUTOEP_ZERO3_EXPERT_STATE_FORMAT_KEY:
@@ -5143,6 +5168,12 @@ class DeepSpeedEngine(Module):
                             self.checkpoint_engine.save(saveable, moe_save_path)
 
                 moe_layer_id += 1
+
+        if autoep_layer_info:
+            DeepSpeedEngine._validate_autoep_zero3_partitioned_metadata(autoep_layer_info,
+                                                                        model=self.module,
+                                                                        require_partitioned=False,
+                                                                        validate_runtime_placement=True)
 
         self._curr_ckpt_path = os.path.join(save_dir, tag)
 
@@ -5738,7 +5769,10 @@ class DeepSpeedEngine(Module):
                 schedule=None,
                 compiled_autograd_enabled=False) -> None:
         """Compile the module using the specified backend and kwargs.
-        If a compiler_fn is set, it will be used instead of torch.compile().
+
+        With ``compile.autoep_non_moe`` enabled in the DeepSpeed config, compile the
+        callable parents of AutoEP layers while keeping routing, token movement,
+        expert compute, and collectives eager. Otherwise, compile the full module.
         """
         # Avoid graph breaks
         deepspeed.utils.nvtx.enable_nvtx = False
@@ -5746,13 +5780,49 @@ class DeepSpeedEngine(Module):
         if not is_compile_supported():
             raise RuntimeError("compile is not supported in your version of PyTorch.")
 
+        compile_mode = "autoep_non_moe" if self._config.compile_config.autoep_non_moe else "model"
+
         if self.is_compiled:
-            return
+            if self._compile_mode == compile_mode:
+                return
+            raise RuntimeError(
+                "Engine is already compiled; compile.autoep_non_moe cannot be changed after compilation.")
 
         if 'backend' in compile_kwargs:
             logger.warning("The `backend` in `compile_kwargs` will be overridden. Use the `backend` argument instead.")
 
-        logger.info(f"Compiling deepcompile={self.is_deepcompile_enabled()} backend={backend}")
+        logger.info(f"Compiling mode={compile_mode} deepcompile={self.is_deepcompile_enabled()} backend={backend}")
+
+        if compile_mode == "autoep_non_moe":
+            if self.is_deepcompile_enabled():
+                raise ValueError("compile.autoep_non_moe=True uses vanilla torch.compile and cannot be combined "
+                                 "with DeepCompile.")
+            autoep_config = getattr(self._config, "expert_parallel_config", None)
+            if getattr(autoep_config, "comm_backend", "comm") != "comm":
+                raise ValueError("compile.autoep_non_moe=True supports only expert_parallel.comm_backend='comm'.")
+            if self.autotp_size() > 1:
+                raise ValueError("compile.autoep_non_moe=True does not support AutoEP+AutoTP folding yet.")
+            if self._autoep_sequence_parallel_world_size() > 1:
+                raise ValueError("compile.autoep_non_moe=True does not support sequence parallelism yet.")
+            folding_spec = getattr(self, "_autoep_folding_spec", None)
+            if getattr(self, "pipeline_parallelism", False) or getattr(folding_spec, "pp_size", 1) > 1:
+                raise ValueError("compile.autoep_non_moe=True does not support pipeline parallelism yet.")
+            if self.zero_optimization_partition_weights():
+                raise ValueError("compile.autoep_non_moe=True does not support ZeRO Stage 3 yet.")
+            for offload_config in (self.zero_offload_optimizer(), self.zero_offload_param()):
+                if offload_config is not None and offload_config.device != OffloadDeviceEnum.none:
+                    raise ValueError(
+                        "compile.autoep_non_moe=True does not support optimizer or parameter offload yet.")
+            if schedule is not None:
+                raise ValueError("compile.autoep_non_moe=True does not support DeepCompile schedules.")
+            if compiled_autograd_enabled:
+                raise ValueError("compile.autoep_non_moe=True does not support compiled autograd yet.")
+            from .compiler import compile_autoep_non_moe_regions
+            self._compiled_regions = compile_autoep_non_moe_regions(self.module, backend, compile_kwargs)
+            self._is_compiled = True
+            self._compile_mode = compile_mode
+            self._compile_kwargs = compile_kwargs
+            return
 
         resolved_backend = None
         if self.is_deepcompile_enabled():
@@ -5776,6 +5846,7 @@ class DeepSpeedEngine(Module):
             raise
 
         self._is_compiled = True
+        self._compile_mode = compile_mode
         self._compile_kwargs = compile_kwargs
         if compiled_autograd_enabled:
             if not self._deepcompile_active:
