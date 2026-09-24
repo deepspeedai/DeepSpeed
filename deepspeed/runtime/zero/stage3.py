@@ -2462,13 +2462,27 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             bucket.clear_params()
 
     @instrument_w_nvtx
+    def _muon_update_lacks_loss_scale(self, sub_group_id):
+        """Whether this sub-group holds a Muon update that has to be scaled like a gradient.
+
+        Newton-Schulz returns the same update at any loss scale, so unlike a gradient it does not
+        carry the scale that the norm and unscale_and_clip_grads assume. Optimizer offload scales
+        it back itself; otherwise step() does.
+        """
+        return (self.use_muon and not self.offload_optimizer and self.loss_scale != 1.0
+                and self.sub_groups_using_muon[sub_group_id])
+
     def _get_norm_groups(self):
         norm_groups = []
         for i, group in enumerate(self.fp16_groups):
             if self.offload_optimizer:
                 norm_groups.append(self.complete_grad_norm_calculation_for_cpu_offload(self.fp16_groups[i]))
             else:
-                norm_groups.append(self.get_grad_norm_direct(self.averaged_gradients[i], self.fp16_groups[i]))
+                norm = self.get_grad_norm_direct(self.averaged_gradients[i], self.fp16_groups[i])
+                if self._muon_update_lacks_loss_scale(i):
+                    # Leave the -1 an invalid norm is masked to as it is.
+                    norm = torch.where(norm >= 0, norm * self.loss_scale, norm)
+                norm_groups.append(norm)
         return norm_groups
 
     @instrument_w_nvtx
@@ -2783,6 +2797,8 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
             #prepare optimizer states, gradients and fp32 parameters for update
             self._prepare_sub_group(sub_group_id, timer_names)
+            if self._muon_update_lacks_loss_scale(sub_group_id):
+                self.fp32_partitioned_groups_flat[sub_group_id].grad.mul_(self.loss_scale)
 
             #scale the fp32 gradients
             self.unscale_and_clip_grads(sub_group_id, scaled_global_grad_norm)
