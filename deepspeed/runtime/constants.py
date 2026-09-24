@@ -301,6 +301,18 @@ DUMP_STATE = 'dump_state'
 DUMP_STATE_DEFAULT = False
 
 #########################################
+# Disable automatic Python cyclic GC
+#########################################
+# Disable automatic Python cyclic GC. By default, this feature is not enabled.
+# Users can configure in ds_config.json as below example:
+DISABLE_PYTHON_GC_FORMAT = '''
+Disable automatic Python cyclic GC should be enabled as:
+"disable_python_gc": true
+'''
+DISABLE_PYTHON_GC = "disable_python_gc"
+DISABLE_PYTHON_GC_DEFAULT = False
+
+#########################################
 # Vocabulary size
 #########################################
 # Vocabulary size.

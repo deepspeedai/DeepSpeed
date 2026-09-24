@@ -445,8 +445,17 @@ void shm_initialize(int size, int rank, char* addr_string, char* port_string)
     struct allreduce_workspace* workspace_buf;
     struct allreduce_workspace* workspace_buf_other;
     workspace_buf = (struct allreduce_workspace*)malloc(sizeof(struct allreduce_workspace));
+    if (!workspace_buf) {
+        printf("shm_initialize: malloc failed to allocate workspace_buf\n");
+        return;
+    }
     snprintf(shm_name, NAME_BUF_SIZE, "%s_%d", shm_name_prefix, rank);
     shared_create(&allreduce_buffer, shm_name, workspace_buf, sizeof(struct allreduce_workspace));
+    // shared_create() only reads workspace_buf's contents (via write()) to seed the
+    // shared-memory segment; it doesn't take ownership of the pointer. Free it here,
+    // before workspace_buf is repointed at the shared mapping below, or the original
+    // heap allocation is leaked for the lifetime of the process.
+    free(workspace_buf);
     workspace_buf = (struct allreduce_workspace*)allreduce_buffer.bytes;
     workspace_buf->states[0] = coll_alt2_allreduce_naive__copy_in_done;
     workspace_buf->states[1] = coll_begin;
@@ -457,6 +466,14 @@ void shm_initialize(int size, int rank, char* addr_string, char* port_string)
     symmetric_buffer[1] = (char**)calloc(size, sizeof(char*));
     distributed_buffer[0] = (char**)calloc(size, sizeof(char*));
     distributed_buffer[1] = (char**)calloc(size, sizeof(char*));
+    // all five must succeed before the loop below dereferences any of them --
+    // calloc() can return NULL under memory pressure, and none of these were
+    // checked before this fix.
+    if (!workspace || !symmetric_buffer[0] || !symmetric_buffer[1] || !distributed_buffer[0] ||
+        !distributed_buffer[1]) {
+        printf("shm_initialize: calloc failed to allocate rank workspace\n");
+        return;
+    }
 
     // map shm of all ranks
     for (int i = 0; i < size; i++) {

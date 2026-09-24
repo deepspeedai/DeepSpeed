@@ -601,8 +601,7 @@ class CheckpointFunction(torch.autograd.Function):
         global data_offsets, size_offsets
         global PARTITION_ACTIVATIONS, buffer_0, buffer_1, buffer_0_offset, buffer_1_offset
 
-        cuda_device = get_accelerator().current_device_name()
-        transport_stream = get_accelerator().Stream(device=cuda_device)
+        device = get_accelerator().current_device_name()
 
         # Offload only when a backward will run; eval/no_grad ids never get consumed.
         offload_engine = _get_cpu_offload_engine() if (CPU_CHECKPOINT and _checkpoint_grad_enabled) else None
@@ -615,7 +614,7 @@ class CheckpointFunction(torch.autograd.Function):
             inputs = copy_to_device(args, device=torch.device('cpu'), criterion_func=is_activation_to_checkpoint)
 
         # just in case something funky is happening such as reuse of inputs
-        inputs_cuda = copy_to_device(args, device=cuda_device, criterion_func=is_activation_to_checkpoint)
+        inputs_cuda = copy_to_device(args, device=device, criterion_func=is_activation_to_checkpoint)
 
         # Copy the rng states.
         ctx.fwd_cpu_rng_state = torch.get_rng_state()
@@ -696,8 +695,7 @@ class CheckpointFunction(torch.autograd.Function):
                                "please use .backward() if possible")
 
         global PARTITION_ACTIVATIONS
-        cuda_device = get_accelerator().current_device_name()
-        transport_stream = get_accelerator().Stream(device=cuda_device)
+        device = get_accelerator().current_device_name()
         # Rebuild deepspeed_saved_tensors
         for t in ctx.deepspeed_saved_tensors:
             if t is not None and hasattr(t, 'saved_data') and t.saved_data is not None:
@@ -706,15 +704,14 @@ class CheckpointFunction(torch.autograd.Function):
 
         offload_engine = getattr(ctx, 'ds_offload_engine', None)
         if PARTITION_ACTIVATIONS:
-            # with get_accelerator().stream(transport_stream):
             inputs = gather_partitioned_activations(ctx.deepspeed_saved_tensors,
-                                                    device=cuda_device if CPU_CHECKPOINT else None)
+                                                    device=device if CPU_CHECKPOINT else None)
             detached_inputs = detach_variable(inputs)
         elif CPU_CHECKPOINT and offload_engine is not None:
             inputs = restore_offloaded_activations(ctx.deepspeed_saved_tensors, offload_engine)
             detached_inputs = detach_variable(inputs)
         elif CPU_CHECKPOINT:
-            inputs = move_to_device(ctx.deepspeed_saved_tensors, cuda_device, is_activation_to_checkpoint)
+            inputs = move_to_device(ctx.deepspeed_saved_tensors, device, is_activation_to_checkpoint)
             detached_inputs = detach_variable(inputs)
         else:
             inputs = ctx.deepspeed_saved_tensors
@@ -734,10 +731,6 @@ class CheckpointFunction(torch.autograd.Function):
         torch.set_rng_state(ctx.fwd_cpu_rng_state)
         _set_cuda_rng_state(ctx.fwd_cuda_rng_state)
         get_cuda_rng_tracker().set_states(ctx.fwd_cuda_rng_state_tracker)
-
-        # if PARTITION_ACTIVATIONS:
-        #     current_stream=get_accelerator().current_stream()
-        #     current_stream.wait_stream(transport_stream)
 
         see_memory_usage("In backward checkpointing code before forward", force=False)
 
@@ -835,8 +828,7 @@ def non_reentrant_checkpoint(function, *args):
     global data_offsets, size_offsets
     global PARTITION_ACTIVATIONS, buffer_0, buffer_1, buffer_0_offset, buffer_1_offset
 
-    cuda_device = get_accelerator().current_device_name()
-    transport_stream = get_accelerator().Stream(device=cuda_device)
+    device = get_accelerator().current_device_name()
 
     # Offload only when a backward will run; eval/no_grad ids never get consumed.
     offload_engine = _get_cpu_offload_engine() if (CPU_CHECKPOINT and torch.is_grad_enabled()) else None
@@ -848,7 +840,7 @@ def non_reentrant_checkpoint(function, *args):
         inputs = copy_to_device(args, device=torch.device('cpu'), criterion_func=is_activation_to_checkpoint)
 
     # just in case something funky is happening such as reuse of inputs
-    inputs_cuda = copy_to_device(args, device=cuda_device, criterion_func=is_activation_to_checkpoint)
+    inputs_cuda = copy_to_device(args, device=device, criterion_func=is_activation_to_checkpoint)
 
     # Copy the rng states.
     fwd_cpu_rng_state = torch.get_rng_state()
@@ -938,8 +930,7 @@ def non_reentrant_checkpoint(function, *args):
                                    "please use .backward() if possible")
 
             global PARTITION_ACTIVATIONS
-            cuda_device = get_accelerator().current_device_name()
-            transport_stream = get_accelerator().Stream(device=cuda_device)
+            device = get_accelerator().current_device_name()
 
             # Rebuild tensors emptied by the blocking CPU path.
             for t in deepspeed_saved_tensors:
@@ -949,15 +940,14 @@ def non_reentrant_checkpoint(function, *args):
 
             # gather inputs which is partitioned or checkpointed before first forward
             if PARTITION_ACTIVATIONS:
-                # with get_accelerator().stream(transport_stream):
                 inputs = gather_partitioned_activations(deepspeed_saved_tensors,
-                                                        device=cuda_device if CPU_CHECKPOINT else None)
+                                                        device=device if CPU_CHECKPOINT else None)
                 detached_inputs = detach_variable(inputs)
             elif CPU_CHECKPOINT and offload_engine is not None:
                 inputs = restore_offloaded_activations(deepspeed_saved_tensors, offload_engine)
                 detached_inputs = detach_variable(inputs)
             elif CPU_CHECKPOINT:
-                inputs = move_to_device(deepspeed_saved_tensors, cuda_device, is_activation_to_checkpoint)
+                inputs = move_to_device(deepspeed_saved_tensors, device, is_activation_to_checkpoint)
                 detached_inputs = detach_variable(inputs)
             else:
                 inputs = deepspeed_saved_tensors

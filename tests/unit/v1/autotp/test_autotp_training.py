@@ -18,7 +18,8 @@ from contextlib import contextmanager
 from torch import nn
 from deepspeed.module_inject.auto_tp import AutoTP
 from deepspeed.module_inject.layers import (LinearAllreduce, LinearLayer, VocabParallelLinear, set_autotp_mode,
-                                            is_autotp_training_mode)
+                                            is_autotp_training_mode, GatherFromTensorParallelRegion,
+                                            ScatterToTensorParallelRegion)
 from deepspeed.module_inject.tp_shard import get_shard_size_list
 from unit.checkpoint.common import compare_lr_scheduler_states, compare_optimizer_states
 import os
@@ -314,6 +315,18 @@ class TestVocabParallelLMHeadCheckpointParity(DistributedTest):
         restored_loss = loaded_engine(input_ids=input_ids, labels=input_ids).loss
 
         torch.testing.assert_close(restored_loss, saved_loss)
+
+
+class RowParallelOutputTrainingModel(nn.Module):
+
+    def __init__(self, hidden_dim, vocab_size, head, bias):
+        super().__init__()
+        self.projection = nn.Linear(hidden_dim, hidden_dim)
+        self.head_name = head
+        setattr(self, head, nn.Linear(hidden_dim, vocab_size, bias=bias))
+
+    def forward(self, x):
+        return getattr(self, self.head_name)(torch.tanh(self.projection(x)))
 
 
 @contextmanager
@@ -792,6 +805,107 @@ class TestLegacyLmHeadGatheredTraining(DistributedTest):
             set_autotp_mode(training=False)
 
 
+class TestRowParallelOutputHeadTraining(DistributedTest):
+    """Catch a missing input-gradient collective or partition/optimizer mismatch."""
+    world_size = 2
+    reuse_dist_env = False
+
+    @pytest.mark.parametrize("hidden_dim,input_shape,head,bias", [
+        (32, (4, ), "lm_head", False),
+        (35, (2, 3), "lm_head", True),
+        (35, (4, ), "embed_out", True),
+    ])
+    def test_five_optimizer_steps_match_unsharded_reference(self, hidden_dim, input_shape, head, bias):
+        skip_on_device()
+        reset_tp_model_init_state()
+        torch.manual_seed(8173)
+        device = get_accelerator().current_device_name()
+        model = RowParallelOutputTrainingModel(hidden_dim, 67, head, bias).to(device)
+        reference = deepcopy(model)
+        learning_rate = 0.05
+        optimizer = torch.optim.SGD(model.parameters(), lr=learning_rate)
+        reference_optimizer = torch.optim.SGD(reference.parameters(), lr=learning_rate)
+        config = {
+            "train_micro_batch_size_per_gpu": 1,
+            "gradient_accumulation_steps": 2,
+            "gradient_clipping": 0.0,
+            "zero_optimization": {
+                "stage": 0
+            },
+            "tensor_parallel": {
+                "autotp_size": self.world_size,
+                "partition_config": {
+                    "use_default_specs": False,
+                    "layer_specs": [{
+                        "patterns": [rf".*{head}\.weight$"],
+                        "partition_type": "row"
+                    }],
+                },
+            },
+        }
+        try:
+            engine, _, _, _ = deepspeed.initialize(model=model, optimizer=optimizer, config=config)
+            assert engine.get_lr() == [learning_rate]
+            output_head = getattr(engine.module, head)
+            reference_head = getattr(reference, head)
+            tp_group = groups.get_tensor_model_parallel_group()
+            tp_rank = dist.get_rank(group=tp_group)
+            sizes = get_shard_size_list(hidden_dim, self.world_size, output_head.tp_meta, head)
+            offset = sum(sizes[:tp_rank])
+            initial_weight = reference_head.weight.detach().clone()
+            for step in range(5):
+                reference_optimizer.zero_grad()
+                for micro_step in range(2):
+                    torch.manual_seed(100 + 2 * step + micro_step)
+                    x = torch.randn(*input_shape, hidden_dim, device=device, requires_grad=True)
+                    labels = torch.randint(67, input_shape, device=device)
+                    tp_x = x.detach().clone().requires_grad_(True)
+                    reference_logits = reference(x)
+                    tp_logits = engine(tp_x)
+                    reference_loss = nn.functional.cross_entropy(reference_logits.reshape(-1, 67), labels.reshape(-1))
+                    tp_loss = nn.functional.cross_entropy(tp_logits.reshape(-1, 67), labels.reshape(-1))
+                    torch.testing.assert_close(tp_logits, reference_logits, atol=1e-6, rtol=1e-5)
+                    torch.testing.assert_close(tp_loss, reference_loss)
+                    (reference_loss / 2).backward()
+                    engine.backward(tp_loss)
+                    torch.testing.assert_close(tp_x.grad, x.grad, atol=1e-6, rtol=1e-5)
+                    torch.testing.assert_close(engine.module.projection.weight.grad,
+                                               reference.projection.weight.grad,
+                                               atol=1e-6,
+                                               rtol=1e-5)
+                    torch.testing.assert_close(output_head.weight.grad,
+                                               reference_head.weight.grad.narrow(1, offset, sizes[tp_rank]),
+                                               atol=1e-6,
+                                               rtol=1e-5)
+                    if bias:
+                        torch.testing.assert_close(output_head.bias.grad, reference_head.bias.grad)
+                    previous_projection = engine.module.projection.weight.detach().clone()
+                    accumulated_gradient = engine.module.projection.weight.grad.detach().clone()
+                    engine.step()
+                    if micro_step == 1:
+                        torch.testing.assert_close(engine.module.projection.weight,
+                                                   previous_projection - learning_rate * accumulated_gradient,
+                                                   atol=1e-6,
+                                                   rtol=1e-5)
+                reference_optimizer.step()
+                assert engine.global_steps == step + 1
+                torch.testing.assert_close(engine.module.projection.weight,
+                                           reference.projection.weight,
+                                           atol=1e-6,
+                                           rtol=1e-5)
+                torch.testing.assert_close(output_head.weight,
+                                           reference_head.weight.narrow(1, offset, sizes[tp_rank]),
+                                           atol=1e-6,
+                                           rtol=1e-5)
+                if bias:
+                    torch.testing.assert_close(output_head.bias, reference_head.bias)
+                if tp_rank == 0:
+                    print(f"PR-E step={step + 1} loss={tp_loss.item():.6f} reference-aligned", flush=True)
+            assert not torch.equal(reference_head.weight, initial_weight)
+        finally:
+            reset_tp_model_init_state()
+
+
 # @pytest.mark.sequential
 class TestParamsGather(DistributedTest):
     world_size = 4
@@ -1232,3 +1346,31 @@ class TestTpGradNorm(DistributedTest):
         tp_params_numel = sum(p.numel() for p in tp_model.parameters())
         base_params_numel = sum(p.numel() for p in base_model.parameters())
         assert tp_params_numel < base_params_numel, f"tp_params_numel: {tp_params_numel}, base_params_numel: {base_params_numel}"
+
+
+@pytest.mark.sequential
+class TestScatterGatherDuality(DistributedTest):
+    world_size = 2
+    reuse_dist_env = False
+
+    @pytest.mark.parametrize("sizes", [(4, 4), (3, 5)])
+    def test_round_trips_preserve_values_and_gradients(self, sizes):
+        device = get_accelerator().current_device_name()
+        group = dist.new_group(list(range(self.world_size)))
+        rank = dist.get_rank(group=group)
+        full = torch.arange(2 * sum(sizes), device=device, dtype=torch.float32).reshape(sum(sizes), 2).t()
+        full = full.requires_grad_()
+        shard = ScatterToTensorParallelRegion.apply(group, full, sizes, rank)
+        rebuilt = GatherFromTensorParallelRegion.apply(group, shard, sizes)
+        torch.testing.assert_close(rebuilt, full)
+        gradient = torch.arange(full.numel(), device=device, dtype=full.dtype).reshape_as(full)
+        rebuilt.backward(gradient)
+        torch.testing.assert_close(full.grad, gradient)
+
+        local = shard.detach().requires_grad_()
+        gathered = GatherFromTensorParallelRegion.apply(group, local, sizes)
+        restored = ScatterToTensorParallelRegion.apply(group, gathered, sizes, rank)
+        torch.testing.assert_close(restored, local)
+        local_gradient = torch.full_like(local, rank + 1)
+        restored.backward(local_gradient)
+        torch.testing.assert_close(local.grad, local_gradient)
