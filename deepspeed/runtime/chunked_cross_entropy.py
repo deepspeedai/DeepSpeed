@@ -186,10 +186,14 @@ def chunked_cross_entropy(logits: torch.Tensor,
                          f"{tuple(target.shape)}")
     if reduction not in ("none", "sum", "mean"):
         raise ValueError(f"Unsupported reduction: {reduction!r}")
-    # An out-of-range target fails in the gather, as it does in cross_entropy; checking it here would
-    # add a host synchronization to every training step.
-    target = target.to(device=logits.device, dtype=torch.long)
+    # The Triton kernels index both tensors by row with unit stride.
+    target = target.to(device=logits.device, dtype=torch.long).contiguous()
     logits = logits.contiguous()
+    # The Triton kernel reads the target's logit without a bounds check, so an out-of-range target would
+    # silently read another row. Asserting on the device fails the way cross_entropy does, without the host
+    # synchronization a Python-side check would add to every step.
+    out_of_range = (target != ignore_index) & ((target < 0) | (target >= logits.shape[-1]))
+    torch._assert_async(~out_of_range.any(), f"Target is out of range for vocabulary size {logits.shape[-1]}")
     if _resolve_backend(backend, logits) == "triton":
         loss = _TritonCrossEntropy.apply(logits, target, ignore_index)
     else:

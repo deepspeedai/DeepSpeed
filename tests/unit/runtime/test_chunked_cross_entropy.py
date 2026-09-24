@@ -119,6 +119,44 @@ def test_ignored_rows_get_no_gradient_and_all_ignored_is_nan(backend, device):
     assert torch.isnan(expected) and torch.isnan(chunked_cross_entropy(logits.detach(), all_ignored, backend=backend))
 
 
+@pytest.mark.parametrize("backend, device", BACKEND_DEVICES)
+def test_a_strided_target_is_read_by_row(backend, device):
+    logits = torch.randn(9, 13, device=device, requires_grad=True)
+    target = torch.randint(0, 13, (9, ), device=device)
+    target[2] = -100
+    # Same labels, but every other element of a wider tensor, so the target's stride is 2.
+    strided = torch.stack([target, torch.zeros_like(target)], dim=1)[:, 0]
+    assert not strided.is_contiguous()
+
+    expected = chunked_cross_entropy(logits.detach(), target, backend=backend)
+    torch.testing.assert_close(chunked_cross_entropy(logits.detach(), strided, backend=backend), expected)
+
+
+def test_an_out_of_range_target_raises_on_cpu():
+    logits = torch.randn(4, 8)
+    for bad in (8, -3):
+        with pytest.raises(RuntimeError, match="out of range"):
+            chunked_cross_entropy(logits, torch.tensor([1, bad, 2, 3]), backend="torch")
+
+
+@pytest.mark.skipif(not _TRITON_ON_CUDA, reason="the Triton backend needs CUDA and Triton")
+def test_an_out_of_range_target_fails_the_triton_backend_instead_of_reading_another_row():
+    """A device-side assert poisons the CUDA context, so this runs in its own process."""
+    import subprocess
+    import sys
+    import textwrap
+    program = textwrap.dedent("""
+        import torch
+        from deepspeed.runtime.chunked_cross_entropy import chunked_cross_entropy
+        logits = torch.randn(4, 8, device="cuda")
+        loss = chunked_cross_entropy(logits, torch.tensor([1, 8, 2, 3], device="cuda"), backend="triton")
+        print("LOSS", loss.item())
+    """)
+    completed = subprocess.run([sys.executable, "-c", program], capture_output=True, text=True, timeout=300)
+    assert completed.returncode != 0, completed.stdout
+    assert "LOSS" not in completed.stdout
+
+
 def test_a_named_backend_that_cannot_run_raises_instead_of_substituting():
     with pytest.raises(RuntimeError, match="needs CUDA logits and Triton"):
         chunked_cross_entropy(torch.randn(4, 8), torch.tensor([1, 2, 3, 4]), backend="triton")
