@@ -52,7 +52,13 @@ def _gqa_model():
     return _GQAModel()
 
 
-def _train(zero_stage, gas, steps, model_fn=_model, per_head=False):
+def _train(zero_stage,
+           gas,
+           steps,
+           model_fn=_model,
+           per_head=False,
+           offload_optimizer=False,
+           save_muon_momentum_buffer_in_memory=False):
     """Train on the same SAMPLES_PER_STEP samples per step, split into `gas` micro-batches."""
     micro_batch = SAMPLES_PER_STEP // gas
     config = {
@@ -74,6 +80,13 @@ def _train(zero_stage, gas, steps, model_fn=_model, per_head=False):
             "reduce_scatter": False
         },
     }
+    if offload_optimizer:
+        config["zero_optimization"]["offload_optimizer"] = {
+            "device": "cpu",
+            "pin_memory": True,
+        }
+    if save_muon_momentum_buffer_in_memory:
+        config["zero_optimization"]["save_muon_momentum_buffer_in_memory"] = True
     model = model_fn()
     engine, *_ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config)
     generator = torch.Generator().manual_seed(dist.get_rank() + 1)
@@ -124,11 +137,57 @@ class TestZero3MuonOncePerStep(DistributedTest):
         # Measured on 2 GPUs: 3.6e-4 at both stages; stage 3 was 1.3e-1 before this change.
         assert relative.item() < 5e-3
 
+    @pytest.mark.world_size(1)
+    def test_single_rank_gradient_accumulation_matches_one_large_micro_batch(self):
+        initial = [param.detach().float().clone() for param in _model().parameters()]
+        one = _train(3, gas=1, steps=3)
+        four = _train(3, gas=4, steps=3)
+
+        for trained in (one, four):
+            update_norm = torch.cat([(after - before).flatten() for before, after in zip(initial, trained)]).norm()
+            assert update_norm.item() > 0.0, "Single-rank ZeRO-3 Muon did not update the model"
+
+        relative = torch.cat([(a - b).flatten()
+                              for a, b in zip(one, four)]).norm() / torch.cat([a.flatten() for a in one]).norm()
+        assert relative.item() < 5e-3, f"Single-rank ZeRO-3 accumulation diverged: {relative.item()}"
+
+    @pytest.mark.world_size(1)
+    def test_single_rank_offloaded_gradient_accumulation_matches_one_large_micro_batch(self):
+        initial = [param.detach().float().clone() for param in _model().parameters()]
+        one = _train(3, gas=1, steps=3, offload_optimizer=True)
+        four = _train(3, gas=4, steps=3, offload_optimizer=True)
+
+        for trained in (one, four):
+            update_norm = torch.cat([(after - before).flatten() for before, after in zip(initial, trained)]).norm()
+            assert update_norm.item() > 0.0, "Single-rank offloaded ZeRO-3 Muon did not update the model"
+
+        relative = torch.cat([(a - b).flatten()
+                              for a, b in zip(one, four)]).norm() / torch.cat([a.flatten() for a in one]).norm()
+        assert relative.item() < 5e-3, f"Single-rank offloaded accumulation diverged: {relative.item()}"
+
+    @pytest.mark.parametrize("save_muon_momentum_buffer_in_memory", [False, True])
+    def test_offloaded_gradient_accumulation_matches_one_large_micro_batch(self, save_muon_momentum_buffer_in_memory):
+        one = _train(3,
+                     gas=1,
+                     steps=3,
+                     offload_optimizer=True,
+                     save_muon_momentum_buffer_in_memory=save_muon_momentum_buffer_in_memory)
+        four = _train(3,
+                      gas=4,
+                      steps=3,
+                      offload_optimizer=True,
+                      save_muon_momentum_buffer_in_memory=save_muon_momentum_buffer_in_memory)
+
+        relative = torch.cat([(a - b).flatten()
+                              for a, b in zip(one, four)]).norm() / torch.cat([a.flatten() for a in one]).norm()
+        assert relative.item() < 5e-3, f"CPU-offloaded ZeRO-3 accumulation diverged: {relative.item()}"
+
     def test_per_head_moves_exactly_the_head_blocked_matrices(self):
         """One step from the same start: per-head changes q and k and leaves the untagged MLP alone."""
         full = _train(3, gas=1, steps=1, model_fn=_gqa_model, per_head=False)
         per_head = _train(3, gas=1, steps=1, model_fn=_gqa_model, per_head=True)
 
         q, k, mlp = [(a - b).abs().max().item() for a, b in zip(full, per_head)]
-        assert q > 0 and k > 0, "per-head Muon did not reach the attention projections under ZeRO-3"
+        assert q > 0 and k > 0, (
+            f"per-head Muon did not reach the attention projections under ZeRO-3: q={q}, k={k}, mlp={mlp}")
         assert mlp == 0, "an MLP matrix has no heads, so per-head must not touch it"
