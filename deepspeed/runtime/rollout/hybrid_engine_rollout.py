@@ -18,6 +18,7 @@ import time
 from copy import copy
 from dataclasses import dataclass
 from inspect import signature
+from typing import Optional
 
 import torch
 
@@ -83,11 +84,17 @@ class HybridEngineRolloutConfig:
     effective lengths in their attention masks, but their physical decode
     fronts are not right-aligned or compacted. When true, the rollout uses
     effective prompt lengths to align physical decode fronts.
+
+    Cache trimming is opt-in because it copies the live cache columns after
+    each reclaim. Set ``enable_cache_trimming`` for staggered request lengths
+    when the configured cache capacity is not sufficient for the workload.
     """
     use_graph_capture: bool = False
     enable_profiling: bool = False
     use_shared_prefill: bool = False
     align_decode_fronts: bool = False
+    enable_cache_trimming: bool = False
+    continuous_cache_capacity: Optional[int] = None
 
 
 class HybridEngineRollout(RolloutEngine):
@@ -106,6 +113,8 @@ class HybridEngineRollout(RolloutEngine):
         self.enable_profiling = getattr(cfg, 'enable_profiling', False) if cfg else False
         self.use_shared_prefill = getattr(cfg, 'use_shared_prefill', False) if cfg else False
         self.align_decode_fronts = getattr(cfg, 'align_decode_fronts', False) if cfg else False
+        self.enable_cache_trimming = getattr(cfg, 'enable_cache_trimming', False) if cfg else False
+        self.continuous_cache_capacity = getattr(cfg, 'continuous_cache_capacity', None) if cfg else None
         self._last_profile = None
         self._last_continuous_stats = None
 
@@ -282,9 +291,14 @@ class HybridEngineRollout(RolloutEngine):
         if max_positions is not None:
             if any(length + sampling.max_new_tokens > max_positions for length in prompt_lengths.values()):
                 raise ValueError("continuous batching request exceeds the model maximum position embeddings")
-        max_cache_len = (prompt_len +
-                         sampling.max_new_tokens if self.align_decode_fronts else self._estimate_continuous_cache_len(
-                             prompt_len, [sampling.max_new_tokens] * len(requests), max_batch_size))
+        if self.continuous_cache_capacity is not None:
+            if self.continuous_cache_capacity < prompt_len:
+                raise ValueError("continuous_cache_capacity must be at least the padded prompt length")
+            max_cache_len = self.continuous_cache_capacity
+        else:
+            max_cache_len = (prompt_len + sampling.max_new_tokens if self.align_decode_fronts else
+                             self._estimate_continuous_cache_len(prompt_len, [sampling.max_new_tokens] * len(requests),
+                                                                 max_batch_size))
         if max_positions is not None and max_cache_len > max_positions:
             raise ValueError("continuous batching cache exceeds the model maximum position embeddings")
         if getattr(module, "_supports_cache_class", None) is False:
@@ -367,16 +381,18 @@ class HybridEngineRollout(RolloutEngine):
                         span_starts[:survivor_count] = [span_starts[index] for index in update.keep_slots]
                         span_starts[survivor_count:] = [0] * (max_batch_size - survivor_count)
 
-                if self.align_decode_fronts:
-                    dead_prefix = min(span_starts[:survivor_count])
-                else:
-                    trim_threshold = max(1, prompt_len)
-                    dead_prefix = self._continuous_dead_prefix(attention_mask, survivor_count)
-                    if dead_prefix < trim_threshold and cache_position < max_cache_len - trim_threshold:
-                        dead_prefix = 0
-                if update.admitted:
-                    longest_admitted = max(prompt_lengths[request.request_id] for request in update.admitted)
-                    dead_prefix = min(dead_prefix, max(0, cache_position - longest_admitted))
+                dead_prefix = 0
+                if self.enable_cache_trimming:
+                    if self.align_decode_fronts:
+                        dead_prefix = min(span_starts[:survivor_count])
+                    else:
+                        trim_threshold = max(1, prompt_len)
+                        dead_prefix = self._continuous_dead_prefix(attention_mask, survivor_count)
+                        if dead_prefix < trim_threshold and cache_position < max_cache_len - trim_threshold:
+                            dead_prefix = 0
+                    if update.admitted:
+                        longest_admitted = max(prompt_lengths[request.request_id] for request in update.admitted)
+                        dead_prefix = min(dead_prefix, max(0, cache_position - longest_admitted))
                 if dead_prefix:
                     trim_start = None
                     if profile_accelerator is not None:
@@ -407,6 +423,8 @@ class HybridEngineRollout(RolloutEngine):
                 span_starts = [0] * max_batch_size
 
             self._profile_end(profile, "cache_management_overhead_ms", cache_start)
+            if survivor_count and cache_position >= max_cache_len:
+                raise self._continuous_cache_exhaustion_error(max_cache_len)
             admitted_tokens = self._continuous_prefill(
                 module,
                 StaticCache,
@@ -431,7 +449,7 @@ class HybridEngineRollout(RolloutEngine):
                 survivor_ids = update.active_ids[:survivor_count]
                 decode_input = torch.cat([next_tokens[request_id] for request_id in survivor_ids], dim=0)
                 if cache_position >= max_cache_len:
-                    raise ValueError("continuous batching cache exhausted before active requests retired")
+                    raise self._continuous_cache_exhaustion_error(max_cache_len)
                 write_positions[:survivor_count].fill_(cache_position)
                 if self.align_decode_fronts:
                     position_ids = torch.tensor([logical_positions[request_id] for request_id in survivor_ids],
@@ -498,6 +516,13 @@ class HybridEngineRollout(RolloutEngine):
             self._finish_continuous_profile(profile, original_request, responses, max_batch_size, prompt_len,
                                             generation_end, post_processing_end)
         return output
+
+    @staticmethod
+    def _continuous_cache_exhaustion_error(max_cache_len):
+        return ValueError(
+            f"continuous batching cache capacity ({max_cache_len}) exhausted before active requests retired; "
+            "increase HybridEngineRolloutConfig.continuous_cache_capacity or enable cache trimming with "
+            "HybridEngineRolloutConfig(enable_cache_trimming=True)")
 
     @staticmethod
     def _estimate_continuous_cache_len(prompt_len, max_new_tokens, max_batch_size):
