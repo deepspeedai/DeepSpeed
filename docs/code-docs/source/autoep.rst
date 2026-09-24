@@ -74,6 +74,64 @@ Weights-only/module-only Universal Checkpoint loads use the converted
         }
     }
 
+Experimental regional ``torch.compile``
+----------------------------------------
+
+AutoEP can keep its router, token movement, expert computation, and collectives
+in eager mode while compiling the surrounding decoder blocks with vanilla
+``torch.compile``. This targets fragmented attention, normalization, residual,
+and dense backward work without capturing AutoEP communication in the graph.
+The path is opt-in. Enable it in the DeepSpeed configuration, then call
+``engine.compile()`` after initialization:
+
+.. code-block:: json
+
+    {
+      "compile": {
+        "autoep_non_moe": true
+      }
+    }
+
+.. code-block:: python
+
+    engine, optimizer, _, _ = deepspeed.initialize(
+        model=model,
+        model_parameters=model.parameters(),
+        config=ds_config,
+    )
+    engine.compile()
+
+The call must happen after ``deepspeed.initialize()`` so AutoEP replacement is
+complete. DeepSpeed discovers each ``AutoEPMoELayer`` and regionally compiles
+its direct callable parent with ``fullgraph=False`` and ``dynamic=False``.
+This is usually a decoder block; a callable model root with a direct AutoEP
+child is also supported. The AutoEP layer is an explicit compiler-disabled
+graph break, so routing, AllToAll dispatch/combine, and expert execution remain
+eager. An AutoEP layer used as the model root has no surrounding region and
+is rejected.
+
+The decoder blocks contain repeated attention, normalization, residual, and
+dense work targeted by this optimization. Compiling these regions bounds the
+traced code and lets structurally identical blocks reuse compiled graphs.
+Modules outside the selected regions, such as top-level embeddings and the
+language-model head, remain eager. They are not intrinsically incompatible
+with compilation, but extending the region would need separate validation
+and performance measurements. If the selected region is the model root,
+its non-MoE operations are included.
+
+``compile.autoep_non_moe`` defaults to ``false``, preserving the existing
+full-model behavior of ``engine.compile()``. Setting the option alone does
+not compile the model; execution stays eager until ``engine.compile()`` is
+called.
+
+The initial experimental path supports vanilla ``torch.compile`` with the
+standard ``comm`` backend, sequence and pipeline parallel sizes of one, and
+ZeRO stages 0, 1, and 2. Distributed performance and parity validation currently
+target ZeRO stage 1. It rejects DeepEP, DeepCompile, AutoEP+AutoTP folding,
+sequence or pipeline parallelism, ZeRO stage 3, optimizer or parameter offload,
+compiled autograd, DeepCompile schedules, and any ``fullgraph`` or ``dynamic``
+value other than ``False`` instead of silently changing the requested behavior.
+
 **How it works:**
 
 1. During ``deepspeed.initialize()``, AutoEP scans the model for MoE layers
@@ -141,6 +199,23 @@ the figures are medians rather than single observations, and DeepEP's own
 median moved by 0.3% between the two jobs while the collective baseline moved
 by 2.5%. The advantage grows with routing imbalance: at the most skewed
 step measured, the collective path degraded to 116 ms while DeepEP stayed flat.
+
+Within one model, all MoE layers that agree on EP group, expert count, top-k,
+hidden size, capacity, ``comm_num_sm`` and ``comm_qp_margin`` share a single
+DeepEP buffer, which is every layer of a normal model. A buffer reserves fabric
+resources that are not reported as device memory and that run out: measured on
+32 H100s across four nodes, the twenty-eighth buffer per rank fails inside
+``ncclDevCommCreate``, so one buffer per layer put a 27-layer ceiling on the
+backend there. Buffers are also slow to build, about 15 seconds each on 16
+H100s and 22 on 32, so sharing removes minutes of startup as well. The buffer is
+released once the last layer holding it is torn down.
+
+Sharing stops at the model. Two models converted separately get their own
+buffers even on the same EP group with identical geometry, because they are
+driven independently: an actor and a frozen reference model in a reinforcement
+learning loop need not reach their MoE layers in any fixed order relative to
+each other, and a shared DeepEP communication context would make that order
+matter. The cost is one extra buffer per model against a ceiling of 27.
 
 ``comm_num_sm`` matters because communication competes with the expert GEMM for
 SMs. The default of 12 was chosen by measuring whole steps: 8 SMs gave a median

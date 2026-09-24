@@ -160,6 +160,6 @@ class TestCheckpointConvert(DistributedTest):
             assert tensor.dtype == torch.bfloat16
             torch.testing.assert_close(tensor.float(), state_dict[name], rtol=5e-3, atol=5e-3)
 
-        fp32_size = (fp32_save_dir / 'pytorch_model.bin').stat().st_size
-        bf16_size = (bf16_save_dir / 'pytorch_model.bin').stat().st_size
+        fp32_size = (fp32_save_dir / 'pytorch_model.bin').stat().size
+        bf16_size = (bf16_save_dir / 'pytorch_model.bin').stat().size
         assert bf16_size < fp32_size * 0.6

@@ -10,7 +10,11 @@ import types
 from typing import List, Tuple, Union
 from dataclasses import dataclass
 from .constants import (FP32_WEIGHT_KEY, PARAM, VOCAB_TENSOR, CAT_DIM, PARAM_N_SUB_PARAMS, SUB_PARAM_SHAPE,
-                        EP_IS_EXPERT_PARAM, EP_NUM_EXPERTS, DS_AUTOTP_UC_META, UNIVERSAL_CHECKPOINT_VERSION_KEY)
+                        EP_IS_EXPERT_PARAM, EP_NUM_EXPERTS, DS_AUTOEP_UC_META, DS_AUTOTP_UC_META,
+                        AUTOEP_EXPERT_PLACEMENT, AUTOEP_PARAM_EP_RANK, AUTOEP_PARAM_LOCAL_EXPERTS,
+                        AUTOEP_PARAM_LOGICAL_SHAPE, AUTOEP_PLACEMENT_EXPERTS, AUTOEP_PLACEMENT_RANK,
+                        AUTOEP_PLACEMENT_RANKS, UNIVERSAL_CHECKPOINT_VERSION_KEY)
+from .autoep_affine import autoep_metadata_to_affine_map, extract_autoep_rank_tensor
 
 
 @dataclass
@@ -29,6 +33,75 @@ def _get_param_uc_restore_meta(param):
       `collect_autotp_universal_checkpoint_info()` in `layers.py`
     """
     return getattr(param, DS_AUTOTP_UC_META, None)
+
+
+def _resolve_autoep_partition(current_param, ckpt_dict, full_hp_param, ep_rank):
+    meta = getattr(current_param, DS_AUTOEP_UC_META, None)
+    if meta is None:
+        return None
+    if not isinstance(meta, dict):
+        raise RuntimeError(f"AutoEP universal checkpoint target metadata must be a dict, got {type(meta).__name__}.")
+
+    required = {
+        AUTOEP_EXPERT_PLACEMENT,
+        AUTOEP_PARAM_LOGICAL_SHAPE,
+        AUTOEP_PARAM_EP_RANK,
+        AUTOEP_PARAM_LOCAL_EXPERTS,
+    }
+    missing = required - meta.keys()
+    if missing:
+        raise RuntimeError(f"AutoEP universal checkpoint target metadata is missing fields {sorted(missing)}.")
+
+    etp_size = meta.get('expert_tensor_parallel_size', meta.get('etp_size', 1))
+    if etp_size != 1:
+        raise NotImplementedError("Universal checkpoint restore for AutoEP expert tensor parallelism is not "
+                                  f"supported; got expert_tensor_parallel_size={etp_size}.")
+
+    logical_shape_value = meta[AUTOEP_PARAM_LOGICAL_SHAPE]
+    if not isinstance(logical_shape_value, (tuple, list)):
+        raise RuntimeError("AutoEP universal checkpoint target logical_shape must be a tuple or list.")
+    logical_shape = tuple(logical_shape_value)
+
+    checkpoint_num_experts = ckpt_dict.get(EP_NUM_EXPERTS)
+    if checkpoint_num_experts is None:
+        raise RuntimeError(f"AutoEP universal checkpoint is missing '{EP_NUM_EXPERTS}' metadata.")
+    placement = meta[AUTOEP_EXPERT_PLACEMENT]
+    placement_num_experts = placement.get('num_experts') if isinstance(placement, dict) else None
+    if logical_shape and logical_shape[0] != checkpoint_num_experts and placement_num_experts == logical_shape[0]:
+        ranks = placement.get(AUTOEP_PLACEMENT_RANKS, []) if isinstance(placement, dict) else []
+        if ranks and checkpoint_num_experts % len(ranks) == 0:
+            checkpoint_local_experts = checkpoint_num_experts // len(ranks)
+            target_local_experts = len(meta[AUTOEP_PARAM_LOCAL_EXPERTS])
+            raise ValueError("AutoEP expert shape mismatch: "
+                             f"target_local_experts={target_local_experts}, "
+                             f"checkpoint_local_experts={checkpoint_local_experts}.")
+        raise ValueError("AutoEP universal checkpoint expert count disagrees with target logical shape: "
+                         f"checkpoint={checkpoint_num_experts}, target={logical_shape}.")
+    if tuple(full_hp_param.shape) != logical_shape:
+        raise RuntimeError("AutoEP universal checkpoint tensor shape disagrees with target logical shape: "
+                           f"checkpoint={tuple(full_hp_param.shape)}, target={logical_shape}.")
+    if not logical_shape or logical_shape[0] != checkpoint_num_experts:
+        raise RuntimeError("AutoEP universal checkpoint expert count disagrees with target logical shape: "
+                           f"checkpoint={checkpoint_num_experts}, target={logical_shape}.")
+
+    try:
+        target_map = autoep_metadata_to_affine_map(meta, logical_shape)
+        if not isinstance(ep_rank, int) or isinstance(ep_rank, bool):
+            raise ValueError(f"ep_rank must be an integer, got {ep_rank!r}.")
+        metadata_ep_rank = meta[AUTOEP_PARAM_EP_RANK]
+        if metadata_ep_rank != ep_rank:
+            raise ValueError(f"target ep_rank {ep_rank} does not match parameter metadata ep_rank {metadata_ep_rank}.")
+        entries_by_rank = {
+            entry[AUTOEP_PLACEMENT_RANK]: entry
+            for entry in meta[AUTOEP_EXPERT_PLACEMENT][AUTOEP_PLACEMENT_RANKS]
+        }
+        expected_local_experts = entries_by_rank[ep_rank][AUTOEP_PLACEMENT_EXPERTS]
+        if meta[AUTOEP_PARAM_LOCAL_EXPERTS] != expected_local_experts:
+            raise ValueError("parameter metadata local_experts does not match the selected placement rank: "
+                             f"{meta[AUTOEP_PARAM_LOCAL_EXPERTS]} != {expected_local_experts}.")
+        return extract_autoep_rank_tensor(full_hp_param, target_map, ep_rank)
+    except (AssertionError, KeyError, TypeError, ValueError) as exc:
+        raise RuntimeError(f"Invalid AutoEP universal checkpoint target metadata: {exc}") from exc
 
 
 def _narrow_sub_params(full_view, partition_dim, sub_dim_sizes, shard_widths, tp_rank, tp_world_size, uc_version):
@@ -173,7 +246,11 @@ def load_hp_checkpoint_state(self, folder, tp_rank, tp_world_size, ep_rank=0, ep
         # Must happen BEFORE shape-match check so that after slicing,
         # full_hp_param.shape == self.shape triggers tp_rank=0, tp_world_size=1.
         is_expert_param = ckpt_dict.get(EP_IS_EXPERT_PARAM, False)
-        if is_expert_param and ep_size > 1:
+        autoep_hp_param = (_resolve_autoep_partition(self, ckpt_dict, full_hp_param, ep_rank)
+                           if is_expert_param else None)
+        if autoep_hp_param is not None:
+            full_hp_param = autoep_hp_param
+        elif is_expert_param and ep_size > 1:
             ep_num_experts = ckpt_dict.get(EP_NUM_EXPERTS)
             assert ep_num_experts is not None, \
                 f"Expert param in {ckpt_file} missing '{EP_NUM_EXPERTS}' metadata"
