@@ -442,8 +442,12 @@ class OpBuilder(ABC):
         if cpu_info['arch'].startswith('PPC_'):
             # gcc does not provide -march on PowerPC, use -mcpu instead
             return '-mcpu=native'
-        elif cpu_info['arch'].startswith('riscv64'):
-            return '-march=rv64gc'
+        elif (cpu_info['arch'] or '').lower().replace('_', '').startswith('riscv64'):
+            # The vector extension must be in -march for the RVV kernels to compile.
+            # py-cpuinfo on riscv64 reports "RISCV_64" (uppercase, underscore), but
+            # the lscpu fallback path and platform.uname().machine both report
+            # "riscv64" (lowercase, no separator); normalize both forms.
+            return '-march=rv64gcv' if self._riscv_has_vector() else '-march=rv64gc'
         return '-march=native'
 
     def get_cuda_compile_flag(self):
@@ -488,6 +492,23 @@ class OpBuilder(ABC):
 
         return cpu_info
 
+    def _riscv_has_vector(self):
+        # /proc/cpuinfo reports e.g. "isa             : rv64gcv_svinval..." -- the
+        # single-letter V extension can only appear in the base segment before the first
+        # underscore, so multi-letter extensions (zvl*b, zvfh, ...) can never match.
+        # Each character in the base segment is its own extension token, so a substring
+        # test would misfire on "vh" (half-float vector, no RVV 1.0): "v" in "imafdcvh"
+        # is True even though the host has no V. Use a set test instead.
+        try:
+            with open('/proc/cpuinfo') as f:
+                for line in f:
+                    if line.startswith('isa'):
+                        base = line.split(':', 1)[1].split('_', 1)[0].strip()
+                        return 'v' in set(base[4:])
+        except OSError:
+            pass
+        return False
+
     def simd_width(self):
         try:
             from cpuinfo import get_cpu_info
@@ -516,6 +537,8 @@ class OpBuilder(ABC):
             # NEON is baseline on AArch64; vdivq/vsqrtq used by simd.h are A64-only,
             # so do not advertise it for 32-bit ARM.
             return '-D__NEON__'
+        elif (cpu_info['arch'] or '').lower().replace('_', '').startswith('riscv64') and self._riscv_has_vector():
+            return '-D__RVV__'
         return '-D__SCALAR__'
 
     def command_exists(self, cmd):

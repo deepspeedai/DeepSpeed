@@ -12,6 +12,7 @@
 #include <torch/extension.h>
 #include <cassert>
 #include <cstdint>
+#include "rvv.h"
 #include "simd.h"
 #include "sve.h"
 
@@ -58,6 +59,16 @@ public:
 #if defined(__SVE__) && defined(__ARM_FEATURE_SVE)
     template <int span, typename ds_params_precision_t, typename ds_state_precision_t>
     void Step_SVE(size_t* rounded_size,
+                  ds_params_precision_t* _params,
+                  ds_params_precision_t* grads,
+                  ds_state_precision_t* _exp_avg,
+                  ds_state_precision_t* _exp_avg_sq,
+                  size_t param_size,
+                  bool parallel = true);
+#endif
+#if defined(__RVV__) && defined(__riscv_v_intrinsic) && __riscv_v_intrinsic >= 12000
+    template <int span, typename ds_params_precision_t, typename ds_state_precision_t>
+    void Step_RVV(size_t* rounded_size,
                   ds_params_precision_t* _params,
                   ds_params_precision_t* grads,
                   ds_state_precision_t* _exp_avg,
@@ -226,6 +237,37 @@ void Adam_Optimizer::Step_SVE(size_t* rounded_size,
     if constexpr (std::is_same_v<ds_params_precision_t, float> &&
                   std::is_same_v<ds_state_precision_t, float>) {
         sve_adam_update<span>(_params,
+                              grads,
+                              _exp_avg,
+                              _exp_avg_sq,
+                              _param_size,
+                              _betta1,
+                              _betta2,
+                              _bias_correction1,
+                              _bias_correction2,
+                              _eps,
+                              _alpha,
+                              _weight_decay,
+                              _adamw_mode,
+                              parallel);
+        *rounded_size = _param_size;
+    }
+}
+#endif
+
+#if defined(__RVV__) && defined(__riscv_v_intrinsic) && __riscv_v_intrinsic >= 12000
+template <int span, typename ds_params_precision_t, typename ds_state_precision_t>
+void Adam_Optimizer::Step_RVV(size_t* rounded_size,
+                              ds_params_precision_t* _params,
+                              ds_params_precision_t* grads,
+                              ds_state_precision_t* _exp_avg,
+                              ds_state_precision_t* _exp_avg_sq,
+                              size_t _param_size,
+                              bool parallel)
+{
+    if constexpr (std::is_same_v<ds_params_precision_t, float> &&
+                  std::is_same_v<ds_state_precision_t, float>) {
+        rvv_adam_update<span>(_params,
                               grads,
                               _exp_avg,
                               _exp_avg_sq,
