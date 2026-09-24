@@ -11,10 +11,10 @@ from deepspeed.utils.logging import should_log_le
 class DeepSpeedCPUAdagrad(torch.optim.Optimizer):
     optimizer_id = 0
 
-    def __init__(self, model_params, lr=1e-2, eps=1e-10, weight_decay=0, amsgrad=False, fp32_optimizer_states=True):
+    def __init__(self, params, lr=1e-2, eps=1e-10, weight_decay=0, amsgrad=False, fp32_optimizer_states=True):
 
         default_args = dict(lr=lr, eps=eps, weight_decay=weight_decay, amsgrad=amsgrad)
-        super(DeepSpeedCPUAdagrad, self).__init__(model_params, default_args)
+        super(DeepSpeedCPUAdagrad, self).__init__(params, default_args)
 
         self.opt_id = DeepSpeedCPUAdagrad.optimizer_id
         DeepSpeedCPUAdagrad.optimizer_id = DeepSpeedCPUAdagrad.optimizer_id + 1
