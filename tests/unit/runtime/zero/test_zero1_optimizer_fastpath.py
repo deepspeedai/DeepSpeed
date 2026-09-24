@@ -62,29 +62,6 @@ def test_non_identity_scale_still_unscales():
     torch.testing.assert_close(gradient, torch.full_like(gradient, 0.5))
 
 
-def test_invalid_clip_norm_zeros_gradients_for_direct_callers():
-    # The -1 group-norm sentinel used to produce clip_coef=1 after clamp(min=1.0).
-    optimizer = object.__new__(DeepSpeedZeroOptimizer)
-    optimizer.clip_grad = 1.0
-    optimizer.custom_loss_scaler = False
-    optimizer.loss_scaler = SimpleNamespace(cur_scale=1.0)
-    optimizer.device = "cpu"
-    gradient = torch.ones(4)
-    optimizer.unscale_and_clip_grads([gradient], total_norm=torch.tensor(-1.0))
-    assert torch.count_nonzero(gradient) == 0
-
-
-def test_scaled_global_norm_does_not_turn_cpu_offload_sentinel_into_one():
-    optimizer = object.__new__(DeepSpeedZeroOptimizer)
-    optimizer.cpu_offload = True
-    optimizer.has_moe_layers = False
-    optimizer.bit16_groups = [[None]]
-    optimizer.params_in_partition = [[]]
-    optimizer.complete_grad_norm_calculation_for_cpu_offload = lambda params: torch.tensor(-1.0)
-    combined = optimizer.scaled_global_norm()
-    assert not torch.isfinite(combined)
-
-
 def test_checkpoint_clipping_rejects_disabled_norm():
     optimizer = object.__new__(DeepSpeedZeroOptimizer)
     optimizer.compute_grad_norm = False

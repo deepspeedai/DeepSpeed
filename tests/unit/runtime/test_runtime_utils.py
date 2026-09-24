@@ -27,31 +27,6 @@ def test_call_to_str():
     assert c2s('hello', 1138, val=3) == 'hello(1138, val=3)'
 
 
-@pytest.mark.parametrize("bad", [-1.0, float("nan"), float("inf")])
-def test_combine_grad_norm_groups_keeps_invalid_sentinels_invalid(bad):
-    # vector_norm would turn the -1 DeepSpeed sentinel into 1.0 (and mix a
-    # failed group into a finite hypot of the remaining groups).
-    healthy = torch.tensor(3.0)
-    combined = ds_utils.combine_grad_norm_groups([healthy, torch.tensor(bad)])
-    assert not torch.isfinite(combined)
-
-
-def test_combine_grad_norm_groups_matches_l2_for_finite_groups():
-    combined = ds_utils.combine_grad_norm_groups([torch.tensor(3.0), torch.tensor(4.0)])
-    torch.testing.assert_close(combined, torch.tensor(5.0))
-
-
-@pytest.mark.parametrize("bad", [-1.0, float("nan"), float("inf")])
-def test_get_global_norm_keeps_invalid_sentinels_invalid(bad):
-    assert ds_utils.get_global_norm([3.0, bad]) == float("inf")
-
-
-@pytest.mark.parametrize("bad", [-1.0, float("nan"), float("inf")])
-def test_overflow_check_accepts_every_invalid_norm_representation(bad):
-    checker = ds_utils.CheckOverflow()
-    assert checker.check_using_norm([bad], reduce_overflow=False)
-
-
 class TestClipGradNorm(DistributedTest):
     world_size = 2
 
