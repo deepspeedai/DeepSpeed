@@ -195,7 +195,9 @@ class TestMuonMixedOverflow(DistributedTest):
 
             if step == 0:
                 assert not engine.optimizer.overflow, "step 0 was meant to survive"
-                assert calm_before != calm_after and boom_before != boom_after, \
+                # The buffer does not exist before the first step, so compare against zero rather
+                # than against `calm_before`, which is None here and differs from anything.
+                assert calm_after > 0 and boom_after > 0, \
                     "a surviving step still has to move both momenta, or the guard is global"
             else:
                 assert engine.optimizer.overflow, "step 1 was meant to overflow"
@@ -205,3 +207,60 @@ class TestMuonMixedOverflow(DistributedTest):
                 assert calm_before == calm_after, (
                     "a tensor whose gradient was finite must not advance its momentum on a step "
                     "the loss scaler discards -- the update it advances towards is thrown away")
+
+
+@pytest.mark.parametrize("zero_stage", [1, 2])
+class TestMuonMatchesZeroStage0(DistributedTest):
+    """ZeRO-1/2 keep one flat momentum per partition and stage it while the partition is filled.
+
+    Staging copies the committed momentum in, so it has to happen once per partition: done per
+    parameter it overwrote what the parameters before it had just written, and every Muon matrix
+    but the last one in each partition lost its momentum. ZeRO-0 applies Muon per parameter in
+    the optimizer itself, which makes it the reference here.
+    """
+
+    world_size = 2
+
+    def test_every_matrix_keeps_its_momentum(self, zero_stage):
+        hidden_dims = [16, 24, 20, 16, 12]
+
+        def train(stage):
+            torch.manual_seed(0)
+            layers = [torch.nn.Linear(i, o, bias=False) for i, o in zip(hidden_dims, hidden_dims[1:])]
+            model = torch.nn.Sequential(*[m for layer in layers for m in (layer, torch.nn.Tanh())])
+            config = {
+                "train_micro_batch_size_per_gpu": 4,
+                "optimizer": {
+                    "type": "muon",
+                    "params": {
+                        "lr": 0.02,
+                        "momentum": 0.95
+                    }
+                },
+                # Clipping is computed over different tensors at different stages, so it is left
+                # out to compare the Muon updates alone.
+                "gradient_clipping": 0.0,
+                "zero_optimization": {
+                    "stage": stage
+                },
+            }
+            engine, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config)
+            # The same batch on every rank, so the averaged gradient is the same at every stage.
+            generator = torch.Generator().manual_seed(1)
+            for _ in range(3):
+                x = torch.randn(4, hidden_dims[0], generator=generator).to(engine.device)
+                y = torch.randn(4, hidden_dims[-1], generator=generator).to(engine.device)
+                engine.backward(torch.nn.functional.mse_loss(engine(x), y))
+                engine.step()
+            weights = [p.detach().float().cpu().clone() for p in model.parameters()]
+            engine.destroy()
+            return weights
+
+        reference = train(0)
+        weights = train(zero_stage)
+
+        # Before the fix only the last matrix of each partition kept its momentum, and the
+        # others ended 2e-2 to 3e-2 away from ZeRO-0 after three steps.
+        for index, (ref, got) in enumerate(zip(reference, weights)):
+            relative = ((got - ref).norm() / ref.norm()).item()
+            assert relative < 1e-5, f"matrix {index} is {relative:.1e} away from ZeRO-0"
