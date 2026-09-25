@@ -373,6 +373,10 @@ def validate_autoep_post_detection(
                 raise ValueError(f"num_limited_groups ({num_limited_groups}) must be <= "
                                  f"num_expert_groups ({num_expert_groups}) in layer "
                                  f"'{spec.moe_module_name}'")
+            candidates = (spec.num_experts // num_expert_groups) * num_limited_groups
+            if spec.top_k > candidates:
+                raise ValueError(f"top_k={spec.top_k} exceeds the {candidates} experts available in the selected "
+                                 f"{num_limited_groups} group(s) in layer '{spec.moe_module_name}'")
 
 
 def _divisors(n: int) -> list[int]:
