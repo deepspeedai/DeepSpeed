@@ -464,6 +464,16 @@ Enabling and configuring ZeRO memory optimizations
 | ------------------------------------------------------------------------------------------------------------------- | ------- |
 | Number of elements reduced/allreduced at a time. Limits the memory required for the allgather for large model sizes | `5e8`   |
 
+***ZeRO offload gradient protections***
+
+ZeRO-1 and ZeRO-2 with optimizer offload (`cpu` or `nvme`) always protects gradient storage
+and stream ordering; there is no configuration option. Gradients larger than
+`reduce_bucket_size` are cloned into independent storage before reduction, and
+events order bucket producers, bucket reuse, successive offload copies, and CPU
+consumption, with or without `overlap_comm`. This adds a gradient-sized copy for
+oversized gradients plus event synchronization overhead. ZenFlow uses its own
+reduction and offload ordering and is not covered; a warning is logged.
+
 <i>**contiguous_gradients**</i>: [boolean]
 
 | Description                                                                                                         | Default |

@@ -138,6 +138,7 @@ def _build_average_tensor_optimizer(monkeypatch, *, copy_streams):
     optimizer = DeepSpeedZeroOptimizer.__new__(DeepSpeedZeroOptimizer)
     optimizer.overlap_comm = True
     optimizer.reduce_scatter = False  # take the early-return reduce path, isolating the wait logic
+    optimizer._offload_gradient_safety_enabled = False  # exercise the non-offload stream-wait path
     optimizer.reduction_stream = _FakeWaitStream()
     comm_dtype = torch.float16
     bucket = zero_stage12.IPGBucket()
