@@ -55,6 +55,28 @@ class TestCPUAdagrad(DistributedTest):
 
         check_equal(param, param1, atol=1e-2, verbose=True)
 
+    def test_cpu_adagrad_weight_decay(self, model_size=64):
+        # torch.optim.Adagrad folds weight decay into the gradient before both the
+        # accumulator and the update: g = grad + wd * p, sum += g * g, p -= lr * g / (sqrt(sum) + eps).
+        # From p = 1 with a zero gradient, one step with lr = wd = 0.1 lands on 1 - 0.1 * 0.1 / 0.1 = 0.9.
+        param = torch.nn.Parameter(torch.ones(model_size))
+        param.grad = torch.zeros(model_size)
+        DeepSpeedCPUAdagrad([param], lr=0.1, weight_decay=0.1).step()
+        check_equal(param, torch.full((model_size, ), 0.9), atol=1e-6)
+
+        param = torch.nn.Parameter(torch.randn(model_size))
+        param1 = torch.nn.Parameter(param.detach().clone())
+        optimizer = DeepSpeedCPUAdagrad([param], lr=0.1, weight_decay=0.1)
+        optimizer1 = torch.optim.Adagrad([param1], lr=0.1, weight_decay=0.1)
+        for i in range(10):
+            grad = torch.randn(model_size)
+            param.grad = grad.clone()
+            param1.grad = grad.clone()
+            optimizer.step()
+            optimizer1.step()
+
+        check_equal(param, param1, atol=1e-5)
+
     def test_cpu_adagrad_opt_sparse_embedding(self, model_size=32, vocabulary_size=64, dim=16):
         device = 'cpu'
         rng_state = torch.get_rng_state()
