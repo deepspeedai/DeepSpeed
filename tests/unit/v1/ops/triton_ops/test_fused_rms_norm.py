@@ -92,6 +92,8 @@ def _assert_ulp_close(actual, expected, *, max_ulp, min_frac_within_1, label):
         (1000, 96),
         (257, 64),
         (33, 16),
+        (257, 7),
+        (33, 15),
     ])
 def test_fused_rms_norm_matches_hf_forward_and_backward(dtype, shape):
     device = _device()
@@ -113,6 +115,38 @@ def test_fused_rms_norm_matches_hf_forward_and_backward(dtype, shape):
     _assert_ulp_close(fused_out, eager_out, max_ulp=2, min_frac_within_1=0.99, label="forward")
     _assert_ulp_close(fused_hidden.grad, eager_hidden.grad, max_ulp=8, min_frac_within_1=0.95, label="dx")
     _assert_ulp_close(fused_weight.grad, eager_weight.grad, max_ulp=8, min_frac_within_1=0.95, label="dgamma")
+
+
+@pytest.mark.skipif(not _fused_engine_available(), reason="fused RMSNorm needs CUDA and Triton")
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+def test_fused_rms_norm_width_one_has_nonzero_input_gradient(dtype):
+    device = _device()
+    eps = 0.25
+    hidden = torch.linspace(0.25, 0.75, 257, device=device).to(dtype).reshape(-1, 1)
+    weight = torch.ones((1, ), dtype=dtype, device=device)
+    upstream = torch.ones_like(hidden)
+
+    eager_hidden = hidden.clone().requires_grad_(True)
+    eager_weight = weight.clone().requires_grad_(True)
+    eager_out = _hf_rms_norm(eager_hidden, eager_weight, eps)
+    eager_out.backward(upstream)
+
+    fused_hidden = hidden.clone().requires_grad_(True)
+    fused_weight = weight.clone().requires_grad_(True)
+    fused_out = fused_rms_norm.fused_rms_norm(fused_hidden, fused_weight, eps)
+    fused_out.backward(upstream)
+
+    # Before gamma, d(x / sqrt(x**2 + eps))/dx = eps / (x**2 + eps)**1.5.
+    reference_dx = (eps / (hidden.double().square() + eps).pow(1.5)).to(dtype)
+    assert torch.all(reference_dx > 0)
+    torch.testing.assert_close(fused_hidden.grad, reference_dx, rtol=2 * torch.finfo(dtype).eps, atol=0)
+    _assert_ulp_close(fused_out, eager_out, max_ulp=2, min_frac_within_1=0.99, label="width-one forward")
+    _assert_ulp_close(fused_hidden.grad, eager_hidden.grad, max_ulp=8, min_frac_within_1=0.95, label="width-one dx")
+    _assert_ulp_close(fused_weight.grad,
+                      eager_weight.grad,
+                      max_ulp=8,
+                      min_frac_within_1=0.95,
+                      label="width-one dgamma")
 
 
 @pytest.mark.skipif(not _fused_engine_available(), reason="fused RMSNorm needs CUDA and Triton")
