@@ -2695,7 +2695,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         see_memory_usage('After overflow after clearing gradients', force=False)
 
     @instrument_w_nvtx
-    def _overflow_check_and_loss_scale_update(self):
+    def _overflow_check_and_loss_scale_update(self, update_scale=True):
 
         # First compute norm for all group so we know if there is overflow
         if self.dtype == torch.float16:
@@ -2703,7 +2703,8 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
         #loss scaling related computation
         prev_scale = self.loss_scale
-        self._update_scale(self.overflow)
+        if self.overflow or update_scale:
+            self._update_scale(self.overflow)
 
         if self.overflow:
             self._overflow_clean_up(prev_scale)
@@ -2757,7 +2758,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         self._partition_all_parameters()
 
         #checks for overflow, adjust the loss scale accordingly
-        if self._overflow_check_and_loss_scale_update():
+        if self._overflow_check_and_loss_scale_update(update_scale=False):
             if self.swap_optimizer:
                 self.optimizer_swapper.log_timers()
             return
@@ -2800,6 +2801,8 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
         self.timers(OPTIMIZER_STEP_TIMER).stop()
 
+        # All subgroups must use the scale from this step's backward.
+        self._update_scale(self.overflow)
         self._post_step(timer_names)
 
         # warn user about caching allocator flushes
