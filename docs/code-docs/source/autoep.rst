@@ -291,6 +291,60 @@ Failing fast matters for measurement: a run that asked for the fused reduction
 and silently got the eager one would report the difference between an
 implementation and itself.
 
+**Fused rotary position embedding (experimental):**
+
+Like RMSNorm, RoPE belongs to the attention layers rather than to AutoEP, so it
+is not configured under ``expert_parallel``. DeepSpeed provides an opt-in
+installer that runs Hugging Face's ``apply_rotary_pos_emb`` with a fused Triton
+kernel:
+
+.. code-block:: python
+
+    from deepspeed.ops.triton_ops.fused_rotary_pos_emb import replace_rotary_pos_emb
+
+    patched = replace_rotary_pos_emb(model)
+
+The eager function computes ``q * cos + rotate_half(q) * sin`` in several
+elementwise kernels, each reading and writing the whole query or key tensor.
+The fused kernel reads each tensor once and writes it once, in the forward and in
+the backward, and applies each position's ``cos`` and ``sin`` to all of its
+heads. Every product and sum is rounded to the input dtype where the eager
+expression rounds it, so outputs and gradients are bitwise identical to eager.
+
+Attention modules look ``apply_rotary_pos_emb`` up in their modeling module, so
+the installer replaces it there: the replacement applies to every model of that
+architecture in the process, not only to ``model``, and
+``restore_rotary_pos_emb()`` undoes it. A modeling module is patched only if one
+of the model's submodules is defined in it, it is listed in
+``SUPPORTED_ROTARY_MODULES`` (Llama, Mistral, Mixtral, Qwen2, Qwen2-MoE, Qwen3,
+Qwen3-MoE and DeepSeek-V3), and its ``apply_rotary_pos_emb`` and
+``rotate_half`` still have the code of the split-half expression. Other
+architectures define functions of the same name that rotate only part of the
+head dimension or add casts, so a module whose function has changed is left
+alone with a warning. The return value is the number of modeling modules
+patched: 1 for Qwen3-30B-A3B.
+
+The replacement runs the kernel when the queries, keys, ``cos`` and ``sin`` are
+bfloat16 or float16 CUDA tensors of one dtype, the head dimension is even, at
+most 512 and has unit stride, and ``cos`` and ``sin`` do not require grad. For
+any other input it runs the original function, so the result is exactly eager's,
+and logs a warning once. ``fused_apply_rotary_pos_emb`` in the same module
+applies the kernel directly and raises on unsupported inputs instead.
+
+Requirements and limits:
+
+- The kernel needs CUDA with Triton. On ROCm or without Triton, the replaced
+  function runs eager.
+- ``unsqueeze_dim`` 1 (heads before the sequence) or 2 (sequence before the
+  heads), with ``cos`` and ``sin`` of shape ``[batch, sequence, head_dim]`` or
+  ``[1, sequence, head_dim]``.
+- Outputs keep the strides of the queries and keys, as eager outputs do. The
+  gradients produced for the queries and keys also take their layout, whereas
+  eager gradients follow the incoming gradient.
+- First-order gradients for the queries and keys; ``cos`` and ``sin`` are
+  constants. Differentiating those gradients again (double backward) raises.
+  ``torch.compile`` and ``torch.func`` transforms are not covered.
+
 **Constraints:**
 
 - ``autoep_size`` must divide ``num_experts`` for all detected MoE layers.
