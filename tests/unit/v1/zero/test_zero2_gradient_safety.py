@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # DeepSpeed Team
-"""ZeRO-2 offload gradient storage ownership and stream ordering tests."""
+"""ZeRO-1/2 offload gradient storage ownership and stream ordering tests."""
 
 from contextlib import nullcontext
 import copy
@@ -147,9 +147,13 @@ class FakeStream:
 
     def __init__(self):
         self.waited = []
+        self.waited_streams = []
 
     def wait_event(self, event):
         self.waited.append(event)
+
+    def wait_stream(self, stream):
+        self.waited_streams.append(stream)
 
 
 def fake_accelerator(current):
@@ -178,6 +182,8 @@ def test_average_waits_all_producers_even_without_overlap(monkeypatch, overlap):
                                                                                                     ) != 2 else None
     opt.average_tensor(torch.zeros(8), torch.float32)
     assert set(used.waited) == set(bucket.ready_events.values())
+    # Overlap keeps the pre-existing compute-waits-on-reduction barrier.
+    assert current.waited_streams == ([consumer] if overlap else [])
     bucket.reuse_events[0] = FakeEvent()
     bucket.clear()
     assert not bucket.ready_events
@@ -360,11 +366,11 @@ def _distributed_default_training(rank, rendezvous):
                               world_size=2,
                               timeout=timedelta(seconds=60))
     try:
-        # NVMe offload shares the CPU gradient path, so it must be protected too.
+        # ZeRO-1 and NVMe offload share the CPU gradient path, so they must be protected too.
         constructor_cases = [
             (True, True, None, False),
             (True, False, None, False),
-            (False, True, "cpu", False),
+            (False, True, "cpu", True),
             (True, True, "none", False),
             (True, True, "cpu", True),
             (True, False, "cpu", True),
@@ -422,7 +428,7 @@ def _distributed_default_training(rank, rendezvous):
                 "offload_optimizer": {
                     "device": "cpu"
                 }
-            }, False),
+            }, True),
         ]
         for zero_config, expected in cases:
             torch.manual_seed(42)

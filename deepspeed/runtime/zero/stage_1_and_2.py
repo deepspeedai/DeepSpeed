@@ -210,18 +210,18 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         # TODO: Remove zenflow-specific call from vanilla ZeroOptimizer, try to isolate zenflow-specific code into sub-class zenflow_zero_optimizer
         self.zenflow = True if zenflow_config is not None else False
 
-        # NVMe offload uses the same CPU gradient path. ZenFlow overrides reduction
+        # ZeRO-1 and NVMe offload use the same CPU gradient path. ZenFlow overrides reduction
         # and offload copies with its own ordering, so these protections do not apply.
-        self._offload_gradient_safety_enabled = partition_grads and self.cpu_offload and not self.zenflow
+        self._offload_gradient_safety_enabled = self.cpu_offload and not self.zenflow
         self._pending_offload_events = {}
 
         if dist.get_rank() == 0:
             logger.info(f"Reduce bucket size {reduce_bucket_size}")
             logger.info(f"Allgather bucket size {allgather_bucket_size}")
             logger.info(f"CPU Offload: {self.cpu_offload}")
-            logger.info(f"ZeRO-2 offload gradient protections: {self._offload_gradient_safety_enabled}")
-            if partition_grads and self.cpu_offload and self.zenflow:
-                logger.warning("ZeRO-2 offload gradient protections are not applied with ZenFlow")
+            logger.info(f"ZeRO offload gradient protections: {self._offload_gradient_safety_enabled}")
+            if self.cpu_offload and self.zenflow:
+                logger.warning("ZeRO offload gradient protections are not applied with ZenFlow")
             logger.info(f'Round robin gradient partitioning: {round_robin_gradients}')
         # The fused optimizer does all the work. We need this layer for two reason:
         # 1. maintain same user API from apex.fp16_utils
@@ -1404,11 +1404,8 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                                            log=log,
                                            divide=divide,
                                            process_group=process_group)
-        stream = get_accelerator().current_stream()
         if self.overlap_comm and not get_accelerator().resolves_data_dependency():
             allreduced.record_stream(self.reduction_stream)
-        else:
-            self._record_gradient_stream(allreduced, stream)
         local_rank = dist.get_rank(group=process_group)
         for buf, synced, bucket_rank in zip(small_bucket, self.unflatten(allreduced, small_bucket), bucket_ranks):
             copy_to_local_rank = local_rank in bucket_rank if isinstance(bucket_rank,
@@ -1417,8 +1414,6 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                 buf.copy_(synced)
                 if self.overlap_comm and not get_accelerator().resolves_data_dependency():
                     buf.record_stream(self.reduction_stream)
-                else:
-                    self._record_gradient_stream(buf, stream)
 
     def allreduce_and_scatter(self,
                               bucket,
@@ -1461,6 +1456,9 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             stream = self.reduction_stream if self.overlap_comm else get_accelerator().current_stream()
             for event in self.ipg_buckets[communication_data_type].ready_events.values():
                 stream.wait_event(event)
+            if self.overlap_comm and not get_accelerator().resolves_data_dependency():
+                # Keep the existing overlap barrier; events only add ordering on top of it.
+                get_accelerator().current_stream().wait_stream(stream)
         elif self.overlap_comm:
             stream = self.reduction_stream
             if not get_accelerator().resolves_data_dependency():
@@ -2242,15 +2240,11 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             )
             if self.overlap_comm and not get_accelerator().resolves_data_dependency():
                 allreduced.record_stream(stream)
-            else:
-                self._record_gradient_stream(allreduced, stream)
             if rank is None or rank == dist.get_rank(group=self.dp_process_group):
                 for buf, synced in zip(small_bucket, self.unflatten(allreduced, small_bucket)):
                     buf.copy_(synced)
                     if self.overlap_comm and not get_accelerator().resolves_data_dependency():
                         buf.record_stream(stream)
-                    else:
-                        self._record_gradient_stream(buf, stream)
 
     def allreduce_no_retain(
         self,
