@@ -711,7 +711,8 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             see_memory_usage("After initializing ZeRO optimizer", force=False)
 
         self._link_all_hp_params()
-        self._hp_optimizer_states_linked = False
+        # Param groups whose optimizer states the fragments are linked to.
+        self._hp_optimizer_states_linked = set()
 
         self._enable_universal_checkpoint()
         self._param_slice_mappings = self._create_param_mapping()
@@ -818,12 +819,13 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                            dp_group=self.real_dp_process_group[i],
                            param_offsets=param_offsets)
 
-    def _lazy_init_hp_params_optimizer_state(self):
-        if not self._hp_optimizer_states_linked:
-            for i, _ in enumerate(self.optimizer.param_groups):
-                lazy_init_hp_params_optimizer_state(self.bit16_groups[i], self.single_partition_of_fp32_groups[i],
-                                                    self.optimizer.state)
-            self._hp_optimizer_states_linked = True
+    def _lazy_init_hp_params_optimizer_state(self, group_no):
+        # One group at a time: `_optimizer_step` steps the groups one by one, and a group has no
+        # optimizer state to link before its own first step.
+        if group_no not in self._hp_optimizer_states_linked:
+            lazy_init_hp_params_optimizer_state(self.bit16_groups[group_no],
+                                                self.single_partition_of_fp32_groups[group_no], self.optimizer.state)
+            self._hp_optimizer_states_linked.add(group_no)
 
     def is_moe_group(self, group):
         return 'moe' in group and group['moe']
@@ -2643,7 +2645,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         self.optimizer.param_groups = original_param_groups
 
         # We need to link optimizer state after the first step() call
-        self._lazy_init_hp_params_optimizer_state()
+        self._lazy_init_hp_params_optimizer_state(group_no)
 
     def _muon_staging_momentum(self, flatten_copy, param_group_idx):
         """The buffer `muon_update` writes this step's momentum into.
