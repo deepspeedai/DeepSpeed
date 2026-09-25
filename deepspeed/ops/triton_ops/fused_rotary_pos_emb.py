@@ -208,11 +208,12 @@ class _FusedRotaryPosEmb(torch.autograd.Function):
         # An unused output must leave its input without a gradient, as eager does, rather than a zero one.
         ctx.set_materialize_grads(False)
         cos, sin = cos.contiguous(), sin.contiguous()
-        # Outputs keep the strides of their inputs, as the eager expression's do.
+        # For dense inputs the outputs keep their strides, as the eager expression's do.
         q_out = _launch(q, cos, sin, torch.empty_like(q), backward=False)
         k_out = _launch(k, cos, sin, torch.empty_like(k), backward=False)
         ctx.save_for_backward(cos, sin)
-        # The gradients take the layout of q and k, which is what their producers wrote; only strides are kept.
+        # The gradients take the outputs' layout, which for dense q and k is what their producers wrote. Only the
+        # strides are kept, not the outputs.
         ctx.layouts = ((q_out.shape, q_out.stride()), (k_out.shape, k_out.stride()))
         return q_out, k_out
 
@@ -251,9 +252,10 @@ def fused_apply_rotary_pos_emb(q: torch.Tensor,
     are ``[batch, sequence, head_dim]``, and ``unsqueeze_dim`` is 1 for
     ``[batch, heads, sequence, head_dim]`` queries and keys or 2 for
     ``[batch, sequence, heads, head_dim]``. Each product and sum is rounded to the
-    input dtype where the eager expression rounds it, so outputs and gradients are
-    bitwise identical to eager. Outputs keep the strides of ``q`` and ``k``, and
-    so do the gradients produced for them.
+    input dtype where the eager expression rounds it, so outputs and gradients
+    equal eager's element for element as compared by ``torch.equal``, which does
+    not distinguish ``+0.0`` from ``-0.0``. For dense ``q`` and ``k`` the outputs
+    keep their strides; the gradients produced for them take the outputs' layout.
 
     All four tensors must be bfloat16 or float16 CUDA tensors of one dtype, the
     head dimension must be even and at most 512 with unit stride, and ``cos`` and

@@ -293,8 +293,8 @@ implementation and itself.
 
 **Fused rotary position embedding (experimental):**
 
-Like RMSNorm, RoPE belongs to the attention layers rather than to AutoEP, so it
-is not configured under ``expert_parallel``. DeepSpeed provides an opt-in
+RoPE belongs to the attention layers rather than to AutoEP, so it is not
+configured under ``expert_parallel``. DeepSpeed provides an opt-in
 installer that runs Hugging Face's ``apply_rotary_pos_emb`` with a fused Triton
 kernel:
 
@@ -309,7 +309,9 @@ elementwise kernels, each reading and writing the whole query or key tensor.
 The fused kernel reads each tensor once and writes it once, in the forward and in
 the backward, and applies each position's ``cos`` and ``sin`` to all of its
 heads. Every product and sum is rounded to the input dtype where the eager
-expression rounds it, so outputs and gradients are bitwise identical to eager.
+expression rounds it, so the outputs, and the gradients for the queries and
+keys, equal eager's element for element as compared by ``torch.equal``, which
+does not distinguish ``+0.0`` from ``-0.0``.
 
 Attention modules look ``apply_rotary_pos_emb`` up in their modeling module, so
 the installer replaces it there: the replacement applies to every model of that
@@ -318,7 +320,8 @@ architecture in the process, not only to ``model``, and
 of the model's submodules is defined in it, it is listed in
 ``SUPPORTED_ROTARY_MODULES`` (Llama, Mistral, Mixtral, Qwen2, Qwen2-MoE, Qwen3,
 Qwen3-MoE and DeepSeek-V3), and its ``apply_rotary_pos_emb`` and
-``rotate_half`` still have the code of the split-half expression. Other
+``rotate_half`` still have the code of the split-half expression: the same
+bytecode, names, constants and defaults, whatever their docstrings. Other
 architectures define functions of the same name that rotate only part of the
 head dimension or add casts, so a module whose function has changed is left
 alone with a warning. The return value is the number of modeling modules
@@ -338,9 +341,14 @@ Requirements and limits:
 - ``unsqueeze_dim`` 1 (heads before the sequence) or 2 (sequence before the
   heads), with ``cos`` and ``sin`` of shape ``[batch, sequence, head_dim]`` or
   ``[1, sequence, head_dim]``.
-- Outputs keep the strides of the queries and keys, as eager outputs do. The
-  gradients produced for the queries and keys also take their layout, whereas
-  eager gradients follow the incoming gradient.
+- For dense layouts, such as attention's transposed projection, outputs keep
+  the strides of the queries and keys, as eager's do; other non-contiguous
+  inputs can give outputs laid out differently from eager's. The gradients for
+  the queries and keys take the layout of the outputs, whereas eager's follow
+  the incoming gradient, so weight gradients computed from them further back,
+  such as the query projection's, can differ from eager's in the last bits.
+- Transformers releases whose ``apply_rotary_pos_emb`` still takes
+  ``position_ids``, such as 4.51, are left unpatched.
 - First-order gradients for the queries and keys; ``cos`` and ``sin`` are
   constants. Differentiating those gradients again (double backward) raises.
   ``torch.compile`` and ``torch.func`` transforms are not covered.

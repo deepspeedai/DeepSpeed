@@ -55,7 +55,7 @@ def _layout(tensor):
     return [stride for size, stride in zip(tensor.shape, tensor.stride()) if size > 1]
 
 
-def _assert_bitwise(actual, expected, label):
+def _assert_equal(actual, expected, label):
     assert actual.shape == expected.shape and actual.dtype == expected.dtype, label
     # torch.equal treats -0.0 and +0.0 as equal, which is the only difference the order of an exact sum can make.
     assert torch.equal(actual, expected), f"{label}: max |diff| {(actual.float() - expected.float()).abs().max()}"
@@ -72,7 +72,7 @@ def _assert_bitwise(actual, expected, label):
         (1, 1, 2, 1, 128, "projection"),
     ],
 )
-def test_matches_eager_bitwise(dtype, batch, seq_len, q_heads, k_heads, head_dim, layout):
+def test_matches_eager(dtype, batch, seq_len, q_heads, k_heads, head_dim, layout):
     generator = torch.Generator().manual_seed(seq_len * 131 + head_dim)
     make = _projection_layout if layout == "projection" else _contiguous_layout
     q = make(batch, seq_len, q_heads, head_dim, dtype, generator)
@@ -84,7 +84,7 @@ def test_matches_eager_bitwise(dtype, batch, seq_len, q_heads, k_heads, head_dim
     expected = _run(eager_rope, q, k, cos, sin, grad_q, grad_k)
     actual = _run(fused_rope.fused_apply_rotary_pos_emb, q, k, cos, sin, grad_q, grad_k)
     for name, a, e in zip(("q_embed", "k_embed", "q.grad", "k.grad"), actual, expected):
-        _assert_bitwise(a, e, name)
+        _assert_equal(a, e, name)
     # The outputs keep the strides of their inputs, as eager's do; the gradients take the layout of q and k.
     assert _layout(actual[0]) == _layout(expected[0])
     assert _layout(actual[1]) == _layout(expected[1])
@@ -101,7 +101,7 @@ def test_heads_second_layout_with_unsqueeze_dim_2():
     expected = _run(eager_rope, q, k, cos, sin, grad_q, grad_k, unsqueeze_dim=2)
     actual = _run(fused_rope.fused_apply_rotary_pos_emb, q, k, cos, sin, grad_q, grad_k, unsqueeze_dim=2)
     for name, a, e in zip(("q_embed", "k_embed", "q.grad", "k.grad"), actual, expected):
-        _assert_bitwise(a, e, name)
+        _assert_equal(a, e, name)
 
 
 def test_one_table_broadcast_over_the_batch():
@@ -114,7 +114,7 @@ def test_one_table_broadcast_over_the_batch():
     expected = _run(eager_rope, q, k, cos, sin, grad_q, grad_k)
     actual = _run(fused_rope.fused_apply_rotary_pos_emb, q, k, cos, sin, grad_q, grad_k)
     for name, a, e in zip(("q_embed", "k_embed", "q.grad", "k.grad"), actual, expected):
-        _assert_bitwise(a, e, name)
+        _assert_equal(a, e, name)
 
 
 def test_non_contiguous_incoming_gradients():
@@ -129,7 +129,7 @@ def test_non_contiguous_incoming_gradients():
     expected = _run(eager_rope, q, k, cos, sin, grad_q, grad_k)
     actual = _run(fused_rope.fused_apply_rotary_pos_emb, q, k, cos, sin, grad_q, grad_k)
     for name, a, e in zip(("q_embed", "k_embed", "q.grad", "k.grad"), actual, expected):
-        _assert_bitwise(a, e, name)
+        _assert_equal(a, e, name)
 
 
 def test_unused_key_output_leaves_no_key_gradient():
@@ -219,7 +219,7 @@ def restore_after():
     fused_rope.restore_rotary_pos_emb()
 
 
-def test_installer_matches_eager_model_bitwise(restore_after):
+def test_installer_matches_eager_model(restore_after):
     _, modeling, model = _tiny_qwen3()
     tokens = torch.randint(0, 97, (2, 40), device=_device())
 
@@ -245,9 +245,9 @@ def test_installer_matches_eager_model_bitwise(restore_after):
     finally:
         fused_rope._run_kernels = run_kernels
     assert len(calls) == 2, "each decoder layer must run the kernel"
-    _assert_bitwise(fused_logits, eager_logits, "logits")
+    _assert_equal(fused_logits, eager_logits, "logits")
     for name, grad in eager_grads.items():
-        _assert_bitwise(fused_grads[name], grad, name)
+        _assert_equal(fused_grads[name], grad, name)
 
 
 def test_installer_is_idempotent_and_restorable(restore_after):
@@ -342,4 +342,4 @@ def test_installed_function_runs_eager_for_unsupported_inputs(restore_after):
     actual = modeling.apply_rotary_pos_emb(q, k, cos, sin)
     expected = original(q, k, cos, sin)
     for a, e in zip(actual, expected):
-        _assert_bitwise(a, e, "float32 fallback")
+        _assert_equal(a, e, "float32 fallback")
