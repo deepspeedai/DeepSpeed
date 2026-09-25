@@ -311,3 +311,36 @@ implementation and itself.
 - DeepSeek-V2 and DeepSeek-V3 AutoEP do not support load-balance expert bias
   yet. The built-in DeepSeek presets disable it by default; explicit non-null
   values fail.
+
+Chunked causal-LM loss
+----------------------
+
+Long sequences with large vocabularies spend much of their peak memory on the
+language-model loss rather than on the model. Hugging Face's
+``ForCausalLMLoss`` upcasts the full ``[tokens, vocab]`` logits to FP32 and
+keeps an FP32 log-softmax for backward, and backward allocates two more FP32
+tensors of the same size. At 8,192 tokens and Qwen3's 151,936-token
+vocabulary each is about 5 GB, and all of them are live when backward starts,
+which is where AutoEP training memory peaks.
+
+``install_chunked_causal_lm_loss`` replaces that loss with one that computes
+the same FP32 cross entropy without them: forward keeps only the logits it was
+given plus one FP32 value per token, and backward recomputes the softmax and
+writes the gradient directly in the logits' dtype. On CUDA a Triton kernel does
+each pass in a single read of the logits (``backend="triton"``); the PyTorch
+backend (``backend="torch"``) does the same arithmetic in blocks of rows and
+runs anywhere. The default ``"auto"`` picks Triton when it can run; naming a
+backend that cannot run raises. The
+loss, the label shifting, ``ignore_index`` and ``num_items_in_batch``
+normalization follow ``ForCausalLMLoss``; gradients may differ from it by one
+BF16/FP16 rounding step where the FP32 evaluation order lands on a rounding
+boundary. It has no second derivative: backward with ``create_graph=True``
+raises. It is opt-in, and it refuses models whose ``loss_function`` is not
+the stock ``ForCausalLMLoss``:
+
+.. code-block:: python
+
+    from deepspeed.runtime.chunked_cross_entropy import install_chunked_causal_lm_loss
+
+    install_chunked_causal_lm_loss(model)
+    engine, optimizer, _, _ = deepspeed.initialize(model=model, config=ds_config)
