@@ -437,6 +437,56 @@ def test_top1gating_drop_capacity_exceeds_num_tokens():
     assert int(dispatch_mask.sum()) == num_tokens
 
 
+def _routing(gate, hidden, calls=4, seed=100):
+    out = []
+    for i in range(calls):
+        torch.manual_seed(seed + i)
+        _, _, dispatch_mask, exp_counts = gate(hidden)
+        out.append((dispatch_mask.nonzero().tolist(), exp_counts.tolist()))
+    return out
+
+
+def test_top2_gate_is_deterministic_in_eval():
+    # The Gumbel sample that picks the second expert is training-time noise, and
+    # top2_2nd_expert_sampling defaults to True, so leaving it on in eval routed one input
+    # differently on every forward.
+    torch.manual_seed(0)
+    hidden = torch.randn(6, 8)
+    gate = sharded_moe.TopKGate(8, 4, k=2, capacity_factor=2.0, eval_capacity_factor=2.0, min_capacity=2)
+    gate.eval()
+    routes = _routing(gate, hidden)
+    assert all(route == routes[0] for route in routes), [route[1] for route in routes]
+
+
+def test_top2_gate_still_samples_in_train():
+    # Only eval changes: training keeps the Gumbel draw that spreads the second expert.
+    torch.manual_seed(0)
+    hidden = torch.randn(6, 8)
+    gate = sharded_moe.TopKGate(8, 4, k=2, capacity_factor=2.0, eval_capacity_factor=2.0, min_capacity=2)
+    gate.train()
+    routes = _routing(gate, hidden)
+    assert any(route != routes[0] for route in routes)
+
+
+def test_top2_gate_eval_matches_sampling_disabled():
+    # Eval must give the deterministic argmax over the non-top-1 logits, which is exactly what
+    # top2_2nd_expert_sampling=False produces.
+    torch.manual_seed(0)
+    hidden = torch.randn(6, 8)
+    sampling = sharded_moe.TopKGate(8, 4, k=2, capacity_factor=2.0, eval_capacity_factor=2.0, min_capacity=2)
+    disabled = sharded_moe.TopKGate(8,
+                                    4,
+                                    k=2,
+                                    capacity_factor=2.0,
+                                    eval_capacity_factor=2.0,
+                                    min_capacity=2,
+                                    top2_2nd_expert_sampling=False)
+    disabled.load_state_dict(sampling.state_dict())
+    sampling.eval()
+    disabled.eval()
+    assert _routing(sampling, hidden) == _routing(disabled, hidden)
+
+
 def test_topkgating_position_preserves_min_capacity():
     # drop_policy='position' never selects over the token dimension, so min_capacity padding stays.
     num_tokens, num_experts = 4, 2
