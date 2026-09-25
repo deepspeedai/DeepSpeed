@@ -107,6 +107,13 @@ def resolve_combine_impl(
     return "weighted_sum"
 
 
+def resolve_row_weighting_impl(config_override: Literal["auto", "eager", "fused"]) -> Literal["eager", "fused"]:
+    """Resolve DeepEP row weighting implementation from config override."""
+    if config_override != "auto":
+        return config_override
+    return "eager"
+
+
 def _copy_parameter_data(target: nn.Parameter, source: torch.Tensor) -> None:
     full_shape = torch.Size(getattr(source, "ds_shape", source.shape))
     with torch.no_grad():
@@ -156,6 +163,17 @@ def apply_scores_before_experts_if_enabled(
     if score_apply == "pre":
         return (routed_input.to(torch.float32) * top_scores.reshape(-1, 1)).to(routed_input.dtype)
     return routed_input
+
+
+def apply_deepep_row_weights(
+    rows: torch.Tensor,
+    weights: torch.Tensor,
+    row_weighting_impl: Literal["eager", "fused"],
+) -> torch.Tensor:
+    """Apply DeepEP's per-arrival routing weights at the configured boundary."""
+    if row_weighting_impl == "fused":
+        return fused_token_ops.fused_row_weighting(rows, weights)
+    return (rows.float() * weights).to(rows.dtype)
 
 
 def _split_plan_from_expert_counts(
@@ -502,7 +520,9 @@ class AutoEPMoELayer(nn.Module):
         self.top_k = spec.top_k
         self.score_apply = resolve_score_apply_mode(spec, config.score_apply)
         self.combine_impl = resolve_combine_impl(config.combine_impl)
+        self.row_weighting_impl = resolve_row_weighting_impl(config.row_weighting_impl)
         self._fused_combine_checked = False
+        self._fused_row_weighting_checked = False
         route_norm = spec.route_norm if config.route_norm is None else config.route_norm
         self.ep_size = ep_size
         self.ep_rank = ep_rank
@@ -816,7 +836,7 @@ class AutoEPMoELayer(nn.Module):
         # doesn't commute with the weight.
         weights = None if recv_weights is None else recv_weights[:arrived].reshape(-1, 1)
         if weights is not None and self.score_apply == "pre":
-            received = (received.float() * weights).to(received.dtype)
+            received = apply_deepep_row_weights(received, weights, self.row_weighting_impl)
             weights = None
 
         # The grouped GEMM needs per-expert row counts, which arrive as a
@@ -831,7 +851,7 @@ class AutoEPMoELayer(nn.Module):
         expert_output = self.experts(received, counts)
 
         if weights is not None:
-            expert_output = (expert_output.float() * weights).to(expert_output.dtype)
+            expert_output = apply_deepep_row_weights(expert_output, weights, self.row_weighting_impl)
 
         return deepep_combine(exchange, expert_output, handle)
 
@@ -906,6 +926,10 @@ class AutoEPMoELayer(nn.Module):
         if self.combine_impl == "fused_weighted_sum" and not self._fused_combine_checked:
             fused_token_ops.assert_supported(x, score_apply=self.score_apply)
             self._fused_combine_checked = True
+        if self.row_weighting_impl == "fused" and not self._fused_row_weighting_checked:
+            weights = x.new_empty((x.shape[0], 1), dtype=torch.float32)
+            fused_token_ops.assert_row_weighting_supported(x, weights)
+            self._fused_row_weighting_checked = True
 
         # Router
         ro: RouterOutput = RouterOutput(*self.router(x, self.expert_bias))

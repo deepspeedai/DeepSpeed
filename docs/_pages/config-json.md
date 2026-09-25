@@ -972,6 +972,12 @@ smoke coverage used for this AutoEP surface produced the following version gates
 | -------------------------------------------------------------------------------------------------------------- | -------- |
 | How expert outputs are weighted by their router scores and reduced over top-k. `"auto"` resolves to `"weighted_sum"`. `"fused_weighted_sum"` is experimental and computes the same reduction in one Triton pass, without materializing the scattered assignment buffer or the `[tokens, top_k, hidden]` FP32 intermediate; it requires CUDA, Triton, bfloat16/float16 activations, `tensor_parallel.autotp_size=1`, `expert_tensor_parallel_size=1`, and a resolved `score_apply="post"`, and is rejected rather than silently ignored when any of those does not hold. `"legacy_bmm"` is a debug reduction retained for model-family verification. | `"auto"` |
 
+***row_weighting_impl***: [string]
+
+| Description                                                                                                    | Default  |
+| -------------------------------------------------------------------------------------------------------------- | -------- |
+| How the DeepEP route applies one FP32 routing weight to each received row at the existing `score_apply` boundary. `"auto"` resolves to `"eager"`, preserving `(rows.float() * weights).to(rows.dtype)`. `"fused"` is experimental and uses a separate Triton pointwise operator for that per-row product only; it does not perform the top-k reduction or move the BF16/FP16 rounding point. It requires `comm_backend="deepep"`, `autoep_size > 1`, CUDA, Triton, contiguous bfloat16/float16 rows shaped `[N, H]`, and contiguous FP32 weights shaped `[N, 1]` on the same device; DeepEP dispatch currently supports BF16 rows only. Fused weight gradients can differ from eager due to FP32 summation order. Unsupported configurations fail rather than falling back. | `"auto"` |
+
 ***route_norm***: [boolean]
 
 | Description                                                                                                     | Default |

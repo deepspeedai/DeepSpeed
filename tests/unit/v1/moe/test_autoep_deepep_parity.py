@@ -16,6 +16,7 @@ mock-level test still passed; only comparing the two paths' numbers exposes it.
 Requires GPUs and a DeepEP build, so it is opt-in.
 """
 
+import contextlib
 import functools
 from unittest import mock
 
@@ -28,6 +29,7 @@ import deepspeed.comm as dist
 from deepspeed.module_inject import auto_ep_layer
 from deepspeed.module_inject.auto_ep_comm import destroy_exchanges
 from deepspeed.module_inject.auto_ep_layer import AutoEPMoELayer
+from deepspeed.ops.triton_ops import autoep_fused_token_ops as fused_ops
 from deepspeed.utils import safe_get_full_fp32_param
 
 from unit.common import DistributedTest
@@ -51,6 +53,34 @@ def _deepep_available() -> bool:
     except Exception:
         return False
     return True
+
+
+def _skip_unless_fused_row_weighting_enabled(reason):
+    skip_unless_h100_tests_enabled(reason)
+    if not fused_ops.is_available():
+        pytest.skip("fused row weighting needs CUDA and Triton")
+
+
+@contextlib.contextmanager
+def _eager_weight_gradient_summation_order():
+    """Sum the fused weight gradient in eager's order, leaving the rest of the fused path as it is.
+
+    Fused and eager form the same FP32 products for the weight gradient and differ only in the order they sum
+    them, and neither order is more accurate (test_fused_row_weighting_weight_gradient_is_as_accurate_as_eager
+    checks the fused one against FP64). These comparisons repeat bit-for-bit, while Adam can amplify a
+    near-zero gradient sign change into a learning-rate-scale update difference. Matching only that order
+    keeps the fused forward, row gradient, routing and optimizer plumbing under the full comparison.
+    """
+    fused_backward = fused_ops._FusedRowWeighting.backward
+
+    def backward(ctx, grad_output):
+        grad_rows, _ = fused_backward(ctx, grad_output)
+        rows, weights = ctx.saved_tensors
+        grad_weights = (grad_output.float() * rows.float()).sum_to_size(weights.shape)
+        return grad_rows, grad_weights
+
+    with mock.patch.object(fused_ops._FusedRowWeighting, "backward", staticmethod(backward)):
+        yield
 
 
 def _install_legacy_deepep_prep(engine):
@@ -102,10 +132,27 @@ def _install_skewed_routing(engine):
         router.forward = skewed_forward
 
 
-def _checkpoint_autoep_layers(engine):
+def _checkpoint_autoep_layers(engine, *, use_reentrant=False):
     for module in engine.module.modules():
         if isinstance(module, AutoEPMoELayer):
-            module.forward = functools.partial(checkpoint, module.forward, use_reentrant=False)
+            module.forward = functools.partial(checkpoint, module.forward, use_reentrant=use_reentrant)
+
+
+def _count_autoep_layer_forwards(engine):
+    forward_counts = {}
+    for name, module in engine.module.named_modules():
+        if not isinstance(module, AutoEPMoELayer):
+            continue
+        forward_counts[name] = 0
+        original_forward = module.forward
+
+        @functools.wraps(original_forward)
+        def counted_forward(*args, _name=name, _forward=original_forward, **kwargs):
+            forward_counts[_name] += 1
+            return _forward(*args, **kwargs)
+
+        module.forward = counted_forward
+    return forward_counts
 
 
 def _snapshot_fp32_parameters(engine):
@@ -134,7 +181,16 @@ def _snapshot_fp32_parameters(engine):
     return snapshot
 
 
-def _run_one_step(backend, ep_size, seed, *, cleanup=True, activation_checkpointing=False, skewed_routing=False):
+def _run_one_step(backend,
+                  ep_size,
+                  seed,
+                  *,
+                  cleanup=True,
+                  activation_checkpointing=False,
+                  reentrant_checkpointing=False,
+                  skewed_routing=False,
+                  row_weighting_impl="auto",
+                  score_apply=None):
     """Build a model on ``backend``, run one step, return its output and grads."""
     seed_everything(seed)
 
@@ -144,14 +200,17 @@ def _run_one_step(backend, ep_size, seed, *, cleanup=True, activation_checkpoint
     # dtype anyway for the comparison to mean anything.
     config.pop("fp16", None)
     config["bf16"] = {"enabled": True}
-    # At step 1, Adam's bias correction makes every updated parameter's delta
-    # equal to +/-lr regardless of its gradient's magnitude. make_autoep_config's
+    # Adam's first update can be learning-rate-scale even for small gradients. make_autoep_config's
     # default lr=1e-4 is smaller than the parameter_deltas comparison's
     # atol=5e-4 below, so that check could not have told a correct update apart
     # from a missing or wrong-signed one (deepspeedai/DeepSpeed#8423, review
     # comment from tohtana). Raised well above that noise floor instead.
     config["optimizer"]["params"]["lr"] = 1e-2
     config["expert_parallel"]["comm_backend"] = backend
+    if row_weighting_impl != "auto":
+        config["expert_parallel"]["row_weighting_impl"] = row_weighting_impl
+    if score_apply is not None:
+        config["expert_parallel"]["score_apply"] = score_apply
     if backend == "deepep":
         # Sized explicitly rather than from the first batch, so both backends
         # see identical shapes whatever that batch turns out to be.
@@ -173,8 +232,9 @@ def _run_one_step(backend, ep_size, seed, *, cleanup=True, activation_checkpoint
         _install_legacy_deepep_prep(engine)
     if skewed_routing:
         _install_skewed_routing(engine)
+    forward_counts = _count_autoep_layer_forwards(engine)
     if activation_checkpointing:
-        _checkpoint_autoep_layers(engine)
+        _checkpoint_autoep_layers(engine, use_reentrant=reentrant_checkpointing)
 
     # Reseeded so the input is identical on every rank and across backends: the
     # comparison is of the transport, so nothing else may differ.
@@ -225,6 +285,7 @@ def _run_one_step(backend, ep_size, seed, *, cleanup=True, activation_checkpoint
         "score_gradients": score_gradients,
         "gradients": gradients,
         "parameter_deltas": parameter_deltas,
+        "forward_counts": forward_counts,
     }
     if backend == "deepep":
         exchanges = [
@@ -276,6 +337,9 @@ def _assert_cleanup_results_close(actual, expected, *, compare_score_gradients):
                                    msg=f"routing-score gradient norm for {name}")
     assert actual["gradients"].keys() == expected["gradients"].keys()
     assert actual["parameter_deltas"].keys() == expected["parameter_deltas"].keys()
+    # Every gradient is checked before any update, because the updates are the
+    # sensitive half: interleaving them stops at the first failing update and
+    # leaves the remaining gradients unexamined.
     for name in actual["gradients"]:
         torch.testing.assert_close(
             actual["gradients"][name],
@@ -284,13 +348,57 @@ def _assert_cleanup_results_close(actual, expected, *, compare_score_gradients):
             atol=5e-2,
             msg=(f"gradient for {name}; max_diff="
                  f"{(actual['gradients'][name] - expected['gradients'][name]).abs().max().item()}"))
-        torch.testing.assert_close(
-            actual["parameter_deltas"][name],
-            expected["parameter_deltas"][name],
-            rtol=5e-3,
-            atol=5e-4,
-            msg=(f"optimizer delta for {name}; max_diff="
-                 f"{(actual['parameter_deltas'][name] - expected['parameter_deltas'][name]).abs().max().item()}"))
+    for name in actual["parameter_deltas"]:
+        torch.testing.assert_close(actual["parameter_deltas"][name],
+                                   expected["parameter_deltas"][name],
+                                   rtol=5e-3,
+                                   atol=5e-4,
+                                   msg=_delta_failure_message(name, actual, expected))
+
+
+def _assert_native_fused_gradient_close(actual, expected, *, name):
+    assert actual.shape == expected.shape, f"{name} gradient shape differs: {actual.shape} vs {expected.shape}"
+    actual = actual.double()
+    expected = expected.double()
+    assert torch.isfinite(actual).all() and torch.isfinite(expected).all(), f"{name} gradient is non-finite"
+    expected_norm = expected.norm().item()
+    assert expected_norm > 0, f"{name} eager gradient is zero"
+    error_norm = (actual - expected).norm().item()
+    relative_l2 = error_norm / expected_norm
+    # Same-seed eager/eager is bit-exact on H100. Across native fused/eager controls,
+    # the largest measured model-gradient relative L2 was 5.6e-3 (reentrant);
+    # 2e-2 leaves room for FP32 summation order without accepting a dropped path.
+    assert relative_l2 <= 2e-2, (f"{name} gradient relative L2={relative_l2:.3e}, "
+                                 f"error_norm={error_norm:.3e}, eager_norm={expected_norm:.3e}")
+
+
+def _delta_failure_message(name, actual, expected):
+    """Describe a delta mismatch together with the gradient that produced it.
+
+    Adam's first update can be learning-rate-scale even for small gradients,
+    so a near-zero sign flip can show up as a large update difference.
+    Reporting the gradients and updates at the worst coordinate distinguishes
+    that from a genuinely different gradient.
+    """
+
+    difference = (actual["parameter_deltas"][name] - expected["parameter_deltas"][name]).abs()
+    worst = int(difference.flatten().argmax().item())
+    reference_gradient = expected["gradients"][name].flatten()[worst]
+    actual_gradient = actual["gradients"][name].flatten()[worst]
+    reference_delta = expected["parameter_deltas"][name].flatten()[worst]
+    actual_delta = actual["parameter_deltas"][name].flatten()[worst]
+    return (f"optimizer delta for {name}; max_diff={difference.flatten()[worst].item()}; "
+            f"at that coordinate the gradients are reference={reference_gradient.item()} "
+            f"actual={actual_gradient.item()} "
+            f"(signs {'differ' if reference_gradient.sign() != actual_gradient.sign() else 'agree'}), "
+            f"against a reference gradient maximum of {expected['gradients'][name].abs().max().item()}; "
+            f"the updates there are reference={reference_delta.item()} actual={actual_delta.item()}, "
+            f"with update magnitude maxima reference="
+            f"{expected['parameter_deltas'][name].abs().max().item()} actual="
+            f"{actual['parameter_deltas'][name].abs().max().item()}. "
+            "Gradient clipping rescales every gradient by one positive factor, so it cannot flip a sign; "
+            "a sign difference here therefore came from the gradient itself, while Adam's first step "
+            "can amplify the update difference to the scale of the learning rate")
 
 
 @pytest.mark.skipif(not _deepep_available(), reason="deep_ep is not installed")
@@ -351,6 +459,100 @@ class TestDeepEPMatchesCollective(DistributedTest):
         gate_grads = [value for name, value in result["gradients"].items() if "gate" in name]
         assert gate_grads, "the router gate received no gradient at all"
         assert any(value.abs().sum() > 0 for value in gate_grads), "the router gate's gradient was entirely zero"
+
+    @pytest.mark.parametrize("score_apply", ["pre", "post"])
+    def test_native_fused_row_weighting_backward_reaches_router(self, score_apply):
+        """A wrong weight gradient must not disappear between DeepEP and the router."""
+        _skip_unless_fused_row_weighting_enabled("fused DeepEP row weighting needs H100s and a DeepEP build")
+        seed = 2468
+
+        eager = _run_one_step("deepep", self.world_size, seed, row_weighting_impl="eager", score_apply=score_apply)
+        fused = _run_one_step("deepep", self.world_size, seed, row_weighting_impl="fused", score_apply=score_apply)
+
+        torch.testing.assert_close(fused["output"], eager["output"], rtol=2e-3, atol=2e-3)
+        torch.testing.assert_close(fused["loss"], eager["loss"], rtol=2e-3, atol=2e-3)
+        assert len(fused["routes"]) == len(eager["routes"])
+        for (fused_name, fused_route), (eager_name, eager_route) in zip(fused["routes"], eager["routes"]):
+            assert fused_name == eager_name
+            assert torch.equal(fused_route, eager_route)
+
+        assert fused["score_gradients"].keys() == eager["score_gradients"].keys()
+        assert fused["score_gradients"], "no routing-score gradient was retained"
+        for name, eager_gradient in eager["score_gradients"].items():
+            _assert_native_fused_gradient_close(fused["score_gradients"][name],
+                                                eager_gradient,
+                                                name=f"routing scores for {name}")
+
+        assert fused["gradients"].keys() == eager["gradients"].keys()
+        gate_names = [name for name in eager["gradients"] if ".router.gate." in name]
+        assert gate_names and len(gate_names) == len(eager["score_gradients"]), "router gate gradients are missing"
+        for name in gate_names:
+            _assert_native_fused_gradient_close(fused["gradients"][name],
+                                                eager["gradients"][name],
+                                                name=f"router gate {name}")
+
+        names = sorted(eager["gradients"])
+        fused_gradients = torch.cat([fused["gradients"][name].flatten() for name in names])
+        eager_gradients = torch.cat([eager["gradients"][name].flatten() for name in names])
+        _assert_native_fused_gradient_close(fused_gradients, eager_gradients, name="all model parameters")
+        _assert_native_fused_gradient_close(fused["input_gradient"], eager["input_gradient"], name="model input")
+
+    @pytest.mark.parametrize("score_apply", ["pre", "post"])
+    def test_fused_row_weighting_matches_eager_for_each_score_boundary(self, score_apply):
+        _skip_unless_fused_row_weighting_enabled("fused DeepEP row weighting needs H100s and a DeepEP build")
+        seed = 2468
+
+        eager = _run_one_step("deepep", self.world_size, seed, row_weighting_impl="eager", score_apply=score_apply)
+        with _eager_weight_gradient_summation_order():
+            fused = _run_one_step("deepep", self.world_size, seed, row_weighting_impl="fused", score_apply=score_apply)
+
+        _assert_cleanup_results_close(fused, eager, compare_score_gradients=True)
+
+    def test_fused_row_weighting_supports_reentrant_activation_checkpointing(self):
+        _skip_unless_fused_row_weighting_enabled("fused DeepEP row weighting needs H100s and a DeepEP build")
+        seed = 1357
+
+        eager = _run_one_step("deepep",
+                              self.world_size,
+                              seed,
+                              activation_checkpointing=True,
+                              reentrant_checkpointing=True,
+                              row_weighting_impl="eager")
+        with _eager_weight_gradient_summation_order():
+            fused = _run_one_step("deepep",
+                                  self.world_size,
+                                  seed,
+                                  activation_checkpointing=True,
+                                  reentrant_checkpointing=True,
+                                  row_weighting_impl="fused")
+
+        _assert_cleanup_results_close(fused, eager, compare_score_gradients=False)
+        assert fused["forward_counts"], "the test did not exercise any AutoEP layers"
+        assert all(count == 2 for count in fused["forward_counts"].values())
+
+    @pytest.mark.parametrize("score_apply", ["pre", "post"])
+    def test_fused_row_weighting_handles_empty_experts_and_skewed_routing(self, score_apply):
+        _skip_unless_fused_row_weighting_enabled("fused DeepEP row weighting needs H100s and a DeepEP build")
+        seed = 9753
+
+        eager = _run_one_step("deepep",
+                              self.world_size,
+                              seed,
+                              skewed_routing=True,
+                              row_weighting_impl="eager",
+                              score_apply=score_apply)
+        with _eager_weight_gradient_summation_order():
+            fused = _run_one_step("deepep",
+                                  self.world_size,
+                                  seed,
+                                  skewed_routing=True,
+                                  row_weighting_impl="fused",
+                                  score_apply=score_apply)
+
+        _assert_cleanup_results_close(fused, eager, compare_score_gradients=True)
+        all_routes = torch.cat([route.flatten() for _, route in fused["routes"]])
+        assert torch.count_nonzero(all_routes == 3) == 0
+        assert torch.count_nonzero(all_routes == 1) > torch.count_nonzero(all_routes == 2)
 
     @pytest.mark.parametrize(
         "activation_checkpointing, skewed_routing",
