@@ -13,7 +13,8 @@ Three concerns, in order:
 1. **The arithmetic** -- per-head Newton-Schulz equals orthogonalizing each head alone.
 2. **The tagging** -- which parameters get a head count, and what it is. `set_optimizer_flags`
    already tags `use_muon` per parameter; head structure rides along the same way, so it does
-   not depend on AutoTP being enabled.
+   not depend on AutoTP being enabled. A fused QKV weight is tagged like a split one, because
+   both layouts that ship put every head in `head_dim` contiguous rows of dim 0.
 3. **Tensor parallelism** -- `set_optimizer_flags` runs before the engine partitions the model,
    so the count it records counts the model's heads. Column-parallel TP splits attention
    projections on dim 0, the axis the heads are on: the per-head width survives the split and
@@ -24,14 +25,16 @@ CPU-only: these pin the arithmetic and the bookkeeping, not the accelerator path
 multi-GPU side lives in `tests/unit/ops/muon/test_per_head_muon_accelerator.py`.
 """
 
+import logging
 from types import SimpleNamespace
 
 import pytest
 import torch
 
 import deepspeed
-from deepspeed import _attention_head_count, resolve_per_head_muon_after_sharding
+from deepspeed import OWNER_FUSED, _attention_head_count, resolve_per_head_muon_after_sharding
 from deepspeed.runtime.config import MUON_OPTIMIZER
+from deepspeed.utils import logger as ds_logger
 from deepspeed.runtime.zero.muon.original_muon import (
     muon_update,
     zeropower_via_gram_newtonschulz,
@@ -127,6 +130,51 @@ def test_per_head_differs_from_full_matrix_when_heads_are_unbalanced():
     # Every head should come out with a comparable update scale.
     norms = torch.stack([per_head[h * head_dim:(h + 1) * head_dim].norm() for h in range(num_heads)])
     assert norms.max() / norms.min() < 1.5
+
+
+@pytest.mark.parametrize("ns_method", ["gram", "newtonschulz5"])
+def test_fused_qkv_layout_does_not_change_the_update(ns_method):
+    """Sectioned and interleaved fused weights hold the same head blocks in a different order.
+
+    A fused QKV weight is sectioned (`cat([q_proj, k_proj, v_proj])`) in most codebases and
+    interleaved per KV group in Falcon / GPT-NeoX, and the two order the heads differently:
+    `Q0..Q7 K0 K1 V0 V1` against `Q0..Q3 K0 V0 Q4..Q7 K1 V1` for 8 query heads over 2 KV heads.
+    Every head is `head_dim` contiguous rows of dim 0 in both, so the block partition is the
+    same set either way, and per-head Newton-Schulz is block-wise with the same scale on every
+    block - it therefore commutes with the reordering. That is why nothing downstream needs to
+    know which layout a fused weight uses. An implementation that assumed the sectioned order
+    would give the interleaved weight a different update and fail here.
+    """
+    q_heads, kv_heads, head_dim, in_features = 8, 2, 8, 32
+    torch.manual_seed(0)
+    heads = [torch.randn(head_dim, in_features) for _ in range(q_heads + 2 * kv_heads)]
+
+    # Head indices in the order the interleaved layout stores them: each KV group holds its
+    # share of the query heads followed by its key head and its value head.
+    reps = q_heads // kv_heads
+    interleaved_order = []
+    for group in range(kv_heads):
+        interleaved_order += [group * reps + i for i in range(reps)]
+        interleaved_order += [q_heads + group, q_heads + kv_heads + group]
+
+    sectioned = torch.cat(heads, dim=0)
+    interleaved = torch.cat([heads[i] for i in interleaved_order], dim=0)
+    num_heads = q_heads + 2 * kv_heads
+
+    sectioned_update = muon_update(sectioned.clone(),
+                                   torch.zeros_like(sectioned),
+                                   ns_method=ns_method,
+                                   num_heads=num_heads)
+    interleaved_update = muon_update(interleaved.clone(),
+                                     torch.zeros_like(interleaved),
+                                     ns_method=ns_method,
+                                     num_heads=num_heads)
+
+    # The permutation that maps the sectioned order onto the interleaved one maps the updates too.
+    sectioned_blocks = sectioned_update.view(num_heads, head_dim, in_features)
+    reordered = sectioned_blocks[interleaved_order].reshape(num_heads * head_dim, in_features)
+    torch.testing.assert_close(reordered, interleaved_update, **_ns_tolerance(ns_method))
+    assert not torch.allclose(sectioned_update, sectioned, rtol=1e-2, atol=1e-2), "Newton-Schulz did not run"
 
 
 def test_rejects_shapes_that_do_not_split_into_heads():
@@ -227,11 +275,39 @@ def test_non_attention_parameters_are_left_on_the_full_matrix_path():
     assert tags["embed_tokens.weight"] is None
 
 
-def test_fused_qkv_is_skipped():
-    """One matrix holding Q, K and V does not split into uniform heads under GQA."""
+def test_fused_qkv_splits_into_uniform_head_blocks_under_gqa():
+    """One matrix holding Q, K and V.
+
+    GQA gives K/V fewer heads than Q, so the sections do not share a head count - but the split
+    is still uniform, because a head is `head_dim` contiguous rows of dim 0 whether the layout
+    concatenates the sections or interleaves them per KV group. 8 query heads over 2 KV heads is
+    8 + 2 + 2 = 12 head blocks, not 8. Regression test: this was declined on the assumption that
+    the three sections had to share a head count.
+    """
     tags = _flags(_Attn(fused=True))
 
-    assert tags["qkv_proj.weight"] is None
+    assert tags["qkv_proj.weight"] == 12
+
+
+def test_a_fused_projection_whose_head_axis_is_on_the_input_dim_is_declined():
+    """GPT-2's `c_attn` is a Conv1D: `[hidden, 3 * hidden]`, so the heads are on dim 1.
+
+    Muon splits dim 0, which here is the input axis, and `hidden` is `num_heads * head_dim`, so
+    divisibility alone would accept it and cut every row in the wrong direction. The exact fused
+    total is what rejects it.
+    """
+    model = _Attn(q_heads=8, kv_heads=2, head_dim=8)
+    model.c_attn = torch.nn.Linear(3 * 64, 64, bias=False)
+
+    assert _flags(model)["c_attn.weight"] is None
+
+
+def test_a_fused_projection_that_is_not_the_exact_qkv_total_is_declined():
+    """A matrix with one head's worth of rows too many is not this layout."""
+    model = _Attn(q_heads=8, kv_heads=2, head_dim=8)
+    model.qkv_proj = torch.nn.Linear(64, (8 + 2 * 2) * 8 + 8, bias=False)
+
+    assert _flags(model)["qkv_proj.weight"] is None
 
 
 def test_opt_in_is_required():
@@ -291,23 +367,57 @@ def test_split_qkv_architectures_tag_only_qkv(arch):
         assert tags[mlp_leaf] is None, f"{mlp_leaf} has no head structure"
 
 
-@pytest.mark.parametrize("arch", ["gpt_neox", "falcon"])
-def test_fused_qkv_architectures_tag_nothing(arch):
-    """These name their MLP matrices `dense_h_to_4h` / `dense_4h_to_h` and their output proj `dense`.
+def test_fused_qkv_architecture_tags_its_fused_projection_only():
+    """GPT-NeoX fuses Q, K and V into `query_key_value` and names its MLP matrices
+    `dense_h_to_4h` / `dense_4h_to_h` and its output projection `dense`.
 
-    Matching `dense` anywhere in the path tagged all three; this pins that none of them are.
+    The fused projection is a real per-head split; the `dense` leaves are not, and matching
+    `dense` anywhere in the path tagged all three before. Both halves are pinned here: the fused
+    matrix carries one block per head, and no other 2-D parameter is head-blocked. The expected
+    block count comes from the config rather than from the shape, so it does not restate the code
+    under test.
     """
     transformers = pytest.importorskip("transformers")
-    cfg_cls = {"gpt_neox": transformers.GPTNeoXConfig, "falcon": transformers.FalconConfig}[arch]
-    kwargs = dict(hidden_size=64, num_attention_heads=8, num_hidden_layers=1, vocab_size=32)
-    if arch == "gpt_neox":
-        kwargs["intermediate_size"] = 128
-    model = transformers.AutoModelForCausalLM.from_config(cfg_cls(**kwargs))
+    config = transformers.GPTNeoXConfig(hidden_size=64,
+                                        num_attention_heads=8,
+                                        num_hidden_layers=1,
+                                        intermediate_size=128,
+                                        vocab_size=32)
+    model = transformers.AutoModelForCausalLM.from_config(config)
+
+    kv_heads = getattr(config, "num_key_value_heads", None) or config.num_attention_heads
+    expected = config.num_attention_heads + 2 * kv_heads
+    tags = {n: _attention_head_count(n, p, model) for n, p in model.named_parameters() if p.ndim == 2}
+    fused = {n: v for n, v in tags.items() if "query_key_value" in n}
+
+    assert fused, "no fused query_key_value projection was found"
+    assert set(fused.values()) == {expected}, fused
+    for name, value in tags.items():
+        if "query_key_value" not in name:
+            assert value is None, f"{name} is not head-blocked, but was tagged {value}"
+
+
+def test_a_kv_head_count_that_disagrees_with_the_module_is_declined():
+    """Falcon reports `num_attention_heads` key/value heads, and `multi_query=True` then makes
+    the module build a single one: the config's fused total is 192 rows against a real 80.
+
+    The exact-total check is what turns that into the full-matrix path rather than a split of
+    the wrong blocks. The mismatch is in `AutoTPMeta`, which reads `num_kv_heads` and is what
+    AutoTP shards these layers with as well, so this test also records that the per-head split
+    is not the thing that has to change. It fails if either side starts agreeing, at which point
+    Falcon can be tagged like GPT-NeoX.
+    """
+    transformers = pytest.importorskip("transformers")
+    config = transformers.FalconConfig(hidden_size=64, num_attention_heads=8, num_hidden_layers=1, vocab_size=32)
+    model = transformers.AutoModelForCausalLM.from_config(config)
+
+    head_dim = config.head_dim
+    fused_rows = dict(model.named_parameters())["transformer.h.0.self_attention.query_key_value.weight"].shape[0]
+    assert fused_rows == (config.num_attention_heads + 2) * head_dim, "falcon is no longer single-KV-head"
+    assert fused_rows != (config.num_attention_heads + 2 * config.num_kv_heads) * head_dim, "the mismatch is gone"
 
     tags = {n: _attention_head_count(n, p, model) for n, p in model.named_parameters() if p.ndim == 2}
-
-    assert all(v is None for v in tags.values()), \
-        {k: v for k, v in tags.items() if v is not None}
+    assert all(value is None for value in tags.values()), {k: v for k, v in tags.items() if v is not None}
 
 
 # Shapes and config values read off the real checkpoints delock pointed at in #8367:
@@ -724,6 +834,63 @@ def test_owner_geometry_still_has_to_match_the_shape():
     name = "layers.0.self_attn.q_proj.weight"
 
     assert _attention_head_count(name, dict(model.named_parameters())[name], model) is None
+
+
+def test_a_fused_projection_on_a_listed_owner_is_declined():
+    """A listed owner's geometry is its own, and it offers no fused candidate to confirm one.
+
+    When the tagger learned to split fused weights, this leaf stopped being declined outright and
+    started falling through to the config. Kimi-K3's config describes the model's two MLA layers
+    (`num_attention_heads 8 x head_dim 74`), so the fused total it proposes is 1776 rows - and a
+    fused `in_proj_qkv` of exactly that width is the coincidence the whitelist exists to keep
+    from deciding. The module is listed, so the config is not consulted for it, and the
+    projection stays on the full-matrix path as it was before fused weights were tagged at all.
+    """
+    attn = KimiDeltaAttention()
+    attn.in_proj_qkv = torch.nn.Linear(1024, (8 + 2 * 8) * 74, bias=False)
+    model = _HybridModel(attn)
+    name = "layers.0.self_attn.in_proj_qkv.weight"
+    param = dict(model.named_parameters())[name]
+
+    assert param.shape == (1776, 1024), "1776 is 24 x 74, the config's fused total"
+    assert _attention_head_count(name, param, model) is None
+
+    meta, text_config = deepspeed._per_head_muon_meta(model)
+    resolved = deepspeed._resolve_attention_head_count(name, param, meta, text_config, {"layers.0.self_attn": attn})
+    assert resolved == (None, OWNER_FUSED)
+
+
+def test_a_fused_projection_on_an_unlisted_owner_keeps_the_config_path():
+    """The decline above is the whitelist, not the fused kind: an unlisted module still tags."""
+    unlisted = type("SomeOtherLinearAttention", (KimiDeltaAttention, ), {})
+    attn = unlisted()
+    attn.in_proj_qkv = torch.nn.Linear(1024, (8 + 2 * 8) * 74, bias=False)
+    model = _HybridModel(attn)
+    name = "layers.0.self_attn.in_proj_qkv.weight"
+
+    assert _attention_head_count(name, dict(model.named_parameters())[name], model) == 24
+
+
+def test_the_owner_fused_decline_is_not_reported_as_an_unmatched_name(caplog):
+    """Declining by design must not read as a name that went unrecognized.
+
+    The module still tags its split projections, so the opt-in is not silently inactive and the
+    fused leaf is a settled outcome rather than a candidate that failed to confirm.
+    """
+    attn = KimiDeltaAttention()
+    attn.in_proj_qkv = torch.nn.Linear(1024, 1776, bias=False)
+    model = _HybridModel(attn)
+
+    ds_logger.addHandler(caplog.handler)
+    try:
+        with caplog.at_level(logging.WARNING, logger=ds_logger.name):
+            tags = _flags(model)
+    finally:
+        ds_logger.removeHandler(caplog.handler)
+
+    assert tags["layers.0.self_attn.q_proj.weight"] == 8
+    assert tags["layers.0.self_attn.in_proj_qkv.weight"] is None
+    assert "in_proj_qkv" not in caplog.text
 
 
 def test_a_standard_model_is_unchanged_when_the_module_agrees():
