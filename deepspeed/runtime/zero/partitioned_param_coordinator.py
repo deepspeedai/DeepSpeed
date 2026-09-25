@@ -540,7 +540,7 @@ class PartitionedParameterCoordinator:
             if param in self.__inflight_param_registry:
                 self.__inflight_param_registry.pop(param).wait()
 
-            # TODO. make this throw if if there are still active submodules. currently
+            # TODO. make this throw if there are still active submodules. currently
             # there's a hook execution issue
             param.ds_active_sub_modules.clear()
             self.__release_param(param)
