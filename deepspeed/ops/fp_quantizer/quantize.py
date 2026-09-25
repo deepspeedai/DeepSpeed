@@ -3,6 +3,8 @@
 
 # DeepSpeed Team
 
+import math
+
 import torch
 import abc
 from abc import ABC
@@ -12,6 +14,18 @@ from deepspeed.ops.op_builder import FPQuantizerBuilder
 from deepspeed.accelerator import get_accelerator
 
 fp_quant_module = None
+
+
+def _validate_scale(scale) -> None:
+    """Reject zero / non-finite scales before inversion to avoid silently
+    propagating inf/nan into dequantized outputs (#7838)."""
+    if torch.is_tensor(scale):
+        if not torch.isfinite(scale).all() or (scale == 0).any():
+            raise ValueError("FPQuantizer.dequantize requires finite non-zero scale values")
+    else:
+        scale_f = float(scale)
+        if scale_f == 0.0 or not math.isfinite(scale_f):
+            raise ValueError("FPQuantizer.dequantize requires a finite non-zero scale")
 
 
 class Quantizer(ABC):
@@ -125,6 +139,7 @@ class FP_Quantize(Quantizer):
                 f"Missing {q_bits}-dequantization, please add the template arguments for the kernel to support this precision!"
 
         if scale is not None:
+            _validate_scale(scale)
             assert input_q.numel() == fp_out.numel(), \
             '[De-quantization Error]: quantized data should have the same size as original tensor when scale is not None!'
             input_q = torch.cat([input_q.reshape(-1, self.group_size), scale], dim=-1).contiguous()
@@ -158,6 +173,7 @@ class FP_Quantize(Quantizer):
                 f"Missing {q_bits}-dequantization, please add the template arguments for the kernel to support this precision!"
 
         if scale is not None:
+            _validate_scale(scale)
             assert input_q.numel() == fp_out.numel(), \
             '[De-quantization Error]: quantized data should have the same size as original tensor when scale is not None!'
             input_q = torch.cat([input_q.reshape(-1, self.group_size), scale], dim=-1).contiguous()
