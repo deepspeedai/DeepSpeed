@@ -3053,7 +3053,7 @@ class DeepSpeedEngine(Module):
 
         see_memory_usage("Engine before backward", force=self.memory_breakdown())
 
-        if self.is_deepcompile_active() and not self.compile_autotp():
+        if self.is_deepcompile_active() and not self.uses_parallelization_pass_only():
             deepcompile_backward_prologue(self.is_gradient_accumulation_boundary())
 
         if isinstance(self.optimizer, ZeROOptimizer):
@@ -3088,7 +3088,7 @@ class DeepSpeedEngine(Module):
                 self.optimizer.backward_epilogue()
             self.optimizer.exit_backward()
 
-        if self.is_deepcompile_active() and not self.compile_autotp():
+        if self.is_deepcompile_active() and not self.uses_parallelization_pass_only():
             deepcompile_backward_epilogue()
 
         see_memory_usage("Engine after backward", force=self.memory_breakdown())

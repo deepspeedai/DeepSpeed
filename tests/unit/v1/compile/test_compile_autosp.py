@@ -85,6 +85,52 @@ class TestAutoSPCompile(DistributedTest):
         compare_sp_loss(self, config_dict, sp_size)
 
 
+class TestAutoSPEngineBackward(DistributedTest):
+    """AutoSP never initializes the ZeRO DeepCompile runtime, so backward must not enter its hooks."""
+    world_size = 1
+
+    def test_backward_skips_zero_deepcompile_hooks(self, monkeypatch):
+        import deepspeed
+        import deepspeed.compile.util as dc_util
+        from unit.simple_model import SimpleModel, random_dataloader
+
+        config = {
+            "train_micro_batch_size_per_gpu": 1,
+            "optimizer": {
+                "type": "Adam",
+                "params": {
+                    "lr": 1e-3
+                }
+            },
+            "zero_optimization": {
+                "stage": 0
+            },
+            "compile": {
+                "deepcompile": True,
+                "passes": ["autosp"]
+            },
+        }
+        model = SimpleModel(hidden_dim=8)
+        engine, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config)
+        # Emulate the state after engine.compile() installed the AutoSP backend, without compiling.
+        engine._set_deepcompile_active(True)
+        assert engine.is_deepcompile_active()
+
+        def fail_native_handle():
+            raise RuntimeError("AutoSP backward must not load the ZeRO DeepCompile runtime")
+
+        monkeypatch.setattr(dc_util, "get_deepcompile_handle", fail_native_handle)
+        monkeypatch.setattr(dc_util, "post_backward_hooks", [fail_native_handle])
+
+        batch = next(
+            iter(
+                random_dataloader(model=engine, total_samples=1, hidden_dim=8, device=engine.device,
+                                  dtype=torch.float)))
+        loss = engine(batch[0], batch[1])
+        engine.backward(loss)
+        engine.step()
+
+
 # Plain pytest classes — no distributed runtime needed because these functions
 # perform pure IR-level graph rewrites; sp_size and get_rank are mocked.
 
