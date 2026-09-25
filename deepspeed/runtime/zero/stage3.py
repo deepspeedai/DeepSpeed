@@ -1783,7 +1783,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
         dist.all_reduce(buffer_to_reduce, group=process_group)
 
-        if self.postscale_gradients and self.gradient_predivide_factor != averaging_world_sz:
+        if self.postscale_gradients and self.gradient_predivide_factor != 1.0:
             buffer_to_reduce = buffer_to_reduce.mul(self.gradient_predivide_factor)
 
         if communication_data_type != self.gradient_accumulation_dtype:
@@ -1834,8 +1834,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         else:
             grad_partitions_for_rank = reduce_scatter_coalesced(full_grads_for_rank, process_group)
 
-        if self.postscale_gradients and self.gradient_predivide_factor != 1.0 and self.gradient_predivide_factor != dist.get_world_size(
-                process_group):
+        if self.postscale_gradients and self.gradient_predivide_factor != 1.0:
             grad_partitions_for_rank = [g.mul(self.gradient_predivide_factor) for g in grad_partitions_for_rank]
 
         partition_world_size = dist.get_world_size(group=process_group)
