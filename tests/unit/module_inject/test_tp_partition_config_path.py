@@ -16,10 +16,12 @@ from transformers import PreTrainedModel, PretrainedConfig
 
 from deepspeed.module_inject.auto_tp import AutoTP, AutoTPConfig, PartitionType, TPLayerSpec
 from deepspeed.module_inject.layers import (LinearAllreduce, LinearLayer, LmHeadLinearAllreduce, VocabParallelLinear,
-                                            set_autotp_mode)
+                                            VocabParallelEmbedding, set_autotp_mode)
 from deepspeed.module_inject.tp_plan_converter import TPPlanConverter
 from deepspeed.utils import logger as ds_logger
-from deepspeed.sequence.cross_entropy import VocabParallelCausalLMLoss, configure_vocab_parallel_loss
+from deepspeed.sequence.cross_entropy import (VocabParallelCausalLMLoss, configure_vocab_parallel_loss,
+                                              validate_vocab_parallel_loss)
+from deepspeed.runtime.tensor_parallel.config import TPTrainingConfig
 
 
 class SubAttn(nn.Module):
@@ -290,6 +292,17 @@ def test_vocab_parallel_linear_exposes_vocab_metadata():
     assert not layer.gather_output
 
 
+@pytest.mark.parametrize("config,expected", [({}, None), ({
+    "vocab_parallel_lm_head": None
+}, None), ({
+    "vocab_parallel_lm_head": False
+}, False), ({
+    "vocab_parallel_lm_head": True
+}, True)])
+def test_vocab_parallel_config_distinguishes_automatic_and_explicit_choices(config, expected):
+    assert TPTrainingConfig(**config).vocab_parallel_lm_head is expected
+
+
 def test_plain_colwise_lm_head_uses_vocab_parallel_layer():
     model = OutputModel(tied=False)
 
@@ -360,17 +373,49 @@ def test_lm_head_name_matching_uses_configured_patterns():
     assert autotp._is_lm_head_name("model.lm_head") is False
 
 
-def test_plain_colwise_lm_head_rejects_tied_weights():
+def test_plain_colwise_lm_head_supports_tied_weights():
     model = OutputModel(tied=True)
 
-    with pytest.raises(ValueError, match="requires untied"):
+    _build_local_lm_head_autotp(model)._replace_module(model)
+
+    assert isinstance(model.lm_head, VocabParallelLinear)
+    assert isinstance(model.embed_tokens, VocabParallelEmbedding)
+    assert model.lm_head.weight is model.embed_tokens.weight
+
+
+def test_vocab_parallel_lm_head_rejects_unsupported_embedding_forward():
+
+    class OffsetEmbedding(nn.Embedding):
+
+        def forward(self, input_ids):
+            return super().forward(input_ids) + 1
+
+    model = OutputModel(tied=True)
+    model.embed_tokens = OffsetEmbedding(100, 32)
+    model.lm_head.weight = model.embed_tokens.weight
+
+    with pytest.raises(NotImplementedError, match="embedding forward"):
+        _build_local_lm_head_autotp(model)._replace_module(model)
+
+    assert model.lm_head.weight.shape == (100, 32)
+    assert model.lm_head.weight is model.embed_tokens.weight
+
+
+@pytest.mark.parametrize("embedding_kwargs", [{"max_norm": 1.0}, {"scale_grad_by_freq": True}, {"sparse": True}])
+def test_vocab_parallel_lm_head_rejects_unsupported_embedding_options(embedding_kwargs):
+    model = OutputModel(tied=True)
+    model.embed_tokens = nn.Embedding(100, 32, **embedding_kwargs)
+    model.lm_head.weight = model.embed_tokens.weight
+
+    with pytest.raises(NotImplementedError, match="embedding options"):
         _build_local_lm_head_autotp(model)._replace_module(model)
 
 
-def test_plain_colwise_lm_head_rejects_tie_before_embedding_is_sliced():
+def test_vocab_parallel_lm_head_supersedes_conflicting_embedding_spec(caplog):
     model = OutputModel(tied=True)
-    # A row-partitioned embedding is rebuilt by _slice_embedding with a fresh parameter, so by the
-    # time traversal reaches the head the tie is no longer observable through weight identity.
+    # A tied vocab-parallel head forces its embedding onto the same vocab-dimension shard as
+    # the head, regardless of any spec explicitly configured for the embedding itself; the
+    # embedding's ROW spec here is expected to be overridden rather than applied.
     specs = [
         TPLayerSpec(patterns=[r".*embed_tokens\.weight$"], partition_type=PartitionType.ROW),
         TPLayerSpec(patterns=[r".*lm_head\.weight$"], partition_type=PartitionType.COLUMN),
@@ -388,8 +433,17 @@ def test_plain_colwise_lm_head_rejects_tie_before_embedding_is_sliced():
     autotp.set_tensor_parallel_config(2, None)
     autotp.update_linear_policies()
 
-    with pytest.raises(ValueError, match="requires untied"):
-        autotp._replace_module(model)
+    ds_logger.addHandler(caplog.handler)
+    try:
+        with caplog.at_level(logging.WARNING, logger=ds_logger.name):
+            autotp._replace_module(model)
+    finally:
+        ds_logger.removeHandler(caplog.handler)
+
+    assert isinstance(model.lm_head, VocabParallelLinear)
+    assert isinstance(model.embed_tokens, VocabParallelEmbedding)
+    assert model.lm_head.weight is model.embed_tokens.weight
+    assert any("supersedes" in record.message and "embed_tokens" in record.message for record in caplog.records)
 
 
 def test_configure_vocab_parallel_loss_installs_and_preserves_hook():
@@ -402,6 +456,17 @@ def test_configure_vocab_parallel_loss_installs_and_preserves_hook():
 
     assert isinstance(model.loss_function, VocabParallelCausalLMLoss)
     assert model._deepspeed_original_loss_function is original_loss_function
+
+
+def test_vocab_parallel_loss_validation_preserves_registered_loss_module():
+    model = OutputModel(tied=True)
+    model.loss_function = nn.CrossEntropyLoss()
+    original_loss = model.loss_function
+
+    validate_vocab_parallel_loss(model)
+
+    assert model.loss_function is original_loss
+    assert model.get_submodule("loss_function") is original_loss
 
 
 def test_configure_vocab_parallel_loss_installs_on_huggingface_model():

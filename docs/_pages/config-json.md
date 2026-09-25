@@ -774,11 +774,19 @@ When a HuggingFace model provides a built-in `tp_plan` (via `model.config.base_m
 | -------------------------------------------------------------------------------------------------------- | ------- |
 | Overlap tensor-parallel allreduce communication with computation (training only).                       | `false` |
 
-***vocab_parallel_lm_head***: [boolean]
+***vocab_parallel_lm_head***: [boolean or null]
 
 | Description                                                                                                                                                  | Default |
 | ------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------- |
-| Keep an untied `lm_head`/`embed_out` output vocabulary sharded and install DeepSpeed's pure-PyTorch vocab-parallel causal-LM loss instead of gathering logits. | `false` |
+| `true` requires a vocabulary-sharded `lm_head`/`embed_out` and distributed causal-LM loss; `false` disables this path; `null` automatically follows supported HF tied-embedding plans. | `null` |
+
+When this field is omitted or `null`, an HF `embedding_rowwise` plan may enable tied
+vocabulary sharding automatically, returning rank-local rather than full-vocabulary
+logits. Set it to `false` to opt out. Unsupported implicit sharding, including the
+DeepCompile `autotp` pass, keeps the tied embedding/head replicated and logs a warning.
+Explicit `true` requests fail instead of silently downgrading. See
+[Vocabulary-parallel LM Loss](/tutorials/autotp-training/#vocabulary-parallel-lm-loss)
+for supported embedding semantics and compiler limitations.
 
 ***partition_config***: [dictionary]
 

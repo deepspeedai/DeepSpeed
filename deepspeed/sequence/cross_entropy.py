@@ -424,6 +424,35 @@ class VocabParallelCausalLMLoss:
         return loss
 
 
+def _set_vocab_parallel_loss(model, loss_fn):
+    if not hasattr(model, "loss_function"):
+        raise ValueError("A no-gather vocab-parallel LM head requires a writable loss_function hook; "
+                         "use gather_output=True for models without one")
+
+    original_loss_function = model.loss_function
+    registered_loss_module = getattr(model, "_modules", {}).pop("loss_function", None)
+
+    # Read-only properties and setters that ignore the new hook cannot be used with
+    # rank-local logits; reject both before the caller commits to vocabulary sharding.
+    try:
+        model.loss_function = loss_fn
+    except (AttributeError, TypeError) as exc:
+        if registered_loss_module is not None:
+            model.loss_function = registered_loss_module
+        raise ValueError("Unable to install the vocab-parallel loss_function hook; use gather_output=True") from exc
+
+    if model.loss_function is not loss_fn:
+        model.loss_function = original_loss_function
+        raise ValueError("Unable to install the vocab-parallel loss_function hook; use gather_output=True")
+    return original_loss_function
+
+
+def validate_vocab_parallel_loss(model):
+    """Check hook replacement before partitioning weights, then restore the original loss."""
+    original_loss_function = _set_vocab_parallel_loss(model, VocabParallelCausalLMLoss())
+    model.loss_function = original_loss_function
+
+
 def configure_vocab_parallel_loss(model, vocab_parallel_head, sp_group=None, ignore_index=-100, backend="torch"):
     """Install the causal-LM loss required by a no-gather vocabulary projection.
 
@@ -431,30 +460,13 @@ def configure_vocab_parallel_loss(model, vocab_parallel_head, sp_group=None, ign
     sequence-parallel engine: the engine performs the token-count-weighted aggregation
     across SP ranks itself and expects this loss to return the local shard's mean.
     """
-    if not hasattr(model, "loss_function"):
-        raise ValueError("A no-gather vocab-parallel LM head requires a writable loss_function hook; "
-                         "use gather_output=True for models without one")
-
     loss_fn = VocabParallelCausalLMLoss(tp_group=vocab_parallel_head.mp_group,
                                         sp_group=sp_group,
                                         vocab_start_index=vocab_parallel_head.vocab_start_index,
                                         vocab_end_index=vocab_parallel_head.vocab_end_index,
                                         ignore_index=ignore_index,
                                         backend=backend)
-    original_loss_function = model.loss_function
-    registered_loss_module = getattr(model, "_modules", {}).pop("loss_function", None)
-
-    # Some model classes expose loss_function as a read-only property, in which case the
-    # assignment raises; the identity check below turns that into an actionable error
-    # instead of leaving the model silently computing loss on rank-local logits.
-    try:
-        model.loss_function = loss_fn
-    except (AttributeError, TypeError):
-        if registered_loss_module is not None:
-            model.add_module("loss_function", registered_loss_module)
-
-    if model.loss_function is not loss_fn:
-        raise ValueError("Unable to install the vocab-parallel loss_function hook; use gather_output=True")
+    original_loss_function = _set_vocab_parallel_loss(model, loss_fn)
 
     # Keep the stock loss reachable so callers can restore it when tearing the head down.
     if not hasattr(model, "_deepspeed_original_loss_function"):
