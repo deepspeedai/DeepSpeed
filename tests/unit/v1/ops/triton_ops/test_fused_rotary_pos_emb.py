@@ -50,6 +50,11 @@ def _run(function, q, k, cos, sin, grad_q, grad_k, unsqueeze_dim=1):
     return q_out, k_out, q.grad, k.grad
 
 
+def _layout(tensor):
+    # A dimension of size one has no meaningful stride.
+    return [stride for size, stride in zip(tensor.shape, tensor.stride()) if size > 1]
+
+
 def _assert_bitwise(actual, expected, label):
     assert actual.shape == expected.shape and actual.dtype == expected.dtype, label
     # torch.equal treats -0.0 and +0.0 as equal, which is the only difference the order of an exact sum can make.
@@ -80,11 +85,10 @@ def test_matches_eager_bitwise(dtype, batch, seq_len, q_heads, k_heads, head_dim
     actual = _run(fused_rope.fused_apply_rotary_pos_emb, q, k, cos, sin, grad_q, grad_k)
     for name, a, e in zip(("q_embed", "k_embed", "q.grad", "k.grad"), actual, expected):
         _assert_bitwise(a, e, name)
-    # The outputs keep the strides of their inputs, as eager's do.
-    assert actual[0].stride() == expected[0].stride()
-    assert actual[1].stride() == expected[1].stride()
-    # The gradients take the layout of q and k.
-    assert actual[2].stride() == q.stride()
+    # The outputs keep the strides of their inputs, as eager's do; the gradients take the layout of q and k.
+    assert _layout(actual[0]) == _layout(expected[0])
+    assert _layout(actual[1]) == _layout(expected[1])
+    assert _layout(actual[2]) == _layout(q)
 
 
 def test_heads_second_layout_with_unsqueeze_dim_2():

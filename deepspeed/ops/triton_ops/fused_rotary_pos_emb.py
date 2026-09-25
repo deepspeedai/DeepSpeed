@@ -189,6 +189,8 @@ def _launch(x, cos, sin, out, backward):
         BLOCK_S=_BLOCK_S,
         HEADS_PER_PROGRAM=_HEADS_PER_PROGRAM,
         BACKWARD=backward,
+        # Contracting a product and a sum into one FMA would skip the product's rounding, which eager performs.
+        enable_fp_fusion=False,
     )
     return out
 
@@ -202,6 +204,8 @@ class _FusedRotaryPosEmb(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, q, k, cos, sin):
+        # An unused output must leave its input without a gradient, as eager does, rather than a zero one.
+        ctx.set_materialize_grads(False)
         cos, sin = cos.contiguous(), sin.contiguous()
         # Outputs keep the strides of their inputs, as the eager expression's do.
         q_out = _launch(q, cos, sin, torch.empty_like(q), backward=False)
