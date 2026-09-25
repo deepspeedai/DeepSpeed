@@ -14,7 +14,7 @@ from transformers import AutoModel
 from unit.common import DistributedTest
 from deepspeed.sequence.layer import (DistributedAttention, _SeqAllToAll, _generate_layout_params, post_all2all,
                                       pre_all2all_fun, single_all_to_all)
-from deepspeed.sequence.fpdt_layer import _FPDTGPUOffloadingAttentionImpl_, FPDT_InputConstruct
+from deepspeed.sequence.fpdt_layer import _FPDTGPUAttentionImpl_, _FPDTGPUOffloadingAttentionImpl_, FPDT_InputConstruct
 from unit.util import skip_on_arch
 from unit.simple_model import *
 from deepspeed.utils import groups
@@ -382,6 +382,94 @@ class TestFPDTAttention(DistributedTest):
         assert torch.allclose(
             fpdt_output, baseline_output_shuffled, rtol=0.01, atol=0.1
         ), f"rank {dist.get_rank()}, sp size: {dist.get_world_size(spg)}, input_tensor: {input_tensor.shape}, fpdt_input_tensor: {fpdt_input_tensor.shape}, fpdt_output: {fpdt_output.shape},            baseline_output_shuffled: {baseline_output_shuffled.shape},{torch.max(torch.abs(fpdt_output - baseline_output_shuffled))}"
+
+
+@pytest.mark.parametrize("num_kv_heads", [2, 4, 8])
+class TestFPDTAttentionGQABackward(DistributedTest):
+    """The non-offloading FPDT attention must produce K/V gradients shaped like K/V, not Q, under GQA."""
+    world_size = 2
+
+    def test_gqa_backward_matches_reference(self, num_kv_heads: int) -> None:
+        skip_on_arch(min_arch=8)
+
+        try:
+            from flash_attn.flash_attn_interface import _flash_attn_forward, _flash_attn_backward
+        except ImportError:
+            _flash_attn_forward = None
+            _flash_attn_backward = None
+
+        if _flash_attn_forward is None or _flash_attn_backward is None:
+            pytest.skip("Flash Attention is not available.")
+
+        batch_size, seq_len, chunk_size = 2, 512, 128
+        num_heads, head_dim = 8, 32
+        dim = num_heads * head_dim
+        kv_dim = num_kv_heads * head_dim
+        qkv_dim = dim + 2 * kv_dim
+
+        ds_engine, _, _, _ = initialize(
+            model=SimpleModel(4),
+            config_params={
+                "train_batch_size": 8,
+                "data_parallel_size": 1,
+                "sequence_parallel_size": self.world_size
+            },
+        )
+        spg = ds_engine.seq_parallel_group
+        sp_size = dist.get_world_size(spg)
+        device = ds_engine.device
+
+        torch.manual_seed(42)
+        get_accelerator().manual_seed_all(42)
+        input_tensor = torch.randn(seq_len, batch_size, dim, device=device, dtype=torch.half)  # l, b, d
+        qkv_linear_weight = torch.randn(qkv_dim, dim, device=device, dtype=torch.half) * 0.02
+        qkv_linear_bias = torch.randn(qkv_dim, device=device, dtype=torch.half) * 0.02
+        grad_output = torch.randn(batch_size, seq_len, num_heads, head_dim, device=device, dtype=torch.half)
+        for tensor in (input_tensor, qkv_linear_weight, qkv_linear_bias, grad_output):
+            dist.broadcast(tensor, src=0, group=spg)
+
+        class args:
+            ds_sequence_parallel_fpdt_chunk_size = chunk_size
+
+        def shard(tensor_bld):
+            return FPDT_InputConstruct(tensor_bld, None, None, None, None, args(), sp_size,
+                                       dist.get_rank(spg)).generate()[0]
+
+        fpdt_input = shard(input_tensor.permute(1, 0, 2)).permute(1, 0, 2).contiguous().requires_grad_()
+        fpdt_weight = qkv_linear_weight.clone().requires_grad_()
+        fpdt_bias = qkv_linear_bias.clone().requires_grad_()
+        num_chunks = fpdt_input.shape[0] * sp_size // chunk_size
+
+        fpdt_output = _FPDTGPUAttentionImpl_.apply(fpdt_input, None, None, None, spg, 2, 0, dim, dim, head_dim, kv_dim,
+                                                   fpdt_weight, fpdt_bias, 0, num_chunks, False)
+        fpdt_output.backward(shard(grad_output))
+        dist.all_reduce(fpdt_weight.grad, group=spg)
+        dist.all_reduce(fpdt_bias.grad, group=spg)
+
+        # Reference: full-sequence causal GQA attention in fp32.
+        ref_input = input_tensor.float().requires_grad_()
+        ref_weight = qkv_linear_weight.float().requires_grad_()
+        ref_bias = qkv_linear_bias.float().requires_grad_()
+        qkv = torch.matmul(ref_input, ref_weight.t()) + ref_bias
+
+        def heads(x):
+            return x.reshape(seq_len, batch_size, -1, head_dim).permute(1, 2, 0, 3)  # b, n, l, d
+
+        q = heads(qkv[:, :, :dim])
+        k = heads(qkv[:, :, dim:dim + kv_dim]).repeat_interleave(num_heads // num_kv_heads, dim=1)
+        v = heads(qkv[:, :, dim + kv_dim:]).repeat_interleave(num_heads // num_kv_heads, dim=1)
+        ref_output = F.scaled_dot_product_attention(q, k, v, is_causal=True).permute(0, 2, 1, 3)  # b, l, n, d
+        ref_output.backward(grad_output.float())
+
+        def assert_close(actual, expected, name):
+            actual, expected = actual.float(), expected.float()
+            assert torch.allclose(actual, expected, rtol=0.05, atol=0.05), (
+                f"rank {dist.get_rank()} {name} mismatch: max diff {torch.max(torch.abs(actual - expected))}")
+
+        assert_close(fpdt_output, shard(ref_output), "output")
+        assert_close(fpdt_input.grad, shard(ref_input.grad.permute(1, 0, 2)).permute(1, 0, 2), "input grad")
+        assert_close(fpdt_weight.grad, ref_weight.grad, "qkv weight grad")
+        assert_close(fpdt_bias.grad, ref_bias.grad, "qkv bias grad")
 
 
 @pytest.mark.parametrize("sp_size", [2])
