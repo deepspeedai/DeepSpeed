@@ -900,6 +900,13 @@ class AutoEPMoELayer(nn.Module):
 
     def _forward(self, hidden_states: torch.Tensor) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         bsz, seqlen, hdim = hidden_states.shape
+        folded_tp = self.folding_group_handles is not None and self.folding_group_handles.spec.tp_size > 1
+        if folded_tp:
+            # Tensor-parallel layers before this one need the same input gradient on every TP peer;
+            # see average_gradient_over_tp.
+            from deepspeed.moe.ep_tp_dispatch import average_gradient_over_tp
+            hidden_states = average_gradient_over_tp(hidden_states, self.tp_group,
+                                                     self.folding_group_handles.spec.tp_size)
         x = hidden_states.reshape(-1, hdim)  # [T, H]
 
         # Fail all ranks before any collective can stall.
@@ -910,7 +917,6 @@ class AutoEPMoELayer(nn.Module):
         # Router
         ro: RouterOutput = RouterOutput(*self.router(x, self.expert_bias))
 
-        folded_tp = self.folding_group_handles is not None and self.folding_group_handles.spec.tp_size > 1
         pending_plan = None
         if self.async_split_plan and self.ep_size > 1 and self.comm_backend == COMM_BACKEND:
             if folded_tp:

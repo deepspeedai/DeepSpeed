@@ -245,10 +245,6 @@ def validate_folding_global(
         raise ValueError("expert_parallel with use_data_before_expert_parallel_ is not supported with "
                          "AutoEP+AutoTP folding. Disable use_data_before_expert_parallel_.")
 
-    if spec.tp_size > 1 and zero_stage == 3:
-        raise ValueError("AutoEP+AutoTP with ZeRO stage 3 is reserved for the separate ZeRO-3 composition lane. "
-                         "Use ZeRO stage 0, 1, or 2 for this folding MVP.")
-
     if spec.tp_size > 1 and (zero_offload_optimizer or zero_offload_param):
         raise ValueError("ZeRO optimizer/parameter offload with AutoEP+AutoTP folding is not validated yet. "
                          "Disable offload or run a follow-up proof for per-family replica groups.")
@@ -392,8 +388,8 @@ def autoep_folding_gradient_reduction_strategy(
     has no adjacent all-to-all, so partitioning it requires changing the dense
     activation layout, which is Sequence Parallel by definition.
 
-    Both the DeepSpeedEngine path and the ZeRO-2 path call this helper so the
-    policy cannot silently drift between optimizers.
+    The DeepSpeedEngine path, the ZeRO-2 path and the ZeRO-3 path all call this
+    helper so the policy cannot silently drift between optimizers.
     """
     if folding_spec is None or getattr(folding_spec, "tp_size", 1) <= 1:
         return AUTOEP_FOLDING_GRAD_REDUCE_SKIP

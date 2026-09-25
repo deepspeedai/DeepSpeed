@@ -49,9 +49,11 @@ Transformers build that exposes the matching config/model classes,
 
 **ZeRO compatibility:** Stages 0, 1, and 2, plus constrained Stage 3
 support. Stage 3 requires AutoEP-managed MoE layers and does not support native
-DeepSpeed MoE layers, AutoTP, tensor model parallelism from ``mpu``, sequence
+DeepSpeed MoE layers, tensor model parallelism from ``mpu``, sequence
 parallelism, hpZeRO secondary tensor groups, non-1 expert tensor
-parallelism, or quantized gradients. Stage 3 AutoEP checkpoints are saved
+parallelism, or quantized gradients. AutoTP folding
+(``tensor_parallel.autotp_size > 1``) works at Stage 3 as at stages 0 to 2,
+including models built under ``deepspeed.zero.Init``. Stage 3 AutoEP checkpoints are saved
 partition-natively in the ``zero_pp_rank_*`` shard files and support
 same-topology load, module-only loads (``load_module_only``),
 optimizer-state-free loads (``load_optimizer_states=False``), and Universal
@@ -296,9 +298,12 @@ implementation and itself.
 - ``autoep_size`` must divide ``num_experts`` for all detected MoE layers.
 - ``autoep_size=1`` is valid: all experts remain local (no AllToAll), useful
   for functional testing on a single GPU.
-- AutoEP currently cannot be combined with AutoTP
-  (``tensor_parallel.autotp_size > 1``) or tensor model parallelism from
-  ``mpu``; support is planned as follow-up work.
+- AutoEP combines with AutoTP (``tensor_parallel.autotp_size > 1``) by
+  folding: on the same ranks, AutoTP shards the layers its partition
+  specification names and AutoEP distributes the routed experts. Folding
+  supports ZeRO stages 0 to 3 with ``expert_tensor_parallel_size=1``, and
+  rejects ZeRO optimizer or parameter offload and DeepCompile. Tensor model
+  parallelism from ``mpu`` is not supported.
 - AutoEP with ZeRO Stage 3 is supported only without sequence parallelism,
   hpZeRO secondary tensor groups, non-1 expert tensor parallelism, or
   quantized gradients.

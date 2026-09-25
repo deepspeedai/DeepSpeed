@@ -22,6 +22,8 @@ from deepspeed.module_inject.layers import is_autotp_training_mode
 from deepspeed.module_inject.layers import _build_param_uc_restore_meta
 from deepspeed.checkpoint.constants import DS_AUTOTP_UC_META
 from .autotp_config import TPLayerSpec, AutoTPConfig, PartitionType
+from deepspeed.runtime.zero import GatheredParameters
+from deepspeed.runtime.zero.utils import is_zero_param
 
 
 def move(tensor, device, copy=True):
@@ -196,6 +198,15 @@ class Loading():
                     module.norm.bias = mp_replace.copy(module.norm.bias, state_dict[prefix + 'bias'])
 
 
+def _weight_ndim(weight):
+    """Number of dimensions of a layer's weight. A weight partitioned by ``deepspeed.zero.Init``
+    holds an empty 1-D placeholder, so its original shape, ``ds_shape``, is used instead."""
+    ds_shape = getattr(weight, "ds_shape", None)
+    if ds_shape is not None:
+        return len(ds_shape)
+    return getattr(weight, "dim", lambda: 0)()
+
+
 class AutoTP():
 
     def __init__(self,
@@ -243,6 +254,9 @@ class AutoTP():
         self._gathered_column_tie_fallbacks_configured = False
         self._tied_gathered_column_module_names = set()
         TensorParallel_Layer.set_keep_module_on_host(keep_module_on_host)
+        # The parameters _gather_zero3_params replaced, for the engine to re-point a caller's optimizer.
+        from deepspeed.module_inject.auto_ep_layer import ReplacementSourceMap
+        self.replacement_sources = ReplacementSourceMap()
 
     def in_module_list(module, module_list):
         for item in module_list:
@@ -476,10 +490,36 @@ class AutoTP():
         if spec.partition_type == PartitionType.SKIP:
             return child
 
+        self._gather_zero3_params(child)
         if spec.partition_type == PartitionType.ROW:
             return self._create_row_parallel_layer(child, spec, name)
         else:
             return self._create_column_parallel_layer(child, spec, name)
+
+    def _gather_zero3_params(self, module):
+        """Give ``module`` full, ordinary parameters in place of ZeRO-3 partitioned ones.
+
+        Under ``deepspeed.zero.Init`` every rank holds one partition of each weight and an empty
+        placeholder as its data, so the tensor-parallel layer would slice the placeholder. Each
+        weight is gathered once and replaced by an ordinary parameter holding the full value, which
+        the layer then slices to this rank's shard. ZeRO-3 partitions that shard over the
+        data-parallel group when it builds its optimizer. The replaced parameters are recorded in
+        ``self.replacement_sources`` so the engine can re-point an optimizer built before.
+        """
+        zero_params = [(name, param) for name, param in module.named_parameters(recurse=False) if is_zero_param(param)]
+        if not zero_params:
+            return
+        with GatheredParameters([param for _, param in zero_params], modifier_rank=None):
+            full_values = [(name, param, param.data.clone()) for name, param in zero_params]
+        for name, source, value in full_values:
+            replacement = nn.Parameter(value, requires_grad=source.requires_grad)
+            # Optimizer tags set by deepspeed.set_optimizer_flags before the engine runs AutoTP.
+            for attr in ("use_muon", "muon_num_heads"):
+                if hasattr(source, attr):
+                    setattr(replacement, attr, getattr(source, attr))
+            setattr(module, name, replacement)
+            self.replacement_sources.sources[id(replacement)] = [source]
+            self.replacement_sources.discarded.add(id(source))
 
     def _create_row_parallel_layer(self, module, spec: TPLayerSpec, name: str):
         """Create row-parallel layer (AllReduce after forward)."""
@@ -814,8 +854,7 @@ class AutoTP():
             if child is None:
                 continue
             full_name = f"{autoep_name}.{child_name}" if autoep_name else child_name
-            if self.partition_config is not None and hasattr(child, "weight") and getattr(
-                    child.weight, "dim", lambda: 0)() == 2:
+            if self.partition_config is not None and hasattr(child, "weight") and _weight_ndim(child.weight) == 2:
                 new_child = self._replace_with_config(child, full_name)
                 if new_child is not None:
                     setattr(autoep_layer, child_name, new_child)
@@ -870,7 +909,7 @@ class AutoTP():
                         if new_child is not None:
                             setattr(r_module, name, new_child)
                     # If no pattern matched or skip, leave embedding unchanged
-                elif hasattr(child, "weight") and getattr(child.weight, "dim", lambda: 0)() == 2:
+                elif hasattr(child, "weight") and _weight_ndim(child.weight) == 2:
                     new_child = self._replace_with_config(child, full_name)
                     if new_child is not None:
                         setattr(r_module, name, new_child)
