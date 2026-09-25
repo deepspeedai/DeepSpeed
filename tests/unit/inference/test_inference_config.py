@@ -22,6 +22,84 @@ def test_max_out_tokens_must_be_positive(field, value):
 
 
 @pytest.mark.inference
+def test_generate_rejects_input_plus_max_new_tokens_over_budget():
+    # Regression test for https://github.com/deepspeedai/DeepSpeed/issues/3081.
+    # max_out_tokens sizes the KV-cache workspace for the whole generation (input
+    # tokens plus newly generated ones), but the length check in
+    # InferenceEngine._generate only compared the input length against it, so a
+    # request whose input alone fit could still push input + max_new_tokens past
+    # the workspace size and reach the wrapped module's generate() unguarded.
+    class GenerateStub(torch.nn.Module):
+
+        def generate(self, *args, **kwargs):
+            return "reached-generate"
+
+    engine = deepspeed.init_inference(GenerateStub(), config={"max_out_tokens": 100, "dtype": torch.float32})
+
+    with pytest.raises(RuntimeError, match="exceed"):
+        engine.generate(input_ids=torch.zeros((1, 90), dtype=torch.long), max_new_tokens=20)
+
+    # An input that fits alongside its requested new tokens must still be let through.
+    assert engine.generate(input_ids=torch.zeros((1, 58), dtype=torch.long), max_new_tokens=20) == "reached-generate"
+
+
+@pytest.mark.inference
+def test_generate_rejects_max_length_over_budget():
+    # max_length is already a total (input + new tokens) budget in its own right,
+    # so an overflow expressed that way must be caught even when max_new_tokens
+    # is never set.
+    class GenerateStub(torch.nn.Module):
+
+        def generate(self, *args, **kwargs):
+            return "reached-generate"
+
+    engine = deepspeed.init_inference(GenerateStub(), config={"max_out_tokens": 100, "dtype": torch.float32})
+
+    with pytest.raises(RuntimeError, match="exceed"):
+        engine.generate(input_ids=torch.zeros((1, 90), dtype=torch.long), max_length=4000)
+
+
+@pytest.mark.inference
+def test_generate_lets_fitting_call_through_when_both_budgets_set():
+    # transformers gives max_new_tokens precedence over max_length when both are
+    # set (see GenerationMixin._prepare_generated_length), so the guard must
+    # mirror that precedence rather than reject on whichever of the two is
+    # larger: a call whose *effective* total (input + max_new_tokens) fits must
+    # not be rejected just because the unused max_length would not have fit.
+    class GenerateStub(torch.nn.Module):
+
+        def generate(self, *args, **kwargs):
+            return "reached-generate"
+
+    engine = deepspeed.init_inference(GenerateStub(), config={"max_out_tokens": 100, "dtype": torch.float32})
+
+    assert engine.generate(input_ids=torch.zeros((1, 90), dtype=torch.long), max_new_tokens=5,
+                           max_length=4000) == "reached-generate"
+
+
+@pytest.mark.inference
+def test_generate_with_generation_config_does_not_crash_and_still_checks_budget():
+    # transformers' GenerationConfig defaults num_beams to None (not 1), so the
+    # pre-existing `getattr(gen_config, "num_beams", 1)` returned None instead of
+    # falling back, and `None > 1` raised TypeError before the length guard below
+    # it ever ran -- silently making the generation_config fallback unreachable.
+    from transformers import GenerationConfig
+
+    class GenerateStub(torch.nn.Module):
+
+        def generate(self, *args, **kwargs):
+            return "reached-generate"
+
+    engine = deepspeed.init_inference(GenerateStub(), config={"max_out_tokens": 100, "dtype": torch.float32})
+
+    gen_config = GenerationConfig(max_new_tokens=20)
+    assert gen_config.num_beams is None
+
+    with pytest.raises(RuntimeError, match="exceed"):
+        engine.generate(input_ids=torch.zeros((1, 90), dtype=torch.long), generation_config=gen_config)
+
+
+@pytest.mark.inference
 @pytest.mark.skipif(not get_accelerator().is_available(), reason="requires accelerator")
 class TestInferenceCudaGraphConfig:
 
