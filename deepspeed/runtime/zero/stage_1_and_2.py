@@ -2691,6 +2691,10 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         if not self.overflow:
             self._commit_muon_momentum()
         if self.overflow:
+            logger.warning(
+                f"[ZeRO] Gradient overflow detected. Skipping optimizer step. "
+                f"Loss scale: {self.loss_scale}. "
+                f"Total skipped steps so far: {self.skipped_steps + 1}.")
             see_memory_usage('After overflow before clearing gradients')
             self.zero_grad(set_to_none=True)
             self._release_preflattened_grad_buffers()
