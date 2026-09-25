@@ -7,6 +7,7 @@ from __future__ import annotations
 import functools
 import importlib
 import sys
+import types
 
 import torch
 from torch.autograd.function import once_differentiable
@@ -263,10 +264,24 @@ def fused_apply_rotary_pos_emb(q: torch.Tensor,
     return _run_kernels(q, k, cos, sin, unsqueeze_dim)
 
 
+def _code_key(code, docstring=None):
+    # The bytecode refers to constants by index, so a function that changes only a constant, such as the split point
+    # of rotate_half, keeps its bytecode. A docstring is stored as the first constant but changes nothing computed.
+    constants = list(code.co_consts)
+    if docstring is not None and constants and constants[0] == docstring:
+        constants[0] = None
+    # Types are compared too, since 2 == 2.0 == True; nested code objects are compared by their own key.
+    constants = tuple(
+        _code_key(constant) if isinstance(constant, types.CodeType) else (type(constant), constant)
+        for constant in constants)
+    return code.co_code, code.co_names, code.co_varnames, constants
+
+
 def _same_code(function, reference):
-    code, expected = getattr(function, "__code__", None), reference.__code__
-    return (code is not None and code.co_code == expected.co_code and code.co_names == expected.co_names
-            and code.co_varnames == expected.co_varnames and function.__defaults__ == reference.__defaults__)
+    code = getattr(function, "__code__", None)
+    if code is None or function.__defaults__ != reference.__defaults__:
+        return False
+    return _code_key(code, function.__doc__) == _code_key(reference.__code__, reference.__doc__)
 
 
 def _make_fused(original):

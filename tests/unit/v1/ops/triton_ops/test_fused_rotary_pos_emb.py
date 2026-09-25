@@ -275,6 +275,60 @@ def test_installer_leaves_a_changed_expression_alone(restore_after, monkeypatch)
     assert modeling.apply_rotary_pos_emb is rope_with_cast
 
 
+def _rotate_a_quarter(x):
+    """Rotates half the hidden dims of the input."""
+    x1 = x[..., :x.shape[-1] // 4]
+    x2 = x[..., x.shape[-1] // 4:]
+    return torch.cat((-x2, x1), dim=-1)
+
+
+def _rotate_along_the_sequence(x):
+    """Rotates half the hidden dims of the input."""
+    x1 = x[..., :x.shape[-2] // 2]
+    x2 = x[..., x.shape[-2] // 2:]
+    return torch.cat((-x2, x1), dim=-2)
+
+
+# Each differs from the split-half rotate_half only in constants, which its bytecode refers to by index. From
+# Python 3.14 small integers are written into the bytecode instead, so only the second stays bytecode-identical there.
+@pytest.mark.parametrize("changed_rotate_half", [_rotate_a_quarter, _rotate_along_the_sequence],
+                         ids=["quarter", "sequence-axis"])
+def test_installer_leaves_a_rotation_with_changed_constants_alone(restore_after, monkeypatch, changed_rotate_half):
+    _, modeling, model = _tiny_qwen3()
+    original = modeling.apply_rotary_pos_emb
+    monkeypatch.setattr(modeling, "rotate_half", changed_rotate_half)
+    assert fused_rope.replace_rotary_pos_emb(model) == 0
+    assert modeling.apply_rotary_pos_emb is original
+
+
+def _rotate_half_documented_differently(x):
+    """The split-half rotation, documented differently."""
+    x1 = x[..., :x.shape[-1] // 2]
+    x2 = x[..., x.shape[-1] // 2:]
+    return torch.cat((-x2, x1), dim=-1)
+
+
+# The expression below looks the rotation up by this name, as the Hugging Face function does in its module.
+rotate_half = _rotate_half_documented_differently
+
+
+def _apply_documented_differently(q, k, cos, sin, unsqueeze_dim=1):
+    """The split-half expression, documented differently."""
+    cos = cos.unsqueeze(unsqueeze_dim)
+    sin = sin.unsqueeze(unsqueeze_dim)
+    q_embed = (q * cos) + (rotate_half(q) * sin)
+    k_embed = (k * cos) + (rotate_half(k) * sin)
+    return q_embed, k_embed
+
+
+def test_installer_accepts_functions_that_differ_only_in_docstrings(restore_after, monkeypatch):
+    _, modeling, model = _tiny_qwen3()
+    monkeypatch.setattr(modeling, "apply_rotary_pos_emb", _apply_documented_differently)
+    monkeypatch.setattr(modeling, "rotate_half", _rotate_half_documented_differently)
+    assert fused_rope.replace_rotary_pos_emb(model) == 1
+    assert modeling.apply_rotary_pos_emb is not _apply_documented_differently
+
+
 def test_installed_function_runs_eager_for_unsupported_inputs(restore_after):
     _, modeling, model = _tiny_qwen3()
     original = modeling.apply_rotary_pos_emb
