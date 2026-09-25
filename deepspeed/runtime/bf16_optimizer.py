@@ -24,7 +24,8 @@ from deepspeed.checkpoint.constants import UNIVERSAL_CHECKPOINT_INFO
 from deepspeed.checkpoint.constants import (DS_VERSION, PARTITION_COUNT, BASE_OPTIMIZER_STATE,
                                             SINGLE_PARTITION_OF_FP32_GROUPS, CLIP_GRAD, GROUP_PADDINGS,
                                             PARAM_SLICE_MAPPINGS)
-from deepspeed.module_inject.auto_ep_folding import apply_folding_correction_to_grad_buffer
+from deepspeed.module_inject.auto_ep_folding import (apply_folding_correction_to_grad_buffer,
+                                                     clear_autoep_folding_gradient_corrected)
 
 setattr(sys.modules[__name__], 'fragment_address', fragment_address)
 
@@ -722,6 +723,8 @@ class BF16_Optimizer(ZeROOptimizer):
         # through the end of backward, and zeroing it instead frees nothing. Graph harvesting replays
         # captured kernels on fixed gradient addresses, so it keeps them.
         if not self.graph_harvesting:
+            # The correction marker belongs to the low-precision gradient being released.
+            clear_autoep_folding_gradient_corrected(lp_param)
             lp_param.grad = None
 
     def create_grad_acc_hooks(self):
