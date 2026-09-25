@@ -104,7 +104,7 @@ _REMOVED_TOP_LEVEL_CONFIG_KEYS = {
     f"supported. See {_REMOVED_FEATURES_ISSUE}.",
     "elasticity":
     "Elastic training has been removed; the 'elasticity' configuration block is no longer supported. "
-    "Set train_batch_size / train_micro_batch_size_per_gpu / gradient_accumulation_steps directly. "
+    "Set train_batch_size / train_micro_batch_size_per_gpu / gradient_accumulation_steps directly. ",
     "graph_harvesting":
     "Graph harvesting has been removed; the 'graph_harvesting' configuration option is no longer supported. "
     f"See {_REMOVED_FEATURES_ISSUE}.",
