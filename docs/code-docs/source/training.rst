@@ -55,6 +55,25 @@ Optimizer Step
 --------------
 .. autofunction:: deepspeed.DeepSpeedEngine.step
 
+Parallelism Topology
+--------------------
+``DeepSpeedEngine`` exposes the rank and world size of each parallelism axis.
+Unused axes report rank ``0`` and world size ``1``. Ulysses sequence-parallel
+MPUs are treated as sequence-only: tensor/model-parallel getters stay at those
+defaults instead of inheriting the sequence-parallel alias.
+
+.. automethod:: deepspeed.DeepSpeedEngine.get_data_parallel_rank
+.. automethod:: deepspeed.DeepSpeedEngine.get_data_parallel_world_size
+.. automethod:: deepspeed.DeepSpeedEngine.get_tensor_parallel_rank
+.. automethod:: deepspeed.DeepSpeedEngine.get_tensor_parallel_world_size
+.. automethod:: deepspeed.DeepSpeedEngine.get_model_parallel_rank
+.. automethod:: deepspeed.DeepSpeedEngine.get_model_parallel_world_size
+.. automethod:: deepspeed.DeepSpeedEngine.get_pipeline_parallel_rank
+.. automethod:: deepspeed.DeepSpeedEngine.get_pipeline_parallel_world_size
+.. automethod:: deepspeed.DeepSpeedEngine.get_sequence_parallel_rank
+.. automethod:: deepspeed.DeepSpeedEngine.get_sequence_parallel_world_size
+.. automethod:: deepspeed.DeepSpeedEngine.get_sequence_parallel_group
+
 Gradient Accumulation
 ---------------------
 DeepSpeed accumulates gradients over ``gradient_accumulation_steps`` micro-batches
