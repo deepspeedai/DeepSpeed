@@ -3149,10 +3149,10 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                 self.overflow = True
 
         prev_scale = self.loss_scale
-        self._update_scale(self.overflow)
         if not self.overflow:
             self._commit_muon_momentum()
         if self.overflow:
+            self._update_scale(self.overflow)
             if self.compute_grad_norm:
                 self._global_grad_norm = float("inf")
             see_memory_usage('After overflow before clearing gradients')
@@ -3274,6 +3274,8 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         self.timers.log(OPTIMIZER_TIMERS)
         see_memory_usage('After zero_optimizer step')
 
+        # All parameter groups must use the scale from this step's backward.
+        self._update_scale(self.overflow)
         return
 
     @torch.no_grad()

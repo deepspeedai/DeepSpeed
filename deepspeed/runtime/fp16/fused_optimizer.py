@@ -182,8 +182,6 @@ class FP16_Optimizer(DeepSpeedOptimizer):
         scaled_grad_norm = get_global_norm(norm_list=norm_groups)
         if is_invalid_grad_norm(scaled_grad_norm):
             return self._skip_invalid_grad_norm()
-        if self.loss_scale_config.use_grad_scaling:
-            self._update_scale(False)
 
         combined_scale = self.unscale_and_clip_grads(grads_groups_flat, scaled_grad_norm, apply_scale=False)
 
@@ -200,6 +198,8 @@ class FP16_Optimizer(DeepSpeedOptimizer):
             updated_params = _unflatten_dense_tensors(self.fp16_groups_flat[i], self.fp16_groups[i])
             for p, q in zip(self.fp16_groups[i], updated_params):
                 p.data = q.data
+        if self.loss_scale_config.use_grad_scaling:
+            self._update_scale(self.overflow)
         return self.overflow
 
     def set_lr(self, lr):
@@ -333,8 +333,6 @@ class FP16_Optimizer(DeepSpeedOptimizer):
             return self._skip_invalid_grad_norm()
         if self.timers:
             self.timers(COMPUTE_NORM_TIMER).stop()
-        if self.loss_scale_config.use_grad_scaling:
-            self._update_scale(False)
 
         # Stash unscaled gradient norm
         self._global_grad_norm = scaled_global_grad_norm / self.loss_scale_config.cur_scale
@@ -369,6 +367,9 @@ class FP16_Optimizer(DeepSpeedOptimizer):
         if self.timers:
             self.timers.log(STEP_TIMERS)
 
+        # The current gradients must be unscaled before the scale can grow.
+        if self.loss_scale_config.use_grad_scaling:
+            self._update_scale(self.overflow)
         return self.overflow
 
     def unscale_and_clip_grads(self, grad_groups_flat, total_norm, apply_scale=True):
