@@ -279,7 +279,8 @@ class TestDistIsendIrecv(DistributedTest):
             self.non_daemonic_procs = True
             self.reuse_dist_env = False
             return self._launch_non_daemonic_procs(num_procs, init_method)
-        torch.multiprocessing.set_start_method('forkserver', force=True)
+        start_method = 'forkserver' if 'forkserver' in torch.multiprocessing.get_all_start_methods() else 'spawn'
+        torch.multiprocessing.set_start_method(start_method, force=True)
         self._launch_daemonic_procs(num_procs, init_method)
 
     def test(self):

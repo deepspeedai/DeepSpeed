@@ -26,7 +26,9 @@ void do_aio_operation_overlap(const bool read_op,
                               deepspeed_aio_config_t* config,
                               deepspeed_aio_perf_t* perf);
 
-int open_file(const char* filename, const bool read_op);
+aio_fd_t open_file(const char* filename, const bool read_op);
+
+void close_file(const aio_fd_t fd);
 
 void report_file_error(const char* filename, const std::string file_op, const int error_code);
 
