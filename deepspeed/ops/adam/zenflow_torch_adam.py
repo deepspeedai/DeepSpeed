@@ -60,7 +60,7 @@ class ZenFlowSelectiveAdamW(torch.optim.AdamW):
     def temp_copy_param(self, group_to_paramlist):
         for group_id, params in group_to_paramlist.items():
             for param in params:
-                if hasattr(param, "selected_grad"):
+                if getattr(param, "selected_grad", None) is not None:
                     temp_selected_param = param.data[:, param.selected_indices].clone().detach() if len(
                         param.shape) != 1 else param.data.clone().detach()
                     if self.offload:
@@ -97,6 +97,7 @@ class ZenFlowSelectiveAdamW(torch.optim.AdamW):
     @torch.no_grad()
     def _step_without_offload(self):
         for group in self.param_groups:
+            params = [p for p in group["params"] if getattr(p, "selected_grad", None) is not None]
 
             params_with_grad: List[Tensor] = []
             grads: List[Tensor] = []
@@ -107,8 +108,8 @@ class ZenFlowSelectiveAdamW(torch.optim.AdamW):
             amsgrad: bool = group["amsgrad"]
             beta1, beta2 = cast(Tuple[float, float], group["betas"])
 
-            for param in group["params"]:
-                if hasattr(param, "selected_grad"):
+            for param in params:
+                if getattr(param, "selected_grad", None) is not None:
                     selected_param = param.data[:, param.selected_indices] if len(param.shape) != 1 else param.data
                     if hasattr(param, 'temp_selected_param') and param.temp_selected_param is not None:
                         selected_param.copy_(param.temp_selected_param)
@@ -145,12 +146,12 @@ class ZenFlowSelectiveAdamW(torch.optim.AdamW):
                 maximize=False,
             )
 
-            for i, param in enumerate(group["params"]):
-                if hasattr(param, "selected_grad"):
+            for i, param in enumerate(params):
+                if getattr(param, "selected_grad", None) is not None:
                     if len(param.shape) != 1:
                         param.data[:, param.selected_indices] = params_with_grad[i]
 
-            for param in group["params"]:
+            for param in params:
                 if hasattr(param, "temp_selected_param"):
                     param.temp_selected_param = None
                     param.selected_grad = None
@@ -184,7 +185,7 @@ class ZenFlowSelectiveAdamW(torch.optim.AdamW):
                 bucket.clear()
 
             for param in params:
-                if hasattr(param, "selected_grad"):
+                if getattr(param, "selected_grad", None) is not None:
                     bucket.append(param)
                     bucket_numel += param.numel()
                     if bucket_numel >= self.bucket_size:
@@ -196,6 +197,7 @@ class ZenFlowSelectiveAdamW(torch.optim.AdamW):
     @torch.no_grad()
     def group_step(self, group_to_paramlist):
         for group_id, params in group_to_paramlist.items():
+            params = [p for p in params if getattr(p, "selected_grad", None) is not None]
             group = self.param_groups[group_id]
 
             if self.offload:
@@ -212,7 +214,7 @@ class ZenFlowSelectiveAdamW(torch.optim.AdamW):
             beta1, beta2 = cast(Tuple[float, float], group["betas"])
 
             for param in params:
-                if hasattr(param, "selected_grad"):
+                if getattr(param, "selected_grad", None) is not None:
                     is_2d = (len(param.shape) != 1)
                     selected_param = param.data[:, param.selected_indices] if is_2d else param.data
 
