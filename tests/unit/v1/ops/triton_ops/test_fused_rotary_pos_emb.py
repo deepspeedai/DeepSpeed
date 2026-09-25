@@ -166,6 +166,11 @@ def test_double_backward_raises():
         grad_q.float().sum().backward()
 
 
+# Parametrized by name, so collection creates no tensors on any device; each test builds its own inputs.
+_UNSUPPORTED_CASES = ("float32", "dtype mismatch", "cpu", "odd head dimension", "strided head dimension",
+                      "sequence mismatch", "table requires grad", "unsqueeze_dim")
+
+
 def _unsupported_cases():
     dtype = torch.bfloat16
     q = torch.randn(1, 4, 8, 128, device=_device(), dtype=dtype)
@@ -183,7 +188,7 @@ def _unsupported_cases():
     }
 
 
-@pytest.mark.parametrize("case", list(_unsupported_cases()))
+@pytest.mark.parametrize("case", _UNSUPPORTED_CASES)
 def test_direct_call_rejects_unsupported_inputs(case):
     with pytest.raises(RuntimeError, match="fused RoPE"):
         fused_rope.fused_apply_rotary_pos_emb(*_unsupported_cases()[case])
