@@ -92,3 +92,32 @@ class TestInferenceConfig(DistributedTest):
             config = DeepSpeedInferenceConfig(moe=value)
             assert isinstance(config.moe, DeepSpeedMoEConfig)
             assert config.moe.enabled == value
+
+    def test_int8_dtype_accepted_with_injection_policy(self):
+        # Regression test: the dtype gate added in #6528 ("add bfloat16 to inference support
+        # dtypes") replaced a narrow fp16-only check with `get_accelerator().supported_dtypes()`,
+        # whose per-accelerator lists (cpu/cuda/hpu/mlu/xpu) have never included torch.int8. That
+        # unintentionally made every `init_inference(..., dtype=torch.int8)` call raise ValueError
+        # on every accelerator, even when an injection_policy is given and
+        # replace_module.py's replace_transformer_layer would actually consume config.dtype ==
+        # torch.int8 to build a quantizer.
+        class _WithLinear(torch.nn.Module):
+
+            def __init__(self):
+                super().__init__()
+                self.lin = torch.nn.Linear(4, 4)
+
+        engine = deepspeed.init_inference(_WithLinear(),
+                                          dtype=torch.int8,
+                                          injection_policy={torch.nn.Linear: ("lin", )})
+        assert engine._config.dtype == torch.int8
+
+    def test_int8_dtype_without_consumer_raises(self):
+        # torch.int8 is only consumed by replace_transformer_layer's quantizer construction,
+        # reached solely via kernel injection / an injection_policy / AutoTP
+        # (tensor_parallel.tp_size > 1 or tensor_parallel.mpu). Plain dtype conversion
+        # (InferenceEngine._convert_to_dtype) never acts on int8, so without one of those,
+        # accepting the dtype would silently leave weights in their original dtype while
+        # `_config.dtype` claimed int8. Assert this now fails loudly instead.
+        with pytest.raises(ValueError, match="requires kernel injection or a replacement policy"):
+            deepspeed.init_inference(torch.nn.Linear(4, 4), dtype=torch.int8)
