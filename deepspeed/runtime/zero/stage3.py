@@ -3522,6 +3522,23 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         else:
             self.load_module_checkpoint_state_from_checkpoint_dir_stage3(checkpoint_folder, load_from_fp32_weights)
 
+    def _universal_state_keys(self, checkpoint_dir, fp16_group):
+        """The states this sub-group's parameters were saved with, `fp32` first.
+
+        Which states exist is the optimizer's business, and it can differ within one run: Muon
+        keeps `momentum_buffer` for the matrices it orthogonalizes and Adam's pair for the rest,
+        each in its own param group, so the answer is per sub-group rather than per checkpoint.
+        """
+        for param in fp16_group:
+            folder = os.path.join(checkpoint_dir, self.param_names[param])
+            if not os.path.isdir(folder):
+                continue
+            keys = {f[:-len(".pt")] for f in os.listdir(folder) if f.endswith(".pt")}
+            keys.discard("step")
+            if keys:
+                return sorted(keys, key=lambda key: (key != "fp32", key))
+        return ["fp32"]
+
     def load_hp_checkpoint_state_from_checkpoint_dir_stage3(self, checkpoint_dir):
         """ Load optimizer and model states from the checkpoint directory. """
         checkpoint_dir = os.path.join(checkpoint_dir, "zero")
@@ -3533,9 +3550,13 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         self._load_global_state_stage3(optim_sd)
 
         # Generally the step of each optimizer file should be the same, we can obtain from any parameter.
-        state_step = optim_sd[OPTIMIZER_STATE_DICT]['state'][0]['step']
-        for key in ["fp32", "exp_avg", "exp_avg_sq"]:
-            for sub_group_id, fp16_group in enumerate(self.fp16_groups):
+        # Not every group has one to give: Muon keeps no step count for the parameters it
+        # orthogonalizes, and those can be the first group.
+        saved_states = optim_sd[OPTIMIZER_STATE_DICT]['state']
+        saved_states = saved_states.values() if isinstance(saved_states, dict) else saved_states
+        state_step = next((state['step'] for state in saved_states if 'step' in state), None)
+        for sub_group_id, fp16_group in enumerate(self.fp16_groups):
+            for key in self._universal_state_keys(checkpoint_dir, fp16_group):
                 fp32_param = self.fp32_partitioned_groups_flat[sub_group_id]
                 key_tensor = torch.zeros_like(fp32_param)
                 offset = 0
@@ -3550,13 +3571,20 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                     offset += key_layer_state_partition.numel()
                 if key == "fp32":
                     self.fp32_partitioned_groups_flat[sub_group_id].data.copy_(key_tensor)
-                    self.optimizer.state[fp32_param]['step'] = state_step
+                    if state_step is not None:
+                        self.optimizer.state[fp32_param]['step'] = state_step
                 else:
                     self.optimizer.state[fp32_param][key] = key_tensor
 
-        for param_group in self.optimizer.param_groups:
-            # Generally, the hyperparameters of each parameter should be the same, we can obtain from any parameter.
-            for key, value in optim_sd[OPTIMIZER_STATE_DICT]["param_groups"][0].items():
+        # Each group takes back its own hyperparameters. Muon keeps two groups with different
+        # settings, its own and the Adam half's, and copying the first onto both runs the Adam half
+        # as a Muon group.
+        saved_groups = optim_sd[OPTIMIZER_STATE_DICT]["param_groups"]
+        if len(saved_groups) != len(self.optimizer.param_groups):
+            # No group to match each to, so fall back to copying the first, as before.
+            saved_groups = [saved_groups[0]] * len(self.optimizer.param_groups)
+        for param_group, saved_group in zip(self.optimizer.param_groups, saved_groups):
+            for key, value in saved_group.items():
                 if key == 'params':
                     param_group['params'] = []
                 else:
