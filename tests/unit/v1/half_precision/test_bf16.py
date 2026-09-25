@@ -9,7 +9,7 @@ import pytest
 from deepspeed.ops.adam import FusedAdam
 from unit.common import DistributedTest
 from deepspeed.ops.op_builder import CPUAdamBuilder
-from unit.simple_model import SimpleModel, SimpleOptimizer, random_dataloader
+from unit.simple_model import SimpleModel, SimpleOptimizer, random_dataloader, random_dataset
 from unit.util import bf16_required_version_check
 from deepspeed import comm as dist
 from deepspeed.accelerator import get_accelerator
@@ -506,3 +506,71 @@ class TestBF16OptimizerStatesOffloadValidation(DistributedTest):
 
         with pytest.raises(AssertionError, match="fp32_optimizer_states=False"):
             deepspeed.initialize(config=config_dict, model=model, optimizer=optimizer)
+
+
+class TestBF16ImmediateGradUpdateReleasesLowPrecisionGrads(DistributedTest):
+    """Accumulating each gradient as it is produced must train identically and not keep a BF16 copy."""
+    world_size = 2
+
+    def _train(self, immediate_grad_update, batches, hidden_dim, seed):
+        torch.manual_seed(seed)
+        model = SimpleModel(hidden_dim, nlayers=2)
+        config_dict = {
+            "train_micro_batch_size_per_gpu": 2,
+            "gradient_accumulation_steps": len(batches),
+            "optimizer": {
+                "type": "Adam",
+                "params": {
+                    "lr": 1e-2
+                }
+            },
+            "bf16": {
+                "enabled": True,
+                "immediate_grad_update": immediate_grad_update
+            },
+            "data_types": {
+                "grad_accum_dtype": "fp32"
+            },
+            # BF16 with FP32 gradient accumulation selects BF16_Optimizer at ZeRO stage 1.
+            "zero_optimization": {
+                "stage": 1
+            },
+        }
+        engine, _, _, _ = deepspeed.initialize(config=config_dict, model=model, model_parameters=model.parameters())
+        lp_grads_after_backward = []
+        fp32_grads = None
+        for index, (inputs, labels) in enumerate(batches):
+            engine.backward(engine(inputs, labels))
+            lp_grads_after_backward.append([param.grad for param in engine.module.parameters()])
+            if index == len(batches) - 1:
+                # The FP32 accumulation buffer after the last micro-batch, read the same way in both modes;
+                # safe_get_full_grad would return the BF16 .grad whenever one is still alive.
+                fp32_grads = {
+                    name: param.get_full_hp_grad().detach().cpu().clone()
+                    for name, param in engine.module.named_parameters()
+                }
+            # DeepSpeed advances the accumulation boundary in step(); only the last call updates parameters.
+            engine.step()
+        parameters = {name: param.detach().float().cpu().clone() for name, param in engine.module.named_parameters()}
+        engine.destroy()
+        return lp_grads_after_backward, fp32_grads, parameters
+
+    def test_matches_backward_epilogue_accumulation(self):
+        if not bf16_required_version_check():
+            pytest.skip("DeepSpeed BFloat16 tests need torch >= 1.10, NCCL >= 2.10.3, CUDA >= 11.0 and HW support")
+        hidden_dim = 8
+        device, _, _ = initialize_distributed()
+        data_loader = torch.utils.data.DataLoader(random_dataset(8, hidden_dim, device, dtype=torch.bfloat16),
+                                                  batch_size=2)
+        batches = [batch for batch, _ in zip(data_loader, range(2))]
+
+        epilogue_lp, epilogue_grads, epilogue_parameters = self._train(False, batches, hidden_dim, seed=7)
+        immediate_lp, immediate_grads, immediate_parameters = self._train(True, batches, hidden_dim, seed=7)
+
+        assert all(grad is not None for grads in epilogue_lp for grad in grads)
+        assert all(grad is None for grads in immediate_lp for grad in grads), "BF16 gradients outlived accumulation"
+        assert epilogue_grads.keys() == immediate_grads.keys() and epilogue_grads
+        for name in epilogue_grads:
+            assert torch.equal(immediate_grads[name], epilogue_grads[name]), name
+        for name in epilogue_parameters:
+            assert torch.equal(immediate_parameters[name], epilogue_parameters[name]), name
