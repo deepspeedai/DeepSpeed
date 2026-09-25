@@ -164,9 +164,9 @@ class FP16_Optimizer(DeepSpeedOptimizer):
         self.overflow = self.overflow_checker.check_using_norm(norm_groups)
         if self.loss_scale_config.use_grad_scaling:
             prev_scale = self.loss_scale_config.cur_scale
-            self._update_scale(self.overflow)
 
             if self.overflow:
+                self._update_scale(self.overflow)
                 if self.verbose:
                     logger.info("[deepspeed] fp16 dynamic loss scale overflow! Skipping step. Attempted loss "
                                 "scale: {}, reducing to {}".format(prev_scale, self.loss_scale_config.cur_scale))
@@ -189,6 +189,8 @@ class FP16_Optimizer(DeepSpeedOptimizer):
             updated_params = _unflatten_dense_tensors(self.fp16_groups_flat[i], self.fp16_groups[i])
             for p, q in zip(self.fp16_groups[i], updated_params):
                 p.data = q.data
+        if self.loss_scale_config.use_grad_scaling:
+            self._update_scale(self.overflow)
         return self.overflow
 
     def set_lr(self, lr):
@@ -262,8 +264,8 @@ class FP16_Optimizer(DeepSpeedOptimizer):
 
         if self.loss_scale_config.use_grad_scaling:
             prev_scale = self.loss_scale_config.cur_scale
-            self._update_scale(self.overflow)
             if self.overflow:
+                self._update_scale(self.overflow)
                 if self.verbose:
                     log_dist(
                         "Overflow detected. Skipping step. Attempted loss "
@@ -362,6 +364,9 @@ class FP16_Optimizer(DeepSpeedOptimizer):
         if self.timers:
             self.timers.log(STEP_TIMERS)
 
+        # The current gradients must be unscaled before the scale can grow.
+        if self.loss_scale_config.use_grad_scaling:
+            self._update_scale(self.overflow)
         return self.overflow
 
     def unscale_and_clip_grads(self, grad_groups_flat, total_norm, apply_scale=True):

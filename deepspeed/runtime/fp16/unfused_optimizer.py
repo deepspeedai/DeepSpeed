@@ -149,8 +149,8 @@ class FP16_UnfusedOptimizer(DeepSpeedOptimizer):
         self.overflow = self.overflow_checker.check_using_norm(norm_groups + expert_norm_groups)
         prev_scale = self.loss_scale_config.cur_scale
 
-        self._update_scale(self.overflow)
         if self.overflow:
+            self._update_scale(self.overflow)
             if self.verbose:
                 logger.info("[deepspeed] fp16 dynamic loss scale overflow! Skipping step. Attempted loss "
                             "scale: {}, reducing to {}".format(prev_scale, self.loss_scale_config.cur_scale))
@@ -169,6 +169,7 @@ class FP16_UnfusedOptimizer(DeepSpeedOptimizer):
                 #copy data from fp32 to fp16
                 fp16_param.data.copy_(fp32_param.data)
 
+        self._update_scale(self.overflow)
         return self.overflow
 
     def set_lr(self, lr):
@@ -197,8 +198,8 @@ class FP16_UnfusedOptimizer(DeepSpeedOptimizer):
         self.overflow = self.overflow_checker.check()
         prev_scale = self.loss_scale_config.cur_scale
 
-        self._update_scale(self.overflow)
         if self.overflow:
+            self._update_scale(self.overflow)
             if self.verbose:
                 logger.info("[deepspeed] fp16 dynamic loss scale overflow! Skipping step. Attempted loss "
                             "scale: {}, reducing to {}".format(prev_scale, self.loss_scale_config.cur_scale))
@@ -233,6 +234,8 @@ class FP16_UnfusedOptimizer(DeepSpeedOptimizer):
                 #copy data from fp32 to fp16
                 fp16_param.data.copy_(fp32_param.data)
 
+        # The current gradients must be unscaled before the scale can grow.
+        self._update_scale(self.overflow)
         return self.overflow
 
     def unscale_and_clip_grads(self, total_norm, apply_scale=True):
