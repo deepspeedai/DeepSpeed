@@ -3,6 +3,9 @@
 
 # DeepSpeed Team
 
+import inspect
+import pickle
+
 import deepspeed.utils.nvtx as ds_nvtx
 import accelerator.cuda_accelerator as cuda_accelerator
 from accelerator.cuda_accelerator import CUDA_Accelerator
@@ -10,6 +13,12 @@ from accelerator.cuda_accelerator import CUDA_Accelerator
 
 def _sample_nvtx_function():
     return "ok"
+
+
+@ds_nvtx.instrument_w_nvtx
+def _documented_nvtx_function(value, scale=2):
+    """Return the value, scaled."""
+    return value * scale
 
 
 def test_instrument_w_nvtx_uses_deepspeed_domain(monkeypatch, capsys):
@@ -137,3 +146,33 @@ def test_cuda_accelerator_falls_back_to_torch_nvtx_without_nvtx_package(monkeypa
         ("push", "my_range"),
         ("pop", ),
     ]
+
+
+def test_instrument_w_nvtx_preserves_wrapped_function_metadata(capsys):
+    # Without metadata copying the wrapper reports __name__ 'wrapped_fn', a None
+    # docstring and a signature of (*args, **kwargs), so help(), IDE tooltips and
+    # the autodoc build all describe the decorator instead of the function.
+    decorated = _documented_nvtx_function
+
+    with capsys.disabled():
+        print(f"\nDecorated metadata: {decorated.__name__} {inspect.signature(decorated)}")
+
+    assert decorated.__name__ == "_documented_nvtx_function"
+    assert decorated.__qualname__ == "_documented_nvtx_function"
+    assert decorated.__doc__ == "Return the value, scaled."
+    assert decorated.__module__ == __name__
+    assert str(inspect.signature(decorated)) == "(value, scale=2)"
+    assert decorated.__wrapped__.__name__ == "_documented_nvtx_function"
+
+
+def test_instrument_w_nvtx_keeps_a_module_level_function_picklable(capsys):
+    # pickle resolves a function by __module__ and __qualname__ and then checks the
+    # lookup returns the same object. A wrapper that keeps the decorator's own
+    # qualname resolves to a local and raises, which breaks anything that sends a
+    # decorated function to another process.
+    blob = pickle.dumps(_documented_nvtx_function)
+
+    with capsys.disabled():
+        print(f"\nPickled qualname: {_documented_nvtx_function.__qualname__}")
+
+    assert pickle.loads(blob) is _documented_nvtx_function
