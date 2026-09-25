@@ -236,6 +236,45 @@ def shared_qk_value_head_ids(num_heads, world_size, rank):
     return v_head_ids
 
 
+def codegen_block_layout(total_rows, world_size, num_kv_heads, codegen_mp_num=4):
+    """Which equal-sized blocks of a codegen fused-QKV weight each rank holds, in shard order.
+
+    ``_codegen_type_transpose`` views the weight as ``codegen_mp_num`` blocks, cuts every block
+    into q/k/v, subdivides each third across the ranks, then reassembles the pieces q, k, v at a
+    time. That produces one fixed permutation of the whole weight from which a rank takes a
+    contiguous slice, so a rank's rows are a selection of equal blocks rather than a span -- which
+    is why one partition dimension cannot describe this layout.
+
+    Returns ``(block_size, {rank: block_ids})``, or ``None`` where this permutation is not the
+    layout the weight actually has: the partition refuses a head count it cannot divide, it is
+    never reached below two ranks, and without equal blocks there is nothing to enumerate.
+    """
+    if world_size < 2 or num_kv_heads is None or num_kv_heads % (world_size * codegen_mp_num):
+        # The same condition `_codegen_type_transpose` asserts, plus the single-rank case it is
+        # never called for. Describing a permutation the partition does not apply would be worse
+        # than leaving the layout undescribed.
+        return None
+
+    divisor = 3 * codegen_mp_num * world_size
+    if not total_rows or total_rows % divisor:
+        return None
+
+    block_size = total_rows // divisor
+    mp_block_rows = total_rows // codegen_mp_num
+    third_rows = total_rows // (3 * codegen_mp_num)
+
+    block_ids_by_rank = {}
+    for rank in range(world_size):
+        block_ids = []
+        for entry in range(codegen_mp_num):
+            mp_block, within = divmod(rank * codegen_mp_num + entry, world_size)
+            for third in range(3):
+                row = mp_block * mp_block_rows + third * third_rows + within * block_size
+                block_ids.append(row // block_size)
+        block_ids_by_rank[rank] = block_ids
+    return block_size, block_ids_by_rank
+
+
 def shard_value_with_share_qk(
         weight,
         bias,
