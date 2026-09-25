@@ -601,6 +601,9 @@ class AutoEPMoELayer(nn.Module):
             num_experts=self.num_local_experts,
             use_grouped_mm=config.use_grouped_mm,
             disable_triton_grouped_mm=config.disable_triton_grouped_mm,
+            activation=spec.expert_activation,
+            activation_alpha=spec.expert_activation_alpha,
+            activation_limit=spec.expert_activation_limit,
         )
         _copy_parameter_data(self.experts.w1, w1)
         _copy_parameter_data(self.experts.w2, w2)

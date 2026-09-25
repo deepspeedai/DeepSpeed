@@ -1056,6 +1056,12 @@ smoke coverage used for this AutoEP surface produced the following version gates
 | -------------------------------------------------------------------------------------------------------- | ------- |
 | Direct child attribute name for shared experts (e.g., `"shared_expert"`). `null` = use preset default.   | `null`  |
 
+***expert_activation***: [string]
+
+| Description                                                                                              | Default |
+| -------------------------------------------------------------------------------------------------------- | ------- |
+| How the expert MLP combines its gate and up projections, by a name registered in `deepspeed.moe.ep_experts.EXPERT_ACTIVATIONS`: `"swiglu"` (`silu(gate) * up`), `"geglu_tanh"` (`gelu_tanh(gate) * up`, Gemma-4), `"swiglu_clamped"` (`silu(clamp(gate)) * clamp(up)`, DeepSeek-V4) or `"swiglu_oai"` (`(clamp(up) + 1) * clamp(gate) * sigmoid(alpha * clamp(gate))`, GPT-OSS and MiniMax-M3). `null` = use preset default, which is `"swiglu"` for every built-in preset. AutoEP checks the name against the model: a clamp limit on the experts module or the model config, or an experts `act_fn` that is not the named form's gate function, is an error unless this key is set. The clamp limit and alpha are taken from the model when it states them. `deepspeed.moe.ep_experts.register_expert_activation` adds a form. | `null`  |
+
 #### Custom Model Example
 
 For a model with non-standard naming conventions that is not covered by built-in presets:
