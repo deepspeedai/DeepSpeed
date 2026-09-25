@@ -479,6 +479,14 @@ class TorchBackend(Backend):
         return torch.distributed.irecv(tensor=tensor, src=src, group=group, tag=tag)
 
     @disable_compiler_collective
+    def batch_isend_irecv(self, p2p_op_list):
+        ops = [
+            torch.distributed.P2POp(getattr(torch.distributed, op.op), op.tensor, op.peer, op.group, op.tag)
+            for op in p2p_op_list
+        ]
+        return torch.distributed.batch_isend_irecv(ops)
+
+    @disable_compiler_collective
     @stage_on_cpu
     def gather(self, tensor, gather_list=None, dst=0, group=None, async_op=False):
         return torch.distributed.gather(tensor=tensor,
