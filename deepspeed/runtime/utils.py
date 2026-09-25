@@ -47,6 +47,13 @@ class DummyOptim():
         self.param_groups.append({'params': params})
 
 
+def view_as_uint8(tensor):
+    # PyTorch cannot reinterpret a scalar as a dtype with a different element size.
+    if tensor.ndim == 0:
+        tensor = tensor.unsqueeze(0)
+    return tensor.view(torch.uint8)
+
+
 def filter_empty_parameters(params):
     """Filter out empty parameters (numel == 0) from optimizer params.
 
