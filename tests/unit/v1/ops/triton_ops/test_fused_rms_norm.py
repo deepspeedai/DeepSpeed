@@ -79,7 +79,20 @@ def _assert_ulp_close(actual, expected, *, max_ulp, min_frac_within_1, label):
 
 @pytest.mark.skipif(not _fused_engine_available(), reason="fused RMSNorm needs CUDA and Triton")
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
-@pytest.mark.parametrize("shape", [(0, 2048), (7, 128), (5, 2048), (3, 130)])
+@pytest.mark.parametrize(
+    "shape",
+    [
+        (0, 2048),
+        (7, 128),
+        (5, 2048),
+        (3, 130),
+        # Narrow norms run several rows per program; these cover partial last blocks and masked columns.
+        (4099, 128),
+        (2, 300, 32, 128),
+        (1000, 96),
+        (257, 64),
+        (33, 1),
+    ])
 def test_fused_rms_norm_matches_hf_forward_and_backward(dtype, shape):
     device = _device()
     generator = torch.Generator(device=device).manual_seed(20260923)
@@ -100,6 +113,24 @@ def test_fused_rms_norm_matches_hf_forward_and_backward(dtype, shape):
     _assert_ulp_close(fused_out, eager_out, max_ulp=2, min_frac_within_1=0.99, label="forward")
     _assert_ulp_close(fused_hidden.grad, eager_hidden.grad, max_ulp=8, min_frac_within_1=0.95, label="dx")
     _assert_ulp_close(fused_weight.grad, eager_weight.grad, max_ulp=8, min_frac_within_1=0.95, label="dgamma")
+
+
+@pytest.mark.skipif(not _fused_engine_available(), reason="fused RMSNorm needs CUDA and Triton")
+@pytest.mark.parametrize("width", [128, 2048])
+def test_fused_rms_norm_weight_gradient_is_deterministic(width):
+    device = _device()
+    generator = torch.Generator(device=device).manual_seed(7)
+    hidden = torch.randn((8192, width), device=device, dtype=torch.bfloat16, generator=generator)
+    weight = torch.randn((width, ), device=device, dtype=torch.bfloat16, generator=generator)
+    upstream = torch.randn((8192, width), device=device, dtype=torch.bfloat16, generator=generator)
+    grads = []
+    for _ in range(2):
+        leaf_hidden = hidden.clone().requires_grad_(True)
+        leaf_weight = weight.clone().requires_grad_(True)
+        fused_rms_norm.fused_rms_norm(leaf_hidden, leaf_weight, 1e-6).backward(upstream)
+        grads.append((leaf_hidden.grad, leaf_weight.grad))
+    assert torch.equal(grads[0][0], grads[1][0])
+    assert torch.equal(grads[0][1], grads[1][1])
 
 
 @pytest.mark.skipif(not _fused_engine_available(), reason="fused RMSNorm needs CUDA and Triton")

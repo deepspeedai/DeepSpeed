@@ -33,6 +33,10 @@ SUPPORTED_RMS_NORM_CLASSES = (
 _MAX_FORWARD_BLOCK = 2048
 _DWEIGHT_BLOCK_M = 16
 _DWEIGHT_BLOCK_N = 256
+# Norms at most this wide, such as the 128-wide query and key norms, give each program several rows: one row per
+# program leaves most of a program idle, and the backward reads each row once for both gradients.
+_NARROW_MAX_COLS = 128
+_NARROW_BLOCK_ELEMENTS = 4096
 
 if _TRITON_AVAILABLE:
 
@@ -120,6 +124,71 @@ if _TRITON_AVAILABLE:
         partial = tl.sum(product, axis=0)
         tl.store(partial_ptr + row_block * n_cols + col_offsets, partial, mask=col_offsets < n_cols)
 
+    @triton.jit
+    def _rms_norm_narrow_forward_kernel(
+        hidden_ptr,
+        weight_ptr,
+        out_ptr,
+        rstd_ptr,
+        n_rows,
+        n_cols: tl.constexpr,
+        eps: tl.constexpr,
+        BLOCK_M: tl.constexpr,
+        BLOCK_N: tl.constexpr,
+    ):
+        rows = tl.program_id(0).to(tl.int64) * BLOCK_M + tl.arange(0, BLOCK_M)
+        cols = tl.arange(0, BLOCK_N)
+        row_mask = rows < n_rows
+        mask = row_mask[:, None] & (cols[None, :] < n_cols)
+        offsets = rows[:, None] * n_cols + cols[None, :]
+
+        hidden = tl.load(hidden_ptr + offsets, mask=mask, other=0.0).to(tl.float32)
+        variance = tl.sum(hidden * hidden, axis=1) / n_cols
+        rstd = tl.rsqrt(variance + eps)
+        tl.store(rstd_ptr + rows, rstd, mask=row_mask)
+
+        normalized = (hidden * rstd[:, None]).to(out_ptr.dtype.element_ty)
+        weight = tl.load(weight_ptr + cols, mask=cols < n_cols, other=0.0)
+        tl.store(out_ptr + offsets, normalized * weight[None, :], mask=mask)
+
+    @triton.jit
+    def _rms_norm_narrow_backward_kernel(
+        grad_out_ptr,
+        hidden_ptr,
+        weight_ptr,
+        rstd_ptr,
+        grad_hidden_ptr,
+        partial_ptr,
+        n_rows,
+        n_cols: tl.constexpr,
+        BLOCK_M: tl.constexpr,
+        BLOCK_N: tl.constexpr,
+    ):
+        row_block = tl.program_id(0).to(tl.int64)
+        rows = row_block * BLOCK_M + tl.arange(0, BLOCK_M)
+        cols = tl.arange(0, BLOCK_N)
+        row_mask = rows < n_rows
+        col_mask = cols < n_cols
+        mask = row_mask[:, None] & col_mask[None, :]
+        offsets = rows[:, None] * n_cols + cols[None, :]
+
+        grad_out = tl.load(grad_out_ptr + offsets, mask=mask, other=0.0).to(tl.float32)
+        hidden = tl.load(hidden_ptr + offsets, mask=mask, other=0.0).to(tl.float32)
+        weight = tl.load(weight_ptr + cols, mask=col_mask, other=0.0).to(tl.float32)
+        rstd = tl.load(rstd_ptr + rows, mask=row_mask, other=0.0).to(tl.float32)
+
+        # The same steps as the row kernels, so values round where the eager backward rounds them.
+        grad_norm = (grad_out * weight[None, :]).to(grad_hidden_ptr.dtype.element_ty).to(tl.float32)
+        grad_scaled = grad_norm * rstd[:, None]
+        grad_rstd = tl.sum(grad_norm * hidden, axis=1)
+        grad_variance = (-0.5 * grad_rstd) * (rstd * rstd * rstd)
+        grad_hidden = grad_scaled + (grad_variance / n_cols)[:, None] * (2.0 * hidden)
+        tl.store(grad_hidden_ptr + offsets, grad_hidden, mask=mask)
+
+        normalized = (hidden * rstd[:, None]).to(hidden_ptr.dtype.element_ty).to(tl.float32)
+        product = (grad_out * normalized).to(hidden_ptr.dtype.element_ty).to(tl.float32)
+        tl.store(partial_ptr + row_block * n_cols + cols, tl.sum(product, axis=0), mask=col_mask)
+
 
 def is_available() -> bool:
     """Whether this build can run the fused RMSNorm kernels."""
@@ -167,6 +236,13 @@ def _block_n(n_cols: int) -> int:
     return max(16, triton.next_power_of_2(n_cols))
 
 
+def _narrow_block_m(n_cols: int):
+    """Rows per program for the narrow kernels, or None where the row kernels apply."""
+    if n_cols > _NARROW_MAX_COLS:
+        return None
+    return _NARROW_BLOCK_ELEMENTS // _block_n(n_cols)
+
+
 class _FusedRMSNorm(torch.autograd.Function):
     """RMSNorm autograd with FP32 reductions and a rounded pre-gamma value."""
 
@@ -179,7 +255,20 @@ class _FusedRMSNorm(torch.autograd.Function):
         ctx.save_for_backward(hidden, weight, rstd)
         ctx.n_cols = n_cols
 
-        if n_rows > 0:
+        block_m = _narrow_block_m(n_cols)
+        if n_rows > 0 and block_m is not None:
+            _rms_norm_narrow_forward_kernel[(triton.cdiv(n_rows, block_m), )](
+                hidden,
+                weight,
+                out,
+                rstd,
+                n_rows,
+                n_cols,
+                eps,
+                BLOCK_M=block_m,
+                BLOCK_N=_block_n(n_cols),
+            )
+        elif n_rows > 0:
             _rms_norm_forward_kernel[(n_rows, )](
                 hidden,
                 weight,
@@ -203,6 +292,24 @@ class _FusedRMSNorm(torch.autograd.Function):
 
         if n_rows == 0:
             return grad_hidden, torch.zeros_like(weight), None
+
+        block_m = _narrow_block_m(n_cols)
+        if block_m is not None:
+            n_row_blocks = triton.cdiv(n_rows, block_m)
+            partial = torch.empty((n_row_blocks, n_cols), dtype=torch.float32, device=hidden.device)
+            _rms_norm_narrow_backward_kernel[(n_row_blocks, )](
+                grad_out,
+                hidden,
+                weight,
+                rstd,
+                grad_hidden,
+                partial,
+                n_rows,
+                n_cols,
+                BLOCK_M=block_m,
+                BLOCK_N=_block_n(n_cols),
+            )
+            return grad_hidden, partial.sum(dim=0).to(weight.dtype), None
 
         _rms_norm_dx_kernel[(n_rows, )](
             grad_out,
