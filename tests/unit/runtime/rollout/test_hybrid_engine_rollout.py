@@ -8,19 +8,25 @@ the transformer inference extension are available.
 """
 
 from types import SimpleNamespace
+from types import MethodType
 from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
 
+import deepspeed
+import deepspeed.comm as dist
 from deepspeed.ops.transformer.inference.op_binding.workspace import WorkspaceOp
 from deepspeed.runtime.hybrid_engine import DeepSpeedHybridEngine
 from deepspeed.runtime.rollout.base import RolloutRequest, SamplingConfig
 from deepspeed.runtime.rollout.hybrid_engine_rollout import (
+    GlobalWorkRemaining,
     HybridEngineRollout,
     HybridEngineRolloutConfig,
+    _GlobalEosStoppingCriteria,
 )
 from deepspeed.utils.static_cache import DeepSpeedStaticCache
+from unit.common import DistributedTest
 
 
 def _make_engine():
@@ -263,6 +269,243 @@ def test_continuous_generation_trims_cache_after_staggered_eos():
         [1, 0, 0, 0],
         [1, 1, 1, 1],
     ]
+
+
+def test_global_work_remaining_uses_requested_group(monkeypatch):
+    process_group = object()
+    all_reduce = MagicMock(side_effect=lambda flag, **kwargs: flag.fill_(1))
+    monkeypatch.setattr("deepspeed.runtime.rollout.hybrid_engine_rollout.dist.is_initialized", lambda: True)
+    monkeypatch.setattr("deepspeed.runtime.rollout.hybrid_engine_rollout.dist.get_world_size", lambda group: 2)
+    monkeypatch.setattr("deepspeed.runtime.rollout.hybrid_engine_rollout.dist.all_reduce", all_reduce)
+
+    assert GlobalWorkRemaining(process_group)(torch.tensor(0)) is True
+    assert all_reduce.call_args.kwargs["group"] is process_group
+
+
+def test_global_eos_stops_only_when_no_global_work_remains():
+    rendezvous = MagicMock(side_effect=[True, False])
+    criterion = _GlobalEosStoppingCriteria(response_start=2, eos_token_id=2, work_remaining=rendezvous)
+
+    keep_going = criterion(torch.tensor([[10, 11, 2], [10, 11, 5]]), scores=None)
+    stop = criterion(torch.tensor([[10, 11, 2], [10, 11, 2]]), scores=None)
+
+    assert keep_going is False
+    assert stop is True
+    # Transformers 4.32 applies Python any() to criterion results.
+    assert any([keep_going]) is False
+    assert any([stop]) is True
+    assert [call.args[0].item() for call in rendezvous.call_args_list] == [1, 0]
+
+
+def test_zero3_rendezvous_uses_optimizer_dp_group(monkeypatch):
+    engine = _make_engine()
+    process_group = object()
+    engine.zero_optimization_partition_weights.return_value = True
+    engine.optimizer.dp_process_group = process_group
+    monkeypatch.setattr("deepspeed.runtime.rollout.hybrid_engine_rollout.dist.is_initialized", lambda: True)
+
+    rendezvous = HybridEngineRollout(engine, _make_tokenizer())._zero3_work_remaining()
+
+    assert rendezvous.process_group is process_group
+
+
+def test_non_zero3_generation_uses_native_eos():
+    engine = _make_engine()
+    engine.zero_optimization_partition_weights.return_value = False
+    engine.module.generate.return_value = torch.tensor([[0, 1, 2, 5, 6], [0, 3, 4, 7, 8]])
+    rollout = HybridEngineRollout(engine, _make_tokenizer())
+
+    rollout.generate(_make_request(), _make_sampling())
+
+    assert engine.module.generate.call_args.kwargs["eos_token_id"] == 2
+    assert engine.module.generate.call_args.kwargs["stopping_criteria"] is None
+    # Non-ZeRO-3 generation must keep the Transformers default.
+    assert engine.module.generate.call_args.kwargs["synced_gpus"] is None
+
+
+def test_zero3_generation_disables_native_synced_gpus(monkeypatch):
+    engine = _make_engine()
+    engine.zero_optimization_partition_weights.return_value = True
+    engine.optimizer.dp_process_group = object()
+    engine.module.generate.return_value = torch.tensor([[0, 1, 2, 5, 6], [0, 3, 4, 7, 8]])
+    monkeypatch.setattr("deepspeed.runtime.rollout.hybrid_engine_rollout.dist.is_initialized", lambda: True)
+
+    HybridEngineRollout(engine, _make_tokenizer()).generate(_make_request(), _make_sampling())
+
+    kwargs = engine.module.generate.call_args.kwargs
+    # Transformers would otherwise derive synced_gpus from the default world
+    # size and issue an ungrouped world all-reduce inside the decode loop.
+    assert kwargs["synced_gpus"] is False
+    assert kwargs["eos_token_id"] is None
+    assert kwargs["stopping_criteria"] is not None
+
+
+class TestGlobalWorkRemainingSubgroups(DistributedTest):
+    world_size = 4
+    backend = "gloo"
+    requires_cuda_env = False
+    init_distributed = False
+
+    def test(self):
+        # This is a CPU/Gloo topology test. Avoid binding the Gloo default
+        # group to the host's visible accelerator when running on a GPU node.
+        with patch("deepspeed.comm.torch.get_accelerator") as mock_accelerator:
+            mock_accelerator.return_value.device_name.return_value = "cpu"
+            deepspeed.init_distributed(dist_backend="gloo")
+        first_group = dist.new_group(ranks=[0, 1])
+        second_group = dist.new_group(ranks=[2, 3])
+        rank = dist.get_rank()
+        process_group = first_group if rank < 2 else second_group
+
+        # Only rank 0 has local work. Its DP sibling must continue, while the
+        # independent DP subgroup must be able to stop.
+        local_work_remaining = torch.tensor(rank == 0, dtype=torch.int32)
+        global_work_remaining = GlobalWorkRemaining(process_group)(local_work_remaining)
+
+        assert global_work_remaining is (rank < 2)
+
+
+class TestZero3SubgroupGeneration(DistributedTest):
+    """ZeRO-3 rollout inside one data-parallel subgroup must not touch WORLD.
+
+    When Transformers can observe ZeRO-3 it derives ``synced_gpus`` from the
+    default world size, and the decode loop then issues an ungrouped world
+    all-reduce. A subgroup that enters rollout while the remaining WORLD ranks
+    stay out would block forever on that collective. Here ranks 0-1 generate
+    inside one subgroup and ranks 2-3 never enter rollout at all.
+    """
+    world_size = 4
+    backend = "gloo"
+    requires_cuda_env = False
+    init_distributed = False
+
+    def test(self):
+        from transformers import Qwen2Config, Qwen2ForCausalLM
+        from transformers.integrations.deepspeed import HfDeepSpeedConfig, is_deepspeed_zero3_enabled
+
+        # This is a CPU/Gloo topology test. Avoid binding the Gloo default
+        # group to the host's visible accelerator when running on a GPU node.
+        with patch("deepspeed.comm.torch.get_accelerator") as mock_accelerator:
+            mock_accelerator.return_value.device_name.return_value = "cpu"
+            deepspeed.init_distributed(dist_backend="gloo")
+        first_group = dist.new_group(ranks=[0, 1])
+        dist.new_group(ranks=[2, 3])
+        rank = dist.get_rank()
+        dist.barrier()
+
+        # Make ZeRO-3 visible to Transformers so the native default for
+        # synced_gpus would be True. Keep the config alive for the process.
+        deepspeed_config = HfDeepSpeedConfig({"zero_optimization": {"stage": 3}})
+        assert is_deepspeed_zero3_enabled()
+
+        if rank >= 2:
+            # Non-participating WORLD ranks must not be required by rollout.
+            del deepspeed_config
+            return
+
+        model = Qwen2ForCausalLM(
+            Qwen2Config(
+                vocab_size=32,
+                max_position_embeddings=16,
+                hidden_size=32,
+                intermediate_size=64,
+                num_hidden_layers=2,
+                num_attention_heads=4,
+                num_key_value_heads=4,
+                bos_token_id=1,
+                eos_token_id=2,
+                pad_token_id=0,
+            ))
+        engine = SimpleNamespace(
+            module=model,
+            zero_optimization_partition_weights=lambda: True,
+            optimizer=SimpleNamespace(dp_process_group=first_group),
+        )
+        rollout = HybridEngineRollout(engine, SimpleNamespace(pad_token_id=0, eos_token_id=2))
+        request = RolloutRequest(
+            prompt_ids=torch.tensor([[5, 6]]),
+            prompt_attention_mask=torch.ones(1, 2, dtype=torch.long),
+        )
+
+        result = rollout.generate(request, SamplingConfig(max_new_tokens=3, temperature=0))
+
+        assert result.input_ids.shape == (1, 5)
+        assert result.attention_mask.shape == (1, 5)
+        assert result.input_ids[0, :2].tolist() == [5, 6]
+        del deepspeed_config
+
+
+class TestZero3SynchronizedEarlyStop(DistributedTest):
+    world_size = 2
+
+    def test(self):
+        """Different local EOS steps stop at the latest EOS, not max length."""
+        from transformers import Qwen2Config, Qwen2ForCausalLM
+
+        rank = dist.get_rank()
+        device = torch.device(f"cuda:{rank}")
+        model = Qwen2ForCausalLM(
+            Qwen2Config(
+                vocab_size=32,
+                max_position_embeddings=16,
+                hidden_size=32,
+                intermediate_size=64,
+                num_hidden_layers=2,
+                num_attention_heads=4,
+                num_key_value_heads=4,
+                bos_token_id=1,
+                eos_token_id=2,
+                pad_token_id=0,
+            ))
+        ds_config = {
+            "train_micro_batch_size_per_gpu": 1,
+            "optimizer": {
+                "type": "AdamW",
+                "params": {
+                    "lr": 1e-5,
+                    "torch_adam": True
+                },
+            },
+            "zero_optimization": {
+                "stage": 3
+            },
+            "hybrid_engine": {
+                "enabled": True,
+                "inference_tp_size": 1,
+                "pin_parameters": True,
+            },
+        }
+        engine, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=ds_config)
+        engine.eval()
+
+        target_eos_step = 2 if rank == 0 else 5
+        forward_count = 0
+        original_forward = engine.module.forward
+
+        def scripted_forward(_module, *args, **kwargs):
+            nonlocal forward_count
+            output = original_forward(*args, **kwargs)
+            forward_count += 1
+            scripted_token = 2 if forward_count >= target_eos_step else 3
+            logits = torch.full_like(output.logits, torch.finfo(output.logits.dtype).min)
+            logits[:, -1, scripted_token] = 0
+            output.logits = logits
+            return output
+
+        engine.module.forward = MethodType(scripted_forward, engine.module)
+        tokenizer = SimpleNamespace(pad_token_id=0, eos_token_id=2)
+        rollout = HybridEngineRollout(engine, tokenizer)
+        request = RolloutRequest(
+            prompt_ids=torch.tensor([[5, 6]], device=device),
+            prompt_attention_mask=torch.ones(1, 2, dtype=torch.long, device=device),
+        )
+        result = rollout.generate(request, SamplingConfig(max_new_tokens=8, temperature=0))
+
+        counts = [torch.zeros(1, dtype=torch.int32, device=device) for _ in range(2)]
+        dist.all_gather(counts, torch.tensor([forward_count], dtype=torch.int32, device=device))
+        assert [count.item() for count in counts] == [5, 5]
+        assert int(result.attention_mask[:, 2:].sum()) == target_eos_step
+        assert result.input_ids[0, 1 + target_eos_step].item() == 2
 
 
 @patch("deepspeed.runtime.rollout.hybrid_engine_rollout.time.perf_counter")
