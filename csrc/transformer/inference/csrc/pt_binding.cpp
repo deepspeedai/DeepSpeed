@@ -194,7 +194,9 @@ void attention_unfused(at::Tensor& prev_key_cont,
                        .layout(at::kStrided)
                        .device(at::kCUDA)
                        .requires_grad(false);
-    float alpha = norm_factor;
+    // ds_attention passes 1/sqrt(sqrt(head_dim)); square it back to the
+    // 1/sqrt(head_dim) softmax scale, matching the fallback binding below.
+    float alpha = norm_factor * norm_factor;
     float gemm_beta = 0.0;
     auto attn_score = at::empty({bsz, heads, seq_len, soft_len}, options);
     int k = prev_value_cont.size(2) / heads;
