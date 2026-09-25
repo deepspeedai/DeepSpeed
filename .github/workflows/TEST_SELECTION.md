@@ -23,10 +23,11 @@ one config — see [Adding a workflow](#adding-a-new-workflow).
 
 - On a PR, `ci/tests_fetcher.py` diffs your branch against the base branch, traces
   the import graph from your changed files to the impacted tests, and writes the
-  list to `ci/.test_selection/test_list.txt`.
+  list to `ci/.test_selection/test_list.txt`. A nightly scheduled run always
+  executes the full suite.
 - The trusted controller validates that list, then fetches, installs, and tests
   the exact candidate SHA inside a no-secret Modal Sandbox. The Sandbox runs
-  only for merge queue entries, `push` to `master` (always the full suite), and
+  only for merge queue entries, the nightly scheduled full run, and
   manual runs — a plain PR event never spends Modal quota.
 - It is **fail-safe**: anything it can't reason about safely → run the *full* suite.
   It never silently runs *fewer* tests than reality.
@@ -64,7 +65,7 @@ The design is a small, self-contained take on HuggingFace `transformers`'
 ### Job flow
 
 ```
-           pull_request_target / merge_group / push / workflow_dispatch
+           pull_request_target / merge_group / schedule / workflow_dispatch
                                   │
                     ┌─────────────┴─────────────┐
                     │        collect-tests       │   (no secrets)
@@ -100,10 +101,54 @@ The design is a small, self-contained take on HuggingFace `transformers`'
 Independent of `mode`, `deploy` is also skipped on `pull_request_target` runs,
 so pushing to a PR never spends Modal quota — the `collect-tests` summary still
 previews what the queue will run. The Sandbox actually executes on
-`merge_group` (the merged tree, gating the merge), `push` to `master`, and
+`merge_group` (the merged tree, gating the merge), `schedule`, and
 `workflow_dispatch`. On `merge_group` the candidate is the merge-group commit
 in the base repository, diffed against the queue's base SHA, so the selection
-covers exactly what the entry would introduce.
+covers exactly what the entry would introduce. There is deliberately no `push`
+trigger: master receives no direct pushes (the merge queue lands every entry,
+and each merge_group run already tested the merged tree), so a post-push run
+would duplicate the queue's work. Cross-entry interaction regressions are what
+the nightly full suite exists to catch.
+
+### Nightly full-suite runs and regression triage
+
+A scheduled nightly (`cron`, see `modal-torch-latest.yml`) always runs the full
+suite. Its outcome feeds `nightly-triage.yml`:
+
+- **Green** → the `nightly-last-green` tag moves to the tested SHA. The tag
+  anchors the last verified-good master revision (and is exactly the good
+  endpoint a later manual bisect would need), so days that fail for operational
+  reasons (no GPU instance, timeout) simply leave the tag in place.
+- **Infra** (the Sandbox never got a GPU instance) → nothing is concluded; no
+  report, no tag move.
+- **Timeout** (the Sandbox/job time budget ran out) → an issue is opened; a
+  timeout points at an operational problem, not a candidate regression.
+- **Unknown** (no sentinel in the logs) → an issue is opened. A failed run can
+  lack a sentinel for reasons other than a timeout — checkout, setup, or a job
+  kill before the controller could classify itself — so triage reports it as
+  unclassified rather than guessing a class.
+- **Real test failures** → an issue is opened listing the failing test files
+  and the run. Triage deliberately stops there: the merge queue already gated
+  each entry on its own impacted tests, so a nightly failure is either a
+  cross-entry interaction (worth human judgment; the issue provides the
+  exposure) or an operational flake. If nightly regressions turn out to be
+  frequent enough to justify automated bisection, the `nightly-last-green` tag
+  is the good endpoint it would start from.
+
+The controller (`ci/torch_latest.py`) classifies its own failures for this
+routing: it prints a `DS_CI_FAILURE_CLASS=infra|timeout|test` sentinel line and
+exits with a dedicated code (75 / 124 / 1). A failed run with no sentinel
+routes to the unknown class instead of guessing.
+
+Triage reports (timeout, unknown, test failures) go through `ci/nightly_report.sh`:
+every report carries the `nightly-triage` label, and a recurring outcome
+comments on its still-open issue instead of filing a new one. Dedup keys on
+the title, so titles are stable across recurrences (per-night SHAs live in
+the body).
+
+Triage checks out the SHA the nightly actually ran rather than current master,
+so the classifier and the sentinel protocol it parses come from the same
+revision.
 
 
 ## How a decision is made
@@ -111,7 +156,7 @@ covers exactly what the entry would introduce.
 `TestSelector.select()` in `ci/tests_fetcher.py` runs these checks in order; the
 first that matches wins:
 
-1. **No base ref** (push / manual) → `all`.
+1. **No base ref** (nightly / manual) → `all`.
 2. **Base ref unresolvable** → `all`.
 3. **No merge-base** with the base (e.g. shallow clone, unrelated history) → `all`.
    A diff here would be wrong, so we never narrow on it.

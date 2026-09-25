@@ -4,9 +4,13 @@ name: modal-torch-latest
 # the exact candidate SHA inside a no-secret Modal Sandbox. Under
 # pull_request_target, every GitHub-side checkout and Python entrypoint comes
 # from the trusted base commit; merge queue runs resolve that trusted base from
-# merge_group.base_sha. The Sandbox only runs for merge queue entries, pushes to
-# master, and manual runs, so plain PR events never spend Modal quota. See
-# .github/workflows/TEST_SELECTION.md.
+# merge_group.base_sha. The Sandbox only runs for merge queue entries, the
+# nightly scheduled full run, and manual runs, so plain PR events never spend
+# Modal quota. Master receives no direct pushes (the merge queue lands every
+# entry, and each merge_group run already tested the merged tree), so there is
+# no push trigger; cross-entry interaction regressions are covered by the
+# nightly full suite, which feeds regression triage
+# (.github/workflows/nightly-triage.yml). See .github/workflows/TEST_SELECTION.md.
 
 on:
   workflow_dispatch:
@@ -35,10 +39,10 @@ on:
         required: false
         default: 'main'
         type: string
-
-  push:
-    branches:
-      - master
+  # Nightly full-suite run of master. This is the only event whose failures feed
+  # automated regression triage; see .github/workflows/nightly-triage.yml.
+  schedule:
+    - cron: '0 10 * * *'
 
   pull_request_target:
     types: [review_requested, ready_for_review, synchronize]
@@ -57,7 +61,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
