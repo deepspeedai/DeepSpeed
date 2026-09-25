@@ -800,13 +800,13 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             partition_size = self.bit16_groups_flat[i].numel() // dist.get_world_size(
                 group=self.real_dp_process_group[i])
             flat_hp_partition = self.single_partition_of_fp32_groups[i]
-            param_offsets = None
-            if any(self.round_robin_bit16_padding[i]):
-                offset_by_param = {
-                    id(param): offset
-                    for param, offset in zip(self.round_robin_bit16_groups[i], self.round_robin_bit16_offsets[i])
-                }
-                param_offsets = [offset_by_param[id(param)] for param in self.bit16_groups[i]]
+            # Where each parameter sits in the flat buffer. The buffer is laid out in round-robin order,
+            # so the offsets cannot be summed up in `bit16_groups` order, padding or not.
+            offset_by_param = {
+                id(param): offset
+                for param, offset in zip(self.round_robin_bit16_groups[i], self.round_robin_bit16_offsets[i])
+            }
+            param_offsets = [offset_by_param[id(param)] for param in self.bit16_groups[i]]
             link_hp_params(lp_param_list=self.bit16_groups[i],
                            flat_hp_partition=flat_hp_partition,
                            gradient_dict=self.averaged_gradients,
