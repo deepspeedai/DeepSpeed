@@ -474,7 +474,8 @@ class BF16_Optimizer(ZeROOptimizer):
                 update = muon_update(gradients[param_index].view(param.shape).clone(),
                                      momentum.view(param.shape),
                                      beta=group['momentum'],
-                                     ns_method=group.get('ns_method', 'gram'))
+                                     ns_method=group.get('ns_method', 'gram'),
+                                     num_heads=getattr(param, 'muon_num_heads', None))
                 partition.grad.narrow(0, local_offset,
                                       length).copy_(update.reshape(-1).narrow(0, matrix_offset, length))
                 committed.narrow(0, local_offset, length).copy_(momentum.narrow(0, matrix_offset, length))
