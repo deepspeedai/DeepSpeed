@@ -15,13 +15,13 @@ class SchedulingResult(Enum):
 
     EngineSequenceLimitExceeded = 1
     """
-    The proposed batch would would overflow the number of concurrent sequences the engine may support.
+    The proposed batch would overflow the number of concurrent sequences the engine may support.
     """
 
     BatchSequenceLimitExceeded = 2
     """
     The proposed batch contains more sequences than the engine was configured
-    to support in a single forwardp
+    to support in a single forward.
     """
 
     BatchTokenLimitExceeded = 3
