@@ -571,8 +571,11 @@ may be reordered freely.
 
 Map-piece counts here and resolved-copy segment counts are different metrics. For the
 BigCode TP2→TP4 transfer fixture with 48×8 logical elements, the default lowest-holder
-choice yields 7 resolved copies after physical folding; a specified per-target holder
-choice yields 6. Both write 768 target elements because the KV block is replicated.
+choice yields 7 resolved copies after physical folding. Choosing the source that holds
+each target's private query rows (source 0 for targets 0 and 1, source 1 for targets 2
+and 3) puts the query read next to the KV read in that source shard and yields 6 copies.
+Choosing the highest-ranked KV holder for every target still yields 7. All three plans
+write 768 target elements because the KV block is replicated.
 These counts describe that fixture and policy, not a general minimum or a measured
 communication speedup.
 

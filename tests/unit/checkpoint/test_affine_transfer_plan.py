@@ -151,7 +151,7 @@ def test_bigcode_physical_folding_keeps_lowest_holder():
     _check_bigcode_copy(plan, source, target)
 
 
-def test_bigcode_selector_can_choose_per_target_holder():
+def test_bigcode_selector_can_choose_target_private_query_holder():
     source, target = _bigcode_maps()
     calls = []
 
@@ -160,13 +160,24 @@ def test_bigcode_selector_can_choose_per_target_holder():
         assert request.logical_origin == (32, 0)
         assert request.shape == (16, 8)
         assert [candidate.source_rank for candidate in request.candidates] == [0, 1]
-        return 0 if request.target_rank < 2 else 1
+        return request.target_rank // 2
 
     plan = plan_transfer(target, source, replica_selector=select)
     assert len(calls) == 4
     assert len(plan.segments) == 6
     assert sum(segment.numel for segment in plan.segments if segment.source_rank == 0) == 384
     assert sum(segment.numel for segment in plan.segments if segment.source_rank == 1) == 384
+    _check_bigcode_copy(plan, source, target)
+
+
+def test_bigcode_highest_holder_still_needs_seven_segments():
+    source, target = _bigcode_maps()
+    plan = plan_transfer(target,
+                         source,
+                         replica_selector=lambda request: max(candidate.source_rank
+                                                              for candidate in request.candidates))
+
+    assert len(plan.segments) == 7
     _check_bigcode_copy(plan, source, target)
 
 
