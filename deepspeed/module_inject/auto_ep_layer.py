@@ -360,7 +360,8 @@ def permute_by_local_expert(
         aligned_counts: [E_local] aligned token counts per expert (for expert computation)
         n_tokens: original token count before padding (for unpermute)
     """
-    from deepspeed.moe.ep_kernels import generate_permute_indices, TOKEN_GROUP_ALIGN_SIZE_M
+    from deepspeed.moe.ep_kernels import (generate_permute_indices, permute_rows, permute_rows_supported,
+                                          TOKEN_GROUP_ALIGN_SIZE_M)
 
     if local_counts.ndim == 1:
         # [E_local]: already aggregated over sources (ep_degree=1)
@@ -399,9 +400,13 @@ def permute_by_local_expert(
         permuted_indices = permuted_indices.to(tokens.device)
         m_sizes = m_sizes.to(tokens.device)
 
-    # Add padding row for out-of-bounds indices (index n_tokens -> zero row)
-    tokens_padded = torch.vstack((tokens, tokens.new_zeros((tokens.shape[-1], ))))
-    tokens_permuted = tokens_padded[permuted_indices, :]
+    if permute_rows_supported(tokens):
+        # One gather that writes zero rows at padding slots, and a gather again in the backward.
+        tokens_permuted = permute_rows(tokens, permuted_indices)
+    else:
+        # Add padding row for out-of-bounds indices (index n_tokens -> zero row)
+        tokens_padded = torch.vstack((tokens, tokens.new_zeros((tokens.shape[-1], ))))
+        tokens_permuted = tokens_padded[permuted_indices, :]
 
     return tokens_permuted, permuted_indices, m_sizes, n_tokens
 
@@ -418,6 +423,11 @@ def unpermute_by_local_expert(
         permuted_indices: [N_padded] index mapping from permute_by_local_expert
         n_tokens: original token count before alignment padding
     """
+    from deepspeed.moe.ep_kernels import permute_rows_supported, unpermute_rows
+
+    if permute_rows_supported(expert_output):
+        # A gather through the inverse permutation instead of zero-filling and scattering.
+        return unpermute_rows(expert_output, permuted_indices, n_tokens)
     # Scatter expert outputs back to original positions.
     # permuted_indices values range 0..n_tokens, where n_tokens is the zero-padding row.
     out_unpermuted = expert_output.new_zeros((n_tokens + 1, expert_output.shape[-1]))
