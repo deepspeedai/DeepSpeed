@@ -250,15 +250,18 @@ class DeepSpeedDataSampler(object):
         self.data_clusters[cidx] = MMapIndexedDataset(cluster_path, skip_warmup=True)
 
     def get_sample_from_cluster(self, cidx, num_samples):
-        start_idx = self.data_cluster_current_position[cidx]
-        samples = list(np.copy(self.data_clusters[cidx][0][start_idx:(start_idx + num_samples)]))
-        self.data_cluster_current_position[cidx] += num_samples
-        if len(samples) < num_samples:
-            num_samples_remained = num_samples - len(samples)
-            logger.info(f"reshuffling cluster {cidx}.")
-            self.reshuffle_clusters(cidx)
-            samples += list(np.copy(self.data_clusters[cidx][0][:num_samples_remained]))
-            self.data_cluster_current_position[cidx] = num_samples_remained
+        samples = []
+        while len(samples) < num_samples:
+            start_idx = self.data_cluster_current_position[cidx]
+            remaining = num_samples - len(samples)
+            selected = self.data_clusters[cidx][0][start_idx:(start_idx + remaining)]
+            samples.extend(np.copy(selected))
+            self.data_cluster_current_position[cidx] += len(selected)
+            if len(samples) < num_samples:
+                logger.info(f"reshuffling cluster {cidx}.")
+                self.reshuffle_clusters(cidx)
+                self.data_cluster_current_position[cidx] = 0
+
         return samples
 
     def get_next_global_batch(self):

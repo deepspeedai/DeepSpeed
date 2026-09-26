@@ -11,6 +11,8 @@ import pytest
 from unit.common import DistributedTest
 from unit.simple_model import SimpleModel, random_dataset
 from deepspeed.runtime.data_pipeline.curriculum_scheduler import CurriculumScheduler
+from deepspeed.runtime.data_pipeline.config import get_data_efficiency_config
+from deepspeed.runtime.data_pipeline.data_sampling.data_sampler import DeepSpeedDataSampler
 
 
 class MPU():
@@ -177,3 +179,66 @@ class TestDataEfficiency(DistributedTest):
             model.step()
             if n >= 10:
                 break
+
+
+@pytest.mark.parametrize("batch_size", [2, 3, 8])
+def test_small_curriculum_cluster_full_batches(tmpdir, batch_size):
+    deepspeed.comm.init_distributed(get_accelerator().communication_backend_name(),
+                                    auto_mpi_discovery=False,
+                                    init_method=f"file://{tmpdir}/rdzv",
+                                    rank=0,
+                                    world_size=1)
+    try:
+        config = get_data_efficiency_config({
+            "data_efficiency": {
+                "enabled": True,
+                "seed": 1234,
+                "data_sampling": {
+                    "enabled": True,
+                    "num_epochs": 20,
+                    "curriculum_learning": {
+                        "enabled": True,
+                        "data_cluster_path": str(tmpdir),
+                        "curriculum_metrics": {
+                            "index": {
+                                "difficulty_type": "value",
+                                "clustering_type": "single_cluster",
+                                "min_difficulty": 1,
+                                "max_difficulty": 1,
+                                "schedule_type": "fixed_linear",
+                                "schedule_config": {
+                                    "total_curriculum_step": 1,
+                                    "difficulty_step": 1
+                                },
+                            }
+                        },
+                    },
+                },
+            }
+        })
+        sampler = DeepSpeedDataSampler(config,
+                                       2,
+                                       batch_size,
+                                       0,
+                                       1,
+                                       deepspeed.comm.get_world_group(),
+                                       1,
+                                       global_rank=0,
+                                       drop_last=False)
+        loader = torch.utils.data.DataLoader(torch.arange(2), batch_sampler=sampler)
+        iterator = iter(loader)
+        model = torch.nn.Linear(1, 1)
+        optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+        for _ in range(3):
+            batch = next(iterator)
+            assert batch.numel() == batch_size
+            assert set(batch.tolist()) <= {0, 1}
+            # Complete passes over the two-item cluster must remain balanced.
+            counts = torch.bincount(batch, minlength=2)
+            assert abs(int(counts[0] - counts[1])) <= 1
+            optimizer.zero_grad()
+            loss = model(batch.float().unsqueeze(1)).square().mean()
+            loss.backward()
+            optimizer.step()
+    finally:
+        deepspeed.comm.destroy_process_group()
