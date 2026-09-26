@@ -7,6 +7,8 @@ Copyright NVIDIA/apex
 This file is adapted from FP16_Optimizer in NVIDIA/apex
 """
 
+from typing import Callable, Sequence
+
 import torch
 from torch._utils import _flatten_dense_tensors, _unflatten_dense_tensors
 from deepspeed.runtime.base_optimizer import DeepSpeedOptimizer
@@ -242,6 +244,54 @@ class FP16_Optimizer(DeepSpeedOptimizer):
 
         return torch.tensor(group_mask_idx_list, device=get_accelerator().current_device_name())
 
+    def _step_with_mixed_precision_fused_adam(self, grads_groups_flat: Sequence[torch.Tensor],
+                                              mixed_precision_step: Callable) -> bool:
+        non_experts_grads_for_norm = []
+        for i, group in enumerate(self.fp16_groups):
+            if not self.has_executed_step:
+                self.flatten_grad_norm_mask_list.append(self._get_norm_mask_idx(group))
+            self.fp16_groups_flat[i].grad = grads_groups_flat[i]
+            non_experts_grads_for_norm.append(self.fp16_groups_flat[i])
+            for param in group:
+                param.grad = None
+
+        if self.timers:
+            self.timers(COMPUTE_NORM_TIMER).start()
+        all_groups_norm = get_flattened_grad_norm(non_experts_grads_for_norm,
+                                                  mpu=self.mpu,
+                                                  grad_norm_mask=self.flatten_grad_norm_mask_list,
+                                                  grad_norm_dtype=torch.float32)
+        scaled_global_grad_norm = get_global_norm(norm_list=[all_groups_norm])
+        if self.timers:
+            self.timers(COMPUTE_NORM_TIMER).stop()
+
+        self._global_grad_norm = scaled_global_grad_norm / self.loss_scale_config.cur_scale
+
+        if self.timers:
+            self.timers(UNSCALE_AND_CLIP_TIMER).start()
+        combined_scale = self.unscale_and_clip_grads(grads_groups_flat, scaled_global_grad_norm, apply_scale=False)
+        if self.timers:
+            self.timers(UNSCALE_AND_CLIP_TIMER).stop()
+
+        if self.timers:
+            self.timers(BASIC_STEP_TIMER).start()
+        mixed_precision_step(grads_groups_flat, self.fp16_groups_flat, combined_scale)
+        if self.timers:
+            self.timers(BASIC_STEP_TIMER).stop()
+
+        for group in self.fp16_groups_flat:
+            group.grad = None
+
+        if self.timers:
+            self.timers(UPDATE_FP16_TIMER).start()
+            self.timers(UPDATE_FP16_TIMER).stop()
+
+        self.has_executed_step = True
+        if self.timers:
+            self.timers.log(STEP_TIMERS)
+
+        return self.overflow
+
     def step(self, closure=None):
         """
         Not supporting closure.
@@ -276,6 +326,19 @@ class FP16_Optimizer(DeepSpeedOptimizer):
                 if self.timers:
                     self.timers.log(OVERFLOW_TIMERS)
                 return self.overflow
+
+        can_step_with_mixed_precision_grads = getattr(self.optimizer, '_can_step_with_mixed_precision_grads', None)
+        mixed_precision_step = getattr(self.optimizer, '_step_with_mixed_precision_grads', None)
+        if (not self.has_moe_layers and callable(can_step_with_mixed_precision_grads)
+                and callable(mixed_precision_step)):
+            mixed_precision_grads_groups_flat = []
+            for group in self.fp16_groups:
+                mixed_precision_grads_groups_flat.append(
+                    _flatten_dense_tensors(
+                        [torch.zeros_like(param) if param.grad is None else param.grad for param in group]))
+            if can_step_with_mixed_precision_grads(mixed_precision_grads_groups_flat, self.fp16_groups_flat):
+                return self._step_with_mixed_precision_fused_adam(mixed_precision_grads_groups_flat,
+                                                                  mixed_precision_step)
 
         grads_groups_flat = []
         non_experts_grads_for_norm = []
