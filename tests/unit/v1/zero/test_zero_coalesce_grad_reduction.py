@@ -174,6 +174,7 @@ class TestCoalesceCpuOffload(DistributedTest):
 # ---------------------------------------------------------------------------
 # FP16 + dynamic loss scaling
 # ---------------------------------------------------------------------------
+@pytest.mark.skipif(not get_accelerator().is_fp16_supported(), reason="fp16 is not supported on this accelerator")
 @pytest.mark.parametrize("zero_stage", [1, 2, 3])
 class TestCoalesceFP16(DistributedTest):
     world_size = 2

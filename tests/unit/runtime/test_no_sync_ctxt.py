@@ -13,6 +13,7 @@ from unit.common import DistributedTest
 
 import deepspeed
 import deepspeed.comm as dist
+from deepspeed.accelerator import get_accelerator
 from deepspeed.utils import safe_get_full_grad
 
 
@@ -22,6 +23,10 @@ class TestNoSyncCtxt(DistributedTest):
     @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
     @pytest.mark.parametrize("zero_stage", [0, 1, 2, 3])
     def test_zero_stage(self, zero_stage, dtype):
+        # The fp16 parametrization crashes initialize's sanity check on accelerators
+        # without fp16 support (#8398's hardware lottery); skip instead of failing.
+        if dtype == torch.float16 and not get_accelerator().is_fp16_supported():
+            pytest.skip("fp16 is not supported on this accelerator")
         config_dict = {
             "train_micro_batch_size_per_gpu": 1,
             "gradient_accumulation_steps": 1,
@@ -65,6 +70,10 @@ class TestNoSyncCtxt(DistributedTest):
     @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
     @pytest.mark.parametrize("zero_stage", [0, 1])
     def test_engine_step(self, zero_stage, dtype):
+        # The fp16 parametrization crashes initialize's sanity check on accelerators
+        # without fp16 support (#8398's hardware lottery); skip instead of failing.
+        if dtype == torch.float16 and not get_accelerator().is_fp16_supported():
+            pytest.skip("fp16 is not supported on this accelerator")
         config_dict = {
             "train_micro_batch_size_per_gpu": 1,
             "gradient_accumulation_steps": 1,
@@ -107,6 +116,10 @@ class TestNoSyncCtxt(DistributedTest):
     @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
     @pytest.mark.parametrize("zero_stage", [0, 1])
     def test_multiple_ctxts(self, zero_stage, dtype):
+        # The fp16 parametrization crashes initialize's sanity check on accelerators
+        # without fp16 support (#8398's hardware lottery); skip instead of failing.
+        if dtype == torch.float16 and not get_accelerator().is_fp16_supported():
+            pytest.skip("fp16 is not supported on this accelerator")
         config_dict = {
             "train_micro_batch_size_per_gpu": 1,
             "gradient_accumulation_steps": 1,

@@ -61,6 +61,34 @@ def check_environment(pytestconfig):
 
 # Override of pytest "runtest" for DistributedTest class
 # This hook is run before the default pytest_runtest_call
+# The multi-rank-only CI workflow (DS_MULTIRANK_ONLY=1) spends its budget only on
+# the multi-rank tests its LOCAL_SIZE gate admits; single-rank tests are deselected
+# because the plain cpu-torch-latest run already guards them. Per-test world_size
+# marks are honored with the same precedence as the launcher (mark, then class
+# attribute); a fixture-injected world_size falls back to the class attribute.
+def pytest_collection_modifyitems(config, items):
+    if os.environ.get('DS_MULTIRANK_ONLY', '0') != '1':
+        return
+
+    def is_multirank(item):
+        cls = getattr(item, 'cls', None)
+        if not getattr(cls, 'is_dist_test', False):
+            return False
+        mark = item.get_closest_marker('world_size')
+        if mark is not None:
+            world_size = mark.args[0]
+        else:
+            world_size = getattr(cls, 'world_size', None)
+        if isinstance(world_size, (list, tuple)):
+            return any(ws > 1 for ws in world_size)
+        return isinstance(world_size, int) and world_size > 1
+
+    deselected = [item for item in items if not is_multirank(item)]
+    if deselected:
+        config.hook.pytest_deselected(items=deselected)
+    items[:] = [item for item in items if is_multirank(item)]
+
+
 @pytest.hookimpl(tryfirst=True)
 def pytest_runtest_call(item):
     # We want to use our own launching function for distributed tests
