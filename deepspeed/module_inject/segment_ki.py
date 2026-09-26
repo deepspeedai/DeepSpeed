@@ -86,7 +86,6 @@ def find_glu_segments(root: torch.nn.Module) -> List[GLUSegment]:
     return segments
 
 
-
 class DualWeightGluGEMV(torch.autograd.Function):
     """silu(hidden @ gate_w.T) * (hidden @ up_w.T) reading weights directly.
 
@@ -337,7 +336,7 @@ def apply_segment_ki(model: torch.nn.Module) -> dict:
     replaced = 0
     for seg in segments:
         seg.parent._ki_dual_op = kernel_op if kernel_op is not None and hasattr(kernel_op,
-                                                                               "dual_gemv_silu_mul") else None
+                                                                                "dual_gemv_silu_mul") else None
         seg.parent.forward = _dual_weight_glu_forward.__get__(seg.parent, type(seg.parent))
         replaced += 1
     report["fused_glu"] = {"segments_found": len(segments), "segments_replaced": replaced}
@@ -352,8 +351,12 @@ def apply_segment_ki(model: torch.nn.Module) -> dict:
 # ─── Custom b=1 decode attention: replace SDPA in full-attention layers ───
 
 
-def _decode_attn_forward(self, hidden_states, position_embeddings=None, attention_mask=None,
-                         past_key_values=None, **kwargs):
+def _decode_attn_forward(self,
+                         hidden_states,
+                         position_embeddings=None,
+                         attention_mask=None,
+                         past_key_values=None,
+                         **kwargs):
     """Replacement forward for full-attention layers: run the custom
     decode_attn kernel at b=1, seq_len=1 instead of SDPA-with-mask (which
     falls into the slow mem_efficient backend against the full-width static
@@ -389,8 +392,9 @@ def _decode_attn_forward(self, hidden_states, position_embeddings=None, attentio
         key_states = self.k_norm(k_out.view(hidden_shape)).transpose(1, 2)
         value_states = v_out.view(hidden_shape).transpose(1, 2)
     else:
-        query_states, gate = torch.chunk(
-            self.q_proj(hidden_states).view(*input_shape, -1, self.head_dim * 2), 2, dim=-1)
+        query_states, gate = torch.chunk(self.q_proj(hidden_states).view(*input_shape, -1, self.head_dim * 2),
+                                         2,
+                                         dim=-1)
         gate = gate.reshape(*input_shape, -1)
 
         query_states = self.q_norm(query_states.view(hidden_shape)).transpose(1, 2)
@@ -449,7 +453,7 @@ def install_decode_attention(model: torch.nn.Module, write_pos: torch.Tensor, ke
             module._ki_orig_attn_forward = module.forward
         module._ki_attn_op = kernel_op
         module._ki_qkv_op = kernel_op if (hasattr(kernel_op, "triple_gemv")
-                                        and os.environ.get("DS_TIER2", "1") == "1") else None
+                                          and os.environ.get("DS_TIER2", "1") == "1") else None
         module._ki_write_pos = write_pos
         module._ki_rope = apply_rotary_pos_emb
         module._ki_num_q_heads = num_q_heads
@@ -462,8 +466,13 @@ def install_decode_attention(model: torch.nn.Module, write_pos: torch.Tensor, ke
 # ─── Fused residual-add + RMSNorm in the decoder-layer forward ───
 
 
-def _fused_norm_layer_forward(self, hidden_states, position_embeddings, attention_mask=None,
-                          position_ids=None, past_key_values=None, **kwargs):
+def _fused_norm_layer_forward(self,
+                              hidden_states,
+                              position_embeddings,
+                              attention_mask=None,
+                              position_ids=None,
+                              past_key_values=None,
+                              **kwargs):
     """Replacement forward for decoder layers at b=1, seq_len=1: the
     post-attention residual-add + RMSNorm pair runs through the
     fused_add_norm kernel (one launch updates the residual stream in-place
@@ -472,13 +481,12 @@ def _fused_norm_layer_forward(self, hidden_states, position_embeddings, attentio
     state there, with no add to fuse — and the final post-MLP add stays a
     plain add for the same reason. Attention and MLP are called unchanged,
     so attention-level patches (decode_attn / triple_gemv) still apply."""
-    if (hidden_states.shape[0] != 1 or hidden_states.shape[1] > 1
-            or hidden_states.dtype is not torch.bfloat16 or not hidden_states.is_contiguous()
-            or getattr(self, "_ki_norm_op", None) is None):
+    if (hidden_states.shape[0] != 1 or hidden_states.shape[1] > 1 or hidden_states.dtype is not torch.bfloat16
+            or not hidden_states.is_contiguous() or getattr(self, "_ki_norm_op", None) is None):
         # Prefill, batched decode, or a non-graph path: the original forward
         # is the correct path.
-        return self._ki_orig_layer_forward(hidden_states, position_embeddings, attention_mask,
-                                           position_ids, past_key_values, **kwargs)
+        return self._ki_orig_layer_forward(hidden_states, position_embeddings, attention_mask, position_ids,
+                                           past_key_values, **kwargs)
 
     op = self._ki_norm_op
     residual = hidden_states
@@ -505,8 +513,7 @@ def _fused_norm_layer_forward(self, hidden_states, position_embeddings, attentio
     # residual stream and returns the normalized input to the MLP — keep
     # both handles, the final add must go through the residual stream.
     new_residual = hidden_states
-    mlp_input = op.fused_add_norm(new_residual, residual, self._ki_postattn_scale,
-                                  self.post_attention_layernorm.eps)
+    mlp_input = op.fused_add_norm(new_residual, residual, self._ki_postattn_scale, self.post_attention_layernorm.eps)
     hidden_states = self.mlp(mlp_input)
     hidden_states = hidden_states + new_residual
 
@@ -527,8 +534,7 @@ def install_fused_norm(model: torch.nn.Module, kernel_op) -> int:
     patched = 0
     for module in model.modules():
         norms = [getattr(module, name, None) for name in ("input_layernorm", "post_attention_layernorm")]
-        if not all(isinstance(n, torch.nn.Module) and hasattr(n, "weight") and hasattr(n, "eps")
-                   for n in norms):
+        if not all(isinstance(n, torch.nn.Module) and hasattr(n, "weight") and hasattr(n, "eps") for n in norms):
             continue
         if getattr(module, "block_type", None) not in ("linear_attention", "full_attention"):
             continue
@@ -539,5 +545,3 @@ def install_fused_norm(model: torch.nn.Module, kernel_op) -> int:
         module.forward = _fused_norm_layer_forward.__get__(module, type(module))
         patched += 1
     return patched
-
-

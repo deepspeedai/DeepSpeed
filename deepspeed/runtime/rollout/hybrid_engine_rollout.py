@@ -984,14 +984,15 @@ class HybridEngineRollout(RolloutEngine):
 
                 def replay_fn():
                     module(static_token,
-                           attention_mask={"full_attention": static_attn,
-                                           "linear_attention": None},
+                           attention_mask={
+                               "full_attention": static_attn,
+                               "linear_attention": None
+                           },
                            past_key_values=ds_cache,
                            use_cache=True)
 
-            loop_op.decode_loop(replay_fn, static_logits[:, -1, :].contiguous(), static_token,
-                                write_pos, static_attn, token_buf, max_new_tokens,
-                                eos_token_id if eos_token_id is not None else -1,
+            loop_op.decode_loop(replay_fn, static_logits[:, -1, :].contiguous(), static_token, write_pos, static_attn,
+                                token_buf, max_new_tokens, eos_token_id if eos_token_id is not None else -1,
                                 pad_token_id if pad_token_id is not None else 0, 16)
             gen_ids = token_buf.unsqueeze(0)
             return torch.cat([prompt_ids, gen_ids], dim=1)
