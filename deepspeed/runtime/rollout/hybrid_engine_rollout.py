@@ -156,18 +156,20 @@ class HybridEngineRollout(RolloutEngine):
             else:
                 temperature = max(sampling.temperature, 1e-8)
                 do_sample = not is_greedy
-                output_ids = module.generate(
-                    prompt_ids,
-                    attention_mask=prompt_attn,
-                    max_new_tokens=max_new_tokens,
+                generate_kwargs = {
+                    "attention_mask": prompt_attn,
+                    "max_new_tokens": max_new_tokens,
                     # ZeRO-3 gathers parameters during each decode forward, so every
                     # data-parallel rank must execute the same number of iterations.
-                    eos_token_id=None,
-                    do_sample=do_sample,
-                    temperature=temperature if do_sample else 1.0,
-                    top_p=sampling.top_p if do_sample else 1.0,
-                    pad_token_id=pad_token_id,
-                )
+                    "eos_token_id": None,
+                    "do_sample": do_sample,
+                    "temperature": temperature if do_sample else 1.0,
+                    "top_p": sampling.top_p if do_sample else 1.0,
+                    "pad_token_id": pad_token_id,
+                }
+                if do_sample:
+                    generate_kwargs["top_k"] = max(sampling.top_k, 0)
+                output_ids = module.generate(prompt_ids, **generate_kwargs)
         finally:
             for handle in shared_prefill_handles:
                 handle.remove()
@@ -845,23 +847,6 @@ class HybridEngineRollout(RolloutEngine):
             eos_mask |= (next_token.squeeze(1) == eos_token_id)
 
         return torch.cat(output_ids, dim=1)
-
-    @staticmethod
-    def _sample_top_p(logits: torch.Tensor, temperature: float = 1.0, top_p: float = 1.0) -> torch.Tensor:
-        """Sample from logits with temperature and nucleus (top-p) filtering."""
-        logits = logits / temperature
-        if top_p < 1.0:
-            sorted_logits, sorted_indices = torch.sort(logits, descending=True, dim=-1)
-            cumulative_probs = torch.cumsum(torch.softmax(sorted_logits, dim=-1), dim=-1)
-            mask = (cumulative_probs - torch.softmax(sorted_logits, dim=-1)) >= top_p
-            sorted_logits[mask] = -float('inf')
-            probs = torch.softmax(sorted_logits, dim=-1)
-            sampled = torch.multinomial(probs, 1)
-            tokens = sorted_indices.gather(1, sampled)
-        else:
-            probs = torch.softmax(logits, dim=-1)
-            tokens = torch.multinomial(probs, 1)
-        return tokens
 
     def sync_weights(self, step: int) -> None:  # noqa: ARG002
         """No-op: hybrid engine reads model weights live."""
