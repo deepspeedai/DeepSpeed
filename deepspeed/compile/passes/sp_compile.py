@@ -247,8 +247,6 @@ def apply_autosp(gm: GraphModule,
         debug: If True, print graph before/after each pass
         passes: Optional custom list of passes (default: DEFAULT_PASSES)
     """
-    assert sp_size * dp_size <= dist.get_world_size(), 'Insufficient device count for mesh size'
-
     sp_dp_registry.populate_registry(sp_size, dp_size)
 
     AUTOSP_PASSES = [

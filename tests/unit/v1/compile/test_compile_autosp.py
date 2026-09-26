@@ -85,8 +85,56 @@ class TestAutoSPCompile(DistributedTest):
         compare_sp_loss(self, config_dict, sp_size)
 
 
+class TestAutoSPMeshRegistry(DistributedTest):
+    """Re-registering the mesh an engine already uses keeps the existing process groups."""
+    world_size = 4
+
+    def test_same_mesh_is_reused(self, monkeypatch):
+        import deepspeed.comm as dist
+        from deepspeed.compile.custom_ops import sp_dp_registry
+
+        monkeypatch.setattr(sp_dp_registry, "GROUP_REGISTRY", {})
+        sp_dp_registry.populate_registry(2, 2)
+        group = sp_dp_registry.get_group(dist.get_rank() // 2)
+        sp_dp_registry.populate_registry(2, 2)
+
+        assert sp_dp_registry.get_group(dist.get_rank() // 2) is group
+        assert dist.get_world_size(group) == 2
+
+
 # Plain pytest classes — no distributed runtime needed because these functions
 # perform pure IR-level graph rewrites; sp_size and get_rank are mocked.
+
+
+class TestAutoSPMeshValidation:
+    """The SP/DP registry is process-global and read by compiled graphs at runtime."""
+
+    def test_rejects_changed_mesh(self, monkeypatch):
+        from deepspeed.compile.custom_ops import sp_dp_registry
+
+        registry = {"SP_SIZE": 2, "DP_SIZE": 2, "is_reg": True}
+        monkeypatch.setattr(sp_dp_registry, "GROUP_REGISTRY", registry)
+        monkeypatch.setattr(sp_dp_registry.dist, "get_world_size", lambda *args, **kwargs: 4)
+
+        with pytest.raises(RuntimeError, match="already initialized"):
+            sp_dp_registry.populate_registry(4, 1)
+        assert (sp_dp_registry.sp_size(), sp_dp_registry.dp_size()) == (2, 2)
+
+    @pytest.mark.parametrize("sp_size, dp_size", [(2, 1), (1, 2)])
+    def test_rejects_mesh_not_covering_world(self, monkeypatch, sp_size, dp_size):
+        from deepspeed.compile.custom_ops import sp_dp_registry
+
+        monkeypatch.setattr(sp_dp_registry, "GROUP_REGISTRY", {})
+        monkeypatch.setattr(sp_dp_registry.dist, "get_world_size", lambda *args, **kwargs: 4)
+
+        def fail_new_group(ranks):
+            raise AssertionError(f"process group {ranks} created for an invalid mesh")
+
+        monkeypatch.setattr(sp_dp_registry.dist, "new_group", fail_new_group)
+
+        with pytest.raises(ValueError, match="must cover"):
+            sp_dp_registry.populate_registry(sp_size, dp_size)
+        assert not sp_dp_registry.is_setup()
 
 
 class TestSDPANodesCompile:
