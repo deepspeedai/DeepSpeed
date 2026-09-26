@@ -24,10 +24,33 @@ import deepspeed
 from deepspeed.runtime.engine import DeepSpeedEngine
 from deepspeed.runtime.bf16_optimizer import BF16_Optimizer
 from deepspeed.runtime.zero.partition_parameters import ZeroParamStatus
+from deepspeed.runtime.zero.stage_1_and_2 import split_half_float_double
 from deepspeed.utils.zero_to_fp32 import load_state_dict_from_zero_checkpoint
 from deepspeed.runtime.zero.utils import ZeRORuntimeException
 from deepspeed.accelerator import get_accelerator
 from deepspeed.utils import safe_get_full_fp32_param, safe_get_full_grad
+
+
+class TestSplitHalfFloatDouble:
+
+    def test_device_independent_buckets_exclude_sparse(self):
+        # Pins two fixed membership bugs: the legacy accelerator-prefixed type
+        # strings matched nothing on CPU, silently dropping every bucket, and
+        # dtype-only matching would admit sparse layouts, which cannot be
+        # flattened into a dense all-reduce buffer. The CSR sample also pins that
+        # the exclusion covers layouts where is_sparse is False.
+        dense_grads = [
+            torch.zeros(2, dtype=dtype) for dtype in (torch.half, torch.float, torch.double, torch.bfloat16)
+        ]
+        sparse_grad = torch.sparse_coo_tensor(torch.tensor([[0]]), torch.tensor([1.0]), (1, ))
+        csr_grad = torch.sparse_csr_tensor(torch.tensor([0, 1]), torch.tensor([0]), torch.tensor([1.0]), (1, 1))
+
+        buckets = split_half_float_double(dense_grads + [sparse_grad, csr_grad])
+
+        assert len(buckets) == 4
+        for bucket, grad in zip(buckets, dense_grads):
+            assert len(bucket) == 1
+            assert bucket[0] is grad
 
 
 @pytest.mark.parametrize("zero_stage", [0, 1, 2])
@@ -872,6 +895,75 @@ class EltwiseMultiplicationTestNetwork_List(EltwiseMultiplicationTestNetwork_Dic
             "y_hat": outputs[2],
             "loss": outputs[3],
         }
+
+
+class GradClearingParameter(Parameter):
+
+    def __setattr__(self, name, value):
+        if name == "grad" and value is None and getattr(self, "count_grad_clears", False):
+            self.grad_clear_count += 1
+        super().__setattr__(name, value)
+
+
+class TestZero3SubgroupGradientClearing(DistributedTest):
+    world_size = 1
+
+    @pytest.mark.parametrize("sub_group_size", [8, 1000000])
+    @pytest.mark.parametrize("gradient_accumulation_steps", [1, 2])
+    @pytest.mark.parametrize("offload_optimizer", [False, True])
+    def test_training_matches_adamw(self, sub_group_size, gradient_accumulation_steps, offload_optimizer):
+        device = get_accelerator().device_name()
+        torch.manual_seed(1234)
+        model = torch.nn.Sequential(Linear(4, 4), Linear(4, 4), Linear(4, 2)).to(device)
+        reference = deepcopy(model)
+        for layer in model:
+            layer.weight = GradClearingParameter(layer.weight.detach())
+            layer.bias = GradClearingParameter(layer.bias.detach())
+        reference_optimizer = torch.optim.AdamW(reference.parameters(), lr=0.01)
+        optimizer = torch.optim.AdamW(model.parameters(), lr=0.01)
+        config = {
+            "train_micro_batch_size_per_gpu": 2,
+            "gradient_accumulation_steps": gradient_accumulation_steps,
+            "gradient_clipping": 0.5,
+            "zero_allow_untested_optimizer": True,
+            "zero_force_ds_cpu_optimizer": False,
+            "zero_optimization": {
+                "stage": 3,
+                "sub_group_size": sub_group_size,
+                "overlap_comm": False,
+                "offload_optimizer": {
+                    "device": "cpu" if offload_optimizer else "none"
+                },
+            },
+        }
+        engine, optimizer, _, _ = deepspeed.initialize(model=model, optimizer=optimizer, config=config)
+        parameters = list(engine.module.parameters())
+        for _ in range(3):
+            for _ in range(gradient_accumulation_steps):
+                inputs = torch.randn(2, 4, device=device)
+                reference_loss = reference(inputs).square().mean()
+                (reference_loss / gradient_accumulation_steps).backward()
+                loss = engine(inputs).square().mean()
+                torch.testing.assert_close(loss, reference_loss)
+                engine.backward(loss)
+                for param in parameters:
+                    param.grad_clear_count = 0
+                    param.count_grad_clears = True
+                engine.step()
+                for param in parameters:
+                    param.count_grad_clears = False
+                    # Pin #8586: a parameter may be cleared in optimizer.step and engine
+                    # cleanup, but must not be revisited once for every sub-group.
+                    assert param.grad_clear_count <= 2
+
+            torch.nn.utils.clip_grad_norm_(reference.parameters(), 0.5)
+            reference_optimizer.step()
+            reference_optimizer.zero_grad()
+            for param, expected in zip(parameters, reference.parameters()):
+                torch.testing.assert_close(safe_get_full_fp32_param(param), expected, rtol=1e-5, atol=1e-6)
+                assert param.grad is None
+            assert optimizer.micro_step_id == 0
+            assert not optimizer._epilogue_ran_this_backward
 
 
 class TestZero3ParamPartitioningBase(DistributedTest):

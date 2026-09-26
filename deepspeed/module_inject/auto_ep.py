@@ -13,7 +13,7 @@ from __future__ import annotations
 import math
 import re
 from collections import OrderedDict
-from typing import TYPE_CHECKING, Literal
+from typing import Callable, TYPE_CHECKING, Literal
 
 import torch
 import torch.nn as nn
@@ -290,8 +290,13 @@ class AutoEP:
     """Automatic Expert Parallelism: detect and replace MoE layers."""
 
     def __init__(self, model: nn.Module, config: AutoEPConfig) -> None:
+        from deepspeed.module_inject.auto_ep_comm import new_exchange_scope
+
         self.model = model
         self.config = config
+        # One DeepEP sharing scope per converted model. Its layers all want
+        # the same buffer; another model's do not, even on the same group.
+        self.deepep_scope = new_exchange_scope()
         self.model_config = getattr(model, 'config', None)
         self._retargeted_transformers_output_recorders: set[str] = set()
         fill_autoep_config_from_hf(self.config, self.model_config)
@@ -529,6 +534,7 @@ class AutoEP:
             ep_size=ep_size,
             ep_rank=ep_rank,
             config=self.config,
+            deepep_scope=self.deepep_scope,
         )
 
         # Collected before the source module leaves the tree, and only when a caller-supplied
@@ -570,6 +576,7 @@ class AutoEP:
         ep_size: int,
         ep_rank: int,
         collect_sources: bool = False,
+        on_moe_layer_replaced: Callable[[nn.Module], None] | None = None,
     ) -> "ReplacementSourceMap":
         """Replace multiple MoE modules and batch post-replacement recorder retargeting.
 
@@ -587,8 +594,10 @@ class AutoEP:
         replacement_sources = ReplacementSourceMap()
         for spec in specs:
             replacement, sources = self._replace_moe_layer_without_retarget(spec, ep_size, ep_rank, collect_sources)
-            replacements.append((spec, replacement))
             replacement_sources.update(sources)
+            if on_moe_layer_replaced is not None:
+                on_moe_layer_replaced(replacement)
+            replacements.append((spec, replacement))
             logger.info(f"AutoEP: replaced '{spec.moe_module_name}' with AutoEPMoELayer "
                         f"(ep_size={ep_size}, ep_rank={ep_rank}, "
                         f"local_experts={replacement.num_local_experts})")

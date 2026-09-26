@@ -53,7 +53,8 @@ if _TRITON_AVAILABLE:
         K_PADDED: tl.constexpr,
         BLOCK_H: tl.constexpr,
     ):
-        token = tl.program_id(0)
+        # int64: token * out_stride overflows int32 once tokens x hidden > 2**31.
+        token = tl.program_id(0).to(tl.int64)
         hidden_offsets = tl.program_id(1) * BLOCK_H + tl.arange(0, BLOCK_H)
         hidden_mask = hidden_offsets < hidden
 
@@ -99,7 +100,8 @@ if _TRITON_AVAILABLE:
         K_PADDED: tl.constexpr,
         BLOCK_H: tl.constexpr,
     ):
-        token = tl.program_id(0)
+        # int64: token * grad_out_stride overflows int32 once tokens x hidden > 2**31.
+        token = tl.program_id(0).to(tl.int64)
 
         slots = tl.arange(0, K_PADDED)
         slot_mask = slots < TOP_K

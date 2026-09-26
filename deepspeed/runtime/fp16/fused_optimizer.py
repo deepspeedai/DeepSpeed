@@ -10,7 +10,7 @@ This file is adapted from FP16_Optimizer in NVIDIA/apex
 import torch
 from torch._utils import _flatten_dense_tensors, _unflatten_dense_tensors
 from deepspeed.runtime.base_optimizer import DeepSpeedOptimizer
-from deepspeed.runtime.utils import get_global_norm, get_flattened_grad_norm, CheckOverflow, get_weight_norm, get_norm_with_moe_layers, is_model_parallel_parameter
+from deepspeed.runtime.utils import get_global_norm, get_flattened_grad_norm, CheckOverflow, get_weight_norm, get_norm_with_moe_layers, is_model_parallel_parameter, is_optimized_parameter
 from deepspeed.runtime.fp16.loss_scaler import LossScaleConfig, LossScaleProfile
 from deepspeed.utils import logger, log_dist
 from deepspeed.utils.torch import required_torch_version
@@ -86,7 +86,7 @@ class FP16_Optimizer(DeepSpeedOptimizer):
         # loop to deal with groups
         for i, param_group in enumerate(self.optimizer.param_groups):
             # push this group to list before modify
-            trainable = [p for p in param_group['params'] if p.requires_grad]
+            trainable = [p for p in param_group['params'] if is_optimized_parameter(p)]
             self.fp16_groups.append(trainable)
             # init fp16 weight buffer, flattened
             self.fp16_groups_flat.append(_flatten_dense_tensors([p.clone().detach() for p in self.fp16_groups[i]]))

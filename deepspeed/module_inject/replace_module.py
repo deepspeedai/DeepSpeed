@@ -299,6 +299,7 @@ def replace_transformer_layer(orig_layer_impl, model, checkpoint_dict, config, m
                          orig_layer_impl,
                          config.keep_module_on_host,
                          partition_config=partition_config,
+                         vocab_parallel_lm_head=getattr(config, "vocab_parallel_lm_head", False),
                          model_config=meta_config,
                          tp_grain_size=config.tensor_parallel.tp_grain_size,
                          training_mode=training_mode)

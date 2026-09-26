@@ -123,8 +123,8 @@ in the stage-2 path.
 
 .. note::
    Unmanaged mode supports ZeRO stage 0/1/2/3 (and DDP), including ZeRO optimizer-state and parameter
-   offload (CPU/NVMe). It is incompatible with pipeline parallelism, DeepCompile, and Apex AMP, which
-   are rejected at initialization. ZeRO ``overlap_comm`` is supported only with ZeRO stage 2
+   offload (CPU/NVMe). It is incompatible with pipeline parallelism and DeepCompile, which are
+   rejected at initialization. ZeRO ``overlap_comm`` is supported only with ZeRO stage 2
    (rejected for stage 0/1, where reduction is deferred to ``step()``).
 
 .. autofunction:: deepspeed.DeepSpeedEngine.set_gradient_accumulation_boundary

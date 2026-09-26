@@ -186,6 +186,7 @@ jobs:
         env:
           DS_CI_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
           DS_CI_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          DS_CI_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || '' }}
           DS_TEST_SELECTION_MODE: ${{ needs.collect-tests.outputs.mode }}
           DS_TEST_LIST_FILE: ci/.test_selection/test_list.txt
           MODAL_TORCH_PRESET: ${{ github.event.inputs.torch_preset || '2.10.0-cuda12.8' }}

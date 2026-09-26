@@ -86,6 +86,18 @@ and pending rows are prefetched into the released slots. The returned
 The experimental path periodically trims unused cache columns from the left
 to keep long-running staggered-EOS workloads within the allocated cache span.
 
+When ``HybridEngineRolloutConfig(enable_profiling=True)`` is enabled, this path
+also records a snapshot in ``get_last_profile()``. In addition to the common
+rollout fields, the snapshot reports ``scheduler_overhead_ms`` for scheduler
+transitions, ``cache_management_overhead_ms`` for cache compaction, trimming,
+reset, and admitted-row copies, and separate ``prefill_forward_ms`` and
+``decode_forward_ms`` totals. ``num_prefill_forwards`` counts each admitted
+prompt batch, while ``num_decode_forwards`` counts decode steps that had
+surviving rows. ``num_generated_tokens`` counts tokens actually produced by
+all requests (padding is excluded), and ``active_batch_size`` is the maximum
+number of simultaneously active rows; ``continuous_batch_size`` is the
+configured capacity.
+
 The experimental path intentionally does not implement paged attention or change the
 default generation semantics. It currently requires one prompt width for all
 rows, a model with cache-class support, greedy decoding, and one sample per
