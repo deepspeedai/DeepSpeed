@@ -103,7 +103,8 @@ class HybridEngineRollout(RolloutEngine):
         self.use_shared_prefill = getattr(cfg, 'use_shared_prefill', False) if cfg else False
         self._last_profile = None
 
-        if cfg is not None and getattr(cfg, 'use_segki', False):
+        self.use_segki = cfg is not None and getattr(cfg, 'use_segki', False)
+        if self.use_segki:
             self._segki_report = self._apply_segki()
         else:
             self._segki_report = None
@@ -830,16 +831,19 @@ class HybridEngineRollout(RolloutEngine):
         # decode_attn kernel for the b=1 decode steps (prefill and any
         # non-graph path keep the original forward). Must happen before the
         # warmup forwards so the captured graph records the kernel.
-        try:
-            from deepspeed.module_inject.segment_ki import install_decode_attention, install_fused_norm
-            from deepspeed.ops.module_inject import get_fused_glu_op
-            attn_op = get_fused_glu_op()
-            attn_patched = install_decode_attention(module, write_pos, attn_op) if hasattr(attn_op,
-                                                                                           "decode_attn") else 0
-            module._ki_fused_norm_patched = install_fused_norm(module, attn_op)
-        except Exception:
-            attn_patched = 0
-            module._ki_fused_norm_patched = 0
+        attn_patched = 0
+        module._ki_fused_norm_patched = 0
+        if self.use_segki:
+            try:
+                from deepspeed.module_inject.segment_ki import install_decode_attention, install_fused_norm
+                from deepspeed.ops.module_inject import get_fused_glu_op
+                attn_op = get_fused_glu_op()
+                attn_patched = install_decode_attention(module, write_pos, attn_op) if hasattr(attn_op,
+                                                                                               "decode_attn") else 0
+                module._ki_fused_norm_patched = install_fused_norm(module, attn_op)
+            except Exception:
+                attn_patched = 0
+                module._ki_fused_norm_patched = 0
 
         # Snapshot the GDN states right after prefill: the warmup forwards
         # advance conv/recurrent states by extra steps, so they must be
