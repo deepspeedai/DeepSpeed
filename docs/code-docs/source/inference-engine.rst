@@ -110,3 +110,32 @@ Transformers.
 active rows while preserving its static tensor addresses. This mirrors the
 scheduler/cache separation used by systems such as vLLM and SGLang without
 copying their backend-specific kernels.
+
+OPSD response-token utilities
+-----------------------------
+
+``ResponseTokenBatch.from_rollout`` derives causal training targets and a
+response-only loss mask from a ``RolloutBatch``. The mask excludes prompt and
+padding tokens while retaining an attended EOS token. Use
+``generalized_jsd_loss`` to compare aligned student and teacher logits on that
+mask:
+
+.. code-block:: python
+
+    from deepspeed.runtime.rollout import ResponseTokenBatch, generalized_jsd_loss
+
+    response_batch = ResponseTokenBatch.from_rollout(rollout_batch)
+    student_logits = response_batch.select_causal_logits(student_model(**model_inputs).logits)
+    teacher_logits = aligned_teacher_logits
+    loss_output = generalized_jsd_loss(
+        student_logits,
+        teacher_logits,
+        response_batch.response_mask,
+    )
+    loss = loss_output.loss
+
+The rollout supplies only the student on-policy trajectory. Construct the
+teacher inputs, including any privileged context, separately and align the
+teacher logits with the student causal-logit shape before calling the loss.
+``loss_sum`` and ``valid_token_count`` are available for callers that need
+explicit distributed loss normalization.
