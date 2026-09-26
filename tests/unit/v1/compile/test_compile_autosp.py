@@ -4,6 +4,7 @@
 # DeepSpeed Team
 
 import operator
+import re
 from unittest.mock import patch
 
 import pytest
@@ -26,12 +27,13 @@ pytestmark = pytest.mark.skipif(not required_torch_version(min_version=2.9),
 _SP_SIZE = 2
 
 
-def _create_sdpa_graph(seq_len):
+def _create_sdpa_graph(seq_len, num_heads=2, num_kv_heads=None):
+    num_kv_heads = num_heads if num_kv_heads is None else num_kv_heads
     graph = Graph()
     inputs = []
-    for name in ("query", "key", "value"):
+    for name, heads in (("query", num_heads), ("key", num_kv_heads), ("value", num_kv_heads)):
         node = graph.placeholder(name)
-        node.meta["example_value"] = torch.empty(1, 2, seq_len, 8)
+        node.meta["example_value"] = torch.empty(1, heads, seq_len, 8)
         inputs.append(node)
     sdpa = graph.call_function(F.scaled_dot_product_attention, args=tuple(inputs))
     graph.output(sdpa)
@@ -304,3 +306,74 @@ class TestShardTensorCompile:
             shard_tensor_node(reordered_gm, reordered_input_ids)
 
         reordered_gm.graph.lint()
+
+
+def _create_shard_offsets_graph():
+    """Graph mapping the (dynamic) sequence length to this rank's (start, end) shard offsets."""
+    import deepspeed.comm as _dist
+    from deepspeed.compile.custom_ops import sp_dp_registry as _registry
+    from deepspeed.compile.util import create_shard_offsets
+
+    graph = Graph()
+    seq_len = graph.placeholder("seq_len")
+    output = graph.output(seq_len)
+    gm = GraphModule({}, graph)
+    with patch.object(_registry, "sp_size", return_value=_SP_SIZE), \
+         patch.object(_dist, "get_rank", return_value=0):
+        start, end = create_shard_offsets(gm, seq_len)
+    output.args = ((start, end), )
+    gm.recompile()
+    return gm
+
+
+class TestAutoSPDivisibilityValidation:
+    """AutoSP splits the sequence across SP ranks and the heads in the all-to-all, so both must divide evenly."""
+
+    @pytest.mark.parametrize("seq_len, expected", [(16, (0, 8)), (32, (0, 16))])
+    def test_shard_offsets_for_divisible_sequence_length(self, seq_len, expected):
+        assert _create_shard_offsets_graph()(seq_len) == expected
+
+    def test_shard_offsets_reject_non_divisible_sequence_length(self):
+        # The sequence length is dynamic, so the check has to run with the graph rather than at compile time.
+        gm = _create_shard_offsets_graph()
+        with pytest.raises(RuntimeError, match="sequence length to be divisible by sequence_parallel_size"):
+            gm(15)
+
+    @pytest.mark.parametrize("num_heads, num_kv_heads, role, bad_heads", [(3, 3, "query", 3), (4, 1, "key", 1)],
+                             ids=["mha", "gqa"])
+    def test_rejects_non_divisible_attention_heads(self, num_heads, num_kv_heads, role, bad_heads):
+        from deepspeed.compile.custom_ops import sp_dp_registry as _registry
+        from deepspeed.compile.passes.sp_compile import pass_insert_attention_all_to_all
+
+        gm = _create_sdpa_graph(seq_len=8, num_heads=num_heads, num_kv_heads=num_kv_heads)
+        with patch.object(_registry, "sp_size", return_value=_SP_SIZE):
+            with pytest.raises(ValueError, match=re.escape(f"number of {role} heads ({bad_heads}) to be divisible")):
+                pass_insert_attention_all_to_all(gm, ())
+
+    def test_accepts_grouped_query_attention_with_divisible_heads(self):
+        from deepspeed.compile.custom_ops import sp_dp_registry as _registry
+        from deepspeed.compile.passes.sp_compile import pass_insert_attention_all_to_all
+
+        gm = _create_sdpa_graph(seq_len=8, num_heads=4, num_kv_heads=2)
+        with patch.object(_registry, "sp_size", return_value=_SP_SIZE):
+            pass_insert_attention_all_to_all(gm, ())
+
+        a2a_nodes = [n for n in gm.graph.nodes if n.target == torch.ops.autosp.all_to_all.default]
+        assert len(a2a_nodes) == 4
+
+    def test_all_to_all_rejects_non_divisible_heads_before_the_collective(self):
+        import importlib
+        import deepspeed.comm as _dist
+
+        a2a_module = importlib.import_module("deepspeed.compile.custom_ops.all_to_all")
+
+        def fail_collective(*args, **kwargs):
+            raise AssertionError("the collective must not run for a non-divisible head count")
+
+        with patch.object(a2a_module, "is_setup", return_value=True), \
+             patch.object(a2a_module, "sp_size", return_value=_SP_SIZE), \
+             patch.object(a2a_module, "get_group", return_value=None), \
+             patch.object(_dist, "get_rank", return_value=0), \
+             patch.object(_dist, "all_to_all_single", side_effect=fail_collective):
+            with pytest.raises(ValueError, match=re.escape("number of attention heads (3)")):
+                torch.ops.autosp.all_to_all(torch.empty(1, 3, 4, 8), 1, 2, "q")

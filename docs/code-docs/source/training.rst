@@ -719,6 +719,8 @@ config and calling ``prepare_autosp_inputs()`` to prepare inputs before each for
 .. note::
    AutoSP requires ZeRO stage 0 (no ZeRO optimization). Using AutoSP with ZeRO stages 1, 2, or 3 is not currently supported.
    AutoSP also requires ``torch.nn.functional.scaled_dot_product_attention()`` as the attention backend.
+   The sequence length and the number of query, key, and value heads of every SDPA call must be divisible by
+   ``sequence_parallel_size``.
 
 Input Preparation
 ~~~~~~~~~~~~~~~~~

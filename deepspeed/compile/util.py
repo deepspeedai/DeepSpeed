@@ -540,7 +540,19 @@ def pad_tensors(specs: List[Tuple[torch.Tensor, int, int]]) -> List[torch.Tensor
 def create_shard_offsets(gm: GraphModule, s0_node: Node) -> Tuple[Node, Node]:
     sp_size: int = sp_dp_registry.sp_size()
     sp_rank: int = dist.get_rank() % sp_dp_registry.sp_size()
+    # The sequence length is dynamic, so its divisibility can only be checked when the graph runs.
+    # Without the check, every rank takes s0 // sp_size tokens and the remainder is silently dropped.
     with gm.graph.inserting_after(s0_node):
+        remainder_node = gm.graph.call_function(operator.mod, args=(s0_node, sp_size))
+    with gm.graph.inserting_after(remainder_node):
+        divisible_node = gm.graph.call_function(operator.eq, args=(remainder_node, 0))
+    with gm.graph.inserting_after(divisible_node):
+        assert_node = gm.graph.call_function(
+            torch.ops.aten._assert_scalar.default,
+            args=(divisible_node, f"AutoSP requires the sequence length to be divisible by "
+                  f"sequence_parallel_size ({sp_size})"),
+        )
+    with gm.graph.inserting_after(assert_node):
         chunk_size_node = gm.graph.call_function(operator.floordiv, args=(s0_node, sp_size))
     with gm.graph.inserting_after(chunk_size_node):
         start_node = gm.graph.call_function(operator.mul, args=(sp_rank, chunk_size_node))

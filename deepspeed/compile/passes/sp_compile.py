@@ -157,6 +157,7 @@ def pass_insert_attention_all_to_all(gm: GraphModule, real_inputs):
             a2a_node.update_arg(0, node)
         return a2a_node
 
+    sp_size = sp_dp_registry.sp_size()
     attention_nodes = get_sdpa_nodes(gm)
     if len(attention_nodes) == 0:
         raise RuntimeError("AutoSP currently supports torch.nn.functional.scaled_dot_product_attention as the "
@@ -167,6 +168,19 @@ def pass_insert_attention_all_to_all(gm: GraphModule, real_inputs):
     for idx, attn_node in enumerate(attention_nodes):
         q, k, v = attn_node.args[:3]
         suffix = f"_{idx}" if len(attention_nodes) > 1 else ""
+
+        # Q/K/V are checked separately: with GQA, K/V can have fewer heads than Q.
+        for role, tensor in (("query", q), ("key", k), ("value", v)):
+            meta = get_node_shape_meta(tensor) if isinstance(tensor, Node) else None
+            if meta is None:
+                continue
+            if meta.ndim != 4:
+                raise RuntimeError(f"AutoSP expects 4D [batch, heads, seq, head_dim] SDPA {role} tensors, "
+                                   f"but got shape {tuple(meta.shape)}")
+            num_heads = meta.shape[1]
+            if isinstance(num_heads, int) and num_heads % sp_size != 0:
+                raise ValueError(f"AutoSP requires the number of {role} heads ({num_heads}) to be divisible by "
+                                 f"sequence_parallel_size ({sp_size})")
 
         # QKV: [B, N, S/P, H] -> [B, N/P, S, H]
         insert_a2a(q, scatter_idx=1, gather_idx=2, name=f"q{suffix}")
