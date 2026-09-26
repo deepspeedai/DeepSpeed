@@ -70,9 +70,10 @@ branches. The option is disabled by default.
 
 Shared prefill currently requires HybridEngine kernel injection, ZeRO stage 0,
 inference tensor-parallel size 1, an internal KV cache, and a prompt longer than
-one token. It cannot be combined with CUDA graph capture or
-``release_inference_cache``. Sampling still happens independently for every
-response branch after the shared prompt forward.
+one token. It cannot be combined with CUDA graph capture,
+``release_inference_cache``, or continuous batching
+(``SamplingConfig.continuous_batch_size``). Sampling still happens independently
+for every response branch after the shared prompt forward.
 
 Continuous batching (experimental)
 -----------------------------------
@@ -101,10 +102,10 @@ configured capacity.
 The experimental path intentionally does not implement paged attention or change the
 default generation semantics. It currently requires one prompt width for all
 rows, a model with cache-class support, greedy decoding, and one sample per
-prompt. CUDA Graph capture and multiple prompt widths are rejected until the
-scheduling semantics are validated on real workloads. Models without
-cache-class support should use the default ``generate()`` path or upgrade
-Transformers.
+prompt. CUDA Graph capture, shared prompt prefill, and multiple prompt widths
+are rejected until the scheduling semantics are validated on real workloads.
+Models without cache-class support should use the default ``generate()`` path
+or upgrade Transformers.
 
 ``DeepSpeedStaticCache`` accepts one write position per row and can compact
 active rows while preserving its static tensor addresses. This mirrors the
