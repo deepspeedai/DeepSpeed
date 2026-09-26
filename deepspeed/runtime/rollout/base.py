@@ -26,7 +26,10 @@ class RolloutConfig:
 
 @dataclass
 class SamplingConfig:
-    """Sampling knobs that the trainer passes to ``generate`` each step."""
+    """Sampling knobs that the trainer passes to ``generate`` each step.
+
+    ``top_k <= 0`` disables top-k filtering.
+    """
 
     max_new_tokens: int
     temperature: float = 1.0
