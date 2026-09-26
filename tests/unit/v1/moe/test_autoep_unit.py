@@ -50,6 +50,7 @@ from deepspeed.moe.layer import MoE
 from deepspeed.moe.ep_experts import GroupedExperts
 from deepspeed.moe.ep_repack import repack_expert_weights
 from deepspeed.moe.ep_router import TokenChoiceTopKRouter
+from deepspeed.moe.routing_replay import RoutingReplay
 from deepspeed.compile.config import CompileConfig
 from deepspeed.runtime.config import DeepSpeedConfig
 from deepspeed.runtime.engine import DeepSpeedEngine
@@ -1288,6 +1289,132 @@ class TestAutoEPRegionalCompile:
 
 
 class TestRoutingAndLayerSemantics:
+
+    @pytest.mark.parametrize("device", ["cpu", "cuda"])
+    def test_router_replay_keeps_route_ids_and_router_gradients(self, device, monkeypatch):
+        if device == "cuda":
+            from deepspeed.accelerator import get_accelerator
+
+            if get_accelerator().device_name() != "cuda" or not get_accelerator().is_available():
+                pytest.skip("CUDA routing replay requires a CUDA accelerator")
+        router = TokenChoiceTopKRouter(8, 4, None, None, 2, "softmax", True, 1.0, False).to(device)
+        replay = RoutingReplay()
+        router.set_routing_replay(replay, "layer.0")
+        inputs = torch.randn(6, 8, device=device, requires_grad=True)
+
+        with replay.recording():
+            _, recorded_experts, _ = router(inputs)
+
+        with torch.no_grad():
+            router.gate.weight.zero_()
+
+        def unexpected_topk(*args, **kwargs):
+            raise AssertionError("replay should not recompute top-k")
+
+        monkeypatch.setattr(torch, "topk", unexpected_topk)
+        with replay.replaying():
+            replayed_scores, replayed_experts, _ = router(inputs)
+
+        torch.testing.assert_close(replayed_experts, recorded_experts)
+        expected_scores = router.gate(inputs).softmax(dim=-1).gather(1, recorded_experts)
+        expected_scores = expected_scores / expected_scores.sum(dim=-1, keepdim=True)
+        torch.testing.assert_close(replayed_scores, expected_scores)
+        assert replayed_scores.requires_grad
+        replayed_scores[:, 0].sum().backward()
+        assert router.gate.weight.grad is not None
+
+    def test_router_replay_validates_external_routes(self):
+        router = TokenChoiceTopKRouter(8, 4, None, None, 2, "softmax", False, 1.0, False)
+        replay = RoutingReplay()
+        router.set_routing_replay(replay, "layer.0")
+        inputs = torch.randn(3, 8)
+
+        external_routes = torch.tensor([[0, 1], [2, 3], [0, 2]], dtype=torch.int16)
+        replay.set_replay_data("layer.0", external_routes)
+        external_routes[0, 0] = 3
+        with replay.replaying():
+            _, selected, _ = router(inputs)
+        expected = torch.tensor([[0, 1], [2, 3], [0, 2]])
+        torch.testing.assert_close(selected, expected)
+
+        with pytest.raises(TypeError, match="integer dtype"):
+            replay.set_replay_data("layer.0", torch.randn(3, 2))
+
+        replay.set_replay_data("layer.0", torch.tensor([[0, 1], [2, 3]], dtype=torch.int16))
+        with pytest.raises(ValueError, match=r"expected \(3, 2\)"):
+            with replay.replaying():
+                router(inputs)
+        with replay.replaying():
+            _, selected, _ = router(inputs[:2])
+        torch.testing.assert_close(selected, torch.tensor([[0, 1], [2, 3]]))
+
+        replay.set_replay_data("layer.0", torch.tensor([[0, 0], [1, 2], [2, 3]]))
+        with pytest.raises(ValueError, match="duplicate experts"):
+            with replay.replaying():
+                router(inputs)
+
+        replay.set_replay_data("layer.0", torch.tensor([[0, 4], [1, 2], [2, 3]]))
+        with pytest.raises(ValueError, match="outside"):
+            with replay.replaying():
+                router(inputs)
+
+        recorded_replay = RoutingReplay()
+        recorded_router = TokenChoiceTopKRouter(8, 4, None, None, 2, "softmax", False, 1.0, False)
+        recorded_router.set_routing_replay(recorded_replay, "layer.0")
+        recorded_inputs = torch.randn(2, 8)
+        with recorded_replay.recording():
+            _, recorded_routes, _ = recorded_router(recorded_inputs)
+        expected_recorded_routes = recorded_routes.clone()
+        recorded_routes[0, 0] = (recorded_routes[0, 0] + 1) % 4
+        with recorded_replay.replaying():
+            _, selected, _ = recorded_router(recorded_inputs)
+        torch.testing.assert_close(selected, expected_recorded_routes)
+
+    @pytest.mark.parametrize("checkpoint_mode", [False, True])
+    @pytest.mark.parametrize("device", ["cpu", "cuda"])
+    def test_autoep_router_replay_matches_checkpoint_gradients(self, checkpoint_mode, device, monkeypatch):
+        if device == "cuda":
+            from deepspeed.accelerator import get_accelerator
+
+            if get_accelerator().device_name() != "cuda" or not get_accelerator().is_available():
+                pytest.skip("CUDA checkpoint replay requires a CUDA accelerator")
+
+        torch.manual_seed(1234)
+        source = MockMoEBlock(num_experts=4, ffn_hidden=128, hidden_size=64)
+        spec = _make_spec()
+        config = _runtime_config(enabled=True, autoep_size=1)
+        reference = AutoEPMoELayer(spec, copy.deepcopy(source), ep_size=1, ep_rank=0, config=config).to(device)
+        candidate = AutoEPMoELayer(spec, copy.deepcopy(source), ep_size=1, ep_rank=0, config=config).to(device)
+        replay = RoutingReplay()
+        candidate.router.set_routing_replay(replay, "layer.0")
+        inputs = torch.randn(4, 8, 64, device=device)
+
+        with torch.no_grad(), replay.recording():
+            candidate(inputs)
+            candidate(inputs)
+
+        reference_inputs = inputs.detach().clone().requires_grad_(True)
+        reference_output = reference(reference_inputs)
+        reference_output.square().mean().backward()
+
+        candidate_inputs = inputs.detach().clone().requires_grad_(True)
+
+        def unexpected_topk(*args, **kwargs):
+            raise AssertionError("checkpoint replay must not recompute top-k")
+
+        monkeypatch.setattr(torch, "topk", unexpected_topk)
+        with replay.replaying():
+            candidate_output = checkpoint(candidate, candidate_inputs, use_reentrant=checkpoint_mode)
+            candidate_output.square().mean().backward()
+
+        torch.testing.assert_close(candidate_output, reference_output, rtol=1e-5, atol=1e-6)
+        torch.testing.assert_close(candidate_inputs.grad, reference_inputs.grad, rtol=1e-5, atol=1e-6)
+        reference_parameters = dict(reference.named_parameters())
+        for name, parameter in candidate.named_parameters():
+            expected = reference_parameters[name]
+            assert (parameter.grad is None) == (expected.grad is None), name
+            if parameter.grad is not None:
+                torch.testing.assert_close(parameter.grad, expected.grad, rtol=1e-5, atol=1e-6)
 
     def test_router_route_scale_and_group_limited_routing(self):
         base = TokenChoiceTopKRouter(64, 8, 4, 2, 2, "softmax", False, 1.0, False)
