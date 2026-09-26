@@ -27,6 +27,7 @@ SOFTWARE.
 
 """
 
+import math
 import torch
 import deepspeed.comm as dist  # replace torch's distributed package with deepspeed.comm to resolve deepspeed check
 from deepspeed.runtime import compiler
@@ -99,13 +100,19 @@ def zeropower_via_gram_newtonschulz(G, steps: int):
     assert G.ndim >= 2
     a, b, c = (3.4445, -4.7750, 2.0315)
     compute_dtype = ns_compute_dtype("gram")
-    X = G.to(compute_dtype)
+    # Normalize before the cast, in a dtype the input cannot already have left. fp16 stops at
+    # 65504, so a finite fp32 gradient under a loss scale arrives at the iteration as inf and
+    # the whole matrix comes back zero. bf16 and fp32 carry fp32's range, so they normalize as
+    # they are. The iteration itself is unchanged: it still runs in compute_dtype on a matrix
+    # the normalization has already brought into [-1, 1].
+    norm_dtype = torch.float32 if G.dtype == torch.float16 else G.dtype
+    X = G.to(norm_dtype)
     if G.size(-2) > G.size(-1):
         X = X.mT
 
     n, m = X.size(-2), X.size(-1)
 
-    X = X / (X.norm(dim=(-2, -1), keepdim=True) + 1e-7)
+    X = (X / (X.norm(dim=(-2, -1), keepdim=True) + 1e-7)).to(compute_dtype)
 
     # For square matrices, no FLOP advantage; use standard iteration
     if m <= n:
@@ -153,6 +160,13 @@ def zeropower_via_gram_newtonschulz(G, steps: int):
 NS_METHODS = {"standard", "gram"}
 
 
+def _aspect_ratio_scale(rows, cols):
+    # sqrt(max(1, rows / cols)), written without max() or **. Once `muon_update` is recompiled
+    # for a second shape the sizes are symbolic: inductor casts both sides of a symbolic max to
+    # int64, so max(1, 32 / 12) came out as 2, and a symbolic ** failed to compile for Triton.
+    return math.sqrt(rows / cols) if rows > cols else 1.0
+
+
 def _per_head_orthogonalize(update, num_heads, ns_steps, ns_method):
     """Newton-Schulz per attention head, then fold the head dim back."""
     if update.ndim != 2:
@@ -166,7 +180,7 @@ def _per_head_orthogonalize(update, num_heads, ns_steps, ns_method):
     head_dim = out_features // num_heads
     ns_fn = zeropower_via_gram_newtonschulz if ns_method == "gram" else zeropower_via_newtonschulz5
     # Scale per head block, matching what the full-matrix path does for the whole matrix.
-    scale = max(1, head_dim / in_features)**0.5
+    scale = _aspect_ratio_scale(head_dim, in_features)
     per_head = ns_fn(update.view(num_heads, head_dim, in_features), steps=ns_steps) * scale
 
     return per_head.reshape(out_features, in_features)
@@ -204,7 +218,7 @@ def muon_update(grad,
         return _per_head_orthogonalize(update, num_heads, ns_steps, ns_method).to(orig_dtype)
     if is_expert_group:
         ns_fn = zeropower_via_gram_newtonschulz if ns_method == "gram" else zeropower_via_newtonschulz5
-        scale = max(1, update.size(-2) / update.size(-1))**0.5
+        scale = _aspect_ratio_scale(update.size(-2), update.size(-1))
         update = ns_fn(update, steps=ns_steps) * scale
     else:
         if update.ndim == 4:  # for the case of conv filters
@@ -213,7 +227,7 @@ def muon_update(grad,
             update = zeropower_via_gram_newtonschulz(update, steps=ns_steps)
         else:
             update = zeropower_via_newtonschulz5(update, steps=ns_steps)
-        update *= max(1, grad.size(-2) / grad.size(-1))**0.5
+        update *= _aspect_ratio_scale(grad.size(-2), grad.size(-1))
     if update.dtype != orig_dtype:
         update = update.to(orig_dtype)
     # On the non-nesterov path `update` is the (untouched, finite) momentum, so without this

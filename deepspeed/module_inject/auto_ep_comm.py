@@ -21,6 +21,8 @@ sized at construction and are expensive to rebuild.
 
 from __future__ import annotations
 
+import itertools
+
 import torch
 
 from deepspeed.utils import logger
@@ -66,19 +68,87 @@ def assert_dtype_supported(dtype: torch.dtype) -> None:
                         "default all-to-all, which has no such restriction.")
 
 
+# Live shared buffers, keyed by everything that has to match for two layers to
+# use the same one. Entries leave when their last holder releases them.
+_SHARED_EXCHANGES: dict = {}
+
+_SCOPE_COUNTER = itertools.count()
+
+
+def new_exchange_scope() -> int:
+    """A fresh sharing scope, normally one per model AutoEP converts.
+
+    Layers sharing a scope share a buffer. Two models do not, even on one
+    expert-parallel group with identical geometry: they are driven
+    independently, so one DeepEP communication context between them would
+    couple schedules that nothing forces to agree. Reinforcement learning
+    puts an actor and a frozen reference model in exactly that position. The
+    cost of keeping them apart is one more buffer, against a ceiling of 27.
+
+    Every rank converts the same models in the same order, so a scope number
+    means the same thing on all of them.
+    """
+    return next(_SCOPE_COUNTER)
+
+
+def _exchange_key(scope: int, ep_group, num_experts: int, top_k: int, hidden_size: int, num_max_tokens_per_rank: int,
+                  num_sms: int, qp_margin: int) -> tuple:
+    """Everything two layers must agree on to share one buffer.
+
+    Capacity, hidden size and top-k size the buffer itself; the queue-pair
+    budget is fixed at construction; the group decides the topology; and the
+    expert count and SM budget are passed to every dispatch, so a layer that
+    disagreed on either would drive the shared buffer differently. The scope
+    is not about the buffer's shape at all: it is who is allowed to share it.
+    """
+    return (scope, ep_group, num_experts, top_k, hidden_size, num_max_tokens_per_rank, num_sms, qp_margin)
+
+
+def shared_exchange(scope: int,
+                    ep_group,
+                    num_experts: int,
+                    top_k: int,
+                    hidden_size: int,
+                    num_max_tokens_per_rank: int,
+                    num_sms: int = DEFAULT_COMM_SMS,
+                    qp_margin: int = 4) -> "DeepEPExchange":
+    """The buffer for this scope and geometry, building it on first ask.
+
+    Collective on construction, and every rank asks in the same order because
+    they run the same layers of the same model, so a hit on one rank is a hit
+    on all of them.
+    """
+    key = _exchange_key(scope, ep_group, num_experts, top_k, hidden_size, num_max_tokens_per_rank, num_sms, qp_margin)
+    exchange = _SHARED_EXCHANGES.get(key)
+    if exchange is None:
+        exchange = DeepEPExchange(
+            scope=scope,
+            ep_group=ep_group,
+            num_experts=num_experts,
+            top_k=top_k,
+            hidden_size=hidden_size,
+            num_max_tokens_per_rank=num_max_tokens_per_rank,
+            num_sms=num_sms,
+            qp_margin=qp_margin,
+        )
+        _SHARED_EXCHANGES[key] = exchange
+    exchange.holders += 1
+    return exchange
+
+
 def destroy_exchanges(module) -> None:
     """Release the DeepEP buffers held by the AutoEP layers under ``module``.
 
     Collective, and ordered by the module tree, which every rank walks the same
     way. Scoped to one module rather than to the process because several
-    engines can exist at once, and one engine's teardown must not free
-    another's buffers. Worth calling at the end of training: the buffers ask
-    DeepEP not to reclaim them, so nothing else will.
+    engines can exist at once, and each holds buffers no other engine shares.
+    Worth calling at the end of training: the buffers ask DeepEP not to
+    reclaim them, so nothing else will.
     """
     for submodule in module.modules():
         exchange = getattr(submodule, "_deepep_exchange", None)
         if exchange is not None:
-            exchange.destroy()
+            exchange.release()
             submodule._deepep_exchange = None
 
 
@@ -123,7 +193,7 @@ def _nccl_version() -> tuple[int, ...] | None:
 
 
 class DeepEPExchange:
-    """Wraps a DeepEP v2 ``ElasticBuffer`` for one MoE layer.
+    """Wraps a DeepEP v2 ``ElasticBuffer``, shared by the layers that fit it.
 
     Only v2 is supported. The legacy v1 ``Buffer`` moves data over NVSHMEM and
     IBGDA instead of NCCL, which needs either the NVreg_EnableStreamMemOPs
@@ -134,9 +204,16 @@ class DeepEPExchange:
     a dispatch and the gradient of a dispatch is a combine, both replayed
     against the handle the forward dispatch produced, so the handle has to
     survive from forward to backward.
+
+    Build these through :func:`shared_exchange` rather than directly. A buffer
+    reserves fabric resources that are scarce and, unlike device memory, are
+    not reported anywhere, so one per MoE layer is both wasteful and a ceiling
+    on depth: on 32 H100s across four nodes the twenty-eighth buffer fails
+    inside ``ncclDevCommCreate``, which no forty-eight-layer model can survive.
     """
 
     def __init__(self,
+                 scope: int,
                  ep_group,
                  num_experts: int,
                  top_k: int,
@@ -162,13 +239,22 @@ class DeepEPExchange:
             allow_hybrid_mode=True,
             explicitly_destroy=True,
         )
+        self.key = _exchange_key(scope, ep_group, num_experts, top_k, hidden_size, num_max_tokens_per_rank, num_sms,
+                                 qp_margin)
         self.num_sms = num_sms
         self.num_experts = num_experts
         # Recorded so the layer can tell when a later batch outgrows it.
         self.num_max_tokens_per_rank = num_max_tokens_per_rank
         # The handle the last dispatch produced. Combine and both backward
         # passes replay against it, so it has to outlive the dispatch call.
+        # Overwritten by whichever layer dispatched most recently, which is
+        # safe only because callers read it before dispatching again; the
+        # handle each layer needs for its backward is held by its autograd
+        # node, not here.
         self.last_handle = None
+        # Layers holding this buffer. Sharing is the point, so the last holder
+        # to let go is the one that may free it.
+        self.holders = 0
         self.destroyed = False
         # Buffer construction is collective and allocates fabric resources, so
         # it's often where an unsuitable cluster kills the process silently.
@@ -212,6 +298,10 @@ class DeepEPExchange:
             tokens,
             handle=handle,
             num_sms=self.num_sms,
+            # DeepEP takes do_expand from this argument, defaulting to False, even
+            # for a cached dispatch, while combine reads it from the handle. The
+            # forward dispatch is expanded, so the replay must ask for it too.
+            do_expand=handle.do_expand,
         )
         return recv_x
 
@@ -241,11 +331,26 @@ class DeepEPExchange:
         combined, _, _ = self.buffer.combine(rows, handle=handle, num_sms=self.num_sms)
         return combined
 
+    def release(self) -> None:
+        """Give up one holder's claim, freeing the buffer at the last one.
+
+        Collective at the point it frees, so every rank has to release the
+        same number of times. Ranks agree because they hold the same layers.
+        """
+        self.holders = max(self.holders - 1, 0)
+        if self.holders == 0:
+            self.destroy()
+
     def destroy(self) -> None:
         """Release the buffer. Collective, so every rank must call it."""
         if self.destroyed:
             return
         self.destroyed = True
+        self.holders = 0
+        # Only if this instance is still the registered one: a caller that
+        # destroys a buffer directly may already have been replaced.
+        if _SHARED_EXCHANGES.get(self.key) is self:
+            del _SHARED_EXCHANGES[self.key]
         self.buffer.destroy()
 
 

@@ -14,7 +14,7 @@ from packaging import version as pkg_version
 from deepspeed.git_version_info import version
 from deepspeed.runtime.utils import (get_global_norm_of_tensors, clip_tensors_by_global_norm, DummyOptim,
                                      align_dense_tensors, all_gather_dp_groups, is_model_parallel_parameter,
-                                     see_memory_usage, graph_process, get_norm_with_moe_layers)
+                                     see_memory_usage, get_norm_with_moe_layers, is_optimized_parameter)
 from deepspeed.utils import link_hp_params, lazy_init_hp_params_optimizer_state, fragment_address, groups
 from deepspeed.moe.utils import is_moe_param, is_moe_param_group
 from deepspeed.utils.bwc import bwc_tensor_model_parallel_rank
@@ -47,7 +47,6 @@ class BF16_Optimizer(ZeROOptimizer):
                  dp_process_group=None,
                  timers=None,
                  grad_acc_dtype=None,
-                 graph_harvesting=False,
                  has_moe_layers=False):
         super().__init__()
         see_memory_usage('begin bf16_optimizer', force=True)
@@ -56,7 +55,7 @@ class BF16_Optimizer(ZeROOptimizer):
         from deepspeed.runtime.zero.muon.muon_optimizer import MuonWithAuxAdam
         self._uses_muon = isinstance(init_optimizer, MuonWithAuxAdam)
         if self._uses_muon:
-            if grad_acc_dtype != torch.float32 or graph_harvesting or has_moe_layers or mpu is not None:
+            if grad_acc_dtype != torch.float32 or has_moe_layers or mpu is not None:
                 raise ValueError("BF16 Muon currently requires FP32 accumulation, dense DP and eager execution")
             for group in init_optimizer.param_groups:
                 if group.get('use_muon', False):
@@ -116,7 +115,6 @@ class BF16_Optimizer(ZeROOptimizer):
 
         self.group_paddings = []
         self._muon_exchange_layouts = []
-        self.graph_harvesting = graph_harvesting
         if self.using_real_optimizer:
             self._setup_for_real_optimizer()
 
@@ -158,7 +156,7 @@ class BF16_Optimizer(ZeROOptimizer):
             partition_id = dist.get_rank(group=self.real_dp_process_group[i])
 
             # grab the original list
-            trainable_parameters = [param for param in param_group['params'] if param.requires_grad]
+            trainable_parameters = [param for param in param_group['params'] if is_optimized_parameter(param)]
             self.bf16_groups.append(trainable_parameters)
 
             # create flat bf16 params
@@ -384,8 +382,7 @@ class BF16_Optimizer(ZeROOptimizer):
         non_expert_grads_for_norm, expert_grads_for_norm = self.get_grads_for_norm()
         non_expert_groups_norm = get_global_norm_of_tensors(input_tensors=non_expert_grads_for_norm,
                                                             mpu=self.mpu,
-                                                            norm_type=self.norm_type,
-                                                            use_graph=self.graph_harvesting)
+                                                            norm_type=self.norm_type)
         all_groups_norm = non_expert_groups_norm
         if self.has_moe_layers:
             all_groups_norm = get_norm_with_moe_layers(non_expert_groups_norm,
@@ -400,8 +397,7 @@ class BF16_Optimizer(ZeROOptimizer):
             clip_tensors_by_global_norm(input_tensors=self.get_grads_for_norm(for_clipping=True),
                                         max_norm=self.clip_grad,
                                         global_norm=all_groups_norm,
-                                        mpu=self.mpu,
-                                        use_graph=self.graph_harvesting)
+                                        mpu=self.mpu)
 
         for param_partition, grad_partition in zip(self.fp32_groups_flat_partition,
                                                    self.fp32_groups_gradient_flat_partition):
@@ -521,26 +517,13 @@ class BF16_Optimizer(ZeROOptimizer):
             lp.grad.zero_()
 
     @torch.no_grad()
-    def _update_hp_grads_func(self, clear_lp_grads=False):
-        for i, group in enumerate(self.bf16_groups):
-            for j, lp in enumerate(group):
-                self._update_hp_grad(lp, i, j, clear_lp_grads)
-
-    @torch.no_grad()
     def update_hp_grads(self, clear_lp_grads=False):
         if self.immediate_grad_update:
             return
 
-        if self.graph_harvesting:
-            graph_process(False, self._update_hp_grads_func, clear_lp_grads)
-        else:
-            self._update_hp_grads_func(clear_lp_grads)
-        #cpu op
         for i, group in enumerate(self.bf16_groups):
             for j, lp in enumerate(group):
-                if lp.grad is None:
-                    continue
-                self.fp32_groups_has_gradients[i][j] = True
+                self._update_hp_grad(lp, i, j, clear_lp_grads)
 
     @torch.no_grad()
     def get_grads_for_reduction(self):
@@ -615,11 +598,6 @@ class BF16_Optimizer(ZeROOptimizer):
             self.fp32_groups_has_gradients[i] = [False] * len(group)
 
     def clear_lp_grads(self, set_to_none=False):
-
-        # using zero_() fixed memory address for graph replay
-        if self.graph_harvesting:
-            assert not set_to_none, "graph harvesting is incompatible with setting lp grads to None"
-
         zero_grads_list = []
         for group in self.bf16_groups:
             for param in group:

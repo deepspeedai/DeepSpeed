@@ -5,13 +5,18 @@
 """Compact critical-path tests for AutoEP."""
 
 import ast
+import copy
+import gc
 import inspect
+import weakref
 from collections import OrderedDict
+from contextlib import contextmanager
 from types import SimpleNamespace
 
 import pytest
 import torch
 import torch.nn as nn
+from torch.utils.checkpoint import checkpoint
 
 import deepspeed.runtime.engine as ds_engine
 import deepspeed.runtime.zero.stage3 as zero_stage3
@@ -45,10 +50,16 @@ from deepspeed.moe.layer import MoE
 from deepspeed.moe.ep_experts import GroupedExperts
 from deepspeed.moe.ep_repack import repack_expert_weights
 from deepspeed.moe.ep_router import TokenChoiceTopKRouter
+from deepspeed.compile.config import CompileConfig
+from deepspeed.runtime.config import DeepSpeedConfig
 from deepspeed.runtime.engine import DeepSpeedEngine
+from deepspeed.runtime.compiler import compile_autoep_non_moe_regions, is_compiling
+from deepspeed.runtime.zero.offload_config import DeepSpeedZeroOffloadOptimizerConfig, DeepSpeedZeroOffloadParamConfig
 from deepspeed.runtime.zero.stage3 import DeepSpeedZeroOptimizer_Stage3
 from deepspeed.utils import groups
+from unit.simple_model import SimpleModel
 from unit.v1.moe.autoep_test_utils import (
+    MockHFConfig,
     MockMoEBlock,
     MockMoETransformer,
     UNSUPPORTED_LOAD_BALANCE_VALUES,
@@ -103,6 +114,41 @@ def _get_expert_weight_for_test(expert, name):
 def _assert_same_dtype_device(actual, expected):
     assert actual.dtype == expected.dtype
     assert actual.device == expected.device
+
+
+class _CallableMoEDecoderLayer(nn.Module):
+
+    def __init__(self):
+        super().__init__()
+        self.input_layernorm = nn.LayerNorm(64)
+        self.dense = nn.Linear(64, 64, bias=False)
+        self.mlp = MockMoEBlock()
+
+    def forward(self, hidden_states):
+        residual = hidden_states
+        hidden_states = self.input_layernorm(hidden_states)
+        hidden_states = residual + self.dense(hidden_states)
+        return hidden_states + self.mlp(hidden_states)
+
+
+class _CallableMoETransformer(nn.Module):
+
+    def __init__(self, num_layers=2):
+        super().__init__()
+        self.config = MockHFConfig()
+        self.model = nn.Module()
+        self.model.layers = nn.ModuleList([_CallableMoEDecoderLayer() for _ in range(num_layers)])
+
+    def forward(self, hidden_states):
+        for layer in self.model.layers:
+            hidden_states = layer(hidden_states)
+        return hidden_states
+
+
+def _replace_callable_autoep_layers(num_layers=2):
+    model = _CallableMoETransformer(num_layers=num_layers)
+    replace_autoep_layers(model, "mixtral", expected_count=num_layers)
+    return model
 
 
 def _mark_fake_zero_param(param, full_data, partition_data=None, ds_id=0, name="param"):
@@ -207,6 +253,7 @@ class TestAutoEPConfig:
         assert disabled.enabled is False
         assert disabled.autoep_size == 1
         assert disabled.validate_folding_routing is False
+        assert disabled.async_split_plan is False
         assert disabled.load_balance_coeff is None
         assert disabled._load_balance_coeff_explicit is False
 
@@ -218,12 +265,14 @@ class TestAutoEPConfig:
             "score_apply": "pre",
             "route_scale": 2.0,
             "validate_folding_routing": True,
+            "async_split_plan": True,
         })
 
         assert config.enabled is True
         assert config.autoep_size == 4
         assert config.preset_model == "mixtral"
         assert config.validate_folding_routing is True
+        assert config.async_split_plan is True
         assert config.load_balance_coeff is None
         assert config._load_balance_coeff_explicit is True
         assert config.score_apply == "pre"
@@ -236,6 +285,22 @@ class TestAutoEPConfig:
                                    world_size=1,
                                    pp_size=1,
                                    tp_size=1,
+                                   sp_size=1)
+
+    def test_async_split_plan_requires_boolean(self):
+        with pytest.raises(ValueError, match="async_split_plan"):
+            validate_autoep_config(AutoEPConfig(enabled=True, async_split_plan="true"),
+                                   world_size=1,
+                                   pp_size=1,
+                                   tp_size=1,
+                                   sp_size=1)
+
+    def test_async_split_plan_rejects_autotp_folding(self):
+        with pytest.raises(ValueError, match="async_split_plan.*AutoEP\\+AutoTP folding"):
+            validate_autoep_config(AutoEPConfig(enabled=True, autoep_size=2, async_split_plan=True),
+                                   world_size=4,
+                                   pp_size=1,
+                                   tp_size=2,
                                    sp_size=1)
 
     def test_combine_impl_rejects_unknown_value(self):
@@ -519,6 +584,94 @@ class TestAutoEPConfig:
 
         for param in autoep_layer.router.parameters():
             assert param.ds_zero_placement_family == "replicated"
+
+    def test_autoep_layer_emits_uniform_placement_and_param_restore_metadata(self):
+        from deepspeed.checkpoint.constants import (
+            AFFINE_MAP,
+            AUTOEP_EXPERT_PLACEMENT,
+            AUTOEP_PARAM_EP_RANK,
+            AUTOEP_PARAM_LOCAL_EXPERTS,
+            AUTOEP_PARAM_LOGICAL_SHAPE,
+            DS_AUTOEP_UC_META,
+        )
+
+        source = MockMoEBlock(num_experts=4, ffn_hidden=128, hidden_size=64)
+        layer = AutoEPMoELayer(_make_spec(),
+                               source,
+                               ep_size=2,
+                               ep_rank=1,
+                               config=_runtime_config(enabled=True, autoep_size=2))
+        peer_layer = AutoEPMoELayer(_make_spec(),
+                                    source,
+                                    ep_size=2,
+                                    ep_rank=0,
+                                    config=_runtime_config(enabled=True, autoep_size=2))
+        expected_placement = {
+            "version": 1,
+            "num_experts": 4,
+            "ep_size": 2,
+            "ranks": [{
+                "rank": 0,
+                "experts": [0, 1]
+            }, {
+                "rank": 1,
+                "experts": [2, 3]
+            }],
+        }
+
+        assert layer.expert_placement_descriptor == expected_placement
+        assert peer_layer.expert_placement_descriptor == expected_placement
+        for param in layer.experts.parameters():
+            restore_metadata = getattr(param, DS_AUTOEP_UC_META)
+            assert restore_metadata[AUTOEP_EXPERT_PLACEMENT] == expected_placement
+            assert restore_metadata[AUTOEP_PARAM_LOGICAL_SHAPE] == [4, *param.shape[1:]]
+            assert restore_metadata[AUTOEP_PARAM_EP_RANK] == 1
+            assert restore_metadata[AUTOEP_PARAM_LOCAL_EXPERTS] == [2, 3]
+            assert restore_metadata[AFFINE_MAP]["logical_shape"] == [4, *param.shape[1:]]
+
+        for param in layer.router.parameters():
+            assert not hasattr(param, DS_AUTOEP_UC_META)
+
+    def test_checkpoint_source_placement_does_not_need_to_match_target_topology(self):
+        from deepspeed.checkpoint.autoep_affine import make_autoep_placement_descriptor
+        from deepspeed.checkpoint.constants import (
+            AUTOEP_EXPERT_PLACEMENT,
+            AUTOEP_ZERO3_EXPERT_STATE_FORMAT_KEY,
+            AUTOEP_ZERO3_EXPERT_STATE_FORMAT_VERSION,
+            AUTOEP_ZERO3_EXPERT_STATE_FORMAT_VERSION_KEY,
+            AUTOEP_ZERO3_PARTITIONED_EXPERT_STATE_FORMAT,
+        )
+
+        source = MockMoEBlock(num_experts=4, ffn_hidden=128, hidden_size=64)
+        target_layer = AutoEPMoELayer(_make_spec(),
+                                      source,
+                                      ep_size=4,
+                                      ep_rank=0,
+                                      config=_runtime_config(enabled=True, autoep_size=4))
+        target_model = nn.Sequential(target_layer)
+        source_metadata = [{
+            "moe_layer_id": 0,
+            "module_path": "0",
+            "num_experts": 4,
+            "num_local_experts": 2,
+            "ep_size": 2,
+            AUTOEP_EXPERT_PLACEMENT: make_autoep_placement_descriptor(4, [[0, 1], [2, 3]]),
+            "expert_key_prefix": "0.experts",
+            AUTOEP_ZERO3_EXPERT_STATE_FORMAT_KEY: AUTOEP_ZERO3_PARTITIONED_EXPERT_STATE_FORMAT,
+            AUTOEP_ZERO3_EXPERT_STATE_FORMAT_VERSION_KEY: AUTOEP_ZERO3_EXPERT_STATE_FORMAT_VERSION,
+            "ep_group_name": "ep_size_2",
+            "ep_rank": 0,
+            "expert_data_parallel_rank": 0,
+            "expert_data_parallel_world_size": 1,
+            "global_expert_start": 0,
+            "global_expert_end": 2,
+        }]
+
+        DeepSpeedEngine._validate_autoep_zero3_partitioned_metadata(source_metadata, model=target_model)
+        with pytest.raises(RuntimeError, match="expert order"):
+            DeepSpeedEngine._validate_autoep_zero3_partitioned_metadata(source_metadata,
+                                                                        model=target_model,
+                                                                        validate_runtime_placement=True)
 
     def test_zero3_checkpoint_metadata_includes_partition_group_ranks(self):
         optimizer = object.__new__(DeepSpeedZeroOptimizer_Stage3)
@@ -868,6 +1021,272 @@ class TestAutoEPConfig:
             _resolve_route_scale(AutoEPConfig(enabled=True, routed_scaling_factor=value), None)
 
 
+class TestAutoEPRegionalCompile:
+
+    @pytest.mark.parametrize("compile_options, expected", [(None, False), ({}, False),
+                                                           ({
+                                                               "autoep_non_moe": False
+                                                           }, False), ({
+                                                               "autoep_non_moe": True
+                                                           }, True)])
+    def test_compile_config(self, compile_options, expected):
+        config = {"train_batch_size": 1}
+        if compile_options is not None:
+            config["compile"] = compile_options
+        assert CompileConfig(**(compile_options or {})).autoep_non_moe is expected
+        assert DeepSpeedConfig(config).compile_config.autoep_non_moe is expected
+
+    @pytest.mark.parametrize("compile_options", [None, {"autoep_non_moe": False}])
+    def test_default_compiles_full_model(self, compile_options):
+        config = {"train_batch_size": 1}
+        if compile_options is not None:
+            config["compile"] = compile_options
+        engine = object.__new__(DeepSpeedEngine)
+        nn.Module.__init__(engine)
+        engine.module = SimpleModel(4)
+        engine._config = DeepSpeedConfig(config)
+        engine._deepcompile_active = False
+        engine._is_compiled = False
+        engine._compile_mode = None
+        engine._is_compiled_autograd_enabled = False
+        inputs = torch.randn(2, 4)
+        labels = torch.tensor([0, 1])
+        expected = engine.module(inputs, labels)
+        torch._dynamo.reset()
+        torch._dynamo.utils.counters.clear()
+
+        try:
+            engine.compile(backend="eager")
+            engine.compile(backend="eager")
+            torch.testing.assert_close(engine.module(inputs, labels), expected)
+            assert engine.is_compiled
+            assert torch._dynamo.utils.counters["stats"]["unique_graphs"] > 0
+        finally:
+            torch._dynamo.reset()
+            torch._dynamo.utils.counters.clear()
+
+    @pytest.mark.parametrize("checkpoint_enabled", [False, True])
+    def test_compiles_model_root_with_direct_autoep_child(self, checkpoint_enabled):
+        eager_model = _replace_callable_autoep_layers(num_layers=1).model.layers[0]
+        compiled_model = copy.deepcopy(eager_model)
+        compiled_inputs = torch.randn(1, 8, 64, requires_grad=True)
+        eager_inputs = compiled_inputs.detach().clone().requires_grad_(True)
+        eager_calls = []
+
+        def observe_router(_module, _inputs, _output):
+            assert not is_compiling(), "AutoEP router must remain eager"
+            eager_calls.append(True)
+
+        handle = compiled_model.mlp.router.register_forward_hook(observe_router)
+        torch._dynamo.reset()
+        torch._dynamo.utils.counters.clear()
+        try:
+            compile_autoep_non_moe_regions(compiled_model, backend="eager", compile_kwargs={})
+            if checkpoint_enabled:
+                expected = checkpoint(eager_model, eager_inputs, use_reentrant=False)
+                actual = checkpoint(compiled_model, compiled_inputs, use_reentrant=False)
+            else:
+                expected = eager_model(eager_inputs)
+                actual = compiled_model(compiled_inputs)
+            expected.square().mean().backward()
+            actual.square().mean().backward()
+
+            torch.testing.assert_close(actual, expected)
+            torch.testing.assert_close(compiled_inputs.grad, eager_inputs.grad)
+            eager_params = dict(eager_model.named_parameters())
+            for name, param in compiled_model.named_parameters():
+                assert param.grad is not None, f"Missing gradient for {name}"
+                torch.testing.assert_close(param.grad, eager_params[name].grad)
+            assert len(eager_calls) == (2 if checkpoint_enabled else 1)
+            assert torch._dynamo.utils.counters["stats"]["unique_graphs"] > 0
+        finally:
+            handle.remove()
+            torch._dynamo.reset()
+            torch._dynamo.utils.counters.clear()
+
+    def test_rejects_bare_autoep_model_root(self):
+        model = _replace_callable_autoep_layers(num_layers=1).model.layers[0].mlp
+        with pytest.raises(ValueError, match="AutoEPMoELayer at the model root"):
+            compile_autoep_non_moe_regions(model, backend="eager", compile_kwargs={})
+
+    def test_rejects_model_without_autoep_layers(self):
+        with pytest.raises(ValueError, match="requires at least one AutoEPMoELayer"):
+            compile_autoep_non_moe_regions(nn.Linear(4, 4), backend="eager", compile_kwargs={})
+
+    def test_rejects_non_callable_parent_region(self):
+        model = MockMoETransformer(num_layers=1)
+        replace_autoep_layers(model, "mixtral", expected_count=1)
+        with pytest.raises(ValueError, match="has no forward implementation"):
+            compile_autoep_non_moe_regions(model, backend="eager", compile_kwargs={})
+
+    def test_compiles_decoder_parents_and_disables_autoep(self, monkeypatch):
+        model = _replace_callable_autoep_layers()
+        compile_calls = []
+
+        def record_compile(module, **kwargs):
+            compile_calls.append((module, kwargs))
+            module._compiled_call_impl = object()
+
+        monkeypatch.setattr(_CallableMoEDecoderLayer, "compile", record_compile)
+
+        regions = compile_autoep_non_moe_regions(model, backend="eager", compile_kwargs={})
+
+        assert regions == ["model.layers.0", "model.layers.1"]
+        assert [module for module, _ in compile_calls] == list(model.model.layers)
+        assert all(kwargs == {"backend": "eager", "dynamic": False, "fullgraph": False} for _, kwargs in compile_calls)
+        for layer in model.model.layers:
+            assert getattr(layer.mlp.forward, "_torchdynamo_disable", False)
+
+    def test_deduplicates_shared_decoder_parent(self, monkeypatch):
+        model = _replace_callable_autoep_layers(num_layers=1)
+        model.model.layers[0].second_mlp = AutoEPMoELayer(
+            spec=_make_spec(moe_module_name="model.layers.0.second_mlp"),
+            source_module=MockMoEBlock(),
+            ep_size=1,
+            ep_rank=0,
+            config=_runtime_config(),
+        )
+        compile_calls = []
+
+        def record_compile(module, **kwargs):
+            compile_calls.append(module)
+            module._compiled_call_impl = object()
+
+        monkeypatch.setattr(_CallableMoEDecoderLayer, "compile", record_compile)
+
+        regions = compile_autoep_non_moe_regions(model, backend="eager", compile_kwargs={})
+
+        assert regions == ["model.layers.0"]
+        assert compile_calls == [model.model.layers[0]]
+        assert getattr(model.model.layers[0].mlp.forward, "_torchdynamo_disable", False)
+        assert getattr(model.model.layers[0].second_mlp.forward, "_torchdynamo_disable", False)
+
+    @pytest.mark.parametrize(
+        "compile_kwargs, match",
+        [
+            ({
+                "fullgraph": True
+            }, "fullgraph=False"),
+            ({
+                "fullgraph": None
+            }, "fullgraph=False"),
+            ({
+                "dynamic": True
+            }, "dynamic=False"),
+            ({
+                "dynamic": None
+            }, "dynamic=False"),
+        ],
+    )
+    def test_rejects_unsupported_compile_kwargs(self, compile_kwargs, match):
+        model = _replace_callable_autoep_layers(num_layers=1)
+        with pytest.raises(ValueError, match=match):
+            compile_autoep_non_moe_regions(model, backend="eager", compile_kwargs=compile_kwargs)
+
+    def test_rolls_back_partial_compilation(self, monkeypatch):
+        model = _replace_callable_autoep_layers()
+        original_forwards = [layer.mlp.forward for layer in model.model.layers]
+        compile_calls = 0
+
+        def fail_second_compile(module, **kwargs):
+            nonlocal compile_calls
+            compile_calls += 1
+            module._compiled_call_impl = object()
+            if compile_calls == 2:
+                raise RuntimeError("compile failed")
+
+        monkeypatch.setattr(_CallableMoEDecoderLayer, "compile", fail_second_compile)
+
+        with pytest.raises(RuntimeError, match="compile failed"):
+            compile_autoep_non_moe_regions(model, backend="eager", compile_kwargs={})
+
+        for layer, original_forward in zip(model.model.layers, original_forwards):
+            assert "forward" not in layer.mlp.__dict__
+            assert layer.mlp.forward.__func__ is original_forward.__func__
+            assert layer._compiled_call_impl is None
+
+    @pytest.mark.parametrize(
+        "condition, match",
+        [
+            ("deepcompile", "cannot be combined with DeepCompile"),
+            ("deepep", "comm_backend='comm'"),
+            ("autotp", "AutoEP\\+AutoTP folding"),
+            ("sequence_parallel", "sequence parallelism"),
+            ("pipeline_parallel", "pipeline parallelism"),
+            ("zero3", "ZeRO Stage 3"),
+            ("optimizer_offload", "optimizer or parameter offload"),
+            ("param_offload", "optimizer or parameter offload"),
+            ("schedule", "DeepCompile schedules"),
+            ("compiled_autograd", "compiled autograd"),
+        ],
+    )
+    def test_engine_rejects_unsupported_modes(self, monkeypatch, condition, match):
+        model = _replace_callable_autoep_layers(num_layers=1)
+        engine = object.__new__(DeepSpeedEngine)
+        nn.Module.__init__(engine)
+        engine.module = model
+        engine._config = SimpleNamespace(
+            compile_config=CompileConfig(autoep_non_moe=True, deepcompile=condition == "deepcompile"),
+            expert_parallel_config=SimpleNamespace(comm_backend="deepep" if condition == "deepep" else "comm"),
+        )
+        engine._is_compiled = False
+        engine._compile_mode = None
+        engine._compiled_regions = []
+        engine.autotp_size = lambda: 2 if condition == "autotp" else 1
+        engine._autoep_sequence_parallel_world_size = lambda: 2 if condition == "sequence_parallel" else 1
+        engine.pipeline_parallelism = condition == "pipeline_parallel"
+        engine._autoep_folding_spec = None
+        engine.zero_optimization_partition_weights = lambda: condition == "zero3"
+        optimizer_offload = DeepSpeedZeroOffloadOptimizerConfig(device="cpu")
+        param_offload = DeepSpeedZeroOffloadParamConfig(device="cpu")
+        engine.zero_offload_optimizer = lambda: optimizer_offload if condition == "optimizer_offload" else None
+        engine.zero_offload_param = lambda: param_offload if condition == "param_offload" else None
+        monkeypatch.setattr(_CallableMoEDecoderLayer, "compile", lambda module, **kwargs: None)
+
+        with pytest.raises(ValueError, match=match):
+            engine.compile(
+                backend="eager",
+                schedule=[] if condition == "schedule" else None,
+                compiled_autograd_enabled=condition == "compiled_autograd",
+            )
+
+    @pytest.mark.parametrize("offload_config", [None, {}, {"device": "none"}])
+    def test_engine_tracks_regional_compile_mode(self, monkeypatch, offload_config):
+        model = _replace_callable_autoep_layers()
+        engine = object.__new__(DeepSpeedEngine)
+        nn.Module.__init__(engine)
+        engine.module = model
+        engine._config = SimpleNamespace(
+            compile_config=CompileConfig(autoep_non_moe=True),
+            expert_parallel_config=SimpleNamespace(comm_backend="comm"),
+        )
+        engine._is_compiled = False
+        engine._compile_mode = None
+        engine._compiled_regions = []
+        engine._is_compiled_autograd_enabled = False
+        engine.autotp_size = lambda: 1
+        engine._autoep_sequence_parallel_world_size = lambda: 1
+        engine.pipeline_parallelism = False
+        engine._autoep_folding_spec = None
+        engine.zero_optimization_partition_weights = lambda: False
+        optimizer_offload = None if offload_config is None else DeepSpeedZeroOffloadOptimizerConfig(**offload_config)
+        param_offload = None if offload_config is None else DeepSpeedZeroOffloadParamConfig(**offload_config)
+        engine.zero_offload_optimizer = lambda: optimizer_offload
+        engine.zero_offload_param = lambda: param_offload
+        monkeypatch.setattr(_CallableMoEDecoderLayer, "compile",
+                            lambda module, **kwargs: setattr(module, "_compiled_call_impl", object()))
+
+        engine.compile(backend="eager")
+        engine.compile(backend="eager")
+
+        assert engine.is_compiled
+        assert engine._compile_mode == "autoep_non_moe"
+        assert engine._compiled_regions == ["model.layers.0", "model.layers.1"]
+        engine._config.compile_config.autoep_non_moe = False
+        with pytest.raises(RuntimeError, match="already compiled"):
+            engine.compile(backend="eager")
+
+
 class TestRoutingAndLayerSemantics:
 
     def test_router_route_scale_and_group_limited_routing(self):
@@ -927,6 +1346,128 @@ class TestRoutingAndLayerSemantics:
                            ep_rank=0,
                            config=AutoEPConfig(enabled=True, autoep_size=1, load_balance_coeff=0.02))
 
+    def test_router_cache_does_not_duplicate_model_level_gate_capture(self):
+        source = MockMoEBlock(num_experts=4, ffn_hidden=128, hidden_size=64)
+        layer = AutoEPMoELayer(_make_spec(router_logits_capture_target="router", router_logits_capture_mode="raw"),
+                               source,
+                               ep_size=1,
+                               ep_rank=0,
+                               config=_runtime_config(enabled=True, autoep_size=1))
+        captured = []
+        hidden_states = torch.randn(2, 8, 64)
+        with layer.router.gate.register_forward_hook(lambda _module, _args, output: captured.append(output.detach())):
+            layer(hidden_states)
+        # HF model-level recording must see one set of logits per MoE layer, not a second cache projection.
+        assert len(captured) == 1
+        expected = nn.functional.linear(hidden_states.reshape(-1, 64), layer.router.gate.weight)
+        torch.testing.assert_close(captured[0], expected)
+
+    @pytest.mark.parametrize("capture_mode,score_func", [("raw", "softmax"), ("post_score", "softmax"),
+                                                         ("post_score", "sigmoid")])
+    def test_router_cache_returned_logits_match_gate(self, capture_mode, score_func):
+        source = MockMoEBlock(num_experts=4, ffn_hidden=128, hidden_size=64)
+        layer = AutoEPMoELayer(_make_spec(return_router_logits=True,
+                                          router_logits_capture_target="router",
+                                          router_logits_capture_mode=capture_mode,
+                                          score_func=score_func),
+                               source,
+                               ep_size=1,
+                               ep_rank=0,
+                               config=_runtime_config(enabled=True, autoep_size=1))
+        inputs = torch.randn(2, 8, 64, requires_grad=True)
+        reference_inputs = inputs.detach().clone().requires_grad_(True)
+
+        _, logits = layer(inputs)
+        expected = source.gate(reference_inputs.reshape(-1, 64))
+        if capture_mode == "post_score":
+            expected = expected.softmax(dim=-1) if score_func == "softmax" else expected.sigmoid()
+
+        torch.testing.assert_close(logits, expected)
+        actual_grads = torch.autograd.grad(logits.square().mean(), (inputs, layer.router.gate.weight))
+        expected_grads = torch.autograd.grad(expected.square().mean(), (reference_inputs, source.gate.weight))
+        for actual_grad, expected_grad in zip(actual_grads, expected_grads):
+            torch.testing.assert_close(actual_grad, expected_grad)
+
+    @pytest.mark.parametrize("return_logits", [False, True])
+    @pytest.mark.parametrize("checkpoint_mode", [None, False, True])
+    @pytest.mark.parametrize("device", ["cpu", "cuda"])
+    def test_router_cache_checkpoint_training(self, return_logits, checkpoint_mode, device):
+        from deepspeed.accelerator import get_accelerator
+
+        if device == "cuda" and (get_accelerator().device_name() != "cuda" or not get_accelerator().is_available()):
+            pytest.skip("CUDA regression case requires a CUDA accelerator")
+        torch.manual_seed(1234)
+        source = MockMoEBlock(num_experts=4, ffn_hidden=128, hidden_size=64)
+        spec = _make_spec(return_router_logits=return_logits,
+                          router_logits_capture_target="router",
+                          router_logits_capture_mode="raw")
+        config = _runtime_config(enabled=True, autoep_size=1)
+        reference = AutoEPMoELayer(spec, copy.deepcopy(source), ep_size=1, ep_rank=0, config=config).to(device)
+        candidate = AutoEPMoELayer(spec, copy.deepcopy(source), ep_size=1, ep_rank=0, config=config).to(device)
+        reference_optimizer = torch.optim.SGD(reference.parameters(), lr=1e-4)
+        candidate_optimizer = torch.optim.SGD(candidate.parameters(), lr=1e-4)
+        gate_tensors = []
+
+        def train_step(layer, optimizer, inputs, mode):
+            optimizer.zero_grad(set_to_none=True)
+            x = inputs.detach().clone().requires_grad_(True)
+            result = layer(x) if mode is None else checkpoint(layer, x, use_reentrant=mode)
+            output, logits = result if return_logits else (result, None)
+            loss = output.square().mean()
+            if logits is not None:
+                # A nonzero auxiliary term verifies that needed router-logit gradients remain connected.
+                loss = loss + 0.01 * logits.square().mean()
+            loss.backward()
+            grads = {name: parameter.grad.detach().clone() for name, parameter in layer.named_parameters()}
+            optimizer.step()
+            values = (output.detach().clone(), None if logits is None else logits.detach().clone(),
+                      loss.detach().clone(), x.grad.detach().clone())
+            return values, grads
+
+        with candidate.router.gate.register_forward_hook(
+                lambda _module, _args, output: gate_tensors.append(weakref.ref(output))):
+            for _step in range(2):
+                inputs = torch.randn(2, 8, 64, device=device)
+                expected_values, expected_grads = train_step(reference, reference_optimizer, inputs, None)
+                actual_values, actual_grads = train_step(candidate, candidate_optimizer, inputs, checkpoint_mode)
+                for actual, expected in zip(actual_values, expected_values):
+                    if expected is None:
+                        assert actual is None
+                    else:
+                        torch.testing.assert_close(actual, expected, rtol=1e-4, atol=1e-5)
+                assert actual_grads.keys() == expected_grads.keys()
+                for name in expected_grads:
+                    torch.testing.assert_close(actual_grads[name], expected_grads[name], rtol=1e-4, atol=1e-5)
+                for actual, expected in zip(candidate.parameters(), reference.parameters()):
+                    torch.testing.assert_close(actual, expected, rtol=1e-4, atol=1e-5)
+                gc.collect()
+                # Weak observers do not themselves retain the replay gate tensors or their autograd graph.
+                assert all(tensor_ref() is None for tensor_ref in gate_tensors)
+                gate_tensors.clear()
+
+    def test_router_cache_is_released_after_expert_failure(self, monkeypatch):
+        source = MockMoEBlock(num_experts=4, ffn_hidden=128, hidden_size=64)
+        layer = AutoEPMoELayer(_make_spec(return_router_logits=True,
+                                          router_logits_capture_target="router",
+                                          router_logits_capture_mode="raw"),
+                               source,
+                               ep_size=1,
+                               ep_rank=0,
+                               config=_runtime_config(enabled=True, autoep_size=1))
+
+        def fail_expert(*_args, **_kwargs):
+            raise RuntimeError("expert failure")
+
+        monkeypatch.setattr(layer.experts, "forward", fail_expert)
+        gate_tensors = []
+        with layer.router.gate.register_forward_hook(
+                lambda _module, _args, output: gate_tensors.append(weakref.ref(output))):
+            with pytest.raises(RuntimeError, match="expert failure"):
+                layer(torch.randn(2, 8, 64))
+        gc.collect()
+        assert gate_tensors
+        assert all(tensor_ref() is None for tensor_ref in gate_tensors)
+
 
 SPLIT_PLAN_EP_SIZE = 3
 SPLIT_PLAN_LOCAL_EXPERTS = 2
@@ -972,7 +1513,7 @@ def _legacy_split_plan(num_tokens_per_expert):
     auto_ep_layer.dist.all_to_all_single(received_flat, expert_counts, group=None)
     received_counts = received_flat.view(SPLIT_PLAN_EP_SIZE, SPLIT_PLAN_LOCAL_EXPERTS)
 
-    return SplitPlan(input_splits, output_splits, received_counts.sum(dim=0), received_counts)
+    return SplitPlan(input_splits, output_splits, received_counts)
 
 
 class TestSplitPlan:
@@ -1024,7 +1565,6 @@ class TestSplitPlan:
         mine = all_counts[ep_rank].view(SPLIT_PLAN_EP_SIZE, SPLIT_PLAN_LOCAL_EXPERTS)
         assert plan.input_splits == mine.sum(dim=1).tolist()
         assert plan.output_splits == received.sum(dim=1).tolist()
-        assert torch.equal(plan.local_counts, received.sum(dim=0))
         assert torch.equal(plan.local_counts_by_source, received)
         assert sum(plan.output_splits) == int(received.sum())
 
@@ -1049,7 +1589,6 @@ class TestSplitPlan:
         assert len(sent) == 1
         assert plan.input_splits == expected.input_splits
         assert plan.output_splits == expected.output_splits
-        assert torch.equal(plan.local_counts, expected.local_counts)
         assert torch.equal(plan.local_counts_by_source, expected.local_counts_by_source)
 
     @pytest.mark.parametrize("scenario", sorted(SPLIT_PLAN_SCENARIOS))
@@ -1067,7 +1606,6 @@ class TestSplitPlan:
 
         assert derived.input_splits == folded.input_splits
         assert derived.output_splits == folded.output_splits
-        assert torch.equal(derived.local_counts, folded.local_counts)
         assert torch.equal(derived.local_counts_by_source, folded.local_counts_by_source)
 
     def test_ep_size_one_needs_no_exchange(self, monkeypatch):
@@ -1085,8 +1623,270 @@ class TestSplitPlan:
         assert sent == []
         assert plan.input_splits == [9]
         assert plan.output_splits == [9]
-        assert torch.equal(plan.local_counts, counts)
         assert torch.equal(plan.local_counts_by_source, counts.view(1, 4))
+
+
+@pytest.fixture
+def async_split_layer(monkeypatch):
+    source = MockMoEBlock(num_experts=4, ffn_hidden=128, hidden_size=64)
+    layer = AutoEPMoELayer(_make_spec(),
+                           source,
+                           ep_size=2,
+                           ep_rank=0,
+                           config=_runtime_config(enabled=True, autoep_size=2, async_split_plan=True))
+    activity = {"buffers": [], "events": [], "waits": [], "records": [], "timeline": [], "stream": "caller"}
+
+    def synchronize():
+        activity["waits"].append("ready")
+        activity["timeline"].append(("synchronize", activity["stream"]))
+
+    def record(event, stream):
+        stream_name = stream.name if hasattr(stream, "name") else stream
+        event.recorded_stream = stream_name
+        if stream_name == "copy":
+            activity["records"].append("submitted")
+        activity["timeline"].append(("record", stream_name))
+
+    event = SimpleNamespace(synchronize=synchronize)
+
+    def create_event():
+        created = event if not activity["events"] else SimpleNamespace(synchronize=synchronize)
+        created.record = lambda stream: record(created, stream)
+        activity["events"].append(created)
+        return created
+
+    def wait_event(event):
+        assert event.recorded_stream == "caller"
+        activity["timeline"].append(("wait_event", "copy"))
+
+    stream = SimpleNamespace(name="copy", wait_event=wait_event)
+
+    @contextmanager
+    def copy_stream(stream):
+        activity["stream"] = "copy"
+        try:
+            yield
+        finally:
+            activity["stream"] = "caller"
+
+    class CUDADeviceCounts(torch.Tensor):
+
+        @property
+        def device(self):
+            return torch.device("cuda", 0)
+
+        def sum(self, *args, **kwargs):
+            if not any(operation == "payload" for operation, _ in activity["timeline"]):
+                activity["timeline"].append(("reduce", activity["stream"]))
+            return super().sum(*args, **kwargs)
+
+    def pin_memory(tensor):
+        # Pinning can allocate new storage, so preserve its inference-mode behavior.
+        pinned = tensor.clone()
+        activity["buffers"].append(pinned)
+        return pinned
+
+    original_copy = torch.Tensor.copy_
+
+    def copy(tensor, source, *args, **kwargs):
+        if any(tensor is buffer for buffer in activity["buffers"]):
+            activity["timeline"].append(("copy", activity["stream"]))
+            assert kwargs.get("non_blocking") is True
+            assert source.dtype == tensor.dtype
+            # Host storage must not inherit the fake CUDA tensor subclass.
+            source = source.as_subclass(torch.Tensor)
+        return original_copy(tensor, source, *args, **kwargs)
+
+    accelerator = SimpleNamespace(current_device=lambda: 0,
+                                  current_stream=lambda device: activity["stream"],
+                                  Event=create_event,
+                                  Stream=lambda device: stream,
+                                  stream=copy_stream,
+                                  pin_memory=pin_memory)
+
+    def device_counts(_module, _inputs, output):
+        scores, selected, counts = output
+        return scores, selected, counts.as_subclass(CUDADeviceCounts)
+
+    def exchange(output, input_, **kwargs):
+        kind = "payload" if "input_split_sizes" in kwargs else "counts"
+        activity["timeline"].append((kind, activity["stream"]))
+        output.copy_(input_)
+
+    # Counts have CUDA device metadata with host storage so the real planner
+    # can run against deterministic stream/collective protocol doubles.
+    hook = layer.router.register_forward_hook(device_counts)
+    monkeypatch.setattr(auto_ep_layer, "get_accelerator", lambda: accelerator)
+    monkeypatch.setattr(auto_ep_layer.dist, "all_to_all_single", exchange)
+    monkeypatch.setattr(torch.Tensor, "copy_", copy)
+    monkeypatch.setattr(torch.Tensor, "record_stream", lambda tensor, stream: None)
+    auto_ep_layer._get_async_split_plan_stream.cache_clear()
+    yield layer, event, activity
+    hook.remove()
+    auto_ep_layer._get_async_split_plan_stream.cache_clear()
+
+
+class TestAsyncSplitPlanLifecycle:
+    """Pin stream ordering and pending-buffer reuse through layer forwards."""
+
+    def test_only_metadata_copy_uses_side_stream(self, monkeypatch, async_split_layer):
+        layer, _, activity = async_split_layer
+        original_argsort = torch.argsort
+
+        def sort(*args, **kwargs):
+            result = original_argsort(*args, **kwargs)
+            activity["timeline"].append(("sort", activity["stream"]))
+            return result
+
+        monkeypatch.setattr(torch, "argsort", sort)
+        layer(torch.randn(1, 8, 64))
+
+        # Keep count exchange/reductions on the caller stream so only the
+        # metadata transfer overlaps sorting and packing, not count kernels.
+        timeline = activity["timeline"]
+        for operation, stream in timeline:
+            if operation in ("counts", "reduce", "sort", "payload", "synchronize"):
+                assert stream == "caller"
+        assert timeline.count(("counts", "caller")) == 1
+        assert timeline.count(("record", "caller")) == 1
+        assert timeline.count(("wait_event", "copy")) == 1
+        assert timeline.count(("copy", "copy")) == 1
+        assert timeline.count(("record", "copy")) == 1
+        operations = [operation for operation, _ in timeline]
+        assert operations.index("counts") < timeline.index(("record", "caller")) < operations.index("wait_event")
+        assert all(index < timeline.index(("record", "caller")) for index, operation in enumerate(operations)
+                   if operation == "reduce")
+        assert operations.index("wait_event") < operations.index("copy") < timeline.index(("record", "copy"))
+        assert timeline.index(("record", "copy")) < operations.index("sort")
+        assert activity["buffers"][0].dtype == torch.int64
+        assert operations.index("sort") < operations.index("synchronize") < operations.index("payload")
+
+    @pytest.mark.parametrize("warmup_mode", [torch.no_grad, torch.inference_mode])
+    def test_warmup_allows_subsequent_training(self, async_split_layer, warmup_mode):
+        layer, _, activity = async_split_layer
+        hidden = torch.randn(1, 8, 64, requires_grad=True)
+        layer.async_split_plan = False
+        expected = layer(hidden)
+        expected.square().mean().backward()
+        expected_input_grad = hidden.grad.clone()
+        hidden.grad = None
+        layer.zero_grad(set_to_none=True)
+
+        layer.async_split_plan = True
+        with warmup_mode():
+            warmup_output = layer(hidden)
+        torch.testing.assert_close(warmup_output, expected)
+
+        actual = layer(hidden)
+        actual.square().mean().backward()
+        torch.testing.assert_close(actual, expected)
+        torch.testing.assert_close(hidden.grad, expected_input_grad)
+        assert len(activity["buffers"]) == 1
+        assert layer._async_split_plan_pending is None
+
+    def test_packing_failure_drains_pending_and_allows_retry(self, monkeypatch, async_split_layer):
+        layer, _, activity = async_split_layer
+        hidden = torch.randn(1, 8, 64)
+        layer.async_split_plan = False
+        expected = layer(hidden)
+        layer.async_split_plan = True
+        packing_error = RuntimeError("token packing failed")
+
+        def fail_packing(*args, **kwargs):
+            raise packing_error
+
+        with monkeypatch.context() as patch:
+            patch.setattr(torch, "argsort", fail_packing)
+            with pytest.raises(RuntimeError) as raised:
+                layer(hidden)
+
+        assert raised.value is packing_error
+        assert activity["waits"] == ["ready"]
+        assert layer._async_split_plan_pending is None
+        actual = layer(hidden)
+        torch.testing.assert_close(actual, expected)
+        assert activity["waits"] == ["ready", "ready"]
+        assert activity["records"] == ["submitted", "submitted"]
+        assert len(activity["buffers"]) == 1
+        # Reuse the dependency event as well as the ready event after draining
+        # a failed forward, without allocating events in the per-layer hot path.
+        assert len(activity["events"]) == 2
+        assert layer._async_split_plan_pending is None
+
+    def test_drain_failure_preserves_original_error_and_pending_buffers(self, monkeypatch, async_split_layer):
+        layer, event, activity = async_split_layer
+        packing_error = RuntimeError("token packing failed")
+
+        def fail_packing(*args, **kwargs):
+            raise packing_error
+
+        def fail_drain():
+            activity["waits"].append("failed")
+            raise RuntimeError("device failed while draining")
+
+        monkeypatch.setattr(torch, "argsort", fail_packing)
+        event.synchronize = fail_drain
+        hidden = torch.randn(1, 8, 64)
+        with pytest.raises(RuntimeError) as raised:
+            layer(hidden)
+        assert raised.value is packing_error
+        pending = layer._async_split_plan_pending
+        assert pending._host_splits is activity["buffers"][0]
+        assert pending._keepalive
+
+        with pytest.raises(RuntimeError, match="already pending"):
+            layer(hidden)
+        assert layer._async_split_plan_pending is pending
+        assert activity["waits"] == ["failed"]
+        assert activity["records"] == ["submitted"]
+
+    @pytest.mark.parametrize("backend, ep_size", [("comm", 1), ("deepep", 1), ("deepep", 2)])
+    def test_unused_async_planner_is_bypassed(self, monkeypatch, backend, ep_size):
+        source = MockMoEBlock(num_experts=4, ffn_hidden=128, hidden_size=64).to(torch.bfloat16)
+        layer = AutoEPMoELayer(_make_spec(),
+                               source,
+                               ep_size=ep_size,
+                               ep_rank=0,
+                               config=_runtime_config(enabled=True,
+                                                      autoep_size=ep_size,
+                                                      comm_backend=backend,
+                                                      comm_max_tokens_per_rank=16))
+        monkeypatch.setattr(auto_ep_layer.dist, "all_to_all_single",
+                            lambda output, input_, **kwargs: output.copy_(input_))
+        # The loopback exchange must not initialize a real EP communicator.
+        monkeypatch.setattr(auto_ep_layer.dist, "barrier", lambda **kwargs: None)
+
+        class LoopbackExchange:
+
+            def __init__(self, *, num_experts, num_max_tokens_per_rank, **kwargs):
+                self.num_local_experts = num_experts // ep_size
+                self.num_max_tokens_per_rank = num_max_tokens_per_rank
+
+            def dispatch(self, tokens, topk_idx, topk_weights):
+                local_experts = topk_idx.flatten() % self.num_local_experts
+                order = torch.argsort(local_experts, stable=True)
+                token_indices = order // topk_idx.shape[1]
+                counts = torch.bincount(local_experts, minlength=self.num_local_experts)
+                self.last_handle = SimpleNamespace(num_expanded_tokens=order.numel(),
+                                                   psum_num_recv_tokens_per_expert=counts.cumsum(0),
+                                                   token_indices=token_indices,
+                                                   num_tokens=tokens.shape[0])
+                return tokens[token_indices], topk_weights.flatten()[order].float(), self.last_handle
+
+            def combine(self, rows, handle):
+                output = rows.new_zeros((handle.num_tokens, rows.shape[1]))
+                return output.index_add_(0, handle.token_indices, rows)
+
+        monkeypatch.setattr(auto_ep_layer, "shared_exchange", LoopbackExchange)
+        hidden = torch.randn(1, 8, 64, dtype=torch.bfloat16)
+        expected = layer(hidden)
+        layer.async_split_plan = True
+        for _ in range(2):
+            torch.testing.assert_close(layer(hidden), expected)
+            assert layer._async_split_plan_pending is None
+        assert layer._async_split_plan_host_splits is None
+        assert layer._async_split_plan_ready_event is None
+        assert layer._async_split_plan_dependency_event is None
 
 
 class TestModelDetectionAndReplacement:

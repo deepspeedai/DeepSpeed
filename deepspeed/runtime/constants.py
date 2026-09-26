@@ -203,18 +203,6 @@ GRADIENT_CLIPPING = 'gradient_clipping'
 GRADIENT_CLIPPING_DEFAULT = 1.0
 
 #########################################
-# Capture graph for short kernels sequences
-#########################################
-# Graph harvesting. By default, this feature is not enabled.
-# Users can configure in ds_config.json as below example:
-GRAPH_HARVESTING_FORMAT = '''
-Graph harvesting should be enabled as:
-"graph_harvesting": true
-'''
-GRAPH_HARVESTING = 'graph_harvesting'
-GRAPH_HARVESTING_DEFAULT = False
-
-#########################################
 # Communication data type
 #########################################
 # Supported types: ['none', 'fp16', 'fp32']
@@ -299,6 +287,18 @@ Dump state should be enabled as:
 '''
 DUMP_STATE = 'dump_state'
 DUMP_STATE_DEFAULT = False
+
+#########################################
+# Disable automatic Python cyclic GC
+#########################################
+# Disable automatic Python cyclic GC. By default, this feature is not enabled.
+# Users can configure in ds_config.json as below example:
+DISABLE_PYTHON_GC_FORMAT = '''
+Disable automatic Python cyclic GC should be enabled as:
+"disable_python_gc": true
+'''
+DISABLE_PYTHON_GC = "disable_python_gc"
+DISABLE_PYTHON_GC_DEFAULT = False
 
 #########################################
 # Vocabulary size
