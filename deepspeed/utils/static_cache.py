@@ -119,13 +119,22 @@ class DeepSpeedStaticLayer:
         return self.keys, self.values
 
     def get_mask_sizes(self, query_length: int) -> tuple[int, int]:
+        # Mirror HF StaticLayer exactly: static caches answer with the full
+        # buffer width, which matches the full-width K/V that update()
+        # returns (position-based sizes are the DynamicLayer formula).
         return self.max_cache_len, 0
 
     def get_seq_length(self) -> int | torch.Tensor:
+        # The write position doubles as the cached-token count (HF
+        # cumulative_length semantics): the next token is written AT this
+        # index, so the count of already-cached tokens equals it. Returning
+        # +1 here shifts every model-derived decode position by one and
+        # mis-ropes the stored keys. Kept as a tensor expression: this is
+        # read inside captured regions and must not sync.
         if not self.is_initialized:
             return 0
         if self._write_position is not None:
-            return self._write_position + 1
+            return self._write_position
         return 0
 
     def get_max_cache_shape(self) -> int:
@@ -171,7 +180,61 @@ class DeepSpeedStaticLayer:
                 self._write_position = self._write_position.index_select(0, beam_idx.to(self._write_position.device))
 
 
+class DSStaticGDNSlot:
+    """Pass-through cache slot for hybrid models' linear-attention layers.
+
+    HF's ``LinearAttentionLayer`` is already cudagraph-safe by construction:
+    static shapes, ``mark_static_address`` buffers, and in-place ``copy_``
+    state updates (its own comments say "to preserve the static address for
+    cudagraphs"). Duplicating that state management here would only drift;
+    the graph path therefore binds and reuses the prefill cache's slot
+    object directly - zero copies, and decode-time updates land in the very
+    buffers the captured graph reads."""
+
+    is_compileable = True
+    supports_early_init = False
+
+    def __init__(self, max_cache_len: int):
+        self._slot = None
+        self.max_cache_len = max_cache_len
+        self._write_position: torch.Tensor | None = None
+
+    def bind(self, hf_slot) -> None:
+        """Adopt a prefill cache's linear-attention slot (by reference)."""
+        self._slot = hf_slot
+
+    def __getattr__(self, name):
+        # Forward the HF slot API (conv_states, recurrent_states,
+        # has_previous_state, update_*, ...) so the model's GDN modules see
+        # the exact object semantics they were written against.
+        slot = object.__getattribute__(self, "_slot")
+        if slot is None:
+            raise AttributeError(f"DSStaticGDNSlot not bound: {name}")
+        return getattr(slot, name)
+
+    def set_write_position(self, pos: torch.Tensor):
+        self._write_position = pos  # tracked for symmetry; GDN state is position-free
+
+    def get_seq_length(self) -> int:
+        return 0
+
+    def get_max_cache_shape(self) -> int:
+        return 0
+
+    def get_mask_sizes(self, query_length: int) -> tuple[int, int]:
+        return query_length, 0
+
+    def reset(self) -> None:
+        if self._slot is not None:
+            self._slot.reset()
+
+
 class DeepSpeedStaticCache:
+    # Mirrors HF StaticCache: static buffers answer mask builders with
+    # full-width masks (is_compileable), which must match the full-width
+    # K/V buffers update() returns; a position-truncated mask against a
+    # full-width buffer crashes SDPA at decode.
+    is_compileable = True
     """CUDA-graph-compatible static KV cache.
 
     Drop-in replacement for ``transformers.StaticCache`` in the graph-capture
@@ -204,7 +267,14 @@ class DeepSpeedStaticCache:
         self.config = config
         text_config = getattr(config, "text_config", config)
         num_layers = getattr(text_config, "num_hidden_layers", 1)
-        self._layers = [DeepSpeedStaticLayer(max_cache_len) for _ in range(num_layers)]
+        # Hybrid families (e.g. qwen3_5) mix full_attention and
+        # linear_attention blocks behind one decoder-layer list; mirror the
+        # split so KV slots and GDN pass-through slots line up by index.
+        layer_types = getattr(text_config, "layer_types", None) or ["full_attention"] * num_layers
+        self._layers = [
+            DSStaticGDNSlot(max_cache_len) if t == "linear_attention" else DeepSpeedStaticLayer(max_cache_len)
+            for t in layer_types
+        ]
         self._max_cache_len = max_cache_len
         self._write_position: torch.Tensor | None = None
 
@@ -275,7 +345,10 @@ class DeepSpeedStaticCache:
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if layer_idx >= len(self._layers):
             raise IndexError(f"layer_idx {layer_idx} out of range (cache has {len(self._layers)} layers)")
-        return self._layers[layer_idx].update(key_states, value_states, *args, **kwargs)
+        layer = self._layers[layer_idx]
+        if isinstance(layer, DSStaticGDNSlot):
+            raise TypeError("linear-attention slots manage conv/recurrent state, not key/value pairs")
+        return layer.update(key_states, value_states, *args, **kwargs)
 
     def early_initialization(
         self,
@@ -286,13 +359,29 @@ class DeepSpeedStaticCache:
         device,
     ):
         for layer in self._layers:
+            if isinstance(layer, DSStaticGDNSlot):
+                continue  # bound to the prefill cache's HF slot later
             fake_k = torch.zeros((batch_size, num_heads, 0, head_dim), dtype=dtype, device=device)
             fake_v = torch.zeros((batch_size, num_heads, 0, head_dim), dtype=dtype, device=device)
             layer.lazy_initialization(fake_k, fake_v)
 
+    def _first_attention_idx(self) -> int | None:
+        # HF convention (cache_utils): alternating caches answer container
+        # length queries with attention-slot semantics; a linear-attention
+        # slot never tracks sequence length.
+        for idx, layer in enumerate(self._layers):
+            if not isinstance(layer, DSStaticGDNSlot):
+                return idx
+        return None
+
     def get_seq_length(self, layer_idx: int = 0) -> int | torch.Tensor:
         if layer_idx >= len(self._layers):
             return 0
+        if isinstance(self._layers[layer_idx], DSStaticGDNSlot):
+            first = self._first_attention_idx()
+            if first is None:
+                return 0
+            layer_idx = first
         length = self._layers[layer_idx].get_seq_length()
         if isinstance(length, torch.Tensor) and length.dim() == 1:
             # Transformer decoder implementations use one scalar past length
@@ -301,14 +390,44 @@ class DeepSpeedStaticCache:
             return length.max()
         return length
 
+    def update_recurrent_state(self, recurrent_state, layer_idx: int = 0, state_idx: int = 0):
+        return self._layers[layer_idx].update_recurrent_state(recurrent_state, state_idx=state_idx)
+
+    def update_conv_state(self, conv_state, layer_idx: int = 0, **kwargs):
+        return self._layers[layer_idx].update_conv_state(conv_state, state_idx=0, **kwargs)
+
+    def has_previous_state(self, layer_idx: int = 0, state_idx: int = 0) -> bool:
+        # transformers cache protocol: GDN blocks ask the container whether a
+        # previous recurrent state exists before reading it.
+        if layer_idx >= len(self._layers):
+            return False
+        layer = self._layers[layer_idx]
+        if isinstance(layer, DSStaticGDNSlot):
+            return layer.has_previous_state[state_idx]
+        return self.get_seq_length(layer_idx) > 0
+
+    def get_query_offset(self, layer_idx: int = 0) -> int:
+        # transformers >= 5 cache protocol: the query offset equals the cached
+        # sequence length for non-MTP layers (see HF cache_utils).
+        return self.get_seq_length(layer_idx=layer_idx)
+
     def get_max_cache_shape(self, layer_idx: int = 0) -> int:
         if layer_idx >= len(self._layers):
             return self._max_cache_len
         return self._layers[layer_idx].get_max_cache_shape()
 
     def get_mask_sizes(self, query_length: int, layer_idx: int = 0) -> tuple[int, int]:
+        # HF convention: mask builders sample shared masks with the default
+        # layer_idx, which on hybrid models may land on a linear-attention
+        # slot; redirect such queries to the first attention slot so the
+        # shared mask gets attention-sized spans.
+        if layer_idx < len(self._layers) and isinstance(self._layers[layer_idx], DSStaticGDNSlot):
+            first = self._first_attention_idx()
+            if first is None:
+                return query_length, 0
+            return self._layers[first].get_mask_sizes(query_length)
         if layer_idx >= len(self._layers):
-            return self._max_cache_len, 0
+            return query_length, 0
         return self._layers[layer_idx].get_mask_sizes(query_length)
 
     def reset(self):

@@ -80,6 +80,10 @@ class HybridEngineRolloutConfig:
     use_graph_capture: bool = False
     enable_profiling: bool = False
     use_shared_prefill: bool = False
+    # Apply segment-KI kernel injection to the engine's module at rollout
+    # construction. Fuses comm-free projection+activation segments into
+    # single GEMM+custom-kernel calls (MLP gate|up and GDN input projections).
+    use_segki: bool = False
 
 
 class HybridEngineRollout(RolloutEngine):
@@ -98,6 +102,29 @@ class HybridEngineRollout(RolloutEngine):
         self.enable_profiling = getattr(cfg, 'enable_profiling', False) if cfg else False
         self.use_shared_prefill = getattr(cfg, 'use_shared_prefill', False) if cfg else False
         self._last_profile = None
+
+        self.use_segki = cfg is not None and getattr(cfg, 'use_segki', False)
+        if self.use_segki:
+            self._segki_report = self._apply_segki()
+        else:
+            self._segki_report = None
+
+    def _apply_segki(self):
+        """Apply segment-KI kernel injection to the wrapped module.
+
+        Returns the injection report dict, or None if the module is not
+        supported (unsupported architectures pass through silently).
+        """
+        try:
+            from deepspeed.module_inject.segment_ki import apply_segment_ki
+        except ImportError:
+            return None
+        report = apply_segment_ki(self.engine.module)
+        if isinstance(report, dict) and report.get('segments_replaced', 0) == 0 \
+                and report.get('segments_found', 0) == 0:
+            # No segments found: model architecture not supported, not an error
+            return report
+        return report
 
     @torch.no_grad()
     def generate(self, request: RolloutRequest, sampling: SamplingConfig) -> RolloutBatch:
@@ -741,19 +768,22 @@ class HybridEngineRollout(RolloutEngine):
 
         # --- Prefill with HF StaticCache (correct attention semantics) ---
         prefill_cache = self._create_static_cache(StaticCache, module.config, batch_size, max_len, device, model_dtype)
-        prefill_attn = torch.ones(batch_size, prompt_len, dtype=torch.long, device=device)
-        prefill_attn[:, :prompt_len] = prompt_attn
+        # Mirror generate's hybrid-model kwargs exactly: a per-type mask dict
+        # (GDN must see None) and no explicit cache_position. A 2D mask here
+        # corrupts the GDN conv-state initialization and collapses decode.
         prefill_out = module(
             prompt_ids,
-            attention_mask=prefill_attn,
+            attention_mask={
+                "full_attention": None,
+                "linear_attention": None
+            },
             past_key_values=prefill_cache,
             use_cache=True,
-            cache_position=torch.arange(prompt_len, device=device),
         )
         next_token = prefill_out.logits[:, -1, :].argmax(dim=-1, keepdim=True)
 
         # --- Copy prefill KV into DeepSpeedStaticCache ---
-        write_pos = torch.tensor(prompt_len - 1, dtype=torch.long, device=device)
+        write_pos = torch.tensor(prompt_len, dtype=torch.long, device=device)
         ds_cache = DeepSpeedStaticCache(
             module.config,
             batch_size=batch_size,
@@ -762,10 +792,17 @@ class HybridEngineRollout(RolloutEngine):
             dtype=model_dtype,
         )
         ds_cache.set_write_position(write_pos)
-        # Trigger lazy init then copy real data
+        # Trigger lazy init then copy real data. Hybrid models carry
+        # linear-attention (GDN) slots alongside KV slots; the GDN slots are
+        # bound by reference to the prefill cache's HF slot objects, whose
+        # state management is already cudagraph-safe by construction.
+        from deepspeed.utils.static_cache import DSStaticGDNSlot
         for layer_idx in range(len(ds_cache.layers)):
             ds_layer = ds_cache.layers[layer_idx]
             hf_layer = prefill_cache.layers[layer_idx]
+            if isinstance(ds_layer, DSStaticGDNSlot):
+                ds_layer.bind(hf_layer)
+                continue
             if not ds_layer.is_initialized:
                 ds_layer.lazy_initialization(hf_layer.keys, hf_layer.values)
             ds_layer.keys[:, :, :prompt_len, :].copy_(hf_layer.keys[:, :, :prompt_len, :])
@@ -775,14 +812,52 @@ class HybridEngineRollout(RolloutEngine):
 
         # --- Static buffers for graph capture ---
         static_token = torch.zeros(batch_size, 1, dtype=torch.long, device=device)
-        static_attn = torch.zeros(batch_size, max_len, dtype=torch.long, device=device)
-        static_attn[:, :prompt_len] = prompt_attn
-        static_attn[:, prompt_len] = 1  # first decode position
-        static_pos = torch.tensor(prompt_len, dtype=torch.long, device=device)
-        static_cache_pos = static_pos.unsqueeze(0)  # [1] for cache_position
-        static_pos_ids = static_pos.reshape(1, 1).expand(batch_size, 1)  # [batch, 1]
+        # Full-width static causal mask for the full-attention layers; revealed
+        # one position per decode step by in-place writes (graph-replay safe).
+        # GDN layers must receive None: their recurrence ignores attention masks
+        # and a non-None value corrupts the conv-state updates.
+        static_attn = torch.zeros(batch_size, 1, 1, max_len, dtype=torch.bool, device=device)
+        static_attn[:, :, :, :prompt_len] = prompt_attn.unsqueeze(1).unsqueeze(1).bool()
+        static_attn[:, :, :, prompt_len] = True
+
+        full_token_buf = torch.zeros(max_len, dtype=torch.long, device=device)
+        if batch_size == 1:
+            full_token_buf[:prompt_len] = prompt_ids.view(-1)
+        full_token_buf[prompt_len] = next_token.view(-1)[0]  # first generated token
 
         write_pos.fill_(prompt_len)
+
+        # Replace SDPA in the full-attention layers with the custom
+        # decode_attn kernel for the b=1 decode steps (prefill and any
+        # non-graph path keep the original forward). Must happen before the
+        # warmup forwards so the captured graph records the kernel.
+        attn_patched = 0
+        module._ki_fused_norm_patched = 0
+        if self.use_segki:
+            try:
+                from deepspeed.module_inject.segment_ki import install_decode_attention, install_fused_norm
+                from deepspeed.ops.module_inject import get_fused_glu_op
+                attn_op = get_fused_glu_op()
+                attn_patched = install_decode_attention(module, write_pos, attn_op) if hasattr(attn_op,
+                                                                                               "decode_attn") else 0
+                module._ki_fused_norm_patched = install_fused_norm(module, attn_op)
+            except Exception:
+                attn_patched = 0
+                module._ki_fused_norm_patched = 0
+
+        # Snapshot the GDN states right after prefill: the warmup forwards
+        # advance conv/recurrent states by extra steps, so they must be
+        # restored before capture or every replay starts from corrupted state.
+        gdn_snapshot = []
+        for ds_layer in ds_cache.layers:
+            if type(ds_layer).__name__ == "DSStaticGDNSlot":
+                cs, rs = ds_layer.conv_states[0], ds_layer.recurrent_states[0]
+                gdn_snapshot.append((cs, rs, cs.clone(), rs.clone()))
+
+        def restore_gdn_states():
+            for cs, rs, cs0, rs0 in gdn_snapshot:
+                cs.copy_(cs0)
+                rs.copy_(rs0)
 
         # Remove forward hooks (they synchronize — illegal during graph capture)
         saved_pre = dict(module._forward_pre_hooks)
@@ -799,51 +874,146 @@ class HybridEngineRollout(RolloutEngine):
                 for _ in range(3):
                     out = module(
                         static_token,
-                        attention_mask=static_attn,
+                        attention_mask={
+                            "full_attention": static_attn,
+                            "linear_attention": None
+                        },
                         past_key_values=ds_cache,
                         use_cache=True,
-                        cache_position=static_cache_pos,
-                        position_ids=static_pos_ids,
                     )
             get_accelerator().current_stream().wait_stream(s)
+            restore_gdn_states()
 
-            # Capture
+            # Capture: full-step graph (forward + argmax + buffer updates).
+            # The step-update kernel indexes token_buf via write_pos (a GPU
+            # tensor the kernel itself advances), so no host-side step counter
+            # is needed — the graph is fully self-contained for replay.
+            graph_op = None
+            try:
+                from deepspeed.ops.module_inject import get_fused_glu_op
+                candidate = get_fused_glu_op()
+                if hasattr(candidate, "decode_step_graph"):
+                    graph_op = candidate
+            except Exception:
+                graph_op = None
+
             graph = get_accelerator().create_graph()
             with get_accelerator().capture_to_graph(graph):
                 out = module(
                     static_token,
-                    attention_mask=static_attn,
+                    attention_mask={
+                        "full_attention": static_attn,
+                        "linear_attention": None
+                    },
                     past_key_values=ds_cache,
                     use_cache=True,
-                    cache_position=static_cache_pos,
-                    position_ids=static_pos_ids,
                 )
-            static_logits = out.logits
+                static_logits = out.logits
+                # decode_step_graph kernel is b=1 only (single-sequence argmax);
+                # for b>1 the graph captures forward only and Python handles
+                # argmax + buffer updates outside the graph.
+                if graph_op is not None and batch_size == 1:
+                    graph_op.decode_step_graph(static_logits[:, -1, :].contiguous(), static_token.view(batch_size, 1),
+                                               write_pos, static_attn, full_token_buf)
+
+            if graph_op is not None:
+                # The capture run advanced the GDN conv/recurrent states (its
+                # forward consumed static_token) and mutated write_pos; without
+                # this restore every batch size would re-feed the first decode
+                # token to the GDN layers, double-counting it and derailing the
+                # whole trajectory at b>1.
+                restore_gdn_states()
+                write_pos.fill_(prompt_len)
+                static_token.copy_(next_token)
         finally:
             module._forward_pre_hooks.update(saved_pre)
             module._forward_hooks.update(saved_post)
 
-        # --- Decode loop ---
+        # --- Decode loop: full-step graph (b=1) > graph+Python (b>1) > fallbacks ---
+        if graph is not None and batch_size > 1:
+            # Graph forward + Python argmax for b>1: the graph eliminates kernel
+            # launch overhead for the forward pass; argmax and buffer updates
+            # stay in Python (PyTorch argmax is batch-native).  The Python
+            # overhead (~50us/step) is a smaller fraction of the larger GPU
+            # workload at higher batch.
+            eos_mask = torch.zeros(batch_size, dtype=torch.bool, device=device)
+            for step in range(max_new_tokens - 1):
+                if eos_mask.all():
+                    output_ids.append(torch.full((batch_size, 1), pad_token_id, dtype=torch.long, device=device))
+                    continue
+                static_token.copy_(next_token)
+                pos = prompt_len + step
+                write_pos.fill_(pos)
+                # Reveal only the current token's own slot: the pos+1 slot has
+                # not been written yet (warmup/capture leftovers), and SDPA at
+                # b>1 attends every slot the mask reveals.
+                static_attn[:, :, :, pos] = True
+                get_accelerator().replay_graph(graph)
+                next_token = static_logits[:, -1, :].argmax(dim=-1, keepdim=True)
+                output_ids.append(next_token)
+                eos_mask |= (next_token.view(batch_size) == eos_token_id)
+            return torch.cat(output_ids, dim=1)
+
+        if graph_op is not None:
+            # Full-step graph: one replay = forward + argmax + buffer updates.
+            # Python only does replay + periodic EOS check (every 16 steps).
+            eos_check_every = 16
+            for step in range(max_new_tokens - 1):
+                get_accelerator().replay_graph(graph)
+                if step % eos_check_every == eos_check_every - 1:
+                    tok_val = static_token.view(-1)[0].item()
+                    if tok_val == eos_token_id:
+                        full_token_buf[step + 2:] = pad_token_id
+                        break
+            gen_ids = full_token_buf[prompt_len:prompt_len + max_new_tokens].unsqueeze(0)
+            return torch.cat([prompt_ids, gen_ids], dim=1)
+
+        loop_op = None
+        try:
+            from deepspeed.ops.module_inject.decode_loop import get_decode_loop_op
+            loop_op = get_decode_loop_op()
+        except Exception:
+            pass
+
+        static_token.copy_(next_token)
+        token_buf = torch.zeros(max_new_tokens, dtype=torch.long, device=device)
+        token_buf[0] = next_token.squeeze(0)[0] if batch_size == 1 else next_token[0, 0]
+
+        if loop_op is not None and hasattr(loop_op, "decode_loop"):
+            # Construct the replay callable: use the graph's bound method if a
+            # graph was captured; otherwise fall back to an eager forward.
+            if graph is not None:
+                replay_fn = graph.replay
+            else:
+
+                def replay_fn():
+                    module(static_token,
+                           attention_mask={
+                               "full_attention": static_attn,
+                               "linear_attention": None
+                           },
+                           past_key_values=ds_cache,
+                           use_cache=True)
+
+            loop_op.decode_loop(replay_fn, static_logits[:, -1, :].contiguous(), static_token, write_pos, static_attn,
+                                token_buf, max_new_tokens, eos_token_id if eos_token_id is not None else -1,
+                                pad_token_id if pad_token_id is not None else 0, 16)
+            gen_ids = token_buf.unsqueeze(0)
+            return torch.cat([prompt_ids, gen_ids], dim=1)
+
         eos_mask = torch.zeros(batch_size, dtype=torch.bool, device=device)
         for step in range(max_new_tokens - 1):
             if eos_mask.all():
                 output_ids.append(torch.full((batch_size, 1), pad_token_id, dtype=torch.long, device=device))
                 continue
-
-            # Update static inputs
             static_token.copy_(next_token)
             pos = prompt_len + step
             write_pos.fill_(pos)
-            static_cache_pos.fill_(pos)
-            static_pos_ids.fill_(pos)
-            static_attn[:, pos] = 1
-
-            # Replay
+            static_attn[:, :, :, pos] = True
             get_accelerator().replay_graph(graph)
             next_token = static_logits[:, -1, :].argmax(dim=-1, keepdim=True)
             output_ids.append(next_token)
-            eos_mask |= (next_token.squeeze(1) == eos_token_id)
-
+            eos_mask |= (next_token.view(1) == eos_token_id)
         return torch.cat(output_ids, dim=1)
 
     @staticmethod
