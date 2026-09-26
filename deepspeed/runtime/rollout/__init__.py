@@ -6,6 +6,7 @@
 Provides:
   - :class:`RolloutEngine` — abstract base class
   - :class:`RolloutRequest`, :class:`RolloutBatch`, :class:`SamplingConfig` — dataclasses
+  - :class:`ResponseTokenBatch` — response-only causal training targets
   - :class:`HybridEngineRollout` — concrete implementation using DeepSpeed hybrid engine
   - :func:`build_rollout` — factory that selects the engine from config
 """
@@ -18,15 +19,19 @@ from deepspeed.runtime.rollout.base import (
     SamplingConfig,
 )
 from deepspeed.runtime.rollout.hybrid_engine_rollout import HybridEngineRollout
+from deepspeed.runtime.rollout.opsd import JSDLossOutput, ResponseTokenBatch, generalized_jsd_loss
 
 __all__ = [
     "HybridEngineRollout",
+    "JSDLossOutput",
     "RolloutBatch",
     "RolloutConfig",
     "RolloutEngine",
     "RolloutRequest",
+    "ResponseTokenBatch",
     "SamplingConfig",
     "build_rollout",
+    "generalized_jsd_loss",
 ]
 
 
