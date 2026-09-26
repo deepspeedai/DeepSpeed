@@ -373,6 +373,26 @@ def tiny_mixtral_config(transformers):
     )
 
 
+def tiny_minimax_m3_config(transformers):
+    return transformers.MiniMaxM3VLTextConfig(
+        vocab_size=64,
+        hidden_size=32,
+        intermediate_size=64,
+        shared_intermediate_size=64,
+        dense_intermediate_size=64,
+        num_hidden_layers=1,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=8,
+        max_position_embeddings=64,
+        num_local_experts=4,
+        num_experts_per_tok=2,
+        output_router_logits=True,
+        tie_word_embeddings=False,
+        use_cache=False,
+    )
+
+
 def _cpu_gloo_worker_entry(rank, world_size, init_method, master_port, worker, shared_tmpdir, error_queue):
     set_accelerator(CPU_Accelerator())
     os.environ["MASTER_ADDR"] = "127.0.0.1"

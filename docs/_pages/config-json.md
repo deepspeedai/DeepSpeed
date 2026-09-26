@@ -909,7 +909,7 @@ This option reduces the host synchronization exposed by reading split sizes; it 
 
 | Description                                                                                                                            | Default |
 | -------------------------------------------------------------------------------------------------------------------------------------- | ------- |
-| Built-in model preset for MoE detection: `mixtral`, `qwen3_moe`, `qwen3_5_moe`, `deepseek_v2`, `deepseek_v3`. Determines router, expert, and weight naming patterns. | `null`  |
+| Built-in model preset for MoE detection: `mixtral`, `qwen3_moe`, `qwen3_5_moe`, `deepseek_v2`, `deepseek_v3`, `minimax_m3`. Determines router, expert, and weight naming patterns. | `null`  |
 
 Built-in AutoEP presets describe DeepSpeed's router/expert/weight-pattern support for a model family.
 Running a HuggingFace model also requires the installed Transformers package to expose the corresponding
@@ -923,6 +923,7 @@ smoke coverage used for this AutoEP surface produced the following version gates
 | `qwen3_5_moe` | `5.2.0` | Requires the Qwen3.5 text-backbone `qwen3_5_moe_text` model type. For performance on Qwen3.5's Gated DeltaNet layers, install optimized kernels; see the [Hugging Face Transformers kernel loading docs](https://huggingface.co/docs/transformers/kernel_doc/loading_kernels) and the [Qwen FlashQLA blog](https://qwen.ai/blog?id=flashqla). |
 | `deepseek_v2` | `5.0.0` | `load_balance_coeff` / expert-bias auxiliary-loss-free load balancing is not currently supported; non-null values are rejected. |
 | `deepseek_v3` | `5.0.0` | `load_balance_coeff` / expert-bias auxiliary-loss-free load balancing is not currently supported; non-null values are rejected. |
+| `minimax_m3` | `5.15.0` | Requires the MiniMax-M3 text-backbone `minimax_m3_vl_text` model type. The expert MLP uses the clamped GPT-OSS activation (`swiglu_oai`), selected by the preset. `load_balance_coeff` / expert-bias auxiliary-loss-free load balancing is not currently supported; non-null values are rejected. |
 
 ***use_grouped_mm***: [boolean]
 
@@ -1055,6 +1056,12 @@ smoke coverage used for this AutoEP surface produced the following version gates
 | Description                                                                                              | Default |
 | -------------------------------------------------------------------------------------------------------- | ------- |
 | Direct child attribute name for shared experts (e.g., `"shared_expert"`). `null` = use preset default.   | `null`  |
+
+***expert_activation***: [string]
+
+| Description                                                                                              | Default |
+| -------------------------------------------------------------------------------------------------------- | ------- |
+| How the expert MLP combines its gate and up projections, by a name registered in `deepspeed.moe.ep_experts.EXPERT_ACTIVATIONS`: `"swiglu"` (`silu(gate) * up`), `"geglu_tanh"` (`gelu_tanh(gate) * up`, Gemma-4), `"swiglu_clamped"` (`silu(clamp(gate)) * clamp(up)`, DeepSeek-V4) or `"swiglu_oai"` (`(clamp(up) + 1) * clamp(gate) * sigmoid(alpha * clamp(gate))`, GPT-OSS and MiniMax-M3). `null` = use preset default, which is `"swiglu"` for every built-in preset. AutoEP checks the name against the model: a clamp limit on the experts module or the model config, or an experts `act_fn` that is not the named form's gate function, is an error unless this key is set. The clamp limit and alpha are taken from the model when it states them. `deepspeed.moe.ep_experts.register_expert_activation` adds a form. | `null`  |
 
 #### Custom Model Example
 

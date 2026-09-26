@@ -9,8 +9,8 @@ This API is separate from the explicit ``deepspeed.moe.layer.MoE`` layer API.
 For the explicit DeepSpeed MoE layer API, see :doc:`moe`.
 
 **Built-in AutoEP presets:** ``mixtral`` (Mixtral), ``qwen3_moe`` (Qwen3-MoE),
-``qwen3_5_moe`` (Qwen3.5-MoE), ``deepseek_v2`` (DeepSeek-V2), and
-``deepseek_v3`` (DeepSeek-V3).
+``qwen3_5_moe`` (Qwen3.5-MoE), ``deepseek_v2`` (DeepSeek-V2),
+``deepseek_v3`` (DeepSeek-V3), and ``minimax_m3`` (MiniMax-M3).
 
 The preset name means AutoEP knows the router, expert, and weight naming
 patterns for that model family. Running a Hugging Face model also requires a
@@ -46,6 +46,13 @@ Transformers build that exposes the matching config/model classes,
      - ``5.0.0``
      - ``load_balance_coeff`` / expert-bias auxiliary-loss-free load balancing
        is not currently supported; non-null values are rejected.
+   * - ``minimax_m3``
+     - ``5.15.0``
+     - Requires the MiniMax-M3 text-backbone ``minimax_m3_vl_text`` model
+       type. The expert MLP uses the clamped GPT-OSS activation
+       (``swiglu_oai``), selected by the preset. ``load_balance_coeff`` /
+       expert-bias auxiliary-loss-free load balancing is not currently
+       supported; non-null values are rejected.
 
 **ZeRO compatibility:** Stages 0, 1, and 2, plus constrained Stage 3
 support. Stage 3 requires AutoEP-managed MoE layers and does not support native

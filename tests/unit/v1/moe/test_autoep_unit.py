@@ -68,6 +68,7 @@ from unit.v1.moe.autoep_test_utils import (
     replace_autoep_layers,
     skip_unless_transformers_has,
     state_matched_models,
+    tiny_minimax_m3_config,
     tiny_mixtral_config,
 )
 
@@ -981,14 +982,20 @@ class TestAutoEPConfig:
             parse_model_states([str(model_file)])
 
     def test_preset_registry_core_contracts(self):
-        assert set(PRESET_MODELS) == {"mixtral", "qwen3_moe", "qwen3_5_moe", "deepseek_v2", "deepseek_v3"}
+        assert set(PRESET_MODELS) == {
+            "mixtral", "qwen3_moe", "qwen3_5_moe", "deepseek_v2", "deepseek_v3", "minimax_m3"
+        }
         assert preset_name_for_hf_model_type("mixtral") == "mixtral"
         assert preset_name_for_hf_model_type("qwen2_moe") == "qwen3_moe"
+        assert preset_name_for_hf_model_type("minimax_m3_vl_text") == "minimax_m3"
         assert preset_name_for_hf_model_type("llama4_text") is None
 
         qwen35 = unsupported_preset_for_hf_model_type("qwen3_5_moe")
         assert qwen35 is not None
         assert "qwen3_5_moe_text" in qwen35[1].unsupported_hf_model_type_notes["qwen3_5_moe"]
+        minimax = unsupported_preset_for_hf_model_type("minimax_m3_vl")
+        assert minimax is not None
+        assert "minimax_m3_vl_text" in minimax[1].unsupported_hf_model_type_notes["minimax_m3_vl"]
         assert PRESET_MODELS["deepseek_v2"].supports_expert_bias is False
         assert PRESET_MODELS["deepseek_v3"].unsupported_router_bias_names == ()
 
@@ -2073,6 +2080,46 @@ class TestModelDetectionAndReplacement:
                                        compare_router_logits=True,
                                        compare_aux_loss=True,
                                        compare_logits=False)
+
+    def test_hf_minimax_m3_causal_lm_matches_autoep_with_router_logits(self):
+        transformers = pytest.importorskip("transformers")
+        skip_unless_transformers_has(transformers,
+                                     "MiniMaxM3VLTextConfig",
+                                     "MiniMaxM3VLForCausalLM",
+                                     min_version="5.15.0",
+                                     reason="MiniMax-M3 AutoEP router-logit capture")
+
+        torch.manual_seed(1234)
+        config = tiny_minimax_m3_config(transformers)
+        native_model, autoep_model = state_matched_models(transformers.MiniMaxM3VLForCausalLM, config)
+        replace_autoep_layers(autoep_model, "minimax_m3")
+        assert_causal_lm_outputs_close(native_model,
+                                       autoep_model,
+                                       output_router_logits=True,
+                                       compare_router_logits=True,
+                                       compare_aux_loss=True,
+                                       compare_logits=False)
+
+    def test_minimax_m3_adapter_guards(self, monkeypatch):
+        adapter = get_preset_adapter("minimax_m3")
+        model = MockMoETransformer(num_layers=1, num_experts=4, moe_every_n=1)
+        model.config.model_type = "minimax_m3_vl_text"
+
+        monkeypatch.setattr(adapter, "_installed_transformers_version", lambda: "5.15.0")
+        specs = AutoEP(model, _runtime_config(enabled=True, autoep_size=1)).ep_parser()
+        assert len(specs) == 1
+        assert specs[0].model_family == "minimax_m3"
+        assert specs[0].expert_activation == "swiglu_oai"
+
+        # The version gate runs for this preset: the MiniMax-M3 classes appear in 5.15.0.
+        monkeypatch.setattr(adapter, "_installed_transformers_version", lambda: "5.14.0")
+        with pytest.raises(ValueError, match="requires Transformers >= 5.15.0"):
+            AutoEP(model, _runtime_config(enabled=True, autoep_size=1))._resolve_presets()
+
+        monkeypatch.setattr(adapter, "_installed_transformers_version", lambda: "5.15.0")
+        model.config.model_type = "minimax_m3_vl"
+        with pytest.raises(ValueError, match="minimax_m3_vl_text"):
+            AutoEP(model, _runtime_config(enabled=True, autoep_size=1))._resolve_presets()
 
     def test_qwen_adapter_guards(self, monkeypatch):
         monkeypatch.setattr(get_preset_adapter("qwen3_moe"), "_installed_transformers_version", lambda: "5.0.0")

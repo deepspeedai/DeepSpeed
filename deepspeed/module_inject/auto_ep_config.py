@@ -19,6 +19,7 @@ from deepspeed.module_inject.auto_ep_presets.registry import (
     resolve_autoep_config_defaults,
 )
 from deepspeed.module_inject.auto_ep_folding import build_folding_spec, validate_folding_global
+from deepspeed.moe.ep_experts import EXPERT_ACTIVATIONS
 from deepspeed.utils import logger
 
 __all__ = [
@@ -89,6 +90,7 @@ def parse_autoep_config(param_dict: dict) -> AutoEPConfig:
     config.has_shared_experts = param_dict.get("has_shared_experts", None)
     config.shared_experts_pattern = param_dict.get("shared_experts_pattern", None)
     config.shared_experts_gate_pattern = param_dict.get("shared_experts_gate_pattern", None)
+    config.expert_activation = param_dict.get("expert_activation", None)
 
     return config
 
@@ -212,6 +214,11 @@ def validate_autoep_config(
         raise ValueError(f"score_func must be one of {valid_score_func}, "
                          f"got '{config.score_func}'")
 
+    # Validate expert_activation
+    if config.expert_activation is not None and config.expert_activation not in EXPERT_ACTIVATIONS:
+        raise ValueError(f"expert_activation must be one of {tuple(EXPERT_ACTIVATIONS)}, "
+                         f"got '{config.expert_activation}'")
+
     # Validate group-limited routing constraints
     if config.num_limited_groups is not None:
         if config.num_limited_groups < 1:
@@ -303,6 +310,8 @@ def validate_autoep_config(
         custom_fields_set.append("shared_experts_pattern")
     if config.shared_experts_gate_pattern is not None:
         custom_fields_set.append("shared_experts_gate_pattern")
+    if config.expert_activation is not None:
+        custom_fields_set.append("expert_activation")
     if custom_fields_set and config.preset_model is not None:
         logger.warning(f"Custom preset fields {custom_fields_set} are set alongside "
                        f"preset_model='{config.preset_model}'. Custom fields will override "
