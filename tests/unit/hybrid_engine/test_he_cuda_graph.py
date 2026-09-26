@@ -2,6 +2,7 @@
 # DeepSpeed Team
 
 import os
+from types import SimpleNamespace
 import pytest
 import torch
 import deepspeed
@@ -196,3 +197,60 @@ class TestHybridEngineCudaGraphEquivalence(DistributedTest):
             eager = engine.generate(**gen_kwargs).clone()
 
         assert torch.equal(graphed, eager), "CUDA graph generation diverged from eager generation"
+
+    def test_shared_prefill_graph_generation_matches_eager(self):
+        from transformers import AutoModelForCausalLM
+
+        from deepspeed.runtime.rollout.base import RolloutRequest, SamplingConfig
+        from deepspeed.runtime.rollout.hybrid_engine_rollout import HybridEngineRollout, HybridEngineRolloutConfig
+
+        model_name = "facebook/opt-125m"
+        prompt_len, gen_len, source_batch_size, repeats = 32, 16, 1, 2
+        target_batch_size = source_batch_size * repeats
+        local_rank = int(os.getenv("LOCAL_RANK", "0"))
+        device = f"{get_accelerator().device_name()}:{local_rank}"
+
+        config = {
+            "train_batch_size": target_batch_size,
+            "train_micro_batch_size_per_gpu": target_batch_size,
+            "steps_per_print": 10**9,
+            "zero_optimization": {
+                "stage": 0
+            },
+            "fp16": {
+                "enabled": True
+            },
+            "hybrid_engine": {
+                "enabled": True,
+                "max_out_tokens": prompt_len + gen_len,
+                "enable_cuda_graph": True,
+            },
+        }
+
+        model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=torch.half)
+        model.config.use_cache = True
+        engine, *_ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config)
+        assert engine._decode_graphs is not None, "CUDA graphs should be active for this config"
+
+        torch.manual_seed(0)
+        prompt_ids = torch.randint(100, 1000, (source_batch_size, prompt_len), device=device)
+        request = RolloutRequest(
+            prompt_ids=prompt_ids,
+            prompt_attention_mask=torch.ones_like(prompt_ids),
+        )
+        sampling = SamplingConfig(max_new_tokens=gen_len, temperature=0.0, n_samples_per_prompt=repeats)
+        tokenizer = SimpleNamespace(pad_token_id=1, eos_token_id=None)
+        rollout = HybridEngineRollout(engine, tokenizer, HybridEngineRolloutConfig(use_shared_prefill=True))
+
+        engine.eval()
+        with torch.no_grad():
+            graphed = rollout.generate(request, sampling).input_ids.clone()
+        assert engine._decode_graphs.captured_positions == gen_len - 1
+
+        # Detach the graph dispatcher and repeat the same shared-prefill generation eagerly.
+        engine.module.forward = engine._orig_module_forward
+        engine._decode_graphs = None
+        with torch.no_grad():
+            eager = rollout.generate(request, sampling).input_ids.clone()
+
+        assert torch.equal(graphed, eager), "Shared-prefill CUDA graph generation diverged from eager generation"
