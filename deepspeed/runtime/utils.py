@@ -894,6 +894,7 @@ def get_global_norm_of_tensors(input_tensors, norm_type=2, mpu=None, moe_ep_grou
         Total norm of the tensors (viewed as a single vector), as a detached float32 scalar tensor.
     """
     assert isinstance(input_tensors, Iterable), f'expected Iterable type not {type(input_tensors)}'
+    input_tensors = list(input_tensors)
     assert all([torch.is_tensor(t) for t in input_tensors]), 'expected list of only tensors'
 
     norm_type = float(norm_type)
@@ -954,6 +955,7 @@ def clip_tensors_by_global_norm(input_tensors, max_norm=1.0, global_norm=None, m
     Returns:
         float: the global norm
     """
+    input_tensors = list(input_tensors)
     if global_norm is None:
         global_norm = get_global_norm_of_tensors(input_tensors, mpu=mpu)
     clip_coef = max_norm / (global_norm + eps)
