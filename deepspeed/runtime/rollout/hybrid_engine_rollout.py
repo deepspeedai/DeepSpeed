@@ -86,8 +86,8 @@ class HybridEngineRolloutConfig:
     effective prompt lengths to align physical decode fronts.
 
     Cache trimming is opt-in because it copies the live cache columns after
-    each reclaim. Set ``enable_cache_trimming`` for staggered request lengths
-    when the configured cache capacity is not sufficient for the workload.
+    each reclaim. Without it, the rollout trims only when the cache would
+    otherwise exhaust and a dead prefix can be reclaimed.
     """
     use_graph_capture: bool = False
     enable_profiling: bool = False
@@ -297,8 +297,8 @@ class HybridEngineRollout(RolloutEngine):
             max_cache_len = self.continuous_cache_capacity
         else:
             max_cache_len = (prompt_len + sampling.max_new_tokens if self.align_decode_fronts else
-                             self._estimate_continuous_cache_len(
-                                 prompt_len, [sampling.max_new_tokens] * len(requests), max_batch_size))
+                             self._estimate_continuous_cache_len(prompt_len, [sampling.max_new_tokens] *
+                                                                 len(requests), max_batch_size))
         if max_positions is not None and max_cache_len > max_positions:
             raise ValueError("continuous batching cache exceeds the model maximum position embeddings")
         if getattr(module, "_supports_cache_class", None) is False:
@@ -390,10 +390,15 @@ class HybridEngineRollout(RolloutEngine):
                         dead_prefix = self._continuous_dead_prefix(attention_mask, survivor_count)
                         if dead_prefix < trim_threshold and cache_position < max_cache_len - trim_threshold:
                             dead_prefix = 0
+                elif cache_position >= max_cache_len:
+                    if self.align_decode_fronts:
+                        dead_prefix = min(span_starts[:survivor_count])
+                    else:
+                        dead_prefix = self._continuous_dead_prefix(attention_mask, survivor_count)
+                if dead_prefix:
                     if update.admitted:
                         longest_admitted = max(prompt_lengths[request.request_id] for request in update.admitted)
                         dead_prefix = min(dead_prefix, max(0, cache_position - longest_admitted))
-                if dead_prefix:
                     trim_start = None
                     if profile_accelerator is not None:
                         profile_accelerator.synchronize()
@@ -403,8 +408,10 @@ class HybridEngineRollout(RolloutEngine):
                                       for layer in cache.layers)
                     moved_bytes += attention_mask[:, dead_prefix:].numel() * attention_mask.element_size()
                     cache.trim_left(dead_prefix)
-                    attention_mask[:, :-dead_prefix].copy_(attention_mask[:, dead_prefix:].clone())
-                    attention_mask[:, -dead_prefix:].zero_()
+                    remaining_columns = max_cache_len - dead_prefix
+                    if remaining_columns:
+                        attention_mask[:, :remaining_columns].copy_(attention_mask[:, dead_prefix:].clone())
+                    attention_mask[:, remaining_columns:].zero_()
                     write_positions[:survivor_count].sub_(dead_prefix)
                     cache_position -= dead_prefix
                     stats["trim_count"] += 1

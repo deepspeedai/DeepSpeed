@@ -340,6 +340,56 @@ def test_aligned_continuous_generation_supports_mixed_effective_prompt_lengths()
     assert stats["end_to_end_ms"] is None
 
 
+def test_aligned_continuous_generation_reclaims_dead_prefix_when_cache_would_exhaust():
+
+    class CacheConfig(SimpleNamespace):
+
+        def get_text_config(self, **_kwargs):
+            return self
+
+    class CacheClassModel(torch.nn.Module):
+        _supports_cache_class = True
+
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.zeros(1))
+            self.config = CacheConfig(
+                max_position_embeddings=32,
+                num_hidden_layers=1,
+                num_attention_heads=1,
+                num_key_value_heads=1,
+                hidden_size=1,
+                head_dim=1,
+            )
+
+        def forward(self, input_ids, attention_mask, past_key_values=None, use_cache=True, **kwargs):
+            states = input_ids[:, None, :, None].to(dtype=torch.float32)
+            kwargs.pop("cache_position", None)
+            kwargs.pop("position_ids", None)
+            _, values = past_key_values.update(states, states, layer_idx=0, **kwargs)
+            cache_sums = values[:, 0].sum(dim=(1, 2))
+            next_tokens = torch.where(cache_sums == 20, 2, 7).long()
+            logits = torch.zeros((input_ids.shape[0], input_ids.shape[1], 16))
+            logits.scatter_(2, next_tokens[:, None, None].expand(-1, input_ids.shape[1], 1), 1)
+            return SimpleNamespace(logits=logits, past_key_values=past_key_values)
+
+    rollout = HybridEngineRollout(
+        SimpleNamespace(module=CacheClassModel()),
+        SimpleNamespace(pad_token_id=0, eos_token_id=2),
+        cfg=HybridEngineRolloutConfig(align_decode_fronts=True),
+    )
+    request = RolloutRequest(
+        torch.tensor([[1, 2, 3], [1, 2, 4], [1, 2, 5]]),
+        torch.ones((3, 3), dtype=torch.long),
+    )
+
+    output = rollout.generate(request, SamplingConfig(max_new_tokens=4, temperature=0, continuous_batch_size=2))
+
+    assert output.input_ids[:, 3:].tolist() == [[7, 7, 2, 0], [7, 7, 7, 7], [7, 7, 7, 7]]
+    assert output.attention_mask[:, 3:].tolist() == [[1, 1, 1, 0], [1, 1, 1, 1], [1, 1, 1, 1]]
+    assert rollout.get_last_continuous_stats()["trim_count"] == 1
+
+
 def test_continuous_generation_trims_cache_after_staggered_eos():
 
     class CacheConfig(SimpleNamespace):

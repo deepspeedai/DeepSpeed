@@ -111,7 +111,9 @@ all requests use the same padded prompt width. Different effective lengths
 encoded by the attention masks retain the legacy staggered logical decode
 positions; physical decode-front alignment is enabled only when
 ``align_decode_fronts=True``. Cache trimming is independently controlled by
-``enable_cache_trimming`` and is disabled by default.
+``enable_cache_trimming`` and is disabled by default. When disabled, the
+rollout does not trim periodically, but it reclaims a dead prefix when that is
+necessary to avoid exhausting the configured cache capacity.
 
 Set ``HybridEngineRolloutConfig(align_decode_fronts=True)`` to enable the
 follow-up alignment path. It derives each request's effective prompt width from
@@ -132,7 +134,8 @@ the preallocated KV tensors and active cache metadata. With profiling enabled,
 measured with accelerator synchronization; otherwise those timing fields are
 ``None`` or zero.
 ``trim_frequency`` is the number of trims divided by decode steps. Trimming
-statistics remain zero when ``enable_cache_trimming`` is false.
+statistics remain zero when ``enable_cache_trimming`` is false unless a
+capacity-exhaustion fallback reclaims a dead prefix.
 
 ``DeepSpeedStaticCache`` accepts one write position per row and can compact
 active rows while preserving its static tensor addresses. This mirrors the
