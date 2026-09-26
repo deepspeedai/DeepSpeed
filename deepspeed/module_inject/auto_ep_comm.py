@@ -298,6 +298,10 @@ class DeepEPExchange:
             tokens,
             handle=handle,
             num_sms=self.num_sms,
+            # DeepEP takes do_expand from this argument, defaulting to False, even
+            # for a cached dispatch, while combine reads it from the handle. The
+            # forward dispatch is expanded, so the replay must ask for it too.
+            do_expand=handle.do_expand,
         )
         return recv_x
 
