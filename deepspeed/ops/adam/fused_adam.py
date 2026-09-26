@@ -7,6 +7,7 @@ Copyright NVIDIA/apex
 This file is adapted from fused adam in NVIDIA/apex, commit 6bd01c4
 """
 
+import math
 import torch
 from .multi_tensor_apply import MultiTensorApply
 
@@ -95,6 +96,72 @@ class FusedAdam(torch.optim.Optimizer):
         # Skip buffer
         self._dummy_overflow_buf = get_accelerator().IntTensor([0])
         self.multi_tensor_adam = fused_adam_cuda.multi_tensor_adam
+        self.multi_tensor_adam_mixed_precision = getattr(fused_adam_cuda, "multi_tensor_adam_mixed_precision", None)
+
+    def _can_step_with_mixed_precision_grads(self, grads, output_params):
+        """Return whether the internal mixed-precision step can consume every group; callers must fall back if false."""
+        if not callable(self.multi_tensor_adam_mixed_precision):
+            return False
+        if len(grads) != len(self.param_groups) or len(output_params) != len(self.param_groups):
+            return False
+
+        for group, grad, output in zip(self.param_groups, grads, output_params):
+            if len(group['params']) != 1:
+                return False
+            master = group['params'][0]
+            if not all(torch.is_tensor(tensor) for tensor in (grad, master, output)):
+                return False
+            if master.dtype != torch.float32 or not master.is_contiguous():
+                return False
+            if grad.dtype not in (torch.float16, torch.bfloat16) or output.dtype != grad.dtype:
+                return False
+            if not grad.is_contiguous() or not output.is_contiguous():
+                return False
+            if master.device != grad.device or output.device != grad.device:
+                return False
+            if master.shape != grad.shape or output.shape != grad.shape:
+                return False
+
+            state = self.state.get(master)
+            if not state:
+                continue
+            if set(state) != {'step', 'exp_avg', 'exp_avg_sq'} or not isinstance(state['step'], int):
+                return False
+            for moment_name in ('exp_avg', 'exp_avg_sq'):
+                moment = state[moment_name]
+                if not torch.is_tensor(moment):
+                    return False
+                if moment.dtype != torch.float32 or moment.device != master.device:
+                    return False
+                if moment.shape != master.shape or not moment.is_contiguous():
+                    return False
+        return True
+
+    def _step_with_mixed_precision_grads(self, grads, output_params, scale):
+        """Run the internal mixed-precision update; callers must use the public step when this contract is ineligible."""
+        if not self._can_step_with_mixed_precision_grads(grads, output_params):
+            raise RuntimeError("mixed-precision FusedAdam inputs are not eligible")
+        if not math.isfinite(scale) or scale <= 0:
+            raise RuntimeError("mixed-precision FusedAdam scale must be finite and positive")
+
+        for group in self.param_groups:
+            master = group['params'][0]
+            state = self.state[master]
+            if len(state) == 0:
+                state['step'] = group.get('step', 0)
+                state['exp_avg'] = torch.zeros_like(master)
+                state['exp_avg_sq'] = torch.zeros_like(master)
+
+        for group, grad, output in zip(self.param_groups, grads, output_params):
+            master = group['params'][0]
+            state = self.state[master]
+            state['step'] += 1
+            beta1, beta2 = group['betas']
+            bias_correction = 1 if group['bias_correction'] else 0
+            multi_tensor_applier(self.multi_tensor_adam_mixed_precision, self._dummy_overflow_buf,
+                                 [[grad], [master], [state['exp_avg']], [state['exp_avg_sq']], [output]], group['lr'],
+                                 beta1, beta2, group['eps'], state['step'], self.adam_w_mode, bias_correction,
+                                 group['weight_decay'], scale)
 
     def zero_grad(self):
         if self.set_grad_none:

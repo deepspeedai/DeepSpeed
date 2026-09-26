@@ -288,3 +288,143 @@ def test_mixed_precision_fused_adam_op_rejects_invalid_inputs_without_mutation(i
 
     for tensor, snapshot in zip(supplied_tensors, snapshots):
         torch.testing.assert_close(tensor, snapshot, rtol=0, atol=0, equal_nan=True)
+
+
+def test_fused_adam_mixed_precision_step_preserves_group_state():
+    if not {torch.float16, torch.bfloat16}.issubset(get_accelerator().supported_dtypes()):
+        pytest.skip(f"fp16 and bf16 not supported on {get_accelerator().device_name()}")
+    if not deepspeed.ops.__compatible_ops__[FusedAdamBuilder.NAME]:
+        pytest.skip("FusedAdam is not compatible")
+
+    device = get_accelerator().device_name()
+    torch.manual_seed(5678)
+    masters = [torch.nn.Parameter(torch.randn(1003, device=device, dtype=torch.float32)) for _ in range(2)]
+    grads = [torch.empty(1003, device=device, dtype=torch.float16),
+             torch.empty(1003, device=device, dtype=torch.bfloat16)]
+    outputs = [torch.empty_like(grad) for grad in grads]
+    groups = [
+        {
+            "params": [masters[0]],
+            "lr": 1e-2,
+            "weight_decay": 0.0,
+        },
+        {
+            "params": [masters[1]],
+            "lr": 2e-3,
+            "weight_decay": 0.1,
+            "step": 3,
+        },
+    ]
+    optimizer = FusedAdam(groups, betas=(0.8, 0.95), eps=1e-6, adam_w_mode=True, bias_correction=True)
+    ref_masters = [master.detach().clone() for master in masters]
+    ref_exp_avgs = [torch.zeros_like(master) for master in masters]
+    ref_exp_avg_sqs = [torch.zeros_like(master) for master in masters]
+    initial_steps = [0, 3]
+    assert not optimizer.state
+    assert optimizer._can_step_with_mixed_precision_grads(grads, outputs)
+
+    for update_idx in range(1, 6):
+        for group_idx, (grad, group) in enumerate(zip(grads, optimizer.param_groups)):
+            grad.copy_(torch.randn_like(grad))
+            reference_mixed_precision_adam_step(ref_masters[group_idx], grad, ref_exp_avgs[group_idx],
+                                                ref_exp_avg_sqs[group_idx], initial_steps[group_idx] + update_idx,
+                                                group["lr"], group["betas"][0], group["betas"][1], group["eps"],
+                                                group["weight_decay"], True, group["bias_correction"], 128.0)
+        optimizer._step_with_mixed_precision_grads(grads, outputs, 128.0)
+
+    for group_idx, (master, output) in enumerate(zip(masters, outputs)):
+        state = optimizer.state[master]
+        assert set(state) == {"step", "exp_avg", "exp_avg_sq"}
+        assert state["step"] == initial_steps[group_idx] + 5
+        assert master.dtype == torch.float32
+        assert state["exp_avg"].dtype == torch.float32
+        assert state["exp_avg_sq"].dtype == torch.float32
+        fp32_atol = 8 * torch.finfo(torch.float32).eps * ref_masters[group_idx].abs().max().item()
+        output_atol = 8 * torch.finfo(output.dtype).eps * ref_masters[group_idx].abs().max().item()
+        torch.testing.assert_close(master, ref_masters[group_idx], rtol=0, atol=fp32_atol)
+        torch.testing.assert_close(state["exp_avg"], ref_exp_avgs[group_idx], rtol=0, atol=fp32_atol)
+        torch.testing.assert_close(state["exp_avg_sq"], ref_exp_avg_sqs[group_idx], rtol=0, atol=fp32_atol)
+        torch.testing.assert_close(output.float(), ref_masters[group_idx].to(output.dtype).float(), rtol=0,
+                                   atol=output_atol)
+
+
+def test_fused_adam_missing_mixed_precision_symbol_falls_back():
+    if torch.float16 not in get_accelerator().supported_dtypes():
+        pytest.skip(f"fp16 not supported on {get_accelerator().device_name()}")
+    if not deepspeed.ops.__compatible_ops__[FusedAdamBuilder.NAME]:
+        pytest.skip("FusedAdam is not compatible")
+
+    device = get_accelerator().device_name()
+    master = torch.nn.Parameter(torch.randn(1003, device=device, dtype=torch.float32))
+    grad = torch.randn(1003, device=device, dtype=torch.float16)
+    output = torch.randn_like(grad)
+    optimizer = FusedAdam([master])
+    optimizer.multi_tensor_adam_mixed_precision = None
+    master_snapshot = master.detach().clone()
+    output_snapshot = output.clone()
+
+    assert not optimizer._can_step_with_mixed_precision_grads([grad], [output])
+    assert not optimizer.state
+    torch.testing.assert_close(master, master_snapshot, rtol=0, atol=0)
+    torch.testing.assert_close(output, output_snapshot, rtol=0, atol=0)
+
+
+def test_fused_adam_mixed_precision_rejects_invalid_scale_before_state_initialization():
+    if torch.float16 not in get_accelerator().supported_dtypes():
+        pytest.skip(f"fp16 not supported on {get_accelerator().device_name()}")
+    if not deepspeed.ops.__compatible_ops__[FusedAdamBuilder.NAME]:
+        pytest.skip("FusedAdam is not compatible")
+
+    device = get_accelerator().device_name()
+    master = torch.nn.Parameter(torch.randn(1003, device=device, dtype=torch.float32))
+    grad = torch.randn(1003, device=device, dtype=torch.float16)
+    output = torch.randn_like(grad)
+    optimizer = FusedAdam([master])
+    master_snapshot = master.detach().clone()
+    output_snapshot = output.clone()
+
+    with pytest.raises(RuntimeError):
+        optimizer._step_with_mixed_precision_grads([grad], [output], 0.0)
+
+    assert not optimizer.state
+    torch.testing.assert_close(master, master_snapshot, rtol=0, atol=0)
+    torch.testing.assert_close(output, output_snapshot, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("invalid_state", ["low_precision", "wrong_shape"])
+def test_fused_adam_mixed_precision_capability_rejects_invalid_state(invalid_state):
+    if torch.float16 not in get_accelerator().supported_dtypes():
+        pytest.skip(f"fp16 not supported on {get_accelerator().device_name()}")
+    if not deepspeed.ops.__compatible_ops__[FusedAdamBuilder.NAME]:
+        pytest.skip("FusedAdam is not compatible")
+
+    device = get_accelerator().device_name()
+    master = torch.nn.Parameter(torch.randn(1003, device=device, dtype=torch.float32))
+    grad = torch.randn(1003, device=device, dtype=torch.float16)
+    output = torch.randn_like(grad)
+    optimizer = FusedAdam([master])
+    optimizer.state[master] = {
+        "step": 4,
+        "exp_avg": torch.zeros_like(master),
+        "exp_avg_sq": torch.zeros_like(master),
+    }
+    if invalid_state == "low_precision":
+        optimizer.state[master]["exp_avg"] = optimizer.state[master]["exp_avg"].half()
+    else:
+        optimizer.state[master]["exp_avg"] = optimizer.state[master]["exp_avg"][:-1]
+    state_snapshot = {
+        key: value.clone() if torch.is_tensor(value) else value
+        for key, value in optimizer.state[master].items()
+    }
+    master_snapshot = master.detach().clone()
+    output_snapshot = output.clone()
+
+    assert not optimizer._can_step_with_mixed_precision_grads([grad], [output])
+    assert optimizer.state[master].keys() == state_snapshot.keys()
+    for key, value in optimizer.state[master].items():
+        if torch.is_tensor(value):
+            torch.testing.assert_close(value, state_snapshot[key], rtol=0, atol=0)
+        else:
+            assert value == state_snapshot[key]
+    torch.testing.assert_close(master, master_snapshot, rtol=0, atol=0)
+    torch.testing.assert_close(output, output_snapshot, rtol=0, atol=0)
