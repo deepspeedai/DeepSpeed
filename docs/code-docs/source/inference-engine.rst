@@ -83,8 +83,9 @@ When unset, generation keeps its existing behavior. When set to a positive
 value, at most that many prompt rows are active at once; completed rows retire
 and pending rows are prefetched into the released slots. The returned
 ``RolloutBatch`` remains in the original ``RolloutRequest`` row order.
-The experimental path periodically trims unused cache columns from the left
-to keep long-running staggered-EOS workloads within the allocated cache span.
+When ``HybridEngineRolloutConfig(enable_cache_trimming=True)`` is enabled, the
+experimental path periodically trims unused cache columns from the left to
+keep long-running staggered-EOS workloads within the allocated cache span.
 
 When ``HybridEngineRolloutConfig(enable_profiling=True)`` is enabled, this path
 also records a snapshot in ``get_last_profile()``. In addition to the common
@@ -99,12 +100,42 @@ number of simultaneously active rows; ``continuous_batch_size`` is the
 configured capacity.
 
 The experimental path intentionally does not implement paged attention or change the
-default generation semantics. It currently requires one prompt width for all
-rows, a model with cache-class support, greedy decoding, and one sample per
-prompt. CUDA Graph capture and multiple prompt widths are rejected until the
-scheduling semantics are validated on real workloads. Models without
-cache-class support should use the default ``generate()`` path or upgrade
-Transformers.
+default generation semantics. It currently requires one padded prompt width for
+all rows, a model with cache-class support, greedy decoding, and one sample per
+prompt. CUDA Graph capture is rejected until the scheduling semantics are
+validated on real workloads. Models that explicitly declare no cache-class
+support are rejected; models with unknown support should be validated against
+the default ``generate()`` path before use.
+``align_decode_fronts=False`` is the default equal-width padded-prompt baseline:
+all requests use the same padded prompt width. Different effective lengths
+encoded by the attention masks retain the legacy staggered logical decode
+positions; physical decode-front alignment is enabled only when
+``align_decode_fronts=True``. Cache trimming is independently controlled by
+``enable_cache_trimming`` and is disabled by default. When disabled, the
+rollout does not trim periodically, but it reclaims a dead prefix when that is
+necessary to avoid exhausting the configured cache capacity.
+
+Set ``HybridEngineRolloutConfig(align_decode_fronts=True)`` to enable the
+follow-up alignment path. It derives each request's effective prompt width from
+its attention mask, orders requests from longest to shortest internally, and
+restores the original row order in the returned batch. Retired rows are refilled
+from that pre-sorted pending queue. Cache trimming remains disabled unless
+``enable_cache_trimming=True`` is also set. You can override the derived cache
+span with ``continuous_cache_capacity``; if the span is exhausted, the rollout
+raises an error that names both remedies.
+
+The most recent cache statistics are available from
+``rollout.get_last_continuous_stats()``. They include ``cache_capacity``,
+``peak_cache_length``, ``cache_memory_bytes``, ``trim_count``,
+``trimmed_columns``, ``trim_frequency``, and ``trim_bytes_moved``.
+``cache_memory_bytes`` covers
+the preallocated KV tensors and active cache metadata. With profiling enabled,
+``trim_latency_ms``, ``end_to_end_ms``, and ``tokens_per_second`` are also
+measured with accelerator synchronization; otherwise those timing fields are
+``None`` or zero.
+``trim_frequency`` is the number of trims divided by decode steps. Trimming
+statistics remain zero when ``enable_cache_trimming`` is false unless a
+capacity-exhaustion fallback reclaims a dead prefix.
 
 ``DeepSpeedStaticCache`` accepts one write position per row and can compact
 active rows while preserving its static tensor addresses. This mirrors the

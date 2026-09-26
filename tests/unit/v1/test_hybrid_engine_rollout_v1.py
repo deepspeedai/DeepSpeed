@@ -39,6 +39,8 @@ def test_continuous_generation_profile_on_accelerator():
 
         def forward(self, input_ids, attention_mask, past_key_values=None, use_cache=True, **kwargs):
             states = input_ids[:, None, :, None].to(dtype=torch.float32)
+            kwargs.pop("cache_position", None)
+            kwargs.pop("position_ids", None)
             _, values = past_key_values.update(states, states, layer_idx=0, **kwargs)
             logits = torch.zeros((input_ids.shape[0], input_ids.shape[1], 16), device=input_ids.device)
             logits[..., 7] = 1
