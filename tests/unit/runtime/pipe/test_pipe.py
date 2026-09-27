@@ -296,13 +296,8 @@ class TestDualPipeV(DistributedTest):
 
     @pytest.mark.parametrize("checkpoint_interval", [0, 1])
     def test_matches_sequential_model(self, checkpoint_interval, tmpdir):
-        """One DualPipeV training step must equal gradient accumulation on the unpartitioned model.
-
-        Both halves of every rank, the turn-around on the last rank, and the loss on rank 0 all
-        feed the same weights, so wrong routing, a dropped micro-batch or a doubly scaled loss
-        shows up as a weight or loss mismatch. A checkpoint round trip through a fresh engine
-        checks that both stages of a rank are saved and loaded under their own layer indices.
-        Activation checkpointing recomputes activations in backward and must not change any of it.
+        """DualPipeV must give the same loss and weights as the unpartitioned model.
+        A checkpoint saved by one engine must restore the same weights in a fresh engine.
         """
         from deepspeed.pipe import DualPipeVModule
 
