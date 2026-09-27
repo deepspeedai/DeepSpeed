@@ -176,6 +176,9 @@ class PipelineEngine(DeepSpeedEngine):
             'output_tensors': [],  # tensor object to preserve backward graph
         }
         self.pipe_recv_buf = None
+        self.pipe_recv_buf_requires_grad = None
+        self.pipe_recv_buf_training = None
+        self.pipe_send_buf_training = None
         self.grad_layer = None
         self._grad_layer_buf = []
 
@@ -323,6 +326,9 @@ class PipelineEngine(DeepSpeedEngine):
         """
         self.first_output_send = True
         self.pipe_recv_buf = None
+        self.pipe_recv_buf_requires_grad = None
+        self.pipe_recv_buf_training = None
+        self.pipe_send_buf_training = None
         self.grad_layer = None
         self._grad_layer_buf = []
         self.meta_buffer = None
@@ -841,13 +847,16 @@ class PipelineEngine(DeepSpeedEngine):
             # Use tensor.backward(gradient) style which is now supported by DeepSpeed.
             # This properly integrates with DeepSpeed's hooks and loss scaling.
             if isinstance(outputs, tuple):
-                out_tensors = [t for t in outputs if t.is_floating_point()]
+                out_tensors = [t for t in outputs if t.requires_grad]
                 assert len(out_tensors) == len(grad_tensors)
                 # For multiple tensors, use retain_graph for all but the last
                 for i, (out, grad) in enumerate(zip(out_tensors, grad_tensors)):
                     out.backward(gradient=grad, retain_graph=(i < len(out_tensors) - 1))
             else:
-                outputs.backward(gradient=grad_tensors)
+                if outputs.requires_grad:
+                    outputs.backward(gradient=grad_tensors)
+                else:
+                    assert grad_tensors is None
         finally:
             self._running_engine_backward = False
 
@@ -932,6 +941,8 @@ class PipelineEngine(DeepSpeedEngine):
             * type (0: tensor, 1: list)
             * num_tensors if type=list
             foreach tensor in buffer:
+                * dtype
+                * requires_grad
                 * ndims
                 * shape
         """
@@ -940,6 +951,7 @@ class PipelineEngine(DeepSpeedEngine):
             meta_buf_list = [
                 0,  # type of data (0: tensor, 1: list (unused), 2: tuple)
                 self.DTYPE_TO_ID[buffer.dtype],  # dtype
+                int(buffer.requires_grad),  # requires_grad
                 len(buffer.size())  # ndims
             ]
             meta_buf_list.extend(buffer.size())
@@ -958,6 +970,7 @@ class PipelineEngine(DeepSpeedEngine):
             for tensor in buffer:
                 assert isinstance(tensor, torch.Tensor)
                 meta_buf_list.append(self.DTYPE_TO_ID[tensor.dtype])
+                meta_buf_list.append(int(tensor.requires_grad))
                 meta_buf_list.append(len(tensor.size()))
                 meta_buf_list.extend(tensor.size())
 
@@ -980,7 +993,7 @@ class PipelineEngine(DeepSpeedEngine):
         """Receive metadata about upcoming p2p transfers and return allocated buffers.
 
         Returns:
-            Allocated buffer for receiving from send_stage.
+            Allocated buffer and requires-grad metadata for receiving from send_stage.
         """
         buffer = torch.empty(TENSOR_META_SIZE, dtype=torch.int32, device=self.device)
         p2p.recv(buffer, send_stage)
@@ -990,28 +1003,33 @@ class PipelineEngine(DeepSpeedEngine):
         # A single tensor will be sent.
         if recv_type == 0:
             recv_dtype = self.ID_TO_DTYPE[buffer[1].item()]
-            recv_ndims = buffer[2].item()
-            recv_shape = buffer[3:3 + recv_ndims].tolist()
-            return self._allocate_or_extend_buffers(0, recv_shape, recv_dtype)
+            recv_requires_grad = bool(buffer[2].item())
+            recv_ndims = buffer[3].item()
+            recv_shape = buffer[4:4 + recv_ndims].tolist()
+            recv_buffer = self._allocate_or_extend_buffers(0, recv_shape, recv_dtype)
+            return recv_buffer, recv_requires_grad
 
         # List or tuple of tensors (recv_type == 1 (list) is currently unused)
         elif recv_type == 1 or recv_type == 2:
             num_tensors = buffer[1].item()
 
             buffers = []
+            requires_grad = []
             offset = 2
             for idx in range(num_tensors):
                 recv_dtype = self.ID_TO_DTYPE[buffer[offset].item()]
-                recv_ndims = buffer[offset + 1].item()
-                recv_shape = buffer[offset + 2:offset + 2 + recv_ndims].tolist()
-                offset += 2 + recv_ndims
+                requires_grad.append(bool(buffer[offset + 1].item()))
+                recv_ndims = buffer[offset + 2].item()
+                recv_shape = buffer[offset + 3:offset + 3 + recv_ndims].tolist()
+                offset += 3 + recv_ndims
 
                 buffers.append(self._allocate_or_extend_buffers(idx, recv_shape, recv_dtype))
 
             # Convert to tuples if requested.
             if recv_type == 2:
                 buffers = tuple(buffers)
-            return buffers
+                requires_grad = tuple(requires_grad)
+            return buffers, requires_grad
 
         else:
             raise NotImplementedError(f'Could not receive type {type(recv_type)}')
@@ -1030,8 +1048,9 @@ class PipelineEngine(DeepSpeedEngine):
             outputs[-1] = outputs[-1].half()
             outputs = tuple(outputs)
 
-        if self.dynamic_shape or self.first_output_send:
+        if self.dynamic_shape or self.first_output_send or self.pipe_send_buf_training != self.module.training:
             self.first_output_send = False
+            self.pipe_send_buf_training = self.module.training
             self._send_tensor_meta(outputs, self.next_stage)
 
         if isinstance(outputs, torch.Tensor):
@@ -1063,7 +1082,7 @@ class PipelineEngine(DeepSpeedEngine):
             if isinstance(inputs, tuple):
                 first_input = inputs[0]
                 assert all([torch.is_tensor(elt) for elt in inputs[1:]])
-                inputs_grad_tail = [elt.grad for elt in inputs[1:]]
+                inputs_grad_tail = [elt.grad for elt in inputs[1:] if elt.requires_grad]
             elif torch.is_tensor(inputs):
                 first_input = inputs
                 inputs_grad_tail = []
@@ -1085,8 +1104,11 @@ class PipelineEngine(DeepSpeedEngine):
             inputs = tuple(inputs)
 
         if isinstance(inputs, torch.Tensor):
-            assert inputs.grad is not None
-            p2p.send(inputs.grad, self.prev_stage)
+            if inputs.requires_grad:
+                assert inputs.grad is not None
+                p2p.send(inputs.grad, self.prev_stage)
+            else:
+                assert inputs.grad is None
         else:
             # XXX terrible hacky branch
             if self.is_grad_partitioned:
@@ -1096,7 +1118,7 @@ class PipelineEngine(DeepSpeedEngine):
             else:
                 for idx, buffer in enumerate(inputs):
                     # Skip tensors that will not produce a grad
-                    if not buffer.is_floating_point():
+                    if not buffer.requires_grad:
                         assert buffer.grad is None
                         continue
                     assert buffer.grad is not None
@@ -1115,15 +1137,17 @@ class PipelineEngine(DeepSpeedEngine):
         recvd = None
 
         # Allocate the buffer if necessary
-        if self.dynamic_shape or self.pipe_recv_buf is None:
-            self.pipe_recv_buf = self._recv_tensor_meta(self.prev_stage)
+        if self.dynamic_shape or self.pipe_recv_buf is None or self.pipe_recv_buf_training != self.module.training:
+            self.pipe_recv_buf, self.pipe_recv_buf_requires_grad = self._recv_tensor_meta(self.prev_stage)
+            self.pipe_recv_buf_training = self.module.training
 
         if isinstance(self.pipe_recv_buf, torch.Tensor):
             p2p.recv(self.pipe_recv_buf, self.prev_stage)
             recvd = self.pipe_recv_buf.clone().detach()
-            recvd.requires_grad = recvd.is_floating_point()
+            recvd.requires_grad = self.pipe_recv_buf_requires_grad
         else:
             assert isinstance(self.pipe_recv_buf, tuple)
+            assert isinstance(self.pipe_recv_buf_requires_grad, tuple)
             recvd = [None] * len(self.pipe_recv_buf)
             for idx, buffer in enumerate(self.pipe_recv_buf):
                 assert torch.is_tensor(buffer)
@@ -1143,8 +1167,8 @@ class PipelineEngine(DeepSpeedEngine):
 
             recvd = tuple(recvd)
 
-            for buffer in recvd:
-                buffer.requires_grad = buffer.is_floating_point()
+            for buffer, requires_grad in zip(recvd, self.pipe_recv_buf_requires_grad):
+                buffer.requires_grad = requires_grad
 
         self.pipe_buffers['inputs'][buffer_id] = recvd
 
@@ -1170,14 +1194,16 @@ class PipelineEngine(DeepSpeedEngine):
             self.pipe_buffers['outputs'][buffer_id] = outputs
 
         # Allocate gradient if necessary
-        if self.dynamic_shape or self.grad_layer is None:
+        if isinstance(outputs, torch.Tensor) and not outputs.requires_grad:
+            self.grad_layer = None
+        elif self.dynamic_shape or self.grad_layer is None:
             if isinstance(outputs, torch.Tensor):
                 self.grad_layer = self._allocate_or_extend_buffers(0, list(outputs.size()), outputs.dtype)
             else:
                 # XXX This is a HACK
                 # When we exchange activations/gradients, the two pipe stages
                 # need to issue the send/recv with the same buffer sizes or
-                # else there is a deadlock. The is_floating_point() filter is
+                # else there is a deadlock. The requires_grad filter is
                 # used to avoid sending gradients for tensors that do not
                 # produce gradients. When TP>1, we partition the first
                 # activations/gradients across TP ranks to save communication
@@ -1191,9 +1217,9 @@ class PipelineEngine(DeepSpeedEngine):
                 if self.is_grad_partitioned:
                     sizes_and_dtypes = [(list(t.size()), t.dtype)
                                         for t in outputs[:2]] + [(list(t.size()), t.dtype)
-                                                                 for t in outputs[2:] if t.is_floating_point()]
+                                                                 for t in outputs[2:] if t.requires_grad]
                 else:
-                    sizes_and_dtypes = [(list(t.size()), t.dtype) for t in outputs if t.is_floating_point()]
+                    sizes_and_dtypes = [(list(t.size()), t.dtype) for t in outputs if t.requires_grad]
 
                 self.grad_layer = [
                     self._allocate_or_extend_buffers(i, size, dtype)
@@ -1202,7 +1228,7 @@ class PipelineEngine(DeepSpeedEngine):
 
         if isinstance(self.grad_layer, torch.Tensor):
             p2p.recv(self.grad_layer, self.next_stage)
-        else:
+        elif self.grad_layer is not None:
             assert isinstance(outputs, tuple)
             for idx, buffer in enumerate(self.grad_layer):
                 # XXX GPT-2 hack
