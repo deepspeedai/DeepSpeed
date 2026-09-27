@@ -102,6 +102,25 @@ def test_fused_weighted_restore_walks_wide_hidden_deterministically(num_tokens, 
     assert torch.equal(restore(), fused)
 
 
+def test_fused_weighted_restore_rounds_fp32_product_before_accumulation():
+    device = _device()
+    hidden = 1030
+    next_float = 1.0 + 2**-23
+    rows = torch.zeros((3, hidden), device=device, dtype=torch.float32)
+    rows[0].fill_(-1.0 - 2**-22)
+    rows[1].fill_(next_float)
+    scores = torch.tensor([[1.0, next_float, 1.0]], device=device, dtype=torch.float32)
+
+    output = fused_ops.fused_weighted_restore(rows,
+                                              top_scores=scores,
+                                              token_indices_sorted=torch.arange(3, device=device),
+                                              top_k=3,
+                                              shape=(1, 1, hidden))
+
+    # Rounded separately, next_float**2 is 1 + 2**-22; a contracted multiply-add retains the 2**-46 residual.
+    assert torch.equal(output, torch.zeros_like(output))
+
+
 def test_fused_engine_names_what_it_cannot_run():
     device = _device()
     for dtype in fused_ops.SUPPORTED_ROW_DTYPES:
