@@ -22,7 +22,7 @@ from deepspeed.utils.pin_memory_tracker import pinned_memory_summary
 from deepspeed.runtime.fp16.loss_scaler import CreateLossScaler
 from deepspeed.runtime.torch_autocast import get_autocast_dtype, get_all_comm_dtypes, is_autocast_initialized, sort_dtypes
 from deepspeed.runtime.comm.coalesced_collectives import reduce_scatter_coalesced, all_to_all_quant_reduce
-from deepspeed.runtime.utils import has_inf_or_nan, inf, is_model_parallel_parameter, mask_nan_or_inf_with_val_inplace, count_used_parameters_in_backward
+from deepspeed.runtime.utils import has_inf_or_nan, inf, is_model_parallel_parameter, mask_nan_or_inf_with_val_inplace, count_used_parameters_in_backward, is_optimized_parameter
 from deepspeed.runtime.zero.partition_parameters import *
 from deepspeed.runtime.zero.config import ZeroStageEnum
 from deepspeed.runtime.zero.offload_config import OffloadDeviceEnum, OffloadStateTypeEnum
@@ -685,7 +685,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         for source_param_group_id, param_group in enumerate(self.optimizer.param_groups):
             trainable_params_by_group = collections.OrderedDict()
             for param in param_group[PARAMS_KEY]:
-                if not param.requires_grad:
+                if not is_optimized_parameter(param):
                     continue
                 process_group = getattr(param, "ds_process_group", self.dp_process_group)
                 trainable_params_by_group.setdefault(id(process_group), (process_group, []))[1].append(param)
@@ -2579,9 +2579,6 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
         self.fp32_partitioned_groups_flat[sub_group_id].grad = single_grad_partition
 
-        # release all the gradient since we have already created a necessary copy in dp_grad_partition
-        self.zero_grad(set_to_none=True)
-
         if not get_accelerator().is_synchronized_device():
             for grad in filter(lambda g: get_accelerator().on_accelerator(g), self.averaged_gradients[sub_group_id]):
                 grad.record_stream(get_accelerator().current_stream())
@@ -2777,6 +2774,11 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
         timer_names.add(OPTIMIZER_STEP_TIMER)
         self.timers(OPTIMIZER_STEP_TIMER).start()
+
+        if not self.offload_optimizer:
+            # The epilogue has copied all gradients into the partition buffers. Clear the
+            # model gradients once, rather than visiting every parameter for each sub-group.
+            self.zero_grad(set_to_none=True)
 
         #update parameters one sub group at a time
         for sub_group_id, group in enumerate(self.fp16_groups):

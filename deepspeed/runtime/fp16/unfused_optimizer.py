@@ -12,7 +12,7 @@ import torch
 from torch._utils import _flatten_dense_tensors
 
 from deepspeed.runtime.base_optimizer import DeepSpeedOptimizer
-from deepspeed.runtime.utils import get_global_norm, CheckOverflow, get_weight_norm
+from deepspeed.runtime.utils import get_global_norm, CheckOverflow, get_weight_norm, is_optimized_parameter
 from deepspeed.runtime.fp16.loss_scaler import LossScaleConfig, LossScaleProfile
 from deepspeed.utils import logger
 from deepspeed.utils.torch import required_torch_version
@@ -69,7 +69,7 @@ class FP16_UnfusedOptimizer(DeepSpeedOptimizer):
         # loop to deal with groups
         for i, param_group in enumerate(self.optimizer.param_groups):
             #fp16 weights that represents the actual model weights
-            trainable = [p for p in param_group['params'] if p.requires_grad]
+            trainable = [p for p in param_group['params'] if is_optimized_parameter(p)]
             self.fp16_groups.append(trainable)
 
             #creating a fp32 copy of the weights that will be updated first then
