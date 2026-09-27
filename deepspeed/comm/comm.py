@@ -429,7 +429,8 @@ class P2POp:
         self.tag = tag
 
 
-def batch_isend_irecv(p2p_op_list):
+@timed_op
+def batch_isend_irecv(p2p_op_list, prof=False, log_name='batch_isend_irecv', debug=get_caller_func()):
     """Launch a list of :class:`P2POp` as one batch and return their requests.
     """
     global cdb
