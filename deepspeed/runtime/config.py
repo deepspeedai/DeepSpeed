@@ -470,8 +470,10 @@ class DeepSpeedConfig(object):
                 else:
                     self.world_size = dist.get_world_size()
         except (RuntimeError, AssertionError, AttributeError):
-            self.global_rank = 0
-            self.world_size = 1
+            self.global_rank = int(os.environ.get("RANK", "0"))
+            self.world_size = int(os.environ.get("WORLD_SIZE", "1"))
+            if "sequence_parallel_size" in self._param_dict:
+                self.world_size /= self._param_dict["sequence_parallel_size"]
         logger.info(f"Config mesh_device {mesh_device} world_size = {self.world_size}")
         # Pass a copy so that the user json is unmodified, e.g. for logging.
         param_dict = copy.copy(self._param_dict)
