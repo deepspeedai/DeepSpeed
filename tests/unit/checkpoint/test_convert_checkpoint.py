@@ -207,3 +207,41 @@ class TestCheckpointConvert(DistributedTest):
 
         model = ModelWithSharedSubmodule()
         model.load_state_dict(state_dict, strict=True)
+
+
+class _SharedSubmoduleModel(nn.Module):
+    """A module that aliases an entire child under a second attribute name."""
+
+    def __init__(self):
+        super().__init__()
+        self.layer0 = nn.Linear(4, 4)
+        self.layer1 = nn.Linear(4, 4)
+        self.layer2 = self.layer1
+
+
+def test_get_shared_params_records_aliased_submodule(monkeypatch):
+    """The traversal itself must not drop an aliased submodule's params.
+
+    The end-to-end conversion test above needs an accelerator and is skipped in
+    most environments, so it cannot demonstrate this defect. `_get_shared_params`
+    only reads `self.module`, `zero_optimization_partition_weights()` and the
+    rank, so the tree walk can be exercised directly -- which is the level the
+    bug actually lives at.
+    """
+    from deepspeed.runtime.engine import DeepSpeedEngine
+    import deepspeed.comm as dist
+
+    monkeypatch.setattr(dist, "get_rank", lambda *a, **k: 0)
+
+    class _Engine:
+        module = _SharedSubmoduleModel()
+
+        def zero_optimization_partition_weights(self):
+            return False
+
+    shared = DeepSpeedEngine._get_shared_params(_Engine())
+
+    # layer2 aliases layer1 in full, so BOTH of its params must be recorded as
+    # shared -- otherwise they are absent from the reconstructed state dict.
+    assert shared.get("layer2.weight") == "layer1.weight"
+    assert shared.get("layer2.bias") == "layer1.bias"
