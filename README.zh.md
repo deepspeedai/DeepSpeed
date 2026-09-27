@@ -143,7 +143,7 @@ DeepSpeed 已无缝集成至众多主流开源深度学习框架与生态：
 | 英特尔 (Intel)       | Intel(R) Gaudi(R) 2 AI 加速器  | hpu              | 是 (Yes) | 是 (Yes)                |
 | 英特尔 (Intel)       | Intel(R) 至强(R) 处理器 (Xeon Processors)         | cpu              | 是 (Yes) | 是 (Yes)                |
 | 英特尔 (Intel)       | Intel(R) 数据中心 GPU Max 系列 (Data Center GPU Max) | xpu              | 是 (Yes) | 是 (Yes)                |
-| 太初元碁 (Tecorigin)        | 可扩展数据分析加速器 (SDAA) | sdaa             | 是 (Yes) | 否 (No)                 |
+| 太初元碁 (Tecorigin)        | SDAA                                | sdaa             | 是 (Yes) | 否 (No)                 |
 
 ## PyPI 安装
 我们定期向 [PyPI](https://pypi.org/project/deepspeed/) 发布最新版本，在绝大多数场景下推荐直接从 PyPI 安装：
@@ -263,4 +263,4 @@ DCO 针对每次 Git Commit 生效，因此每个提交都需要附加签署声�
 
 ---
 
-> 💡 **文档维护说明**：本中文文档由社区志愿者（@JasonYeYuhe）翻译维护，最后同步更新于 2026年09月19日。如发现内容与官方英文原版存在差异或新特性滞后，欢迎提交 PR 共同完善！
+> 💡 **文档维护说明**：本中文文档由社区志愿者（@JasonYeYuhe）翻译维护，最后同步更新于 2026年09月27日。如发现内容与官方英文原版存在差异或新特性滞后，欢迎提交 PR 共同完善！
