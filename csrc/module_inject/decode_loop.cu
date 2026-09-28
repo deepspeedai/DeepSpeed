@@ -58,8 +58,18 @@ __global__ void ds_loop_step_kernel(const __nv_bfloat16* __restrict__ logits,
         out_buf[step] = best;
         int64_t new_pos = write_pos[0] + 1;
         write_pos[0] = new_pos;
-        if (new_pos + 1 < max_len) { mask[new_pos + 1] = true; }
+        // new_pos is the slot the token just written occupies during the
+        // next replay; revealing new_pos+1 masks the current slot for
+        // layers still on native SDPA.
+        if (new_pos < max_len) { mask[new_pos] = true; }
     }
+}
+
+// Fills buf[from, len) with pad on the device — used after an early EOS exit.
+__global__ void pad_tail_kernel(int64_t* __restrict__ buf, int64_t from, int64_t len, int64_t pad)
+{
+    int64_t i = from + (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < len) { buf[i] = pad; }
 }
 
 int64_t ds_decode_loop(std::function<void()> replay_fn,
@@ -118,7 +128,15 @@ int64_t ds_decode_loop(std::function<void()> replay_fn,
             cudaMemcpyAsync(&token, tok_ptr, sizeof(int64_t), cudaMemcpyDeviceToHost, stream);
             cudaStreamSynchronize(stream);
             if (token == eos_token_id) {
-                for (int64_t i = step + 1; i < max_steps; i++) { buf_ptr[i] = pad_token_id; }
+                // buf_ptr is a device pointer: pad the remaining slots with a
+                // kernel on the same stream instead of writing it from host.
+                int64_t remaining = max_steps - (step + 1);
+                if (remaining > 0) {
+                    int threads = 128;
+                    int64_t blocks = (remaining + threads - 1) / threads;
+                    pad_tail_kernel<<<(int)blocks, threads, 0, stream>>>(
+                        buf_ptr, step + 1, max_steps, pad_token_id);
+                }
                 break;
             }
         }

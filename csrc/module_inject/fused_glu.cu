@@ -121,7 +121,7 @@ __global__ void decode_step_kernel(const __nv_bfloat16* __restrict__ logits,
         out_buf[step] = best;
         int64_t new_pos = write_pos[0] + 1;
         write_pos[0] = new_pos;
-        if (new_pos + 1 < max_len) { mask[new_pos + 1] = true; }
+        if (new_pos < max_len) { mask[new_pos] = true; }
     }
 }
 
@@ -198,7 +198,11 @@ __global__ void decode_step_graph_kernel(const __nv_bfloat16* __restrict__ logit
         int64_t new_pos = write_pos[0] + 1;
         write_pos[0] = new_pos;
         out_buf[new_pos] = best;
-        if (new_pos + 1 < max_len) { mask[new_pos + 1] = true; }
+        // new_pos is the slot the token just written will occupy during the
+        // NEXT replay, matching the Python loop's reveal-before-replay
+        // convention; revealing new_pos+1 would unmask an unwritten slot
+        // and mask the current one for layers still on native SDPA.
+        if (new_pos < max_len) { mask[new_pos] = true; }
     }
 }
 
