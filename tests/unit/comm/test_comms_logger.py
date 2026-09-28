@@ -198,3 +198,46 @@ def test_calc_bw_log_supports_object_and_list_collectives(monkeypatch, comm_op, 
         expected_busbw *= (world_size - 1) / world_size
     assert tput == pytest.approx(expected_tput)
     assert busbw == pytest.approx(expected_busbw)
+
+
+@pytest.mark.parametrize('op_name',
+                         ['all_gather_into_tensor', 'all_gather', 'reduce_scatter_tensor', 'reduce_scatter'])
+def test_gather_and_scatter_bandwidth_use_the_total_array_size(monkeypatch, op_name):
+    # nccl-tests (doc/PERFORMANCE.md) defines algbw and busbw for both all-gather and
+    # reduce-scatter from S, the size of the whole array across all ranks. An
+    # all-gather logs the per-rank input and a reduce-scatter logs the full input,
+    # so reduce-scatter used to be scaled by the world size a second time.
+    from deepspeed.comm import comm
+
+    world_size = 4
+    backend = SimpleNamespace(using_mpi=False,
+                              is_initialized=lambda: True,
+                              get_world_size=lambda group=None: world_size)
+    setattr(backend, op_name, Mock(return_value='done'))
+    monkeypatch.setattr(comm, 'cdb', backend)
+    monkeypatch.setattr(comm, 'get_accelerator', lambda: SimpleNamespace(synchronize=lambda: None))
+    op_timer = Mock()
+    op_timer.elapsed.return_value = 2.0
+    monkeypatch.setattr(comm, 'timers', Mock(return_value=op_timer))
+    monkeypatch.setattr(comm, 'comms_logger', CommsLogger())
+    comm.comms_logger.enabled = True
+    comm.comms_logger.prof_all = True
+
+    shard = torch.ones(256)
+    shards = [torch.ones(256) for _ in range(world_size)]
+    full = torch.ones(256 * world_size)
+    args = {
+        'all_gather_into_tensor': (full, shard),
+        'all_gather': (shards, shard),
+        'reduce_scatter_tensor': (shard, full),
+        'reduce_scatter': (shard, shards),
+    }[op_name]
+    assert getattr(comm, op_name)(*args) == 'done'
+
+    total_bytes = full.numel() * full.element_size()
+    expected_algbw = total_bytes / 2.0 * 8 / 1e6
+    expected_busbw = expected_algbw * (world_size - 1) / world_size
+    records = comm.comms_logger.comms_dict[op_name]
+    (_, _, algbws, busbws), = records.values()
+    assert algbws == [pytest.approx(expected_algbw)]
+    assert busbws == [pytest.approx(expected_busbw)]
