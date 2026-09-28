@@ -24,6 +24,16 @@ def _validate_superoffload_accelerator():
         f"SuperOffload only supports NVIDIA CUDA GPUs, but found accelerator '{accelerator.device_name()}'.")
 
 
+def _validate_superoffload_optimizer(optimizer):
+    """Reject Adam settings the SuperOffload CPU worker would silently replace with AdamW."""
+    unsupported = "SuperOffload's CPU optimizer step and rollback only support AdamW with bias correction"
+    if not getattr(optimizer, "adam_w_mode", True):
+        raise ValueError(f"adam_w_mode=False is not supported: {unsupported}.")
+    for group_id, group in enumerate(optimizer.param_groups):
+        if not group.get("bias_correction", True):
+            raise ValueError(f"bias_correction=False in param group {group_id} is not supported: {unsupported}.")
+
+
 class SuperOffloadOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
 
     def __init__(
@@ -36,6 +46,7 @@ class SuperOffloadOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
         **kwargs,
     ):
         _validate_superoffload_accelerator()
+        _validate_superoffload_optimizer(init_optimizer)
 
         self.sub_group_to_param_num = {}
         self.sub_group_grad_partition_counts = {}

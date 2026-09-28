@@ -111,6 +111,37 @@ def test_cpu_adam_strict_state_updates(model_size, adamw_mode, weight_decay, bia
         torch.testing.assert_close(state['exp_avg_sq'], ref_exp_avg_sq, rtol=3e-5, atol=2e-6)
 
 
+@pytest.mark.parametrize('optimizer_kwargs,error', [
+    ({}, None),
+    ({
+        'adamw_mode': False
+    }, "adam_w_mode=False"),
+    ({
+        'bias_correction': False
+    }, "bias_correction=False"),
+])
+def test_superoffload_rejects_adam_settings_it_cannot_honor(monkeypatch, optimizer_kwargs, error):
+    from deepspeed.ops.adam import DeepSpeedCPUAdam
+    from deepspeed.runtime.superoffload import superoffload_stage3
+    from deepspeed.runtime.zero.stage3 import DeepSpeedZeroOptimizer_Stage3
+
+    def fake_stage3_init(self, module, init_optimizer, *args, **kwargs):
+        self.optimizer = init_optimizer
+        self.offload_optimizer_pin_memory = False
+
+    # Construct on CPU: skip the CUDA check, the ZeRO-3 setup and the worker process.
+    monkeypatch.setattr(superoffload_stage3, "_validate_superoffload_accelerator", lambda: None)
+    monkeypatch.setattr(DeepSpeedZeroOptimizer_Stage3, "__init__", fake_stage3_init)
+    monkeypatch.setattr(superoffload_stage3, "SuperOffloadCPUOptimizer", lambda **kwargs: None)
+
+    optimizer = DeepSpeedCPUAdam([torch.nn.Parameter(torch.zeros(4))], weight_decay=0.01, **optimizer_kwargs)
+    if error is None:
+        superoffload_stage3.SuperOffloadOptimizer_Stage3(None, optimizer, [], None, None)
+    else:
+        with pytest.raises(ValueError, match=error):
+            superoffload_stage3.SuperOffloadOptimizer_Stage3(None, optimizer, [], None, None)
+
+
 @pytest.mark.parametrize('dtype', [torch.half, torch.bfloat16, torch.float], ids=["fp16", "bf16", "fp32"])
 @pytest.mark.parametrize('model_size',
                          [
