@@ -79,10 +79,13 @@ def _find_fusable_projections(root: torch.nn.Module, attr_names: tuple) -> dict:
 
 
 def _is_silu_activation(act) -> bool:
-    """True when ``act`` is SiLU as a module or a plain function reference."""
+    """True when ``act`` is SiLU as a torch module, the plain function, or
+    transformers' SiLUActivation wrapper (what Qwen3.5 MLPs carry)."""
     if isinstance(act, torch.nn.SiLU):
         return True
-    return act is torch.nn.functional.silu
+    if act is torch.nn.functional.silu:
+        return True
+    return type(act).__name__ == "SiLUActivation"
 
 
 def find_glu_segments(root: torch.nn.Module) -> List[GLUSegment]:
