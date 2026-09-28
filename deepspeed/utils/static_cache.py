@@ -305,15 +305,21 @@ class DeepSpeedStaticCache:
         """Compact active rows after requests retire from a batch."""
         if not isinstance(active_indices, torch.Tensor) or active_indices.dim() != 1:
             raise ValueError("active_indices must be a 1-D tensor")
-        max_batch_size = self._layers[0].max_batch_size if self._layers else 0
-        active_indices = active_indices.to(device=self._layers[0].keys.device, dtype=torch.long)
+        # Hybrid caches mix KV layers with pass-through GDN slots; the GDN
+        # slots keep no per-row KV rows (their state is position-free and
+        # managed by HF), so compaction only touches the KV layers.
+        kv_layers = [layer for layer in self._layers if not isinstance(layer, DSStaticGDNSlot)]
+        if not kv_layers:
+            return
+        max_batch_size = kv_layers[0].max_batch_size
+        active_indices = active_indices.to(device=kv_layers[0].keys.device, dtype=torch.long)
         if active_indices.numel() > max_batch_size:
             raise ValueError("active_indices exceeds the cache batch size")
         if active_indices.numel() and ((active_indices < 0).any() or (active_indices >= max_batch_size).any()):
             raise ValueError("active_indices contains an out-of-range row")
         if active_indices.unique().numel() != active_indices.numel():
             raise ValueError("active_indices must not contain duplicates")
-        for layer in self._layers:
+        for layer in kv_layers:
             layer._compact_rows(active_indices)
         if self._write_position is not None and self._write_position.dim() == 1:
             positions = self._write_position

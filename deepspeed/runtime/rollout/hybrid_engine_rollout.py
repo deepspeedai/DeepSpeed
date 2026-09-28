@@ -600,6 +600,11 @@ class HybridEngineRollout(RolloutEngine):
         cache_offset = cache_position - prompt_len
         for layer_idx, prefill_layer in enumerate(prefill_cache.layers):
             target_layer = cache.layers[layer_idx]
+            # Hybrid caches put pass-through GDN slots in the layer list;
+            # they keep no keys/values and their state travels inside the
+            # model's GDN modules, so there is nothing to copy per row.
+            if not hasattr(target_layer, "keys") or not hasattr(prefill_layer, "keys"):
+                continue
             for source_row, target_row in enumerate(update.admitted_slots):
                 target_layer.keys[target_row, :, cache_offset:cache_position].copy_(prefill_layer.keys[source_row])
                 target_layer.values[target_row, :, cache_offset:cache_position].copy_(prefill_layer.values[source_row])
@@ -911,8 +916,11 @@ class HybridEngineRollout(RolloutEngine):
                 static_logits = out.logits
                 # decode_step_graph kernel is b=1 only (single-sequence argmax);
                 # for b>1 the graph captures forward only and Python handles
-                # argmax + buffer updates outside the graph.
-                if graph_op is not None and batch_size == 1:
+                # argmax + buffer updates outside the graph. The kernel also
+                # only accepts CUDA bf16 logits — fp16 models must keep the
+                # PyTorch argmax path instead of failing during capture.
+                if (graph_op is not None and batch_size == 1 and static_logits.dtype is torch.bfloat16
+                        and get_accelerator().on_accelerator(static_logits)):
                     graph_op.decode_step_graph(static_logits[:, -1, :].contiguous(), static_token.view(batch_size, 1),
                                                write_pos, static_attn, full_token_buf)
 
