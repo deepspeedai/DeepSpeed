@@ -1,7 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # DeepSpeed Team
 
-import torch
+try:
+    import torch
+except ImportError:
+    pass
 
 from .builder import NPUOpBuilder
 

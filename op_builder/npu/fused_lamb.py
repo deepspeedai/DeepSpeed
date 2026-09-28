@@ -3,7 +3,10 @@
 
 import math
 
-import torch
+try:
+    import torch
+except ImportError:
+    pass
 
 from .builder import NPUOpBuilder
 
