@@ -22,11 +22,14 @@ def _has_torch_npu_hifloat8_helper():
 
 requires_torch_npu_hifloat8 = pytest.mark.skipif(not _has_torch_npu_hifloat8_helper(),
                                                  reason="torch_npu HiFloat8 training helper is not installed")
+requires_torchao_npu = pytest.mark.skipif(find_spec("torchao_npu") is None,
+                                         reason="torchao_npu is not installed")
 
 
 def test_hifloat8_config_defaults_disabled():
     assert get_hifloat8_config({}) == {
         "enabled": False,
+        "backend": "torch_npu",
         "module_name_patterns": (),
         "min_numel": 0,
         "expected_module_count": None,
@@ -92,6 +95,42 @@ def test_hifloat8_config_accepts_dense_selection_contract():
     # Existing Swift Dense configurations require exactly 28 * 3 projections.
     config = get_hifloat8_config({"hifloat8": {"expected_module_count": 84}})
     assert config["expected_module_count"] == 84
+
+
+@pytest.mark.parametrize("backend", ["", "unknown", None, 1])
+def test_hifloat8_config_rejects_unknown_backend(backend):
+    with pytest.raises(DeepSpeedConfigError, match="hifloat8.backend"):
+        get_hifloat8_config({"hifloat8": {"backend": backend}})
+
+
+def test_hifloat8_config_selects_torchao_npu():
+    assert get_hifloat8_config({"hifloat8": {"backend": "torchao_npu"}})["backend"] == "torchao_npu"
+
+
+@requires_torchao_npu
+def test_torchao_npu_backend_preserves_dense_and_grouped_parameters():
+    if not hasattr(torch, "npu") or not torch.npu.is_available():
+        pytest.skip("NPU unavailable")
+    from deepspeed.moe.ep_experts import GroupedExperts
+    from torchao_npu.hifloat8 import HiFloat8Linear
+
+    model = nn.ModuleDict({
+        "dense": nn.Linear(16, 16, bias=False),
+        "experts": GroupedExperts(16, 32, 2, use_grouped_mm=True),
+    }).to("npu").bfloat16()
+    parameters_before = dict(model.named_parameters())
+    keys_before = tuple(model.state_dict())
+    engine = _make_engine(model, ["dense", "experts"])
+    engine.device = torch.device("npu:0")
+    engine._config.hifloat8_config["backend"] = "torchao_npu"
+    engine._configure_hifloat8()
+
+    assert isinstance(model["dense"], HiFloat8Linear)
+    assert model["experts"].hifloat8_enabled
+    assert model["experts"].hifloat8_backend == "torchao_npu"
+    assert tuple(model.state_dict()) == keys_before
+    assert all(dict(model.named_parameters())[name] is parameter
+               for name, parameter in parameters_before.items())
 
 
 class _ToyModel(nn.Module):

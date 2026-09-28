@@ -210,7 +210,7 @@ class _NPUGroupedMatmul(torch.autograd.Function):
         return dx, dw, None
 
 
-def _run_experts_npu(w1, w2, w3, x, num_tokens_per_expert, *, hifloat8):
+def _run_experts_npu(w1, w2, w3, x, num_tokens_per_expert, *, hifloat8, hifloat8_backend="torch_npu"):
     """Keep EP layout and BF16 parameters; select only the expert GEMM precision."""
     offsets = num_tokens_per_expert.cumsum(0).to(torch.int64)
     # AutoEP reserves extra rows for permutation padding beyond the last group.
@@ -223,7 +223,10 @@ def _run_experts_npu(w1, w2, w3, x, num_tokens_per_expert, *, hifloat8):
         return x * 0 + zero.to(x.dtype)
     inputs = x[:rows]
     if hifloat8:
-        from torch_npu.utils.hifloat8_train import hifloat8_grouped_mm
+        if hifloat8_backend == "torchao_npu":
+            from torchao_npu.hifloat8 import hifloat8_grouped_mm
+        else:
+            from torch_npu.utils.hifloat8_train import hifloat8_grouped_mm
 
         def mm(lhs, weight):
             return hifloat8_grouped_mm(lhs, weight.to(x.dtype).transpose(-2, -1), offsets)
@@ -281,6 +284,7 @@ class GroupedExperts(nn.Module):
         self.use_triton_grouped_mm = False
         self.use_grouped_mm = use_grouped_mm
         self.hifloat8_enabled = False
+        self.hifloat8_backend = "torch_npu"
 
         # Resolve the Triton path. The device-specific decision is delegated to
         # the accelerator backend (e.g. the CUDA backend prefers Triton on
@@ -319,7 +323,8 @@ class GroupedExperts(nn.Module):
         if self.hifloat8_enabled:
             if x.device.type != "npu" or x.dtype != torch.bfloat16:
                 raise RuntimeError("HiFloat8 experts require BF16 NPU inputs")
-            return _run_experts_npu(self.w1, self.w2, self.w3, x, num_tokens_per_expert, hifloat8=True)
+            return _run_experts_npu(self.w1, self.w2, self.w3, x, num_tokens_per_expert,
+                                    hifloat8=True, hifloat8_backend=self.hifloat8_backend)
         if x.device.type == "npu" and self.use_grouped_mm:
             return _run_experts_npu(self.w1, self.w2, self.w3, x, num_tokens_per_expert, hifloat8=False)
         if self.use_triton_grouped_mm:
