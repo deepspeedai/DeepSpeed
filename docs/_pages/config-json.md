@@ -774,11 +774,19 @@ When a HuggingFace model provides a built-in `tp_plan` (via `model.config.base_m
 | -------------------------------------------------------------------------------------------------------- | ------- |
 | Overlap tensor-parallel allreduce communication with computation (training only).                       | `false` |
 
-***vocab_parallel_lm_head***: [boolean]
+***vocab_parallel_lm_head***: [boolean or null]
 
 | Description                                                                                                                                                  | Default |
 | ------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------- |
-| Keep an untied `lm_head`/`embed_out` output vocabulary sharded and install DeepSpeed's pure-PyTorch vocab-parallel causal-LM loss instead of gathering logits. | `false` |
+| `true` requires a vocabulary-sharded `lm_head`/`embed_out` and distributed causal-LM loss; `false` disables this path; `null` automatically follows supported HF tied-embedding plans. | `null` |
+
+When this field is omitted or `null`, an HF `embedding_rowwise` plan may enable tied
+vocabulary sharding automatically, returning rank-local rather than full-vocabulary
+logits. Set it to `false` to opt out. Unsupported implicit sharding, including the
+DeepCompile `autotp` pass, keeps the tied embedding/head replicated and logs a warning.
+Explicit `true` requests fail instead of silently downgrading. See
+[Vocabulary-parallel LM Loss](/tutorials/autotp-training/#vocabulary-parallel-lm-loss)
+for supported embedding semantics and compiler limitations.
 
 ***partition_config***: [dictionary]
 
@@ -1055,6 +1063,12 @@ smoke coverage used for this AutoEP surface produced the following version gates
 | Description                                                                                              | Default |
 | -------------------------------------------------------------------------------------------------------- | ------- |
 | Direct child attribute name for shared experts (e.g., `"shared_expert"`). `null` = use preset default.   | `null`  |
+
+***expert_activation***: [string]
+
+| Description                                                                                              | Default |
+| -------------------------------------------------------------------------------------------------------- | ------- |
+| How the expert MLP combines its gate and up projections, by a name registered in `deepspeed.moe.ep_experts.EXPERT_ACTIVATIONS`: `"swiglu"` (`silu(gate) * up`), `"geglu_tanh"` (`gelu_tanh(gate) * up`, Gemma-4), `"swiglu_clamped"` (`silu(clamp(gate)) * clamp(up)`, DeepSeek-V4) or `"swiglu_oai"` (`(clamp(up) + 1) * clamp(gate) * sigmoid(alpha * clamp(gate))`, GPT-OSS and MiniMax-M3). `null` = use preset default, which is `"swiglu"` for every built-in preset. AutoEP checks the name against the model: a clamp limit on the experts module or the model config, or an experts `act_fn` that is not the named form's gate function, is an error unless this key is set. The clamp limit and alpha are taken from the model when it states them. `deepspeed.moe.ep_experts.register_expert_activation` adds a form. | `null`  |
 
 #### Custom Model Example
 
