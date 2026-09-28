@@ -8,6 +8,7 @@ from unit.common import DistributedTest
 from unit.simple_model import *
 from unit.checkpoint.common import checkpoint_correctness_verification
 from unit.util import skip_on_arch
+from deepspeed.accelerator import get_accelerator
 
 import pytest
 
@@ -18,6 +19,10 @@ class TestPipelineCheckpoint(DistributedTest):
     @pytest.mark.parametrize("zero_stage", [0, 1])
     def test_checkpoint_pipe_engine(self, zero_stage, tmpdir):
         skip_on_arch(min_arch=7)
+        # fp16 is only enabled for zero_stage > 0; skip that parametrization on
+        # accelerators without fp16 support instead of failing the sanity check.
+        if zero_stage > 0 and not get_accelerator().is_fp16_supported():
+            pytest.skip("fp16 is not supported on this accelerator")
 
         config_dict = {
             "train_batch_size": 2,

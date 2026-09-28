@@ -10,6 +10,7 @@ from unit.simple_model import random_dataloader
 import deepspeed
 import torch
 from deepspeed.runtime.zero.offload_config import DeepSpeedZeroOffloadOptimizerConfig
+from deepspeed.accelerator import get_accelerator
 
 import torch.nn as nn
 
@@ -33,6 +34,7 @@ def test_zero_partial_offload_config():
 
 
 #Large sweep along hidden dim, num_layers of different sizes
+@pytest.mark.skipif(not get_accelerator().is_fp16_supported(), reason="fp16 is not supported on this accelerator")
 @pytest.mark.parametrize("h_dim", [1024])
 @pytest.mark.parametrize("n_layers", [4, 8])
 class TestZeroPartialOffloadConfigSweep(DistributedTest):

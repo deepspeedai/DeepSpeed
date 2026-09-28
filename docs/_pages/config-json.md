@@ -48,6 +48,10 @@ toc_label: "Contents"
 
 Muon optimizer is supported with ZeRO Stage 1, 2, and 3. To use Muon, set the optimizer name to `Muon`. The parameters applied for Muon are automatically determined by the matrix shape and name. For ZeRO Stage 3 with NVMe offloading, set `save_muon_momentum_buffer_in_memory` to `true` under `zero_optimization` to keep the Muon momentum buffer in GPU/CPU memory instead of swapping to NVMe.
 
+Keeping Muon momentum in memory does not keep gradients resident: swappable ZeRO-3 subgroups still load their gradients from NVMe before computing Muon updates.
+
+With ZeRO Stage 1/2 CPU optimizer offload, Muon gathers only locally owned gradient and momentum slices. Communication is chunked to a 64 MiB combined send/receive scratch budget per rank, independently of the 256 MiB buffer-cache limit. Full gradients and momentum are processed in batches targeting 64 MiB; a matrix exceeding that target is processed alone because Newton-Schulz requires the full matrix. These limits exclude Newton-Schulz workspaces and other training memory.
+
 Muon supports the following params:
 
 | "params" key   | Description                                                                                                          | Default   |
@@ -770,11 +774,19 @@ When a HuggingFace model provides a built-in `tp_plan` (via `model.config.base_m
 | -------------------------------------------------------------------------------------------------------- | ------- |
 | Overlap tensor-parallel allreduce communication with computation (training only).                       | `false` |
 
-***vocab_parallel_lm_head***: [boolean]
+***vocab_parallel_lm_head***: [boolean or null]
 
 | Description                                                                                                                                                  | Default |
 | ------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------- |
-| Keep an untied `lm_head`/`embed_out` output vocabulary sharded and install DeepSpeed's pure-PyTorch vocab-parallel causal-LM loss instead of gathering logits. | `false` |
+| `true` requires a vocabulary-sharded `lm_head`/`embed_out` and distributed causal-LM loss; `false` disables this path; `null` automatically follows supported HF tied-embedding plans. | `null` |
+
+When this field is omitted or `null`, an HF `embedding_rowwise` plan may enable tied
+vocabulary sharding automatically, returning rank-local rather than full-vocabulary
+logits. Set it to `false` to opt out. Unsupported implicit sharding, including the
+DeepCompile `autotp` pass, keeps the tied embedding/head replicated and logs a warning.
+Explicit `true` requests fail instead of silently downgrading. See
+[Vocabulary-parallel LM Loss](/tutorials/autotp-training/#vocabulary-parallel-lm-loss)
+for supported embedding semantics and compiler limitations.
 
 ***partition_config***: [dictionary]
 
@@ -1051,6 +1063,12 @@ smoke coverage used for this AutoEP surface produced the following version gates
 | Description                                                                                              | Default |
 | -------------------------------------------------------------------------------------------------------- | ------- |
 | Direct child attribute name for shared experts (e.g., `"shared_expert"`). `null` = use preset default.   | `null`  |
+
+***expert_activation***: [string]
+
+| Description                                                                                              | Default |
+| -------------------------------------------------------------------------------------------------------- | ------- |
+| How the expert MLP combines its gate and up projections, by a name registered in `deepspeed.moe.ep_experts.EXPERT_ACTIVATIONS`: `"swiglu"` (`silu(gate) * up`), `"geglu_tanh"` (`gelu_tanh(gate) * up`, Gemma-4), `"swiglu_clamped"` (`silu(clamp(gate)) * clamp(up)`, DeepSeek-V4) or `"swiglu_oai"` (`(clamp(up) + 1) * clamp(gate) * sigmoid(alpha * clamp(gate))`, GPT-OSS and MiniMax-M3). `null` = use preset default, which is `"swiglu"` for every built-in preset. AutoEP checks the name against the model: a clamp limit on the experts module or the model config, or an experts `act_fn` that is not the named form's gate function, is an error unless this key is set. The clamp limit and alpha are taken from the model when it states them. `deepspeed.moe.ep_experts.register_expert_activation` adds a form. | `null`  |
 
 #### Custom Model Example
 
