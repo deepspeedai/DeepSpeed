@@ -21,7 +21,6 @@ import os
 
 import pytest
 import torch
-import torch.nn.functional as F
 
 from deepspeed.accelerator import get_accelerator
 
@@ -127,9 +126,24 @@ class _MiniGLU(torch.nn.Module):
         self.gate_proj = torch.nn.Linear(hidden, inter, bias=False, dtype=torch.bfloat16)
         self.up_proj = torch.nn.Linear(hidden, inter, bias=False, dtype=torch.bfloat16)
         self.down_proj = torch.nn.Linear(inter, hidden, bias=False, dtype=torch.bfloat16)
+        self.act_fn = torch.nn.SiLU()
 
     def forward(self, x):
-        return self.down_proj(F.silu(self.gate_proj(x)) * self.up_proj(x))
+        return self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
+
+
+class _MiniGeluGated(torch.nn.Module):
+    """GELU-gated MLP (Gemma-style): same projection names, different act."""
+
+    def __init__(self, hidden=32, inter=48):
+        super().__init__()
+        self.gate_proj = torch.nn.Linear(hidden, inter, bias=False, dtype=torch.bfloat16)
+        self.up_proj = torch.nn.Linear(hidden, inter, bias=False, dtype=torch.bfloat16)
+        self.down_proj = torch.nn.Linear(inter, hidden, bias=False, dtype=torch.bfloat16)
+        self.act_fn = torch.nn.GELU()
+
+    def forward(self, x):
+        return self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
 
 
 class TestInjectionInvariants:
@@ -148,6 +162,15 @@ class TestInjectionInvariants:
         with torch.no_grad():
             got = model(x)
         torch.testing.assert_close(got.float(), expected.float(), atol=1e-2, rtol=1e-2)
+
+    def test_gelu_gated_mlp_not_fused(self):
+        """A GELU-gated MLP satisfies the projection-name selector but must
+        not be fused: the replacement hardcodes SiLU and would silently
+        change its logits."""
+        from deepspeed.module_inject.segment_ki import apply_segment_ki
+        model = _MiniGeluGated().eval()
+        report = apply_segment_ki(model)
+        assert report["fused_glu"]["segments_replaced"] == 0
 
     def test_no_weight_copies_installed(self):
         """Injection must not materialize fused weight buffers."""

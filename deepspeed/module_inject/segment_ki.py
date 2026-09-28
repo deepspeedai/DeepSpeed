@@ -78,12 +78,36 @@ def _find_fusable_projections(root: torch.nn.Module, attr_names: tuple) -> dict:
         yield module, projections
 
 
+def _is_silu_activation(act) -> bool:
+    """True when ``act`` is SiLU as a module or a plain function reference."""
+    if isinstance(act, torch.nn.SiLU):
+        return True
+    return act is torch.nn.functional.silu
+
+
 def find_glu_segments(root: torch.nn.Module) -> List[GLUSegment]:
     """Detect gated MLPs by structure (gate_proj/up_proj/down_proj attribute set)."""
     segments = []
     for module, p in _find_fusable_projections(root, ("gate_proj", "up_proj", "down_proj")):
+        # The fused replacement hardcodes SiLU, while the name-based selector
+        # also matches GELU-gated families (e.g. Gemma). Only fuse when the
+        # module's own activation is positively identified as SiLU.
+        activations = [getattr(module, name, None) for name in ("act_fn", "activation_fn", "activation_func")]
+        if not any(_is_silu_activation(act) for act in activations if act is not None):
+            continue
         segments.append(GLUSegment(parent=module, gate=p["gate_proj"], up=p["up_proj"], down=p["down_proj"]))
     return segments
+
+
+def _native_kernel_ready(kernel_op, hidden, *weights) -> bool:
+    """The CUDA kernels read raw BFloat16 pointers only, so anything else
+    (fp16 weights, non-contiguous views) must take the composite reference
+    path instead of raising inside the binding."""
+    if kernel_op is None:
+        return False
+    if not hidden.is_contiguous() or hidden.dtype is not torch.bfloat16:
+        return False
+    return all(w.is_contiguous() and w.dtype is torch.bfloat16 for w in weights)
 
 
 class DualWeightGluGEMV(torch.autograd.Function):
@@ -99,7 +123,7 @@ class DualWeightGluGEMV(torch.autograd.Function):
     @staticmethod
     def forward(ctx, hidden, gate_w, up_w, kernel_op):
         ctx.save_for_backward(hidden, gate_w, up_w)
-        if hidden.dim() == 1 and kernel_op is not None:
+        if hidden.dim() == 1 and _native_kernel_ready(kernel_op, hidden, gate_w, up_w):
             out = torch.empty(gate_w.shape[0], dtype=hidden.dtype, device=hidden.device)
             kernel_op.dual_gemv_silu_mul(hidden, gate_w, up_w, out)
             return out
@@ -120,8 +144,12 @@ class DualWeightGluGEMV(torch.autograd.Function):
             grad_up_w = torch.outer(grad_up_coef, hidden).view_as(up_w)
             grad_hidden = torch.matmul(grad_gate_coef, gate_w) + torch.matmul(grad_up_coef, up_w)
         else:
-            grad_gate_w = torch.matmul(grad_gate_coef.t(), hidden)
-            grad_up_w = torch.matmul(grad_up_coef.t(), hidden)
+            # Training activations are [batch, seq, hidden]; .t() only works
+            # on 2-D, so flatten the leading dims as the GDN backward does.
+            flat_hidden = hidden.reshape(-1, hidden.shape[-1])
+            grad_gate_w = torch.matmul(grad_gate_coef.reshape(-1, grad_gate_coef.shape[-1]).t(),
+                                       flat_hidden).view_as(gate_w)
+            grad_up_w = torch.matmul(grad_up_coef.reshape(-1, grad_up_coef.shape[-1]).t(), flat_hidden).view_as(up_w)
             grad_hidden = torch.matmul(grad_gate_coef, gate_w) + torch.matmul(grad_up_coef, up_w)
         return grad_hidden, grad_gate_w, grad_up_w, None
 
@@ -139,7 +167,7 @@ class GDNInputProj(torch.autograd.Function):
     @staticmethod
     def forward(ctx, hidden, w_qkv, w_z, w_b, w_a, kernel_op):
         ctx.save_for_backward(hidden, w_qkv, w_z, w_b, w_a)
-        if hidden.dim() == 1 and kernel_op is not None:
+        if hidden.dim() == 1 and _native_kernel_ready(kernel_op, hidden, w_qkv, w_z, w_b, w_a):
             total = w_qkv.shape[0] + w_z.shape[0] + w_b.shape[0] + w_a.shape[0]
             out = torch.empty(total, dtype=hidden.dtype, device=hidden.device)
             kernel_op.quad_gemv(hidden, w_qkv, w_z, w_b, w_a, out)
@@ -561,8 +589,13 @@ def _fused_norm_layer_forward(self,
     # fused_add_norm mutates its first argument in-place into the new
     # residual stream and returns the normalized input to the MLP — keep
     # both handles, the final add must go through the residual stream.
+    # The 1+w scale is recomputed from the live Parameter on every call:
+    # HF's norm multiplies by 1+weight, the kernel by its weight argument
+    # directly. During capture the add becomes part of the graph, so replay
+    # reads the parameter's memory and reflects post-training values.
     new_residual = hidden_states
-    mlp_input = op.fused_add_norm(new_residual, residual, self._ki_postattn_scale, self.post_attention_layernorm.eps)
+    postattn_scale = torch.add(1.0, self.post_attention_layernorm.weight).contiguous()
+    mlp_input = op.fused_add_norm(new_residual, residual, postattn_scale, self.post_attention_layernorm.eps)
     hidden_states = self.mlp(mlp_input)
     hidden_states = hidden_states + new_residual
 
@@ -573,11 +606,8 @@ def install_fused_norm(model: torch.nn.Module, kernel_op) -> int:
     """Patch decoder layers to use fused_add_norm at b=1 decode.
 
     Detection is structural (block_type + mlp + both layernorms), so it
-    covers full-attention and linear-attention layers alike. Pre-computes
-    the 1+w RMSNorm scale into a persistent contiguous buffer (the HF norm
-    multiplies by 1+weight; the kernel multiplies by its weight argument
-    directly) so the captured graph never rebuilds it. Returns the patched
-    count."""
+    covers full-attention and linear-attention layers alike. Returns the
+    patched count."""
     if kernel_op is None or not hasattr(kernel_op, "fused_add_norm") or os.environ.get("DS_TIER1", "1") != "1":
         return 0
     patched = 0
@@ -590,7 +620,6 @@ def install_fused_norm(model: torch.nn.Module, kernel_op) -> int:
         if getattr(module, "_ki_orig_layer_forward", None) is None:
             module._ki_orig_layer_forward = module.forward
         module._ki_norm_op = kernel_op
-        module._ki_postattn_scale = torch.add(1.0, norms[1].weight.detach()).contiguous()
         module.forward = _fused_norm_layer_forward.__get__(module, type(module))
         patched += 1
     return patched
