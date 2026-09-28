@@ -32,7 +32,7 @@ training BERT-Large optimized through DeepSpeed, comparing with the two
 well-known PyTorch implementations from [NVIDIA
 BERT](https://github.com/NVIDIA/DeepLearningExamples/tree/master/PyTorch/LanguageModeling/BERT)
 and [Hugging Face
-BERT](https://github.com/huggingface/transformers/blob/master/src/transformers/modeling_bert.py).
+BERT](https://github.com/huggingface/transformers/blob/main/src/transformers/models/bert/modeling_bert.py).
 DeepSpeed reaches as high as 64 and 53 teraflops throughputs (corresponding to
 272 and 52 samples/second) for sequence lengths 128 and 512, respectively,
 exhibiting up to 28% throughput improvements over NVIDIA BERT and up to 62%
