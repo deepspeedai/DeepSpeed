@@ -510,6 +510,8 @@ class HybridEngineRollout(RolloutEngine):
             raise ValueError("max_batch_size must be positive")
         if self.use_graph_capture:
             raise ValueError("continuous batching does not yet support CUDA graph capture")
+        if self.use_shared_prefill:
+            raise ValueError("continuous batching does not support shared prompt prefill")
 
         prompt_len = requests[0].prompt_ids.shape[1]
         device = requests[0].prompt_ids.device
