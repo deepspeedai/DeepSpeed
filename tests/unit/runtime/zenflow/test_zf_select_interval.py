@@ -11,12 +11,25 @@ is. DeepSpeed can only read that from a dataloader it owns, so a caller driving
 its own dataloader has to say. These pin what each combination produces.
 """
 
+import logging
 import types
 
 import pytest
 
 from deepspeed.runtime.zenflow.engine import configure_zenflow
 from deepspeed.runtime.zenflow.zenflow_config import ZenFlowConfig
+from deepspeed.utils import logger as ds_logger
+
+
+@pytest.fixture
+def ds_warnings(caplog):
+    # The DeepSpeed logger does not propagate to the root logger, so attach caplog's handler to it.
+    ds_logger.addHandler(caplog.handler)
+    try:
+        with caplog.at_level(logging.WARNING, logger=ds_logger.name):
+            yield caplog
+    finally:
+        ds_logger.removeHandler(caplog.handler)
 
 
 class _StubEngine:
@@ -74,19 +87,18 @@ def test_epoch_length_given_by_the_user_needs_no_dataloader(select_strategy, sel
 
 
 @pytest.mark.parametrize("select_strategy,select_interval", [("auto", "auto"), ("epoch", 1)])
-def test_no_epoch_length_selects_once_and_says_so(select_strategy, select_interval, caplog):
+def test_no_epoch_length_selects_once_and_says_so(select_strategy, select_interval, ds_warnings):
     # select_interval 0 makes is_zenflow_select_boundary true exactly once, so
     # the columns chosen at the first step are used for the whole run. That is
     # the shape of the bug; the point of the test is that it is now announced.
     config = ZenFlowConfig(select_strategy=select_strategy, select_interval=select_interval, update_interval="auto")
     engine = _StubEngine(config, training_dataloader=None)
 
-    with caplog.at_level("WARNING"):
-        configure_zenflow(engine)
+    configure_zenflow(engine)
 
     assert engine.select_interval == 0
     assert _select_boundaries(engine.select_interval, steps=40) == 1
-    assert any("never re-selected" in record.getMessage() for record in caplog.records)
+    assert any("never re-selected" in record.getMessage() for record in ds_warnings.records)
 
 
 @pytest.mark.parametrize("steps_per_epoch", [0, -5])
@@ -108,7 +120,7 @@ def test_a_non_positive_epoch_length_is_refused(steps_per_epoch):
                       steps_per_epoch=steps_per_epoch)
 
 
-def test_an_empty_dataloader_warns_rather_than_selecting_once_in_silence(caplog):
+def test_an_empty_dataloader_warns_rather_than_selecting_once_in_silence(ds_warnings):
     """The programmatic path to the same 0: len(dataloader) == 0.
 
     configure_zenflow fills steps_per_epoch from the dataloader it owns, and the
@@ -117,11 +129,10 @@ def test_an_empty_dataloader_warns_rather_than_selecting_once_in_silence(caplog)
     config = ZenFlowConfig(select_strategy="auto", select_interval="auto", update_interval="auto")
     engine = _StubEngine(config, training_dataloader=_Loader(0))
 
-    with caplog.at_level("WARNING"):
-        configure_zenflow(engine)
+    configure_zenflow(engine)
 
     assert engine.select_interval == 0
-    assert any("never re-selected" in record.getMessage() for record in caplog.records)
+    assert any("never re-selected" in record.getMessage() for record in ds_warnings.records)
 
 
 def test_step_strategy_needs_no_epoch_length():
