@@ -1202,9 +1202,22 @@ class Init(InsertPostInitMethodToModuleSubClasses):
             dist.broadcast(param.data.view(torch.uint8), dist.get_global_rank(partition_group, 0), partition_group)
         param.partition()
 
+    def _leave_unpartitioned(self, param):
+        """Keep a zero-element parameter out of ZeRO-3 and return True.
+
+        It has nothing to shard or gather, and no optimizer state (``is_optimized_parameter``),
+        so it stays an ordinary tensor. It only has to sit where, and in the dtype, the
+        partitioned parameters around it are gathered to.
+        """
+        if param.numel() > 0:
+            return False
+        dtype = self.dtype if param.is_floating_point() else param.dtype
+        param.data = param.data.to(device=self.local_device, dtype=dtype)
+        return True
+
     def _convert_to_zero_parameters(self, param_list):
         for param in param_list:
-            if is_zero_param(param):
+            if is_zero_param(param) or self._leave_unpartitioned(param):
                 continue
 
             param.data = param.data.to(self.local_device)
@@ -1234,7 +1247,7 @@ class Init(InsertPostInitMethodToModuleSubClasses):
             print_rank_0(f'Analyzing param {name} in {module.__class__.__name__}', force=False)
             InsertPostInitMethodToModuleSubClasses.num_module_parameters += 1
             InsertPostInitMethodToModuleSubClasses.num_module_elements += param.numel()
-            if not is_zero_param(param):
+            if not is_zero_param(param) and not self._leave_unpartitioned(param):
                 if not get_accelerator().on_accelerator(param):
                     param.data = param.data.to(self.local_device)
 

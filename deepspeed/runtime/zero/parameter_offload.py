@@ -319,6 +319,8 @@ class DeepSpeedZeRoOffload(object):
         total_persistent_parameters = 0
         params_count = 0
         for name, param in self.module.named_parameters(recurse=True):
+            if not is_zero_param(param):  # a zero-element param left unpartitioned
+                continue
             if param.ds_numel + total_persistent_parameters > model_threshold:
                 continue
 
