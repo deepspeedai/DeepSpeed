@@ -143,6 +143,39 @@ class TestClipGradNorm(DistributedTest):
 
         assert abs(float(norm) - 2.0) < 1e-4
 
+    def test_a_rank_with_no_gradient_at_all_still_gets_the_norm(self):
+        """Every local gradient can be absent, expert ones included, and the rank still has to answer."""
+        groups._create_expert_and_data_parallel(2)
+        rank = dist.get_rank()
+        device = get_accelerator().device_name(rank)
+
+        norm = ds_utils.clip_grad_norm_([self._expert(2.0, device, with_grad=(rank == 1))], max_norm=1e9)
+
+        # Only rank 1's expert has a gradient, of norm 4.0, and both ranks report it.
+        assert abs(float(norm) - 4.0) < 1e-4
+
+    def test_expert_groups_are_visited_in_registry_order(self, monkeypatch):
+        """Ranks owning different expert groups must still walk the groups in one order."""
+        groups._create_expert_and_data_parallel(2)
+        groups._create_expert_and_data_parallel(1)
+        rank = dist.get_rank()
+        device = get_accelerator().device_name(rank)
+
+        visited = []
+        real = ds_utils.get_norm_with_moe_layers
+
+        def spy(non_expert_norm, mpu, expert_tensors, norm_type=2):
+            visited.append(list(expert_tensors))
+            return real(non_expert_norm, mpu=mpu, expert_tensors=expert_tensors, norm_type=norm_type)
+
+        monkeypatch.setattr(ds_utils, "get_norm_with_moe_layers", spy)
+
+        expert = self._expert(2.0, device)
+        expert.group_name = "ep_size_2" if rank == 0 else "ep_size_1"
+        ds_utils.clip_grad_norm_([expert], max_norm=1e9)
+
+        assert visited == [["ep_size_1", "ep_size_2"]]
+
     def test_clipped_val(self):
         max_norm = 0.1
 

@@ -431,6 +431,10 @@ def clip_grad_norm_(parameters, max_norm, norm_type=2, mpu=None):
 
     expert_tensors: Dict[str, List[torch.Tensor]] = {}
     if expert_group_names:
+        # `get_norm_with_moe_layers` issues one collective per entry, so every rank has to
+        # walk the groups in the same order. Start from the registry's order rather than
+        # the order this rank's parameters happen to come in.
+        expert_tensors = {group_name: [] for group_name in expert_group_names}
         for p in parameters:
             if is_moe_param(p):
                 expert_tensors.setdefault(p.group_name, []).append(p.grad.data)
@@ -438,8 +442,9 @@ def clip_grad_norm_(parameters, max_norm, norm_type=2, mpu=None):
         # were used this step; a zero contributes nothing to the sum of p-th powers
         # and nothing to a max over absolute values.
         zero = torch.zeros(1, device=get_accelerator().current_device_name())
-        for group_name in expert_group_names:
-            expert_tensors.setdefault(group_name, [zero])
+        for tensors in expert_tensors.values():
+            if not tensors:
+                tensors.append(zero)
 
     norm_parameters = [p for p in parameters if not is_moe_param(p)] if expert_tensors else parameters
 
@@ -491,7 +496,7 @@ def clip_grad_norm_(parameters, max_norm, norm_type=2, mpu=None):
         # behaviour the averaging path already had, which is to scale them to zero.
         if moe_norm == -1:
             moe_norm = float('inf')
-        total_norm = torch.tensor([float(moe_norm)], device=parameters[0].device, dtype=torch.float)
+        total_norm = torch.tensor([float(moe_norm)], device=total_norm.device, dtype=torch.float)
     else:
         # Need to average total_norm across different GPUs due to the presence of moe params
         pg = groups._get_data_parallel_group()
