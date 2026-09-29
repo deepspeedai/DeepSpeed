@@ -27,7 +27,12 @@ def _validate_superoffload_accelerator():
 def _validate_superoffload_optimizer(optimizer):
     """Reject Adam settings the SuperOffload CPU worker would silently replace with AdamW."""
     unsupported = "SuperOffload's CPU optimizer step and rollback only support AdamW with bias correction"
-    if not getattr(optimizer, "adam_w_mode", True):
+    adam_w_mode = getattr(optimizer, "adam_w_mode", None)
+    if adam_w_mode is None:
+        # torch_adam=true builds torch.optim.Adam, which has no adam_w_mode attribute.
+        adam_w_mode = (not isinstance(optimizer, torch.optim.Adam) or isinstance(optimizer, torch.optim.AdamW)
+                       or optimizer.defaults.get("decoupled_weight_decay", False))
+    if not adam_w_mode:
         raise ValueError(f"adam_w_mode=False is not supported: {unsupported}.")
     for group_id, group in enumerate(optimizer.param_groups):
         if not group.get("bias_correction", True):

@@ -111,16 +111,18 @@ def test_cpu_adam_strict_state_updates(model_size, adamw_mode, weight_decay, bia
         torch.testing.assert_close(state['exp_avg_sq'], ref_exp_avg_sq, rtol=3e-5, atol=2e-6)
 
 
-@pytest.mark.parametrize('optimizer_kwargs,error', [
-    ({}, None),
-    ({
+@pytest.mark.parametrize('optimizer_class,optimizer_kwargs,error', [
+    ("cpu_adam", {}, None),
+    ("cpu_adam", {
         'adamw_mode': False
     }, "adam_w_mode=False"),
-    ({
+    ("cpu_adam", {
         'bias_correction': False
     }, "bias_correction=False"),
+    ("torch_adamw", {}, None),
+    ("torch_adam", {}, "adam_w_mode=False"),
 ])
-def test_superoffload_rejects_adam_settings_it_cannot_honor(monkeypatch, optimizer_kwargs, error):
+def test_superoffload_rejects_adam_settings_it_cannot_honor(monkeypatch, optimizer_class, optimizer_kwargs, error):
     from deepspeed.ops.adam import DeepSpeedCPUAdam
     from deepspeed.runtime.superoffload import superoffload_stage3
     from deepspeed.runtime.zero.stage3 import DeepSpeedZeroOptimizer_Stage3
@@ -134,7 +136,12 @@ def test_superoffload_rejects_adam_settings_it_cannot_honor(monkeypatch, optimiz
     monkeypatch.setattr(DeepSpeedZeroOptimizer_Stage3, "__init__", fake_stage3_init)
     monkeypatch.setattr(superoffload_stage3, "SuperOffloadCPUOptimizer", lambda **kwargs: None)
 
-    optimizer = DeepSpeedCPUAdam([torch.nn.Parameter(torch.zeros(4))], weight_decay=0.01, **optimizer_kwargs)
+    optimizer_class = {
+        "cpu_adam": DeepSpeedCPUAdam,
+        "torch_adam": torch.optim.Adam,
+        "torch_adamw": torch.optim.AdamW
+    }[optimizer_class]
+    optimizer = optimizer_class([torch.nn.Parameter(torch.zeros(4))], weight_decay=0.01, **optimizer_kwargs)
     if error is None:
         superoffload_stage3.SuperOffloadOptimizer_Stage3(None, optimizer, [], None, None)
     else:
