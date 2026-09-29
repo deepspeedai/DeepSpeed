@@ -448,7 +448,7 @@ class OneCycle(object):
         cycle_first_stair_count(int): Number of stairs in first half of cycle phase. This means
         lr/mom are changed in staircase fashion. Default 0, means staircase disabled.
         cycle_second_stair_count(int): Number of stairs in second half of cycle phase. This means
-        lr/mom are changed in staircase fashion. Default 0, means staircase disabled.
+        lr/mom are changed in staircase fashion. If None, it is set to cycle_first_stair_count. Default: None
         decay_step_size (int): Intervals for applying decay in decay phase. Default: 0, means no decay.
         cycle_momentum (bool): If ``True``, momentum is cycled inversely
             to learning rate between 'cycle_min_mom' and 'cycle_max_mom'.
