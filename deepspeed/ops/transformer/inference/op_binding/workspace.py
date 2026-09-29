@@ -137,17 +137,20 @@ class InferenceContext:
 
     def get_rotary(self, rotary_dim, rope_theta, device=None):
         if self.rotary is None:
-            from transformers.models.llama.configuration_llama import LlamaConfig
+            import inspect
             from transformers.models.llama.modeling_llama import LlamaRotaryEmbedding
 
-            # transformers 4.48 replaced the (dim, base=..., device=...) signature with one
-            # that reads both off a config. head_dim carries the rotary width and rope_theta
-            # the base; transformers 5 folds rope_theta into rope_parameters itself, so
-            # passing it this way works on both.
-            config = LlamaConfig(head_dim=rotary_dim, rope_theta=rope_theta)
-            self.rotary = LlamaRotaryEmbedding(config)
-            if device is not None:
-                self.rotary = self.rotary.to(device)
+            # transformers 4.45 added a `config` argument to the constructor, and 4.48 made it
+            # the only way in. head_dim carries the rotary width and rope_theta the base;
+            # transformers 5 folds rope_theta into rope_parameters itself, so passing it this
+            # way works on both. Older releases still take (dim, base=..., device=...).
+            if "config" in inspect.signature(LlamaRotaryEmbedding.__init__).parameters:
+                from transformers.models.llama.configuration_llama import LlamaConfig
+
+                config = LlamaConfig(head_dim=rotary_dim, rope_theta=rope_theta)
+                self.rotary = LlamaRotaryEmbedding(config=config, device=device)
+            else:
+                self.rotary = LlamaRotaryEmbedding(rotary_dim, base=rope_theta, device=device)
 
         return self.rotary
 
