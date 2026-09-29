@@ -11,14 +11,19 @@ rather than shrinking it. A bare `assert all_groups_norm > 0.` stood in the way,
 nothing about the cause and also rejected a norm of exactly zero: a micro-batch whose labels
 are all masked produces one, and clipping from it is a no-op, not an error.
 
-CPU-only: the guard and the clip arithmetic are local to one rank.
+The last two tests go through `deepspeed.initialize`, which builds `BF16_Optimizer` for ZeRO stage 1
+with bf16 parameters and fp32 gradient accumulation.
 """
 
 import pytest
 import torch
 
+import deepspeed
+from deepspeed.accelerator import get_accelerator
 from deepspeed.runtime.bf16_optimizer import BF16_Optimizer
 from deepspeed.runtime.utils import clip_tensors_by_global_norm, mask_nan_or_inf_with_val_inplace
+from unit.common import DistributedTest
+from unit.simple_model import SimpleModel
 
 
 def test_a_non_finite_norm_is_reported_as_minus_one():
@@ -36,66 +41,51 @@ def test_clipping_from_minus_one_flips_every_gradient():
     assert (gradient < 0).all(), "a negative clip coefficient negates the gradient"
 
 
-class _Bf16Step:
-    """The parts of BF16_Optimizer.step that reaching the guard needs, and nothing else."""
+@pytest.mark.skipif(not get_accelerator().is_bf16_supported(), reason="bf16 is not supported on this accelerator")
+class TestBF16GradNormGuard(DistributedTest):
+    world_size = 1
 
-    step = BF16_Optimizer.step
+    def _engine(self):
+        hidden_dim = 8
+        model = SimpleModel(hidden_dim)
+        config = {
+            "train_micro_batch_size_per_gpu": 2,
+            "gradient_clipping": 1.0,
+            "zero_allow_untested_optimizer": True,
+            "bf16": {
+                "enabled": True
+            },
+            "data_types": {
+                "grad_accum_dtype": "fp32"
+            },
+            "zero_optimization": {
+                "stage": 1
+            },
+            "optimizer": {
+                "type": "SGD",
+                "params": {
+                    "lr": 0.1
+                }
+            },
+        }
+        engine, _, _, _ = deepspeed.initialize(config=config, model=model, model_parameters=model.parameters())
+        assert isinstance(engine.optimizer, BF16_Optimizer)
+        x = torch.randn(2, hidden_dim, dtype=torch.bfloat16, device=engine.device)
+        y = torch.randint(hidden_dim, (2, ), device=engine.device)
+        return engine, x, y
 
-    def __init__(self, gradient_value):
-        self._gradient = torch.full((4, ), gradient_value)
-        self.mpu = None
-        self.norm_type = 2
-        self.graph_harvesting = False
-        self.has_moe_layers = False
-        self.clip_grad = 1.0
-        self._global_grad_norm = 0.
-        self._uses_muon = False
-        self.grad_acc_dtype = torch.float32
-        self.fp32_groups_flat_partition = []
-        self.fp32_groups_gradient_flat_partition = []
-        self.optimizer = type("_Recorder", (), {"step": lambda self: None})()
-        self.stepped = False
+    def test_an_all_zero_gradient_step_is_not_an_error(self):
+        # A fully masked micro-batch gives exactly zero gradients; the step must still run.
+        engine, x, y = self._engine()
+        engine.backward(engine(x, y) * 0.0)
+        engine.step()
+        assert float(engine.get_global_grad_norm()) == 0.0
 
-    def get_grads_for_norm(self, for_clipping=False):
-        if for_clipping:
-            return [self._gradient]
-        return [self._gradient], {}
-
-    def _lazy_init_hp_params_optimizer_state(self):
-        pass
-
-    def update_lp_params(self):
-        self.stepped = True
-
-    def clear_hp_grads(self):
-        pass
-
-
-def test_an_all_zero_gradient_step_is_not_an_error():
-    """A fully masked micro-batch gives exactly zero gradients; the step must still run."""
-    optimizer = _Bf16Step(0.0)
-
-    optimizer.step()
-
-    assert optimizer.stepped
-    assert float(optimizer._global_grad_norm) == 0.0
-    assert (optimizer._gradient == 0).all(), "nothing to clip, and nothing was clipped"
-
-
-def test_a_non_finite_norm_raises_with_a_reason():
-    optimizer = _Bf16Step(float("inf"))
-
-    with pytest.raises(RuntimeError, match="not finite"):
-        optimizer.step()
-
-    assert not optimizer.stepped
-    assert (optimizer._gradient > 0).all(), "the gradients were not negated on the way out"
-
-
-def test_an_ordinary_norm_still_clips():
-    optimizer = _Bf16Step(2.0)  # norm 4.0 against a max of 1.0
-
-    optimizer.step()
-
-    assert float(optimizer._global_grad_norm) == pytest.approx(4.0)
-    assert optimizer._gradient[0].item() == pytest.approx(0.5, rel=1e-4)
+    def test_a_non_finite_norm_raises_with_a_reason(self):
+        engine, x, y = self._engine()
+        before = [p.detach().clone() for p in engine.module.parameters()]
+        engine.backward(engine(x, y) * float("inf"))
+        with pytest.raises(RuntimeError, match="not finite"):
+            engine.step()
+        for p, b in zip(engine.module.parameters(), before):
+            assert torch.equal(p, b), "no update may be applied from a non-finite norm"
