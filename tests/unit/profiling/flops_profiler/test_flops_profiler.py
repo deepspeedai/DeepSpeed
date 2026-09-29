@@ -388,6 +388,7 @@ def test_addmm_broadcast_bias_flops(bias_shape):
     assert flops == 2 * macs + result.numel()
 
 
+@pytest.mark.sequential
 @pytest.mark.parametrize("bias_shape", [(2, 4, 5), (5, ), (1, 1, 5), (4, 5)])
 def test_baddbmm_broadcast_bias_flops(bias_shape):
     """baddbmm shares the addmm counter, and its output carries a batch dimension the
