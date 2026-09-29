@@ -350,6 +350,8 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
         self.reduce_scatter = reduce_scatter
         self.use_muon = isinstance(self.optimizer, MuonWithAuxAdam)
+        # Sub-groups whose Muon update was written into the gradient partitions without loss scale.
+        self.sub_groups_lacking_loss_scale = set()
         self.save_muon_momentum_buffer_in_memory = save_muon_momentum_buffer_in_memory
         if self.use_muon and self.reduce_scatter:
             raise ValueError("Muon and reduce scatter cannot be used together")
@@ -1758,12 +1760,14 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         """
         if not self.use_muon:
             return
+        self.sub_groups_lacking_loss_scale.clear()
         if self.offload_optimizer:
             self._apply_muon_updates_cpu_offload()
             return
         for i, group in enumerate(self.fp16_groups):
             if not self.sub_groups_using_muon[i] or not group:
                 continue
+            self.sub_groups_lacking_loss_scale.add(i)
             rank = dist.get_rank(group=self._get_sub_group_process_group(i))
             partitions = self.averaged_gradients[i]
             # Bound what is materialized at once, as the reduce path's buckets did.
@@ -2483,17 +2487,17 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         for bucket in self.ipg_buckets.values():
             bucket.clear_params()
 
-    @instrument_w_nvtx
     def _muon_update_lacks_loss_scale(self, sub_group_id):
         """Whether this sub-group holds a Muon update that has to be scaled like a gradient.
 
         Newton-Schulz returns the same update at any loss scale, so unlike a gradient it does not
-        carry the scale that the norm and unscale_and_clip_grads assume. Optimizer offload scales
-        it back itself; otherwise step() does.
+        carry the scale that the norm and unscale_and_clip_grads assume. The path that writes
+        such an update marks its sub-group in `sub_groups_lacking_loss_scale`; step() scales
+        the marked ones back.
         """
-        return (self.use_muon and not self.offload_optimizer and self.loss_scale != 1.0
-                and self.sub_groups_using_muon[sub_group_id])
+        return self.loss_scale != 1.0 and sub_group_id in self.sub_groups_lacking_loss_scale
 
+    @instrument_w_nvtx
     def _get_norm_groups(self):
         norm_groups = []
         for i, group in enumerate(self.fp16_groups):

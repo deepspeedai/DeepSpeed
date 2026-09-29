@@ -375,6 +375,8 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         else:
             self.use_grad_accum_attribute = False
 
+        # Groups whose Muon update was written into the gradient partitions without loss scale.
+        self.groups_lacking_loss_scale = set()
         self._muon_allgather_buffers = OrderedDict()
         self._muon_allgather_buffer_bytes = 0
         self._muon_allgather_max_cached_bytes = 256 * 1024 * 1024
@@ -2415,6 +2417,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         staged_momentum = None
         if self._is_muon_group(tensor_list):
             self._muon_momentum_buffer(tensor_list, param_group_idx, dtype, device)
+            self.groups_lacking_loss_scale.add(param_group_idx)
             # Staged once for the whole partition: staging copies the committed momentum in, so
             # doing it per parameter would throw away what the parameters before it just wrote.
             staged_momentum = self._muon_staging_momentum(flatten_copy, param_group_idx)
@@ -2471,11 +2474,10 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         """Whether this group holds a Muon update that has to be scaled like a gradient.
 
         Newton-Schulz returns the same update at any loss scale, so unlike a gradient it does not
-        carry the scale that the norm and unscale_and_clip_grads assume. CPU offload scales it
-        back itself; otherwise step() does.
+        carry the scale that the norm and unscale_and_clip_grads assume. The path that writes such
+        an update marks its group in `groups_lacking_loss_scale`; step() scales the marked ones back.
         """
-        group = self.bit16_groups[group_index]
-        return not self.cpu_offload and self.loss_scale != 1.0 and bool(group) and self._is_muon_group(group)
+        return self.loss_scale != 1.0 and group_index in self.groups_lacking_loss_scale
 
     def _muon_momentum_buffer(self, tensor_list, param_group_idx, dtype, device):
         """The flat momentum buffer for this group, in the dtype `muon_update` needs.
@@ -2524,6 +2526,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         staged_momentum = None
         if self._is_muon_group(tensor_list):
             self._muon_momentum_buffer(tensor_list, param_group_idx, dtype, device)
+            self.groups_lacking_loss_scale.add(param_group_idx)
             # Staged once for the whole partition: staging copies the committed momentum in, so
             # doing it per parameter would throw away what the parameters before it just wrote.
             staged_momentum = self._muon_staging_momentum(flatten_copy, param_group_idx)
