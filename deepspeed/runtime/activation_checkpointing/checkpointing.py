@@ -350,10 +350,10 @@ def merge_tensors(tensor_objects, non_tensor_objects, tensor_flags):
 
     real_tensor_flags = None
 
-    # get_partitioned_activations_for_backward() saved a (value, size) pair for every argument, so
-    # the flags and the non-tensors both hold one extra entry per argument. A tensor argument pairs
-    # with a tensor size and a non-tensor argument pairs with None, so every argument owns an even
-    # index in each list and dropping the odd ones restores one entry per original argument.
+    # get_partitioned_activations_for_backward() saved a (value, size) pair for every argument. The
+    # flags hold both entries of every pair. The non-tensors hold only the non-tensor arguments'
+    # pairs, (value, None), since a tensor argument pairs with a tensor size. In both lists each
+    # argument's value sits at an even index, so dropping the odd ones restores one entry per argument.
     if PARTITION_ACTIVATIONS:
         real_tensor_flags = tensor_flags[::2]
         non_tensor_objects = non_tensor_objects[::2]
