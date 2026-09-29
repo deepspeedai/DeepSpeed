@@ -122,7 +122,7 @@ The 2T parameter model consists of 160 layers, 32k hidden dimension, and 128 att
 
 We recognize that DeepSpeed users are diverse and have different environments. In this tutorial, our focus is on making things simpler for users who plan to run large model training experiments on Azure.
 
-> The easiest way to do model training on Azure is via the Azure ML recipes. The job submission and data preparation scripts have been made available [here](https://github.com/deepspeedai/Megatron-DeepSpeed/tree/main/examples_deepspeed/azureml). Users simply need to setup their Azure ML workspace following the [guide](https://github.com/Azure/azureml-examples/tree/main/sdk/python) and submit experiment using the aml_submit.py file.
+> The easiest way to do model training on Azure is via the Azure ML recipes. The job submission and data preparation scripts have been made available [here](https://github.com/deepspeedai/Megatron-DeepSpeed/tree/main/examples_deepspeed/azureml). Users simply need to setup their Azure ML workspace and submit experiment using the aml_submit.py file.
 
 Some users have customized environments built on top of Azure VMs and VMSS based clusters. To simplify training on such setups, we are working on an easy-to-use cluster setup script that will be published in the next few weeks. If you already have a cluster setup running, you can use the [azure recipes](https://github.com/deepspeedai/Megatron-DeepSpeed/tree/main/examples_deepspeed/azure) for the 175B and the 1T model. The recipes can easily be modified to train other model configurations.
 
