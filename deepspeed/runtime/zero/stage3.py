@@ -3604,6 +3604,9 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         saved_groups = optim_sd[OPTIMIZER_STATE_DICT]["param_groups"]
         if len(saved_groups) != len(self.optimizer.param_groups):
             # No group to match each to, so fall back to copying the first, as before.
+            logger.warning(f"The universal checkpoint has {len(saved_groups)} optimizer param group(s) but this "
+                           f"optimizer has {len(self.optimizer.param_groups)}, so the hyperparameters of the first "
+                           f"saved group are applied to every group.")
             saved_groups = [saved_groups[0]] * len(self.optimizer.param_groups)
         for param_group, saved_group in zip(self.optimizer.param_groups, saved_groups):
             for key, value in saved_group.items():

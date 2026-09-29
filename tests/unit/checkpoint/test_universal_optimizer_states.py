@@ -10,6 +10,7 @@ With offload, and under ZeRO-3, it is in the partition's layout like any other s
 """
 
 import glob
+import logging
 import os
 from types import SimpleNamespace
 
@@ -20,6 +21,7 @@ import deepspeed
 import deepspeed.comm as dist
 from deepspeed.checkpoint import OPTIMIZER_STATE_DICT, UNIVERSAL_CHECKPOINT_INFO, WHOLE_PARAM_OPTIMIZER_STATES
 from deepspeed.checkpoint.ds_to_universal import main as convert_to_universal
+from deepspeed.utils import logger as ds_logger
 
 from unit.common import DistributedTest, DistributedFixture
 
@@ -27,16 +29,18 @@ TAG = "muon"
 # Four matrices for Muon, sized so that at two ranks one of them straddles the partition boundary,
 # and a bias and a norm for the Adam half.
 WIDTHS = [16, 24, 20, 16, 12]
+# Matrices of 35 + 21 + 15 + 10 = 81 elements: not a multiple of two ranks, so the last one pads.
+ODD_WIDTHS = [5, 7, 3, 5, 2]
 
 
 class MuonModel(torch.nn.Module):
 
-    def __init__(self):
+    def __init__(self, widths=WIDTHS):
         super().__init__()
         self.layers = torch.nn.ModuleList(
-            torch.nn.Linear(i, o, bias=index == len(WIDTHS) - 2)
-            for index, (i, o) in enumerate(zip(WIDTHS, WIDTHS[1:])))
-        self.norm = torch.nn.LayerNorm(WIDTHS[-1])
+            torch.nn.Linear(i, o, bias=index == len(widths) - 2)
+            for index, (i, o) in enumerate(zip(widths, widths[1:])))
+        self.norm = torch.nn.LayerNorm(widths[-1])
 
     def forward(self, x):
         for layer in self.layers:
@@ -44,9 +48,9 @@ class MuonModel(torch.nn.Module):
         return self.norm(x)
 
 
-def _engine(zero_stage, offload=False, load_universal=False):
+def _engine(zero_stage, offload=False, load_universal=False, widths=WIDTHS):
     torch.manual_seed(0)
-    model = MuonModel()
+    model = MuonModel(widths)
     config = {
         "train_micro_batch_size_per_gpu": 4,
         "optimizer": {
@@ -72,12 +76,12 @@ def _engine(zero_stage, offload=False, load_universal=False):
     return engine
 
 
-def _train(engine, first_step, steps):
+def _train(engine, first_step, steps, widths=WIDTHS):
     # The same batch on every rank, so every data-parallel size averages to the same gradient.
     generator = torch.Generator().manual_seed(1)
     for step in range(first_step + steps):
-        x = torch.randn(4, WIDTHS[0], generator=generator)
-        y = torch.randn(4, WIDTHS[-1], generator=generator)
+        x = torch.randn(4, widths[0], generator=generator)
+        y = torch.randn(4, widths[-1], generator=generator)
         if step >= first_step:
             engine.backward(torch.nn.functional.mse_loss(engine(x.to(engine.device)), y.to(engine.device)))
             engine.step()
@@ -186,12 +190,166 @@ class TestUnrecordedMomentumLayoutIsRefused(DistributedTest):
         _train(engine, first_step=0, steps=2)
         engine.save_checkpoint(tmpdir, tag=TAG, client_state={UNIVERSAL_CHECKPOINT_INFO: {}})
         dist.barrier()
+        refusal = None
         if dist.get_rank() == 0:
             for path in glob.glob(os.path.join(tmpdir, TAG, "*_optim_states.pt")):
                 checkpoint = torch.load(path, weights_only=False)
                 assert WHOLE_PARAM_OPTIMIZER_STATES in checkpoint[OPTIMIZER_STATE_DICT]
                 del checkpoint[OPTIMIZER_STATE_DICT][WHOLE_PARAM_OPTIMIZER_STATES]
                 torch.save(checkpoint, path)
-            with pytest.raises(ValueError, match=WHOLE_PARAM_OPTIMIZER_STATES):
+            try:
                 _convert(tmpdir)
+            except ValueError as exc:
+                refusal = exc
+        # Assert only after every rank has left the collective: a failed assertion on rank 0 alone
+        # would leave the others waiting at the barrier until the distributed-test timeout.
         dist.barrier()
+        if dist.get_rank() == 0:
+            assert refusal is not None, "the conversion should have refused a checkpoint without the record"
+            assert WHOLE_PARAM_OPTIMIZER_STATES in str(refusal)
+
+
+class TestAlignmentPaddingOnTheLastRank(DistributedTest):
+    """ZeRO-1/2 save the fp32 partition without alignment padding but Adam's moments with it.
+
+    A group whose size is not a multiple of the world size leaves the last rank's moments a few
+    elements longer than its partition on disk. The checkpoint reader strips that padding before
+    the converter checks sizes, and this pins that the two keep agreeing.
+    """
+
+    world_size = 2
+
+    @pytest.mark.parametrize("zero_stage", [1, 2])
+    def test_a_padded_partition_converts(self, tmpdir, zero_stage):
+        torch.manual_seed(0)
+        # 5 * 3 + 3 = 18 elements plus a 1-element bias is odd, so the two partitions cannot be equal.
+        model = torch.nn.Sequential(torch.nn.Linear(5, 3), torch.nn.Linear(3, 1))
+        config = {
+            "train_micro_batch_size_per_gpu": 1,
+            "optimizer": {
+                "type": "Adam",
+                "params": {
+                    "lr": 1e-3
+                }
+            },
+            "zero_optimization": {
+                "stage": zero_stage
+            },
+        }
+        engine, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config)
+        x = torch.randn(1, 5, device=engine.device)
+        engine.backward(engine(x).sum())
+        engine.step()
+        engine.save_checkpoint(tmpdir, tag=TAG, client_state={UNIVERSAL_CHECKPOINT_INFO: {}})
+        dist.barrier()
+
+        if dist.get_rank() == dist.get_world_size() - 1:
+            assert sum(engine.optimizer.groups_padding) > 0, "the model was meant to leave the last rank padding"
+        _convert_on_rank_0(tmpdir, engine.device)
+
+        if dist.get_rank() == 0:
+            zero_folder = os.path.join(tmpdir, f"{TAG}_universal", "zero")
+            for name, param in model.named_parameters():
+                for state in ("fp32", "exp_avg", "exp_avg_sq"):
+                    saved = torch.load(os.path.join(zero_folder, name, f"{state}.pt"), weights_only=False)
+                    assert saved["param"].numel() == param.numel(), (name, state)
+        dist.barrier()
+        engine.destroy()
+
+
+class muon_odd_baseline_ws2(DistributedFixture):
+    """Like `muon_baseline_ws2`, on matrices whose total size is odd, so the last rank pads."""
+
+    world_size = 2
+
+    def run(self, tmpdir, zero_stage):
+        engine = _engine(zero_stage, widths=ODD_WIDTHS)
+        _train(engine, first_step=0, steps=3, widths=ODD_WIDTHS)
+        engine.save_checkpoint(tmpdir, tag=TAG, client_state={UNIVERSAL_CHECKPOINT_INFO: {}})
+        dist.barrier()
+        _convert_on_rank_0(tmpdir, engine.device)
+        _train(engine, first_step=3, steps=2, widths=ODD_WIDTHS)
+        weights = _weights(engine, zero_stage)
+        if dist.get_rank() == 0:
+            torch.save(weights, os.path.join(tmpdir, "reference.pt"))
+        dist.barrier()
+        engine.destroy()
+
+
+@pytest.mark.parametrize("zero_stage", [1, 2])
+class TestMuonResumeWithAlignmentPadding(DistributedTest):
+    """The last rank's partition is padded to the world size, and ZeRO-1/2's whole-parameter momentum is not.
+
+    Stripping the padding from every tensor state cut that many elements off the end of the momentum
+    buffer, so the converter could not read the last parameter's momentum out of it.
+    """
+
+    world_size = 2
+
+    def test_resume_on_the_same_ranks(self, muon_odd_baseline_ws2, tmpdir, zero_stage):
+        engine = _engine(zero_stage, load_universal=True, widths=ODD_WIDTHS)
+        engine.load_checkpoint(tmpdir, tag=f"{TAG}_universal", load_optimizer_states=True)
+        _train(engine, first_step=3, steps=2, widths=ODD_WIDTHS)
+        weights = _weights(engine, zero_stage)
+        reference = torch.load(os.path.join(tmpdir, "reference.pt"), weights_only=True)
+        for name, expected in reference.items():
+            relative = ((weights[name] - expected).norm() / expected.norm()).item()
+            assert relative < 1e-5, f"{name} is {relative:.1e} away from the uninterrupted run"
+
+
+class TestParamGroupCountMismatch(DistributedTest):
+    """A checkpoint saved with one param group, resumed into an optimizer with two.
+
+    There is no group to match each saved one to, so ZeRO-3 keeps applying the first saved group
+    to every group. That is a guess, and it says so rather than making it quietly.
+    """
+
+    world_size = 2
+
+    def test_a_mismatch_is_announced(self, tmpdir):
+        config = {
+            "train_micro_batch_size_per_gpu": 4,
+            "optimizer": {
+                "type": "Adam",
+                "params": {
+                    "lr": 1e-3
+                }
+            },
+            "zero_optimization": {
+                "stage": 3
+            },
+        }
+
+        def build(load_universal, two_groups):
+            torch.manual_seed(0)
+            model = MuonModel()
+            groups = [{"params": list(model.layers.parameters())}, {"params": list(model.norm.parameters())}]
+            params = groups if two_groups else model.parameters()
+            cfg = dict(config, checkpoint={"load_universal": True}) if load_universal else config
+            engine, _, _, _ = deepspeed.initialize(model=model, model_parameters=params, config=cfg)
+            return engine
+
+        engine = build(load_universal=False, two_groups=False)
+        _train(engine, first_step=0, steps=1)
+        engine.save_checkpoint(tmpdir, tag=TAG, client_state={UNIVERSAL_CHECKPOINT_INFO: {}})
+        dist.barrier()
+        _convert_on_rank_0(tmpdir, engine.device)
+        engine.destroy()
+
+        records = []
+
+        class Collect(logging.Handler):
+
+            def emit(self, record):
+                records.append(record.getMessage())
+
+        handler = Collect(level=logging.WARNING)
+        ds_logger.addHandler(handler)
+        try:
+            engine = build(load_universal=True, two_groups=True)
+            engine.load_checkpoint(tmpdir, tag=f"{TAG}_universal", load_optimizer_states=True)
+        finally:
+            ds_logger.removeHandler(handler)
+
+        assert any("1 optimizer param group(s) but this optimizer has 2" in message for message in records), records
+        engine.destroy()
