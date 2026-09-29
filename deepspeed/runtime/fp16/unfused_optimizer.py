@@ -166,9 +166,9 @@ class FP16_UnfusedOptimizer(DeepSpeedOptimizer):
             return self._skip_invalid_grad_norm()
 
         # Stash unscaled gradient norm. `_update_scale` below moves cur_scale to the next one, so
-        # divide by the scale these gradients were actually produced under, the way
-        # `zero/stage_1_and_2.py` does.
-        self._global_grad_norm = scaled_global_grad_norm / self.loss_scale_config.cur_scale
+        # divide by the scale these gradients were actually produced under (the external one after
+        # override_loss_scale), the way `zero/stage_1_and_2.py` does.
+        self._global_grad_norm = scaled_global_grad_norm / self.loss_scale
         self._update_scale(False)
         combined_scale = self.unscale_and_clip_grads(scaled_global_grad_norm, apply_scale=False)
         self.optimizer.step(grads=grads_groups, output_params=self.fp16_groups, scale=combined_scale)
@@ -232,7 +232,7 @@ class FP16_UnfusedOptimizer(DeepSpeedOptimizer):
 
         # Same as in step_fused_lamb: report against the scale the gradients carry, not the one
         # `_update_scale` moves to.
-        self._global_grad_norm = scaled_global_grad_norm / self.loss_scale_config.cur_scale
+        self._global_grad_norm = scaled_global_grad_norm / self.loss_scale
         self._update_scale(False)
         self.unscale_and_clip_grads(scaled_global_grad_norm)
 
