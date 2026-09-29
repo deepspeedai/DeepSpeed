@@ -198,7 +198,14 @@ class NoopTimer:
 
 class ThroughputTimer:
 
-    def __init__(self, config, batch_size, start_step=2, steps_per_output=None, monitor_memory=False, logging_fn=None):
+    def __init__(self,
+                 config,
+                 batch_size,
+                 start_step=2,
+                 steps_per_output=None,
+                 monitor_memory=False,
+                 logging_fn=None,
+                 sync_current_stream=False):
         from deepspeed.utils import logger
         self.config = config
         self.start_time = 0
@@ -217,6 +224,9 @@ class ThroughputTimer:
         if self.logging is None:
             self.logging = logger.info
         self.initialized = False
+        # Reflow auto-enables this: with CPU-offload side streams, sync only the current
+        # stream so the timer does not serialize them. Default preserves the full device sync.
+        self.sync_current_stream = sync_current_stream
 
         if self.monitor_memory and not PSUTILS_INSTALLED:
             raise ImportError("Unable to import 'psutils', please install package")
@@ -228,6 +238,12 @@ class ThroughputTimer:
     def _init_timer(self):
         self.initialized = True
 
+    def _synchronize(self):
+        if self.sync_current_stream:
+            get_accelerator().current_stream().synchronize()
+        else:
+            get_accelerator().synchronize()
+
     def start(self):
         if not self.config.enabled:
             return
@@ -235,7 +251,7 @@ class ThroughputTimer:
         self.started = True
         if self.global_step_count >= self.start_step:
             if self.config.synchronized:
-                get_accelerator().synchronize()
+                self._synchronize()
             self.start_time = time.time()
 
     def _is_report_boundary(self):
@@ -253,7 +269,7 @@ class ThroughputTimer:
 
         if self.start_time > 0:
             if self.config.synchronized:
-                get_accelerator().synchronize()
+                self._synchronize()
             self.end_time = time.time()
             duration = self.end_time - self.start_time
             self.total_elapsed_time += duration

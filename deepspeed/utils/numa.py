@@ -14,6 +14,8 @@ import psutil
 import shutil
 import subprocess
 
+from .logging import logger
+
 
 # return a list of list for cores to numa mapping
 # [
@@ -60,6 +62,17 @@ def check_for_numactl_pkg():
                 print(f"please install the {lib} package with {tool}")
             break
     return found
+
+
+def numactl_cmd_error(numactl_cmd):
+    """Dry-run numactl with a no-op program. Returns None on success, else the error message."""
+    try:
+        result = subprocess.run(numactl_cmd + ["true"], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    except OSError as e:
+        return str(e)
+    if result.returncode == 0:
+        return None
+    return result.stderr.decode("utf-8").strip().replace("\n", "; ")
 
 
 def parse_range(rng):
@@ -202,4 +215,18 @@ def get_numactl_cmd(bind_core_list, num_local_procs, local_rank):
     if first_core != last_core:
         core_list_str = f"{core_list_str}-{last_core}"
     numactl_cmd.append(f"{core_list_str}")
-    return cores_per_rank, numactl_cmd
+
+    # Containers without CAP_SYS_NICE reject NUMA memory policies (-m/-p) with "Operation not
+    # permitted", which would kill every rank at spawn. Degrade gracefully instead of failing.
+    error = numactl_cmd_error(numactl_cmd)
+    if error is None:
+        return cores_per_rank, numactl_cmd
+    cpu_only_cmd = ["numactl", "-C", core_list_str]
+    cpu_only_error = numactl_cmd_error(cpu_only_cmd)
+    if cpu_only_error is None:
+        logger.warning(f"'{' '.join(numactl_cmd)}' failed ({error}). "
+                       f"Falling back to CPU binding without NUMA memory binding: '{' '.join(cpu_only_cmd)}'")
+        return cores_per_rank, cpu_only_cmd
+    logger.warning(f"'{' '.join(cpu_only_cmd)}' failed ({cpu_only_error}). "
+                   "Launching without numactl core/memory binding.")
+    return cores_per_rank, []
