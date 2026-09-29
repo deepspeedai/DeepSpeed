@@ -53,12 +53,16 @@ def test_ds_vae_forwards_the_inputs_it_accepts():
     assert vae.seen["forward"] == {"sample_posterior": True, "return_dict": False, "generator": None}
 
 
-def test_ds_vae_decode_forwards_the_generator():
-    # every diffusers pipeline calls vae.decode(latents, return_dict=False, generator=generator)
+def test_ds_vae_forward_runs_a_seeded_call_eagerly():
+    # a captured graph cannot use the caller's generator, so sample_posterior would not follow the seed
     vae = RecordingVAE()
-    ds_vae = DSVAE(vae, enable_cuda_graph=False)
+    ds_vae = DSVAE(vae, enable_cuda_graph=True)
+
+    def no_capture(*inputs, **kwargs):
+        raise AssertionError("a call with a generator must not be captured")
+
+    ds_vae._create_cuda_graph = no_capture
     generator = torch.Generator()
 
-    ds_vae.decode(torch.zeros(1), return_dict=False, generator=generator)
-
-    assert vae.seen["decode"] == {"return_dict": False, "generator": generator}
+    assert ds_vae(torch.zeros(1), sample_posterior=True, generator=generator) == "forwarded"
+    assert vae.seen["forward"]["generator"] is generator
