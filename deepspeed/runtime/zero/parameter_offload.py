@@ -644,7 +644,7 @@ class DeepSpeedZeRoOffload(object):
 
         num_layers = 0
         num_params = 0
-        num_params += sum(p.ds_numel for p in module.parameters(recurse=False))
+        num_params += sum(p.ds_numel for p in module.parameters(recurse=False) if is_zero_param(p))
         if not any(module.children()):
             # torch leaf module
             module.ds_model_granularity = sys.maxsize
@@ -677,7 +677,7 @@ class DeepSpeedZeRoOffload(object):
     def _set_leaf_by_threshold_preorder(self, module, granularity_treshhold):
         '''Set modules as leaf modules based on the threshold, prioritizing parent nodes.'''
 
-        num_params = sum(p.ds_numel for p in module.parameters())
+        num_params = sum(p.ds_numel for p in module.parameters() if is_zero_param(p))
         if num_params == 0:
             # skip Modules without parameters, such as GELU, etc.
             return

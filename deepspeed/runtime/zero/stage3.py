@@ -28,7 +28,7 @@ from deepspeed.runtime.zero.config import ZeroStageEnum
 from deepspeed.runtime.zero.offload_config import OffloadDeviceEnum, OffloadStateTypeEnum
 from deepspeed.runtime.zero.parameter_offload import DeepSpeedZeRoOffload
 import deepspeed.runtime.zenflow.engine_stage3 as zf_engine_stage3
-from deepspeed.runtime.zero.utils import get_mapping_to_flat_buffer, defragment, get_norm_dtype
+from deepspeed.runtime.zero.utils import get_mapping_to_flat_buffer, defragment, get_norm_dtype, is_zero_param
 from deepspeed.runtime.zero.offload_states import (offload_adam_states, reload_adam_states,
                                                    unpin_offloaded_optimizer_states)
 from deepspeed.ops.adam import DeepSpeedCPUAdam
@@ -3770,7 +3770,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
             self.lp_param_buffer.data = cpu_buffer
             for tensor, offset, tensor_numel in get_mapping_to_flat_buffer(
-                [p.ds_tensor for p in self.module.parameters()]):
+                [p.ds_tensor for p in self.module.parameters() if is_zero_param(p)]):
                 tensor.data = cpu_buffer.narrow(0, offset, tensor_numel)
 
             self.fp16_partitioned_groups_flat.clear()

@@ -17,6 +17,8 @@ import torch
 from unit.common import DistributedTest
 
 import deepspeed
+from deepspeed.runtime.zero.offload_config import OffloadStateTypeEnum
+from deepspeed.runtime.zero.offload_states import get_state_devices
 from deepspeed.utils.zero_to_fp32 import get_fp32_state_dict_from_zero_checkpoint
 
 HIDDEN = 8
@@ -114,9 +116,10 @@ def _build(model_name, config, zero_init):
     return engine
 
 
-def _train(engine, steps):
+def _train(engine, steps, input_requires_grad=False):
     for _ in range(steps):
-        loss = engine(torch.randn(1, HIDDEN, device=engine.device, dtype=torch.bfloat16))
+        x = torch.randn(1, HIDDEN, device=engine.device, dtype=torch.bfloat16, requires_grad=input_requires_grad)
+        loss = engine(x)
         engine.backward(loss)
         engine.step()
 
@@ -174,6 +177,28 @@ class TestZeroElementParam(DistributedTest):
         engine = _build("mixed", config, zero_init=True)
         _assert_left_unpartitioned(engine)
         _train(engine, steps=2)
+        assert engine.global_steps == 2
+
+    @pytest.mark.parametrize("zero_init", [True, False])
+    def test_with_module_granularity_threshold(self, zero_init):
+        engine = _build("mixed", _config(stage3_module_granularity_threshold=1000), zero_init)
+        _train(engine, steps=2, input_requires_grad=True)
+        assert engine.global_steps == 2
+
+    def test_offload_and_reload_states(self):
+        engine = _build("mixed", _config(), zero_init=False)
+        _train(engine, steps=1)
+
+        engine.offload_states()
+        for state in (OffloadStateTypeEnum.lp_params, OffloadStateTypeEnum.hp_params,
+                      OffloadStateTypeEnum.optim_states):
+            assert get_state_devices(engine, state) == {torch.device("cpu")}, state
+        engine.reload_states()
+        for state in (OffloadStateTypeEnum.lp_params, OffloadStateTypeEnum.hp_params,
+                      OffloadStateTypeEnum.optim_states):
+            assert get_state_devices(engine, state) == {engine.device}, state
+
+        _train(engine, steps=1)
         assert engine.global_steps == 2
 
     def test_checkpoint_round_trip(self, tmpdir):
