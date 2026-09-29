@@ -8,7 +8,7 @@ import torch
 from collections import OrderedDict
 from deepspeed.utils import z3_leaf_module, set_z3_leaf_module
 from deepspeed.runtime.utils import see_memory_usage
-from deepspeed.runtime.zero.utils import apply_to_tensors_only, is_zero_param
+from deepspeed.runtime.zero.utils import apply_to_tensors_only, is_zero_param, zero_parameters
 from deepspeed.runtime.zero.offload_config import OffloadDeviceEnum
 from deepspeed.runtime.zero.partition_parameters import _init_external_params
 from deepspeed.runtime.zero.partition_parameters import *
@@ -318,9 +318,7 @@ class DeepSpeedZeRoOffload(object):
         persistent_params = []
         total_persistent_parameters = 0
         params_count = 0
-        for name, param in self.module.named_parameters(recurse=True):
-            if not is_zero_param(param):  # a zero-element param left unpartitioned
-                continue
+        for param in zero_parameters(self.module):
             if param.ds_numel + total_persistent_parameters > model_threshold:
                 continue
 
@@ -644,7 +642,7 @@ class DeepSpeedZeRoOffload(object):
 
         num_layers = 0
         num_params = 0
-        num_params += sum(p.ds_numel for p in module.parameters(recurse=False) if is_zero_param(p))
+        num_params += sum(p.ds_numel for p in zero_parameters(module, recurse=False))
         if not any(module.children()):
             # torch leaf module
             module.ds_model_granularity = sys.maxsize
@@ -677,7 +675,7 @@ class DeepSpeedZeRoOffload(object):
     def _set_leaf_by_threshold_preorder(self, module, granularity_treshhold):
         '''Set modules as leaf modules based on the threshold, prioritizing parent nodes.'''
 
-        num_params = sum(p.ds_numel for p in module.parameters() if is_zero_param(p))
+        num_params = sum(p.ds_numel for p in zero_parameters(module))
         if num_params == 0:
             # skip Modules without parameters, such as GELU, etc.
             return

@@ -19,6 +19,7 @@ from unit.common import DistributedTest
 import deepspeed
 from deepspeed.runtime.zero.offload_config import OffloadStateTypeEnum
 from deepspeed.runtime.zero.offload_states import get_state_devices
+from deepspeed.runtime.zero.utils import zero_parameters
 from deepspeed.utils.zero_to_fp32 import get_fp32_state_dict_from_zero_checkpoint
 
 HIDDEN = 8
@@ -142,6 +143,9 @@ def _assert_left_unpartitioned(engine):
         assert param.dtype == torch.bfloat16, name
     sized = [p for p in engine.module.parameters() if _declared_numel(p) > 0]
     assert sized and all(hasattr(p, "ds_id") for p in sized)
+    # Post-init ZeRO-3 walks must skip unpartitioned empties; this helper is that contract.
+    partitioned = list(zero_parameters(engine.module))
+    assert set(partitioned) == set(sized)
 
 
 class TestZeroElementParamSingleRank(DistributedTest):
