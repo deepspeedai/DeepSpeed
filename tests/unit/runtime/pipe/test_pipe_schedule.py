@@ -258,3 +258,16 @@ def test_dualpipev_schedule_runs_to_completion(stages, micro_batches, forward_on
             assert sum(1 for c in streams[rank] if type(c) == schedule.BackwardPass and c.phase == phase) == expected
     for channel, (sent, received) in posted.items():
         assert sent == received, f'{channel}: sends {sent} vs receives {received}'
+
+    # Each WeightPass needs a deferred backward, and none may be left at the optimizer step.
+    for stream in streams:
+        deferred = 0
+        for cmd in stream:
+            if type(cmd) == schedule.BackwardPass and cmd.enable_zb:
+                deferred += 1
+            elif type(cmd) == schedule.WeightPass:
+                assert deferred > 0
+                deferred -= 1
+            elif type(cmd) == schedule.OptimizerStep:
+                assert deferred == 0
+        assert deferred == 0

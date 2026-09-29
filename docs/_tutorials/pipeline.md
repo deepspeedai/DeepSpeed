@@ -350,3 +350,35 @@ DualPipeV has the following requirements:
 * Boolean tensors cannot be passed between stages.
 * The `pipe_partitioned` and `grad_partitioned` options for model parallelism
   are not supported.
+
+#### Zero bubble
+DualPipeV can compute weight gradients later than the rest of a backward pass,
+while a GPU would otherwise wait for its neighbor. A layer opts in from the
+`backward()` of a custom `torch.autograd.Function`: when
+`WeightGradStore.enabled` is set, it passes the function that accumulates its
+weight gradient to `WeightGradStore.put()` instead of calling it.
+```python
+from deepspeed.pipe import WeightGradStore
+
+class LinearFunc(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, input, weight):
+        ctx.save_for_backward(input, weight)
+        return torch.nn.functional.linear(input, weight)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        input, weight = ctx.saved_tensors
+
+        def grad_weight_fn():
+            grad = grad_output.flatten(0, -2).T @ input.flatten(0, -2)
+            weight.grad = grad if weight.grad is None else weight.grad + grad
+
+        if WeightGradStore.enabled:
+            WeightGradStore.put(grad_weight_fn)
+        else:
+            grad_weight_fn()
+        return grad_output @ weight, None
+```
+Other layers need no changes. Deferring weight gradients is not supported with
+the BF16 optimizer.

@@ -291,11 +291,46 @@ class TestPipeDynamicShape(DistributedTest):
                 assert len(layer.shapes) > 1
 
 
+class DeferredLinearFunc(torch.autograd.Function):
+
+    @staticmethod
+    def forward(ctx, input, weight, bias):
+        ctx.save_for_backward(input, weight, bias)
+        return nn.functional.linear(input, weight, bias)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        from deepspeed.pipe import WeightGradStore
+
+        input, weight, bias = ctx.saved_tensors
+
+        def grad_weight_fn():
+            grads = (grad_output.flatten(0, -2).T @ input.flatten(0, -2), grad_output.flatten(0, -2).sum(0))
+            for param, grad in zip((weight, bias), grads):
+                param.grad = grad if param.grad is None else param.grad + grad
+
+        if WeightGradStore.enabled:
+            DeferredLinear.num_deferred += 1
+            WeightGradStore.put(grad_weight_fn)
+        else:
+            grad_weight_fn()
+        return grad_output @ weight, None, None
+
+
+class DeferredLinear(nn.Linear):
+    """Defers its weight gradients to a weight pass."""
+    num_deferred = 0
+
+    def forward(self, input):
+        return DeferredLinearFunc.apply(input, self.weight, self.bias)
+
+
 class TestDualPipeV(DistributedTest):
     world_size = [1, 2, 4]
 
+    @pytest.mark.parametrize("linear", [nn.Linear, DeferredLinear])
     @pytest.mark.parametrize("checkpoint_interval", [0, 1])
-    def test_matches_sequential_model(self, checkpoint_interval, tmpdir):
+    def test_matches_sequential_model(self, checkpoint_interval, linear, tmpdir):
         """DualPipeV must give the same loss and weights as the unpartitioned model.
         A checkpoint saved by one engine must restore the same weights in a fresh engine.
         """
@@ -322,7 +357,7 @@ class TestDualPipeV(DistributedTest):
         torch.manual_seed(0)
         layers = []
         for _ in range(2 * num_ranks):
-            layers += [nn.Linear(hidden, hidden), nn.Tanh()]
+            layers += [linear(hidden, hidden), nn.Tanh()]
         reference = copy.deepcopy(nn.Sequential(*layers))
         data = [(torch.randn(1, hidden), torch.randn(1, hidden)) for _ in range(micro_batches)]
         loss_fn = nn.MSELoss()
@@ -355,6 +390,8 @@ class TestDualPipeV(DistributedTest):
             for name, p in engine.module.named_parameters():
                 assert torch.allclose(p.detach().cpu(), reference_params[name], atol=1e-5), name
             assert_nothing_retained()
+        # equal weights do not show that any gradient was deferred
+        assert linear is nn.Linear or DeferredLinear.num_deferred > 0
 
         # Too few micro-batches must be rejected before the eval iterator replaces the training one.
         with pytest.raises(ValueError):
