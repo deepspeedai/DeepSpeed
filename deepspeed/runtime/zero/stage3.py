@@ -1760,7 +1760,6 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         """
         if not self.use_muon:
             return
-        self.sub_groups_lacking_loss_scale.clear()
         if self.offload_optimizer:
             self._apply_muon_updates_cpu_offload()
             return
