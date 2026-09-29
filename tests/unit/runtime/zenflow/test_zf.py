@@ -95,6 +95,7 @@ class BaseZenFlowTest:
 @pytest.mark.parametrize("offload_selective_optimizer", [True, False])
 @pytest.mark.parametrize("select_strategy,select_interval,update_interval", [
     ("auto", "auto", "auto"),
+    ("auto", 5, "auto"),
     ("step", 10, 3),
     ("epoch", 1, 4),
 ])
@@ -114,6 +115,7 @@ class TestZenFlowSingleGPU(DistributedTest, BaseZenFlowTest):
 @pytest.mark.parametrize("offload_selective_optimizer", [True, False])
 @pytest.mark.parametrize("select_strategy,select_interval,update_interval", [
     ("auto", "auto", "auto"),
+    ("auto", 5, "auto"),
     ("step", 10, 3),
     ("epoch", 1, 4),
 ])

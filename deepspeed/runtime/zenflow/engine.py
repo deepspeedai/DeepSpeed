@@ -69,12 +69,11 @@ def configure_zenflow(engine: "DeepSpeedEngine") -> None:
             # is_zenflow_select_boundary() treats 0 as "never again", so this
             # leaves the columns chosen at the first step in place for the whole
             # run. Say so rather than degrading in silence.
-            logger.warning("ZenFlow: select_strategy resolves to 'epoch', but the number of steps in an epoch "
-                           "is unknown -- DeepSpeed reads it from a dataloader it owns, and none was given to "
-                           "deepspeed.initialize(). Important columns will be selected once and never "
-                           "re-selected. Set \"steps_per_epoch\" in the zenflow config, or pass training_data= "
-                           "to deepspeed.initialize(), or use \"select_strategy\": \"step\" with an explicit "
-                           "\"select_interval\".")
+            logger.warning("ZenFlow: select_strategy resolves to 'epoch', but the number of steps in an "
+                           "epoch is unknown. Important columns will be selected once and never "
+                           "re-selected. Set \"steps_per_epoch\" in the zenflow config, or pass "
+                           "training_data= to deepspeed.initialize(), or use \"select_strategy\": "
+                           "\"step\" with an explicit \"select_interval\".")
             engine.select_interval = 0
 
     if not engine.auto_update and engine.select_interval != 0 and engine.select_interval < engine.update_interval:

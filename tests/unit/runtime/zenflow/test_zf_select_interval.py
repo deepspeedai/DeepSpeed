@@ -145,7 +145,7 @@ def test_step_strategy_needs_no_epoch_length():
     assert _select_boundaries(engine.select_interval, steps=40) == 4
 
 
-def test_auto_strategy_warns_rather_than_raising_on_an_ignored_interval():
+def test_auto_strategy_warns_rather_than_raising_on_an_ignored_interval(ds_warnings):
     # `raise Warning(...)` raises: Warning is an Exception. This combination
     # could not run at all, and the `select_interval = 1` line after it was dead.
     config = ZenFlowConfig(select_strategy="auto", select_interval=5, update_interval="auto")
@@ -154,3 +154,4 @@ def test_auto_strategy_warns_rather_than_raising_on_an_ignored_interval():
     configure_zenflow(engine)
 
     assert engine.select_interval == 10  # one epoch, not the ignored 5
+    assert any("is ignored" in record.getMessage() for record in ds_warnings.records)
