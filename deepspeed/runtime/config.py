@@ -692,6 +692,16 @@ class DeepSpeedConfig(object):
             raise ValueError(f"{GRADIENT_ALLREDUCE_OP}='sum' is not supported with ZenFlow")
         if self.gradient_allreduce_op == GRADIENT_ALLREDUCE_OP_SUM and self.compile_config.deepcompile:
             raise ValueError(f"{GRADIENT_ALLREDUCE_OP}='sum' is not supported with DeepCompile")
+        reflow_enabled = self.zero_config.reflow is not None
+        if reflow_enabled and self.compile_config.deepcompile:
+            # DeepCompile's ZeRO-3 backward reduces grads without partition_grads, which is where Reflow
+            # launches its bucketwise CPU optimizer, so the optimizer would never see those grads.
+            raise ValueError("Reflow optimizer offload is not supported with DeepCompile")
+        if reflow_enabled and self.optimizer_name == MUON_OPTIMIZER:
+            # Reflow's CPU step runs its Adam/Lion kernels on every subgroup, so Muon's orthogonalized update would
+            # be silently replaced by Adam. Supporting Muon in Reflow is future work.
+            raise ValueError("Reflow does not support the Muon optimizer yet; remove the 'reflow' block from "
+                             "zero_optimization to use Muon with ZeRO-Offload")
 
         if self.float16_config.fp16_master_weights_and_grads:
             assert self.zero_enabled and self.zero_optimization_stage in (

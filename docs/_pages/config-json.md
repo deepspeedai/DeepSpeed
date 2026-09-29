@@ -687,6 +687,49 @@ Note that if the value of "device" is not specified or not supported, an asserti
 | ------------------------------------------------------------- | ------- |
 | Enable fast optimizer initialization when offloading to NVMe. | `false` |
 
+### Reflow
+[Reflow](/tutorials/reflow/) is an asynchronous CPU-offload optimizer for ZeRO stage 3. The CPU optimizer runs per gradient bucket during backward, gradients move to CPU in half precision, and the FP32 master weights and optimizer state are committed in the background while the next forward runs.
+
+The `reflow` block enables it, so an empty block is enough to run with the defaults. Reflow requires `"stage": 3` with `offload_optimizer` on `cpu` (or `nvme`), and a CPU Adam build with AVX2 or AVX-512. It uses `ReflowCPUAdam`/`ReflowCPULion`; a client `DeepSpeedCPUAdam`/`DeepSpeedCPULion` is remapped automatically. It is not compatible with `super_offload`, ZenFlow, DeepCompile, the Muon optimizer (support to be implemented), or `managed_gradient_accumulation: false`.
+```json
+  "reflow": {
+    "num_threads": null,
+    "enable_cpu_affinity": false,
+    "main_thread_cores": 3,
+    "bucketwise_cores_per_worker": 1,
+    "state_update_cores": 2
+  }
+```
+***num_threads***: [integer]
+
+| Description | Default |
+| ----------- | ------- |
+| Threads for the CPU optimizer kernels. When unset, all cores available to the rank are used. | `null` |
+
+***enable_cpu_affinity***: [boolean]
+
+| Description | Default |
+| ----------- | ------- |
+| Pin the main (forward/backward) thread and the optimizer workers to separate NUMA-local CPU cores. | `false` |
+
+***main_thread_cores***: [integer]
+
+| Description | Default |
+| ----------- | ------- |
+| CPU cores reserved for the main thread when `enable_cpu_affinity` is true; the remaining cores go to the optimizer workers. | `3` |
+
+***bucketwise_cores_per_worker***: [integer]
+
+| Description | Default |
+| ----------- | ------- |
+| CPU cores per bucketwise optimizer worker; the worker count is the rank's worker cores divided by this value. | `1` |
+
+***state_update_cores***: [integer]
+
+| Description | Default |
+| ----------- | ------- |
+| Worker cores the background optimizer-state commit uses while it overlaps the next forward. Fewer busy cores keep the CPU at a higher turbo frequency for the forward; once backward starts, the commit uses every worker core. | `2` |
+
 
 ### Asynchronous I/O
 Configuring the asynchronous I/O module for offloading parameter and optimizer states to persistent (NVMe) storage. This module uses Linux native asynchronous I/O (libaio).
