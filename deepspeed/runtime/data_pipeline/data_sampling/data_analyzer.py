@@ -545,7 +545,8 @@ class DistributedDataAnalyzer(object):
                         metric_results[m_idx] = metric_values
                     else:
                         metric_results[m_idx].add_(metric_values)
-            batch_start_idx += len(data)
+            # The batch sampler counts examples; len(data) can count dict keys or tuple fields.
+            batch_start_idx += min(self.batch_size, thread_end_idx - batch_start_idx)
 
         if self.num_threads == 1:
             return metric_results

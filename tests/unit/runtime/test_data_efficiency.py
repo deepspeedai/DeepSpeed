@@ -12,7 +12,8 @@ import pytest
 from unit.common import DistributedTest
 from unit.simple_model import Curriculum_SimpleModel, SimpleModel, random_dataloader, random_dataset
 from deepspeed.runtime.data_pipeline.curriculum_scheduler import CurriculumScheduler
-from deepspeed.runtime.data_pipeline.data_sampling.data_analyzer import DataAnalyzer
+from deepspeed.runtime.data_pipeline.data_sampling import data_analyzer
+from deepspeed.runtime.data_pipeline.data_sampling.data_analyzer import DataAnalyzer, DistributedDataAnalyzer
 from deepspeed.runtime.data_pipeline.data_sampling.indexed_dataset import MMapIndexedDataset
 
 
@@ -56,6 +57,36 @@ def test_data_analyzer_tracks_samples_in_structured_batches(tmp_path, batch_kind
 
     expected = {index: sample_indices[index] if shuffle_indices else index for index in range(len(dataset))}
     assert observed == expected
+
+
+@pytest.mark.parametrize("batch_kind", ["tensor", "dict", "tuple"])
+@pytest.mark.parametrize("shuffle_indices", [False, True])
+def test_distributed_data_analyzer_tracks_samples_in_structured_batches(monkeypatch, batch_kind, shuffle_indices):
+    values = torch.arange(11, dtype=torch.long)
+    if batch_kind == "dict":
+        dataset = [{"value": value, "extra": value + 1} for value in values]
+        metric = lambda batch: batch["value"]
+    elif batch_kind == "tuple":
+        dataset = torch.utils.data.TensorDataset(values, values + 1)
+        metric = lambda batch: batch[0]
+    else:
+        dataset = values
+        metric = lambda batch: batch
+    sample_indices = list(reversed(range(len(dataset)))) if shuffle_indices else None
+
+    monkeypatch.setattr(data_analyzer.dist, "is_initialized", lambda: True)
+    analyzer = DistributedDataAnalyzer(dataset,
+                                       batch_size=3,
+                                       metric_names=["value"],
+                                       metric_functions=[metric],
+                                       metric_types=["single_value_per_sample"],
+                                       sample_indices=sample_indices)
+    # A nonzero thread offset and a partial final batch.
+    analyzer.thread_splits = [(2, 10)]
+    (results, ) = analyzer.run_map_helper()
+
+    expected = [(index, sample_indices[index] if shuffle_indices else index) for index in range(2, 10)]
+    assert results == expected
 
 
 class MPU():
