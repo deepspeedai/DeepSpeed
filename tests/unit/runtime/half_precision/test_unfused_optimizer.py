@@ -93,3 +93,25 @@ class TestUnfusedOptimizerGradNorm(DistributedTest):
         for i, norm in enumerate(reported):
             assert norm == pytest.approx(expected_norm, abs=1e-6), (
                 f"step {i} reported {norm} instead of {expected_norm}, scale went {scales[i][0]} to {scales[i][1]}")
+
+    @pytest.mark.parametrize("fused_lamb_legacy", [False, True])
+    def test_reported_grad_norm_uses_external_loss_scale(self, fused_lamb_legacy):
+        # After override_loss_scale(), backward() scales the loss by the external scale rather
+        # than cur_scale, so the reported norm has to be divided by the external scale too.
+        external_scale = 64.0
+        true_grad_value = 0.25
+        expected_norm = 1.0
+        params = [torch.nn.Parameter(torch.zeros(8, dtype=torch.float16)) for _ in range(2)]
+        optimizer = FP16_UnfusedOptimizer(LegacyStepOptimizer(params, lr=0.0),
+                                          static_loss_scale=1.0,
+                                          clip_grad=0.0,
+                                          fused_lamb_legacy=fused_lamb_legacy,
+                                          verbose=False)
+        optimizer.override_loss_scale(external_scale)
+        for p in params:
+            p.grad = torch.full_like(p, true_grad_value * external_scale)
+        optimizer.step()
+
+        assert optimizer._global_grad_norm == pytest.approx(
+            expected_norm,
+            abs=1e-6), (f"reported norm {optimizer._global_grad_norm} is not the unscaled norm {expected_norm}")
