@@ -177,7 +177,7 @@ class FP16_Optimizer(DeepSpeedOptimizer):
         combined_scale = self.unscale_and_clip_grads(grads_groups_flat, scaled_grad_norm, apply_scale=False)
 
         # Stash unscaled gradient norm
-        self._global_grad_norm = scaled_grad_norm / self.loss_scale_config.cur_scale
+        self._global_grad_norm = scaled_grad_norm / self._grad_scale()
 
         # norm is in fact norm*cur_scale
         self.optimizer.step(grads=[[g] for g in grads_groups_flat],
@@ -334,7 +334,7 @@ class FP16_Optimizer(DeepSpeedOptimizer):
             self.timers(COMPUTE_NORM_TIMER).stop()
 
         # Stash unscaled gradient norm
-        self._global_grad_norm = scaled_global_grad_norm / self.loss_scale_config.cur_scale
+        self._global_grad_norm = scaled_global_grad_norm / self._grad_scale()
 
         if self.timers:
             self.timers(UNSCALE_AND_CLIP_TIMER).start()
@@ -368,14 +368,19 @@ class FP16_Optimizer(DeepSpeedOptimizer):
 
         return self.overflow
 
+    def _grad_scale(self):
+        # The scale backward() applied: the external one after override_loss_scale()
+        return self.external_loss_scale if self.custom_loss_scaler else self.loss_scale_config.cur_scale
+
     def unscale_and_clip_grads(self, grad_groups_flat, total_norm, apply_scale=True):
         # compute combined scale factor for this group
-        combined_scale = self.loss_scale_config.cur_scale
+        loss_scale = self._grad_scale()
+        combined_scale = loss_scale
         if self.clip_grad > 0.:
             # norm is in fact norm*scale
-            clip = ((total_norm / self.loss_scale_config.cur_scale) + 1e-6) / self.clip_grad
+            clip = ((total_norm / loss_scale) + 1e-6) / self.clip_grad
             if clip > 1:
-                combined_scale = clip * self.loss_scale_config.cur_scale
+                combined_scale = clip * loss_scale
 
         if apply_scale:
             for grad in grad_groups_flat:
