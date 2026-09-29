@@ -68,7 +68,7 @@ CUDA specific tensor operations needs to be converted according to the following
 - When pin a tensor to GPU memory such as `my_tensor.pin_memory()`, we use `get_accelerator().pin_memory(my_tensor)`
 
 ## Communication backend
-When a communication backend string is used, the interface `get_accelerator().communication_backend_name()` is used get get communication backend name. So instead of:
+When a communication backend string is used, the interface `get_accelerator().communication_backend_name()` is used to get the communication backend name. So instead of:
 ```
 torch.distributed.init_process_group('nccl')
 ```

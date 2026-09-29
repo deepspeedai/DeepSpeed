@@ -299,7 +299,11 @@ class FP16_Optimizer(DeepSpeedOptimizer):
                 if param_group['name'] not in expert_grads_for_norm:
                     expert_grads_for_norm[param_group['name']] = []
 
-                expert_grads_for_norm[param_group['name']].append(self.fp32_groups_flat[i])
+                # The expert norm is taken by get_global_norm_of_tensors, which reads
+                # each tensor's data rather than its .grad, so it has to be handed the
+                # gradient itself. The non-expert list below is consumed by
+                # get_flattened_grad_norm, which does read .grad, and keeps the parameter.
+                expert_grads_for_norm[param_group['name']].append(grads_groups_flat[i])
             else:
                 # retrieves the required mask for calculating the norm of flat_grad
                 # perform this collect operation only once
