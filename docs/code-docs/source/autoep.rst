@@ -265,14 +265,17 @@ to turn it back into one row per token. ``combine_impl`` selects how:
 ``"auto"`` (default) resolves to ``"weighted_sum"``, which scatters the rows into
 a zero-filled ``[tokens * top_k, hidden]`` buffer, widens it to FP32 to apply the
 routing weights, and reduces over top-k. ``"fused_weighted_sum"`` computes the
-same result in a single pass: each program owns one token and one slice of the
-hidden dimension, walks its top-k rows in registers and accumulates in FP32, so
-neither the scattered buffer nor the FP32 intermediate is allocated. At the
-canonical shape the FP32 intermediate alone is 64 MiB per layer.
+weighted reduction in one kernel launch: each program owns a whole token and
+walks the hidden dimension in chunks, multiplying each routed row by its score
+in FP32 and accumulating the products in slot order in FP32. FP contraction is
+disabled so each product rounds before it is added; the result is cast only
+once to the output dtype. Neither the scattered buffer nor the FP32
+intermediate is allocated. At the canonical shape the FP32 intermediate alone
+is 64 MiB per layer.
 
-Routing weights are still accumulated in FP32 and cast once, so the result
-matches the eager reduction to within the order of the top-k summation. Only the
-reduction changes: the collectives, the router, the grouped GEMM and the
+The top-k summation order can differ from eager, so results are within the
+existing numerical tolerances, not bitwise unchanged. Only the forward
+reduction changes: the backward, collectives, router, grouped GEMM and
 expert-major reorder are untouched.
 
 ``"fused_weighted_sum"`` is rejected, rather than quietly ignored, when it would

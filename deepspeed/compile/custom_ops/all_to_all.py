@@ -31,6 +31,9 @@ def all_to_all(
 
     if scatter_idx == 1:
         N, local_S = dim1, dim2
+        if N % sp_size() != 0:
+            raise ValueError(f"AutoSP requires the number of attention heads ({N}) to be divisible by "
+                             f"sequence_parallel_size ({sp_size()})")
         input_t = input.reshape(B, sp_size(), N // sp_size(), local_S, H)
         input_t = input_t.permute(1, 0, 2, 3, 4).contiguous()
 

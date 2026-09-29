@@ -64,7 +64,7 @@ from deepspeed.checkpoint.autoep_zero3_metadata import (
     is_autoep_zero3_partitioned_entry,
     validate_autoep_zero3_partitioned_metadata,
 )
-from deepspeed.checkpoint.affine import ParamAffineMap, AFFINE_MAP_FORMAT_VERSION
+from deepspeed.checkpoint.affine import ParamAffineMap, AFFINE_MAP_FORMAT_VERSION, SCALE_POWER_BY_STATE
 from deepspeed.checkpoint.autoep_affine import autoep_metadata_to_affine_map, validate_autoep_placement_descriptor
 
 
@@ -377,7 +377,6 @@ def merge_tp_slices(uc_info, dir, slice_dir, tp_degree, name_and_shapes):
     # gradient by `1 / s`, so Adam's first moment carries the inverse and its second moment
     # the inverse square. Using the parameter's factor for all three would corrupt the
     # optimizer state and change the trajectory after a resume.
-    scale_powers = {"fp32": 1, "exp_avg": -1, "exp_avg_sq": -2}
 
     for state in ("fp32", "exp_avg", "exp_avg_sq"):
         slices = _merge_zero_shards(slice_base_path, state, tp_degree, per_tp_shapes)
@@ -392,7 +391,7 @@ def merge_tp_slices(uc_info, dir, slice_dir, tp_degree, name_and_shapes):
             # writes none of the per-category keys those branches add to `ckpt_dict`,
             # because the geometry is what a restoring job needs and it is not tied to a
             # category.
-            param = matched_affine_map.rebuild(dict(enumerate(slices)), scale_powers[state])
+            param = matched_affine_map.rebuild(dict(enumerate(slices)), SCALE_POWER_BY_STATE[state])
         elif get_matched_pattern(replicated_parameters, name):
             if len(slices) > 1:
                 assert all([slices[0].equal(other_slice) for other_slice in slices[1:]])

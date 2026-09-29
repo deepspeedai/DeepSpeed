@@ -17,6 +17,8 @@ _IS_ROCM_PYTORCH = getattr(torch.version, "hip", None) is not None
 SUPPORTED_ROW_DTYPES = (torch.bfloat16, torch.float16, torch.float32)
 
 _MAX_BLOCK_HIDDEN = 512
+# The forward adds one row at a time, so only a single [BLOCK_H] FP32 accumulator is live.
+_MAX_FORWARD_BLOCK_HIDDEN = 1024
 _INVERT_INDEX_BLOCK = 256
 # The kernels hold a [slots, BLOCK_H] FP32 block live, so the hidden tile shrinks
 # as top-k grows to keep that block in registers rather than spilling.
@@ -50,37 +52,31 @@ if _TRITON_AVAILABLE:
         scores_stride,
         out_stride,
         TOP_K: tl.constexpr,
-        K_PADDED: tl.constexpr,
         BLOCK_H: tl.constexpr,
     ):
+        # One program walks a whole token: a program per token and hidden tile left each one too little work to
+        # keep enough row loads in flight.
         # int64: token * out_stride overflows int32 once tokens x hidden > 2**31.
         token = tl.program_id(0).to(tl.int64)
-        hidden_offsets = tl.program_id(1) * BLOCK_H + tl.arange(0, BLOCK_H)
-        hidden_mask = hidden_offsets < hidden
-
-        slots = tl.arange(0, K_PADDED)
-        slot_mask = slots < TOP_K
-
-        source_rows = tl.load(inverse_ptr + token * TOP_K + slots, mask=slot_mask, other=-1).to(tl.int64)
-        row_valid = slot_mask & (source_rows >= 0)
-        safe_rows = tl.where(row_valid, source_rows, 0)
-
-        scores = tl.load(scores_ptr + token * scores_stride + slots, mask=slot_mask, other=0.0).to(tl.float32)
-
-        block_mask = row_valid[:, None] & hidden_mask[None, :]
-        values = tl.load(
-            rows_ptr + safe_rows[:, None] * rows_stride + hidden_offsets[None, :],
-            mask=block_mask,
-            other=0.0,
-        ).to(tl.float32)
-
-        # Match the eager path's FP32 product and accumulation.
-        weighted = tl.sum(values * scores[:, None], axis=0)
-        tl.store(
-            out_ptr + token * out_stride + hidden_offsets,
-            weighted.to(out_ptr.dtype.element_ty),
-            mask=hidden_mask,
-        )
+        for hidden_start in range(0, hidden, BLOCK_H):
+            hidden_offsets = hidden_start + tl.arange(0, BLOCK_H)
+            hidden_mask = hidden_offsets < hidden
+            weighted = tl.zeros([BLOCK_H], dtype=tl.float32)
+            # The top-k rows are added in slot order, each as its FP32 product with the score.
+            for slot in tl.static_range(TOP_K):
+                source_row = tl.load(inverse_ptr + token * TOP_K + slot).to(tl.int64)
+                score = tl.load(scores_ptr + token * scores_stride + slot).to(tl.float32)
+                values = tl.load(
+                    rows_ptr + tl.maximum(source_row, 0) * rows_stride + hidden_offsets,
+                    mask=hidden_mask & (source_row >= 0),
+                    other=0.0,
+                ).to(tl.float32)
+                weighted += values * score
+            tl.store(
+                out_ptr + token * out_stride + hidden_offsets,
+                weighted.to(out_ptr.dtype.element_ty),
+                mask=hidden_mask,
+            )
 
     @triton.jit
     def _weighted_restore_backward_kernel(
@@ -211,22 +207,22 @@ class _FusedWeightedRestore(torch.autograd.Function):
         ctx.save_for_backward(combined_rows, top_scores, inverse)
         ctx.top_k = top_k
 
-        k_padded = _padded_top_k(top_k)
-        block_hidden = _block_hidden(hidden, slots=k_padded)
-        grid = (n_tokens, triton.cdiv(hidden, block_hidden))
-        _weighted_restore_forward_kernel[grid](
-            combined_rows,
-            inverse,
-            top_scores,
-            output,
-            hidden,
-            combined_rows.stride(0),
-            top_scores.stride(0),
-            output.stride(0),
-            TOP_K=top_k,
-            K_PADDED=k_padded,
-            BLOCK_H=block_hidden,
-        )
+        if n_tokens > 0:
+            _weighted_restore_forward_kernel[(n_tokens, )](
+                combined_rows,
+                inverse,
+                top_scores,
+                output,
+                hidden,
+                combined_rows.stride(0),
+                top_scores.stride(0),
+                output.stride(0),
+                TOP_K=top_k,
+                BLOCK_H=min(_MAX_FORWARD_BLOCK_HIDDEN, max(16, triton.next_power_of_2(hidden))),
+                num_warps=4,
+                # A product contracted into the sum would skip the FP32 rounding the eager product has.
+                enable_fp_fusion=False,
+            )
         return output
 
     @staticmethod
