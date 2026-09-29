@@ -200,14 +200,11 @@ def _run_one_step(backend,
     # dtype anyway for the comparison to mean anything.
     config.pop("fp16", None)
     config["bf16"] = {"enabled": True}
-    # Adam's first update can be learning-rate-scale even for small gradients. make_autoep_config's
-    # default lr=1e-4 is smaller than the parameter_deltas comparison's
-    # atol=5e-4 below, so that check could not have told a correct update apart
-    # from a missing or wrong-signed one (deepspeedai/DeepSpeed#8423, review
-    # comment from tohtana). Raised well above that noise floor instead.
-    config["optimizer"]["params"]["lr"] = 1e-2
     config["expert_parallel"]["comm_backend"] = backend
     if row_weighting_impl != "auto":
+        # The original cleanup/legacy comparisons keep the fixture's lr=1e-4. Only the new eager/fused
+        # comparisons need a first-step update above the existing parameter-delta atol=5e-4.
+        config["optimizer"]["params"]["lr"] = 1e-2
         config["expert_parallel"]["row_weighting_impl"] = row_weighting_impl
     if score_apply is not None:
         config["expert_parallel"]["score_apply"] = score_apply
@@ -295,6 +292,22 @@ def _run_one_step(backend,
         result["exchanges"] = exchanges
         destroy_exchanges(engine.module)
     return result
+
+
+@pytest.mark.parametrize("row_weighting_impl, expected_lr", [("auto", 1e-4), ("eager", 1e-2), ("fused", 1e-2)])
+def test_one_step_helper_keeps_original_learning_rate_for_default(row_weighting_impl, expected_lr):
+
+    class ConfigCaptured(Exception):
+        pass
+
+    def check_config(*, config, **_kwargs):
+        assert config["optimizer"]["params"]["lr"] == expected_lr
+        assert config["expert_parallel"].get("row_weighting_impl", "auto") == row_weighting_impl
+        raise ConfigCaptured
+
+    with mock.patch.object(deepspeed, "initialize", side_effect=check_config):
+        with pytest.raises(ConfigCaptured):
+            _run_one_step("deepep", ep_size=4, seed=2468, row_weighting_impl=row_weighting_impl)
 
 
 def _assert_cleanup_results_close(actual, expected, *, compare_score_gradients):
