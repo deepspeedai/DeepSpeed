@@ -22,11 +22,8 @@ class DSVAE(CUDAGraph, torch.nn.Module):
         self.all_cuda_graph_created = False
 
     def _graph_replay_decoder(self, *inputs, **kwargs):
-        for captured, latest in zip(self.static_decoder_inputs, inputs):
-            refresh_static_tensors(captured, latest)
-        for key, captured in self.static_decoder_kwargs.items():
-            if key in kwargs:
-                refresh_static_tensors(captured, kwargs[key])
+        refresh_static_tensors(self.static_decoder_inputs, inputs)
+        refresh_static_tensors(self.static_decoder_kwargs, kwargs)
         get_accelerator().replay_graph(self._decoder_cuda_graph)
         return self.static_decoder_output
 
@@ -64,11 +61,8 @@ class DSVAE(CUDAGraph, torch.nn.Module):
             return self._decode(*inputs, **kwargs)
 
     def _graph_replay_encoder(self, *inputs, **kwargs):
-        for captured, latest in zip(self.static_encoder_inputs, inputs):
-            refresh_static_tensors(captured, latest)
-        for key, captured in self.static_encoder_kwargs.items():
-            if key in kwargs:
-                refresh_static_tensors(captured, kwargs[key])
+        refresh_static_tensors(self.static_encoder_inputs, inputs)
+        refresh_static_tensors(self.static_encoder_kwargs, kwargs)
         get_accelerator().replay_graph(self._encoder_cuda_graph)
         return self.static_encoder_output
 
@@ -106,11 +100,8 @@ class DSVAE(CUDAGraph, torch.nn.Module):
             return self._encode(*inputs, **kwargs)
 
     def _graph_replay(self, *inputs, **kwargs):
-        for captured, latest in zip(self.static_inputs, inputs):
-            refresh_static_tensors(captured, latest)
-        for key, captured in self.static_kwargs.items():
-            if key in kwargs:
-                refresh_static_tensors(captured, kwargs[key])
+        refresh_static_tensors(self.static_inputs, inputs)
+        refresh_static_tensors(self.static_kwargs, kwargs)
         get_accelerator().replay_graph(self._all_cuda_graph)
         return self.static_output
 

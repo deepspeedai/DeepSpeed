@@ -16,19 +16,21 @@ def refresh_static_tensors(static, new):
     whatever capture saw. SDXL passes `added_cond_kwargs` as
     `{"text_embeds": ..., "time_ids": ...}`, so every image after the first was built from the
     first prompt's conditioning, with no error to show for it.
+
+    The graph can only run the inputs it captured, so a call whose tensors or containers do not
+    line up with them raises instead of replaying stale values. Plain values are left alone.
     """
-    if torch.is_tensor(static):
-        if torch.is_tensor(new):
-            static.copy_(new)
-    elif isinstance(static, dict):
-        if isinstance(new, dict):
-            for key, captured in static.items():
-                if key in new:
-                    refresh_static_tensors(captured, new[key])
-    elif isinstance(static, (list, tuple)):
-        if isinstance(new, (list, tuple)) and len(static) == len(new):
-            for captured, latest in zip(static, new):
-                refresh_static_tensors(captured, latest)
+    if torch.is_tensor(static) and torch.is_tensor(new):
+        static.copy_(new)
+    elif isinstance(static, dict) and isinstance(new, dict):
+        for key in static.keys() | new.keys():
+            refresh_static_tensors(static.get(key), new.get(key))
+    elif isinstance(static, (list, tuple)) and isinstance(new, (list, tuple)) and len(static) == len(new):
+        for captured, latest in zip(static, new):
+            refresh_static_tensors(captured, latest)
+    elif any(torch.is_tensor(x) or isinstance(x, (dict, list, tuple)) for x in (static, new)):
+        raise ValueError("CUDA graph replay needs the same tensors and containers as the captured call, "
+                         f"got {type(new).__name__} where capture had {type(static).__name__}")
 
 
 class CUDAGraph(ABC):

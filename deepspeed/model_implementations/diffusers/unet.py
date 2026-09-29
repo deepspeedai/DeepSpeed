@@ -24,11 +24,8 @@ class DSUNet(CUDAGraph, torch.nn.Module):
         self.cuda_graph_created = False
 
     def _graph_replay(self, *inputs, **kwargs):
-        for captured, latest in zip(self.static_inputs, inputs):
-            refresh_static_tensors(captured, latest)
-        for key, captured in self.static_kwargs.items():
-            if key in kwargs:
-                refresh_static_tensors(captured, kwargs[key])
+        refresh_static_tensors(self.static_inputs, inputs)
+        refresh_static_tensors(self.static_kwargs, kwargs)
         get_accelerator().replay_graph(self._cuda_graphs)
         return self.static_output
 

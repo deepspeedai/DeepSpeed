@@ -32,11 +32,8 @@ class DSClipEncoder(CUDAGraph, torch.nn.Module):
         return mask
 
     def _graph_replay(self, *inputs, **kwargs):
-        for captured, latest in zip(self.static_inputs[self.iter], inputs):
-            refresh_static_tensors(captured, latest)
-        for key, captured in self.static_kwargs[self.iter].items():
-            if key in kwargs:
-                refresh_static_tensors(captured, kwargs[key])
+        refresh_static_tensors(self.static_inputs[self.iter], inputs)
+        refresh_static_tensors(self.static_kwargs[self.iter], kwargs)
         get_accelerator().replay_graph(self._cuda_graphs[self.iter])
         return self.static_output[self.iter]
 
