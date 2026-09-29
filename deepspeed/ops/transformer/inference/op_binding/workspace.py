@@ -148,7 +148,10 @@ class InferenceContext:
                 from transformers.models.llama.configuration_llama import LlamaConfig
 
                 config = LlamaConfig(head_dim=rotary_dim, rope_theta=rope_theta)
-                self.rotary = LlamaRotaryEmbedding(config=config, device=device)
+                self.rotary = LlamaRotaryEmbedding(config=config)
+                # The `device` argument is deprecated for removal in transformers 5.18.
+                if device is not None:
+                    self.rotary = self.rotary.to(device)
             else:
                 self.rotary = LlamaRotaryEmbedding(rotary_dim, base=rope_theta, device=device)
 
