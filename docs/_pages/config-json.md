@@ -1401,7 +1401,7 @@ DeepSpeed Data Efficiency Library includes two techniques: curriculum learning a
 | <i>**model_type**</i>: [str] | Users need to identify whether the model is `decoder` or `encoder`. Currently we only support these two. | N/A |
 | <i>**hidden_state_order**</i>: [str] | Users need to know the input order of the hidden state tensor. Normally, it’s batch, sequence and then the hidden dimension, which is `batch_seq_dim`. Somethings, the order between batch and sequence will be switch like `seq_batch_dim`. Currently, we support these two.  | N/A |
 | <i>**random_ltd_schedule**</i>: [dictionary] | The schedule of the effective sequence length after token dropping. It's a linear function where random-LTD gradually drops less tokens and increases effective sequence length. | N/A |
-| <i>&emsp;&emsp;**min_value**</i>: [integer] | The initial effective sequence length (after token dropping) at step/iteration 0. | N/A |
+| <i>&emsp;&emsp;**min_value**</i>: [integer] | The initial effective sequence length (after token dropping) at step/iteration 0. If it is not a multiple of `seq_per_step`, it is rounded up to the next multiple. | N/A |
 | <i>&emsp;&emsp;**max_value**</i>: [integer] | The max effective sequence length (usually the case without any token dropping). Usually this is set as baseline's seqlen. | N/A |
 | <i>&emsp;&emsp;**schedule_type**</i>: [str] | The sequence length follows a linear increasing function starting from `min_value` and reaching `max_value`. We currently only support this type. | N/A |
 | <i>&emsp;&emsp;**schedule_config**</i>: [dictionary] | Configs for the linear increasing function. | N/A |
