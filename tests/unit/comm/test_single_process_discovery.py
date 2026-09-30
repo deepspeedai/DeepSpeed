@@ -20,9 +20,32 @@ LAUNCHER_ENV = ("RANK", "WORLD_SIZE", "LOCAL_RANK", "MASTER_ADDR", "MASTER_PORT"
 
 
 @pytest.fixture
-def clean_env(monkeypatch):
-    for name in LAUNCHER_ENV + MPI_WORLD_SIZE_ENV_VARS + MPI_RANK_ENV_VARS + ("PMIX_NAMESPACE", ):
-        monkeypatch.delenv(name, raising=False)
+def clean_env():
+    """A bare environment, put back afterwards along with the process group a test may have created.
+
+    monkeypatch.delenv does not record a variable that was never set, so the ones
+    `single_process_discovery` adds would outlive the test and leak into the next one.
+    """
+    import deepspeed.comm.comm as comm
+
+    names = LAUNCHER_ENV + MPI_WORLD_SIZE_ENV_VARS + MPI_RANK_ENV_VARS + ("PMIX_NAMESPACE", )
+    saved = {name: os.environ.pop(name, None) for name in names}
+    backend_before = comm.cdb
+    assert backend_before is None or not backend_before.is_initialized(), \
+        "an earlier test left a process group behind, and this one would skip constructing the backend"
+    try:
+        yield
+    finally:
+        # A test that reached the backend leaves an initialized group behind, and the next one would
+        # then take the already-initialized branch and never construct a backend.
+        if comm.cdb is not backend_before:
+            if comm.cdb is not None and comm.cdb.is_initialized():
+                comm.destroy_process_group()
+            comm.cdb = backend_before
+        for name in names:
+            os.environ.pop(name, None)
+            if saved[name] is not None:
+                os.environ[name] = saved[name]
 
 
 def test_a_bare_environment_reports_no_launcher_and_no_size(clean_env):
@@ -165,3 +188,42 @@ def test_a_bare_environment_initializes_end_to_end(clean_env, monkeypatch):
 
     assert os.environ["WORLD_SIZE"] == "1"
     assert os.environ["RANK"] == "0"
+
+
+@pytest.mark.parametrize("name,value", [("WORLD_SIZE", "2"), ("RANK", "1"), ("LOCAL_RANK", "1")])
+def test_standard_variables_describing_several_processes_are_refused(clean_env, monkeypatch, name, value):
+    """The five variables are only partly set, and the part that is set says this is not one process.
+
+    Filling in the rest would make rank 1 a member of a world of 1, or a rank that waits for peers
+    it was never told about.
+    """
+    import deepspeed.comm.comm as comm
+
+    def no_mpi4py(*args, **kwargs):
+        raise ImportError("No module named 'mpi4py'")
+
+    monkeypatch.setattr(comm, "mpi_discovery", no_mpi4py)
+    monkeypatch.setenv(name, value)
+
+    with pytest.raises(ImportError, match=f"{name}={value}"):
+        comm.init_distributed(dist_backend="gloo", auto_mpi_discovery=True, dist_init_required=True)
+
+    assert "MASTER_ADDR" not in os.environ, "the environment must not be completed for a multi-process job"
+
+
+def test_a_partly_set_single_process_environment_is_completed(clean_env, monkeypatch):
+    """RANK=0 and WORLD_SIZE=1 are a single process, so the rest can be filled in around them."""
+    import deepspeed.comm.comm as comm
+
+    def no_mpi4py(*args, **kwargs):
+        raise ImportError("No module named 'mpi4py'")
+
+    monkeypatch.setattr(comm, "mpi_discovery", no_mpi4py)
+    monkeypatch.setenv("RANK", "0")
+    monkeypatch.setenv("WORLD_SIZE", "1")
+
+    comm.init_distributed(dist_backend="gloo", auto_mpi_discovery=True, dist_init_required=True)
+
+    assert os.environ["WORLD_SIZE"] == "1"
+    assert os.environ["LOCAL_RANK"] == "0"
+    assert os.environ["MASTER_ADDR"] == "127.0.0.1"

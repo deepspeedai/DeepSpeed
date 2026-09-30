@@ -860,6 +860,12 @@ def init_distributed(dist_backend: Optional[str] = None,
                             "so whether this is one rank of several cannot be determined without mpi4py. "
                             "Install mpi4py, or set RANK, WORLD_SIZE, LOCAL_RANK, MASTER_ADDR and MASTER_PORT "
                             "yourself.") from err
+                    multi_process_vars = multi_process_env_vars()
+                    if multi_process_vars:
+                        raise ImportError(
+                            f"{', '.join(multi_process_vars)} describe a job with more than one process, but not all "
+                            "of RANK, WORLD_SIZE, LOCAL_RANK, MASTER_ADDR and MASTER_PORT are set and mpi4py is not "
+                            "installed to fill in the rest. Set all five yourself, or install mpi4py.") from err
                     single_process_discovery(distributed_port=distributed_port, verbose=verbose)
 
         if cdb is not None and cdb.is_initialized():
@@ -899,6 +905,22 @@ def mpi_world_size_from_env():
 def launched_by_mpi():
     """Whether a launcher started this process, whatever world size it reports."""
     return any(var in os.environ for var in MPI_RANK_ENV_VARS)
+
+
+def multi_process_env_vars():
+    """The RANK, LOCAL_RANK and WORLD_SIZE already set that only make sense in a job of several processes.
+
+    Filling in the missing variables around them would give rank 1 of a world of 1, or a rank that
+    waits for peers that were never told about it.
+    """
+    multi_process = []
+    for name, first_multi_value in (("RANK", 1), ("LOCAL_RANK", 1), ("WORLD_SIZE", 2)):
+        try:
+            if int(os.environ[name]) >= first_multi_value:
+                multi_process.append(f"{name}={os.environ[name]}")
+        except (KeyError, ValueError):
+            continue
+    return multi_process
 
 
 def single_process_discovery(distributed_port=TORCH_DISTRIBUTED_DEFAULT_PORT, verbose=True):
