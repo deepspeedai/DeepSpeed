@@ -29,7 +29,6 @@ def _bf16_optimizer_stub(lp, hp_grad):
     optimizer.param_names = {lp: "model.layers.0.mlp.router.gate.weight"}
     optimizer.fp32_groups_gradients = [[hp_grad]]
     optimizer.fp32_groups_has_gradients = [[False]]
-    optimizer.graph_harvesting = False
     return optimizer
 
 
@@ -91,24 +90,6 @@ def test_bf16_immediate_grad_update_corrects_every_consumed_gradient(monkeypatch
             assert not is_autoep_folding_gradient_corrected(lp)
         hp_grad.zero_()
         optimizer.fp32_groups_has_gradients[0][0] = False
-
-
-def test_bf16_immediate_grad_update_preserves_graph_harvesting_addresses(monkeypatch):
-    lp = torch.nn.Parameter(torch.ones(2, dtype=torch.bfloat16))
-    lp.grad = torch.full((2, ), 6.0, dtype=torch.bfloat16)
-    lp.allreduce = False
-    hp_grad = torch.zeros(2, dtype=torch.float32)
-    optimizer = _bf16_optimizer_stub(lp, hp_grad)
-    optimizer.immediate_grad_update = True
-    optimizer.graph_harvesting = True
-    optimizer.param_names[lp] = "model.layers.0.mlp.experts.w2"
-    monkeypatch.setattr(bf16_mod.dist, "get_world_size", lambda group=None: 2)
-
-    optimizer.accumulate_hp_grads_and_remove_lp(lp, group_idx=0, param_idx=0)
-
-    torch.testing.assert_close(hp_grad, torch.full_like(hp_grad, 3.0))
-    assert lp.grad is not None
-    assert is_autoep_folding_gradient_corrected(lp)
 
 
 class _FoldedGradientLifecycleModel(torch.nn.Module):

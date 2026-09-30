@@ -13,6 +13,8 @@ from unit.simple_model import SimpleModel, SimpleOptimizer, random_dataloader, r
 from unit.util import bf16_required_version_check
 from deepspeed import comm as dist
 from deepspeed.accelerator import get_accelerator
+from deepspeed.runtime.bf16_optimizer import BF16_Optimizer
+from deepspeed.utils import safe_get_full_fp32_param, safe_get_full_grad
 from unit.v1.zero.test_zero_user_backward import (initialize_distributed, create_ddp_model, collect_ddp_gradients,
                                                   collect_gradients_safe, compare_gradients)
 
@@ -574,3 +576,96 @@ class TestBF16ImmediateGradUpdateReleasesLowPrecisionGrads(DistributedTest):
             assert torch.equal(immediate_grads[name], epilogue_grads[name]), name
         for name in epilogue_parameters:
             assert torch.equal(immediate_parameters[name], epilogue_parameters[name]), name
+
+
+class _GradientFragmentModel(torch.nn.Module):
+
+    def __init__(self):
+        super().__init__()
+        # The small parameter fits one partition; the following four-element parameter crosses it.
+        self.bias = torch.nn.Parameter(torch.zeros(1))
+        self.weight = torch.nn.Parameter(torch.ones(4))
+
+    def forward(self, x):
+        return (x * self.weight).float().sum() + self.bias.float().sum()
+
+
+class TestBF16FullGradientReconstruction(DistributedTest):
+    world_size = 2
+    reuse_dist_env = False
+
+    @pytest.mark.parametrize("zero_stage", [1, 2])
+    @pytest.mark.parametrize("micro_batches", [1, 2])
+    def test_split_and_unsplit_gradients_match_the_global_reference(self, zero_stage, micro_batches):
+        if not bf16_required_version_check():
+            pytest.skip("DeepSpeed BFloat16 tests need torch >= 1.10, NCCL >= 2.10.3, CUDA >= 11.0 and HW support")
+        config = {
+            "train_micro_batch_size_per_gpu": 1,
+            "gradient_accumulation_steps": micro_batches,
+            "gradient_clipping": 0.25,
+            "optimizer": {
+                "type": "SGD",
+                "params": {
+                    "lr": 0.1
+                }
+            },
+            "zero_allow_untested_optimizer": True,
+            "zero_optimization": {
+                "stage": zero_stage
+            },
+            "bf16": {
+                "enabled": True,
+                "immediate_grad_update": True
+            },
+            "data_types": {
+                "grad_accum_dtype": "fp32"
+            },
+        }
+        engine, _, _, _ = deepspeed.initialize(model=_GradientFragmentModel(), config=config)
+        if zero_stage == 1:
+            assert isinstance(engine.optimizer, BF16_Optimizer)
+        rank_scale = dist.get_rank() + 1
+        mean_rank_scale = (dist.get_world_size() + 1) / 2
+        before = {
+            name: safe_get_full_fp32_param(param).detach().cpu().clone()
+            for name, param in engine.module.named_parameters()
+        }
+        for step in range(2):
+            for micro_batch in range(micro_batches):
+                x = torch.arange(1, 5, dtype=torch.bfloat16, device=engine.device)
+                x = x * rank_scale + step + micro_batch
+                engine.backward(engine(x.reshape(1, 4)))
+                if micro_batch + 1 < micro_batches:
+                    engine.step()
+
+            expected = {
+                "bias": torch.ones(1),
+                "weight": torch.arange(1, 5, dtype=torch.float32) * mean_rank_scale + step + (micro_batches - 1) / 2,
+            }
+            for name, param in engine.module.named_parameters():
+                gradient = safe_get_full_grad(param)
+                assert gradient is not None and gradient.dtype == torch.float32
+                torch.testing.assert_close(gradient.cpu(),
+                                           expected[name],
+                                           rtol=0,
+                                           atol=0,
+                                           msg=f"{name} at step {step}")
+
+            expected_norm = torch.cat([gradient.flatten() for gradient in expected.values()]).double().norm()
+            assert expected_norm > config["gradient_clipping"]
+            clip_scale = config["gradient_clipping"] / (expected_norm.item() + 1e-6)
+            engine.step()
+            torch.testing.assert_close(float(engine.get_global_grad_norm()),
+                                       expected_norm.item(),
+                                       rtol=1e-6,
+                                       atol=1e-6)
+            for name, param in engine.module.named_parameters():
+                after = safe_get_full_fp32_param(param).detach().cpu()
+                expected_parameter = before[name] - config["optimizer"]["params"]["lr"] * expected[name] * clip_scale
+                torch.testing.assert_close(after,
+                                           expected_parameter,
+                                           rtol=1e-6,
+                                           atol=1e-7,
+                                           msg=f"{name} at step {step}")
+                before[name] = after.clone()
+        engine.destroy()

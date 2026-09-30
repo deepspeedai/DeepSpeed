@@ -332,7 +332,7 @@ Example of <i>**scheduler**</i>
 
 | Description | Default |
 | ----------- | ------- |
-| When `BF16_Optimizer` is selected, accumulate each completed BF16 gradient in an autograd hook (in FP32 when `data_types.grad_accum_dtype="fp32"`). With graph harvesting disabled, the consumed `param.grad` is released and may be `None` after backward. In that case, `deepspeed.utils.safe_get_full_grad(param)` returns the accumulated gradient; read it **before** `engine.step()`. Graph harvesting retains the BF16 `param.grad` for fixed-address replay, and `safe_get_full_grad` returns that gradient while it is present. The default keeps the existing backward-epilogue accumulation. | `false` |
+| When `BF16_Optimizer` is selected, accumulate each completed BF16 gradient in an autograd hook (in FP32 when `data_types.grad_accum_dtype="fp32"`). The consumed `param.grad` is released and may be `None` after backward. In that case, `deepspeed.utils.safe_get_full_grad(param)` reconstructs the accumulated gradient from the optimizer-owned fragments; all data-parallel ranks must call it before `engine.step()` in the same order. The default keeps the existing backward-epilogue accumulation. | `false` |
 
 <i>**bf16:bf16_master_weights_and_grads**</i>: [boolean]
 

@@ -18,6 +18,7 @@ from deepspeed.utils import safe_set_full_fp32_param, safe_set_full_grad, safe_s
 from deepspeed.utils import safe_get_local_fp32_param, safe_get_local_grad, safe_get_local_optimizer_state
 from deepspeed.utils import safe_set_local_fp32_param, safe_set_local_grad, safe_set_local_optimizer_state
 from deepspeed.utils import safe_update_full_grad_vectorized
+from deepspeed.utils.mixed_precision_linkage import link_hp_params
 from deepspeed.runtime.zero.offload_config import OffloadDeviceEnum
 from deepspeed.ops.aio import AsyncIOBuilder
 from deepspeed.accelerator import get_accelerator
@@ -27,6 +28,34 @@ WEIGHT_KEY = 'weight'
 FIRST_ORDER_KEY = 'exp_avg'
 SECOND_ORDER_KEY = 'exp_avg_sq'
 GRADIENT_KEY = 'gradient'
+
+
+@pytest.mark.parametrize("full_accumulation_buffer", [True, False])
+def test_full_gradient_reconstruction_uses_only_the_owned_fragment(monkeypatch, full_accumulation_buffer):
+    reference = torch.tensor([5.5, 11.0, 16.5, 22.0])
+    for rank in range(2):
+        param = torch.nn.Parameter(torch.zeros(4, dtype=torch.bfloat16))
+        local_gradient = reference if full_accumulation_buffer else reference.narrow(0, 2 * rank, 2)
+        link_hp_params(lp_param_list=[param],
+                       flat_hp_partition=torch.zeros(2),
+                       gradient_dict={0: [local_gradient]},
+                       offload_gradient_dict={},
+                       use_offload=False,
+                       param_group_index=0,
+                       partition_start=2 * rank,
+                       partition_size=2,
+                       dp_group=object())
+        peer_contribution = torch.zeros_like(reference)
+        peer_start = 2 * (1 - rank)
+        peer_contribution[peer_start:peer_start + 2] = reference[peer_start:peer_start + 2]
+
+        def sum_peer_fragment(tensor, *, group, _peer=peer_contribution):
+            tensor.add_(_peer)
+
+        monkeypatch.setattr(dist, "all_reduce", sum_peer_fragment)
+        # A full BF16 buffer must not be contributed twice when the parameter spans partitions.
+        actual = safe_get_full_grad(param)
+        torch.testing.assert_close(actual, reference, rtol=0, atol=0)
 
 
 def validate_tensor(model, api_type, opt_states):
