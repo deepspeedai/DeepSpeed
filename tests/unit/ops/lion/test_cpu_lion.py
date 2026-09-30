@@ -40,6 +40,37 @@ def _compare_optimizers(model_size, param1, optimizer1, param2, optimizer2):
     check_equal(param1.float().norm(), param2.float().cpu().norm(), atol=tolerance, verbose=True)
 
 
+@pytest.mark.skipif(not deepspeed.ops.__compatible_ops__[CPULionBuilder.NAME],
+                    reason="CPULionBuilder has not been implemented on this system.")
+@pytest.mark.parametrize('model_size', [22, 64, 1048577])
+@pytest.mark.parametrize('weight_decay', [0.0, 0.07])
+def test_cpu_lion_matches_reference(model_size, weight_decay):
+    from deepspeed.ops.lion import DeepSpeedCPULion
+
+    generator = torch.Generator().manual_seed(model_size)
+    initial = torch.randn(model_size, generator=generator)
+    cpu_param = torch.nn.Parameter(initial.clone())
+    ref_param = initial.clone()
+    ref_exp_avg = torch.zeros_like(ref_param)
+    lr = 1e-3
+    beta1, beta2 = 0.9, 0.99
+
+    optimizer = DeepSpeedCPULion([cpu_param], lr=lr, betas=(beta1, beta2), weight_decay=weight_decay)
+
+    for _ in range(3):
+        grad = torch.randn(model_size, generator=generator)
+        cpu_param.grad = grad
+        optimizer.step()
+
+        # Lion, Algorithm 2 of https://arxiv.org/abs/2302.06675
+        update = torch.sign(beta1 * ref_exp_avg + (1 - beta1) * grad)
+        ref_param.mul_(1 - lr * weight_decay).add_(update, alpha=-lr)
+        ref_exp_avg.mul_(beta2).add_(grad, alpha=1 - beta2)
+
+        torch.testing.assert_close(cpu_param.detach(), ref_param, rtol=0, atol=1e-5)
+        torch.testing.assert_close(optimizer.state[cpu_param]['exp_avg'], ref_exp_avg)
+
+
 @pytest.mark.parametrize('dtype', [torch.half, torch.bfloat16, torch.float], ids=["fp16", "bf16", "fp32"])
 @pytest.mark.parametrize('model_size',
                          [
