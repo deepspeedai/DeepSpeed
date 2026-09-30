@@ -76,6 +76,7 @@ class PlanBudget:
     max_segments: int = 1 << 16
     max_merge_passes: int = 8
     max_plan_bytes: int = 1 << 24
+    max_merge_checks: int = 1 << 18
 
 
 @dataclass(frozen=True)
@@ -257,6 +258,8 @@ def _frame_of(piece: AffinePiece, rank: int, side: str, logical_shape: Tuple[int
     if piece.scale != 1.0:
         raise UnsupportedLayoutError(f'{where}: scale {piece.scale}, which would leave a resumed optimizer '
                                      'in the source coordinate')
+    if len(piece.source_strides) != len(piece.shape) or len(piece.dest_strides) != len(piece.shape):
+        raise InvalidMapError(f'{where}: stride vector length must match the piece rank')
     if piece.numel == 0:
         # A rank may hold none of one sub-parameter, and the builders give such a piece the running
         # offset where it would have started, which is legitimately one past the end of the tensor.
@@ -303,8 +306,15 @@ def _normalized(map_: ParamAffineMap, side: str, limits: PlanBudget) -> List[_Fr
         raise UnsupportedLayoutError(
             f'{side}: a shard is described with a different number of axes than the logical parameter, so '
             'no axis correspondence exists to plan against')
+    piece_count = sum(len(pieces) for pieces in map_.pieces_by_rank.values())
+    if piece_count > limits.max_pieces_per_map:
+        raise AffineTransferError(f'{side}: {piece_count} pieces exceeds max_pieces_per_map '
+                                  f'{limits.max_pieces_per_map}')
 
     frames = []
+    for rank, shape in map_.shard_shapes.items():
+        if _product(shape) and not any(piece.numel for piece in map_.pieces_by_rank.get(rank, [])):
+            raise InvalidMapError(f'{side}: rank {rank} declares a nonempty shard but has no pieces')
     for rank, pieces in sorted(map_.pieces_by_rank.items()):
         if rank not in map_.shard_shapes:
             raise InvalidMapError(f'{side}: rank {rank} holds pieces but declares no shard shape')
@@ -317,10 +327,8 @@ def _normalized(map_: ParamAffineMap, side: str, limits: PlanBudget) -> List[_Fr
             frame = _frame_of(piece, rank, side, logical_shape, shard_shape)
             if frame is not None:
                 frames.append(frame)
-    if len(frames) > limits.max_pieces_per_map:
-        raise AffineTransferError(f'{side}: {len(frames)} pieces exceeds max_pieces_per_map '
-                                  f'{limits.max_pieces_per_map}')
     _shards_tile(frames, side, limits)
+    _validate_holders(frames, side, limits)
     return frames
 
 
@@ -353,6 +361,33 @@ def _shards_tile(frames: List[_Frame], side: str, limits: PlanBudget) -> None:
                                   'shard elements')
 
 
+def _validate_holders(frames: List[_Frame], side: str, limits: PlanBudget) -> None:
+    """A piece's declared holders must cover exactly its logical box on every named rank."""
+    if len(frames)**2 > limits.max_pair_checks:
+        raise AffineTransferError(f'{side}: holder checks exceed max_pair_checks {limits.max_pair_checks}')
+    by_rank: Dict[int, List[_Frame]] = {}
+    for frame in frames:
+        by_rank.setdefault(frame.rank, []).append(frame)
+
+    for rank, held in by_rank.items():
+        for index, frame in enumerate(held):
+            for other in held[index + 1:]:
+                if not frame.box.intersection(other.box).is_empty:
+                    raise InvalidMapError(f'{side}: rank {rank} holds overlapping logical pieces')
+
+    for frame in frames:
+        actual = set()
+        for rank, held in by_rank.items():
+            covered = sum(frame.box.intersection(other.box).volume for other in held)
+            if covered:
+                actual.add(rank)
+            if rank in frame.locations and covered != frame.box.volume:
+                raise InvalidMapError(f'{side}: rank {rank} does not hold all of {frame.box!r}')
+        if actual != set(frame.locations):
+            raise InvalidMapError(f'{side}: {frame.box!r} has different locations: '
+                                  f'declares {sorted(frame.locations)}, held by {sorted(actual)}')
+
+
 def _sources(frames: List[_Frame], limits: PlanBudget) -> List[Tuple[LogicalBox, Tuple[_Frame, ...]]]:
     """Keep the validated holders of each disjoint source region.
 
@@ -376,13 +411,10 @@ def _sources(frames: List[_Frame], limits: PlanBudget) -> List[Tuple[LogicalBox,
     grouped = []
     for index, box in enumerate(regions):
         holders = by_box[box]
-        if len({frozenset(holder.locations) for holder in holders}) > 1:
-            raise InvalidMapError(f'source: {box!r} is claimed by ranks {[h.rank for h in holders]} '
-                                  'with different locations')
         for other in regions[index + 1:]:
             if not box.intersection(other).is_empty:
-                raise InvalidMapError(f'source: {box!r} and {other!r} overlap without agreeing, so part of '
-                                      'the parameter has two owners')
+                raise UnsupportedLayoutError(f'source: replicas of {box!r} and {other!r} have different '
+                                             'piece boundaries')
         grouped.append((box, tuple(sorted(holders, key=lambda frame: frame.rank))))
     return grouped
 
@@ -398,6 +430,49 @@ def _covers_exactly(region: LogicalBox, parts: Sequence[LogicalBox]) -> bool:
     gap and an overlap of equal size cancel in any total.
     """
     return sum(part.volume for part in parts) == region.volume
+
+
+def _subtract(region: LogicalBox, cut: LogicalBox) -> List[LogicalBox]:
+    """Return the disjoint parts of a box outside another box."""
+    overlap = region.intersection(cut)
+    if overlap.is_empty:
+        return [region]
+    origin = list(region.origin)
+    extent = list(region.extent)
+    pieces = []
+    for axis, (low, high) in enumerate(zip(overlap.origin, overlap.upper())):
+        if origin[axis] < low:
+            shape = extent.copy()
+            shape[axis] = low - origin[axis]
+            pieces.append(LogicalBox(tuple(origin), tuple(shape)))
+            extent[axis] -= shape[axis]
+            origin[axis] = low
+        end = origin[axis] + extent[axis]
+        if high < end:
+            start = origin.copy()
+            shape = extent.copy()
+            start[axis] = high
+            shape[axis] = end - high
+            pieces.append(LogicalBox(tuple(start), tuple(shape)))
+            extent[axis] = high - origin[axis]
+    return pieces
+
+
+def _covers_union(region: LogicalBox, boxes: Sequence[LogicalBox], limits: PlanBudget) -> bool:
+    """Check a union without enumerating parameter elements or counting replica overlap twice."""
+    uncovered = [] if region.is_empty else [region]
+    checks = 0
+    for box in boxes:
+        remaining = []
+        for gap in uncovered:
+            checks += 1
+            if checks > limits.max_pair_checks:
+                raise AffineTransferError(f'coverage checks exceed max_pair_checks {limits.max_pair_checks}')
+            remaining.extend(_subtract(gap, box))
+        uncovered = remaining
+        if not uncovered:
+            return True
+    return not uncovered
 
 
 def plan_transfer(target_map: ParamAffineMap,
@@ -418,6 +493,13 @@ def plan_transfer(target_map: ParamAffineMap,
 
     sources = _sources(_normalized(source_map, 'source', budget), budget)
     targets = _normalized(target_map, 'target', budget)
+    logical_shape = tuple(target_map.logical_shape)
+    logical_box = LogicalBox((0, ) * len(logical_shape), logical_shape)
+    source_volume = sum(box.volume for box, _ in sources)
+    if source_volume != logical_box.volume:
+        raise InvalidMapError(f'source pieces cover {source_volume} of its {logical_box.volume} logical elements')
+    if not _covers_union(logical_box, [frame.box for frame in targets], budget):
+        raise InvalidMapError('target pieces do not cover the full logical parameter')
 
     pair_checks = len(sources) * len(targets)
     if pair_checks > budget.max_pair_checks:
@@ -466,7 +548,7 @@ def plan_transfer(target_map: ParamAffineMap,
     segments = _coalesce(candidates, budget)
     if len(segments) > budget.max_segments:
         raise AffineTransferError(f'{len(segments)} segments exceeds max_segments {budget.max_segments}')
-    plan_bytes = _plan_bytes(segments)
+    plan_bytes = _plan_bytes(segments, logical_shape)
     if plan_bytes > budget.max_plan_bytes:
         raise AffineTransferError(f'plan metadata is {plan_bytes} bytes, over max_plan_bytes '
                                   f'{budget.max_plan_bytes}')
@@ -482,9 +564,10 @@ def plan_transfer(target_map: ParamAffineMap,
                                                   plan_bytes=plan_bytes))
 
 
-def _plan_bytes(segments: Tuple[TransferSegment, ...]) -> int:
+def _plan_bytes(segments: Tuple[TransferSegment, ...], logical_shape: Tuple[int, ...]) -> int:
     """Size of the serialized plan, so the budget is spent on what a caller actually ships."""
-    return len(json.dumps([segment.to_dict() for segment in segments], separators=(',', ':'), sort_keys=True))
+    payload = {'logical_shape': list(logical_shape), 'segments': [segment.to_dict() for segment in segments]}
+    return len(json.dumps(payload, separators=(',', ':'), sort_keys=True).encode('utf-8'))
 
 
 def _merge(one: TransferSegment, other: TransferSegment) -> Optional[TransferSegment]:
@@ -527,6 +610,7 @@ def _coalesce(segments: List[TransferSegment], limits: PlanBudget) -> Tuple[Tran
         groups.setdefault(key, []).append(segment)
 
     folded = []
+    checks = 0
     for group in groups.values():
         merged = sorted(group, key=lambda segment: (segment.target_offset, segment.source_offset, segment.shape))
         for _ in range(limits.max_merge_passes):
@@ -534,6 +618,9 @@ def _coalesce(segments: List[TransferSegment], limits: PlanBudget) -> Tuple[Tran
             joined = False
             for segment in merged:
                 for index, held in enumerate(remaining):
+                    checks += 1
+                    if checks > limits.max_merge_checks:
+                        raise AffineTransferError(f'merge checks exceed max_merge_checks {limits.max_merge_checks}')
                     candidate = _merge(held, segment)
                     if candidate is not None:
                         remaining[index] = candidate

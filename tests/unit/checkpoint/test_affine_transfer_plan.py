@@ -23,6 +23,7 @@ refuse rather than being skipped, so a passing run cannot be an accident of gene
 """
 
 import itertools
+import json
 import random
 
 import pytest
@@ -452,6 +453,132 @@ def test_a_map_naming_a_rank_with_no_shard_is_refused():
                             })
     with pytest.raises(InvalidMapError, match='no shard shape'):
         plan_transfer(replicated_map((4, 4), 1), source)
+
+
+@pytest.mark.parametrize('strides', [(2, ), (2, 1, 1)])
+@pytest.mark.parametrize('side', ['source', 'dest'])
+def test_stride_vector_must_match_piece_rank(strides, side):
+    source_strides = strides if side == 'source' else (2, 1)
+    dest_strides = strides if side == 'dest' else (2, 1)
+    piece = AffinePiece((2, 2), 0, source_strides, 0, dest_strides, [0])
+    malformed = ParamAffineMap((2, 2), {0: (2, 2)}, {0: [piece]})
+    with pytest.raises(InvalidMapError, match='stride vector length'):
+        plan_transfer(replicated_map((2, 2), 1), malformed)
+
+
+@pytest.mark.parametrize('side', ['source', 'target'])
+def test_empty_pieces_count_against_piece_budget(side):
+    empty = ParamAffineMap((0, 1), {0: (0, 1)}, {0: []})
+    piece = AffinePiece((0, 1), 0, (1, 1), 0, (1, 1), [0])
+    many = ParamAffineMap((0, 1), {0: (0, 1)}, {0: [piece] * 3})
+    source, target = (many, empty) if side == 'source' else (empty, many)
+    with pytest.raises(AffineTransferError, match='max_pieces_per_map'):
+        plan_transfer(target, source, PlanBudget(max_pieces_per_map=2))
+
+
+@pytest.mark.parametrize('side', ['source', 'target'])
+@pytest.mark.parametrize('pieces', [{}, {0: []}])
+def test_nonempty_shard_needs_pieces(side, pieces):
+    missing = ParamAffineMap((4, ), {0: (4, )}, pieces)
+    full = replicated_map((4, ), 1)
+    source, target = (missing, full) if side == 'source' else (full, missing)
+    with pytest.raises(InvalidMapError, match='nonempty shard'):
+        plan_transfer(target, source)
+
+
+@pytest.mark.parametrize('side', ['source', 'target'])
+def test_declared_holders_must_match_actual_ranks(side):
+    pieces = {rank: [AffinePiece((4, ), 0, (1, ), 0, (1, ), [0])] for rank in (0, 1)}
+    mismatched = ParamAffineMap((4, ), {0: (4, ), 1: (4, )}, pieces)
+    full = replicated_map((4, ), 2)
+    source, target = (mismatched, full) if side == 'source' else (full, mismatched)
+    with pytest.raises(InvalidMapError, match='different locations'):
+        plan_transfer(target, source)
+
+
+@pytest.mark.parametrize('side', ['source', 'target'])
+def test_declared_replica_without_a_shard_is_refused(side):
+    missing = ParamAffineMap((4, ), {0: (4, )}, {0: [AffinePiece((4, ), 0, (1, ), 0, (1, ), [0, 1])]})
+    full = replicated_map((4, ), 1)
+    source, target = (missing, full) if side == 'source' else (full, missing)
+    with pytest.raises(InvalidMapError, match='different locations'):
+        plan_transfer(target, source)
+
+
+def test_target_must_cover_full_logical_parameter():
+    source = replicated_map((4, ), 1)
+    target = ParamAffineMap((4, ), {0: (2, )}, {0: [AffinePiece((2, ), 0, (1, ), 0, (1, ), [0])]})
+    with pytest.raises(InvalidMapError, match='target pieces do not cover'):
+        plan_transfer(target, source)
+
+
+def test_target_with_no_shards_cannot_skip_the_parameter():
+    source = replicated_map((4, ), 1)
+    target = ParamAffineMap((4, ), {}, {})
+    with pytest.raises(InvalidMapError, match='target pieces do not cover'):
+        plan_transfer(target, source)
+
+
+def test_target_replicas_can_use_different_piece_boundaries():
+    source = replicated_map((2, 4), 1)
+    target = ParamAffineMap((2, 4), {
+        0: (2, 4),
+        1: (2, 4)
+    }, {
+        0: [AffinePiece((2, 4), 0, (4, 1), 0, (4, 1), [0, 1])],
+        1: [AffinePiece((1, 4), offset, (4, 1), offset, (4, 1), [0, 1]) for offset in (0, 4)]
+    })
+    full = torch.arange(8, dtype=torch.float64).reshape(2, 4)
+    plan = plan_transfer(target, source)
+    copied = _apply_plan(plan, target, {0: source.extract(full, 0)})
+    for shard in copied.values():
+        torch.testing.assert_close(shard, full)
+
+
+def test_replica_declarations_match_each_partial_region():
+    source = replicated_map((2, 4), 1)
+    target = ParamAffineMap((2, 4), {
+        0: (2, 4),
+        1: (2, 4)
+    }, {
+        0: [AffinePiece((2, 4), 0, (4, 1), 0, (4, 1), [0, 1])],
+        1: [
+            AffinePiece((1, 4), 0, (4, 1), 0, (4, 1), [0, 1]),
+            AffinePiece((1, 4), 4, (4, 1), 4, (4, 1), [1]),
+        ]
+    })
+    with pytest.raises(InvalidMapError, match='different locations'):
+        plan_transfer(target, source)
+
+
+def test_partial_replica_boundaries_offer_rebuild_fallback():
+    source = ParamAffineMap((2, 4), {
+        0: (2, 4),
+        1: (2, 4)
+    }, {
+        0: [AffinePiece((2, 4), 0, (4, 1), 0, (4, 1), [0, 1])],
+        1: [AffinePiece((1, 4), offset, (4, 1), offset, (4, 1), [0, 1]) for offset in (0, 4)]
+    })
+    with pytest.raises(UnsupportedLayoutError, match='different piece boundaries'):
+        plan_transfer(replicated_map((2, 4), 1), source)
+
+
+def test_plan_byte_budget_counts_the_serialized_envelope():
+    source = replicated_map((4, ), 1)
+    plan = plan_transfer(source, source)
+    encoded = json.dumps(plan.to_dict(), separators=(',', ':'), sort_keys=True).encode('utf-8')
+    assert plan.statistics.plan_bytes == len(encoded)
+    with pytest.raises(AffineTransferError, match='max_plan_bytes'):
+        plan_transfer(source, source, PlanBudget(max_plan_bytes=len(encoded) - 1))
+
+
+def test_merge_comparisons_have_their_own_budget():
+    rows = 16
+    source = replicated_map((rows, 2), 1)
+    pieces = [AffinePiece((1, 2), 2 * row, (2, 1), 2 * (rows - row - 1), (2, 1), [0]) for row in range(rows)]
+    target = ParamAffineMap((rows, 2), {0: (rows, 2)}, {0: pieces})
+    with pytest.raises(AffineTransferError, match='max_merge_checks'):
+        plan_transfer(target, source, PlanBudget(max_merge_checks=10))
 
 
 # ---------------------------------------------------------------- never materializing
