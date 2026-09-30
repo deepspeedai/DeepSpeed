@@ -416,13 +416,12 @@ def clip_grad_norm_(parameters, max_norm, norm_type=2, mpu=None):
         # on that group. The second slot carries "an expert here has no group name", which
         # has no expert parallel group to reduce over, so such a call stays on the
         # original path rather than guessing which group the parameter belongs to.
-        vote = torch.tensor(
-            [
-                float(any(is_moe_param(p) and getattr(p, "group_name", None) is not None for p in parameters)),
-                float(any(is_moe_param(p) and getattr(p, "group_name", None) is None for p in parameters)),
-            ],
-            device=get_accelerator().current_device_name(),
-            dtype=torch.float)
+        vote = torch.tensor([
+            float(any(is_moe_param(p) and getattr(p, "group_name", None) is not None for p in parameters)),
+            float(any(is_moe_param(p) and getattr(p, "group_name", None) is None for p in parameters)),
+        ],
+                            device=get_accelerator().current_device_name(),
+                            dtype=torch.float)
         dist.all_reduce(vote, group=groups._clone_world_group())
         if vote[0].item() > 0 and vote[1].item() == 0:
             expert_group_names = registry
@@ -487,10 +486,7 @@ def clip_grad_norm_(parameters, max_norm, norm_type=2, mpu=None):
         # `total_norm` now covers only the replicated parameters, so it is already the
         # same on every rank. Fold the experts in over their own group, counting each
         # expert once, rather than averaging norms that describe different parameters.
-        moe_norm = get_norm_with_moe_layers(total_norm,
-                                            mpu=mpu,
-                                            expert_tensors=expert_tensors,
-                                            norm_type=norm_type)
+        moe_norm = get_norm_with_moe_layers(total_norm, mpu=mpu, expert_tensors=expert_tensors, norm_type=norm_type)
         # That helper reports a non-finite norm as -1. Left as-is it would make
         # `clip_coef` negative and flip the sign of every gradient; inf keeps the
         # behaviour the averaging path already had, which is to scale them to zero.

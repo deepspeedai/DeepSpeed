@@ -79,8 +79,8 @@ class TestClipGradNorm(DistributedTest):
         # computed norm rather than the clipped result.
         norm = ds_utils.clip_grad_norm_(params, max_norm=1e9)
 
-        assert abs(float(norm) - expected) < 1e-4, (
-            f"global norm {float(norm)} should be {expected} regardless of expert placement")
+        assert abs(float(norm) -
+                   expected) < 1e-4, (f"global norm {float(norm)} should be {expected} regardless of expert placement")
 
     def _expert(self, value, device, with_grad=True):
         param = torch.nn.Parameter(torch.zeros(4, device=device))
@@ -137,9 +137,7 @@ class TestClipGradNorm(DistributedTest):
         rank = dist.get_rank()
         device = get_accelerator().device_name(rank)
 
-        norm = ds_utils.clip_grad_norm_([self._expert(float(rank + 1), device)],
-                                        max_norm=1e9,
-                                        norm_type=float('inf'))
+        norm = ds_utils.clip_grad_norm_([self._expert(float(rank + 1), device)], max_norm=1e9, norm_type=float('inf'))
 
         assert abs(float(norm) - 2.0) < 1e-4
 
