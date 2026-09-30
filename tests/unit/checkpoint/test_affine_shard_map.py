@@ -456,6 +456,55 @@ def test_stored_version_is_the_format_version():
     assert AFFINE_MAP_FORMAT_VERSION >= 1
 
 
+def test_singleton_stride_overlap_is_refused():
+    pieces = [AffinePiece((1, 2), offset, (4, 1), 0, (4, 1), [0]) for offset in (0, 2)]
+    affine_map = ParamAffineMap((1, 4), {0: (1, 4)}, {0: pieces})
+    with pytest.raises(ValueError, match='twice'):
+        affine_map.validate()
+
+
+def test_singleton_stride_out_of_bounds_is_refused():
+    pieces = [AffinePiece((1, 2), source, (4, 1), dest, (4, 1), [0]) for source, dest in ((0, 0), (2, 3))]
+    affine_map = ParamAffineMap((1, 4), {0: (1, 4)}, {0: pieces})
+    with pytest.raises(ValueError, match='outside the shard'):
+        affine_map.validate()
+
+
+def test_singleton_stride_contiguous_layout_round_trips():
+    pieces = [AffinePiece((1, 2), offset, (4, 1), offset, (4, 1), [0]) for offset in (0, 2)]
+    affine_map = ParamAffineMap((1, 4), {0: (1, 4)}, {0: pieces})
+    shard = torch.arange(4).reshape(1, 4)
+    affine_map.validate()
+    torch.testing.assert_close(affine_map.rebuild({0: shard}), shard)
+
+
+def test_strided_column_pieces_remain_valid():
+    pieces = [AffinePiece((2, 2), offset, (4, 1), offset, (4, 1), [0]) for offset in (0, 2)]
+    affine_map = ParamAffineMap((2, 4), {0: (2, 4)}, {0: pieces})
+    shard = torch.arange(8).reshape(2, 4)
+    affine_map.validate()
+    torch.testing.assert_close(affine_map.rebuild({0: shard}), shard)
+
+
+def test_shard_element_count_mismatch_is_value_error():
+    piece = AffinePiece((2, ), 0, (1, ), 0, (1, ), [0])
+    affine_map = ParamAffineMap((4, ), {0: (4, )}, {0: [piece]})
+    with pytest.raises(ValueError, match='account for 2'):
+        affine_map.validate()
+
+
+def test_destination_validation_does_not_enumerate_elements(monkeypatch):
+    size = 10**9
+    piece = AffinePiece((size, 8), 0, (8, 1), 0, (8, 1), [0])
+    affine_map = ParamAffineMap((size, 8), {0: (size, 8)}, {0: [piece]})
+
+    def refuse_walk(self):
+        raise AssertionError('validation must not enumerate parameter elements')
+
+    monkeypatch.setattr(AffinePiece, 'source_offsets', refuse_walk)
+    affine_map.validate()
+
+
 # Guards added in review. Each one covers a way a map could produce a plausible but wrong
 # parameter rather than failing, which is the failure mode that matters for a checkpoint.
 
