@@ -23,7 +23,7 @@ from deepspeed.runtime.fp16.loss_scaler import CreateLossScaler
 from deepspeed.runtime.torch_autocast import get_autocast_dtype, get_all_comm_dtypes, is_autocast_initialized, sort_dtypes
 from deepspeed.runtime.utils import (empty_cache, see_memory_usage, has_inf_or_nan, inf, is_model_parallel_parameter,
                                      align_dense_tensors, all_gather_dp_groups, mask_nan_or_inf_with_val_inplace,
-                                     count_used_parameters_in_backward)
+                                     count_used_parameters_in_backward, is_optimized_parameter)
 from deepspeed.runtime.zero.config import ZeroStageEnum
 from deepspeed.runtime.zero.utils import get_norm_dtype
 from deepspeed.runtime.zero.offload_config import OffloadDeviceEnum, OffloadStateTypeEnum
@@ -386,6 +386,8 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         else:
             self.use_grad_accum_attribute = False
 
+        # Groups whose Muon update was written into the gradient partitions without loss scale.
+        self.groups_lacking_loss_scale = set()
         self._muon_allgather_buffers = OrderedDict()
         self._muon_allgather_buffer_bytes = 0
         self._muon_allgather_max_cached_bytes = 256 * 1024 * 1024
@@ -408,7 +410,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             # TODO: Explore simplification that avoids the extra book-keeping by pushing the reordered group
             trainable_parameters = []
             for param in param_group['params']:
-                if param.requires_grad:
+                if is_optimized_parameter(param):
                     param.grad_accum = None
                     param.param_idx_in_group = len(trainable_parameters)
                     trainable_parameters.append(param)
@@ -2484,8 +2486,13 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         current_size = 0
         # find the flatten copy in the optimizer's state
         flatten_copy = self.optimizer.param_groups[param_group_idx]['params'][0]
+        staged_momentum = None
         if self._is_muon_group(tensor_list):
             self._muon_momentum_buffer(tensor_list, param_group_idx, dtype, device)
+            self.groups_lacking_loss_scale.add(param_group_idx)
+            # Staged once for the whole partition: staging copies the committed momentum in, so
+            # doing it per parameter would throw away what the parameters before it just wrote.
+            staged_momentum = self._muon_staging_momentum(flatten_copy, param_group_idx)
 
         partition_id = dist.get_rank(group=self.real_dp_process_group[param_group_idx])
         buffer_idx = 0
@@ -2493,8 +2500,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             grad_accum = self.all_grad_tensors[param_group_idx][i]
             if getattr(tensor, 'use_muon', False) and 'muon' in self.optimizer.__class__.__name__.lower():
                 assert tensor.ndim > 1, f"if use muon, then tensor dim > 1, got {tensor.size()}"
-                buffer = torch.narrow(self._muon_staging_momentum(flatten_copy, param_group_idx), 0, buffer_idx,
-                                      tensor.numel()).view(tensor.size())
+                buffer = torch.narrow(staged_momentum, 0, buffer_idx, tensor.numel()).view(tensor.size())
                 ns_method = self.optimizer.param_groups[param_group_idx].get('ns_method', 'gram')
                 grad_accum = muon_update(grad_accum,
                                          buffer,
@@ -2535,6 +2541,15 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
 
     def _is_muon_group(self, tensor_list):
         return getattr(tensor_list[0], 'use_muon', False) and 'muon' in self.optimizer.__class__.__name__.lower()
+
+    def _muon_update_lacks_loss_scale(self, group_index):
+        """Whether this group holds a Muon update that has to be scaled like a gradient.
+
+        Newton-Schulz returns the same update at any loss scale, so unlike a gradient it does not
+        carry the scale that the norm and unscale_and_clip_grads assume. The path that writes such
+        an update marks its group in `groups_lacking_loss_scale`; step() scales the marked ones back.
+        """
+        return self.loss_scale != 1.0 and group_index in self.groups_lacking_loss_scale
 
     def _muon_momentum_buffer(self, tensor_list, param_group_idx, dtype, device):
         """The flat momentum buffer for this group, in the dtype `muon_update` needs.
@@ -2580,16 +2595,20 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         flat_tensor_list = []
         current_size = 0
         flatten_copy = self.optimizer.param_groups[param_group_idx]['params'][0]
+        staged_momentum = None
         if self._is_muon_group(tensor_list):
             self._muon_momentum_buffer(tensor_list, param_group_idx, dtype, device)
+            self.groups_lacking_loss_scale.add(param_group_idx)
+            # Staged once for the whole partition: staging copies the committed momentum in, so
+            # doing it per parameter would throw away what the parameters before it just wrote.
+            staged_momentum = self._muon_staging_momentum(flatten_copy, param_group_idx)
 
         buffer_idx = 0
         for i, tensor in enumerate(tensor_list):
             grad_accum = self.all_grad_tensors[param_group_idx][i]
             if getattr(tensor, 'use_muon', False) and 'muon' in self.optimizer.__class__.__name__.lower():
                 assert tensor.ndim > 1, f"if use muon, then tensor dim > 1, got {tensor.size()}"
-                buffer = torch.narrow(self._muon_staging_momentum(flatten_copy, param_group_idx), 0, buffer_idx,
-                                      tensor.numel()).view(tensor.size())
+                buffer = torch.narrow(staged_momentum, 0, buffer_idx, tensor.numel()).view(tensor.size())
                 ns_method = self.optimizer.param_groups[param_group_idx].get('ns_method', 'gram')
                 grad_accum = muon_update(grad_accum,
                                          buffer,
@@ -2677,7 +2696,11 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                 norm = self.complete_grad_norm_calculation_for_cpu_offload(self.params_in_partition[i])
                 norm_groups.append(norm)
             else:
-                norm_groups.append(self.get_grad_norm_direct(self.averaged_gradients[i], self.params_in_partition[i]))
+                norm = self.get_grad_norm_direct(self.averaged_gradients[i], self.params_in_partition[i])
+                if self._muon_update_lacks_loss_scale(i):
+                    # Leave the -1 an invalid norm is masked to as it is.
+                    norm = torch.where(norm >= 0, norm * self.loss_scale, norm)
+                norm_groups.append(norm)
 
         if self.has_moe_layers:
             self._average_expert_grad_norms(norm_groups)
@@ -2831,6 +2854,8 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                         flat_grad_partition = self.flatten(self.averaged_gradients[i])
                 single_grad_partition = flat_grad_partition.to(self.single_partition_of_fp32_groups[i].dtype)
                 del flat_grad_partition
+                if self._muon_update_lacks_loss_scale(i):
+                    single_grad_partition.mul_(self.loss_scale)
                 assert single_grad_partition.numel() == self.partition_size[i], \
                     "averaged gradients have different number of elements that partition size {} {} {} {}".format(
                         single_grad_partition.numel(), self.partition_size[i], i, partition_id)

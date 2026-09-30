@@ -8,6 +8,7 @@ import sys
 import unittest
 
 import torch
+from types import SimpleNamespace
 from unittest import mock
 
 from deepspeed.module_inject.auto_ep_comm import (COMM_BACKEND, DEEPEP_BACKEND, SUPPORTED_DTYPES, _conform_rows,
@@ -574,6 +575,81 @@ class TestBufferLifecycle(unittest.TestCase):
         self.assertEqual(built.call_args.kwargs["scope"], 0)
         built.assert_called_once()
         barrier.assert_called_once_with(group=layer.ep_group, device_ids=[tokens.device.index])
+
+
+class TestCachedDispatchLayout(unittest.TestCase):
+    """A cached dispatch must reproduce the layout its handle was built with.
+
+    DeepEP's cached dispatch takes ``do_expand`` from the caller, defaulting to
+    False, rather than from the handle, while combine reads it from the handle.
+    The forward dispatch is expanded, so the combine backward, which replays
+    that dispatch, has to ask for the expanded layout explicitly or it scatters
+    gradient rows into a different layout than the experts produced.
+    """
+
+    # The token each of four received rows came from, in DeepEP's source-major and expanded (expert-major) layouts.
+    TOKEN_OF_ROW = {False: torch.tensor([0, 1, 0, 2]), True: torch.tensor([1, 0, 2, 0])}
+
+    def exchange(self, buffer):
+        exchange = auto_ep_comm.DeepEPExchange.__new__(auto_ep_comm.DeepEPExchange)
+        exchange.buffer = buffer
+        exchange.num_sms = 12
+        return exchange
+
+    def elastic_buffer(self):
+        token_of_row = self.TOKEN_OF_ROW
+
+        class ElasticBufferContract:
+            """DeepEP's documented behavior: a cached dispatch takes do_expand from its argument, combine from the handle."""
+
+            def dispatch(self, tokens, *, handle, do_expand=False, **kwargs):
+                return tokens[token_of_row[do_expand]], None, None, handle, None
+
+            def combine(self, rows, *, handle, **kwargs):
+                combined = rows.new_zeros(3, rows.shape[1]).index_add(0, token_of_row[handle.do_expand], rows)
+                return combined, None, None
+
+        return ElasticBufferContract()
+
+    def test_the_combine_backward_matches_the_rows_it_combined(self):
+        target = torch.tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]])
+        for expanded in (False, True):
+            with self.subTest(expanded=expanded):
+                exchange = self.exchange(self.elastic_buffer())
+                handle = SimpleNamespace(do_expand=expanded)
+                token_of_row = self.TOKEN_OF_ROW[expanded]
+                weights = torch.nn.Parameter(torch.arange(12, dtype=torch.float32).reshape(4, 3) / 10)
+                expected_weights = torch.nn.Parameter(weights.detach().clone())
+                optimizer = torch.optim.SGD([weights], lr=0.01)
+                expected_optimizer = torch.optim.SGD([expected_weights], lr=0.01)
+                # Two steps, so a gradient scattered into the wrong rows also shows up in the next forward.
+                for _ in range(2):
+                    rows = torch.arange(12, dtype=torch.float32).reshape(4, 3).requires_grad_(True)
+                    expected_rows = rows.detach().clone().requires_grad_(True)
+                    combined = auto_ep_comm.deepep_combine(exchange, rows * weights, handle)
+                    expected = torch.zeros(3, 3).index_add(0, token_of_row, expected_rows * expected_weights)
+                    torch.testing.assert_close(combined, expected, rtol=0, atol=0)
+
+                    (combined * target).sum().backward()
+                    (expected * target).sum().backward()
+                    torch.testing.assert_close(rows.grad, expected_rows.grad, rtol=0, atol=0)
+                    torch.testing.assert_close(weights.grad, expected_weights.grad, rtol=0, atol=0)
+
+                    optimizer.step()
+                    expected_optimizer.step()
+                    torch.testing.assert_close(weights, expected_weights, rtol=0, atol=0)
+                    optimizer.zero_grad(set_to_none=True)
+                    expected_optimizer.zero_grad(set_to_none=True)
+
+    def test_the_forward_dispatch_records_an_expanded_layout(self):
+        exchange = self.exchange(mock.Mock())
+        exchange.buffer.dispatch.return_value = (torch.zeros((4, 8)), None, torch.zeros((4, 1)), mock.Mock(), None)
+        exchange.deep_ep = mock.Mock(topk_idx_t=torch.int64)
+        exchange.num_experts = 4
+
+        exchange.dispatch(torch.ones((2, 8)), torch.zeros((2, 2), dtype=torch.long), torch.ones((2, 2)))
+
+        self.assertIs(exchange.buffer.dispatch.call_args.kwargs["do_expand"], True)
 
 
 class TestAutogradSignatures(unittest.TestCase):

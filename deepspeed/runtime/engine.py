@@ -109,7 +109,7 @@ from deepspeed.utils.timer import NoopTimer, ThroughputTimer, SynchronizedWallCl
     STEP_GLOBAL_TIMER
 from deepspeed.utils.debug import debug_extract_module_and_param_names, debug_clear_module_and_param_names
 from deepspeed.monitor.monitor import MonitorMaster
-from deepspeed.runtime.utils import clip_grad_norm_, compare_tensors_in_structures, maybe_loss_for_backward
+from deepspeed.runtime.utils import clip_grad_norm_, compare_tensors_in_structures, maybe_loss_for_backward, is_optimized_parameter
 from deepspeed.runtime.data_pipeline.constants import DATA_SAMPLING, \
     DATA_ROUTING, DATA_SAMPLING_ENABLED, CURRICULUM_LEARNING, \
     CURRICULUM_LEARNING_ENABLED, DATA_SAMPLING_NUM_WORKERS, RANDOM_LTD, \
@@ -1050,7 +1050,7 @@ class DeepSpeedEngine(Module):
         from deepspeed.runtime.tensor_parallel.config import _get_hf_tp_plan
         hf_tp_plan = _get_hf_tp_plan(model)
 
-        def finalize_autotp(autotp=None, attach_uc_metadata=False):
+        def finalize_autotp(autotp=None, attach_uc_metadata=False, require_vocab_parallel_lm_head=False):
             if autotp is not None:
                 autotp.register_replicated_grad_hooks(model)
 
@@ -1063,7 +1063,7 @@ class DeepSpeedEngine(Module):
                 configure_vocab_parallel_loss(model,
                                               vocab_parallel_heads[0],
                                               backend=tp_config.vocab_parallel_ce_backend)
-            elif tp_config.vocab_parallel_lm_head:
+            elif require_vocab_parallel_lm_head:
                 # Every partitioning path must agree; otherwise the request degrades into ordinary
                 # AutoTP with a gathered head and no distributed loss, which is easy to miss.
                 raise ValueError(
@@ -1084,14 +1084,16 @@ class DeepSpeedEngine(Module):
                             orig_layer_impl=None,
                             keep_module_on_host=tp_config.keep_module_on_host,
                             partition_config=partition_config,
-                            vocab_parallel_lm_head=tp_config.vocab_parallel_lm_head,
+                            vocab_parallel_lm_head=tp_config.vocab_parallel_lm_head is True,
                             model_config=model_config,
                             tp_grain_size=tp_config.tensor_parallel.tp_grain_size,
                             training_mode=True)
             autotp.set_tensor_parallel_config(tp_size, tp_config.tensor_parallel.tp_group)
             autotp.update_linear_policies()
             autotp._replace_module(model)
-            finalize_autotp(autotp, attach_uc_metadata=True)
+            finalize_autotp(autotp,
+                            attach_uc_metadata=True,
+                            require_vocab_parallel_lm_head=tp_config.vocab_parallel_lm_head is True)
             return
 
         if tp_size <= 1:
@@ -1105,6 +1107,29 @@ class DeepSpeedEngine(Module):
 
             layer_specs = TPPlanConverter.convert(hf_tp_plan)
             if layer_specs is not None:
+                hf_requests_vocab_parallel_embedding = any(style.lower() == "embedding_rowwise"
+                                                           for style in hf_tp_plan.values())
+                has_tied_vocab_head = False
+                if hf_requests_vocab_parallel_embedding:
+                    embedding_weight_ids = {
+                        id(module.weight)
+                        for module in model.modules() if isinstance(module, torch.nn.Embedding)
+                    }
+                    has_tied_vocab_head = any(
+                        isinstance(module, torch.nn.Linear) and module_name.split(".")[-1] in (
+                            "lm_head", "embed_out") and id(module.weight) in embedding_weight_ids
+                        for module_name, module in model.named_modules())
+                auto_vocab_parallel_lm_head = tp_config.vocab_parallel_lm_head is None and has_tied_vocab_head
+                use_vocab_parallel_lm_head = tp_config.vocab_parallel_lm_head is True or auto_vocab_parallel_lm_head
+                if auto_vocab_parallel_lm_head:
+                    if self.is_deepcompile_enabled() and self.compile_autotp():
+                        use_vocab_parallel_lm_head = False
+                        log_dist(
+                            "AutoTP: keeping the tied embedding and output head replicated despite the "
+                            "HuggingFace 'embedding_rowwise' plan because the DeepCompile 'autotp' pass "
+                            "does not support vocabulary-parallel embeddings.",
+                            ranks=[0],
+                            level=logging.WARNING)
                 gathered_output_patterns = [
                     pattern for pattern, style in hf_tp_plan.items()
                     if style.lower() in ("colwise_rep", "colwise_gather_output")
@@ -1124,15 +1149,41 @@ class DeepSpeedEngine(Module):
                     orig_layer_impl=None,
                     keep_module_on_host=tp_config.keep_module_on_host,
                     partition_config=tp_plan_config,
-                    vocab_parallel_lm_head=tp_config.vocab_parallel_lm_head,
+                    vocab_parallel_lm_head=use_vocab_parallel_lm_head,
                     model_config=model_config,
                     tp_grain_size=tp_config.tensor_parallel.tp_grain_size,
                     training_mode=True,
                 )
                 autotp.set_tensor_parallel_config(tp_size, tp_config.tensor_parallel.tp_group)
+                if use_vocab_parallel_lm_head:
+                    from deepspeed.sequence.cross_entropy import validate_vocab_parallel_loss
+
+                    # Only compatibility checks may fall back. Never catch errors after
+                    # replacement has mutated the shared weights or installed collectives.
+                    try:
+                        autotp._resolve_vocab_parallel_lm_head()
+                        validate_vocab_parallel_loss(model)
+                    except (ValueError, NotImplementedError) as exc:
+                        if not auto_vocab_parallel_lm_head:
+                            raise
+                        use_vocab_parallel_lm_head = False
+                        autotp.vocab_parallel_lm_head = False
+                        log_dist(
+                            "AutoTP: keeping the tied embedding and output head replicated despite the "
+                            f"HuggingFace 'embedding_rowwise' plan: {exc}",
+                            ranks=[0],
+                            level=logging.WARNING)
+                    if auto_vocab_parallel_lm_head and use_vocab_parallel_lm_head:
+                        log_dist(
+                            "AutoTP: HuggingFace tp_plan requests 'embedding_rowwise' for a tied output head; "
+                            "enabling vocabulary-parallel embedding/head sharding and distributed causal-LM loss. "
+                            "Set vocab_parallel_lm_head=false to retain full-vocabulary logits.",
+                            ranks=[0])
                 autotp.update_linear_policies()
                 autotp._replace_module(model)
-                finalize_autotp(autotp, attach_uc_metadata=True)
+                finalize_autotp(autotp,
+                                attach_uc_metadata=True,
+                                require_vocab_parallel_lm_head=use_vocab_parallel_lm_head)
                 return
             log_dist(
                 f"AutoTP: effective HuggingFace tp_plan could not be converted; falling back to heuristic AutoTP. "
@@ -1166,7 +1217,8 @@ class DeepSpeedEngine(Module):
 
         if vocab_head_autotp is not None:
             vocab_head_autotp._replace_vocab_parallel_lm_head()
-        finalize_autotp(attach_uc_metadata=True)
+        finalize_autotp(attach_uc_metadata=True,
+                        require_vocab_parallel_lm_head=tp_config.vocab_parallel_lm_head is True)
 
     def __del__(self):
         try:
@@ -1603,9 +1655,6 @@ class DeepSpeedEngine(Module):
 
     def autotp_size(self):
         return self._config.tensor_parallel_config.autotp_size
-
-    def graph_harvesting(self):
-        return self._config.graph_harvesting
 
     def fp16_enabled(self):
         return self._config.float16_config.enabled
@@ -2554,7 +2603,6 @@ class DeepSpeedEngine(Module):
                                    dp_process_group=self.seq_data_parallel_group,
                                    timers=timers,
                                    grad_acc_dtype=self.get_data_types()[1],
-                                   graph_harvesting=self.graph_harvesting(),
                                    has_moe_layers=self.has_moe_layers)
 
         return optimizer
@@ -3057,7 +3105,7 @@ class DeepSpeedEngine(Module):
 
         see_memory_usage("Engine before backward", force=self.memory_breakdown())
 
-        if self.is_deepcompile_active() and not self.compile_autotp():
+        if self.is_deepcompile_active() and not self.uses_parallelization_pass_only():
             deepcompile_backward_prologue(self.is_gradient_accumulation_boundary())
 
         if isinstance(self.optimizer, ZeROOptimizer):
@@ -3092,7 +3140,7 @@ class DeepSpeedEngine(Module):
                 self.optimizer.backward_epilogue()
             self.optimizer.exit_backward()
 
-        if self.is_deepcompile_active() and not self.compile_autotp():
+        if self.is_deepcompile_active() and not self.uses_parallelization_pass_only():
             deepcompile_backward_epilogue()
 
         see_memory_usage("Engine after backward", force=self.memory_breakdown())
@@ -4224,7 +4272,7 @@ class DeepSpeedEngine(Module):
         if checkpoint.get(FROZEN_PARAM_FRAGMENTS, None) is not None:
             saved_frozen_params = checkpoint[FROZEN_PARAM_FRAGMENTS]
             for param in self.module.parameters():
-                if param.requires_grad:
+                if is_optimized_parameter(param):
                     continue
                 if param not in self.param_names:
                     raise ValueError(f"failed to find frozen {param} in named params")
@@ -5351,8 +5399,10 @@ class DeepSpeedEngine(Module):
     def _get_zero_frozen_param_attributes(self, attr_func):
         frozen_param_fragments = OrderedDict()
 
+        # "Frozen" here means "not owned by the optimizer", which also covers zero-element
+        # parameters: they are not in the flat groups, so this is where their shape is saved.
         for param in self.module.parameters():
-            if param.requires_grad:
+            if is_optimized_parameter(param):
                 continue
             if param not in self.param_names:
                 raise ValueError(f"failed to find frozen {param} in named params")
