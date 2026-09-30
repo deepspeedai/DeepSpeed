@@ -350,6 +350,23 @@ DualPipeV has the following requirements:
 * Boolean tensors cannot be passed between stages.
 * The `pipe_partitioned` and `grad_partitioned` options for model parallelism
   are not supported.
+* A stage must not pass a floating point tensor that it returns to another
+  operation in the same stage. See the warning below.
+
+**Warning:** During training, DualPipeV clears the data of a stage's outputs
+once they are sent to the next GPU. This saves memory, but the backward pass of
+any operation in the stage that took such an output as its input then computes
+wrong gradients. No error is raised.
+{: .notice--warning}
+
+```python
+def forward(self, x):
+    h = self.block(x)
+    return h, h * self.scale           # unsupported: h is returned and also used
+    return h.clone(), h * self.scale   # supported: the copy is cleared, h is kept
+```
+Integer tensors, such as token ids, and outputs that are views of another
+tensor are not cleared.
 
 #### Zero bubble
 DualPipeV can compute weight gradients later than the rest of a backward pass,
@@ -382,3 +399,22 @@ class LinearFunc(torch.autograd.Function):
 ```
 Other layers need no changes. Deferring weight gradients is not supported with
 the BF16 optimizer.
+
+#### Overlapping forward and backward
+In the middle of a batch, a GPU runs the forward pass of one micro-batch and
+then the backward pass of another. Pass a function as
+`overlapped_forward_backward` to overlap the two. Without it, the forward pass
+runs first and the backward pass second.
+```python
+def overlap(forward, inputs, backward, tensors, grad_tensors):
+    outputs = forward(inputs)
+    backward(tensors, grad_tensors)
+    return outputs
+
+net = DualPipeVModule(layers=net, loss_fn=torch.nn.CrossEntropyLoss(), num_stages=2,
+                      overlapped_forward_backward=overlap)
+```
+`forward(inputs)` runs the layers of the forward pass, which are also available
+as `net.forward_funcs`. `backward` takes the arguments of
+`torch.autograd.backward`, and `tensors` and `grad_tensors` are the ones for the
+whole backward pass. The function must return the outputs of the forward pass.

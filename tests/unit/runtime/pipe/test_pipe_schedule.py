@@ -169,9 +169,11 @@ def test_dualpipev_schedule_runs_to_completion(stages, micro_batches, forward_on
     one-time shape exchange is reached by the two sides in different situations), computes on a
     micro-batch before its data arrived, or sends and receives micro-batches in different orders.
     """
+    # a ForwardBackwardPass computes like its ForwardPass followed by its BackwardPass
     streams = [[
-        cmd for step in schedule.DualPipeVSchedule(micro_batches, stages, rank, forward_only=forward_only)
+        part for step in schedule.DualPipeVSchedule(micro_batches, stages, rank, forward_only=forward_only)
         for cmd in step
+        for part in ([cmd.forward, cmd.backward] if type(cmd) == schedule.ForwardBackwardPass else [cmd])
     ] for rank in range(stages)]
     pos = [0] * stages
     pending = [[] for _ in range(stages)]  # (channel, index, micro-batch) posted since the last CommitP2P

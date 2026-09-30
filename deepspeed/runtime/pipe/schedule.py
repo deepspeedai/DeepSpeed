@@ -410,7 +410,9 @@ class DualPipeVSchedule(PipeSchedule):
 
         def forward_backward_chunk(phase0, phase1, recv0=True):
             cmds = recv_forward(phase0) if recv0 else []
-            cmds += recv_backward(phase1) + [CommitP2P()] + forward(phase0) + backward(phase1)
+            cmds += recv_backward(phase1) + [CommitP2P()] + forward(phase0)
+            if not self.forward_only:
+                cmds[-1] = ForwardBackwardPass(forward=cmds[-1], backward=backward(phase1)[0])
             return cmds + send_forward(phase0) + send_backward(phase1)
 
         def weight_chunk():
@@ -632,6 +634,13 @@ class RecvGrad(BufferOpInstruction):
     .. note::
         The communication is blocking and must be paired with a :class:`SendGrad`
         on the next pipeline stage to avoid deadlock.
+    """
+    pass
+
+
+class ForwardBackwardPass(PipeInstruction):
+    """A :class:`ForwardPass` and the :class:`BackwardPass` of another micro-batch, which the
+    module may overlap.
     """
     pass
 

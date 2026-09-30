@@ -69,7 +69,33 @@ class DualPipeVModule(PipelineModule):
     share one module on rank 0, so no gradient exchange is needed for them.
 
     Only one phase is exposed through ``forward()`` at a time.
+
+    .. warning::
+        The data of a sent output is cleared after the send. A stage must not pass a floating
+        point tensor it returns to another of its operations, or that operation's backward
+        computes wrong gradients without an error. Return a ``clone()`` instead.
+
+    Args:
+        overlapped_forward_backward (callable, optional): Called as ``fn(forward, inputs,
+            backward, tensors, grad_tensors)`` to overlap a forward pass with the backward pass
+            of another micro-batch. It returns the outputs of ``forward(inputs)`` and calls
+            ``backward(tensors, grad_tensors)``, which takes the arguments of
+            ``torch.autograd.backward``.
     """
+
+    # set by the engine: the backward pass to overlap with the next forward()
+    _backward_pass = None
+
+    def __init__(self, *args, overlapped_forward_backward=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.overlapped_forward_backward = overlapped_forward_backward
+
+    def forward(self, forward_input):
+        backward_pass, self._backward_pass = self._backward_pass, None
+        if backward_pass is None:
+            return super().forward(forward_input)
+        with backward_pass as (backward, tensors, grad_tensors):
+            return self.overlapped_forward_backward(super().forward, forward_input, backward, tensors, grad_tensors)
 
     def _partition_layers(self, method='uniform'):
         self.num_stages *= 2
@@ -193,12 +219,16 @@ class DualPipeVEngine(PipelineEngine):
 
     @contextmanager
     def _phase(self, phase):
+        previous = self._active_phase
         self._active_phase = phase
         self.module.activate_phase(phase)
         try:
             yield
         finally:
-            self._active_phase = None
+            # an overlapped backward runs inside the forward of the other phase
+            self._active_phase = previous
+            if previous is not None:
+                self.module.activate_phase(previous)
 
     def _downstream_stage(self, phase):
         return self.stage_id + 1 if phase == 0 else self.stage_id - 1
@@ -260,33 +290,49 @@ class DualPipeVEngine(PipelineEngine):
             if self._is_loss_stage(phase) or (self._is_last_rank() and phase == 0):
                 self.pipe_buffers['outputs'][buffer_id] = None
 
-    def _exec_backward_pass(self, buffer_id, phase, enable_zb):
+    @contextmanager
+    def _backward_pass(self, buffer_id, phase):
+        """Yields ``backward`` and its default arguments. The caller makes the autograd calls,
+        which the parent's backward pass would make itself.
+        """
         if self._is_loss_stage(phase):
-            self.loss = self.pipe_buffers['losses'][buffer_id]
+            tensors = self.scale(self.pipe_buffers['losses'][buffer_id])
             self.pipe_buffers['losses'][buffer_id] = None
-        elif self._is_last_rank() and phase == 0:
-            inputs = self.pipe_buffers['inputs'][self._phase1_buffer(buffer_id)]
-            self.pipe_buffers['inputs'][self._phase1_buffer(buffer_id)] = None
-            grads = [t.grad for t in _as_list(inputs) if t.is_floating_point()]
-            self.grad_layer = grads[0] if torch.is_tensor(inputs) else grads
+            grad_tensors = None
         else:
-            self.grad_layer = self.pipe_buffers['grads'][buffer_id]
-            self.pipe_buffers['grads'][buffer_id] = None
+            if self._is_last_rank() and phase == 0:
+                inputs = self.pipe_buffers['inputs'][self._phase1_buffer(buffer_id)]
+                self.pipe_buffers['inputs'][self._phase1_buffer(buffer_id)] = None
+                grad_tensors = [t.grad for t in _as_list(inputs) if t.is_floating_point()]
+            else:
+                grad_tensors = _as_list(self.pipe_buffers['grads'][buffer_id])
+                self.pipe_buffers['grads'][buffer_id] = None
+            tensors = [t for t in _as_list(self.pipe_buffers['outputs'][buffer_id]) if t.is_floating_point()]
             # backward() checks shapes, so a freed output borrows its gradient's data
-            outputs = _as_list(self.pipe_buffers['outputs'][buffer_id])
-            outputs = [t for t in outputs if t.is_floating_point()]
-            for output, grad in zip(outputs, _as_list(self.grad_layer)):
+            for output, grad in zip(tensors, grad_tensors):
                 if output.shape != grad.shape:
                     output.data = grad
-        WeightGradStore.enabled = enable_zb
-        with self._phase(phase):
-            super()._exec_backward_pass(buffer_id)
-        WeightGradStore.enabled = False
-        if enable_zb:
-            # the BF16 optimizer reads the weight gradients at the end of backward
-            assert not (WeightGradStore.cache and self.using_bf16_optimizer), \
-                "DualPipeV cannot defer weight gradients with the BF16 optimizer"
-            WeightGradStore.flush()
+            if self.using_bf16_optimizer:
+                self.optimizer.clear_lp_grads()
+
+        def backward(*args, **kwargs):
+            with self._phase(phase):
+                torch.autograd.backward(*args, **kwargs)
+
+        # the engine's backward hooks reject autograd calls made outside of engine.backward()
+        self._running_engine_backward = True
+        try:
+            yield backward, tensors, grad_tensors
+        finally:
+            self._running_engine_backward = False
+
+        if self._is_loss_stage(phase):
+            self._backward_epilogue()
+        else:
+            if self.using_bf16_optimizer:
+                self.optimizer.update_hp_grads(clear_lp_grads=False)
+            self._stop_timers(self.engine_timers.backward_inner_timers)
+            self._stop_timers(self.engine_timers.backward_timers)
         # The first stage sends no gradients, so nothing else frees its inputs, and the loss stage
         # keeps its outputs and labels; the parent relies on cyclic buffers overwriting them.
         self.pipe_buffers['outputs'][buffer_id] = None
@@ -294,6 +340,26 @@ class DualPipeVEngine(PipelineEngine):
             self.pipe_buffers['inputs'][buffer_id] = None
         if self._is_loss_stage(phase):
             self.pipe_buffers['labels'][buffer_id] = None
+
+    def _exec_backward_pass(self, buffer_id, phase, enable_zb):
+        WeightGradStore.enabled = enable_zb
+        with self._backward_pass(buffer_id, phase) as (backward, tensors, grad_tensors):
+            backward(tensors, grad_tensors)
+        WeightGradStore.enabled = False
+        if enable_zb:
+            # the BF16 optimizer reads the weight gradients at the end of backward
+            assert not (WeightGradStore.cache and self.using_bf16_optimizer), \
+                "DualPipeV cannot defer weight gradients with the BF16 optimizer"
+            WeightGradStore.flush()
+
+    def _exec_forward_backward_pass(self, forward, backward):
+        if self.module.overlapped_forward_backward is not None:
+            # the module's forward() runs the hook inside this backward pass
+            self.module._backward_pass = self._backward_pass(backward.buffer_id, backward.phase)
+            self._exec_forward_pass(**forward.kwargs)
+        else:
+            self._exec_forward_pass(**forward.kwargs)
+            self._exec_backward_pass(**backward.kwargs)
 
     def _exec_send_activations(self, buffer_id, phase):
         outputs = self.pipe_buffers['outputs'][buffer_id]
@@ -342,6 +408,7 @@ class DualPipeVEngine(PipelineEngine):
         schedule.LoadMicroBatch: _exec_load_micro_batch,
         schedule.ForwardPass: _exec_forward_pass,
         schedule.BackwardPass: _exec_backward_pass,
+        schedule.ForwardBackwardPass: _exec_forward_backward_pass,
         schedule.SendActivation: _exec_send_activations,
         schedule.RecvActivation: _exec_recv_activations,
         schedule.SendGrad: _exec_send_grads,

@@ -328,9 +328,9 @@ class DeferredLinear(nn.Linear):
 class TestDualPipeV(DistributedTest):
     world_size = [1, 2, 4]
 
-    @pytest.mark.parametrize("linear", [nn.Linear, DeferredLinear])
+    @pytest.mark.parametrize("linear, overlapped", [(nn.Linear, False), (DeferredLinear, False), (nn.Linear, True)])
     @pytest.mark.parametrize("checkpoint_interval", [0, 1])
-    def test_matches_sequential_model(self, checkpoint_interval, linear, tmpdir):
+    def test_matches_sequential_model(self, checkpoint_interval, linear, overlapped, tmpdir):
         """DualPipeV must give the same loss and weights as the unpartitioned model.
         A checkpoint saved by one engine must restore the same weights in a fresh engine.
         """
@@ -362,7 +362,23 @@ class TestDualPipeV(DistributedTest):
         data = [(torch.randn(1, hidden), torch.randn(1, hidden)) for _ in range(micro_batches)]
         loss_fn = nn.MSELoss()
 
-        model = DualPipeVModule(layers=layers, num_stages=num_ranks, loss_fn=loss_fn, partition_method='uniform')
+        num_overlapped = 0
+
+        def overlap(forward, inputs, backward, tensors, grad_tensors):
+            # the backward pass runs between the layers of the forward pass
+            nonlocal num_overlapped
+            num_overlapped += 1
+            x = model.forward_funcs[0](inputs)
+            backward(tensors, grad_tensors)
+            for layer in model.forward_funcs[1:]:
+                x = layer(x)
+            return x
+
+        model = DualPipeVModule(layers=layers,
+                                num_stages=num_ranks,
+                                loss_fn=loss_fn,
+                                partition_method='uniform',
+                                overlapped_forward_backward=overlap if overlapped else None)
         engine, _, _, _ = deepspeed.initialize(config=config, model=model, model_parameters=model.parameters())
         engine.set_dataiterator(RepeatingLoader(data))
 
@@ -392,6 +408,7 @@ class TestDualPipeV(DistributedTest):
             assert_nothing_retained()
         # equal weights do not show that any gradient was deferred
         assert linear is nn.Linear or DeferredLinear.num_deferred > 0
+        assert num_overlapped > 0 or not overlapped
 
         # Too few micro-batches must be rejected before the eval iterator replaces the training one.
         with pytest.raises(ValueError):
