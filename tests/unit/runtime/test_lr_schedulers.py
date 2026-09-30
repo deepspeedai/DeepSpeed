@@ -959,8 +959,7 @@ def test_one_cycle_config_from_args_builds_a_scheduler():
     #   ValueError: cycle_second_step_size must be non-negative, got -1.0
     parser = lrs.add_tuning_arguments(argparse.ArgumentParser())
     args = parser.parse_args([
-        "--lr_schedule", ONE_CYCLE, "--cycle_min_lr", "1e-4", "--cycle_max_lr", "1e-3",
-        "--cycle_first_step_size", "4"
+        "--lr_schedule", ONE_CYCLE, "--cycle_min_lr", "1e-4", "--cycle_max_lr", "1e-3", "--cycle_first_step_size", "4"
     ])
 
     config, err = lrs.get_config_from_args(args)
@@ -983,8 +982,8 @@ def test_one_cycle_second_stair_count_falls_back_to_the_first():
     # the first half kept them.
     parser = lrs.add_tuning_arguments(argparse.ArgumentParser())
     args = parser.parse_args([
-        "--lr_schedule", ONE_CYCLE, "--cycle_min_lr", "1e-4", "--cycle_max_lr", "1e-3",
-        "--cycle_first_step_size", "4", "--cycle_first_stair_count", "5"
+        "--lr_schedule", ONE_CYCLE, "--cycle_min_lr", "1e-4", "--cycle_max_lr", "1e-3", "--cycle_first_step_size", "4",
+        "--cycle_first_stair_count", "5"
     ])
 
     config, _ = lrs.get_config_from_args(args)
@@ -1020,8 +1019,8 @@ def test_cycle_momentum_flag_decides_whether_betas_move(argv, cycles):
     # momentum cycling is on. Without the flag the optimizer's own beta1 must survive.
     parser = lrs.add_tuning_arguments(argparse.ArgumentParser())
     args = parser.parse_args([
-        "--lr_schedule", ONE_CYCLE, "--cycle_min_lr", "1e-4", "--cycle_max_lr", "1e-3",
-        "--cycle_first_step_size", "4", "--cycle_min_mom", "0.80", "--cycle_max_mom", "0.99"
+        "--lr_schedule", ONE_CYCLE, "--cycle_min_lr", "1e-4", "--cycle_max_lr", "1e-3", "--cycle_first_step_size", "4",
+        "--cycle_min_mom", "0.80", "--cycle_max_mom", "0.99"
     ] + argv)
 
     config, _ = lrs.get_config_from_args(args)
