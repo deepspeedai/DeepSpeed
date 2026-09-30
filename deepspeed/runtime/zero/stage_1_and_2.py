@@ -375,6 +375,8 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         else:
             self.use_grad_accum_attribute = False
 
+        # Groups whose Muon update was written into the gradient partitions without loss scale.
+        self.groups_lacking_loss_scale = set()
         self._muon_allgather_buffers = OrderedDict()
         self._muon_allgather_buffer_bytes = 0
         self._muon_allgather_max_cached_bytes = 256 * 1024 * 1024
@@ -2415,6 +2417,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         staged_momentum = None
         if self._is_muon_group(tensor_list):
             self._muon_momentum_buffer(tensor_list, param_group_idx, dtype, device)
+            self.groups_lacking_loss_scale.add(param_group_idx)
             # Staged once for the whole partition: staging copies the committed momentum in, so
             # doing it per parameter would throw away what the parameters before it just wrote.
             staged_momentum = self._muon_staging_momentum(flatten_copy, param_group_idx)
@@ -2467,6 +2470,15 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
     def _is_muon_group(self, tensor_list):
         return getattr(tensor_list[0], 'use_muon', False) and 'muon' in self.optimizer.__class__.__name__.lower()
 
+    def _muon_update_lacks_loss_scale(self, group_index):
+        """Whether this group holds a Muon update that has to be scaled like a gradient.
+
+        Newton-Schulz returns the same update at any loss scale, so unlike a gradient it does not
+        carry the scale that the norm and unscale_and_clip_grads assume. The path that writes such
+        an update marks its group in `groups_lacking_loss_scale`; step() scales the marked ones back.
+        """
+        return self.loss_scale != 1.0 and group_index in self.groups_lacking_loss_scale
+
     def _muon_momentum_buffer(self, tensor_list, param_group_idx, dtype, device):
         """The flat momentum buffer for this group, in the dtype `muon_update` needs.
 
@@ -2514,6 +2526,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         staged_momentum = None
         if self._is_muon_group(tensor_list):
             self._muon_momentum_buffer(tensor_list, param_group_idx, dtype, device)
+            self.groups_lacking_loss_scale.add(param_group_idx)
             # Staged once for the whole partition: staging copies the committed momentum in, so
             # doing it per parameter would throw away what the parameters before it just wrote.
             staged_momentum = self._muon_staging_momentum(flatten_copy, param_group_idx)
@@ -2610,7 +2623,11 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                 norm = self.complete_grad_norm_calculation_for_cpu_offload(self.params_in_partition[i])
                 norm_groups.append(norm)
             else:
-                norm_groups.append(self.get_grad_norm_direct(self.averaged_gradients[i], self.params_in_partition[i]))
+                norm = self.get_grad_norm_direct(self.averaged_gradients[i], self.params_in_partition[i])
+                if self._muon_update_lacks_loss_scale(i):
+                    # Leave the -1 an invalid norm is masked to as it is.
+                    norm = torch.where(norm >= 0, norm * self.loss_scale, norm)
+                norm_groups.append(norm)
 
         if self.has_moe_layers:
             self._average_expert_grad_norms(norm_groups)
@@ -2763,6 +2780,8 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                         flat_grad_partition = self.flatten(self.averaged_gradients[i])
                 single_grad_partition = flat_grad_partition.to(self.single_partition_of_fp32_groups[i].dtype)
                 del flat_grad_partition
+                if self._muon_update_lacks_loss_scale(i):
+                    single_grad_partition.mul_(self.loss_scale)
                 assert single_grad_partition.numel() == self.partition_size[i], \
                     "averaged gradients have different number of elements that partition size {} {} {} {}".format(
                         single_grad_partition.numel(), self.partition_size[i], i, partition_id)
