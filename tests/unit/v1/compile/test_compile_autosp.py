@@ -4,6 +4,7 @@
 # DeepSpeed Team
 
 import operator
+import re
 from unittest.mock import patch
 
 import pytest
@@ -26,12 +27,13 @@ pytestmark = pytest.mark.skipif(not required_torch_version(min_version=2.9),
 _SP_SIZE = 2
 
 
-def _create_sdpa_graph(seq_len):
+def _create_sdpa_graph(seq_len, num_heads=2, num_kv_heads=None):
+    num_kv_heads = num_heads if num_kv_heads is None else num_kv_heads
     graph = Graph()
     inputs = []
-    for name in ("query", "key", "value"):
+    for name, heads in (("query", num_heads), ("key", num_kv_heads), ("value", num_kv_heads)):
         node = graph.placeholder(name)
-        node.meta["example_value"] = torch.empty(1, 2, seq_len, 8)
+        node.meta["example_value"] = torch.empty(1, heads, seq_len, 8)
         inputs.append(node)
     sdpa = graph.call_function(F.scaled_dot_product_attention, args=tuple(inputs))
     graph.output(sdpa)
@@ -85,8 +87,117 @@ class TestAutoSPCompile(DistributedTest):
         compare_sp_loss(self, config_dict, sp_size)
 
 
-# Plain pytest classes — no distributed runtime needed because these functions
-# perform pure IR-level graph rewrites; sp_size and get_rank are mocked.
+class TestAutoSPMeshRegistry(DistributedTest):
+    """Re-registering the mesh an engine already uses keeps the existing process groups."""
+    world_size = 4
+
+    def test_same_mesh_is_reused(self, monkeypatch):
+        import deepspeed.comm as dist
+        from deepspeed.compile.custom_ops import sp_dp_registry
+
+        monkeypatch.setattr(sp_dp_registry, "GROUP_REGISTRY", {})
+        sp_dp_registry.populate_registry(2, 2)
+        group = sp_dp_registry.get_group(dist.get_rank() // 2)
+        sp_dp_registry.populate_registry(2, 2)
+
+        assert sp_dp_registry.get_group(dist.get_rank() // 2) is group
+        assert dist.get_world_size(group) == 2
+
+
+# Plain pytest classes — distributed state is mocked where needed, and the remaining
+# tests perform pure IR-level graph rewrites.
+
+
+class TestAutoSPMeshValidation:
+    """The SP/DP registry is process-global and read by compiled graphs at runtime."""
+
+    def test_rejects_changed_mesh(self, monkeypatch):
+        from deepspeed.compile.custom_ops import sp_dp_registry
+
+        registry = {"SP_SIZE": 2, "DP_SIZE": 2, "is_reg": True}
+        monkeypatch.setattr(sp_dp_registry, "GROUP_REGISTRY", registry)
+        monkeypatch.setattr(sp_dp_registry.dist, "get_world_size", lambda *args, **kwargs: 4)
+
+        with pytest.raises(RuntimeError, match="already initialized"):
+            sp_dp_registry.populate_registry(4, 1)
+        assert (sp_dp_registry.sp_size(), sp_dp_registry.dp_size()) == (2, 2)
+
+    @pytest.mark.parametrize("sp_size, dp_size", [(2, 1), (1, 2)])
+    def test_rejects_mesh_not_covering_world(self, monkeypatch, sp_size, dp_size):
+        from deepspeed.compile.custom_ops import sp_dp_registry
+
+        monkeypatch.setattr(sp_dp_registry, "GROUP_REGISTRY", {})
+        monkeypatch.setattr(sp_dp_registry.dist, "get_world_size", lambda *args, **kwargs: 4)
+
+        def fail_new_group(ranks):
+            raise AssertionError(f"process group {ranks} created for an invalid mesh")
+
+        monkeypatch.setattr(sp_dp_registry.dist, "new_group", fail_new_group)
+
+        with pytest.raises(ValueError, match="must cover"):
+            sp_dp_registry.populate_registry(sp_size, dp_size)
+        assert not sp_dp_registry.is_setup()
+
+    @pytest.mark.parametrize("sp_size, dp_size", [(0, 4), (-2, -2)])
+    def test_rejects_non_positive_mesh_dimensions(self, monkeypatch, sp_size, dp_size):
+        from deepspeed.compile.custom_ops import sp_dp_registry
+
+        monkeypatch.setattr(sp_dp_registry, "GROUP_REGISTRY", {})
+        monkeypatch.setattr(sp_dp_registry.dist, "get_world_size", lambda *args, **kwargs: 4)
+
+        with pytest.raises(ValueError, match="must be positive"):
+            sp_dp_registry.populate_registry(sp_size, dp_size)
+        assert not sp_dp_registry.is_setup()
+
+
+class TestAutoSPEngineBackward(DistributedTest):
+    """AutoSP never initializes the ZeRO DeepCompile runtime, so backward must not enter its hooks."""
+    world_size = 1
+
+    def test_backward_skips_zero_deepcompile_hooks(self, monkeypatch):
+        import deepspeed
+        import deepspeed.compile.util as dc_util
+        from unit.simple_model import SimpleModel, random_dataloader
+
+        config = {
+            "train_micro_batch_size_per_gpu": 1,
+            "optimizer": {
+                "type": "Adam",
+                "params": {
+                    "lr": 1e-3
+                }
+            },
+            "zero_optimization": {
+                "stage": 0
+            },
+            "compile": {
+                "deepcompile": True,
+                "passes": ["autosp"]
+            },
+        }
+        model = SimpleModel(hidden_dim=8)
+        engine, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config)
+        # Emulate the state after engine.compile() installed the AutoSP backend, without compiling.
+        engine._set_deepcompile_active(True)
+        assert engine.is_deepcompile_active()
+
+        def fail_native_handle():
+            raise RuntimeError("AutoSP backward must not load the ZeRO DeepCompile runtime")
+
+        monkeypatch.setattr(dc_util, "get_deepcompile_handle", fail_native_handle)
+        monkeypatch.setattr(dc_util, "post_backward_hooks", [fail_native_handle])
+
+        batch = next(
+            iter(
+                random_dataloader(model=engine, total_samples=1, hidden_dim=8, device=engine.device,
+                                  dtype=torch.float)))
+        loss = engine(batch[0], batch[1])
+        engine.backward(loss)
+        engine.step()
+
+
+# Plain pytest classes — distributed state is mocked where needed, and the remaining
+# tests perform pure IR-level graph rewrites.
 
 
 class TestSDPANodesCompile:
@@ -304,3 +415,74 @@ class TestShardTensorCompile:
             shard_tensor_node(reordered_gm, reordered_input_ids)
 
         reordered_gm.graph.lint()
+
+
+def _create_shard_offsets_graph():
+    """Graph mapping the (dynamic) sequence length to this rank's (start, end) shard offsets."""
+    import deepspeed.comm as _dist
+    from deepspeed.compile.custom_ops import sp_dp_registry as _registry
+    from deepspeed.compile.util import create_shard_offsets
+
+    graph = Graph()
+    seq_len = graph.placeholder("seq_len")
+    output = graph.output(seq_len)
+    gm = GraphModule({}, graph)
+    with patch.object(_registry, "sp_size", return_value=_SP_SIZE), \
+         patch.object(_dist, "get_rank", return_value=0):
+        start, end = create_shard_offsets(gm, seq_len)
+    output.args = ((start, end), )
+    gm.recompile()
+    return gm
+
+
+class TestAutoSPDivisibilityValidation:
+    """AutoSP splits the sequence across SP ranks and the heads in the all-to-all, so both must divide evenly."""
+
+    @pytest.mark.parametrize("seq_len, expected", [(16, (0, 8)), (32, (0, 16))])
+    def test_shard_offsets_for_divisible_sequence_length(self, seq_len, expected):
+        assert _create_shard_offsets_graph()(seq_len) == expected
+
+    def test_shard_offsets_reject_non_divisible_sequence_length(self):
+        # The sequence length is dynamic, so the check has to run with the graph rather than at compile time.
+        gm = _create_shard_offsets_graph()
+        with pytest.raises(RuntimeError, match="sequence length to be divisible by sequence_parallel_size"):
+            gm(15)
+
+    @pytest.mark.parametrize("num_heads, num_kv_heads, role, bad_heads", [(3, 3, "query", 3), (4, 1, "key", 1)],
+                             ids=["mha", "gqa"])
+    def test_rejects_non_divisible_attention_heads(self, num_heads, num_kv_heads, role, bad_heads):
+        from deepspeed.compile.custom_ops import sp_dp_registry as _registry
+        from deepspeed.compile.passes.sp_compile import pass_insert_attention_all_to_all
+
+        gm = _create_sdpa_graph(seq_len=8, num_heads=num_heads, num_kv_heads=num_kv_heads)
+        with patch.object(_registry, "sp_size", return_value=_SP_SIZE):
+            with pytest.raises(ValueError, match=re.escape(f"number of {role} heads ({bad_heads}) to be divisible")):
+                pass_insert_attention_all_to_all(gm, ())
+
+    def test_accepts_grouped_query_attention_with_divisible_heads(self):
+        from deepspeed.compile.custom_ops import sp_dp_registry as _registry
+        from deepspeed.compile.passes.sp_compile import pass_insert_attention_all_to_all
+
+        gm = _create_sdpa_graph(seq_len=8, num_heads=4, num_kv_heads=2)
+        with patch.object(_registry, "sp_size", return_value=_SP_SIZE):
+            pass_insert_attention_all_to_all(gm, ())
+
+        a2a_nodes = [n for n in gm.graph.nodes if n.target == torch.ops.autosp.all_to_all.default]
+        assert len(a2a_nodes) == 4
+
+    def test_all_to_all_rejects_non_divisible_heads_before_the_collective(self):
+        import importlib
+        import deepspeed.comm as _dist
+
+        a2a_module = importlib.import_module("deepspeed.compile.custom_ops.all_to_all")
+
+        def fail_collective(*args, **kwargs):
+            raise AssertionError("the collective must not run for a non-divisible head count")
+
+        with patch.object(a2a_module, "is_setup", return_value=True), \
+             patch.object(a2a_module, "sp_size", return_value=_SP_SIZE), \
+             patch.object(a2a_module, "get_group", return_value=None), \
+             patch.object(_dist, "get_rank", return_value=0), \
+             patch.object(_dist, "all_to_all_single", side_effect=fail_collective):
+            with pytest.raises(ValueError, match=re.escape("number of attention heads (3)")):
+                torch.ops.autosp.all_to_all(torch.empty(1, 3, 4, 8), 1, 2, "q")

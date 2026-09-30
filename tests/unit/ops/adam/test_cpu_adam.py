@@ -111,6 +111,18 @@ def test_cpu_adam_strict_state_updates(model_size, adamw_mode, weight_decay, bia
         torch.testing.assert_close(state['exp_avg_sq'], ref_exp_avg_sq, rtol=3e-5, atol=2e-6)
 
 
+def test_cpu_adam_rejects_amsgrad():
+    from deepspeed.ops.adam import DeepSpeedCPUAdam
+
+    with pytest.raises(RuntimeError, match="AMSGrad"):
+        DeepSpeedCPUAdam([torch.nn.Parameter(torch.zeros(4))], amsgrad=True)
+
+    optimizer = DeepSpeedCPUAdam([torch.nn.Parameter(torch.zeros(4))])
+    with pytest.raises(RuntimeError, match="AMSGrad"):
+        optimizer.add_param_group({'params': [torch.nn.Parameter(torch.zeros(4))], 'amsgrad': True})
+    assert len(optimizer.param_groups) == 1
+
+
 @pytest.mark.parametrize('dtype', [torch.half, torch.bfloat16, torch.float], ids=["fp16", "bf16", "fp32"])
 @pytest.mark.parametrize('model_size',
                          [

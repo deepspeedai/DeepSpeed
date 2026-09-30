@@ -4,9 +4,11 @@
 # DeepSpeed Team
 
 import pytest
+import torch
 import deepspeed.comm as dist
 from deepspeed.accelerator import get_accelerator
 from deepspeed.runtime.zenflow.zenflow_stage_1_and_2 import _num_selected_columns
+from deepspeed.ops.adam.zenflow_torch_adam import ZenFlowSelectiveAdamW, ZenFlowSelectiveAdamW_stage3
 
 from unit.common import DistributedTest
 from unit.simple_model import SimpleModel, random_dataloader
@@ -20,6 +22,57 @@ import deepspeed
 ])
 def test_num_selected_columns_has_nonzero_floor(num_columns, topk_ratio, expected):
     assert _num_selected_columns(num_columns, topk_ratio) == expected
+
+
+@pytest.mark.parametrize("dtype,steps", [(torch.bfloat16, 300), (torch.float16, 2100), (torch.float32, 300)])
+def test_selective_adamw_step_counter_keeps_advancing(dtype, steps):
+    model = torch.nn.Linear(2, 1, bias=False, dtype=dtype)
+    optimizer = ZenFlowSelectiveAdamW(model.parameters(), lr=0.01)
+    inputs = torch.ones(1, 2, dtype=dtype)
+    for _ in range(steps):
+        optimizer.zero_grad()
+        model(inputs).float().square().sum().backward()
+        model.weight.selected_indices = torch.arange(2)
+        model.weight.selected_grad = model.weight.grad
+        optimizer.step()
+
+    # BF16 cannot represent 257 and FP16 cannot represent 2049. The bias-correction
+    # clock must keep advancing even when the model uses either of those dtypes.
+    assert optimizer.state_dict()["state"][0]["step"].item() == steps
+
+
+@pytest.mark.parametrize("optimizer_cls", [ZenFlowSelectiveAdamW, ZenFlowSelectiveAdamW_stage3])
+@pytest.mark.parametrize("counter_dtype", [torch.bfloat16, torch.float16, torch.float32, torch.float64])
+def test_selective_adamw_loads_counter_without_losing_precision(optimizer_cls, counter_dtype):
+    param = torch.nn.Parameter(torch.ones(2))
+    original = torch.optim.AdamW([param])
+    param.grad = torch.ones_like(param)
+    original.step()
+    checkpoint = original.state_dict()
+    checkpoint["state"][0]["step"] = torch.tensor(256, dtype=counter_dtype)
+
+    optimizer = optimizer_cls([param])
+    optimizer.load_state_dict(checkpoint)
+    restored_step = optimizer.state_dict()["state"][0]["step"]
+    assert restored_step.item() == 256
+    expected_dtype = torch.float64 if counter_dtype == torch.float64 else torch.float32
+    assert restored_step.dtype == expected_dtype
+    assert checkpoint["state"][0]["step"].dtype == counter_dtype
+
+
+@pytest.mark.parametrize("dtype,boundary", [(torch.bfloat16, 256), (torch.float16, 2048)])
+def test_selective_adamw_resumed_counter_advances_past_old_limit(dtype, boundary):
+    param = torch.nn.Parameter(torch.ones(2, dtype=dtype))
+    optimizer = ZenFlowSelectiveAdamW([param])
+    param.selected_grad = torch.ones_like(param)
+    optimizer.step()
+    checkpoint = optimizer.state_dict()
+    checkpoint["state"][0]["step"] = torch.tensor(boundary, dtype=dtype)
+
+    optimizer.load_state_dict(checkpoint)
+    param.selected_grad = torch.ones_like(param)
+    optimizer.step()
+    assert optimizer.state_dict()["state"][0]["step"].item() == boundary + 1
 
 
 class BaseZenFlowTest:

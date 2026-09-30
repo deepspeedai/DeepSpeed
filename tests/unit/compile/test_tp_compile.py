@@ -5,6 +5,7 @@
 
 from types import SimpleNamespace
 from unittest.mock import patch
+from copy import deepcopy
 
 import pytest
 import torch
@@ -53,6 +54,31 @@ class MLPModel(torch.nn.Module):
         for layer in self.layers:
             x = layer(x)
         return self.head(x)
+
+
+class TiedEmbeddingMLPModel(torch.nn.Module):
+
+    def __init__(self):
+        super().__init__()
+        self.embed_tokens = torch.nn.Embedding(37, HIDDEN_DIM, padding_idx=0)
+        self.layers = torch.nn.ModuleList([MLPBlock()])
+        self.lm_head = torch.nn.Linear(HIDDEN_DIM, 37, bias=False)
+        self.lm_head.weight = self.embed_tokens.weight
+        self.loss_function = torch.nn.functional.cross_entropy
+        self.config = SimpleNamespace(
+            base_model_tp_plan={
+                "embed_tokens": "embedding_rowwise",
+                "layers.*.gate_proj": "colwise",
+                "layers.*.up_proj": "colwise",
+                "layers.*.down_proj": "rowwise",
+                "lm_head": "colwise_gather_output",
+            })
+
+    def forward(self, input_ids):
+        hidden = self.embed_tokens(input_ids)
+        for layer in self.layers:
+            hidden = layer(hidden)
+        return self.lm_head(hidden)
 
 
 def build_config(tp_size, use_compile_pass, gather_output_head=False):
@@ -119,6 +145,59 @@ def test_gather_from_tp_region_supports_uneven_shards():
         gathered = tp_collectives.gather_from_tp_region(local, [2, 3])
 
     assert torch.equal(gathered, torch.tensor([[7.0, 8.0, 1.0, 2.0, 3.0]]))
+
+
+class TestAutoTPCompileTiedEmbeddings(DistributedTest):
+    world_size = 2
+    non_daemonic_procs = True
+
+    @pytest.mark.sequential
+    @pytest.mark.parametrize("explicit_vocab_parallel", [None, False, True])
+    def test_embedding_rowwise_plan_preserves_compile_compatibility(self, explicit_vocab_parallel):
+        device = get_accelerator().current_device_name()
+        torch.manual_seed(42)
+        model = TiedEmbeddingMLPModel().to(device)
+        reference = deepcopy(model)
+        reference_optimizer = torch.optim.SGD(reference.parameters(), lr=0.01)
+        optimizer = torch.optim.SGD(model.parameters(), lr=0.01)
+        engine, _, _, _ = deepspeed.initialize(model=model,
+                                               optimizer=optimizer,
+                                               config={
+                                                   "train_micro_batch_size_per_gpu": 1,
+                                                   "gradient_clipping": 0.0,
+                                                   "tensor_parallel": {
+                                                       "autotp_size": self.world_size,
+                                                       "vocab_parallel_lm_head": explicit_vocab_parallel,
+                                                   },
+                                                   "compile": {
+                                                       "deepcompile": True,
+                                                       "passes": ["autotp"],
+                                                   },
+                                               })
+        if explicit_vocab_parallel:
+            # An explicit request must not silently downgrade to a replicated vocabulary.
+            with pytest.raises(NotImplementedError, match="VocabParallelEmbedding"):
+                engine.compile()
+            return
+
+        engine.compile()
+        input_ids = torch.tensor([[0, 1, 19, 36]], device=device)
+        labels = torch.tensor([1, 19, 36, 2], device=device)
+        for _ in range(3):
+            expected = reference(input_ids)
+            output = engine(input_ids)
+            torch.testing.assert_close(output, expected, atol=2e-5, rtol=1e-5)
+            expected_loss = torch.nn.functional.cross_entropy(expected.flatten(0, 1), labels)
+            loss = torch.nn.functional.cross_entropy(output.flatten(0, 1), labels)
+            expected_loss.backward()
+            engine.backward(loss)
+            torch.testing.assert_close(engine.module.embed_tokens.weight.grad,
+                                       reference.embed_tokens.weight.grad,
+                                       atol=2e-5,
+                                       rtol=1e-5)
+            reference_optimizer.step()
+            reference_optimizer.zero_grad()
+            engine.step()
 
 
 class TestAutoTPCompileEquivalence(DistributedTest):
