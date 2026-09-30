@@ -13,7 +13,7 @@ from deepspeed.ops.op_builder import CPULionBuilder
 class DeepSpeedCPULion(torch.optim.Optimizer):
     optimizer_id = 0
 
-    def __init__(self, model_params, lr=1e-3, betas=(0.9, 0.999), weight_decay=0, fp32_optimizer_states=True):
+    def __init__(self, params, lr=1e-3, betas=(0.9, 0.999), weight_decay=0, fp32_optimizer_states=True):
         """Fast vectorized implementation of Lion optimizer on CPU:
 
         See Symbolic Discovery of Optimization Algorithms (https://doi.org/10.48550/arXiv.2302.06675).
@@ -26,7 +26,7 @@ class DeepSpeedCPULion(torch.optim.Optimizer):
 
 
         Arguments:
-            model_params (iterable): iterable of parameters to optimize or dicts defining
+            params (iterable): iterable of parameters to optimize or dicts defining
                 parameter groups.
             lr (float, optional): learning rate. (default: 1e-3)
             betas (Tuple[float, float], optional): coefficients used for computing
@@ -37,7 +37,7 @@ class DeepSpeedCPULion(torch.optim.Optimizer):
         """
 
         default_args = dict(lr=lr, betas=betas, weight_decay=weight_decay)
-        super(DeepSpeedCPULion, self).__init__(model_params, default_args)
+        super(DeepSpeedCPULion, self).__init__(params, default_args)
 
         cpu_info = get_cpu_info()
         self.cpu_vendor = cpu_info["vendor_id_raw"].lower() if "vendor_id_raw" in cpu_info else "unknown"
