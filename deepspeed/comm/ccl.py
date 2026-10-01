@@ -134,7 +134,7 @@ class CCLBackend(TorchBackend):
     def scatter(self, tensor, gather_list, dst, group=None, async_op=False):
         return self.run_collective(name="scatter", tensor=tensor, gather_list=gather_list, dst=dst, group=group)
 
-    def barrier(self, group=None, async_op=False):
+    def barrier(self, group=None, async_op=False, device_ids=None):
         return self.run_collective(name="barrier", group=group, async_op=async_op)
 
     def monitored_barrier(self, group=None, timeout=None, wait_all_ranks=False):

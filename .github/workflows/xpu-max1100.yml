@@ -72,7 +72,7 @@ jobs:
         export I_MPI_SHM=off
         pytest --verbose accelerator/*
         pytest --verbose autotuning/*
-        pytest --verbose model_parallelism/*
+        pytest --verbose v1/autotp/*
         pytest --verbose monitor/*
         pytest --verbose utils/*
         pytest --verbose runtime/test_ds_config_model.py

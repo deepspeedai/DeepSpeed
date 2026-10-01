@@ -8,11 +8,20 @@ path).  Patterns like ``model.layers.0.self_attn.q_proj`` never matched
 because the name was just ``0.self_attn.q_proj``.
 """
 
+import logging
+
 import pytest
 import torch.nn as nn
+from transformers import PreTrainedModel, PretrainedConfig
 
 from deepspeed.module_inject.auto_tp import AutoTP, AutoTPConfig, PartitionType, TPLayerSpec
-from deepspeed.module_inject.layers import LinearLayer
+from deepspeed.module_inject.layers import (LinearAllreduce, LinearLayer, LmHeadLinearAllreduce, VocabParallelLinear,
+                                            VocabParallelEmbedding, set_autotp_mode)
+from deepspeed.module_inject.tp_plan_converter import TPPlanConverter
+from deepspeed.utils import logger as ds_logger
+from deepspeed.sequence.cross_entropy import (VocabParallelCausalLMLoss, configure_vocab_parallel_loss,
+                                              validate_vocab_parallel_loss)
+from deepspeed.runtime.tensor_parallel.config import TPTrainingConfig
 
 
 class SubAttn(nn.Module):
@@ -53,6 +62,15 @@ class OutputModel(nn.Module):
             self.lm_head.weight = self.embed_tokens.weight
 
 
+class HFOutputModel(PreTrainedModel):
+    config_class = PretrainedConfig
+
+    def __init__(self):
+        super().__init__(PretrainedConfig())
+        self.embed_tokens = nn.Embedding(100, 32)
+        self.lm_head = nn.Linear(32, 100, bias=False)
+
+
 def _build_config():
     """Partition config that matches q_proj and o_proj via regex."""
     return AutoTPConfig(layer_specs=[
@@ -85,6 +103,7 @@ def _capture_matched_names(model, config):
             linear_layer_setting=None,
             orig_layer_impl=None,
             partition_config=config,
+            model_config=getattr(model, "config", None),
         )
         autotp._replace_module(model)
     finally:
@@ -151,8 +170,64 @@ def _build_gathered_lm_head_autotp(model, mp_size=1):
         linear_layer_setting=None,
         orig_layer_impl=None,
         partition_config=config,
+        model_config=getattr(model, "config", None),
     )
     autotp.set_tensor_parallel_config(mp_size, None)
+    autotp.update_linear_policies()
+    return autotp
+
+
+def _build_local_lm_head_autotp(model, vocab_parallel_lm_head=True):
+    config = AutoTPConfig(layer_specs=[
+        TPLayerSpec(patterns=[r".*lm_head\.weight$"], partition_type=PartitionType.COLUMN),
+    ])
+    autotp = AutoTP(
+        module=model,
+        all_reduce_linears=[],
+        prefix="",
+        state_dict=None,
+        linear_layer_setting=None,
+        orig_layer_impl=None,
+        partition_config=config,
+        vocab_parallel_lm_head=vocab_parallel_lm_head,
+    )
+    autotp.set_tensor_parallel_config(1, None)
+    autotp.update_linear_policies()
+    return autotp
+
+
+def _build_legacy_lm_head_autotp(model, training_mode=False):
+    autotp = AutoTP(
+        module=model,
+        all_reduce_linears=("lm_head", "embed_out"),
+        prefix="",
+        state_dict=None,
+        linear_layer_setting=(nn.Linear, nn.Embedding),
+        orig_layer_impl=None,
+        training_mode=training_mode,
+    )
+    autotp.mp_size = 1
+    autotp.mp_group = None
+    autotp.update_linear_policies()
+    return autotp
+
+
+def _build_row_output_head_autotp(model, head="lm_head", training_mode=False, mp_size=1):
+    config = AutoTPConfig(layer_specs=[
+        TPLayerSpec(patterns=[rf".*{head}\.weight$"], partition_type=PartitionType.ROW),
+    ])
+    autotp = AutoTP(
+        module=model,
+        all_reduce_linears=(),
+        prefix="",
+        state_dict=None,
+        linear_layer_setting=(nn.Linear, nn.Embedding),
+        orig_layer_impl=None,
+        partition_config=config,
+        training_mode=training_mode,
+    )
+    autotp.mp_size = mp_size
+    autotp.mp_group = None
     autotp.update_linear_policies()
     return autotp
 
@@ -176,6 +251,28 @@ def test_gathered_lm_head_falls_back_for_runtime_parameter_tie():
     assert model.lm_head.weight is model.embed_tokens.weight
 
 
+def test_tied_embedding_plan_leaves_lm_head_and_embedding_replicated():
+    model = OutputModel(tied=True)
+    specs = TPPlanConverter.convert({"embed_tokens": "embedding_rowwise", "lm_head": "colwise_gather_output"})
+
+    autotp = AutoTP(
+        module=model,
+        all_reduce_linears=[],
+        prefix="",
+        state_dict=None,
+        linear_layer_setting=None,
+        orig_layer_impl=None,
+        partition_config=AutoTPConfig(layer_specs=specs),
+    )
+    autotp.set_tensor_parallel_config(1, None)
+    autotp.update_linear_policies()
+    autotp._replace_module(model)
+
+    assert isinstance(model.embed_tokens, nn.Embedding)
+    assert isinstance(model.lm_head, nn.Linear)
+    assert model.lm_head.weight is model.embed_tokens.weight
+
+
 def test_gathered_lm_head_uses_column_parallel_layer_when_output_dim_is_uneven():
     model = OutputModel(tied=False)
     model.lm_head = nn.Linear(32, 101, bias=False)
@@ -184,6 +281,324 @@ def test_gathered_lm_head_uses_column_parallel_layer_when_output_dim_is_uneven()
 
     assert isinstance(model.lm_head, LinearLayer)
     assert model.lm_head.gather_output
+
+
+def test_vocab_parallel_linear_exposes_vocab_metadata():
+    layer = VocabParallelLinear(nn.Linear(32, 101, bias=False), mp_group=None, name="lm_head")
+
+    assert layer.vocab_size == 101
+    assert layer.vocab_start_index == 0
+    assert layer.vocab_end_index == 101
+    assert not layer.gather_output
+
+
+@pytest.mark.parametrize("config,expected", [({}, None), ({
+    "vocab_parallel_lm_head": None
+}, None), ({
+    "vocab_parallel_lm_head": False
+}, False), ({
+    "vocab_parallel_lm_head": True
+}, True)])
+def test_vocab_parallel_config_distinguishes_automatic_and_explicit_choices(config, expected):
+    assert TPTrainingConfig(**config).vocab_parallel_lm_head is expected
+
+
+def test_plain_colwise_lm_head_uses_vocab_parallel_layer():
+    model = OutputModel(tied=False)
+
+    _build_local_lm_head_autotp(model, vocab_parallel_lm_head=True)._replace_module(model)
+
+    assert isinstance(model.lm_head, VocabParallelLinear)
+
+
+def test_vocab_parallel_lm_head_warns_when_it_supersedes_an_explicit_spec(caplog):
+    model = OutputModel(tied=False)
+    config = AutoTPConfig(layer_specs=[
+        TPLayerSpec(patterns=[r".*lm_head\.weight$"], partition_type=PartitionType.COLUMN, gather_output=True),
+    ])
+    autotp = AutoTP(
+        module=model,
+        all_reduce_linears=[],
+        prefix="",
+        state_dict=None,
+        linear_layer_setting=None,
+        orig_layer_impl=None,
+        partition_config=config,
+        vocab_parallel_lm_head=True,
+    )
+    autotp.set_tensor_parallel_config(1, None)
+    autotp.update_linear_policies()
+
+    # The DeepSpeed logger does not propagate to the root logger, so attach caplog's handler to it.
+    ds_logger.addHandler(caplog.handler)
+    try:
+        with caplog.at_level(logging.WARNING, logger=ds_logger.name):
+            autotp._replace_module(model)
+    finally:
+        ds_logger.removeHandler(caplog.handler)
+
+    assert isinstance(model.lm_head, VocabParallelLinear)
+    assert any("supersedes" in record.message and "lm_head" in record.message for record in caplog.records)
+
+
+def test_plain_colwise_lm_head_without_flag_keeps_local_logits():
+    model = OutputModel(tied=False)
+
+    _build_local_lm_head_autotp(model, vocab_parallel_lm_head=False)._replace_module(model)
+
+    assert isinstance(model.lm_head, LinearLayer)
+    assert not isinstance(model.lm_head, VocabParallelLinear)
+    assert not model.lm_head.gather_output
+
+
+@pytest.mark.parametrize("name,expected", [
+    ("lm_head", True),
+    ("embed_out", True),
+    ("model.lm_head", True),
+    ("lm_head_proj", False),
+    ("model.lm_head_proj.weight", False),
+    ("inner_lm_head.block", False),
+])
+def test_lm_head_name_matching_ignores_projections(name, expected):
+    autotp = _build_legacy_lm_head_autotp(OutputModel(tied=False))
+
+    assert autotp._is_lm_head_name(name) is expected
+
+
+def test_lm_head_name_matching_uses_configured_patterns():
+    autotp = _build_legacy_lm_head_autotp(OutputModel(tied=False))
+    autotp.partition_config = AutoTPConfig(lm_head_patterns=["output_proj"])
+
+    assert autotp._is_lm_head_name("model.output_proj") is True
+    assert autotp._is_lm_head_name("model.lm_head") is False
+
+
+def test_plain_colwise_lm_head_supports_tied_weights():
+    model = OutputModel(tied=True)
+
+    _build_local_lm_head_autotp(model)._replace_module(model)
+
+    assert isinstance(model.lm_head, VocabParallelLinear)
+    assert isinstance(model.embed_tokens, VocabParallelEmbedding)
+    assert model.lm_head.weight is model.embed_tokens.weight
+
+
+def test_vocab_parallel_lm_head_rejects_unsupported_embedding_forward():
+
+    class OffsetEmbedding(nn.Embedding):
+
+        def forward(self, input_ids):
+            return super().forward(input_ids) + 1
+
+    model = OutputModel(tied=True)
+    model.embed_tokens = OffsetEmbedding(100, 32)
+    model.lm_head.weight = model.embed_tokens.weight
+
+    with pytest.raises(NotImplementedError, match="embedding forward"):
+        _build_local_lm_head_autotp(model)._replace_module(model)
+
+    assert model.lm_head.weight.shape == (100, 32)
+    assert model.lm_head.weight is model.embed_tokens.weight
+
+
+@pytest.mark.parametrize("embedding_kwargs", [{"max_norm": 1.0}, {"scale_grad_by_freq": True}, {"sparse": True}])
+def test_vocab_parallel_lm_head_rejects_unsupported_embedding_options(embedding_kwargs):
+    model = OutputModel(tied=True)
+    model.embed_tokens = nn.Embedding(100, 32, **embedding_kwargs)
+    model.lm_head.weight = model.embed_tokens.weight
+
+    with pytest.raises(NotImplementedError, match="embedding options"):
+        _build_local_lm_head_autotp(model)._replace_module(model)
+
+
+def test_vocab_parallel_lm_head_supersedes_conflicting_embedding_spec(caplog):
+    model = OutputModel(tied=True)
+    # A tied vocab-parallel head forces its embedding onto the same vocab-dimension shard as
+    # the head, regardless of any spec explicitly configured for the embedding itself; the
+    # embedding's ROW spec here is expected to be overridden rather than applied.
+    specs = [
+        TPLayerSpec(patterns=[r".*embed_tokens\.weight$"], partition_type=PartitionType.ROW),
+        TPLayerSpec(patterns=[r".*lm_head\.weight$"], partition_type=PartitionType.COLUMN),
+    ]
+    autotp = AutoTP(
+        module=model,
+        all_reduce_linears=[],
+        prefix="",
+        state_dict=None,
+        linear_layer_setting=None,
+        orig_layer_impl=None,
+        partition_config=AutoTPConfig(layer_specs=specs),
+        vocab_parallel_lm_head=True,
+    )
+    autotp.set_tensor_parallel_config(2, None)
+    autotp.update_linear_policies()
+
+    ds_logger.addHandler(caplog.handler)
+    try:
+        with caplog.at_level(logging.WARNING, logger=ds_logger.name):
+            autotp._replace_module(model)
+    finally:
+        ds_logger.removeHandler(caplog.handler)
+
+    assert isinstance(model.lm_head, VocabParallelLinear)
+    assert isinstance(model.embed_tokens, VocabParallelEmbedding)
+    assert model.lm_head.weight is model.embed_tokens.weight
+    assert any("supersedes" in record.message and "embed_tokens" in record.message for record in caplog.records)
+
+
+def test_configure_vocab_parallel_loss_installs_and_preserves_hook():
+    model = OutputModel(tied=False)
+    model.loss_function = nn.CrossEntropyLoss()
+    original_loss_function = model.loss_function
+    _build_local_lm_head_autotp(model)._replace_module(model)
+
+    configure_vocab_parallel_loss(model, model.lm_head)
+
+    assert isinstance(model.loss_function, VocabParallelCausalLMLoss)
+    assert model._deepspeed_original_loss_function is original_loss_function
+
+
+def test_vocab_parallel_loss_validation_preserves_registered_loss_module():
+    model = OutputModel(tied=True)
+    model.loss_function = nn.CrossEntropyLoss()
+    original_loss = model.loss_function
+
+    validate_vocab_parallel_loss(model)
+
+    assert model.loss_function is original_loss
+    assert model.get_submodule("loss_function") is original_loss
+
+
+def test_configure_vocab_parallel_loss_installs_on_huggingface_model():
+    model = HFOutputModel()
+    original_loss_function = model.loss_function
+    _build_local_lm_head_autotp(model)._replace_module(model)
+
+    configure_vocab_parallel_loss(model, model.lm_head)
+
+    assert isinstance(model.loss_function, VocabParallelCausalLMLoss)
+    assert not isinstance(model.loss_function, nn.Module)
+    assert model._deepspeed_original_loss_function is original_loss_function
+
+
+def test_configure_vocab_parallel_loss_requires_hook():
+    model = OutputModel(tied=False)
+    _build_local_lm_head_autotp(model)._replace_module(model)
+
+    with pytest.raises(ValueError, match="requires a writable loss_function"):
+        configure_vocab_parallel_loss(model, model.lm_head)
+
+
+@pytest.mark.parametrize("head", ["lm_head", "embed_out"])
+def test_legacy_output_head_defaults_to_column_parallel_during_training(head):
+    model = OutputModel(tied=False)
+    if head == "embed_out":
+        model.embed_out = model.lm_head
+        del model.lm_head
+
+    _build_legacy_lm_head_autotp(model, training_mode=True)._replace_last_linear_module(model)
+
+    output_head = getattr(model, head)
+    assert isinstance(output_head, LinearLayer)
+    assert output_head.gather_output
+
+
+def test_legacy_lm_head_keeps_inference_allreduce_routing():
+    model = OutputModel(tied=False)
+    _build_legacy_lm_head_autotp(model)._replace_last_linear_module(model)
+
+    assert isinstance(model.lm_head, LmHeadLinearAllreduce)
+
+
+def test_global_training_mode_does_not_leak_into_inference_routing():
+    model = OutputModel(tied=False)
+    set_autotp_mode(training=True)
+    try:
+        _build_legacy_lm_head_autotp(model, training_mode=False)._replace_last_linear_module(model)
+    finally:
+        set_autotp_mode(training=False)
+
+    assert isinstance(model.lm_head, LmHeadLinearAllreduce)
+
+
+def test_legacy_tied_lm_head_stays_replicated_during_training():
+    model = OutputModel(tied=True)
+    tied_weight = model.embed_tokens.weight
+
+    _build_legacy_lm_head_autotp(model, training_mode=True)._replace_last_linear_module(model)
+
+    assert isinstance(model.embed_tokens, nn.Embedding)
+    assert isinstance(model.lm_head, nn.Linear)
+    assert model.embed_tokens.weight is tied_weight
+    assert model.lm_head.weight is tied_weight
+
+
+def test_vocab_parallel_flag_preserves_nonstandard_tied_output_fallback():
+    model = OutputModel(tied=False)
+    model.output_proj = model.lm_head
+    model.output_proj.weight = model.embed_tokens.weight
+    del model.lm_head
+    tied_weight = model.embed_tokens.weight
+    specs = TPPlanConverter.convert({
+        "embed_tokens": "embedding_rowwise",
+        "output_proj": "colwise_gather_output",
+    })
+    autotp = AutoTP(
+        module=model,
+        all_reduce_linears=[],
+        prefix="",
+        state_dict=None,
+        linear_layer_setting=None,
+        orig_layer_impl=None,
+        partition_config=AutoTPConfig(layer_specs=specs),
+        vocab_parallel_lm_head=True,
+    )
+    autotp.set_tensor_parallel_config(2, None)
+    autotp.update_linear_policies()
+
+    autotp._replace_module(model)
+
+    assert isinstance(model.embed_tokens, nn.Embedding)
+    assert isinstance(model.output_proj, nn.Linear)
+    assert model.embed_tokens.weight is tied_weight
+    assert model.output_proj.weight is tied_weight
+
+
+def test_explicit_row_parallel_lm_head_is_not_overridden_by_its_name():
+    model = OutputModel(tied=False)
+    _build_row_output_head_autotp(model, training_mode=True)._replace_module(model)
+
+    assert isinstance(model.lm_head, LinearAllreduce)
+    assert not isinstance(model.lm_head, LmHeadLinearAllreduce)
+
+
+def test_explicit_row_parallel_lm_head_training_rejects_tied_weight():
+    model = OutputModel(tied=True)
+    weight = model.embed_tokens.weight
+
+    with pytest.raises(NotImplementedError, match="cannot shard a tied weight"):
+        _build_row_output_head_autotp(model, training_mode=True, mp_size=2)._replace_module(model)
+    assert model.lm_head.weight is weight
+    assert model.embed_tokens.weight is weight
+
+
+@pytest.mark.parametrize("head", ["lm_head", "embed_out"])
+def test_explicit_row_parallel_output_head_training_accepts_tp_greater_than_one(head):
+    model = OutputModel(tied=False)
+    if head != "lm_head":
+        model.embed_out = model.lm_head
+        del model.lm_head
+    weight = getattr(model, head).weight
+    _build_row_output_head_autotp(model, head=head, training_mode=True, mp_size=2)._replace_module(model)
+    assert isinstance(getattr(model, head), LinearAllreduce)
+    assert getattr(model, head).weight is weight
+
+
+def test_explicit_row_parallel_lm_head_keeps_inference_specialization():
+    model = OutputModel(tied=False)
+    _build_row_output_head_autotp(model)._replace_module(model)
+
+    assert isinstance(model.lm_head, LmHeadLinearAllreduce)
 
 
 if __name__ == "__main__":

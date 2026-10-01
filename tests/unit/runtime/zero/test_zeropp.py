@@ -10,6 +10,7 @@ from unit.common import DistributedTest
 from unit.simple_model import random_dataloader
 
 import deepspeed
+from deepspeed.accelerator import get_accelerator
 
 from deepspeed.runtime.zero.config import DeepSpeedZeroConfig
 from deepspeed.runtime.zero.partition_parameters import CUDAQuantizer, Init, ZeroParamStatus
@@ -169,6 +170,9 @@ def _assert_secondary_tensor_size(model: Module) -> None:
 class TestZeroPPConfigSweep(DistributedTest):
     world_size = 4
 
+    @pytest.mark.skipif(not get_accelerator().is_fp16_supported(), reason="fp16 is not supported on this accelerator")
+    @pytest.mark.skipif(get_accelerator().device_name() == "cpu",
+                        reason="ZeRO++ quantized weight tests require the CUDA quantizer op")
     def test(self, h_dim: int, n_layers: int, zpg: int) -> None:
         config_dict = {
             "train_micro_batch_size_per_gpu": 1,
@@ -211,6 +215,7 @@ class TestZeroPPConfigSweep(DistributedTest):
             model.backward(loss)
             model.step()
 
+    @pytest.mark.skipif(not get_accelerator().is_fp16_supported(), reason="fp16 is not supported on this accelerator")
     def test_eval(self, h_dim: int, n_layers: int, zpg: int) -> None:
         # in this test case, we are testing that hpz should be enabled when eval mode is on
         config_dict = {
@@ -252,6 +257,7 @@ class TestZeroPPConfigSweep(DistributedTest):
             with torch.no_grad():
                 loss = model(batch[0], batch[1])
 
+    @pytest.mark.skipif(not get_accelerator().is_fp16_supported(), reason="fp16 is not supported on this accelerator")
     def test_gradient_accumulation(self, h_dim: int, n_layers: int, zpg: int) -> None:
         # in this test case, we are testing that hpz should be enabled for the intermediate gradient accumulation steps
         # In this test, we should disable loss_scale
@@ -377,6 +383,7 @@ class TestZeroPPConvergence(DistributedTest):
             config["zero_optimization"]["zero_hpz_partition_size"] = self.world_size // 2
         return config
 
+    @pytest.mark.skipif(not get_accelerator().is_fp16_supported(), reason="fp16 is not supported on this accelerator")
     def test(self, model_name):
         torch.manual_seed(0)
         model, data_loader = self.load_and_prepare_data(model_name)

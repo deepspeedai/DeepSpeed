@@ -12,6 +12,7 @@ from deepspeed.checkpoint.constants import (AUTOTP_UNSUPPORTED_PARAMETER_PATTERN
                                             VOCABULARY_PARAMETER_PATTERNS, DS_AUTOTP_UC_META,
                                             UNIVERSAL_CHECKPOINT_VERSION_VALUE)
 from deepspeed.checkpoint.universal_checkpoint import _narrow_sub_params, _resolve_autotp_partition
+from deepspeed.module_inject.tp_shard import AutoTPMeta
 from deepspeed.module_inject.layers import (_build_param_uc_restore_meta, _get_param_uc_conversion_meta,
                                             _subparam_shard_widths, GateUpPack_LinearLayer, LinearAllreduce,
                                             LinearLayer, SubParamLinearAllreduce, SubParamLinearLayer,
@@ -340,7 +341,8 @@ def test_collect_records_fused_layouts_without_a_sub_param_split():
                               mp_group=None,
                               skip_partition=True,
                               fused_module=fused_module,
-                              name="qkv_proj")
+                              name="qkv_proj",
+                              tp_meta=AutoTPMeta())
     model = torch.nn.Module()
     model.qkv_proj = layer
 
@@ -403,7 +405,7 @@ def test_sub_param_shard_widths_round_trip_with_zero_width_ranks(tp_world_size):
     # More ranks than kv heads leaves some ranks holding none of a sub-parameter. Those empty
     # shards still have to tile the sub-parameter and survive a restore round trip.
     sub_param_sizes = (8, 2, 2)
-    widths = _subparam_shard_widths(sub_param_sizes, tp_world_size)
+    widths = _subparam_shard_widths(sub_param_sizes, tp_world_size, AutoTPMeta())
 
     assert any(width == 0 for per_rank in widths for width in per_rank)
     for size, per_rank in zip(sub_param_sizes, widths):
@@ -469,32 +471,144 @@ def test_sub_param_layer_materializes_zero_width_final_dimension(layer_cls):
     layer._tp_partition([layer.weight, None])
 
     assert layer.weight.shape == (4, 0)
-    output = layer(torch.empty(2, 0))
+    output = layer(torch.empty(2, 0, device=layer.weight.device))
     assert output.shape == (2, 4)
 
 
 def test_lm_head_forward_uses_frozen_partition_sizes():
-    # The weight columns were cut when the layer was built. A second AutoTP model overwrites the
-    # process-wide tp_shard globals, so re-deriving the split in forward would slice the input
-    # differently than the weight and the row-parallel all-reduce would hide the mismatch.
-    from deepspeed.module_inject import tp_shard
+    # The weight columns were cut when the layer was built; forward must slice the input with
+    # the same frozen partition sizes rather than re-derive them.
     from deepspeed.module_inject.layers import LmHeadLinearAllreduce
+    from deepspeed.module_inject.tp_shard import AutoTPMeta
 
-    grain_size, kv_heads = tp_shard.tp_grain_size, tp_shard.num_kv_heads
-    try:
-        tp_shard.set_tp_grain_size(1)
-        tp_shard.set_num_kv_heads(None)
-        layer = LmHeadLinearAllreduce(torch.nn.Linear(101, 8, bias=False), mp_group=None)
-        layer.tp_world_size = 2
-        layer.tp_index = 1
-        frozen = layer._freeze_partition_sizes(101)
-        assert frozen == (51, 50)
+    layer = LmHeadLinearAllreduce(torch.nn.Linear(101, 8, bias=False),
+                                  mp_group=None,
+                                  tp_meta=AutoTPMeta(tp_grain_size=1))
+    layer.tp_world_size = 2
+    layer.tp_index = 1
+    frozen = layer._freeze_partition_sizes(101)
+    assert frozen == (51, 50)
+    assert layer.tp_meta.tp_grain_size == 1
+    layer.weight.data = torch.zeros(8, frozen[1])
 
-        # A later model narrows the grain, which would change a recomputed split.
-        tp_shard.set_tp_grain_size(64)
-        layer.weight.data = torch.zeros(8, frozen[1])
+    # A second layer of a different model is then built and initialized in the same process:
+    # a coarser grain (vocabulary sharding) and a different kv-head count (GQA attention
+    # sharding). Neither may leak into the first layer, whose meta and frozen split describe
+    # its own model only.
+    second = LmHeadLinearAllreduce(torch.nn.Linear(101, 8, bias=False),
+                                   mp_group=None,
+                                   tp_meta=AutoTPMeta(tp_grain_size=64, num_kv_heads=1))
+    second.tp_world_size = 2
+    second.tp_index = 1
+    assert second._freeze_partition_sizes(101) == (64, 37)
 
-        layer(torch.zeros(1, 1, 101))
-    finally:
-        tp_shard.set_tp_grain_size(grain_size)
-        tp_shard.set_num_kv_heads(kv_heads)
+    assert layer.tp_meta.tp_grain_size == 1
+    assert layer.tp_meta.num_kv_heads is None
+    assert layer._freeze_partition_sizes(101) == frozen
+    assert layer._partition_sizes == frozen
+
+    layer(torch.zeros(1, 1, 101))
+
+
+def test_restore_prefers_the_map_over_the_category_keys():
+    """Restore must read the map, not the per-category keys, when the layer published one.
+
+    The two are given deliberately contradictory geometry: the keys describe a plain dim-0
+    split, so rank 0 would take the first half, while the map hands rank 0 the second half.
+    Whichever rank 0 actually receives says which side of the metadata restore consulted.
+    Without this, removing the map branch leaves the old path quietly producing the same
+    answer for every layout it happens to cover.
+    """
+    from deepspeed.checkpoint.affine import AffinePiece, ParamAffineMap
+
+    full = torch.arange(8, dtype=torch.float32).reshape(4, 2)
+    reversed_map = ParamAffineMap(logical_shape=(4, 2),
+                                  shard_shapes={
+                                      0: (2, 2),
+                                      1: (2, 2)
+                                  },
+                                  pieces_by_rank={
+                                      rank: [
+                                          AffinePiece(shape=(2, 2),
+                                                      source_offset=(1 - rank) * 4,
+                                                      source_strides=(2, 1),
+                                                      dest_offset=0,
+                                                      dest_strides=(2, 1),
+                                                      locations=[rank])
+                                      ]
+                                      for rank in range(2)
+                                  })
+
+    param = torch.nn.Parameter(torch.zeros(2, 2))
+    param.ds_autotp_universal_checkpoint_meta = _build_param_uc_restore_meta(
+        partition_type="column",
+        partition_dim=0,
+        logical_shape=[4, 2],
+        original_shape=[4, 2],
+        partition_sizes=[2, 2],
+        affine_map=reversed_map,
+    )
+
+    restored = _resolve_autotp_partition(param, {}, full.flatten(), tp_rank=0, tp_world_size=2)
+
+    # The map gives rank 0 the second half; the category keys would give it the first.
+    torch.testing.assert_close(restored, full[2:].flatten())
+
+
+def test_restore_falls_back_when_no_map_was_published():
+    """A layout with no map must still restore through the existing keys."""
+    full = torch.arange(8, dtype=torch.float32).reshape(4, 2)
+    param = torch.nn.Parameter(torch.zeros(2, 2))
+    param.ds_autotp_universal_checkpoint_meta = _build_param_uc_restore_meta(
+        partition_type="column",
+        partition_dim=0,
+        logical_shape=[4, 2],
+        original_shape=[4, 2],
+        partition_sizes=[2, 2],
+    )
+
+    restored = _resolve_autotp_partition(param, {}, full.flatten(), tp_rank=0, tp_world_size=2)
+    torch.testing.assert_close(restored, full[:2].flatten())
+
+
+def _scaled_replicated_meta(scale):
+    from deepspeed.checkpoint.affine import replicated_map
+    param = torch.nn.Parameter(torch.zeros(4))
+    param.ds_autotp_universal_checkpoint_meta = _build_param_uc_restore_meta(
+        partition_type="row",
+        logical_shape=[4],
+        original_shape=[4],
+        replicated=True,
+        affine_map=replicated_map((4, ), 2, scale=scale),
+    )
+    return param
+
+
+def test_restore_refuses_a_scaled_optimizer_state():
+    """A moment needs its own power of the scale, so restoring one is refused, not rescaled.
+
+    `_resolve_autotp_partition` runs once per state file, so passing the parameter's power for
+    `exp_avg` would apply the wrong factor with nothing to signal it. The map refuses instead,
+    and this test fails if the state is not threaded through to reach that refusal.
+    """
+    param = _scaled_replicated_meta(0.5)
+    full = torch.arange(4, dtype=torch.float32)
+
+    # The parameter itself restores: a shard holds the value pre-divided, so extracting it
+    # applies the scale the piece records.
+    restored = _resolve_autotp_partition(param, {}, full, 0, 2, state_key="fp32")
+    torch.testing.assert_close(restored, full * 0.5)
+
+    for moment in ("exp_avg", "exp_avg_sq"):
+        with pytest.raises(NotImplementedError, match="source coordinate"):
+            _resolve_autotp_partition(param, {}, full, 0, 2, state_key=moment)
+
+
+def test_restore_moments_are_unaffected_when_nothing_is_scaled():
+    """Every state restores the same way through an unscaled map, which is the common case."""
+    param = _scaled_replicated_meta(1.0)
+    full = torch.arange(4, dtype=torch.float32)
+
+    for state in ("fp32", "exp_avg", "exp_avg_sq"):
+        restored = _resolve_autotp_partition(param, {}, full, 0, 2, state_key=state)
+        torch.testing.assert_close(restored, full)

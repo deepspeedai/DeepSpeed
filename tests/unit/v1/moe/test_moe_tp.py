@@ -57,6 +57,7 @@ class MPU():
 class TestMOETensorParallel(DistributedTest):
     world_size = 4
 
+    @pytest.mark.skipif(not get_accelerator().is_fp16_supported(), reason="fp16 is not supported on this accelerator")
     def test(self, ep_size, tp_size, enable_expert_tp, use_residual):
         # TODO: replace this with a true parallel mlp in the future
         # and run convergence tests

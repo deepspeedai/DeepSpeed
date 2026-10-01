@@ -8,7 +8,7 @@ import functools
 from deepspeed import comm as dist
 import torch
 from typing import Optional
-from deepspeed.module_inject.tp_shard import get_shard_size_list
+from deepspeed.module_inject.tp_shard import AutoTPMeta, get_shard_size_list
 
 
 class _HeadCountProxy:
@@ -27,16 +27,12 @@ class _HeadCountProxy:
             setattr(self._module, name, value)
 
 
-def get_head_shard_sizes(num_heads, mp_group=None, num_kv_heads=None):
+def get_head_shard_sizes(meta: AutoTPMeta, mp_group=None):
     tp_world_size = dist.get_world_size(group=mp_group)
-    return get_shard_size_list(
-        num_heads,
-        tp_world_size,
-        num_kv_heads=num_kv_heads,
-    )
+    return get_shard_size_list(meta.num_attention_heads, tp_world_size, meta)
 
 
-def install_head_sharded_helper(module, name, wrapper, mp_group=None, num_heads=None, num_kv_heads=None):
+def install_head_sharded_helper(module, name, wrapper, meta, mp_group=None):
     """Give ``module`` a head-slicing wrapper around one of its own methods.
 
     The wrapper is bound to this instance instead of installed on its class. A class-wide patch
@@ -48,10 +44,15 @@ def install_head_sharded_helper(module, name, wrapper, mp_group=None, num_heads=
     if original_name not in module.__dict__:
         # Wrapping an already wrapped instance would make it delegate to itself.
         setattr(module, original_name, getattr(module, name))
-    shard_sizes = get_head_shard_sizes(num_heads, mp_group, num_kv_heads) if num_heads is not None else None
+    total_num_heads = meta.num_attention_heads
+    shard_sizes = get_head_shard_sizes(meta, mp_group) if total_num_heads is not None else None
     setattr(
         module, name,
-        functools.partial(wrapper, module, mp_group=mp_group, head_shard_sizes=shard_sizes, total_num_heads=num_heads))
+        functools.partial(wrapper,
+                          module,
+                          mp_group=mp_group,
+                          head_shard_sizes=shard_sizes,
+                          total_num_heads=total_num_heads))
 
 
 def _head_shard(num_heads, mp_group=None, head_shard_sizes=None, total_num_heads=None):
@@ -64,7 +65,9 @@ def _head_shard(num_heads, mp_group=None, head_shard_sizes=None, total_num_heads
     tp_world_size = dist.get_world_size(group=mp_group)
     tp_index = dist.get_rank(group=mp_group)
     full_num_heads = total_num_heads if total_num_heads is not None else num_heads
-    shard_sizes = head_shard_sizes or get_shard_size_list(full_num_heads, tp_world_size)
+    # The fallback split is only reached when no per-head shard sizes were recorded, i.e. when
+    # the model is not GQA-aware, so an even split (default meta, no kv-heads) is correct here.
+    shard_sizes = head_shard_sizes or get_shard_size_list(full_num_heads, tp_world_size, AutoTPMeta())
     if len(shard_sizes) != tp_world_size or sum(shard_sizes) != full_num_heads:
         raise ValueError(f"Head shard sizes {shard_sizes} do not partition {full_num_heads} heads across "
                          f"{tp_world_size} tensor-parallel ranks.")

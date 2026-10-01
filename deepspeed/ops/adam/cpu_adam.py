@@ -96,7 +96,13 @@ class DeepSpeedCPUAdam(torch.optim.Optimizer):
     def __del__(self):
         # need to destroy the C++ object explicitly to avoid a memory leak when deepspeed.initialize
         # is used multiple times in the same process (notebook or pytest worker)
-        self.ds_opt_adam.destroy_adam(self.opt_id)
+        if hasattr(self, 'ds_opt_adam'):
+            self.ds_opt_adam.destroy_adam(self.opt_id)
+
+    def add_param_group(self, param_group):
+        if param_group.get('amsgrad', self.defaults['amsgrad']):
+            raise RuntimeError('DeepSpeedCPUAdam does not support the AMSGrad variant.')
+        super().add_param_group(param_group)
 
     def __setstate__(self, state):
         super(DeepSpeedCPUAdam, self).__setstate__(state)

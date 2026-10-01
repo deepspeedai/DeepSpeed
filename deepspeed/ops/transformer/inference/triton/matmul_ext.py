@@ -33,17 +33,18 @@ def is_nfs_path(path):
             break
         path = parent
 
-    # Use the 'df' command to find the file system type for the given path
+    # POSIX output keeps long device names from wrapping onto a separate line.
     try:
-        output = subprocess.check_output(['df', '-T', path], encoding='utf-8', stderr=subprocess.DEVNULL)
+        output = subprocess.check_output(['df', '-PT', path], encoding='utf-8', stderr=subprocess.DEVNULL)
     except (subprocess.CalledProcessError, FileNotFoundError):
         return False  # Command failed or 'df' not available
 
-    # Process the output of 'df -T' to check for 'nfs' in the filesystem type column
+    # Process the output of 'df -PT' to check for 'nfs' in the filesystem type column.
     lines = output.strip().split('\n')
     if len(lines) > 1:  # The first line is headers
-        fs_type = lines[1].split()[1].lower()  # File system type is the second column
-        return 'nfs' in fs_type
+        fields = lines[1].split()
+        if len(fields) > 1:
+            return 'nfs' in fields[1].lower()
     return False
 
 

@@ -13,6 +13,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -100,11 +101,13 @@ class FakeSandbox:
         fail_label: str | None = None,
         cleanup_failure: bool = False,
         wait_failure: bool = False,
+        never_starts: bool = False,
     ):
         self.candidate_sha = candidate_sha
         self.fail_label = fail_label
         self.cleanup_failure = cleanup_failure
         self.wait_failure = wait_failure
+        self.never_starts = never_starts
         self.exec_calls = []
         self.processes = []
         self.terminated = False
@@ -112,6 +115,9 @@ class FakeSandbox:
 
     def exec(self, *args, **kwargs):
         self.exec_calls.append((args, kwargs))
+        if self.never_starts:
+            # A container that never gets a GPU never returns from its first exec.
+            threading.Event().wait()
         lines = [self.candidate_sha + "\n"] if "rev-parse" in args and "HEAD^{commit}" in args else ["ok\n"]
         label_failure = self.fail_label and self.fail_label in " ".join(args)
         process = FakeProcess(lines, return_code=9 if label_failure else 0)
@@ -135,16 +141,32 @@ def _fake_modal(
     cleanup_failure: bool = False,
     wait_failure: bool = False,
     create_failure: bool = False,
+    never_starts: bool = False,
 ):
     state = SimpleNamespace(image_calls=[], app_calls=[], create_calls=[])
-    sandbox = FakeSandbox(candidate_sha, fail_label, cleanup_failure, wait_failure)
+    sandbox = FakeSandbox(candidate_sha, fail_label, cleanup_failure, wait_failure, never_starts)
+
+    class FakeImage:
+
+        def __init__(self):
+            self.layers = []
+
+        def run_commands(self, *commands):
+            self.layers.append(("run_commands", commands))
+            return self
+
+        def pip_install(self, *packages, index_url=None):
+            self.layers.append(("pip_install", packages, index_url))
+            return self
+
+    image = FakeImage()
 
     class Image:
 
         @staticmethod
-        def from_registry(image, add_python=None):
-            state.image_calls.append((image, add_python))
-            return ("image", image, add_python)
+        def from_registry(registry, add_python=None):
+            state.image_calls.append((registry, add_python))
+            return image
 
     class App:
 
@@ -391,8 +413,7 @@ def test_remote_plan_is_structural_and_preserves_order_and_scope():
         commands = torch_latest.build_remote_commands(inputs)
         assert all(isinstance(command.argv, tuple) for command in commands)
         labels = [command.label for command in commands]
-        assert labels.index("install runtime requirements") < labels.index("reinstall Torch packages")
-        assert labels.index("reinstall Torch packages") < labels.index("install candidate DeepSpeed")
+        assert labels.index("install runtime requirements") < labels.index("install candidate DeepSpeed")
         pytest_command = next(command for command in commands if command.label == "run pytest")
         separator = pytest_command.argv.index("--")
         assert pytest_command.argv[separator + 1:] == ("tests/unit/v1/test_one.py", )
@@ -407,7 +428,8 @@ def test_remote_plan_is_structural_and_preserves_order_and_scope():
 def test_sandbox_kwargs_are_fixed_and_secret_free():
     kwargs = torch_latest.build_sandbox_kwargs("image")
     assert kwargs["gpu"] == "l40s:2"
-    assert kwargs["timeout"] == 3600
+    assert kwargs["timeout"] == 5400
+    assert torch_latest.SANDBOX_ACQUIRE_TIMEOUT_SECONDS == 1800
     assert kwargs["secrets"] == []
     assert kwargs["network_file_systems"] == {}
     assert kwargs["volumes"] == {}
@@ -444,12 +466,73 @@ def test_controller_creates_one_sandbox_without_forwarding_secrets_and_cleans_up
         shutil.rmtree(root, ignore_errors=True)
 
 
+def test_await_sandbox_start_gives_up_when_the_container_never_runs():
+    # Catches a controller that blocks forever on a GPU reservation that is never satisfied.
+    sandbox = FakeSandbox("a" * 40, never_starts=True)
+    error = _expect_error(
+        torch_latest.await_sandbox_start,
+        sandbox,
+        0.05,
+        exception=torch_latest.SandboxStartTimeout,
+    )
+    assert "no test ran" in str(error)
+
+
+def test_await_sandbox_start_reports_startup_duration():
+    sandbox = FakeSandbox("a" * 40)
+    assert torch_latest.await_sandbox_start(sandbox, 30) >= 0
+
+
+def test_controller_aborts_without_running_tests_when_sandbox_never_starts():
+    # Catches a controller that spends the whole job budget waiting, or that runs commands
+    # against a Sandbox that never started, or that leaks the Sandbox when startup times out.
+    root, path = _selection_file("tests/unit/v1\n")
+    original = torch_latest.SANDBOX_ACQUIRE_TIMEOUT_SECONDS
+    torch_latest.SANDBOX_ACQUIRE_TIMEOUT_SECONDS = 0.05
+    try:
+        env = _valid_env(path)
+        fake, _, sandbox = _fake_modal("a" * 40, never_starts=True)
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            code = torch_latest.run_controller(env, fake)
+        assert code == torch_latest.EXIT_INFRA
+        assert "DS_CI_FAILURE_CLASS=infra" in stdout.getvalue()
+        assert sandbox.terminated
+        assert not any("pytest" in " ".join(args) for args, _ in sandbox.exec_calls)
+    finally:
+        torch_latest.SANDBOX_ACQUIRE_TIMEOUT_SECONDS = original
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_controller_reports_sandbox_lifetime_exhaustion_as_timeout():
+    # Catches a lifetime-budget death being misreported as a candidate regression:
+    # a run that dies at the Sandbox ceiling must classify as a timeout, not a test failure.
+    root, path = _selection_file("tests/unit/v1\n")
+    original = torch_latest.SANDBOX_TIMEOUT_SECONDS
+    torch_latest.SANDBOX_TIMEOUT_SECONDS = 0.05
+    try:
+        env = _valid_env(path)
+        fake, _, sandbox = _fake_modal("a" * 40, fail_label="pytest")
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            code = torch_latest.run_controller(env, fake)
+        assert code == torch_latest.EXIT_TIMEOUT
+        assert "DS_CI_FAILURE_CLASS=timeout" in stdout.getvalue()
+        assert sandbox.terminated
+    finally:
+        torch_latest.SANDBOX_TIMEOUT_SECONDS = original
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def test_controller_propagates_command_and_cleanup_failures():
     root, path = _selection_file("tests/unit/v1\n")
     try:
         env = _valid_env(path)
         fake, _, sandbox = _fake_modal("a" * 40, fail_label="pytest")
-        _expect_error(torch_latest.run_controller, env, fake, exception=RuntimeError)
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            _expect_error(torch_latest.run_controller, env, fake, exception=RuntimeError)
+        assert "DS_CI_FAILURE_CLASS=test" in stdout.getvalue()
         assert sandbox.terminated
 
         fake, _, sandbox = _fake_modal("a" * 40, fail_label="pytest", cleanup_failure=True)
@@ -468,7 +551,7 @@ def test_controller_propagates_command_and_cleanup_failures():
         assert sandbox.wait_calls == [False]
 
         fake, state, sandbox = _fake_modal("a" * 40, create_failure=True)
-        _expect_error(torch_latest.run_controller, env, fake, exception=RuntimeError)
+        assert torch_latest.run_controller(env, fake) == torch_latest.EXIT_INFRA
         assert len(state.create_calls) == 1
         assert not sandbox.terminated
     finally:
@@ -539,7 +622,7 @@ def test_validate_selection_cli_needs_no_modal_install():
 def test_workflow_keeps_github_execution_trusted_and_preserves_modes():
     workflow = Path(torch_latest.__file__).resolve().parents[1] / ".github/workflows/modal-torch-latest.yml"
     text = workflow.read_text(encoding="utf-8")
-    trusted_ref = "ref: ${{ github.event.pull_request.base.sha || github.sha }}"
+    trusted_ref = "ref: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.sha }}"
     assert text.count(trusted_ref) == 2
     assert "ref: ${{ github.event.pull_request.head.sha" not in text
     assert "allow-unsafe-pr-checkout" not in text
@@ -547,7 +630,7 @@ def test_workflow_keeps_github_execution_trusted_and_preserves_modes():
     assert "HF_TOKEN" not in text
     assert "modal==1.2.6" in text
     assert "timeout-minutes: 20" in text
-    assert "timeout-minutes: 75" in text
+    assert "timeout-minutes: 105" in text
     assert text.count("persist-credentials: false") == 2
     assert text.count("lfs: false") == 2
     assert text.count("submodules: false") == 2

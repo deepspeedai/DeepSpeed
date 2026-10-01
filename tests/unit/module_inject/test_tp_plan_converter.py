@@ -126,6 +126,28 @@ class TestTPPlanConverter:
         with pytest.raises(ValueError, match="unsupported partition style"):
             TPPlanConverter.convert(hf_plan)
 
+    def test_tied_embedding_style_converts_to_skip(self):
+        """`embedding_rowwise` is injected for every tied-embedding model, so rejecting it would
+        strand those models on the heuristic path. Tied embeddings stay replicated here, and the
+        entry carries no gradient all-reduce because the parameter is never split."""
+        hf_plan = {
+            "layers.*.self_attn.q_proj": "colwise",
+            "layers.*.self_attn.o_proj": "rowwise",
+            "embed_tokens": "embedding_rowwise",
+            "lm_head": "colwise_gather_output",
+        }
+        specs = TPPlanConverter.convert(hf_plan)
+
+        assert len(specs) == 4
+
+        embed_spec = [s for s in specs if "embed_tokens" in s.patterns[0]][0]
+        lm_head_spec = [s for s in specs if "lm_head" in s.patterns[0]][0]
+
+        assert embed_spec.partition_type == PartitionType.SKIP
+        assert not embed_spec.grad_allreduce
+        assert lm_head_spec.partition_type == PartitionType.COLUMN
+        assert lm_head_spec.gather_output
+
     def test_alternate_prefixes(self):
         """Test tp_plan with non-layers prefix"""
         hf_plan = {

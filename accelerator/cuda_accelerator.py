@@ -333,6 +333,15 @@ class CUDA_Accelerator(DeepSpeedAccelerator):
         else:
             return False
 
+    def register_host_memory(self, address, num_bytes):
+        result = int(torch.cuda.cudart().cudaHostRegister(address, num_bytes, 0))
+        torch.cuda.check_error(result)
+        return True
+
+    def unregister_host_memory(self, address):
+        result = int(torch.cuda.cudart().cudaHostUnregister(address))
+        torch.cuda.check_error(result)
+
     def op_builder_dir(self):
         try:
             # is op_builder from deepspeed or a 3p version? this should only succeed if it's deepspeed

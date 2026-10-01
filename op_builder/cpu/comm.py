@@ -4,6 +4,7 @@
 # DeepSpeed Team
 
 import os
+import sys
 from .builder import CPUOpBuilder
 
 
@@ -65,6 +66,7 @@ class ShareMemCommBuilder(CPUOpBuilder):
         return ['-O2', '-fopenmp']
 
     def is_compatible(self, verbose=False):
-        # TODO: add soft compatibility check for private binary release.
-        #  a soft check, as in we know it can be trivially changed.
+        # The shared-memory kernels use Linux-only APIs, so let other platforms fall back to gloo.
+        if sys.platform != 'linux':
+            return False
         return super().is_compatible(verbose)

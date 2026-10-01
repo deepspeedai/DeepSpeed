@@ -117,6 +117,8 @@ def set_accelerator_visible():
             br_smi = subprocess.check_output(['brsmi', 'gpu', 'list'])
             gpu_ids = filter(lambda s: 'GPU' in s, br_smi.decode('utf-8').strip().split('\n'))
             num_accelerators = len(list(gpu_ids))
+        elif get_accelerator().device_name() == 'mps':
+            num_accelerators = get_accelerator().device_count()
         else:
             assert get_accelerator().device_name() == 'cpu'
             num_accelerators = _get_cpu_socket_count()
@@ -274,7 +276,8 @@ class DistributedExec(ABC):
                 f"Skipping test because not enough GPUs are available: {num_procs} required, {get_accelerator().device_count()} available"
             )
 
-        if get_accelerator().device_name() == 'xpu':
+        # MPS cannot be used from a forked child (Metal's compiler service is lost), so spawn instead.
+        if get_accelerator().device_name() in ['xpu', 'mps']:
             self.non_daemonic_procs = True
             self.reuse_dist_env = False
 
@@ -572,8 +575,10 @@ def enable_determinism(seed: int):
 def reduce_boolean_flags(flag: bool, op=all) -> bool:
     if not dist.is_initialized():
         return flag
-    device = get_accelerator().current_device()
-    tensor_flag = torch.tensor(1 if flag else 0, dtype=torch.int, device=device)
+    # current_device() is a rank id on CPU, not a valid torch device; use the device name.
+    device = get_accelerator().current_device_name()
+    # gloo rejects 0-dim inputs to all_gather_into_tensor, so carry the flag in a 1-dim tensor.
+    tensor_flag = torch.tensor([1 if flag else 0], dtype=torch.int, device=device)
     world_size = dist.get_world_size()
     tensor_flag_buf = torch.zeros(world_size, dtype=torch.int, device=device)
     dist.all_gather_into_tensor(tensor_flag_buf, tensor_flag)

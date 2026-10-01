@@ -3,6 +3,7 @@
 
 # DeepSpeed Team
 
+import argparse
 import math
 
 import torch
@@ -874,3 +875,77 @@ def test_one_cycle_rejects_wrong_length_per_group_lists(kwargs):
 
     with pytest.raises(ValueError):
         OneCycle(optimizer=optimizer, **{**defaults, **kwargs})
+
+
+def test_lr_range_test_staircase_is_an_opt_in_flag():
+    # type=bool ran the builtin over the raw string, so "False", "false" and "0" were all
+    # non-empty and evaluated to True: the flag could be turned on but never off. Pin it to
+    # the store_true shape used by --cycle_momentum, the other boolean in this same parser.
+    parser = lrs.add_tuning_arguments(argparse.ArgumentParser())
+
+    assert parser.parse_args([]).lr_range_test_staircase is False
+    assert parser.parse_args(["--lr_range_test_staircase"]).lr_range_test_staircase is True
+
+    assert parser.parse_args([]).cycle_momentum is False
+    assert parser.parse_args(["--cycle_momentum"]).cycle_momentum is True
+
+
+@pytest.mark.parametrize("argv, expected", [([], False), (["--lr_range_test_staircase"], True)])
+def test_lr_range_test_staircase_reaches_scheduler_params(argv, expected):
+    # override_lr_range_test_params copies the parsed flag into the scheduler config, which is
+    # what LRRangeTest turns into _staircase_interval vs _continuous_interval. Both directions
+    # have to survive the trip so the documented "false" default stays reachable.
+    args = lrs.add_tuning_arguments(argparse.ArgumentParser()).parse_args(argv)
+    params = {}
+    lrs.override_lr_range_test_params(args, params)
+
+    assert params[LR_RANGE_TEST_STAIRCASE] is expected
+
+
+def test_warmup_cosine_lr_config_from_args_carries_the_ratios():
+    # --warmup_min_ratio and --cos_min_ratio are declared by add_tuning_arguments and
+    # were then dropped: WarmupCosineLR fell into the WarmupLR branch, so the config
+    # came back with warmup_min_lr/warmup_max_lr instead, which WarmupCosineLR does
+    # not accept and which made building it from that config a TypeError.
+    parser = lrs.add_tuning_arguments(argparse.ArgumentParser())
+    args = parser.parse_args(
+        ["--lr_schedule", WARMUP_COSINE_LR, "--warmup_min_ratio", "0.1", "--cos_min_ratio", "0.05"])
+
+    config, err = lrs.get_config_from_args(args)
+    assert err is None
+    params = config["params"]
+
+    assert params[WARMUP_MIN_RATIO] == 0.1
+    assert params[COS_MIN_RATIO] == 0.05
+    assert WARMUP_MIN_LR not in params
+    assert WARMUP_MAX_LR not in params
+
+    param = torch.nn.Parameter(torch.zeros(1))
+    optimizer = torch.optim.Adam([param], lr=0.001)
+    scheduler = WarmupCosineLR(optimizer=optimizer, total_num_steps=2000, **params)
+    assert scheduler.warmup_min_ratio == 0.1
+    assert scheduler.cos_min_ratio == 0.05
+
+
+def test_warmup_cosine_lr_has_no_lr_in_its_config_params():
+    # get_lr_from_config read warmup_max_lr for every non-LRRangeTest, non-OneCycle
+    # schedule. WarmupCosineLR scales each param group's own lr by a ratio, so its
+    # params never hold one, and the lookup either returned an unrelated WarmupLR
+    # default or raised KeyError on a config written for this schedule.
+    config = {"type": WARMUP_COSINE_LR, "params": {WARMUP_MIN_RATIO: 0.1, COS_MIN_RATIO: 0.05}}
+
+    lr, err = lrs.get_lr_from_config(config)
+    assert lr is None
+    assert WARMUP_COSINE_LR in err
+
+
+def test_other_schedules_keep_their_config_params():
+    # The routing change must leave the three schedules that already worked alone.
+    parser = lrs.add_tuning_arguments(argparse.ArgumentParser())
+
+    for schedule, expected in ((LR_RANGE_TEST, LR_RANGE_TEST_MIN_LR), (ONE_CYCLE, CYCLE_MAX_LR),
+                               (WARMUP_LR, WARMUP_MAX_LR), (WARMUP_DECAY_LR, WARMUP_MAX_LR)):
+        config, err = lrs.get_config_from_args(parser.parse_args(["--lr_schedule", schedule]))
+        assert err is None
+        assert expected in config["params"]
+        assert lrs.get_lr_from_config(config)[0] == config["params"][expected]
