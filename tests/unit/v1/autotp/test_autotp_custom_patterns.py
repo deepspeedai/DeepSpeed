@@ -585,13 +585,19 @@ def test_update_mp_params_follows_actual_tp_parameter_metadata(monkeypatch):
     assert child.hidden_size == 6
 
 
-def test_sliced_embedding_publishes_row_partition_metadata(monkeypatch):
+@pytest.mark.parametrize("vocab_parallel_lm_head", [False, True])
+def test_sliced_embedding_publishes_row_partition_metadata(monkeypatch, vocab_parallel_lm_head):
     tp_group = object()
-    autotp = object.__new__(AutoTP)
+    embedding = nn.Embedding(5, 4)
+    autotp = AutoTP(module=embedding,
+                    all_reduce_linears=[],
+                    prefix="",
+                    state_dict=None,
+                    linear_layer_setting=(nn.Linear, nn.Embedding),
+                    orig_layer_impl=None,
+                    vocab_parallel_lm_head=vocab_parallel_lm_head)
     autotp.mp_group = tp_group
     autotp.mp_size = 2
-    autotp.tp_meta = AutoTPMeta()
-    embedding = nn.Embedding(5, 4)
 
     monkeypatch.setattr(dist, "get_rank", lambda group=None: 1 if group is tp_group else 0)
     sliced = autotp._slice_embedding(embedding, "embed_tokens", False)

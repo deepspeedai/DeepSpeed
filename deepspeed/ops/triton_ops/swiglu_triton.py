@@ -35,7 +35,9 @@ if _TRITON_AVAILABLE:
 
     @triton.jit
     def _swiglu_fwd_kernel(gate_ptr, up_ptr, out_ptr, n_elements, BLOCK_SIZE: tl.constexpr):
-        pid = tl.program_id(axis=0)
+        # int64: tl.program_id is int32, so pid * BLOCK_SIZE wraps negative once
+        # n_elements > 2**31, and the mask below does not reject a negative offset.
+        pid = tl.program_id(axis=0).to(tl.int64)
         offsets = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
         mask = offsets < n_elements
 
@@ -50,7 +52,9 @@ if _TRITON_AVAILABLE:
     @triton.jit
     def _swiglu_bwd_kernel(grad_out_ptr, gate_ptr, up_ptr, grad_gate_ptr, grad_up_ptr, n_elements,
                            BLOCK_SIZE: tl.constexpr):
-        pid = tl.program_id(axis=0)
+        # int64: tl.program_id is int32, so pid * BLOCK_SIZE wraps negative once
+        # n_elements > 2**31, and the mask below does not reject a negative offset.
+        pid = tl.program_id(axis=0).to(tl.int64)
         offsets = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
         mask = offsets < n_elements
 

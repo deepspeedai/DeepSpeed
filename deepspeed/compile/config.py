@@ -15,6 +15,9 @@ class CompileConfig(DeepSpeedConfigModel):
     deepcompile: bool = False
     """ Turn on/off the DeepCompile mode """
 
+    autoep_non_moe: bool = False
+    """ Compile callable parents of AutoEP layers while keeping AutoEP eager when engine.compile() is called """
+
     free_activation: bool = False
     """ Turn on/off the free activation mode """
 

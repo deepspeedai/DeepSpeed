@@ -11,6 +11,7 @@ backends are tested manually with a launched training script (see README).
 import pytest
 import torch
 
+import deepspeed.runtime.rollout as rollout_module
 from deepspeed.runtime.rollout import (
     RolloutBatch,
     RolloutEngine,
@@ -60,6 +61,13 @@ def test_sampling_config_defaults():
     assert cfg.top_p == 1.0
     assert cfg.top_k == -1
     assert cfg.n_samples_per_prompt == 1
+    assert cfg.continuous_batch_size is None
+
+
+def test_continuous_batching_details_are_not_public_exports():
+    assert "ContinuousBatchRequest" not in rollout_module.__all__
+    assert "ContinuousBatchScheduler" not in rollout_module.__all__
+    assert "ContinuousBatchUpdate" not in rollout_module.__all__
 
 
 # --- interface conformance via FakeRollout ---------------------------------

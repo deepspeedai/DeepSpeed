@@ -123,8 +123,8 @@ in the stage-2 path.
 
 .. note::
    Unmanaged mode supports ZeRO stage 0/1/2/3 (and DDP), including ZeRO optimizer-state and parameter
-   offload (CPU/NVMe). It is incompatible with pipeline parallelism, DeepCompile, and Apex AMP, which
-   are rejected at initialization. ZeRO ``overlap_comm`` is supported only with ZeRO stage 2
+   offload (CPU/NVMe). It is incompatible with pipeline parallelism and DeepCompile, which are
+   rejected at initialization. ZeRO ``overlap_comm`` is supported only with ZeRO stage 2
    (rejected for stage 0/1, where reduction is deferred to ``step()``).
 
 .. autofunction:: deepspeed.DeepSpeedEngine.set_gradient_accumulation_boundary
@@ -719,6 +719,8 @@ config and calling ``prepare_autosp_inputs()`` to prepare inputs before each for
 .. note::
    AutoSP requires ZeRO stage 0 (no ZeRO optimization). Using AutoSP with ZeRO stages 1, 2, or 3 is not currently supported.
    AutoSP also requires ``torch.nn.functional.scaled_dot_product_attention()`` as the attention backend.
+   The sequence length and the number of query, key, and value heads of every SDPA call must be divisible by
+   ``sequence_parallel_size``.
 
 Input Preparation
 ~~~~~~~~~~~~~~~~~

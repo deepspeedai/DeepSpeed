@@ -877,6 +877,31 @@ def test_one_cycle_rejects_wrong_length_per_group_lists(kwargs):
         OneCycle(optimizer=optimizer, **{**defaults, **kwargs})
 
 
+def test_lr_range_test_staircase_is_an_opt_in_flag():
+    # type=bool ran the builtin over the raw string, so "False", "false" and "0" were all
+    # non-empty and evaluated to True: the flag could be turned on but never off. Pin it to
+    # the store_true shape used by --cycle_momentum, the other boolean in this same parser.
+    parser = lrs.add_tuning_arguments(argparse.ArgumentParser())
+
+    assert parser.parse_args([]).lr_range_test_staircase is False
+    assert parser.parse_args(["--lr_range_test_staircase"]).lr_range_test_staircase is True
+
+    assert parser.parse_args([]).cycle_momentum is False
+    assert parser.parse_args(["--cycle_momentum"]).cycle_momentum is True
+
+
+@pytest.mark.parametrize("argv, expected", [([], False), (["--lr_range_test_staircase"], True)])
+def test_lr_range_test_staircase_reaches_scheduler_params(argv, expected):
+    # override_lr_range_test_params copies the parsed flag into the scheduler config, which is
+    # what LRRangeTest turns into _staircase_interval vs _continuous_interval. Both directions
+    # have to survive the trip so the documented "false" default stays reachable.
+    args = lrs.add_tuning_arguments(argparse.ArgumentParser()).parse_args(argv)
+    params = {}
+    lrs.override_lr_range_test_params(args, params)
+
+    assert params[LR_RANGE_TEST_STAIRCASE] is expected
+
+
 def test_warmup_cosine_lr_config_from_args_carries_the_ratios():
     # --warmup_min_ratio and --cos_min_ratio are declared by add_tuning_arguments and
     # were then dropped: WarmupCosineLR fell into the WarmupLR branch, so the config
