@@ -80,11 +80,18 @@ class InferenceEngine(Module):
             # automatic tensor parallelism. Without one of those, _convert_to_dtype has no int8
             # branch (see its `if False:` guard), so weights would silently stay in their
             # original dtype while config.dtype claimed int8.
+            #
+            # AutoTP is reached two ways: an explicit tensor_parallel.tp_size > 1, or a
+            # tensor_parallel.mpu. An mpu caller does not set tp_size here; it is derived from
+            # dist.get_world_size(self.mpu.get_model_parallel_group()) further down in __init__,
+            # after this gate. So the mpu case must be recognized directly, or int8 + mpu is
+            # wrongly refused even though the AutoTP branch would run and quantize.
             if not (config.injection_policy or config.replace_with_kernel_inject
-                    or config.tensor_parallel.tp_size > 1):
+                    or config.tensor_parallel.tp_size > 1 or config.tensor_parallel.mpu):
                 raise ValueError("Data type torch.int8 requires kernel injection or a replacement policy "
-                                 "(replace_with_kernel_inject=True, injection_policy=..., or "
-                                 "tensor_parallel.tp_size > 1) to actually quantize weights.")
+                                 "(replace_with_kernel_inject=True, injection_policy=..., "
+                                 "tensor_parallel.tp_size > 1, or tensor_parallel.mpu) to actually "
+                                 "quantize weights.")
 
         # todo: keep this self.injection_dict because we don't use to change config.injection_policy API
         # todo: this will get changed when Molly's PR on auto injection dict is merged
