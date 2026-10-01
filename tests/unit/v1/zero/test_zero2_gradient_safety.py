@@ -22,7 +22,11 @@ from deepspeed.runtime.zero.offload_config import DeepSpeedZeroOffloadOptimizerC
 from deepspeed.utils.timer import NoopTimer
 
 
-def make_optimizer(dtype=torch.bfloat16, device="cpu", low_precision=False, cpu_offload=True):
+def make_optimizer(dtype=torch.bfloat16, device=None, low_precision=False, cpu_offload=True):
+    # ZeRO-1/2 offload keeps gradients on the accelerator. record_stream has no CPU kernel,
+    # so a CPU default makes CUDA runners call aten::record_stream on CPU storage.
+    if device is None:
+        device = get_accelerator().device_name()
     opt = zero.DeepSpeedZeroOptimizer.__new__(zero.DeepSpeedZeroOptimizer)
     opt.cpu_offload = cpu_offload
     opt._offload_gradient_safety_enabled = cpu_offload
@@ -90,7 +94,7 @@ def test_oversized_copy_is_independent_and_preserves_routing(dtype, cpu_offload,
     opt, param, _ = make_optimizer(dtype, cpu_offload=cpu_offload)
     opt.reduce_bucket_size = bucket_size
     opt.reduce_ipg_grads = lambda **kwargs: None
-    original = torch.arange(8, dtype=dtype)
+    original = torch.arange(8, dtype=dtype, device=param.device)
     param.grad = original
     original_alias = original.view_as(original)
     opt.reduce_independent_p_g_buckets_and_remove_grads(param, 0)
