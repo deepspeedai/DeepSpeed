@@ -645,11 +645,15 @@ class InferenceEngine(Module):
             for input_tensor in kwargs["input_ids"]:
                 tensor_length = input_tensor.shape[-1]
                 # transformers gives max_new_tokens precedence over max_length when both
-                # are set, so mirror that instead of taking the larger of the two.
+                # are set, so mirror that instead of taking the larger of the two. When only
+                # max_length is set it is a total (input + new tokens), but it can be smaller
+                # than the input; max(tensor_length, max_length) keeps the guard comparing
+                # against at least the prompt length so it still fires (and transformers'
+                # own _validate_generated_length also rejects max_length < input afterwards).
                 if max_new_tokens is not None:
                     total_length = tensor_length + max_new_tokens
                 elif max_length is not None:
-                    total_length = max_length
+                    total_length = max(tensor_length, max_length)
                 else:
                     total_length = tensor_length
                 if total_length > self._config.max_out_tokens:

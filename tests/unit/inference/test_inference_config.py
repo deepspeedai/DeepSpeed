@@ -60,6 +60,28 @@ def test_generate_rejects_max_length_over_budget():
 
 
 @pytest.mark.inference
+def test_generate_rejects_input_over_budget_when_max_length_is_smaller_than_input():
+    # max_length is a total, but a caller can set it below the input length. Comparing
+    # against max_length alone then uses a number below the prompt size, so an input that
+    # overflows the KV-cache workspace slips through whenever max_length < input. The guard
+    # must compare against max(tensor_length, max_length) so the prompt length still counts.
+    class GenerateStub(torch.nn.Module):
+
+        def generate(self, *args, **kwargs):
+            return "reached-generate"
+
+    engine = deepspeed.init_inference(GenerateStub(), config={"max_out_tokens": 1024, "dtype": torch.float32})
+
+    # input (2000) > max_out_tokens (1024) > max_length (512): must still raise.
+    with pytest.raises(RuntimeError, match="exceed"):
+        engine.generate(input_ids=torch.zeros((1, 2000), dtype=torch.long), max_length=512)
+
+    # A total that genuinely fits (both input and max_length under budget) still passes.
+    assert engine.generate(input_ids=torch.zeros((1, 800), dtype=torch.long),
+                           max_length=900) == "reached-generate"
+
+
+@pytest.mark.inference
 def test_generate_lets_fitting_call_through_when_both_budgets_set():
     # transformers gives max_new_tokens precedence over max_length when both are
     # set (see GenerationMixin._prepare_generated_length), so the guard must
