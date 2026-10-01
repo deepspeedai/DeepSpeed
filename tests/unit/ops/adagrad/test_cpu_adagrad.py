@@ -94,6 +94,29 @@ class TestCPUAdagrad(DistributedTest):
 
         check_equal(param, param1, atol=1e-2, verbose=True)
 
+    def test_cpu_adagrad_sparse_embedding_backward(self):
+        emb = torch.nn.Embedding(10, 4, sparse=True)
+        emb1 = torch.nn.Embedding(10, 4, sparse=True)
+        emb1.load_state_dict(emb.state_dict())
+        initial = emb.weight.detach().clone()
+
+        optimizer = DeepSpeedCPUAdagrad(emb.parameters())
+        optimizer1 = torch.optim.Adagrad(emb1.parameters())
+
+        # Repeated indices give an uncoalesced gradient that must be summed per row
+        indices = torch.tensor([1, 3, 1, 7, 3, 1])
+        for i in range(3):
+            for e in (emb, emb1):
+                e.zero_grad()
+                e(indices).pow(2).sum().backward()
+            assert not emb.weight.grad.is_coalesced()
+            optimizer.step()
+            optimizer1.step()
+
+        assert not torch.equal(emb.weight, initial)
+        torch.testing.assert_close(emb.weight, emb1.weight)
+        torch.testing.assert_close(optimizer.state[emb.weight]['exp_avg_sq'], optimizer1.state[emb1.weight]['sum'])
+
 
 class TestCPUAdagradGPUError(DistributedTest):
 

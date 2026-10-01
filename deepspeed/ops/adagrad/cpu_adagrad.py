@@ -85,10 +85,12 @@ class DeepSpeedCPUAdagrad(torch.optim.Optimizer):
                 state['step'] += 1
 
                 if p.grad.is_sparse == True:
-                    sparse_param = p.sparse_mask(p.grad)
-                    sparse_exp_avg_sq = state['exp_avg_sq'].sparse_mask(p.grad)
+                    # Backward through nn.Embedding(sparse=True) leaves duplicate indices uncoalesced
+                    grad = p.grad.coalesce()
+                    sparse_param = p.sparse_mask(grad)
+                    sparse_exp_avg_sq = state['exp_avg_sq'].sparse_mask(grad)
                     self.ds_opt_adagrad.adagrad_update(self.opt_id, state['step'], group['lr'], group['eps'],
-                                                       group['weight_decay'], sparse_param.values(), p.grad.values(),
+                                                       group['weight_decay'], sparse_param.values(), grad.values(),
                                                        sparse_exp_avg_sq.values())
                     p[sparse_param.indices()] = sparse_param.values()
                     state['exp_avg_sq'][sparse_exp_avg_sq.indices()] = sparse_exp_avg_sq.values()
