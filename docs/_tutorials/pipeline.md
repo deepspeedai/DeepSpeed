@@ -388,7 +388,8 @@ class LinearFunc(torch.autograd.Function):
         input, weight = ctx.saved_tensors
 
         def grad_weight_fn():
-            grad = grad_output.flatten(0, -2).T @ input.flatten(0, -2)
+            grad_2d = grad_output.reshape(-1, grad_output.shape[-1])
+            grad = grad_2d.T @ input.reshape(-1, input.shape[-1])
             weight.grad = grad if weight.grad is None else weight.grad + grad
 
         if WeightGradStore.enabled:
@@ -407,14 +408,20 @@ then the backward pass of another. Pass a function as
 runs first and the backward pass second.
 ```python
 def overlap(forward, inputs, backward, tensors, grad_tensors):
-    outputs = forward(inputs)
+    # run the backward pass between the first layer and the rest of the forward pass
+    x = model.forward_funcs[0](inputs)
     backward(tensors, grad_tensors)
-    return outputs
+    for layer in model.forward_funcs[1:]:
+        x = layer(x)
+    return x
 
-net = DualPipeVModule(layers=net, loss_fn=torch.nn.CrossEntropyLoss(), num_stages=2,
-                      overlapped_forward_backward=overlap)
+model = DualPipeVModule(layers=net, loss_fn=torch.nn.CrossEntropyLoss(), num_stages=2,
+                        overlapped_forward_backward=overlap)
 ```
-`forward(inputs)` runs the layers of the forward pass, which are also available
-as `net.forward_funcs`. `backward` takes the arguments of
+`model.forward_funcs` holds the layers of the forward pass, and
+`forward(inputs)` runs all of them. `backward` takes the arguments of
 `torch.autograd.backward`, and `tensors` and `grad_tensors` are the ones for the
 whole backward pass. The function must return the outputs of the forward pass.
+Splitting the forward pass only saves time when the part before `backward`
+starts asynchronous work, such as the all-to-all communication of an MoE
+layer, that the backward pass can hide.
