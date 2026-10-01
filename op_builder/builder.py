@@ -591,6 +591,8 @@ class OpBuilder(ABC):
         self.jit_mode = True
         torch_arch_list_present = "TORCH_CUDA_ARCH_LIST" in os.environ
         torch_arch_list = os.environ.get("TORCH_CUDA_ARCH_LIST")
+        rocm_arch_list_present = "PYTORCH_ROCM_ARCH" in os.environ
+        rocm_arch_list = os.environ.get("PYTORCH_ROCM_ARCH")
         normalized_arch_list = torch_arch_list.strip() if torch_arch_list is not None else None
         self._jit_arch_list = normalized_arch_list or None
         from torch.utils.cpp_extension import load
@@ -639,6 +641,10 @@ class OpBuilder(ABC):
                 os.environ["TORCH_CUDA_ARCH_LIST"] = torch_arch_list
             else:
                 os.environ.pop("TORCH_CUDA_ARCH_LIST", None)
+            if rocm_arch_list_present:
+                os.environ["PYTORCH_ROCM_ARCH"] = rocm_arch_list
+            else:
+                os.environ.pop("PYTORCH_ROCM_ARCH", None)
             self._jit_arch_list = None
             self.jit_mode = saved_jit_mode
 
