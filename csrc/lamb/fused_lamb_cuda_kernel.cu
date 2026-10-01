@@ -202,7 +202,9 @@ __global__ void lamb_cuda_kernel_part1(
     const float b2,
     const float eps,
     const float grad_scale,
-    const float step_size,
+    const float lr,
+    const float bias_correction1,
+    const float bias_correction2,
     const size_t tsize,
     adamMode_t mode,
     const float decay,
@@ -224,12 +226,14 @@ __global__ void lamb_cuda_kernel_part1(
         T pj = p[j];
         m[j] = b1 * m[j] + (1 - b1) * scaled_grad;
         v[j] = b2 * v[j] + (1 - b2) * scaled_grad * scaled_grad;
+        T m_hat = m[j] / bias_correction1;
+        T v_hat = v[j] / bias_correction2;
         float denom;
         if (mode == ADAM_MODE_0)
-            denom = sqrtf(v[j] + eps);
+            denom = sqrtf(v_hat + eps);
         else  // Mode 1
-            denom = sqrtf(v[j]) + eps;
-        T update = (m[j] / denom) + (decay * p[j]);
+            denom = sqrtf(v_hat) + eps;
+        T update = (m_hat / denom) + (decay * p[j]);
 
         reg_u += update * update;
         reg_w += pj * pj;
@@ -270,7 +274,9 @@ __global__ void lamb_cuda_kernel_part3(
     const float min_coeff,
     const float eps,
     const float grad_scale,
-    const float step_size,
+    const float lr,
+    const float bias_correction1,
+    const float bias_correction2,
     const size_t tsize,
     adamMode_t mode,
     const float decay,
@@ -303,8 +309,8 @@ __global__ void lamb_cuda_kernel_part3(
 
     for (int j = i; j < tsize; j += totThreads) {
         T pj = (float)p[j];
-        T mj = m[j];
-        T vj = v[j];
+        T mj = m[j] / bias_correction1;
+        T vj = v[j] / bias_correction2;
         float denom;
         if (mode == ADAM_MODE_0)
             denom = sqrtf(vj + eps);
@@ -312,7 +318,7 @@ __global__ void lamb_cuda_kernel_part3(
             denom = sqrtf(vj) + eps;
         T update = (mj / denom) + (decay * pj);
 
-        pj = pj - (step_size * lamb_coeff * update);
+        pj = pj - (lr * lamb_coeff * update);
         p[j] = pj;
         if (p_copy != NULL) p_copy[j] = (GRAD_T)pj;
     }
@@ -360,13 +366,13 @@ void fused_lamb_cuda(at::Tensor& p,
     AT_ASSERTM(at::cuda::detail::canUse32BitIndexMath(p),
                "parameter tensor is too large to be indexed with int32");
     // Constants
-    float step_size = 0;
+    // Bias-correct m and v themselves (LAMB, Algorithm 2). Folding the correction into the
+    // step size instead would scale the whole trust-ratio-normalized update.
+    float bias_correction1 = 1;
+    float bias_correction2 = 1;
     if (bias_correction == 1) {
-        const float bias_correction1 = 1 - std::pow(beta1, step);
-        const float bias_correction2 = 1 - std::pow(beta2, step);
-        step_size = lr * std::sqrt(bias_correction2) / bias_correction1;
-    } else {
-        step_size = lr;
+        bias_correction1 = 1 - std::pow(beta1, step);
+        bias_correction2 = 1 - std::pow(beta2, step);
     }
     cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
@@ -391,7 +397,9 @@ void fused_lamb_cuda(at::Tensor& p,
                         beta2,
                         eps,
                         grad_scale,
-                        step_size,
+                        lr,
+                        bias_correction1,
+                        bias_correction2,
                         tsize,
                         (adamMode_t)mode,
                         decay,
@@ -415,7 +423,9 @@ void fused_lamb_cuda(at::Tensor& p,
                         min_coeff,
                         eps,
                         grad_scale,
-                        step_size,
+                        lr,
+                        bias_correction1,
+                        bias_correction2,
                         tsize,
                         (adamMode_t)mode,
                         decay,
@@ -438,7 +448,9 @@ void fused_lamb_cuda(at::Tensor& p,
                         beta2,
                         eps,
                         grad_scale,
-                        step_size,
+                        lr,
+                        bias_correction1,
+                        bias_correction2,
                         tsize,
                         (adamMode_t)mode,
                         decay,
@@ -462,7 +474,9 @@ void fused_lamb_cuda(at::Tensor& p,
                         min_coeff,
                         eps,
                         grad_scale,
-                        step_size,
+                        lr,
+                        bias_correction1,
+                        bias_correction2,
                         tsize,
                         (adamMode_t)mode,
                         decay,
