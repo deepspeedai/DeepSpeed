@@ -11,7 +11,7 @@ from torch.optim.lr_scheduler import _LRScheduler, LambdaLR
 
 from unit.simple_model import SimpleModel, random_dataloader
 from unit.common import DistributedTest
-from unit.util import bf16_required_version_check, required_amp_check
+from unit.util import bf16_required_version_check
 
 import deepspeed
 from deepspeed.ops.adam import FusedAdam
@@ -125,7 +125,7 @@ class TestConfigOptimizer(DistributedTest):
         assert isinstance(ds_optimizer, FusedAdam)
 
 
-@pytest.mark.parametrize('optimizer_extension', ['zero1', 'zero2', 'zero3', 'amp', None])
+@pytest.mark.parametrize('optimizer_extension', ['zero1', 'zero2', 'zero3', None])
 @pytest.mark.parametrize('model_dtype', ['fp16', 'bf16', 'fp32'])
 @pytest.mark.parametrize('grad_accum_dtype', [None, 'fp16', 'bf16', 'fp32'])
 class TestOptimizerImplementation(DistributedTest):
@@ -144,7 +144,6 @@ class TestOptimizerImplementation(DistributedTest):
             zero_stage = 3
         else:
             zero_stage = 0
-        amp = (optimizer_extension == 'amp')
         fp16 = (model_dtype == 'fp16')
         bf16 = (model_dtype == 'bf16')
         # Skip checks
@@ -152,8 +151,6 @@ class TestOptimizerImplementation(DistributedTest):
             pytest.skip(
                 "DeepSpeed BFloat16 tests need torch >= 1.10, NCCL >= 2.10.3, CUDA > =11.0 and HW support for BFloat16 to run correctly"
             )
-        if amp and not required_amp_check():
-            pytest.skip("Amp is not installed can't run amp check")
         # Config declaration
         ds_config = {
             "train_batch_size": 1,
@@ -162,9 +159,6 @@ class TestOptimizerImplementation(DistributedTest):
             },
             'bf16': {
                 'enabled': bf16
-            },
-            'amp': {
-                'enabled': amp
             },
             'zero_optimization': {
                 "stage": zero_stage
@@ -223,9 +217,6 @@ class TestOptimizerImplementation(DistributedTest):
         is_supported[('zero3', 'fp32', 'fp16')] = True
         is_supported[('zero3', 'fp32', 'bf16')] = True
         is_supported[('zero3', 'fp32', 'fp32')] = True
-        # Amp Wrapper
-        is_supported[('amp', 'fp32', None)] = True
-        is_supported[('amp', 'fp32', 'fp32')] = True
         # FP16 Wrapper
         is_supported[(None, 'fp16', None)] = True
         is_supported[(None, 'fp16', 'fp16')] = True

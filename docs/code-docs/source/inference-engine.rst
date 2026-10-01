@@ -70,9 +70,10 @@ branches. The option is disabled by default.
 
 Shared prefill currently requires HybridEngine kernel injection, ZeRO stage 0,
 inference tensor-parallel size 1, an internal KV cache, and a prompt longer than
-one token. It cannot be combined with CUDA graph capture or
-``release_inference_cache``. Sampling still happens independently for every
-response branch after the shared prompt forward.
+one token. It cannot be combined with CUDA graph capture,
+``release_inference_cache``, or continuous batching
+(``SamplingConfig.continuous_batch_size``). Sampling still happens independently
+for every response branch after the shared prompt forward.
 
 Continuous batching (experimental)
 -----------------------------------
@@ -86,13 +87,25 @@ and pending rows are prefetched into the released slots. The returned
 The experimental path periodically trims unused cache columns from the left
 to keep long-running staggered-EOS workloads within the allocated cache span.
 
+When ``HybridEngineRolloutConfig(enable_profiling=True)`` is enabled, this path
+also records a snapshot in ``get_last_profile()``. In addition to the common
+rollout fields, the snapshot reports ``scheduler_overhead_ms`` for scheduler
+transitions, ``cache_management_overhead_ms`` for cache compaction, trimming,
+reset, and admitted-row copies, and separate ``prefill_forward_ms`` and
+``decode_forward_ms`` totals. ``num_prefill_forwards`` counts each admitted
+prompt batch, while ``num_decode_forwards`` counts decode steps that had
+surviving rows. ``num_generated_tokens`` counts tokens actually produced by
+all requests (padding is excluded), and ``active_batch_size`` is the maximum
+number of simultaneously active rows; ``continuous_batch_size`` is the
+configured capacity.
+
 The experimental path intentionally does not implement paged attention or change the
 default generation semantics. It currently requires one prompt width for all
 rows, a model with cache-class support, greedy decoding, and one sample per
-prompt. CUDA Graph capture and multiple prompt widths are rejected until the
-scheduling semantics are validated on real workloads. Models without
-cache-class support should use the default ``generate()`` path or upgrade
-Transformers.
+prompt. CUDA Graph capture, shared prompt prefill, and multiple prompt widths
+are rejected until the scheduling semantics are validated on real workloads.
+Models without cache-class support should use the default ``generate()`` path
+or upgrade Transformers.
 
 ``DeepSpeedStaticCache`` accepts one write position per row and can compact
 active rows while preserving its static tensor addresses. This mirrors the

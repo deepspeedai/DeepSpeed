@@ -399,8 +399,30 @@ whose name matched a metadata key could never be confused for one.
   and for debugging a checkpoint that will not load.
 - **`locations` is per piece, not per parameter.** This is the field that expresses
   `bigcodetype`, whose kv block is held identically by every rank (§5).
+- **A reader that prefers the map must still account for the categories.** Additivity means
+  both are in the file, so a reader taking the map never consults the category branches —
+  which leaves their patterns looking unused, and a strict conversion rejects them. They are
+  superseded, not unused, and the reader has to say so. This is not cosmetic: it is the
+  difference between a checkpoint that converts and one that aborts.
 
-### 6.4 Size
+### 6.4 Where a map is built
+
+Not where the file is assembled. Collecting model-level metadata sees only the conversion
+schema, which does not carry per-rank extents — those are resolved while a layer is built
+and are not recoverable later from a shape alone. So a map is derived at the point a layer
+records its metadata, and collection gathers what the layers produced.
+
+Two consequences worth stating, because both are easy to get wrong:
+
+- A parameter the tensor-parallel machinery never touches is still describable — one piece
+  held by every rank — but it reaches no layer, so nothing derives its map. It needs the
+  degree of the group, which only the partitioned layers know. Producing a map for it means
+  taking that from elsewhere in the model rather than skipping it: a parameter with no map
+  falls back to its name category, which is what the IR exists to replace.
+- A layout the machinery refuses to describe produces no map, and conversion falls back to
+  the categories. That is the intended escape, not a gap.
+
+### 6.5 Size
 
 Measured on a fused-QKV parameter at TP=8: 96 pieces, 6836 bytes of compact JSON —
 about **71 bytes per piece**. Extrapolated by tensor count:
@@ -546,11 +568,26 @@ and fp16 alike, because dividing by `2^k` only shifts the exponent — so a bias
 bit-exactly at every TP degree in normal use. It is lossy for non-power-of-two `N` (3, 6,
 12), where a converted-and-restored bias may differ in the last bits from the original.
 
-**8.4 ZeRO and offload placement.** delock's extension in #8230 — "a subset of a parameter
-combined with a list of ranks holding this subset" — is what §2.1's `locations` implements.
-ZeRO-1/3 partitions and offload replicas should fall out as pieces whose `locations`
-describe the DP group rather than the TP group, but this spec does not yet work through
-AutoEP's expert placement, where locations are per-expert rather than per-parameter.
+**8.4 AutoEP, ZeRO, and offload placement.** AutoEP persists a versioned
+`ParamAffineMap` for each expert parameter in addition to a versioned placement
+descriptor in EP-local rank coordinates. The persisted map is the geometry execution
+contract for conversion and restore; descriptor lowering is retained only as a legacy
+checkpoint fallback. The descriptor records each rank's ordered global expert IDs,
+including uneven, non-contiguous, replicated, and empty placements, so it remains useful
+for placement provenance and validation rather than scheduling policy. Rank entries are
+identified by their explicit rank IDs, not their list positions. When a checkpoint carries
+both forms, lowering the descriptor must reproduce the persisted map exactly; a conflict
+invalidates the checkpoint. ZeRO and EDP fragments remain outside the map: callers first
+normalize storage to one logical packed expert tensor per EP rank.
+
+This phase does not change the current runtime's uniform contiguous scheduling, choose an
+arbitrary future expert schedule, or implement direct phase-2 shard-to-shard transfer.
+Those remain follow-on work. Phase 2 may derive a target descriptor from runtime
+scheduling and transfer directly between source and target maps; until then extraction
+from the universal full tensor uses the target map. delock's extension in #8230 — "a
+subset of a parameter combined with a list of ranks holding this subset" — is still what
+§2.1's exact `locations` implements, and the same mechanism can later describe normalized
+ZeRO/offload placement without introducing another geometry IR.
 
 ---
 

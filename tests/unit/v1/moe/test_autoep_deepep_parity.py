@@ -227,6 +227,11 @@ def _run_one_step(backend, ep_size, seed, *, cleanup=True, activation_checkpoint
         "parameter_deltas": parameter_deltas,
     }
     if backend == "deepep":
+        exchanges = [
+            submodule._deepep_exchange for submodule in engine.module.modules()
+            if getattr(submodule, "_deepep_exchange", None) is not None
+        ]
+        result["exchanges"] = exchanges
         destroy_exchanges(engine.module)
     return result
 
@@ -314,6 +319,23 @@ class TestDeepEPMatchesCollective(DistributedTest):
                                        rtol=5e-2,
                                        atol=5e-2,
                                        msg=f"gradient for {name}")
+
+    def test_every_moe_layer_shares_one_buffer(self):
+        """Buffers are a fabric resource, and one per layer runs the fabric out.
+
+        On 32 H100s across four nodes the twenty-eighth construction fails
+        inside ncclDevCommCreate, which puts a 27-layer ceiling on any model.
+        The parity tests above already run through the shared buffer; this
+        asserts that it is in fact shared, and released once nothing holds it.
+        """
+        skip_unless_h100_tests_enabled("DeepEP parity needs H100s and a DeepEP build")
+
+        result = _run_one_step("deepep", self.world_size, seed=4321)
+
+        exchanges = result["exchanges"]
+        assert len(exchanges) > 1, "the model under test has to have more than one MoE layer to prove sharing"
+        assert len({id(exchange) for exchange in exchanges}) == 1
+        assert all(exchange.destroyed for exchange in exchanges), "the last release did not free the buffer"
 
     def test_the_router_gate_receives_gradients(self):
         """The gate silently never learning is what a dropped weight costs.

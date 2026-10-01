@@ -156,18 +156,20 @@ class HybridEngineRollout(RolloutEngine):
             else:
                 temperature = max(sampling.temperature, 1e-8)
                 do_sample = not is_greedy
-                output_ids = module.generate(
-                    prompt_ids,
-                    attention_mask=prompt_attn,
-                    max_new_tokens=max_new_tokens,
+                generate_kwargs = {
+                    "attention_mask": prompt_attn,
+                    "max_new_tokens": max_new_tokens,
                     # ZeRO-3 gathers parameters during each decode forward, so every
                     # data-parallel rank must execute the same number of iterations.
-                    eos_token_id=None,
-                    do_sample=do_sample,
-                    temperature=temperature if do_sample else 1.0,
-                    top_p=sampling.top_p if do_sample else 1.0,
-                    pad_token_id=pad_token_id,
-                )
+                    "eos_token_id": None,
+                    "do_sample": do_sample,
+                    "temperature": temperature if do_sample else 1.0,
+                    "top_p": sampling.top_p if do_sample else 1.0,
+                    "pad_token_id": pad_token_id,
+                }
+                if do_sample:
+                    generate_kwargs["top_k"] = max(sampling.top_k, 0)
+                output_ids = module.generate(prompt_ids, **generate_kwargs)
         finally:
             for handle in shared_prefill_handles:
                 handle.remove()
@@ -259,6 +261,7 @@ class HybridEngineRollout(RolloutEngine):
         self._validate_continuous_inputs(requests, sampling, max_batch_size)
 
         module = self.engine.module
+        profile = self._start_continuous_profile() if self.enable_profiling else None
         prompt_len = requests[0].prompt_ids.shape[1]
         max_positions = getattr(module.config, "max_position_embeddings", None)
         if max_positions is not None:
@@ -282,6 +285,7 @@ class HybridEngineRollout(RolloutEngine):
         device = requests[0].prompt_ids.device
         model_dtype = next(module.parameters()).dtype
 
+        scheduler_start = self._profile_start(profile)
         scheduler = ContinuousBatchScheduler(max_batch_size, sampling.max_new_tokens)
         request_by_id = {}
         responses = {}
@@ -289,7 +293,9 @@ class HybridEngineRollout(RolloutEngine):
             scheduler.submit(ContinuousBatchRequest(request_id))
             request_by_id[request_id] = request
             responses[request_id] = []
+        self._profile_end(profile, "scheduler_overhead_ms", scheduler_start)
 
+        cache_start = self._profile_start(profile)
         cache = DeepSpeedStaticCache(
             module.config,
             batch_size=max_batch_size,
@@ -303,9 +309,15 @@ class HybridEngineRollout(RolloutEngine):
         next_tokens = {}
         cache_position = prompt_len
         trim_threshold = max(1, prompt_len)
+        self._profile_end(profile, "cache_management_overhead_ms", cache_start)
+        scheduler_start = self._profile_start(profile)
         update = scheduler.schedule()
+        self._profile_end(profile, "scheduler_overhead_ms", scheduler_start)
 
         while update.active:
+            if profile is not None:
+                profile["active_batch_sizes"].append(len(update.active))
+            cache_start = self._profile_start(profile)
             keep_slots = torch.tensor(update.keep_slots, dtype=torch.long, device=device)
             survivor_count = keep_slots.numel()
             if survivor_count:
@@ -332,6 +344,7 @@ class HybridEngineRollout(RolloutEngine):
                 write_positions.fill_(-1)
                 attention_mask.zero_()
                 cache_position = prompt_len
+            self._profile_end(profile, "cache_management_overhead_ms", cache_start)
 
             admitted_tokens = self._continuous_prefill(
                 module,
@@ -345,6 +358,7 @@ class HybridEngineRollout(RolloutEngine):
                 prompt_len,
                 model_dtype,
                 device,
+                profile,
             )
 
             decoded_tokens = {}
@@ -354,6 +368,7 @@ class HybridEngineRollout(RolloutEngine):
                 write_positions[:survivor_count].fill_(cache_position)
                 position_ids = attention_mask[:survivor_count, :cache_position].sum(dim=1, keepdim=True)
                 attention_mask[:survivor_count, cache_position] = 1
+                decode_start = self._profile_start(profile)
                 output = self._call_model(
                     module,
                     decode_input,
@@ -363,6 +378,7 @@ class HybridEngineRollout(RolloutEngine):
                     cache_position=torch.tensor([cache_position], dtype=torch.long, device=device),
                     position_ids=position_ids,
                 )
+                self._profile_end(profile, "decode_forward_ms", decode_start, count="num_decode_forwards")
                 decoded = output.logits[:, -1, :].argmax(dim=-1, keepdim=True)
                 decoded_tokens = dict(zip(survivor_ids, decoded.split(1, dim=0)))
 
@@ -374,11 +390,85 @@ class HybridEngineRollout(RolloutEngine):
                 if self._is_eos(token):
                     finished_ids.append(request_id)
 
+            scheduler_start = self._profile_start(profile)
             update = scheduler.advance(finished_ids)
+            self._profile_end(profile, "scheduler_overhead_ms", scheduler_start)
             if survivor_count:
                 cache_position += 1
 
-        return self._build_continuous_batch(original_request, responses)
+        generation_end = self._profile_start(profile)
+        post_processing_start = generation_end
+        output = self._build_continuous_batch(original_request, responses)
+        post_processing_end = self._profile_end(profile, None, post_processing_start)
+        if profile is not None:
+            self._finish_continuous_profile(profile, original_request, responses, max_batch_size, prompt_len,
+                                            generation_end, post_processing_end)
+        return output
+
+    def _start_continuous_profile(self):
+        accelerator = get_accelerator()
+        accelerator.synchronize()
+        return {
+            "accelerator": accelerator,
+            "start": time.perf_counter(),
+            "prefill_forward_ms": 0.0,
+            "decode_forward_ms": 0.0,
+            "scheduler_overhead_ms": 0.0,
+            "cache_management_overhead_ms": 0.0,
+            "num_prefill_forwards": 0,
+            "num_decode_forwards": 0,
+            "active_batch_sizes": [],
+        }
+
+    @staticmethod
+    def _profile_start(profile):
+        if profile is None:
+            return None
+        profile["accelerator"].synchronize()
+        return time.perf_counter()
+
+    @staticmethod
+    def _profile_end(profile, field, start, count=None, count_if=True, synchronize=True):
+        if profile is None or start is None:
+            return None
+        if synchronize:
+            profile["accelerator"].synchronize()
+        end = time.perf_counter()
+        if field is not None and count_if:
+            profile[field] += (end - start) * 1000.0
+        if count is not None and count_if:
+            profile[count] += 1
+        return end
+
+    def _finish_continuous_profile(self, profile, request, responses, max_batch_size, prompt_len, generation_end,
+                                   post_processing_end):
+        total_ms = (post_processing_end - profile["start"]) * 1000.0
+        generation_ms = (generation_end - profile["start"]) * 1000.0
+        prefill_ms = profile["prefill_forward_ms"]
+        decode_ms = profile["decode_forward_ms"]
+        response_lengths = [len(response) for response in responses.values()]
+        num_generated_tokens = sum(response_lengths)
+        self._last_profile = {
+            "prompt_expansion_ms": 0.0,
+            "generation_ms": generation_ms,
+            "prefill_forward_ms": prefill_ms,
+            "decode_forward_ms": decode_ms,
+            "generation_overhead_ms": max(0.0, generation_ms - prefill_ms - decode_ms),
+            "num_prefill_forwards": profile["num_prefill_forwards"],
+            "num_decode_forwards": profile["num_decode_forwards"],
+            "scheduler_overhead_ms": profile["scheduler_overhead_ms"],
+            "cache_management_overhead_ms": profile["cache_management_overhead_ms"],
+            "post_processing_ms": (post_processing_end - generation_end) * 1000.0,
+            "total_ms": total_ms,
+            "num_generated_tokens": num_generated_tokens,
+            "tokens_per_second": num_generated_tokens / (total_ms / 1000.0) if total_ms > 0.0 else 0.0,
+            "batch_size": request.prompt_ids.shape[0],
+            "num_samples_per_prompt": 1,
+            "prompt_length": prompt_len,
+            "response_length": max(response_lengths, default=0),
+            "active_batch_size": max(profile["active_batch_sizes"], default=0),
+            "continuous_batch_size": max_batch_size,
+        }
 
     @staticmethod
     def _estimate_continuous_cache_len(prompt_len, max_new_tokens, max_batch_size):
@@ -422,6 +512,8 @@ class HybridEngineRollout(RolloutEngine):
             raise ValueError("max_batch_size must be positive")
         if self.use_graph_capture:
             raise ValueError("continuous batching does not yet support CUDA graph capture")
+        if self.use_shared_prefill:
+            raise ValueError("continuous batching does not support shared prompt prefill")
 
         prompt_len = requests[0].prompt_ids.shape[1]
         device = requests[0].prompt_ids.device
@@ -448,8 +540,19 @@ class HybridEngineRollout(RolloutEngine):
             return 0
         return int(occupied.to(dtype=torch.int32).argmax().item())
 
-    def _continuous_prefill(self, module, static_cache_type, cache, update, request_by_id, attention_mask,
-                            write_positions, cache_position, prompt_len, model_dtype, device):
+    def _continuous_prefill(self,
+                            module,
+                            static_cache_type,
+                            cache,
+                            update,
+                            request_by_id,
+                            attention_mask,
+                            write_positions,
+                            cache_position,
+                            prompt_len,
+                            model_dtype,
+                            device,
+                            profile=None):
         if not update.admitted:
             return {}
 
@@ -459,6 +562,7 @@ class HybridEngineRollout(RolloutEngine):
                                      dim=0)
         prefill_cache = self._create_static_cache(static_cache_type, module.config, len(admitted_ids), prompt_len,
                                                   device, model_dtype)
+        prefill_start = self._profile_start(profile)
         prefill_output = self._call_model(
             module,
             prompt_ids,
@@ -467,16 +571,19 @@ class HybridEngineRollout(RolloutEngine):
             use_cache=True,
             cache_position=torch.arange(prompt_len, device=device),
         )
+        self._profile_end(profile, "prefill_forward_ms", prefill_start, count="num_prefill_forwards")
+        cache_start = self._profile_start(profile)
         prefill_tokens = prefill_output.logits[:, -1, :].argmax(dim=-1, keepdim=True)
-        cache_start = cache_position - prompt_len
+        cache_offset = cache_position - prompt_len
         for layer_idx, prefill_layer in enumerate(prefill_cache.layers):
             target_layer = cache.layers[layer_idx]
             for source_row, target_row in enumerate(update.admitted_slots):
-                target_layer.keys[target_row, :, cache_start:cache_position].copy_(prefill_layer.keys[source_row])
-                target_layer.values[target_row, :, cache_start:cache_position].copy_(prefill_layer.values[source_row])
+                target_layer.keys[target_row, :, cache_offset:cache_position].copy_(prefill_layer.keys[source_row])
+                target_layer.values[target_row, :, cache_offset:cache_position].copy_(prefill_layer.values[source_row])
         for source_row, target_row in enumerate(update.admitted_slots):
-            attention_mask[target_row, cache_start:cache_position].copy_(prompt_attention[source_row])
+            attention_mask[target_row, cache_offset:cache_position].copy_(prompt_attention[source_row])
             write_positions[target_row] = cache_position
+        self._profile_end(profile, "cache_management_overhead_ms", cache_start)
         return dict(zip(admitted_ids, prefill_tokens.split(1, dim=0)))
 
     def _is_eos(self, token):
@@ -742,23 +849,6 @@ class HybridEngineRollout(RolloutEngine):
             eos_mask |= (next_token.squeeze(1) == eos_token_id)
 
         return torch.cat(output_ids, dim=1)
-
-    @staticmethod
-    def _sample_top_p(logits: torch.Tensor, temperature: float = 1.0, top_p: float = 1.0) -> torch.Tensor:
-        """Sample from logits with temperature and nucleus (top-p) filtering."""
-        logits = logits / temperature
-        if top_p < 1.0:
-            sorted_logits, sorted_indices = torch.sort(logits, descending=True, dim=-1)
-            cumulative_probs = torch.cumsum(torch.softmax(sorted_logits, dim=-1), dim=-1)
-            mask = (cumulative_probs - torch.softmax(sorted_logits, dim=-1)) >= top_p
-            sorted_logits[mask] = -float('inf')
-            probs = torch.softmax(sorted_logits, dim=-1)
-            sampled = torch.multinomial(probs, 1)
-            tokens = sorted_indices.gather(1, sampled)
-        else:
-            probs = torch.softmax(logits, dim=-1)
-            tokens = torch.multinomial(probs, 1)
-        return tokens
 
     def sync_weights(self, step: int) -> None:  # noqa: ARG002
         """No-op: hybrid engine reads model weights live."""
