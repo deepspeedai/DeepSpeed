@@ -9,9 +9,12 @@ import deepspeed.comm as dist
 import pytest
 from typing import Dict
 
+import deepspeed
 import deepspeed.runtime.utils as ds_utils
 import deepspeed.utils.groups as groups
 from deepspeed.accelerator import get_accelerator
+from deepspeed.moe.layer import MoE
+from deepspeed.moe.utils import is_moe_param, split_params_into_different_moe_groups_for_optimizer
 
 from unit.common import DistributedTest
 
@@ -194,6 +197,84 @@ class TestClipGradNorm(DistributedTest):
         # This can be allclose
         assert torch.equal(params_expected[0].grad, params_actual[0].grad)
         assert torch.equal(params_expected[1].grad, params_actual[1].grad)
+
+
+class _OneMoELayer(torch.nn.Module):
+    """A dense layer, then one expert per rank behind a gate."""
+
+    def __init__(self, hidden_dim):
+        super().__init__()
+        self.dense = torch.nn.Linear(hidden_dim, hidden_dim)
+        expert = torch.nn.Linear(hidden_dim, hidden_dim)
+        # k=2 sends every token to both experts, so each rank's expert gets a gradient.
+        self.moe = MoE(hidden_size=hidden_dim, expert=expert, num_experts=2, ep_size=2, k=2, capacity_factor=2.0)
+
+    def forward(self, x):
+        output, _, _ = self.moe(self.dense(x))
+        return output.pow(2).mean()
+
+
+class TestClipFp32GradientsThroughEngine(DistributedTest):
+    """The clip `DeepSpeedEngine.step()` applies in an fp32 run without ZeRO, with experts on two ranks.
+
+    `clip_grad_norm_` returns its norm and the engine drops it, so the norm is read from its effect. With
+    plain SGD the update is `lr * clip_coef * grad`, and the coefficient has to come from the norm of every
+    gradient with each expert counted once, not from the ranks' own norms averaged.
+    """
+
+    world_size = 2
+
+    def test_the_update_is_clipped_by_the_global_norm(self):
+        hidden_dim, max_norm, lr = 8, 1e-3, 1.0
+        torch.manual_seed(0)
+        model = _OneMoELayer(hidden_dim)
+        param_group = {'params': list(model.parameters()), 'name': 'all'}
+        optimizer = torch.optim.SGD(split_params_into_different_moe_groups_for_optimizer(param_group), lr=lr)
+        config = {
+            "train_micro_batch_size_per_gpu": 2,
+            "gradient_clipping": max_norm,
+            "zero_optimization": {
+                "stage": 0
+            }
+        }
+        engine, _, _, _ = deepspeed.initialize(config=config, model=model, optimizer=optimizer)
+
+        # A different loss scale on each rank gives the two experts gradients of different size.
+        rank = dist.get_rank()
+        generator = torch.Generator().manual_seed(100 + rank)
+        x = torch.randn(2, 4, hidden_dim, generator=generator).to(engine.device)
+        engine.backward(engine(x) * (1 + 3 * rank))
+
+        params = list(engine.module.parameters())
+        dense = [p for p in params if not is_moe_param(p)]
+        experts = [p for p in params if is_moe_param(p)]
+        assert dense and experts
+        dense_sq = torch.stack([p.grad.float().pow(2).sum() for p in dense]).sum()
+        expert_sq = torch.stack([p.grad.float().pow(2).sum() for p in experts]).sum()
+
+        # The oracle counts a dense gradient once because it is the same on both ranks, and an expert once
+        # because each rank owns a different one.
+        dense_on_every_rank = dense_sq.clone()
+        dist.all_reduce(dense_on_every_rank, op=dist.ReduceOp.MIN)
+        assert torch.equal(dense_on_every_rank, dense_sq), "dense gradients should match across ranks"
+        all_experts_sq = expert_sq.clone()
+        dist.all_reduce(all_experts_sq)
+        true_norm = (dense_sq + all_experts_sq).sqrt().item()
+
+        # Averaging the ranks' own norms is the answer this test exists to rule out, so it has to differ.
+        own_norm = (dense_sq + expert_sq).sqrt()
+        dist.all_reduce(own_norm)
+        averaged_norm = own_norm.item() / dist.get_world_size()
+        assert true_norm > 5 * max_norm, "the clip must be active for this to say anything"
+        assert abs(averaged_norm - true_norm) > 0.05 * true_norm, "the two norms must be distinguishable"
+
+        clip_coef = max_norm / (true_norm + 1e-6)
+        before = [p.detach().clone() for p in params]
+        grads = [p.grad.detach().clone() for p in params]
+        engine.step()
+
+        for p, start, grad in zip(params, before, grads):
+            torch.testing.assert_close(p.detach(), start - lr * clip_coef * grad, rtol=1e-4, atol=1e-6)
 
 
 class TestClipGradNormPNorm(DistributedTest):
