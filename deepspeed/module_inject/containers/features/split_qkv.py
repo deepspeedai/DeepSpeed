@@ -33,20 +33,40 @@ class HybridSplitQKVContainer(HybridEngineContainer):
     def attention_qkv_mp(self, mp_replace, reversed_dim=False):
         # Only need to alter
         if self.module.attention.attn_qkvw is None:
-            params = [
-                (self.module.attention.attn_qw, self.qw),
-                (self.module.attention.attn_qb, self.qb),
-                (self.module.attention.attn_kw, self.kw),
-                (self.module.attention.attn_kb, self.kb),
-                (self.module.attention.attn_vw, self.vw),
-                (self.module.attention.attn_vb, self.vb),
-            ]
-            for dst, src in params:
-                dst = mp_replace.copy(
-                    dst[:self.qw.shape[0] // mp_replace.mp_size], src, int8=reversed_dim,
-                    allocate_tensor=reversed_dim) if src is not None else None
+
+            self.module.attention.attn_qw = mp_replace.copy(
+                self.module.attention.attn_qw[:self.qw.shape[0] // mp_replace.mp_size], self.qw, int8=reversed_dim,
+                allocate_tensor=reversed_dim) if self.qw is not None else None
+            self.module.attention.attn_qb = mp_replace.copy(
+                self.module.attention.attn_qb[:self.qw.shape[0] // mp_replace.mp_size], self.qb, int8=reversed_dim,
+                allocate_tensor=reversed_dim) if self.qb is not None else None
+            self.module.attention.attn_kw = mp_replace.copy(
+                self.module.attention.attn_kw[:self.qw.shape[0] // mp_replace.mp_size], self.kw, int8=reversed_dim,
+                allocate_tensor=reversed_dim) if self.kw is not None else None
+            self.module.attention.attn_kb = mp_replace.copy(
+                self.module.attention.attn_kb[:self.qw.shape[0] // mp_replace.mp_size], self.kb, int8=reversed_dim,
+                allocate_tensor=reversed_dim) if self.kb is not None else None
+            self.module.attention.attn_vw = mp_replace.copy(
+                self.module.attention.attn_vw[:self.qw.shape[0] // mp_replace.mp_size], self.vw, int8=reversed_dim,
+                allocate_tensor=reversed_dim) if self.vw is not None else None
+            self.module.attention.attn_vb = mp_replace.copy(
+                self.module.attention.attn_vb[:self.qw.shape[0] // mp_replace.mp_size], self.vb, int8=reversed_dim,
+                allocate_tensor=reversed_dim) if self.vb is not None else None
+
         else:
             super().attention_qkv_mp(mp_replace)
+
+    def attention_o_mp(self, mp_replace, reversed_dim=False):
+        self.module.attention.attn_ow = mp_replace.copy(
+            self.module.attention.attn_ow[:, :self.dense_w.shape[1] // mp_replace.mp_size],
+            self.dense_w,
+            int8=reversed_dim,
+            allocate_tensor=reversed_dim) if self.dense_w is not None else None
+        self.module.attention.attn_ob = mp_replace.copy(
+            self.module.attention.attn_ob[:self.dense_w.shape[1] // mp_replace.mp_size],
+            self.dense_b,
+            int8=reversed_dim,
+            allocate_tensor=reversed_dim) if self.dense_b is not None else None
 
     def release_qkv(self):
         super().release_qkv()
