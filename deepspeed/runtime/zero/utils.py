@@ -62,6 +62,15 @@ try:
 except ImportError:
     pass
 
+# Add ReflowCPUAdam / ReflowCPULion (Reflow async CPU-offload optimizer) to supported list
+try:
+    from deepspeed.runtime.reflow.reflow_cpu_adam import ReflowCPUAdam
+    from deepspeed.runtime.reflow.reflow_cpu_lion import ReflowCPULion
+    ZERO_SUPPORTED_OPTIMIZERS.append(ReflowCPUAdam)
+    ZERO_SUPPORTED_OPTIMIZERS.append(ReflowCPULion)
+except ImportError:
+    pass
+
 
 def get_norm_dtype():
     """Gradient norms accumulate in fp64 for accuracy, except on devices without fp64 (e.g. MPS)."""

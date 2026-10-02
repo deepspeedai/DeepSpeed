@@ -4,9 +4,10 @@
 # DeepSpeed Team
 
 import argparse
+import os
 import pytest
 import deepspeed
-from deepspeed.utils.numa import parse_range_list
+from deepspeed.utils.numa import get_numactl_cmd, parse_range_list
 
 
 def basic_parser():
@@ -131,3 +132,64 @@ def test_core_binding_arguments():
     else:
         # invalid core list must fail
         assert False
+
+
+FAKE_NUMACTL = """#!/bin/sh
+# Stand-in for numactl: reports one 8-core NUMA node and rejects the options listed in
+# FAKE_NUMACTL_DENIED, the way a container without CAP_SYS_NICE rejects memory policies.
+if [ "$1" = "--hardware" ]; then
+    echo "available: 1 nodes (0)"
+    echo "node 0 cpus: 0 1 2 3 4 5 6 7"
+    exit 0
+fi
+if [ "$1" = "-C" ] && [ -n "$FAKE_NUMACTL_CPU_ERROR" ]; then
+    echo "$FAKE_NUMACTL_CPU_ERROR" >&2
+    exit 1
+fi
+for arg in "$@"; do
+    case " $FAKE_NUMACTL_DENIED " in
+        *" $arg "*)
+            echo "${FAKE_NUMACTL_ERROR:-set_mempolicy: Operation not permitted}" >&2
+            exit 1
+            ;;
+    esac
+done
+exit 0
+"""
+
+
+@pytest.mark.parametrize("denied_options, expected_cmd", [
+    ("", ["numactl", "-m", "0", "-C", "0-3"]),
+    ("-m", ["numactl", "-C", "0-3"]),
+    ("-m -C", []),
+])
+def test_numactl_cmd_fallback(tmp_path, monkeypatch, denied_options, expected_cmd):
+    # Launching a rank must not fail just because numactl rejects some binding options.
+    fake_numactl = tmp_path / "numactl"
+    fake_numactl.write_text(FAKE_NUMACTL)
+    fake_numactl.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.setenv("FAKE_NUMACTL_DENIED", denied_options)
+    monkeypatch.delenv("KMP_AFFINITY", raising=False)
+
+    cores_per_rank, numactl_cmd = get_numactl_cmd("0-7", 2, 0)
+    assert cores_per_rank == 4
+    assert numactl_cmd == expected_cmd
+
+
+def test_numactl_cmd_rejects_invalid_binding(tmp_path, monkeypatch):
+    fake_numactl = tmp_path / "numactl"
+    fake_numactl.write_text(FAKE_NUMACTL)
+    fake_numactl.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.setenv("FAKE_NUMACTL_DENIED", "-m")
+    monkeypatch.setenv("FAKE_NUMACTL_ERROR", "numactl: invalid NUMA node")
+    monkeypatch.delenv("KMP_AFFINITY", raising=False)
+
+    with pytest.raises(RuntimeError, match="invalid NUMA node"):
+        get_numactl_cmd("0-7", 2, 0)
+
+    monkeypatch.setenv("FAKE_NUMACTL_ERROR", "set_mempolicy: Operation not permitted")
+    monkeypatch.setenv("FAKE_NUMACTL_CPU_ERROR", "numactl: invalid CPU list")
+    with pytest.raises(RuntimeError, match="invalid CPU list"):
+        get_numactl_cmd("0-7", 2, 0)

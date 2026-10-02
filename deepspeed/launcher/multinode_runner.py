@@ -12,7 +12,7 @@ import re
 from shlex import split
 from abc import ABC, abstractmethod
 from deepspeed.accelerator import get_accelerator
-from ..utils import logger, get_numactl_cmd
+from ..utils import logger, numa
 from .constants import PDSH_MAX_FAN_OUT, MVAPICH_TMP_HOSTFILE
 
 
@@ -303,10 +303,6 @@ class IMPIRunner(MultiNodeRunner):
         for k, v in self.exports.items():
             export_cmd += ['-genv', f'{k}', f'{v}']
 
-        if self.args.bind_cores_to_rank:
-            cores_per_rank, _ = get_numactl_cmd(self.args.bind_core_list, process_per_node, 0)
-            export_cmd += ['-genv', 'OMP_NUM_THREADS', str(cores_per_rank)]
-
         export_cmd += ['-genv', 'MASTER_ADDR', str(self.args.master_addr)]
         export_cmd += ['-genv', 'MASTER_PORT', str(self.args.master_port)]
         export_cmd += ['-genv', 'WORLD_SIZE', str(total_process_count)]
@@ -330,8 +326,15 @@ class IMPIRunner(MultiNodeRunner):
             local_rank = i % process_per_node
             python_exec = []
             if self.args.bind_cores_to_rank:
-                _, numactl_cmd = get_numactl_cmd(self.args.bind_core_list, process_per_node, local_rank)
-                python_exec += numactl_cmd
+                # NUMA topology and permissions belong to the target host, not the launcher.
+                python_exec = [
+                    sys.executable, "-u", numa.__file__, "--num_local_procs",
+                    str(process_per_node), "--local_rank",
+                    str(local_rank)
+                ]
+                if self.args.bind_core_list is not None:
+                    python_exec += ["--bind_core_list", self.args.bind_core_list]
+                python_exec.append("--")
 
             if not self.args.no_python:
                 python_exec += [sys.executable, "-u"]

@@ -17,7 +17,10 @@ class CPULionBuilder(NPUOpBuilder):
         return f'deepspeed.ops.lion.{self.NAME}_op'
 
     def sources(self):
-        return ['csrc/lion/cpu_lion.cpp', 'csrc/lion/cpu_lion_impl.cpp']
+        return [
+            'csrc/lion/cpu_lion.cpp', 'csrc/lion/cpu_lion_impl.cpp', 'csrc/lion/reflow_cpu_lion_impl.cpp',
+            'csrc/lion/reflow_cpu_lion_bindings.cpp'
+        ]
 
     def include_paths(self):
         args = super().include_paths()
