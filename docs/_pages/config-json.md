@@ -464,6 +464,16 @@ Enabling and configuring ZeRO memory optimizations
 | ------------------------------------------------------------------------------------------------------------------- | ------- |
 | Number of elements reduced/allreduced at a time. Limits the memory required for the allgather for large model sizes | `5e8`   |
 
+***ZeRO offload gradient protections***
+
+ZeRO-1 and ZeRO-2 with optimizer offload (`cpu` or `nvme`) always protects gradient storage
+and stream ordering; there is no configuration option. Gradients larger than
+`reduce_bucket_size` are cloned into independent storage before reduction, and
+events order bucket producers, bucket reuse, successive offload copies, and CPU
+consumption, with or without `overlap_comm`. This adds a gradient-sized copy for
+oversized gradients plus event synchronization overhead. ZenFlow uses its own
+reduction and offload ordering and is not covered; a warning is logged.
+
 <i>**contiguous_gradients**</i>: [boolean]
 
 | Description                                                                                                         | Default |
@@ -917,7 +927,7 @@ This option reduces the host synchronization exposed by reading split sizes; it 
 
 | Description                                                                                                                            | Default |
 | -------------------------------------------------------------------------------------------------------------------------------------- | ------- |
-| Built-in model preset for MoE detection: `mixtral`, `qwen3_moe`, `qwen3_5_moe`, `deepseek_v2`, `deepseek_v3`. Determines router, expert, and weight naming patterns. | `null`  |
+| Built-in model preset for MoE detection: `mixtral`, `qwen3_moe`, `qwen3_5_moe`, `deepseek_v2`, `deepseek_v3`, `minimax_m3`. Determines router, expert, and weight naming patterns. | `null`  |
 
 Built-in AutoEP presets describe DeepSpeed's router/expert/weight-pattern support for a model family.
 Running a HuggingFace model also requires the installed Transformers package to expose the corresponding
@@ -931,6 +941,7 @@ smoke coverage used for this AutoEP surface produced the following version gates
 | `qwen3_5_moe` | `5.2.0` | Requires the Qwen3.5 text-backbone `qwen3_5_moe_text` model type. For performance on Qwen3.5's Gated DeltaNet layers, install optimized kernels; see the [Hugging Face Transformers kernel loading docs](https://huggingface.co/docs/transformers/kernel_doc/loading_kernels) and the [Qwen FlashQLA blog](https://qwen.ai/blog?id=flashqla). |
 | `deepseek_v2` | `5.0.0` | `load_balance_coeff` / expert-bias auxiliary-loss-free load balancing is not currently supported; non-null values are rejected. |
 | `deepseek_v3` | `5.0.0` | `load_balance_coeff` / expert-bias auxiliary-loss-free load balancing is not currently supported; non-null values are rejected. |
+| `minimax_m3` | `5.15.0` | Requires the MiniMax-M3 text-backbone `minimax_m3_vl_text` model type. The expert MLP uses the clamped GPT-OSS activation (`swiglu_oai`), selected by the preset. `load_balance_coeff` / expert-bias auxiliary-loss-free load balancing is not currently supported; non-null values are rejected. |
 
 ***use_grouped_mm***: [boolean]
 
@@ -979,6 +990,12 @@ smoke coverage used for this AutoEP surface produced the following version gates
 | Description                                                                                                    | Default  |
 | -------------------------------------------------------------------------------------------------------------- | -------- |
 | How expert outputs are weighted by their router scores and reduced over top-k. `"auto"` resolves to `"weighted_sum"`. `"fused_weighted_sum"` is experimental and computes the same reduction in one Triton pass, without materializing the scattered assignment buffer or the `[tokens, top_k, hidden]` FP32 intermediate; it requires CUDA, Triton, bfloat16/float16 activations, `tensor_parallel.autotp_size=1`, `expert_tensor_parallel_size=1`, and a resolved `score_apply="post"`, and is rejected rather than silently ignored when any of those does not hold. `"legacy_bmm"` is a debug reduction retained for model-family verification. | `"auto"` |
+
+***row_weighting_impl***: [string]
+
+| Description                                                                                                    | Default  |
+| -------------------------------------------------------------------------------------------------------------- | -------- |
+| How the DeepEP route applies one FP32 routing weight to each received row at the existing `score_apply` boundary. `"auto"` resolves to `"eager"`, preserving `(rows.float() * weights).to(rows.dtype)`. `"fused"` is experimental and uses a separate Triton pointwise operator for that per-row product only; it does not perform the top-k reduction or move the BF16/FP16 rounding point. It requires `comm_backend="deepep"`, `autoep_size > 1`, CUDA, Triton, contiguous bfloat16/float16 rows shaped `[N, H]`, and contiguous FP32 weights shaped `[N, 1]` on the same device; DeepEP dispatch currently supports BF16 rows only. Fused weight gradients can differ from eager due to FP32 summation order. Unsupported configurations fail rather than falling back. | `"auto"` |
 
 ***route_norm***: [boolean]
 
