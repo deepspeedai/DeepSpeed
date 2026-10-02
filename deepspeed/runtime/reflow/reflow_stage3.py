@@ -994,6 +994,7 @@ class ReflowOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
             eps = work_item.get("eps")
             weight_decay = work_item.get("weight_decay")
             bias_correction = work_item.get("bias_correction", True)
+            maximize = work_item.get("maximize", False)
             # increment_step controls the per-range skip flag only; the Python state['step']
             # is committed once at the end of step().
             if target_step is None:
@@ -1051,6 +1052,7 @@ class ReflowOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
                         half_params_slice,
                         combined_scale,
                         not range_increment_step,
+                        maximize,
                     )
 
                 self.optimizer.ds_opt_adam.reflow_adam_memory_fence()
@@ -1207,20 +1209,21 @@ class ReflowOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
             eps = group.get('eps', 0.0)
             weight_decay = group['weight_decay']
             bias_correction = group.get('bias_correction', True)
+            maximize = group.get('maximize', False)
 
-            return increment_step, target_step, lr, beta1, beta2, eps, weight_decay, bias_correction
+            return increment_step, target_step, lr, beta1, beta2, eps, weight_decay, bias_correction, maximize
 
         if already_locked:
             result = _prepare_state_and_params()
             if result is None:
                 return None
-            increment_step, target_step, lr, beta1, beta2, eps, weight_decay, bias_correction = result
+            increment_step, target_step, lr, beta1, beta2, eps, weight_decay, bias_correction, maximize = result
         else:
             with lock:
                 result = _prepare_state_and_params()
                 if result is None:
                     return None
-                increment_step, target_step, lr, beta1, beta2, eps, weight_decay, bias_correction = result
+                increment_step, target_step, lr, beta1, beta2, eps, weight_decay, bias_correction, maximize = result
 
         work_item = {
             "sub_group_id": sub_group_id,
@@ -1237,6 +1240,7 @@ class ReflowOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
             "eps": eps,
             "weight_decay": weight_decay,
             "bias_correction": bias_correction,
+            "maximize": maximize,
         }
 
         future = self._bucketwise_update_submit(self._bucketwise_chunk_update_worker, work_item)

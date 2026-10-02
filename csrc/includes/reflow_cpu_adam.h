@@ -218,7 +218,8 @@ void Reflow_Adam_Optimizer::Step_AVX_HalfGrad(size_t* rounded_size,
 #endif
 
     // Pick the loop specialized for this step's flags, so no per-element branch remains.
-    bool unscale_grads = (combined_scale > 1.0f);
+    // A negative scale folds maximizing into the existing gradient multiply, before weight decay.
+    bool unscale_grads = (combined_scale > 1.0f || combined_scale < 0.0f);
     bool decay_grad = (_weight_decay > 0 && !_adamw_mode);
     bool decay_param = (_weight_decay > 0 && _adamw_mode);
     using G = ds_grad_precision_t;
@@ -397,7 +398,8 @@ int reflow_ds_adam_step_params_halfgrad(int optimizer_id,
                                         torch::Tensor& exp_avg_sq,
                                         torch::Tensor& half_params,
                                         float combined_scale = 1.0f,
-                                        bool skip_increment_step = false);
+                                        bool skip_increment_step = false,
+                                        bool maximize = false);
 
 int reflow_ds_adam_state_step_halfgrad(int optimizer_id,
                                        size_t step,
@@ -412,7 +414,8 @@ int reflow_ds_adam_state_step_halfgrad(int optimizer_id,
                                        torch::Tensor& exp_avg,
                                        torch::Tensor& exp_avg_sq,
                                        float combined_scale = 1.0f,
-                                       bool skip_increment_step = false);
+                                       bool skip_increment_step = false,
+                                       bool maximize = false);
 
 int reflow_destroy_adam_optimizer(int optimizer_id);
 

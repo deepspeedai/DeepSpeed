@@ -322,3 +322,79 @@ def test_accumulation_matches_addition_on_restricted_worker_cpus(dtype, size):
         executor.submit(accumulate).result()
     # A restricted OpenMP team must still finish every SIMD chunk and the non-vectorized tail.
     assert torch.equal(dst, expected)
+
+
+@pytest.mark.parametrize('adamw_mode', [False, True], ids=['adam', 'adamw'])
+@pytest.mark.parametrize('model_size', [7, 129, 4099])
+@pytest.mark.parametrize('combined_scale', [1.0, 8.0])
+def test_adam_maximize_groups_match_pytorch(adamw_mode, model_size, combined_scale):
+    # Catch dropped per-group directions, incorrect decay, scalar-tail omissions, and a
+    # deferred commit that reads changed live flags instead of the submitted step's snapshot.
+    if not deepspeed.ops.__compatible_ops__[CPUAdamBuilder.NAME]:
+        pytest.skip('CPUAdamBuilder is not compatible')
+    _skip_without_avx(CPUAdamBuilder)
+    generator = torch.Generator().manual_seed(4321)
+    params = [torch.nn.Parameter(torch.randn(model_size, generator=generator)) for _ in range(2)]
+    references = [torch.nn.Parameter(p.detach().clone()) for p in params]
+    groups = [{'params': [params[0]]}, {'params': [params[1]], 'maximize': False}]
+    reference_groups = [{'params': [references[0]]}, {'params': [references[1]], 'maximize': False}]
+    kwargs = dict(lr=0.05, betas=(0.8, 0.95), eps=1e-5, weight_decay=0.1, maximize=True)
+    optimizer = ReflowCPUAdam(groups, adamw_mode=adamw_mode, num_threads=1, **kwargs)
+    reference_type = torch.optim.AdamW if adamw_mode else torch.optim.Adam
+    reference = reference_type(reference_groups, foreach=False, **kwargs)
+    module = optimizer.ds_opt_adam
+    for p in params:
+        optimizer.state[p].update(step=0, exp_avg=torch.zeros_like(p), exp_avg_sq=torch.zeros_like(p))
+
+    for step in range(1, 6):
+        grads = [torch.randn(model_size, generator=generator).bfloat16() for _ in params]
+        for p, grad in zip(references, grads):
+            p.grad = grad.float() / combined_scale
+        reference.step()
+        snapshots = {
+            i: {
+                k: v
+                for k, v in group.items() if k != 'params'
+            }
+            for i, group in enumerate(optimizer.param_groups)
+        }
+        for i, p in enumerate(params):
+            state = optimizer.state[p]
+            half_params = torch.empty(model_size, dtype=torch.bfloat16)
+            before = p.detach().clone()
+            before_momentum = state['exp_avg'].clone()
+            before_variance = state['exp_avg_sq'].clone()
+            group = snapshots[i]
+            module.reflow_adam_update_params_halfgrad(optimizer.opt_id,
+                                                      step,
+                                                      group['lr'],
+                                                      *group['betas'],
+                                                      group['eps'],
+                                                      group['weight_decay'],
+                                                      group['bias_correction'],
+                                                      p,
+                                                      grads[i],
+                                                      state['exp_avg'],
+                                                      state['exp_avg_sq'],
+                                                      half_params,
+                                                      combined_scale,
+                                                      maximize=group['maximize'])
+            optimizer.memory_fence()
+            torch.testing.assert_close(half_params.float(),
+                                       references[i].detach().bfloat16().float(),
+                                       rtol=0.008,
+                                       atol=1e-5)
+            assert torch.equal(p, before)
+            assert torch.equal(state['exp_avg'], before_momentum)
+            assert torch.equal(state['exp_avg_sq'], before_variance)
+            state['step'] = step
+            optimizer.param_groups[i]['maximize'] = not group['maximize']
+        optimizer.step_state_halfgrad(grads, combined_scale=combined_scale, group_hyperparams=snapshots)
+        optimizer.memory_fence()
+        for i, p in enumerate(params):
+            optimizer.param_groups[i]['maximize'] = snapshots[i]['maximize']
+            state = optimizer.state[p]
+            expected = reference.state[references[i]]
+            torch.testing.assert_close(p, references[i], rtol=2e-6, atol=2e-7)
+            torch.testing.assert_close(state['exp_avg'], expected['exp_avg'], rtol=2e-6, atol=2e-7)
+            torch.testing.assert_close(state['exp_avg_sq'], expected['exp_avg_sq'], rtol=2e-6, atol=2e-7)

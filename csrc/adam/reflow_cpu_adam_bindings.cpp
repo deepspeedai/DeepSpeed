@@ -26,7 +26,8 @@ static inline int reflow_ds_adam_step_params_halfgrad_gilfree(int optimizer_id,
                                                               torch::Tensor& exp_avg_sq,
                                                               torch::Tensor& half_params,
                                                               float combined_scale,
-                                                              bool skip_increment_step = false)
+                                                              bool skip_increment_step = false,
+                                                              bool maximize = false)
 {
     pybind11::gil_scoped_release release;
     return reflow_ds_adam_step_params_halfgrad(optimizer_id,
@@ -43,7 +44,8 @@ static inline int reflow_ds_adam_step_params_halfgrad_gilfree(int optimizer_id,
                                                exp_avg_sq,
                                                half_params,
                                                combined_scale,
-                                               skip_increment_step);
+                                               skip_increment_step,
+                                               maximize);
 }
 
 static inline int reflow_ds_adam_state_step_halfgrad_gilfree(int optimizer_id,
@@ -59,7 +61,8 @@ static inline int reflow_ds_adam_state_step_halfgrad_gilfree(int optimizer_id,
                                                              torch::Tensor& exp_avg,
                                                              torch::Tensor& exp_avg_sq,
                                                              float combined_scale,
-                                                             bool skip_increment_step = false)
+                                                             bool skip_increment_step = false,
+                                                             bool maximize = false)
 {
     pybind11::gil_scoped_release release;
     return reflow_ds_adam_state_step_halfgrad(optimizer_id,
@@ -75,7 +78,8 @@ static inline int reflow_ds_adam_state_step_halfgrad_gilfree(int optimizer_id,
                                               exp_avg,
                                               exp_avg_sq,
                                               combined_scale,
-                                              skip_increment_step);
+                                              skip_increment_step,
+                                              maximize);
 }
 
 static inline int reflow_ds_bf16_accumulate_gilfree(torch::Tensor& dst, torch::Tensor& src)
@@ -116,7 +120,8 @@ void bind_reflow_adam(pybind11::module_& m)
           pybind11::arg("exp_avg_sq"),
           pybind11::arg("half_params"),
           pybind11::arg("combined_scale"),
-          pybind11::arg("skip_increment_step") = false);
+          pybind11::arg("skip_increment_step") = false,
+          pybind11::arg("maximize") = false);
     m.def("reflow_adam_update_state_halfgrad",
           &reflow_ds_adam_state_step_halfgrad_gilfree,
           "Reflow CPU Adam update state stream with half gradients, GIL-released (C++)",
@@ -133,7 +138,8 @@ void bind_reflow_adam(pybind11::module_& m)
           pybind11::arg("exp_avg"),
           pybind11::arg("exp_avg_sq"),
           pybind11::arg("combined_scale"),
-          pybind11::arg("skip_increment_step") = false);
+          pybind11::arg("skip_increment_step") = false,
+          pybind11::arg("maximize") = false);
     m.def("reflow_adam_memory_fence",
           &reflow_adam_memory_fence,
           "Reflow CPU Adam memory fence (C++)");

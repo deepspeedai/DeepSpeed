@@ -309,8 +309,11 @@ int reflow_ds_adam_step_params_halfgrad(int optimizer_id,
                                         torch::Tensor& exp_avg_sq,
                                         torch::Tensor& half_params,
                                         float combined_scale,
-                                        bool skip_increment_step)
+                                        bool skip_increment_step,
+                                        bool maximize)
 {
+    // Encode direction in the scale so SIMD and scalar tails share the same gradient transform.
+    if (maximize) { combined_scale = -combined_scale; }
     auto params_c = params_fp32.contiguous();
     auto grads_c = grads.contiguous();
     auto exp_avg_c = exp_avg.contiguous();
@@ -425,8 +428,11 @@ int reflow_ds_adam_state_step_halfgrad(int optimizer_id,
                                        torch::Tensor& exp_avg,
                                        torch::Tensor& exp_avg_sq,
                                        float combined_scale,
-                                       bool skip_increment_step)
+                                       bool skip_increment_step,
+                                       bool maximize)
 {
+    // Encode direction in the scale so SIMD and scalar tails share the same gradient transform.
+    if (maximize) { combined_scale = -combined_scale; }
     unsigned int total_cpus = reflow_get_available_cpu_count();
     int configured_num_threads = s_reflow_optimizers[optimizer_id].state_opt->get_num_threads();
     unsigned int max_omp_threads = reflow_resolve_omp_threads(configured_num_threads, total_cpus);

@@ -47,12 +47,14 @@ class ReflowCPUAdam(DeepSpeedCPUAdam):
                  amsgrad=False,
                  adamw_mode=True,
                  fp32_optimizer_states=True,
-                 num_threads=None):
+                 num_threads=None,
+                 maximize=False):
         """Reflow CPU Adam(W).
 
         Same arguments as :class:`DeepSpeedCPUAdam`, requiring ``fp32_optimizer_states=True``, plus:
 
         Arguments:
+            maximize (bool): maximize the objective instead of minimizing it; may be overridden per group.
             num_threads (int): number of CPU threads for the Adam update. ``None`` uses
                 all available cores.
         """
@@ -67,7 +69,8 @@ class ReflowCPUAdam(DeepSpeedCPUAdam):
                             eps=eps,
                             weight_decay=weight_decay,
                             bias_correction=bias_correction,
-                            amsgrad=amsgrad)
+                            amsgrad=amsgrad,
+                            maximize=maximize)
         super(DeepSpeedCPUAdam, self).__init__(model_params, default_args)
 
         cpu_info = get_cpu_info()
@@ -183,8 +186,17 @@ class ReflowCPUAdam(DeepSpeedCPUAdam):
                     exp_avg_sq = exp_avg_sq.narrow(0, start, numel)
 
                 beta1, beta2 = hyperparams['betas']
-                self.ds_opt_adam.reflow_adam_update_state_halfgrad(self.opt_id, state['step'], hyperparams['lr'],
-                                                                   beta1, beta2, hyperparams['eps'],
+                self.ds_opt_adam.reflow_adam_update_state_halfgrad(self.opt_id,
+                                                                   state['step'],
+                                                                   hyperparams['lr'],
+                                                                   beta1,
+                                                                   beta2,
+                                                                   hyperparams['eps'],
                                                                    hyperparams['weight_decay'],
-                                                                   hyperparams['bias_correction'], params, grad,
-                                                                   exp_avg, exp_avg_sq, combined_scale)
+                                                                   hyperparams['bias_correction'],
+                                                                   params,
+                                                                   grad,
+                                                                   exp_avg,
+                                                                   exp_avg_sq,
+                                                                   combined_scale,
+                                                                   maximize=hyperparams.get("maximize", False))

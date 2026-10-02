@@ -836,3 +836,62 @@ class TestReflowStateReadAfterStep(DistributedTest):
                                                               expected_step, actual_step):
                 for index, (want, got) in enumerate(zip(expected_tensors, actual_tensors)):
                     assert torch.equal(got, want), f"{name}[{index}] differs after step {step}"
+
+
+class TestReflowMaximizeClientInitialization(DistributedTest):
+    world_size = 1
+    non_daemonic_procs = True
+
+    @pytest.mark.parametrize('optimizer_type', [torch.optim.Adam, torch.optim.AdamW])
+    def test_preserves_group_directions(self, optimizer_type):
+        skip_if_reflow_training_unsupported()
+        model = SimpleModel(hidden_dim=16, nlayers=2)
+        params = list(model.parameters())
+        optimizer = optimizer_type([{'params': params[:2]}, {'params': params[2:], 'maximize': False}], maximize=True)
+        config = get_variant_config(reflow=True, variant='client_optimizer')
+        config['zero_force_ds_cpu_optimizer'] = False
+        engine, _, _, _ = deepspeed.initialize(model=model, optimizer=optimizer, config=config)
+        try:
+            actual = engine.optimizer.optimizer
+            assert isinstance(actual, ReflowCPUAdam)
+            assert [group['maximize'] for group in actual.param_groups] == [True, False]
+        finally:
+            engine.destroy()
+
+
+@needs_gpu_accelerator
+class TestReflowMaximizeTraining(DistributedTest):
+    world_size = [1, 2]
+
+    @pytest.mark.parametrize('adamw_mode', [False, True])
+    def test_matches_minimizing_negative_loss(self, adamw_mode):
+        # Negating the loss supplies an independent ascent oracle using the existing descent optimizer.
+        skip_if_reflow_training_unsupported()
+        torch.manual_seed(1234)
+        initial = SimpleModel(hidden_dim=16, nlayers=2)
+        batches = make_batches(16, count=5)
+        results = []
+        for reflow in (False, True):
+            model = copy.deepcopy(initial)
+            config = get_variant_config(reflow, 'client_optimizer')
+            config['zero_force_ds_cpu_optimizer'] = False
+            if reflow:
+                optimizer_type = torch.optim.AdamW if adamw_mode else torch.optim.Adam
+                optimizer = optimizer_type(model.parameters(), lr=0.01, weight_decay=0.1, maximize=True)
+            else:
+                optimizer = DeepSpeedCPUAdam(model.parameters(), lr=0.01, weight_decay=0.1, adamw_mode=adamw_mode)
+            engine, _, _, _ = deepspeed.initialize(model=model, optimizer=optimizer, config=config)
+            try:
+                losses = []
+                for inputs, labels in batches:
+                    loss = engine(inputs, labels)
+                    engine.backward(loss if reflow else -loss)
+                    engine.step()
+                    losses.append(loss.detach().clone())
+                results.append((losses, [safe_get_full_fp32_param(p).clone() for p in engine.module.parameters()]))
+            finally:
+                engine.destroy()
+        for expected, actual in zip(results[0][0], results[1][0]):
+            torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+        for expected, actual in zip(results[0][1], results[1][1]):
+            torch.testing.assert_close(actual, expected, rtol=0, atol=0)

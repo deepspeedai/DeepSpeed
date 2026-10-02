@@ -91,7 +91,11 @@ a disjoint NUMA-local core slice) plus a single chained async-state worker.
 
 A client that passes a plain `DeepSpeedCPUAdam` / `DeepSpeedCPULion` is auto-remapped to
 `ReflowCPUAdam` / `ReflowCPULion` when the `reflow` block is set (see
-`engine._maybe_remap_to_reflow_cpu_optimizer`). PyTorch `Adam` and `AdamW` are also remapped.
+`engine._maybe_remap_to_reflow_cpu_optimizer`). PyTorch `Adam` and `AdamW` are also remapped, preserving each group's `maximize` option.
+`ReflowCPUAdam` also accepts `maximize=True` directly or per parameter group. Both parameter generation
+and the deferred state commit negate the objective gradient before Adam weight decay; AdamW
+weight decay keeps its usual direction. The sign is combined with gradient unscaling inside the CPU
+kernel, without an extra gradient buffer or pass.
 Pass client LR schedulers as factories or configure them in DeepSpeed; a scheduler already bound
 to the original optimizer cannot follow the remapping and is rejected.
 

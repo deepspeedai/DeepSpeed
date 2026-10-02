@@ -85,7 +85,7 @@ def maybe_remap_client_optimizer(engine: "DeepSpeedEngine", optimizer):
     if is_lion:
         keep = ("lr", "betas", "weight_decay")
     else:
-        keep = ("lr", "betas", "eps", "weight_decay", "bias_correction", "amsgrad")
+        keep = ("lr", "betas", "eps", "weight_decay", "bias_correction", "amsgrad", "maximize")
     param_groups = [{"params": g["params"], **{k: g[k] for k in keep if k in g}} for g in optimizer.param_groups]
     if is_lion:
         log_dist(f"Reflow enabled: remapping client optimizer {name} to ReflowCPULion", ranks=[0])
@@ -105,5 +105,6 @@ def maybe_remap_client_optimizer(engine: "DeepSpeedEngine", optimizer):
                          weight_decay=defaults.get("weight_decay", 0.0),
                          bias_correction=defaults.get("bias_correction", True),
                          amsgrad=defaults.get("amsgrad", False),
+                         maximize=defaults.get("maximize", False),
                          adamw_mode=bool(adamw_mode),
                          num_threads=reflow_num_threads(engine))
