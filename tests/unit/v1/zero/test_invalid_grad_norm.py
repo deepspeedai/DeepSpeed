@@ -86,6 +86,7 @@ def test_stage3_rejects_invalid_group_norm_before_optimizer_step():
     optimizer._partition_all_parameters = lambda: None
     optimizer.overflow = False
     optimizer._overflow_check_and_loss_scale_update = lambda update_scale: False
+    optimizer._apply_muon_to_accumulated_grads = lambda: None
     optimizer._get_norm_groups = lambda: [torch.tensor(-1.0)]
     cleanup = []
     optimizer._loss_scale_update_and_overflow_cleanup = lambda: cleanup.append(optimizer.overflow
@@ -123,6 +124,7 @@ def test_stage3_raw_overflow_replaces_stale_global_norm():
 def test_bf16_optimizer_reports_invalid_step_and_recovers(monkeypatch):
     optimizer = object.__new__(BF16_Optimizer)
     optimizer.has_moe_layers = False
+    optimizer._uses_muon = False
     optimizer.graph_harvesting = False
     optimizer.norm_type = 2
     optimizer.mpu = None
