@@ -244,6 +244,14 @@ class AutoTP():
                     continue
                 for tied_embedding in embedding_modules_by_weight_id.get(id(module.weight), []):
                     self._tied_vocab_parallel_embedding_ids.add(id(tied_embedding))
+        # Snapshot weight ties from the original model: once an earlier sibling such as a tied
+        # embedding is sliced, its new Parameter no longer aliases the head's weight, so a check
+        # made during the replacement walk would miss the tie and silently break it.
+        self._tied_weight_partners = self._find_tied_weight_partners()
+        # Embeddings tied to a row-parallel training output head are replaced by
+        # _create_row_parallel_layer with a HiddenParallelEmbedding sharing the head's shard, so
+        # _slice_embedding must leave them alone for the same reason as the vocab-parallel case.
+        self._tied_row_parallel_embedding_ids = self._find_tied_row_parallel_embedding_ids()
         self._gathered_column_tie_fallbacks_configured = False
         self._tied_gathered_column_module_names = set()
         TensorParallel_Layer.set_keep_module_on_host(keep_module_on_host)
@@ -495,14 +503,15 @@ class AutoTP():
             if spec.shape is not None or spec.get_partition_dim() != 1:
                 raise NotImplementedError(
                     "Row-parallel output-head training requires an unreshaped input-dimension shard.")
-            tied = any(weight is module.weight for other in self.module.modules() if other is not module
-                       for name, weight in other.named_parameters(recurse=False) if name == 'weight')
-            if self.mp_size > 1 and tied:
-                raise NotImplementedError(
-                    "Row-parallel output-head training cannot shard a tied weight. "
-                    "Keep the tied embedding and output head replicated until coupled embedding sharding is supported."
-                )
-            return LinearAllreduceWithReplicatedInput(module, self.mp_group, name=name, tp_meta=self.tp_meta)
+            tied_embeddings = []
+            if self.mp_size > 1:
+                tied_embeddings = self._validate_row_parallel_head_ties(module)
+            row_parallel_head = LinearAllreduceWithReplicatedInput(module,
+                                                                   self.mp_group,
+                                                                   name=name,
+                                                                   tp_meta=self.tp_meta)
+            self._replace_tied_row_parallel_embeddings(row_parallel_head, tied_embeddings)
+            return row_parallel_head
 
         if spec.shape is not None:
             return SubParamLinearAllreduce(
@@ -539,6 +548,75 @@ class AutoTP():
                 tp_meta=self.tp_meta,
             )
         return LinearLayer(module, self.mp_group, name=name, gather_output=spec.gather_output, tp_meta=self.tp_meta)
+
+    def _find_tied_weight_partners(self):
+        modules_by_weight_id = {}
+        for module in self.module.modules():
+            weight = module._parameters.get("weight")
+            if weight is not None:
+                modules_by_weight_id.setdefault(id(weight), []).append(module)
+        tied_weight_partners = {}
+        for modules in modules_by_weight_id.values():
+            if len(modules) < 2:
+                continue
+            for module in modules:
+                tied_weight_partners[id(module)] = [other for other in modules if other is not module]
+        return tied_weight_partners
+
+    def _find_tied_row_parallel_embedding_ids(self):
+        if not self.training_mode or self.partition_config is None:
+            return set()
+        model_type = self._get_model_type()
+        embedding_ids = set()
+        for name, module in self.module.named_modules():
+            if not isinstance(module, nn.Linear) or not self._is_lm_head_name(name):
+                continue
+            if self._is_vocab_parallel_lm_head(module, name):
+                continue
+            spec = self.partition_config.find_matching_spec(name + ".weight", model_type)
+            if spec is None or spec.partition_type != PartitionType.ROW:
+                continue
+            for partner in self._tied_weight_partners.get(id(module), []):
+                if isinstance(partner, nn.Embedding):
+                    embedding_ids.add(id(partner))
+        return embedding_ids
+
+    def _validate_row_parallel_head_ties(self, head):
+        partners = self._tied_weight_partners.get(id(head), [])
+        if any(not isinstance(partner, nn.Embedding) for partner in partners):
+            raise NotImplementedError("Row-parallel output-head training can only share its weight with nn.Embedding "
+                                      "modules, which are then sharded along the same hidden dimension.")
+        for partner in partners:
+            HiddenParallelEmbedding.validate_embedding(partner)
+        # Validated partners were skipped by _slice_embedding, so they still alias the head's weight here.
+        return self._find_tied_embedding_modules(head)
+
+    def _replace_tied_row_parallel_embeddings(self, row_parallel_head, tied_embeddings):
+        model_type = self._get_model_type()
+        replacements = {}
+        for embed_parent, embed_child_name, embed_module, embed_full_name in tied_embeddings:
+            spec = self.partition_config.find_matching_spec(embed_full_name + ".weight", model_type)
+            if spec is not None and spec.partition_type != PartitionType.ROW:
+                log_dist(
+                    f"AutoTP: the row-parallel output head '{row_parallel_head.name}' supersedes the configured "
+                    f"'{spec.partition_type.value}' partitioning for tied embedding '{embed_full_name}'; it shares "
+                    "the head's hidden-dimension shard instead.",
+                    ranks=[0],
+                    level=logging.WARNING)
+            if embed_module not in replacements:
+                hidden_parallel_embedding = HiddenParallelEmbedding(embed_module,
+                                                                    self.mp_group,
+                                                                    tied_row_parallel_linear=row_parallel_head,
+                                                                    name=embed_full_name,
+                                                                    tp_meta=self.tp_meta)
+                # Guards re-entry when the replacement walk later reaches this module.
+                setattr(hidden_parallel_embedding, "replaced", True)
+                replacements[embed_module] = hidden_parallel_embedding
+            setattr(embed_parent, embed_child_name, replacements[embed_module])
+            log_dist(
+                f"AutoTP: tied embedding '{embed_full_name}' shares the hidden-dimension shard of the "
+                f"row-parallel output head '{row_parallel_head.name}'",
+                ranks=[0])
 
     @staticmethod
     def _default_lm_head_patterns():
@@ -754,6 +832,10 @@ class AutoTP():
 
     def _slice_embedding(self, child, name, conv_linear_layer):
         if getattr(child, "replaced", False) == True:
+            return
+        if id(child) in self._tied_row_parallel_embedding_ids:
+            # Replaced by _create_row_parallel_layer's HiddenParallelEmbedding, which shares the
+            # tied head's shard; slicing a separate copy here would break the tie.
             return
         if self.vocab_parallel_lm_head and id(child) in self._tied_vocab_parallel_embedding_ids:
             # This embedding is tied to a vocab_parallel_lm_head and gets replaced by
