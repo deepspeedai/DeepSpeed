@@ -74,9 +74,9 @@ With `gradient_clipping: 1.0` in the same setup, Reflow's optimizer step average
 
 ## Limitations
 
-- Reflow requires BF16 model parameters and gradients with FP32 master weights and optimizer states. Enable `bf16.enabled`; FP16/FP32 model parameters, `torch_autocast`, low-precision master weights/states, and `fp32_optimizer_states: false` are rejected.
+- Reflow uses FP16/BF16 model parameters and gradients with FP32 master weights and optimizer states. Enable `fp16.enabled` or `bf16.enabled`; FP32 model parameters, `torch_autocast`, low-precision master weights/states, and `fp32_optimizer_states: false` are rejected.
 - Use `engine.step()` after `deepspeed.initialize()`. Direct `ReflowCPUAdam.step()` and `ReflowCPULion.step()` calls are rejected.
-- ZeRO stage 3 with `offload_optimizer.device` set to `cpu`; any other stage or device is rejected when the configuration is parsed. NVMe optimizer offload is accepted but is not covered by tests.
+- Reflow requires ZeRO stage 3 with optimizer offload; unsupported stages and offload devices are rejected when the configuration is parsed.
 - The CPU Adam/Lion extension must be built with AVX2 or AVX-512; Reflow raises an error when it creates the optimizer on other builds.
 - Not supported with `super_offload`, ZenFlow, DeepCompile, the Muon optimizer, or `managed_gradient_accumulation: false`. The first four are rejected at initialization.
 - Muon support needs to be implemented in the future. Reflow's CPU step applies its Adam/Lion kernels to every subgroup, so Muon's orthogonalized update needs its own path through the two-phase step.

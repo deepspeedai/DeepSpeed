@@ -50,8 +50,9 @@ class ReflowOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
 
     def __init__(self, module, init_optimizer, param_names, timers, ds_config, reflow_config, **kwargs):
         # zero.Init models bypass the engine's parameter cast, so validate their actual dtype too.
-        if any(param.is_floating_point() and param.dtype != torch.bfloat16 for param in module.parameters()):
-            raise ValueError("Reflow requires BF16 model parameters; FP16 and FP32 model parameters "
+        if any(param.is_floating_point() and param.dtype not in (torch.float16, torch.bfloat16)
+               for param in module.parameters()):
+            raise ValueError("Reflow requires FP16 or BF16 model parameters; FP32 model parameters "
                              "are not supported.")
         self._reflow_config = reflow_config
         # These attributes must exist before super().__init__ runs: the parent constructor

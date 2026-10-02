@@ -164,21 +164,13 @@ def test_rejects_muon_config():
         "bf16": {
             "enabled": False
         }
-    }, "requires BF16 model parameters"),
-    ({
-        "bf16": {
-            "enabled": False
-        },
-        "fp16": {
-            "enabled": True
-        }
-    }, "requires BF16 model parameters"),
+    }, "requires FP16 or BF16 model parameters"),
     ({
         "torch_autocast": {
             "enabled": True,
             "dtype": "bfloat16"
         }
-    }, "requires BF16 model parameters"),
+    }, "requires FP16 or BF16 model parameters"),
     ({
         "bf16": {
             "enabled": True,
@@ -203,6 +195,19 @@ def test_rejects_unsupported_precision(precision_config, error):
     config.update(precision_config)
     with pytest.raises(ValueError, match=error):
         DeepSpeedConfig(config)
+
+
+@pytest.mark.parametrize("precision", ["fp16", "bf16"])
+@pytest.mark.parametrize("device", ["cpu", "nvme"])
+def test_accepts_half_precision_and_supported_optimizer_offload(precision, device):
+    # FP32 masters/states must not accidentally exclude FP16 compute or NVMe state swapping.
+    config = minimal_reflow_config(offload_optimizer={"device": device})
+    config["bf16"] = {"enabled": precision == "bf16"}
+    config["fp16"] = {"enabled": precision == "fp16"}
+    parsed = DeepSpeedConfig(config)
+    assert parsed.zero_config.offload_optimizer.device == device
+    precision_config = parsed.float16_config if precision == "fp16" else parsed.bfloat16_config
+    assert precision_config.enabled
 
 
 def test_precision_restrictions_do_not_apply_without_reflow():
@@ -415,14 +420,15 @@ def train_and_collect(model, config, batches, client_optimizer=None, on_initiali
 
 
 @pytest.mark.parametrize("variant", ["lion", "offload_param", "client_optimizer"])
+@pytest.mark.parametrize("precision", ["bf16", "fp16"])
 @needs_gpu_accelerator
 class TestReflowVariantsMatchZeroOffload(DistributedTest):
     world_size = [1, 2]
 
-    def test_matches_zero_offload(self, variant):
+    def test_matches_zero_offload(self, variant, precision):
         skip_if_reflow_training_unsupported()
         hidden_dim = 16
-        dtype = torch.bfloat16
+        dtype = torch.float16 if precision == "fp16" else torch.bfloat16
         num_steps = 4
         torch.manual_seed(1234)
         initial_model = SimpleModel(hidden_dim=hidden_dim, nlayers=2)
@@ -433,7 +439,11 @@ class TestReflowVariantsMatchZeroOffload(DistributedTest):
             client_optimizer = None
             if variant == "client_optimizer":
                 client_optimizer = DeepSpeedCPUAdam(model.parameters(), lr=1e-3)
-            return train_and_collect(model, get_variant_config(reflow, variant), batches, client_optimizer)
+            config = get_variant_config(reflow, variant)
+            if precision == "fp16":
+                config["bf16"] = {"enabled": False}
+                config["fp16"] = {"enabled": True, "loss_scale": 128}
+            return train_and_collect(model, config, batches, client_optimizer)
 
         expected = run(reflow=False)
         actual = run(reflow=True)
@@ -589,6 +599,7 @@ class TestReflowCPUPlacementMatchesZeroOffload(DistributedTest):
 
 class TestReflowPrecisionValidation(DistributedTest):
     world_size = 1
+    non_daemonic_procs = True
 
     @pytest.mark.parametrize("optimizer_type", [DeepSpeedCPUAdam, DeepSpeedCPULion])
     def test_rejects_low_precision_client_states(self, optimizer_type):
@@ -601,13 +612,32 @@ class TestReflowPrecisionValidation(DistributedTest):
         with pytest.raises(ZeRORuntimeException, match="requires FP32 optimizer states"):
             deepspeed.initialize(model=model, optimizer=optimizer, config=config)
 
-    @pytest.mark.parametrize("dtype", [torch.float32, torch.float16])
+    @pytest.mark.parametrize("precision", ["bf16", "fp16"])
+    def test_initializes_half_precision_zero_init_model(self, precision):
+        if not deepspeed.ops.__compatible_ops__.get(CPUAdamBuilder.NAME, False):
+            pytest.skip("the CPU optimizer builder is not supported on this accelerator")
+        config = get_variant_config(reflow=True, variant="offload_param")
+        dtype = torch.float16 if precision == "fp16" else torch.bfloat16
+        if precision == "fp16":
+            config["bf16"] = {"enabled": False}
+            config["fp16"] = {"enabled": True, "loss_scale": 128}
+        with deepspeed.zero.Init(config_dict_or_path=config, dtype=dtype):
+            model = SimpleModel(hidden_dim=16, nlayers=2)
+        engine, optimizer, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config)
+        try:
+            assert all(param.dtype == dtype for param in engine.module.parameters())
+            assert isinstance(optimizer.optimizer, ReflowCPUAdam)
+            assert optimizer.optimizer.fp32_optimizer_states
+        finally:
+            engine.destroy()
+
+    @pytest.mark.parametrize("dtype", [torch.float32])
     def test_rejects_zero_init_model_with_unsupported_dtype(self, dtype):
-        # zero.Init bypasses the engine's model cast; the config's BF16 flag alone cannot guarantee BF16 weights.
+        # zero.Init bypasses the engine's model cast, so its actual parameters must still be half precision.
         config = get_variant_config(reflow=True, variant="offload_param")
         with deepspeed.zero.Init(config_dict_or_path=config, dtype=dtype):
             model = SimpleModel(hidden_dim=16, nlayers=2)
-        with pytest.raises(ValueError, match="requires BF16 model parameters"):
+        with pytest.raises(ValueError, match="requires FP16 or BF16 model parameters"):
             deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config)
 
 

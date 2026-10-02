@@ -11,8 +11,8 @@ GPU compute and the inter-GPU gradient reduction.
 momentum tensor (`exp_avg`) — no second moment, no `eps`, no bias correction — so its offloaded state
 is half of Adam's; everything else in the pipeline below is identical.
 
-**Precision support:** BF16 model parameters and gradients with FP32 master weights and optimizer
-states. FP16/FP32 model parameters, `torch_autocast`, low-precision master weights/states, and
+**Precision support:** FP16/BF16 model parameters and gradients with FP32 master weights and optimizer
+states. FP32 model parameters, `torch_autocast`, low-precision master weights/states, and
 `fp32_optimizer_states=False` are rejected at initialization. Use `engine.step()` after
 `deepspeed.initialize()`; direct `ReflowCPUAdam.step()` and `ReflowCPULion.step()` calls are rejected.
 
