@@ -53,6 +53,8 @@ Launch with `--bind_cores_to_rank` so each rank runs on the CPU cores local to i
 deepspeed --bind_cores_to_rank train.py --deepspeed_config ds_config.json
 ```
 
+With Intel MPI, core selection and NUMA permission checks run on each target host at rank startup. If a container denies NUMA memory binding, the launcher retains CPU binding when permitted; if CPU binding is also denied, it launches without `numactl` binding. Invalid CPU or NUMA selections still fail. These checks add no work to training steps, but losing memory locality can affect throughput on hosts with multiple NUMA nodes.
+
 Reflow always pins optimizer workers to NUMA-local cores and reserves `main_thread_cores` from those workers. `enable_cpu_affinity` additionally restricts the main process to its NUMA-local core slice. The remaining cores are split into workers of `bucketwise_cores_per_worker` cores. While the state commit overlaps the forward it uses only `state_update_cores` cores: every busy core lowers the CPU's turbo frequency, which would slow the launch-bound forward.
 
 ## Gradient clipping

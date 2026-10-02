@@ -10,11 +10,23 @@
 # ]
 
 import os
+
+if __name__ == "__main__":
+    import sys
+    # Sibling types.py and logging.py must not shadow the standard library in the rank wrapper.
+    if sys.path and sys.path[0] == os.path.dirname(os.path.abspath(__file__)):
+        sys.path.pop(0)
+
 import psutil
 import shutil
 import subprocess
 
-from .logging import logger
+# Running this file directly avoids importing DeepSpeed/PyTorch in the short-lived rank wrapper.
+if __name__ == "__main__":
+    import logging
+    logger = logging.getLogger("DeepSpeed")
+else:
+    from .logging import logger
 
 
 # return a list of list for cores to numa mapping
@@ -239,3 +251,30 @@ def get_numactl_cmd(bind_core_list, num_local_procs, local_rank):
     logger.warning(f"'{' '.join(cpu_only_cmd)}' failed ({cpu_only_error}). "
                    "Launching without numactl core/memory binding.")
     return cores_per_rank, []
+
+
+def main(args=None):
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Bind and exec a command using this host's NUMA permissions.")
+    parser.add_argument("--bind_core_list", default=None)
+    parser.add_argument("--num_local_procs", type=int, required=True)
+    parser.add_argument("--local_rank", type=int, required=True)
+    parser.add_argument("command", nargs=argparse.REMAINDER)
+    args = parser.parse_args(args)
+    command = args.command
+    if command and command[0] == "--":
+        command = command[1:]
+    if not command:
+        parser.error("a command to launch is required")
+
+    cores_per_rank, numactl_cmd = get_numactl_cmd(args.bind_core_list, args.num_local_procs, args.local_rank)
+    env = os.environ.copy()
+    env["OMP_NUM_THREADS"] = str(cores_per_rank)
+    command = numactl_cmd + command
+    # Keep the MPI rank's PID and signal/exit handling without a resident wrapper process.
+    os.execvpe(command[0], command, env)
+
+
+if __name__ == "__main__":
+    main()
