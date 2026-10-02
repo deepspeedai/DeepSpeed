@@ -57,6 +57,53 @@ def test_checkpoint_file_output_dtype(monkeypatch, tmp_path):
     assert (bf16_dir / "pytorch_model.bin").stat().st_size < (fp32_dir / "pytorch_model.bin").stat().st_size * 0.6
 
 
+def test_convert_bf16_stage0_checkpoint(tmp_path):
+    checkpoint_dir = tmp_path / "checkpoint"
+    tag = "global_step1"
+    tagged_dir = checkpoint_dir / tag
+    tagged_dir.mkdir(parents=True)
+    (checkpoint_dir / "latest").write_text(tag, encoding="utf-8")
+
+    expected = {
+        "layer.weight": torch.arange(6, dtype=torch.float32).reshape(2, 3),
+        "layer.bias": torch.tensor([6.0, 7.0]),
+    }
+    torch.save(
+        {
+            "buffer_names": [],
+            "module": {},
+            "param_shapes": [{
+                name: tensor.shape
+                for name, tensor in expected.items()
+            }],
+            "shared_params": {},
+            "ds_version": "test",
+        },
+        tagged_dir / "mp_rank_00_model_states.pt",
+    )
+    flat_group = torch.cat([tensor.flatten() for tensor in expected.values()])
+    for rank, partition in enumerate(flat_group.chunk(2)):
+        torch.save(
+            {
+                "optimizer_state_dict": {
+                    "single_partition_of_fp32_groups": [partition],
+                    "group_paddings": [0],
+                    "partition_count": [2],
+                    "param_slice_mappings": [{}],
+                }
+            },
+            tagged_dir / f"bf16_zero_pp_rank_{rank}_mp_rank_00_optim_states.pt",
+        )
+
+    output_dir = tmp_path / "fp32"
+    convert_zero_checkpoint_to_fp32_state_dict(checkpoint_dir, output_dir, max_shard_size=None)
+    converted = torch.load(output_dir / "pytorch_model.bin", weights_only=True)
+
+    assert converted.keys() == expected.keys()
+    for name, tensor in expected.items():
+        torch.testing.assert_close(converted[name], tensor, rtol=0, atol=0)
+
+
 def test_zero_to_torch_cli_passes_dtype(monkeypatch, tmp_path):
     call = {}
 
