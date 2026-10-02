@@ -13,11 +13,14 @@ import torch
 
 import deepspeed.runtime.rollout as rollout_module
 from deepspeed.runtime.rollout import (
+    JSDLossOutput,
     RolloutBatch,
     RolloutEngine,
     RolloutRequest,
+    ResponseTokenBatch,
     SamplingConfig,
     build_rollout,
+    generalized_jsd_loss,
 )
 
 # --- dataclass invariants ---------------------------------------------------
@@ -68,6 +71,75 @@ def test_continuous_batching_details_are_not_public_exports():
     assert "ContinuousBatchRequest" not in rollout_module.__all__
     assert "ContinuousBatchScheduler" not in rollout_module.__all__
     assert "ContinuousBatchUpdate" not in rollout_module.__all__
+
+
+def test_response_token_batch_masks_prompts_and_padding():
+    rollout = RolloutBatch(
+        input_ids=torch.tensor([[0, 11, 12, 21, 2, 0], [13, 14, 15, 22, 23, 2]]),
+        attention_mask=torch.tensor([[0, 1, 1, 1, 1, 0], [1, 1, 1, 1, 1, 1]]),
+        response_start_idx=torch.tensor([3, 3]),
+    )
+
+    response_batch = ResponseTokenBatch.from_rollout(rollout)
+
+    assert torch.equal(response_batch.input_ids, rollout.input_ids)
+    assert response_batch.target_ids.tolist() == [[11, 12, 21, 2, 0], [14, 15, 22, 23, 2]]
+    assert response_batch.response_mask.tolist() == [[False, False, True, True, False],
+                                                     [False, False, True, True, True]]
+
+
+@pytest.mark.parametrize("response_start_idx", [torch.tensor([0]), torch.tensor([4]), torch.tensor([2.0])])
+def test_response_token_batch_rejects_invalid_response_boundaries(response_start_idx):
+    rollout = RolloutBatch(
+        input_ids=torch.tensor([[1, 2, 3]]),
+        attention_mask=torch.ones((1, 3), dtype=torch.long),
+        response_start_idx=response_start_idx,
+    )
+
+    with pytest.raises(ValueError):
+        ResponseTokenBatch.from_rollout(rollout)
+
+
+def test_response_token_batch_aligns_causal_logits():
+    rollout = RolloutBatch(
+        input_ids=torch.tensor([[1, 2, 3]]),
+        attention_mask=torch.ones((1, 3), dtype=torch.long),
+        response_start_idx=torch.tensor([2]),
+    )
+    logits = torch.randn(1, 3, 5)
+
+    response_batch = ResponseTokenBatch.from_rollout(rollout)
+
+    assert torch.equal(response_batch.select_causal_logits(logits), logits[:, :-1])
+    with pytest.raises(ValueError, match="sequence"):
+        response_batch.select_causal_logits(torch.randn(1, 2, 5))
+
+
+def test_generalized_jsd_loss_matches_forward_kl_on_response_tokens():
+    student_logits = torch.log(torch.tensor([[[0.8, 0.2], [0.5, 0.5]]]))
+    teacher_logits = torch.log(torch.tensor([[[0.5, 0.5], [0.9, 0.1]]]))
+    response_mask = torch.tensor([[True, False]])
+
+    output = generalized_jsd_loss(student_logits, teacher_logits, response_mask, beta=0.0)
+
+    expected = 0.5 * torch.log(torch.tensor(0.5 / 0.8)) + 0.5 * torch.log(torch.tensor(0.5 / 0.2))
+    assert isinstance(output, JSDLossOutput)
+    assert output.valid_token_count.item() == 1
+    assert torch.allclose(output.loss_sum, expected)
+    assert torch.allclose(output.loss, expected)
+
+
+def test_generalized_jsd_loss_supports_top_k_and_empty_response_masks():
+    student_logits = torch.tensor([[[20.0, 0.0, 0.0]]])
+    teacher_logits = torch.tensor([[[0.0, 10.0, 9.0]]])
+    response_mask = torch.tensor([[True]])
+
+    top_one = generalized_jsd_loss(student_logits, teacher_logits, response_mask, teacher_top_k=1)
+    empty = generalized_jsd_loss(student_logits, teacher_logits, torch.tensor([[False]]))
+
+    assert top_one.loss.item() == pytest.approx(0.0)
+    assert empty.valid_token_count.item() == 0
+    assert empty.loss.item() == pytest.approx(0.0)
 
 
 # --- interface conformance via FakeRollout ---------------------------------
