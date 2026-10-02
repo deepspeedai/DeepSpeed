@@ -169,6 +169,11 @@ def test_continuous_generation_covers_modern_static_cache_path():
                 def get_text_config(self, **_kwargs):
                     return self
 
+                @property
+                def per_layer_config(self):
+                    # StaticCache on current Transformers main reads this before choosing layer types.
+                    return [self]
+
             self.config = CacheConfig(
                 max_position_embeddings=32,
                 num_hidden_layers=1,
@@ -211,6 +216,11 @@ def test_continuous_generation_trims_cache_after_staggered_eos():
 
         def get_text_config(self, **_kwargs):
             return self
+
+        @property
+        def per_layer_config(self):
+            # StaticCache on current Transformers main reads this before choosing layer types.
+            return [self]
 
     class CacheClassModel(torch.nn.Module):
         _supports_cache_class = True
