@@ -11,7 +11,7 @@ In this tutorial, we introduce the DeepSpeed Monitor and provide examples of its
 
 ## Overview
 
-Monitoring model and system metrics during training is vital to ensure hardware resources are fully utilized. The DeepSpeed Monitor enables live logging of metrics through one or more monitoring backends such as PyTorch's [TensorBoard](https://pytorch.org/docs/1.8.0/tensorboard.html), [WandB](https://docs.wandb.ai/quickstart), [Comet](https://www.comet.com/site/?utm_source=deepseed&utm_medium=docs&utm_content=tutorial) and simple CSV files.
+Monitoring model and system metrics during training is vital to ensure hardware resources are fully utilized. The DeepSpeed Monitor enables live logging of metrics through one or more monitoring backends such as PyTorch's [TensorBoard](https://pytorch.org/docs/1.8.0/tensorboard.html), [WandB](https://docs.wandb.ai/quickstart), [Comet](https://www.comet.com/site/?utm_source=deepseed&utm_medium=docs&utm_content=tutorial), [Trackio](https://github.com/huggingface/trackio) and simple CSV files.
 
 Below is a live monitoring view for TensorBoard:
 
@@ -24,6 +24,8 @@ Below is a live monitoring view for WandB:
 Below is a live monitoring view for Comet:
 
 ![CometML Example Output](/assets/images/comet_monitor.png){: .align-center}
+
+[Trackio](https://github.com/huggingface/trackio) is a lightweight, offline-first experiment tracking library from Hugging Face with a WandB-compatible API. Runs can be visualized as an HF Space or dataset on the HF Hub.
 
 ## Usage
 
@@ -54,6 +56,10 @@ When using DeepSpeed for model training, the Monitor can be configured in the De
     "project": "my_project",
     "experiment_name": "my_experiment"
   }
+  "trackio": {
+    "enabled": true,
+    "project": "my_project"
+  }
   "csv_monitor": {
     "enabled": true,
     "output_path": "output/ds_logs/",
@@ -69,7 +75,7 @@ DeepSpeed will automatically log to all available and enabled monitoring backend
 In addition to automatic monitoring, users can log their own custom metrics in client scripts. Currently, there are two ways to initialize Monitor objects:
 
 1. (Recommended) - Create a `MonitorMaster(ds_config.monitor_config)` object, which automatically initializes all monitor backends present in the DeepSpeed configuration
-2. Create a specific `TensorBoardMonitor(ds_config.monitor_config)`, `WandbMonitor(ds_config.monitor_config)`, `csvMonitor(ds_config.monitor_config)` object which will only initialize a specific monitor backend present in the DeepSpeed configuration
+2. Create a specific `TensorBoardMonitor(ds_config.monitor_config)`, `WandbMonitor(ds_config.monitor_config)`, `TrackioMonitor(ds_config.monitor_config)`, `csvMonitor(ds_config.monitor_config)` object which will only initialize a specific monitor backend present in the DeepSpeed configuration
 
 
 The steps to create a custom monitor are as follows:
