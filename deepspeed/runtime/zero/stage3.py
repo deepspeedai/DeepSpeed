@@ -3810,8 +3810,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                 cpu_buffer = self.lp_param_buffer.to(device, non_blocking=non_blocking)
 
             self.lp_param_buffer.data = cpu_buffer
-            for tensor, offset, tensor_numel in get_mapping_to_flat_buffer(
-                [p.ds_tensor for p in self.module.parameters()]):
+            for tensor, offset, tensor_numel in get_mapping_to_flat_buffer(self._get_parameter_partitions()):
                 tensor.data = cpu_buffer.narrow(0, offset, tensor_numel)
 
             self.fp16_partitioned_groups_flat.clear()

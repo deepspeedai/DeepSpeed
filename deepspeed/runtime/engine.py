@@ -5632,14 +5632,16 @@ class DeepSpeedEngine(Module):
                             key = prefix + name
                             # can't rely on param.data_ptr() as it will be reused as weights gets
                             # gathered and reduced, but param.ds_id is unique across all zero weights
-                            # (and shared params will have the same param.ds_id)
-                            if param.ds_id in shared_params:
+                            # (and shared params will have the same param.ds_id). Zero-element
+                            # params are left unpartitioned and have no ds_id.
+                            share_key = param.ds_id if hasattr(param, "ds_id") else ("unpartitioned", id(param))
+                            if share_key in shared_params:
                                 # shared weights
-                                #print(f"`{key}` is shared with `{shared_params[param.ds_id]}`")
-                                state_dict[key] = state_dict[shared_params[param.ds_id]]
+                                #print(f"`{key}` is shared with `{shared_params[share_key]}`")
+                                state_dict[key] = state_dict[shared_params[share_key]]
                             else:
                                 state_dict[key] = param.detach().cpu()
-                                shared_params[param.ds_id] = key
+                                shared_params[share_key] = key
                             #print(f"param {param.ds_id} {param.shape} {key} ")
 
                         # now buffers - not sure if need to take care of potentially shared weights here
