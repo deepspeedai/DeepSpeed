@@ -196,6 +196,21 @@ constructed, including when the caller supplied a lazily initialized process
 group. This initialization does not run on subsequent forwards. The standard
 ``comm`` and ``autoep_size=1`` paths are unchanged.
 
+Both reentrant and non-reentrant activation checkpointing are supported with
+DeepEP. The order in which DeepEP delivers rows depends on arrival timing, and a
+non-reentrant checkpoint keeps the forward pass's autograd nodes, together with
+the dispatch handle they hold. A non-reentrant recompute therefore repeats the
+forward's dispatch on that handle rather than dispatching afresh, so the expert
+activations it restores are in the order the backward expects. A recompute is
+matched to its forward pass by requiring each micro-batch to run backward before
+the layer's next forward, as gradient accumulation does; a recompute that could
+belong to more than one live forward pass raises an error rather than guessing.
+Use reentrant checkpointing for schedules that run several forwards before their
+backwards. With PyTorch's default early stop, a non-reentrant recompute ends once
+the expert activations are restored, so it does not repeat the combine when
+nothing after the combine in the checkpointed region saves activations, for
+example a layer without shared experts.
+
 On 16 H100s across two nodes, replaying routing captured from real training,
 DeepEP reduced payload AllToAll time from roughly 100 ms to 48 ms per step. A
 full SFT step on Qwen3.5-MoE went from roughly 325 ms to 266 ms, a 1.2x speedup
