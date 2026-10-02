@@ -19,6 +19,8 @@ from cpuinfo import get_cpu_info
 
 import deepspeed
 from deepspeed.ops.op_builder import CPUAdamBuilder, CPULionBuilder
+from deepspeed.runtime.reflow.reflow_cpu_adam import ReflowCPUAdam
+from deepspeed.runtime.reflow.reflow_cpu_lion import ReflowCPULion
 
 pytest.cpu_vendor = get_cpu_info()["vendor_id_raw"].lower() if "vendor_id_raw" in get_cpu_info() else "unknown"
 
@@ -41,6 +43,28 @@ def _skip_without_avx(builder):
     # The Reflow kernels exist only for AVX2/AVX-512; on other builds creating the optimizer raises.
     if builder().simd_width() not in ("-D__AVX512__", "-D__AVX256__"):
         pytest.skip("the CPU optimizer extension is not built with AVX2 or AVX-512")
+
+
+@pytest.mark.parametrize("optimizer_type", [ReflowCPUAdam, ReflowCPULion])
+def test_reflow_optimizer_rejects_low_precision_states(optimizer_type):
+    param = torch.nn.Parameter(torch.ones(22, dtype=torch.bfloat16))
+    with pytest.raises(ValueError, match="requires FP32 optimizer states"):
+        optimizer_type([param], fp32_optimizer_states=False)
+
+
+@pytest.mark.parametrize("optimizer_type, builder", [(ReflowCPUAdam, CPUAdamBuilder), (ReflowCPULion, CPULionBuilder)])
+def test_reflow_optimizer_rejects_direct_step(optimizer_type, builder):
+    if not deepspeed.ops.__compatible_ops__.get(builder.NAME, False):
+        pytest.skip("the CPU optimizer builder is not supported on this accelerator")
+    _skip_without_avx(builder)
+    param = torch.nn.Parameter(torch.ones(22, dtype=torch.bfloat16))
+    param.grad = torch.ones_like(param)
+    optimizer = optimizer_type([param], num_threads=1)
+    original = param.detach().clone()
+    with pytest.raises(NotImplementedError, match="use engine.step"):
+        optimizer.step()
+    assert torch.equal(param, original)
+    assert not optimizer.state
 
 
 def test_every_builder_of_the_shared_bindings_compiles_the_reflow_kernels():

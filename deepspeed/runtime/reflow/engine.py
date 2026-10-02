@@ -59,6 +59,9 @@ def maybe_remap_client_optimizer(engine: "DeepSpeedEngine", optimizer):
     from deepspeed.ops.adam import DeepSpeedCPUAdam
     from deepspeed.ops.lion import DeepSpeedCPULion
     from deepspeed.runtime.zero.muon.muon_optimizer import MuonWithAuxAdam
+    if not getattr(optimizer, "fp32_optimizer_states", True):
+        raise ZeRORuntimeException("Reflow requires FP32 optimizer states; fp32_optimizer_states=False "
+                                   "is not supported.")
     if isinstance(optimizer, (ReflowCPUAdam, ReflowCPULion)):
         return optimizer
     if isinstance(optimizer, MuonWithAuxAdam):

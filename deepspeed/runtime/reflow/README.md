@@ -11,6 +11,11 @@ GPU compute and the inter-GPU gradient reduction.
 momentum tensor (`exp_avg`) — no second moment, no `eps`, no bias correction — so its offloaded state
 is half of Adam's; everything else in the pipeline below is identical.
 
+**Precision support:** BF16 model parameters and gradients with FP32 master weights and optimizer
+states. FP16/FP32 model parameters, `torch_autocast`, low-precision master weights/states, and
+`fp32_optimizer_states=False` are rejected at initialization. Use `engine.step()` after
+`deepspeed.initialize()`; direct `ReflowCPUAdam.step()` and `ReflowCPULion.step()` calls are rejected.
+
 This directory is the implementation. A fine-tuning example is planned for
 [DeepSpeedExamples](https://github.com/deepspeedai/DeepSpeedExamples); until it lands, the tutorial
 (`docs/_tutorials/reflow.md`) shows the configuration a training script needs.
@@ -30,16 +35,16 @@ A `reflow` block in `zero_optimization` turns on three cooperating behaviors:
    reduce-scatter.
 
 2. **`cpu_conversion` — half-precision gradient transfer.**
-   Gradients are copied to the CPU in their native FP16/BF16 precision and promoted to FP32 *inside*
+   Gradients are copied to the CPU in their native BF16 precision and promoted to FP32 *inside*
    the AVX CPU-Adam kernel. This halves the GPU→CPU traffic with no extra host-side cast, and removes
-   the CPU-side FP32 gradient buffer entirely — only the half-precision (BF16/FP16) gradient is kept
+   the CPU-side FP32 gradient buffer entirely — only the half-precision BF16 gradient is kept
    on the CPU — so CPU memory usage drops.
 
 3. **`async_state` — asynchronous state update.**
-   The foreground step only generates the new BF16/FP16 parameters (produced just in time for the
+   The foreground step only generates the new BF16 parameters (produced just in time for the
    next step); updating the FP32 master parameters and the optimizer state (Adam's
    `exp_avg`/`exp_avg_sq`, or Lion's `exp_avg`) is split off to a background CPU worker. That state
-   update runs after the gradient-clipping and FP16-overflow checks, so it can overlap the *next*
+   update runs after the gradient-clipping and non-finite gradient checks, so it can overlap the *next*
    iteration's forward.
 
 A **NUMA-aware core binding** underlies all three: worker threads are pinned to the CPU cores local
@@ -52,9 +57,9 @@ to each GPU's NUMA node for higher CPU↔GPU bandwidth.
 ```
 backward:   reduce bucket ──► D2H grad copy (half precision, copy_grad_stream)
                               └► submit per-bucket CPU-Adam to a worker
-                                   ├► worker: FP32-promote + generate updated FP16/BF16 params
-                                   └► worker: H2D copy updated FP16/BF16 weights (bucketwise_h2d_stream)
-step():     drain bucket workers ─► FP16-overflow check ─► grad-norm / gradient clipping
+                                   ├► worker: FP32-promote + generate updated BF16 params
+                                   └► worker: H2D copy updated BF16 weights (bucketwise_h2d_stream)
+step():     drain bucket workers ─► non-finite gradient check ─► grad-norm / gradient clipping
                               └► submit the deferred FP32-master + exp_avg/exp_avg_sq update to the
                                  async-state worker (the param generation already ran during
                                  backward, so this is a thin tail)
@@ -212,7 +217,7 @@ the default and the only fully supported path.
 
 `REFLOW_SINGLE_GRAD_BUFFER=1` enables a **single** grad buffer prototype that is not fully implemented
 yet. With `offload_param: cpu`, one slot only duplicates the CPU parameter source, so the prototype
-writes the updated FP16/BF16 params straight into that source and saves ~2 bytes/param. It has been
+writes the updated BF16 params straight into that source and saves ~2 bytes/param. It has been
 checked only with `offload_param: cpu` and `gradient_accumulation_steps: 1`; any other run (gradient
 accumulation, params on GPU, NVMe offload) logs a warning and falls back to the double buffer.
 
@@ -251,7 +256,7 @@ fell from ~1700 ms to ~120 ms once the bucketwise workers ran concurrently.
 
 ## Correctness
 
-- **FP16 dynamic loss scaling**: an overflowing step is detected with an on-GPU `isfinite` scan over
+- **Non-finite gradients**: a step with non-finite gradients is detected with an on-GPU `isfinite` scan over
   the offloaded grads and discarded exactly like the standard optimizer — the FP32 master is
   untouched and the GPU weights are regenerated from it.
 - **Async grad-copy aliveness**: the D2H grad-copy source is recorded against `copy_grad_stream`

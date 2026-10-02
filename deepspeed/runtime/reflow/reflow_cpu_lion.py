@@ -49,12 +49,15 @@ class ReflowCPULion(DeepSpeedCPULion):
                  num_threads=None):
         """Reflow CPU Lion.
 
-        Same arguments as :class:`DeepSpeedCPULion` plus:
+        Same arguments as :class:`DeepSpeedCPULion`, requiring ``fp32_optimizer_states=True``, plus:
 
         Arguments:
             num_threads (int): number of CPU threads for the Lion update. ``None`` uses
                 all available cores.
         """
+        if not fp32_optimizer_states:
+            raise ValueError("ReflowCPULion requires FP32 optimizer states; fp32_optimizer_states=False "
+                             "is not supported.")
         # Initialize torch.optim.Optimizer directly (rather than via DeepSpeedCPULion.__init__)
         # and register a Reflow C++ optimizer in its own registry. This avoids registering a
         # standard cpu_lion optimizer instance and keeps the native state isolated.
@@ -83,6 +86,11 @@ class ReflowCPULion(DeepSpeedCPULion):
         num_threads = int(self.num_threads) if self.num_threads is not None else -1
         self.ds_opt_lion.reflow_create_lion(self.opt_id, lr, betas[0], betas[1], weight_decay, should_log_le("info"),
                                             num_threads)
+
+    def step(self, closure=None):
+        """Direct steps cannot use the separate Reflow native registry."""
+        raise NotImplementedError("ReflowCPULion.step() is not supported; initialize Reflow with "
+                                  "deepspeed.initialize() and use engine.step().")
 
     def __del__(self):
         # Destroy the C++ object explicitly to avoid a leak when deepspeed.initialize

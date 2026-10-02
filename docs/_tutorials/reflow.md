@@ -11,8 +11,8 @@ We recommend that you read the tutorials on [ZeRO](/tutorials/zero/) and [ZeRO-O
 Adding a `reflow` block to `zero_optimization` turns on three cooperating behaviors:
 
 1. **Per-bucket optimizer during backward.** As each gradient bucket is reduced, its CPU optimizer update is submitted to a background worker, so the optimizer overlaps the rest of backward and the gradient reduce-scatter.
-2. **Half-precision gradient transfer.** Gradients are copied to CPU in FP16/BF16 and promoted to FP32 inside the AVX kernel. This halves the GPU-to-CPU traffic and removes the CPU-side FP32 gradient buffer.
-3. **Asynchronous state commit.** The foreground only produces the new FP16/BF16 parameters. The FP32 master weights and optimizer state are committed by a background worker after the gradient clipping and overflow checks, overlapping the next forward.
+2. **Half-precision gradient transfer.** Gradients are copied to CPU in BF16 and promoted to FP32 inside the AVX kernel. This halves the GPU-to-CPU traffic and removes the CPU-side FP32 gradient buffer.
+3. **Asynchronous state commit.** The foreground only produces the new BF16 parameters. The FP32 master weights and optimizer state are committed by a background worker after the gradient clipping and overflow checks, overlapping the next forward.
 
 Checkpoint APIs (`state_dict`, `load_state_dict`, and the `safe_get_*`/`safe_set_*` helpers) wait for that background commit, so they always see the fully applied step.
 
@@ -72,6 +72,8 @@ With `gradient_clipping: 1.0` in the same setup, Reflow's optimizer step average
 
 ## Limitations
 
+- Reflow requires BF16 model parameters and gradients with FP32 master weights and optimizer states. Enable `bf16.enabled`; FP16/FP32 model parameters, `torch_autocast`, low-precision master weights/states, and `fp32_optimizer_states: false` are rejected.
+- Use `engine.step()` after `deepspeed.initialize()`. Direct `ReflowCPUAdam.step()` and `ReflowCPULion.step()` calls are rejected.
 - ZeRO stage 3 with `offload_optimizer.device` set to `cpu`; any other stage or device is rejected when the configuration is parsed. NVMe optimizer offload is accepted but is not covered by tests.
 - The CPU Adam/Lion extension must be built with AVX2 or AVX-512; Reflow raises an error when it creates the optimizer on other builds.
 - Not supported with `super_offload`, ZenFlow, DeepCompile, the Muon optimizer, or `managed_gradient_accumulation: false`. The first four are rejected at initialization.

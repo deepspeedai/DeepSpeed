@@ -50,12 +50,15 @@ class ReflowCPUAdam(DeepSpeedCPUAdam):
                  num_threads=None):
         """Reflow CPU Adam(W).
 
-        Same arguments as :class:`DeepSpeedCPUAdam` plus:
+        Same arguments as :class:`DeepSpeedCPUAdam`, requiring ``fp32_optimizer_states=True``, plus:
 
         Arguments:
             num_threads (int): number of CPU threads for the Adam update. ``None`` uses
                 all available cores.
         """
+        if not fp32_optimizer_states:
+            raise ValueError("ReflowCPUAdam requires FP32 optimizer states; fp32_optimizer_states=False "
+                             "is not supported.")
         # Initialize torch.optim.Optimizer directly (rather than via DeepSpeedCPUAdam.__init__)
         # and register a Reflow C++ optimizer in its own registry. This avoids registering a
         # standard cpu_adam optimizer instance and keeps the native state isolated.
@@ -90,6 +93,11 @@ class ReflowCPUAdam(DeepSpeedCPUAdam):
         num_threads = int(self.num_threads) if self.num_threads is not None else -1
         self.ds_opt_adam.reflow_create_adam(self.opt_id, lr, betas[0], betas[1], eps, weight_decay, adamw_mode,
                                             should_log_le("info"), num_threads)
+
+    def step(self, closure=None):
+        """Direct steps cannot use the separate Reflow native registry."""
+        raise NotImplementedError("ReflowCPUAdam.step() is not supported; initialize Reflow with "
+                                  "deepspeed.initialize() and use engine.step().")
 
     def memory_fence(self):
         """Flush the non-temporal (streaming) stores so updated params/state are globally visible
