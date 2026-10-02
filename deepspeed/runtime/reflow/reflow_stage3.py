@@ -1671,8 +1671,28 @@ class ReflowOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
     # step() returns while background workers still commit the FP32 master and optimizer state, so
     # checkpoints and the safe_get/set_* APIs wait for that commit; the training loop does not.
 
+    def checkpoint_event_prologue(self):
+        self._wait_for_pending_state_updates()
+        local_error = self._bucketwise_worker_error
+        if dist.get_world_size() > 1:
+            # Checkpoints involve every rank, including ranks outside this optimizer's DP group.
+            # Reuse the training error flag, but coordinate once globally before any checkpoint file is written.
+            error_flag = self._bucketwise_error_flag
+            if error_flag is None:
+                error_flag = get_accelerator().ByteTensor([0])
+                self._bucketwise_error_flag = error_flag
+            error_flag.fill_(1 if local_error is not None else 0)
+            dist.all_reduce(error_flag, op=dist.ReduceOp.MAX)
+            if error_flag[0].item() != 0 and local_error is None:
+                raise RuntimeError("Reflow asynchronous optimizer update failed on another rank; aborting checkpoint")
+        if local_error is not None:
+            raise local_error
+        super().checkpoint_event_prologue()
+
     def state_dict(self):
         self._wait_for_pending_state_updates()
+        if self._bucketwise_worker_error is not None:
+            raise self._bucketwise_worker_error
         return super().state_dict()
 
     def load_state_dict(self,
@@ -1693,6 +1713,8 @@ class ReflowOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
 
     def get_lean_optimizer_state(self):
         self._wait_for_pending_state_updates()
+        if self._bucketwise_worker_error is not None:
+            raise self._bucketwise_worker_error
         return super().get_lean_optimizer_state()
 
     def _get_fp32_opt_state_partition(self, param, release_swap_buffers, optim_state_key=None):

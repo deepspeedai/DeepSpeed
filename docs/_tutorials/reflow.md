@@ -14,7 +14,7 @@ Adding a `reflow` block to `zero_optimization` turns on three cooperating behavi
 2. **Half-precision gradient transfer.** Gradients are copied to CPU in BF16 and promoted to FP32 inside the AVX kernel. This halves the GPU-to-CPU traffic and removes the CPU-side FP32 gradient buffer.
 3. **Asynchronous state commit.** The foreground only produces the new BF16 parameters. The FP32 master weights and optimizer state are committed by a background worker after the gradient clipping and overflow checks, overlapping the next forward.
 
-Checkpoint APIs (`state_dict`, `load_state_dict`, and the `safe_get_*`/`safe_set_*` helpers) wait for that background commit, so they always see the fully applied step.
+Checkpoint APIs (`state_dict`, `load_state_dict`, and the `safe_get_*`/`safe_set_*` helpers) wait for that background commit. If a worker fails, `engine.save_checkpoint()` aborts on every rank before writing checkpoint files. Direct `state_dict()` and `get_lean_optimizer_state()` calls raise any recorded local worker error. Checkpoint preparation shares one error flag across ranks; this adds no collectives to the training or direct state-read paths.
 
 ## Configuration
 

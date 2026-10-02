@@ -10,6 +10,7 @@ test runs the same model and batches through plain ZeRO-Offload as the oracle an
 import copy
 import os
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import patch
 
 import pytest
@@ -690,6 +691,57 @@ class TestReflowAsyncWorkerFailures(DistributedTest):
                     else:
                         with pytest.raises(RuntimeError, match=message):
                             engine.step()
+        finally:
+            engine.destroy()
+
+
+@pytest.mark.parametrize("worker_fails, read_before_save", [(True, False), (True, True), (False, True)])
+class TestReflowCheckpointWorkerFailures(DistributedTest):
+    world_size = [1, 2] if get_accelerator().device_count() > 1 else 1
+    non_daemonic_procs = True
+
+    def test_checkpoint_reports_worker_failure(self, worker_fails, read_before_save, tmpdir):
+        skip_if_reflow_training_unsupported()
+        model = SimpleModel(hidden_dim=16, nlayers=2)
+        config = get_offload_clip_config(reflow=True, gradient_clipping=0.0)
+        engine, optimizer, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config)
+        save_dir = tmpdir / f"checkpoint_{dist.get_world_size()}"
+        message = "injected asynchronous state commit failure"
+        failing_rank = worker_fails and dist.get_rank() == 0
+
+        def commit():
+            if failing_rank:
+                raise RuntimeError(message)
+
+        try:
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                # Inject the real Future at the async commit boundary to reproduce the checkpoint bug;
+                # CPU-only execution cannot run Reflow's GPU backward/copy path.
+                optimizer._last_state_update_future = executor.submit(commit)
+                read_error = None
+                if read_before_save and dist.get_rank() == 0:
+                    try:
+                        optimizer.state_dict()
+                    except RuntimeError as error:
+                        read_error = error
+
+                if worker_fails:
+                    with pytest.raises(RuntimeError) as save_error:
+                        engine.save_checkpoint(str(save_dir), tag="test")
+                    if failing_rank:
+                        assert str(save_error.value) == message
+                    assert not save_dir.exists()
+                    if read_before_save and failing_rank:
+                        assert str(read_error) == message
+                    if failing_rank:
+                        # A consumed future must not hide its failure from a later serialization attempt.
+                        for read in (optimizer.state_dict, optimizer.get_lean_optimizer_state):
+                            with pytest.raises(RuntimeError, match=message):
+                                read()
+                else:
+                    assert read_error is None
+                    assert engine.save_checkpoint(str(save_dir), tag="test")
+                    assert (save_dir / "latest").read_text(encoding="utf-8") == "test"
         finally:
             engine.destroy()
 

@@ -272,7 +272,10 @@ fell from ~1700 ms to ~120 ms once the bucketwise workers ran concurrently.
 - **Checkpoints see the committed state**: a step's FP32 master and optimizer state are committed in
   the background after `step()` returns, so `state_dict` / `load_state_dict` and the `safe_get_*` /
   `safe_set_*` hp-param APIs wait for that commit first. Only these entry points wait; the training
-  step is unchanged.
+  step is unchanged. Before writing checkpoint files, the checkpoint prologue shares one reused
+  error flag across all ranks and aborts everywhere if a worker failed. Single-rank checkpoints
+  need no error collective. Direct `state_dict` and `get_lean_optimizer_state` calls propagate
+  local worker errors without adding communication.
 
 ---
 
