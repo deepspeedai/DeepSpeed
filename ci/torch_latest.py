@@ -71,6 +71,15 @@ PYTORCH_CUDA_128_INDEX_URL = "https://download.pytorch.org/whl/cu128"
 APP_NAME = "deepspeedai-torch-latest-ci"
 SANDBOX_TIMEOUT_SECONDS = 5400
 SANDBOX_ACQUIRE_TIMEOUT_SECONDS = 1800
+# Exit codes that nightly triage (see .github/workflows/nightly-bisect.yml) keys on. GitHub only
+# reports run success/failure, so the controller also prints a DS_CI_FAILURE_CLASS=<class> sentinel
+# line that survives into the job logs even when the job is killed before it can exit.
+EXIT_TEST_FAILURE = 1
+EXIT_INFRA = 75  # EX_TEMPFAIL: no GPU instance was provisioned, so no test ever ran
+EXIT_TIMEOUT = 124
+# The Sandbox server-side lifetime can kill a run slightly before the local clock crosses the
+# nominal budget, so classify a failure as a timeout just inside the limit.
+SANDBOX_TIMEOUT_GRACE_SECONDS = 120
 MAX_TEST_LIST_BYTES = 64 * 1024
 MAX_TEST_TARGETS = 1024
 MAX_DISPLAY_BYTES_PER_COMMAND = 16 * 1024 * 1024
@@ -654,11 +663,13 @@ def run_controller(env: Mapping[str, str], modal_module: Any | None = None) -> i
     image = _build_sandbox_image(modal_module, preset, inputs)
     app = modal_module.App.lookup(APP_NAME, create_if_missing=True)
     sandbox = None
+    sandbox_started_at: float | None = None
     primary_error: BaseException | None = None
     cleanup_error: BaseException | None = None
     try:
         sandbox = modal_module.Sandbox.create(app=app, **build_sandbox_kwargs(image))
         startup_seconds = await_sandbox_start(sandbox)
+        sandbox_started_at = time.monotonic()
         print(f"Sandbox started after {startup_seconds:.0f}s", flush=True)
         for command in build_remote_commands(inputs):
             run_sandbox_command(sandbox, modal_module, command)
@@ -674,10 +685,29 @@ def run_controller(env: Mapping[str, str], modal_module: Any | None = None) -> i
     if primary_error is not None and cleanup_error is not None:
         raise ControllerCleanupError(primary_error, cleanup_error) from primary_error
     if primary_error is not None:
-        raise primary_error.with_traceback(primary_error.__traceback__)
+        return _report_primary_failure(primary_error, sandbox_started_at)
     if cleanup_error is not None:
         raise RuntimeError(f"Sandbox cleanup failed: {cleanup_error}") from cleanup_error
     return 0
+
+
+def _report_primary_failure(error: BaseException, sandbox_started_at: float | None) -> int:
+    """Map a controller failure to a triage class for nightly regression tooling.
+
+    A Sandbox that never started is a capacity problem and a run that died at the Sandbox
+    lifetime budget is an operational timeout; both print a DS_CI_FAILURE_CLASS sentinel and
+    return a dedicated exit code instead of raising, so nightly triage can route them away from
+    git-bisect. Anything else is a candidate failure and still raises for the full traceback.
+    """
+    if sandbox_started_at is None:
+        print(f"DS_CI_FAILURE_CLASS=infra: no test ran ({error})", flush=True)
+        return EXIT_INFRA
+    elapsed = time.monotonic() - sandbox_started_at
+    if elapsed >= SANDBOX_TIMEOUT_SECONDS - SANDBOX_TIMEOUT_GRACE_SECONDS:
+        print(f"DS_CI_FAILURE_CLASS=timeout: Sandbox lifetime exhausted after {elapsed:.0f}s ({error})", flush=True)
+        return EXIT_TIMEOUT
+    print("DS_CI_FAILURE_CLASS=test: candidate failed", flush=True)
+    raise error.with_traceback(error.__traceback__)
 
 
 def _build_parser() -> argparse.ArgumentParser:

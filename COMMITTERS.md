@@ -11,3 +11,4 @@
 | Sam Foreman     | [saforem2](https://github.com/saforem2)        | Argonne National Laboratory |
 | Zhipeng Wang    | [PKUWZP](https://github.com/PKUWZP)       | Google  |
 | Guokai Ma       | [delock](https://github.com/delock)       | Intel  |
+| Fengchun Hua    | [hipudding](https://github.com/hipudding)    | Huawei  |
