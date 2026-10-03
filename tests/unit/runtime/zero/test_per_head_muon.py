@@ -24,6 +24,7 @@ CPU-only: these pin the arithmetic and the bookkeeping, not the accelerator path
 multi-GPU side lives in `tests/unit/ops/muon/test_per_head_muon_accelerator.py`.
 """
 
+import inspect
 from types import SimpleNamespace
 
 import pytest
@@ -38,6 +39,7 @@ from deepspeed.runtime.zero.muon.original_muon import (
     ns_compute_dtype,
     zeropower_via_newtonschulz5,
 )
+from unit.common import DistributedTest
 
 # ---------------------------------------------------------------------------
 # 1. The arithmetic
@@ -840,3 +842,146 @@ def test_it_raises_when_the_flag_ends_up_doing_nothing():
 
     with pytest.raises(ValueError, match="sharded across head boundaries"):
         resolve_per_head_muon_after_sharding(attn)
+
+
+# ---------------------------------------------------------------------------
+# 4. The call sites
+# ---------------------------------------------------------------------------
+#
+# The head count is tagged on the parameter, so it only reaches Newton-Schulz if the code
+# that calls `muon_update` reads it back off. Three of the six call sites did not, and an
+# update that quietly stays whole-matrix looks exactly like a working one.
+
+_MUON_UPDATE_ARGS = list(inspect.signature(muon_update).parameters)
+
+
+def _muon_update_call_sites():
+    """Every `muon_update(...)` call under `deepspeed/`, as (file, line, arguments passed)."""
+    import ast
+    import os
+
+    root = os.path.dirname(os.path.dirname(deepspeed.__file__))
+    for directory, _, names in os.walk(os.path.join(root, "deepspeed")):
+        for name in names:
+            if not name.endswith(".py"):
+                continue
+            path = os.path.join(directory, name)
+            with open(path, encoding="utf-8") as handle:
+                tree = ast.parse(handle.read())
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                function = node.func
+                called = function.attr if isinstance(function, ast.Attribute) else getattr(function, "id", None)
+                if called == "muon_update":
+                    # A positional argument counts as passing the parameter at that position.
+                    passed = {kw.arg for kw in node.keywords} | set(_MUON_UPDATE_ARGS[:len(node.args)])
+                    yield os.path.relpath(path, root), node.lineno, passed
+
+
+def test_every_muon_update_call_site_forwards_the_head_count():
+    sites = list(_muon_update_call_sites())
+    assert len(sites) >= 5, f"expected the ZeRO and optimizer call sites, found {sites}"
+    missing = [(path, line) for path, line, keywords in sites if "num_heads" not in keywords]
+    assert not missing, ("these call `muon_update` without `num_heads`, so a per-head parameter "
+                         f"is orthogonalized whole there: {missing}")
+
+
+def test_muon_with_aux_adam_orthogonalizes_a_tagged_projection_per_head():
+    """`MuonWithAuxAdam.step` is the path taken with no ZeRO optimizer to do the work."""
+    from deepspeed.runtime.zero.muon.muon_optimizer import MuonWithAuxAdam
+
+    num_heads, head_dim, in_features = 4, 8, 32
+    torch.manual_seed(0)
+    weight = torch.nn.Parameter(torch.randn(num_heads * head_dim, in_features))
+    weight.muon_num_heads = num_heads
+    weight.grad = torch.randn_like(weight)
+
+    lr = 0.02
+    optimizer = MuonWithAuxAdam([dict(params=[weight], lr=lr, momentum=0.95, use_muon=True)])
+    before = weight.detach().clone()
+    grad = weight.grad.detach().clone()
+    optimizer.step()
+    applied = (before - weight.detach()) / lr
+
+    per_head = muon_update(grad.clone(), torch.zeros_like(grad), beta=0.95, num_heads=num_heads)
+    whole = muon_update(grad.clone(), torch.zeros_like(grad), beta=0.95)
+
+    # Which of the two updates was applied, not how closely: the gap between them is four
+    # orders of magnitude wider than the rounding between two runs of the same iteration.
+    assert (applied - per_head).abs().max() < 1e-4
+    assert (applied - whole).abs().max() > 1e-2, "the whole-matrix update is what a dropped tag gives"
+
+
+class _PaddedAttn(torch.nn.Module):
+    """Two 63x63 matrices, so the group is off the bf16 alignment of 8 wherever they land.
+
+    Only matrices, so every parameter goes to Muon and no auxiliary Adam is built.
+    """
+
+    def __init__(self, hidden=63, heads=8, head_dim=8):
+        super().__init__()
+        self.up = torch.nn.Linear(hidden, hidden, bias=False)
+        self.down = torch.nn.Linear(hidden, hidden, bias=False)
+        self.q_proj = torch.nn.Linear(hidden, heads * head_dim, bias=False)
+        self.o_proj = torch.nn.Linear(heads * head_dim, hidden, bias=False)
+        self.config = SimpleNamespace(num_attention_heads=heads,
+                                      num_key_value_heads=heads,
+                                      hidden_size=hidden,
+                                      head_dim=head_dim)
+
+    def forward(self, x, y):
+        return torch.nn.functional.mse_loss(self.o_proj(self.q_proj(self.down(self.up(x)))), y)
+
+
+@pytest.mark.parametrize("zero_stage", [1, 2])
+class TestZeroPaddedPartitionForwardsTheHeadCount(DistributedTest):
+    """ZeRO 1/2 run Muon inside `get_flat_partition`, which has a padded and an unpadded branch.
+
+    `parameter_alignment` is what pads the group (round robin only reorders it), so this runs
+    the padded branch on a real engine and checks what `muon_update` was handed.
+    """
+
+    world_size = 1
+
+    def test_q_proj_reaches_muon_update_with_its_head_count(self, zero_stage, monkeypatch):
+        import deepspeed.runtime.zero.stage_1_and_2 as stage_1_and_2
+
+        seen = []
+
+        def spy(grad, momentum, *args, **kwargs):
+            seen.append((tuple(grad.shape), kwargs.get("num_heads")))
+            return muon_update(grad, momentum, *args, **kwargs)
+
+        monkeypatch.setattr(stage_1_and_2, "muon_update", spy)
+
+        config = {
+            "train_micro_batch_size_per_gpu": 2,
+            "steps_per_print": 10**9,
+            "bf16": {
+                "enabled": True
+            },
+            "zero_optimization": {
+                "stage": zero_stage,
+                "reduce_scatter": False,
+                "parameter_alignment": True,
+            },
+            "optimizer": {
+                "type": "Muon",
+                "params": {
+                    "lr": 1e-3,
+                    "momentum": 0.95,
+                    "per_head_muon": True
+                }
+            },
+        }
+        model = _PaddedAttn()
+        engine, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config)
+        padding = engine.optimizer.round_robin_bit16_padding
+        assert any(any(group) for group in padding), "nothing was padded, so this runs the unpadded branch"
+
+        x = torch.randn(2, 63, device=engine.device, dtype=torch.bfloat16)
+        engine.backward(engine(x, torch.randn_like(x)))
+        engine.step()
+
+        assert (tuple(model.q_proj.weight.shape), 8) in seen, f"q_proj lost its head count: {seen}"
