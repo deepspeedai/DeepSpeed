@@ -350,6 +350,8 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
         self.reduce_scatter = reduce_scatter
         self.use_muon = isinstance(self.optimizer, MuonWithAuxAdam)
+        # Sub-groups whose Muon update was written into the gradient partitions without loss scale.
+        self.sub_groups_lacking_loss_scale = set()
         self.save_muon_momentum_buffer_in_memory = save_muon_momentum_buffer_in_memory
         if self.use_muon and self.reduce_scatter:
             raise ValueError("Muon and reduce scatter cannot be used together")
@@ -1764,6 +1766,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         for i, group in enumerate(self.fp16_groups):
             if not self.sub_groups_using_muon[i] or not group:
                 continue
+            self.sub_groups_lacking_loss_scale.add(i)
             rank = dist.get_rank(group=self._get_sub_group_process_group(i))
             partitions = self.averaged_gradients[i]
             # Bound what is materialized at once, as the reduce path's buckets did.
@@ -2483,6 +2486,16 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         for bucket in self.ipg_buckets.values():
             bucket.clear_params()
 
+    def _muon_update_lacks_loss_scale(self, sub_group_id):
+        """Whether this sub-group holds a Muon update that has to be scaled like a gradient.
+
+        Newton-Schulz returns the same update at any loss scale, so unlike a gradient it does not
+        carry the scale that the norm and unscale_and_clip_grads assume. The path that writes
+        such an update marks its sub-group in `sub_groups_lacking_loss_scale`; step() scales
+        the marked ones back.
+        """
+        return self.loss_scale != 1.0 and sub_group_id in self.sub_groups_lacking_loss_scale
+
     @instrument_w_nvtx
     def _get_norm_groups(self):
         norm_groups = []
@@ -2490,7 +2503,11 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             if self.offload_optimizer:
                 norm_groups.append(self.complete_grad_norm_calculation_for_cpu_offload(self.fp16_groups[i]))
             else:
-                norm_groups.append(self.get_grad_norm_direct(self.averaged_gradients[i], self.fp16_groups[i]))
+                norm = self.get_grad_norm_direct(self.averaged_gradients[i], self.fp16_groups[i])
+                if self._muon_update_lacks_loss_scale(i):
+                    # Leave the -1 an invalid norm is masked to as it is.
+                    norm = torch.where(norm >= 0, norm * self.loss_scale, norm)
+                norm_groups.append(norm)
         return norm_groups
 
     @instrument_w_nvtx
@@ -2807,6 +2824,8 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
             #prepare optimizer states, gradients and fp32 parameters for update
             self._prepare_sub_group(sub_group_id, timer_names)
+            if self._muon_update_lacks_loss_scale(sub_group_id):
+                self.fp32_partitioned_groups_flat[sub_group_id].grad.mul_(self.loss_scale)
 
             #scale the fp32 gradients
             self.unscale_and_clip_grads(sub_group_id, scaled_global_grad_norm)
