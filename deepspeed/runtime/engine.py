@@ -124,6 +124,7 @@ from deepspeed.runtime.data_pipeline.data_routing.basic_layer import RandomLayer
 
 from deepspeed.utils.zero_to_fp32 import get_fp32_state_dict_from_zero_checkpoint
 from deepspeed.runtime.torch_autocast import init_autocast_params, get_default_autocast_lower_precision_modules, autocast_if_enabled
+from deepspeed.runtime.keep_in_fp32 import keep_in_fp32_pattern, keep_buffers_in_fp32, buffers_to_keep_in_fp32
 
 from .pipe.module import PipelineModule
 from .utils import get_ma_status
@@ -1835,8 +1836,12 @@ class DeepSpeedEngine(Module):
 
         return param_dtype, buffer_dtype
 
-    def _cast_module_mixed_precision(self, param_dtype, buffer_dtype, is_zero_init_model):
-        """Cast params to param_dtype; cast buffers only when buffer_dtype is set."""
+    def _cast_module_mixed_precision(self, param_dtype, buffer_dtype, is_zero_init_model, keep_pattern=None):
+        """Cast params to param_dtype; cast buffers only when buffer_dtype is set.
+
+        Buffers whose names match keep_pattern stay in fp32 (data_types.keep_in_fp32_modules,
+        deepspeed/runtime/keep_in_fp32.py).
+        """
         # ZeRO-Init params are already at the configured dtype and partitioned, so
         # the per-parameter cast applies only in the non-zero-init path.
         if param_dtype is not None and not is_zero_init_model:
@@ -1845,8 +1850,15 @@ class DeepSpeedEngine(Module):
                     p.data = p.data.to(param_dtype)
 
         # Buffers are never ZeRO-partitioned.
+        kept = set()
+        if keep_pattern is not None:
+            kept = {id(b) for b in buffers_to_keep_in_fp32(self.module, keep_pattern)}
+            # Also upcasts a listed buffer that arrives in a lower precision.
+            keep_buffers_in_fp32(self.module, keep_pattern)
         if buffer_dtype is not None:
             for b in self.module.buffers(recurse=True):
+                if id(b) in kept:
+                    continue
                 if b.dtype in CASTABLE_DTYPES and b.dtype != buffer_dtype:
                     b.data = b.data.to(buffer_dtype)
 
@@ -2060,7 +2072,8 @@ class DeepSpeedEngine(Module):
             # Cast params only; preserve fp32 buffers (e.g. rotary inv_freq)
             # unless buffer_dtype is set. Replaces blanket module.half()/bfloat16().
             param_dtype, buffer_dtype = self._mixed_precision_dtypes()
-            self._cast_module_mixed_precision(param_dtype, buffer_dtype, is_zero_init_model)
+            keep_pattern = keep_in_fp32_pattern(self.module, self._config.keep_in_fp32_modules, param_dtype)
+            self._cast_module_mixed_precision(param_dtype, buffer_dtype, is_zero_init_model, keep_pattern)
         else:
             self.__check_params(self.module, torch.float)
 
