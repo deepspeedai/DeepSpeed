@@ -102,8 +102,10 @@ configured capacity.
 The experimental path intentionally does not implement paged attention or change the
 default generation semantics. It currently requires one prompt width for all
 rows, a model with cache-class support, greedy decoding, and one sample per
-prompt. CUDA Graph capture, shared prompt prefill, and multiple prompt widths
-are rejected until the scheduling semantics are validated on real workloads.
+prompt. CUDA Graph capture is supported for CUDA inputs: it uses a fixed
+``continuous_batch_size`` layout, keeps every KV-cache row and decode tensor at
+a stable address, and masks inactive rows while the scheduler refills them.
+Shared prompt prefill and multiple prompt widths remain unsupported.
 Models without cache-class support should use the default ``generate()`` path
 or upgrade Transformers.
 
