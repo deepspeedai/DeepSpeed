@@ -157,6 +157,11 @@ def test_continuous_generation_reports_cache_capacity_remedies():
         def get_text_config(self, **_kwargs):
             return self
 
+        @property
+        def per_layer_config(self):
+            # StaticCache on current Transformers main reads this before choosing layer types.
+            return [self]
+
     class CacheClassModel(torch.nn.Module):
         _supports_cache_class = True
 
@@ -276,6 +281,11 @@ def test_aligned_continuous_generation_supports_mixed_effective_prompt_lengths()
         def get_text_config(self, **_kwargs):
             return self
 
+        @property
+        def per_layer_config(self):
+            # StaticCache on current Transformers main reads this before choosing layer types.
+            return [self]
+
     class CacheClassModel(torch.nn.Module):
         _supports_cache_class = True
 
@@ -351,6 +361,11 @@ def test_aligned_continuous_generation_reclaims_dead_prefix_when_cache_would_exh
 
         def get_text_config(self, **_kwargs):
             return self
+
+        @property
+        def per_layer_config(self):
+            # StaticCache on current Transformers main reads this before choosing layer types.
+            return [self]
 
     class CacheClassModel(torch.nn.Module):
         _supports_cache_class = True
@@ -472,6 +487,11 @@ def test_continuous_generation_refills_padded_prompts_after_trim():
 
         def get_text_config(self, **_kwargs):
             return self
+
+        @property
+        def per_layer_config(self):
+            # StaticCache on current Transformers main reads this before choosing layer types.
+            return [self]
 
     class CacheClassModel(torch.nn.Module):
         _supports_cache_class = True
