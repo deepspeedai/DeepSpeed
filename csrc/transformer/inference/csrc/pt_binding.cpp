@@ -194,7 +194,10 @@ void attention_unfused(at::Tensor& prev_key_cont,
                        .layout(at::kStrided)
                        .device(at::kCUDA)
                        .requires_grad(false);
-    float alpha = norm_factor;
+    // norm_factor is the caller-provided pre-square scale (1/sqrt(sqrt(head_dim)) by
+    // default in ds_attention, different under use_mup or inverse-layer scaling);
+    // squaring it here yields the final softmax scale, matching the fallback binding.
+    float alpha = norm_factor * norm_factor;
     float gemm_beta = 0.0;
     auto attn_score = at::empty({bsz, heads, seq_len, soft_len}, options);
     int k = prev_value_cont.size(2) / heads;

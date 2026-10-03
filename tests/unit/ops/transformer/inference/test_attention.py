@@ -3,10 +3,13 @@
 
 # DeepSpeed Team
 
+import math
+
 import pytest
 import torch
 import deepspeed
 from deepspeed.accelerator import get_accelerator
+from deepspeed.ops.op_builder import InferenceBuilder
 from .inference_test_utils import allclose
 
 
@@ -91,3 +94,49 @@ def test_attention(BATCH, H, N_CTX, D_HEAD, causal, use_flash, dtype=torch.float
                                     use_ds_attention=False)
     tri_out = tri_out.reshape((BATCH, N_CTX, H, D_HEAD)).permute(0, 2, 1, 3)
     assert (allclose(ref_out, tri_out))
+
+
+# ds_attention passes 1/norm_factor where norm_factor = sqrt(sqrt(head_dim)) in the default
+# configuration, so the binding must square it to reach the 1/sqrt(head_dim) softmax scale.
+# This legacy binding derives seq_len from query.size(1), so it is only addressable with a
+# single head; the int8 KV cache also stores keys transposed ([batch, head_dim, seq]).
+def run_softmax_context_int8_reference(q, k, v, norm_factor):
+    softmax_scale = norm_factor * norm_factor
+    scores = torch.matmul(q, k.transpose(2, 3)) * softmax_scale
+    probs = torch.softmax(scores.float(), dim=-1).half()
+    return torch.matmul(probs, v)
+
+
+@pytest.mark.inference_ops
+@pytest.mark.parametrize("BATCH", [1])
+@pytest.mark.parametrize("H", [1])
+@pytest.mark.parametrize("N_CTX", [16, 128])
+@pytest.mark.parametrize("D_HEAD", [64, 128, 256])
+def test_softmax_context_int8(BATCH, H, N_CTX, D_HEAD):
+    if not torch.cuda.is_available():
+        pytest.skip("softmax_context_int8 requires CUDA")
+
+    device = deepspeed.accelerator.get_accelerator().device_name()
+    inference_module = InferenceBuilder().load()
+    torch.manual_seed(20)
+
+    head_dim_4th_root = math.sqrt(math.sqrt(D_HEAD))
+    norm_factor = 1.0 / head_dim_4th_root
+
+    q = torch.empty((BATCH, H, N_CTX, D_HEAD), dtype=torch.float16, device=device).normal_(mean=0, std=0.5)
+    k = torch.empty((BATCH, H, N_CTX, D_HEAD), dtype=torch.float16, device=device).normal_(mean=0, std=0.5)
+    v = torch.empty((BATCH, H, N_CTX, D_HEAD), dtype=torch.float16, device=device).normal_(mean=0, std=0.5)
+    ref_out = run_softmax_context_int8_reference(q, k, v, norm_factor)
+
+    query = q.permute(0, 2, 1, 3).contiguous().reshape((BATCH, N_CTX, H * D_HEAD))
+    # keys are consumed in transposed cache layout, values in [batch, seq, head_dim] layout
+    prev_key = k.transpose(-1, -2).contiguous()
+    prev_value = v.permute(0, 2, 1, 3).contiguous().reshape((BATCH, N_CTX, H * D_HEAD))
+
+    ds_out = inference_module.softmax_context_int8(query, prev_key, torch.empty(1, device=device),
+                                                   torch.empty(1, device=device), prev_value,
+                                                   torch.empty(1, device=device), H, norm_factor, False, False, False,
+                                                   -1, True)[0]
+
+    ds_out = ds_out.reshape((BATCH, H, N_CTX, D_HEAD))
+    assert allclose(ref_out, ds_out)
