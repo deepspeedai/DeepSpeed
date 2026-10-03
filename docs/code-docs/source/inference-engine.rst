@@ -70,9 +70,10 @@ branches. The option is disabled by default.
 
 Shared prefill currently requires HybridEngine kernel injection, ZeRO stage 0,
 inference tensor-parallel size 1, an internal KV cache, and a prompt longer than
-one token. It cannot be combined with CUDA graph capture or
-``release_inference_cache``. Sampling still happens independently for every
-response branch after the shared prompt forward.
+one token. It cannot be combined with CUDA graph capture,
+``release_inference_cache``, or continuous batching
+(``SamplingConfig.continuous_batch_size``). Sampling still happens independently
+for every response branch after the shared prompt forward.
 
 Continuous batching (experimental)
 -----------------------------------
@@ -102,7 +103,7 @@ configured capacity.
 The experimental path intentionally does not implement paged attention or change the
 default generation semantics. It currently requires one padded prompt width for
 all rows, a model with cache-class support, greedy decoding, and one sample per
-prompt. CUDA Graph capture is rejected until the scheduling semantics are
+prompt. CUDA Graph capture and shared prompt prefill are rejected until the scheduling semantics are
 validated on real workloads. Models that explicitly declare no cache-class
 support are rejected; models with unknown support should be validated against
 the default ``generate()`` path before use.
