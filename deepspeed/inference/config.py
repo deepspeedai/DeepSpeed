@@ -302,6 +302,12 @@ class DeepSpeedInferenceConfig(DeepSpeedConfigModel):
                                       "new_param": "moe.type"
                                   })
 
+    @field_validator("max_out_tokens", "min_out_tokens", mode="before")
+    def validate_token_limits(cls, field_value):
+        if isinstance(field_value, int) and field_value <= 0:
+            raise ValueError(f"Token limit must be a positive integer, got {field_value}")
+        return field_value
+
     @field_validator("dtype", mode="before")
     def validate_dtype(cls, field_value, values):
         if isinstance(field_value, str):
