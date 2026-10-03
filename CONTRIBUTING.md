@@ -46,6 +46,13 @@ tests. Note that [pytest-forked](https://github.com/pytest-dev/pytest-forked) an
 `--forked` is safe because `import deepspeed` no longer initializes a CUDA context;
 earlier versions probed CUDA at import time, which poisoned `fork()`.
 
+To test an installed DeepSpeed package and its precompiled ops instead of the source
+checkout, run PyTest from the `tests` directory:
+```bash
+cd tests
+DS_TEST_USE_INSTALLED_DEEPSPEED=1 pytest --forked unit/
+```
+
 You can also run:
 ```
 make test
