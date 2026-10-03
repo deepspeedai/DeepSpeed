@@ -22,6 +22,11 @@ def test_continuous_generation_profile_on_accelerator():
         def get_text_config(self, **_kwargs):
             return self
 
+        @property
+        def per_layer_config(self):
+            # StaticCache on current Transformers main reads this before choosing layer types.
+            return [self]
+
     class CacheClassModel(torch.nn.Module):
         _supports_cache_class = True
 

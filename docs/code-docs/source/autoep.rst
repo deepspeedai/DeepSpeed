@@ -9,8 +9,8 @@ This API is separate from the explicit ``deepspeed.moe.layer.MoE`` layer API.
 For the explicit DeepSpeed MoE layer API, see :doc:`moe`.
 
 **Built-in AutoEP presets:** ``mixtral`` (Mixtral), ``qwen3_moe`` (Qwen3-MoE),
-``qwen3_5_moe`` (Qwen3.5-MoE), ``deepseek_v2`` (DeepSeek-V2), and
-``deepseek_v3`` (DeepSeek-V3).
+``qwen3_5_moe`` (Qwen3.5-MoE), ``deepseek_v2`` (DeepSeek-V2),
+``deepseek_v3`` (DeepSeek-V3), and ``minimax_m3`` (MiniMax-M3).
 
 The preset name means AutoEP knows the router, expert, and weight naming
 patterns for that model family. Running a Hugging Face model also requires a
@@ -46,6 +46,13 @@ Transformers build that exposes the matching config/model classes,
      - ``5.0.0``
      - ``load_balance_coeff`` / expert-bias auxiliary-loss-free load balancing
        is not currently supported; non-null values are rejected.
+   * - ``minimax_m3``
+     - ``5.15.0``
+     - Requires the MiniMax-M3 text-backbone ``minimax_m3_vl_text`` model
+       type. The expert MLP uses the clamped GPT-OSS activation
+       (``swiglu_oai``), selected by the preset. ``load_balance_coeff`` /
+       expert-bias auxiliary-loss-free load balancing is not currently
+       supported; non-null values are rejected.
 
 **ZeRO compatibility:** Stages 0, 1, and 2, plus constrained Stage 3
 support. Stage 3 requires AutoEP-managed MoE layers and does not support native
@@ -224,6 +231,59 @@ SMs. The default of 12 was chosen by measuring whole steps: 8 SMs gave a median
 it is alone on the fabric, which exhausts the queue pairs ZeRO and the
 data-parallel groups have already claimed in a training step.
 
+**DeepEP row weighting implementation (experimental):**
+
+DeepEP dispatch returns one received row per routed assignment and one FP32
+weight per row. ``row_weighting_impl`` selects how AutoEP multiplies those rows
+by their weights at the existing ``score_apply`` boundary:
+
+.. code-block:: json
+
+    {
+      "expert_parallel": {
+        "enabled": true,
+        "autoep_size": 8,
+        "comm_backend": "deepep",
+        "comm_max_tokens_per_rank": 4096,
+        "row_weighting_impl": "fused"
+      }
+    }
+
+``"auto"`` (default) resolves to ``"eager"``, preserving the existing eager
+expression exactly. ``"fused"`` runs a separate Triton pointwise operator for
+``(rows.float() * weights).to(rows.dtype)``. It does not reduce over top-k, does
+not change where BF16/FP16 rounding occurs, and does not replace DeepEP's
+combine; the output remains one weighted row per received row in the same row
+order.
+
+The forward product and row gradient match eager's rounding. The FP32 gradient
+of the routing weight sums the same products in a different order, so it need
+not be bitwise equal to eager's; neither summation is consistently closer to
+an FP64 reference. Comparisons should use gradient errors relative to the
+gradient norm after backward and before optimizer clipping in ``engine.step()``.
+Adam's first update can differ on the scale of the learning rate when a
+near-zero gradient changes sign, even if the overall gradients agree closely.
+
+``"fused"`` is rejected, rather than silently ignored, when AutoEP cannot honor
+it:
+
+- ``comm_backend`` is not ``"deepep"`` or ``autoep_size=1``, because the call
+  sites exist only inside the DeepEP route;
+- Triton is unavailable, the device is not CUDA, or the build is ROCm;
+- rows are not bfloat16 or float16;
+- weights are not FP32 ``[N, 1]`` tensors on the same CUDA device;
+- rows or weights are not contiguous, or rows are not shaped ``[N, H]``.
+
+The operator also accepts FP16 rows, but the current DeepEP dispatch supports
+BF16 rows only. Correct backward replay through DeepEP additionally requires
+preserving the cached dispatch layout; that correction is independent of row
+weighting. The separate MoE gradient-norm correction affects the
+``FP16_Optimizer`` wrapper, which is also used by some BF16 configurations
+(for example, BF16 with BF16 gradient accumulation without ZeRO).
+The model-level gradient comparison samples gradients before the wrapper
+computes the norm and clips them in ``engine.step()``. GPU validation applies
+both independent corrections; neither is part of this opt-in change.
+
 Requirements and limits:
 
 - The ``deep_ep`` package must be installed. It is imported only when this
@@ -323,14 +383,17 @@ to turn it back into one row per token. ``combine_impl`` selects how:
 ``"auto"`` (default) resolves to ``"weighted_sum"``, which scatters the rows into
 a zero-filled ``[tokens * top_k, hidden]`` buffer, widens it to FP32 to apply the
 routing weights, and reduces over top-k. ``"fused_weighted_sum"`` computes the
-same result in a single pass: each program owns one token and one slice of the
-hidden dimension, walks its top-k rows in registers and accumulates in FP32, so
-neither the scattered buffer nor the FP32 intermediate is allocated. At the
-canonical shape the FP32 intermediate alone is 64 MiB per layer.
+weighted reduction in one kernel launch: each program owns a whole token and
+walks the hidden dimension in chunks, multiplying each routed row by its score
+in FP32 and accumulating the products in slot order in FP32. FP contraction is
+disabled so each product rounds before it is added; the result is cast only
+once to the output dtype. Neither the scattered buffer nor the FP32
+intermediate is allocated. At the canonical shape the FP32 intermediate alone
+is 64 MiB per layer.
 
-Routing weights are still accumulated in FP32 and cast once, so the result
-matches the eager reduction to within the order of the top-k summation. Only the
-reduction changes: the collectives, the router, the grouped GEMM and the
+The top-k summation order can differ from eager, so results are within the
+existing numerical tolerances, not bitwise unchanged. Only the forward
+reduction changes: the backward, collectives, router, grouped GEMM and
 expert-major reorder are untouched.
 
 ``"fused_weighted_sum"`` is rejected, rather than quietly ignored, when it would

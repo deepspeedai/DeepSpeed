@@ -19,6 +19,7 @@ from deepspeed.module_inject.auto_ep_presets.registry import (
     resolve_autoep_config_defaults,
 )
 from deepspeed.module_inject.auto_ep_folding import build_folding_spec, validate_folding_global
+from deepspeed.moe.ep_experts import EXPERT_ACTIVATIONS
 from deepspeed.utils import logger
 
 __all__ = [
@@ -59,6 +60,7 @@ def parse_autoep_config(param_dict: dict) -> AutoEPConfig:
     config.route_scale = param_dict.get("route_scale", 1.0)
     config.score_apply = param_dict.get("score_apply", "auto")
     config.combine_impl = param_dict.get("combine_impl", "auto")
+    config.row_weighting_impl = param_dict.get("row_weighting_impl", "auto")
     config.comm_backend = param_dict.get("comm_backend", "comm")
     config.comm_num_sm = param_dict.get("comm_num_sm", 12)
     config.comm_qp_margin = param_dict.get("comm_qp_margin", 4)
@@ -89,6 +91,7 @@ def parse_autoep_config(param_dict: dict) -> AutoEPConfig:
     config.has_shared_experts = param_dict.get("has_shared_experts", None)
     config.shared_experts_pattern = param_dict.get("shared_experts_pattern", None)
     config.shared_experts_gate_pattern = param_dict.get("shared_experts_gate_pattern", None)
+    config.expert_activation = param_dict.get("expert_activation", None)
 
     return config
 
@@ -185,11 +188,27 @@ def validate_autoep_config(
         raise ValueError(f"combine_impl must be one of {valid_combine_impl}, "
                          f"got '{config.combine_impl}'")
 
+    # Validate row_weighting_impl
+    valid_row_weighting_impl = ("auto", "eager", "fused")
+    if config.row_weighting_impl not in valid_row_weighting_impl:
+        raise ValueError(f"row_weighting_impl must be one of {valid_row_weighting_impl}, "
+                         f"got '{config.row_weighting_impl}'")
+
     # Validate comm_backend
     valid_comm_backend = ("comm", "deepep")
     if config.comm_backend not in valid_comm_backend:
         raise ValueError(f"comm_backend must be one of {valid_comm_backend}, "
                          f"got '{config.comm_backend}'")
+
+    if config.row_weighting_impl == "fused":
+        if config.comm_backend != "deepep":
+            raise ValueError('row_weighting_impl="fused" only runs inside the DeepEP route, but '
+                             f'comm_backend="{config.comm_backend}" was selected. Set comm_backend to '
+                             '"deepep", or leave row_weighting_impl unset.')
+        if config.autoep_size == 1:
+            raise ValueError('row_weighting_impl="fused" only runs when DeepEP dispatch is active '
+                             '(autoep_size > 1), but autoep_size=1. Increase autoep_size, or leave '
+                             "row_weighting_impl unset.")
 
     # A zero budget would hand the whole GPU to the collective, and a negative
     # one is meaningless; both are worth rejecting where the value is written
@@ -211,6 +230,11 @@ def validate_autoep_config(
     if config.score_func not in valid_score_func:
         raise ValueError(f"score_func must be one of {valid_score_func}, "
                          f"got '{config.score_func}'")
+
+    # Validate expert_activation
+    if config.expert_activation is not None and config.expert_activation not in EXPERT_ACTIVATIONS:
+        raise ValueError(f"expert_activation must be one of {tuple(EXPERT_ACTIVATIONS)}, "
+                         f"got '{config.expert_activation}'")
 
     # Validate group-limited routing constraints
     if config.num_limited_groups is not None:
@@ -303,6 +327,8 @@ def validate_autoep_config(
         custom_fields_set.append("shared_experts_pattern")
     if config.shared_experts_gate_pattern is not None:
         custom_fields_set.append("shared_experts_gate_pattern")
+    if config.expert_activation is not None:
+        custom_fields_set.append("expert_activation")
     if custom_fields_set and config.preset_model is not None:
         logger.warning(f"Custom preset fields {custom_fields_set} are set alongside "
                        f"preset_model='{config.preset_model}'. Custom fields will override "

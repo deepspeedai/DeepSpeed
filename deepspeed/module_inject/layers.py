@@ -28,7 +28,7 @@ __all__ = [
     "TensorParallel_Layer", "LinearAllreduce", "LinearAllreduceWithReplicatedInput", "LinearLayer",
     "LmHeadLinearAllreduce", "Yuan_LinearAllreduce", "Yuan_LinearLayer", "GateUpPack_LinearLayer",
     "Conv_LinearALlreduce", "fused_LinearLayer", "conv_LinearLayer", "SubParamLinearLayer", "SubParamLinearAllreduce",
-    "VocabParallelLinear"
+    "VocabParallelLinear", "VocabParallelEmbedding"
 ]
 
 DEEPSPEED_AUTOTP_MODE = AUTOTP_MODE.INFERENCE
@@ -1091,6 +1091,125 @@ class VocabParallelLinear(LinearLayer):
         self.vocab_size = self._orig_weight_shape[0]
         self.vocab_start_index = sum(self._partition_sizes[:self.tp_index])
         self.vocab_end_index = self.vocab_start_index + self._partition_sizes[self.tp_index]
+
+
+class VocabParallelEmbedding(TensorParallel_Layer):
+    """Vocabulary-parallel embedding lookup.
+
+    Shards ``nn.Embedding.weight`` along the vocabulary dimension (dim 0) and reduces the
+    per-rank partial lookups with an all-reduce, mirroring Megatron's ``VocabParallelEmbedding``.
+    When tied to a :class:`VocabParallelLinear` output head, this module reuses that layer's
+    already-sharded weight ``Parameter`` and shard boundaries instead of partitioning its own
+    copy, so both modules read from and accumulate gradients into the same physical tensor.
+    """
+
+    @staticmethod
+    def validate_embedding(module):
+        if module.max_norm is not None or module.scale_grad_by_freq or module.sparse:
+            raise NotImplementedError(
+                "Vocabulary-parallel embedding options max_norm, scale_grad_by_freq, and sparse are not supported.")
+        embedding_type = type(module)
+        if embedding_type.forward is nn.Embedding.forward:
+            return
+        if (embedding_type.__module__ == "transformers.models.gemma3.modeling_gemma3"
+                and embedding_type.__name__ == "Gemma3TextScaledWordEmbedding"):
+            return
+        raise NotImplementedError(f"Vocabulary-parallel sharding does not support the custom embedding forward of "
+                                  f"{embedding_type.__name__}.")
+
+    def __init__(self, module, mp_group=None, tied_vocab_parallel_linear=None, **kwargs):
+        super().__init__(mp_group, **kwargs)
+        self.validate_embedding(module)
+        self.weight = module.weight
+        # nn.Embedding has no bias, but the base class's extra_repr() unconditionally reads
+        # self.bias, same as every other TensorParallel_Layer subclass here.
+        self.bias = None
+        self.support_training = True
+
+        if tied_vocab_parallel_linear is not None:
+            # The lm_head side already partitioned and materialized its shard; share that
+            # Parameter verbatim so the tied weight has exactly one physical copy per rank.
+            # Its gather_params/_tp_partition hooks are equivalent to ours (both split dim 0
+            # the same way), so we deliberately leave them attached instead of re-configuring.
+            self._orig_weight_shape = tied_vocab_parallel_linear._orig_weight_shape
+            self._partition_sizes = tied_vocab_parallel_linear._partition_sizes
+            self.vocab_start_index = tied_vocab_parallel_linear.vocab_start_index
+            self.vocab_end_index = tied_vocab_parallel_linear.vocab_end_index
+            self.weight = tied_vocab_parallel_linear.weight
+        else:
+            self._orig_weight_shape = self._shape_before_zero3_partition(module.weight)
+            self._freeze_partition_sizes(self._orig_weight_shape[0])
+            if self._should_materialize_tp_partition():
+                self._tp_partition([self.weight])
+            self.vocab_start_index = sum(self._partition_sizes[:self.tp_index])
+            self.vocab_end_index = self.vocab_start_index + self._partition_sizes[self.tp_index]
+            self.config_tp_params(self.weight)
+
+        self.vocab_size = self._orig_weight_shape[0]
+        self.padding_idx = None
+        if module.padding_idx is not None and self.vocab_start_index <= module.padding_idx < self.vocab_end_index:
+            self.padding_idx = module.padding_idx - self.vocab_start_index
+        embed_scale = None
+        if type(module).forward is not nn.Embedding.forward:
+            embed_scale = module.embed_scale.to(self.weight.device)
+        self.register_buffer("embed_scale", embed_scale, persistent=False)
+        # collect_autotp_universal_checkpoint_info() re-invokes _mark_uc_metadata() on every
+        # module unconditionally, so whichever of the tied pair runs last determines the
+        # metadata actually attached to the shared Parameter. Calling it here too keeps this
+        # layer correctly self-described even when queried standalone, before that collection
+        # runs; the affine map it derives is identical either way since both sides shard dim 0
+        # with the same partition_sizes.
+        self._mark_uc_metadata()
+
+    def forward(self, input):
+        self._assert_compiled_if_deferred()
+        if self.mp_group is None or self.tp_world_size == 1:
+            output = F.embedding(input, self.weight, padding_idx=self.padding_idx)
+        else:
+            # Tokens outside this rank's vocab shard are remapped to index 0 so the local lookup
+            # never runs out of bounds; their (wrong) contribution is then zeroed before the
+            # cross-rank reduction assembles the correct embedding for every token.
+            input_mask = (input < self.vocab_start_index) | (input >= self.vocab_end_index)
+            local_input = (input - self.vocab_start_index).masked_fill(input_mask, 0)
+            output = F.embedding(local_input, self.weight, padding_idx=self.padding_idx)
+            output = output.masked_fill(input_mask.unsqueeze(-1), 0.0)
+            output = RowParallel.apply(self.mp_group, output, not self.is_training_mode())
+        if self.embed_scale is not None:
+            output = output * self.embed_scale.to(self.weight.dtype)
+        return output
+
+    @torch.no_grad()
+    def gather_params(self, params_list):
+        for idx, param in enumerate(params_list):
+            if param is None:
+                continue
+            if self.mp_group is None or self.tp_world_size == 1:
+                params_list[idx].data = param.data.contiguous()
+                continue
+            params_list[idx].data = self._all_gather_shards(param, self._partition_sizes, dim=0).contiguous()
+
+    @torch.no_grad()
+    def _tp_partition(self, params_list):
+        for idx, param in enumerate(params_list):
+            if param is None:
+                return
+            _partition = params_list[idx].split(self._partition_sizes, dim=0)[self.tp_index]
+            params_list[idx].data = self.move(_partition).detach()
+
+    def _mark_uc_metadata(self):
+        # Uses the same 'column'/dim-0 label as VocabParallelLinear (this file's convention:
+        # dim 0 splits are 'column', dim 1 splits are 'row') since both shard the shared weight
+        # identically; when tied, whichever side runs last during universal-checkpoint metadata
+        # collection determines the label attached to the Parameter, but the derived affine map
+        # is the same regardless.
+        self._set_param_uc_meta(self.weight,
+                                partition_type='column',
+                                partition_dim=0,
+                                logical_shape=self._orig_weight_shape,
+                                output_shape=self._orig_weight_shape,
+                                partition_sizes=self._partition_sizes,
+                                target_partition_shape=tuple(self.weight.shape),
+                                original_shape=self._orig_weight_shape)
 
 
 class SubParamColumnParallel(LinearLayer):
