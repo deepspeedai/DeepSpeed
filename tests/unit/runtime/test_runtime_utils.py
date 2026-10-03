@@ -27,6 +27,38 @@ def test_call_to_str():
     assert c2s('hello', 1138, val=3) == 'hello(1138, val=3)'
 
 
+@pytest.mark.parametrize("container", [list, tuple, iter])
+@pytest.mark.parametrize("norm_type", [1, 2, 3, float("inf")])
+def test_global_norm_accepts_iterables(container, norm_type):
+    tensors = [torch.tensor([3.0, -4.0]), torch.tensor([2.0])]
+    expected = torch.linalg.vector_norm(torch.cat(tensors), ord=norm_type)
+
+    actual = ds_utils.get_global_norm_of_tensors(container(tensors), norm_type=norm_type)
+
+    torch.testing.assert_close(actual, expected)
+
+
+def test_clip_tensor_generator_matches_torch_training_step():
+    model = torch.nn.Linear(3, 2)
+    reference = torch.nn.Linear(3, 2)
+    reference.load_state_dict(model.state_dict())
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+    reference_optimizer = torch.optim.SGD(reference.parameters(), lr=0.1)
+    inputs = torch.arange(12, dtype=torch.float32).reshape(4, 3)
+
+    for _ in range(2):
+        for module, opt in [(model, optimizer), (reference, reference_optimizer)]:
+            opt.zero_grad()
+            module(inputs).square().mean().backward()
+        expected_norm = torch.nn.utils.clip_grad_norm_(reference.parameters(), max_norm=0.5)
+        actual_norm = ds_utils.clip_tensors_by_global_norm((p.grad for p in model.parameters()), max_norm=0.5)
+        torch.testing.assert_close(actual_norm, expected_norm)
+        optimizer.step()
+        reference_optimizer.step()
+        for actual, expected in zip(model.parameters(), reference.parameters()):
+            torch.testing.assert_close(actual, expected)
+
+
 class TestClipGradNorm(DistributedTest):
     world_size = 2
 
