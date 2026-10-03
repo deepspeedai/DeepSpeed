@@ -170,29 +170,31 @@ def _launch(x, cos, sin, out, backward):
     if x.numel() == 0:
         return out
     grid = (triton.cdiv(seq_len, _BLOCK_S), batch, triton.cdiv(heads, _HEADS_PER_PROGRAM))
-    _rotary_kernel[grid](
-        x,
-        cos,
-        sin,
-        out,
-        heads,
-        seq_len,
-        x.stride(0),
-        x.stride(1),
-        x.stride(2),
-        out.stride(0),
-        out.stride(1),
-        out.stride(2),
-        cos.stride(0) if cos.shape[0] > 1 else 0,
-        cos.stride(1),
-        HALF=head_dim // 2,
-        BLOCK_HALF=max(16, triton.next_power_of_2(head_dim // 2)),
-        BLOCK_S=_BLOCK_S,
-        HEADS_PER_PROGRAM=_HEADS_PER_PROGRAM,
-        BACKWARD=backward,
-        # Contracting a product and a sum into one FMA would skip the product's rounding, which eager performs.
-        enable_fp_fusion=False,
-    )
+    # Triton launches on the current CUDA device and stream, which need not be the input tensor's device.
+    with torch.cuda.device(x.device):  #ignore-cuda
+        _rotary_kernel[grid](
+            x,
+            cos,
+            sin,
+            out,
+            heads,
+            seq_len,
+            x.stride(0),
+            x.stride(1),
+            x.stride(2),
+            out.stride(0),
+            out.stride(1),
+            out.stride(2),
+            cos.stride(0) if cos.shape[0] > 1 else 0,
+            cos.stride(1),
+            HALF=head_dim // 2,
+            BLOCK_HALF=max(16, triton.next_power_of_2(head_dim // 2)),
+            BLOCK_S=_BLOCK_S,
+            HEADS_PER_PROGRAM=_HEADS_PER_PROGRAM,
+            BACKWARD=backward,
+            # Contracting a product and a sum into one FMA would skip the product's rounding, which eager performs.
+            enable_fp_fusion=False,
+        )
     return out
 
 
@@ -257,10 +259,11 @@ def fused_apply_rotary_pos_emb(q: torch.Tensor,
     not distinguish ``+0.0`` from ``-0.0``. For dense ``q`` and ``k`` the outputs
     keep their strides; the gradients produced for them take the outputs' layout.
 
-    All four tensors must be bfloat16 or float16 CUDA tensors of one dtype, the
-    head dimension must be even and at most 512 with unit stride, and ``cos`` and
-    ``sin`` must not require grad. Gradients are first order only: differentiating
-    them again raises. Unsupported inputs raise.
+    All four tensors must be bfloat16 or float16 CUDA tensors of one dtype on
+    one device. Launches use that device's current stream and restore the caller's
+    current device. The head dimension must be even and at most 512 with unit
+    stride, and ``cos`` and ``sin`` must not require grad. Gradients are first order
+    only: differentiating them again raises. Unsupported inputs raise.
     """
     assert_supported(q, k, cos, sin, unsqueeze_dim)
     return _run_kernels(q, k, cos, sin, unsqueeze_dim)

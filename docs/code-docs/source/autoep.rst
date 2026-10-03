@@ -338,6 +338,9 @@ Requirements and limits:
 
 - The kernel needs CUDA with Triton. On ROCm or without Triton, the replaced
   function runs eager.
+- All four tensors must be on one device. Launches use that device's current
+  stream even if another device is current, and restore the caller's current
+  device afterwards.
 - ``unsqueeze_dim`` 1 (heads before the sequence) or 2 (sequence before the
   heads), with ``cos`` and ``sin`` of shape ``[batch, sequence, head_dim]`` or
   ``[1, sequence, head_dim]``.
